@@ -117,6 +117,26 @@ MT5_SERVER_UNKNOWN_DETAIL = (
     "spelling of the name; if it is right, we have been notified and will add it."
 )
 
+# Phase 164.6.6.3.2 D-02 - the refusal when the validation terminal cannot take this
+# check right now: it owes a scrub or a relaunch from an earlier check
+# (`routers/exchange.py`, the owed-scrub gate), or it is still held when the interactive
+# lease bound expires (`except Mt5TerminalBusyError`). Both used to answer
+# NETWORK_UNAVAILABLE and told the user a network timeout.
+# ⛔ It is forwarded VERBATIM by the dashboard key forms
+# (`src/app/api/keys/validate-and-encrypt/route.ts`), so it is written for users: it
+# names a duration and none of "terminal", "lease", "queue" or "lock" (WIZFORM-03).
+# ⛔ It must be TRUE at BOTH emitters. At the owed-scrub gate nothing else is running,
+# so it must never say another check is using the connection. "was busy and could not
+# take this check yet" is true of an owed scrub and of a held lease alike.
+# ⛔ Do not use the words "timeout" or "rate", "ip"+"allow", "probe", "trading" or
+# "withdraw": `tests/test_mt5_server_known.py::
+# test_terminal_busy_detail_collides_with_no_cascade_needle` sweeps every needle of the
+# TypeScript classifier's substring cascade.
+MT5_TERMINAL_BUSY_DETAIL = (
+    "Our MetaTrader connection was busy and could not take this check yet. "
+    "Try again in a minute."
+)
+
 
 def mt5_enabled_server() -> bool:
     """True iff MT5_ENABLED is set to "true" (fail-closed; see module note)."""

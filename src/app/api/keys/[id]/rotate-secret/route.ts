@@ -104,7 +104,12 @@ import type { z } from "zod";
  *      service-error-shaped failures (`RATE_LIMITED`, `KEK_UNAVAILABLE`,
  *      `MT5_GATEWAY_UNCONFIGURED`) route through the carried `seamCode` into
  *      the classifier's existing `VENUE_WIRE_CODE_TO_VERDICT` rows instead of
- *      falling to the terminal UNKNOWN. ⭐ 164.5.4-02 / D-03 added the FOURTH
+ *      falling to the terminal UNKNOWN. ⛔ CORRECTED
+ *      2026-10-07 (Phase 164.6.6.3.2 D-01): `MT5_GATEWAY_UNCONFIGURED` is now the D-31
+ *      `undetermined` arm's code alone (rendering `SEAM_INTERNAL_FAULT`); the three
+ *      env-gap arms answer `MT5_VALIDATION_UNCONFIGURED` and render
+ *      `KEY_MT5_VALIDATION_UNCONFIGURED`, through the same `seamCode` hop. Original
+ *      sentence kept as lineage. ⭐ 164.5.4-02 / D-03 added the FOURTH
  *      of that family and the only one that needed a new member:
  *      `KEY_UNDECRYPTABLE` — the stored row this endpoint must decrypt before
  *      it can re-secret anything — now routes to `KEY_MUST_BE_RECONNECTED`,
@@ -329,6 +334,9 @@ export async function PATCH(
       // BEFORE the substring cascade) always saw `undefined` and every
       // non-MT5-specific Python failure — RATE_LIMITED, KEK_UNAVAILABLE,
       // MT5_GATEWAY_UNCONFIGURED — fell through to the terminal UNKNOWN/500.
+      // (CORRECTED 2026-10-07, Phase 164.6.6.3.2 D-01: the env-gap arms of that last
+      // code now arrive as MT5_VALIDATION_UNCONFIGURED, carried the same way; the
+      // sentence above describes the state before WR-01 and is kept as lineage.)
       // `seamCode` is read as a plain, typeof-guarded OWN property (never
       // `instanceof`) — the same shape `AnalyticsUpstreamError` sets — so this
       // survives every wholesale seam mock in the suite identically.

@@ -48,6 +48,7 @@ import {
   readCashConventions,
 } from "./composite-read-path";
 import { resolveDailyReturnSeries } from "./allocator-portfolio-payload";
+import { curveMethodFromFlags } from "./resolve-series";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload, IngestSource } from "./types";
 
@@ -416,7 +417,17 @@ async function resolveFactsheetInputs(
   //       real series lives in `returns_series` as a cumprod equity curve.
   // Both gates have to fall before we render the "still computing"
   // placeholder.
-  let dailyReturns = resolveDailyReturnSeries(dailyRaw, analytics?.returns_series);
+  // 164.6.6.2.2 D-05: the curve is read by the row's own method, so the flags
+  // are read BEFORE the series is resolved.
+  const dqf = analytics?.data_quality_flags as
+    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown; native_unit?: unknown }
+    | null
+    | undefined;
+  let dailyReturns = resolveDailyReturnSeries(
+    dailyRaw,
+    analytics?.returns_series,
+    curveMethodFromFlags(dqf),
+  );
   // Phase 90 (D6) — composite discriminator is SERVER TRUTH
   // (`data_quality_flags.composite`), NEVER `apiKeyId === null` (Phase-89
   // Pitfall 1). A stitched multi-key composite has `daily_returns=NULL` (so
@@ -425,10 +436,6 @@ async function resolveFactsheetInputs(
   // sparse in `csv_daily_returns`. We read that series, route the payload down
   // the csv arm with an EXPLICIT `ingestSource:"csv"` at the build call, render
   // the arithmetic running-cumulative curve, and thread the marker/basis fields.
-  const dqf = analytics?.data_quality_flags as
-    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown; native_unit?: unknown }
-    | null
-    | undefined;
   const isComposite = dqf?.composite === true;
   let compositeBuildOpts: BuildFactsheetOpts | undefined;
   // SFH HIGH-1 (169.1 review round 1): a failed `cash_settlement` conventions

@@ -399,11 +399,21 @@ describe("ComparePage — RANK-02 explicit analytics projection", () => {
     }
   });
 
-  it("never projects daily_returns, metrics_json, or data_quality_flags", async () => {
+  it("never projects daily_returns, metrics_json, or the data_quality_flags blob", async () => {
     const { cols, embed } = await capture();
     expect(cols).not.toContain("daily_returns");
-    expect(cols).not.toContain("data_quality_flags");
+    // Only the one-scalar alias form (`data_quality_flags->>cumulative_method`)
+    // is allowed; a bare `data_quality_flags` would ship the whole blob
+    // cross-tenant.
+    expect(embed).not.toMatch(/data_quality_flags(?!->>cumulative_method)/);
     expect(embed).not.toMatch(/metrics_json(?!->)/);
+  });
+
+  it("projects the curve method as a scalar alias so the correlation matrix can read the curve by method (WR-05)", async () => {
+    const { embed } = await capture();
+    expect(embed).toContain(
+      "cumulative_method:data_quality_flags->>cumulative_method",
+    );
   });
 });
 

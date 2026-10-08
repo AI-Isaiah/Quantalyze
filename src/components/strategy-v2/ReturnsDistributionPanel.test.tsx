@@ -48,8 +48,18 @@ vi.mock("@/components/charts/DailyHeatmap", () => ({
   },
 }));
 vi.mock("@/components/charts/ReturnHistogram", () => ({
-  ReturnHistogram: ({ benchmarkReturns }: { benchmarkReturns?: unknown }) => (
-    <div data-testid="return-histogram" data-benchmark={benchmarkReturns ? "yes" : "no"} />
+  ReturnHistogram: ({
+    benchmarkReturns,
+    curveMethod,
+  }: {
+    benchmarkReturns?: unknown;
+    curveMethod?: string;
+  }) => (
+    <div
+      data-testid="return-histogram"
+      data-benchmark={benchmarkReturns ? "yes" : "no"}
+      data-curve-method={curveMethod}
+    />
   ),
 }));
 vi.mock("@/components/charts/ReturnQuantiles", () => ({
@@ -335,5 +345,34 @@ describe("ReturnsDistributionPanel — Phase 14b-02", () => {
       />,
     );
     expect(lastDailyHeatmapDataRef).toBe(refAfterFirst);
+  });
+});
+
+describe("ReturnsDistributionPanel — curve method threading (WR-05)", () => {
+  const renderHistogram = (flags?: Record<string, unknown> | null) => {
+    mockHookReturn = { ref: () => {}, data: null, status: "ready" };
+    const { getByTestId } = render(
+      <ReturnsDistributionPanel
+        strategyId="s1"
+        history_days={365}
+        monthly_returns={FULL_MONTHLY}
+        return_quantiles={FULL_QUANTILES}
+        returns_series={makeReturns(30)}
+        data_quality_flags={flags as never}
+      />,
+    );
+    return getByTestId("return-histogram").getAttribute("data-curve-method");
+  };
+
+  it("hands the row's simple curve method to the histogram", () => {
+    expect(renderHistogram({ cumulative_method: "simple" })).toBe("simple");
+  });
+
+  it("reads geometric when the flags blob carries no curve method", () => {
+    expect(renderHistogram({ csv_source: true })).toBe("geometric");
+  });
+
+  it("reads geometric when the flags blob is null", () => {
+    expect(renderHistogram(null)).toBe("geometric");
   });
 });

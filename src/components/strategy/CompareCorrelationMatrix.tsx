@@ -3,6 +3,10 @@
 import { useMemo } from "react";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import { pearson } from "@/lib/return-stats";
+import {
+  curveMethodFromFlags,
+  resolveDailyReturnSeries,
+} from "@/lib/factsheet/resolve-series";
 
 interface CompareItem {
   strategy: Strategy;
@@ -21,13 +25,21 @@ function cellBg(val: number | null): string {
 
 export function CompareCorrelationMatrix({ items }: { items: CompareItem[] }) {
   const matrix = useMemo(() => {
-    // Extract trailing daily returns keyed by date for each strategy
+    // Extract trailing daily returns keyed by date for each strategy.
+    // `returns_series` is the stored cumulative CURVE, not daily returns: a
+    // Pearson over its levels reads near +1 for any two rising strategies. It
+    // goes through the shared boundary (a curve level is never read as a
+    // return), by the row's own method. `daily_returns` is deliberately not
+    // projected on this cross-tenant read (COMPARE_ANALYTICS_COLUMNS), so the
+    // curve is the only input; only the method alias travels.
     const series = items.map((item) => {
-      const rs = item.analytics.returns_series;
-      if (!rs || rs.length === 0) return new Map<string, number>();
-      const tail = rs.slice(-TRAILING_DAYS);
+      const daily = resolveDailyReturnSeries(
+        null,
+        item.analytics.returns_series,
+        curveMethodFromFlags({ cumulative_method: item.analytics.cumulative_method }),
+      );
       const m = new Map<string, number>();
-      for (const p of tail) m.set(p.date, p.value);
+      for (const p of daily.slice(-TRAILING_DAYS)) m.set(p.date, p.value);
       return m;
     });
 

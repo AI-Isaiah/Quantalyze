@@ -7,7 +7,9 @@ import {
   recogniseDashboardDialogCode,
   classifyKeyValidationError,
   recogniseSeamErrorCode,
+  OUR_DEFECT_KEY_ERROR_CODES,
   WIZARD_ERROR_COPY,
+  MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR,
   CSV_RULE_LABELS,
   CSV_UPLOAD_STEP_HEADINGS,
   CSV_PREVIEW_STEP_HEADINGS,
@@ -1415,6 +1417,12 @@ describe("[153.7-02 / WIZFORM-02-CLASS] every code that reaches classifyKeyValid
     // refusal when the gateway terminal has trade permission off. All four are
     // `retryable=False` — an operator must act, so no retry affordance may
     // render.
+    // ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): three of those four emitters
+    // (unset-env and malformed-port, the empty known-server list, the IPC ordering
+    // inversion) now answer wire `MT5_VALIDATION_UNCONFIGURED` and render
+    // `KEY_MT5_VALIDATION_UNCONFIGURED`; only the D-31 refusal still arrives as
+    // `MT5_GATEWAY_UNCONFIGURED`. This case sends the wire code itself, so it is the
+    // D-31 path now. Original kept as lineage.
     const detail =
       "The MetaTrader gateway is not configured. This needs an operator, not a retry.";
     expect(classifyKeyValidationError(seamThrow(detail, "MT5_GATEWAY_UNCONFIGURED"))).toEqual({
@@ -1589,6 +1597,10 @@ describe("[153.7-02 / WIZFORM-02-CLASS] every code that reaches classifyKeyValid
    * fix it"* across three wire codes where that is true at ONE:
    *
    *   · `MT5_GATEWAY_UNCONFIGURED` — true (operator faults, all four emitters).
+   *     CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): three of the four emitters now
+   *     answer `MT5_VALIDATION_UNCONFIGURED` and render
+   *     `KEY_MT5_VALIDATION_UNCONFIGURED`; the D-31 emitter alone still reaches
+   *     this member through the old code. The claim stays true at it.
    *   · `ADAPTER_INIT_FAILED` — FALSE at a third of the emitter's OWN declared
    *     cause set: `routers/exchange.py` enumerates "a ccxt signature change,
    *     an ImportError on a missing extra or an **OOM**". An OOM clears.
@@ -2137,8 +2149,31 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * and the "destructive class is FOUR entries" receipt below is unchanged. The
    * value was re-measured at HEAD (97, from this guard's failure message) before it
    * moved, and it moves in lockstep with the declaration in the SEAMUX-04 block.
+   *
+   * ⚠️ 98 → 99 (2026-10-07, Phase 164.6.6.3.2 plan 01 / item 7): one arrival,
+   * `KEY_MT5_VALIDATION_UNCONFIGURED`. Its actions are `request_call` and `expand_log`;
+   * neither is in `DESTRUCTIVE_ACTIONS`, so it sits outside the scanned population
+   * and the "destructive class is FOUR entries" receipt below is unchanged. The
+   * value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 99 to be 98")
+   * with the entry added and the pin unmoved, never counted, and it moves in
+   * lockstep with the declaration in the SEAMUX-04 block.
+   *
+   * ⚠️ 99 → 100 (2026-10-07, Phase 164.6.6.3.2 plan 02 / item 10): one arrival,
+   * `KEY_MT5_TERMINAL_BUSY`. Its actions are `clear_and_retry` and `request_call`;
+   * neither is in `DESTRUCTIVE_ACTIONS`, so it sits outside the scanned population and
+   * the "destructive class is FOUR entries" receipt below is unchanged. The value was
+   * READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 100 to be 99") with the entry
+   * added and the pin unmoved, never counted, and it moves in lockstep with the
+   * declaration in the SEAMUX-04 block.
+   *
+   * ⚠️ 100 → 101 (2026-10-07, Phase 164.6.6.3.2 plan 04 / item 0): one arrival,
+   * `GATE_HISTORY_NOT_SETTLED`. Its actions are `clear_and_retry` and `request_call`;
+   * neither is in `DESTRUCTIVE_ACTIONS`, so the "destructive class is FOUR entries"
+   * receipt below is unchanged. The value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE
+   * ("expected 101 to be 100") with the entry added and the pin unmoved, never counted,
+   * and it moves in lockstep with the declaration in the SEAMUX-04 block.
    */
-  const EXPECTED_TABLE_SIZE = 98;
+  const EXPECTED_TABLE_SIZE = 101;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2264,6 +2299,13 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
         "internal column name is not user-facing copy. Say what the user gets, " +
         "never the mechanism's field name.",
     },
+    {
+      fragment: "been alerted",
+      why:
+        "An alert claim asserts an audit trail exactly as 'been notified' does, so a " +
+        "synonym of the banned phrase must not dodge the same rule (164.6.6.3.2 D-07). " +
+        "Reachable only where a capture backs it; see the per-code exemption below.",
+    },
   ];
 
   /**
@@ -2286,6 +2328,13 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
     Record<string, readonly string[]>
   > = {
     KEY_MT5_SERVER_UNKNOWN: ["been notified"],
+    // 164.6.6.3.2 D-07. "We have been alerted" rests on a Sentry capture at EACH of the
+    // three env-gap arms that answer this code: the endpoint arm's
+    // `alert_mt5_validation_gateway_unconfigured`, the empty-known-server-list arm's
+    // `_capture_server_unknown_once` (inside `assert_mt5_server_known`), and the
+    // inverted-timeout arm's `alert_mt5_validation_timeout_chain_inverted`. The test
+    // below pins all three by name.
+    KEY_MT5_VALIDATION_UNCONFIGURED: ["been alerted"],
   };
 
   it("[164.6.6.3 / item 9] the substantiated 'been notified' claim rests on a capture that still exists", () => {
@@ -2305,7 +2354,82 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
     ).toBe(true);
     expect(Object.keys(FORBIDDEN_FRAGMENT_SUBSTANTIATED_FOR)).toEqual([
       "KEY_MT5_SERVER_UNKNOWN",
+      "KEY_MT5_VALIDATION_UNCONFIGURED",
     ]);
+  });
+
+  it("[164.6.6.3.2 D-07] every env-gap arm that answers KEY_MT5_VALIDATION_UNCONFIGURED captures to Sentry", () => {
+    const router = readFileSync(
+      join(process.cwd(), "analytics-service", "routers", "exchange.py"),
+      "utf-8",
+    );
+    const probe = readFileSync(
+      join(process.cwd(), "analytics-service", "services", "mt5_probe.py"),
+      "utf-8",
+    );
+    const relogin = readFileSync(
+      join(process.cwd(), "analytics-service", "services", "mt5_relogin.py"),
+      "utf-8",
+    );
+
+    // A call counts only when it STARTS a line: a commented-out call (`# alert(...)`) must
+    // not satisfy the pin, which is the exact neuter this test exists to catch.
+    // The three raise sites, found by their code literal. Exactly three: a fourth would be
+    // an arm this pin does not know to check, and a missing one a lost emitter.
+    const raises: number[] = [];
+    for (const m of router.matchAll(/"MT5_VALIDATION_UNCONFIGURED",/g)) raises.push(m.index!);
+    expect(
+      raises.length,
+      "routers/exchange.py no longer has exactly three MT5_VALIDATION_UNCONFIGURED raises: " +
+        "re-derive which arms the card's 'we have been alerted' rests on",
+    ).toBe(3);
+
+    // Arm 1, the validation endpoint: the alert precedes the raise.
+    const callAt = (src: string, name: string): number =>
+      src.search(new RegExp("^[ \\t]*" + name + "\\(", "m"));
+    const endpointAlert = callAt(router, "alert_mt5_validation_gateway_unconfigured");
+    expect(
+      endpointAlert > -1 && endpointAlert < raises[0],
+      "the unset-or-malformed endpoint arm no longer calls " +
+        "alert_mt5_validation_gateway_unconfigured before it raises, so " +
+        "KEY_MT5_VALIDATION_UNCONFIGURED's 'we have been alerted' is unsubstantiated there",
+    ).toBe(true);
+
+    // Arm 2, the empty known-server list: the arm sits behind assert_mt5_server_known, whose
+    // unconfigured path captures.
+    const guardCall = callAt(router, "assert_mt5_server_known");
+    expect(
+      guardCall > -1 && guardCall < raises[1] && raises[1] - guardCall < 1200,
+      "the empty-known-server-list arm is no longer guarded by assert_mt5_server_known, " +
+        "so its raise has no capture behind it",
+    ).toBe(true);
+    const probeStart = probe.indexOf("def assert_mt5_server_known(");
+    expect(probeStart, "assert_mt5_server_known moved or was renamed").toBeGreaterThan(-1);
+    const probeBody = probe.slice(probeStart);
+    const unconfigured = probeBody.slice(
+      probeBody.indexOf("if not known:"),
+      probeBody.indexOf("raise Mt5KnownServersUnconfigured"),
+    );
+    expect(
+      callAt(unconfigured, "_capture_server_unknown_once") > -1,
+      "assert_mt5_server_known's empty-list path no longer calls _capture_server_unknown_once, " +
+        "so the empty-known-server-list arm answers without a capture",
+    ).toBe(true);
+
+    // Arm 3, the inverted timeout chain: the windowed capture precedes the raise.
+    const invertedAlert = callAt(router, "alert_mt5_validation_timeout_chain_inverted");
+    expect(
+      invertedAlert > -1 && invertedAlert > raises[1] &&invertedAlert < raises[2],
+      "the inverted-timeout-chain arm no longer calls " +
+        "alert_mt5_validation_timeout_chain_inverted before it raises, so " +
+        "KEY_MT5_VALIDATION_UNCONFIGURED's 'we have been alerted' is unsubstantiated there",
+    ).toBe(true);
+    const helperStart = relogin.indexOf("def alert_mt5_validation_timeout_chain_inverted(");
+    expect(helperStart, "the inverted-chain alert helper was removed").toBeGreaterThan(-1);
+    expect(
+      callAt(relogin.slice(helperStart, helperStart + 2500), "sentry_sdk\\.capture_message") > -1,
+      "alert_mt5_validation_timeout_chain_inverted no longer calls sentry_sdk.capture_message",
+    ).toBe(true);
   });
 
   /**
@@ -2790,8 +2914,32 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * one substantiated exception recorded beside `FORBIDDEN_FRAGMENT_SUBSTANTIATED_FOR`
    * above, with the capture it rests on pinned by its own test. The value was
    * re-measured at HEAD (97, from this guard's failure message) before it moved.
+   *
+   * ⚠️ 98 → 99 (2026-10-07, Phase 164.6.6.3.2 plan 01 / item 7): one arrival,
+   * `KEY_MT5_VALIDATION_UNCONFIGURED`, walked against the FORBIDDEN fragments by hand
+   * BEFORE the number moved. "we fetched your trades", "data is unchanged" and
+   * "wizard_session_id idempotency" are ABSENT. "been notified" is ABSENT, and the
+   * entry's own claim, "We have been alerted", is the synonym that fragment's `why`
+   * warns about: it is recorded as the `been alerted` FORBIDDEN fragment with a
+   * per-code exemption (`FORBIDDEN_FRAGMENT_SUBSTANTIATED_FOR`) whose capture, at all
+   * three env-gap arms, is pinned by `[164.6.6.3.2 D-07]` above. The value was READ OFF
+   * THIS GUARD'S OWN FAILURE MESSAGE ("expected 99 to be 98"), never counted.
+   *
+   * ⚠️ 99 → 100 (2026-10-07, Phase 164.6.6.3.2 plan 02 / item 10): one arrival,
+   * `KEY_MT5_TERMINAL_BUSY`, walked against the FORBIDDEN fragments by hand BEFORE the
+   * number moved: "been notified", "been alerted", "we fetched your trades", "data is
+   * unchanged" and "wizard_session_id idempotency" are all ABSENT, and it takes no
+   * exemption. The value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 100
+   * to be 99"), never counted.
+   *
+   * ⚠️ 100 → 101 (2026-10-07, Phase 164.6.6.3.2 plan 04 / item 0): one arrival,
+   * `GATE_HISTORY_NOT_SETTLED`, walked against the FORBIDDEN fragments by hand BEFORE the
+   * number moved: "been notified", "been alerted", "we fetched your trades", "data is
+   * unchanged" and "wizard_session_id idempotency" are all ABSENT, and it takes no
+   * exemption. The value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 101 to
+   * be 100"), never counted.
    */
-  const EXPECTED_TABLE_SIZE = 98;
+  const EXPECTED_TABLE_SIZE = 101;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -4405,6 +4553,105 @@ describe("[164.6.6.3 plan 06] the unlisted-server arm is recognised on every key
   it("derives recoverable: true, so the Retry control renders", () => {
     const envelope = buildEnvelope("KEY_MT5_SERVER_UNKNOWN", "corr-srv-1");
     expect(envelope.recoverable).toBe(true);
+  });
+});
+
+/**
+ * [164.6.6.3.2 plan 01 / D-01, D-05, D-07] `KEY_MT5_VALIDATION_UNCONFIGURED` — our
+ * connection for checking MT5 keys is not set up, as every key surface receives it.
+ *
+ * The wire body is the nested `service_error` 500 `{detail: {code:
+ * "MT5_VALIDATION_UNCONFIGURED", dependency, retryable: false, detail}}`; the seam
+ * client lifts `code` onto `seamCode`, which is all the classifier reads. The D-31
+ * `undetermined` arm keeps wire `MT5_GATEWAY_UNCONFIGURED` and
+ * `SEAM_INTERNAL_FAULT`: a terminal that ran and refused to classify is not "not set
+ * up", so the control case below pins that the two never merge.
+ */
+describe("[164.6.6.3.2 plan 01] the env-gap arm is recognised on every key surface", () => {
+  it("a 500 MT5_VALIDATION_UNCONFIGURED wire code classifies to KEY_MT5_VALIDATION_UNCONFIGURED, by machine code", () => {
+    // The message would classify differently under the substring cascade ("timeout"
+    // is a network-timeout token and "sign in" a credential token), so only
+    // `seamCode` can win.
+    const result = classifyKeyValidationError({
+      seamCode: "MT5_VALIDATION_UNCONFIGURED",
+      message: "connection timeout while we tried to sign in",
+    });
+    expect(result).toEqual({ code: "KEY_MT5_VALIDATION_UNCONFIGURED", status: 500 });
+  });
+
+  it("derives recoverable: false, so no Retry control renders", () => {
+    const envelope = buildEnvelope("KEY_MT5_VALIDATION_UNCONFIGURED", "corr-unc-1");
+    expect(envelope.recoverable).toBe(false);
+  });
+
+  it("D-31 control: wire MT5_GATEWAY_UNCONFIGURED still renders SEAM_INTERNAL_FAULT at 500", () => {
+    const result = classifyKeyValidationError({
+      seamCode: "MT5_GATEWAY_UNCONFIGURED",
+      message: "connection timeout while we tried to sign in",
+    });
+    expect(result).toEqual({ code: "SEAM_INTERNAL_FAULT", status: 500 });
+  });
+
+  it("the copy says whose fault it is and where to go, and names no setting, host, port, route or address (D-05)", () => {
+    const copy = WIZARD_ERROR_COPY.KEY_MT5_VALIDATION_UNCONFIGURED;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ");
+    expect(blob.toLowerCase()).toContain("on our side");
+    expect(blob.toLowerCase()).toContain("contact form");
+    expect(blob).not.toContain("@");
+    expect(blob).not.toMatch(/MT5_[A-Z_]+|_HOST|_PORT|\/api\/|\b\d{3,5}\b/);
+    expect(copy.actions).not.toContain("clear_and_retry");
+    expect(copy.actions).not.toContain("try_another_key");
+  });
+});
+
+/**
+ * [164.6.6.3.2 plan 02 / D-02] `KEY_MT5_TERMINAL_BUSY` - our validation terminal could
+ * not take this check right now, as every key surface receives it.
+ *
+ * Wire `MT5_TERMINAL_BUSY` is a flat 424 `VenueTransientHTTPException` body
+ * `{detail, code, recoverable: true}` emitted at TWO sites (the owed-scrub gate and the
+ * held-lease refusal). Both used to answer `NETWORK_UNAVAILABLE`, which stays on the other
+ * eight sites and still renders `KEY_NETWORK_TIMEOUT`; the control case pins that the two
+ * never merge. The row is the only recognition path: no substring needle exists for it.
+ */
+describe("[164.6.6.3.2 plan 02] the terminal-busy arms are recognised on every key surface", () => {
+  it("a 424 MT5_TERMINAL_BUSY wire code classifies to KEY_MT5_TERMINAL_BUSY, by machine code", () => {
+    // The message below would classify as KEY_NETWORK_TIMEOUT under the substring cascade
+    // ("timeout"), so only `seamCode` can win.
+    const result = classifyKeyValidationError({
+      seamCode: "MT5_TERMINAL_BUSY",
+      message: "Network error: the request hit a timeout. Check connectivity and try again.",
+    });
+    expect(result).toEqual({ code: "KEY_MT5_TERMINAL_BUSY", status: 424 });
+  });
+
+  it("derives recoverable: true, so the Retry control renders (never read back from `actions`)", () => {
+    const envelope = buildEnvelope("KEY_MT5_TERMINAL_BUSY", "corr-busy-1");
+    expect(envelope.recoverable).toBe(true);
+  });
+
+  it("control: wire NETWORK_UNAVAILABLE still renders KEY_NETWORK_TIMEOUT at 502", () => {
+    const result = classifyKeyValidationError({
+      seamCode: "NETWORK_UNAVAILABLE",
+      message: "Network error reaching the exchange. Check connectivity and try again.",
+    });
+    expect(result).toEqual({ code: "KEY_NETWORK_TIMEOUT", status: 502 });
+  });
+
+  it("is NOT paged: a held terminal is contention, not our defect", () => {
+    expect(OUR_DEFECT_KEY_ERROR_CODES.has("KEY_MT5_TERMINAL_BUSY")).toBe(false);
+  });
+
+  it("the copy is true at BOTH emitters: it says the terminal was busy, never that another check is using it (W1)", () => {
+    const copy = WIZARD_ERROR_COPY.KEY_MT5_TERMINAL_BUSY;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ").toLowerCase();
+    // At the owed-scrub gate NOTHING ELSE is running, so either phrase is false there.
+    expect(blob).not.toContain("another");
+    expect(blob).not.toContain("in use");
+    expect(blob).toContain("briefly busy");
+    expect(blob).toContain("try again in a minute");
+    expect(blob).toContain("contact form");
+    expect(blob).not.toContain("@");
   });
 });
 
@@ -6359,5 +6606,43 @@ describe("[167.1.2 / WR-04 follow-up] KEY_ORPHANED claims only what every path t
     expect(copy).not.toMatch(/whose draft was deleted, leaving/);
     expect(copy).not.toMatch(/attached to nothing/);
     expect(copy).not.toMatch(/nothing uses it/);
+  });
+});
+
+describe("[164.6.6.3.2 D-06] GATE_HISTORY_NOT_SETTLED rests on one sentence two languages must agree on", () => {
+  /**
+   * The Python worker stamps `_MT5_HISTORY_UNSETTLED_USER_SENTENCE` into
+   * `strategy_analytics.computation_error` on the derive job's final failed attempt; the
+   * wizard recognises the cause by EXACT equality with the TypeScript mirror. Changing
+   * either side alone makes the card unreachable (the wizard falls back to the generic
+   * analytics-failed copy), and nothing at runtime would say so. This reads the Python
+   * source the way the item 9 pin reads `mt5_probe.py`.
+   */
+  it("[164.6.6.3.2 D-06] the history-not-settled sentence is byte-equal across Python and TypeScript", () => {
+    const src = readFileSync(
+      join(process.cwd(), "analytics-service", "services", "job_worker.py"),
+      "utf-8",
+    );
+    const decl = src.match(
+      /^_MT5_HISTORY_UNSETTLED_USER_SENTENCE\s*:\s*Final\[str\]\s*=\s*\(\s*\n([\s\S]*?)\n\)/m,
+    );
+    expect(
+      decl,
+      "_MT5_HISTORY_UNSETTLED_USER_SENTENCE was not found as a module-level parenthesised " +
+        "string in analytics-service/services/job_worker.py: it moved, was renamed, or lost " +
+        "its Final[str] annotation. The wizard card for GATE_HISTORY_NOT_SETTLED is " +
+        "unreachable without it.",
+    ).not.toBeNull();
+    const literals = [...decl![1].matchAll(/^\s*"((?:[^"\\]|\\.)*)"\s*$/gm)].map((m) => m[1]);
+    expect(literals.length, "no string literals inside the Python constant").toBeGreaterThan(0);
+    expect(
+      literals.some((l) => l.includes("\\")),
+      "the Python sentence uses an escape sequence; extend this pin before trusting it",
+    ).toBe(false);
+    expect(literals.join("")).toBe(MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR);
+  });
+
+  it("[164.6.6.3.2 D-05] the mirror names no email address", () => {
+    expect(MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR).not.toContain("@");
   });
 });

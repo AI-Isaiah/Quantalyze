@@ -389,6 +389,8 @@ def test_every_audit_emission_is_AFTER_compute_and_BEFORE_return():
 
 import pytest  # noqa: E402 — kept local to the behavioral block
 
+from tests._curve_fixtures import curve_from_returns  # noqa: E402
+
 
 def _make_chain(execute_result):
     """A Supabase query-builder double: every fluent method returns self,
@@ -414,11 +416,16 @@ def _make_bridge_supabase(*, candidates_present: bool):
     UNDERPERF_ID = "22222222-2222-2222-2222-222222222222"
     CANDIDATE_ID = "33333333-3333-3333-3333-333333333333"
 
-    series_records = [
-        {"date": "2024-01-02", "value": 0.01},
-        {"date": "2024-01-03", "value": -0.02},
-        {"date": "2024-01-04", "value": 0.015},
-    ]
+    # Phase 164.6.6.2.2: `strategy_analytics.returns_series` is the stored cumulative
+    # CURVE, and the router reads it as daily returns through the shared boundary
+    # (day 0 has no stored predecessor and never emits). The leading 0.0 day keeps
+    # the three original returns 0.01, -0.02, 0.015 on 2024-01-02..04 alive. The
+    # bridge path under test needs no more points than that: the scorer is stubbed
+    # on the full-scoring branch and the empty-candidates branch never scores.
+    series_records = curve_from_returns(
+        [0.0, 0.01, -0.02, 0.015],
+        ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"],
+    )
 
     # strategy_analytics is queried twice (portfolio members, then candidates).
     # The router calls .in_(strategy_ids) the first time and .in_(candidate_ids)

@@ -20,6 +20,7 @@ substitution that lives in ``transforms.trades_to_daily_returns_with_status``
 """
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 
@@ -33,12 +34,15 @@ from services.nav_twr import (
     BINANCE_DEPOSIT_TERMINUS_DAYS,
     BYBIT_DEPOSIT_TERMINUS_DAYS,
     FLOW_TERMINUS_DAYS_BY_VENUE,
+    NAV_TWR_ANNOTATION_KEYS,
     NAV_TWR_GUARD_KEYS,
     OKX_DEPOSIT_TERMINUS_DAYS,
     PNL_DOM_RATIO,
     FLOW_BOUNDARY_PROXIMITY_DAYS,
     NavReconstructionError,
+    _build_nav_meta,
     _flows_to_daily_usd,
+    _guard_denominator,
     apply_flow_coverage_terminus,
     chain_linked_twr,
     cumulative_twr_segmented,
@@ -1573,6 +1577,30 @@ def test_reconcile_residual_tolerance_is_per_unit() -> None:
     ) == pytest.approx(0.0, abs=1e-12)
 
 
+def test_reconcile_residual_tolerance_catches_the_smallest_mm2x_trade() -> None:
+    """D-24 follow-up: MM-2x holds 0.00961461 BTC and its smallest trade is about 2e-5 BTC.
+    The BTC absolute band 1e-6 is 1/20 of that trade and 1e-4 of the balance, so a roll
+    that drops a 2e-5 BTC flow still raises, and a clean roll at that balance is accepted.
+      terminal 0.00961461, pnl [2e-5, -2e-5, 5e-4] (sum 5e-4), flow +2e-5 on day 2.
+      true start = 0.00961461 - 0.0005 - 0.00002 = 0.00909461
+      mutant start (flow dropped from the roll) = 0.00909461 + 0.00002 = 0.00911461
+      residual = 0.00961461 - 0.00911461 - 0.0005 - 0.00002 = -0.00002
+    |-2e-5| > max(1e-6, 1e-6 * 0.00961461) = 1e-6, so it raises."""
+    daily_pnl = _pnl([0.00002, -0.00002, 0.0005])
+    flows = _flows_to_daily_usd([("2026-01-02", 0.00002)])
+    terminal = 0.00961461
+    true_start = _reconstructed_start(daily_pnl, terminal, flows)
+    assert true_start == pytest.approx(0.00909461, abs=1e-15)
+    with pytest.raises(NavReconstructionError):
+        reconcile_flow_residual(
+            terminal, true_start + 0.00002, daily_pnl, flows,
+            abs_tol=_BTC_FLOORS.residual_abs_tol,
+        )
+    assert reconcile_flow_residual(
+        terminal, true_start, daily_pnl, flows, abs_tol=_BTC_FLOORS.residual_abs_tol
+    ) == pytest.approx(0.0, abs=1e-15)
+
+
 def test_reconcile_wired_with_unit_tolerance(monkeypatch) -> None:
     """The tolerance is threaded THROUGH ``reconstruct_nav_and_twr``, not merely available:
     a roll that corrupts early NAV by 0.001 BTC is refused when the BTC floors are passed
@@ -1596,7 +1624,7 @@ def test_reconcile_wired_with_unit_tolerance(monkeypatch) -> None:
 def test_upnl_materiality_reads_unit_dust_floor() -> None:
     """The uPnL wedge ratio is only evaluated on a non-dust anchor, and 'non-dust' is
     per unit. Anchor 0.02 BTC, open uPnL 0.004: |0.004| / 0.02 = 0.20 > the 0.05 ratio.
-    Under BTC floors the anchor (0.02 > 0.001) is material, so the flag fires; under the
+    Under BTC floors the anchor (0.02 > 1e-7) is material, so the flag fires; under the
     USD default 0.02 is below $1000, the ratio is not evaluated, no flag."""
     pnl = _pnl([0.001])
     _, btc_meta = reconstruct_nav_and_twr(
@@ -1631,3 +1659,139 @@ def test_floors_keyword_default_is_byte_identical() -> None:
     )
     pd.testing.assert_series_equal(d_r, e_r)
     assert d_f == e_f
+
+
+# ---------------------------------------------------------------------------
+# D-25 (founder, 2026-10-08): a MEASURED day whose starting balance is below the unit's
+# ``material_equity`` is kept exact AND flagged ``small_base_measured`` (informational: never
+# a chain break, never a dropped day, never a status promotion). IN-03 (code review of plan
+# 14): the dust boundary at exactly 1e-7 distinguishes ``<`` from ``<=``.
+# ---------------------------------------------------------------------------
+
+_BTC_MATERIAL = _BTC_FLOORS.material_equity  # 1e-4
+_BTC_DUST = _BTC_FLOORS.dust_nav  # 1e-7
+
+
+def _two_day_nav(first: float, second: float) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Two closing NAVs and a zero flow series; day 0's pnl is 0 so ``prev0`` for day 0
+    is exactly ``first``, and day 1's prior NAV is exactly ``first`` too."""
+    idx = _days(2)
+    nav = pd.Series([first, second], index=idx, name="nav")
+    pnl = pd.Series([0.0, second - first], index=idx, name="daily_pnl")
+    return nav, pnl, _flows_to_daily_usd([])
+
+
+def test_dust_boundary_is_strict_at_exactly_1e_7() -> None:
+    """IN-03. ``prev_nav < dust_floor`` is strict: a prior NAV of exactly 1e-7 BTC is a
+    usable denominator, and the next float below it is dust. A ``<=`` mutant turns the first
+    assertion RED; a floor one ulp too low turns the second RED."""
+    assert _guard_denominator(_BTC_DUST, 0.0, _BTC_DUST) is None
+    below = math.nextafter(_BTC_DUST, 0.0)
+    assert _guard_denominator(below, 0.0, _BTC_DUST) == "dust_nav_guard"
+
+
+def test_chain_at_exactly_the_dust_floor_is_measured_and_flagged() -> None:
+    """The chain-level twin of the boundary: both days start from exactly 1e-7, so both are
+    measured (hand arithmetic: (1.2e-7 - 1e-7) / 1e-7 = 0.2 for day 1, 0.0 for day 0) and
+    both are under the 1e-4 material equity, so both are flagged. One ulp below, and the
+    days are dust-guarded and NOT counted as measured."""
+    nav, pnl, flows = _two_day_nav(_BTC_DUST, 1.2e-7)
+    returns, flags = chain_linked_twr(nav, pnl, flows, floors=_BTC_FLOORS)
+    assert returns.iloc[0] == pytest.approx(0.0, abs=1e-12)
+    assert returns.iloc[1] == pytest.approx(0.2, abs=1e-9)
+    assert "dust_nav_guard" not in flags
+    assert flags["small_base_measured"] is True
+    assert flags["small_base_measured_days"] == 2
+    assert flags["small_base_measured_min_nav"] == _BTC_DUST
+
+    nav2, pnl2, flows2 = _two_day_nav(math.nextafter(_BTC_DUST, 0.0), 1.2e-7)
+    returns2, flags2 = chain_linked_twr(nav2, pnl2, flows2, floors=_BTC_FLOORS)
+    assert returns2.isna().all()
+    assert flags2.get("dust_nav_guard") is True
+    assert "small_base_measured" not in flags2  # a guarded day is not a measured day
+
+
+def test_material_equity_boundary_is_strict_at_exactly_1e_4() -> None:
+    """A prior NAV of exactly 1e-4 BTC (the BTC ``material_equity``) is NOT a small base;
+    the next float below it is. Hand arithmetic for day 1: (1.2e-4 - 1e-4) / 1e-4 = 0.2 in
+    both cases, so only the flag differs. A ``<=`` mutant flags the first case and turns
+    this RED; a missing check leaves the second case unflagged and turns it RED."""
+    nav, pnl, flows = _two_day_nav(_BTC_MATERIAL, 1.2e-4)
+    returns, flags = chain_linked_twr(nav, pnl, flows, floors=_BTC_FLOORS)
+    assert returns.iloc[1] == pytest.approx(0.2, abs=1e-9)
+    assert flags == {}
+
+    below = math.nextafter(_BTC_MATERIAL, 0.0)
+    nav2, pnl2, flows2 = _two_day_nav(below, 1.2e-4)
+    returns2, flags2 = chain_linked_twr(nav2, pnl2, flows2, floors=_BTC_FLOORS)
+    assert returns2.iloc[1] == pytest.approx(0.2, abs=1e-9)
+    assert flags2["small_base_measured"] is True
+    assert flags2["small_base_measured_days"] == 2
+    assert flags2["small_base_measured_min_nav"] == below
+
+
+def test_small_base_days_keep_their_exact_returns_and_do_not_break_the_chain() -> None:
+    """D-25: informational only. Terminal equity 7e-5 BTC, day P&L +1e-5, -2e-5, +3e-5, no flows.
+    Hand arithmetic (NAV_{t-1} = NAV_t - pnl_t):
+        NAV_2 = 7e-5     NAV_1 = 7e-5 - 3e-5 = 4e-5     NAV_0 = 4e-5 + 2e-5 = 6e-5
+        day-0 base = 6e-5 - 1e-5 = 5e-5
+    returns: 1e-5 / 5e-5 = 0.2,  -2e-5 / 6e-5 = -1/3,  3e-5 / 4e-5 = 0.75.
+    Every base (5e-5, 6e-5, 4e-5) is under 1e-4, so all three days are flagged, none is
+    dropped, the cumulative is the exact product (1.2 * 2/3 * 1.75 - 1 = 0.4), there is NO
+    ``twr_chain_broken``, and the status hint stays ``complete`` (not a warning)."""
+    pnl = _pnl([1e-5, -2e-5, 3e-5])
+    returns, meta = reconstruct_nav_and_twr(pnl, anchor_nav=7e-5, floors=_BTC_FLOORS)
+    assert returns.to_numpy() == pytest.approx([0.2, -1 / 3, 0.75], abs=1e-9)
+    assert int(returns.notna().sum()) == 3
+    assert meta["small_base_measured"] is True
+    assert meta["small_base_measured_days"] == 3
+    assert meta["small_base_measured_min_nav"] == pytest.approx(4e-5, abs=1e-15)
+    assert "twr_chain_broken" not in meta
+    for guard in NAV_TWR_GUARD_KEYS:
+        assert guard not in meta
+    assert meta["computation_status_hint"] == "complete"
+    cumulative, chain_flags = cumulative_twr_segmented(returns)
+    assert chain_flags == {}
+    assert cumulative == pytest.approx(0.4, abs=1e-9)
+
+
+def test_small_base_is_unreachable_for_the_usd_row() -> None:
+    """USD exactness: ``dust_nav`` 1000 is above ``material_equity`` 100, so every prior NAV
+    under 100 is dust-guarded before the small-base check runs. The same shape as above, in
+    dollars (NAVs 50, 60, 40), is three NaN days and NO small-base flag; a clean 5000 USD
+    ledger carries none either. The USD flag set is exactly what it was before D-25."""
+    pnl = _pnl([10.0, -20.0, 30.0])
+    returns, meta = reconstruct_nav_and_twr(pnl, anchor_nav=70.0)
+    assert returns.isna().all()
+    assert meta.get("dust_nav_guard") is True
+    assert "small_base_measured" not in meta
+    assert USD_FLOORS.dust_nav > USD_FLOORS.material_equity
+
+    clean = _pnl([100.0, 50.0, -25.0])
+    _r, clean_meta = reconstruct_nav_and_twr(clean, anchor_nav=5000.0)
+    assert "small_base_measured" not in clean_meta
+    assert clean_meta["computation_status_hint"] == "complete"
+
+
+def test_small_base_is_an_annotation_not_a_guard_key() -> None:
+    """D-25 design pin. The flag is informational, so it must NOT be a ``NAV_TWR_GUARD_KEYS``
+    member: membership promotes every consumer to ``complete_with_warnings`` and (founder-lp
+    strict mode) withholds the account. It is declared on ``NavTWRMeta`` so the meta type
+    knows it, and ``_build_nav_meta`` promotes the status only on a REAL warning beside it."""
+    for key in NAV_TWR_ANNOTATION_KEYS:
+        assert key not in NAV_TWR_GUARD_KEYS
+        assert key in nav_twr_mod.NavTWRMeta.__annotations__
+    only = _build_nav_meta(
+        {"small_base_measured": True, "small_base_measured_days": 2,
+         "small_base_measured_min_nav": 1e-5}
+    )
+    assert only["computation_status_hint"] == "complete"
+    assert only["small_base_measured"] is True
+    assert only["small_base_measured_days"] == 2
+    both = _build_nav_meta(
+        {"small_base_measured": True, "small_base_measured_days": 2,
+         "small_base_measured_min_nav": 1e-5, "dust_nav_guard": True}
+    )
+    assert both["computation_status_hint"] == "complete_with_warnings"
+    assert both["dust_nav_guard"] is True and both["small_base_measured"] is True
+    assert "small_base_measured" not in _build_nav_meta({})

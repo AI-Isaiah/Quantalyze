@@ -22,6 +22,7 @@ from services.closed_sets import (
     MT5_MASTER_PASSWORD_DETAIL,
     MT5_WRONG_SERVER_DETAIL,
     MT5_SERVER_UNKNOWN_DETAIL,
+    MT5_TERMINAL_BUSY_DETAIL,
 )
 from services.mt5_client import (
     Mt5Client,
@@ -55,6 +56,7 @@ from services.mt5_terminal_scrub import (
 # and the alert this site fires when it is absent. Never the job pair.
 from services.mt5_relogin import (
     alert_mt5_validation_gateway_unconfigured,
+    alert_mt5_validation_timeout_chain_inverted,
     read_env_mt5_credentials,
     read_env_validation_gateway_endpoint,
 )
@@ -521,6 +523,15 @@ async def _validate_mt5_key_probe(
     # is exactly half of A-01, where the 503 tripped the ONE global breaker key
     # and denied every Deribit user over an MT5 config gap. R-1: 500,
     # retryable:false. The genuinely transient MT5 arms are S-04/S-05 below.
+    #
+    # ⭐ Phase 164.6.6.3.2 D-01 (2026-10-07) — the three ENV-GAP arms (this one, the
+    # empty known-server list below, and the inverted IPC timeout chain in
+    # `_connect_and_probe`) now carry their OWN wire code, MT5_VALIDATION_UNCONFIGURED,
+    # so the wizard can say the connection is not set up on our side. The D-31
+    # `undetermined` arm alone keeps MT5_GATEWAY_UNCONFIGURED: there the terminal ran
+    # and refused to classify, and a "not set up" card would be false. Status, body
+    # shape, dependency, retryable and the detail string are unchanged; only the code
+    # literal moved.
     endpoint = read_env_validation_gateway_endpoint()
     if endpoint is None:
         # D-05's ALERT, fired BEFORE the refusal; it never raises.
@@ -532,7 +543,7 @@ async def _validate_mt5_key_probe(
         trace.outcome = "gateway_unconfigured"
         raise service_error(
             500,
-            "MT5_GATEWAY_UNCONFIGURED",
+            "MT5_VALIDATION_UNCONFIGURED",
             dependency="mt5-gateway",
             retryable=False,
             detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
@@ -558,6 +569,14 @@ async def _validate_mt5_key_probe(
     # unknown". That gives the wire code its FIFTH router emitter (after the ~531,
     # ~686, port-malformed and D-31 ~1159 sites); Phase 164.6.6.3.2 owns its wizard
     # mapping.
+    #
+    # ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): the paragraph above called this
+    # arm the FIFTH emitter of MT5_GATEWAY_UNCONFIGURED and left its wizard mapping to
+    # this phase. It now answers MT5_VALIDATION_UNCONFIGURED, with the other two env-gap
+    # arms, so the wizard names the cause; the D-31 arm alone keeps the old code.
+    # "We have been alerted" holds here because `assert_mt5_server_known` logs ERROR and
+    # calls `_capture_server_unknown_once` on its unconfigured path before it raises.
+    # The original sentences are kept as lineage.
     try:
         assert_mt5_server_known(server, site=SITE_VALIDATE_WIZARD)
     except Mt5ServerUnknownError:
@@ -572,7 +591,7 @@ async def _validate_mt5_key_probe(
         trace.outcome = "gateway_unconfigured"
         raise service_error(
             500,
-            "MT5_GATEWAY_UNCONFIGURED",
+            "MT5_VALIDATION_UNCONFIGURED",
             dependency="mt5-gateway",
             retryable=False,
             detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
@@ -716,6 +735,14 @@ async def _validate_mt5_key_probe(
             # user-facing code table), and `outcome` stays inside the existing
             # category set: an inverted timeout chain IS a gateway that is not
             # correctly configured, refused before any client exists.
+            #
+            # ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01, D-07): the code is no
+            # longer reused from the endpoint arm's old literal. This arm answers
+            # MT5_VALIDATION_UNCONFIGURED with the other two env-gap arms, and the
+            # D-31 arm alone keeps MT5_GATEWAY_UNCONFIGURED. The wizard card for the
+            # new code says "we have been alerted", and this arm only LOGGED, so it now
+            # makes a windowed Sentry capture before it raises. The original sentences
+            # above are kept as lineage.
             if _is_ipc_timeout_ordering_inversion(connect_err):
                 # Names the fault class only — no timeout values, no login,
                 # password or broker server (T-153.3-15).
@@ -723,10 +750,11 @@ async def _validate_mt5_key_probe(
                     "validate_key: MT5 IPC/rpyc timeout ordering inverted "
                     "(server misconfig) — permanent, not a bridge outage"
                 )
+                alert_mt5_validation_timeout_chain_inverted(site=SITE_VALIDATE_WIZARD)
                 trace.outcome = "gateway_unconfigured"
                 raise service_error(
                     500,
-                    "MT5_GATEWAY_UNCONFIGURED",
+                    "MT5_VALIDATION_UNCONFIGURED",
                     dependency="mt5-gateway",
                     retryable=False,
                     detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
@@ -1098,10 +1126,18 @@ async def _validate_mt5_key_probe(
                     host, port, site=SITE_VALIDATE_WIZARD, probe_thread_done=None
                 )
                 trace.outcome = "scrub_owed"
+                # Phase 164.6.6.3.2 D-02 (2026-10-07): the code now names the cause. This
+                # arm answered NETWORK_UNAVAILABLE, so the wizard told the user a network
+                # timeout when OUR terminal was refusing the check. Same flat 424, still
+                # recoverable (the scrub clears in seconds), `trace.outcome` unchanged so
+                # Railway logs still tell this apart from `lease_busy`. The detail is true
+                # here as well as at the lease site: nothing else is running at THIS arm.
+                # Edited in place; the lease arm below is a second in-place edit, not a
+                # shared helper.
                 raise VenueTransientHTTPException(
                     status_code=424,
-                    code="NETWORK_UNAVAILABLE",
-                    detail=NETWORK_ERROR_DETAIL,
+                    code="MT5_TERMINAL_BUSY",
+                    detail=MT5_TERMINAL_BUSY_DETAIL,
                     recoverable=True,
                 )
             # D-07 part 2 — where the deadline starts, so the park can read how much
@@ -1417,6 +1453,15 @@ async def _validate_mt5_key_probe(
         # to the EXISTING transient arm, by cause, minting no new code (153.1 owns
         # the user-facing code table).
         #
+        # ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-02): "minting no new code" is no
+        # longer true. This arm answered NETWORK_UNAVAILABLE, so the wizard told the user
+        # a network timeout while OUR terminal was held. It now answers MT5_TERMINAL_BUSY,
+        # the same code the owed-scrub gate answers (flat 424, recoverable, no
+        # dependency), so the card names the real cause and the remedy is "try again in a
+        # minute". The two sites are two in-place edits, never a shared helper, and
+        # `trace.outcome` stays `lease_busy` so Railway logs still tell them apart. The
+        # paragraph above is kept as lineage.
+        #
         # WHY this arm: it is genuinely RECOVERABLE — the terminal frees up — so
         # "try again" is honest advice rather than a shrug, which is what
         # WIZFORM-04's "copy names an action" requires of the server leg. And it
@@ -1450,8 +1495,8 @@ async def _validate_mt5_key_probe(
         trace.outcome = "lease_busy"
         raise VenueTransientHTTPException(
             status_code=424,
-            code="NETWORK_UNAVAILABLE",
-            detail=NETWORK_ERROR_DETAIL,
+            code="MT5_TERMINAL_BUSY",
+            detail=MT5_TERMINAL_BUSY_DETAIL,
             recoverable=True,
         )
 

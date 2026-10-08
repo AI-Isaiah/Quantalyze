@@ -329,6 +329,22 @@ _MT5_HISTORY_UNSETTLED_MESSAGE: Final[str] = (
     "budget — retrying"
 )
 
+# Phase 164.6.6.3.2 / D-06 — the USER half of the D-162-4 message/detail split for the same
+# failure. `_MT5_HISTORY_UNSETTLED_MESSAGE` above is the operator message (it stays in
+# `compute_jobs`); this is the curated sentence stamped into
+# `strategy_analytics.computation_error` on the derive job's FINAL failed attempt, where it
+# renders verbatim on the account surface and in the wizard. ⛔ Mirrored byte-for-byte as
+# `MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR` in `src/lib/wizardErrors.ts`, which
+# recognises the cause by EXACT equality with it; a vitest reads this file and pins the two
+# equal. A fixed constant: no amount, login, server or email (D-05), and `scrub_freeform_string`
+# must leave it unchanged (a test pins that too). Keep it one parenthesised string of plain
+# literals, one per line, with no escape sequences, because that pin parses it.
+_MT5_HISTORY_UNSETTLED_USER_SENTENCE: Final[str] = (
+    "Your broker had not finished sending this MT5 account's history when we read it, "
+    "so the analytics could not run yet. Nothing is wrong with your key. "
+    "Retry the sync in a few minutes."
+)
+
 # ── FLIPRETRY-01 per-crawl wall-clock bounds, sized UNDER the outer budget ──
 # derive_broker_dailies runs under a FIXED outer wait_for =
 # TIMEOUT_PER_KIND["derive_broker_dailies"] (900s / 15 min; mirrored here because
@@ -5148,6 +5164,21 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     #
                     # ⛔ NO failed-analytics stamp — a user-attributed 'failed' row
                     # for a fault that is neither the key's nor the strategy's.
+                    # ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-06), original kept
+                    # as lineage: the stamp is written on the FINAL attempt only, with
+                    # the curated `_MT5_HISTORY_UNSETTLED_USER_SENTENCE` and the 164.2
+                    # provenance pair, so the wizard can say the broker is still
+                    # sending the history instead of "the fault is in our pipeline".
+                    # Final-attempt only because an earlier stamp would flip the wizard
+                    # to failed while the job still retries. `attempts` is the attempt
+                    # being run (the claim RPC returns the row after `attempts + 1`) and
+                    # `mark_compute_job_failed` makes a transient failure final at
+                    # `attempts >= max_attempts`; a row without both counts reads as
+                    # not-final, which is today's behaviour. `heal_series=False` (F4,
+                    # as at the NAV-refusal stamp): a late history is no reason to
+                    # delete persisted basis series. Key mode stamps nothing (the
+                    # closure returns early). The result below, the operator message
+                    # and the ERROR line's other fields are unchanged.
                     #
                     # ⛔ NO terminal restart — restarting would kill the very
                     # download being waited for. That is also why the exception is
@@ -5169,11 +5200,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         "derive_broker_dailies: mt5 deal history did not settle "
                         "within the wait budget (label=%s, deals=%d, "
                         "material_equity=%s) — classified transient, retrying, no "
-                        "stamp, no restart (D-06, D-13)",
+                        "stamp before the final attempt, no restart (D-06, D-13)",
                         funding_label,
                         exc.deal_count,
                         exc.material,
                     )
+                    _attempts = job.get("attempts")
+                    _max_attempts = job.get("max_attempts")
+                    _is_final = (
+                        isinstance(_attempts, int)
+                        and isinstance(_max_attempts, int)
+                        and _attempts >= _max_attempts
+                    )
+                    if _is_final:
+                        await _stamp_strategy_analytics_failed(
+                            _MT5_HISTORY_UNSETTLED_USER_SENTENCE, heal_series=False
+                        )
                     return DispatchResult(
                         outcome=DispatchOutcome.FAILED,
                         error_message=_MT5_HISTORY_UNSETTLED_MESSAGE,
@@ -6724,6 +6766,14 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # replaces data_quality_flags wholesale, so a re-derive after a unit change clears it.
     if _mt5_unit is not None and _mt5_unit.native:
         _prestamp_flags["native_unit"] = _mt5_unit.code
+    # 164.6.6.2 / D-25 — a MEASURED day on a very small balance (prior NAV under the unit's
+    # material equity) is kept exact and ANNOTATED. A BOOL only (the smallest prior NAV is an
+    # account-size magnitude, T-73-02), present-only, and NEVER a member of
+    # NAV_TWR_GUARD_KEYS: membership promotes a row to complete_with_warnings, and an
+    # informational annotation on exact days is not a warning. The prestamp replaces
+    # data_quality_flags wholesale, so a re-derive that no longer has such a day clears it.
+    if meta.get("small_base_measured"):
+        _prestamp_flags["small_base_measured"] = True
 
     # MTM-01 (Phase 101): this seam now ALSO owns the single-key by-basis write.
     # The prestamp runs BEFORE the CSV finalizer, and the finalizer's _mark_complete

@@ -30,7 +30,6 @@ from services.dispersion import dispersing_corrwith, pairwise_correlation_or_non
 from services.native_to_usd import (
     UsdSeriesConverter,
     native_units_by_id,
-    usd_equity_from_converted_returns,
 )
 # PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
@@ -41,6 +40,7 @@ from services.error_contract import VenueTransientHTTPException
 from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions, PERMANENT_VALIDATION_ERROR_CODES
 from services.metrics import (
     _safe_float,
+    blend_periods_per_year,
     sanitize_metrics,
     sharpe_vol_status_from_backbone,
     total_return_from_equity,
@@ -55,6 +55,10 @@ from services.portfolio_risk import (
     compute_rolling_correlation,
 )
 from services.transforms import trades_to_daily_returns
+# Phase 164.6.6.2.2 (D-01, D-02, D-04): the one boundary from a stored
+# strategy_analytics row to DAILY RETURNS, plus the endpoint-ratio scaffold the
+# TWRs are read from.
+from services.wealth_returns import daily_returns_from_row, equity_from_daily_returns
 # NEW-C19-07: OWN-membership cap lives in a shared module so every OWN-portfolio
 # O(N^2) path imports the same guard (no router-to-router import / cycle).
 from services.portfolio_limits import (
@@ -426,45 +430,6 @@ def _verify_strategy_idempotency_store(
         _verify_strategy_idempotency.pop(oldest, None)
 
 
-def _records_to_series(raw: list[Any] | None, name: str = "") -> pd.Series | None:
-    """Convert [{date, value}, ...] records to a DatetimeIndex pd.Series.
-
-    Tolerates malformed records by skipping any entry missing ``date`` or
-    ``value`` and emitting a single warning. A single typo (legacy
-    ``{ts, val}`` row) used to raise KeyError that propagated up to the
-    outer catch and overwrote the real exception with the generic
-    "Analytics computation failed" message — masking schema drift.
-    """
-    if not isinstance(raw, list) or not raw:
-        return None
-
-    dates: list[Any] = []
-    vals: list[Any] = []
-    skipped = 0
-    for r in raw:
-        if not isinstance(r, dict):
-            skipped += 1
-            continue
-        d = r.get("date")
-        v = r.get("value")
-        if d is None or v is None:
-            skipped += 1
-            continue
-        dates.append(d)
-        vals.append(v)
-
-    if skipped:
-        logger.warning(
-            "_records_to_series: skipped %d malformed records for %s",
-            skipped, name or "<unnamed>",
-        )
-
-    if not dates:
-        return None
-
-    return pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
-
-
 def _build_monthly_returns(
     portfolio_returns_series: "pd.Series",
 ) -> dict[str, dict[str, float]]:
@@ -477,9 +442,10 @@ def _build_monthly_returns(
     a cumulative product masquerading as a period return.
 
     audit-2026-05-07 red-team (MED conf 8) — input series may contain
-    DUPLICATE dates. `_records_to_series` does not dedupe; an upstream
-    `returns_series` JSONB with a repeated `date` key (or a future
-    reindex against a non-unique DatetimeIndex) would feed two
+    DUPLICATE dates. The shared boundary parser (`services.wealth_returns`)
+    now sorts and dedupes the stored series, but a series built another way
+    (a reindex against a non-unique DatetimeIndex, a repeated `date` key
+    that reached the caller undeduped) would feed two
     entries for the same calendar day into the cumprod, double-counting
     that day's return in the bucket. We dedupe last-write-wins on the
     raw `(date, value)` stream BEFORE the cumprod so the bucket math
@@ -641,6 +607,24 @@ def _build_normalized_weights(portfolio_strategies: list[dict[str, Any]]) -> dic
     return {sid: w / total for sid, w in raw.items()}
 
 
+def _asset_classes_by_id(
+    portfolio_strategies: list[dict[str, Any]],
+    candidate_rows: list[dict[str, Any]],
+) -> dict[str, str | None]:
+    """{strategy_id: strategies.asset_class} for a portfolio's rows (embedded
+    ``strategies(asset_class)``) and for published-candidate rows (own column).
+
+    WR-01: handed to the scorers so each blend's Sharpe is annualized on the
+    blend's risk clock. A row with no readable class maps to None (252).
+    """
+    classes: dict[str, str | None] = {
+        row["strategy_id"]: (row.get("strategies") or {}).get("asset_class")
+        for row in portfolio_strategies
+    }
+    classes.update({row["id"]: row.get("asset_class") for row in candidate_rows})
+    return classes
+
+
 def _series_to_curve(series: pd.Series) -> list[dict[str, Any]]:
     """Serialize a cumprod Series into JSON-shaped equity-curve records.
 
@@ -743,7 +727,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
 
     try:
         ps_result = supabase.table("portfolio_strategies").select(
-            "strategy_id, current_weight, strategies(id, name)"
+            "strategy_id, current_weight, allocated_amount, strategies(id, name, asset_class)"
         ).eq("portfolio_id", portfolio_id).execute()
 
         portfolio_strategies = rows(ps_result)
@@ -776,8 +760,14 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # D-23: `data_quality_flags` rides the SAME row as `returns_series`, so a
         # BTC-denominated strategy's `native_unit` is read beside the series it
         # describes (never from another query that could disagree).
+        # D-04: only columns `strategy_analytics` really has. It carries no
+        # `equity_curve` and no `total_aum` (the old select named both, so the
+        # query could not run against PROD). `returns_series` is the stored
+        # cumulative CURVE, so it is never weighted as returns directly: the
+        # shared boundary below reads it (and `daily_returns`, which wins) as
+        # daily returns first.
         sa_result = supabase.table("strategy_analytics").select(
-            "strategy_id, returns_series, equity_curve, total_aum, data_quality_flags"
+            "strategy_id, returns_series, daily_returns, data_quality_flags"
         ).in_("strategy_id", strategy_ids).execute()
 
         analytics_rows = {row["strategy_id"]: row for row in rows(sa_result)}
@@ -785,7 +775,21 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         strategy_returns: dict[str, pd.Series] = {}
         strategy_equity: dict[str, pd.Series] = {}
         strategy_twrs: dict[str, float] = {}
-        strategy_aum: dict[str, float] = {}
+
+        # D-07: a strategy's AUM in this portfolio is what the allocator put in it,
+        # `portfolio_strategies.allocated_amount`. (`strategy_analytics` has no
+        # `total_aum`, and `strategies.aum` is the strategy's own book, not this
+        # allocation.) NEW-C19-06 is kept: `is not None`, never a truthiness test,
+        # so a genuine 0 allocation counts as a known reporter and a null does not.
+        # It is filled HERE, from the portfolio rows, BEFORE the per-strategy
+        # analytics loop below: a strategy that has an allocation but no
+        # `strategy_analytics` row (or no usable returns) still counts toward the
+        # total, because the loop's `if not row: continue` would skip it.
+        strategy_aum: dict[str, float] = {
+            row["strategy_id"]: float(row["allocated_amount"])
+            for row in portfolio_strategies
+            if row.get("allocated_amount") is not None
+        }
 
         # Telemetry — record sids dropped at each step so the persisted
         # analytics row can flag partial-data computations. Project memory
@@ -794,6 +798,12 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # "computed from N of M strategies" badge instead of silently degrading.
         missing_analytics_sids: list[str] = []
         missing_returns_sids: list[str] = []
+        # D-04: an equity is DERIVED from every strategy's returns below, so no
+        # strategy that has returns lacks one and this producer leaves the list
+        # empty. The key and the wiring that reads the local list (partial_data,
+        # the analytics_payload handed to generate_narrative, data_quality) stay
+        # so the persisted shape is unchanged; they simply never fire from this
+        # cause any more.
         missing_equity_sids: list[str] = []
 
         for sid in strategy_ids:
@@ -802,27 +812,11 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                 missing_analytics_sids.append(sid)
                 continue
 
-            s = _records_to_series(row.get("returns_series"), name=sid)
+            s = daily_returns_from_row(row, name=sid, keep_absent=True)
             if s is not None:
                 strategy_returns[sid] = s
-
-                eq = _records_to_series(row.get("equity_curve"), name=sid)
-                if eq is not None:
-                    strategy_equity[sid] = eq
-                else:
-                    missing_equity_sids.append(sid)
             else:
                 missing_returns_sids.append(sid)
-
-            # NEW-C19-06: use `is not None` so a genuine $0 strategy is counted
-            # as a known reporter, not silently treated as NULL.  A truthy check
-            # (if row.get("total_aum"):) maps $0 → falsy → no entry in
-            # strategy_aum, causing aum_known_count to fall short of
-            # len(strategy_ids) even when every strategy has reported, and
-            # collapsing total_aum to None for any portfolio that contains one
-            # drained strategy.
-            if row.get("total_aum") is not None:
-                strategy_aum[sid] = float(row["total_aum"])
 
         if missing_analytics_sids:
             logger.warning(
@@ -850,22 +844,18 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # weighted raw and never as a flat account.
         _usd = UsdSeriesConverter(get_btc_closes)
         _native_units = native_units_by_id(analytics_rows.values())
-        _native_series = dict(strategy_returns)
         strategy_returns, _unconvertible_sids = await _usd.convert(
             strategy_returns, _native_units
         )
         for sid in _unconvertible_sids:
-            strategy_equity.pop(sid, None)
-            missing_equity_sids = [m for m in missing_equity_sids if m != sid]
             missing_returns_sids.append(sid)
-        for sid in strategy_returns:
-            # A converted strategy's stored equity_curve is in its NATIVE unit;
-            # its TWR (the attribution input) is rebuilt from the converted
-            # returns instead.
-            if sid in _native_units and sid in strategy_equity:
-                strategy_equity[sid] = usd_equity_from_converted_returns(
-                    _native_series[sid], strategy_returns[sid]
-                )
+        for sid, blend_series in strategy_returns.items():
+            # D-04: every strategy's TWR (the attribution input) is the endpoint
+            # ratio of an equity built from the SAME returns that enter the blend,
+            # i.e. prod(1 + r) - 1 over the post-boundary, post-conversion series.
+            # No stored curve is read, so a native-unit strategy's TWR is already
+            # in USD and every TWR covers the same days (1..n).
+            strategy_equity[sid] = equity_from_daily_returns(blend_series)
 
         if not strategy_returns:
             _fail("No returns data available for strategies in this portfolio.")
@@ -910,9 +900,15 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
             name="portfolio",
         )
 
-        # Portfolio TWR
+        # Portfolio TWR over the SAME window as the per-strategy TWRs above, which
+        # `compute_attribution` compares it with: prod(1 + p_k) - 1 over every
+        # blended day (days 1..n). The old `(1 + p).cumprod()` fed straight to
+        # `total_return_from_equity` is an endpoint ratio that drops the first
+        # blended day (that function's day-0 exclusion fits a STORED equity curve,
+        # whose first point is a level, not a return). Deliberate behaviour
+        # change: the displayed portfolio TWR now includes the first blended day.
         portfolio_twr = total_return_from_equity(
-            (1 + portfolio_returns_series).cumprod()
+            equity_from_daily_returns(portfolio_returns_series)
         )
 
         # Period returns
@@ -1032,7 +1028,12 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                     # does not disperse (a constant-yield portfolio), as for
                     # an all-zero one; pandas divides by the residue std.
                     corr = _safe_float(pairwise_correlation_or_none(aligned, b_aligned))
-                    btc_twr = total_return_from_equity((1 + b_aligned).cumprod())
+                    # Same day convention as `portfolio_twr` (days 1..n, first day
+                    # INCLUDED): BenchmarkComparison.tsx shows the two side by
+                    # side as a delta, so the pair must cover the same convention.
+                    btc_twr = total_return_from_equity(
+                        equity_from_daily_returns(b_aligned)
+                    )
                     benchmark_comparison = {
                         "symbol": "BTC",
                         "correlation": corr,
@@ -1057,9 +1058,11 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         cumulative = (1 + portfolio_returns_series).cumprod()
         portfolio_equity_curve = _series_to_curve(cumulative)
 
-        # Total AUM — only meaningful when every strategy reports AUM. A
-        # mix of $0 reporters and NULLs would otherwise collapse to None and
-        # be indistinguishable from "no strategies" / "all missing".
+        # Total AUM (D-07) — the sum of `allocated_amount` over every strategy in
+        # the portfolio, only meaningful when every strategy reports one. A mix
+        # of $0 reporters and NULLs would otherwise collapse to None and be
+        # indistinguishable from "no strategies" / "all missing". Uncomputable is
+        # None, never 0 and never a partial sum.
         aum_known_count = sum(1 for sid in strategy_ids if sid in strategy_aum)
         if aum_known_count == len(strategy_ids):
             total_aum = sum(strategy_aum.get(sid, 0) for sid in strategy_ids) or 0.0
@@ -1069,7 +1072,17 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # Portfolio-level sharpe and volatility. Track WHY the metric is None
         # so the dashboard can show the right empty-state instead of conflating
         # "insufficient history" with "flat vol" with "broken compute".
-        vol, sharpe, sharpe_status = sharpe_vol_status_from_backbone(portfolio_returns_series)
+        # WR-01 (founder rule): risk is annualized by frequency, and a blend uses
+        # 365 if ANY strategy blended into it is crypto, else 252. Read from the
+        # strategies actually blended (post-drop), not the whole membership.
+        blend_ppy = blend_periods_per_year(
+            (row.get("strategies") or {}).get("asset_class")
+            for row in portfolio_strategies
+            if row["strategy_id"] in strategy_returns
+        )
+        vol, sharpe, sharpe_status = sharpe_vol_status_from_backbone(
+            portfolio_returns_series, periods_per_year=blend_ppy
+        )
         vol_status = "insufficient_history" if sharpe_status == "insufficient_history" else "ok"
 
         running_max = cumulative.cummax()
@@ -1773,7 +1786,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     portfolio_owner_id = portfolio_result.get("user_id")
 
     ps_result = supabase.table("portfolio_strategies").select(
-        "strategy_id, current_weight"
+        "strategy_id, current_weight, strategies(asset_class)"
     ).eq("portfolio_id", req.portfolio_id).execute()
 
     portfolio_strategies = rows(ps_result)
@@ -1809,7 +1822,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     # D-23: `data_quality_flags` rides the same row as `returns_series`, so the
     # native unit is read beside the series it describes.
     sa_in_result = supabase.table("strategy_analytics").select(
-        "strategy_id, returns_series, data_quality_flags"
+        "strategy_id, returns_series, daily_returns, data_quality_flags"
     ).in_("strategy_id", strategy_ids).execute()
 
     portfolio_returns: dict[str, pd.Series] = {}
@@ -1817,7 +1830,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     optimizer_fetched_sids: set[str] = set()
     for row in rows(sa_in_result):
         optimizer_fetched_sids.add(row["strategy_id"])
-        s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+        s = daily_returns_from_row(row, name=row["strategy_id"], keep_absent=True)
         if s is not None:
             portfolio_returns[row["strategy_id"]] = s
         else:
@@ -1874,7 +1887,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     # behavior; no additional scoping is required.
     # If a future "unlisted but published" visibility tier is introduced, scope
     # this SELECT by that predicate (e.g. `.eq("is_listed", True)`).
-    all_published = supabase.table("strategies").select("id, name").eq(
+    all_published = supabase.table("strategies").select("id, name, asset_class").eq(
         "status", "published"
     ).not_.in_("id", strategy_ids).order(
         "created_at", desc=True
@@ -1883,6 +1896,11 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     candidate_rows = rows(all_published)
     candidate_ids = [row["id"] for row in candidate_rows]
     candidate_names = {row["id"]: row.get("name", row["id"]) for row in candidate_rows}
+    # WR-01 + D-08: the scorers annualize risk on the EXISTING BOOK's clock (365 if
+    # a book leg is crypto, else 252; a candidate's own class never moves it). They
+    # are still handed every strategy's asset class, portfolio members and
+    # candidates alike, and read only the book legs'.
+    asset_classes = _asset_classes_by_id(portfolio_strategies, candidate_rows)
 
     candidate_returns: dict[str, pd.Series] = {}
     # review-fix SF-F5: track published candidates that lack a returns_series so
@@ -1892,11 +1910,11 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     candidate_missing_returns_count = 0
     if candidate_ids:
         sa_cand_result = supabase.table("strategy_analytics").select(
-            "strategy_id, returns_series, data_quality_flags"
+            "strategy_id, returns_series, daily_returns, data_quality_flags"
         ).in_("strategy_id", candidate_ids).execute()
 
         for row in rows(sa_cand_result):
-            s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+            s = daily_returns_from_row(row, name=row["strategy_id"], keep_absent=True)
             if s is not None:
                 candidate_returns[row["strategy_id"]] = s
             else:
@@ -1915,7 +1933,9 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
             candidate_missing_returns_count, len(candidate_ids), req.portfolio_id,
         )
 
-    suggestions = find_improvement_candidates(portfolio_returns, candidate_returns, weights)
+    suggestions = find_improvement_candidates(
+        portfolio_returns, candidate_returns, weights, asset_classes=asset_classes
+    )
     # Hydrate suggestions with strategy names so the UI can render them without an extra round-trip.
     for s in suggestions:
         s["strategy_name"] = candidate_names.get(s["strategy_id"], s["strategy_id"])
@@ -2086,7 +2106,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
 
     # Verify the underperformer is actually in this portfolio
     ps_result = supabase.table("portfolio_strategies").select(
-        "strategy_id, current_weight"
+        "strategy_id, current_weight, strategies(asset_class)"
     ).eq("portfolio_id", req.portfolio_id).execute()
 
     portfolio_strategies = rows(ps_result)
@@ -2106,13 +2126,13 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
     # Fetch portfolio strategy returns. D-23: `data_quality_flags` rides the same
     # row as `returns_series`, so the native unit is read beside its series.
     sa_in_result = supabase.table("strategy_analytics").select(
-        "strategy_id, returns_series, data_quality_flags"
+        "strategy_id, returns_series, daily_returns, data_quality_flags"
     ).in_("strategy_id", strategy_ids).execute()
 
     portfolio_returns: dict[str, pd.Series] = {}
     bridge_missing_returns_sids: list[str] = []
     for row in rows(sa_in_result):
-        s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+        s = daily_returns_from_row(row, name=row["strategy_id"], keep_absent=True)
         if s is not None:
             portfolio_returns[row["strategy_id"]] = s
         else:
@@ -2202,7 +2222,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
     # derived numeric scores (composite_score, sharpe_delta, etc.) are returned,
     # never the raw return series.  No additional scoping is required until a
     # "unlisted-but-published" visibility tier is added.
-    all_published = supabase.table("strategies").select("id, name").eq(
+    all_published = supabase.table("strategies").select("id, name, asset_class").eq(
         "status", "published"
     ).not_.in_("id", strategy_ids).order(
         "created_at", desc=True
@@ -2211,15 +2231,20 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
     candidate_rows = rows(all_published)
     candidate_ids = [row["id"] for row in candidate_rows]
     candidate_names = {row["id"]: row.get("name", row["id"]) for row in candidate_rows}
+    # WR-01 + D-08: the scorers annualize risk on the EXISTING BOOK's clock (365 if
+    # a book leg is crypto, else 252; a candidate's own class never moves it). They
+    # are still handed every strategy's asset class, portfolio members and
+    # candidates alike, and read only the book legs'.
+    asset_classes = _asset_classes_by_id(portfolio_strategies, candidate_rows)
 
     candidate_returns: dict[str, pd.Series] = {}
     if candidate_ids:
         sa_cand_result = supabase.table("strategy_analytics").select(
-            "strategy_id, returns_series, data_quality_flags"
+            "strategy_id, returns_series, daily_returns, data_quality_flags"
         ).in_("strategy_id", candidate_ids).execute()
 
         for row in rows(sa_cand_result):
-            s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+            s = daily_returns_from_row(row, name=row["strategy_id"], keep_absent=True)
             if s is not None:
                 candidate_returns[row["strategy_id"]] = s
 
@@ -2277,7 +2302,11 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
         }
 
     candidates = find_replacement_candidates(
-        portfolio_returns, candidate_returns, weights, req.underperformer_strategy_id
+        portfolio_returns,
+        candidate_returns,
+        weights,
+        req.underperformer_strategy_id,
+        asset_classes=asset_classes,
     )
 
     # Hydrate with strategy names (allocator-safe, no emails/profiles)
@@ -2570,8 +2599,12 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
             hit_candidate_cap = len(published_ids) >= _MATCH_CANDIDATE_LIMIT
 
             if published_ids:
+                # Phase 164.6.6.2.2 (D-06): `daily_returns` and
+                # `data_quality_flags` ride the same row so the shared boundary
+                # can read each published strategy as DAILY RETURNS (the stored
+                # `returns_series` is a cumulative curve, not returns).
                 sa_result = supabase.table("strategy_analytics").select(
-                    "strategy_id, returns_series"
+                    "strategy_id, returns_series, daily_returns, data_quality_flags"
                 ).in_("strategy_id", published_ids).execute()
 
                 # Vectorized matching: build a DataFrame of all existing series and
@@ -2587,10 +2620,21 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
                 # slice is the relevant window for correlation matching
                 # anyway — older history dilutes the recent-regime
                 # signal verify_strategy is actually looking for.
+                #
+                # Phase 164.6.6.2.2 (D-06): the trim PRECEDES the conversion and
+                # covers BOTH list columns the boundary can read. A curve cut to
+                # its trailing N levels then loses only its own first point at
+                # the boundary (N - 1 returns); converting first would build the
+                # full series in memory, which is what the cap exists to stop.
+                # A dict-shaped `daily_returns` is passed through as stored.
                 existing: dict[str, pd.Series] = {}
                 for row in rows(sa_result):
-                    raw_series = _trim_returns_series(row.get("returns_series"))
-                    s = _records_to_series(raw_series, name=row["strategy_id"])
+                    trimmed_row = {
+                        **row,
+                        "returns_series": _trim_returns_series(row.get("returns_series")),
+                        "daily_returns": _trim_returns_series(row.get("daily_returns")),
+                    }
+                    s = daily_returns_from_row(trimmed_row, name=row["strategy_id"])
                     if s is not None:
                         existing[row["strategy_id"]] = s
 

@@ -141,7 +141,11 @@ async def test_csv_analytics_happy_path() -> None:
     completed = [c for c in upsert_calls if c.args[0].get("computation_status") == "complete"]
     assert len(completed) >= 1, "Expected at least one upsert with status='complete'"
     payload = completed[0].args[0]
-    assert payload["data_quality_flags"] == {"csv_source": True}
+    # Phase 164.6.6.2.2 (D-05): a success write names its curve's cumulative method.
+    assert payload["data_quality_flags"] == {
+        "csv_source": True,
+        "cumulative_method": "geometric",
+    }
     assert payload["trade_metrics"] is None
     assert payload["volume_metrics"] is None
     assert payload["exposure_metrics"] is None
@@ -1593,6 +1597,157 @@ async def test_a_malformed_native_unit_is_not_carried(bad) -> None:  # type: ign
     assert "native_unit" not in payload["data_quality_flags"]
     assert spy.call_args.args[1] is not None
     bench.assert_awaited_once()
+
+
+# ===========================================================================
+# Phase 164.6.6.2 (D-25) — `small_base_measured` is an INFORMATIONAL annotation: a
+# measured day started from a balance under the unit's material equity, so its return
+# can be extreme and the factsheet says so. It is carried present-only by the wholesale
+# data_quality_flags rebuild (an unbridged pre-stamp would be wiped seconds after the
+# derive wrote it) and, unlike a guard key, it NEVER promotes the status.
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_small_base_measured_is_carried_and_never_promotes() -> None:
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "native_unit": "BTC", "small_base_measured": True}
+    )
+    dq = payload["data_quality_flags"]
+    assert dq.get("small_base_measured") is True, (
+        "the pre-stamped annotation must survive the wholesale rebuild; "
+        f"got {dq!r}"
+    )
+    assert payload["computation_status"] == "complete", (
+        "an informational annotation on exact days must not promote the status"
+    )
+    assert payload["computation_warned"] is False
+
+
+@pytest.mark.asyncio
+async def test_small_base_measured_beside_a_real_guard_still_warns() -> None:
+    """The annotation does not mask or replace a genuine warning."""
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "native_unit": "BTC", "small_base_measured": True,
+         "dust_nav_guard": True}
+    )
+    assert payload["computation_status"] == "complete_with_warnings"
+    dq = payload["data_quality_flags"]
+    assert dq.get("dust_nav_guard") is True and dq.get("small_base_measured") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [False, None, 1, "true", ["x"], {}])
+async def test_a_non_true_small_base_measured_is_not_carried(bad) -> None:  # type: ignore[no-untyped-def]
+    """Strict `is True`, present-only: anything else is absent, so a stale or malformed
+    value can never print the caveat."""
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "small_base_measured": bad}
+    )
+    assert "small_base_measured" not in payload["data_quality_flags"]
+
+
+# ===========================================================================
+# Phase 164.6.6.2.2 (D-05) — the single-key row names the cumulative method its
+# curve was built with, as composites already do. Readers default to geometric
+# when the key is absent, so a simple (allocated-capital) curve WITHOUT the stamp
+# would be read with the ratio rule. The stamp is the SAME `_cumulative_method`
+# variable handed to derive_basis_series, never a re-derivation.
+# ===========================================================================
+
+
+async def _run_for_cumulative_method(
+    returns_denominator_config: object | None,
+) -> tuple[dict, MagicMock]:
+    """Run the REAL runner (real derive, real compute) and return the completed
+    upsert payload plus the derive spy, so a test can compare the stamped method
+    with the one derive was actually given."""
+    from services import basis_series
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1", asset_class="crypto",
+        returns_denominator_config=returns_denominator_config,
+    )
+    real_derive = basis_series.derive_basis_series
+    spy = MagicMock(side_effect=real_derive)
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.basis_series.derive_basis_series", new=spy):
+        await run_csv_strategy_analytics("cumulative-method-uuid")
+    sa = sb.table("strategy_analytics")
+    completed = [
+        c for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and str(c.args[0].get("computation_status", "")).startswith("complete")
+    ]
+    assert completed, "expected a completed headline upsert"
+    return completed[0].args[0], spy
+
+
+@pytest.mark.asyncio
+async def test_cumulative_method_simple_config_is_stamped_simple() -> None:
+    """TRACER: an allocated-capital config whose cumulative_method is 'simple'
+    stamps 'simple' beside the curve, and it is the very value derive was given."""
+    payload, spy = await _run_for_cumulative_method(_ALLOC_CFG_SIMPLE_ACTIVE)
+    assert payload["data_quality_flags"]["cumulative_method"] == "simple"
+    assert spy.call_args.kwargs["cumulative_method"] == "simple", (
+        "the stamp must name the method the curve was BUILT with"
+    )
+    assert payload["returns_series"], "the stamp rides a row that carries a curve"
+
+
+@pytest.mark.asyncio
+async def test_cumulative_method_no_config_is_stamped_geometric_exactly() -> None:
+    """No config: the flags are exactly csv_source + the geometric stamp, so the
+    stamp adds no other key and never promotes the status (T-164.6.6.2.2-06).
+    Same stubbed-compute setup as the happy-path test, so the exact-equality
+    assertion is not muddied by the real compute's own annotations."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+        {"date": "2024-01-03", "daily_return": 0.008},
+    ] * 5
+    sb = _make_supabase_mock(rows)
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(pd.Series([0.001] * 15), False))), \
+         patch("services.basis_series.compute_all_metrics",
+               return_value=_make_metrics_result()) as compute:
+        await run_csv_strategy_analytics("cumulative-method-geo-uuid")
+    payload = next(
+        c.args[0] for c in sb.table.return_value.upsert.call_args_list
+        if c.args[0].get("computation_status") == "complete"
+    )
+    assert payload["data_quality_flags"] == {
+        "csv_source": True,
+        "cumulative_method": "geometric",
+    }
+    assert compute.call_args.kwargs["cumulative_method"] == "geometric"
+    assert payload["computation_warned"] is False
+
+
+@pytest.mark.asyncio
+async def test_cumulative_method_failure_write_gains_no_stamp() -> None:
+    """A run that wrote no curve must not gain a method stamp: the unrecoverable
+    arm preserves prior flags and adds only csv_source (D-05, plan 02 truth 4)."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [{"date": "2024-01-01", "daily_return": 0.005}]  # 1 row: cannot derive
+    sb = _make_supabase_mock(rows)
+    with patch("services.analytics_runner.get_supabase", return_value=sb):
+        with pytest.raises(HTTPException):
+            await run_csv_strategy_analytics("cumulative-method-fail-uuid")
+    failed = [
+        c for c in sb.table.return_value.upsert.call_args_list
+        if c.args[0].get("computation_status") == "failed"
+    ]
+    assert failed, "expected a failed-status upsert"
+    for c in failed:
+        assert "cumulative_method" not in (c.args[0].get("data_quality_flags") or {})
 
 
 # ===========================================================================

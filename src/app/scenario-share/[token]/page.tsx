@@ -30,6 +30,7 @@ import {
 } from "@/lib/ratelimit";
 import { hashShareToken } from "@/lib/scenario-share-token";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import { curveMethodFromFlags, type CurveMethod } from "@/lib/factsheet/resolve-series";
 import { readBtcCloses } from "@/lib/factsheet/benchmark-source";
 // toWealth MUST come from the pure @/lib/scenario module, NOT from the
 // EquityChart widget — that widget is "use client", and calling a client
@@ -198,6 +199,10 @@ export default async function ScenarioSharePage({
   // An empty lookup is the conservative default: every leg resolves as USD,
   // byte-identical to before this phase.
   const returnsUnitById: Record<string, string | null> = {};
+  // Phase 164.6.6.2.2 (D-05) — how each leg's stored curve was built, parsed from
+  // the same sibling read (`curveMethodFromFlags`). Only the parsed method
+  // crosses, never the raw flags. Empty lookup -> geometric, as before.
+  const returnsMethodById: Record<string, CurveMethod> = {};
   const seriesIds = (row.series ?? []).map((s) => s.strategy_id);
   if (seriesIds.length > 0) {
     try {
@@ -261,8 +266,10 @@ export default async function ScenarioSharePage({
     //     flags column the unit lives in) and NONE of it reaches the client:
     //     resolveSharedScenario consumes the index server-side and emits only
     //     resolved DailyPoint arrays, and `data_quality_flags` is reduced to the
-    //     parsed unit string right here (164.6.6.2 D-18: the leg's unit is not on
-    //     the RPC and the RPC cannot be widened). The raw flags are never stored.
+    //     parsed unit string and the parsed curve method right here (164.6.6.2
+    //     D-18: the leg's unit is not on the RPC and the RPC cannot be widened;
+    //     164.6.6.2.2 D-05: the method is read off the same flags). Only parsed
+    //     values cross; the raw flags are never stored.
     try {
       const { data: rsRows, error: rsError } = await admin
         .from("strategy_analytics")
@@ -280,12 +287,15 @@ export default async function ScenarioSharePage({
       for (const r of (rsRows ?? []) as Array<{
         strategy_id: string;
         returns_series: unknown;
-        data_quality_flags: { native_unit?: unknown } | null;
+        data_quality_flags: { native_unit?: unknown; cumulative_method?: unknown } | null;
       }>) {
         returnsSeriesById[r.strategy_id] = r.returns_series;
         // Keep ONLY the parsed unit (a malformed value reads as USD).
         returnsUnitById[r.strategy_id] = parseReturnsUnit(
           r.data_quality_flags?.native_unit,
+        );
+        returnsMethodById[r.strategy_id] = curveMethodFromFlags(
+          r.data_quality_flags,
         );
       }
     } catch (e) {
@@ -317,6 +327,7 @@ export default async function ScenarioSharePage({
     returnsSeriesById,
     returnsUnitById,
     conversionCloses,
+    returnsMethodById,
   );
 
   // DI-23-01 — a version-ahead / undecodable / dangling-ref draft is honest

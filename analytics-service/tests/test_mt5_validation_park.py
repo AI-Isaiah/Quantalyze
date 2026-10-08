@@ -1557,12 +1557,17 @@ def _assert_one_scrub_alert(scrub_sentry: MagicMock, caplog, cause: str) -> None
     assert f"cause={cause}" in scrub_sentry.capture_message.call_args.args[0]
 
 
-def _assert_transient_424(exc: BaseException) -> None:
+def _assert_transient_424(
+    exc: BaseException, expected_code: str = "NETWORK_UNAVAILABLE"
+) -> None:
+    """The flat recoverable 424. `expected_code` defaults to the network code the
+    stage-timeout and deadline exits still answer (they are the CONTROL for
+    Phase 164.6.6.3.2 D-02); the two terminal-busy exits pass `MT5_TERMINAL_BUSY`."""
     from services.error_contract import VenueTransientHTTPException
 
     assert isinstance(exc, VenueTransientHTTPException), repr(exc)
     assert exc.status_code == 424
-    assert exc.code == "NETWORK_UNAVAILABLE"
+    assert exc.code == expected_code
     assert exc.recoverable is True
 
 
@@ -1685,7 +1690,7 @@ async def _assert_wizard_owed_refusal(
     with caplog.at_level(logging.DEBUG, logger=_SCRUB_LOGGER):
         with pytest.raises(HTTPException) as ei:
             await _call(router, _make_req())
-    _assert_transient_424(ei.value)
+    _assert_transient_424(ei.value, expected_code="MT5_TERMINAL_BUSY")
     assert factory.call_count == 0, "a client was built for an owed terminal"
     assert transport.logins() == [], "a login ran on a terminal that owes a scrub"
     assert outcomes == ["scrub_owed"], outcomes
@@ -2005,7 +2010,7 @@ async def test_scrub_a_wizard_validation_already_queued_is_refused_quietly_and_o
             assert await a == {"valid": True, "read_only": True}
             with pytest.raises(HTTPException) as ei:
                 await b
-            _assert_transient_424(ei.value)
+            _assert_transient_424(ei.value, expected_code="MT5_TERMINAL_BUSY")
             tasks = await _drain_scheduled_scrubs()
     finally:
         blocker.set()

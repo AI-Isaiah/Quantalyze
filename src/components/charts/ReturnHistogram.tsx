@@ -9,6 +9,7 @@ import {
   CHART_TEXT_MUTED,
   CHART_TICK_STYLE,
 } from "./chart-tokens";
+import { equityCurveToDailyReturns, type CurveMethod } from "@/lib/factsheet/resolve-series";
 
 interface ReturnHistogramProps {
   returns: { date: string; value: number }[];
@@ -20,6 +21,14 @@ interface ReturnHistogramProps {
    */
   benchmarkReturns?: { date: string; value: number }[];
   bins?: number;
+  /**
+   * How `returns` (a stored cumulative CURVE, despite the prop name) was
+   * built: `geometric` is `(1 + r).cumprod()`, `simple` is `1 + r.cumsum()`.
+   * Pass `curveMethodFromFlags(data_quality_flags)`. Defaults to geometric,
+   * which is also what the benchmark curve and the scenario blend's wealth
+   * series always are. The benchmark overlay is always read geometric.
+   */
+  curveMethod?: CurveMethod;
 }
 
 /**
@@ -30,14 +39,19 @@ interface ReturnHistogramProps {
  * the CHART_BORDER token; the optional benchmarkReturns overlay renders
  * at CHART_TEXT_MUTED with 0.4 opacity.
  */
-export function ReturnHistogram({ returns, benchmarkReturns, bins = 20 }: ReturnHistogramProps) {
+export function ReturnHistogram({
+  returns,
+  benchmarkReturns,
+  bins = 20,
+  curveMethod = "geometric",
+}: ReturnHistogramProps) {
   if (!returns || returns.length < 10) return null;
 
-  // Compute daily returns from cumulative equity: (equity[i+1] / equity[i]) - 1
-  const cumulative = returns.map((r) => r.value);
-  const dailyReturns = cumulative.slice(1).map((v, i) =>
-    cumulative[i] !== 0 ? (v / cumulative[i]) - 1 : 0
-  );
+  // Daily returns from the stored cumulative curve, through the shared
+  // boundary: a day whose pair of levels is unusable is ABSENT, never a
+  // fabricated 0 return.
+  const dailyReturns = equityCurveToDailyReturns(returns, curveMethod).map((p) => p.value);
+  if (dailyReturns.length === 0) return null;
 
   const min = Math.min(...dailyReturns);
   const max = Math.max(...dailyReturns);
@@ -48,10 +62,7 @@ export function ReturnHistogram({ returns, benchmarkReturns, bins = 20 }: Return
   // scaling as the strategy series — bins align by construction.
   const benchmarkAvailable = !!benchmarkReturns && benchmarkReturns.length >= 10;
   const benchmarkDailyReturns: number[] = benchmarkAvailable
-    ? (benchmarkReturns ?? []).slice(1).map((v, i) => {
-        const prev = (benchmarkReturns ?? [])[i];
-        return prev && prev.value !== 0 ? v.value / prev.value - 1 : 0;
-      })
+    ? equityCurveToDailyReturns(benchmarkReturns ?? [], "geometric").map((p) => p.value)
     : [];
 
   const histogram = Array.from({ length: bins }, (_, i) => {

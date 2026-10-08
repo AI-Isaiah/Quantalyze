@@ -775,6 +775,14 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   // the ARRIVAL gate: a new Python error_code with no TypeScript disposition falls
   // through the substring cascade, which is what this file exists to prevent.
   "MT5_SERVER_UNKNOWN",
+  // 164.6.6.3.2 / item 10 (D-02) - minted by `_validate_mt5_key_probe`'s two
+  // terminal-busy refusals (routers/exchange.py: the owed-scrub gate and
+  // `except Mt5TerminalBusyError`), each a `VenueTransientHTTPException` 424 with
+  // `recoverable=True`. Both answered `NETWORK_UNAVAILABLE` before this phase. Takes a
+  // KEY_MT5_TERMINAL_BUSY verdict row at 424. Added here because this roster is the
+  // ARRIVAL gate: a new Python error_code with no TypeScript disposition falls through
+  // the substring cascade, which is what this file exists to prevent.
+  "MT5_TERMINAL_BUSY",
   // 164.6.5 / criterion 5 (D-12/D-13) — minted by `_validate_mt5_key_probe`'s
   // `Mt5ClientError` handler when the client error's code is one of MT5's IPC
   // transport codes (our own terminal bridge, never the exchange). Takes a
@@ -789,6 +797,15 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   // Python error_code with no TypeScript disposition falls through the
   // substring cascade, which is what this file exists to prevent.
   "MT5_VALIDATE_INVARIANT_VIOLATION",
+  // 164.6.6.3.2 / item 7 (D-01) — minted by `_validate_mt5_key_probe`'s three ENV-GAP
+  // arms (routers/exchange.py: endpoint unset or malformed, empty known-server list,
+  // inverted IPC timeout chain), each a `service_error(500, ...)` with
+  // `dependency="mt5-gateway"` and `retryable=False`. Takes a
+  // KEY_MT5_VALIDATION_UNCONFIGURED verdict row at 500. The D-31 arm keeps
+  // MT5_GATEWAY_UNCONFIGURED above. Added here because this roster is the ARRIVAL
+  // gate: a new Python error_code with no TypeScript disposition falls through the
+  // substring cascade, which is what this file exists to prevent.
+  "MT5_VALIDATION_UNCONFIGURED",
   "MT5_WRONG_SERVER",
   "NETWORK_UNAVAILABLE",
   "PERMISSION_DENIED",
@@ -873,8 +890,20 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * (`MT5_TERMINAL_UNRESPONSIVE` and `SIGN_IN_FAILED`), 43 codes, and the
  * set-equality assertion below agrees with the derived emitter set at 43.
  * 0.6 × 43 = 25.8, floored to 25 — same rule, no move.
+ *
+ * 27 stays 27 (2026-10-07, Phase 164.6.6.3.2 plan 01 / item 7): `MT5_VALIDATION_UNCONFIGURED`
+ * arrives. The hand-typed roster held 45 codes at HEAD and holds 46 with it, and the
+ * set-equality assertion below agrees with the derived emitter set at 46 (that
+ * assertion's own failure message was read for the count, not a hand tally).
+ * 0.6 x 46 = 27.6, floored to 27 - same rule, no move.
+ *
+ * 27 -> 28 (2026-10-07, Phase 164.6.6.3.2 plan 02 / item 10): `MT5_TERMINAL_BUSY` arrives.
+ * The hand-typed roster holds 47 codes with it, and the set-equality assertion below
+ * agrees with the derived emitter set at 47 (read off that assertion's own failure,
+ * which listed 47 derived against 46 typed, not a hand tally).
+ * 0.6 x 47 = 28.2, floored to 28 - the rule MOVES the floor this time.
  */
-const DERIVED_FLOOR = 27;
+const DERIVED_FLOOR = 28;
 
 /**
  * ⭐ THE REACH PIN — hand-typed, because today nothing else asserts WHERE the

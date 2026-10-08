@@ -489,7 +489,10 @@ export async function readCompositeFactsheet(
  * composite path so a malformed dqf value can never render the caveat (T-92-05).
  */
 export function singleKeyDataQuality(
-  dqf: { insufficient_window?: unknown; twr_chain_broken?: unknown } | null | undefined,
+  dqf:
+    | { insufficient_window?: unknown; twr_chain_broken?: unknown; small_base_measured?: unknown }
+    | null
+    | undefined,
 ): NonNullable<BuildFactsheetOpts["dataQuality"]> {
   return {
     composite: false,
@@ -497,6 +500,10 @@ export function singleKeyDataQuality(
     // Phase 169 review round 1 (SFH H-1): present only when true, with the same
     // strict `=== true` coercion, so a clean row's opt is unchanged.
     ...(dqf?.twr_chain_broken === true ? { twrChainBroken: true } : {}),
+    // Phase 164.6.6.2 (D-25): an informational "measured on a very small balance"
+    // annotation, present only when true under the same strict coercion (a string
+    // "true" or 1 never prints the caveat, T-92-05).
+    ...(dqf?.small_base_measured === true ? { smallBaseMeasured: true } : {}),
   };
 }
 

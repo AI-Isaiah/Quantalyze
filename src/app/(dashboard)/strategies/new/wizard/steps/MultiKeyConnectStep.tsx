@@ -365,6 +365,19 @@ const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // surface starts to receive it. Omit this line and the multi-key step renders
     // `UNKNOWN`, whose copy names no cause, for a server our terminals do not list.
     "KEY_MT5_SERVER_UNKNOWN",
+    // 164.6.6.3.2 / item 7 (D-01) — same addition as `KNOWN_CREATE_WITH_KEY_CODES`
+    // (full reasoning there): the shared classifier now returns it for wire
+    // `MT5_VALIDATION_UNCONFIGURED`, so it is admitted HERE IN THE SAME COMMIT the
+    // second key surface starts to receive it. Omit this line and the multi-key step
+    // renders `UNKNOWN`, which offers a Retry and names no cause, for a fault that
+    // repeats until an operator acts.
+    "KEY_MT5_VALIDATION_UNCONFIGURED",
+    // 164.6.6.3.2 / item 10 (D-02) — same addition as `KNOWN_CREATE_WITH_KEY_CODES`
+    // (full reasoning there): the shared classifier now returns it for wire
+    // `MT5_TERMINAL_BUSY`, so it is admitted HERE IN THE SAME COMMIT the second key surface
+    // starts to receive it. Omit this line and the multi-key step renders `UNKNOWN`, which
+    // names no cause, for a terminal that is only briefly busy.
+    "KEY_MT5_TERMINAL_BUSY",
     "KEY_IP_ALLOWLIST",
     "KEY_NETWORK_TIMEOUT",
     "KEY_PROBE_FAILED",

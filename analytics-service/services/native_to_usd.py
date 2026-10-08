@@ -28,6 +28,13 @@ priced only when EVERY calendar day in ``[d_{k-1}, d_k]`` has a usable close
 Saturday and Sunday closes too), and a close that is non-finite or not
 positive counts as missing. A non-finite input return is absent too.
 
+A NON-FINITE return is how an absent day is KEPT in the input (WR-02): the
+curve boundary, asked with ``keep_absent=True``, leaves a NaN at the date of a
+day it could not form. This converter skips that day and prices the NEXT day
+against the NaN day's own date, so a one-day native return is multiplied by the
+price move over that same single day, never over the whole gap. The output never
+carries a NaN.
+
 ``unit is None`` is a USD row: the SAME object is returned, untouched. A unit
 with no price source (``btc_closes is None``) returns an EMPTY series, since no
 price is invented: the caller must read that as "no BTC price source", never as
@@ -218,22 +225,3 @@ class UsdSeriesConverter:
                 dropped,
             )
         return out, dropped
-
-
-def usd_equity_from_converted_returns(
-    native_series: pd.Series, converted: pd.Series
-) -> pd.Series:
-    """The USD equity curve of a converted strategy, for the per-strategy TWR.
-
-    ``routers/portfolio.py`` derives each strategy's TWR from its stored
-    ``equity_curve``, which for a native-unit account is in the NATIVE unit, so
-    using it would put a raw BTC return into the attribution beside USD ones
-    (D-23). This rebuilds the curve from the converted returns instead.
-
-    The first point is a 1.0 base at the native series' own day 0, then the
-    cumulative product of ``1 + converted``. ``total_return_from_equity`` of it
-    is ``prod(1 + converted_k, k >= 1) - 1``, the same "days 1..n" window a USD
-    strategy's equity ratio covers (the legacy day-0 exclusion), now in USD.
-    """
-    base = pd.Series([1.0], index=pd.DatetimeIndex([native_series.sort_index().index[0]]))
-    return pd.concat([base, (1.0 + converted).cumprod()]).rename(native_series.name)

@@ -312,6 +312,33 @@ describe("UpdateMt5SecretDialog", () => {
     );
   });
 
+  // 164.6.6.3.2 (D-01, D-02). `rotate_key_secret` runs the same `_validate_mt5_key_probe`,
+  // so an unset validation gateway reaches this dialog as wire `MT5_VALIDATION_UNCONFIGURED`
+  // and a held terminal as `MT5_TERMINAL_BUSY`. Without a roster row each would answer
+  // `UNKNOWN`, whose copy names no cause. Expected text is typed here, not read from the
+  // table. No Retry assertion for either: this dialog passes no `onRetry` (164.6.6.3
+  // plan 06 deviation 2); the Retry verdict is gated on the multi-key step instead.
+  it("[164.6.6.3.2 D-01] KEY_MT5_VALIDATION_UNCONFIGURED is recognised, not UNKNOWN, and hides the draft line", async () => {
+    const envelope = await submitAndFailWith("KEY_MT5_VALIDATION_UNCONFIGURED");
+    expect(envelope).not.toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(envelope.textContent).toContain("Our MetaTrader connection is not set up yet.");
+    expect(envelope.textContent).not.toContain("Try the last action again.");
+    // This dialog has no wizard draft behind it (connect-surface-gated slot).
+    expect(envelope.textContent).not.toContain("Your draft is saved.");
+    // Non-vacuity: the surface-free bullet still renders beside the absence above.
+    expect(envelope.textContent).toContain("Come back to this later.");
+  });
+
+  it("[164.6.6.3.2 D-02] KEY_MT5_TERMINAL_BUSY is recognised, not UNKNOWN, and hides the draft line", async () => {
+    const envelope = await submitAndFailWith("KEY_MT5_TERMINAL_BUSY");
+    expect(envelope).not.toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(envelope.textContent).toContain("Our MetaTrader terminal is briefly busy.");
+    expect(envelope.textContent).not.toContain("Try the last action again.");
+    expect(envelope.textContent).not.toContain("Your draft is saved.");
+    // Non-vacuity: the surface-free bullet still renders beside the absence above.
+    expect(envelope.textContent).toContain("Try again in a minute.");
+  });
+
   it("the submit button is disabled while the field is empty", () => {
     render(
       <UpdateMt5SecretDialog
