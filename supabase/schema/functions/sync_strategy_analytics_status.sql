@@ -44,6 +44,9 @@ DECLARE
   -- D-09 (founder 2026-10-07), keyed on the TRIGGER: TRUE only when the job whose
   -- terminal transition caused THIS call is a side-kind job that did not succeed.
   v_side_failed_only   BOOLEAN;
+  -- WR-R3-01: the trigger is a side-kind job that has not finished done (failed,
+  -- or deferred back to pending). Read by the early return ahead of branch (a) only.
+  v_side_trigger_not_done BOOLEAN;
   v_nonterminal_counting_count INTEGER;
   -- D-05, the closed side-kind list, spelled ONCE. Every use below reads this
   -- constant (the live_failures CTE, the trigger test, the in-flight count), so
@@ -158,9 +161,9 @@ BEGIN
 
   -- ---- D-09: did a SIDE-KIND job's FAILURE cause this call? -----------------
   -- The decision is keyed on the job that TRIGGERED the call, never on recency.
-  -- The mark RPCs pass the job they just terminalised; every other caller (the
-  -- Python DEFERRED path, a status re-sync) passes NULL and gets today's
-  -- behaviour. TRUE only for a side-kind job that is failed_retry or
+  -- The mark RPCs pass the job they just terminalised and the Python DEFERRED
+  -- path the job it just deferred; every other caller (a status re-sync) passes
+  -- NULL and gets today's behaviour. TRUE only for a side-kind job that is failed_retry or
   -- failed_final: a side job that succeeded, any counting job in any state, a
   -- NULL id and a job of another strategy all read FALSE. (A recency key, "the
   -- latest-created terminal job is a failed_final", froze computed_at after a
@@ -190,6 +193,17 @@ BEGIN
                                            AND d.status = 'done'
                                            AND NOT COALESCE(d.kind = ANY (v_side_kinds), FALSE)
                                            AND d.updated_at > sa.computed_at);
+  -- The EARLY RETURN below reads a wider trigger test (review round 3, WR-R3-01;
+  -- founder D-10). The Python DEFERRED path passes the job it just deferred (an
+  -- exchange circuit breaker puts it back to pending), and a deferral computes
+  -- nothing either: without this its call ran branch (a), which stamped
+  -- computed_at = now() and blanked the sentence, and the hold of the job's later
+  -- failure then kept that stamp. So any side-kind trigger of this strategy that
+  -- has not finished done counts here. Branch (c)'s holds stay on
+  -- v_side_failed_only: a call reaching (c) has nothing in flight.
+  v_side_trigger_not_done := COALESCE((SELECT t.status <> 'done' AND t.kind = ANY (v_side_kinds)
+                                         FROM compute_jobs t
+                                        WHERE t.id = p_trigger_job_id AND t.strategy_id = p_strategy_id), FALSE);
 
   -- ---- Phase 161.1 / CR-01: is the published row still HEALTHY? -------------
   -- Conjunct (ii) of the protection predicate — see this file's header. Read
@@ -527,18 +541,20 @@ BEGIN
                     AND COALESCE(v_nonterminal_unmarked_count, 1) = 0
                     AND COALESCE(v_failed_count, 1) = 0;
 
-  -- (a-hold) D-09: a side-kind job FAILED and nothing that counts is in flight.
+  -- (a-hold) D-09: a side-kind job FAILED, or was DEFERRED (WR-R3-01), and
+  -- nothing that counts is in flight.
   -- A transient side failure (a sync_funding timeout is the founder's example)
   -- retries through failed_retry, and each retry mark reaches branch (a), which
   -- stamps computed_at = now() and blanks the sentence while the side job is
-  -- merely in flight. Nothing that produces analytics is running, so the call has
+  -- merely in flight. A deferred side job (the Python DEFERRED path, which now
+  -- passes its job id) is in flight in the same way. Nothing that produces analytics is running, so the call has
   -- nothing to say about a stored analytic: it leaves the row exactly as it is,
   -- computation_status, computed_at, the sentence and both markers included, and
   -- writes no row when none exists. The terminal hop (failed_final) reaches
   -- branch (c) with nothing in flight and holds there. When a counting job IS in
   -- flight, branch (a) below runs as it always did, because that job, not the
   -- side failure, is why the row moves.
-  IF v_side_failed_only
+  IF v_side_trigger_not_done
      AND COALESCE(v_nonterminal_count, 0) > 0
      AND COALESCE(v_nonterminal_counting_count, 1) = 0 THEN
     RETURN;

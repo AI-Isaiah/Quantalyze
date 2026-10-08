@@ -80,9 +80,10 @@
 --       ever re-stamps it. The mark RPCs now pass the job they just terminalised
 --       as p_trigger_job_id, and v_side_failed_only is TRUE only when THAT job is
 --       a side-kind job in failed_retry or failed_final (NULL, a job of another
---       strategy, a done side job and any counting job all read FALSE). Every
---       other caller (the Python DEFERRED path, a status re-sync) passes NULL and
---       gets the pre-D-09 behaviour. The flag is then narrowed (round 4,
+--       strategy, a done side job and any counting job all read FALSE). The
+--       Python DEFERRED path passes the job it just deferred (round 4, WR-R3-01);
+--       every other caller (a status re-sync) passes NULL and gets the pre-D-09
+--       behaviour. The flag is then narrowed (round 4,
 --       CR-R3-01, founder D-10): it stays TRUE only when no COUNTING job reached
 --       `done` (its updated_at) after the row's computed_at. Branch (a) holds
 --       computed_at on a warned row and leaves the stamp to the terminal call, so a
@@ -90,8 +91,10 @@
 --       else" that moved the row, and the side job's failure must stamp it. When
 --       the flag is TRUE:
 --         * (a-hold) with only side kinds in flight, the call returns before
---           branch (a): the row, and a missing row, stay exactly as they were. A
---           failed_retry hop therefore changes nothing; the terminal hop reaches
+--           branch (a): the row, and a missing row, stay exactly as they were. This
+--           return reads a wider trigger test, v_side_trigger_not_done (a side-kind
+--           trigger that has not finished done), so a DEFERRED side job returns here
+--           too (WR-R3-01). A failed_retry hop therefore changes nothing; the terminal hop reaches
 --           branch (c) with nothing in flight. With a counting job in flight,
 --           branch (a) runs as it always did, because that job is why the row moves.
 --         * branch (c) resolves the status as before (computing -> complete or
@@ -100,8 +103,8 @@
 --           `failed` (a `failed` row with NO sentence is the stale Eclipse shape
 --           D-05 exists for and still resolves to complete); and no
 --           strategy_analytics row is written when none exists.
---       Gate arms D9 to D15 of supabase/tests/test_sync_status_analytics_scope.sql
---       pin it (D15 is the counting-done release).
+--       Gate arms D9 to D16 of supabase/tests/test_sync_status_analytics_scope.sql
+--       pin it (D15 is the counting-done release, D16 the deferred side job).
 --       Known limit, unchanged by this file: a SUCCESSFUL side-kind job still
 --       takes branch (c) unchanged and stamps computed_at (the booked Phase
 --       166.5 COMPUTEDATSTAMP limit).
@@ -159,10 +162,10 @@
 --
 -- CALLERS OF THE CHANGED SIGNATURE. The second argument is optional, so every
 -- existing caller keeps working unchanged: the two mark RPCs (this file passes
--- p_job_id), the Python DEFERRED path (analytics-service/services/analytics_status.py
--- and the other `rpc("sync_strategy_analytics_status", {"p_strategy_id": ...})`
--- sites), the TypeScript sites that call the same RPC with `p_strategy_id`, and the
--- test corpus. Named-argument and one-positional-argument calls both resolve.
+-- p_job_id), the Python DEFERRED path (analytics-service/services/analytics_status.py,
+-- reached from job_worker.py's dispatch; since round 4 it passes the deferred job as
+-- p_trigger_job_id, WR-R3-01), the TypeScript sites that call the same RPC with
+-- `p_strategy_id`, and the test corpus. Named-argument and one-positional-argument calls both resolve.
 --
 -- ==========================================================================
 -- VAC-04 ACKNOWLEDGEMENT -- the PROD bodies this migration overwrites
@@ -187,7 +190,7 @@
 --   node scripts/sql-body-normalize.mjs --diff-bodies \
 --     supabase/schema/functions/<fn>.sql <scratch>
 --
--- The rows read: sync_strategy_analytics_status 62 differing lines (the
+-- The rows read: sync_strategy_analytics_status 66 differing lines (the
 -- normalizer counts lines of the function body only; the verify block sits
 -- outside it: the one-line side-kind exclusion and the 19-line process_key_long
 -- supersession, both conjuncts of the live_failures CTE, plus the D-09 trigger,
@@ -301,6 +304,9 @@ DECLARE
   -- D-09 (founder 2026-10-07), keyed on the TRIGGER: TRUE only when the job whose
   -- terminal transition caused THIS call is a side-kind job that did not succeed.
   v_side_failed_only   BOOLEAN;
+  -- WR-R3-01: the trigger is a side-kind job that has not finished done (failed,
+  -- or deferred back to pending). Read by the early return ahead of branch (a) only.
+  v_side_trigger_not_done BOOLEAN;
   v_nonterminal_counting_count INTEGER;
   -- D-05, the closed side-kind list, spelled ONCE. Every use below reads this
   -- constant (the live_failures CTE, the trigger test, the in-flight count), so
@@ -415,9 +421,9 @@ BEGIN
 
   -- ---- D-09: did a SIDE-KIND job's FAILURE cause this call? -----------------
   -- The decision is keyed on the job that TRIGGERED the call, never on recency.
-  -- The mark RPCs pass the job they just terminalised; every other caller (the
-  -- Python DEFERRED path, a status re-sync) passes NULL and gets today's
-  -- behaviour. TRUE only for a side-kind job that is failed_retry or
+  -- The mark RPCs pass the job they just terminalised and the Python DEFERRED
+  -- path the job it just deferred; every other caller (a status re-sync) passes
+  -- NULL and gets today's behaviour. TRUE only for a side-kind job that is failed_retry or
   -- failed_final: a side job that succeeded, any counting job in any state, a
   -- NULL id and a job of another strategy all read FALSE. (A recency key, "the
   -- latest-created terminal job is a failed_final", froze computed_at after a
@@ -447,6 +453,17 @@ BEGIN
                                            AND d.status = 'done'
                                            AND NOT COALESCE(d.kind = ANY (v_side_kinds), FALSE)
                                            AND d.updated_at > sa.computed_at);
+  -- The EARLY RETURN below reads a wider trigger test (review round 3, WR-R3-01;
+  -- founder D-10). The Python DEFERRED path passes the job it just deferred (an
+  -- exchange circuit breaker puts it back to pending), and a deferral computes
+  -- nothing either: without this its call ran branch (a), which stamped
+  -- computed_at = now() and blanked the sentence, and the hold of the job's later
+  -- failure then kept that stamp. So any side-kind trigger of this strategy that
+  -- has not finished done counts here. Branch (c)'s holds stay on
+  -- v_side_failed_only: a call reaching (c) has nothing in flight.
+  v_side_trigger_not_done := COALESCE((SELECT t.status <> 'done' AND t.kind = ANY (v_side_kinds)
+                                         FROM compute_jobs t
+                                        WHERE t.id = p_trigger_job_id AND t.strategy_id = p_strategy_id), FALSE);
 
   -- ---- Phase 161.1 / CR-01: is the published row still HEALTHY? -------------
   -- Conjunct (ii) of the protection predicate — see this file's header. Read
@@ -784,18 +801,20 @@ BEGIN
                     AND COALESCE(v_nonterminal_unmarked_count, 1) = 0
                     AND COALESCE(v_failed_count, 1) = 0;
 
-  -- (a-hold) D-09: a side-kind job FAILED and nothing that counts is in flight.
+  -- (a-hold) D-09: a side-kind job FAILED, or was DEFERRED (WR-R3-01), and
+  -- nothing that counts is in flight.
   -- A transient side failure (a sync_funding timeout is the founder's example)
   -- retries through failed_retry, and each retry mark reaches branch (a), which
   -- stamps computed_at = now() and blanks the sentence while the side job is
-  -- merely in flight. Nothing that produces analytics is running, so the call has
+  -- merely in flight. A deferred side job (the Python DEFERRED path, which now
+  -- passes its job id) is in flight in the same way. Nothing that produces analytics is running, so the call has
   -- nothing to say about a stored analytic: it leaves the row exactly as it is,
   -- computation_status, computed_at, the sentence and both markers included, and
   -- writes no row when none exists. The terminal hop (failed_final) reaches
   -- branch (c) with nothing in flight and holds there. When a counting job IS in
   -- flight, branch (a) below runs as it always did, because that job, not the
   -- side failure, is why the row moves.
-  IF v_side_failed_only
+  IF v_side_trigger_not_done
      AND COALESCE(v_nonterminal_count, 0) > 0
      AND COALESCE(v_nonterminal_counting_count, 1) = 0 THEN
     RETURN;
@@ -1443,6 +1462,7 @@ DECLARE
   v_c_status_hold_ok           BOOLEAN;
   v_c_row_guard_ok             BOOLEAN;
   v_side_release_ok            BOOLEAN;
+  v_side_not_done_ok           BOOLEAN;
   v_bridge_overloads           INTEGER;
   v_bridge_ndefaults           SMALLINT;
   v_bridge_argtypes            TEXT;
@@ -2182,17 +2202,17 @@ BEGIN
     RAISE EXCEPTION 'status-bridge: the side-kind list is not the four kinds D-05 names, spelled once. Found % spelling(s) with literals %; expected exactly one list of compute_intro_snapshot, poll_positions, reconcile_strategy and sync_funding. A list that gains a literal hides a failure, one that loses a literal pins an analytics status failed over a job that wrote no analytic, and a second spelling is how two lists drift apart.', v_side_lists, v_side_kinds;
   END IF;
 
-  -- (xv-b) the constant is READ at exactly the four sites that need it, each as
+  -- (xv-b) the constant is READ at exactly the five sites that need it, each as
   -- a whole expression (the live_failures CTE, the D-09 trigger test, the in-flight
-  -- counting count, the counting-done release of the hold), and no side kind is
-  -- spelled anywhere else in the body. A
+  -- counting count, the counting-done release of the hold, the early return's
+  -- not-done trigger test), and no side kind is spelled anywhere else in the body. A
   -- second NOT-IN or IN list, or a respelled literal, is how two copies of the
   -- list drift apart; that is the defect the single declaration removes.
   SELECT count(*) INTO v_side_uses
     FROM regexp_matches(v_body, 'ANY\s*\(\s*v_side_kinds\s*\)', 'g');
   SELECT count(*) INTO v_side_lit_sites
     FROM regexp_matches(v_body, '''(sync_funding|poll_positions|reconcile_strategy|compute_intro_snapshot)''', 'g');
-  v_side_sites_ok := v_side_uses = 4
+  v_side_sites_ok := v_side_uses = 5
     AND v_side_lit_sites = 4
     AND v_body !~ '\mkind\s+NOT\s+IN\s*\('
     AND v_body ~ 'AND\s+NOT\s+COALESCE\s*\(\s*f\.kind\s*=\s*ANY\s*\(\s*v_side_kinds\s*\)\s*,\s*FALSE\s*\)'
@@ -2200,7 +2220,7 @@ BEGIN
     AND v_body ~ 'count\s*\(\s*\*\s*\)\s*FILTER\s*\(\s*WHERE\s+NOT\s+COALESCE\s*\(\s*kind\s*=\s*ANY\s*\(\s*v_side_kinds\s*\)\s*,\s*FALSE\s*\)\s*\)\s+INTO\s+v_nonterminal_count\s*,\s*v_nonterminal_unmarked_count\s*,\s*v_nonterminal_counting_count'
     AND v_body ~ 'AND\s+NOT\s+COALESCE\s*\(\s*d\.kind\s*=\s*ANY\s*\(\s*v_side_kinds\s*\)\s*,\s*FALSE\s*\)\s+AND\s+d\.updated_at';
   IF NOT v_side_sites_ok THEN
-    RAISE EXCEPTION 'status-bridge: the side-kind constant is not read at exactly the four D-05/D-09 sites (the live_failures CTE, the trigger test, the in-flight counting count, the counting-done release of the hold) as whole expressions, or a side kind is spelled outside its one declaration (found % read(s) of the constant and % literal(s) of the four kinds, expected 4 and 4, and no NOT-IN list). A second spelling is how the failure filter and the freshness hold come to disagree about what a side kind is.', v_side_uses, v_side_lit_sites;
+    RAISE EXCEPTION 'status-bridge: the side-kind constant is not read at exactly the five D-05/D-09 sites (the live_failures CTE, the trigger test, the in-flight counting count, the counting-done release of the hold, the not-done trigger test of the early return) as whole expressions, or a side kind is spelled outside its one declaration (found % read(s) of the constant and % literal(s) of the four kinds, expected 5 and 4, and no NOT-IN list). A second spelling is how the failure filter and the freshness hold come to disagree about what a side kind is.', v_side_uses, v_side_lit_sites;
   END IF;
 
   -- (xvii) D-06, the supersession as ONE whole expression: a failed
@@ -2244,9 +2264,15 @@ BEGIN
   IF NOT v_side_release_ok THEN
     RAISE EXCEPTION 'status-bridge: v_side_failed_only is not narrowed by "no counting (non-side) job of this strategy reached done after the row''s computed_at" (d.status = done, d.updated_at > sa.computed_at). Without it a genuine recompute that finished done while a side job was queued keeps a stale computed_at whenever that side job then fails (CR-R3-01, D-09/D-10).';
   END IF;
-  v_a_hold_ok := v_body ~ 'IF\s+v_side_failed_only\s+AND\s+COALESCE\s*\(\s*v_nonterminal_count\s*,\s*0\s*\)\s*>\s*0\s+AND\s+COALESCE\s*\(\s*v_nonterminal_counting_count\s*,\s*1\s*\)\s*=\s*0\s+THEN\s+RETURN\s*;\s*END\s+IF\s*;\s*IF\s+v_nonterminal_count\s*>\s*0\s+AND\s+NOT\s+v_protect_hold\s+THEN';
+  -- (xix-d) WR-R3-01: the early return's trigger test, as one whole expression: a
+  -- side-kind job of THIS strategy that has not finished done, NULL read as FALSE.
+  v_side_not_done_ok := v_body ~ 'v_side_trigger_not_done\s*:=\s*COALESCE\s*\(\s*\(\s*SELECT\s+t\.status\s*<>\s*''done''\s+AND\s+t\.kind\s*=\s*ANY\s*\(\s*v_side_kinds\s*\)\s+FROM\s+compute_jobs\s+t\s+WHERE\s+t\.id\s*=\s*p_trigger_job_id\s+AND\s+t\.strategy_id\s*=\s*p_strategy_id\s*\)\s*,\s*FALSE\s*\)\s*;';
+  IF NOT v_side_not_done_ok THEN
+    RAISE EXCEPTION 'status-bridge: v_side_trigger_not_done is not "the trigger job (p_trigger_job_id, of THIS strategy) is a side-kind job whose status is not done, NULL read as FALSE". Without it a DEFERRED side job (the Python DEFERRED path) runs branch (a), which stamps computed_at = now() and blanks the sentence, and the hold of its later failure keeps that stamp (WR-R3-01, D-09/D-10).';
+  END IF;
+  v_a_hold_ok := v_body ~ 'IF\s+v_side_trigger_not_done\s+AND\s+COALESCE\s*\(\s*v_nonterminal_count\s*,\s*0\s*\)\s*>\s*0\s+AND\s+COALESCE\s*\(\s*v_nonterminal_counting_count\s*,\s*1\s*\)\s*=\s*0\s+THEN\s+RETURN\s*;\s*END\s+IF\s*;\s*IF\s+v_nonterminal_count\s*>\s*0\s+AND\s+NOT\s+v_protect_hold\s+THEN';
   IF NOT v_a_hold_ok THEN
-    RAISE EXCEPTION 'status-bridge: the early return for a failed side-kind trigger with only side kinds in flight is missing or not directly ahead of branch (a). Without it every failed_retry hop of a timing-out sync_funding runs branch (a), which stamps computed_at = now() and blanks the sentence (D-09: a failing nightly side job must never make stale analytics look freshly updated).';
+    RAISE EXCEPTION 'status-bridge: the early return for a side-kind trigger that has not finished done (v_side_trigger_not_done) with only side kinds in flight is missing, keyed on another flag, or not directly ahead of branch (a). Without it every failed_retry hop of a timing-out sync_funding runs branch (a), which stamps computed_at = now() and blanks the sentence (D-09: a failing nightly side job must never make stale analytics look freshly updated).';
   END IF;
   v_side_hold_ok := v_body ~ 'computation_error\s*=\s*CASE\s+WHEN\s+v_side_failed_only\s+THEN\s+strategy_analytics\.computation_error\s+ELSE\s+NULL\s+END'
                 AND v_body ~ 'computed_at\s*=\s*CASE\s+WHEN\s+v_side_failed_only\s+THEN\s+strategy_analytics\.computed_at\s+ELSE\s+now\(\)\s+END';

@@ -28,8 +28,17 @@ from services.db import db_execute, get_supabase
 logger = logging.getLogger("quantalyze.analytics.status_bridge")
 
 
-async def sync_strategy_analytics_status(strategy_id: str) -> None:
+async def sync_strategy_analytics_status(
+    strategy_id: str, trigger_job_id: str | None = None
+) -> None:
     """Call the 038 atomic RPC to derive + write UI status.
+
+    ``trigger_job_id`` names the job whose transition caused this call, the same
+    ``p_trigger_job_id`` the mark RPCs pass (migration 20261009120000, founder
+    D-09/D-10). The DEFERRED path passes the job it just deferred: without it the
+    bridge cannot tell that a deferred side-kind job computed nothing, runs its
+    in-flight branch and stamps ``computed_at`` (review round 3, WR-R3-01). When
+    it is None the key is omitted and the RPC's NULL default applies.
 
     Raises no exceptions for "normal" outcomes (row absent, status unchanged,
     etc.). Lets Supabase-layer exceptions bubble so the caller can log them
@@ -39,11 +48,14 @@ async def sync_strategy_analytics_status(strategy_id: str) -> None:
         return
 
     supabase = get_supabase()
+    params: dict[str, str] = {"p_strategy_id": strategy_id}
+    if trigger_job_id:
+        params["p_trigger_job_id"] = trigger_job_id
 
     def _rpc() -> None:
         supabase.rpc(
             "sync_strategy_analytics_status",
-            {"p_strategy_id": strategy_id},
+            params,
         ).execute()
 
     await db_execute(_rpc)

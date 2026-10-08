@@ -84,7 +84,10 @@
 --                 row's stamp), then that sync_funding fails. A counting job reached
 --                 done after the stamp, so computed_at advances and the superseded
 --                 sentence clears.
--- The completion sentinel at the foot counts these twenty sections.
+--   D16           WR-R3-01 (founder D-10): a sync_funding DEFERRED back to pending,
+--                 then the Python DEFERRED path's bridge call naming it as the
+--                 trigger, then its later failure. The row is unchanged after both.
+-- The completion sentinel at the foot counts these twenty-one sections.
 --
 -- UNKNOWN KIND, RESOLVED LOUD. An unregistered kind cannot be inserted into
 -- compute_jobs at all (the kind column references compute_job_kinds and the
@@ -1084,7 +1087,7 @@ BEGIN
     --            failed_retry hop runs branch (a), which stamps computed_at = now()
     --            and blanks the sentence and markers over the ten-day-old analytics.
     --            ⚠️ LAYERED: anchor (xix)'s early-return check is stood down.
-  -- RED-UNDER-M: {"arm":"D11","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"  IF v_side_failed_only\n     AND COALESCE(v_nonterminal_count, 0) > 0\n     AND COALESCE(v_nonterminal_counting_count, 1) = 0 THEN\n    RETURN;\n  END IF;\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_a_hold_ok THEN","replace":"IF FALSE AND NOT v_a_hold_ok THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"D11","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"  IF v_side_trigger_not_done\n     AND COALESCE(v_nonterminal_count, 0) > 0\n     AND COALESCE(v_nonterminal_counting_count, 1) = 0 THEN\n    RETURN;\n  END IF;\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_a_hold_ok THEN","replace":"IF FALSE AND NOT v_a_hold_ok THEN","occurrences":1}]}
     IF v_status IS DISTINCT FROM 'complete' OR v_at IS DISTINCT FROM v_old_at
        OR v_msg IS DISTINCT FROM v_err OR v_src IS DISTINCT FROM 'writer' OR v_mjob IS DISTINCT FROM fj THEN
       RAISE EXCEPTION 'TEST FAILED (D11): after transient sync_funding failure % of 3 (job now %) the row reads status %, computed_at % (seeded % ten days old), sentence %, source %, job %. A side job that timed out computed nothing, so no retry hop may stamp the analytics fresh, blank the sentence of a real earlier failure or move the status (D-09, founder 2026-10-07).', i, v_jobstat, COALESCE(v_status, 'NULL'), COALESCE(v_at::text, 'NULL'), v_old_at, COALESCE(v_msg, 'NULL'), COALESCE(v_src, 'NULL'), COALESCE(v_mjob::text, 'NULL');
@@ -1369,12 +1372,110 @@ BEGIN
   END IF;
 END $$;
 
+-- ===== ARM D16 — a DEFERRED side job leaves the row alone, and so does its later failure ==
+-- Review round 3, WR-R3-01 (founder D-10). A side-kind job that hits the exchange
+-- circuit breaker is DEFERRED back to pending, and the Python DEFERRED path then
+-- calls the bridge directly, naming that job as the trigger (round 4). The job is
+-- in flight and nothing that counts is, so the call computed nothing: the row must
+-- not move. Before round 4 the call passed no trigger, ran branch (a) (computing,
+-- computed_at = now(), the sentence blanked), and the hold of the job's later
+-- failure then kept that stamp. defer_compute_job is not on this lane, so its
+-- effect is reproduced (status back to pending, claim cleared, the reason in
+-- last_error), the way D11 reproduces the claim RPC.
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  sj         UUID;
+  fj         UUID;
+  stok       UUID := gen_random_uuid();
+  v_old_at   TIMESTAMPTZ := now() - interval '10 days';
+  v_err      TEXT := 'seeded sentence of a real earlier compute failure';
+  v_jobstat  TEXT;
+  v_status   TEXT;
+  v_at       TIMESTAMPTZ;
+  v_msg      TEXT;
+  v_src      TEXT;
+  v_mjob     UUID;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'sscope-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'sscope', 'sscope-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'sscope mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'sscope D16') RETURNING id INTO s;
+
+  -- An earlier failure and the done compute that superseded it, both finished
+  -- before the ten-day-old stamp, whose writer sentence still sits on a COMPLETE row.
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, last_error, error_kind, created_at, updated_at)
+  VALUES (s, 'compute_analytics_from_csv', 'failed_final', 3, 3, 'seeded failure', 'permanent', v_old_at - interval '2 days', v_old_at - interval '2 days')
+  RETURNING id INTO fj;
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, created_at, updated_at)
+  VALUES (s, 'compute_analytics_from_csv', 'done', 1, 3, v_old_at - interval '1 day', v_old_at - interval '1 day');
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, computation_error,
+                                  computation_error_source, computation_error_job_id, computed_at)
+  VALUES (s, 'complete', FALSE, v_err, 'writer', fj, v_old_at);
+
+  -- The nightly sync_funding, claimed, then deferred by the circuit breaker.
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, created_at)
+  VALUES (s, 'sync_funding', 'running', stok, 1, 3, now())
+  RETURNING id INTO sj;
+  UPDATE compute_jobs
+     SET status = 'pending', attempts = 0, next_attempt_at = now() + interval '65 seconds',
+         claimed_at = NULL, claimed_by = NULL, claim_token = NULL,
+         last_error = 'exchange_cooldown:binance:60s_remaining'
+   WHERE id = sj;
+
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = sj;
+  IF v_jobstat IS DISTINCT FROM 'pending' THEN
+    RAISE EXCEPTION 'TEST FAILED (D16-SETUP): the deferred sync_funding is % rather than pending, so the DEFERRED shape this arm is about was not seeded.', COALESCE(v_jobstat, 'NULL');
+  END IF;
+
+  -- The Python DEFERRED path's call, as job_worker.py dispatch makes it since round 4.
+  PERFORM sync_strategy_analytics_status(s, sj);
+
+  SELECT computation_status, computed_at, computation_error, computation_error_source, computation_error_job_id
+    INTO v_status, v_at, v_msg, v_src, v_mjob
+    FROM strategy_analytics WHERE strategy_id = s;
+  -- RED-UNDER: the early return keyed on a FAILED side trigger only (the round 3 body): the
+  --            deferred job is pending, so the call runs branch (a), which moves the
+  --            complete row to computing, stamps computed_at = now() and blanks the
+  --            sentence and its markers over the ten-day-old analytics.
+  --            ⚠️ LAYERED: anchor (xix)'s early-return check is stood down.
+  -- RED-UNDER-M: {"arm":"D16","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"  IF v_side_trigger_not_done\n     AND COALESCE(v_nonterminal_count, 0) > 0\n","replace":"  IF v_side_failed_only\n     AND COALESCE(v_nonterminal_count, 0) > 0\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_a_hold_ok THEN","replace":"IF FALSE AND NOT v_a_hold_ok THEN","occurrences":1}]}
+  IF v_status IS DISTINCT FROM 'complete' OR v_at IS DISTINCT FROM v_old_at
+     OR v_msg IS DISTINCT FROM v_err OR v_src IS DISTINCT FROM 'writer' OR v_mjob IS DISTINCT FROM fj THEN
+    RAISE EXCEPTION 'TEST FAILED (D16): after the DEFERRED path''s bridge call for a deferred sync_funding the row reads status %, computed_at % (seeded % ten days old), sentence %, source %, job %. A deferred side job computed nothing, so the call must leave the row exactly as it was (WR-R3-01, D-09/D-10).', COALESCE(v_status, 'NULL'), COALESCE(v_at::text, 'NULL'), v_old_at, COALESCE(v_msg, 'NULL'), COALESCE(v_src, 'NULL'), COALESCE(v_mjob::text, 'NULL');
+  END IF;
+
+  -- The deferred job is re-claimed later and fails: the terminal call holds too.
+  stok := gen_random_uuid();
+  UPDATE compute_jobs SET status = 'running', claim_token = stok, attempts = 1 WHERE id = sj;
+  PERFORM mark_compute_job_failed(sj, 'handler timeout', 'permanent', stok);
+
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = sj;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'TEST FAILED (D16-SETUP): the re-claimed sync_funding is % rather than failed_final, so its terminal call was never made.', COALESCE(v_jobstat, 'NULL');
+  END IF;
+  SELECT computation_status, computed_at, computation_error, computation_error_source, computation_error_job_id
+    INTO v_status, v_at, v_msg, v_src, v_mjob
+    FROM strategy_analytics WHERE strategy_id = s;
+  IF v_status IS DISTINCT FROM 'complete' OR v_at IS DISTINCT FROM v_old_at
+     OR v_msg IS DISTINCT FROM v_err OR v_src IS DISTINCT FROM 'writer' OR v_mjob IS DISTINCT FROM fj THEN
+    RAISE EXCEPTION 'TEST FAILED (D16): after the deferred sync_funding later failed the row reads status %, computed_at % (seeded % ten days old), sentence %, source %, job %. Neither the deferral nor the failure computed anything, so stale analytics must not read freshly updated (WR-R3-01, D-09/D-10).', COALESCE(v_status, 'NULL'), COALESCE(v_at::text, 'NULL'), v_old_at, COALESCE(v_msg, 'NULL'), COALESCE(v_src, 'NULL'), COALESCE(v_mjob::text, 'NULL');
+  END IF;
+END $$;
+
 -- ===== COMPLETION SENTINEL ==================================================
--- Reached only if every arm above passed. Counts the twenty sections the
+-- Reached only if every arm above passed. Counts the twenty-one sections the
 -- mutation runner counts: the -SETUP sub-arms fold into their parent section.
 DO $$
 BEGIN
-  RAISE NOTICE 'ALL 20 ARMS EXECUTED (S1, S2, S3, S4, S5, S6, C1, C2, C3, C4, G1, G2, G3, D9, D10, D11, D12, D13, D14, D15): [164.6.6.3.4 STATUSBRIDGE] a failed side-kind job (sync_funding, poll_positions, reconcile_strategy, compute_intro_snapshot) never pins strategy_analytics.computation_status failed (S1..S4), while a live stitch_composite failure beside it still does (S5) and a warned row keeps complete_with_warnings (S6); a failed process_key_long is cleared only by a later done derive AND a later done compute, ledger-refresh chains included (C1), never by either alone (C2, C3) nor by a chain that predates the failure (C4); and the per-kind rule holds for everything else: the retired compute_analytics still counts (G1), a done chain does not clear a failed sync_trades (G2), and a done side kind does not clear a genuine compute_analytics_from_csv failure (G3); a failed side-kind job never stamps computed_at or blanks the sentence of a real earlier failure (D9, D-09), also through every retry of a transient failure (D11), while a genuine compute finished done after it still does, even with a side job created later that failed fast (D10, D12); a failed row that carries a sentence stays failed (D13) and no row is manufactured for a strategy that has none (D14); and a genuine recompute on a warned row that finished done while a side job was queued is stamped when that side job then fails (D15).';
+  RAISE NOTICE 'ALL 21 ARMS EXECUTED (S1, S2, S3, S4, S5, S6, C1, C2, C3, C4, G1, G2, G3, D9, D10, D11, D12, D13, D14, D15, D16): [164.6.6.3.4 STATUSBRIDGE] a failed side-kind job (sync_funding, poll_positions, reconcile_strategy, compute_intro_snapshot) never pins strategy_analytics.computation_status failed (S1..S4), while a live stitch_composite failure beside it still does (S5) and a warned row keeps complete_with_warnings (S6); a failed process_key_long is cleared only by a later done derive AND a later done compute, ledger-refresh chains included (C1), never by either alone (C2, C3) nor by a chain that predates the failure (C4); and the per-kind rule holds for everything else: the retired compute_analytics still counts (G1), a done chain does not clear a failed sync_trades (G2), and a done side kind does not clear a genuine compute_analytics_from_csv failure (G3); a failed side-kind job never stamps computed_at or blanks the sentence of a real earlier failure (D9, D-09), also through every retry of a transient failure (D11), while a genuine compute finished done after it still does, even with a side job created later that failed fast (D10, D12); a failed row that carries a sentence stays failed (D13) and no row is manufactured for a strategy that has none (D14); and a genuine recompute on a warned row that finished done while a side job was queued is stamped when that side job then fails (D15), while a deferred side job leaves the row alone, and so does its later failure (D16).';
 END $$;
 
 ROLLBACK;
