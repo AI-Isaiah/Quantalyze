@@ -65,6 +65,7 @@ jobs:
       - name: Record the nightly start time
         run: echo "NIGHTLY_START=$(date +%s)" >> "$GITHUB_ENV"
       - name: Provision pg_cron for the lane's PostgreSQL (Phase 164.4.1)
+        timeout-minutes: 7
         # Copy of ci.yml sql-mutation's step of the same name (pinned byte-equal).
         run: |
           set -euo pipefail
@@ -124,10 +125,11 @@ jobs:
             echo "::error::MEASURE_FAIL: the runner's PostgreSQL major is '${major:-none}', not 16. 164.4.1-RESEARCH assumption A5 (ubuntu-latest => 24.04 => PostgreSQL 16.15) no longer holds, and criterion 1 (CI and the authoring box, which is 16.13, must measure the SAME corpus) is at risk: an extension .so built for another major will not load, and the five pg_cron gate files would be proven on a server the author never ran. Re-take the macOS/ubuntu major comparison before changing this line."
             exit 1
           fi
-          sudo apt-get update -y
-          echo "--- apt-cache policy postgresql-${major}-cron (which source wins) ---"
+          echo "--- apt-cache policy postgresql-${major}-cron (read BEFORE the install: Installed shows whether the image already ships it) ---"
           apt-cache policy "postgresql-${major}-cron"
-          sudo apt-get install -y --no-install-recommends "postgresql-${major}-cron"
+          bash scripts/ci-apt.sh install --budget 360 "postgresql-${major}-cron"
+          echo "--- apt-cache policy postgresql-${major}-cron (read AFTER the install: Installed shows the version and the source that won) ---"
+          apt-cache policy "postgresql-${major}-cron"
           echo "--- installed version ---"
           dpkg -s "postgresql-${major}-cron" | grep -a '^Version'
           echo "--- the two artifacts the lane needs ---"
