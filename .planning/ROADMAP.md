@@ -2898,7 +2898,7 @@ Plans:
 4. A gate stops a new `quantalyze.com` URL from coming back, and it is shown RED once.
 ⭐ **Scope, founder 2026-10-07 (AskUserQuestion; `164.6.6.3.5-CONTEXT.md` D-01..D-04):** `quantalyze.com`'s mail goes to an unrelated company's server, and `quantalyze.xyz` has no mail records. So the product names NO contact email at all. Every `@quantalyze.com` address (about 158 outside `.planning/`, not 18) becomes a pointer to the contact form, which carries the correlation id; `security.txt`'s `Contact:` becomes the contact page URL. No Resend or mail-domain setup is done or booked (founder: "Dont want to setup resend").
 
-**Plans:** 13 plans in 5 waves (plan 13 runs after `/land-and-deploy`: verification reads `human_needed` at ship and `passed` after it)
+**Plans:** 13/13 plans complete in 5 waves (plan 13 runs after `/land-and-deploy`: verification reads `human_needed` at ship and `passed` after it)
 
 Plans:
 - [x] 164.6.6.3.5-01-PLAN.md — D-10 canonical-domain gate, shown RED on the unswept tree (wave 1)
@@ -5423,6 +5423,7 @@ kept verbatim.
 | 164.6.6.1 MT5SCRUB | 0/4 (moved, not re-planned) | Waiting — split from 164.6.6 on 2026-09-27 (founder); re-planned only after the founder's live scrub spike | - |
 | 164.6.6.2 BTCNATIVE | 0/? | Queued — booked 2026-10-03 | - |
 | 164.6.6.3 UATFIXES | 0/? | Queued — the 2026-10-03/04 production UAT defects; item 0 blocks new MT5 onboards | - |
+| 164.6.6.3.5 DOMAINONE | 13/13 | Complete — verification passed after plan 13's live checks | 2026-10-08 · v0.127.0.0 · #971 |
 | 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Complete    | 2026-10-04 |
 | 164.6.8 OUTAGEALERT | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 7/7 | Complete | v0.77.32.1 · finalized v0.77.32.1; its 33 stranded artifacts restored to main by PR #785. Row said `0/? Queued 2nd` until 2026-09-12 |
