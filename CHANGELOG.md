@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.129.2.2] - 2026-10-08 — APTHANG follow-up: two self-test scenarios no longer depend on runner speed
+
+### Fixed
+- **Main CI went red on 1c8e79fb8**, in `ci-apt-bounded.contract.test.ts` › `ci-apt.sh --self-test`. Scenario `unclassified-exit-100-no-mirror-blame` asserts at least two `update` calls inside a 2 s budget, but it slept 1 s between retries. On a loaded shard, one slow call plus the sleep used up the budget, so only one call ran. Scenario `warned-update-then-missing-bounded` has the same shape (at least 2 updates in 3 s, with a 1 s sleep).
+- Both scenarios now keep `retry_sleep` at 0, so the count measures the classifier, not the runner's speed. No wrapper code changed, and no assertion was loosened.
+- Proven: classifying the unknown error as deterministic still fails scenario 18 by name. Self-test green, about 32 s locally. `shellcheck` clean.
+
 ## [0.129.2.0] - 2026-10-08 — TRUNCATEREVOKE: anon and authenticated no longer hold TRUNCATE on public tables
 
 Phase 164.9.7. Row-level security never evaluates TRUNCATE, so the grant layer is the only control, and it was wide open. Measured read-only on PROD on 2026-10-07: anon held TRUNCATE on 53 of 63 base tables, and authenticated on 56. Any SQL-capable path running as either role could empty a table whatever its policies said, and `TRUNCATE ... CASCADE` reaches foreign-key children. The source was the Supabase bootstrap's default ACL on schema `public` (`ALL` includes TRUNCATE), not this repo's migrations. Migration `20261009130000` fixes the class. ⚠️ PROD applies it automatically after `apply-test`.
