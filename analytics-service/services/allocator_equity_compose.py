@@ -300,6 +300,7 @@ def compose_allocator_equity(
     degrade_reasons: Sequence[DegradeReason] | None = None,
     departed_end_by_key: Mapping[str, str] | None = None,
     full_history_keys: Collection[str] | None = None,
+    dropped_day_pnl_by_key: Mapping[str, Mapping[str, float]] | None = None,
 ) -> dict[str, Any]:
     """Compose the allocator display-row payload from real per-key inputs.
 
@@ -342,8 +343,16 @@ def compose_allocator_equity(
     reaches the account's start (``FULL_HISTORY_VENUES``). Only those get the
     opening-flow zero-start check in ``replay_key_equity``; every other key keeps the
     positional ``OUT_OF_WINDOW_FLOW`` rule. The caller knows the venue, this pure
-    layer does not, so it is passed in rather than guessed."""
+    layer does not, so it is passed in rather than guessed.
+
+    ``dropped_day_pnl_by_key`` (167.1.2.2 D-15) maps a key to {ISO day: P&L in USD} for
+    the days its TWR writer left out of the stored returns (the funding day, a day whose
+    flow dominates the prior NAV). ``replay_key_equity`` uses that P&L on those days
+    instead of reading them as flat, and judges the opening run by the capital before
+    the funding day's P&L. A key with no entry (every row written before D-15) is
+    composed exactly as before."""
     departed_end = dict(departed_end_by_key or {})
+    dropped_pnl = dict(dropped_day_pnl_by_key or {})
     full_history = frozenset(full_history_keys or ())
     reasons: set[DegradeReason] = set(degrade_reasons or ())
     flag_tokens: set[str] = set()
@@ -436,6 +445,7 @@ def compose_allocator_equity(
             anchored_flows[k],
             anchors_by_key[k],
             history_reaches_inception=k in full_history,
+            dropped_day_pnl=dropped_pnl.get(k),
         )
         for k in anchored_keys
     }

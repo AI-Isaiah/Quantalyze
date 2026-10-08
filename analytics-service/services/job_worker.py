@@ -4030,13 +4030,26 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # combine and writes no per-key series; ``_run_key_mode_compose_epilogue`` reads this
         # to persist ``anchor_null_reason: "native_unit"`` and no flows.
         _native_unit_key_skip: bool = False
+        # Phase 167.1.2.2 / D-15 — set ONLY in key-mode by a venue whose reconstruction
+        # builds a NAV (deribit's native core, MT5's deal ledger): the account's actual P&L per
+        # NAV day, in USD. ``_run_key_mode_compose_epilogue`` persists it for the days the TWR
+        # left out of the stored returns. ``None`` for every other venue and for the
+        # allocated-capital path, whose key_inputs row then carries no such field.
+        _day_pnl_usd: "pd.Series | None" = None
+        # D-15: the native §5 inception verdict, where one exists. Only a deribit ledger that
+        # reaches inception (``full_history``) runs the gate, and a breach raises before this is
+        # set, so a value here means the gate ran and passed.
+        _native_inception_verdict: str | None = None
 
         if venue == "deribit":
             # D-08: realized returns come from the ONE txn-log ledger pass
             # (funding-inclusive settlement cash deltas) — NEVER fetch_all_trades
             # / the fills endpoint. Funding is INSIDE the settlement sum (A3/D-10)
             # → EMPTY funding_rows, no funding_fees write (count-once, DRB-07).
-            from services.broker_dailies import combine_native_ledger
+            from services.broker_dailies import (
+                combine_native_ledger,
+                native_ledger_day_pnl,
+            )
             from services.deribit_ingest import (
                 CurrencyEnumerationError,
                 DeribitTransientReadError,
@@ -4224,6 +4237,15 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     _completeness.indexable_currencies,
                     denominator_config=denominator_config,
                 )
+                # D-15 (key-mode only): the per-day P&L off the SAME NAV levels the returns
+                # were just chained from, for the days the TWR drops. The allocated-capital
+                # path builds no NAV, so it has none to give.
+                if is_key_mode and denominator_config is None:
+                    _day_pnl_usd = native_ledger_day_pnl(
+                        native_ledger, _completeness.indexable_currencies
+                    )
+                    if native_ledger.full_history:
+                        _native_inception_verdict = "reconciled"
                 # FLOW-04 materiality: the pure native core does not emit
                 # unrealized_pnl_in_anchor (it subtracts the wedge per-currency, App
                 # A #6). Preserve the v1.8 warning using the collapsed USD anchor +
@@ -4974,7 +4996,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     error_message=f"derive_broker_dailies: {MT5_DISABLED_DETAIL}",
                     error_kind="permanent",
                 )
-            from services.broker_dailies import combine_mt5_deal_ledger
+            from services.broker_dailies import combine_mt5_deal_ledger, mt5_day_pnl
             from services.mt5_client import (
                 Mt5AccountMismatchError,
                 Mt5ClientError,
@@ -5539,6 +5561,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
                         floors=_mt5_unit.floors,
                     )
+                    if is_key_mode:
+                        # D-15: the deal ledger's P&L per NAV day, for the days the TWR drops.
+                        _day_pnl_usd = mt5_day_pnl(
+                            _mt5_deals,
+                            server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+                        )
             except Mt5DealClassificationError as exc:
                 _scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_strategy_analytics_failed(
@@ -6101,6 +6129,20 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             "anchor_asof": datetime.now(timezone.utc).isoformat(),
             "venue": venue,
         }
+        # 167.1.2.2 D-15 — ADDITIVE optional fields; a reader that does not know them, and
+        # a row written before them, are both fine (the compose reads a missing field as no
+        # dropped-day P&L and composes as before). No payload version exists on this row,
+        # so none is bumped. ``dropped_day_pnl`` holds the actual P&L of each day the TWR
+        # left out of the stored returns (the funding day, a flow-dominated day): those
+        # days have no return but their P&L is already inside the account's NAV.
+        if _day_pnl_usd is not None:
+            from services.allocator_equity_derive import dropped_day_pnl_payload
+
+            _key_inputs_payload["dropped_day_pnl"] = dropped_day_pnl_payload(
+                returns, _day_pnl_usd
+            )
+        if _native_inception_verdict is not None:
+            _key_inputs_payload["native_inception"] = _native_inception_verdict
 
         def _persist_key_inputs(
             payload: dict[str, Any] = _key_inputs_payload,
@@ -11265,6 +11307,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         DegradeReason,
         account_groups,
         eligible_key_predicate,
+        read_dropped_day_pnl,
+        stitch_dropped_day_pnl,
         stitch_shared_account,
         working_holder_predicate,
     )
@@ -11705,6 +11749,10 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     key_inputs_ids: set[str] = set()
     # SFH-R2-03: a stitch source's flows, when its key_inputs row is usable.
     source_flows: dict[str, list[ExternalFlow]] = {}
+    # 167.1.2.2 D-15: the P&L of the days each key's TWR left out of its stored
+    # returns ({ISO day: USD}). An older row has none and composes as before.
+    dropped_pnl_by_key: dict[str, dict[str, float]] = {}
+    source_dropped_pnl: dict[str, dict[str, float]] = {}
     orphan_kinds: list[str] = []
     # M3: the JSONB→python coercions below (float(usd_signed), float(anchor_usd))
     # sit OUTSIDE the compose NavReconstructionError catch — a corrupt persisted
@@ -11738,6 +11786,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                         for _f in (departed_payload.get("flows") or [])
                     ]
                     anchors_by_key[api_key_id] = float(departed_payload["anchor_usd"])
+                    dropped_pnl_by_key[api_key_id] = read_dropped_day_pnl(departed_payload)
                 continue
             if api_key_id not in counted_ids:
                 # A shared-account key left out by the group resolution: still
@@ -11760,6 +11809,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                         )
                         for _f in (source_payload.get("flows") or [])
                     ]
+                    source_dropped_pnl[api_key_id] = read_dropped_day_pnl(source_payload)
                 continue
             key_inputs_ids.add(api_key_id)
             payload = row.get("payload") or {}
@@ -11772,6 +11822,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 )
                 for _f in (payload.get("flows") or [])
             ]
+            dropped_pnl_by_key[api_key_id] = read_dropped_day_pnl(payload)
             _anchor = payload.get("anchor_usd")
             anchors_by_key[api_key_id] = None if _anchor is None else float(_anchor)
             if _anchor is None:
@@ -11799,6 +11850,12 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         if stitched is None:
             truncated_accounts += 1
             continue
+        # D-15: the dropped days follow the same ownership as the flows.
+        dropped_pnl_by_key[kept_id] = stitch_dropped_day_pnl(
+            [source_returns[k] for k in source_ids] + [kept_series],
+            [source_dropped_pnl.get(k, {}) for k in source_ids]
+            + [dropped_pnl_by_key.get(kept_id, {})],
+        )
         returns_by_key[kept_id], flows_by_key[kept_id] = stitched
         stitched_accounts += 1
     if truncated_accounts:
@@ -11920,6 +11977,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 for row in key_rows
                 if str(row.get("exchange") or "").strip().lower() in FULL_HISTORY_VENUES
             },
+            # D-15: the P&L of the days the TWR left out of the stored returns. An
+            # older key_inputs row has none, and its key composes as before.
+            dropped_day_pnl_by_key=dropped_pnl_by_key,
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3
