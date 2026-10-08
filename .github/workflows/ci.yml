@@ -923,10 +923,10 @@ jobs:
       # timeout note; if the first green run proves the image ships it, drop this
       # step on that evidence rather than on assumption.
       - name: Install psql client (the lane loads the baseline through it)
+        timeout-minutes: 8
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          bash scripts/ci-apt.sh install --provides psql postgresql-client
           psql --version
       - name: Preflight - the lane must have a non-empty test corpus
         # A green job that ran nothing is the silent-green this lane exists to
@@ -1233,14 +1233,14 @@ jobs:
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
       - name: Install psql client (the lane loads the baseline through it)
+        timeout-minutes: 8
         # Same reason as `frontend-local-stack`: `run.sh` loads the committed baseline
         # through `psql`, and `resolve_psql`'s only fallback is a macOS keg that does
         # not exist on this runner. A miss is `FATAL: psql not found` and exit 1, not
         # a skip.
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          bash scripts/ci-apt.sh install --provides psql postgresql-client
           psql --version
       - name: Preflight - the lane must have a non-empty derived corpus
         # A green job that ran nothing is the silent-green this lane exists to
@@ -5447,11 +5447,11 @@ jobs:
       # 164.9.4 this job installed the client inside its mutex acquire step; that
       # step left with the key, so the install is its own step again.
       - name: Install psql client (the lane loads the baseline through it)
+        timeout-minutes: 8
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          bash scripts/ci-apt.sh install --provides psql postgresql-client
           psql --version
       - name: Boot the local-stack lane (Supabase CLI stack + committed baseline)
         # The same boot `frontend-local-stack` and `sql-tests` run, verbatim. `up`
@@ -5794,9 +5794,11 @@ jobs:
           # persisted cred is pure attack surface.
           persist-credentials: false
       - name: Install psql client
+        timeout-minutes: 8
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          set -euo pipefail
+          bash scripts/ci-apt.sh install --provides psql postgresql-client
+          psql --version
       # ── THE ORDERING WAIT (Phase 164.9 plan 06, [164.8-PUSH-RACE-VAC08]) ───
       # On a merge push this job's DB work must not begin before the TEST schema
       # apply for the SAME commit has concluded. The mutex below guarantees the
@@ -6008,6 +6010,7 @@ jobs:
       # and we add it back. On cache miss, do the full install (download
       # + apt deps).
       - name: Install Playwright (browser bundle from cache when available)
+        timeout-minutes: 10
         run: |
           if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
             echo "Cache hit — chromium bundle restored. Runner image has system libs; skipping apt install."
@@ -6395,6 +6398,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-playwright-
       - name: Install Playwright (browser bundle from cache when available)
+        timeout-minutes: 10
         run: |
           if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
             echo "Cache hit — chromium bundle restored. Runner image has system libs; skipping apt install."
@@ -6461,10 +6465,10 @@ jobs:
       # 164.9.4 this job installed the client inside its ordering-wait and mutex
       # steps; those left with the key, so the install is its own step.
       - name: Install psql client (the lane loads the baseline through it)
+        timeout-minutes: 8
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          bash scripts/ci-apt.sh install --provides psql postgresql-client
           psql --version
       - name: Boot the local-stack lane (Supabase CLI stack + committed baseline)
         # The same boot `frontend-local-stack` and `sql-tests` run, verbatim. `up`
@@ -7008,6 +7012,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-playwright-
       - name: Install Playwright Chromium (for lhci's headless Chrome)
+        timeout-minutes: 10
         run: |
           if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
             echo "Cache hit — chromium bundle restored. Runner image has system libs; skipping apt install."
