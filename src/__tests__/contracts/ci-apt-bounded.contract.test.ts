@@ -59,10 +59,15 @@ import { join } from "node:path";
  * legitimate lock wait. Their apt is bounded by the wrapper's own default
  * budget instead. That exemption is the ONLY one, and it is by exact step name.
  *
- * KNOWN LIMIT, stated so nobody mistakes it for a hole in the rules: R1 reads
- * workflow `run:` text. It does not read other scripts, and a `timeout N apt-get`
- * form is deliberately NOT special-cased: the wrapper is the one sanctioned
- * entry point, so bypassing it is a violation even when it happens to be bounded.
+ * KNOWN LIMITS, stated so nobody mistakes them for a hole in the rules: R1 reads
+ * workflow `run:` text. It does not read other scripts, and it does not look
+ * inside a quoted `bash -c "..."` / `sh -c '...'` string or a `$(...)` command
+ * substitution. A `timeout N apt-get` form is deliberately NOT special-cased as
+ * "bounded": the wrapper is the one sanctioned entry point, so bypassing it is a
+ * violation even when it happens to be bounded, and R1 flags it (this comment
+ * said so before the rule did; round-1 review CR-01 made the rule match). R1
+ * also reads a one-line `run: sudo apt-get ...` / `- run: ...` key, the commonest
+ * way a new workflow writes apt.
  *
  * HOW THIS TEST IS KEPT HONEST. Every rule is a pure function over workflow /
  * wrapper TEXT, and the CALIBRATION block applies an in-memory mutant to the REAL
@@ -194,16 +199,20 @@ const label = (s: Step) => `${s.file} :: job ${s.job || "?"} :: step "${s.name |
 // R1: apt at command position.
 // ---------------------------------------------------------------------------
 
-// Where a command may start: line start, after && || ; |, after then/else/do, or after ( { !.
-const CMD_POS = String.raw`(?:^|&&|\|\||;|\||\bthen\b|\belse\b|\bdo\b|[({!])`;
-// What may sit between the command position and `apt`: sudo / env / nohup, their flags
-// (including `-u user`), and VAR=value assignments.
-const PREFIX = String.raw`(?:(?:sudo|env|nohup|exec|command)[ \t]+|(?:-u|--user|-g|--group)[ \t]+\S+[ \t]+|-{1,2}[A-Za-z][\w-]*(?:=\S+)?[ \t]+|[A-Za-z_]\w*=\S*[ \t]+)*`;
+// Where a command may start: line start, a YAML single-line `run:` / `- run:` key (the
+// command follows it on the same line), after && || ; |, after then/else/do, or after ( { !.
+const CMD_POS = String.raw`(?:^[ \t]*(?:-[ \t]+)?run:[ \t]*["']?|^|&&|\|\||;|\||\bthen\b|\belse\b|\bdo\b|[({!])`;
+// What may sit between the command position and `apt`: sudo / env / nohup / time / xargs /
+// nice / stdbuf (optionally path-qualified), `timeout [flags] DURATION`, a variable used as
+// the privilege prefix (`"$SUDO"`, `${SUDO:-sudo}`), a bare `--`, their flags (including
+// `-u user`, `-n 10`), and VAR=value assignments.
+const PREFIX = String.raw`(?:(?:\S*/)?(?:sudo|env|nohup|exec|command|time|xargs|nice|stdbuf)[ \t]+|(?:\S*/)?timeout(?:[ \t]+(?:-\S+|\d+\S*))+[ \t]+|"?\$(?:\{[^}]*\}|\w+)"?[ \t]+|--[ \t]+|(?:-u|--user|-g|--group|-n)[ \t]+\S+[ \t]+|-{1,2}[A-Za-z]\S*[ \t]+|[A-Za-z_]\w*=\S*[ \t]+)*`;
 // apt's own options between `apt-get` and the subcommand (`-o Key=Val` takes an argument).
 const APT_OPT = String.raw`(?:(?:-o|--option|-c|--config-file|-t|--target-release)[ \t]+\S+|-\S+)[ \t]+`;
 const APT_VERBS = "update|install|upgrade|dist-upgrade|full-upgrade|download|source|build-dep";
+// `(?:\S*/)?` lets the binary be path-qualified (`/usr/bin/apt-get`).
 const RAW_APT = new RegExp(
-  `${CMD_POS}[ \\t]*${PREFIX}apt(?:-get)?[ \\t]+(?:${APT_OPT})*(?:${APT_VERBS})\\b`,
+  `${CMD_POS}[ \\t]*${PREFIX}(?:\\S*/)?apt(?:-get)?[ \\t]+(?:${APT_OPT})*(?:${APT_VERBS})\\b`,
   "m",
 );
 
@@ -218,8 +227,12 @@ function r1(wf: Workflows): string[] {
 // ---------------------------------------------------------------------------
 
 const callsWrapper = (s: Step) => s.live.includes("scripts/ci-apt.sh");
-const DEPS_INSTALL =
-  /playwright[ \t]+install(?:[ \t]+\S+)*?[ \t]+--with-deps\b|playwright[ \t]+install-deps\b/;
+// The package may carry a version pin or be spelled `playwright-core` / `@playwright/test`
+// (`npx playwright@1.48.0 install --with-deps`, `npx -y @playwright/test@x install-deps`).
+const PW = String.raw`playwright(?:-core|/test)?(?:@\S+)?`;
+const DEPS_INSTALL = new RegExp(
+  String.raw`${PW}[ \t]+install(?:[ \t]+\S+)*?[ \t]+--with-deps\b|${PW}[ \t]+install-deps\b`,
+);
 const runsPlaywrightDeps = (s: Step) => DEPS_INSTALL.test(s.live);
 
 function limitProblem(s: Step): string | null {
@@ -326,6 +339,16 @@ function r6(wf: Workflows, wrapper: string): string[] {
   for (const s of parseAll(wf)) {
     if (!callsWrapper(s) || s.name === EXEMPT_STEP || s.timeout === null) continue;
     const calls = s.live.split("\n").filter((l) => l.includes("scripts/ci-apt.sh"));
+    // A non-literal budget (`--budget "$B"`) cannot be read, and silently assuming the default
+    // would let a large value pass R6: refuse it by name instead (round-1 review IN-03).
+    const unreadable = calls.filter((l) => {
+      const m = /--budget[ \t]+(\S+)/.exec(l);
+      return m !== null && !/^\d+$/.test(m[1]);
+    });
+    if (unreadable.length > 0) {
+      v.push(`R6: ${label(s)} passes a --budget that is not a literal integer, so R6 cannot read it: ${unreadable[0].trim()}`);
+      continue;
+    }
     const budgets = calls.map((l) => {
       const m = /--budget[ \t]+(\d+)/.exec(l);
       return m ? Number(m[1]) : dflt;
@@ -396,6 +419,19 @@ function duplicateStep(wf: Workflows, file: string, namePrefix: string): Workflo
   const lines = wf[file].split("\n");
   const block = lines.slice(step.start, step.end);
   lines.splice(step.end, 0, ...block);
+  return { ...wf, [file]: lines.join("\n") };
+}
+
+/**
+ * Insert a synthetic step right after the first step of `file`. `body` is the text of the
+ * step's lines (already indented). Used to put an apt form into a ONE-LINE `run:` key, the
+ * placement the `run: |` substitutions through WRAPPER_PSQL_LINE can never exercise.
+ */
+function insertStepAfterFirst(wf: Workflows, file: string, body: string): Workflows {
+  const first = parseSteps(file, wf[file])[0];
+  if (!first) throw new Error(`no step to anchor a mutant in ${file}`);
+  const lines = wf[file].split("\n");
+  lines.splice(first.end, 0, ...body.split("\n"));
   return { ...wf, [file]: lines.join("\n") };
 }
 
@@ -506,6 +542,63 @@ describe("ci-apt-bounded: CALIBRATION - an in-memory mutant flips each rule", ()
     }
   });
 
+  // Round-1 review CR-01. Every form below used to pass R1 (and so passed the whole guard).
+  // Each is placed three ways: (1) in the indented body of a `run: |` block, (2) on a named
+  // step's one-line `run:` key, (3) on a `- run:` step's first line. All three must flip R1.
+  const MISSED_FORMS: ReadonlyArray<readonly [string, string]> = [
+    ["one-line sudo apt-get install", "sudo apt-get install -y postgresql-client"],
+    ["one-line sudo apt-get update", "sudo apt-get update"],
+    ["bare apt-get install", "apt-get install -y postgresql-client"],
+    ["apt (not apt-get)", "sudo apt install -y postgresql-client"],
+    ["timeout N apt-get", "timeout 60 apt-get install -y postgresql-client"],
+    ["sudo timeout N apt-get", "sudo timeout 600 apt-get install -y postgresql-client"],
+    ["timeout flags then duration", "sudo timeout -k 10 150 apt-get update"],
+    ["timeout --kill-after=10 S", "sudo timeout --kill-after=10 150 apt-get update"],
+    ["/usr/bin/apt-get", "/usr/bin/apt-get install -y postgresql-client"],
+    ["/usr/bin/sudo apt-get", "/usr/bin/sudo apt-get install -y postgresql-client"],
+    ["sudo /usr/bin/apt-get", "sudo /usr/bin/apt-get install -y postgresql-client"],
+    ["quoted $SUDO", '"$SUDO" apt-get install -y postgresql-client'],
+    ["bare $SUDO", "$SUDO apt-get install -y postgresql-client"],
+    ["${SUDO:-sudo}", "${SUDO:-sudo} apt-get install -y postgresql-client"],
+    ["time prefix", "time sudo apt-get install -y postgresql-client"],
+    ["xargs sudo", "echo postgresql-client | xargs sudo apt-get install -y"],
+    ["xargs flags", "echo postgresql-client | xargs -r apt-get install -y"],
+    ["nice -n 10", "sudo nice -n 10 apt-get install -y postgresql-client"],
+    ["sudo -- apt-get", "sudo -- apt-get install -y postgresql-client"],
+  ];
+
+  it.each(MISSED_FORMS)("R1d: %s is flagged in a run: | block, a one-line run: key and a - run: step", (_n, form) => {
+    const block = mutate(WF, MUTEX_PROBE, (t) => sub(t, WRAPPER_PSQL_LINE, `$1${form}`));
+    expect(r1(block).length, `run: | block: ${form}`).toBeGreaterThanOrEqual(1);
+    const named = insertStepAfterFirst(WF, MUTEX_PROBE, `      - name: Mutant\n        run: ${form}`);
+    expect(r1(named).length, `one-line run: key: ${form}`).toBeGreaterThanOrEqual(1);
+    const dash = insertStepAfterFirst(WF, MUTEX_PROBE, `      - run: ${form}`);
+    expect(r1(dash).length, `- run: step: ${form}`).toBeGreaterThanOrEqual(1);
+  });
+
+  it("R1d-quoted: a YAML-quoted one-line run: scalar is flagged", () => {
+    const named = insertStepAfterFirst(WF, MUTEX_PROBE, `      - name: Mutant\n        run: "sudo apt-get install -y postgresql-client"`);
+    expect(r1(named).length).toBeGreaterThanOrEqual(1);
+    const dash = insertStepAfterFirst(WF, MUTEX_PROBE, `      - run: 'apt-get update'`);
+    expect(r1(dash).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("R1d-neg: one-line run: keys that are not an apt call produce NO violation", () => {
+    for (const ok of [
+      'echo "sudo apt-get install -y x"',
+      "apt-cache policy postgresql-client",
+      "bash scripts/ci-apt.sh install --provides psql postgresql-client",
+      "dpkg -s postgresql-client",
+      "sudo timeout 60 pg_isready",
+      "npm install apt-get",
+    ]) {
+      const named = insertStepAfterFirst(WF, MUTEX_PROBE, `      - name: Fine\n        run: ${ok}`);
+      expect(r1(named), `false positive: ${ok}`).toEqual([]);
+      const dash = insertStepAfterFirst(WF, MUTEX_PROBE, `      - run: ${ok}`);
+      expect(r1(dash), `false positive on - run: ${ok}`).toEqual([]);
+    }
+  });
+
   it("R1-neg: an echo line that merely mentions apt install produces NO violation", () => {
     const m = mutate(WF, MUTEX_PROBE, (t) =>
       sub(t, WRAPPER_PSQL_LINE, '$1echo "skipping apt install, do not run apt-get update here"'),
@@ -587,6 +680,29 @@ describe("ci-apt-bounded: CALIBRATION - an in-memory mutant flips each rule", ()
     expect(r3(m).length).toBe(1);
     const commentOnly = "# npx playwright install --with-deps chromium\n";
     expect(runsPlaywrightDeps({ live: liveText(commentOnly.split("\n")) } as Step)).toBe(false);
+  });
+
+  it("R3c: version-pinned and package-spelling variants of Playwright --with-deps are recognised (IN-02)", () => {
+    for (const form of [
+      "npx playwright@1.48.0 install --with-deps chromium",
+      "npx -y @playwright/test@1.48.0 install --with-deps chromium",
+      "npx playwright-core install --with-deps chromium",
+      "npx playwright@latest install-deps",
+    ]) {
+      const named = insertStepAfterFirst(WF, "ci.yml", `      - name: Mutant\n        run: ${form}`);
+      expect(census(named).aptReaching.length, `census missed: ${form}`).toBe(EXPECTED_APT_REACHING_STEPS + 1);
+      // No timeout-minutes on the synthetic step, so R3 must also name it.
+      expect(r3(named).join("\n"), `R3 missed: ${form}`).toContain("Mutant");
+    }
+  });
+
+  it("R6b: a --budget that is not a literal integer is flagged instead of defaulted (IN-03)", () => {
+    for (const arg of ['"$B"', "$B", "${BUDGET}"]) {
+      const m = mutate(WF, "ci.yml", (t) => sub(t, WRAPPER_PSQL_LINE, `$1bash scripts/ci-apt.sh install --budget ${arg} --provides psql postgresql-client`));
+      const v = r6(m, WRAPPER);
+      expect(v.length, arg).toBe(1);
+      expect(v[0]).toContain("not a literal integer");
+    }
   });
 
   it("R4a: removing an Acquire key from the wrapper text is flagged", () => {
