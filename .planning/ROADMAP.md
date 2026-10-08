@@ -2957,6 +2957,7 @@ Plans:
 
 
 ⭐ **Founder 2026-10-07 (D-09, CONTEXT):** a call whose only failures are excluded side kinds must not stamp `computed_at` or clear a foreign `computation_error`; fixed before merge.
+⚠️ **Founder 2026-10-08 (D-10, CONTEXT) — DEVIATION from the 3-round review cap:** a 4th fix round, on Opus, for CR-R3-01 (a genuine recompute on a warned row keeps a stale `computed_at`) and WR-R3-01 (the DEFERRED side path stamps), both in this phase's own logic.
 ### Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b) (INSERTED)
 
 Split C of 164.6.6.3 (founder, 2026-10-06, `164.6.6.3-CONTEXT.md` D-01). It delivers items **2,
