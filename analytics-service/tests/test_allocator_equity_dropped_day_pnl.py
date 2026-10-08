@@ -372,6 +372,59 @@ def test_a_stored_pnl_on_a_day_that_has_a_return_is_ignored_and_counted() -> Non
     for i, day in enumerate(book.days):
         assert float(ke.equity[day]) == pytest.approx(float(book.nav[i]), rel=1e-9), day
     assert ke.flags["dropped_day_pnl_ignored_days"] == 1
+    # M2: it is also a BLOCKING degrade reason under an honest name. A stored P&L on a
+    # day that has a return means the row and the returns are from different runs.
+    assert ke.degrade_reasons == frozenset({DegradeReason.KEY_INPUTS_MISMATCH})
+    assert ke.is_trustworthy is False
+
+
+def test_a_clean_replay_raises_no_key_inputs_mismatch() -> None:
+    """The reason fires on the ignored entry and on nothing else."""
+    ke = _replay(funding_and_dominated_book())
+    assert DegradeReason.KEY_INPUTS_MISMATCH not in ke.degrade_reasons
+    assert "dropped_day_pnl_ignored_days" not in ke.flags
+
+
+def test_the_compose_surfaces_the_mismatch_and_logs_counts_only(caplog) -> None:
+    """The count flag never leaves ``replay_key_equity`` (the compose keeps only the
+    ``True`` flags), so the reason has to be the thing that reaches the payload, and
+    the WARNING carries the count and no key, day or amount."""
+    import logging
+
+    from services.allocator_equity_compose import compose_allocator_equity
+
+    book = funding_and_dominated_book()
+    on_a_return_day = _iso(10)
+    pnl = {**book.dropped_pnl, on_a_return_day: 99_999.0, _iso(11): 88_888.0}
+    with caplog.at_level(logging.WARNING, logger="services.allocator_equity_compose"):
+        payload = compose_allocator_equity(
+            {"k": book.stored_returns}, {"k": book.flows}, {"k": book.anchor},
+            full_history_keys={"k"}, dropped_day_pnl_by_key={"k": pnl},
+        )
+
+    assert "key_inputs_mismatch" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    (record,) = [r for r in caplog.records if "stored dropped-day P&L" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    text = record.getMessage()
+    assert text.startswith("compose: 2 stored dropped-day P&L")
+    for leak in ("99999", "88888", on_a_return_day, _iso(11)):
+        assert leak not in text
+
+
+def test_a_clean_compose_logs_no_mismatch_warning(caplog) -> None:
+    import logging
+
+    from services.allocator_equity_compose import compose_allocator_equity
+
+    book = funding_and_dominated_book()
+    with caplog.at_level(logging.WARNING, logger="services.allocator_equity_compose"):
+        payload = compose_allocator_equity(
+            {"k": book.stored_returns}, {"k": book.flows}, {"k": book.anchor},
+            full_history_keys={"k"}, dropped_day_pnl_by_key={"k": book.dropped_pnl},
+        )
+    assert payload["degrade_reasons"] == []
+    assert not [r for r in caplog.records if "stored dropped-day P&L" in r.getMessage()]
 
 
 def test_a_non_finite_stored_pnl_is_refused() -> None:

@@ -452,6 +452,21 @@ def compose_allocator_equity(
     for ke in per_key_equity.values():
         reasons |= ke.degrade_reasons
         flag_tokens |= _bool_flag_tokens(ke.flags)
+    # M2: the count flags never leave the replay (``_bool_flag_tokens`` keeps only
+    # ``True``), so a stored P&L it had to ignore would be invisible. Counts only: no
+    # key id, no day, no USD (T-115-05).
+    ignored_pnl_days = sum(
+        int(ke.flags.get("dropped_day_pnl_ignored_days", 0))
+        for ke in per_key_equity.values()
+    )
+    if ignored_pnl_days:
+        logger.warning(
+            "compose: %d stored dropped-day P&L entr(ies) sit on a day that has a "
+            "return row and were ignored — the key_inputs row and the returns come "
+            "from different derive runs; the book is untrustworthy (%s)",
+            ignored_pnl_days,
+            DegradeReason.KEY_INPUTS_MISMATCH.value,
+        )
 
     # D-05 / D-09: clip each departed key to its end day (levels, returns and
     # flows). A key with no level on or before that day has no history to

@@ -139,6 +139,14 @@ class DegradeReason(str, Enum):
     # book's return with frozen capital. Round 1 raised a benign flag of the
     # same name that nothing reads, so the book read "ready".
     SHARED_ACCOUNT_NO_WORKING_KEY = "shared_account_no_working_key"
+    # 167.1.2.2 round-1 review (SFH M2): a key's ``key_inputs`` row and its stored
+    # return series describe different derive runs. The dropped-day P&L the row carries
+    # sits on a day that now HAS a return, so it could not be used and was ignored. The
+    # two writes are not atomic, so a compose between them reads a stale/fresh mix, and
+    # the levels it rebuilds from it are not the writer's. Counted in
+    # ``dropped_day_pnl_ignored_days``; blocking because the curve is suspect, not
+    # because any one number is wrong.
+    KEY_INPUTS_MISMATCH = "key_inputs_mismatch"
 
 
 # The BLOCKING subset: any of these present -> ``is_trustworthy`` is False.
@@ -152,6 +160,7 @@ _BLOCKING_REASONS: frozenset[DegradeReason] = frozenset(
         DegradeReason.NONFINITE_RETURN,
         DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED,
         DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY,
+        DegradeReason.KEY_INPUTS_MISMATCH,
     }
 )
 
@@ -883,8 +892,10 @@ def replay_key_equity(
     which moved the day's P&L into every earlier level and, on the funding day, into
     the zero-start check below as "missing start capital". A day that also has a
     return row keeps the return and its stored P&L is ignored (counted in the
-    ``dropped_day_pnl_ignored_days`` flag): the two cannot both describe it. Absent or
-    empty (every row written before D-15) behaves exactly as before.
+    ``dropped_day_pnl_ignored_days`` flag, and the key degrades as ``KEY_INPUTS_MISMATCH``,
+    blocking): the two cannot both describe it, so the row and the returns come from
+    different derive runs. Absent or empty (every row written before D-15) behaves
+    exactly as before.
 
     Structural refusals raise ``NavReconstructionError`` (permanent, mirroring
     ``nav_twr``): a return factor ``1 + r_t <= 0`` (an un-replayable ≤ −100% day)
@@ -984,6 +995,9 @@ def replay_key_equity(
         flags["dropped_day_pnl_days"] = len(pnl_by_day)
     if ignored_pnl_days:
         flags["dropped_day_pnl_ignored_days"] = ignored_pnl_days
+        # M2: a stored P&L that sits on a day with a return is a data-consistency
+        # fault (the row and the returns are from different runs), not a note.
+        reasons.add(DegradeReason.KEY_INPUTS_MISMATCH)
     if out_of_window_flows:
         flags["out_of_window_flows"] = out_of_window_flows
         reasons.add(DegradeReason.OUT_OF_WINDOW_FLOW)
