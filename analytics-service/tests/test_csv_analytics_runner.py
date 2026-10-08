@@ -1600,6 +1600,54 @@ async def test_a_malformed_native_unit_is_not_carried(bad) -> None:  # type: ign
 
 
 # ===========================================================================
+# Phase 164.6.6.2 (D-25) — `small_base_measured` is an INFORMATIONAL annotation: a
+# measured day started from a balance under the unit's material equity, so its return
+# can be extreme and the factsheet says so. It is carried present-only by the wholesale
+# data_quality_flags rebuild (an unbridged pre-stamp would be wiped seconds after the
+# derive wrote it) and, unlike a guard key, it NEVER promotes the status.
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_small_base_measured_is_carried_and_never_promotes() -> None:
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "native_unit": "BTC", "small_base_measured": True}
+    )
+    dq = payload["data_quality_flags"]
+    assert dq.get("small_base_measured") is True, (
+        "the pre-stamped annotation must survive the wholesale rebuild; "
+        f"got {dq!r}"
+    )
+    assert payload["computation_status"] == "complete", (
+        "an informational annotation on exact days must not promote the status"
+    )
+    assert payload["computation_warned"] is False
+
+
+@pytest.mark.asyncio
+async def test_small_base_measured_beside_a_real_guard_still_warns() -> None:
+    """The annotation does not mask or replace a genuine warning."""
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "native_unit": "BTC", "small_base_measured": True,
+         "dust_nav_guard": True}
+    )
+    assert payload["computation_status"] == "complete_with_warnings"
+    dq = payload["data_quality_flags"]
+    assert dq.get("dust_nav_guard") is True and dq.get("small_base_measured") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [False, None, 1, "true", ["x"], {}])
+async def test_a_non_true_small_base_measured_is_not_carried(bad) -> None:  # type: ignore[no-untyped-def]
+    """Strict `is True`, present-only: anything else is absent, so a stale or malformed
+    value can never print the caveat."""
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "small_base_measured": bad}
+    )
+    assert "small_base_measured" not in payload["data_quality_flags"]
+
+
+# ===========================================================================
 # Phase 164.6.6.2.2 (D-05) — the single-key row names the cumulative method its
 # curve was built with, as composites already do. Readers default to geometric
 # when the key is absent, so a simple (allocated-capital) curve WITHOUT the stamp

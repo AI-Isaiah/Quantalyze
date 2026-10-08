@@ -6724,6 +6724,14 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # replaces data_quality_flags wholesale, so a re-derive after a unit change clears it.
     if _mt5_unit is not None and _mt5_unit.native:
         _prestamp_flags["native_unit"] = _mt5_unit.code
+    # 164.6.6.2 / D-25 — a MEASURED day on a very small balance (prior NAV under the unit's
+    # material equity) is kept exact and ANNOTATED. A BOOL only (the smallest prior NAV is an
+    # account-size magnitude, T-73-02), present-only, and NEVER a member of
+    # NAV_TWR_GUARD_KEYS: membership promotes a row to complete_with_warnings, and an
+    # informational annotation on exact days is not a warning. The prestamp replaces
+    # data_quality_flags wholesale, so a re-derive that no longer has such a day clears it.
+    if meta.get("small_base_measured"):
+        _prestamp_flags["small_base_measured"] = True
 
     # MTM-01 (Phase 101): this seam now ALSO owns the single-key by-basis write.
     # The prestamp runs BEFORE the CSV finalizer, and the finalizer's _mark_complete

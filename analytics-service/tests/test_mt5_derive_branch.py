@@ -1907,6 +1907,8 @@ async def test_btc_account_derives_a_native_series_end_to_end(monkeypatch) -> No
     assert "dust_nav_guard" not in flags, (
         "a 0.1 BTC account is not dust; the guard fired against a USD-sized floor"
     )
+    # D-25: every NAV of this account is ~0.1 BTC, far above the 1e-4 material equity.
+    assert "small_base_measured" not in flags
     assert _api_key_updates(capture) == [
         {
             "account_currency": "BTC",
@@ -1914,6 +1916,43 @@ async def test_btc_account_derives_a_native_series_end_to_end(monkeypatch) -> No
             "account_balance_usdt": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_btc_account_on_a_very_small_balance_is_measured_exactly_and_flagged(
+    monkeypatch,
+) -> None:
+    """D-25 end to end through the derive job. The canonical ledger scaled by 1e-10 puts
+    every NAV between 1.0e-5 and 1.1e-5 BTC: above the 1e-7 dust floor (so every day is
+    MEASURED), under the 1e-4 material equity (so the days are FLAGGED). The returns are the
+    same hand-literal ratios as the 0.1 BTC tracer, because a ratio does not depend on the
+    unit; the pre-stamp carries `small_base_measured` and nothing else new, and it is no
+    guard: no dust guard, and the unit flag is untouched."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account={"equity": 1.105e-5, "balance": 1.105e-5, "currency": "BTC",
+                 "login": 123456},
+        deals=_scaled_deals(1e-10),
+    )
+    ctx, capture = _build_ctx(transport, asset_class="traditional")
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, (
+        f"kind={result.error_kind!r} msg={result.error_message!r}"
+    )
+    rows = _csv_rows(capture)
+    assert rows["2025-06-02"] == pytest.approx(400 / 100_000, abs=1e-9)
+    assert rows["2025-06-04"] == pytest.approx(300 / 100_400, abs=1e-9)
+    assert rows["2025-06-05"] == pytest.approx(-200 / 110_700, abs=1e-9)
+    flags = _dq_flags(capture)
+    assert flags.get("small_base_measured") is True
+    assert flags.get("native_unit") == "BTC"
+    assert "dust_nav_guard" not in flags
+    assert "twr_chain_broken" not in flags
+    # A BOOL only: the smallest prior NAV is an account-size magnitude (T-73-02).
+    assert "small_base_measured_days" not in flags
+    assert "small_base_measured_min_nav" not in flags
 
 
 @pytest.mark.asyncio
