@@ -11340,3 +11340,21 @@ its measurement confirms the crash on PROD, it moves to `## 🔴 FIX NOW` and ge
       **Trigger:** the next edit to that test, to the migration that schedules the job, or to
       `scripts/prod-prober/cron-manifest.json`.
       **Owner:** THE FOUNDER.
+
+### ✅ RESOLVED 2026-10-08 (PR #980) — MUTPARSER-CORPUS-TIMEOUT-01 — the REAL CORPUS rule-3b walk times out on CI shards (booked 2026-10-08)
+
+**What.** `src/__tests__/mutation-annotation-parser.test.ts` › "REAL CORPUS: no annotation that exists today rewrites an identity" hit vitest's 30 s limit twice on 2026-10-08, on CI shard 2 of PR #978 and of PR #980. Locally the same test takes 3.8 s at 605 arms. It passed on reruns and on main, so the result is not wrong; it is slow under shard contention, and the corpus keeps growing.
+**Suspected cause (to measure, not assumed).** The walk does `buffers.clear()` per arm and re-applies each file step from disk, so with 716 steps it re-reads the same migration files many times.
+**Fix when picked up.** Measure the per-arm time on a CI shard, cache file reads across arms (reset only the mutation buffers), and keep the assertion unchanged. Do not raise the timeout to hide it.
+**Owner:** whoever next touches the mutation tooling; it reds unrelated PRs until fixed.
+**Resolution (measured, 2026-10-08).** The suspected cause was wrong in emphasis. Disk reads were 38 ms. 3.66 of 3.74 s went to `failureBranches` re-parsing the same migration text, once per arm and again as each step's next input. `failureBranches` is now memoized by text (FIFO, cap 64, results frozen) in `scripts/mutation-runner/run.mjs`: the walk takes 1.99 s and every assertion is unchanged. Shipped in PR #980 (164.9.7). The timeout was not raised.
+
+### TRUNCREVOKE-ADMIN-DETECTOR-01 — a read-only PROD check for the `supabase_admin` TRUNCATE residual (booked 2026-10-08, founder D-05 of 164.9.7)
+
+**Why.** Phase 164.9.7 revoked TRUNCATE from `anon` and `authenticated` on every `public` relation and in the `postgres` default privileges. It cannot touch the platform admin role's default-ACL row on `public`, which still grants `arwdDxtm` (TRUNCATE included) to anon and authenticated on any table that role creates. Measured on PROD 2026-10-08 18:16 UTC: that role owns 0 `public` relations, so the grant is latent. The founder accepted the residual on 2026-10-07 on condition that a PROD check exists ("Accept, add a PROD check").
+**What to build.** A read-only check, run on the existing prober cadence or the nightly, that fails loud when either of these holds:
+- (a) any relation in `public` is not owned by `postgres`;
+- (b) any non-`postgres` `pg_default_acl` row on `public` grants TRUNCATE to anon or authenticated **and** that role owns at least one `public` relation.
+
+It runs the marker query first and reports counts only.
+**Owner:** the next phase that touches the prod prober (route with 164.9.7.1 TRIGGERREVOKE, which shares the catalogue reads).

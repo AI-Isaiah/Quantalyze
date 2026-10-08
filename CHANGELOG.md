@@ -29,6 +29,27 @@ Phase 167.1.2.2, code half. The allocator derive/compose that the daily cron wil
   - An OKX key whose last day is skipped keeps its open-position shift, with only a log line.
   - Keys with no open-position wedge can lag one derive after a near-simultaneous sibling refresh. They are never marked untrustworthy.
 
+## [0.129.2.4] - 2026-10-08 — Close-out records: WEALTHRETURNS, STATUSBRIDGE, APTHANG and TRUNCATEREVOKE verified on PROD; TRIGGERREVOKE booked
+
+Planning records only. No code and no migration.
+
+### Changed
+- **164.6.6.2.2 WEALTHRETURNS: verification passed, phase complete.** The D-03 post-deploy reading is in `164.6.6.2.2-MEASUREMENT.md`. A1 and A3 have post-deploy personalized batches (15:00 and 14:00 UTC), their scores are byte-identical, and `portfolio_fit` is still 0 on all 5 ranked pairs. Screening is unchanged. A2 had no post-deploy batch yet, so it is left open in the table rather than filled from an old batch. No backfill and no forced recompute.
+- **164.6.6.3.4 STATUSBRIDGE: verification passed, phase complete.** Plan 04 re-synced on PROD the 3 rows that read `failed` and have jobs, one function call each. Every after-status matched its prediction: Eclipse went `failed` → `complete`, the 2 genuine failures stayed `failed`, and totals moved `failed` 22→21 and `complete` 11→12, with 44 rows before and after. The product check found that Eclipse no longer reads failed.
+- **164.9.8 APTHANG: verification passed, phase complete.** The D-04 measurement is in `164.9.8-MEASUREMENT.md`, read from PR #979's real-runner logs:
+  - Every psql site prints `apt-skip` (psql 16.15 is on the image).
+  - The pg_cron step prints its `apt-bound:` line, then goes from `Installed: (none)` to `1.6.2-1`.
+- **164.9.7 TRUNCATEREVOKE: verification passed, phase complete.** Plan 04's PROD after-reading:
+  - anon held TRUNCATE on 56 relations before and 0 after; authenticated 59 → 0. service_role and postgres are unchanged at 67.
+  - The `postgres` default ACL drops `D` (TRUNCATE) for both client roles.
+  - The security re-audit closes T-11 and T-12, making it SECURED 15/15.
+- The ROADMAP checklist and Progress rows are updated for all four phases.
+
+### Added
+- **Phase 164.9.7.1 TRIGGERREVOKE booked** (founder D-06): TRIGGER and PG17 MAINTAIN held by anon and authenticated, the same RLS-exempt class as TRUNCATE. It gets a heading, a checklist bullet and a Progress row, written by hand because `phase.insert` writes only the heading. ROADMAP lint rule 6 catches a missing bullet or row.
+- TODOS `TRUNCREVOKE-ADMIN-DETECTOR-01`: the read-only PROD check founder D-05 made a condition of accepting the `supabase_admin` default-ACL residual. It was never booked until now.
+- TODOS `MUTPARSER-CORPUS-TIMEOUT-01`, booked and resolved the same day by the `failureBranches` memo shipped in #980.
+
 ## [0.129.2.3] - 2026-10-08 — BASELINE: automated re-dump after the PROD apply of 1c8e79fb
 
 ### Changed
