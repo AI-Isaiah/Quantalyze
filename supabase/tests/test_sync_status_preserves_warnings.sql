@@ -43,7 +43,7 @@
 -- ==========================================================================
 DO $$
 DECLARE
-  v_fn TEXT := pg_get_functiondef('sync_strategy_analytics_status(uuid)'::regprocedure);
+  v_fn TEXT := pg_get_functiondef((SELECT p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'sync_strategy_analytics_status'));
 BEGIN
   -- Branch (c) must preserve complete_with_warnings via the CASE.
   IF v_fn !~* 'WHEN\s+strategy_analytics\.computation_status\s*=\s*''complete_with_warnings''' THEN

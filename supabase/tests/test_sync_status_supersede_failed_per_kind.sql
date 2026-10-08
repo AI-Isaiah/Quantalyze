@@ -52,7 +52,7 @@
 -- ==========================================================================
 DO $$
 DECLARE
-  v_fn TEXT := pg_get_functiondef('sync_strategy_analytics_status(uuid)'::regprocedure);
+  v_fn TEXT := pg_get_functiondef((SELECT p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'sync_strategy_analytics_status'));
 BEGIN
   -- Branch (b) must scope supersession PER-KIND (fixes the cross-kind-blind
   -- migration-reviewer HIGH that killed held PR 229d80fa). This is the

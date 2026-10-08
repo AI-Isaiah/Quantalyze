@@ -4148,7 +4148,7 @@ export type Database = {
         Returns: undefined
       }
       sync_strategy_analytics_status: {
-        Args: { p_strategy_id: string }
+        Args: { p_strategy_id: string; p_trigger_job_id?: string }
         Returns: undefined
       }
       sync_trades: {
