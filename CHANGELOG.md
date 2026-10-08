@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.128.0.1] - 2026-10-08 — BTC dust floor 1e-7: a BTC account is measured down to a ten millionth of a coin
+
+Founder decision D-24 for Phase 164.6.6.2 BTCNATIVE (gap closure, plan 14). The BTC row's dust-NAV
+floor drops from 0.001 BTC to 1e-7 BTC. The founder, reading MM-2x on PROD: "it should measure
+more. at least to 0.0000001". Measured before the change, MM-2x read `dust_nav_guard` with 355
+unguarded days and every earlier day guarded, so the opening stretch of its track record was lost to
+a floor that D-20 had set for a different reason (guarding real dust, about $100). **This is a
+behaviour change for BTC-denominated MT5 accounts only:** a day whose prior NAV is anywhere in
+[1e-7, 0.001) BTC is now measured instead of guarded. USD-family accounts and every other venue read
+the unchanged USD row. Nothing is backfilled; the next derive of a BTC account replaces its series.
+
+### Changed
+- **`analytics-service/services/account_unit.py`: BTC `dust_nav` 0.001 to 1e-7** (D-24, superseding
+  D-20's value; D-20's line stays in CONTEXT as lineage). It is the only value that moved.
+
+### Tests
+- A BTC account whose prev_nav sits between 1e-7 and 0.001 is measured, not guarded (hand
+  arithmetic: 0.0001 / 0.0008 = 0.125 and -0.0002 / 0.0009 = -2/9; a base of 4e-7 reads 0.25 and
+  -0.2), and one below 1e-7 is still guarded. The first goes RED on the old value; the second goes
+  RED when the floor is neutered to 1e-9.
+- An exact-arithmetic oracle of MM-2x's shape: a 0.1 BTC deposit, a 1.0 BTC deposit, trading, a
+  near-total withdrawal, then small-balance trading to 0.00961461 BTC with per-trade P&L down to
+  2e-5. Expected returns are `pnl / prior NAV` in `Fraction`, sharing no code with the reconstruction,
+  and every day after the second ledger day matches to 1e-12. Two lower-balance variants of the same
+  shape (5e-4 and 3e-6 BTC) are RED on the old floor.
+- No return before the first deposit: for a residue of 0, 5e-8, 1e-7, 3e-5, 5e-4, 0.02 and 0.2 BTC
+  left by the backward roll at the account's opening, the series starts on the first deposit day and
+  that day books NaN (or exactly 0.0 once the residue exceeds the deposit), never a gain. RED when the
+  denominator guards are neutered.
+- The BTC residual tolerance still catches a dropped 2e-5 BTC flow at MM-2x's balance.
+- The tests that pinned 0.001 are updated (`test_account_unit.py`, `test_mt5_deal_reconstruction.py`,
+  and the comments in `test_nav_twr.py` and `test_mt5_derive_branch.py`). The old "BTC row is the USD
+  row scaled by one ratio" assertion is gone for `dust_nav`, because the founder value is not that
+  ratio; the other two values are pinned as literals.
+
+### Notes
+- **`material_equity` (0.0001 BTC) and `residual_abs_tol` (1e-6 BTC) did not move, and were measured,
+  not assumed.** They were orchestrator-scaled from D-20, not founder values. Every consumer was read:
+  `dust_nav` feeds the NAV denominator guard and the terminal uPnL-wedge materiality test;
+  `material_equity` feeds the history settle wait and the "material equity but fewer than two usable
+  days" refusal; `residual_abs_tol` feeds the construction self-check. None compares one floor with
+  another, so nothing forces a move. There is no TypeScript or SQL mirror of any of the three.
+- The BTC row is no longer one ratio of the USD row: `dust_nav` (1e-7) is now below
+  `residual_abs_tol` (1e-6), which is below `material_equity` (1e-4), the reverse of the USD row's
+  1000, 100, 1.00. Nothing asserts an ordering, and the row's comment says so. Recorded so the next
+  person who scales the row knows the inversion is deliberate.
+- At MM-2x's scale neither value distorts a real day: its balance is 9.6e-3 BTC, 96 times
+  `material_equity`, and its smallest trade (2e-5) is 20 times `residual_abs_tol`. Below roughly 1e-5
+  BTC the residual band is a large share of the balance, so the self-check there is blunt; recorded,
+  not changed.
+- Existing behaviour the oracle makes visible, unchanged: the second ledger day of MM-2x (the 1.0 BTC
+  deposit on a 0.1 BTC base) reads `flow_dominated_guard` and is NaN, because a flow at least as large
+  as the prior NAV is not a usable denominator (`FLOW_DOM_RATIO` 1.0).
+- Plan numbering: `164.6.6.2-13` is the Python conversion twin that merged in 0.126.0.0, so this gap
+  closure is `164.6.6.2-14`.
+
 ## [0.128.0.0] - 2026-10-07 — WEALTHRETURNS: every Python blend reads daily returns, not the stored wealth curve
 
 Phase 164.6.6.2.2 closes the pre-existing defect the 164.6.6.2 review recorded as CR-01.
