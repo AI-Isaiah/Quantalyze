@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.129.3.0] - 2026-10-08 — DERIVECRON (code): My Allocation's equity history is rebuilt on the realized basis, and a curve it cannot reconcile says so
+
+Phase 167.1.2.2, code half. The allocator derive/compose that the daily cron will run (from plan 06) refused or mis-stated books in its PROD rehearsal (plan 02, UNCLEAN). This release fixes the compose before the cron is registered. The cron itself is a later, separate step, registered through the runbook and never by a migration.
+
+### Fixed
+- **The replay self-check checks the forward identity at each step (D-12).** It checks from the stored previous level. The rehearsal's false refusal (forward and backward diverged at day 1024 of 1199) is gone.
+- **Opening deposits are judged by whether the account started from zero, not by where they fall (D-13/D-14, founder).** This applies on venues whose history reaches the account's start (`FULL_HISTORY_VENUES`: Deribit, MT5). Within 0.01% of the first day's level the start reconciles. Outside it, the curve blocks under a new reason, `inception_unreconciled`, reported per key.
+- **Days the TWR writer drops still carry their P&L (D-15, founder).** These are the funding day under `negative_nav_guard` and flow-dominated days. The derive stores each one's P&L in `key_inputs` (`dropped_day_pnl`). The compose uses it in the zero-start check and the level roll, which therefore become exact. Root cause of the rehearsal's −0.355% Deribit residue. A dropped day is absent from `payload.returns`, never a 0 return. With several keys, the book return that day is the capital-weighted mean over the keys that do have one, and the day is counted and flagged.
+- **An open position no longer moves earlier levels or the zero-start verdict (review CR-01).** The derive stores the realized terminal the writer rolls from (`realized_terminal_usd`/`_day`) for MT5, Deribit and, after review round 2, ccxt/OKX. The replay rolls from it, and the live equity enters only on the last day, so the curve's last point still equals live equity. Older rows without the field behave as before. sFOX was checked and has no open-position wedge.
+- **A compose racing a sibling key's derive no longer stores a blocking verdict nothing heals (R2-WR-01, founder D-16).** It reads `key_inputs` before the returns. If a key's returns are newer than its inputs, the job ends transient and retries, and `key_inputs_mismatch` is persisted only on the last attempt.
+- Malformed inputs fail loud. `read_dropped_day_pnl` and `read_realized_terminal` raise on a boolean, non-numeric, non-finite or repeated entry, which is disposed as a permanent corrupt input. A stored dropped-day P&L on a day that has a return is a blocking `key_inputs_mismatch`, logged with counts only.
+
+### Added
+- `docs/runbooks/derivecron-go-live.md`: the go-live procedure, with every PROD statement form behind a marker guard. Dated notes added to the FLIP runbook.
+- TODOS: `167.1.2.2-BACKFILL-STALENESS-ALARM` (routed to OUTAGEALERT) and `167.1.2.2-MT5-CROSS-SERVICE-TERMINAL`.
+
+### Tests
+- New suites: `test_allocator_equity_self_check`, `_inception`, `_dropped_day_pnl`, `_dropped_day_returns`, `_realized_basis` and `_compose_read_race`. They use exact-Fraction oracles built forward from chosen capital, never read back from the code under test. Every fix was shown RED with its code neutered.
+- The full analytics-service suite: 8367 passed, 90 skipped (pre-existing env-gated), 0 failed.
+
+### Notes
+- Three review rounds plus one founder-authorised fix round (D-16). Round 3: 0 findings at MEDIUM or above. Security SECURED, 0 blocking.
+- Plan 04 (one job per claim) was not taken, because the rehearsal measured 0 reclaims.
+- **Next:** plan 05 re-runs the fan-out rehearsal on this deployed code. The Bybit key's IP allow-list now includes the backfill egress (founder, D-11). Only a clean rehearsal registers the cron (plan 06).
+- **Known limits, recorded rather than fixed:**
+  - A key whose stored inputs predate this release, typically a disconnected key, is still rebuilt from live equity until it is re-derived.
+  - An OKX key whose last day is skipped keeps its open-position shift, with only a log line.
+  - Keys with no open-position wedge can lag one derive after a near-simultaneous sibling refresh. They are never marked untrustworthy.
+
 ## [0.129.1.2] - 2026-10-08 — APTHANG: a CI job's apt step never hangs on a dead package mirror
 
 Phase 164.9.8. CI jobs were hanging for most of their timeout on an apt install. The runner image's own retries and 15 s timeouts fail over to the Azure mirror in about 30 s, but the fallback then trickles bytes and never times out. Every apt call in the workflows now goes through one bounded wrapper, and a guard test keeps it that way.
