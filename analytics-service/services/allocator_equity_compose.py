@@ -82,12 +82,17 @@ class PortfolioReturns(NamedTuple):
     denominator was not positive (benign). ``nonfinite_days``: days omitted
     because a level, a return or the sum was non-finite (blocking; SFH-10).
     ``missing_return_days``: key-days inside a key's coverage with no level
-    (no return row and no flow), read as r = 0 on the carried level (SFH-10)."""
+    (no return row and no flow), read as r = 0 on the carried level (SFH-10).
+    ``undefined_return_days``: key-days the TWR writer left out of the stored
+    returns (167.1.2.2 D-15 gives them a level, from their stored P&L), left out of
+    that day's sums too (round-1 WR-01). Not r = 0: that day's return is undefined,
+    and 0 would be a fabricated flat day in the KPIs."""
 
     rows: list[dict[str, Any]]
     skipped_nonpositive_days: int
     nonfinite_days: int
     missing_return_days: int
+    undefined_return_days: int = 0
 
 
 def _bool_flag_tokens(flags: Mapping[str, Any]) -> set[str]:
@@ -120,6 +125,7 @@ def portfolio_returns(
     per_key_equity: Mapping[str, KeyEquity],
     per_key_returns: Mapping[str, pd.Series],
     departed_keys: Collection[str] = (),
+    dropped_days_by_key: Mapping[str, Collection[str]] | None = None,
 ) -> PortfolioReturns:
     """D-06 book returns: ``r_t = Σ_k E_{k,t−1}·r_{k,t} / Σ_k E_{k,t−1}``.
 
@@ -136,7 +142,15 @@ def portfolio_returns(
     replay unions them), so a day inside the key's coverage with NO level has
     neither a return row nor a flow: a gap. The key's level is carried with
     r = 0 there, as for a flow-only day, and the key-day is counted so the
-    caller can report it. ``departed_keys`` (167.1.2 plan 09, D-05) are keys
+    caller can report it. ``dropped_days_by_key`` (167.1.2.2 round-1 WR-01) names, per key,
+    the days its writer left out of the stored returns because its prior capital could
+    not be a denominator (the funding day, a day whose flow dominates the prior NAV, a
+    dust or P&L-dominated day). D-15 gave those days a LEVEL, but they have no return: the
+    day's P&L is inside the level jump and ``E_{t-1}`` is not a base to divide it by. The
+    key therefore sits out that day's sums, exactly as a key sits out the day it joins,
+    and the key-day is counted (``undefined_return_days``). It is never read as r = 0,
+    which would show a flat day the account did not have; a day on which NO key has a
+    defined return is absent from the result. ``departed_keys`` (167.1.2 plan 09, D-05) are keys
     whose history ended on the last day of their (already clipped) series: they
     are treated as rotated out, so on the next day they leave both sums instead
     of carrying their last level. Pure: no I/O.
@@ -196,16 +210,22 @@ def portfolio_returns(
             return 0.0
         return raw
 
+    undefined_days = {
+        key: frozenset(str(d) for d in days)
+        for key, days in (dropped_days_by_key or {}).items()
+    }
     union = sorted({day for day_map in level_by_key.values() for day in day_map})
     rows: list[dict[str, Any]] = []
     skipped = 0
     nonfinite = 0
     missing = 0
+    undefined = 0
     for index in range(1, len(union)):
         prev, day = union[index - 1], union[index]
         numer = 0.0
         denom = 0.0
         poison = False
+        excluded = 0
         for key in level_by_key:
             equity_prev = _level_on(key, prev)
             equity_day = _level_on(key, day)
@@ -213,6 +233,10 @@ def portfolio_returns(
                 continue
             if first_day[key] < day < last_day[key] and day not in level_by_key[key]:
                 missing += 1
+            if day in level_by_key[key] and day in undefined_days.get(key, ()):
+                undefined += 1
+                excluded += 1
+                continue
             ret = _return_on(key, day)
             if (
                 not math.isfinite(equity_prev)
@@ -226,6 +250,10 @@ def portfolio_returns(
         if poison or not math.isfinite(denom) or not math.isfinite(numer):
             nonfinite += 1
             continue
+        if excluded and denom == 0.0:
+            # Every key with a level on this day sat it out (undefined return): there is
+            # no book return to report, and that is not a non-positive denominator.
+            continue
         if not (denom > 0.0):
             skipped += 1
             continue
@@ -234,7 +262,7 @@ def portfolio_returns(
             nonfinite += 1
             continue
         rows.append({"date": day, "r": value})
-    return PortfolioReturns(rows, skipped, nonfinite, missing)
+    return PortfolioReturns(rows, skipped, nonfinite, missing, undefined)
 
 
 def _clip_through(series: pd.Series, end_day: str) -> pd.Series:
@@ -596,8 +624,19 @@ def compose_allocator_equity(
     # D-06: the book curve's own returns. Not _current_equity_weights (static D1
     # shares weight history by today's mix). ``version`` 2 is the contract the
     # reader accepts; a payload without it is still the pre-D-06 $-curve.
+    # WR-01: a day the writer left out of a key's stored returns has a level (D-15) but no
+    # return, so it is left out of the book return too. Derived from the same inputs the
+    # replay used: a stored P&L on a day with no return row.
+    dropped_days: dict[str, set[str]] = {}
+    for k in anchored_keys:
+        if dropped_pnl.get(k):
+            has_return = {str(d) for d in anchored_returns[k].index}
+            dropped_days[k] = {str(d) for d in dropped_pnl[k] if str(d) not in has_return}
     book_returns = portfolio_returns(
-        per_key_equity, anchored_returns, departed_keys=departed_present
+        per_key_equity,
+        anchored_returns,
+        departed_keys=departed_present,
+        dropped_days_by_key=dropped_days,
     )
     if departed_present:
         flag_tokens.add(_DEPARTED_HISTORY_INCLUDED)
@@ -617,6 +656,18 @@ def compose_allocator_equity(
             "compose: %d key-day(s) inside a key's coverage had no return row and "
             "no flow; each was read as r = 0 on the carried level (flag %s)",
             book_returns.missing_return_days,
+            _MISSING_RETURN_INSIDE_COVERAGE,
+        )
+    if book_returns.undefined_return_days:
+        # The signal the dust and P&L-dominated dropped days carried before D-15 gave them
+        # a level: a key-day inside the key's coverage with no return row. Reported, not
+        # blocking: the day is left out of the book return, never invented.
+        flag_tokens.add(_MISSING_RETURN_INSIDE_COVERAGE)
+        logger.warning(
+            "compose: %d key-day(s) had no stored return because the writer left the day "
+            "out; each was left out of the book return for that day, not read as r = 0 "
+            "(flag %s)",
+            book_returns.undefined_return_days,
             _MISSING_RETURN_INSIDE_COVERAGE,
         )
     if skipped_days:
