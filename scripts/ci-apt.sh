@@ -21,7 +21,13 @@
 #      --no-download and NO wall-clock wrapper (dpkg is never killed mid-unpack);
 #   4. skips apt entirely when the tool is already on PATH (--provides), which
 #      is the cheapest bound of all; and
-#   5. ends as a named ::error::MEASURE_FAIL, exit 1, never as a silent hang.
+#   5. ends as a named ::error::MEASURE_FAIL, exit 1, never as a silent hang; and
+#   6. retries ONLY what a retry can fix: a wall-clock kill (exit 124/137), or an
+#      apt exit 100 whose captured output names a network failure. Anything else
+#      (a typo'd package, a held dpkg lock, a bad sources entry) fails at once with
+#      apt's own exit code and a "failed deterministically" MEASURE_FAIL, never as a
+#      mirror failure. A package or file missing from the mirror (404) earns ONE
+#      fresh `update`, because the index may simply be stale.
 #
 # MEASURED BASIS for the defaults (GitHub jobs API over 600 ci.yml runs,
 # 2026-09-11 to 2026-10-07, plus the logs of the 53 slowest successful apt
@@ -67,7 +73,16 @@ MIN_PHASE="${APT_MIN_PHASE:-10}"
 # stating them here makes them independent of apt.conf.d ordering.
 APT_NET_OPTS=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
 
+# What a retry can fix. Network failures apt reports with exit 100 (a wall-clock
+# kill is recognised by its exit code instead), and the stale-index shape.
+NET_RE='Could not connect|Connection (timed out|failed|refused)|Temporary failure resolving|Failed to fetch.*(Timeout|Connection|Undetermined|timed out)|Hash Sum mismatch|Unable to connect'
+STALE_RE='404|Not Found|Unable to locate package|Unable to fetch some archives'
+# A half-failed `update` exits 0 on an apt that predates APT::Update::Error-Mode
+# (and is promoted to exit 100 by Error-Mode=any on a current one).
+HALF_UPDATE_RE='^W: Some index files failed|^E:'
+
 TIMEOUT_BIN=""
+PHASE_DIR=""
 
 usage() {
   cat >&2 <<'EOF'
@@ -112,6 +127,49 @@ net_phase() {
   sudo "${TIMEOUT_BIN}" --kill-after="${KILL_AFTER}" "${cap}" apt-get "${APT_NET_OPTS[@]}" "$@"
 }
 
+# run_capture LOG CMD... -- run CMD with its output streamed to the job log AND
+# captured in LOG, so the retry decision can read what apt said. Sets CAPTURE_RC to
+# CMD's own exit code (never tee's), whatever errexit state the caller is in.
+run_capture() {
+  local log="$1" rcfile="${PHASE_DIR}/capture.rc"
+  shift
+  : >"${log}"
+  { rc=0; "$@" || rc=$?; echo "${rc}" >"${rcfile}"; } 2>&1 | tee "${log}"
+  CAPTURE_RC="$(cat "${rcfile}")"
+}
+
+# run_phase CAP APT-ARGS... -- one capped network phase, captured. Sets PHASE_RC
+# and PHASE_LOG.
+run_phase() {
+  local cap="$1"
+  shift
+  PHASE_LOG="${PHASE_DIR}/phase.log"
+  run_capture "${PHASE_LOG}" net_phase "${cap}" "$@"
+  PHASE_RC="${CAPTURE_RC}"
+}
+
+# classify RC LOG PHASE -- sets VERDICT to retry | stale | fatal.
+classify() {
+  local rc="$1" log="$2" phase="$3"
+  case "${rc}" in
+    124|137) VERDICT=retry; return 0 ;;
+  esac
+  if [ "${rc}" -eq 100 ] && grep -a -E -q "${NET_RE}" "${log}"; then
+    VERDICT=retry
+  elif [ "${phase}" = fetch ] && [ "${rc}" -eq 100 ] && grep -a -E -q "${STALE_RE}" "${log}"; then
+    VERDICT=stale
+  else
+    VERDICT=fatal
+  fi
+}
+
+# last_error_line LOG -- the last `E:` line apt printed, or a stand-in.
+last_error_line() {
+  local line
+  line="$(grep -a '^E:' "$1" | tail -n 1 || true)"
+  echo "${line:-(no E: line in the apt output)}"
+}
+
 do_install() {
   local provides="" budget="${DEFAULT_BUDGET}"
   local update_cap="${DEFAULT_UPDATE_TIMEOUT}" fetch_cap="${DEFAULT_FETCH_TIMEOUT}"
@@ -140,14 +198,21 @@ do_install() {
     esac
   done
   [ "${#pkgs[@]}" -gt 0 ] || die_usage "no packages given"
+  [ "${budget}" -ge "${MIN_PHASE}" ] \
+    || die_usage "--budget ${budget} is below the ${MIN_PHASE} s minimum a single phase needs; no attempt would ever start"
 
-  # (a) D-04 skip: the tool is already on the image, run no apt at all.
+  # (a) D-04 skip: the tool is already on the image, run no apt at all. Only a
+  # binary that actually RUNS counts: on Ubuntu /usr/bin/psql is a pg_wrapper
+  # symlink that exists and exits non-zero when no postgresql-client-NN is installed.
   if [ -n "${provides}" ] && command -v "${provides}" >/dev/null 2>&1; then
-    local resolved version
+    local resolved vout vrc=0
     resolved="$(command -v "${provides}")"
-    version="$("${resolved}" --version 2>&1 | head -n 1 || true)"
-    echo "apt-skip: ${provides} is already on PATH at ${resolved}: ${version}"
-    return 0
+    vout="$("${resolved}" --version 2>&1)" || vrc=$?
+    if [ "${vrc}" -eq 0 ]; then
+      echo "apt-skip: ${provides} is already on PATH at ${resolved}: $(head -n 1 <<<"${vout}")"
+      return 0
+    fi
+    echo "::warning::apt-provides: ${provides} is on PATH at ${resolved} but '--version' exited ${vrc} ($(head -n 1 <<<"${vout}")); not skipping, falling through to apt"
   fi
 
   # (b) Say what bound is in force, and measure the effective apt config.
@@ -160,9 +225,11 @@ do_install() {
     echo "::error::MEASURE_FAIL: neither 'timeout' nor 'gtimeout' is on PATH, so no apt phase can be bounded by wall clock. Install GNU coreutils."
     return 1
   fi
+  PHASE_DIR="$(mktemp -d)"
+  trap 'rm -rf "${PHASE_DIR}"' EXIT
 
   # (e) Retry loop bounded by one total budget.
-  local lists_updated=0 remaining cap phase
+  local lists_updated=0 stale_retries=0 remaining cap phase last_rc=0 last_phase=none urc=0
   SECONDS=0
   while :; do
     remaining=$((budget - SECONDS))
@@ -171,10 +238,23 @@ do_install() {
     if [ "${lists_updated}" -eq 0 ]; then
       phase="update"
       cap=$((update_cap < remaining ? update_cap : remaining))
-      if net_phase "${cap}" update -y; then
+      # Error-Mode=any makes a half-failed index fetch exit 100 (apt >= 2.1; an
+      # older apt ignores the key, which the HALF_UPDATE_RE check below covers).
+      run_phase "${cap}" -o APT::Update::Error-Mode=any update -y
+      if [ "${PHASE_RC}" -eq 0 ] && grep -a -E -q "${HALF_UPDATE_RE}" "${PHASE_LOG}"; then
+        echo "::warning::apt update exited 0 but reported failed index files; treating it as a failure"
+        PHASE_RC=100
+      fi
+      if [ "${PHASE_RC}" -eq 0 ]; then
         lists_updated=1
       else
-        echo "::warning::apt ${phase} attempt failed or hit its ${cap} s cap (${SECONDS} s of ${budget} s budget used)"
+        last_rc="${PHASE_RC}"; last_phase="${phase}"
+        classify "${PHASE_RC}" "${PHASE_LOG}" "${phase}"
+        if [ "${VERDICT}" = fatal ]; then
+          echo "::error::MEASURE_FAIL: apt ${phase} failed deterministically (rc=${PHASE_RC}): $(last_error_line "${PHASE_LOG}")"
+          return "${PHASE_RC}"
+        fi
+        echo "::warning::apt ${phase} attempt failed (rc=${PHASE_RC}) or hit its ${cap} s cap (${SECONDS} s of ${budget} s budget used)"
         forensics
         sleep "${RETRY_SLEEP}"
         continue
@@ -185,18 +265,41 @@ do_install() {
 
     phase="fetch"
     cap=$((fetch_cap < remaining ? fetch_cap : remaining))
-    if net_phase "${cap}" install -y --no-install-recommends --download-only "${pkgs[@]}"; then
+    run_phase "${cap}" install -y --no-install-recommends --download-only "${pkgs[@]}"
+    if [ "${PHASE_RC}" -eq 0 ]; then
       # Archives are cached: the unpack touches no network and is never killed.
-      sudo apt-get "${APT_NET_OPTS[@]}" install -y --no-install-recommends --no-download "${pkgs[@]}"
-      return $?
+      # An explicit status: this must not depend on errexit surviving a caller's `||`.
+      run_capture "${PHASE_DIR}/unpack.log" \
+        sudo apt-get "${APT_NET_OPTS[@]}" install -y --no-install-recommends --no-download "${pkgs[@]}"
+      urc="${CAPTURE_RC}"
+      if [ "${urc}" -ne 0 ]; then
+        echo "::error::MEASURE_FAIL: apt unpack failed (rc=${urc}); the archives were cached, so this is not a network failure: $(last_error_line "${PHASE_DIR}/unpack.log")"
+        return "${urc}"
+      fi
+      return 0
     fi
-    echo "::warning::apt ${phase} attempt failed or hit its ${cap} s cap (${SECONDS} s of ${budget} s budget used)"
+    last_rc="${PHASE_RC}"; last_phase="${phase}"
+    classify "${PHASE_RC}" "${PHASE_LOG}" "${phase}"
+    if [ "${VERDICT}" = stale ] && [ "${stale_retries}" -lt 1 ]; then
+      # A package or file the index promised is gone from the mirror: the index is
+      # stale, so ONE fresh update is worth the time. A second miss is real.
+      stale_retries=$((stale_retries + 1))
+      lists_updated=0
+      echo "::warning::apt ${phase} found a package or file missing from the mirror (rc=${PHASE_RC}); re-running update once (${SECONDS} s of ${budget} s budget used)"
+      sleep "${RETRY_SLEEP}"
+      continue
+    fi
+    if [ "${VERDICT}" = fatal ] || [ "${VERDICT}" = stale ]; then
+      echo "::error::MEASURE_FAIL: apt ${phase} failed deterministically (rc=${PHASE_RC}): $(last_error_line "${PHASE_LOG}")"
+      return "${PHASE_RC}"
+    fi
+    echo "::warning::apt ${phase} attempt failed (rc=${PHASE_RC}) or hit its ${cap} s cap (${SECONDS} s of ${budget} s budget used)"
     forensics
     sleep "${RETRY_SLEEP}"
   done
 
-  # (f) Budget spent.
-  echo "::error::MEASURE_FAIL: apt could not fetch '${pkgs[*]}' within the ${budget} s budget (update cap ${update_cap} s, fetch cap ${fetch_cap} s). A dead or trickling package mirror, not a repo defect."
+  # (f) Budget spent, every failure so far a retryable (timeout / network) one.
+  echo "::error::MEASURE_FAIL: apt could not fetch '${pkgs[*]}' within the ${budget} s budget (update cap ${update_cap} s, fetch cap ${fetch_cap} s; last failure: ${last_phase} rc=${last_rc}). A dead or trickling package mirror, not a repo defect."
   return 1
 }
 
@@ -250,11 +353,41 @@ echo "${n}" >"${cnt}"
 case "${STUB_HANG:-}" in
   "${kind}:all" | "${kind}:${n}") sleep 300 ;;
 esac
+# STUB_FAIL="<kind>:<n|all>:<mode>" makes that call fail INSTANTLY the way a real apt
+# does. Modes: locate (exit 100, a deterministic refusal), netfail (exit 100, a network
+# failure), whalf / whalf404 (exit 0 with a half-failed index update, network / 404),
+# stale404 (exit 100, a package 404), dpkg (exit 100, a failed unpack).
+case "${STUB_FAIL:-}" in
+  "${kind}:all:"* | "${kind}:${n}:"*)
+    case "${STUB_FAIL##*:}" in
+      locate) echo "E: Unable to locate package x"; exit 100 ;;
+      netfail) echo "E: Failed to fetch http://mirror.invalid/x.deb  Connection timed out [IP: 192.0.2.1 80]"; exit 100 ;;
+      whalf)
+        echo "W: Failed to fetch http://mirror.invalid/InRelease  Connection timed out [IP: 192.0.2.1 80]"
+        echo "W: Some index files failed to download. They have been ignored, or old ones used instead."
+        exit 0 ;;
+      whalf404)
+        echo "W: Failed to fetch http://mirror.invalid/InRelease  404  Not Found [IP: 192.0.2.1 80]"
+        echo "W: Some index files failed to download. They have been ignored, or old ones used instead."
+        exit 0 ;;
+      stale404)
+        echo "E: Failed to fetch http://mirror.invalid/x.deb  404  Not Found [IP: 192.0.2.1 80]"
+        echo "E: Unable to fetch some archives, maybe run apt-get update or try with --fix-missing?"
+        exit 100 ;;
+      dpkg) echo "E: Sub-process /usr/bin/dpkg returned an error code (1)"; exit 100 ;;
+    esac ;;
+esac
 exit 0
 EOF
-  chmod +x "${work}/bin/sudo" "${work}/bin/apt-config" "${work}/bin/apt-get"
+  # A tool that is on PATH and fails --version, like pg_wrapper with no client installed.
+  cat >"${work}/bin/ci-apt-broken-tool" <<'EOF'
+#!/usr/bin/env bash
+echo "You must install at least one postgresql-client-<version> package" >&2
+exit 3
+EOF
+  chmod +x "${work}/bin/sudo" "${work}/bin/apt-config" "${work}/bin/apt-get" "${work}/bin/ci-apt-broken-tool"
 
-  local out rc t0 t1 elapsed log
+  local out rc t0 t1 elapsed log min_phase=1 stub_fail=""
 
   # run_scenario NAME HANG ARGS... : fresh state, run the script, set
   # out/rc/elapsed/log.
@@ -265,8 +398,8 @@ EOF
     : >"${work}/apt-get.log"
     t0="$(date +%s)"
     set +e
-    out="$(PATH="${work}/bin:${PATH}" STUB_DIR="${work}" STUB_HANG="${hang}" \
-      APT_MIN_PHASE=1 APT_KILL_AFTER=1 APT_RETRY_SLEEP=0 \
+    out="$(PATH="${work}/bin:${PATH}" STUB_DIR="${work}" STUB_HANG="${hang}" STUB_FAIL="${stub_fail}" \
+      APT_MIN_PHASE="${min_phase}" APT_KILL_AFTER=1 APT_RETRY_SLEEP=0 \
       bash "${SELF}" install "$@" 2>&1)"
     rc=$?
     set -e
@@ -296,6 +429,8 @@ EOF
   grep -a -q -- '--download-only' <<<"$(grep -a '^fetch' <<<"${log}")" \
     || fail "fetch call lacks --download-only"
   [ "${elapsed}" -ge 2 ] || fail "elapsed ${elapsed}s < 2s: the first phase was not really killed at its cap"
+  grep -a '^update' <<<"${log}" | grep -a -q -- '-o APT::Update::Error-Mode=any' \
+    || fail "the update call lacks -o APT::Update::Error-Mode=any (a half-failed index fetch would exit 0)"
 
   # 2. fail-on-budget: every update hangs, the budget ends it.
   run_scenario fail-on-budget update:all \
@@ -331,7 +466,83 @@ EOF
     || fail "expected stub call order update,fetch,unpack"
   if grep -a -q '^apt-skip:' <<<"${out}"; then fail "skipped although the tool is absent"; fi
 
-  echo "ci-apt self-test OK: retry-after-hang, fail-on-budget, no-update-rerun, skip-when-present, fall-through-when-absent."
+  # 6. deterministic-fail: apt refuses instantly (exit 100, no network word). ONE call,
+  # a fast exit with apt's own code, and a message that does NOT blame the mirror.
+  stub_fail="update:all:locate"
+  run_scenario deterministic-fail "" --budget 30 --update-timeout 5 --fetch-timeout 5 x
+  stub_fail=""
+  [ "${rc}" -eq 100 ] || fail "expected apt's own exit code 100, got ${rc}"
+  [ "$(count_lines '^update' "${log}")" -eq 1 ] || fail "expected exactly ONE update invocation (no retry of a deterministic error)"
+  [ "${elapsed}" -le 3 ] || fail "elapsed ${elapsed}s: a deterministic error must fail fast, not spend the budget"
+  grep -a -q '^::error::MEASURE_FAIL: apt update failed deterministically (rc=100): E: Unable to locate package x' <<<"${out}" \
+    || fail "no 'failed deterministically (rc=100)' MEASURE_FAIL line naming the E: line"
+  if grep -a -i -q 'mirror' <<<"$(grep -a '^::error::' <<<"${out}")"; then fail "a deterministic error was blamed on the mirror"; fi
+
+  # 7. network-fail-retries: an exit-100 network failure IS retried (one call fails, the next succeeds).
+  stub_fail="fetch:1:netfail"
+  run_scenario network-fail-retries "" --budget 30 --update-timeout 5 --fetch-timeout 5 x
+  stub_fail=""
+  [ "${rc}" -eq 0 ] || fail "expected exit 0, got ${rc}"
+  [ "$(count_lines '^fetch' "${log}")" -eq 2 ] || fail "expected TWO fetch invocations (network failure retried)"
+  [ "$(count_lines '^update' "${log}")" -eq 1 ] || fail "expected ONE update invocation"
+
+  # 8. update-half-failure: exit 0 with 'Some index files failed' is a FAILURE, retried when
+  # it names a network cause, and fatal (no retry) when it does not.
+  stub_fail="update:1:whalf"
+  run_scenario update-half-failure-network "" --budget 30 --update-timeout 5 --fetch-timeout 5 x
+  stub_fail=""
+  [ "${rc}" -eq 0 ] || fail "expected exit 0, got ${rc}"
+  [ "$(count_lines '^update' "${log}")" -eq 2 ] || fail "a half-failed update was accepted: expected TWO update invocations"
+  grep -a -q 'treating it as a failure' <<<"${out}" || fail "no 'treating it as a failure' line for the half-failed update"
+  stub_fail="update:all:whalf404"
+  run_scenario update-half-failure-404 "" --budget 30 --update-timeout 5 --fetch-timeout 5 x
+  stub_fail=""
+  [ "${rc}" -eq 100 ] || fail "expected exit 100, got ${rc}"
+  [ "$(count_lines '^update' "${log}")" -eq 1 ] || fail "expected ONE update invocation for a non-network half failure"
+  [ "$(count_lines '^fetch\|^unpack' "${log}")" -eq 0 ] || fail "a fetch or unpack ran after a failed update"
+  grep -a -q 'failed deterministically (rc=100)' <<<"${out}" || fail "no deterministic MEASURE_FAIL for a 404 half-failed update"
+
+  # 9. stale-index: a 404 on the package fetch earns exactly ONE fresh update, then it is real.
+  stub_fail="fetch:1:stale404"
+  run_scenario stale-index-reupdates "" --budget 30 --update-timeout 5 --fetch-timeout 5 x
+  stub_fail=""
+  [ "${rc}" -eq 0 ] || fail "expected exit 0, got ${rc}"
+  [ "$(awk '{print $1}' <<<"${log}" | paste -sd, -)" = "update,fetch,update,fetch,unpack" ] \
+    || fail "expected stub call order update,fetch,update,fetch,unpack (lists_updated reset after a 404)"
+  stub_fail="fetch:all:stale404"
+  run_scenario stale-index-bounded "" --budget 30 --update-timeout 5 --fetch-timeout 5 x
+  stub_fail=""
+  [ "${rc}" -eq 100 ] || fail "expected exit 100, got ${rc}"
+  [ "$(count_lines '^update' "${log}")" -eq 2 ] || fail "expected exactly TWO update invocations (one re-update, then fatal)"
+  [ "$(count_lines '^unpack' "${log}")" -eq 0 ] || fail "an unpack ran although the fetch never succeeded"
+  grep -a -q 'failed deterministically (rc=100)' <<<"${out}" || fail "no deterministic MEASURE_FAIL for a persistent 404"
+
+  # 10. unpack-fails: the local dpkg phase failing is a non-zero exit, never swallowed.
+  stub_fail="unpack:all:dpkg"
+  run_scenario unpack-fails "" --budget 30 --update-timeout 5 --fetch-timeout 5 x
+  stub_fail=""
+  [ "${rc}" -ne 0 ] || fail "an unpack that failed exited 0"
+  [ "${rc}" -eq 100 ] || fail "expected apt's own exit code 100, got ${rc}"
+  [ "$(awk '{print $1}' <<<"${log}" | paste -sd, -)" = "update,fetch,unpack" ] || fail "expected stub call order update,fetch,unpack"
+  grep -a -q 'apt unpack failed (rc=100)' <<<"${out}" || fail "no 'apt unpack failed' error line"
+
+  # 11. provides-broken: on PATH but --version fails => do NOT skip, fall through to apt.
+  run_scenario provides-broken-version "" \
+    --provides ci-apt-broken-tool --budget 12 --update-timeout 2 --fetch-timeout 2 x
+  [ "${rc}" -eq 0 ] || fail "expected exit 0, got ${rc}"
+  if grep -a -q '^apt-skip:' <<<"${out}"; then fail "skipped although the tool's --version fails"; fi
+  grep -a -q 'falling through to apt' <<<"${out}" || fail "no printed reason for falling through"
+  [ "$(awk '{print $1}' <<<"${log}" | paste -sd, -)" = "update,fetch,unpack" ] \
+    || fail "expected stub call order update,fetch,unpack"
+
+  # 12. budget-below-floor: a budget under the one-phase minimum is a usage error, not a silent no-attempt.
+  min_phase=10
+  run_scenario budget-below-floor "" --budget 5 x
+  min_phase=1
+  [ "${rc}" -eq 2 ] || fail "expected usage exit 2, got ${rc}"
+  [ -z "${log}" ] || fail "apt-get was invoked although the budget cannot fit a phase"
+
+  echo "ci-apt self-test OK: retry-after-hang, fail-on-budget, no-update-rerun, skip-when-present, fall-through-when-absent, deterministic-fail, network-fail-retries, update-half-failure, stale-index, unpack-fails, provides-broken-version, budget-below-floor."
 }
 
 case "${1:-}" in
