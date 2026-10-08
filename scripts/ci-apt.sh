@@ -200,10 +200,138 @@ do_install() {
   return 1
 }
 
-# --self-test -- filled in by the next task of this plan (stub).
+# --self-test -- proves the wall-clock cap, the budget, the retry, the loud
+# failure and the skip against a stub apt-get. The wall-clock binary under test
+# is the REAL one (timeout or gtimeout), because the bound under test is real.
 self_test() {
-  echo "ci-apt: --self-test is not implemented yet" >&2
-  return 1
+  local tb
+  tb="$(command -v timeout || command -v gtimeout || true)"
+  if [ -z "${tb}" ]; then
+    echo "::error::MEASURE_FAIL: self-test needs 'timeout' or 'gtimeout' on PATH; refusing to pass without the real wall-clock binary."
+    return 1
+  fi
+
+  # Global on purpose: the EXIT trap runs after this function has returned.
+  work="$(mktemp -d)"
+  trap 'rm -rf "${work}"' EXIT
+  mkdir -p "${work}/bin"
+
+  # sudo stub: just run the command unprivileged.
+  cat >"${work}/bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+  # apt-config stub: echo the three keys.
+  cat >"${work}/bin/apt-config" <<'EOF'
+#!/usr/bin/env bash
+echo 'Acquire::Retries "1";'
+echo 'Acquire::http::Timeout "15";'
+echo 'Acquire::https::Timeout "15";'
+EOF
+  # apt-get stub. Per-scenario behaviour comes from STUB_HANG: "<kind>:<n>"
+  # hangs the nth call of that kind (n=all hangs every call), where kind is
+  # update, fetch or unpack. Every invocation is logged BEFORE it can hang, so
+  # a killed call is still counted. A hang is a plain `sleep 300`: only the
+  # real wall-clock cap can end it.
+  cat >"${work}/bin/apt-get" <<'EOF'
+#!/usr/bin/env bash
+kind=other
+for a in "$@"; do
+  case "$a" in
+    update) kind=update ;;
+    --download-only) kind=fetch ;;
+    --no-download) kind=unpack ;;
+  esac
+done
+echo "${kind} $*" >>"${STUB_DIR}/apt-get.log"
+cnt="${STUB_DIR}/count.${kind}"
+n=$(( $(cat "${cnt}" 2>/dev/null || echo 0) + 1 ))
+echo "${n}" >"${cnt}"
+case "${STUB_HANG:-}" in
+  "${kind}:all" | "${kind}:${n}") sleep 300 ;;
+esac
+exit 0
+EOF
+  chmod +x "${work}/bin/sudo" "${work}/bin/apt-config" "${work}/bin/apt-get"
+
+  local out rc t0 t1 elapsed log
+
+  # run_scenario NAME HANG ARGS... : fresh state, run the script, set
+  # out/rc/elapsed/log.
+  run_scenario() {
+    local name="$1" hang="$2"
+    shift 2
+    rm -f "${work}"/count.* "${work}/apt-get.log"
+    : >"${work}/apt-get.log"
+    t0="$(date +%s)"
+    set +e
+    out="$(PATH="${work}/bin:${PATH}" STUB_DIR="${work}" STUB_HANG="${hang}" \
+      APT_MIN_PHASE=1 APT_KILL_AFTER=1 APT_RETRY_SLEEP=0 \
+      bash "${SELF}" install "$@" 2>&1)"
+    rc=$?
+    set -e
+    t1="$(date +%s)"
+    elapsed=$((t1 - t0))
+    log="$(cat "${work}/apt-get.log")"
+    SCENARIO="${name}"
+  }
+  fail() {
+    echo "ci-apt self-test FAILED in scenario '${SCENARIO}': $1" >&2
+    echo "--- output ---" >&2
+    echo "${out}" >&2
+    echo "--- stub apt-get log ---" >&2
+    echo "${log}" >&2
+    exit 1
+  }
+  count_lines() { grep -a -c "$1" <<<"$2" || true; }
+
+  # 1. retry-after-hang: the first update hangs, the retry succeeds.
+  run_scenario retry-after-hang update:1 \
+    --budget 12 --update-timeout 2 --fetch-timeout 2 x
+  [ "${rc}" -eq 0 ] || fail "expected exit 0, got ${rc}"
+  [ "$(count_lines '^::warning::apt update' "${out}")" -eq 1 ] \
+    || fail "expected exactly one '::warning::apt update' line"
+  [ "$(awk '{print $1}' <<<"${log}" | paste -sd, -)" = "update,update,fetch,unpack" ] \
+    || fail "expected stub call order update,update,fetch,unpack"
+  grep -a -q -- '--download-only' <<<"$(grep -a '^fetch' <<<"${log}")" \
+    || fail "fetch call lacks --download-only"
+  [ "${elapsed}" -ge 2 ] || fail "elapsed ${elapsed}s < 2s: the first phase was not really killed at its cap"
+
+  # 2. fail-on-budget: every update hangs, the budget ends it.
+  run_scenario fail-on-budget update:all \
+    --budget 7 --update-timeout 2 --fetch-timeout 2 x
+  [ "${rc}" -eq 1 ] || fail "expected exit 1, got ${rc}"
+  grep -a -q '^::error::MEASURE_FAIL' <<<"${out}" || fail "no ::error::MEASURE_FAIL line"
+  [ "$(count_lines '^update' "${log}")" -ge 2 ] || fail "expected at least two update invocations"
+  [ "$(count_lines '^fetch\|^unpack' "${log}")" -eq 0 ] || fail "a fetch or unpack ran although update never succeeded"
+  [ "$(count_lines '^::warning::apt update' "${out}")" -ge 2 ] || fail "expected at least two '::warning::apt update' lines"
+  { [ "${elapsed}" -ge 6 ] && [ "${elapsed}" -le 13 ]; } \
+    || fail "elapsed ${elapsed}s outside 6..13s"
+
+  # 3. no-update-rerun: update ok, first fetch hangs, second fetch ok.
+  run_scenario no-update-rerun fetch:1 \
+    --budget 12 --update-timeout 2 --fetch-timeout 2 x
+  [ "${rc}" -eq 0 ] || fail "expected exit 0, got ${rc}"
+  [ "$(count_lines '^update' "${log}")" -eq 1 ] || fail "expected exactly ONE update invocation"
+  [ "$(count_lines '^fetch' "${log}")" -eq 2 ] || fail "expected exactly TWO fetch invocations"
+  [ "$(count_lines '^::warning::apt fetch' "${out}")" -eq 1 ] \
+    || fail "expected exactly one '::warning::apt fetch' line"
+
+  # 4. skip-when-present: the tool is on PATH, no apt is invoked.
+  run_scenario skip-when-present "" --provides sh x
+  [ "${rc}" -eq 0 ] || fail "expected exit 0, got ${rc}"
+  grep -a -q '^apt-skip: sh' <<<"${out}" || fail "no 'apt-skip: sh' line"
+  [ -z "${log}" ] || fail "apt-get was invoked on the skip path"
+
+  # 5. fall-through-when-absent: the tool cannot exist, so apt runs (healthy stub).
+  run_scenario fall-through-when-absent "" \
+    --provides "ci-apt-absent-tool-$$" --budget 12 --update-timeout 2 --fetch-timeout 2 x
+  [ "${rc}" -eq 0 ] || fail "expected exit 0, got ${rc}"
+  [ "$(awk '{print $1}' <<<"${log}" | paste -sd, -)" = "update,fetch,unpack" ] \
+    || fail "expected stub call order update,fetch,unpack"
+  if grep -a -q '^apt-skip:' <<<"${out}"; then fail "skipped although the tool is absent"; fi
+
+  echo "ci-apt self-test OK: retry-after-hang, fail-on-budget, no-update-rerun, skip-when-present, fall-through-when-absent."
 }
 
 case "${1:-}" in
