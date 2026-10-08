@@ -3005,6 +3005,7 @@ time):**
   - ⚠️ 2026-10-06: Eclipse's `failed` comes from the status bridge, not from copy. Twelve non-superseded
     `sync_funding` failures pin it. Phase 164.6.6.3.4 STATUSBRIDGE owns that mechanism. Re-measure
     Eclipse after it ships, before deciding the copy here.
+  - ⭐ 2026-10-08 (STATUSBRIDGE plan 04 re-sync, PROD): Eclipse re-measured after the bridge re-sync, `failed` -> `complete` (`computation_error` NULL); decide the item 5 copy on that state, the job-finished-analytics-failed case now applies only to the genuine failures.
 - **Item 6b.** `scenario-factsheet-payload.ts` (~271) `emptyQuantiles()` returns zeros, carried as a
   LOW in `166.2-VERIFICATION.md` ~245. It should be NaN/null rendering "—".
 - Also owns 170.3's OG-card parity half and 170.6's red "—" on OG cards (moved here 2026-10-06; same defects as item 4).
