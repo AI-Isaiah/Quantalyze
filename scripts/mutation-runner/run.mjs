@@ -1416,6 +1416,7 @@ export function failureBranches(text) {
 // 716 steps, 3.66 of 3.74 s). Results are frozen, so no caller can corrupt a cached
 // entry. Raise the cap if a single arm ever touches more files than it holds.
 const FAILURE_BRANCHES_MEMO_CAP = 64;
+/** @type {Map<string, ReadonlyArray<Readonly<ReturnType<typeof failureBranchesUncached>[number]>>>} */
 const failureBranchesMemo = new Map();
 
 function failureBranchesUncached(text) {
