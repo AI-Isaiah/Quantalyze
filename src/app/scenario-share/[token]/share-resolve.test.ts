@@ -1058,6 +1058,44 @@ describe("resolveSharedScenario — returns_series resolution (SCEN-01)", () => 
     expect(result.metrics.n).toBe(KNOWN_RETURNS.length);
   });
 
+  it("164.6.6.2.2 D-05: returnsMethodById 'simple' reads the stored curve as DIFFERENCES; omitted keeps geometric", () => {
+    // A `simple` curve is 1 + cumsum of the known returns (the inverse of the
+    // difference under test, so the oracle is KNOWN_RETURNS itself, never the
+    // resolver). Head, hand-computed: 1.00, 1.05, 0.95, 1.05.
+    const simpleCurve: DailyPoint[] = [{ date: "2026-01-01", value: 1 }];
+    let level = 1;
+    KNOWN_RETURNS.forEach((r, i) => {
+      level += r;
+      const d = new Date(Date.UTC(2026, 0, 1) + (i + 1) * 86_400_000);
+      simpleCurve.push({ date: d.toISOString().slice(0, 10), value: level });
+    });
+    expect(simpleCurve[1].value).toBeCloseTo(1.05, 10);
+    expect(simpleCurve[2].value).toBeCloseTo(0.95, 10);
+    expect(simpleCurve[3].value).toBeCloseTo(1.05, 10);
+
+    const simple = resolveSharedScenario(
+      scRow(null),
+      {},
+      { [SC_STRAT]: simpleCurve },
+      undefined,
+      undefined,
+      { [SC_STRAT]: "simple" },
+    );
+    expect(simple.kind).toBe("ok");
+    if (simple.kind !== "ok") throw new Error("expected ok");
+    expect(simple.portfolioDaily).toHaveLength(KNOWN_RETURNS.length);
+    simple.portfolioDaily.forEach((p, i) => {
+      expect(p.value).toBeCloseTo(KNOWN_RETURNS[i], 10);
+    });
+
+    // No method map: geometric, so day 2 is 0.95 / 1.05 - 1 = -0.0952..., not -0.1.
+    const geometric = resolveSharedScenario(scRow(null), {}, { [SC_STRAT]: simpleCurve });
+    expect(geometric.kind).toBe("ok");
+    if (geometric.kind !== "ok") throw new Error("expected ok");
+    expect(geometric.portfolioDaily[1].value).toBeCloseTo(0.95 / 1.05 - 1, 10);
+    expect(Math.abs(geometric.portfolioDaily[1].value - -0.1)).toBeGreaterThan(0.004);
+  });
+
   it("returnsSeriesById omitted / id absent → the pre-147 daily_returns-only projection, unchanged", () => {
     // The conservative default: with no lookup (or a lookup that does not carry
     // this id) the resolver falls back to s.daily_returns alone — exactly what
@@ -1181,6 +1219,42 @@ describe("resolveSharedScenario — BTC leg converts to USD before the blend (16
       const upDay = (i + 1) % 2 === 1;
       expect(p.value).toBeCloseTo(upDay ? 0.21 : 0, 12);
     });
+  });
+
+  it("WR-02: a native curve with absent days prices the day after the gap over its OWN day (+10%, not +120%)", () => {
+    // 24 days (the engine needs 10 overlapping), native +10% every day, so the
+    // geometric curve is 1.1^i, EXCEPT
+    // level 5, which is null: days 5 and 6 are absent (day 6 pairs with the null
+    // level, never bridged). BTC is flat at 60000 until day 5, then jumps to
+    // 120000 on day 6 and stays. Day 7's native return is the one-day +10% and
+    // BTC did not move that day, so USD is (1 + 0.1) * (120000 / 120000) - 1 =
+    // 0.1. Priced across the gap, against the last present date (day 4, close
+    // 60000), it is 1.1 * 2 - 1 = 1.2.
+    const start = new Date("2026-02-01T00:00:00Z");
+    const dates = Array.from({ length: 24 }, (_, i) =>
+      new Date(start.getTime() + i * 86_400_000).toISOString().slice(0, 10),
+    );
+    const curve = dates.map((date, i) => ({
+      date,
+      value: i === 5 ? null : Math.pow(1.1, i),
+    }));
+    const btc = {
+      prices: dates.map((date, i) => ({ date, close: i < 6 ? 60000 : 120000 })),
+      dropped: [] as string[],
+    };
+    const result = resolveSharedScenario(
+      scRow(null),
+      {},
+      { [SC_STRAT]: curve },
+      { [SC_STRAT]: "BTC" },
+      btc,
+    );
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.portfolioDaily.map((p) => p.date)).toEqual(
+      [2, 3, 4, ...Array.from({ length: 17 }, (_, j) => 7 + j)].map((i) => dates[i]),
+    );
+    for (const p of result.portfolioDaily) expect(p.value).toBeCloseTo(0.1, 9);
   });
 
   it("parity: the shared blend equals the blend of the same leg handed over already in USD (the owner's composer path)", () => {

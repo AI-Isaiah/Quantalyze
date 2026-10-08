@@ -14,7 +14,10 @@ import {
   type SeriesState,
 } from "./closed-sets";
 import { isWorkingHolder, NOT_WORKING_SYNC_STATUSES } from "@/lib/account-share-note";
-import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+import {
+  curveMethodFromFlags,
+  resolveDailyReturnSeries,
+} from "@/lib/factsheet/resolve-series";
 // Phase 169.4 plan 02 (D-69, D-77): the ONE BTC read, from its server-safe home.
 // Never from `@/lib/factsheet/fetch-and-build-payload`: that module pulls
 // `server-only` (composite-read-path.ts) into every test importing this file.
@@ -243,8 +246,9 @@ export { extractAnalytics, EMPTY_ANALYTICS };
  * reads other managers' published strategies, which is why the requirement
  * names this site alongside the anonymous ones. RLS is ROW-level and cannot
  * hide a column, so an explicit column list is the only control over what
- * leaves the database — `daily_returns`, the `metrics_json` blob and
- * `data_quality_flags` are all absent here and none of them was ever read.
+ * leaves the database — `daily_returns`, the `metrics_json` blob and the
+ * `data_quality_flags` blob are all absent here (only the one
+ * `cumulative_method` scalar alias below is projected).
  *
  * Enumerated from the compare UI at HEAD (enumerate before cutting):
  *   - the nine `METRICS` rows in CompareTable (:27-37), read by DYNAMIC key
@@ -253,13 +257,18 @@ export { extractAnalytics, EMPTY_ANALYTICS };
  *     page.test.tsx.
  *   - `returns_series`, read by BOTH CompareEquityOverlay (:40) and
  *     CompareCorrelationMatrix (:26). Dropping it blanks both charts.
+ *   - `cumulative_method:data_quality_flags->>cumulative_method` (Phase
+ *     164.6.6.2.2 WR-05): ONE scalar out of the flags blob, a JSONB-key alias in
+ *     the `three_month` form, so CompareCorrelationMatrix can difference the
+ *     curve by the row's own method (`curveMethodFromFlags`). The blob itself
+ *     stays out of this projection.
  *
  * Lives here (not in the page file) so every "which analytics columns may
  * leave the DB" list is auditable with one grep of this module, alongside
  * PUBLIC_ANALYTICS_COLUMNS and the STRATEGY_DETAIL_* constants.
  */
 export const COMPARE_ANALYTICS_COLUMNS =
-  "cumulative_return, cagr, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, volatility, six_month_return, returns_series";
+  "cumulative_return, cagr, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, volatility, six_month_return, returns_series, cumulative_method:data_quality_flags->>cumulative_method";
 
 /**
  * Phase 159 (159-03, RANK-02 / decision D-02) — the RANKED-LIST analytics
@@ -2313,7 +2322,8 @@ export async function getOwnCapitalStrategies(
         sharpe,
         volatility,
         max_drawdown,
-        returns_series
+        returns_series,
+        data_quality_flags
       )
       `,
     )
@@ -2352,15 +2362,20 @@ export async function getOwnCapitalStrategies(
     let strategy_analytics: OwnCapitalStrategy["strategy_analytics"] = null;
     let mtd: number | null = null;
     if (analyticsObj) {
+      // 164.6.6.2.2 D-05: `data_quality_flags` is selected ONLY so the curve is
+      // read by the row's own method; the raw blob is stripped like the series
+      // columns, so it never crosses the RSC boundary (T-111-03).
       const {
         returns_series: _rs,
         daily_returns: _dr,
+        data_quality_flags: _dqf,
         ...analyticsRest
       } = analyticsObj;
       mtd = computeMtd(
         resolveDailyReturnSeries(
           analyticsObj.daily_returns,
           analyticsObj.returns_series,
+          curveMethodFromFlags(analyticsObj.data_quality_flags),
         ),
       );
       strategy_analytics =
@@ -5450,7 +5465,7 @@ export const getMyAllocationDashboard = cache(
       // (T-111-03: degraded-member venue detail never ships).
       const analyticsObj = (analytics ?? null) as Record<string, unknown> | null;
       const dqf = analyticsObj?.data_quality_flags as
-        | { composite?: unknown; native_unit?: unknown }
+        | { composite?: unknown; native_unit?: unknown; cumulative_method?: unknown }
         | null
         | undefined;
       const is_composite = dqf?.composite === true;
@@ -5474,12 +5489,25 @@ export const getMyAllocationDashboard = cache(
         ? resolveDailyReturnSeries(
             analyticsObj.daily_returns,
             analyticsObj.returns_series,
+            // 164.6.6.2.2 D-05: the curve is read by the row's own method.
+            curveMethodFromFlags(dqf),
           )
         : [];
       // SFH-1 — converted once, here, so the payload series and the unpriced
       // flag beside it are computed from the SAME conversion.
+      // WR-02: a native leg is converted from the same resolve with its absent
+      // days kept as NaN placeholders (so the day after a gap is priced over its
+      // own interval); `resolvedDailyReturns` stays the placeholder-free series
+      // that `series_state` and `native_unpriced` read.
       const usdDailyReturns = convertNativeReturnsToUsd(
-        resolvedDailyReturns,
+        analyticsObj && returns_unit != null
+          ? resolveDailyReturnSeries(
+              analyticsObj.daily_returns,
+              analyticsObj.returns_series,
+              curveMethodFromFlags(dqf),
+              true,
+            )
+          : resolvedDailyReturns,
         returns_unit,
         btcCloses,
       );

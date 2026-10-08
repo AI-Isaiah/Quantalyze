@@ -3,7 +3,8 @@
 Targets the previously-untested code paths and new behaviors introduced by
 the audit fix pass:
 
-  - _records_to_series tolerates malformed records (M-0614, M-0619, H-0575)
+  - records_to_series tolerates malformed records (M-0614, M-0619, H-0575); the
+    parser moved from the router to services.wealth_returns in Phase 164.6.6.2.2
   - regime_shift filters None values from rolling_corr (H-1074)
   - regime_shift / underperformance / concentration_creep firing rules (C-0314)
   - alert dedup select-then-insert respects existing rows (H-1070)
@@ -48,30 +49,32 @@ from routers.portfolio import (
     _build_normalized_weights,
     _check_verify_strategy_email_rate,
     _generate_alerts,
-    _records_to_series,
     _redact_credentials,
     _series_to_curve,
 )
 from services.metrics import sharpe_vol_status_from_backbone
+from services.wealth_returns import records_to_series
 
 
 # ---------------------------------------------------------------------------
-# _records_to_series (M-0614, M-0619, H-0575)
+# records_to_series (M-0614, M-0619, H-0575). Phase 164.6.6.2.2 (D-01): the router's
+# own `_records_to_series` is gone; these tests now pin the shared parser in
+# services.wealth_returns, which keeps every malformed-record tolerance below.
 # ---------------------------------------------------------------------------
 
 class TestRecordsToSeries:
     def test_none_input_returns_none(self):
-        assert _records_to_series(None) is None
+        assert records_to_series(None) is None
 
     def test_empty_list_returns_none(self):
-        assert _records_to_series([]) is None
+        assert records_to_series([]) is None
 
     def test_non_list_returns_none(self):
-        assert _records_to_series("not-a-list") is None  # type: ignore[arg-type]
-        assert _records_to_series({"date": "2026-01-01", "value": 0.01}) is None  # type: ignore[arg-type]
+        assert records_to_series("not-a-list") is None  # type: ignore[arg-type]
+        assert records_to_series({"date": "2026-01-01", "value": 0.01}) is None  # type: ignore[arg-type]
 
     def test_valid_records_build_series(self):
-        s = _records_to_series([
+        s = records_to_series([
             {"date": "2026-01-01", "value": 0.01},
             {"date": "2026-01-02", "value": -0.02},
         ], name="s1")
@@ -83,7 +86,7 @@ class TestRecordsToSeries:
         """Audit M-0614: legacy {ts, val} rows used to raise KeyError that
         bubbled up and overwrote the real exception with "Contact support".
         Now we skip + warn."""
-        s = _records_to_series([
+        s = records_to_series([
             {"date": "2026-01-01", "value": 0.01},
             {"ts": "2026-01-02", "val": -0.02},  # legacy shape
             {"date": "2026-01-03", "value": 0.03},
@@ -92,7 +95,7 @@ class TestRecordsToSeries:
         assert len(s) == 2  # legacy row skipped, not crash
 
     def test_missing_value_key_skipped(self):
-        s = _records_to_series([
+        s = records_to_series([
             {"date": "2026-01-01"},  # missing value
             {"date": "2026-01-02", "value": 0.02},
         ], name="s1")
@@ -100,7 +103,7 @@ class TestRecordsToSeries:
         assert len(s) == 1
 
     def test_non_dict_records_skipped(self):
-        s = _records_to_series([
+        s = records_to_series([
             "garbage",
             {"date": "2026-01-01", "value": 0.01},
             42,
@@ -110,8 +113,23 @@ class TestRecordsToSeries:
 
     def test_all_malformed_returns_none(self):
         """If every record is malformed we return None (no series at all)."""
-        s = _records_to_series([{"ts": "x", "val": 1}, "garbage"], name="s1")
+        s = records_to_series([{"ts": "x", "val": 1}, "garbage"], name="s1")
         assert s is None
+
+    def test_unsorted_duplicate_dates_are_sorted_and_deduped_keeping_the_last(self):
+        """BEHAVIOUR CHANGE (Phase 164.6.6.2.2, D-01): the router's old copy did
+        NOT sort or dedupe, so a duplicated or out-of-order date reached every
+        downstream cumprod. The shared parser sorts (stable) and keeps the LAST
+        record on a repeated date (G15-006), so the series is monotonic and unique."""
+        s = records_to_series([
+            {"date": "2026-01-03", "value": 0.03},
+            {"date": "2026-01-01", "value": 0.01},
+            {"date": "2026-01-03", "value": 0.09},  # later record on 01-03 wins
+            {"date": "2026-01-02", "value": 0.02},
+        ], name="s1")
+        assert s is not None
+        assert list(s.index.strftime("%Y-%m-%d")) == ["2026-01-01", "2026-01-02", "2026-01-03"]
+        assert list(s.to_numpy()) == [0.01, 0.02, 0.09]
 
 
 # ---------------------------------------------------------------------------

@@ -3122,10 +3122,17 @@ Plans:
 **Origin:** 164.6.6.2 code review CR-01 (pre-existing, not introduced by that phase). Founder 2026-10-07: own phase, ship BTCNATIVE first.
 **Requirements**: TBD
 **Depends on:** Phase 164.6.6.2
-**Plans:** 0 plans
+**Founder decision 2026-10-07 (review round 2):** candidate comparisons (optimizer, bridge, simulator) use the existing book's risk clock for every candidate and both sides of a delta; the headline keeps "365 if any leg is crypto". Detail: `164.6.6.2.2-CONTEXT.md` D-08.
+**Plans:** 7 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.2.2 to break down)
+- [ ] 164.6.6.2.2-01-PLAN.md — the shared Python boundary `services/wealth_returns.py` + cross-runtime oracle; the simulator reads through it (wave 1)
+- [ ] 164.6.6.2.2-02-PLAN.md — the single-key runner stamps `data_quality_flags.cumulative_method` (D-05) (wave 1)
+- [ ] 164.6.6.2.2-03-PLAN.md — TS `resolveDailyReturnSeries` honours the method on the same oracle; every caller passes the row's method (wave 2)
+- [ ] 164.6.6.2.2-04-PLAN.md — `_compute_portfolio_analytics` on real columns, boundary returns, AUM from `allocated_amount` (D-04, D-07) (wave 2)
+- [ ] 164.6.6.2.2-05-PLAN.md — both correlation matchers (D-06), optimizer and bridge on the boundary (wave 3)
+- [ ] 164.6.6.2.2-06-PLAN.md — the match engine's two loaders on the boundary (wave 2)
+- [ ] 164.6.6.2.2-07-PLAN.md — no-bypass census, write-to-read end-to-end test, PROD before/after measurement (D-03) (wave 4)
 
 ### Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view (INSERTED)
 
@@ -4652,6 +4659,38 @@ Plans:
 - [ ] TBD (run /gsd-plan-phase 167.1.2 to break down)
 
 **Cross-phase note 2026-09-27 (Phase 169 D-51, D-57):** Phase 169 plan 169-05 now owns `MetricsColumn`'s period rows and record length (it was "Phase 169 plan 07" in 167.1.2-07's text). After C3 merges, 169-05 may edit only the observation-clock length assertion in C3's `MetricsColumn.periods-per-year.test.tsx` (to the calendar-year length, D-12), and may move a C3 assertion that pinned a 6 Month / 1 Year row on a too-short record to the row-absent form (D-57); its SUMMARY records each such edit. 167.1.2's own CONTEXT lives on its branch and should carry the same note.
+
+### Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt (INSERTED)
+
+Booked 2026-10-07 (founder, AskUserQuestion "Book a phase, run it in Wave 1"), found by the 167.1.2 browser UAT.
+**Evidence (PROD read-only, marker first, 2026-10-07):** `allocator_equity_derived` holds 2 `equity_curve` rows, both
+pre-version-2, both from 2026-07-20. `derive_allocator_equity` has run once ever (2026-10-02, by hand). `cron.job` has
+`poll-allocator-positions` (04:00) and `refresh-allocator-equity` (05:00) but no `derive-allocator-key-dailies` (05:30).
+My Allocation shows "Your equity history is being rebuilt … recomputed … once a day" for every allocator/both user
+with an eligible key, and nothing recomputes it. Diagnosis: `.planning/debug/prod-derive-cron-missing.md` (2026-10-02).
+**Root cause:** (A) the 05:30 cron (`enqueue_derive_broker_dailies_for_allocator_keys`, registered by
+`20260717233529`) was unscheduled by hand on PROD in the v1.11 recovery (2026-07-18/19) after the phase35 backfill
+wedged the sequential worker; re-registering it is Step 6 of `docs/runbooks/flipretry-derived-equity-go-live.md`,
+gated on FLIP-01 / E2GT-01, never run. (B) 167.1.2 PR C2 (#901, 2026-09-29) shipped a reader that accepts only
+payload version 2 and promises a daily recompute, assuming the cron runs (its research: "PROD not measured").
+
+**Goal:** The daily allocator key-mode derive and compose run on PROD again, safely, so every allocator book gets a
+version-2 `equity_curve` row and My Allocation leaves "being rebuilt".
+**Success criteria:**
+1. The worker load the fan-out adds is measured (eligible keys, per-job duration, queue depth at 05:30) and the
+   fan-out cannot wedge the worker the way the July backfill did (bounded, or on its own lane), shown by measurement.
+2. The cron is re-registered through the runbook, never a migration (164.7 rule; ROADMAP's earlier "Do NOT
+   re-register" notes are superseded by this booking and must be amended where they stand).
+3. The first 05:30 UTC run after registration writes a version-2 `equity_curve` row for every eligible allocator,
+   measured counts-only, and My Allocation renders the history (browser check).
+4. 167.1.2's remaining browser UAT (Overview, Scenario, Exchanges notes, `/allocations` tab switch, 390px / 200%)
+   is completed against real rebuilt books.
+**Requirements**: TBD
+**Depends on:** Phase 167.1.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 167.1.2.2 to break down)
 
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 

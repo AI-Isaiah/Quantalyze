@@ -47,6 +47,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests._curve_fixtures import curve_from_returns
 from tests.limiter_stub import evict_module, patch_shared_limiter
 
 
@@ -511,8 +512,8 @@ def test_trim_returns_series_caller_mutation_does_not_leak_to_input():
 def test_build_monthly_returns_dedupes_duplicate_dates():
     """audit-2026-05-07 red-team (MED conf 8) — `_build_monthly_returns`
     MUST be idempotent under duplicate dates. Upstream
-    `returns_series` JSONB can contain repeated `date` keys (no
-    dedupe in `_records_to_series`) — without this guard the
+    `returns_series` JSONB can contain repeated `date` keys (the shared
+    parser now dedupes; this series is built directly) — without this guard the
     cumprod walk double-counts the day's return into the
     `(year, month)` bucket and overstates the month.
 
@@ -735,6 +736,18 @@ def test_portfolio_bridge_rate_limit_uses_wall_clock_not_monotonic():
 # ---------------------------------------------------------------------------
 
 
+# Phase 164.6.6.2.2: `strategy_analytics.returns_series` is the stored cumulative
+# CURVE (a level-1.0 base day, then each day's compounded level), read by the router
+# as daily returns through the shared boundary. These read back as the portfolio's
+# 0.01, 0.02 and the candidate's -0.01, -0.02 on 2026-01-02 and 2026-01-03.
+_OPT_PORTFOLIO_CURVE = curve_from_returns(
+    [0.0, 0.01, 0.02], ["2026-01-01", "2026-01-02", "2026-01-03"]
+)
+_OPT_CANDIDATE_CURVE = curve_from_returns(
+    [0.0, -0.01, -0.02], ["2026-01-01", "2026-01-02", "2026-01-03"]
+)
+
+
 def _make_optimizer_supabase(
     *,
     portfolio_row: dict | None,
@@ -864,7 +877,7 @@ async def test_portfolio_optimizer_no_strategies_raises_400():
 @pytest.mark.asyncio
 async def test_portfolio_optimizer_no_returns_data_raises_400():
     """C-0209 (d) — portfolio_strategies is non-empty but every row's
-    `returns_series` is NULL / empty / malformed, so `_records_to_series`
+    `returns_series` is NULL / empty / malformed, so the boundary
     returns None for all of them. The endpoint MUST raise
     HTTPException(400, 'No returns data available for portfolio
     strategies') rather than returning an empty `portfolio_returns`
@@ -881,7 +894,7 @@ async def test_portfolio_optimizer_no_returns_data_raises_400():
         portfolio_strategies=[
             {"strategy_id": "s-real", "current_weight": 1.0},
         ],
-        # returns_series=None for the one strategy → _records_to_series
+        # returns_series=None for the one strategy → daily_returns_from_row
         # returns None → portfolio_returns stays empty → 400 path.
         sa_in_data=[{"strategy_id": "s-real", "returns_series": None}],
         published_data=[],
@@ -920,10 +933,7 @@ async def test_portfolio_optimizer_phantom_weights_are_dropped():
         sa_in_data=[
             {
                 "strategy_id": "s-real",
-                "returns_series": [
-                    {"date": "2026-01-01", "value": 0.01},
-                    {"date": "2026-01-02", "value": 0.02},
-                ],
+                "returns_series": _OPT_PORTFOLIO_CURVE,
             }
         ],
         published_data=[],
@@ -965,10 +975,7 @@ async def test_portfolio_optimizer_persists_on_complete_analytics():
         sa_in_data=[
             {
                 "strategy_id": "s-real",
-                "returns_series": [
-                    {"date": "2026-01-01", "value": 0.01},
-                    {"date": "2026-01-02", "value": 0.02},
-                ],
+                "returns_series": _OPT_PORTFOLIO_CURVE,
             }
         ],
         published_data=[
@@ -977,10 +984,7 @@ async def test_portfolio_optimizer_persists_on_complete_analytics():
         sa_cand_data=[
             {
                 "strategy_id": "c-1",
-                "returns_series": [
-                    {"date": "2026-01-01", "value": -0.01},
-                    {"date": "2026-01-02", "value": -0.02},
-                ],
+                "returns_series": _OPT_CANDIDATE_CURVE,
             }
         ],
         latest_analytics=[{"id": "pa-1"}],
@@ -1015,10 +1019,7 @@ async def test_portfolio_optimizer_response_only_when_no_complete_analytics():
         sa_in_data=[
             {
                 "strategy_id": "s-real",
-                "returns_series": [
-                    {"date": "2026-01-01", "value": 0.01},
-                    {"date": "2026-01-02", "value": 0.02},
-                ],
+                "returns_series": _OPT_PORTFOLIO_CURVE,
             }
         ],
         published_data=[
@@ -1027,10 +1028,7 @@ async def test_portfolio_optimizer_response_only_when_no_complete_analytics():
         sa_cand_data=[
             {
                 "strategy_id": "c-1",
-                "returns_series": [
-                    {"date": "2026-01-01", "value": -0.01},
-                    {"date": "2026-01-02", "value": -0.02},
-                ],
+                "returns_series": _OPT_CANDIDATE_CURVE,
             }
         ],
         latest_analytics=[],  # no COMPLETE row

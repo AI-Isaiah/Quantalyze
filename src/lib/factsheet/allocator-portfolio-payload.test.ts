@@ -29,19 +29,26 @@ describe("equityCurveToDailyReturns", () => {
     expect(got[1].value).toBeCloseTo(-0.01, 6);
   });
 
-  it("sorts by date and drops non-finite / non-positive values defensively", () => {
+  it("sorts by date and leaves a day absent when its stored-adjacent level is non-finite / non-positive (never bridged)", () => {
+    // 164.6.6.2.2 D-01: the old behaviour filtered the bad levels FIRST and then
+    // paired the survivors, which bridged 1.05 / 1.0 over a missing day and
+    // reported a return no stored day produced. Stored adjacency, sorted:
+    //   01-01 1.0 | 01-02 0 | 01-03 1.05 | 01-04 NaN | 01-05 1.1 | 01-06 1.21
+    //   01-02: 0 / 1.0 - 1 -> current level not > 0, absent
+    //   01-03: previous level 0 is not > 0, absent (NOT 1.05 / 1.0 - 1)
+    //   01-04: current level non-finite, absent
+    //   01-05: previous level non-finite, absent (NOT 1.1 / 1.05 - 1)
+    //   01-06: 1.21 / 1.1 - 1 = 0.1
     const got = equityCurveToDailyReturns([
       { date: "2025-01-03", value: 1.05 },
       { date: "2025-01-01", value: 1.0 },
       { date: "2025-01-02", value: 0 },
       { date: "2025-01-04", value: NaN },
+      { date: "2025-01-06", value: 1.21 },
       { date: "2025-01-05", value: 1.1 },
     ] as Array<{ date: string; value: number }>);
-    // Valid wealth points sorted: [1.0 @ 01-01, 1.05 @ 01-03, 1.1 @ 01-05].
-    // Returns derived as ratio successor pairs of the SORTED valid series.
-    expect(got).toHaveLength(2);
-    expect(got[0].date).toBe("2025-01-03");
-    expect(got[1].date).toBe("2025-01-05");
+    expect(got.map((p) => p.date)).toEqual(["2025-01-06"]);
+    expect(got[0].value).toBeCloseTo(0.1, 12);
   });
 });
 

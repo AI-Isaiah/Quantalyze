@@ -218,6 +218,14 @@ class DataQualityFlags(TypedDict, total=False):
     # NAV_TWR_GUARD_KEYS nor ALLOCATED_CAPITAL_GUARD_KEYS, so it can never promote
     # computation_status or set computation_warned. ---
     native_unit: str
+    # --- Phase 164.6.6.2.2 (D-05): the cumulative method this row's returns_series
+    # was built with, RAW ('geometric' | 'simple'). Stamped by
+    # run_csv_strategy_analytics beside the curve (the composite stitch already wrote
+    # it). A property of the curve, NEVER a warning: it is deliberately in neither
+    # NAV_TWR_GUARD_KEYS nor ALLOCATED_CAPITAL_GUARD_KEYS, so it can never promote
+    # computation_status or set computation_warned. Readers default to geometric when
+    # it is absent. ---
+    cumulative_method: str
     # --- sibling-table batch upsert ---
     sibling_kinds_failed: bool
     sibling_kinds_error: str
@@ -1905,6 +1913,17 @@ async def run_csv_strategy_analytics(
             )
 
             data_quality_flags: DataQualityFlags = {"csv_source": True}  # M-0657
+            # Phase 164.6.6.2.2 (D-05): name the cumulative method this row's curve was
+            # BUILT with, beside the curve, so a reader never has to guess it. This is
+            # the SAME `_cumulative_method` variable handed to derive_basis_series just
+            # above (assigned on every path that reaches this rebuild), never a
+            # re-derivation. The RAW worker string ('geometric' | 'simple'), exactly as
+            # the composite twin persists it (job_worker.py, HARD-03). Readers:
+            # services/wealth_returns.curve_method_from_flags and the TS
+            # curveMethodFromFlags; both default to geometric when the key is absent.
+            # Stamped unconditionally and OUTSIDE both `_warned` loops below: it
+            # describes the curve, it is not a defect.
+            data_quality_flags["cumulative_method"] = _cumulative_method
             # A native-unit series has no benchmark BY DESIGN (D-10): that is not an
             # outage, so it must not stamp the outage flag or its note.
             if _native_unit is None and (benchmark_stale or benchmark_rets is None):
