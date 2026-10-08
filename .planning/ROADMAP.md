@@ -144,7 +144,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.6.1: SUBSETSHARD — a FULL sql-mutation run fits well under its 20-minute cap again, and a stale-baseline-drift red no longer forces one** (INSERTED 2026-10-03) — verification: passed (completed 2026-10-03, PR #941, v0.123.0.0; SS-1 measured 5m01s on main run 37151757248, closed in #942)
 - [ ] **Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables** (INSERTED 2026-10-03) — not yet planned
 - [ ] **Phase 164.9.7.1: TRIGGERREVOKE — anon and authenticated no longer hold TRIGGER or MAINTAIN on public tables** (INSERTED 2026-10-08) — not yet planned (founder D-06, 164.9.7)
-- [ ] **Phase 164.9.8: APTHANG — a CI job's apt step never hangs on a dead package mirror** (INSERTED 2026-10-07) — shipped v0.129.1.2 (merged 2026-10-08); verification: human_needed (post-ship real-runner measurement only)
+- [x] **Phase 164.9.8: APTHANG — a CI job's apt step never hangs on a dead package mirror** (INSERTED 2026-10-07) — shipped v0.129.1.2 (merged 2026-10-08); verification: passed (D-04 runner measurement recorded) (completed 2026-10-08)
 - [x] **~~Phase 165~~: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"), as 165 ACTIONSDEPS: #643 (superseded by #916), #627, #626 and #612 landed green; deviations in `165-VERIFICATION.md`.
 - [x] **~~Phase 165.1~~: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"): the maintenance landings meet the criteria, C1 in substance and not to the letter (the pandas fix rode inside #898); deviations in `165.1-VERIFICATION.md`.
 - [x] **~~Phase 165.2~~: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -3726,14 +3726,14 @@ Plans:
 **Deviations from D-03 (recorded 2026-10-07, planner revision; the same text is in 164.9.8-CONTEXT.md):** (1) the two `Acquire shared-test-db mutex` steps carry no step `timeout-minutes`, because they wait up to about 33 min for the shared-TEST lock by design, and the wrapper's 400 s budget bounds their dead-branch apt; (2) Playwright's internal apt is bounded only by the image defaults plus a 10-minute step cap, about 1.9 times the slowest measured cache-miss install (308 s).
 **Requirements**: SC-1, SC-2, SC-3, SC-4 (the four success criteria above, in order)
 **Depends on:** none (ships first in the merge queue, founder 2026-10-07)
-**Plans:** 5 plans
+**Plans:** 5/5 plans complete
 
 Plans:
-- [ ] 164.9.8-01-PLAN.md — tracer: `scripts/ci-apt.sh` (wall-clock-bounded, retried, psql skip, `--self-test`) wired into ci.yml sql-tests (wave 1)
-- [ ] 164.9.8-02-PLAN.md — ci.yml remaining psql sites, Playwright step limits, `Provision pg_cron` byte-equal in ci.yml and the nightly (wave 2)
-- [ ] 164.9.8-03-PLAN.md — supabase-migrate, test-restore, mutex-probe, prod-prober, nightly.yml; mutex suffix kept identical (wave 2)
-- [ ] 164.9.8-04-PLAN.md — glob-census guard test, neutered RED and restored from a byte backup (wave 3)
-- [ ] 164.9.8-05-PLAN.md — ship: version re-picked from origin/main, CHANGELOG, PR bound by check count, D-04 runner measurement recorded (wave 4)
+- [x] 164.9.8-01-PLAN.md — tracer: `scripts/ci-apt.sh` (wall-clock-bounded, retried, psql skip, `--self-test`) wired into ci.yml sql-tests (wave 1)
+- [x] 164.9.8-02-PLAN.md — ci.yml remaining psql sites, Playwright step limits, `Provision pg_cron` byte-equal in ci.yml and the nightly (wave 2)
+- [x] 164.9.8-03-PLAN.md — supabase-migrate, test-restore, mutex-probe, prod-prober, nightly.yml; mutex suffix kept identical (wave 2)
+- [x] 164.9.8-04-PLAN.md — glob-census guard test, neutered RED and restored from a byte backup (wave 3)
+- [x] 164.9.8-05-PLAN.md — ship: version re-picked from origin/main, CHANGELOG, PR bound by check count, D-04 runner measurement recorded (wave 4)
 
 ### Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables (measured read-only on PROD 2026-10-03: anon 56 of 63 tables, authenticated 59, api_keys included; RLS never covers TRUNCATE). One migration revokes it and the default privilege; migration-reviewer + rls-policy-auditor + silent-failure-hunter before merge, since merges auto-apply to PROD. (INSERTED)
 
@@ -5519,7 +5519,7 @@ kept verbatim.
 | 164.9.6.1 SUBSETSHARD | 3/3 | Complete | v0.123.0.0 · #941 · verification passed 2026-10-03 |
 | 164.9.7 TRUNCATEREVOKE | 0/? | Queued — security, booked 2026-10-03 | - |
 | 164.9.7.1 TRIGGERREVOKE | 0/? | Queued — security, booked 2026-10-08 (founder D-06) | - |
-| 164.9.8 APTHANG | 4/5 | Shipped — verification `human_needed`: post-ship plan 05 runner measurement only, not closed | v0.129.1.2 |
+| 164.9.8 APTHANG | 5/5 | Complete — verification passed after the D-04 runner measurement | 2026-10-08 · v0.129.1.2 · #979 |
 | 166. QSTATS-TRUTH | 10/10 | Complete    | 2026-10-04 |
 | 166.1 ENGINEFLOOR | 4/4 | Complete    | 2026-10-04 |
 | 166.1.1 DDSIGN | 0/? | Queued — feature | - |
