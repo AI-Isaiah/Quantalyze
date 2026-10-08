@@ -29,6 +29,51 @@ Phase 167.1.2.2, code half. The allocator derive/compose that the daily cron wil
   - An OKX key whose last day is skipped keeps its open-position shift, with only a log line.
   - Keys with no open-position wedge can lag one derive after a near-simultaneous sibling refresh. They are never marked untrustworthy.
 
+## [0.129.2.3] - 2026-10-08 — BASELINE: automated re-dump after the PROD apply of 1c8e79fb
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `37820135534`, after the PROD apply of merge `1c8e79fb`: sha256 `cae5e296…` → `2c0fb148…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261009130000_revoke_truncate_anon_authenticated.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-08` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.129.2.0 → 0.129.2.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=289 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `37820135534` succeeded, and this entry was composed by the `redump-pr` job. Run `37820135534` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.129.2.2] - 2026-10-08 — APTHANG follow-up: two self-test scenarios no longer depend on runner speed
+
+### Fixed
+- **Main CI went red on 1c8e79fb8**, in `ci-apt-bounded.contract.test.ts` › `ci-apt.sh --self-test`. Scenario `unclassified-exit-100-no-mirror-blame` asserts at least two `update` calls inside a 2 s budget, but it slept 1 s between retries. On a loaded shard, one slow call plus the sleep used up the budget, so only one call ran. Scenario `warned-update-then-missing-bounded` has the same shape (at least 2 updates in 3 s, with a 1 s sleep).
+- Both scenarios now keep `retry_sleep` at 0, so the count measures the classifier, not the runner's speed. No wrapper code changed, and no assertion was loosened.
+- Proven: classifying the unknown error as deterministic still fails scenario 18 by name. Self-test green, about 32 s locally. `shellcheck` clean.
+
+
+## [0.129.2.0] - 2026-10-08 — TRUNCATEREVOKE: anon and authenticated no longer hold TRUNCATE on public tables
+
+Phase 164.9.7. Row-level security never evaluates TRUNCATE, so the grant layer is the only control, and it was wide open. Measured read-only on PROD on 2026-10-07: anon held TRUNCATE on 53 of 63 base tables, and authenticated on 56. Any SQL-capable path running as either role could empty a table whatever its policies said, and `TRUNCATE ... CASCADE` reaches foreign-key children. The source was the Supabase bootstrap's default ACL on schema `public` (`ALL` includes TRUNCATE), not this repo's migrations. Migration `20261009130000` fixes the class. ⚠️ PROD applies it automatically after `apply-test`.
+
+### Security
+- **TRUNCATE is revoked from `anon` and `authenticated` on every relation in `public`** (tables, partitioned tables, views, materialised views, foreign tables) (D-01). `service_role` and `postgres` keep it.
+- **The default privilege is changed `FOR ROLE postgres`**, so no table created later inherits the grant. It is written explicitly because an unqualified `ALTER DEFAULT PRIVILEGES` targets `current_user`.
+- **The migration checks itself (D-02).** The apply fails if any public relation still grants TRUNCATE to anon or authenticated, or if the `service_role` holder count moved.
+
+### Added
+- Gate `supabase/tests/test_truncate_revoke_anon_authenticated.sql` (D-03), arms TRUNC 1–6: the catalogue sweep, default privileges, a positive control, and behavioural arms where a TRUNCATE as anon or authenticated is refused.
+- Manual rollback `down/20261009130000-rollback.sql`, which restores the exact prior holder set.
+
+### Changed
+- Mutation census re-measured on the tree merged with STATUSBRIDGE (one full run, exit 0, no defects). Read `FILES_FLOOR` and `ARMS_FLOOR` by symbol from `scripts/mutation-floors.mjs`.
+- **The mutation tooling's `failureBranches` is memoized by text** (`scripts/mutation-runner/run.mjs`). The REAL CORPUS rule-3b walk timed out at vitest's 30 s on CI shard 2 three times on 2026-10-08 (PRs #978 and #980, twice on #980). It took 3.74 s locally, 98% of it re-parsing the same migrations once per arm. Now 1.99 s. Results are frozen and every assertion is unchanged. This closes `MUTPARSER-CORPUS-TIMEOUT-01`.
+- **The phase-29 frozen-spine gate now scans applied migrations only.** It skips `supabase/migrations/down/`, which `db push` never applies and which can only restore an earlier state. An applied migration that touches the scenario spine still trips it; this was shown with a probe file.
+
+### Notes
+- Reviews clean. Security SECURED. Verification `human_needed`, for plan 04's post-merge PROD after-reading only (D-04).
+- **Founder decisions:**
+  - D-05: the `supabase_admin` residual is accepted, and a read-only PROD detector is booked.
+  - D-06: the same RLS-exempt class with a larger blast radius goes to a new phase inserted after this one. That covers TRIGGER held by anon and authenticated (a client role could make a BYPASSRLS writer run its code) and PG17 MAINTAIN. TRUNCATE on `storage.*` and `net.*` is accepted as a platform residual.
+
 ## [0.129.1.2] - 2026-10-08 — APTHANG: a CI job's apt step never hangs on a dead package mirror
 
 Phase 164.9.8. CI jobs were hanging for most of their timeout on an apt install. The runner image's own retries and 15 s timeouts fail over to the Azure mirror in about 30 s, but the fallback then trickles bytes and never times out. Every apt call in the workflows now goes through one bounded wrapper, and a guard test keeps it that way.
