@@ -86,7 +86,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - timeout-minutes: 10
+        run: npx playwright install --with-deps chromium
       - name: Run PDF cold-start probe
         id: probe
         env:

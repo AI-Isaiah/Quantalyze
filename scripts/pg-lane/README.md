@@ -252,7 +252,7 @@ ERROR: pg_cron is NOT available to the PostgreSQL server binaries this lane boot
 | Host | Route | Version |
 |---|---|---|
 | macOS | `bash scripts/pg-lane/install-pg-cron-macos.sh` — builds the pinned upstream tag `v1.6.7` from source against the `postgresql@16` keg, sha256-verified before `make` | read it from the script's own `default_version:` print |
-| ubuntu CI | the `Provision pg_cron for the lane's PostgreSQL (Phase 164.4.1)` step in `.github/workflows/ci.yml` — `sudo apt-get install -y --no-install-recommends postgresql-16-cron` | read it from that step's `dpkg -s … Version:` print |
+| ubuntu CI | the `Provision pg_cron for the lane's PostgreSQL (Phase 164.4.1)` step in `.github/workflows/ci.yml` — `bash scripts/ci-apt.sh install --budget 360 postgresql-16-cron` (the wall-clock-bounded apt wrapper; Phase 164.9.8) | read it from that step's `dpkg -s … Version:` print |
 
 ⚠️ **A MINOR-version skew between the two hosts is expected** (macOS builds
 1.6.7 from source; ubuntu takes whatever apt serves for PG16). Both provide
