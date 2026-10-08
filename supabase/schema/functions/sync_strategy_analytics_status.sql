@@ -170,6 +170,26 @@ BEGIN
                                     FROM compute_jobs t
                                    WHERE t.id = p_trigger_job_id
                                      AND t.strategy_id = p_strategy_id), FALSE);
+  -- ... and NOTHING ELSE moved the row since its last stamp (review round 3,
+  -- CR-R3-01; founder D-10). The trigger names the call, not everything the row
+  -- owes. Branch (a) HOLDS computed_at on a complete_with_warnings or warned row
+  -- by design and leaves the stamp to the terminal call; when that terminal call
+  -- is a side job's failure, a genuine recompute that finished done while the side
+  -- job was queued would otherwise never be stamped. So the hold stands only when
+  -- no COUNTING job reached `done` after the row's computed_at. updated_at is
+  -- trigger-stamped on every UPDATE and nothing moves a done row back out of
+  -- terminal, so on a done row it is the moment the job became done; a stamp
+  -- taken in that same transaction is equal, not later, and keeps the hold. No
+  -- row yet means nothing to compare, and the hold stands (branch (c) then writes
+  -- none).
+  v_side_failed_only := v_side_failed_only
+                        AND NOT EXISTS (SELECT 1
+                                          FROM compute_jobs d
+                                          JOIN strategy_analytics sa ON sa.strategy_id = d.strategy_id
+                                         WHERE d.strategy_id = p_strategy_id
+                                           AND d.status = 'done'
+                                           AND NOT COALESCE(d.kind = ANY (v_side_kinds), FALSE)
+                                           AND d.updated_at > sa.computed_at);
 
   -- ---- Phase 161.1 / CR-01: is the published row still HEALTHY? -------------
   -- Conjunct (ii) of the protection predicate — see this file's header. Read
@@ -809,8 +829,9 @@ BEGIN
   END IF;
 
   -- D-09 (Phase 164.6.6.3.4), branch (c) when v_side_failed_only is TRUE: this call
-  -- was caused by a side-kind job that failed, no counting failure is live and
-  -- nothing is in flight. Nothing was computed and the bridge wrote none of the
+  -- was caused by a side-kind job that failed, no counting failure is live,
+  -- nothing is in flight and no counting job reached done since the row's last
+  -- stamp (CR-R3-01). Nothing was computed and the bridge wrote none of the
   -- sentence, so the branch HOLDS computed_at, computation_error and both
   -- provenance markers; it still clears computing_started_at and still resolves
   -- computing to complete (or complete_with_warnings for a warned row). Two more
