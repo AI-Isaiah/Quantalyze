@@ -115,6 +115,13 @@ class DegradeReason(str, Enum):
     UNCLASSIFIED_ROTATION = "unclassified_rotation"
     EXCLUSIVE_FILL = "exclusive_fill"
     OUT_OF_WINDOW_FLOW = "out_of_window_flow"
+    # 167.1.2.2 D-13: a full-history venue's opening deposit run (consecutive flow
+    # days ending the day before the first return day) after which the replay
+    # implies capital that was NOT near zero before the first flow. The curve starts
+    # from money the ledger never funded, so the early levels are suspect. This is
+    # the honest name for the fact; ``out_of_window_flow`` says only where a flow
+    # sits, not whether the account reconciles to a zero start.
+    INCEPTION_UNRECONCILED = "inception_unreconciled"
     DROPPED_KEY = "dropped_key"
     # 167.1.2 C2 silent-failure SFH-10: a book-return day whose level, return or
     # sum was non-finite. It was reported under the benign
@@ -140,6 +147,7 @@ _BLOCKING_REASONS: frozenset[DegradeReason] = frozenset(
         DegradeReason.UNCLASSIFIED_ROTATION,
         DegradeReason.EXCLUSIVE_FILL,
         DegradeReason.OUT_OF_WINDOW_FLOW,
+        DegradeReason.INCEPTION_UNRECONCILED,
         DegradeReason.DROPPED_KEY,
         DegradeReason.NONFINITE_RETURN,
         DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED,
@@ -694,6 +702,25 @@ def _finish_segment(keys: frozenset[str], days: list[str]) -> Segment:
 _SELF_CHECK_ABS = 1e-6
 _SELF_CHECK_REL = 1e-9
 
+# 167.1.2.2 D-13 / D-14 (founder 2026-10-08): the zero-start band. On a venue whose
+# history reaches the account's start, an opening run of pre-window flows is the
+# normal funding shape iff the capital the replay implies existed BEFORE the first
+# flow is within this fraction of the level on the window's first return day. The
+# founder chose 0.01% (tighter than the 1% recommended); do not loosen it to make a
+# key pass, the verdict on a key that lands outside is the point of the check.
+_INCEPTION_ZERO_START_BAND = 1e-4
+
+# Venues whose history reaches the account's start, by the code's own statements:
+#   * deribit: ``NativeLedger(full_history=True)`` (deribit_ingest) — the txn-log
+#     reaches inception, and native_nav's §5 inception gate enforces it.
+#   * mt5: ``combine_mt5_deal_ledger`` — ``history_deals_get`` is a FULL-HISTORY
+#     fetch (epoch 0 -> now, mt5_read.read_mt5_deal_ledger), stamped
+#     ``ledger_complete``. It has NO §5 inception gate of its own, so the zero-start
+#     check below is the only inception evidence an MT5 key gets.
+# Every other venue keeps the positional OUT_OF_WINDOW_FLOW rule unchanged: sfox is a
+# sampled NAV, and the ccxt venues carry retention caps (OKX ~90d, Bybit ~365d).
+FULL_HISTORY_VENUES: frozenset[str] = frozenset({"deribit", "mt5"})
+
 
 @dataclass(frozen=True)
 class KeyEquity:
@@ -810,6 +837,8 @@ def replay_key_equity(
     returns: pd.Series,
     flows: Sequence[Any] | None,
     anchor: float | None,
+    *,
+    history_reaches_inception: bool = False,
 ) -> KeyEquity:
     """Reconstruct one key's $-equity series BACKWARD from ``anchor`` (STITCH-04).
 
@@ -826,6 +855,22 @@ def replay_key_equity(
     so a first-day flow does NOT separately move the base. It is self-consistent
     (the forward self-check absorbs it identically) and correct for level
     reconstruction, but has no distinguishable effect on ``equity[0]``.
+
+    167.1.2.2 D-13 / D-14 — OPENING FLOWS. A return series starts the day AFTER the
+    account's first ledger event (the funding day's return is undefined, the prior
+    capital being zero), so on a venue whose history reaches the account's start
+    (``history_reaches_inception``, see ``FULL_HISTORY_VENUES``) the first flows
+    legitimately sit before the first return day. Position alone cannot tell that
+    from a suspect flow, so such a run is judged by the invariant it implies: the
+    capital before its first flow, ``equity - F`` on that day (the day has no
+    return, ``r = 0``), must be within ``_INCEPTION_ZERO_START_BAND`` of the level on
+    the first return day. Within the band the run is the normal opening shape and
+    does not block; outside it the key blocks as ``INCEPTION_UNRECONCILED``. The run
+    is the consecutive calendar days of flows that END the day before the first
+    return day. Every other flow outside the return window — an earlier,
+    non-adjacent one, or one after the last return day — stays
+    ``OUT_OF_WINDOW_FLOW``, and so does every out-of-window flow on a venue without
+    full history (the default).
 
     Structural refusals raise ``NavReconstructionError`` (permanent, mirroring
     ``nav_twr``): a return factor ``1 + r_t <= 0`` (an un-replayable ≤ −100% day)
@@ -884,9 +929,12 @@ def replay_key_equity(
     # consumer can refuse when nonzero. Return-day window bounds the check.
     ret_days = sorted(r)
     out_of_window_flows = 0
+    opening_run: list[str] = []
     if ret_days:
         lo, hi = ret_days[0], ret_days[-1]
-        out_of_window_flows = sum(1 for fd in fbd if fd < lo or fd > hi)
+        if history_reaches_inception:
+            opening_run = _opening_flow_run(fbd, lo)
+        out_of_window_flows = sum(1 for fd in fbd if fd < lo or fd > hi) - len(opening_run)
 
     equity = [0.0] * n
     equity[n - 1] = float(anchor)
@@ -912,13 +960,37 @@ def replay_key_equity(
 
     series = pd.Series(equity, index=days, name=getattr(returns, "name", None))
     _assert_forward_agreement(series, r, fbd, days)
-    flags = {"out_of_window_flows": out_of_window_flows} if out_of_window_flows else {}
-    reasons = (
-        frozenset({DegradeReason.OUT_OF_WINDOW_FLOW})
-        if out_of_window_flows
-        else frozenset()
-    )
-    return KeyEquity(series, None, flags, degrade_reasons=reasons)
+    flags: dict[str, Any] = {}
+    reasons: set[DegradeReason] = set()
+    if out_of_window_flows:
+        flags["out_of_window_flows"] = out_of_window_flows
+        reasons.add(DegradeReason.OUT_OF_WINDOW_FLOW)
+    if opening_run:
+        # The capital the replay implies before the run's first flow. That day has
+        # no return row (it precedes the first return day), so r = 0 and
+        # equity - F is the level the day started from.
+        first_open = opening_run[0]
+        implied_start = equity[days.index(first_open)] - fbd[first_open]
+        level_first_return = equity[days.index(ret_days[0])]
+        if abs(implied_start) > _INCEPTION_ZERO_START_BAND * level_first_return:
+            flags["inception_unreconciled_flows"] = len(opening_run)
+            reasons.add(DegradeReason.INCEPTION_UNRECONCILED)
+        else:
+            flags["opening_flows_reconciled"] = len(opening_run)
+    return KeyEquity(series, None, flags, degrade_reasons=frozenset(reasons))
+
+
+def _opening_flow_run(fbd: Mapping[str, float], first_return_day: str) -> list[str]:
+    """The consecutive calendar days of flows ending the day BEFORE
+    ``first_return_day``, oldest first (empty when that day carries no flow).
+    Adjacency is by calendar day, so a one-day gap ends the run (D-13)."""
+    run: list[str] = []
+    day = date.fromisoformat(first_return_day) - timedelta(days=1)
+    while day.isoformat() in fbd:
+        run.append(day.isoformat())
+        day -= timedelta(days=1)
+    run.reverse()
+    return run
 
 
 def _assert_forward_agreement(

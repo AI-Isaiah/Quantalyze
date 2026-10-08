@@ -299,6 +299,7 @@ def compose_allocator_equity(
     benign_flag_tokens: Sequence[str] | None = None,
     degrade_reasons: Sequence[DegradeReason] | None = None,
     departed_end_by_key: Mapping[str, str] | None = None,
+    full_history_keys: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Compose the allocator display-row payload from real per-key inputs.
 
@@ -335,8 +336,15 @@ def compose_allocator_equity(
     ``_departure_seams``) and leaves both sums of ``payload.returns``, so its
     leaving is never a return and its level is never carried. The ledger books
     the exit as an outflow of its last level on the next union day. A live key
-    is never in this map, so the frozen core's math for live keys is unchanged."""
+    is never in this map, so the frozen core's math for live keys is unchanged.
+
+    ``full_history_keys`` (167.1.2.2 D-13) names the keys on a venue whose history
+    reaches the account's start (``FULL_HISTORY_VENUES``). Only those get the
+    opening-flow zero-start check in ``replay_key_equity``; every other key keeps the
+    positional ``OUT_OF_WINDOW_FLOW`` rule. The caller knows the venue, this pure
+    layer does not, so it is passed in rather than guessed."""
     departed_end = dict(departed_end_by_key or {})
+    full_history = frozenset(full_history_keys or ())
     reasons: set[DegradeReason] = set(degrade_reasons or ())
     flag_tokens: set[str] = set()
     _null_reasons = null_anchor_reasons or {}
@@ -423,7 +431,12 @@ def compose_allocator_equity(
     # on its own last return day, so clipping before the replay would hang that
     # anchor on the wrong day.
     per_key_equity = {
-        k: replay_key_equity(anchored_returns[k], anchored_flows[k], anchors_by_key[k])
+        k: replay_key_equity(
+            anchored_returns[k],
+            anchored_flows[k],
+            anchors_by_key[k],
+            history_reaches_inception=k in full_history,
+        )
         for k in anchored_keys
     }
     for ke in per_key_equity.values():

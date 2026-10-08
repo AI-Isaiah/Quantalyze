@@ -11260,6 +11260,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
 
     from services.allocator_equity_compose import compose_allocator_equity
     from services.allocator_equity_derive import (
+        FULL_HISTORY_VENUES,
         SHARED_ACCOUNT_KINDS,
         DegradeReason,
         account_groups,
@@ -11911,6 +11912,14 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             ]
             or None,
             departed_end_by_key=departed_end_by_key or None,
+            # D-13: the venue is known here and not in the pure compose. A key on a
+            # venue whose history reaches the account's start gets the zero-start
+            # check on its opening flows instead of the positional rule.
+            full_history_keys={
+                str(row["id"])
+                for row in key_rows
+                if str(row.get("exchange") or "").strip().lower() in FULL_HISTORY_VENUES
+            },
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3
