@@ -27,7 +27,8 @@ import { join } from "node:path";
  * WHAT THIS FILE ENFORCES, so the next workflow someone adds with a raw apt
  * line cannot reopen that failure unnoticed:
  *   R1  no workflow step calls apt / apt-get update|install|... at COMMAND
- *       position (sudo, sudo -E, env VAR=x, sudo env, bare VAR=x prefixes
+ *       position (sudo, sudo -E, env VAR=x, sudo env, bare VAR=x, timeout
+ *       [-s SIG] [-k N] N, nice -N, ionice, chrt and flock [-w N] FILE prefixes
  *       included). An `echo "... apt install ..."` is not a call.
  *   R2  every step that calls the wrapper has a step `timeout-minutes` of at
  *       most 10, so a hang ends the step with a NAMED failure (D-03).
@@ -203,10 +204,11 @@ const label = (s: Step) => `${s.file} :: job ${s.job || "?"} :: step "${s.name |
 // command follows it on the same line), after && || ; |, after then/else/do, or after ( { !.
 const CMD_POS = String.raw`(?:^[ \t]*(?:-[ \t]+)?run:[ \t]*["']?|^|&&|\|\||;|\||\bthen\b|\belse\b|\bdo\b|[({!])`;
 // What may sit between the command position and `apt`: sudo / env / nohup / time / xargs /
-// nice / stdbuf (optionally path-qualified), `timeout [flags] DURATION`, a variable used as
-// the privilege prefix (`"$SUDO"`, `${SUDO:-sudo}`), a bare `--`, their flags (including
-// `-u user`, `-n 10`), and VAR=value assignments.
-const PREFIX = String.raw`(?:(?:\S*/)?(?:sudo|env|nohup|exec|command|time|xargs|nice|stdbuf)[ \t]+|(?:\S*/)?timeout(?:[ \t]+(?:-\S+|\d+\S*))+[ \t]+|"?\$(?:\{[^}]*\}|\w+)"?[ \t]+|--[ \t]+|(?:-u|--user|-g|--group|-n)[ \t]+\S+[ \t]+|-{1,2}[A-Za-z]\S*[ \t]+|[A-Za-z_]\w*=\S*[ \t]+)*`;
+// nice / stdbuf (optionally path-qualified), `timeout [flags] DURATION` (a flag may take a
+// value: `-s KILL`, `-k 10`), `ionice` / `chrt` (`-c 3`, `-i 0`), `flock [-w N] LOCKFILE`, a
+// variable used as the privilege prefix (`"$SUDO"`, `${SUDO:-sudo}`), a bare `--`, their flags
+// (including `-u user`, `-n 10`, and nice's short `-10`), and VAR=value assignments.
+const PREFIX = String.raw`(?:(?:\S*/)?(?:sudo|env|nohup|exec|command|time|xargs|nice|stdbuf)[ \t]+|(?:\S*/)?timeout(?:[ \t]+(?:(?:-s|--signal|-k|--kill-after)[ \t]+\S+|-\S+|\d+\S*))+[ \t]+|(?:\S*/)?(?:ionice|chrt)(?:[ \t]+(?:-\S+|\d+))*[ \t]+|(?:\S*/)?flock(?:[ \t]+(?:(?:-w|--timeout|-E|--conflict-exit-code)[ \t]+\S+|-\S+))*[ \t]+\S+[ \t]+|"?\$(?:\{[^}]*\}|\w+)"?[ \t]+|--[ \t]+|(?:-u|--user|-g|--group|-n)[ \t]+\S+[ \t]+|-\d+[ \t]+|-{1,2}[A-Za-z]\S*[ \t]+|[A-Za-z_]\w*=\S*[ \t]+)*`;
 // apt's own options between `apt-get` and the subcommand (`-o Key=Val` takes an argument).
 const APT_OPT = String.raw`(?:(?:-o|--option|-c|--config-file|-t|--target-release)[ \t]+\S+|-\S+)[ \t]+`;
 const APT_VERBS = "update|install|upgrade|dist-upgrade|full-upgrade|download|source|build-dep";
@@ -565,6 +567,17 @@ describe("ci-apt-bounded: CALIBRATION - an in-memory mutant flips each rule", ()
     ["xargs flags", "echo postgresql-client | xargs -r apt-get install -y"],
     ["nice -n 10", "sudo nice -n 10 apt-get install -y postgresql-client"],
     ["sudo -- apt-get", "sudo -- apt-get install -y postgresql-client"],
+    // Round-2 review WR-R2-03: prefixes whose argument R1 did not consume.
+    ["timeout -s KILL N", "sudo timeout -s KILL 60 apt-get install -y postgresql-client"],
+    ["timeout --signal KILL N", "sudo timeout --signal KILL 60 apt-get install -y postgresql-client"],
+    ["timeout -k N -s SIG N", "sudo timeout -k 5 -s KILL 60 apt-get update"],
+    ["nice -10 (short form)", "sudo nice -10 apt-get install -y postgresql-client"],
+    ["ionice -c3", "sudo ionice -c3 apt-get install -y postgresql-client"],
+    ["ionice -c 3", "sudo ionice -c 3 apt-get install -y postgresql-client"],
+    ["chrt -i 0", "sudo chrt -i 0 apt-get install -y postgresql-client"],
+    ["flock LOCKFILE", "sudo flock /var/lib/dpkg/lock-frontend apt-get install -y postgresql-client"],
+    ["flock -w N LOCKFILE", "sudo flock -w 30 /tmp/apt.lock apt-get update"],
+    ["ionice + nice + timeout -s", "sudo ionice -c3 nice -10 timeout -s KILL 600 apt-get update"],
   ];
 
   it.each(MISSED_FORMS)("R1d: %s is flagged in a run: | block, a one-line run: key and a - run: step", (_n, form) => {
@@ -591,6 +604,9 @@ describe("ci-apt-bounded: CALIBRATION - an in-memory mutant flips each rule", ()
       "dpkg -s postgresql-client",
       "sudo timeout 60 pg_isready",
       "npm install apt-get",
+      "sudo timeout -s KILL 60 pg_isready",
+      "sudo ionice -c3 nice -10 tar czf out.tgz dir",
+      "sudo flock -w 30 /tmp/apt.lock true",
     ]) {
       const named = insertStepAfterFirst(WF, MUTEX_PROBE, `      - name: Fine\n        run: ${ok}`);
       expect(r1(named), `false positive: ${ok}`).toEqual([]);
