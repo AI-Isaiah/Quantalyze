@@ -2,10 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261001120000_compute_job_fence_errcode_55006.sql
--- --------------------------------------------------------------------------
--- mark_compute_job_failed
--- --------------------------------------------------------------------------
+-- source migration: 20261009120000_sync_status_analytics_scope.sql
 CREATE OR REPLACE FUNCTION mark_compute_job_failed(
   p_job_id      UUID,
   p_error       TEXT,
@@ -98,7 +95,7 @@ BEGIN
   -- Phase 18: atomic UI bridge (preserved from mig 099).
   IF v_strategy_id IS NOT NULL THEN
     PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));
-    PERFORM sync_strategy_analytics_status(v_strategy_id);
+    PERFORM sync_strategy_analytics_status(v_strategy_id, p_job_id);
   END IF;
 
   RETURN v_next_attempt;

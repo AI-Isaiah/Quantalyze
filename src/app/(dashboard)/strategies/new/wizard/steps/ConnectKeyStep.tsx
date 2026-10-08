@@ -423,6 +423,23 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // step renders `UNKNOWN` — whose copy is recoverable and says nothing about the
     // server — and the user is told the wrong cause for an unlisted broker server.
     "KEY_MT5_SERVER_UNKNOWN",
+    // 164.6.6.3.2 / item 7 (D-01) — admitted HERE IN THE SAME COMMIT the shared
+    // classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now answers for
+    // `MT5_VALIDATION_UNCONFIGURED` (the three env-gap arms of
+    // `_validate_mt5_key_probe`) with this code; omit this line and the membership
+    // check rejects the honest code, the step renders `UNKNOWN` — whose copy is
+    // recoverable and names no cause — and the user gets a Retry control for a fault
+    // that repeats until an operator acts, with the real cause (our connection is not
+    // set up) hidden. It is deliberately NOT recoverable.
+    "KEY_MT5_VALIDATION_UNCONFIGURED",
+    // 164.6.6.3.2 / item 10 (D-02) — admitted HERE IN THE SAME COMMIT the shared
+    // classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now answers for
+    // `MT5_TERMINAL_BUSY` (the owed-scrub gate and the held-lease refusal of
+    // `_validate_mt5_key_probe`, both formerly `NETWORK_UNAVAILABLE`) with this code;
+    // omit this line and the membership check rejects the honest code, the step renders
+    // `UNKNOWN`, which names no cause, and the user is told nothing about a busy terminal.
+    // It is RECOVERABLE: the card keeps its Retry control.
+    "KEY_MT5_TERMINAL_BUSY",
     // 164.6.5 / criterion 5 — admitted HERE IN THE SAME COMMIT the shared
     // classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now answers
     // for `MT5_TERMINAL_UNRESPONSIVE` (an IPC transport fault raised inside
@@ -493,6 +510,11 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // docblock above says. `SEAM_INTERNAL_FAULT` is deliberately absent from that
     // table (we mint it; no service puts it on the wire), so this roster is the
     // only thing standing for it.
+    //
+    // ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2): the paragraph above says
+    // `VENUE_WIRE_CODE_TO_VERDICT` answers `MT5_GATEWAY_UNCONFIGURED` with this code.
+    // Only the D-31 `undetermined` arm still does; the env gaps now arrive as
+    // `KEY_MT5_VALIDATION_UNCONFIGURED`, admitted above. Original kept as lineage.
     "SEAM_INTERNAL_FAULT",
     // 164.5.4-02 / D-03 — admitted HERE IN THE SAME COMMIT the shared
     // classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now answers

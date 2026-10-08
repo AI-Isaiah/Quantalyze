@@ -233,68 +233,72 @@ class TestBuildNormalizedWeightsC19:
 # ---------------------------------------------------------------------------
 
 class TestAumCollectionC19:
-    """Verify the AUM collection step uses `is not None`.
+    """NEW-C19-06, now driven through the REAL ``_compute_portfolio_analytics``.
 
-    The router's inner loop does:
-        if row.get("total_aum") is not None:
-            strategy_aum[sid] = float(row["total_aum"])
+    These tests used to re-implement the router's AUM loop inline over rows keyed
+    ``total_aum`` and assert on their own copy, so they could not fail when the
+    router changed (and ``strategy_analytics`` has no ``total_aum`` column, so the
+    rows they described never existed). Since Phase 164.6.6.2.2 (D-07) a
+    strategy's AUM in a portfolio is ``portfolio_strategies.allocated_amount``;
+    the rule is unchanged: ``is not None``, so a genuine $0 allocation is a known
+    reporter, while a NULL one still collapses the total to None.
 
-    We cannot call _compute_portfolio_analytics directly without a live DB,
-    so we test the underlying logic by calling _build_normalized_weights
-    (which is the helper layer) and then inline the AUM logic in isolation.
+    The module is resolved at CALL time and patched with ``patch.object`` (this
+    file evicts and re-imports ``routers.portfolio``), and the fake is the
+    column-strict one from ``test_portfolio_compute_integration``.
     """
 
-    def test_zero_aum_counted_as_known(self):
-        """NEW-C19-06: a strategy reporting $0 AUM must be counted as a
-        known reporter, not treated as NULL.
+    @staticmethod
+    async def _persisted_update(amounts: dict[str, float | None]) -> dict:
+        from tests._curve_fixtures import curve_from_returns
+        from tests.test_portfolio_compute_integration import _make_supabase_for_compute
 
-        Pre-fix: `if row.get("total_aum"):` → 0 is falsy → dropped.
-        Post-fix: `if row.get("total_aum") is not None:` → 0 is counted.
-        """
-        rows = [
-            {"strategy_id": "s1", "total_aum": 100.0},
-            {"strategy_id": "s2", "total_aum": 0.0},   # drained strategy
+        portfolio_mod = importlib.import_module("routers.portfolio")
+        dates = ["2026-01-05", "2026-01-06", "2026-01-07"]
+        # Every strategy returns [d1 0.02, d2 0.01] (day 0 has no stored predecessor).
+        ps = [
+            {"strategy_id": sid, "current_weight": 1.0 / len(amounts),
+             "allocated_amount": amount, "strategies": {"id": sid, "name": sid.upper()}}
+            for sid, amount in amounts.items()
         ]
-        strategy_ids = ["s1", "s2"]
-        # Reproduce the router's AUM collection logic.
-        strategy_aum: dict[str, float] = {}
-        for row in rows:
-            sid = row["strategy_id"]
-            # POST-FIX implementation:
-            if row.get("total_aum") is not None:
-                strategy_aum[sid] = float(row["total_aum"])
-        aum_known_count = sum(1 for sid in strategy_ids if sid in strategy_aum)
-        if aum_known_count == len(strategy_ids):
-            total_aum = sum(strategy_aum.get(sid, 0) for sid in strategy_ids) or 0.0
-        else:
-            total_aum = None
-        assert total_aum == pytest.approx(100.0), (
-            "total_aum collapsed to None because the $0 strategy was treated "
+        sa = [
+            {"strategy_id": sid, "returns_series": curve_from_returns([0.0, 0.02, 0.01], dates)}
+            for sid in amounts
+        ]
+        sb, tables = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa)
+
+        async def _no_benchmark(symbol):
+            return None, True
+
+        with patch.object(portfolio_mod, "get_supabase", return_value=sb), \
+             patch.object(portfolio_mod, "get_benchmark_returns", side_effect=_no_benchmark):
+            await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+        return tables["portfolio_analytics"].update.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_zero_aum_counted_as_known(self):
+        """NEW-C19-06: a strategy allocated $0 must be counted as a known
+        reporter, not treated as NULL. A truthiness test maps 0 to "unknown" and
+        collapses the total to None for any portfolio holding one drained leg."""
+        update = await self._persisted_update({"s1": 100.0, "s2": 0.0})
+        assert update["total_aum"] == pytest.approx(100.0), (
+            "total_aum collapsed to None because the $0 allocation was treated "
             "as NULL — AUM collection must use `is not None` (NEW-C19-06)"
         )
+        # Both legs return [0.02, 0.01]: the persisted curve is their blend, which
+        # shows this run really computed from the stored curve shape end to end.
+        values = [pt["value"] for pt in update["portfolio_equity_curve"]]
+        assert values == pytest.approx([1.02, 1.02 * 1.01], abs=1e-12)
 
-    def test_null_aum_is_still_excluded(self):
-        """NEW-C19-06: a strategy with actual NULL/missing AUM must still
-        cause total_aum to collapse to None (the pre-existing behavior for
-        genuinely missing data must not change)."""
-        rows = [
-            {"strategy_id": "s1", "total_aum": 100.0},
-            {"strategy_id": "s2"},  # no total_aum key → None
-        ]
-        strategy_ids = ["s1", "s2"]
-        strategy_aum: dict[str, float] = {}
-        for row in rows:
-            sid = row["strategy_id"]
-            if row.get("total_aum") is not None:
-                strategy_aum[sid] = float(row["total_aum"])
-        aum_known_count = sum(1 for sid in strategy_ids if sid in strategy_aum)
-        if aum_known_count == len(strategy_ids):
-            total_aum = sum(strategy_aum.get(sid, 0) for sid in strategy_ids) or 0.0
-        else:
-            total_aum = None
-        assert total_aum is None, (
-            "A strategy with NULL AUM must cause total_aum to collapse to "
-            "None (not partial sum) — the pre-existing behavior must hold."
+    @pytest.mark.asyncio
+    async def test_null_aum_is_still_excluded(self):
+        """NEW-C19-06: a strategy with a NULL allocation must still cause
+        total_aum to collapse to None (a partial sum would be a fabricated
+        total); the behaviour for genuinely missing data must not change."""
+        update = await self._persisted_update({"s1": 100.0, "s2": None})
+        assert update["total_aum"] is None, (
+            "A strategy with a NULL allocation must cause total_aum to collapse "
+            "to None (not a partial sum) — the pre-existing behaviour must hold."
         )
 
 
@@ -698,6 +702,12 @@ class TestNarrativeMissingEquityHedgeH002:
 
     The fix adds missing_equity_sids to analytics_payload in the router and
     a new hedge branch in generate_narrative.
+
+    Phase 164.6.6.2.2 (D-04): `_compute_portfolio_analytics` now DERIVES every
+    strategy's equity from its returns, so it hands generate_narrative an empty
+    `missing_equity_sids` and this hedge never fires from that producer. The
+    narrative's contract on the key is unchanged and is what these tests pin; they
+    drive `generate_narrative` directly with the list populated.
     """
 
     def test_missing_equity_sids_hedge_fires(self):

@@ -109,3 +109,53 @@ describe("ReturnHistogram — DESIGN-01 identity (14b-02)", () => {
     expect(bars[0].props.dataKey).toBe("count");
   });
 });
+
+/**
+ * Phase 164.6.6.2.2 review WR-05 residual: the histogram differences the stored
+ * CURVE into daily returns. It must read the curve by its method (the simple
+ * curve is differenced, not divided) and must not fabricate a 0 return from a
+ * non-positive level. Expected values are independent of the implementation:
+ * the increments are chosen here, and the histogram is read off them.
+ */
+describe("ReturnHistogram — curve differencing (WR-05)", () => {
+  /** 14 unique ascending dates. */
+  const dated = (levels: number[]) =>
+    levels.map((value, i) => ({
+      date: new Date(Date.UTC(2025, 0, 1) + i * 86_400_000).toISOString().slice(0, 10),
+      value,
+    }));
+
+  const histogramData = () => {
+    const chart = captured.find((c) => c.type === "BarChart");
+    return (chart?.props.data ?? []) as { label: string; count: number }[];
+  };
+
+  it("simple curve: the lowest bin edge is the smallest INCREMENT, not an increment over the level", () => {
+    captured.length = 0;
+    // Increments are +0.10 every day except one -0.05 day (the minimum), so the
+    // curve rises to about 2.2 and a ratio reading would give about -2.3%.
+    const increments = Array.from({ length: 14 }, (_, i) => (i === 9 ? -0.05 : 0.1));
+    const levels = [1];
+    for (const inc of increments) levels.push(levels[levels.length - 1] + inc);
+    render(<ReturnHistogram returns={dated(levels)} curveMethod="simple" />);
+    const data = histogramData();
+    expect(data[0].label).toBe("-5.0%");
+    expect(data.reduce((a, d) => a + d.count, 0)).toBe(increments.length);
+  });
+
+  it("geometric curve with a zero level: the unusable days are absent, never a fabricated 0 return", () => {
+    captured.length = 0;
+    // 14 levels, one of them 0: the day INTO the zero and the day OUT of it
+    // have no defined ratio, so 13 pairs leave 11 returns.
+    const levels = [1, 1.02, 1.01, 1.04, 1.03, 0, 1.05, 1.06, 1.04, 1.07, 1.05, 1.08, 1.06, 1.09];
+    render(<ReturnHistogram returns={dated(levels)} />);
+    const data = histogramData();
+    expect(data.reduce((a, d) => a + d.count, 0)).toBe(levels.length - 1 - 2);
+  });
+
+  it("renders nothing when no day has a usable pair", () => {
+    captured.length = 0;
+    const { container } = render(<ReturnHistogram returns={dated(Array(14).fill(0))} />);
+    expect(container.innerHTML).toBe("");
+  });
+});

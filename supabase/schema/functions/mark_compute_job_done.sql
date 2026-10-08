@@ -2,10 +2,17 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261001120000_compute_job_fence_errcode_55006.sql
+-- source migration: 20261009120000_sync_status_analytics_scope.sql
 -- --------------------------------------------------------------------------
--- mark_compute_job_done
+-- the two mark RPCs: they pass the job they just terminalised (D-09)
 -- --------------------------------------------------------------------------
+-- Each body is the LATEST definition (20261001120000, Phase 164.9.3.2), byte for
+-- byte, with ONE change: the bridge call passes p_job_id as the trigger. Their
+-- signatures, COMMENTs and ACLs are unchanged (CREATE OR REPLACE keeps the
+-- COMMENT; the REVOKE is restated exactly as 20261001120000 issued it). Before
+-- this file the bridge called by them had one argument, so nothing could tell it
+-- WHICH job's transition caused the call, and D-09 had to guess from recency.
+
 CREATE OR REPLACE FUNCTION mark_compute_job_done(
   p_job_id     UUID,
   p_claim_token UUID DEFAULT NULL
@@ -101,7 +108,7 @@ BEGIN
   -- Phase 18: atomic UI bridge (preserved from mig 099).
   IF v_strategy_id IS NOT NULL THEN
     PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));
-    PERFORM sync_strategy_analytics_status(v_strategy_id);
+    PERFORM sync_strategy_analytics_status(v_strategy_id, p_job_id);
   END IF;
 END;
 $$;

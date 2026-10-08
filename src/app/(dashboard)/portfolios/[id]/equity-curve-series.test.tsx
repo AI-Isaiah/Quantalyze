@@ -497,6 +497,42 @@ describe("164.6.6.2 — a BTC constituent's equity curve is its USD curve", () =
     expect(out[0].equityCurve![0].value).toBeCloseTo(1.21, 12);
   });
 
+  it("WR-02: a persisted curve with an absent level prices the day after it over its OWN day (+10%, not +340%)", async () => {
+    const { buildEquityCurveSeries } = await import(PAGE);
+    // Curve 1.0, 1.1, null, 1.2, 1.32 on 03-02..03-06; BTC closes 100, 100, 200,
+    // 400, 400. 03-06's native return is 1.32 / 1.2 - 1 = 0.1 on a flat BTC day, so
+    // USD is (1 + 0.1) * (400 / 400) - 1 = 0.1 and the curve (cumprod from 1) is
+    // 1.1. Priced across the gap, against 03-03 (close 100), it is 1.1 * 4 - 1 = 3.4.
+    const out = buildEquityCurveSeries(
+      [
+        row("btc", "BTC book", {
+          ...nativeAnalytics,
+          returns_series: [
+            { date: "2026-03-02", value: 1.0 },
+            { date: "2026-03-03", value: 1.1 },
+            { date: "2026-03-04", value: null },
+            { date: "2026-03-05", value: 1.2 },
+            { date: "2026-03-06", value: 1.32 },
+          ],
+          daily_returns: null,
+        }),
+      ],
+      {
+        prices: [
+          { date: "2026-03-02", close: 100 },
+          { date: "2026-03-03", close: 100 },
+          { date: "2026-03-04", close: 200 },
+          { date: "2026-03-05", close: 400 },
+          { date: "2026-03-06", close: 400 },
+        ],
+        dropped: [] as string[],
+      },
+    );
+    expect(out[0].equityCurve).toHaveLength(1);
+    expect(out[0].equityCurve![0].date).toBe("2026-03-06");
+    expect(out[0].equityCurve![0].value).toBeCloseTo(1.1, 12);
+  });
+
   it("a USD constituent beside it is unchanged", async () => {
     const { buildEquityCurveSeries } = await import(PAGE);
     const out = buildEquityCurveSeries(

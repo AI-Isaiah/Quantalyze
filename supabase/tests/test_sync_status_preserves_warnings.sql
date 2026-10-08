@@ -43,7 +43,7 @@
 -- ==========================================================================
 DO $$
 DECLARE
-  v_fn TEXT := pg_get_functiondef('sync_strategy_analytics_status(uuid)'::regprocedure);
+  v_fn TEXT := pg_get_functiondef((SELECT p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'sync_strategy_analytics_status'));
 BEGIN
   -- Branch (c) must preserve complete_with_warnings via the CASE.
   IF v_fn !~* 'WHEN\s+strategy_analytics\.computation_status\s*=\s*''complete_with_warnings''' THEN
@@ -218,7 +218,7 @@ DECLARE
   v_user        uuid := gen_random_uuid();
   v_warn        uuid;
   v_job_ana     uuid := gen_random_uuid();  -- the warned analytics job
-  v_job_sib     uuid := gen_random_uuid();  -- a sibling (e.g. sync_funding)
+  v_job_sib     uuid := gen_random_uuid();  -- a sibling (e.g. sync_trades)
   v_token_ana   uuid := gen_random_uuid();
   v_token_sib   uuid := gen_random_uuid();
   v_status  TEXT;
@@ -242,7 +242,14 @@ BEGIN
     (id, kind, strategy_id, status, priority, attempts, next_attempt_at, claim_token)
   VALUES
     (v_job_ana, 'compute_analytics', v_warn, 'running', 'normal', 1, now(), v_token_ana),
-    (v_job_sib, 'sync_funding',      v_warn, 'running', 'normal', 1, now(), v_token_sib);
+    (v_job_sib, 'sync_trades',       v_warn, 'running', 'normal', 1, now(), v_token_sib);
+
+  -- 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, D-05): this sibling was a
+  -- sync_funding job. A failed sync_funding no longer pins computation_status
+  -- 'failed' (it is a side kind that produces no analytics), so a failed
+  -- sync_funding sibling could no longer drive branch (b) here. The sibling is a
+  -- sync_trades job, a kind that still counts toward failed. Every assertion in
+  -- this Part is unchanged.
 
   -- Analytics job done first (sibling still running → branch (a) preserves).
   PERFORM public.mark_compute_job_done(v_job_ana, v_token_ana);

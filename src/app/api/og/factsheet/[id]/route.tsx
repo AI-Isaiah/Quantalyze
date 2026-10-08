@@ -9,7 +9,10 @@ import { isComputedAnalytics } from "@/lib/closed-sets";
 // its own module precisely so this route (and the public share page) can share
 // the ONE series-resolution mechanism without dragging in the factsheet
 // build-payload graph on every unfurl hit.
-import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+import {
+  curveMethodFromFlags,
+  resolveDailyReturnSeries,
+} from "@/lib/factsheet/resolve-series";
 // Phase 164.6.6.2 plan 07 (D-12) — the one validator and label composer every
 // unit surface shares.
 import { parseReturnsUnit, withUnit } from "@/lib/factsheet/returns-unit";
@@ -172,6 +175,8 @@ export async function GET(
     const rows = resolveDailyReturnSeries(
       analytics?.daily_returns,
       analytics?.returns_series,
+      // 164.6.6.2.2 D-05: the curve is read by the row's own method.
+      curveMethodFromFlags(analytics?.data_quality_flags),
     );
     // STALE-01 — the SERIES is a job output too, so a run that did not finish
     // leaves the previous run's track sitting in these columns and nothing

@@ -5004,13 +5004,39 @@ jobs:
           #   provenance markers), so its sentinel reads ALL 16 and ARMS_FLOOR
           #   moves 253 -> 256. No file joined the sentinel-bearing set, so
           #   SENTINEL_FLOOR stays 14.
+          # Re-measured 2026-10-07 (phase 164.6.6.3.4 plan 01), ONE move:
+          #   test_sync_status_analytics_scope.sql, NEW, 13 arms (S1..S6, C1..C4,
+          #   G1..G3) - the STATUSBRIDGE gate for migration 20261009120000 (a failed
+          #   side-kind job never pins the analytics status failed, and a failed
+          #   process_key_long is cleared only by a later done derive AND compute).
+          #   Its -SETUP sub-arms fold into their parent section, as the runner counts
+          #   them. A new sentinel-bearing file, so SENTINEL_FLOOR moves 14 -> 15 and
+          #   ARMS_FLOOR moves 256 -> 269, read off the file's own first
+          #   `ALL N ARMS EXECUTED` sentinel.
+          # Re-measured 2026-10-07 (phase 164.6.6.3.4 founder D-09), ONE move:
+          #   test_sync_status_analytics_scope.sql gains D9 and D10 (a failed side-kind
+          #   job never stamps computed_at; a genuine compute after it still does), so
+          #   its sentinel reads ALL 15 and ARMS_FLOOR moves 269 -> 271. No file joined,
+          #   so SENTINEL_FLOOR stays 15.
+          # Re-measured 2026-10-08 (phase 164.6.6.3.4 founder D-09, round 3), ONE move:
+          #   test_sync_status_analytics_scope.sql gains D11 to D14 (a transient side
+          #   failure holds freshness through every retry; a counting success after a fast
+          #   side failure still stamps; a failed row that carries a sentence stays failed;
+          #   no row is manufactured), so its sentinel reads ALL 19 and ARMS_FLOOR moves
+          #   271 -> 275. No file joined, so SENTINEL_FLOOR stays 15.
+          # Re-measured 2026-10-08 (phase 164.6.6.3.4 founder D-10, round 4), ONE move:
+          #   test_sync_status_analytics_scope.sql gains D15 and D16 (a genuine
+          #   recompute on a warned row is stamped by the side failure that follows it;
+          #   a deferred side job leaves the row alone), so its sentinel reads ALL 21
+          #   and ARMS_FLOOR moves 275 -> 277. No file joined, so SENTINEL_FLOOR stays 15.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
+          #   test_sync_status_analytics_scope.sql             21
           #   test_sync_status_bridge_residues.sql             16
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=14  # files declaring a sentinel
-          ARMS_FLOOR=256     # 13 + 8 + 9 + 3 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 16 + 7 + 23
+          SENTINEL_FLOOR=15  # files declaring a sentinel
+          ARMS_FLOOR=277     # 13 + 8 + 9 + 3 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 21 + 16 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

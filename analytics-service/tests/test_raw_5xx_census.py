@@ -276,6 +276,9 @@ EXPECTED_HTTPEXCEPTION_SUBCLASSES = 1
 #: It is a 4xx, so by this file's own definition blind spot (b) stays LATENT rather
 #: than live. The same pre-check's empty-list arm raises through ``service_error``
 #: (500, ``MT5_GATEWAY_UNCONFIGURED``), which this census does not count.
+#: CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): that arm now raises
+#: ``MT5_VALIDATION_UNCONFIGURED``; ``service_error`` is still not counted here, so
+#: this value does not move. Original kept as lineage.
 EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 15
 
 #: Vacuity fence. A scanner that matched nothing would report agreement with the

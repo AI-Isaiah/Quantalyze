@@ -117,6 +117,7 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
           monthly_returns={panel4Inputs.monthly_returns}
           return_quantiles={panel4Inputs.return_quantiles}
           returns_series={panel4Inputs.returns_series}
+          data_quality_flags={panel6Inputs.data_quality_flags}
           benchmark_returns={panel4Inputs.benchmark_returns}
         />
 
