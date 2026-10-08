@@ -711,7 +711,8 @@ EOF
   # loop re-updates every iteration, never takes the stale credit, and the MEASURE_FAIL names
   # the W: URL instead of "failed deterministically: Unable to locate package".
   stub_fail="update:all:whalf,fetch:all:locate"
-  retry_sleep=1
+  # retry_sleep stays 0: the assertion below counts update calls inside the budget, and a
+  # 1 s sleep let one slow call plus the sleep spend it (main CI 2026-10-08, shard 2).
   run_scenario warned-update-then-missing-bounded "" --budget 3 --update-timeout 2 --fetch-timeout 2 x
   retry_sleep=0
   stub_fail=""
@@ -808,7 +809,8 @@ EOF
   # 18. unclassified-exit-100: wording in neither list retries for the budget (the classifier
   # is inverted on purpose), and the closing message quotes it WITHOUT blaming the mirror.
   stub_fail="update:all:unknown100"
-  retry_sleep=1
+  # retry_sleep stays 0: the assertion below counts update calls inside the budget, and a
+  # 1 s sleep let one slow call plus the sleep spend it (main CI 2026-10-08, shard 2).
   run_scenario unclassified-exit-100-no-mirror-blame "" --budget 2 --update-timeout 1 --fetch-timeout 1 x
   retry_sleep=0
   stub_fail=""
