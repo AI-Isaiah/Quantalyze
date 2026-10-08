@@ -114,6 +114,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series** (INSERTED) — shipped v0.126.0.0 (#969, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — not yet planned (booked 2026-10-07 by 164.6.6.2 D-15)
 - [x] **Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend** (INSERTED) — shipped v0.128.0.0 (#973, merged 2026-10-08); verification: passed (D-03 post-deploy reading 2026-10-08) (completed 2026-10-08)
+- [ ] **Phase 164.6.6.2.3: FLOWTIMING — a deposit never breaks a return, and an account's first day is its inception, not a warning** (INSERTED 2026-10-08) — not yet planned (founder D-01/D-02, 2026-10-08)
 - [ ] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8)** (INSERTED) — shipped v0.125.2.1 (#968, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
 - [x] **Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy)** (INSERTED) — verification: passed (v0.129.0.0) (completed 2026-10-08)
@@ -3172,6 +3173,31 @@ Plans:
 - [x] 164.6.6.2.2-06-PLAN.md — the match engine's two loaders on the boundary (wave 2)
 - [x] 164.6.6.2.2-07-PLAN.md — no-bypass census, write-to-read end-to-end test, PROD before/after measurement (D-03) (wave 4)
 
+### Phase 164.6.6.2.3: FLOWTIMING — a deposit never breaks a return, and an account's first day is its inception, not a warning (INSERTED)
+
+**Goal:** Returns are measured against the capital that was in the account when each position was opened, using the hour-and-minute timestamps of deposits, withdrawals and position opens. A deposit or withdrawal is not "the day's return being uninterpretable", and an account's own start is not a data-quality defect. Today two guards in `analytics-service/services/nav_twr.py` turn both into warnings and drop the day's return.
+**Measured 2026-10-08** (PROD read-only, marker checked; debug note `.planning/debug/mm2x-dust-guard-after-floor.md`):
+- MM-2x re-derived on the plan 14 code (1e-7 BTC floor) and still carries `dust_nav_guard` and `flow_dominated_guard`, at `complete_with_warnings`. The numbers themselves are complete: 356 of 356 daily returns from 2025-10-18 are measured, and the BTC floors are threaded end to end (`job_worker.py:5615` → `chain_linked_twr` → `_guard_denominator`).
+- **Day 0 (first deposit, 2025-10-16):** with no prior NAV, `chain_linked_twr` (`nav_twr.py:483-489`) rolls back to a pre-inception capital that is exactly 0. In floats that is noise of about 1e-16, and `_guard_denominator` (`:579`) labels it by its sign: dust if positive, negative-NAV if not. No positive floor can clear it. 12 of 24 `csv_source` rows on PROD carry `dust_nav_guard` or `negative_nav_guard`, which fits this cause across venues. Not yet confirmed row by row.
+- **Day 1 (2025-10-17):** a 1.0 BTC deposit on a 0.1 BTC base trips `flow_dominated_guard` (`|flow| >= 1.0 x prev_nav`). The day's return is dropped and the account warns.
+
+**Founder decisions 2026-10-08 (AskUserQuestion, verbatim intent):**
+- **D-01 (day 0):** "Fix it, own phase." On a full-history account (MT5 and ledger-complete venues), day 0 is the inception day. Its near-zero start is not a warning, whatever the noise's sign. Retention-windowed venues, where day 0's base is real capital, keep today's behaviour unless research shows otherwise.
+- **D-02 (deposits and positions):** "The Return is based on the Capital that was in the Account When the Trade opened. The Strategy Looses at the Capital in the Account and then opened the Position. Then deposit. That is Idee, as it has notjing to do with the Open Position. When Position closed relative Performance is relative to what was in the sccount at Time of opening the Position." And: "Deposits and Trade/position opens have timestamps with Hour and Minutes. Use it."
+  So a position's P&L is measured against the account capital at the position's open time. A deposit or withdrawal changes the base only for positions opened after it. A large flow is never by itself a reason to drop a return or warn. The current `flow_dominated_guard` rule is replaced, not tuned.
+
+**Scope to settle in discuss/research:**
+- Which venues expose intraday timestamps for flows and position opens: MT5 deals, Deribit, OKX, Bybit, Binance, sFOX.
+- What to do where one is missing. Never invent a time: fall back to the current day-level rule, named.
+- How this interacts with `pnl_dominated_guard`, the negative-NAV guard, the allocator compose replay (Phase 167.1.2.2's realized basis and dropped-day P&L), and the TS factsheet readers.
+- Re-derive and re-measure every affected PROD strategy, not just MM-2x. Before and after readings, marker first.
+**Requirements**: TBD
+**Depends on:** Phase 164.6.6.2.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.2.3 to break down)
+
 ### Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view (INSERTED)
 
 Booked 2026-10-07 by Phase 164.6.6.2 decision D-15 (founder 2026-10-06: "BTC only first, USD later").
@@ -5524,6 +5550,7 @@ kept verbatim.
 | 164.6.6.2 BTCNATIVE | 12/13 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.126.0.0 · #969 |
 | 164.6.6.2.1 BTCUSDVIEW | 0/? | Queued — booked 2026-10-07 by 164.6.6.2 D-15 | - |
 | 164.6.6.2.2 WEALTHRETURNS | 7/7 | Complete — verification passed after the D-03 post-deploy reading | 2026-10-08 · v0.128.0.0 · #973 |
+| 164.6.6.2.3 FLOWTIMING | 0/? | Queued — founder 2026-10-08 (D-01/D-02) | - |
 | 164.6.6.3 UATFIXES | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.125.2.0 · #967 |
 | 164.6.6.3.1 UIPOLISH | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.125.2.1 · #968 |
 | 164.6.6.3.2 WIZARDCODES | 4/4 | Complete — verification passed (WR-01 MEDIUM recorded as a known gap) | 2026-10-08 · v0.129.0.0 |
