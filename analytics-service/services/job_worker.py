@@ -4036,6 +4036,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # left out of the stored returns. ``None`` for every other venue and for the
         # allocated-capital path, whose key_inputs row then carries no such field.
         _day_pnl_usd: "pd.Series | None" = None
+        # CR-01 (167.1.2.2 round 1): the REALIZED terminal the NAV above was rolled back from,
+        # ``(last NAV day, USD)``. It is NOT the live equity the epilogue stores as
+        # ``anchor_usd``: MT5 rolls from ``equity - upnl``, Deribit from the native balance less
+        # the terminal uPnL at the last ledger day's mark. The compose rolls the stored returns
+        # back from THIS level so it does not shift every level by the open-position wedge.
+        _realized_terminal: "tuple[pd.Timestamp, float] | None" = None
         # D-15: the native §5 inception verdict, where one exists. Only a deribit ledger that
         # reaches inception (``full_history``) runs the gate, and a breach raises before this is
         # set, so a value here means the gate ran and passed.
@@ -4049,6 +4055,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             from services.broker_dailies import (
                 combine_native_ledger,
                 native_ledger_day_pnl,
+                native_ledger_realized_terminal,
             )
             from services.deribit_ingest import (
                 CurrencyEnumerationError,
@@ -4242,6 +4249,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # path builds no NAV, so it has none to give.
                 if is_key_mode and denominator_config is None:
                     _day_pnl_usd = native_ledger_day_pnl(
+                        native_ledger, _completeness.indexable_currencies
+                    )
+                    _realized_terminal = native_ledger_realized_terminal(
                         native_ledger, _completeness.indexable_currencies
                     )
                     if native_ledger.full_history:
@@ -5567,6 +5577,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             _mt5_deals,
                             server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
                         )
+                        if not _day_pnl_usd.empty:
+                            # CR-01: the level ``reconstruct_nav_and_twr`` rolled from, the
+                            # byte-identical ``anchor - upnl`` (the balance), on the last NAV day.
+                            _realized_terminal = (
+                                _day_pnl_usd.index[-1],
+                                _mt5_equity - (_mt5_equity - _mt5_balance),
+                            )
             except Mt5DealClassificationError as exc:
                 _scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_strategy_analytics_failed(
@@ -6141,6 +6158,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             _key_inputs_payload["dropped_day_pnl"] = dropped_day_pnl_payload(
                 returns, _day_pnl_usd
             )
+        if _realized_terminal is not None:
+            # CR-01: the writer's own terminal, on its own day. The compose rolls the
+            # stored returns back from it, so the zero-start verdict and every historical
+            # level are independent of the open position at the moment of this derive.
+            from services.allocator_equity_derive import realized_terminal_payload
+
+            _key_inputs_payload.update(realized_terminal_payload(*_realized_terminal))
         if _native_inception_verdict is not None:
             _key_inputs_payload["native_inception"] = _native_inception_verdict
 
@@ -11308,6 +11332,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         account_groups,
         eligible_key_predicate,
         read_dropped_day_pnl,
+        read_realized_terminal,
         stitch_dropped_day_pnl,
         stitch_shared_account,
         working_holder_predicate,
@@ -11753,6 +11778,10 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # returns ({ISO day: USD}). An older row has none and composes as before.
     dropped_pnl_by_key: dict[str, dict[str, float]] = {}
     source_dropped_pnl: dict[str, dict[str, float]] = {}
+    # CR-01: ``(ISO day, USD)`` — the level each key's NAV was rolled back from by its
+    # writer. An older row has none and is replayed from its live anchor as before. A
+    # stitch source needs none: the account's terminal is the counted (newest) key's.
+    realized_terminal_by_key: dict[str, tuple[str, float]] = {}
     orphan_kinds: list[str] = []
     # M3: the JSONB→python coercions below (float(usd_signed), float(anchor_usd))
     # sit OUTSIDE the compose NavReconstructionError catch — a corrupt persisted
@@ -11787,6 +11816,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                     ]
                     anchors_by_key[api_key_id] = float(departed_payload["anchor_usd"])
                     dropped_pnl_by_key[api_key_id] = read_dropped_day_pnl(departed_payload)
+                    _departed_terminal = read_realized_terminal(departed_payload)
+                    if _departed_terminal is not None:
+                        realized_terminal_by_key[api_key_id] = _departed_terminal
                 continue
             if api_key_id not in counted_ids:
                 # A shared-account key left out by the group resolution: still
@@ -11823,6 +11855,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 for _f in (payload.get("flows") or [])
             ]
             dropped_pnl_by_key[api_key_id] = read_dropped_day_pnl(payload)
+            _terminal = read_realized_terminal(payload)
+            if _terminal is not None:
+                realized_terminal_by_key[api_key_id] = _terminal
             _anchor = payload.get("anchor_usd")
             anchors_by_key[api_key_id] = None if _anchor is None else float(_anchor)
             if _anchor is None:
@@ -11980,6 +12015,10 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             # D-15: the P&L of the days the TWR left out of the stored returns. An
             # older key_inputs row has none, and its key composes as before.
             dropped_day_pnl_by_key=dropped_pnl_by_key,
+            # CR-01: the level each writer rolled its NAV back from. The replay rolls
+            # the stored returns back from it, so the open position at the moment of the
+            # derive neither shifts a level nor moves the zero-start verdict.
+            realized_terminal_by_key=realized_terminal_by_key,
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3

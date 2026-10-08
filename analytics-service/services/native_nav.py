@@ -713,6 +713,31 @@ def native_day_pnl(
     return level_day_pnl(nav_usd, composed_flows_usd, prev0=prev0_usd)
 
 
+def native_realized_terminal(
+    ledger: NativeLedger,
+    *,
+    indexable_currencies: frozenset[str],
+    venue: str = "",
+) -> tuple[pd.Timestamp, float] | None:
+    """The level ``reconstruct_native_nav_and_twr`` rolls its USD NAV back from, and the
+    NAV day it sits on: ``(last NAV day, NAV_usd there)`` (167.1.2.2 round-1 CR-01).
+
+    That level is the REALIZED terminal, ``Σ_c (terminal_native_c - upnl_native_c) ×
+    mark_c(last day)``: it excludes the open positions' uPnL and values the coin held at the
+    mark of the LAST LEDGER DAY, not at today's index. The collapsed live equity the derive
+    stores as ``anchor_usd`` differs from it by both, so a consumer that rolls the writer's
+    returns back from the live anchor shifts every level by that wedge. Read off the SAME
+    levels the returns are chained from (``_native_nav_levels``), never a second roll.
+    ``None`` when no bucket rolled; raises what the reconstruction raises."""
+    levels = _native_nav_levels(
+        ledger, indexable_currencies=indexable_currencies, venue=venue
+    )
+    if levels is None:
+        return None
+    nav_usd = levels[0]
+    return pd.Timestamp(nav_usd.index[-1]), float(nav_usd.iloc[-1])
+
+
 def _assert_inception_reconciled(
     ledger: NativeLedger,
     rolled: list[_Bucket],

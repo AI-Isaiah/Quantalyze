@@ -868,7 +868,13 @@ async def test_a_ccxt_key_persists_the_payload_it_always_did() -> None:
 # ── the compose job: the stored field reaches the replay ─────────────────────
 
 
-async def _compose_curve(book: Book, *, with_pnl: bool) -> dict:
+async def _compose_curve(
+    book: Book,
+    *,
+    with_pnl: bool,
+    anchor: float | None = None,
+    ki_extra: dict | None = None,
+) -> dict:
     from unittest.mock import patch
 
     from services.job_worker import run_derive_allocator_equity_job
@@ -882,10 +888,11 @@ async def _compose_curve(book: Book, *, with_pnl: bool) -> dict:
     alloc = "alloc-d15"
     ki_payload: dict = {
         "flows": [{"utc_day_iso": f.utc_day_iso, "usd_signed": f.usd_signed} for f in book.flows],
-        "anchor_usd": book.anchor,
+        "anchor_usd": book.anchor if anchor is None else anchor,
         "anchor_null_reason": None,
         "anchor_asof": f"{book.days[-1]}T06:00:00+00:00",
         "venue": "deribit",
+        **(ki_extra or {}),
     }
     if with_pnl:
         ki_payload["dropped_day_pnl"] = [

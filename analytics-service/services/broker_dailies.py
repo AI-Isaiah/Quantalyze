@@ -70,6 +70,7 @@ from services.mt5_deals import (
 from services.native_nav import (
     NativeLedger,
     native_day_pnl,
+    native_realized_terminal,
     reconstruct_native_nav_and_twr,
 )
 from services.nav_twr import (
@@ -898,3 +899,12 @@ def native_ledger_day_pnl(
     (``native_nav.native_day_pnl``, ``venue="deribit"``). Not defined for the
     allocated-capital (``denominator_config``) path, which builds no NAV."""
     return native_day_pnl(ledger, indexable_currencies=indexable, venue="deribit")
+
+
+def native_ledger_realized_terminal(
+    ledger: NativeLedger, indexable: frozenset[str]
+) -> tuple[pd.Timestamp, float] | None:
+    """The Deribit account's realized terminal NAV and its day (167.1.2.2 round-1 CR-01):
+    the level ``combine_native_ledger``'s NAV path rolls from, which is NOT the live equity
+    (``native_nav.native_realized_terminal``, ``venue="deribit"``). Key-mode NAV path only."""
+    return native_realized_terminal(ledger, indexable_currencies=indexable, venue="deribit")

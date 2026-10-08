@@ -201,6 +201,12 @@ def _patches(
             "services.broker_dailies.native_ledger_day_pnl",
             new=MagicMock(return_value=pd.Series(dtype="float64")),
         ),
+        # CR-01 (round 1): and the realized terminal the NAV was rolled from, for the same
+        # reason; its real-ledger coverage is in test_allocator_equity_dropped_day_pnl.py.
+        patch(
+            "services.broker_dailies.native_ledger_realized_terminal",
+            new=MagicMock(return_value=None),
+        ),
         patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),

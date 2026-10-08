@@ -301,6 +301,7 @@ def compose_allocator_equity(
     departed_end_by_key: Mapping[str, str] | None = None,
     full_history_keys: Collection[str] | None = None,
     dropped_day_pnl_by_key: Mapping[str, Mapping[str, float]] | None = None,
+    realized_terminal_by_key: Mapping[str, tuple[str, float]] | None = None,
 ) -> dict[str, Any]:
     """Compose the allocator display-row payload from real per-key inputs.
 
@@ -350,9 +351,16 @@ def compose_allocator_equity(
     flow dominates the prior NAV). ``replay_key_equity`` uses that P&L on those days
     instead of reading them as flat, and judges the opening run by the capital before
     the funding day's P&L. A key with no entry (every row written before D-15) is
-    composed exactly as before."""
+    composed exactly as before.
+
+    ``realized_terminal_by_key`` (167.1.2.2 round-1 CR-01) maps a key to ``(ISO day, USD)``,
+    the REALIZED terminal level its writer rolled the stored returns back from (not the live
+    equity in ``anchors_by_key``, which adds the open position). ``replay_key_equity`` rolls
+    from it, so levels and the zero-start verdict are the writer's own, and the live anchor
+    enters on the last day only. A key with no entry is replayed from its anchor as before."""
     departed_end = dict(departed_end_by_key or {})
     dropped_pnl = dict(dropped_day_pnl_by_key or {})
+    realized_terminal = dict(realized_terminal_by_key or {})
     full_history = frozenset(full_history_keys or ())
     reasons: set[DegradeReason] = set(degrade_reasons or ())
     flag_tokens: set[str] = set()
@@ -446,6 +454,7 @@ def compose_allocator_equity(
             anchors_by_key[k],
             history_reaches_inception=k in full_history,
             dropped_day_pnl=dropped_pnl.get(k),
+            realized_terminal=realized_terminal.get(k),
         )
         for k in anchored_keys
     }

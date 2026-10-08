@@ -849,6 +849,7 @@ def replay_key_equity(
     *,
     history_reaches_inception: bool = False,
     dropped_day_pnl: Mapping[str, float] | None = None,
+    realized_terminal: tuple[str, float] | None = None,
 ) -> KeyEquity:
     """Reconstruct one key's $-equity series BACKWARD from ``anchor`` (STITCH-04).
 
@@ -897,6 +898,26 @@ def replay_key_equity(
     different derive runs. Absent or empty (every row written before D-15) behaves
     exactly as before.
 
+    167.1.2.2 round-1 review CR-01 — THE WRITER'S OWN BASIS. The venue writers do not
+    roll their NAV from the live equity ``anchor``: MT5 rolls from ``anchor - upnl`` (the
+    balance), Deribit from ``terminal_native - upnl_native`` per currency at the mark of
+    the last ledger day. Everything stored (the returns, the dropped-day P&L) lives on
+    that REALIZED basis. Rolling it back from the live anchor shifts every level by
+    ``U / G(t -> T)`` (``U`` = the open uPnL plus, on Deribit, any coin mark move since
+    the last ledger day), and makes the zero-start check measure ``U`` instead of the
+    inception: a clean account reads trustworthy one day and untrustworthy the next,
+    depending on whether a position is open when the derive runs.
+    ``realized_terminal`` = ``(ISO day, USD)`` is that terminal level, stored by the
+    derive. When it is given and its day is the last day of the series, the roll starts
+    from it, so every historical level (and the inception residual) is the writer's own,
+    independent of the anchor and of any open position. The anchor then enters ONLY on
+    the last day: the curve's last point is the live equity, and ``U`` is a step on that
+    one day, never spread back across history (the writer's own endpoint convention). A
+    row without it (written before this) rolls from the anchor exactly as before. A
+    terminal day that is not the series' last day means the row and the returns come
+    from different derive runs: the roll falls back to the anchor and the key degrades
+    as ``KEY_INPUTS_MISMATCH``.
+
     Structural refusals raise ``NavReconstructionError`` (permanent, mirroring
     ``nav_twr``): a return factor ``1 + r_t <= 0`` (an un-replayable ≤ −100% day)
     or a non-positive reconstructed intermediate equity (a withdrawal dwarfing
@@ -920,6 +941,12 @@ def replay_key_equity(
         raise NavReconstructionError(
             "allocator equity replay: non-finite anchor — refusing a data-quality "
             "NaN/inf terminal equity (distinct from the flow-dominance guard)"
+        )
+
+    if realized_terminal is not None and not math.isfinite(float(realized_terminal[1])):
+        raise NavReconstructionError(
+            "allocator equity replay: non-finite realized terminal — refusing a "
+            "data-quality NaN/inf terminal equity"
         )
 
     # C-idx: enforce the ISO-day-string index contract before any day keying.
@@ -964,7 +991,14 @@ def replay_key_equity(
         out_of_window_flows = sum(1 for fd in fbd if fd < lo or fd > hi) - len(opening_run)
 
     equity = [0.0] * n
-    equity[n - 1] = float(anchor)
+    # CR-01: start from the writer's realized terminal when it is on the series' last
+    # day; otherwise from the live anchor (an older row, or a row/returns mismatch).
+    terminal_level = float(anchor)
+    from_realized = False
+    if realized_terminal is not None and realized_terminal[0] == days[-1]:
+        terminal_level = float(realized_terminal[1])
+        from_realized = True
+    equity[n - 1] = terminal_level
     for t in range(n - 1, 0, -1):
         day_t = days[t]
         factor = 1.0 + r.get(day_t, 0.0)
@@ -991,6 +1025,21 @@ def replay_key_equity(
     _assert_forward_agreement(series, r, fbd, days, pnl_by_day)
     flags: dict[str, Any] = {}
     reasons: set[DegradeReason] = set()
+    if realized_terminal is not None and not from_realized:
+        flags["realized_terminal_day_mismatch"] = True
+        reasons.add(DegradeReason.KEY_INPUTS_MISMATCH)
+    if from_realized and equity[n - 1] != float(anchor):
+        # The live equity enters on the anchor day only. The check above ran on the
+        # writer's own levels (the step into the last day is the writer's identity); this
+        # is the one point the open position and any later mark move are added to.
+        if not (float(anchor) > 0.0):
+            raise NavReconstructionError(
+                "allocator equity replay: non-positive reconstructed equity on 1 of "
+                f"{n} day(s) — a flow dominates prior capital (refusing to fabricate "
+                "a floor)"
+            )
+        series = series.copy()
+        series.iloc[n - 1] = float(anchor)
     if pnl_by_day:
         flags["dropped_day_pnl_days"] = len(pnl_by_day)
     if ignored_pnl_days:
@@ -1075,6 +1124,47 @@ def read_dropped_day_pnl(payload: Mapping[str, Any]) -> dict[str, float]:
             raise ValueError("key_inputs dropped_day_pnl: duplicate day")
         out[day] = amount
     return out
+
+
+def realized_terminal_payload(day: Any, usd: float) -> dict[str, Any]:
+    """The ``key_inputs`` fields for CR-01: the level the venue writer rolled its NAV from
+    (``realized_terminal_usd``) and the NAV day it sits on (``realized_terminal_day``).
+
+    ``usd`` is the writer's REALIZED terminal: MT5 ``anchor - upnl`` (the balance),
+    Deribit ``terminal_native - upnl_native`` per currency at the last ledger day's mark.
+    It differs from ``anchor_usd`` (the live equity) by the open uPnL and, on Deribit, by
+    any coin mark move since that day. A non-finite value is refused: JSONB cannot hold
+    it, and a poison value would fail the upsert and loop the derive."""
+    amount = float(usd)
+    if not math.isfinite(amount):
+        raise NavReconstructionError(
+            "key_inputs realized terminal: non-finite amount — refusing to persist it"
+        )
+    return {
+        "realized_terminal_usd": amount,
+        "realized_terminal_day": pd.Timestamp(day).date().isoformat(),
+    }
+
+
+def read_realized_terminal(payload: Mapping[str, Any]) -> tuple[str, float] | None:
+    """``(ISO day, USD)`` from a ``key_inputs`` payload; ``None`` when the row predates
+    CR-01 (both fields absent or null), which the replay then composes from the live
+    anchor exactly as before. The two fields travel together: one without the other, a
+    boolean or non-numeric amount, a non-finite amount or a bad day raises
+    ``ValueError``/``TypeError`` like the neighbouring parses, so the job disposes it as a
+    corrupt input instead of reading a guess."""
+    raw_day = payload.get("realized_terminal_day")
+    raw_usd = payload.get("realized_terminal_usd")
+    if raw_day is None and raw_usd is None:
+        return None
+    if raw_day is None or raw_usd is None:
+        raise ValueError("key_inputs realized terminal: day and amount must come together")
+    if isinstance(raw_usd, bool) or not isinstance(raw_usd, (int, float)):
+        raise TypeError("key_inputs realized terminal: non-numeric amount")
+    amount = float(raw_usd)
+    if not math.isfinite(amount):
+        raise ValueError("key_inputs realized terminal: non-finite amount")
+    return date.fromisoformat(str(raw_day)).isoformat(), amount
 
 
 def stitch_dropped_day_pnl(
