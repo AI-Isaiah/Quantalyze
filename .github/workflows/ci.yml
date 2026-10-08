@@ -4180,11 +4180,15 @@ jobs:
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
       - name: Install psql client
+        timeout-minutes: 8
         # Two consumers now: `run.sh up` loads the baseline through psql, and the
         # capability probe and the corpus loop below connect with it.
+        # Phase 164.9.8 APTHANG: apt goes through the wall-clock-bounded wrapper,
+        # which skips apt entirely when the runner image already ships psql.
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          set -euo pipefail
+          bash scripts/ci-apt.sh install --provides psql postgresql-client
+          psql --version
       - name: Preflight - reject psql meta-commands in test files (Finding 6)
         # Reject any test file containing psql meta-commands that could
         # exfiltrate secrets from the runner. Specifically:
