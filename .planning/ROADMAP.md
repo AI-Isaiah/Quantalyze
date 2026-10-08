@@ -143,6 +143,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.6: SUBSETMAIN — a push to main runs only its PR's changed SQL gates; a nightly job runs the full corpus and enforces the floors** (INSERTED 2026-10-03) — planned 2026-10-03, 5 plans in 4 waves (completed 2026-10-03)
 - [x] **Phase 164.9.6.1: SUBSETSHARD — a FULL sql-mutation run fits well under its 20-minute cap again, and a stale-baseline-drift red no longer forces one** (INSERTED 2026-10-03) — verification: passed (completed 2026-10-03, PR #941, v0.123.0.0; SS-1 measured 5m01s on main run 37151757248, closed in #942)
 - [ ] **Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables** (INSERTED 2026-10-03) — not yet planned
+- [ ] **Phase 164.9.7.1: TRIGGERREVOKE — anon and authenticated no longer hold TRIGGER or MAINTAIN on public tables** (INSERTED 2026-10-08) — not yet planned (founder D-06, 164.9.7)
 - [x] **~~Phase 165~~: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"), as 165 ACTIONSDEPS: #643 (superseded by #916), #627, #626 and #612 landed green; deviations in `165-VERIFICATION.md`.
 - [x] **~~Phase 165.1~~: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"): the maintenance landings meet the criteria, C1 in substance and not to the letter (the pandas fix rode inside #898); deviations in `165.1-VERIFICATION.md`.
 - [x] **~~Phase 165.2~~: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -3720,6 +3721,17 @@ Plans:
 Plans:
 - [ ] TBD (run /gsd-plan-phase 164.9.7 to break down)
 
+### Phase 164.9.7.1: TRIGGERREVOKE — anon and authenticated no longer hold TRIGGER or MAINTAIN on public tables (INSERTED)
+
+**Goal:** Close the rest of the RLS-exempt privilege class that 164.9.7 opened for TRUNCATE. A client role holding TRIGGER on a table can attach code that a BYPASSRLS writer then runs (RLS audit HIGH, 164.9.7 review), and PG17 MAINTAIN lets a role LOCK and VACUUM FULL a table, which is an outage. Revoke both from `anon` and `authenticated` on every `public` relation and in the `postgres` default privileges, with a catalogue self-check and a gate, the same shape as 164.9.7.
+**Booked:** founder D-06 (164.9.7 CONTEXT, 2026-10-08): its own phase, not folded into the TRUNCATE migration. TRUNCATE on `storage.*` and `net.*` stays an accepted platform residual. Re-measure the per-role holder counts on PROD at plan time (marker query first).
+**Requirements**: TBD
+**Depends on:** Phase 164.9.7
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.9.7.1 to break down)
+
 ### Phase 164.9.6: SUBSETMAIN — a push to main runs only the SQL gate files its PR changed, and a nightly scheduled job runs the full mutation corpus and enforces FILES_FLOOR / ARMS_FLOOR; the split is printed on every run. Founder decision 2026-10-03 after sql-mutation crossed its 20-minute ceiling on push 98f04db16 (prior main runs 15.2-16.9 min); the timeout is never raised again. (INSERTED)
 
 **Goal:** A push to `main` mutates only the SQL gate files its PR changed, plus the gates whose `RED-UNDER-SETUP` loads a changed migration. A push that changes no mutation input does not mutate at all. A new nightly workflow runs the full corpus under its own 45-minute cap and is where the floors are enforced. Every run prints what it covered and why. The push job's 20-minute `timeout-minutes` stays a ceiling and is never raised.
@@ -5482,6 +5494,7 @@ kept verbatim.
 | 164.9.6 SUBSETMAIN | 5/5 | Complete    | 2026-10-03 |
 | 164.9.6.1 SUBSETSHARD | 3/3 | Complete | v0.123.0.0 · #941 · verification passed 2026-10-03 |
 | 164.9.7 TRUNCATEREVOKE | 0/? | Queued — security, booked 2026-10-03 | - |
+| 164.9.7.1 TRIGGERREVOKE | 0/? | Queued — security, booked 2026-10-08 (founder D-06) | - |
 | 166. QSTATS-TRUTH | 10/10 | Complete    | 2026-10-04 |
 | 166.1 ENGINEFLOOR | 4/4 | Complete    | 2026-10-04 |
 | 166.1.1 DDSIGN | 0/? | Queued — feature | - |
