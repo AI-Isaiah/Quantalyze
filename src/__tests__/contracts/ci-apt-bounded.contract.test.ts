@@ -29,7 +29,8 @@ import { join } from "node:path";
  *   R1  no workflow step calls apt / apt-get update|install|... at COMMAND
  *       position (sudo, sudo -E, env VAR=x, sudo env, bare VAR=x, timeout
  *       [-s SIG] [-k N] N, nice -N, ionice, chrt and flock [-w N] FILE prefixes
- *       included). An `echo "... apt install ..."` is not a call.
+ *       included, and the commands that follow if / elif / while / until / then /
+ *       else / do). An `echo "... apt install ..."` is not a call.
  *   R2  every step that calls the wrapper has a step `timeout-minutes` of at
  *       most 10, so a hang ends the step with a NAMED failure (D-03).
  *   R3  a Playwright `install --with-deps` / `install-deps` step (apt happens
@@ -201,8 +202,11 @@ const label = (s: Step) => `${s.file} :: job ${s.job || "?"} :: step "${s.name |
 // ---------------------------------------------------------------------------
 
 // Where a command may start: line start, a YAML single-line `run:` / `- run:` key (the
-// command follows it on the same line), after && || ; |, after then/else/do, or after ( { !.
-const CMD_POS = String.raw`(?:^[ \t]*(?:-[ \t]+)?run:[ \t]*["']?|^|&&|\|\||;|\||\bthen\b|\belse\b|\bdo\b|[({!])`;
+// command follows it on the same line), after && || ; |, after the shell keywords that take a
+// command next (then/else/elif/do/if/while/until), or after ( { !. `if`, `elif`, `while` and
+// `until` matter most: `until sudo apt-get update; do sleep 5; done` is the classic hand-written
+// unbounded retry loop (round-3 review CR-R3-01).
+const CMD_POS = String.raw`(?:^[ \t]*(?:-[ \t]+)?run:[ \t]*["']?|^|&&|\|\||;|\||\b(?:then|else|elif|do|if|while|until)\b|[({!])`;
 // What may sit between the command position and `apt`: sudo / env / nohup / time / xargs /
 // nice / stdbuf (optionally path-qualified), `timeout [flags] DURATION` (a flag may take a
 // value: `-s KILL`, `-k 10`), `ionice` / `chrt` (`-c 3`, `-i 0`), `flock [-w N] LOCKFILE`, a
@@ -375,7 +379,9 @@ function r6(wf: Workflows, wrapper: string): string[] {
 function census(wf: Workflows) {
   const steps = parseAll(wf);
   const wrappers = steps.filter(callsWrapper);
-  const aptReaching = steps.filter((s) => callsWrapper(s) || runsPlaywrightDeps(s));
+  // A step holding only a RAW apt call is apt-reaching too (round-3 CR-R3-01): R1 names it, and
+  // the pinned count moves, so a raw call cannot hide from both.
+  const aptReaching = steps.filter((s) => callsWrapper(s) || runsPlaywrightDeps(s) || RAW_APT.test(s.live));
   return { wrappers, aptReaching };
 }
 
@@ -578,6 +584,13 @@ describe("ci-apt-bounded: CALIBRATION - an in-memory mutant flips each rule", ()
     ["flock LOCKFILE", "sudo flock /var/lib/dpkg/lock-frontend apt-get install -y postgresql-client"],
     ["flock -w N LOCKFILE", "sudo flock -w 30 /tmp/apt.lock apt-get update"],
     ["ionice + nice + timeout -s", "sudo ionice -c3 nice -10 timeout -s KILL 600 apt-get update"],
+    // Round-3 review CR-R3-01: apt as the command a shell keyword runs.
+    ["if sudo apt-get", "if sudo apt-get install -y postgresql-client; then :; fi"],
+    ["elif sudo apt-get", "elif sudo apt-get install -y postgresql-client; then :; fi"],
+    ["while sudo apt-get", "while sudo apt-get update; do :; done"],
+    ["until sudo apt-get (retry loop)", "until sudo apt-get update; do sleep 5; done"],
+    ["until timeout N apt-get", "until sudo timeout 60 apt-get update; do sleep 5; done"],
+    ["if bare apt", "if apt install -y postgresql-client; then :; fi"],
   ];
 
   it.each(MISSED_FORMS)("R1d: %s is flagged in a run: | block, a one-line run: key and a - run: step", (_n, form) => {
@@ -607,6 +620,12 @@ describe("ci-apt-bounded: CALIBRATION - an in-memory mutant flips each rule", ()
       "sudo timeout -s KILL 60 pg_isready",
       "sudo ionice -c3 nice -10 tar czf out.tgz dir",
       "sudo flock -w 30 /tmp/apt.lock true",
+      // Round-3 CR-R3-01: the new keyword positions stay quiet for a command that is not apt.
+      "if command -v psql; then echo ok; fi",
+      "until pg_isready; do sleep 1; done",
+      "while read l; do echo $l; done",
+      "if apt-cache policy postgresql-client; then :; fi",
+      "if dpkg -s postgresql-client; then :; fi",
     ]) {
       const named = insertStepAfterFirst(WF, MUTEX_PROBE, `      - name: Fine\n        run: ${ok}`);
       expect(r1(named), `false positive: ${ok}`).toEqual([]);
@@ -791,6 +810,14 @@ describe("ci-apt-bounded: CALIBRATION - an in-memory mutant flips each rule", ()
     expect(r1(m)).toEqual([]);
     expect(r2(m)).toEqual([]);
     expect(r6(m, WRAPPER)).toEqual([]);
+  });
+
+  it("census-raw: a step holding only an `until sudo apt-get update` loop is flagged by R1 AND moves the census (CR-R3-01)", () => {
+    const m = insertStepAfterFirst(WF, MUTEX_PROBE, "      - name: Mutant\n        run: until sudo apt-get update; do sleep 5; done");
+    expect(r1(m).join("\n")).toContain("Mutant");
+    expect(census(m).aptReaching.length).toBe(EXPECTED_APT_REACHING_STEPS + 1);
+    expect(censusViolations(m).join("\n")).toContain("19 apt-reaching steps");
+    expect(census(m).wrappers.length).toBe(EXPECTED_WRAPPER_CALLERS);
   });
 
   it("census-up: a duplicated Playwright step block raises the count to 19", () => {
