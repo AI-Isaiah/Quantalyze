@@ -3129,6 +3129,8 @@ Plans:
 - [ ] 164.6.6.2-12-PLAN.md — post-deploy: MM-2x re-derived via Sync and read live on PROD; D-06 canary (wave 4)
 - [ ] 164.6.6.2-13-PLAN.md — Python twin of the conversion on the shared oracle fixture; portfolio analytics, simulator and match engine convert BTC before weighting (D-23) (wave 2)
 
+
+⭐ **Founder 2026-10-08 (D-24, CONTEXT):** the BTC dust floor drops from 0.001 to 1e-7 BTC ("it should measure more"), shipped as a gap-closure fix after plan 12's read.
 ### Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend (INSERTED)
 
 **Goal:** Every Python blend reads daily returns, not the stored wealth curve. `strategy_analytics.returns_series` holds the cumprod wealth curve (`(1 + r).cumprod()`, `services/metrics.py`), measured on PROD 2026-10-07 across 32 rows: first value about 1.0, last values averaging about 209k. `routers/simulator.py`, `routers/match.py` and `routers/portfolio.py` (analytics, optimizer, bridge) and the 164.6.6.2 Python BTC twin (`services/native_to_usd.py`) read it as daily returns, so a wealth of 1.30 is weighted as a +130% day. The TypeScript side already converts through `resolveDailyReturnSeries`.

@@ -1801,6 +1801,22 @@ function KpiStrip() {
           ⚠ Track record under 90 days — annualized metrics are flagged as computed on an insufficient window.
         </p>
       )}
+      {/* Phase 164.6.6.2 (D-25, founder 2026-10-08): server-truth small-base flag from
+          data_quality_flags.small_base_measured. A measured day whose starting balance
+          was under the unit's material equity keeps its exact return and can be
+          extreme; this says so. Informational (the day is kept, the chain is not
+          broken). Reuses the identical amber caveat pattern above, no new component. */}
+      {payload.dataQuality?.smallBaseMeasured === true && (
+        <p
+          className="px-3 sm:px-4 py-2 text-micro font-mono"
+          style={{
+            borderTop: "1px solid var(--color-border)",
+            color: "var(--color-warning, #B45309)",
+          }}
+        >
+          ⚠ Some days were measured on a very small balance, so their returns can be extreme.
+        </p>
+      )}
       {coverageCaveat && (
         <p
           className="px-3 sm:px-4 py-2 text-micro font-mono"
