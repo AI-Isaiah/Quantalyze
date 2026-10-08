@@ -1073,7 +1073,22 @@
 // arm bit its own arm first.`, exit 0. Per-file line:
 // `test_for_quants_leads_contact_dedupe.sql: sections 4 / judged 4 / annotated 4 /
 // waived 0 / biting 4`. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 59;
+//
+// RAISED 59 -> 60 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): the new gate
+// supabase/tests/test_sync_status_analytics_scope.sql (thirteen annotated arms: S1..S6,
+// C1..C4, G1..G3) took the corpus from 59 to 60 annotated files. MEASURED by ONE
+// full lane run of `node scripts/mutation-runner/run.mjs` on the tree merged with
+// origin/main (239106dc5), no file edited during it, constants still at 59 / 578
+// (the floors read the measurement, never the other way round): `scope: FULL 60/60
+// annotated files`, `lane-concurrency: 4`, `coverage: files 60/87`, `arms:
+// 591/591/0`, `biting: 591`, `lane-invocations: 591 ... plus 60 baseline / 60
+// restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`,
+// `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean
+// 3.1s over 591 arm run(s)`, `No defects. Every annotated arm bit its own arm
+// first.`, exit 0. Per-file line: `test_sync_status_analytics_scope.sql: sections
+// 13 / judged 13 / annotated 13 / waived 0 / biting 13`. Both directions are
+// recorded under ARMS_FLOOR below. WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 60;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2773,7 +2788,76 @@ export const FILES_FLOOR = 59;
 // file raises for to carry a twin, and section 4 (behavioural) raises. Each arm
 // was also driven by hand on the lane and read RED on its own identity first.
 // WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 578;
+//
+// RAISED 578 -> 591 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): THIRTEEN arms
+// from test_sync_status_analytics_scope.sql, the gate over the status bridge's
+// side-kind exclusion (S1..S6), its process_key_long supersession (C1..C4) and
+// the unchanged per-kind rule (G1..G3), measured by the same single full run
+// recorded under FILES_FLOOR above: `arms: 591/591/0`, `biting: 591`. The census
+// pins moved in the same commit: src/__tests__/mutation-runner-floors.test.ts
+// (the stale-low ratchet, `totalAnchored`, the synthetic run logs),
+// mutation-annotation-parser.test.ts (`armsSeen` 591, `stepsSeen` 700, needles
+// 700, `filesTotal` 87, `filesAnnotated` 60), lint-sql-gates.test.ts (`scanned
+// 87 file`) and gate-family-meta.test.ts (the two threshold-site strings).
+// Stale-low direction OBSERVED at 59 / 578: mutation-runner-floors.test.ts FAILS
+// with `RATCHET STALE: 60 of 87 gate files are now annotated but FILES_FLOOR is
+// still 59` and `The corpus declares 591 twin(s) of which 0 are waivers, so a
+// green run bites 591. ARMS_FLOOR is 578`. Too-high direction OBSERVED at
+// ARMS_FLOOR 592 (the observation is recorded in the plan 03 SUMMARY): a full
+// lane run exits 1 naming `ARMS_FLOOR regression: 591 biting arm(s) < floor
+// 592`. The separation edit was restored from a byte backup and proved with cmp
+// (exit 0). WAIVED_CEILING stays 0 - no waiver was added.
+// RAISED 591 -> 593 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, founder D-09): TWO arms,
+// D9 and D10, added to the ALREADY-ANNOTATED test_sync_status_analytics_scope.sql (so
+// FILES_FLOOR stays 60 and the denominator stays 87). D9: a failed side-kind job never
+// stamps computed_at or blanks the sentence of a real earlier failure. D10 (guard): a
+// genuine compute created after a lingering failed side job still does. MEASURED by ONE
+// full lane run of `node scripts/mutation-runner/run.mjs`, no file edited during it,
+// constants still at 60 / 591 (the floors read the measurement, never the other way
+// round): `scope: FULL 60/60 annotated files`, `coverage: files 60/87`, `arms:
+// 593/593/0`, `biting: 593`, `lane-invocations: 593 ... plus 60 baseline / 60 restore
+// leg(s)` (the two tallies AGREE), `unreachable: 27`, `lane-blocked: 0`, `per-arm lane
+// time: mean 1.9s over 593 arm run(s)`, `No defects.`, exit 0. Per-file line:
+// `test_sync_status_analytics_scope.sql: sections 15 / judged 15 / annotated 15 /
+// waived 0 / biting 15`. The census pins moved in the same commit:
+// mutation-runner-floors.test.ts (`totalAnchored` and the synthetic run logs),
+// mutation-annotation-parser.test.ts (`armsSeen`, `stepsSeen`, needles),
+// drift-check-scripts.test.ts and ci.yml (ARMS_FLOOR=271 over the sentinel sum) and
+// gate-family-meta.test.ts (the threshold-site string). WAIVED_CEILING stays 0.
+// RAISED 593 -> 597 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, round 3 of the founder D-09
+// rework): FOUR arms, D11 to D14, added to the ALREADY-ANNOTATED
+// test_sync_status_analytics_scope.sql (so FILES_FLOOR stays 60 and the denominator stays
+// 87). D11: a TRANSIENT side failure (a sync_funding timeout) holds computed_at, the
+// sentence, the markers and the status through every failed_retry hop. D12 (guard): a
+// counting success after a side job created later failed fast still advances computed_at
+// (the hold is keyed on the trigger, not on recency). D13: a failed row that carries a
+// sentence stays failed. D14: no strategy_analytics row is manufactured for a side-only
+// failure. MEASURED by ONE full lane run of `node scripts/mutation-runner/run.mjs`, no
+// file edited during it, constants still at 60 / 593 (the floors read the measurement,
+// never the other way round): `scope: FULL 60/60 annotated files`, `coverage: files
+// 60/87`, `arms: 597/597/0`, `biting: 597`, `lane-invocations: 597 ... plus 60 baseline /
+// 60 restore leg(s)` (the two tallies AGREE), `unreachable: 27`, `lane-blocked: 0`,
+// `per-arm lane time: mean 1.6s over 597 arm run(s)`, `No defects.` Per-file line:
+// `test_sync_status_analytics_scope.sql: sections 19 / judged 19 / annotated 19 / waived 0
+// / biting 19`. The census pins moved in the same commit: mutation-runner-floors.test.ts,
+// mutation-annotation-parser.test.ts, drift-check-scripts.test.ts, ci.yml (ARMS_FLOOR=275
+// over the sentinel sum) and gate-family-meta.test.ts. WAIVED_CEILING stays 0.
+// RAISED 597 -> 599 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, review fix round 4,
+// founder D-10): TWO arms, D15 and D16, added to the ALREADY-ANNOTATED
+// test_sync_status_analytics_scope.sql (so FILES_FLOOR stays 60 and the denominator
+// stays 87). D15 (CR-R3-01): a genuine recompute on a warned row that finished done while
+// a side job was queued is stamped when that side job then fails. D16 (WR-R3-01): a side
+// job DEFERRED back to pending, named as the trigger by the Python DEFERRED path, leaves
+// the row alone, and so does its later failure. MEASURED by ONE full lane run of
+// `node scripts/mutation-runner/run.mjs`, no file edited during it (a first run, during
+// which ci.yml was edited, reported a dirty-checkout defect and was discarded), constants
+// still at 60 / 597: `scope: FULL 60/60 annotated files`, `coverage: files 60/87`,
+// `arms: 599/599/0`, `biting: 599`, `lane-invocations: 599 ... plus 60 baseline / 60
+// restore leg(s)` (the two tallies AGREE), `unreachable: 27`, `lane-blocked: 0`,
+// `per-arm lane time: mean 1.7s over 599 arm run(s)`, `No defects.` Per-file line:
+// `test_sync_status_analytics_scope.sql: sections 21 / judged 21 / annotated 21 / waived 0
+// / biting 21`. The census pins moved in the same commit. WAIVED_CEILING stays 0.
+export const ARMS_FLOOR = 599;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

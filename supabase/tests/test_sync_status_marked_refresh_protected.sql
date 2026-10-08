@@ -248,7 +248,7 @@ BEGIN
   --            hazard, MEASURED across this phase).
   -- RED-UNDER-M: {"arm":"0a","apply":[{"kind":"edit","file":"supabase/migrations/20260826120000_computation_error_curated_copy.sql","find":"PROTECTED MARKED REFRESH (mig 20260825150000, Phase 161.1 CR-01)","replace":"PROTECTED MARKED REFRESH (Phase 161.1 CR-01)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260826120000_computation_error_curated_copy.sql","find":"+ 20260802120000 + 20260825150000 + 20260826120000.';","replace":"+ 20260802120000 + 20260826120000.';","occurrences":1}]}
   IF COALESCE(
-       obj_description('sync_strategy_analytics_status(uuid)'::regprocedure, 'pg_proc'),
+       obj_description((SELECT p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'sync_strategy_analytics_status'), 'pg_proc'),
        ''
      ) !~ '20260825150000' THEN
     RAISE EXCEPTION 'TEST FAILED (0a): public.sync_strategy_analytics_status(uuid) does not carry the migration 20260825150000 comment on this database, so NONE of arms A-K ran. This is a FAILURE, not a skip. TWO causes fit and this assertion cannot distinguish them, so check both: (i) the TEST project has not received migration 20260825150000_sync_status_protect_marked_refresh.sql — apply it and re-run; expect this exactly once, on the PR that introduces or re-applies it, because NO workflow applies migrations to TEST; (ii) the function was REDEFINED by a later migration that dropped this comment, which silently reverts the CR-01 protection and un-publishes a funded account on its next failed maintenance refresh. ⛔ Do NOT "fix" this by restoring the old RAISE NOTICE/RETURN skip, and do NOT reword it to any phrasing CI''s SKIP grep cannot see: that is what made this file assert nothing while reading green.';
@@ -262,7 +262,7 @@ BEGIN
   -- migration is missing". Same shape as the gate above, same COMMENT key, and
   -- the same rule: absence is a FAILURE that names the cause, never a skip.
   IF COALESCE(
-       obj_description('sync_strategy_analytics_status(uuid)'::regprocedure, 'pg_proc'),
+       obj_description((SELECT p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'sync_strategy_analytics_status'), 'pg_proc'),
        ''
      ) !~ '20260826120000' THEN
     RAISE EXCEPTION 'TEST FAILED (0b): public.sync_strategy_analytics_status(uuid) does not carry the migration 20260826120000 comment on this database, so arms A and I would report a copy mismatch for the wrong reason. TWO causes fit: (i) the TEST project has not received 20260826120000_computation_error_curated_copy.sql — apply it and re-run; NO workflow applies migrations to TEST; (ii) the function was REDEFINED by a later migration that dropped this comment, which silently reverts HONEST-01 and puts raw Python exception strings back in front of users in the wizard failure envelope.';
@@ -840,13 +840,13 @@ BEGIN
   -- held". (has_function_privilege does raise 42883 rather than returning FALSE
   -- — MEASURED on PG 16.13, not assumed — so the arm is non-vacuous either way;
   -- this makes the failure legible instead of merely loud.)
-  IF to_regprocedure('public.sync_strategy_analytics_status(uuid)') IS NULL THEN
+  IF (SELECT p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'sync_strategy_analytics_status') IS NULL THEN
     RAISE EXCEPTION 'ARM K FAILED: public.sync_strategy_analytics_status(uuid) does not exist on this database, so the two ACL assertions below would have reddened on a missing OBJECT rather than on a missing REVOKE. Fix the object first; the ACL verdict for this run is UNKNOWN, not green.';
   END IF;
-  IF has_function_privilege('anon', 'public.sync_strategy_analytics_status(uuid)', 'EXECUTE') THEN
+  IF has_function_privilege('anon', (SELECT p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'sync_strategy_analytics_status'), 'EXECUTE') THEN
     RAISE EXCEPTION 'ARM K FAILED: role anon can EXECUTE sync_strategy_analytics_status. That is a SECURITY DEFINER writer with no ownership check in its body — an unauthenticated caller could drive any tenant''s strategy_analytics publish state by strategy_id. The REVOKE in migration 20260825150000 is the only thing bounding it.';
   END IF;
-  IF has_function_privilege('authenticated', 'public.sync_strategy_analytics_status(uuid)', 'EXECUTE') THEN
+  IF has_function_privilege('authenticated', (SELECT p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'sync_strategy_analytics_status'), 'EXECUTE') THEN
     RAISE EXCEPTION 'ARM K FAILED: role authenticated can EXECUTE sync_strategy_analytics_status. That is a SECURITY DEFINER writer with no ownership check in its body — any signed-in user could drive ANOTHER tenant''s funded account to ''computing'' or ''failed'' by strategy_id. The REVOKE in migration 20260825150000 is the only thing bounding it.';
   END IF;
 

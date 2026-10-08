@@ -224,7 +224,7 @@ BEGIN
   END IF;
 
   -- ----- JOB-01: the bridge body ---------------------------------------
-  v_fn := pg_get_functiondef('sync_strategy_analytics_status(uuid)'::regprocedure);
+  v_fn := pg_get_functiondef((SELECT p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'sync_strategy_analytics_status'));
 
   IF v_fn !~* 'computing_started_at\s*=\s*CASE' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-01): branch (a) does not maintain computing_started_at with a conditional CASE. The bridge is PERFORMed in-RPC on EVERY job transition, so the stamp must be conditional on the RESOLVED status.';

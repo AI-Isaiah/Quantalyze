@@ -12161,10 +12161,17 @@ async def dispatch(job: dict[str, Any]) -> DispatchResult:
     #
     # DEFERRED is the ONLY outcome with no post-mark bridge (main_worker runs no
     # mark RPC on defer), so it alone still needs a dispatch-side status refresh.
+    # It passes the deferred job as the trigger, like the mark RPCs do: a
+    # deferred side-kind job (sync_funding, poll_positions, reconcile_strategy
+    # all run the exchange circuit breaker) computed nothing, and without the id
+    # the bridge's in-flight branch stamped computed_at = now() over stale
+    # analytics (review round 3, WR-R3-01; founder D-09/D-10).
     strategy_id = job.get("strategy_id")
     if strategy_id and result.outcome == DispatchOutcome.DEFERRED:
         try:
-            await sync_strategy_analytics_status(strategy_id)
+            await sync_strategy_analytics_status(
+                strategy_id, trigger_job_id=job.get("id")
+            )
         except Exception as exc:  # noqa: BLE001
             # The status bridge is best-effort — a failure here does NOT
             # change the job's outcome. Log and move on.

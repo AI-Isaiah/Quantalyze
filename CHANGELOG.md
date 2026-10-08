@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.129.1.0] - 2026-10-08 — STATUSBRIDGE: a strategy's analytics status reads `failed` only for an analytics failure
+
+Phase 164.6.6.3.4. A PROD investigation found strategies whose analytics status read `failed` although every derive and compute job after the failure had finished `done`:
+- AI-FX-35 was pinned by a `process_key_long` resync that failed on an MT5 password rotation and was never re-run.
+- Eclipse was pinned by twelve transient `sync_funding` timeouts.
+
+The bridge counted every unsuperseded `failed_final` job of any kind. Migration `20261009120000` re-bases `sync_strategy_analytics_status` and both mark RPCs. ⚠️ PROD applies it automatically after `apply-test`.
+
+### Fixed
+- **Side kinds never pin the status (D-05).** `sync_funding`, `poll_positions`, `reconcile_strategy` and `compute_intro_snapshot` produce no analytics and are spelled once as `v_side_kinds`. Their failures no longer enter the analytics live-failure set. Any kind not on the list still counts, including future ones. They stay visible on the key card, the job surface and Sentry (D-07).
+- **A failed `process_key_long` is superseded by its follow-on chain (D-06).** It is cleared only when both `derive_broker_dailies` and `compute_analytics_from_csv` for the same strategy finished `done` strictly after it. A later compute alone does not clear it. For every other kind the per-kind rule is unchanged (D-04).
+- **A failing side job never makes stale analytics look fresh (D-09, founder).** The bridge now takes `p_trigger_job_id` (the mark RPCs pass the job they just terminalised). When only a side job's failure caused the call, the bridge leaves `computed_at` and a `computation_error` it did not write untouched, including through transient side retries.
+- **A genuine recompute is not held back (D-10, round 4).** The D-09 hold stands only while no counting job reached `done` after the row's `computed_at`.
+- **The DEFERRED path names its job (round 4).** `analytics_status.sync_strategy_analytics_status` forwards `trigger_job_id`, and `dispatch` passes it on DEFERRED. A side job deferred by the exchange circuit breaker therefore leaves the row alone instead of stamping it.
+
+### Tests
+- New gate `supabase/tests/test_sync_status_analytics_scope.sql` with 21 arms and twins: S1-S6 (side kinds), C1-C4 (supersession), G1-G3 (guards), D9-D16 (D-09/D-10 holds and releases).
+- Five existing gates and the lane probe no longer hardcode the one-argument signature.
+- `status-bridge-side-kinds-drift.test.ts` pins the side-kind classification against the job kinds.
+- Census moved to the values a full runner run measured: `ARMS_FLOOR` 599 and the `ci.yml` sentinel. Read them by symbol from `scripts/mutation-floors.mjs`, not from this entry.
+- Manual rollback `down/20261009120000-rollback.sql`. It was measured on a throwaway lane: before-migration and after-rollback function definitions, ACLs, owner and config dumped byte-identical.
+
+### Notes
+- Four review rounds ran: the 3-round cap plus one founder-authorised round (D-10). Migration-reviewer and rls-policy-auditor are clean at round 4. Security is SECURED (16 closed, 5 deferred to the post-deploy plan 04). Verification is `human_needed`, for plan 04's PROD re-sync only.
+- **Known gaps, recorded rather than fixed:**
+  - WR-R4-01 (MEDIUM): no arm pins the equal boundary of the D-09 release (`updated_at > computed_at`). Only a text anchor catches a `>=`.
+  - A successful side job whose sibling side job is still in flight still stamps stale analytics through branch (a). This is routed to Phase 166.5 COMPUTEDATSTAMP, which owns the successful-side-job stamp.
+- ⚠️ **Deploy order.** The Python DEFERRED call now sends `p_trigger_job_id`. If Railway deploys before the PROD apply, or after a rollback, that one best-effort status refresh fails with a logged warning until the migration is in place.
+- Post-deploy: plan 04 re-syncs the PROD rows that read `failed` and have jobs, before and after recorded (D-08).
+
 ## [0.129.0.0] - 2026-10-08 — WIZARDCODES: the MT5 wizard names the real cause instead of "the fault is in our pipeline"
 
 Phase 164.6.6.3.2. Three MT5 situations that the wizard used to report as a network fault or a pipeline fault now get their own wire code, their own copy, and their own tests. The 2026-10-03 PROD UAT showed all three.

@@ -1061,8 +1061,15 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): `armsSeen` 555 -> 556 and `stepsSeen` 614 -> 615: arm R3 in test_enqueue_race_loss_40001.sql, whose twin carries one `edit` step with a `find`. MEASURED: this file's run read `expected 556 to be 555`, then `expected 615 to be 614`.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): `armsSeen` 556 -> 574 and `stepsSeen` 615 -> 668: the TWO NEW gates test_sync_status_bridge_residues.sql (16 arms, 49 file steps) and test_sync_status_bridge_lock.sql (2 arms, 4 file steps). MEASURED: this file's run read `expected 574 to be 556` and the needle census below read `expected 668 to be 615`.
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): `armsSeen` 574 -> 578: the NEW gate test_for_quants_leads_contact_dedupe.sql (4 arms, every twin a single `sql` step, so `stepsSeen` is read below).
-    expect(armsSeen).toBe(578);
-    expect(stepsSeen).toBe(668);
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): `armsSeen` 578 -> 591 and `stepsSeen` 668 -> 700: the NEW gate test_sync_status_analytics_scope.sql (13 arms, 32 file steps). MEASURED: this file's run read `expected 591 to be 578`, then `expected 700 to be 668`.
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, founder D-09): `armsSeen` 591 -> 593: arms D9 and D10 in the ALREADY-ANNOTATED test_sync_status_analytics_scope.sql, whose twins each carry one `edit` step (`stepsSeen` is read below).
+    // ⭐ CURRENCY 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, round 3): `armsSeen` 593 -> 597: arms D11 to D14 in the ALREADY-ANNOTATED test_sync_status_analytics_scope.sql.
+    // ⭐ CURRENCY 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, review fix round 4, founder D-10): `armsSeen` 597 -> 599: arms D15 and D16 in the ALREADY-ANNOTATED test_sync_status_analytics_scope.sql. MEASURED: `expected 599 to be 597`.
+    expect(armsSeen).toBe(599);
+    // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
+    // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
+    // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
+    expect(stepsSeen).toBe(716);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1979,7 +1986,11 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 611 -> 614, moving WITH `stepsSeen` (the 3 file steps of the enqueue race-loss gate). MEASURED: `expected 614 to be 611`.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 614 -> 615, moving WITH `stepsSeen` (R3's one file step). MEASURED: `expected 615 to be 614`.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 615 -> 668, moving WITH `stepsSeen` (the 49 + 4 file steps of the two bridge gates). MEASURED: `expected 668 to be 615`.
-    expect(needles.length).toBe(668);
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 668 -> 700, moving WITH `stepsSeen` (the new gate's 32 file steps). MEASURED: `expected 700 to be 668`.
+    // ⭐ CURRENCY 2026-10-07 (founder D-09): 700 -> 702, moving WITH `stepsSeen` (D9 and D10, one file step each). MEASURED: `expected 702 to be 700`.
+    // ⭐ CURRENCY 2026-10-08 (round 3): 702 -> 711, moving WITH `stepsSeen`. MEASURED: `expected 711 to be 702`.
+    // ⭐ CURRENCY 2026-10-08 (round 4): 711 -> 716, moving WITH `stepsSeen`. MEASURED: `expected 716 to be 711`.
+    expect(needles.length).toBe(716);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2562,7 +2573,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 82 -> 83, the enqueue race-loss gate file. MEASURED: this file's run read `expected 83 to be 82`, and the full lane run printed `coverage: files 56/83` (annotated 56 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 83).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 83 -> 85, the two bridge gate files. MEASURED: this file's run read `expected 85 to be 83`, and the full lane run printed `coverage: files 58/85` (annotated 58 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 85).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 85 -> 86, the contact-dedupe gate file.
-    expect(corpus.filesTotal).toBe(86);
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 86 -> 87, the side-kind scope gate file. MEASURED: this file's run read `expected 87 to be 86`, and the full lane run printed `coverage: files 60/87`.
+    expect(corpus.filesTotal).toBe(87);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2625,7 +2637,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 55 -> 56, with the denominator and the by-name list below (test_enqueue_race_loss_40001.sql).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 56 -> 58, with the denominator and the by-name list below (test_sync_status_bridge_lock.sql, test_sync_status_bridge_residues.sql).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 58 -> 59 (test_for_quants_leads_contact_dedupe.sql), with the denominator and the by-name list below.
-    expect(corpus.filesAnnotated).toBe(59);
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 59 -> 60 (test_sync_status_analytics_scope.sql), with the denominator and the by-name list below.
+    expect(corpus.filesAnnotated).toBe(60);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2721,6 +2734,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       // gate that PERFORMS a compute_jobs transition and reads the curated
       // computation_error sentence back (criterion 1). Eight sections, eight
       // twins, all eight biting on the first proof run.
+      "test_sync_status_analytics_scope.sql",
       "test_sync_status_bridge_lock.sql",
       "test_sync_status_bridge_residues.sql",
       "test_sync_status_curated_sentence_survives.sql",
@@ -3129,7 +3143,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 82 -> 83, the enqueue race-loss gate file. MEASURED: this file's run read `expected 83 to be 82`, and the full lane run printed `coverage: files 56/83` (annotated 56 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 83).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 83 -> 85, the two bridge gate files. MEASURED: this file's run read `expected 85 to be 83`, and the full lane run printed `coverage: files 58/85` (annotated 58 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 85).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 85 -> 86, the contact-dedupe gate file.
-    expect(corpus.filesTotal).toBe(86);
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 86 -> 87, the side-kind scope gate file. MEASURED: this file's run read `expected 87 to be 86`, and the full lane run printed `coverage: files 60/87`.
+    expect(corpus.filesTotal).toBe(87);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3148,7 +3163,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 55 -> 56 (test_enqueue_race_loss_40001.sql).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 56 -> 58 (test_sync_status_bridge_lock.sql, test_sync_status_bridge_residues.sql).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 58 -> 59 (test_for_quants_leads_contact_dedupe.sql).
-    expect(corpus.annotatedFiles).toHaveLength(59);
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 59 -> 60 (test_sync_status_analytics_scope.sql).
+    expect(corpus.annotatedFiles).toHaveLength(60);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {
