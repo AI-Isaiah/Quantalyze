@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.128.0.1] - 2026-10-08 — ROADMAP repair, a lint rule that keeps every phase closable, and the 2026-10-08 verification records
+
+A phase could pass verification and never be marked done: 25 of 145 phases in `.planning/ROADMAP.md`
+had no checklist bullet and 26 had no Progress-table row, and `gsd-tools phase complete` ticks only
+those two, so it silently did nothing for them. This release repairs the drift, adds a lint rule
+that fails on it, and records the human-verification runs of 2026-10-08.
+
+### Fixed
+- **ROADMAP format drift** (`87613ed7b`). Every `### Phase N:` heading now has a checklist bullet the
+  tooling matches and a Progress-table row (145 headings, 145 bullets, 142 rows; the three retired
+  165-family phases carry a struck-through bullet and no row, by design). Three stale rows corrected
+  (164.6.6.1, 164.6.6.2, 164.6.6.3 read "Queued"/"Waiting" though they shipped).
+
+### Added
+- **Lint rule 6 ROADMAP-STRUCTURE** in `scripts/check-planning-hygiene.ts` (`1da5f6892`), run by
+  `npm run lint` in the always-on `frontend-lint` job. It fails when (a) a phase heading has no
+  bullet the tooling would match, (b) a heading has no Progress-table row, or (c) a phase whose
+  VERIFICATION says `passed` has an unticked bullet. Shown RED on the pre-repair ROADMAP (51
+  violations) and on a neutered 6c; 14 new tests in `check-planning-hygiene.test.ts`.
+
+### Changed
+- **164.6.6.3.5 DOMAINONE closed** (`0f28ee0b4`, `1435dd9dc`, `09e3f64e2`, `5da0cbd11`, `c09e95ae3`,
+  `bac93aef3`): plan 13's live records (LIVE-IMPACT, the production site URL moved to the canonical
+  host, the unread badge measured live) land on main, verification `passed`, phase complete.
+- **164.5.3 MT5CREDS closed** (`66f974cc1`): the visual QA item re-read in the production session on
+  2026-10-08 passed; the disconnected-section and NULL em-dash shapes, absent on PROD, stay covered by
+  the render tests.
+- **2026-10-08 runs recorded, phases still `human_needed`** (`1a52cf1f0`): 164.6.6.3.1 (key card,
+  eyebrow, focus PASS; phone-width check pending on the founder's phone), 164.6.6.3
+  (`MT5_KNOWN_SERVERS` present, names-only; SC1/SC4 need the founder's credentials and VNC),
+  164.6.6.2 (MM-2x reads BTC, +76.3% cumulative in BTC; share card, tear sheet and AUM serve only a
+  published strategy, so their live check waits for publication), 164.6.6.1 (two founder decisions:
+  scrub scope kept as shipped; the relaunch-debt lease wait booked as `MT5-RELAUNCH-DEBT-LEASE-WAIT-01`).
+
+### Notes
+- The `gsd-tools phase complete` runs were each followed by reverting their collateral (stray blank
+  lines, unrelated `state.json` flips, a `STATE.md` current-phase move); `state.json` was left as it
+  was on main.
+- Founder decision 2026-10-08: supported phone widths are 360/375/390 px; 320 px is not a target
+  (recorded as D-26 on the BTCNATIVE branch, which ships separately).
+
 ## [0.128.0.0] - 2026-10-07 — WEALTHRETURNS: every Python blend reads daily returns, not the stored wealth curve
 
 Phase 164.6.6.2.2 closes the pre-existing defect the 164.6.6.2 review recorded as CR-01.
