@@ -111,6 +111,16 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verified 2026-10-06 (completed 2026-10-06; was `human_needed` 2026-09-26 → 2026-10-06)
 - [x] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — verified 2026-10-04 (completed 2026-10-04)
 - [ ] **Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out** (INSERTED) — not yet planned (waits for the founder's live scrub spike)
+- [ ] **Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series** (INSERTED) — shipped v0.126.0.0 (#969, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
+- [ ] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — not yet planned (booked 2026-10-07 by 164.6.6.2 D-15)
+- [ ] **Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend** (INSERTED) — shipped v0.128.0.0 (#973, merged 2026-10-08); verification: human_needed (post-deploy D-03 reading only)
+- [ ] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
+- [ ] **Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8)** (INSERTED) — shipped v0.125.2.1 (#968, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
+- [ ] **Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy)** (INSERTED) — not yet planned (164.6.6.3 split B, founder 2026-10-06)
+- [ ] **Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b)** (INSERTED) — not yet planned (164.6.6.3 split C, founder 2026-10-06)
+- [ ] **Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status** (INSERTED) — not yet planned (booked 2026-10-06, founder)
+- [ ] **Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults** (INSERTED) — verification: passed (completed 2026-10-08, PR #971, v0.127.0.0)
+- [ ] **Phase 164.6.6.3.6: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed** (INSERTED) — not yet planned (booked 2026-10-06, founder)
 - [x] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
 - [ ] **Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button** (INSERTED) — not yet verified
 - [x] **Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here** (INSERTED)
@@ -143,11 +153,14 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — complete with routed residuals 2026-10-01 (halted 2026-09-27, resumed after 166.4); verification pending
 - [ ] **Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds** (INSERTED) — not planned; inserted 2026-10-01 (founder); 166.3's R5 recompute waits on it
 - [x] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
+- [ ] **Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly** (INSERTED) — not yet planned (data integrity)
 - [ ] **Phase 166.5: COMPUTEDATSTAMP — the analytics runner stamps computed_at on a real finish** (INSERTED 2026-10-03) — not yet planned
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [x] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
 - [ ] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — not yet verified
+- [ ] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — not yet planned (data integrity; after 167.1.2 PR C)
+- [ ] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — not yet planned (booked 2026-10-07, founder)
 - [x] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
@@ -161,6 +174,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 169.5: BENCHCOMPARE — a factsheet's BTC comparator is read from the database through 169.2's reader, paired over the same interval as the strategy** (INSERTED) — verification: passed (completed 2026-10-04, PR #908)
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
 - [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
+- [ ] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned
 - [ ] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — not yet planned
 - [ ] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — not yet planned
 - [ ] **Phase 170.5: FACTSHEETV2PANELS — /strategy/[id]/v2 panels render or say why** (INSERTED 2026-10-03) — not yet planned
@@ -5420,10 +5434,17 @@ kept verbatim.
 | 164.6.4 MT5KEEPALIVE | 5/5 | Complete | #800 |
 | 164.6.5 MT5VALIDATEWEDGE | 8/8 | Complete    | 2026-10-06 · v0.96.0.0 · #863 |
 | 164.6.6 MT5TERMINALISOLATION | 9/9 | Complete    | 2026-10-04 |
-| 164.6.6.1 MT5SCRUB | 0/4 (moved, not re-planned) | Waiting — split from 164.6.6 on 2026-09-27 (founder); re-planned only after the founder's live scrub spike | - |
-| 164.6.6.2 BTCNATIVE | 0/? | Queued — booked 2026-10-03 | - |
-| 164.6.6.3 UATFIXES | 0/? | Queued — the 2026-10-03/04 production UAT defects; item 0 blocks new MT5 onboards | - |
+| 164.6.6.1 MT5SCRUB | 7/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Waiting`, 0/4, until 2026-10-08) | v0.125.0.0 · #950 |
+| 164.6.6.2 BTCNATIVE | 12/13 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.126.0.0 · #969 |
+| 164.6.6.2.1 BTCUSDVIEW | 0/? | Queued — booked 2026-10-07 by 164.6.6.2 D-15 | - |
+| 164.6.6.2.2 WEALTHRETURNS | 7/7 | Shipped — verification `human_needed`: post-deploy D-03 reading only, not closed | v0.128.0.0 · #973 |
+| 164.6.6.3 UATFIXES | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.125.2.0 · #967 |
+| 164.6.6.3.1 UIPOLISH | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.125.2.1 · #968 |
+| 164.6.6.3.2 WIZARDCODES | 0/? | Queued — 164.6.6.3 split B (founder 2026-10-06) | - |
+| 164.6.6.3.3 FACTSHEETTRUTH | 0/? | Queued — 164.6.6.3 split C (founder 2026-10-06) | - |
+| 164.6.6.3.4 STATUSBRIDGE | 0/? | Queued — booked 2026-10-06 (founder) | - |
 | 164.6.6.3.5 DOMAINONE | 13/13 | Complete — verification passed after plan 13's live checks | 2026-10-08 · v0.127.0.0 · #971 |
+| 164.6.6.3.6 MT5SERVERLEARN | 0/? | Queued — booked 2026-10-06 (founder); BROKER-SERVERS.md measured, no plans | - |
 | 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Complete    | 2026-10-04 |
 | 164.6.8 OUTAGEALERT | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 7/7 | Complete | v0.77.32.1 · finalized v0.77.32.1; its 33 stranded artifacts restored to main by PR #785. Row said `0/? Queued 2nd` until 2026-09-12 |
@@ -5460,6 +5481,7 @@ kept verbatim.
 | 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
 | 167.1.2 ACCOUNTTRUTH | PR A + PR B shipped | In progress — PR A v0.92.0.0 (#859), PR B v0.103.0.0 (#870); PR C executing | - |
 | 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
+| 167.1.2.2 DERIVECRON | 0/? | Queued — booked 2026-10-07 (founder) | - |
 | 167.2 KEYCARDSYNC | 10/10 | Complete    | 2026-10-04 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |
@@ -5747,6 +5769,12 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 - [x] **Phase 151: AUM — A book you can reach and a size you can set** - Direct AUM input, non-ccxt holdings-sync crash fixed as a CLASS (MT5 + latent sFOX), all-or-nothing book gate fixed incl. cross-role contamination, honest refusal copy (completed 2026-08-07)
 - [x] **Phase 152: SCEN — Composer legibility** - Ownership marker, clickable rows with a working factsheet link, labelled numbers, no duplicate browse entries (completed 2026-08-07)
 - [x] **Phase 153: WIZFORM — Form errors belong on the form (+ MT5 declarable)** ✅ **GOAL MET 2026-08-14 — via the INSERTED Phase 153.7, not by the original span.** Inline field validation, honest error codes from emitting sites, transient infra absorbed not surfaced, venue-appropriate copy, MT5 preselected in metadata. ⭐ **The mechanism is named on purpose and a bare tick would erase it:** the 153.1→153.6 span verdict REMAINS `failed` 5/6 in `153-VERIFICATION.md` and must not be rewritten — that file is the historical record that the span shipped short on WIZFORM-02. Phase 153.7 closed all four of its `missing` items, re-derived from source by the v1.17 milestone audit (router-vocabulary disposition at `wizardErrors.ts:3081`; population root widened at `seam-venue-vocabulary.invariant.test.ts:89` plus the `service_error` callee family at `:318`; boundary decision with per-exclusion reasons and count pins at `SCAN_EXCLUSIONS:134`; `KNOWN_CODELESS_FINALIZE_REJECTIONS = 0`), with both invariants executed at this tree — 2 files / 60 tests passed
+- [x] **Phase 153.1: WIZFORM-CODES — Honest codes + the venue-capability foundation** (INSERTED) — shipped v0.55.0.0 (#670, 2026-08-10); closed with v1.17
+- [x] **Phase 153.2: WIZFORM-FIELD — The form refuses at the field; MT5 declarable *and* submittable** (INSERTED) — completed 2026-08-10 (#670, v0.55.0.0); closed with v1.17
+- [x] **Phase 153.3: WIZFORM-GW — MT5 gateway honesty (Python; file-disjoint)** (INSERTED) — shipped inside the v1.17 span (v0.55.0.0 to v0.58.0.0); closed with v1.17
+- [x] **Phase 153.4: WIZFORM-BUDGET — Venue-aware budget + the honest long wait** (INSERTED) — completed 2026-08-11 (#672, v0.56.0.0); closed with v1.17
+- [x] **Phase 153.5: WIZFORM-ABANDON — Work that outlives its timeout** — completed 2026-08-11 (#673, v0.57.0.0); closed with v1.17
+- [x] **Phase 153.6: PARITY — the fixes that only landed on one path** (INSERTED) — completed 2026-08-12 (#675, v0.58.0.0); closed with v1.17
 - [x] **Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens** - Draft-aware entry chooser, stale-screen root cause investigated BEFORE fixed (verdict M2(ii)), token-less credential dedup toward the existing row (completed 2026-08-12)
 - [x] **Phase 153.7: WIZFORM-02-CLASS — every code that can reach a user is covered** ✅ **COMPLETE 2026-08-14** (INSERTED 2026-08-14) - The coverage law's population is DERIVED from every user-reachable code (`analytics-service/**`, positional `service_error(...)` as well as `error_code =`), and a code absent from BOTH halves reds CI; closes the one requirement the 153 span failed. 3/3 plans: population 17 → 37, all 37 dispositioned, and the last three code-less `finalize-wizard` rejections coded (ledger 3 → 0 with `EXPECTED_FINALIZE_REJECTION_SITES` never edited). **WIZFORM-02 ticked.** ⛔ NOT "add two rows" — see TODOS.md FIX NOW #6
 - [→] **Phase 155: MT5-VERIFY — The numbers are true, live on a trading day** — ➡️ **CARRIED OUT OF v1.17 TO v1.18 on 2026-08-14.** Not started, not dropped, not ticked. Server-UTC offset measured, external-oracle parity on the live funded account, five surfaces agree, discrepancies fixed (uncapped), warnings explained; MT5-GOAL-01 acceptance gate. ⛔ Founder-gated twice over: new investor passwords AND the founder at the terminal on a trading day. Detail block below is retained in place; the milestone header at the top of this file owns its blockers
@@ -6444,6 +6472,12 @@ Plans:
 | 151. AUM book + sizing | 7/7 | Complete    | 2026-08-07 |
 | 152. SCEN composer legibility | 6/6 | Complete    | 2026-08-07 |
 | 153. WIZFORM + MT5-14 | span complete | Goal met via inserted 153.7 (span verdict stays `failed` 5/6) | 2026-08-14 |
+| 153.1. WIZFORM-CODES (INSERTED) | 6/6 | Complete — shipped v0.55.0.0 (#670), closed with v1.17 | 2026-08-10 |
+| 153.2. WIZFORM-FIELD (INSERTED) | 5/5 | Complete (shipped v0.55.0.0, #670) | 2026-08-10 |
+| 153.3. WIZFORM-GW (INSERTED) | 6 planned | Complete — shipped inside the v1.17 span, closed with v1.17 | - |
+| 153.4. WIZFORM-BUDGET (INSERTED) | 5/5 | Complete — shipped v0.56.0.0 (#672), closed with v1.17 | 2026-08-11 |
+| 153.5. WIZFORM-ABANDON | 5/5 | Complete — shipped v0.57.0.0 (#673), closed with v1.17 | 2026-08-11 |
+| 153.6. PARITY (INSERTED) | 6/6 | Complete — shipped v0.58.0.0 (#675), closed with v1.17 | 2026-08-12 |
 | 153.7. WIZFORM-02-CLASS (INSERTED) | 3/3 | Complete (shipped v0.62.0.0, merge `c4555fd0`) | 2026-08-14 |
 | 154. WIZCONT + STALE | 8/8 | Complete   | 2026-08-12 |
 | 155. MT5-VERIFY + acceptance | 0/? | ➡️ **CARRIED to v1.18** | - |
@@ -6565,10 +6599,15 @@ factsheet on a spinner that never resolves.
 - [x] **Phase 141.1: SEAMBACKOFF — Retry-After-aware backoff, breaker recalibration, and SEAM-05 evidence re-derivation** (INSERTED) - Scope from the 8-agent review campaign over 141; **zero user-facing and zero data-integrity defects found**, so no retry verdict changed and no budget row was un-flipped. 9/9 plans (completed 2026-07-31). VERIFICATION was `gaps_found` 19/20 and is now **passed** 20/20 on re-verification 2026-08-01 — all three gaps had been closed in the tree by post-verification work and the file was simply never re-run: D-06's last stale coordinate became a symbol anchor at `22332e34` (the whole self-relative-citation class is now absent from `resilient-fetch.ts`), the two deferred ledgers were reconciled so TODOS.md and `deferred-items.md` both carry all four `DEF-141.1-*` ids, and the Falsifiability Ledger closed at 20/20 observed with `nyquist_compliant: true`
 - [x] **Phase 141.2: SEAMFIX — close the 141.1 code-review findings: duplicate onboard verification write, flag-monitor denominator integrity, breaker re-arm** (INSERTED) - 25 findings from the xhigh review (30 agents) deduped to 13; outcome is **twelve remediated, one dispositioned** — finding 8's retry↔limiter amplification is ACCEPTED, not fixed, and is stated as STILL LIVE everywhere it is summarised. Closes the duplicate `strategy_verifications` write on the money path (onboard's retry is now refused unless the call carries a truthy `wizard_session_id`, decided at the single chokepoint) and the three monitoring-integrity regressions D-16 shipped (unbounded `.select()` → `head: true` count, attacker-movable dedup deleted outright, read error now a distinct `denominator_read_failed` outcome rather than zero traffic). 6/6 plans (completed 2026-08-01). VERIFICATION was `human_needed` 17/17 and is now **passed** — three of its four production probes were discharged read-only on 2026-08-01 (42 rows / 42 distinct `correlation_id` / 0 `wizard:` prefix, flow_type resync 20 · csv 20 · onboard 2; unbounded `.select()` returned exactly 1000 rows at HTTP 200 with `error: null` against 7351 total, reproducing the silent truncation; all five breaker keys ABSENT, keeping finding 10 framed as hardening). The fourth — a real Railway-edge 503 carrying a malformed `Retry-After` — stays **Manual-Only and is not a gap**: it cannot be induced, and the only contract-bound 503 emitter we own structurally cannot emit one. ⏳ On PR #656, **not yet merged**
 - [x] **Phase 142: JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL** - Writer-stamped transition timestamp + pg_cron reaper to terminal `failed` + threshold-math CI invariant + WEDGE-01 regression test (completed 2026-08-02)
+- [x] **Phase 142.1: Close 142 review findings: chain-start stamp preservation, deploy sequencing, terminal-writer parity** (INSERTED) — completed 2026-08-03 (#659, v0.52.0.0)
+- [ ] **Phase 142.2: Get MetaTrader 5 running end to end on the unified backbone** (INSERTED) — shipped 2026-08-04 (#660, v0.53.0.0); its phase detail records it as STILL NOT CLOSED
+- [ ] **Phase 142.3: Prove the MT5 numbers correct against the live terminal on a trading day** (INSERTED) — never planned (0 plans); its requirements MT5-06..10 are owned by v1.18 Phase 155
 - [→] **Phase 143: JOB — Dropped-enqueue reconciliation sweep** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
 - [→] **Phase 144: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
 - [→] **Phase 145: JOB — csv-finalize atomicity (reproduce-first)** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
 - [→] **Phase 146: RATE — Audit + close the two verified gaps** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
+- [x] **Phase 146.1: REVIEW: v1.19 xhigh close-out — fold guards, resolve-arm honesty, rate-gate completeness** (INSERTED) — completed 2026-08-19 (#692, v0.67.0.0); closed with v1.19
+- [x] **Phase 146.2: REVIEW: 146.1 post-merge close-out — the echo path must not silently drop a strategy's classification, and the passphrase must not reach Sentry** (INSERTED) — completed 2026-08-20 (#694, v0.68.0.0); closed with v1.19
 
 ## v1.16 Phase Details (PARKED)
 
@@ -7075,12 +7114,24 @@ Plans:
 | 140. SEAM core + breaker | 7/7 | Complete   | 2026-07-25 |
 | 140.1. PYAPI contract/status/limiter (INSERTED) | 9/9 | Complete | 2026-07-26 |
 | 140.1.1. PYAPI-FIX (INSERTED) | 7/7 | Complete    | 2026-07-26 |
+| 140.1.2. PYAPI-FIX2 (INSERTED) | 4/4 | Complete | 2026-07-30 |
+| 140.2. SEAMCORE (INSERTED) | 12/12 | Complete | 2026-07-27 |
+| 140.3. SEAMUX (INSERTED) | 17 planned | Complete — shipped 2026-07-30, PR #651 | 2026-07-30 |
+| 140.4. SEAMRIM (INSERTED) | 14/14 | Complete — shipped 2026-07-30, PR #652 | 2026-07-30 |
+| 140.5. SEAMPROSE (INSERTED) | 8/8 | Complete | 2026-07-30 |
 | 141. SEAM retry (audit-gated) | 4/4 | Complete    | 2026-07-31 |
+| 141.1. SEAMBACKOFF (INSERTED) | 9/9 | Complete | 2026-07-31 |
+| 141.2. SEAMFIX (INSERTED) | 6/6 | Complete | 2026-08-01 |
 | 142. JOB reaper + DDL | 6/6 | Complete   | 2026-08-02 |
+| 142.1. Close 142 review findings (INSERTED) | 8/8 | Complete (shipped v0.52.0.0, #659) | 2026-08-03 |
+| 142.2. MT5 end to end on the unified backbone (INSERTED) | 8/8 | Shipped v0.53.0.0 (#660); its phase detail records it as not closed | 2026-08-04 |
+| 142.3. MT5 live-terminal proof (INSERTED) | 0/? | Never planned; MT5-06..10 are owned by v1.18 Phase 155 | - |
 | 143. JOB dropped-enqueue sweep | 0/? | ➡️ **CARRIED to v1.19** | - |
 | 144. JOB WR-02 terminal UPDATE | 0/? | ➡️ **CARRIED to v1.19** | - |
 | 145. JOB csv-finalize atomicity | 0/? | ➡️ **CARRIED to v1.19** | - |
 | 146. RATE audit + close | 0/? | ➡️ **CARRIED to v1.19** | - |
+| 146.1. v1.19 xhigh close-out (INSERTED) | 7 planned | Complete (shipped v0.67.0.0, #692), closed with v1.19 | 2026-08-19 |
+| 146.2. 146.1 post-merge close-out (INSERTED) | 8 planned | Complete (shipped v0.68.0.0, #694), closed with v1.19 | 2026-08-20 |
 
 ## Requirement Coverage (v1.16)
 
