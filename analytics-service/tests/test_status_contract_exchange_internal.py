@@ -194,7 +194,7 @@ async def test_s02_mt5_gateway_env_unset_is_permanent_500(
     assert ei.value.status_code == 500
     _assert_r2_keys(ei.value)
     body = _envelope(ei.value)
-    assert body["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert body["code"] == "MT5_VALIDATION_UNCONFIGURED"
     assert body["dependency"] == "mt5-gateway"
     assert body["retryable"] is False
     assert not (ei.value.headers or {}).get("Retry-After")
@@ -221,7 +221,7 @@ async def test_s03_mt5_gateway_port_not_an_int_is_permanent_500(
 
     assert ei.value.status_code == 500
     body = _envelope(ei.value)
-    assert body["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert body["code"] == "MT5_VALIDATION_UNCONFIGURED"
     assert body["dependency"] == "mt5-gateway"
     assert body["retryable"] is False
     factory.assert_not_called()

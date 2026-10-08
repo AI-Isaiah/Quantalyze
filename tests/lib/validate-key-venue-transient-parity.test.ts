@@ -162,6 +162,15 @@ const EXPECTED: Readonly<
     wireRecoverable: true,
     envelopeRecoverable: true,
   },
+  // 164.6.6.3.2 plan 02 (D-02) - the two terminal-busy refusals, cases C9 (owed scrub)
+  // and C10 (held lease): ONE new wire code at 424. Both `recoverable` columns AGREE
+  // (`clear_and_retry` is in `RECOVERABLE_ACTIONS`), so it is not a second permitted
+  // divergence.
+  MT5_TERMINAL_BUSY: {
+    wizardCode: "KEY_MT5_TERMINAL_BUSY",
+    wireRecoverable: true,
+    envelopeRecoverable: true,
+  },
   // Correct BY CONSTRUCTION: the contract's own control for a code the table
   // has never seen. It must reach UNKNOWN through the surviving cascade, not
   // through a short-circuit above it.
@@ -212,9 +221,19 @@ const DIVERGENT_WIRE_CODE = "AUTH_FAILED";
  * ⚠️ 164.6.6.3 plan 05 added ONE case at a NEW site C8, `mt5_server_unknown`,
  * with a NEW recoverable code `MT5_SERVER_UNKNOWN`: `TOTAL_CASES` 15 → 16 and
  * `DISTINCT_WIRE_CODES` 8 → 9. Both non-recoverable counts did not move.
+ *
+ * ⚠️ 164.6.6.3.2 plan 02 (D-02) added ONE case at a NEW site C9, `mt5_scrub_owed`,
+ * with a NEW recoverable code `MT5_TERMINAL_BUSY`: `TOTAL_CASES` 16 → 17 and
+ * `DISTINCT_WIRE_CODES` 9 → 10, each read off its own guard's failure message
+ * ("expected 17 to be 16"). Both non-recoverable counts did not move.
+ *
+ * ⚠️ 164.6.6.3.2 plan 02 then added ONE more case at a NEW site C10, `mt5_lease_busy`,
+ * with the SAME code `MT5_TERMINAL_BUSY` as C9: `TOTAL_CASES` 17 → 18 ("expected 18 to
+ * be 17"). `DISTINCT_WIRE_CODES` did not move (still 10): it is one code. Both
+ * non-recoverable counts did not move either.
  */
-const TOTAL_CASES = 16;
-const DISTINCT_WIRE_CODES = 9;
+const TOTAL_CASES = 18;
+const DISTINCT_WIRE_CODES = 10;
 const NON_RECOVERABLE_WIRE_CASES = 3;
 const NON_RECOVERABLE_WIRE_CODES = 2;
 

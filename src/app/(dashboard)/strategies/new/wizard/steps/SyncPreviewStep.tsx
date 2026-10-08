@@ -19,6 +19,7 @@ import {
 import {
   formatKeyError,
   gateFailureToWizardError,
+  MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR,
   recogniseSeamErrorCode,
   type WizardErrorAction,
   type WizardErrorCode,
@@ -1392,12 +1393,19 @@ export function SyncPreviewStep({
       // line (already threaded via onStatus above), and stop polling.
       if (nextStatus === "failed") {
         if (!mountedRef.current) return "done";
-        setErrorCode("GATE_ANALYTICS_FAILED");
+        // 164.6.6.3.2 / D-06 — exact equality with the curated sentence the worker stamps
+        // on the derive job's final failed attempt, never a substring and never
+        // `last_error`. Every other failed terminal keeps GATE_ANALYTICS_FAILED.
+        const failedCode: WizardErrorCode =
+          nextError === MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR
+            ? "GATE_HISTORY_NOT_SETTLED"
+            : "GATE_ANALYTICS_FAILED";
+        setErrorCode(failedCode);
         setPhase("gate_failed");
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: "sync_preview",
-          code: "GATE_ANALYTICS_FAILED",
+          code: failedCode,
         });
         return "done";
       }

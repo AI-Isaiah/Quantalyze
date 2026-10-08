@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.129.0.0] - 2026-10-08 — WIZARDCODES: the MT5 wizard names the real cause instead of "the fault is in our pipeline"
+
+Phase 164.6.6.3.2. Three MT5 situations that the wizard used to report as a network fault or a pipeline fault now get their own wire code, their own copy, and their own tests. The 2026-10-03 PROD UAT showed all three.
+
+### Added
+- **`MT5_VALIDATION_UNCONFIGURED` → `KEY_MT5_VALIDATION_UNCONFIGURED`.** When the validation endpoint is unset, its terminal list is empty, or its timeouts are inverted, `_validate_mt5_key_probe` now answers 500 `MT5_VALIDATION_UNCONFIGURED`. The wizard shows a "not set up yet" card with no Retry, on create-with-key, add-key and rotate-secret. The card says we have been alerted, and every alert claim rests on a Sentry capture that a vitest source pin names by arm. The D-31 `undetermined` arm is unchanged.
+- **`MT5_TERMINAL_BUSY` → `KEY_MT5_TERMINAL_BUSY`.** An owed scrub or relaunch, and a lease still held at the interactive bound, now answer a flat 424 `MT5_TERMINAL_BUSY` instead of `NETWORK_UNAVAILABLE`. The wizard shows a recoverable "briefly busy, try again in a minute" card, and this case does not page anyone. The other eight `NETWORK_UNAVAILABLE` sites are unchanged.
+- **`GATE_HISTORY_NOT_SETTLED`.** A fresh MT5 account whose deal history is still arriving at the derive job's last attempt now reads "Your broker is still sending this account's history". It offers Retry and points to the contact form, not an email address. The cause rides on a final-attempt failed stamp in the existing 164.2 provenance columns (`_MT5_HISTORY_UNSETTLED_USER_SENTENCE`). No migration, no new `error_kind`, and no stamp on a non-final attempt or in key mode.
+
+### Changed
+- `analytics-service/docs/STATUS_CONTRACT.md`, `deploy/mt5-gateway/railway-gateway.md` and the `SEAM_BUDGETS` docblock in `src/lib/resilient-fetch.ts` describe the new mapping. The old text is kept as dated lineage.
+- Census pins moved to the values their own guards printed: `EXPECTED_EMITTED_CODES` 45 → 47, `DERIVED_FLOOR` 27 → 28, both `EXPECTED_TABLE_SIZE` 98 → 101, dialog `checked` 35 → 37, parity `TOTAL_CASES` 16 → 18, `DISTINCT_WIRE_CODES` 9 → 10.
+
+### Tests
+- All three key routes have a test that fails when `KEY_MT5_VALIDATION_UNCONFIGURED` stops paging, and a twin that fails when `KEY_MT5_TERMINAL_BUSY` starts paging. A single neuter of the paging set reddens all three routes.
+- Fixture sites C9/C10 cover the busy wire. Derive tests cover the final, non-final, missing-count and key-mode history stamps. Scrub-invariance and no-`@` pins are added, and the `test_stamp_io_exhaustive` resolver is fixed.
+
+### Notes
+- Review round 1: worst finding MEDIUM, so no fixer round ran. Security: SECURED 16/16. Verification: passed.
+- **Known gap, recorded rather than fixed:** WR-01 (MEDIUM). No test pins `heal_series=False` on the new final-attempt stamp. The property holds in the code today, but no test would catch it if it changed. Booked as a follow-up.
+
 ## [0.128.0.2] - 2026-10-08 — BTC dust floor 1e-7: a BTC account is measured down to a ten millionth of a coin
 
 Founder decision D-24 for Phase 164.6.6.2 BTCNATIVE (gap closure, plan 14). The BTC row's dust-NAV

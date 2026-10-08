@@ -360,6 +360,53 @@ describe("[164.6.6.3 / D-10] MultiKeyConnectStep — an unlisted broker server i
   });
 });
 
+// 164.6.6.3.2 (D-01, D-02) — the multi-key step's roster gate for the two new MT5 key
+// codes. `composite/add-key` answers a wizard code it got from the classifier and names no
+// literal in the route, so the roster-render sweep cannot see a missing roster row: it
+// would shrink the population instead of reddening a case (the same reasoning as the
+// D-10 block above). These cases are the gate. Without the roster row the step renders
+// `UNKNOWN`, whose copy names no cause. Expected copy is typed here, not read from the table.
+describe("[164.6.6.3.2 D-01/D-02] MultiKeyConnectStep — the two new MT5 key codes are named, not UNKNOWN", () => {
+  async function failSecondKeyWith(code: string, status: number) {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({ code }, status));
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const panel1 = screen.getByTestId("key-panel-1");
+    fireEvent.change(within(panel1).getByTestId("key-1-api-key"), {
+      target: { value: "AK_LIVE_key2" },
+    });
+    fireEvent.change(within(panel1).getByTestId("key-1-api-secret"), {
+      target: { value: "SECRET_key2" },
+    });
+    fireEvent.change(within(panel1).getByTestId("key-1-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    fireEvent.click(within(panel1).getByTestId("key-1-validate"));
+    return within(screen.getByTestId("key-panel-1")).findByTestId("error-envelope");
+  }
+
+  it("[164.6.6.3.2 D-01] renders KEY_MT5_VALIDATION_UNCONFIGURED, not UNKNOWN, with no Retry", async () => {
+    const envelope = await failSecondKeyWith("KEY_MT5_VALIDATION_UNCONFIGURED", 500);
+    expect(envelope).toHaveAttribute("data-error-code", "KEY_MT5_VALIDATION_UNCONFIGURED");
+    expect(envelope).not.toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(envelope.textContent).toContain("Our MetaTrader connection is not set up yet.");
+    // A fault that repeats until an operator acts must not offer a control that cannot work.
+    expect(
+      within(envelope).queryByRole("button", { name: "Retry" }),
+      "a Retry control was offered for a fault that stays wrong until we fix our setup",
+    ).toBeNull();
+  });
+
+  it("[164.6.6.3.2 D-02] renders KEY_MT5_TERMINAL_BUSY, not UNKNOWN, WITH a Retry", async () => {
+    const envelope = await failSecondKeyWith("KEY_MT5_TERMINAL_BUSY", 424);
+    expect(envelope).toHaveAttribute("data-error-code", "KEY_MT5_TERMINAL_BUSY");
+    expect(envelope).not.toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(envelope.textContent).toContain("Our MetaTrader terminal is briefly busy.");
+    // A busy terminal frees in seconds, so Retry is real advice here.
+    expect(within(envelope).getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+});
+
 describe("[ONB-01] MultiKeyConnectStep — reorder (Move ↑/↓, position-derived seq)", () => {
   it("swaps positions and renumbers legends; ends disable move-up/move-down", () => {
     render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);

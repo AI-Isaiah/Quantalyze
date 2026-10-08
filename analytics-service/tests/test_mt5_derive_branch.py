@@ -656,7 +656,13 @@ async def test_unsettled_history_is_transient_error_no_stamp(
       `compute_jobs.error_message`, D-42), and carries no equity, login or server.
 
     No new DB `error_kind` (D-13): that would be a migration that auto-applies to
-    PROD with no reviewer gate."""
+    PROD with no reviewer gate.
+
+    2026-10-07 (Phase 164.6.6.3.2 D-06): the arm now stamps on the FINAL attempt only.
+    This test carries NO ``attempts`` / ``max_attempts`` on the job, so it pins the
+    missing-count path (read as not-final, today's behaviour); the non-final and
+    final-attempt paths have their own tests below. The "never a stamp" bullet above
+    holds for every non-final path and is kept as written for lineage."""
     import logging
 
     from services.mt5_validation import classify_mt5_login_error
@@ -695,6 +701,152 @@ async def test_unsettled_history_is_transient_error_no_stamp(
         classify_mt5_login_error(Mt5ClientError(0, result.error_message or ""))
         == "transient"
     )
+
+
+@pytest.mark.asyncio
+async def test_unsettled_history_on_the_final_attempt_stamps_the_cause_sentence(
+    monkeypatch,
+) -> None:
+    """Phase 164.6.6.3.2 / D-03, D-06 — on the FINAL attempt (the claim RPC returns the
+    row after ``attempts = attempts + 1``, and ``mark_compute_job_failed`` makes a
+    transient failure final when ``attempts >= max_attempts``) the history-unsettled
+    arm writes ONE failed stamp carrying the curated user sentence and the 164.2
+    provenance pair, so the wizard can name the real cause instead of "the fault is
+    in our pipeline".
+
+    The job still comes back FAILED / transient with the operator message: no new
+    ``error_kind``, no terminal restart (164.6.6.3 D-13)."""
+    from services.strategy_analytics_provenance import provenance_source
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
+        deals=[],
+    )
+    connects: list = []
+    ctx, capture = _build_ctx(transport, connects=connects)
+    job = {**_job(), "attempts": 3, "max_attempts": 3}
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(job)
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert result.error_message == jw._MT5_HISTORY_UNSETTLED_MESSAGE
+    stamps = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+    assert len(stamps) == 1, [u[0] for u in capture["upserts"]]
+    payload = stamps[0][1]
+    assert payload["computation_status"] == "failed"
+    assert payload["computation_error"] == jw._MT5_HISTORY_UNSETTLED_USER_SENTENCE
+    assert payload["computation_error_job_id"] == "j-mt5"
+    assert payload["computation_error_source"] == provenance_source("j-mt5")
+    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"])
+    assert len(connects) == 1 and "shutdown" not in transport.calls, (
+        "the wait expiry must never restart a healthy terminal"
+    )
+
+
+def _history_unsettled_transport() -> _FakeMt5Transport:
+    """A funded account (material equity) whose deal history never arrives: the wait
+    budget expires and the derive reaches the history-unsettled arm."""
+    return _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
+        deals=[],
+    )
+
+
+def _assert_reached_the_history_arm(result) -> None:  # noqa: ANN001
+    """Without these three assertions a run that failed EARLIER for an unrelated reason
+    would satisfy every "nothing was stamped" check vacuously."""
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert result.error_message == jw._MT5_HISTORY_UNSETTLED_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_unsettled_history_before_the_final_attempt_stamps_nothing(
+    monkeypatch,
+) -> None:
+    """Phase 164.6.6.3.2 / D-06 — attempt 2 of 3 still retries, so the wizard must not
+    flip to failed yet: same FAILED / transient result, and NO strategy_analytics write
+    and no series (T-164.6.6.3.2-12)."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _history_unsettled_transport()
+    connects: list = []
+    ctx, capture = _build_ctx(transport, connects=connects)
+    job = {**_job(), "attempts": 2, "max_attempts": 3}
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(job)
+
+    _assert_reached_the_history_arm(result)
+    _persisted_nothing(capture)
+    assert len(connects) == 1 and "shutdown" not in transport.calls
+
+
+@pytest.mark.asyncio
+async def test_unsettled_history_with_one_missing_count_stamps_nothing(
+    monkeypatch,
+) -> None:
+    """Phase 164.6.6.3.2 / D-06 — a job row carrying only ONE of the two counts cannot
+    prove finality, so it reads as not-final (today's behaviour), whichever count is
+    missing. ``attempts`` already past ``max_attempts`` by value would be final; the
+    absence of ``max_attempts`` must not be read as zero."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    for partial in ({"attempts": 3}, {"max_attempts": 3}, {"attempts": None, "max_attempts": None}):
+        transport = _history_unsettled_transport()
+        ctx, capture = _build_ctx(transport)
+        with _apply(_patches(ctx)):
+            result = await run_derive_broker_dailies_job({**_job(), **partial})
+        _assert_reached_the_history_arm(result)
+        _persisted_nothing(capture)
+
+
+@pytest.mark.asyncio
+async def test_unsettled_history_in_key_mode_stamps_nothing_even_on_the_final_attempt(
+    monkeypatch,
+) -> None:
+    """Phase 164.6.6.3.2 / D-06 — an ``api_key_id`` job owns no strategy_analytics row:
+    ``_stamp_strategy_analytics_failed`` returns early in key mode, so the final-attempt
+    arm writes nothing there. The reached-the-arm assertions prove the key-mode run got
+    as far as the history wait rather than failing earlier."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _history_unsettled_transport()
+    connects: list = []
+    ctx, capture = _build_ctx(transport, connects=connects)
+    job = {
+        "id": "j-mt5-key",
+        "kind": "derive_broker_dailies",
+        "api_key_id": "key-mt5",
+        "attempts": 3,
+        "max_attempts": 3,
+    }
+    with _apply(
+        _patches(ctx)
+        + [
+            patch(
+                "services.job_worker._allocator_key_preflight",
+                new=AsyncMock(return_value=ctx),
+            )
+        ]
+    ):
+        result = await run_derive_broker_dailies_job(job)
+
+    _assert_reached_the_history_arm(result)
+    assert not any(u[0] == "strategy_analytics" for u in capture["upserts"]), [
+        u[0] for u in capture["upserts"]
+    ]
+    assert len(connects) == 1 and "shutdown" not in transport.calls
+
+
+def test_unsettled_history_user_sentence_is_scrub_invariant_and_carries_no_email() -> None:
+    """Phase 164.6.6.3.2 / D-05, T-164.6.6.3.2-10 — the stamped sentence is curated user
+    copy that renders verbatim, so it must survive ``scrub_freeform_string`` UNCHANGED
+    (a scrub that rewrote it would silently break the wizard's exact-equality match) and
+    must name no contact address: the contact form is the pointer."""
+    from services.redact import scrub_freeform_string
+
+    sentence = jw._MT5_HISTORY_UNSETTLED_USER_SENTENCE
+    assert sentence == str(scrub_freeform_string(sentence))
+    assert "@" not in sentence
 
 
 # ---------------------------------------------------------------------------

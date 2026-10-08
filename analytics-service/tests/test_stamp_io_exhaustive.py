@@ -949,6 +949,12 @@ _STAMP_NAME_SOURCES = {
     "stamp_detail": ("keyword", "_dispose_broker_nav_error"),
     # The MT5-12 verdict refusal assigns it right above its stamp call.
     "_message": ("assign", "_message"),
+    # Phase 164.6.6.3.2 / D-06: the history-unsettled arm stamps the curated user sentence
+    # by its module-level constant, declared ``Final[str]`` (an ``AnnAssign``, resolved
+    # below beside the plain ``Assign``).
+    "_MT5_HISTORY_UNSETTLED_USER_SENTENCE": (
+        "assign", "_MT5_HISTORY_UNSETTLED_USER_SENTENCE",
+    ),
 }
 
 
@@ -1014,6 +1020,14 @@ def _stamp_messages() -> tuple[list[str], int]:
                 for n in ast.walk(tree)
                 if isinstance(n, ast.Assign)
                 and any(isinstance(t, ast.Name) and t.id == owner for t in n.targets)
+            ] + [
+                # 164.6.6.3.2: a ``NAME: Final[str] = "..."`` constant is an AnnAssign.
+                n.value
+                for n in ast.walk(tree)
+                if isinstance(n, ast.AnnAssign)
+                and n.value is not None
+                and isinstance(n.target, ast.Name)
+                and n.target.id == owner
             ]
         assert values, f"no value found for {arg.id!r} ({how} of {owner})"
         messages.extend(_string_bound(v) for v in values)
