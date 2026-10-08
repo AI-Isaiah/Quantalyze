@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.129.2.1] - 2026-10-08 — BASELINE: automated re-dump after the PROD apply of 1c8e79fb
+## [0.129.2.3] - 2026-10-08 — BASELINE: automated re-dump after the PROD apply of 1c8e79fb
 
 ### Changed
 - `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `37820135534`, after the PROD apply of merge `1c8e79fb`: sha256 `cae5e296…` → `2c0fb148…`.
@@ -12,6 +12,14 @@
 ### Notes
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `37820135534` succeeded, and this entry was composed by the `redump-pr` job. Run `37820135534` is the provenance anchor.
 - The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.129.2.2] - 2026-10-08 — APTHANG follow-up: two self-test scenarios no longer depend on runner speed
+
+### Fixed
+- **Main CI went red on 1c8e79fb8**, in `ci-apt-bounded.contract.test.ts` › `ci-apt.sh --self-test`. Scenario `unclassified-exit-100-no-mirror-blame` asserts at least two `update` calls inside a 2 s budget, but it slept 1 s between retries. On a loaded shard, one slow call plus the sleep used up the budget, so only one call ran. Scenario `warned-update-then-missing-bounded` has the same shape (at least 2 updates in 3 s, with a 1 s sleep).
+- Both scenarios now keep `retry_sleep` at 0, so the count measures the classifier, not the runner's speed. No wrapper code changed, and no assertion was loosened.
+- Proven: classifying the unknown error as deterministic still fails scenario 18 by name. Self-test green, about 32 s locally. `shellcheck` clean.
+
 
 ## [0.129.2.0] - 2026-10-08 — TRUNCATEREVOKE: anon and authenticated no longer hold TRUNCATE on public tables
 
