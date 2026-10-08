@@ -5018,14 +5018,19 @@ jobs:
           #   side failure still stamps; a failed row that carries a sentence stays failed;
           #   no row is manufactured), so its sentinel reads ALL 19 and ARMS_FLOOR moves
           #   271 -> 275. No file joined, so SENTINEL_FLOOR stays 15.
+          # Re-measured 2026-10-08 (phase 164.6.6.3.4 founder D-10, round 4), ONE move:
+          #   test_sync_status_analytics_scope.sql gains D15 and D16 (a genuine
+          #   recompute on a warned row is stamped by the side failure that follows it;
+          #   a deferred side job leaves the row alone), so its sentinel reads ALL 21
+          #   and ARMS_FLOOR moves 275 -> 277. No file joined, so SENTINEL_FLOOR stays 15.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
-          #   test_sync_status_analytics_scope.sql             19
+          #   test_sync_status_analytics_scope.sql             21
           #   test_sync_status_bridge_residues.sql             16
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
           SENTINEL_FLOOR=15  # files declaring a sentinel
-          ARMS_FLOOR=275     # 13 + 8 + 9 + 3 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 19 + 16 + 7 + 23
+          ARMS_FLOOR=277     # 13 + 8 + 9 + 3 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 21 + 16 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

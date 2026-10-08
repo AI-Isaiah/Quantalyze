@@ -4818,7 +4818,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=15 and ARMS_FLOOR=275 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=15 and ARMS_FLOOR=277 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -4954,6 +4954,11 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // test_sync_status_analytics_scope.sql gains D11 to D14, so its sentinel reads
     // `ALL 19 ARMS EXECUTED` and ARMS_FLOOR moves by four. No file joined, so
     // SENTINEL_FLOOR stays 15.
+    //
+    // RAISED 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, round 4, founder D-10), 15/275 -> 15/277.
+    // test_sync_status_analytics_scope.sql gains D15 and D16, so its sentinel reads
+    // `ALL 21 ARMS EXECUTED` and ARMS_FLOOR moves by two. No file joined, so
+    // SENTINEL_FLOOR stays 15.
     const res = spawnSync(
       "grep",
       ["-ac", "SENTINEL_FLOOR=15", ".github/workflows/ci.yml"],
@@ -4967,7 +4972,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=275", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=277", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
