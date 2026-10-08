@@ -431,42 +431,55 @@ class TestGatewayTimeoutCalibration:
 
 
 # ---------------------------------------------------------------------------
-# M-0606 — routers/match.py _records_to_series
+# M-0606 — the record parser the match loaders read through
 # ---------------------------------------------------------------------------
+#
+# 164.6.6.2.2 (D-01): the router's own copy `_records_to_series` is gone. The loaders
+# read a stored row through `services.wealth_returns.daily_returns_from_row`, whose
+# parser is `records_to_series`. The M-0606 / M-0604 cases below keep their inputs and
+# their expectations and now exercise that shared parser.
 
 
 class TestRecordsToSeries:
-    """M-0606 / M-0604 — ``_records_to_series`` converts [{date,value},...]
-    JSONB into a DatetimeIndex pd.Series. It is the only adapter feeding
-    ``_load_candidate_universe`` across the whole strategy universe. The
-    `if not isinstance(raw, list) or not raw` guard handles None/empty/
-    non-list; M-0604 added per-row defensiveness so a malformed JSONB row
-    (missing 'date'/'value' or non-dict) is SKIPPED + logged rather than
-    raising KeyError and aborting the entire cron for that allocator.
+    """M-0606 / M-0604 — ``records_to_series`` converts [{date,value},...]
+    JSONB into a DatetimeIndex pd.Series. It is the only parser feeding
+    ``_load_candidate_universe`` and ``_load_allocator_context`` across the whole
+    strategy universe. The `if not isinstance(raw, list) or not raw` guard handles
+    None/empty/non-list; M-0604 added per-row defensiveness so a malformed JSONB row
+    (missing 'date'/'value' or non-dict) is SKIPPED + logged rather than raising
+    KeyError and aborting the entire cron for that allocator.
     """
 
-    def test_none_returns_none(self):
-        from routers.match import _records_to_series
+    def test_the_router_defines_no_parser_copy(self):
+        from routers import match as match_mod
 
-        assert _records_to_series(None) is None
+        assert not hasattr(match_mod, "_records_to_series"), (
+            "the match router must read a stored row through the shared boundary, "
+            "not through a private parser copy"
+        )
+
+    def test_none_returns_none(self):
+        from services.wealth_returns import records_to_series
+
+        assert records_to_series(None) is None
 
     def test_empty_list_returns_none(self):
-        from routers.match import _records_to_series
+        from services.wealth_returns import records_to_series
 
-        assert _records_to_series([]) is None
+        assert records_to_series([]) is None
 
     def test_non_list_returns_none(self):
-        from routers.match import _records_to_series
+        from services.wealth_returns import records_to_series
 
         # A dict / scalar from storage drift hits the `not isinstance(list)`
         # half of the guard rather than crashing the comprehension.
-        assert _records_to_series({"date": "2026-01-01", "value": 0.01}) is None  # type: ignore[arg-type]
+        assert records_to_series({"date": "2026-01-01", "value": 0.01}) is None
 
     def test_valid_records_build_datetime_index_series(self):
-        from routers.match import _records_to_series
+        from services.wealth_returns import records_to_series
         import pandas as pd
 
-        series = _records_to_series(
+        series = records_to_series(
             [
                 {"date": "2026-01-01", "value": 0.01},
                 {"date": "2026-01-02", "value": -0.005},
@@ -488,10 +501,10 @@ class TestRecordsToSeries:
         """
         import logging
         import pandas as pd
-        from routers.match import _records_to_series
+        from services.wealth_returns import records_to_series
 
         with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
-            series = _records_to_series(
+            series = records_to_series(
                 [
                     {"date": "2026-01-01", "value": 0.01},
                     {"value": 0.02},  # missing 'date' — must be skipped
@@ -502,17 +515,20 @@ class TestRecordsToSeries:
         assert series is not None
         assert isinstance(series.index, pd.DatetimeIndex)
         assert list(series.values) == [0.01, 0.03], "only the valid rows survive"
-        assert any("dropped" in r.message for r in caplog.records), (
-            "a WARNING must be logged for the dropped malformed record"
-        )
+        # The shared parser's wording is "skipped N malformed records" (the old
+        # router copy said "dropped"); the contract, a WARNING naming the series,
+        # is unchanged.
+        assert any(
+            "skipped" in r.message and "strat-skip" in r.message for r in caplog.records
+        ), "a WARNING must be logged for the skipped malformed record"
 
     def test_all_malformed_rows_returns_none(self):
         """M-0604: when EVERY record is malformed, return None (treat as
         missing-returns, which the engine handles) rather than raising or
         building an empty Series."""
-        from routers.match import _records_to_series
+        from services.wealth_returns import records_to_series
 
-        assert _records_to_series([{"value": 0.01}, {"date": "2026-01-01"}]) is None
+        assert records_to_series([{"value": 0.01}, {"date": "2026-01-01"}]) is None
 
 
 # ---------------------------------------------------------------------------
@@ -4408,8 +4424,9 @@ class TestScoreOneAllocatorNoPreferencesRowLogging:
 
 class TestLoadUniverseAnalyticsSelectOmitsDeadFields:
     """M-0605: the strategy_analytics SELECT must pull ONLY the fields the
-    engine consumes (strategy_id, returns_series, sharpe, max_drawdown) and
-    NOT the dead cumulative_return / cagr / volatility columns."""
+    engine consumes (strategy_id, returns_series, daily_returns, sharpe,
+    max_drawdown) and NOT the dead cumulative_return / cagr / volatility
+    columns."""
 
     def test_select_string_excludes_unused_columns(self, monkeypatch):
         from routers import match as match_mod
@@ -4448,7 +4465,9 @@ class TestLoadUniverseAnalyticsSelectOmitsDeadFields:
             assert dead not in cols, (
                 f"dead select field {dead!r} must be removed (M-0605); got: {cols}"
             )
-        for live in ("strategy_id", "returns_series", "sharpe", "max_drawdown"):
+        # 164.6.6.2.2 (D-02): `daily_returns` joined the engine-consumed fields, so a
+        # row that stores real daily returns is read from them, not from the curve.
+        for live in ("strategy_id", "returns_series", "daily_returns", "sharpe", "max_drawdown"):
             assert live in cols, f"engine-consumed field {live!r} must remain in SELECT"
 
 
@@ -5768,3 +5787,235 @@ class TestLoadersCarryTheNativeUnitFromTheSameRow:
         ctx = match_mod._load_allocator_context("alloc-units")
         assert ctx["native_units"] == {"S1": "BTC"}
         assert any("data_quality_flags" in c and "returns_series" in c for c in selects)
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.6.6.2.2 (D-01, D-02): the loaders read a stored CURVE as daily returns
+# ---------------------------------------------------------------------------
+#
+# CR-01: ``strategy_analytics.returns_series`` is the cumulative wealth CURVE the
+# worker writes, not daily returns. These fixtures are curve-SHAPED (built by
+# ``curve_from_returns``), so a loader that weights the stored column as returns
+# cannot pass: a level of about 1.0 would stand where a return of about 0.01 belongs.
+
+_CURVE_DATES = ["2026-02-01", "2026-02-02", "2026-02-03", "2026-02-04"]
+
+
+def _allocator_supabase(ps_rows, analytics, selects):
+    """A Supabase double for ``_load_allocator_context`` (no holdings, no feedback)."""
+
+    def _table(name):
+        t = MagicMock()
+        if name == "portfolios":
+            t.select.return_value.eq.return_value.execute.return_value = MagicMock(
+                data=[{"id": "pf-1"}]
+            )
+        elif name == "allocator_preferences":
+            t.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = None
+        elif name == "portfolio_strategies":
+            t.select.return_value.in_.return_value.order.return_value.order.return_value.execute.return_value = MagicMock(
+                data=ps_rows
+            )
+        elif name == "strategy_analytics":
+
+            def _select(cols):
+                selects.append(cols)
+                q = MagicMock()
+                q.in_.return_value.execute.return_value = MagicMock(data=analytics)
+                return q
+
+            t.select.side_effect = _select
+        elif name in ("allocator_holdings", "allocator_equity_snapshots"):
+            t.select.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(
+                data=[]
+            )
+        elif name == "match_decisions":
+            t.select.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock(
+                data=[]
+            )
+        return t
+
+    sb = MagicMock()
+    sb.table.side_effect = _table
+    return sb
+
+
+class TestAllocatorBookIsScoredOnDailyReturnsFromTheStoredCurve:
+    @pytest.mark.asyncio
+    async def test_curve_book_reaches_score_candidates_as_daily_returns(self, monkeypatch):
+        """Select -> boundary -> USD pass-through -> ``score_candidates``.
+
+        The two stored curves are built from daily returns r1 = [0.0, 0.01, -0.02, 0.03]
+        and r2 = [0.0, 0.02, 0.0, -0.01] on four dates. Day 0 has no stored predecessor,
+        so the book carries days 1..3 only. Hand-computed, geometric levels:
+          S1: 1.0, 1.01, 0.9898, 1.019494 -> 1.01/1 - 1 = 0.01; 0.9898/1.01 - 1 = -0.02;
+              1.019494/0.9898 - 1 = 0.03
+          S2: 1.0, 1.02, 1.02, 1.0098     -> 0.02; 1.02/1.02 - 1 = 0.0 (a real zero
+              return, kept, not absent); 1.0098/1.02 - 1 = -0.01
+        """
+        from tests._curve_fixtures import curve_from_returns
+
+        from routers import match as match_mod
+
+        selects: list[str] = []
+        ps_rows = [
+            {"strategy_id": "S1", "current_weight": 0.5, "portfolio_id": "pf-1",
+             "allocated_amount": 100.0},
+            {"strategy_id": "S2", "current_weight": 0.5, "portfolio_id": "pf-1",
+             "allocated_amount": 100.0},
+        ]
+        analytics = [
+            {"strategy_id": "S1", "daily_returns": None,
+             "returns_series": curve_from_returns([0.0, 0.01, -0.02, 0.03], _CURVE_DATES),
+             "data_quality_flags": {}},
+            {"strategy_id": "S2", "daily_returns": [],
+             "returns_series": curve_from_returns([0.0, 0.02, 0.0, -0.01], _CURVE_DATES),
+             "data_quality_flags": {}},
+        ]
+        monkeypatch.setattr(
+            match_mod, "get_supabase",
+            lambda: _allocator_supabase(ps_rows, analytics, selects),
+        )
+        ctx = match_mod._load_allocator_context("alloc-curve")
+        assert any("daily_returns" in c and "returns_series" in c for c in selects), (
+            "the allocator-book select must read daily_returns beside the curve (D-02)"
+        )
+
+        universe = {"strategies_by_id": {}, "returns_by_id": {}, "native_units": {}}
+        seen, closes_mock = await _score_with_spies(ctx, universe, None)
+        port = seen["score"]["portfolio_returns"]
+
+        days = ["2026-02-02", "2026-02-03", "2026-02-04"]
+        for sid, want in (("S1", [0.01, -0.02, 0.03]), ("S2", [0.02, 0.0, -0.01])):
+            got = port[sid]
+            assert [d.strftime("%Y-%m-%d") for d in got.index] == days, (
+                "day 0 has no stored predecessor and must not appear"
+            )
+            assert list(got.values) == pytest.approx(want, abs=1e-12), (
+                f"{sid}: the engine must be handed daily returns, not curve levels near 1.0"
+            )
+        closes_mock.assert_not_awaited()  # USD-only book: nothing to convert
+
+
+def _universe_supabase(strategies, analytics, selects):
+    """A Supabase double for ``_load_candidate_universe``."""
+
+    def _table(name):
+        t = MagicMock()
+        if name == "strategies":
+            t.select.return_value.eq.return_value.execute.return_value = MagicMock(data=strategies)
+            return t
+
+        def _select(cols):
+            selects.append(cols)
+            q = MagicMock()
+            q.in_.return_value.execute.return_value = MagicMock(data=analytics)
+            return q
+
+        t.select.side_effect = _select
+        return t
+
+    sb = MagicMock()
+    sb.table.side_effect = _table
+    return sb
+
+
+class TestCandidateUniverseIsScoredOnDailyReturnsFromTheStoredCurve:
+    @pytest.mark.asyncio
+    async def test_curve_candidate_reaches_score_candidates_as_daily_returns(self, monkeypatch):
+        """A published candidate stored as a curve is handed to the engine as its
+        daily returns; one that stores real ``daily_returns`` is read from them
+        (D-02), whatever its curve says.
+
+        Hand-computed, geometric levels for c-curve (returns [0.0, 0.01, -0.02, 0.03]):
+        1.0, 1.01, 0.9898, 1.019494 -> days 1..3 = 0.01, -0.02, 0.03. c-direct stores
+        daily_returns [0.5, -0.25] verbatim; its curve is a decoy (levels 1.0, 9.0).
+        """
+        from tests._curve_fixtures import curve_from_returns
+
+        from routers import match as match_mod
+
+        selects: list[str] = []
+        strategies = [{"id": "c-curve", "name": "A"}, {"id": "c-direct", "name": "B"}]
+        analytics = [
+            {"strategy_id": "c-curve", "sharpe": 1.0, "max_drawdown": -0.1,
+             "daily_returns": None, "data_quality_flags": {},
+             "returns_series": curve_from_returns([0.0, 0.01, -0.02, 0.03], _CURVE_DATES)},
+            {"strategy_id": "c-direct", "sharpe": 1.0, "max_drawdown": -0.1,
+             "data_quality_flags": {},
+             "daily_returns": [{"date": "2026-02-02", "value": 0.5},
+                               {"date": "2026-02-03", "value": -0.25}],
+             "returns_series": [{"date": "2026-02-01", "value": 1.0},
+                                {"date": "2026-02-02", "value": 9.0}]},
+        ]
+        monkeypatch.setattr(
+            match_mod, "get_supabase",
+            lambda: _universe_supabase(strategies, analytics, selects),
+        )
+        universe = match_mod._load_candidate_universe()
+        assert any("daily_returns" in c for c in selects)
+
+        ctx = {
+            "preferences": {}, "portfolio_strategies": [], "portfolio_weights": {},
+            "portfolio_returns": {}, "native_units": {}, "portfolio_aum": None,
+            "thumbs_down_ids": set(), "_holdings_rows_eligible": [],
+        }
+        seen, _ = await _score_with_spies(ctx, universe, None)
+        cand = seen["score"]["candidate_returns"]
+        assert list(cand["c-curve"].values) == pytest.approx([0.01, -0.02, 0.03], abs=1e-12)
+        assert [d.strftime("%Y-%m-%d") for d in cand["c-curve"].index] == [
+            "2026-02-02", "2026-02-03", "2026-02-04",
+        ]
+        assert list(cand["c-direct"].values) == [0.5, -0.25]
+
+    @pytest.mark.asyncio
+    async def test_a_btc_curve_book_and_candidate_arrive_as_usd_daily_returns(self, monkeypatch):
+        """End to end on curve-shaped storage: select -> boundary -> USD -> engine.
+
+        A BTC account's native daily returns are [0.0, 0.0, 0.10, 0.04] on
+        2026-02-01..04, stored as the curve 1.0, 1.0, 1.1, 1.144. The boundary reads
+        days 1..3: 0.0, 0.10, 0.04 (1.1/1.0 - 1 = 0.10; 1.144/1.1 - 1 = 0.04). BTC
+        closes are 60000 (02-02), 66000 (02-03), 72600 (02-04). The converter drops its
+        first day (no prior priced value), then
+          02-03: (1 + 0.10) * (66000 / 60000) - 1 = 1.1 * 1.1 - 1 = 0.21
+          02-04: (1 + 0.04) * (72600 / 66000) - 1 = 1.04 * 1.1 - 1 = 0.144
+        Weighting the stored level 1.1 as a return would give 1.1, not 0.21.
+        """
+        import pandas as pd
+        from tests._curve_fixtures import curve_from_returns
+
+        from routers import match as match_mod
+
+        btc_curve = curve_from_returns([0.0, 0.0, 0.10, 0.04], _CURVE_DATES)
+        flags = {"native_unit": "BTC"}
+        ps_rows = [{"strategy_id": "btc-b", "current_weight": 1.0, "portfolio_id": "pf-1",
+                    "allocated_amount": 100.0}]
+        book_rows = [{"strategy_id": "btc-b", "daily_returns": None,
+                      "returns_series": btc_curve, "data_quality_flags": flags}]
+        cand_rows = [{"strategy_id": "btc-cand", "sharpe": 1.0, "max_drawdown": -0.1,
+                      "daily_returns": None, "returns_series": btc_curve,
+                      "data_quality_flags": flags}]
+        sels: list[str] = []
+        monkeypatch.setattr(
+            match_mod, "get_supabase",
+            lambda: _allocator_supabase(ps_rows, book_rows, sels),
+        )
+        ctx = match_mod._load_allocator_context("alloc-btc-curve")
+        monkeypatch.setattr(
+            match_mod, "get_supabase",
+            lambda: _universe_supabase([{"id": "btc-cand", "name": "BC"}], cand_rows, sels),
+        )
+        universe = match_mod._load_candidate_universe()
+
+        closes = pd.Series(
+            [60000.0, 66000.0, 72600.0],
+            index=pd.DatetimeIndex(["2026-02-02", "2026-02-03", "2026-02-04"]),
+        )
+        seen, closes_mock = await _score_with_spies(ctx, universe, closes)
+        d1, d2 = pd.Timestamp("2026-02-03"), pd.Timestamp("2026-02-04")
+        for series in (seen["score"]["portfolio_returns"]["btc-b"],
+                       seen["score"]["candidate_returns"]["btc-cand"]):
+            assert series.loc[d1] == pytest.approx(0.21, abs=1e-12)
+            assert series.loc[d2] == pytest.approx(0.144, abs=1e-12)
+            assert len(series) == 2
+        assert closes_mock.await_count == 1

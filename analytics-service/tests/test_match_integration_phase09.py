@@ -20,6 +20,9 @@ from unittest.mock import MagicMock
 # @pytest.mark.asyncio + await on a sync function raises
 # `TypeError: object dict can't be used in 'await' expression`.
 from routers.match import _load_allocator_context, FLAG_COMPOSITE_THRESHOLD
+from tests._curve_fixtures import curve_from_returns
+
+_STRAT_DATES = ["2026-01-01", "2026-01-02", "2026-01-03"]
 
 
 # ---------------------------------------------------------------------------
@@ -179,9 +182,17 @@ def test_mixed_portfolio_weights_sum_to_one(monkeypatch):
         {"strategy_id": "uuid-strat-1", "current_weight": 0.5, "portfolio_id": "port-1", "allocated_amount": 20000.0},
         {"strategy_id": "uuid-strat-2", "current_weight": 0.5, "portfolio_id": "port-1", "allocated_amount": 30000.0},
     ]
+    # 164.6.6.2.2: `returns_series` is the stored cumulative CURVE, so each strategy
+    # carries a curve of at least two points (a one-point curve yields no daily
+    # return, see test_one_point_curve_contributes_no_series_not_a_zero_return).
+    # Geometric levels, hand-computed:
+    #   strat-1 returns [0.0, 0.01, 0.02]  -> 1.0, 1.01, 1.0302 -> days 1..2 = 0.01, 0.02
+    #   strat-2 returns [0.0, 0.02, -0.01] -> 1.0, 1.02, 1.0098 -> days 1..2 = 0.02, -0.01
     sa_rows = [
-        {"strategy_id": "uuid-strat-1", "returns_series": [{"date": "2026-01-01", "value": 0.01}]},
-        {"strategy_id": "uuid-strat-2", "returns_series": [{"date": "2026-01-01", "value": 0.02}]},
+        {"strategy_id": "uuid-strat-1",
+         "returns_series": curve_from_returns([0.0, 0.01, 0.02], _STRAT_DATES)},
+        {"strategy_id": "uuid-strat-2",
+         "returns_series": curve_from_returns([0.0, 0.02, -0.01], _STRAT_DATES)},
     ]
     # Two holdings each with 41-day history
     holdings = [
@@ -214,6 +225,47 @@ def test_mixed_portfolio_weights_sum_to_one(monkeypatch):
 
     # portfolio_aum = strategy allocated_amounts + holding value_usd = 20000+30000+25000+25000
     assert result["portfolio_aum"] == pytest.approx(100000.0)
+
+    # The strategy legs of the blend are DAILY RETURNS derived from the stored curves,
+    # not the curve levels (about 1.0) weighted as returns (CR-01).
+    rets = result["portfolio_returns"]
+    assert list(rets["uuid-strat-1"].values) == pytest.approx([0.01, 0.02], abs=1e-12)
+    assert list(rets["uuid-strat-2"].values) == pytest.approx([0.02, -0.01], abs=1e-12)
+    assert [d.strftime("%Y-%m-%d") for d in rets["uuid-strat-1"].index] == _STRAT_DATES[1:]
+
+
+def test_one_point_curve_contributes_no_series_not_a_zero_return(monkeypatch):
+    """A strategy whose stored curve has one point has no stored predecessor, so no
+    daily return can be formed: it is absent from ``portfolio_returns`` (accounted like
+    a strategy with no returns), never present as a 0 return. It stays in the book and
+    keeps its weight; only its series is missing."""
+    ps_rows = [
+        {"strategy_id": "uuid-one-point", "current_weight": 0.5, "portfolio_id": "port-1",
+         "allocated_amount": 20000.0},
+        {"strategy_id": "uuid-full", "current_weight": 0.5, "portfolio_id": "port-1",
+         "allocated_amount": 30000.0},
+    ]
+    sa_rows = [
+        {"strategy_id": "uuid-one-point", "returns_series": [{"date": "2026-01-01", "value": 1.01}]},
+        {"strategy_id": "uuid-full",
+         "returns_series": curve_from_returns([0.0, 0.03, 0.01], _STRAT_DATES)},
+    ]
+    mock_sb = _build_mock_supabase(
+        portfolios=[{"id": "port-1"}], portfolio_strategies=ps_rows, strategy_analytics=sa_rows,
+    )
+    monkeypatch.setattr("routers.match.get_supabase", lambda: mock_sb)
+
+    result = _load_allocator_context("alloc-one-point")
+
+    assert {ps["strategy_id"] for ps in result["portfolio_strategies"]} == {
+        "uuid-one-point", "uuid-full",
+    }
+    assert result["portfolio_weights"]["uuid-one-point"] == pytest.approx(0.4)  # 20000 / 50000
+    assert "uuid-one-point" not in result["portfolio_returns"]
+    # uuid-full: levels 1.0, 1.03, 1.0403 -> days 1..2 = 0.03, 0.01
+    assert list(result["portfolio_returns"]["uuid-full"].values) == pytest.approx(
+        [0.03, 0.01], abs=1e-12
+    )
 
 
 def test_warmup_gate_under_30d(monkeypatch):

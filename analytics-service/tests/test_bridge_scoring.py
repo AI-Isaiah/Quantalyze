@@ -310,8 +310,9 @@ class TestBaselineWindowAlignment:
         assert results == []
 
     def test_duplicate_timestamp_portfolio_is_deduped_not_amplified(self):
-        # A returns_series carrying a repeated date (routers/portfolio.py
-        # documents that _records_to_series does NOT dedupe its JSONB input)
+        # A series carrying a repeated date (the shared parser
+        # services.wealth_returns.records_to_series dedupes keep-last, but a
+        # series can arrive by another path)
         # must NOT cartesian-amplify the per-candidate baseline reslice. The
         # function dedupes port_df last-write-wins, so a duplicate-timestamp
         # portfolio scores IDENTICALLY to the same portfolio with the duplicate

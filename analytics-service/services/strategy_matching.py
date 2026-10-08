@@ -28,6 +28,7 @@ from typing import Any
 import pandas as pd
 
 from services.dispersion import dispersing_corrwith
+from services.wealth_returns import daily_returns_from_row
 
 logger = logging.getLogger("quantalyze.analytics")
 
@@ -45,22 +46,6 @@ _MIN_OVERLAP_DAYS = 30
 # Cap on the number of published strategies we pull for the match. The
 # legacy block used 100; we preserve that to keep query cost bounded.
 _PUBLISHED_STRATEGIES_LIMIT = 100
-
-
-def _records_to_series(raw: list[dict[str, Any]] | None, name: str = "") -> pd.Series | None:
-    """Convert ``[{date, value}, ...]`` records to a DatetimeIndex Series.
-
-    Mirrors the helper at ``analytics-service/routers/portfolio.py:35``.
-    Duplicated here (rather than imported) to keep the matching service
-    free of router-level imports — the router still owns its copy for
-    other call sites; pulling it across would introduce a circular
-    import once process_key imports this module.
-    """
-    if not isinstance(raw, list) or not raw:
-        return None
-    dates = [r["date"] for r in raw]
-    vals = [r["value"] for r in raw]
-    return pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
 
 
 def find_matched_strategy(
@@ -95,16 +80,21 @@ def find_matched_strategy(
 
         sa_result = (
             supabase.table("strategy_analytics")
-            .select("strategy_id, returns_series")
+            .select("strategy_id, returns_series, daily_returns, data_quality_flags")
             .in_("strategy_id", published_ids)
             .execute()
         )
 
         existing: dict[str, pd.Series] = {}
         for row in sa_result.data or []:
-            s = _records_to_series(
-                row.get("returns_series"), name=row["strategy_id"]
-            )
+            # Phase 164.6.6.2.2 (D-06, D-01, D-02): ``returns_series`` is the
+            # stored cumulative CURVE, so correlating it against the target's
+            # DAILY RETURNS compared levels with returns and could report a
+            # duplicate on a trend. The shared boundary hands back daily returns
+            # (the row's ``daily_returns`` when present, else derived from the
+            # curve by its cumulative method). A pure services module, so it is
+            # imported directly rather than copied.
+            s = daily_returns_from_row(row, name=row["strategy_id"])
             if s is not None:
                 existing[row["strategy_id"]] = s
 

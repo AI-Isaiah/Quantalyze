@@ -1,5 +1,215 @@
 # Changelog
 
+## [0.128.0.1] - 2026-10-08 — ROADMAP repair, a lint rule that keeps every phase closable, and the 2026-10-08 verification records
+
+A phase could pass verification and never be marked done: 25 of 145 phases in `.planning/ROADMAP.md`
+had no checklist bullet and 26 had no Progress-table row, and `gsd-tools phase complete` ticks only
+those two, so it silently did nothing for them. This release repairs the drift, adds a lint rule
+that fails on it, and records the human-verification runs of 2026-10-08.
+
+### Fixed
+- **ROADMAP format drift** (`87613ed7b`). Every `### Phase N:` heading now has a checklist bullet the
+  tooling matches and a Progress-table row (145 headings, 145 bullets, 142 rows; the three retired
+  165-family phases carry a struck-through bullet and no row, by design). Three stale rows corrected
+  (164.6.6.1, 164.6.6.2, 164.6.6.3 read "Queued"/"Waiting" though they shipped).
+
+### Added
+- **Lint rule 6 ROADMAP-STRUCTURE** in `scripts/check-planning-hygiene.ts` (`1da5f6892`), run by
+  `npm run lint` in the always-on `frontend-lint` job. It fails when (a) a phase heading has no
+  bullet the tooling would match, (b) a heading has no Progress-table row, or (c) a phase whose
+  VERIFICATION says `passed` has an unticked bullet. Shown RED on the pre-repair ROADMAP (51
+  violations) and on a neutered 6c; 14 new tests in `check-planning-hygiene.test.ts`.
+
+### Changed
+- **164.6.6.3.5 DOMAINONE closed** (`0f28ee0b4`, `1435dd9dc`, `09e3f64e2`, `5da0cbd11`, `c09e95ae3`,
+  `bac93aef3`): plan 13's live records (LIVE-IMPACT, the production site URL moved to the canonical
+  host, the unread badge measured live) land on main, verification `passed`, phase complete.
+- **164.5.3 MT5CREDS closed** (`66f974cc1`): the visual QA item re-read in the production session on
+  2026-10-08 passed; the disconnected-section and NULL em-dash shapes, absent on PROD, stay covered by
+  the render tests.
+- **2026-10-08 runs recorded, phases still `human_needed`** (`1a52cf1f0`): 164.6.6.3.1 (key card,
+  eyebrow, focus PASS; phone-width check pending on the founder's phone), 164.6.6.3
+  (`MT5_KNOWN_SERVERS` present, names-only; SC1/SC4 need the founder's credentials and VNC),
+  164.6.6.2 (MM-2x reads BTC, +76.3% cumulative in BTC; share card, tear sheet and AUM serve only a
+  published strategy, so their live check waits for publication), 164.6.6.1 (two founder decisions:
+  scrub scope kept as shipped; the relaunch-debt lease wait booked as `MT5-RELAUNCH-DEBT-LEASE-WAIT-01`).
+
+### Notes
+- The `gsd-tools phase complete` runs were each followed by reverting their collateral (stray blank
+  lines, unrelated `state.json` flips, a `STATE.md` current-phase move); `state.json` was left as it
+  was on main.
+- Founder decision 2026-10-08: supported phone widths are 360/375/390 px; 320 px is not a target
+  (recorded as D-26 on the BTCNATIVE branch, which ships separately).
+
+## [0.128.0.0] - 2026-10-07 — WEALTHRETURNS: every Python blend reads daily returns, not the stored wealth curve
+
+Phase 164.6.6.2.2 closes the pre-existing defect the 164.6.6.2 review recorded as CR-01.
+`strategy_analytics.returns_series` holds the strategy's cumulative wealth curve (a compounded curve
+starting near 1.0, or a running sum on the simple method), and five Python code paths weighted it as
+if it were daily returns. A curve level of 1.4 was blended as a 140% daily return. This release puts
+one shared boundary between the stored row and every blend, makes the TypeScript resolver agree with
+it, and rebuilds the fixtures from curve-shaped data so a test can finally tell a curve from returns.
+**This is a behaviour change:** portfolio analytics, the optimizer, the replacement bridge, the
+simulator, the match engine and the duplicate and verify matchers now score on real daily returns, so
+their outputs move once the analytics service recomputes. Nothing is backfilled (D-03): the next
+scheduled runs replace the stored outputs.
+
+### Added
+- **One shared boundary, `daily_returns_from_row`** (`analytics-service/services/wealth_returns.py`,
+  `6378b7c05`). It turns a stored `strategy_analytics` row into daily returns. A non-empty
+  `daily_returns` wins (D-02); otherwise it derives them from the curve by the curve's own method
+  (D-01): ratio `w_k / w_{k-1} - 1` for a compounded curve, difference `w_k - w_{k-1}` for a simple
+  one. Day 0 is dropped. A non-finite or non-positive level makes the days that depend on it absent,
+  never 0 and never bridged. A row with nothing derivable reads as `None`, never an empty series.
+- **A shared oracle both runtimes read.** `wealth_to_returns_oracle.json` carries 21 hand-computed
+  cases (`a07450ee9`), read by pytest and by vitest, so the Python and TypeScript conversions cannot
+  drift apart unnoticed. Its simulator suite runs on curve-shaped fixtures and the router's private
+  copy of the parser is deleted (`48de5faa4`).
+- **The single-key analytics run stamps `cumulative_method`** into `data_quality_flags`
+  (`2c33ef1d6`, `807904bde`), from the same variable passed to the curve builder, so the stamp cannot
+  disagree with how the curve was built (D-05). No migration; a row without the stamp reads
+  geometric, which is exact for every curve on PROD today.
+- **`blend_periods_per_year`** in `services/metrics.py` (`07ec054dc`): the one place the rule
+  "a blend annualizes risk on 365 if any leg is crypto, else 252" lives.
+- **Test infrastructure that can fail.** `_curve_fixtures.curve_from_returns` builds real curve
+  shapes, and `_schema_columns` parses the committed baseline plus migrations so a fake select naming
+  a column the table does not have fails loudly (`84a5be628`). `test_blend_annualization_clock.py`
+  pins the risk clock, and `test_wealth_returns_router_method.py` pins that each router honours the
+  stored method (`a63c6a36a`).
+- **A no-bypass census** (`test_wealth_returns_census.py`, `32a107ddb`, tightened in `0ef048958`).
+  It AST-scans `routers/` and `services/` and classifies each `returns_series` reference against an
+  exact allowlist. It requires `data_quality_flags` in every select that reads the curve, requires
+  the method to reach the boundary, and checks `keep_absent`. A future read that bypasses the boundary
+  goes RED. Two end-to-end tests invert the real runner's curve back through the boundary.
+
+### Fixed
+- **Portfolio analytics read columns that do not exist.** `_compute_portfolio_analytics` (also run by
+  the cron and the job worker) selected `equity_curve` and `total_aum` from `strategy_analytics`,
+  neither of which exists there, so it could not complete on PROD. It now selects real columns and
+  blends boundary-derived returns (`50519d0ef`). Every strategy's time-weighted return comes from
+  its blended daily returns on one day convention (`4b15f0ef8`). Total AUM is the sum of
+  `portfolio_strategies.allocated_amount`, null unless every strategy has one, and a 0 counts (D-07).
+- **The simulator blended curve levels as returns** (`6378b7c05`).
+- **The match engine scored on curve levels.** The allocator book and the candidate universe are now
+  scored on daily returns derived from the stored curve (`4b596882b`, `1826756a3`); the router's
+  parser copy is gone and the integration fixtures are curve-shaped (`f82953e81`).
+- **The two correlation matchers compared levels with returns.** The duplicate matcher compares
+  daily returns with daily returns (`7f6146631`), and `verify_strategy` matching trims the published
+  series first and then reads it through the boundary (`ef99e97d1`, D-06).
+- **The optimizer and the replacement bridge read curve levels**, and the portfolio parser copy is
+  gone (`5dddbdb7d`).
+- **The TypeScript resolver now reads a stored curve by the row's method** on the shared oracle
+  (`1ffd7e574`). The dashboard, factsheet, OG card and own-capital readers pass the row's method
+  (`f8623931c`), and the scenario share forwards each leg's parsed method (`d21a16838`). Raw
+  `data_quality_flags` never cross to the client; the compare read projects one scalar,
+  `cumulative_method`.
+- **Blend risk was annualized on the square root of 252 whatever the asset class** (review WR-01,
+  HIGH). Blend scorers now annualize on the blend's clock (`07ec054dc`), and the portfolio headline
+  plus the optimizer, bridge and simulator routes read each strategy's `asset_class` (`32d6b29a5`).
+- **The native-to-USD converter mispriced the day after an absent day** (WR-02): it priced a one-day
+  native return over the whole gap. It now prices that day over its own single day (`371f0e42f`).
+- **The compare correlation matrix correlated curve levels** (WR-05, `17833ecbc`), and the return
+  histogram read the stored curve without its method and kept unusable days (`2be601822`). Both now
+  read daily returns by the stored method and drop unusable days.
+- **A usable row with no derivable day dropped a strategy silently** (silent-failure review M1). The
+  boundary now warns, with the strategy's name and counts only and never a stored value (`31e233860`).
+
+### Changed
+- **One risk clock per candidate comparison (founder decision D-08, review round 2 R2-01 and R2-02).**
+  The optimizer, bridge and simulator score every candidate in one list, and both sides of every
+  delta, on the EXISTING BOOK's clock (365 if a book leg is crypto, else 252). Before, a crypto
+  candidate against a book with no crypto leg earned about a 20% Sharpe bonus from its label alone,
+  and a book's "current" Sharpe changed with the candidate it was compared against (`8167e34dd`).
+  The decision is recorded in CONTEXT (`534ec7993`). It narrows the risk-by-frequency rule for
+  candidate comparisons only; the portfolio headline keeps the rule as written.
+- `usd_equity_from_converted_returns` and the four per-router `_records_to_series` copies are removed;
+  they have no remaining callers.
+- **Merged `origin/main`** (PR #972 baseline re-dump, the contact form, v0.127.0.1) with no
+  conflicts and nothing under `supabase/schema/` touched by this branch. No migration in this phase.
+
+### Tests
+- Full analytics suite from `analytics-service/`: 8363 passed, 90 skipped, 0 failed (the 90 skips are
+  existing skips, none added by this phase). Phase-touched vitest set plus
+  `critical-regressions.test.ts`: 35 files, 878 tests, all passed.
+- The verifier neutered the boundary at eight sites in a scratch copy (optimizer, match allocator
+  context, strategy matching, AUM source, D-02 order, the stamp, the optimizer's clock, the
+  simulator's clock) and each went RED. The ninth, the bridge's book clock excluding the incumbent,
+  was not caught (see Notes).
+- Known local artefact, unchanged: `compute.conventions.test.ts` fixtures B and C differ from their
+  FROZEN snapshots by one ulp in `skew` on Node 25. The phase does not touch `compute.ts` or
+  `return-stats`; CI's Node decides them, and the snapshots were not loosened.
+
+### Security
+- Phase security audit: SECURED, 21 of 21 register entries closed, 0 open at or above `high`
+  (`b8231b42d`). Warning logs carry names, counts and the validated method only. The diff touches
+  nothing under `supabase/`, and the PROD readings were SELECT-only with the marker query first.
+
+### Notes
+- **The D-03 post-deploy PROD reading is still PENDING, so the phase verification is
+  `human_needed`, not `passed`** (`e9b62bba1`). After merge, a green main CI on the merge sha, and the
+  Railway analytics deploy, the reading must be filled into `164.6.6.2.2-MEASUREMENT.md`: confirm
+  `/health` `git_sha` equals the merge sha, run the marker query first, take the first personalized
+  `match_batches` row per allocator with a `computed_at` after the deploy (never the pg_net cron
+  status), and rerun statements 3 and 4 unchanged. Expected: personalized `portfolio_fit` stays 0,
+  scores are unchanged unless a non-book input moved, screening rows are unchanged. If no personalized
+  batch has landed yet, the reading says so. The "before" reading and an old-versus-new replay on 22
+  PROD rows are recorded (`57a80b03c`): Sharpe 30.7 with an infinite final equity became 2.32 with
+  4.36, and the optimizer's top candidate moved from C3 to C1. The restated backstop is a
+  no-regression check: the three personalized allocators hold no strategies today, so the fix cannot
+  be shown to move a stored match score.
+- **Known limits, not fixed (LOW or INFO, recorded rather than fixed).** R3-02: nothing pins that the
+  bridge's book clock includes the incumbent; excluding it leaves 94 tests green though the code is
+  correct. R3-01: two comments over-claim that the simulator's `current.sharpe` equals the portfolio
+  headline; it shares the clock only. R2-03 and IN-07: the unusable-row and unknown-method warnings
+  repeat per read. IN-01 and F-1: a mixed-timezone stored date raises in the boundary (availability
+  only; the pre-phase code raised too). F-2: `_trim_returns_series` leaves a dict-shaped
+  `daily_returns` uncapped in verify (service-role written). IN-04 and F-5: the writer fills interior
+  chain-break NaN days as 0.0, so "absent, never 0" does not hold for those days. IN-02: the Python
+  and TypeScript twins differ on an overflowing derived return. IN-05 and R2-05: the census scans
+  `routers/` and `services/` only. Parity gaps outside the oracle: a dict-shaped `returns_series`, a
+  numeric-string level, and duplicate dates deduped in Python only.
+- **Routed follow-ups, from the review and silent-failure hunts.** (1) The portfolio page's
+  `buildWealthPoints` plots a stored simple-method `returns_series` as a cumulative product; no
+  simple-method row exists on PROD. (2) TypeScript readers that may still treat curve levels as
+  returns, not traced (confidence 6): `CorrelationWithBenchmark.tsx`, and the `/compare` matrix
+  correlating BTC-native raw returns against USD with no native unit projected; to be booked against
+  FACTSHEETTRUTH or a 170.x phase. (3) The analytics runner's failure upserts overwrite
+  `data_quality_flags` and drop `cumulative_method` while the old curve persists, so a simple curve
+  would read geometric after a failed run. (4) `strategy_matching.find_matched_strategy` conflates
+  "matching down" with "no duplicate" (pre-existing). (5) WR-01 residue: `match_engine`'s
+  portfolio-fit `sharpe_lift` still uses 252 (no asset class in that flow), and `verify_strategy`'s
+  single-account Sharpe is on 252. (6) WR-02 residue: the converter drops its own first element, so a
+  native leg loses its first real return (pinned by the oracle), and the verify-path correlation
+  compares raw native returns with USD (pre-existing). (7) Silent-failure round 2 and 3, confidence 5
+  to 8: no router test that a gapped native curve is converted before the scorer; `ReturnHistogram`
+  shows a blank body or a tiny-sample histogram with no banner; a book leg with no `asset_class`
+  silently reads 252 with no log; no test with the incumbent as the sole crypto leg in the bridge
+  clock. These follow-ups are recorded here and in the phase artifacts, not yet booked in TODOS.
+- **CI defect observed, separate from this phase, to be booked after this ship.** The "Install psql
+  client" step hung for 36 minutes in `apply-test` of a Supabase Migrate run and for over 68 minutes in
+  an `e2e-seeded` job of a CI run. It is an apt install with no step timeout. The remedy is a
+  step-level `timeout-minutes` and apt retry options.
+- **Planning-only commits in this release** (no source change): the phase's context, research,
+  validation strategy and pattern map, seven plans in four waves with two checker revisions, the seven
+  plan summaries, the plan 07 PROD measurement doc and its home-path regex fix so the planning-hygiene
+  gate passes (`3d01fae51`), the review (three rounds, round 3 at 0 HIGH or MEDIUM), the security
+  audit, the verification, the founder-dated booking of Phase 167.1.2.2 DERIVECRON in the roadmap, the
+  merges of the seven worktree branches that carried the plans and review fixes, and the merge of
+  `origin/main`.
+
+## [0.127.0.1] - 2026-10-07 — BASELINE: automated re-dump after the PROD apply of 239106dc
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `37667399720`, after the PROD apply of merge `239106dc`: sha256 `5870bb2a…` → `28f356c4…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261008120000_for_quants_leads_contact_source.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-07` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.127.0.0 → 0.127.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=287 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `37667399720` succeeded, and this entry was composed by the `redump-pr` job. Run `37667399720` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.127.0.0] - 2026-10-07 — DOMAINONE: one canonical address, and a contact form instead of an email address
 
 Phase 164.6.6.3.5 makes `quantalyze.xyz` the product's one address. `quantalyze.com` is a domain we do

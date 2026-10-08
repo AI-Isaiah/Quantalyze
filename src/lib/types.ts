@@ -358,6 +358,16 @@ export interface StrategyAnalytics {
    * "cannot support a freshness claim" — never as "fine".
    */
   series_end?: string | null;
+  /**
+   * Phase 164.6.6.2.2 (WR-05) — NOT a `strategy_analytics` column. The scalar
+   * `data_quality_flags->>cumulative_method`, projected as a JSONB alias
+   * (`cumulative_method:data_quality_flags->>cumulative_method`) by the
+   * cross-tenant compare read, which must not ship the whole flags blob. It is
+   * how a curve consumer knows whether `returns_series` is geometric or simple.
+   * OPTIONAL like `series_end`: reads that do not project it stay valid, and an
+   * absent value reads as the platform default (geometric).
+   */
+  cumulative_method?: string | null;
   drawdown_series: { date: string; value: number }[] | null;
   monthly_returns: Record<string, Record<string, number>> | null;
   daily_returns: Record<string, Record<string, number>> | null;
