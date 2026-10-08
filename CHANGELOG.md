@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.129.1.1] - 2026-10-08 — APTHANG: a CI job's apt step never hangs on a dead package mirror
+## [0.129.1.2] - 2026-10-08 — APTHANG: a CI job's apt step never hangs on a dead package mirror
 
 Phase 164.9.8. CI jobs were hanging for most of their timeout on an apt install. The runner image's own retries and 15 s timeouts fail over to the Azure mirror in about 30 s, but the fallback then trickles bytes and never times out. Every apt call in the workflows now goes through one bounded wrapper, and a guard test keeps it that way.
 
@@ -39,6 +39,19 @@ Phase 164.9.8. CI jobs were hanging for most of their timeout on an apt install.
   - A held apt lock fails at once rather than waiting.
   - The self-test asserts wall-clock windows and was seen slow on a heavily loaded macOS host. Watch it across CI shards.
 - ⚠️ `ubuntu-latest` moves to 26.04 from 2026-10-19, and that will trip the pg_cron step's major-16 guard. It is booked separately.
+
+## [0.129.1.1] - 2026-10-08 — BASELINE: automated re-dump after the PROD apply of f2d8c8da
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `37765078161`, after the PROD apply of merge `f2d8c8da`: sha256 `28f356c4…` → `cae5e296…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261009120000_sync_status_analytics_scope.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-08` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.129.1.0 → 0.129.1.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=288 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `37765078161` succeeded, and this entry was composed by the `redump-pr` job. Run `37765078161` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
 
 ## [0.129.1.0] - 2026-10-08 — STATUSBRIDGE: a strategy's analytics status reads `failed` only for an analytics failure
 
