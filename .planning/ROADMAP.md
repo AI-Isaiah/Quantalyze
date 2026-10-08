@@ -113,12 +113,12 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out** (INSERTED) — not yet planned (waits for the founder's live scrub spike)
 - [ ] **Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series** (INSERTED) — shipped v0.126.0.0 (#969, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — not yet planned (booked 2026-10-07 by 164.6.6.2 D-15)
-- [ ] **Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend** (INSERTED) — shipped v0.128.0.0 (#973, merged 2026-10-08); verification: human_needed (post-deploy D-03 reading only)
+- [x] **Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend** (INSERTED) — shipped v0.128.0.0 (#973, merged 2026-10-08); verification: passed (D-03 post-deploy reading 2026-10-08) (completed 2026-10-08)
 - [ ] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8)** (INSERTED) — shipped v0.125.2.1 (#968, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
 - [x] **Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy)** (INSERTED) — verification: passed (v0.129.0.0) (completed 2026-10-08)
 - [ ] **Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b)** (INSERTED) — not yet planned (164.6.6.3 split C, founder 2026-10-06)
-- [ ] **Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status** (INSERTED) — shipped v0.129.1.0 (merged 2026-10-08); verification: human_needed (post-deploy plan 04 PROD re-sync only)
+- [x] **Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status** (INSERTED) — shipped v0.129.1.0 (merged 2026-10-08); verification: passed (plan 04 PROD re-sync 2026-10-08) (completed 2026-10-08)
 - [x] **Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults** (INSERTED) — verification: passed (PR #971, v0.127.0.0) (completed 2026-10-08)
 - [ ] **Phase 164.6.6.3.6: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed** (INSERTED) — not yet planned (booked 2026-10-06, founder)
 - [x] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
@@ -142,8 +142,9 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — verification: passed (completed 2026-10-02, PR #875, v0.106.0.0; first bot re-dump PR #920)
 - [x] **Phase 164.9.6: SUBSETMAIN — a push to main runs only its PR's changed SQL gates; a nightly job runs the full corpus and enforces the floors** (INSERTED 2026-10-03) — planned 2026-10-03, 5 plans in 4 waves (completed 2026-10-03)
 - [x] **Phase 164.9.6.1: SUBSETSHARD — a FULL sql-mutation run fits well under its 20-minute cap again, and a stale-baseline-drift red no longer forces one** (INSERTED 2026-10-03) — verification: passed (completed 2026-10-03, PR #941, v0.123.0.0; SS-1 measured 5m01s on main run 37151757248, closed in #942)
-- [ ] **Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables** (INSERTED 2026-10-03) — shipped v0.129.2.0 (merged 2026-10-08); verification: human_needed (plan 04 post-merge PROD after-reading only)
-- [ ] **Phase 164.9.8: APTHANG — a CI job's apt step never hangs on a dead package mirror** (INSERTED 2026-10-07) — shipped v0.129.1.2 (merged 2026-10-08); verification: human_needed (post-ship real-runner measurement only)
+- [x] **Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables** (INSERTED 2026-10-03) — shipped v0.129.2.0 (merged 2026-10-08); verification: passed (plan 04 PROD after-reading 2026-10-08) (completed 2026-10-08)
+- [ ] **Phase 164.9.7.1: TRIGGERREVOKE — anon and authenticated no longer hold TRIGGER or MAINTAIN on public tables** (INSERTED 2026-10-08) — not yet planned (founder D-06, 164.9.7)
+- [x] **Phase 164.9.8: APTHANG — a CI job's apt step never hangs on a dead package mirror** (INSERTED 2026-10-07) — shipped v0.129.1.2 (merged 2026-10-08); verification: passed (D-04 runner measurement recorded) (completed 2026-10-08)
 - [x] **~~Phase 165~~: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"), as 165 ACTIONSDEPS: #643 (superseded by #916), #627, #626 and #612 landed green; deviations in `165-VERIFICATION.md`.
 - [x] **~~Phase 165.1~~: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"): the maintenance landings meet the criteria, C1 in substance and not to the letter (the pandas fix rode inside #898); deviations in `165.1-VERIFICATION.md`.
 - [x] **~~Phase 165.2~~: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -2964,13 +2965,13 @@ analytics status, while a genuine analytics failure is still never masked.
 **Depends on:** Phase 164.6.6.3
 **Gates:** a migration, so migration-reviewer and rls-policy-auditor must be clean before merge. PROD auto-applies
 after `apply-test` with no human stop.
-**Plans:** 3/4 plans complete (plan 04 runs after deploy)
+**Plans:** 4/4 plans complete
 
 Plans:
 - [x] 164.6.6.3.4-01-PLAN.md — the re-based bridge migration (side-kind NOT IN list, process_key_long chain supersession), pg-lane fixture, 13-arm gate with twins, sql-tests roster pins
 - [x] 164.6.6.3.4-02-PLAN.md — the four new verify anchors shown refusing an apply, and the rollback proven on the lane
 - [x] 164.6.6.3.4-03-PLAN.md — snapshot and earned VAC-04 ack, kind-classification drift test, local-stack bridge family, mutation census, release commit
-- [ ] 164.6.6.3.4-04-PLAN.md — post-deploy PROD re-sync of the `failed` rows that have jobs (D-08 as amended), before/after recorded, founder checkpoint
+- [x] 164.6.6.3.4-04-PLAN.md — post-deploy PROD re-sync of the `failed` rows that have jobs (D-08 as amended), before/after recorded, founder checkpoint
 
 
 ⭐ **Founder 2026-10-07 (D-09, CONTEXT):** a call whose only failures are excluded side kinds must not stamp `computed_at` or clear a foreign `computation_error`; fixed before merge.
@@ -3008,6 +3009,7 @@ time):**
   - ⚠️ 2026-10-06: Eclipse's `failed` comes from the status bridge, not from copy. Twelve non-superseded
     `sync_funding` failures pin it. Phase 164.6.6.3.4 STATUSBRIDGE owns that mechanism. Re-measure
     Eclipse after it ships, before deciding the copy here.
+  - ⭐ 2026-10-08 (STATUSBRIDGE plan 04 re-sync, PROD): Eclipse re-measured after the bridge re-sync, `failed` -> `complete` (`computation_error` NULL); decide the item 5 copy on that state, the job-finished-analytics-failed case now applies only to the genuine failures.
 - **Item 6b.** `scenario-factsheet-payload.ts` (~271) `emptyQuantiles()` returns zeros, carried as a
   LOW in `166.2-VERIFICATION.md` ~245. It should be NaN/null rendering "—".
 - Also owns 170.3's OG-card parity half and 170.6's red "—" on OG cards (moved here 2026-10-06; same defects as item 4).
@@ -3152,16 +3154,16 @@ Plans:
 **Requirements**: TBD
 **Depends on:** Phase 164.6.6.2
 **Founder decision 2026-10-07 (review round 2):** candidate comparisons (optimizer, bridge, simulator) use the existing book's risk clock for every candidate and both sides of a delta; the headline keeps "365 if any leg is crypto". Detail: `164.6.6.2.2-CONTEXT.md` D-08.
-**Plans:** 7 plans
+**Plans:** 7/7 plans complete
 
 Plans:
-- [ ] 164.6.6.2.2-01-PLAN.md — the shared Python boundary `services/wealth_returns.py` + cross-runtime oracle; the simulator reads through it (wave 1)
-- [ ] 164.6.6.2.2-02-PLAN.md — the single-key runner stamps `data_quality_flags.cumulative_method` (D-05) (wave 1)
-- [ ] 164.6.6.2.2-03-PLAN.md — TS `resolveDailyReturnSeries` honours the method on the same oracle; every caller passes the row's method (wave 2)
-- [ ] 164.6.6.2.2-04-PLAN.md — `_compute_portfolio_analytics` on real columns, boundary returns, AUM from `allocated_amount` (D-04, D-07) (wave 2)
-- [ ] 164.6.6.2.2-05-PLAN.md — both correlation matchers (D-06), optimizer and bridge on the boundary (wave 3)
-- [ ] 164.6.6.2.2-06-PLAN.md — the match engine's two loaders on the boundary (wave 2)
-- [ ] 164.6.6.2.2-07-PLAN.md — no-bypass census, write-to-read end-to-end test, PROD before/after measurement (D-03) (wave 4)
+- [x] 164.6.6.2.2-01-PLAN.md — the shared Python boundary `services/wealth_returns.py` + cross-runtime oracle; the simulator reads through it (wave 1)
+- [x] 164.6.6.2.2-02-PLAN.md — the single-key runner stamps `data_quality_flags.cumulative_method` (D-05) (wave 1)
+- [x] 164.6.6.2.2-03-PLAN.md — TS `resolveDailyReturnSeries` honours the method on the same oracle; every caller passes the row's method (wave 2)
+- [x] 164.6.6.2.2-04-PLAN.md — `_compute_portfolio_analytics` on real columns, boundary returns, AUM from `allocated_amount` (D-04, D-07) (wave 2)
+- [x] 164.6.6.2.2-05-PLAN.md — both correlation matchers (D-06), optimizer and bridge on the boundary (wave 3)
+- [x] 164.6.6.2.2-06-PLAN.md — the match engine's two loaders on the boundary (wave 2)
+- [x] 164.6.6.2.2-07-PLAN.md — no-bypass census, write-to-read end-to-end test, PROD before/after measurement (D-03) (wave 4)
 
 ### Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view (INSERTED)
 
@@ -3724,29 +3726,40 @@ Plans:
 **Deviations from D-03 (recorded 2026-10-07, planner revision; the same text is in 164.9.8-CONTEXT.md):** (1) the two `Acquire shared-test-db mutex` steps carry no step `timeout-minutes`, because they wait up to about 33 min for the shared-TEST lock by design, and the wrapper's 400 s budget bounds their dead-branch apt; (2) Playwright's internal apt is bounded only by the image defaults plus a 10-minute step cap, about 1.9 times the slowest measured cache-miss install (308 s).
 **Requirements**: SC-1, SC-2, SC-3, SC-4 (the four success criteria above, in order)
 **Depends on:** none (ships first in the merge queue, founder 2026-10-07)
-**Plans:** 5 plans
+**Plans:** 5/5 plans complete
 
 Plans:
-- [ ] 164.9.8-01-PLAN.md — tracer: `scripts/ci-apt.sh` (wall-clock-bounded, retried, psql skip, `--self-test`) wired into ci.yml sql-tests (wave 1)
-- [ ] 164.9.8-02-PLAN.md — ci.yml remaining psql sites, Playwright step limits, `Provision pg_cron` byte-equal in ci.yml and the nightly (wave 2)
-- [ ] 164.9.8-03-PLAN.md — supabase-migrate, test-restore, mutex-probe, prod-prober, nightly.yml; mutex suffix kept identical (wave 2)
-- [ ] 164.9.8-04-PLAN.md — glob-census guard test, neutered RED and restored from a byte backup (wave 3)
-- [ ] 164.9.8-05-PLAN.md — ship: version re-picked from origin/main, CHANGELOG, PR bound by check count, D-04 runner measurement recorded (wave 4)
+- [x] 164.9.8-01-PLAN.md — tracer: `scripts/ci-apt.sh` (wall-clock-bounded, retried, psql skip, `--self-test`) wired into ci.yml sql-tests (wave 1)
+- [x] 164.9.8-02-PLAN.md — ci.yml remaining psql sites, Playwright step limits, `Provision pg_cron` byte-equal in ci.yml and the nightly (wave 2)
+- [x] 164.9.8-03-PLAN.md — supabase-migrate, test-restore, mutex-probe, prod-prober, nightly.yml; mutex suffix kept identical (wave 2)
+- [x] 164.9.8-04-PLAN.md — glob-census guard test, neutered RED and restored from a byte backup (wave 3)
+- [x] 164.9.8-05-PLAN.md — ship: version re-picked from origin/main, CHANGELOG, PR bound by check count, D-04 runner measurement recorded (wave 4)
 
 ### Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables (measured read-only on PROD 2026-10-03: anon 56 of 63 tables, authenticated 59, api_keys included; RLS never covers TRUNCATE). One migration revokes it and the default privilege; migration-reviewer + rls-policy-auditor + silent-failure-hunter before merge, since merges auto-apply to PROD. (INSERTED)
 
 **Goal:** anon and authenticated cannot TRUNCATE any relation in `public`, now or on tables `postgres` creates later (D-01); the migration refuses its own apply if that is not true, reading the catalogue only (D-02); an annotated SQL gate fails on a re-grant and every census it moves is updated by measurement (D-03); PROD holder counts are recorded before the merge and after the apply, marker first (D-04). Accepted residual (provisional, founder confirms at verify): the platform admin role's own default-ACL row, which `postgres` cannot alter. ⚠️ The 56/59 in the title counts RELATIONS: 53/56 tables plus 3 views (research, measured 2026-10-07).
 **Requirements**: none assigned; plans trace to CONTEXT D-01..D-04
 **Depends on:** Phase 164.9
-**Plans:** 4 plans (planned 2026-10-07, revised round 1; 4 waves: W1 01 · W2 02 · W3 03 · W4 04; 04 is post-merge and non-autonomous)
+**Plans:** 4/4 plans complete (planned 2026-10-07, revised round 1; 4 waves: W1 01 · W2 02 · W3 03 · W4 04; 04 is post-merge and non-autonomous)
 
 Plans:
 - [x] 164.9.7-01-PLAN.md — migration (schema-wide + default-privilege revoke, catalogue self-check), gate TRUNC 1..6, each guard shown RED
 - [x] 164.9.7-02-PLAN.md — exact-prior-set rollback; local-stack full-dump proof (PG 17.6: corpus green, counts 0/0, rollback back to 56/59, gate RED)
 - [x] 164.9.7-03-PLAN.md — floors and censuses from one full measured run; D-04 BEFORE reading on PROD; TODOS api_keys annotation
-- [ ] 164.9.7-04-PLAN.md — post-merge: apply-test and apply confirmed, D-04 AFTER reading on PROD, founder confirms the residual
+- [x] 164.9.7-04-PLAN.md — post-merge: apply-test and apply confirmed, D-04 AFTER reading on PROD, founder confirms the residual
 
 ⭐ **Founder 2026-10-07 (after review round 1), recorded in CONTEXT D-05/D-06:** the `supabase_admin` residual is CONFIRMED before merge, with a read-only PROD detector booked. TRIGGER and MAINTAIN on `public` (anon/authenticated) go to a new phase inserted after this one. TRUNCATE on `storage.*`/`net.*` is an accepted platform residual (not revocable by `postgres`); this phase's guarantee is schema `public` only.
+
+### Phase 164.9.7.1: TRIGGERREVOKE — anon and authenticated no longer hold TRIGGER or MAINTAIN on public tables (INSERTED)
+
+**Goal:** Close the rest of the RLS-exempt privilege class that 164.9.7 opened for TRUNCATE. A client role holding TRIGGER on a table can attach code that a BYPASSRLS writer then runs (RLS audit HIGH, 164.9.7 review), and PG17 MAINTAIN lets a role LOCK and VACUUM FULL a table, which is an outage. Revoke both from `anon` and `authenticated` on every `public` relation and in the `postgres` default privileges, with a catalogue self-check and a gate, the same shape as 164.9.7.
+**Booked:** founder D-06 (164.9.7 CONTEXT, 2026-10-08): its own phase, not folded into the TRUNCATE migration. TRUNCATE on `storage.*` and `net.*` stays an accepted platform residual. Re-measure the per-role holder counts on PROD at plan time (marker query first).
+**Requirements**: TBD
+**Depends on:** Phase 164.9.7
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.9.7.1 to break down)
 
 ### Phase 164.9.6: SUBSETMAIN — a push to main runs only the SQL gate files its PR changed, and a nightly scheduled job runs the full mutation corpus and enforces FILES_FLOOR / ARMS_FLOOR; the split is printed on every run. Founder decision 2026-10-03 after sql-mutation crossed its 20-minute ceiling on push 98f04db16 (prior main runs 15.2-16.9 min); the timeout is never raised again. (INSERTED)
 
@@ -5480,12 +5493,12 @@ kept verbatim.
 | 164.6.6.1 MT5SCRUB | 7/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Waiting`, 0/4, until 2026-10-08) | v0.125.0.0 · #950 |
 | 164.6.6.2 BTCNATIVE | 12/13 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.126.0.0 · #969 |
 | 164.6.6.2.1 BTCUSDVIEW | 0/? | Queued — booked 2026-10-07 by 164.6.6.2 D-15 | - |
-| 164.6.6.2.2 WEALTHRETURNS | 7/7 | Shipped — verification `human_needed`: post-deploy D-03 reading only, not closed | v0.128.0.0 · #973 |
+| 164.6.6.2.2 WEALTHRETURNS | 7/7 | Complete — verification passed after the D-03 post-deploy reading | 2026-10-08 · v0.128.0.0 · #973 |
 | 164.6.6.3 UATFIXES | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.125.2.0 · #967 |
 | 164.6.6.3.1 UIPOLISH | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.125.2.1 · #968 |
 | 164.6.6.3.2 WIZARDCODES | 4/4 | Complete — verification passed (WR-01 MEDIUM recorded as a known gap) | 2026-10-08 · v0.129.0.0 |
 | 164.6.6.3.3 FACTSHEETTRUTH | 0/? | Queued — 164.6.6.3 split C (founder 2026-10-06) | - |
-| 164.6.6.3.4 STATUSBRIDGE | 3/4 | Shipped — verification `human_needed`: post-deploy plan 04 PROD re-sync only, not closed | v0.129.1.0 |
+| 164.6.6.3.4 STATUSBRIDGE | 4/4 | Complete — verification passed after the plan 04 PROD re-sync | 2026-10-08 · v0.129.1.0 · #977 |
 | 164.6.6.3.5 DOMAINONE | 13/13 | Complete — verification passed after plan 13's live checks | 2026-10-08 · v0.127.0.0 · #971 |
 | 164.6.6.3.6 MT5SERVERLEARN | 0/? | Queued — booked 2026-10-06 (founder); BROKER-SERVERS.md measured, no plans | - |
 | 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Complete    | 2026-10-04 |
@@ -5509,8 +5522,9 @@ kept verbatim.
 | 164.9.5 AUTOREDUMP | 9/9 | Complete | v0.106.0.0 · #875 · verification passed 2026-10-02 |
 | 164.9.6 SUBSETMAIN | 5/5 | Complete    | 2026-10-03 |
 | 164.9.6.1 SUBSETSHARD | 3/3 | Complete | v0.123.0.0 · #941 · verification passed 2026-10-03 |
-| 164.9.7 TRUNCATEREVOKE | 3/4 | Shipped — verification `human_needed`: plan 04 post-merge PROD after-reading only, not closed | v0.129.2.0 |
-| 164.9.8 APTHANG | 4/5 | Shipped — verification `human_needed`: post-ship plan 05 runner measurement only, not closed | v0.129.1.2 |
+| 164.9.7 TRUNCATEREVOKE | 4/4 | Complete — verification passed after the plan 04 PROD after-reading | 2026-10-08 · v0.129.2.0 · #980 |
+| 164.9.7.1 TRIGGERREVOKE | 0/? | Queued — security, booked 2026-10-08 (founder D-06) | - |
+| 164.9.8 APTHANG | 5/5 | Complete — verification passed after the D-04 runner measurement | 2026-10-08 · v0.129.1.2 · #979 |
 | 166. QSTATS-TRUTH | 10/10 | Complete    | 2026-10-04 |
 | 166.1 ENGINEFLOOR | 4/4 | Complete    | 2026-10-04 |
 | 166.1.1 DDSIGN | 0/? | Queued — feature | - |
