@@ -11298,9 +11298,10 @@ its measurement confirms the crash on PROD, it moves to `## 🔴 FIX NOW` and ge
       `scripts/prod-prober/cron-manifest.json`.
       **Owner:** THE FOUNDER.
 
-### MUTPARSER-CORPUS-TIMEOUT-01 — the REAL CORPUS rule-3b walk times out on CI shards (booked 2026-10-08)
+### ✅ RESOLVED 2026-10-08 (PR #980) — MUTPARSER-CORPUS-TIMEOUT-01 — the REAL CORPUS rule-3b walk times out on CI shards (booked 2026-10-08)
 
 **What.** `src/__tests__/mutation-annotation-parser.test.ts` › "REAL CORPUS: no annotation that exists today rewrites an identity" hit vitest's 30 s limit twice on 2026-10-08, on CI shard 2 of PR #978 and of PR #980. Locally the same test takes 3.8 s at 605 arms. It passed on reruns and on main, so the result is not wrong; it is slow under shard contention, and the corpus keeps growing.
 **Suspected cause (to measure, not assumed).** The walk does `buffers.clear()` per arm and re-applies each file step from disk, so with 716 steps it re-reads the same migration files many times.
 **Fix when picked up.** Measure the per-arm time on a CI shard, cache file reads across arms (reset only the mutation buffers), and keep the assertion unchanged. Do not raise the timeout to hide it.
 **Owner:** whoever next touches the mutation tooling; it reds unrelated PRs until fixed.
+**Resolution (measured, 2026-10-08).** The suspected cause was wrong in emphasis. Disk reads were 38 ms. 3.66 of 3.74 s went to `failureBranches` re-parsing the same migration text, once per arm and again as each step's next input. `failureBranches` is now memoized by text (FIFO, cap 64, results frozen) in `scripts/mutation-runner/run.mjs`: the walk takes 1.99 s and every assertion is unchanged. Shipped in PR #980 (164.9.7). The timeout was not raised.
