@@ -1039,17 +1039,27 @@ def read_dropped_day_pnl(payload: Mapping[str, Any]) -> dict[str, float]:
     field: an absent or null field is the old row, not an error. A present but
     malformed one raises ``ValueError``/``TypeError``/``KeyError`` like the neighbouring
     ``flows`` parse, so the job disposes it as a corrupt input instead of reading a
-    guess."""
+    guess. Malformed includes a boolean or non-numeric amount and a repeated day."""
     raw = payload.get("dropped_day_pnl")
     if raw is None:
         return {}
     out: dict[str, float] = {}
     for row in raw:
         day = date.fromisoformat(str(row["utc_day_iso"])).isoformat()
-        amount = float(row["pnl_usd"])
+        raw_amount = row["pnl_usd"]
+        # ``float(True) == 1.0``: a JSON boolean would be read as a dollar. The MT5
+        # flow channel already refuses it (``_fold_mt5_deals``); so does this one.
+        if isinstance(raw_amount, bool) or not isinstance(raw_amount, (int, float)):
+            raise TypeError("key_inputs dropped_day_pnl: non-numeric amount")
+        amount = float(raw_amount)
         if not math.isfinite(amount):
             raise ValueError("key_inputs dropped_day_pnl: non-finite amount")
-        out[day] = out.get(day, 0.0) + amount
+        # The writer emits one row per day. A repeated day is corruption, and
+        # summing it would move every earlier level by the duplicate: refuse it
+        # rather than read a guess.
+        if day in out:
+            raise ValueError("key_inputs dropped_day_pnl: duplicate day")
+        out[day] = amount
     return out
 
 

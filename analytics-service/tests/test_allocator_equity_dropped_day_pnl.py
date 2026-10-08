@@ -331,9 +331,28 @@ def test_a_malformed_field_raises_rather_than_being_read_as_a_guess() -> None:
         [{"utc_day_iso": "not-a-day", "pnl_usd": 1.0}],
         [{"utc_day_iso": "2026-02-01", "pnl_usd": float("nan")}],
         [{"utc_day_iso": "2026-02-01", "pnl_usd": "x"}],
+        # WR-02: ``float(True) == 1.0`` would read a JSON boolean as one dollar.
+        [{"utc_day_iso": "2026-02-01", "pnl_usd": True}],
+        [{"utc_day_iso": "2026-02-01", "pnl_usd": False}],
+        # WR-02: the writer emits one row per day; a repeat is corruption, and summing
+        # it would move every earlier level by the duplicate.
+        [{"utc_day_iso": "2026-02-01", "pnl_usd": 5.0},
+         {"utc_day_iso": "2026-02-01", "pnl_usd": 5.0}],
+        [{"utc_day_iso": "2026-02-01", "pnl_usd": 5.0},
+         {"utc_day_iso": "2026-02-01", "pnl_usd": -5.0}],
     ):
         with pytest.raises((ValueError, TypeError, KeyError)):
             read_dropped_day_pnl({"dropped_day_pnl": bad})
+
+
+def test_distinct_days_and_integer_amounts_still_read() -> None:
+    """The guard is not over-wide: an int amount (JSON has no int/float split) and
+    two different days are the normal payload."""
+    got = read_dropped_day_pnl({"dropped_day_pnl": [
+        {"utc_day_iso": "2026-02-01", "pnl_usd": -683},
+        {"utc_day_iso": "2026-02-03", "pnl_usd": 12.5},
+    ]})
+    assert got == {"2026-02-01": -683.0, "2026-02-03": 12.5}
 
 
 def test_a_stored_pnl_on_a_day_that_has_a_return_is_ignored_and_counted() -> None:
