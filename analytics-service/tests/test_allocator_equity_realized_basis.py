@@ -673,3 +673,213 @@ async def test_a_stitched_accounts_terminal_is_the_counted_keys() -> None:
     for (day, value), (_, want) in list(zip(got, expected))[:-1]:
         assert value == pytest.approx(want, rel=1e-9), day
     assert got[-1][1] == pytest.approx(live, rel=1e-12)
+
+
+# ── 7. R2-WR-02: the ccxt key-mode path (OKX) stores its realized terminal ───
+#
+# THE DEFECT (167.1.2.2-REVIEW.md round 2, R2-WR-02). The ccxt key-mode combine subtracts
+# the real open uPnL ``U`` from the anchor before it rolls back (OKX; Bybit and Binance
+# pass 0.0), so the stored returns are on the realized basis, but the derive stored no
+# realized terminal. The compose therefore rolled them back from the LIVE equity and every
+# level before the anchor day came out off by ``U / G(t -> T)`` (those levels are also the
+# D-06 book-return weights). The fix stores ``equity - U`` on the last NAV day, exactly the
+# expression ``reconstruct_nav_and_twr`` rolls from.
+#
+# THE ORACLE: an ordinary account (a chosen 50,000 of capital before day 0, small daily P&L
+# and a few small flows) built FORWARD in exact ``Fraction`` arithmetic. The terminal the
+# derive must store is the oracle's last nav, and the levels are the oracle's navs; neither
+# is read back from the code under test.
+
+
+def _ordinary_book() -> Book:
+    from tests.test_allocator_equity_dropped_day_pnl import _window_flow, _window_pnl
+
+    book = Book(Fraction(50_000), _window_pnl(30), _window_flow(30))
+    assert book.dropped_idx == []  # every day has a return: a retention-window account
+    return book
+
+
+def _assert_levels(book: Book, ke, live: float) -> None:
+    """Every level before the anchor day is the oracle's realized nav; the last is live."""
+    assert ke.equity is not None
+    for i, day in enumerate(book.days[:-1]):
+        assert _close(float(ke.equity[day]), book.nav[i]), (day, float(ke.equity[day]), float(book.nav[i]))
+    assert float(ke.equity[book.days[-1]]) == live
+
+
+def _daily_pnl_records(book: Book) -> list[dict]:
+    from tests.test_derive_broker_dailies_dualmode import _daily_pnl_record
+
+    return [_daily_pnl_record(book.days[i], float(p)) for i, p in enumerate(book.pnl)]
+
+
+async def _run_ccxt_key_mode(
+    book: Book, *, venue: str, equity: float, upnl: float, realized=None, combine=None
+):
+    """The whole key-mode derive job on a ccxt venue, through the REAL
+    ``combine_realized_and_funding`` (unless ``combine`` replaces it), with the equity read
+    stubbed to ``(equity, no error, upnl)``. Returns ``(result, capture)``."""
+    import pandas as _pd
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from services.job_worker import run_derive_broker_dailies_job
+    from tests.test_derive_broker_dailies_dualmode import _build_ctx
+
+    ctx, capture = _build_ctx(
+        key_row={"id": "key-ccxt", "exchange": venue, "user_id": "alloc-ccxt"},
+        strategy_row=None,
+    )
+    patches = [
+        patch("services.job_worker._allocator_key_preflight", new=AsyncMock(return_value=ctx)),
+        patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=_daily_pnl_records(book) if realized is None else realized),
+        ),
+        patch("services.job_worker.aclose_exchange", new=AsyncMock()),
+        patch(
+            "services.exchange.fetch_account_equity_and_upnl_usd",
+            new=AsyncMock(return_value=(equity, False, upnl, False)),
+        ),
+        patch("services.funding_fetch.fetch_funding_okx", new=AsyncMock(return_value=[])),
+        patch("services.funding_fetch.fetch_funding_bybit", new=AsyncMock(return_value=[])),
+        patch("services.funding_fetch.fetch_funding_binance", new=AsyncMock(return_value=[])),
+        patch("services.ccxt_flow_fetch.fetch_ccxt_transfers", new=AsyncMock(return_value=[])),
+        patch("services.job_worker._resolve_ccxt_flow_price_index", new=AsyncMock(return_value={})),
+        patch("services.ccxt_flows.ccxt_rows_to_dated_flows", new=MagicMock(return_value=book.flows)),
+        # The book is dated in February 2026; the retention window is a different test.
+        patch("services.nav_twr.flow_coverage_terminus_day", new=MagicMock(return_value=None)),
+        patch("services.job_worker.db_execute", new=AsyncMock(side_effect=lambda fn: fn())),
+    ]
+    if combine is not None:
+        patches.append(patch("services.broker_dailies.combine_realized_and_funding", new=combine))
+    stack = __import__("contextlib").ExitStack()
+    for p in patches:
+        stack.enter_context(p)
+    with stack:
+        result = await run_derive_broker_dailies_job(
+            {"id": "j-ccxt", "kind": "derive_broker_dailies", "api_key_id": "key-ccxt"}
+        )
+    return result, capture
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wedge", [Fraction(1, 10_000), Fraction(1, 100), Fraction(1, 20), Fraction(-1, 100)],
+                         ids=lambda w: f"U={float(w):g}")
+async def test_okx_key_mode_stores_the_realized_terminal_and_the_replay_rolls_from_it(wedge) -> None:
+    """OKX through the whole key-mode derive with a real open-position wedge. The stored
+    terminal is the ORACLE's last nav on the last NAV day, the live equity stays the anchor,
+    and replaying the persisted rows gives the oracle's navs before the anchor day."""
+    from services.job_worker import DispatchOutcome
+
+    book = _ordinary_book()
+    nav_t = book.nav[-1]
+    upnl = wedge * nav_t
+    equity = float(nav_t + upnl)
+    result, capture = await _run_ccxt_key_mode(book, venue="okx", equity=equity, upnl=float(upnl))
+
+    assert result.outcome == DispatchOutcome.DONE
+    payload = _key_inputs_payload(capture, "key-ccxt")
+    assert payload["anchor_usd"] == equity  # the live equity is still what is displayed
+    assert payload["realized_terminal_day"] == book.days[-1]
+    assert _close(payload["realized_terminal_usd"], nav_t)
+
+    returns = _csv_returns(capture)
+    flows = [ExternalFlow(f["utc_day_iso"], f["usd_signed"]) for f in payload["flows"]]
+    ke = replay_key_equity(
+        returns, flows, payload["anchor_usd"], history_reaches_inception=False,
+        dropped_day_pnl=read_dropped_day_pnl(payload),
+        realized_terminal=read_realized_terminal(payload),
+    )
+    assert ke.degrade_reasons == frozenset()
+    _assert_levels(book, ke, equity)
+
+    # The same persisted rows WITHOUT the fields are what the compose did before the fix:
+    # every earlier level is shifted by about U / G, far beyond the oracle's tolerance.
+    old = replay_key_equity(
+        returns, flows, payload["anchor_usd"], history_reaches_inception=False,
+    )
+    assert not _close(float(old.equity[book.days[0]]), book.nav[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("venue", ["bybit", "binance"])
+async def test_a_ccxt_key_with_no_open_wedge_stores_no_terminal(venue) -> None:
+    """Bybit and Binance read a realized-basis balance (wedge 0.0): the replay already rolls
+    from the anchor, which IS the terminal, so nothing is added to disagree with the returns."""
+    book = _ordinary_book()
+    result, capture = await _run_ccxt_key_mode(
+        book, venue=venue, equity=float(book.nav[-1]), upnl=0.0
+    )
+    assert result.outcome.name == "DONE"
+    payload = _key_inputs_payload(capture, "key-ccxt")
+    assert "realized_terminal_usd" not in payload and "realized_terminal_day" not in payload
+    ke = replay_key_equity(
+        _csv_returns(capture),
+        [ExternalFlow(f["utc_day_iso"], f["usd_signed"]) for f in payload["flows"]],
+        payload["anchor_usd"], history_reaches_inception=False,
+    )
+    _assert_levels(book, ke, float(book.nav[-1]))
+
+
+@pytest.mark.asyncio
+async def test_a_ccxt_key_whose_last_nav_day_has_no_stored_return_stores_no_terminal(caplog) -> None:
+    """A last day the TWR drops is not a csv row, so a terminal stored on it would be a
+    different day from the compose's last day and read ``key_inputs_mismatch`` for a reason
+    that is not a race. It is left out, and the derive says so."""
+    import logging
+
+    book = Book(Fraction(50_000), _ordinary_book().pnl[:-1] + [Fraction(900_000)], _ordinary_book().flow)
+    assert book.dropped_idx == [len(book.pnl) - 1]  # the oracle: the last day's P&L dominates
+    nav_t = book.nav[-1]
+    with caplog.at_level(logging.WARNING, logger="services.job_worker"):
+        result, capture = await _run_ccxt_key_mode(
+            book, venue="okx", equity=float(nav_t * Fraction(101, 100)), upnl=float(nav_t / 100)
+        )
+    assert result.outcome.name == "DONE"
+    payload = _key_inputs_payload(capture, "key-ccxt")
+    assert "realized_terminal_usd" not in payload
+    assert any("realized terminal not stored" in r.getMessage() for r in caplog.records)
+    assert not any(book.days[-1] in r.getMessage() for r in caplog.records)  # no day, no USD
+
+
+@pytest.mark.asyncio
+async def test_a_non_positive_ccxt_terminal_is_not_stored() -> None:
+    """``equity - upnl <= 0`` would make the replay refuse the WHOLE allocator (a permanent
+    ``NavReconstructionError``); one key keeps the older-row behaviour instead."""
+    from unittest.mock import MagicMock
+
+    book = _ordinary_book()
+    combine = MagicMock(return_value=(
+        pd.Series([0.001] * 3, index=pd.date_range(book.days[0], periods=3, freq="D").as_unit("us")),
+        {"used_heuristic_capital": False, "series_completeness": "fill_derived_unproven"},
+    ))
+    result, capture = await _run_ccxt_key_mode(
+        book, venue="okx", equity=5_000.0, upnl=6_000.0, combine=combine
+    )
+    assert result.outcome.name == "DONE"
+    payload = _key_inputs_payload(capture, "key-ccxt")
+    assert payload["anchor_usd"] == 5_000.0
+    assert "realized_terminal_usd" not in payload
+
+
+def test_sfox_has_no_open_wedge_so_writer_and_replay_already_share_one_level() -> None:
+    """The review asked whether sFOX has the OKX shape. It does not: its NAV is the OBSERVED
+    ``usd_value`` series, the anchor is that series' last point and ``open_unrealized_usd``
+    is 0.0, so nothing is subtracted anywhere. Pinned as an invariant: the real sFOX combine
+    on the oracle's navs, replayed from the last navs with NO terminal, gives the navs."""
+    from services.broker_dailies import combine_sfox_balance_history
+
+    book = _ordinary_book()
+    index = pd.DatetimeIndex([pd.Timestamp(d) for d in book.days]).as_unit("us")
+    usd_value = pd.Series([float(x) for x in book.nav], index=index, name="usd_value")
+    flows = pd.Series(
+        {pd.Timestamp(f.utc_day_iso).as_unit("us"): f.usd_signed for f in book.flows}, name="flows"
+    ).sort_index()
+    returns, _ = combine_sfox_balance_history(usd_value, flows)
+
+    ke = replay_key_equity(
+        _stored(returns), book.flows, float(book.nav[-1]), history_reaches_inception=False
+    )
+    assert ke.degrade_reasons == frozenset()
+    for i, day in enumerate(book.days):
+        assert _close(float(ke.equity[day]), book.nav[i]), day

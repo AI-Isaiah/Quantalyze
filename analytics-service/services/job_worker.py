@@ -4039,7 +4039,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # CR-01 (167.1.2.2 round 1): the REALIZED terminal the NAV above was rolled back from,
         # ``(last NAV day, USD)``. It is NOT the live equity the epilogue stores as
         # ``anchor_usd``: MT5 rolls from ``equity - upnl``, Deribit from the native balance less
-        # the terminal uPnL at the last ledger day's mark. The compose rolls the stored returns
+        # the terminal uPnL at the last ledger day's mark, a ccxt venue from ``equity - upnl``
+        # (R2-WR-02: set after the combine, below). The compose rolls the stored returns
         # back from THIS level so it does not shift every level by the open-position wedge.
         _realized_terminal: "tuple[pd.Timestamp, float] | None" = None
         # D-15: the native §5 inception verdict, where one exists. Only a deribit ledger that
@@ -6047,6 +6048,51 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         )
         if _coverage_flags.get("flow_coverage_incomplete"):
             meta["flow_coverage_incomplete"] = True
+
+    # R2-WR-02 (167.1.2.2 round 2): the ccxt key-mode path's realized terminal. For a ccxt
+    # venue the writer rolled its NAV back from ``equity - open_unrealized_usd`` (OKX subtracts
+    # the real wedge above; Bybit and Binance passed 0.0), on the last NAV day, so its stored
+    # returns are on the realized basis exactly as MT5's are. Store that same level and day, so
+    # the compose rolls from it rather than from the live equity (which would shift every level
+    # before the anchor day by U / G and skew the D-06 book-return weights). The expression is
+    # the one ``reconstruct_nav_and_twr`` evaluates (``terminal_nav = anchor - upnl``) on the
+    # same ``equity`` the combine received, and only where the combine used it as the anchor
+    # (``trades_to_daily_returns_with_status``: a balance above the dust floor).
+    #
+    # Gated on a non-zero wedge: with none, the terminal IS the anchor and the replay already
+    # rolls from it, so storing it would only add a way to disagree with the returns' last day.
+    # Gated on the last NAV day having a stored return: a day the TWR drops (a guard NaN) is
+    # not a csv row, and a ccxt key stores no dropped-day P&L to bring it back, so the compose's
+    # last day would not be the terminal's and the key would read ``key_inputs_mismatch`` for a
+    # reason that is not a race. That case keeps the shifted levels of an older row, and says so.
+    # sFOX needs none of this: its NAV is the observed ``usd_value`` series, the anchor is its
+    # last point and ``open_unrealized_usd`` is 0.0, so writer and replay share one level.
+    if (
+        is_key_mode
+        and venue not in _NATIVE_RETURNS_VENUES
+        and _realized_terminal is None
+        and not returns.empty
+        and not balance_error
+        and equity is not None
+        and math.isfinite(float(equity))
+        and float(equity) > DUST_NAV_FLOOR
+        and math.isfinite(float(open_unrealized_usd))
+        and float(open_unrealized_usd) != 0.0
+    ):
+        _ccxt_terminal_usd = float(equity) - float(open_unrealized_usd)
+        # A non-positive terminal would make the replay refuse the whole allocator
+        # (``NavReconstructionError``, permanent), which is worse than one key's shifted
+        # levels; such a key keeps the older-row behaviour, and says so.
+        if math.isfinite(float(returns.iloc[-1])) and _ccxt_terminal_usd > 0.0:
+            _realized_terminal = (returns.index[-1], _ccxt_terminal_usd)
+        else:
+            logger.warning(
+                "derive_broker_dailies: ccxt key-mode realized terminal not stored for "
+                "api_key %s (venue=%s): the last NAV day has no stored return or the "
+                "realized terminal is not positive, so the open-position wedge stays "
+                "inside this key's earlier levels",
+                api_key_id, venue,
+            )
 
     async def _run_key_mode_compose_epilogue() -> None:
         # ── 115.1 RD-3 OPTION B — key-mode compose epilogue ──────────────────
