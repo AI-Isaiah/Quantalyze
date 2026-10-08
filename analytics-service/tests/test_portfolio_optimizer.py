@@ -436,8 +436,9 @@ class TestBaselineWindowAlignment:
         )
 
     def test_duplicate_timestamp_portfolio_is_deduped_not_amplified(self):
-        """`_records_to_series` does NOT dedupe — a duplicate-date row is a
-        documented JSONB shape. The per-candidate `pd.concat(..., axis=1)` aligns
+        """A duplicate-date row is a reachable shape for a series that skips the
+        shared parser (`services.wealth_returns.records_to_series` sorts and dedupes
+        keep-last). The per-candidate `pd.concat(..., axis=1)` aligns
         on the index, and a non-unique index either raises InvalidIndexError
         (pandas cannot reindex on duplicate labels → a dup-date portfolio 500s the
         optimizer) or silently MULTIPLIES rows on the join (amplifying the

@@ -868,7 +868,7 @@ class TestDispatchStatusBridge:
     async def test_strategy_job_bridges_on_deferred(self) -> None:
         """DEFERRED is the only outcome with no post-mark bridge (main_worker
         runs no mark RPC on defer), so dispatch must still refresh the UI
-        status here."""
+        status here, naming the deferred job as the trigger."""
         job = {"id": "job-13", "kind": "sync_trades", "strategy_id": "strat-13"}
         with patch(
             "services.job_worker.run_sync_trades_job",
@@ -878,7 +878,30 @@ class TestDispatchStatusBridge:
             new=AsyncMock(return_value=None),
         ) as mock_sync:
             await dispatch(job)
-        mock_sync.assert_awaited_once_with("strat-13")
+        mock_sync.assert_awaited_once_with("strat-13", trigger_job_id="job-13")
+
+    @pytest.mark.asyncio
+    async def test_deferred_side_job_names_itself_as_the_bridge_trigger(self) -> None:
+        """Review 164.6.6.3.4 round 3, WR-R3-01 (founder D-09/D-10). A side-kind
+        job that hits the exchange circuit breaker is DEFERRED. The bridge can
+        only tell that this call computed nothing, and hold computed_at, when it
+        is told which job caused the call. Without the trigger id its in-flight
+        branch stamped computed_at = now() over stale analytics, and the hold of
+        the job's later failure then kept that stamp.
+
+        Neuter to redden: drop ``trigger_job_id=job.get("id")`` from the
+        DEFERRED call in services/job_worker.py ``dispatch``."""
+        job = {"id": "job-14", "kind": "sync_funding", "strategy_id": "strat-14"}
+        with patch(
+            "services.job_worker.run_sync_funding_job",
+            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DEFERRED)),
+        ), patch(
+            "services.job_worker.sync_strategy_analytics_status",
+            new=AsyncMock(return_value=None),
+        ) as mock_sync:
+            await dispatch(job)
+        mock_sync.assert_awaited_once()
+        assert mock_sync.await_args.kwargs.get("trigger_job_id") == "job-14", mock_sync.await_args
 
     @pytest.mark.asyncio
     async def test_portfolio_job_does_not_call_status_bridge(self) -> None:

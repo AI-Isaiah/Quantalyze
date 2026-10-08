@@ -141,9 +141,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Install psql client
+        timeout-minutes: 8
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          bash scripts/ci-apt.sh install --provides psql postgresql-client
+          psql --version
       - name: Contend for the shared-test-db advisory lock
         env:
           TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}

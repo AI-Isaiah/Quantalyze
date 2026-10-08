@@ -56,6 +56,31 @@ async def test_calls_rpc_with_correct_args() -> None:
 
 
 @pytest.mark.asyncio
+async def test_trigger_job_id_is_forwarded_as_p_trigger_job_id() -> None:
+    """Review 164.6.6.3.4 round 3, WR-R3-01: the DEFERRED path names the job it
+    deferred, and the wrapper must hand it to the RPC under the parameter name
+    the migration declares (20261009120000: ``p_trigger_job_id uuid DEFAULT
+    NULL``). Dropped, the bridge reads a NULL trigger and stamps computed_at for
+    a deferred side job that computed nothing.
+
+    Neuter to redden: stop adding ``p_trigger_job_id`` to the RPC params."""
+    mock_supabase = MagicMock()
+    mock_rpc_chain = MagicMock()
+    mock_supabase.rpc.return_value = mock_rpc_chain
+    mock_rpc_chain.execute.return_value = MagicMock(data=None)
+
+    with patch(
+        "services.analytics_status.get_supabase", return_value=mock_supabase
+    ):
+        await sync_strategy_analytics_status("strat-abc-123", trigger_job_id="job-9")
+
+    mock_supabase.rpc.assert_called_once_with(
+        "sync_strategy_analytics_status",
+        {"p_strategy_id": "strat-abc-123", "p_trigger_job_id": "job-9"},
+    )
+
+
+@pytest.mark.asyncio
 async def test_rpc_error_propagates() -> None:
     """If the RPC raises (e.g. DB connection drop), the bridge must let it
     bubble up so the caller (services.job_worker.dispatch) can log it as a

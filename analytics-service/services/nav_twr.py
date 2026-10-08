@@ -190,6 +190,19 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     # exactly like every other guard key. Registered in NAV_TWR_GUARD_KEYS so the
     # flag alone promotes the status.
     pre_mark_retention_option_dailies: list[str]
+    # Phase 164.6.6.2 (D-25) — an ANNOTATION, never a warning: at least one MEASURED
+    # day's starting balance was below the unit's ``material_equity`` (BTC 1e-4). The day
+    # is kept exact and the chain is NOT broken; the factsheet says "measured on a very
+    # small balance". Present only when it fired. ⛔ Deliberately NOT a member of
+    # ``NAV_TWR_GUARD_KEYS`` (no promotion to ``complete_with_warnings``, no entry in the
+    # warn-flag bridges) and not counted by ``twr_chain_broken``: it rides its own
+    # present-only carry exactly like ``native_unit``. The two siblings are in-process
+    # counts for logs and tests only: ``small_base_measured_days`` is how many measured
+    # days it covers and ``small_base_measured_min_nav`` the smallest prior NAV among them.
+    # Only the bool is persisted (the min NAV is an account-size magnitude, T-73-02).
+    small_base_measured: bool
+    small_base_measured_days: int
+    small_base_measured_min_nav: float
     # MT5-12 (D-15/D-16) — the SERIES-COMPLETENESS VERDICT: the producing combiner's
     # judgement of whether the raw venue inputs it consumed were WHOLE. One of
     # ``broker_dailies.SERIES_COMPLETENESS_VALUES``; stamped by the combiner that
@@ -232,6 +245,15 @@ NAV_TWR_GUARD_KEYS: tuple[str, ...] = (
     "twr_chain_broken",
     "pre_summary_rollout_option_dailies",
     "pre_mark_retention_option_dailies",
+)
+
+# D-25: the flags ``chain_linked_twr`` may return that are ANNOTATIONS, not warnings. They
+# are deliberately outside ``NAV_TWR_GUARD_KEYS``: ``_build_nav_meta`` neither promotes the
+# status on them nor does any guard-key bridge carry them (see ``small_base_measured``).
+NAV_TWR_ANNOTATION_KEYS: tuple[str, ...] = (
+    "small_base_measured",
+    "small_base_measured_days",
+    "small_base_measured_min_nav",
 )
 
 
@@ -392,7 +414,7 @@ def chain_linked_twr(
     *,
     prev0: float | None = None,
     floors: UnitFloors = USD_FLOORS,
-) -> tuple[pd.Series, dict[str, bool]]:
+) -> tuple[pd.Series, dict[str, Any]]:
     """Chain-link the daily time-weighted return from a reconstructed NAV series.
 
     ``r_t = (NAV_t - NAV_{t-1} - F_t) / NAV_{t-1}`` — the external flow sits in
@@ -421,9 +443,21 @@ def chain_linked_twr(
     day-0 ``prev`` is that supplied value (fail-loud coerced via ``_coerce_float``)
     and the ``_guard_denominator`` guards apply to it UNCHANGED.
 
+    Phase 164.6.6.2 D-25 (``small_base_measured``): a day that PASSES every guard and is
+    therefore measured, but whose prior NAV is below ``floors.material_equity``, is kept
+    EXACTLY as computed and ALSO counted. The flags then carry ``small_base_measured``
+    (``True``), ``small_base_measured_days`` (how many such days) and
+    ``small_base_measured_min_nav`` (the smallest prior NAV among them). It is an
+    annotation, not a guard: the day keeps its return, the chain is not broken, and
+    ``_build_nav_meta`` does not promote the status on it. For the USD row it can never
+    fire (``dust_nav`` 1000 sits above ``material_equity`` 100, so any prior NAV under 100
+    is dust-guarded first); for the BTC row ``dust_nav`` (1e-7) is below ``material_equity``
+    (1e-4), which is the zone it covers.
+
     Returns ``(returns, flags)`` where ``returns`` is a ``"returns"``-named
     Series on the NAV DatetimeIndex (broken days are NaN) and ``flags`` maps the
-    DQ flag keys that fired to ``True``.
+    DQ flag keys that fired to ``True`` (plus the two D-25 counts above when that
+    annotation fired).
     """
     index = nav.index
     flows = _align_flows(flows_by_day, index).to_numpy(dtype=float)
@@ -438,8 +472,10 @@ def chain_linked_twr(
     )
 
     n = len(index)
-    flags: dict[str, bool] = {}
+    flags: dict[str, Any] = {}
     returns = np.full(n, np.nan)
+    small_base_days = 0
+    small_base_min_nav = float("inf")
     for t in range(n):
         cur = nav_vals[t]
         flow_t = flows[t]
@@ -468,6 +504,18 @@ def chain_linked_twr(
             continue
 
         returns[t] = (cur - prev - flow_t) / prev
+
+        # D-25 — a MEASURED day on a base under the unit's material equity: kept exact,
+        # counted, never dropped and never a chain break (no ``continue`` here, and the
+        # break detector reads NaN days, of which this is not one).
+        if prev < floors.material_equity:
+            small_base_days += 1
+            small_base_min_nav = min(small_base_min_nav, prev)
+
+    if small_base_days:
+        flags["small_base_measured"] = True
+        flags["small_base_measured_days"] = small_base_days
+        flags["small_base_measured_min_nav"] = small_base_min_nav
 
     return pd.Series(returns, index=index, name="returns"), flags
 
@@ -594,7 +642,7 @@ def cumulative_twr_segmented(returns: pd.Series) -> tuple[float, dict[str, bool]
     return value, flags
 
 
-def _build_nav_meta(flags: Mapping[str, bool]) -> NavTWRMeta:
+def _build_nav_meta(flags: Mapping[str, Any]) -> NavTWRMeta:
     """Build the returned ``NavTWRMeta``. ``computation_status_hint`` is
     ``complete_with_warnings`` when any DQ guard fired, else ``complete`` —
     reusing the transforms.py convention. The two inherited keys
@@ -602,7 +650,9 @@ def _build_nav_meta(flags: Mapping[str, bool]) -> NavTWRMeta:
     core never uses heuristic capital (it reconstructs from the real anchor) and
     does not read a balance, so both are False here. Guard flags are ADDITIVE and
     present only when they fired (keys assigned explicitly for mypy)."""
-    warn = bool(flags)
+    # D-25: the ``small_base_measured`` annotation keys are not warnings, so a flag set
+    # holding ONLY them stays ``complete``. Every other key warns exactly as before.
+    warn = any(k not in NAV_TWR_ANNOTATION_KEYS for k in flags)
     meta: NavTWRMeta = {
         "used_heuristic_capital": False,
         "balance_error": False,
@@ -620,6 +670,12 @@ def _build_nav_meta(flags: Mapping[str, bool]) -> NavTWRMeta:
     for _guard_key in NAV_TWR_GUARD_KEYS:
         if flags.get(_guard_key):
             meta[_guard_key] = True  # type: ignore[literal-required]
+    # D-25: the annotation rides ITS OWN present-only carry, outside the guard loop above,
+    # so a clean BTC account that merely had a tiny-base day stays exact-string ``complete``.
+    if flags.get("small_base_measured"):
+        meta["small_base_measured"] = True
+        meta["small_base_measured_days"] = int(flags["small_base_measured_days"])
+        meta["small_base_measured_min_nav"] = float(flags["small_base_measured_min_nav"])
     return meta
 
 

@@ -197,6 +197,10 @@ def _mt5_read_never_sleeps_for_real(monkeypatch):
 # the adapter path, never reaches the pre-check: the suites that name it replace the
 # adapter's `validate`. Servers that tests name but that never reach the pre-check, such
 # as the client-contract suite's, are deliberately absent.
+#
+# CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): the empty-list refusal named in the first
+# sentence now answers `MT5_VALIDATION_UNCONFIGURED`, not `MT5_GATEWAY_UNCONFIGURED`
+# (that code is the D-31 arm's alone). Original kept as lineage; nothing else here moved.
 _SUITE_MT5_SERVERS = (
     "Broker-Demo",
     "MyBroker-Live",

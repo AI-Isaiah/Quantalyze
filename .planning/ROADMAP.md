@@ -101,7 +101,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.5.1.4: SYNCCURSOR — the sync cursor is per-KEY while stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies trade window** (INSERTED)
 - [x] **Phase 164.5.2: BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required** (INSERTED)
 - [x] **Phase 164.5.2.1: BRIDGERESIDUE — the two 164.6.7 bridge residues in sync_strategy_analytics_status** (INSERTED) — 5 plans, shipped PR #937 v0.121.0.0 (completed 2026-10-03)
-- [ ] **Phase 164.5.3: MT5CREDS — show the MT5 account number on the key card and add a credential-update path** (INSERTED) — verification: human_needed
+- [x] **Phase 164.5.3: MT5CREDS — show the MT5 account number on the key card and add a credential-update path** (INSERTED) — verification: passed (completed 2026-10-08)
 - [x] **Phase 164.5.4: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently** (INSERTED)
 - [x] **Phase 164.6: GATE-HYGIENE — every gate-hygiene item that left 164.1: the OPS-08 residue, the composite-stamp twin, the reviewer execution-status rule, the RED-UNDER convention's discoverability and the audit allowlist** (INSERTED)
 - [x] **Phase 164.6.1: MYPYSTRICT — the strict gate claims to cover all running-service code and does not cover the module that IS the service** (INSERTED)
@@ -111,6 +111,16 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verified 2026-10-06 (completed 2026-10-06; was `human_needed` 2026-09-26 → 2026-10-06)
 - [x] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — verified 2026-10-04 (completed 2026-10-04)
 - [ ] **Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out** (INSERTED) — not yet planned (waits for the founder's live scrub spike)
+- [ ] **Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series** (INSERTED) — shipped v0.126.0.0 (#969, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
+- [ ] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — not yet planned (booked 2026-10-07 by 164.6.6.2 D-15)
+- [ ] **Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend** (INSERTED) — shipped v0.128.0.0 (#973, merged 2026-10-08); verification: human_needed (post-deploy D-03 reading only)
+- [ ] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
+- [ ] **Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8)** (INSERTED) — shipped v0.125.2.1 (#968, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
+- [x] **Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy)** (INSERTED) — verification: passed (v0.129.0.0) (completed 2026-10-08)
+- [ ] **Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b)** (INSERTED) — not yet planned (164.6.6.3 split C, founder 2026-10-06)
+- [ ] **Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status** (INSERTED) — shipped v0.129.1.0 (merged 2026-10-08); verification: human_needed (post-deploy plan 04 PROD re-sync only)
+- [x] **Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults** (INSERTED) — verification: passed (PR #971, v0.127.0.0) (completed 2026-10-08)
+- [ ] **Phase 164.6.6.3.6: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed** (INSERTED) — not yet planned (booked 2026-10-06, founder)
 - [x] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
 - [ ] **Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button** (INSERTED) — not yet verified
 - [x] **Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here** (INSERTED)
@@ -133,6 +143,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.6: SUBSETMAIN — a push to main runs only its PR's changed SQL gates; a nightly job runs the full corpus and enforces the floors** (INSERTED 2026-10-03) — planned 2026-10-03, 5 plans in 4 waves (completed 2026-10-03)
 - [x] **Phase 164.9.6.1: SUBSETSHARD — a FULL sql-mutation run fits well under its 20-minute cap again, and a stale-baseline-drift red no longer forces one** (INSERTED 2026-10-03) — verification: passed (completed 2026-10-03, PR #941, v0.123.0.0; SS-1 measured 5m01s on main run 37151757248, closed in #942)
 - [ ] **Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables** (INSERTED 2026-10-03) — not yet planned
+- [ ] **Phase 164.9.8: APTHANG — a CI job's apt step never hangs on a dead package mirror** (INSERTED 2026-10-07) — shipped v0.129.1.2 (merged 2026-10-08); verification: human_needed (post-ship real-runner measurement only)
 - [x] **~~Phase 165~~: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"), as 165 ACTIONSDEPS: #643 (superseded by #916), #627, #626 and #612 landed green; deviations in `165-VERIFICATION.md`.
 - [x] **~~Phase 165.1~~: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"): the maintenance landings meet the criteria, C1 in substance and not to the letter (the pandas fix rode inside #898); deviations in `165.1-VERIFICATION.md`.
 - [x] **~~Phase 165.2~~: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -143,11 +154,14 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — complete with routed residuals 2026-10-01 (halted 2026-09-27, resumed after 166.4); verification pending
 - [ ] **Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds** (INSERTED) — not planned; inserted 2026-10-01 (founder); 166.3's R5 recompute waits on it
 - [x] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
+- [ ] **Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly** (INSERTED) — not yet planned (data integrity)
 - [ ] **Phase 166.5: COMPUTEDATSTAMP — the analytics runner stamps computed_at on a real finish** (INSERTED 2026-10-03) — not yet planned
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [x] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
 - [ ] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — not yet verified
+- [ ] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — not yet planned (data integrity; after 167.1.2 PR C)
+- [ ] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — not yet planned (booked 2026-10-07, founder)
 - [x] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
@@ -161,6 +175,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 169.5: BENCHCOMPARE — a factsheet's BTC comparator is read from the database through 169.2's reader, paired over the same interval as the strategy** (INSERTED) — verification: passed (completed 2026-10-04, PR #908)
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
 - [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
+- [ ] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned
 - [ ] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — not yet planned
 - [ ] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — not yet planned
 - [ ] **Phase 170.5: FACTSHEETV2PANELS — /strategy/[id]/v2 panels render or say why** (INSERTED 2026-10-03) — not yet planned
@@ -2306,15 +2321,15 @@ Plans:
 **Goal:** A founder (and a first-time client) can tell which MT5 account a key card belongs to, and can correct a wrong password without deleting the key. Two measured gaps (2026-09-16): `src/app/api/` has ONLY create routes — no update/rotate path — so a wrong password is fixable only by Delete + Add Key; and the MT5 login lands in `api_key`, whose SELECT migration `20260410225608_api_keys_column_revoke.sql` revokes from `authenticated`, so `API_KEY_USER_COLUMNS` (`src/lib/constants.ts:171`) cannot expose it and the card shows only `label` — sourced from the OPTIONAL "Key nickname" field (`ConnectKeyStep.tsx:1188`, fallback `"mt5 key"`). Several MT5 accounts therefore render indistinguishably. ⭐ The MT5 login is NOT a secret (the password is): expose it via a READABLE display column rather than by decrypting the existing one, and add a card action that re-encrypts `api_secret` ONLY, leaving the row and its sync history intact.
 **Requirements**: D-01-PRIME, D-02-PRIME, D-03, D-04, D-05, D-06, D-07 (from `164.5.3-CONTEXT.md`'s locked decisions — no `REQUIREMENTS.md` entries exist for this inserted phase, so the decision IDs are the requirement set, per `164.5.3-RESEARCH.md`'s own framing).
 **Depends on:** Phase 164.5.1 — placed AFTER its go-live; neither blocks the other.
-**Plans:** 5 plans
+**Plans:** 5/5 plans complete
 
 Plans:
 
-- [ ] 164.5.3-01-PLAN.md — Wave 1: GRANT-extend migration (reuse `venue_account_id`, no new column) + three-way sync + render the identifier on both key cards
-- [ ] 164.5.3-02-PLAN.md — Wave 1: populate `venue_account_id` at the non-wizard "Add Key" create chokepoint (`validate-and-encrypt`), with the new venue-identity 23505 arm
-- [ ] 164.5.3-03-PLAN.md — Wave 1: new analytics-service internal endpoint — decrypt, re-validate the new password against the live broker, re-encrypt; plaintext never leaves Python
-- [ ] 164.5.3-04-PLAN.md — Wave 1: new `PATCH /api/keys/[id]/rotate-secret` route — password-only, validate-before-persist, admin-client write, D-05 status-clear
-- [ ] 164.5.3-05-PLAN.md — Wave 2 (depends on 01, 04): the "Update password" dialog wired into both key cards
+- [x] 164.5.3-01-PLAN.md — Wave 1: GRANT-extend migration (reuse `venue_account_id`, no new column) + three-way sync + render the identifier on both key cards
+- [x] 164.5.3-02-PLAN.md — Wave 1: populate `venue_account_id` at the non-wizard "Add Key" create chokepoint (`validate-and-encrypt`), with the new venue-identity 23505 arm
+- [x] 164.5.3-03-PLAN.md — Wave 1: new analytics-service internal endpoint — decrypt, re-validate the new password against the live broker, re-encrypt; plaintext never leaves Python
+- [x] 164.5.3-04-PLAN.md — Wave 1: new `PATCH /api/keys/[id]/rotate-secret` route — password-only, validate-before-persist, admin-client write, D-05 status-clear
+- [x] 164.5.3-05-PLAN.md — Wave 2 (depends on 01, 04): the "Update password" dialog wired into both key cards
 
 ### Phase 164.5.4: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently (INSERTED)
 
@@ -2876,6 +2891,7 @@ Plans:
 3. A server is learned only from an authorized session (`connected` true), never from a failed or timed-out attempt. An unknown server's attempt is bounded so that it cannot hold the shared validation terminal for the full 45 s or leave it off the house server.
 4. The JOBS terminal can use a learned server before the first sync of such a key, or that sync is refused by name instead of hanging. Each terminal's server store is its own, so learning on one terminal does not teach the other.
 5. Every guard in criteria 2–4 is shown RED once.
+
 ⭐ **Founder direction 2026-10-06 (verbatim intent: "We cannot have a static list. There must be some way, where client enters a new server, and then the backend works and verifies etc till it works, provided that the server name is correct").** The static list is the bridge, not the design. Target flow:
 - **(i) No login on an unseen name.** The wizard accepts an unseen server name, enqueues a resolve job on the VALIDATION terminal and says so ("checking a new broker server"), instead of logging in blind.
 - **(ii) The resolve job tries three candidate routes, measured in criterion 1's order.**
@@ -2903,24 +2919,25 @@ Plans:
 2. Every `quantalyze.com` mention is re-counted at plan time (the 18 is a reading, not a constant). Each one is classified: a link, an email address, an OG/canonical/metadata URL, an env default, or prose. Each is corrected to `quantalyze.xyz` or removed, and the classification is recorded.
 3. Anything user-facing that pointed at `quantalyze.com` (emails sent, share or OG URLs, auth redirect allow-lists) is checked for live impact, and the result is recorded.
 4. A gate stops a new `quantalyze.com` URL from coming back, and it is shown RED once.
+
 ⭐ **Scope, founder 2026-10-07 (AskUserQuestion; `164.6.6.3.5-CONTEXT.md` D-01..D-04):** `quantalyze.com`'s mail goes to an unrelated company's server, and `quantalyze.xyz` has no mail records. So the product names NO contact email at all. Every `@quantalyze.com` address (about 158 outside `.planning/`, not 18) becomes a pointer to the contact form, which carries the correlation id; `security.txt`'s `Contact:` becomes the contact page URL. No Resend or mail-domain setup is done or booked (founder: "Dont want to setup resend").
 
-**Plans:** 13 plans in 5 waves (plan 13 runs after `/land-and-deploy`: verification reads `human_needed` at ship and `passed` after it)
+**Plans:** 13/13 plans complete in 5 waves (plan 13 runs after `/land-and-deploy`: verification reads `human_needed` at ship and `passed` after it)
 
 Plans:
-- [ ] 164.6.6.3.5-01-PLAN.md — D-10 canonical-domain gate, shown RED on the unswept tree (wave 1)
-- [ ] 164.6.6.3.5-02-PLAN.md — rho -> xyz host redirect (D-05); PDF/tearsheet/founder-cron allow-lists gain xyz (D-06, D-14); CSRF fixtures (D-07) (wave 1)
-- [ ] 164.6.6.3.5-03-PLAN.md — `for_quants_leads` source/topic/reference + partial dedupe index, SQL gate shown RED, `src/lib/contact.ts` + CHECK parity (D-13) (wave 1)
-- [ ] 164.6.6.3.5-04-PLAN.md — lead route `stored`/`duplicate` contract, contact branch, RequestCallModal by status, CRM columns (wave 2)
-- [ ] 164.6.6.3.5-05-PLAN.md — public `/contact` page and form with id prefill (D-01, D-02), route lockstep, footer link, e2e lists (wave 3)
-- [ ] 164.6.6.3.5-06-PLAN.md — `ContactPointerText`; ErrorEnvelope links carry the correlation/draft id; wizard step copy (wave 2)
-- [ ] 164.6.6.3.5-07-PLAN.md — `wizardErrors.ts` and csv-finalize copy in pointer shapes (wave 1)
-- [ ] 164.6.6.3.5-08-PLAN.md — status-surface and key-card copy, linked at every render site (wave 3)
-- [ ] 164.6.6.3.5-09-PLAN.md — security.txt (D-03), /security, privacy, pending-approval, for-quants; security packet PDF regenerated (D-15); owns `e2e/for-quants-landing.spec.ts`, after plan 04 (wave 3)
-- [ ] 164.6.6.3.5-10-PLAN.md — sender defaults with no fallback (D-04, D-12); URL fallbacks on xyz (D-06) (wave 2)
-- [ ] 164.6.6.3.5-11-PLAN.md — docs and runbooks (D-08); TODOS booking of the address-less strings (D-16) (wave 1)
-- [ ] 164.6.6.3.5-12-PLAN.md — last strays, gate GREEN and wired into `npm run lint`, registered; no-email-in-copy test (wave 4)
-- [ ] 164.6.6.3.5-13-PLAN.md — post-deploy: schema applied, live 308 and contact check, LIVE-IMPACT (D-09), PROD `NEXT_PUBLIC_SITE_URL` to xyz (D-11) (wave 5, non-autonomous)
+- [x] 164.6.6.3.5-01-PLAN.md — D-10 canonical-domain gate, shown RED on the unswept tree (wave 1)
+- [x] 164.6.6.3.5-02-PLAN.md — rho -> xyz host redirect (D-05); PDF/tearsheet/founder-cron allow-lists gain xyz (D-06, D-14); CSRF fixtures (D-07) (wave 1)
+- [x] 164.6.6.3.5-03-PLAN.md — `for_quants_leads` source/topic/reference + partial dedupe index, SQL gate shown RED, `src/lib/contact.ts` + CHECK parity (D-13) (wave 1)
+- [x] 164.6.6.3.5-04-PLAN.md — lead route `stored`/`duplicate` contract, contact branch, RequestCallModal by status, CRM columns (wave 2)
+- [x] 164.6.6.3.5-05-PLAN.md — public `/contact` page and form with id prefill (D-01, D-02), route lockstep, footer link, e2e lists (wave 3)
+- [x] 164.6.6.3.5-06-PLAN.md — `ContactPointerText`; ErrorEnvelope links carry the correlation/draft id; wizard step copy (wave 2)
+- [x] 164.6.6.3.5-07-PLAN.md — `wizardErrors.ts` and csv-finalize copy in pointer shapes (wave 1)
+- [x] 164.6.6.3.5-08-PLAN.md — status-surface and key-card copy, linked at every render site (wave 3)
+- [x] 164.6.6.3.5-09-PLAN.md — security.txt (D-03), /security, privacy, pending-approval, for-quants; security packet PDF regenerated (D-15); owns `e2e/for-quants-landing.spec.ts`, after plan 04 (wave 3)
+- [x] 164.6.6.3.5-10-PLAN.md — sender defaults with no fallback (D-04, D-12); URL fallbacks on xyz (D-06) (wave 2)
+- [x] 164.6.6.3.5-11-PLAN.md — docs and runbooks (D-08); TODOS booking of the address-less strings (D-16) (wave 1)
+- [x] 164.6.6.3.5-12-PLAN.md — last strays, gate GREEN and wired into `npm run lint`, registered; no-email-in-copy test (wave 4)
+- [x] 164.6.6.3.5-13-PLAN.md — post-deploy: schema applied, live 308 and contact check, LIVE-IMPACT (D-09), PROD `NEXT_PUBLIC_SITE_URL` to xyz (D-11) (wave 5, non-autonomous)
 
 ⭐ **D-17 (founder 2026-10-07, after review):** the founder learns of a new contact message from an unread-count badge on the admin sidebar's leads entry (no email service); a skipped founder email is recorded as not sent, never as a success; the one-business-day reply promise stays. Recorded in the phase CONTEXT.
 
@@ -2954,11 +2971,17 @@ analytics status, while a genuine analytics failure is still never masked.
 **Depends on:** Phase 164.6.6.3
 **Gates:** a migration, so migration-reviewer and rls-policy-auditor must be clean before merge. PROD auto-applies
 after `apply-test` with no human stop.
-**Plans:** 0 plans
+**Plans:** 3/4 plans complete (plan 04 runs after deploy)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.3.4 to break down)
+- [x] 164.6.6.3.4-01-PLAN.md — the re-based bridge migration (side-kind NOT IN list, process_key_long chain supersession), pg-lane fixture, 13-arm gate with twins, sql-tests roster pins
+- [x] 164.6.6.3.4-02-PLAN.md — the four new verify anchors shown refusing an apply, and the rollback proven on the lane
+- [x] 164.6.6.3.4-03-PLAN.md — snapshot and earned VAC-04 ack, kind-classification drift test, local-stack bridge family, mutation census, release commit
+- [ ] 164.6.6.3.4-04-PLAN.md — post-deploy PROD re-sync of the `failed` rows that have jobs (D-08 as amended), before/after recorded, founder checkpoint
 
+
+⭐ **Founder 2026-10-07 (D-09, CONTEXT):** a call whose only failures are excluded side kinds must not stamp `computed_at` or clear a foreign `computation_error`; fixed before merge.
+⚠️ **Founder 2026-10-08 (D-10, CONTEXT) — DEVIATION from the 3-round review cap:** a 4th fix round, on Opus, for CR-R3-01 (a genuine recompute on a warned row keeps a stale `computed_at`) and WR-R3-01 (the DEFERRED side path stamps), both in this phase's own logic.
 ### Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b) (INSERTED)
 
 Split C of 164.6.6.3 (founder, 2026-10-06, `164.6.6.3-CONTEXT.md` D-01). It delivers items **2,
@@ -3046,10 +3069,14 @@ that is briefly busy (an owed scrub or a held lease), and for a fresh account wh
 settled, each with its own wire code and copy, pinned by tests.
 **Requirements**: none in REQUIREMENTS.md; the items above are the spec.
 **Depends on:** Phase 164.6.6.3 (it emits the history-not-ready `error_kind` this phase words)
-**Plans:** 0 plans
+**Orchestrator note 2026-10-07 (after plan check):** D-03's backfill carrier `_MT5_BACKFILL_MESSAGES["history_unsettled"]` is excluded from the wizard surface: nothing in `src/` reads it, so it stays operator-side (recorded in `164.6.6.3.2-CONTEXT.md`). The derive carrier is stamped on the final attempt only (D-06, founder C2).
+**Plans:** 4/4 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.3.2 to break down)
+- [x] 164.6.6.3.2-01-PLAN.md — env-gap: three emitters to `MT5_VALIDATION_UNCONFIGURED` / `KEY_MT5_VALIDATION_UNCONFIGURED`, D-31 stays, paging and the inverted-timeout capture (D-01, D-07) — wave 1
+- [x] 164.6.6.3.2-02-PLAN.md — busy: `scrub_owed` and `lease_busy` to recoverable `MT5_TERMINAL_BUSY` / `KEY_MT5_TERMINAL_BUSY`, a test per emitter (D-02) — wave 2
+- [x] 164.6.6.3.2-03-PLAN.md — both new codes proven at every key route and component; STATUS_CONTRACT and runbooks (D-01, D-02, D-07) — wave 3
+- [x] 164.6.6.3.2-04-PLAN.md — history not settled: final-attempt provenance stamp and `GATE_HISTORY_NOT_SETTLED` (D-03, D-06) — wave 4
 
 ### Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8) (INSERTED)
 
@@ -3122,6 +3149,8 @@ Plans:
 - [ ] 164.6.6.2-12-PLAN.md — post-deploy: MM-2x re-derived via Sync and read live on PROD; D-06 canary (wave 4)
 - [ ] 164.6.6.2-13-PLAN.md — Python twin of the conversion on the shared oracle fixture; portfolio analytics, simulator and match engine convert BTC before weighting (D-23) (wave 2)
 
+
+⭐ **Founder 2026-10-08 (D-24, CONTEXT):** the BTC dust floor drops from 0.001 to 1e-7 BTC ("it should measure more"), shipped as a gap-closure fix after plan 12's read.
 ### Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend (INSERTED)
 
 **Goal:** Every Python blend reads daily returns, not the stored wealth curve. `strategy_analytics.returns_series` holds the cumprod wealth curve (`(1 + r).cumprod()`, `services/metrics.py`), measured on PROD 2026-10-07 across 32 rows: first value about 1.0, last values averaging about 209k. `routers/simulator.py`, `routers/match.py` and `routers/portfolio.py` (analytics, optimizer, bridge) and the 164.6.6.2 Python BTC twin (`services/native_to_usd.py`) read it as daily returns, so a wealth of 1.30 is weighted as a +130% day. The TypeScript side already converts through `resolveDailyReturnSeries`.
@@ -3129,10 +3158,17 @@ Plans:
 **Origin:** 164.6.6.2 code review CR-01 (pre-existing, not introduced by that phase). Founder 2026-10-07: own phase, ship BTCNATIVE first.
 **Requirements**: TBD
 **Depends on:** Phase 164.6.6.2
-**Plans:** 0 plans
+**Founder decision 2026-10-07 (review round 2):** candidate comparisons (optimizer, bridge, simulator) use the existing book's risk clock for every candidate and both sides of a delta; the headline keeps "365 if any leg is crypto". Detail: `164.6.6.2.2-CONTEXT.md` D-08.
+**Plans:** 7 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.2.2 to break down)
+- [ ] 164.6.6.2.2-01-PLAN.md — the shared Python boundary `services/wealth_returns.py` + cross-runtime oracle; the simulator reads through it (wave 1)
+- [ ] 164.6.6.2.2-02-PLAN.md — the single-key runner stamps `data_quality_flags.cumulative_method` (D-05) (wave 1)
+- [ ] 164.6.6.2.2-03-PLAN.md — TS `resolveDailyReturnSeries` honours the method on the same oracle; every caller passes the row's method (wave 2)
+- [ ] 164.6.6.2.2-04-PLAN.md — `_compute_portfolio_analytics` on real columns, boundary returns, AUM from `allocated_amount` (D-04, D-07) (wave 2)
+- [ ] 164.6.6.2.2-05-PLAN.md — both correlation matchers (D-06), optimizer and bridge on the boundary (wave 3)
+- [ ] 164.6.6.2.2-06-PLAN.md — the match engine's two loaders on the boundary (wave 2)
+- [ ] 164.6.6.2.2-07-PLAN.md — no-bypass census, write-to-read end-to-end test, PROD before/after measurement (D-03) (wave 4)
 
 ### Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view (INSERTED)
 
@@ -3682,6 +3718,27 @@ silence VAC-04 — the detector worked; what it found is benign, which is a diff
 **Plans:** 0 plans
 
 Plans:
+
+### Phase 164.9.8: APTHANG — a CI job's apt step never hangs on a dead package mirror: every apt-get in the workflows carries short network timeouts and retries so a stalled mirror fails over in seconds, each install step has its own time limit, and an install is skipped where the runner image already ships the tool (psql measured first). Found 2026-10-07: four hangs in one evening on azure.archive.ubuntu.com (migrate apply-test 36 min, e2e-seeded 68+ min, test-db-drift ~30 min, sql-mutation 20 min on Provision pg_cron then cancelled), each stalling main's CI and the merge queue. Founder 2026-10-07 (AskUserQuestion 'Book a CI phase, ship first'). (INSERTED)
+
+**Goal:** No CI job hangs on a dead or stalled apt mirror. A mirror stall fails over or fails fast in seconds, never blocks a job until its job timeout.
+**Evidence (2026-10-07):** four hangs in one evening, each on a step that runs `sudo apt-get update` against `azure.archive.ubuntu.com` (every request `Ign:`, no network timeout, no step `timeout-minutes`): `supabase-migrate.yml` apply-test 36 min, `ci.yml` e2e-seeded 68+ min (cancelled), test-db-drift ~30 min, sql-mutation 20 min in "Provision pg_cron" (job cancelled at its 20-min ceiling). `grep -c apt-get .github/workflows/*.yml` = 31 sites at booking.
+**Success criteria:**
+1. Every apt invocation in `.github/workflows/` runs with short network timeouts and retries (e.g. `Acquire::http::Timeout`, `Acquire::Retries`), set once and shared, so a dead mirror fails over within seconds; a guard test fails if a new apt call lacks it.
+2. Every install step carries its own `timeout-minutes`, so a hang ends the step, not the job.
+3. Where the runner image already ships the tool (psql measured on the runner first), the install is skipped, with the measurement recorded.
+4. The `sql-mutation` ↔ `sql-mutation-nightly` byte-parity pin and every other ci.yml contract test stay green; the 20-min sql-mutation ceiling is not raised.
+**Deviations from D-03 (recorded 2026-10-07, planner revision; the same text is in 164.9.8-CONTEXT.md):** (1) the two `Acquire shared-test-db mutex` steps carry no step `timeout-minutes`, because they wait up to about 33 min for the shared-TEST lock by design, and the wrapper's 400 s budget bounds their dead-branch apt; (2) Playwright's internal apt is bounded only by the image defaults plus a 10-minute step cap, about 1.9 times the slowest measured cache-miss install (308 s).
+**Requirements**: SC-1, SC-2, SC-3, SC-4 (the four success criteria above, in order)
+**Depends on:** none (ships first in the merge queue, founder 2026-10-07)
+**Plans:** 5 plans
+
+Plans:
+- [ ] 164.9.8-01-PLAN.md — tracer: `scripts/ci-apt.sh` (wall-clock-bounded, retried, psql skip, `--self-test`) wired into ci.yml sql-tests (wave 1)
+- [ ] 164.9.8-02-PLAN.md — ci.yml remaining psql sites, Playwright step limits, `Provision pg_cron` byte-equal in ci.yml and the nightly (wave 2)
+- [ ] 164.9.8-03-PLAN.md — supabase-migrate, test-restore, mutex-probe, prod-prober, nightly.yml; mutex suffix kept identical (wave 2)
+- [ ] 164.9.8-04-PLAN.md — glob-census guard test, neutered RED and restored from a byte backup (wave 3)
+- [ ] 164.9.8-05-PLAN.md — ship: version re-picked from origin/main, CHANGELOG, PR bound by check count, D-04 runner measurement recorded (wave 4)
 
 ### Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables (measured read-only on PROD 2026-10-03: anon 56 of 63 tables, authenticated 59, api_keys included; RLS never covers TRUNCATE). One migration revokes it and the default privilege; migration-reviewer + rls-policy-auditor + silent-failure-hunter before merge, since merges auto-apply to PROD. (INSERTED)
 
@@ -4256,6 +4313,8 @@ Plans:
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 166.5 to break down)
+
+⚠️ **Routed in from 164.6.6.3.4 STATUSBRIDGE (review round 4, 2026-10-08):** a SUCCESSFUL side-kind job whose sibling side job is still in flight takes the bridge's branch (a) and stamps `computed_at = now()` over stale analytics (and blanks the sentence); a later sibling failure then keeps that stamp under the D-09 hold. Same class as the successful-side-job stamp this phase owns. Also from that review: no gate arm pins the equal boundary of STATUSBRIDGE's D-09 release (`updated_at > computed_at`), and the marker retractions (`long_fetch.py`, `src/lib/ledger-refresh-marker.ts`) update a job by id with no status guard, which can bump a done row's `updated_at`.
 
 ### Phase 166.1: ENGINEFLOOR — every Python ratio site reads the one dispersion floor, so a constant yield never produces a fabricated ratio (INSERTED)
 
@@ -5432,7 +5491,7 @@ kept verbatim.
 | 164.5.1.4 SYNCCURSOR | 4/4 | Complete | v0.81.0.0 · #829 |
 | 164.5.2 BRIDGELOCK (the per-strategy advisory lock 161.1-D1 asked for) | 3/3 | Complete | v0.104.0.0 · #873 |
 | 164.5.2.1 BRIDGERESIDUE | 5/5 | Complete    | 2026-10-03 |
-| 164.5.3 MT5CREDS | 5/5 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.82.1.0 · #831/#832 |
+| 164.5.3 MT5CREDS | 5/5 | Complete | v0.82.1.0 · #831/#832 |
 | 164.5.4 MT5RECON-GAP | 6/6 | Complete | #835 |
 | 164.6 GATE-HYGIENE | 5/5 | Complete | v0.90.0.0 · #854 |
 | 164.6.1 MYPYSTRICT | 2/2 | Complete | v0.87.1.0 · #847 |
@@ -5441,9 +5500,17 @@ kept verbatim.
 | 164.6.4 MT5KEEPALIVE | 5/5 | Complete | #800 |
 | 164.6.5 MT5VALIDATEWEDGE | 8/8 | Complete    | 2026-10-06 · v0.96.0.0 · #863 |
 | 164.6.6 MT5TERMINALISOLATION | 9/9 | Complete    | 2026-10-04 |
-| 164.6.6.1 MT5SCRUB | 0/4 (moved, not re-planned) | Waiting — split from 164.6.6 on 2026-09-27 (founder); re-planned only after the founder's live scrub spike | - |
-| 164.6.6.2 BTCNATIVE | 0/? | Queued — booked 2026-10-03 | - |
-| 164.6.6.3 UATFIXES | 0/? | Queued — the 2026-10-03/04 production UAT defects; item 0 blocks new MT5 onboards | - |
+| 164.6.6.1 MT5SCRUB | 7/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Waiting`, 0/4, until 2026-10-08) | v0.125.0.0 · #950 |
+| 164.6.6.2 BTCNATIVE | 12/13 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.126.0.0 · #969 |
+| 164.6.6.2.1 BTCUSDVIEW | 0/? | Queued — booked 2026-10-07 by 164.6.6.2 D-15 | - |
+| 164.6.6.2.2 WEALTHRETURNS | 7/7 | Shipped — verification `human_needed`: post-deploy D-03 reading only, not closed | v0.128.0.0 · #973 |
+| 164.6.6.3 UATFIXES | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.125.2.0 · #967 |
+| 164.6.6.3.1 UIPOLISH | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.125.2.1 · #968 |
+| 164.6.6.3.2 WIZARDCODES | 4/4 | Complete — verification passed (WR-01 MEDIUM recorded as a known gap) | 2026-10-08 · v0.129.0.0 |
+| 164.6.6.3.3 FACTSHEETTRUTH | 0/? | Queued — 164.6.6.3 split C (founder 2026-10-06) | - |
+| 164.6.6.3.4 STATUSBRIDGE | 3/4 | Shipped — verification `human_needed`: post-deploy plan 04 PROD re-sync only, not closed | v0.129.1.0 |
+| 164.6.6.3.5 DOMAINONE | 13/13 | Complete — verification passed after plan 13's live checks | 2026-10-08 · v0.127.0.0 · #971 |
+| 164.6.6.3.6 MT5SERVERLEARN | 0/? | Queued — booked 2026-10-06 (founder); BROKER-SERVERS.md measured, no plans | - |
 | 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Complete    | 2026-10-04 |
 | 164.6.8 OUTAGEALERT | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 7/7 | Complete | v0.77.32.1 · finalized v0.77.32.1; its 33 stranded artifacts restored to main by PR #785. Row said `0/? Queued 2nd` until 2026-09-12 |
@@ -5466,6 +5533,7 @@ kept verbatim.
 | 164.9.6 SUBSETMAIN | 5/5 | Complete    | 2026-10-03 |
 | 164.9.6.1 SUBSETSHARD | 3/3 | Complete | v0.123.0.0 · #941 · verification passed 2026-10-03 |
 | 164.9.7 TRUNCATEREVOKE | 0/? | Queued — security, booked 2026-10-03 | - |
+| 164.9.8 APTHANG | 4/5 | Shipped — verification `human_needed`: post-ship plan 05 runner measurement only, not closed | v0.129.1.2 |
 | 166. QSTATS-TRUTH | 10/10 | Complete    | 2026-10-04 |
 | 166.1 ENGINEFLOOR | 4/4 | Complete    | 2026-10-04 |
 | 166.1.1 DDSIGN | 0/? | Queued — feature | - |
@@ -5480,6 +5548,7 @@ kept verbatim.
 | 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
 | 167.1.2 ACCOUNTTRUTH | PR A + PR B shipped | In progress — PR A v0.92.0.0 (#859), PR B v0.103.0.0 (#870); PR C executing | - |
 | 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
+| 167.1.2.2 DERIVECRON | 0/? | Queued — booked 2026-10-07 (founder) | - |
 | 167.2 KEYCARDSYNC | 10/10 | Complete    | 2026-10-04 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |
@@ -5767,6 +5836,12 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 - [x] **Phase 151: AUM — A book you can reach and a size you can set** - Direct AUM input, non-ccxt holdings-sync crash fixed as a CLASS (MT5 + latent sFOX), all-or-nothing book gate fixed incl. cross-role contamination, honest refusal copy (completed 2026-08-07)
 - [x] **Phase 152: SCEN — Composer legibility** - Ownership marker, clickable rows with a working factsheet link, labelled numbers, no duplicate browse entries (completed 2026-08-07)
 - [x] **Phase 153: WIZFORM — Form errors belong on the form (+ MT5 declarable)** ✅ **GOAL MET 2026-08-14 — via the INSERTED Phase 153.7, not by the original span.** Inline field validation, honest error codes from emitting sites, transient infra absorbed not surfaced, venue-appropriate copy, MT5 preselected in metadata. ⭐ **The mechanism is named on purpose and a bare tick would erase it:** the 153.1→153.6 span verdict REMAINS `failed` 5/6 in `153-VERIFICATION.md` and must not be rewritten — that file is the historical record that the span shipped short on WIZFORM-02. Phase 153.7 closed all four of its `missing` items, re-derived from source by the v1.17 milestone audit (router-vocabulary disposition at `wizardErrors.ts:3081`; population root widened at `seam-venue-vocabulary.invariant.test.ts:89` plus the `service_error` callee family at `:318`; boundary decision with per-exclusion reasons and count pins at `SCAN_EXCLUSIONS:134`; `KNOWN_CODELESS_FINALIZE_REJECTIONS = 0`), with both invariants executed at this tree — 2 files / 60 tests passed
+- [x] **Phase 153.1: WIZFORM-CODES — Honest codes + the venue-capability foundation** (INSERTED) — shipped v0.55.0.0 (#670, 2026-08-10); closed with v1.17
+- [x] **Phase 153.2: WIZFORM-FIELD — The form refuses at the field; MT5 declarable *and* submittable** (INSERTED) — completed 2026-08-10 (#670, v0.55.0.0); closed with v1.17
+- [x] **Phase 153.3: WIZFORM-GW — MT5 gateway honesty (Python; file-disjoint)** (INSERTED) — shipped inside the v1.17 span (v0.55.0.0 to v0.58.0.0); closed with v1.17
+- [x] **Phase 153.4: WIZFORM-BUDGET — Venue-aware budget + the honest long wait** (INSERTED) — completed 2026-08-11 (#672, v0.56.0.0); closed with v1.17
+- [x] **Phase 153.5: WIZFORM-ABANDON — Work that outlives its timeout** — completed 2026-08-11 (#673, v0.57.0.0); closed with v1.17
+- [x] **Phase 153.6: PARITY — the fixes that only landed on one path** (INSERTED) — completed 2026-08-12 (#675, v0.58.0.0); closed with v1.17
 - [x] **Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens** - Draft-aware entry chooser, stale-screen root cause investigated BEFORE fixed (verdict M2(ii)), token-less credential dedup toward the existing row (completed 2026-08-12)
 - [x] **Phase 153.7: WIZFORM-02-CLASS — every code that can reach a user is covered** ✅ **COMPLETE 2026-08-14** (INSERTED 2026-08-14) - The coverage law's population is DERIVED from every user-reachable code (`analytics-service/**`, positional `service_error(...)` as well as `error_code =`), and a code absent from BOTH halves reds CI; closes the one requirement the 153 span failed. 3/3 plans: population 17 → 37, all 37 dispositioned, and the last three code-less `finalize-wizard` rejections coded (ledger 3 → 0 with `EXPECTED_FINALIZE_REJECTION_SITES` never edited). **WIZFORM-02 ticked.** ⛔ NOT "add two rows" — see TODOS.md FIX NOW #6
 - [→] **Phase 155: MT5-VERIFY — The numbers are true, live on a trading day** — ➡️ **CARRIED OUT OF v1.17 TO v1.18 on 2026-08-14.** Not started, not dropped, not ticked. Server-UTC offset measured, external-oracle parity on the live funded account, five surfaces agree, discrepancies fixed (uncapped), warnings explained; MT5-GOAL-01 acceptance gate. ⛔ Founder-gated twice over: new investor passwords AND the founder at the terminal on a trading day. Detail block below is retained in place; the milestone header at the top of this file owns its blockers
@@ -6464,6 +6539,12 @@ Plans:
 | 151. AUM book + sizing | 7/7 | Complete    | 2026-08-07 |
 | 152. SCEN composer legibility | 6/6 | Complete    | 2026-08-07 |
 | 153. WIZFORM + MT5-14 | span complete | Goal met via inserted 153.7 (span verdict stays `failed` 5/6) | 2026-08-14 |
+| 153.1. WIZFORM-CODES (INSERTED) | 6/6 | Complete — shipped v0.55.0.0 (#670), closed with v1.17 | 2026-08-10 |
+| 153.2. WIZFORM-FIELD (INSERTED) | 5/5 | Complete (shipped v0.55.0.0, #670) | 2026-08-10 |
+| 153.3. WIZFORM-GW (INSERTED) | 6 planned | Complete — shipped inside the v1.17 span, closed with v1.17 | - |
+| 153.4. WIZFORM-BUDGET (INSERTED) | 5/5 | Complete — shipped v0.56.0.0 (#672), closed with v1.17 | 2026-08-11 |
+| 153.5. WIZFORM-ABANDON | 5/5 | Complete — shipped v0.57.0.0 (#673), closed with v1.17 | 2026-08-11 |
+| 153.6. PARITY (INSERTED) | 6/6 | Complete — shipped v0.58.0.0 (#675), closed with v1.17 | 2026-08-12 |
 | 153.7. WIZFORM-02-CLASS (INSERTED) | 3/3 | Complete (shipped v0.62.0.0, merge `c4555fd0`) | 2026-08-14 |
 | 154. WIZCONT + STALE | 8/8 | Complete   | 2026-08-12 |
 | 155. MT5-VERIFY + acceptance | 0/? | ➡️ **CARRIED to v1.18** | - |
@@ -6585,10 +6666,15 @@ factsheet on a spinner that never resolves.
 - [x] **Phase 141.1: SEAMBACKOFF — Retry-After-aware backoff, breaker recalibration, and SEAM-05 evidence re-derivation** (INSERTED) - Scope from the 8-agent review campaign over 141; **zero user-facing and zero data-integrity defects found**, so no retry verdict changed and no budget row was un-flipped. 9/9 plans (completed 2026-07-31). VERIFICATION was `gaps_found` 19/20 and is now **passed** 20/20 on re-verification 2026-08-01 — all three gaps had been closed in the tree by post-verification work and the file was simply never re-run: D-06's last stale coordinate became a symbol anchor at `22332e34` (the whole self-relative-citation class is now absent from `resilient-fetch.ts`), the two deferred ledgers were reconciled so TODOS.md and `deferred-items.md` both carry all four `DEF-141.1-*` ids, and the Falsifiability Ledger closed at 20/20 observed with `nyquist_compliant: true`
 - [x] **Phase 141.2: SEAMFIX — close the 141.1 code-review findings: duplicate onboard verification write, flag-monitor denominator integrity, breaker re-arm** (INSERTED) - 25 findings from the xhigh review (30 agents) deduped to 13; outcome is **twelve remediated, one dispositioned** — finding 8's retry↔limiter amplification is ACCEPTED, not fixed, and is stated as STILL LIVE everywhere it is summarised. Closes the duplicate `strategy_verifications` write on the money path (onboard's retry is now refused unless the call carries a truthy `wizard_session_id`, decided at the single chokepoint) and the three monitoring-integrity regressions D-16 shipped (unbounded `.select()` → `head: true` count, attacker-movable dedup deleted outright, read error now a distinct `denominator_read_failed` outcome rather than zero traffic). 6/6 plans (completed 2026-08-01). VERIFICATION was `human_needed` 17/17 and is now **passed** — three of its four production probes were discharged read-only on 2026-08-01 (42 rows / 42 distinct `correlation_id` / 0 `wizard:` prefix, flow_type resync 20 · csv 20 · onboard 2; unbounded `.select()` returned exactly 1000 rows at HTTP 200 with `error: null` against 7351 total, reproducing the silent truncation; all five breaker keys ABSENT, keeping finding 10 framed as hardening). The fourth — a real Railway-edge 503 carrying a malformed `Retry-After` — stays **Manual-Only and is not a gap**: it cannot be induced, and the only contract-bound 503 emitter we own structurally cannot emit one. ⏳ On PR #656, **not yet merged**
 - [x] **Phase 142: JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL** - Writer-stamped transition timestamp + pg_cron reaper to terminal `failed` + threshold-math CI invariant + WEDGE-01 regression test (completed 2026-08-02)
+- [x] **Phase 142.1: Close 142 review findings: chain-start stamp preservation, deploy sequencing, terminal-writer parity** (INSERTED) — completed 2026-08-03 (#659, v0.52.0.0)
+- [ ] **Phase 142.2: Get MetaTrader 5 running end to end on the unified backbone** (INSERTED) — shipped 2026-08-04 (#660, v0.53.0.0); its phase detail records it as STILL NOT CLOSED
+- [ ] **Phase 142.3: Prove the MT5 numbers correct against the live terminal on a trading day** (INSERTED) — never planned (0 plans); its requirements MT5-06..10 are owned by v1.18 Phase 155
 - [→] **Phase 143: JOB — Dropped-enqueue reconciliation sweep** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
 - [→] **Phase 144: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
 - [→] **Phase 145: JOB — csv-finalize atomicity (reproduce-first)** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
 - [→] **Phase 146: RATE — Audit + close the two verified gaps** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
+- [x] **Phase 146.1: REVIEW: v1.19 xhigh close-out — fold guards, resolve-arm honesty, rate-gate completeness** (INSERTED) — completed 2026-08-19 (#692, v0.67.0.0); closed with v1.19
+- [x] **Phase 146.2: REVIEW: 146.1 post-merge close-out — the echo path must not silently drop a strategy's classification, and the passphrase must not reach Sentry** (INSERTED) — completed 2026-08-20 (#694, v0.68.0.0); closed with v1.19
 
 ## v1.16 Phase Details (PARKED)
 
@@ -7095,12 +7181,24 @@ Plans:
 | 140. SEAM core + breaker | 7/7 | Complete   | 2026-07-25 |
 | 140.1. PYAPI contract/status/limiter (INSERTED) | 9/9 | Complete | 2026-07-26 |
 | 140.1.1. PYAPI-FIX (INSERTED) | 7/7 | Complete    | 2026-07-26 |
+| 140.1.2. PYAPI-FIX2 (INSERTED) | 4/4 | Complete | 2026-07-30 |
+| 140.2. SEAMCORE (INSERTED) | 12/12 | Complete | 2026-07-27 |
+| 140.3. SEAMUX (INSERTED) | 17 planned | Complete — shipped 2026-07-30, PR #651 | 2026-07-30 |
+| 140.4. SEAMRIM (INSERTED) | 14/14 | Complete — shipped 2026-07-30, PR #652 | 2026-07-30 |
+| 140.5. SEAMPROSE (INSERTED) | 8/8 | Complete | 2026-07-30 |
 | 141. SEAM retry (audit-gated) | 4/4 | Complete    | 2026-07-31 |
+| 141.1. SEAMBACKOFF (INSERTED) | 9/9 | Complete | 2026-07-31 |
+| 141.2. SEAMFIX (INSERTED) | 6/6 | Complete | 2026-08-01 |
 | 142. JOB reaper + DDL | 6/6 | Complete   | 2026-08-02 |
+| 142.1. Close 142 review findings (INSERTED) | 8/8 | Complete (shipped v0.52.0.0, #659) | 2026-08-03 |
+| 142.2. MT5 end to end on the unified backbone (INSERTED) | 8/8 | Shipped v0.53.0.0 (#660); its phase detail records it as not closed | 2026-08-04 |
+| 142.3. MT5 live-terminal proof (INSERTED) | 0/? | Never planned; MT5-06..10 are owned by v1.18 Phase 155 | - |
 | 143. JOB dropped-enqueue sweep | 0/? | ➡️ **CARRIED to v1.19** | - |
 | 144. JOB WR-02 terminal UPDATE | 0/? | ➡️ **CARRIED to v1.19** | - |
 | 145. JOB csv-finalize atomicity | 0/? | ➡️ **CARRIED to v1.19** | - |
 | 146. RATE audit + close | 0/? | ➡️ **CARRIED to v1.19** | - |
+| 146.1. v1.19 xhigh close-out (INSERTED) | 7 planned | Complete (shipped v0.67.0.0, #692), closed with v1.19 | 2026-08-19 |
+| 146.2. 146.1 post-merge close-out (INSERTED) | 8 planned | Complete (shipped v0.68.0.0, #694), closed with v1.19 | 2026-08-20 |
 
 ## Requirement Coverage (v1.16)
 

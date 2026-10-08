@@ -490,8 +490,9 @@ def _judge(
 def _assert_bridge_definition(conn: Any) -> None:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT pg_get_functiondef("
-            "'public.sync_strategy_analytics_status(uuid)'::regprocedure)"
+            "SELECT pg_get_functiondef(p.oid) FROM pg_proc p "
+            "WHERE p.pronamespace = 'public'::regnamespace "
+            "AND p.proname = 'sync_strategy_analytics_status'"
         )
         row = cur.fetchone()
     body = " ".join(str(row[0] if row else "").split())

@@ -174,8 +174,10 @@ def _fixture_single_calendar_day() -> pd.Series:
     """(i) EQUITY on a single calendar day via duplicate-date JSONB (round-2 Fable
     finding 3).
 
-    ``routers/portfolio.py:_records_to_series`` does not dedupe, so duplicate-date
-    JSONB yields multiple observations that all normalise to ONE calendar day. The
+    A series with repeated dates (the shared parser
+    ``services.wealth_returns.records_to_series`` dedupes keep-last, but a caller
+    can hand in any equity Series) yields multiple observations that all
+    normalise to ONE calendar day. The
     deleted ``compute_twr`` built ``breakpoints=sorted({start}|{end})``; a single
     distinct day collapses that to one breakpoint → no sub-period → None. The
     endpoint-ratio helper would instead return 0.10, so it must special-case this

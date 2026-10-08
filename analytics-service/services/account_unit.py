@@ -45,13 +45,16 @@ USD_FLOORS = UnitFloors(dust_nav=1000.0, material_equity=100.0, residual_abs_tol
 
 # Native-unit rows, keyed by upper-case currency code. Exactly one so far.
 _NATIVE_FLOORS: dict[str, UnitFloors] = {
-    # BTC. ``dust_nav`` 0.001 is D-20 itself (superseding D-05's 0.01). CONTEXT gives no
-    # number for the other two, so they follow ONE rule rather than being chosen: the USD row
-    # scaled by D-20's own ratio, 0.001 / 1000 = 1e-6. ``material_equity`` 100 -> 0.0001 BTC and
-    # ``residual_abs_tol`` 1.00 -> 1e-6 BTC. (Recorded in the CONTEXT discretion note
-    # "Recorded 2026-10-07 after the plan check"; RESEARCH A1/A2's 0.001 / 1e-5 were sized
-    # against the superseded 0.01 floor and are not used.)
-    "BTC": UnitFloors(dust_nav=0.001, material_equity=0.0001, residual_abs_tol=1e-6),
+    # BTC. ``dust_nav`` 1e-7 is D-24 itself (founder, 2026-10-08: "it should measure more. at
+    # least to 0.0000001"), superseding D-20's 0.001, which superseded D-05's 0.01. CONTEXT
+    # gives no founder number for the other two, so they stay the orchestrator-scaled D-20
+    # values: the USD row scaled by D-20's own ratio, 0.001 / 1000 = 1e-6, ``material_equity``
+    # 100 -> 0.0001 BTC and ``residual_abs_tol`` 1.00 -> 1e-6 BTC. (Recorded in the CONTEXT
+    # discretion note "Recorded 2026-10-07 after the plan check".) D-24 left both in place
+    # after the gap-closure plan measured every consumer: no code compares the three to each
+    # other, so the row no longer follows one ratio, and that is deliberate. ``dust_nav`` is
+    # BELOW ``material_equity`` here, the reverse of the USD row.
+    "BTC": UnitFloors(dust_nav=1e-7, material_equity=0.0001, residual_abs_tol=1e-6),
 }
 
 

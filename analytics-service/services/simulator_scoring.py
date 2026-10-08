@@ -23,13 +23,20 @@ specific candidate, unlike the REPLACE bridge that ranks multiple
 alternatives.
 """
 
+from collections.abc import Mapping
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 
 from services.metrics import _safe_float
-from services.portfolio_optimizer import _avg_corr, _compute_sharpe, _leg_is_flat, _max_drawdown
+from services.portfolio_optimizer import (
+    _avg_corr,
+    _compute_sharpe,
+    _leg_is_flat,
+    _max_drawdown,
+    blend_clock,
+)
 from services.window_alignment import align_current_and_proposed
 
 
@@ -49,6 +56,7 @@ def simulate_add_candidate(
     candidate_returns: pd.Series,
     weights: dict[str, float],
     add_weight: float = 0.10,
+    asset_classes: Optional[Mapping[str, Optional[str]]] = None,
 ) -> dict[str, Any]:
     """Run the ADD scenario for a single candidate against a portfolio.
 
@@ -61,6 +69,11 @@ def simulate_add_candidate(
             are normalised to sum to 1 before scoring.
         add_weight: fraction of the portfolio freed for the candidate.
             Defaults to 0.10, matching the optimizer's default.
+        asset_classes: {strategy_id: strategies.asset_class} for the
+            portfolio's strategies and the candidate. Sets the risk clock of
+            both Sharpes (WR-01, D-08): the EXISTING BOOK's, 365 if a book leg
+            is crypto, else 252. The candidate's own class never changes it,
+            so ``current.sharpe`` equals the portfolio headline for the book.
 
     Returns:
         A dict with:
@@ -129,7 +142,13 @@ def simulate_add_candidate(
         w_arr = w_arr / w_arr.sum()
     current_returns = (port_aligned * w_arr).sum(axis=1)
 
-    current_sharpe = _compute_sharpe(current_returns)
+    # WR-01 + D-08 (founder 2026-10-07, review round 2 R2-01/R2-02): ONE risk clock
+    # for the current and the proposed blend, and it is the EXISTING BOOK's (365 if
+    # a book leg is crypto, else 252), never the candidate's. `sharpe_delta` then
+    # measures the candidate and never a change of clock, and `current.sharpe`
+    # equals the portfolio headline whatever candidate is being simulated.
+    blend_ppy = blend_clock(asset_classes, list(port_aligned.columns))
+    current_sharpe = _compute_sharpe(current_returns, periods_per_year=blend_ppy)
     current_avg_corr = _avg_corr(port_aligned)
     current_max_dd = _max_drawdown(current_returns)
     current_weights_map = {sid: float(w) for sid, w in zip(port_aligned.columns, w_arr)}
@@ -169,7 +188,7 @@ def simulate_add_candidate(
         w_new = w_new / w_new.sum()
 
     proposed_returns = (aligned * w_new).sum(axis=1)
-    proposed_sharpe = _compute_sharpe(proposed_returns)
+    proposed_sharpe = _compute_sharpe(proposed_returns, periods_per_year=blend_ppy)
     proposed_avg_corr = _avg_corr(aligned)
     proposed_max_dd = _max_drawdown(proposed_returns)
     proposed_weights_map = {sid: float(w) for sid, w in zip(aligned.columns, w_new)}

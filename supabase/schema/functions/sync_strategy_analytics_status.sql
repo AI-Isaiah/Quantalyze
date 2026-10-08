@@ -2,11 +2,14 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261003120000_sync_status_bridge_residues.sql
+-- source migration: 20261009120000_sync_status_analytics_scope.sql
 -- --------------------------------------------------------------------------
 -- the bridge, re-based on 20260906120000 STEP 2
 -- --------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION sync_strategy_analytics_status(p_strategy_id UUID)
+CREATE OR REPLACE FUNCTION sync_strategy_analytics_status(
+  p_strategy_id    UUID,
+  p_trigger_job_id UUID DEFAULT NULL
+)
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -38,6 +41,18 @@ DECLARE
   v_unprotected_job_ids UUID[];
   v_nonterminal_unmarked_count INTEGER;
   v_refresh_keep       BOOLEAN;
+  -- D-09 (founder 2026-10-07), keyed on the TRIGGER: TRUE only when the job whose
+  -- terminal transition caused THIS call is a side-kind job that did not succeed.
+  v_side_failed_only   BOOLEAN;
+  -- WR-R3-01: the trigger is a side-kind job that has not finished done (failed,
+  -- or deferred back to pending). Read by the early return ahead of branch (a) only.
+  v_side_trigger_not_done BOOLEAN;
+  v_nonterminal_counting_count INTEGER;
+  -- D-05, the closed side-kind list, spelled ONCE. Every use below reads this
+  -- constant (the live_failures CTE, the trigger test, the in-flight count), so
+  -- the list cannot drift between them, and the verify block asserts it is the
+  -- four kinds D-05 names and that no other spelling of it exists.
+  v_side_kinds         CONSTANT TEXT[] := ARRAY['sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot'];
 BEGIN
   IF p_strategy_id IS NULL THEN
     RAISE EXCEPTION 'sync_strategy_analytics_status: p_strategy_id is required'
@@ -57,9 +72,10 @@ BEGIN
 
   -- ---- the NON-TERMINAL counts — FIRST of this function's two compute_jobs --
   -- ---- reads, and the ORDER IS THE CORRECTNESS ------------------------------
-  -- One statement, one snapshot, two counts: every in-flight job, and the
-  -- in-flight jobs that do NOT carry an in-scope refresh marker (the second
-  -- feeds the keep flag; see RETRY-PLAIN-COMPLETE in the file header).
+  -- One statement, one snapshot, three counts: every in-flight job, the in-flight
+  -- jobs that do NOT carry an in-scope refresh marker (the second feeds the keep
+  -- flag; see RETRY-PLAIN-COMPLETE in the file header), and the in-flight jobs
+  -- that are NOT side kinds (the third feeds the D-09 early return below).
   -- Consumed by branch (a) far below. They are read HERE, and that placement is a
   -- data-integrity fix (161.1 migration re-review, HIGH), not tidiness.
   --
@@ -136,11 +152,58 @@ BEGIN
            AND kind IN ('derive_broker_dailies',
                         'compute_analytics_from_csv',
                         'stitch_composite'),
-           FALSE))
-    INTO v_nonterminal_count, v_nonterminal_unmarked_count
+           FALSE)),
+         count(*) FILTER (WHERE NOT COALESCE(kind = ANY (v_side_kinds), FALSE))
+    INTO v_nonterminal_count, v_nonterminal_unmarked_count, v_nonterminal_counting_count
     FROM compute_jobs
    WHERE strategy_id = p_strategy_id
      AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry');
+
+  -- ---- D-09: did a SIDE-KIND job's FAILURE cause this call? -----------------
+  -- The decision is keyed on the job that TRIGGERED the call, never on recency.
+  -- The mark RPCs pass the job they just terminalised and the Python DEFERRED
+  -- path the job it just deferred; every other caller (a status re-sync) passes
+  -- NULL and gets today's behaviour. TRUE only for a side-kind job that is failed_retry or
+  -- failed_final: a side job that succeeded, any counting job in any state, a
+  -- NULL id and a job of another strategy all read FALSE. (A recency key, "the
+  -- latest-created terminal job is a failed_final", froze computed_at after a
+  -- genuine counting success whenever a side job created later had failed fast.)
+  v_side_failed_only := COALESCE((SELECT t.status IN ('failed_retry', 'failed_final')
+                                         AND t.kind = ANY (v_side_kinds)
+                                    FROM compute_jobs t
+                                   WHERE t.id = p_trigger_job_id
+                                     AND t.strategy_id = p_strategy_id), FALSE);
+  -- ... and NOTHING ELSE moved the row since its last stamp (review round 3,
+  -- CR-R3-01; founder D-10). The trigger names the call, not everything the row
+  -- owes. Branch (a) HOLDS computed_at on a complete_with_warnings or warned row
+  -- by design and leaves the stamp to the terminal call; when that terminal call
+  -- is a side job's failure, a genuine recompute that finished done while the side
+  -- job was queued would otherwise never be stamped. So the hold stands only when
+  -- no COUNTING job reached `done` after the row's computed_at. updated_at is
+  -- trigger-stamped on every UPDATE and nothing moves a done row back out of
+  -- terminal, so on a done row it is the moment the job became done; a stamp
+  -- taken in that same transaction is equal, not later, and keeps the hold. No
+  -- row yet means nothing to compare, and the hold stands (branch (c) then writes
+  -- none).
+  v_side_failed_only := v_side_failed_only
+                        AND NOT EXISTS (SELECT 1
+                                          FROM compute_jobs d
+                                          JOIN strategy_analytics sa ON sa.strategy_id = d.strategy_id
+                                         WHERE d.strategy_id = p_strategy_id
+                                           AND d.status = 'done'
+                                           AND NOT COALESCE(d.kind = ANY (v_side_kinds), FALSE)
+                                           AND d.updated_at > sa.computed_at);
+  -- The EARLY RETURN below reads a wider trigger test (review round 3, WR-R3-01;
+  -- founder D-10). The Python DEFERRED path passes the job it just deferred (an
+  -- exchange circuit breaker puts it back to pending), and a deferral computes
+  -- nothing either: without this its call ran branch (a), which stamped
+  -- computed_at = now() and blanked the sentence, and the hold of the job's later
+  -- failure then kept that stamp. So any side-kind trigger of this strategy that
+  -- has not finished done counts here. Branch (c)'s holds stay on
+  -- v_side_failed_only: a call reaching (c) has nothing in flight.
+  v_side_trigger_not_done := COALESCE((SELECT t.status <> 'done' AND t.kind = ANY (v_side_kinds)
+                                         FROM compute_jobs t
+                                        WHERE t.id = p_trigger_job_id AND t.strategy_id = p_strategy_id), FALSE);
 
   -- ---- Phase 161.1 / CR-01: is the published row still HEALTHY? -------------
   -- Conjunct (ii) of the protection predicate — see this file's header. Read
@@ -354,6 +417,26 @@ BEGIN
       FROM compute_jobs f
      WHERE f.strategy_id = p_strategy_id
        AND f.status = 'failed_final'
+       AND NOT COALESCE(f.kind = ANY (v_side_kinds), FALSE)
+       AND NOT (
+         f.kind = 'process_key_long'
+         AND EXISTS (
+           SELECT 1
+             FROM compute_jobs c1
+            WHERE c1.strategy_id = f.strategy_id
+              AND c1.kind = 'derive_broker_dailies'
+              AND c1.status = 'done'
+              AND c1.created_at > f.created_at
+         )
+         AND EXISTS (
+           SELECT 1
+             FROM compute_jobs c2
+            WHERE c2.strategy_id = f.strategy_id
+              AND c2.kind = 'compute_analytics_from_csv'
+              AND c2.status = 'done'
+              AND c2.created_at > f.created_at
+         )
+       )
        AND NOT EXISTS (
          SELECT 1
            FROM compute_jobs d
@@ -457,6 +540,25 @@ BEGIN
   v_refresh_keep := v_publish_healthy
                     AND COALESCE(v_nonterminal_unmarked_count, 1) = 0
                     AND COALESCE(v_failed_count, 1) = 0;
+
+  -- (a-hold) D-09: a side-kind job FAILED, or was DEFERRED (WR-R3-01), and
+  -- nothing that counts is in flight.
+  -- A transient side failure (a sync_funding timeout is the founder's example)
+  -- retries through failed_retry, and each retry mark reaches branch (a), which
+  -- stamps computed_at = now() and blanks the sentence while the side job is
+  -- merely in flight. A deferred side job (the Python DEFERRED path, which now
+  -- passes its job id) is in flight in the same way. Nothing that produces analytics is running, so the call has
+  -- nothing to say about a stored analytic: it leaves the row exactly as it is,
+  -- computation_status, computed_at, the sentence and both markers included, and
+  -- writes no row when none exists. The terminal hop (failed_final) reaches
+  -- branch (c) with nothing in flight and holds there. When a counting job IS in
+  -- flight, branch (a) below runs as it always did, because that job, not the
+  -- side failure, is why the row moves.
+  IF v_side_trigger_not_done
+     AND COALESCE(v_nonterminal_count, 0) > 0
+     AND COALESCE(v_nonterminal_counting_count, 1) = 0 THEN
+    RETURN;
+  END IF;
 
   -- (a) any non-terminal row → 'computing', UNLESS the runner has already
   -- written 'complete_with_warnings' OR set its runner-owned computation_warned
@@ -742,32 +844,49 @@ BEGIN
     RETURN;
   END IF;
 
-  -- (c) all rows 'done' → terminal SUCCESS. PRESERVE an existing
-  -- 'complete_with_warnings' OR a runner-owned computation_warned marker (a
-  -- more-informative success the analytics worker already wrote — the marker
-  -- read is what closes the failed_final-bounce launder, since branch (b) may
-  -- have bounced computation_status to 'failed' in between); otherwise resolve
-  -- to 'complete'. Clears any stale computation_error either way.
-  -- JOB-01 (Phase 142): SQL exit transition #2 — clear the stamp. Both arms of
-  -- the status CASE are terminal, so the clear is unconditional here.
+  -- D-09 (Phase 164.6.6.3.4), branch (c) when v_side_failed_only is TRUE: this call
+  -- was caused by a side-kind job that failed, no counting failure is live,
+  -- nothing is in flight and no counting job reached done since the row's last
+  -- stamp (CR-R3-01). Nothing was computed and the bridge wrote none of the
+  -- sentence, so the branch HOLDS computed_at, computation_error and both
+  -- provenance markers; it still clears computing_started_at and still resolves
+  -- computing to complete (or complete_with_warnings for a warned row). Two more
+  -- holds, both for a row the call has no business improving:
+  --   * a `failed` row that carries a sentence stays `failed` (it would
+  --     otherwise read `complete` over a held failure sentence); a `failed` row
+  --     with no sentence is the stale Eclipse shape D-05 exists for and resolves
+  --     to complete as it always did;
+  --   * no strategy_analytics row is written when none exists (the held columns
+  --     have nothing to hold, and a row stamped now() would be the fresh-looking
+  --     analytics D-09 forbids).
+  IF v_side_failed_only
+     AND NOT EXISTS (SELECT 1 FROM strategy_analytics WHERE strategy_id = p_strategy_id) THEN
+    RETURN;
+  END IF;
+
   INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
   VALUES (p_strategy_id, 'complete', NULL, NULL, NULL, NULL)
   ON CONFLICT (strategy_id) DO UPDATE
      SET computation_status = CASE
+           WHEN v_side_failed_only
+                AND strategy_analytics.computation_status = 'failed'
+                AND strategy_analytics.computation_error IS NOT NULL
+           THEN 'failed'
            WHEN strategy_analytics.computation_status = 'complete_with_warnings'
                 OR strategy_analytics.computation_warned
            THEN 'complete_with_warnings'
            ELSE 'complete'
          END,
-         computation_error  = NULL,
-         -- Phase 164.2 / criterion 2: UNCONDITIONAL, exactly like the blank on
-         -- the line above and for the same reason. Every live failure is gone;
-         -- there is nothing left for a marker to describe, and one left
-         -- standing here would be read by the NEXT failure's write branch as a
-         -- writer's claim over a sentence that no longer exists.
-         computation_error_source = NULL,
-         computation_error_job_id = NULL,
+         computation_error  = CASE WHEN v_side_failed_only THEN strategy_analytics.computation_error ELSE NULL END,
+         -- Phase 164.2 / criterion 2: the markers go with the sentence, exactly
+         -- like the blank on the line above and for the same reason. Every live
+         -- failure is gone; there is nothing left for a marker to describe, and
+         -- one left standing here would be read by the NEXT failure's write
+         -- branch as a writer's claim over a sentence that no longer exists.
+         -- D-09: a HELD sentence keeps its markers on the same predicate.
+         computation_error_source = CASE WHEN v_side_failed_only THEN strategy_analytics.computation_error_source ELSE NULL END,
+         computation_error_job_id = CASE WHEN v_side_failed_only THEN strategy_analytics.computation_error_job_id ELSE NULL END,
          computing_started_at = NULL,
-         computed_at        = now();
+         computed_at        = CASE WHEN v_side_failed_only THEN strategy_analytics.computed_at ELSE now() END;
 END;
 $$;

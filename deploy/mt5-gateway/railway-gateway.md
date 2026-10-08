@@ -166,7 +166,11 @@ the one predicate. It is checked at the top of `_default_connect`, the only prod
 transport factory, before `mt5linux` is imported, so no connection is ever built toward a
 refused host. Both endpoint readers in `services/mt5_relogin.py` apply it as well, so a
 refused validation host takes the existing misconfiguration path: the wizard's 500
-`MT5_GATEWAY_UNCONFIGURED` and the worker's `RuntimeError`, each with the D-05 alert. A
+`MT5_VALIDATION_UNCONFIGURED` and the worker's `RuntimeError`, each with the D-05 alert.
+**CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01):** this sentence named
+`MT5_GATEWAY_UNCONFIGURED` (kept here as lineage). That code now belongs to the D-31
+`undetermined` arm alone; an unset, malformed or refused validation endpoint answers
+`MT5_VALIDATION_UNCONFIGURED` with the same status and body shape. A
 refused job host makes the heal and the session monitor skip with a log-once line that
 names the env var, never its value. A test pins that no other production file imports
 `mt5linux` or opens an rpyc connection.
@@ -486,9 +490,11 @@ they go into the phase record (`164.6.6-CONTEXT.md`, `## Stand-up findings`).
 
    These sit beside the job pair (`MT5_GATEWAY_HOST` / `MT5_GATEWAY_PORT`), which keeps its
    names. ⚠️ **D-05 fails loud.** Once plan 04's routing change deploys, every validation
-   is refused with `MT5_GATEWAY_UNCONFIGURED` and an alert fires until BOTH are set. There
+   is refused with `MT5_VALIDATION_UNCONFIGURED` and an alert fires until BOTH are set. There
    is NO fallback to the job terminal, because a fallback would silently bring the
-   eviction back.
+   eviction back. (**CORRECTED 2026-10-07, Phase 164.6.6.3.2 D-01:** the code was
+   `MT5_GATEWAY_UNCONFIGURED`; that is kept as lineage. The wizard now says the
+   connection is not set up on our side instead of an internal fault.)
 
 10. **The house credentials stay on the analytics service.** They are the names read by
     `services/mt5_relogin.py::read_env_mt5_credentials`. They never go on either gateway.

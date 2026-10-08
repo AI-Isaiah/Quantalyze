@@ -149,6 +149,37 @@ describe("getOwnCapitalStrategies — WR-01 series resolution (API-ingested stra
     expect(analytics.volatility).toBe(0.3);
   });
 
+  it("164.6.6.2.2 D-05: a `simple` curve reads as DIFFERENCES, and the raw flags never cross", async () => {
+    // 1 + cumsum levels 1.00 (07-31), 1.01 (08-01), 1.05 (08-04). Hand-computed:
+    // day returns 1.01 - 1.00 = 0.01 and 1.05 - 1.01 = 0.04, so month-to-date is
+    // 1.01 * 1.04 - 1 = 0.0504. Read by ratio (the geometric default) it would
+    // be 1.05 / 1.00 - 1 = 0.05, so the two readings cannot be confused.
+    state.queryResult = {
+      data: [
+        {
+          ...API_INGESTED_ROW,
+          id: "s-simple",
+          strategy_analytics: {
+            ...API_INGESTED_ROW.strategy_analytics,
+            returns_series: [
+              { date: "2026-07-31", value: 1.0 },
+              { date: "2026-08-01", value: 1.01 },
+              { date: "2026-08-04", value: 1.05 },
+            ],
+            data_quality_flags: { cumulative_method: "simple", venue_detail: "x" },
+          },
+        },
+      ],
+      error: null,
+    };
+
+    const marked = await getOwnCapitalStrategies(USER);
+    expect(marked![0].mtd).toBeCloseTo(0.0504, 10);
+    const analytics = marked![0].strategy_analytics as unknown as Record<string, unknown>;
+    expect(analytics).not.toHaveProperty("data_quality_flags");
+    expect(JSON.stringify(marked)).not.toContain("venue_detail");
+  });
+
   it("a CSV-ingested strategy (daily_returns populated, returns_series NULL) is unaffected — the direct column still wins", async () => {
     state.queryResult = {
       data: [

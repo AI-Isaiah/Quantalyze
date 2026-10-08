@@ -923,10 +923,10 @@ jobs:
       # timeout note; if the first green run proves the image ships it, drop this
       # step on that evidence rather than on assumption.
       - name: Install psql client (the lane loads the baseline through it)
+        timeout-minutes: 8
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          bash scripts/ci-apt.sh install --provides psql postgresql-client
           psql --version
       - name: Preflight - the lane must have a non-empty test corpus
         # A green job that ran nothing is the silent-green this lane exists to
@@ -1233,14 +1233,14 @@ jobs:
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
       - name: Install psql client (the lane loads the baseline through it)
+        timeout-minutes: 8
         # Same reason as `frontend-local-stack`: `run.sh` loads the committed baseline
         # through `psql`, and `resolve_psql`'s only fallback is a macOS keg that does
         # not exist on this runner. A miss is `FATAL: psql not found` and exit 1, not
         # a skip.
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          bash scripts/ci-apt.sh install --provides psql postgresql-client
           psql --version
       - name: Preflight - the lane must have a non-empty derived corpus
         # A green job that ran nothing is the silent-green this lane exists to
@@ -2436,6 +2436,7 @@ jobs:
           echo "skip_lane=false" >> "$GITHUB_OUTPUT"
 
       - name: Provision pg_cron for the lane's PostgreSQL (Phase 164.4.1)
+        timeout-minutes: 7
         if: steps.scope.outputs.skip_lane != 'true'
         # ⚠️ THIS STEP'S FIRST RUN IS THE MEASUREMENT. 164.4.1-RESEARCH assumption
         # A1 ("`apt-get install postgresql-16-cron` succeeds on ubuntu-latest and
@@ -2525,10 +2526,11 @@ jobs:
             echo "::error::MEASURE_FAIL: the runner's PostgreSQL major is '${major:-none}', not 16. 164.4.1-RESEARCH assumption A5 (ubuntu-latest => 24.04 => PostgreSQL 16.15) no longer holds, and criterion 1 (CI and the authoring box, which is 16.13, must measure the SAME corpus) is at risk: an extension .so built for another major will not load, and the five pg_cron gate files would be proven on a server the author never ran. Re-take the macOS/ubuntu major comparison before changing this line."
             exit 1
           fi
-          sudo apt-get update -y
-          echo "--- apt-cache policy postgresql-${major}-cron (which source wins) ---"
+          echo "--- apt-cache policy postgresql-${major}-cron (read BEFORE the install: Installed shows whether the image already ships it) ---"
           apt-cache policy "postgresql-${major}-cron"
-          sudo apt-get install -y --no-install-recommends "postgresql-${major}-cron"
+          bash scripts/ci-apt.sh install --budget 360 "postgresql-${major}-cron"
+          echo "--- apt-cache policy postgresql-${major}-cron (read AFTER the install: Installed shows the version and the source that won) ---"
+          apt-cache policy "postgresql-${major}-cron"
           echo "--- installed version ---"
           dpkg -s "postgresql-${major}-cron" | grep -a '^Version'
           echo "--- the two artifacts the lane needs ---"
@@ -4180,11 +4182,15 @@ jobs:
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
       - name: Install psql client
+        timeout-minutes: 8
         # Two consumers now: `run.sh up` loads the baseline through psql, and the
         # capability probe and the corpus loop below connect with it.
+        # Phase 164.9.8 APTHANG: apt goes through the wall-clock-bounded wrapper,
+        # which skips apt entirely when the runner image already ships psql.
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          set -euo pipefail
+          bash scripts/ci-apt.sh install --provides psql postgresql-client
+          psql --version
       - name: Preflight - reject psql meta-commands in test files (Finding 6)
         # Reject any test file containing psql meta-commands that could
         # exfiltrate secrets from the runner. Specifically:
@@ -4998,13 +5004,39 @@ jobs:
           #   provenance markers), so its sentinel reads ALL 16 and ARMS_FLOOR
           #   moves 253 -> 256. No file joined the sentinel-bearing set, so
           #   SENTINEL_FLOOR stays 14.
+          # Re-measured 2026-10-07 (phase 164.6.6.3.4 plan 01), ONE move:
+          #   test_sync_status_analytics_scope.sql, NEW, 13 arms (S1..S6, C1..C4,
+          #   G1..G3) - the STATUSBRIDGE gate for migration 20261009120000 (a failed
+          #   side-kind job never pins the analytics status failed, and a failed
+          #   process_key_long is cleared only by a later done derive AND compute).
+          #   Its -SETUP sub-arms fold into their parent section, as the runner counts
+          #   them. A new sentinel-bearing file, so SENTINEL_FLOOR moves 14 -> 15 and
+          #   ARMS_FLOOR moves 256 -> 269, read off the file's own first
+          #   `ALL N ARMS EXECUTED` sentinel.
+          # Re-measured 2026-10-07 (phase 164.6.6.3.4 founder D-09), ONE move:
+          #   test_sync_status_analytics_scope.sql gains D9 and D10 (a failed side-kind
+          #   job never stamps computed_at; a genuine compute after it still does), so
+          #   its sentinel reads ALL 15 and ARMS_FLOOR moves 269 -> 271. No file joined,
+          #   so SENTINEL_FLOOR stays 15.
+          # Re-measured 2026-10-08 (phase 164.6.6.3.4 founder D-09, round 3), ONE move:
+          #   test_sync_status_analytics_scope.sql gains D11 to D14 (a transient side
+          #   failure holds freshness through every retry; a counting success after a fast
+          #   side failure still stamps; a failed row that carries a sentence stays failed;
+          #   no row is manufactured), so its sentinel reads ALL 19 and ARMS_FLOOR moves
+          #   271 -> 275. No file joined, so SENTINEL_FLOOR stays 15.
+          # Re-measured 2026-10-08 (phase 164.6.6.3.4 founder D-10, round 4), ONE move:
+          #   test_sync_status_analytics_scope.sql gains D15 and D16 (a genuine
+          #   recompute on a warned row is stamped by the side failure that follows it;
+          #   a deferred side job leaves the row alone), so its sentinel reads ALL 21
+          #   and ARMS_FLOOR moves 275 -> 277. No file joined, so SENTINEL_FLOOR stays 15.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
+          #   test_sync_status_analytics_scope.sql             21
           #   test_sync_status_bridge_residues.sql             16
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=14  # files declaring a sentinel
-          ARMS_FLOOR=256     # 13 + 8 + 9 + 3 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 16 + 7 + 23
+          SENTINEL_FLOOR=15  # files declaring a sentinel
+          ARMS_FLOOR=277     # 13 + 8 + 9 + 3 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 21 + 16 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
@@ -5443,11 +5475,11 @@ jobs:
       # 164.9.4 this job installed the client inside its mutex acquire step; that
       # step left with the key, so the install is its own step again.
       - name: Install psql client (the lane loads the baseline through it)
+        timeout-minutes: 8
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          bash scripts/ci-apt.sh install --provides psql postgresql-client
           psql --version
       - name: Boot the local-stack lane (Supabase CLI stack + committed baseline)
         # The same boot `frontend-local-stack` and `sql-tests` run, verbatim. `up`
@@ -5790,9 +5822,11 @@ jobs:
           # persisted cred is pure attack surface.
           persist-credentials: false
       - name: Install psql client
+        timeout-minutes: 8
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          set -euo pipefail
+          bash scripts/ci-apt.sh install --provides psql postgresql-client
+          psql --version
       # ── THE ORDERING WAIT (Phase 164.9 plan 06, [164.8-PUSH-RACE-VAC08]) ───
       # On a merge push this job's DB work must not begin before the TEST schema
       # apply for the SAME commit has concluded. The mutex below guarantees the
@@ -6004,6 +6038,7 @@ jobs:
       # and we add it back. On cache miss, do the full install (download
       # + apt deps).
       - name: Install Playwright (browser bundle from cache when available)
+        timeout-minutes: 10
         run: |
           if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
             echo "Cache hit — chromium bundle restored. Runner image has system libs; skipping apt install."
@@ -6391,6 +6426,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-playwright-
       - name: Install Playwright (browser bundle from cache when available)
+        timeout-minutes: 10
         run: |
           if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
             echo "Cache hit — chromium bundle restored. Runner image has system libs; skipping apt install."
@@ -6457,10 +6493,10 @@ jobs:
       # 164.9.4 this job installed the client inside its ordering-wait and mutex
       # steps; those left with the key, so the install is its own step.
       - name: Install psql client (the lane loads the baseline through it)
+        timeout-minutes: 8
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          bash scripts/ci-apt.sh install --provides psql postgresql-client
           psql --version
       - name: Boot the local-stack lane (Supabase CLI stack + committed baseline)
         # The same boot `frontend-local-stack` and `sql-tests` run, verbatim. `up`
@@ -7004,6 +7040,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-playwright-
       - name: Install Playwright Chromium (for lhci's headless Chrome)
+        timeout-minutes: 10
         run: |
           if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
             echo "Cache hit — chromium bundle restored. Runner image has system libs; skipping apt install."
