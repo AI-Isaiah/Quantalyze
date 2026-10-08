@@ -558,7 +558,12 @@ async def test_the_compose_job_rolls_from_the_stored_terminal(wedge) -> None:
 async def test_the_compose_job_flags_a_terminal_from_another_run() -> None:
     book = funding_and_dominated_book()
     ki = {"realized_terminal_usd": book.anchor, "realized_terminal_day": book.days[-2]}
-    payload = await _compose_curve(book, with_pnl=True, ki_extra=ki)
+    # The returns run past the terminal's day: on a non-final attempt that is retried as a
+    # read race (test_allocator_equity_compose_read_race.py). On the last attempt it is a
+    # genuine mismatch, and this is its loud verdict.
+    payload = await _compose_curve(
+        book, with_pnl=True, ki_extra=ki, job_extra={"attempts": 3, "max_attempts": 3}
+    )
     assert "key_inputs_mismatch" in payload["degrade_reasons"]
     assert payload["is_trustworthy"] is False
 

@@ -874,6 +874,7 @@ async def _compose_curve(
     with_pnl: bool,
     anchor: float | None = None,
     ki_extra: dict | None = None,
+    job_extra: dict | None = None,
 ) -> dict:
     from unittest.mock import patch
 
@@ -912,7 +913,8 @@ async def _compose_curve(
     })
     with patch("services.job_worker.get_supabase", return_value=fake):
         await run_derive_allocator_equity_job(
-            {"id": "j-compose", "kind": "derive_allocator_equity", "allocator_id": alloc}
+            {"id": "j-compose", "kind": "derive_allocator_equity", "allocator_id": alloc,
+             **(job_extra or {})}
         )
     upserts = [u for u in fake.upserts if u[0] == DERIVED_TABLE and _is_equity_curve_upsert(u[1])]
     assert len(upserts) == 1, fake.upserts

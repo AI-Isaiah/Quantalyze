@@ -11425,6 +11425,28 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     eligible_ids = {r["id"] for r in key_rows if eligible_key_predicate(r)}
     rows_by_id = {r["id"]: r for r in key_rows}
 
+    # R2-WR-01 (167.1.2.2 round 2): the key_inputs rows are read BEFORE the returns, and
+    # that order is the point. A key-mode derive writes a key's csv_daily_returns first and
+    # its key_inputs row last, with no transaction between the two. Read in that same order
+    # (returns, then inputs) the pair can be skewed either way, and a skew the compose could
+    # not tell from corruption was stored as a blocking verdict. Read in the opposite order,
+    # a key_inputs row that is visible here means its returns were already written when we
+    # read them below, so the only skew left is the one a derive that is still mid-write
+    # leaves: returns NEWER than the inputs. That one is recognised (below) and retried.
+    def _load_key_inputs() -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            supabase.table("allocator_equity_derived")
+            .select("kind,payload")
+            .eq("allocator_id", allocator_id)
+            .like("kind", "key_inputs:%")
+            .execute()
+            .data
+            or []
+        )
+
+    ki_rows = await db_execute(_load_key_inputs)
+
     # D-01 / D-04 / D-18: one exchange account is ONE counted key. Keys that read
     # one account form a group (account_groups: a holder plus every key marked
     # against it). Of a group's ELIGIBLE members exactly one is counted: a
@@ -11569,20 +11591,6 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         duplicate_counted_once = duplicate_counted_once or "duplicate" in kinds
     counted_ids = eligible_ids - excluded_shared
     counted_rows = [row for row in key_rows if row["id"] in counted_ids]
-
-    def _load_key_inputs() -> list[dict[str, Any]]:
-        return cast(
-            list[dict[str, Any]],
-            supabase.table("allocator_equity_derived")
-            .select("kind,payload")
-            .eq("allocator_id", allocator_id)
-            .like("kind", "key_inputs:%")
-            .execute()
-            .data
-            or []
-        )
-
-    ki_rows = await db_execute(_load_key_inputs)
 
     # WR-R2-02: which departed keys can be levelled is decided BEFORE the D-09
     # rule, from the same key_inputs rows the compose reads. A departed key
@@ -11914,6 +11922,59 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                     null_anchor_reasons[api_key_id] = _reason
     except (ValueError, TypeError, KeyError) as exc:
         return await _permanent_corrupt_input(exc)
+
+    # R2-WR-01 (167.1.2.2 round 2): a counted key whose stored returns run PAST the day its
+    # key_inputs row says its realized terminal sits on. The derive writes the returns, then
+    # the inputs; with the inputs read first (above) this is exactly the state a derive that
+    # is still between those two writes leaves, and it is what moving the last NAV day
+    # forward does on nearly every daily run. It is a read race, not a verdict about the
+    # data: composing it would persist a blocking ``key_inputs_mismatch`` that nothing heals
+    # until that key's next derive, because the sibling's own corrective compose request is
+    # dropped by ``compute_jobs_one_inflight_per_kind_allocator`` while this job is 'running'.
+    #
+    # So the job ends transient instead, and the queue's backoff (30 s, then 2 min) re-reads
+    # after the sibling's inputs have landed. 'failed_retry' is outside that index's
+    # predicate, so a request that arrives while this job waits is enqueued as its own
+    # pending twin (164.9.3, claim_pair_pre_rank_exclusion) rather than lost. A mismatch
+    # that outlives the retries is a genuine one: on the last attempt the compose runs on
+    # what is stored and the replay's own check blocks it, loudly, as it did before.
+    # The opposite skew (inputs NEWER than the returns) cannot come from a race given the
+    # read order, so it is never retried and blocks at once.
+    # The stored row, if any, is left alone: yesterday's curve is a truthful older reading.
+    lagging_inputs = [
+        k
+        for k in counted_ids
+        if k in realized_terminal_by_key
+        and k in last_return_day
+        and last_return_day[k] > realized_terminal_by_key[k][0]
+    ]
+    if lagging_inputs:
+        _attempts = int(job.get("attempts") or 0)
+        _max_attempts = int(job.get("max_attempts") or 3)
+        if _attempts < _max_attempts:
+            # Counts only (no key id, no day, no USD — T-167.1.2-22).
+            logger.warning(
+                "derive_allocator_equity: %d key(s) of allocator %s have returns newer "
+                "than their key_inputs row (a sibling derive is between its two writes) "
+                "— ending transient so the retry re-reads (attempt %d of %d)",
+                len(lagging_inputs), allocator_id, _attempts, _max_attempts,
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=(
+                    f"derive_allocator_equity: {len(lagging_inputs)} key(s) have returns "
+                    "newer than their key_inputs row — a sibling derive is mid-write; "
+                    "retrying so the compose reads a consistent pair"
+                ),
+                error_kind="transient",
+            )
+        logger.warning(
+            "derive_allocator_equity: %d key(s) of allocator %s still have returns newer "
+            "than their key_inputs row on the last attempt (%d of %d) — composing what is "
+            "stored; the curve will read %s",
+            len(lagging_inputs), allocator_id, _attempts, _max_attempts,
+            DegradeReason.KEY_INPUTS_MISMATCH.value,
+        )
 
     # SFH-R2-03: join each stitched account's older members onto its kept key.
     stitched_accounts = 0
