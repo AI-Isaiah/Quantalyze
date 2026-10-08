@@ -167,10 +167,11 @@ jobs:
 
       # The two SQL arms shell out to psql. Same idiom as ci.yml's sql-tests job.
       - name: Install psql client
+        timeout-minutes: 8
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          bash scripts/ci-apt.sh install --provides psql postgresql-client
+          psql --version
 
       - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:

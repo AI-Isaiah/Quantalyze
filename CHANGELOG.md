@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.129.1.2] - 2026-10-08 — APTHANG: a CI job's apt step never hangs on a dead package mirror
+
+Phase 164.9.8. CI jobs were hanging for most of their timeout on an apt install. The runner image's own retries and 15 s timeouts fail over to the Azure mirror in about 30 s, but the fallback then trickles bytes and never times out. Every apt call in the workflows now goes through one bounded wrapper, and a guard test keeps it that way.
+
+### Added
+- **`scripts/ci-apt.sh`.** One wrapper for every CI apt install.
+  - `update` and the download (`--download-only`) run under a wall-clock `timeout`: update 150 s, fetch 120 s.
+  - An overall budget of 400 s by default (`--budget`) retries what a retry can fix: a killed phase (124/137), mirror 5xx, refused or reset connections, DNS failures, and a mirror mid-sync.
+  - Known deterministic errors fail at once: held lock, unmet dependencies, no installation candidate, signature errors, disk full, read-only file system, a repository whose Origin changed, and a pinned version not found.
+  - A 404 or a missing package earns one shared re-update.
+  - A dead third-party source whose packages are not needed no longer fails the install.
+  - An `update` that exits 0 but could not reach a source prints a `::warning::` quoting the `W:` line. A missing package after such an update is retried within the budget, not called deterministic.
+  - The unpack (`dpkg`) is never killed. Its step's `timeout-minutes` caps it.
+  - `--provides <tool>` skips the install when the tool already runs (`--version` exits 0) and prints an `apt-skip:` line (D-04).
+  - Failures end as `::error::MEASURE_FAIL`. The message quotes the first `Failed to fetch` line and the last `E:` line, with forensics (partial downloads, `ss -tn`). It blames the mirror only when the evidence points at the network.
+  - `--self-test` runs 19 scenario groups against a stub `apt-get`.
+- **`src/__tests__/contracts/ci-apt-bounded.contract.test.ts`.**
+  - R1–R6 guard every workflow found by `readdirSync`: no raw `apt-get`/`apt` in a `run:`, in any command position (including after `if`/`elif`/`while`/`until`, behind `sudo`, `timeout`, `nice`, `ionice`, `chrt` or `flock` prefixes, path-qualified or variable-prefixed).
+  - Every install step has a `timeout-minutes`, and no `--allow-unauthenticated`-style option is used.
+  - The pg_cron block is byte-equal between `ci.yml` and `sql-mutation-nightly.yml`.
+  - A census of 18 apt-reaching steps and 14 wrapper callers is pinned. Each rule ships a calibration mutant.
+
+### Changed
+- All 14 apt call sites go through the wrapper: psql installs in `ci.yml`, `supabase-migrate.yml` (`apply-test`), `test-restore-from-baseline.yml`, `mutex-probe.yml` and `prod-prober.yml`, plus pg_cron provisioning in `ci.yml` and the nightly (`--budget 360`).
+- Step limits: psql installs 8 minutes, pg_cron 7, Playwright `--with-deps` 10. The two mutex-acquire steps stay exempt by exact name (D-03 deviation, recorded in CONTEXT and the ROADMAP).
+- `sql-mutation`'s 20-minute ceiling is untouched (D-05).
+
+### Notes
+- Three review rounds and three fix rounds. Every retry class was validated against real apt 2.8.3 in `ubuntu:24.04`:
+  - a primary mirror down about 15 s then back recovers (rc 0, about 21 s);
+  - a primary mirror down for good fails and names the mirror;
+  - a dead third-party source installs in about 5 s;
+  - disk full, a missing version and a read-only disk fail in 0 s without blaming the mirror.
+- Security SECURED, 0 blocking. Verification `human_needed`, for the post-ship real-runner measurement only.
+- **Known limits, recorded rather than fixed:**
+  - An update-phase 404 during a mirror sync gets one retry (WR-R3-03).
+  - A held apt lock fails at once rather than waiting.
+  - The self-test asserts wall-clock windows and was seen slow on a heavily loaded macOS host. Watch it across CI shards.
+- ⚠️ `ubuntu-latest` moves to 26.04 from 2026-10-19, and that will trip the pg_cron step's major-16 guard. It is booked separately.
+
 ## [0.129.1.1] - 2026-10-08 — BASELINE: automated re-dump after the PROD apply of f2d8c8da
 
 ### Changed
