@@ -33,8 +33,12 @@
 #   An `update` that exits 0 with `W:` lines (a flaky THIRD-PARTY source) is a
 #   success: apt's default mode downgrades a failure of one source to a warning on
 #   purpose, and the runner image also configures packages.microsoft.com, which no
-#   wrapped install needs. If the warning left the index we DO need stale, the fetch
-#   reports "Unable to locate package" or a 404 and the stale path above re-updates.
+#   wrapped install needs. The wrapper prints the warning and REMEMBERS it. If the
+#   fetch then succeeds, the dead source did not matter and nothing is re-run. If the
+#   fetch reports "Unable to locate package" right after such an update, the source
+#   that failed may be the primary Ubuntu mirror itself (apt turns that into the same
+#   `W:` + exit 0), so that is a RETRY inside the budget, with a fresh `update` and no
+#   stale-index credit spent, and a budget MEASURE_FAIL quotes the saved warning.
 #
 # MEASURED BASIS for the defaults (GitHub jobs API over 600 ci.yml runs,
 # 2026-09-11 to 2026-10-07, plus the logs of the 53 slowest successful apt
@@ -85,6 +89,8 @@ APT_NET_OPTS=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::htt
 # carries a signature that a retry cannot fix. Add to this list when a new
 # deterministic failure is seen; do not add network wording to a list instead.
 DETERMINISTIC_RE='Unable to locate package|has no installation candidate|Could not get lock|dpkg returned an error code|dpkg was interrupted|NO_PUBKEY|EXPKEYSIG|is not signed|The following signatures|Malformed|Conflicts:|unmet dependencies|Invalid operation'
+# apt exits 0 on an `update` where any source failed and prints these two `W:` lines.
+UPDATE_WARN_RE='^W: (Failed to fetch|Some index files failed)'
 # A 404 anywhere means the index and the mirror disagree: worth ONE fresh update.
 STALE_404_RE='[[:space:]]404[[:space:]]+Not Found'
 # On the fetch phase a package the index does not list is the same stale-index shape.
@@ -204,6 +210,15 @@ failure_detail() {
   fi
 }
 
+# update_warning LOG -- the `W:` line an rc-0 `update` printed for a failed source, or nothing.
+# The line that names the URL wins over apt's generic "Some index files failed" trailer.
+update_warning() {
+  local w
+  w="$(grep -a -m 1 '^W: Failed to fetch' "$1" | cut -c1-300 || true)"
+  [ -n "${w}" ] || w="$(grep -a -m 1 -E "${UPDATE_WARN_RE}" "$1" | cut -c1-300 || true)"
+  echo "${w}"
+}
+
 do_install() {
   local provides="" budget="${DEFAULT_BUDGET}"
   local update_cap="${DEFAULT_UPDATE_TIMEOUT}" fetch_cap="${DEFAULT_FETCH_TIMEOUT}"
@@ -270,6 +285,7 @@ do_install() {
   # Ubuntu mirror can serve. A stale index for the package we DO need surfaces in the
   # fetch phase and takes the stale path below.
   local lists_updated=0 stale_retries=0 remaining cap phase last_rc=0 last_phase=none last_detail="(none)" urc=0
+  local update_warn=""
   SECONDS=0
   while :; do
     remaining=$((budget - SECONDS))
@@ -288,6 +304,11 @@ do_install() {
     if [ "${PHASE_RC}" -eq 0 ]; then
       if [ "${phase}" = update ]; then
         lists_updated=1
+        # rc 0 does not mean every source answered: remember the W: line (empty when clean).
+        update_warn="$(update_warning "${PHASE_LOG}")"
+        if [ -n "${update_warn}" ]; then
+          echo "::warning::apt update exited 0 but a source failed (${SECONDS} s of ${budget} s budget used); installing from the index it left, and re-running update if the package is missing: ${update_warn}"
+        fi
         continue
       fi
       # Archives are cached: the unpack touches no network and is never killed.
@@ -308,6 +329,17 @@ do_install() {
       124|137) last_detail="killed at its ${cap} s wall-clock cap" ;;
       *) last_detail="$(failure_detail "${PHASE_LOG}")" ;;
     esac
+    if [ "${VERDICT}" = stale ] && [ "${phase}" = fetch ] && [ -n "${update_warn}" ] \
+      && grep -a -E -q "${STALE_LOCATE_RE}" "${PHASE_LOG}" && ! grep -a -E -q "${STALE_404_RE}" "${PHASE_LOG}"; then
+      # The update before this fetch exited 0 but a source failed, and the package is not in
+      # the index: the source that failed may be the one that serves it (the primary mirror
+      # down for a few seconds looks exactly like this). That is a transient the budget
+      # rides out, NOT the stale-index case, so the single stale credit is left unspent.
+      lists_updated=0
+      echo "::warning::apt fetch cannot find the package after an update that exited 0 with a failed source (rc=${PHASE_RC}); re-running update (${SECONDS} s of ${budget} s budget used): ${last_detail} | update warning: ${update_warn}"
+      sleep "${RETRY_SLEEP}"
+      continue
+    fi
     if [ "${VERDICT}" = stale ] && [ "${stale_retries}" -lt 1 ]; then
       # The index and the mirror disagree (a 404, or a package the index does not list):
       # the index may simply be stale, so ONE fresh update is worth the time. The cap is
@@ -329,7 +361,9 @@ do_install() {
   done
 
   # (f) Budget spent, every failure so far a retryable (timeout / network) one.
-  echo "::error::MEASURE_FAIL: apt could not fetch '${pkgs[*]}' within the ${budget} s budget (update cap ${update_cap} s, fetch cap ${fetch_cap} s; last failure: ${last_phase} rc=${last_rc}: ${last_detail}). A dead or trickling package mirror, not a repo defect."
+  local update_note=""
+  [ -z "${update_warn}" ] || update_note=" The last update exited 0 but reported: ${update_warn}."
+  echo "::error::MEASURE_FAIL: apt could not fetch '${pkgs[*]}' within the ${budget} s budget (update cap ${update_cap} s, fetch cap ${fetch_cap} s; last failure: ${last_phase} rc=${last_rc}: ${last_detail}).${update_note} A dead or trickling package mirror, not a repo defect."
   return 1
 }
 
@@ -624,13 +658,34 @@ EOF
   [ "$(count_lines '^unpack' "${log}")" -eq 0 ] || fail "an unpack ran although the fetch never succeeded"
   grep -a -q 'failed deterministically (rc=100)' <<<"${out}" || fail "no deterministic MEASURE_FAIL for a persistent 404"
   # The half-failed update that left the needed package out of the index: the fetch says so
-  # and the stale path re-updates (the safety net that replaces Error-Mode=any).
+  # and the update is re-run (the safety net that replaces Error-Mode=any). The update warned,
+  # so this is a retry of a possible mirror outage, NOT the stale credit (WR-R3-02).
   stub_fail="update:1:whalf,fetch:1:locate"
   run_scenario half-update-then-missing-package "" --budget 30 --update-timeout 5 --fetch-timeout 5 x
   stub_fail=""
   [ "${rc}" -eq 0 ] || fail "expected exit 0, got ${rc}"
   [ "$(order "${log}")" = "update,fetch,update,fetch,unpack" ] \
     || fail "expected stub call order update,fetch,update,fetch,unpack (a package the index lacks re-updates once)"
+  grep -a -q '^::warning::apt update exited 0 but a source failed.*W: Failed to fetch http://thirdparty.invalid/InRelease' <<<"${out}" \
+    || fail "the warned update was not announced with its W: line"
+  if grep -a -q 're-running update once' <<<"${out}"; then fail "a warned update spent the stale-index credit"; fi
+  # A warned update then a SUCCESSFUL fetch (a dead source nobody needs) re-runs nothing: scenario 10.
+  # Both mirrors dead for the whole budget (update warns, the package is never there): the
+  # loop re-updates every iteration, never takes the stale credit, and the MEASURE_FAIL names
+  # the W: URL instead of "failed deterministically: Unable to locate package".
+  stub_fail="update:all:whalf,fetch:all:locate"
+  retry_sleep=1
+  run_scenario warned-update-then-missing-bounded "" --budget 4 --update-timeout 2 --fetch-timeout 2 x
+  retry_sleep=0
+  stub_fail=""
+  [ "${rc}" -eq 1 ] || fail "expected exit 1 (budget spent), got ${rc}"
+  [ "$(count_lines '^update' "${log}")" -ge 2 ] || fail "expected at least two update invocations (the outage must be ridden out by re-updating)"
+  [ "$(count_lines '^unpack' "${log}")" -eq 0 ] || fail "an unpack ran although the package was never found"
+  if grep -a -q 'failed deterministically' <<<"${out}"; then fail "a missing package after a warned update was called deterministic"; fi
+  if grep -a -q 're-running update once' <<<"${out}"; then fail "a warned update spent the stale-index credit"; fi
+  grep -a '^::error::MEASURE_FAIL' <<<"${out}" | grep -a -q 'W: Failed to fetch http://thirdparty.invalid/InRelease' \
+    || fail "the MEASURE_FAIL line does not quote the saved update warning's URL"
+  { [ "${elapsed}" -ge 3 ] && [ "${elapsed}" -le 8 ]; } || fail "elapsed ${elapsed}s outside 3..8s"
   stub_fail="fetch:all:locate"
   run_scenario missing-package-bounded "" --budget 30 --update-timeout 5 --fetch-timeout 5 x
   stub_fail=""
@@ -709,7 +764,7 @@ EOF
   grep -a -q '^::warning::apt update attempt failed (rc=100).*Failed to fetch http://mirror.invalid/dists/noble/InRelease' <<<"${out}" \
     || fail "the retry warning does not quote the failing URL"
 
-  echo "ci-apt self-test OK: retry-after-hang, fail-on-budget, no-update-rerun, skip-when-present, fall-through-when-absent, deterministic-fail, network-fail-retries, retryable-by-default, deterministic-signatures, update-half-failure, stale-index, unpack-fails, provides-broken-version, budget-below-floor, fetch-budget-exhausted, unpack-unbounded, measure-fail-names-the-source."
+  echo "ci-apt self-test OK: retry-after-hang, fail-on-budget, no-update-rerun, skip-when-present, fall-through-when-absent, deterministic-fail, network-fail-retries, retryable-by-default, deterministic-signatures, update-half-failure, stale-index, unpack-fails, provides-broken-version, budget-below-floor, fetch-budget-exhausted, unpack-unbounded, measure-fail-names-the-source, warned-update-then-missing-bounded."
 }
 
 case "${1:-}" in
