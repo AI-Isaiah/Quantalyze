@@ -144,6 +144,14 @@ anything above them in either router does.)
 2026-09-22, `grep -c "raise VenueTransientHTTPException"` finds 11 in `routers/exchange.py`
 on `main` and 12 at the 167 head — not six. Re-derive by grep; never trust a count here.
 
+**Two more raises, one wire code (Phase 164.6.6.3.2 D-02, S-30)**, both in `routers/exchange.py`'s
+`_validate_mt5_key_probe()`, cited BY SYMBOL: the owed-scrub gate (`trace.outcome = "scrub_owed"`)
+and the held-lease refusal (`except Mt5TerminalBusyError`, `trace.outcome = "lease_busy"`). Both answer
+`MT5_TERMINAL_BUSY`, 424, `recoverable=True`, no `dependency`, with the detail constant
+`MT5_TERMINAL_BUSY_DETAIL`. They replace two of the ten `NETWORK_UNAVAILABLE` raises; the other
+eight are byte-unchanged. Like S-27 they are reached from `/api/validate-key` AND from
+`/internal/keys/{id}/rotate-secret`.
+
 **A second raise in the MT5 transient-client-error arm (167-CREDTRUST plan 01, S-27), cited
 BY SYMBOL rather than by line number** — it SPLITS that existing arm (the MT5
 transient-client-error entry in the stale enumeration above) rather than adding a new
@@ -371,7 +379,7 @@ nullified if 140.2 gets it wrong.
 
 ---
 
-## 7. The full S-01…S-29 site map
+## 7. The full S-01…S-30 site map
 
 The authoritative enumeration of every 5xx-capable site reachable from the seam.
 `140.2` can diff its assumptions against this table.
@@ -397,8 +405,8 @@ reviewer diffs their assumptions against.
 | # | Site | Endpoint | Today | Trigger | Class | Target | Plan | Done |
 |---|---|---|---|---|---|---|---|---|
 | S-01 | `routers/exchange.py:108` | `/api/validate-key` | 503 | sFOX client ctor `ValueError` — malformed `WORKER_EGRESS_PROXY_URL` | SERVICE-PERMANENT | **500** `EGRESS_PROXY_MISCONFIGURED`, `retryable:false`, `dependency:egress-proxy` | 03 | ✅ |
-| S-02 | `routers/exchange.py:215` | `/api/validate-key` | 503 | `MT5_GATEWAY_HOST`/`PORT` unset | SERVICE-PERMANENT | **500** `MT5_GATEWAY_UNCONFIGURED`, `dependency:mt5-gateway` | 03 | ✅ |
-| S-03 | `routers/exchange.py:220` | `/api/validate-key` | 503 | `MT5_GATEWAY_PORT` not an int | SERVICE-PERMANENT | **500** `MT5_GATEWAY_UNCONFIGURED`, `dependency:mt5-gateway` | 03 | ✅ |
+| S-02 | `routers/exchange.py:215` | `/api/validate-key` | 503 | `MT5_GATEWAY_HOST`/`PORT` unset | SERVICE-PERMANENT | **500** `MT5_VALIDATION_UNCONFIGURED`, `dependency:mt5-gateway` — **CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01):** the target was **500** `MT5_GATEWAY_UNCONFIGURED`, kept here as lineage. Only the code literal moved; status, body shape, `dependency`, `retryable` and the detail string are unchanged. The wizard now names this cause instead of `SEAM_INTERNAL_FAULT` | 03 | ✅ |
+| S-03 | `routers/exchange.py:220` | `/api/validate-key` | 503 | `MT5_GATEWAY_PORT` not an int | SERVICE-PERMANENT | **500** `MT5_VALIDATION_UNCONFIGURED`, `dependency:mt5-gateway` — **CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01):** the target was **500** `MT5_GATEWAY_UNCONFIGURED`, kept here as lineage. Only the code literal moved; status, body shape, `dependency`, `retryable` and the detail string are unchanged. The wizard now names this cause instead of `SEAM_INTERNAL_FAULT` | 03 | ✅ |
 | S-04 | `routers/exchange.py:235` | `/api/validate-key` | 503 | MT5 gateway connect **timed out** | SERVICE-TRANSIENT | **503** `MT5_GATEWAY_UNREACHABLE`, `dependency:mt5-gateway`, `Retry-After` | 03 | ✅ |
 | S-05 | `routers/exchange.py:238` | `/api/validate-key` | 503 | MT5 gateway connect **failed** | SERVICE-TRANSIENT | **503** `MT5_GATEWAY_UNREACHABLE`, `dependency:mt5-gateway`, `Retry-After` | 03 | ✅ |
 | S-06 | `routers/exchange.py:404` | `/api/validate-key` | 500 | bare `except` around `validate_key_permissions` | **SPLIT** | `ccxt.BaseError` → **424** `EXCHANGE_PROBE_FAILED`; else **500** `INTERNAL` with copy that does not blame credentials | 03 | ✅ |
@@ -425,6 +433,7 @@ reviewer diffs their assumptions against.
 | S-27 | `routers/exchange.py` `_validate_mt5_key_probe()`, the `except Mt5ClientError` transient tail (also reached via `rotate_key_secret`'s `_validate_mt5_key` call) | `/api/validate-key`, `/internal/keys/{id}/rotate-secret` | 424 `NETWORK_UNAVAILABLE` | `classify_mt5_login_error` classified the caught `Mt5ClientError` `transient` AND `is_mt5_login_refusal` holds — the terminal answered the sign-in itself falsy with a code outside `_LOGIN_STAGE_NOT_A_REFUSAL_CODES` (the `-10000`…`-10004` IPC-infrastructure family and the success code `1`), and never told us why. A login-stage `-10005` IS such a refusal (D-17: the modal login dialog D-08 measured for a wrong password). **167 WR-01 / D-17:** a post-login read failure, an `initialize()` failure, or a login-stage `-10000`…`-10004` / `1` reaching the same arm keeps the pre-167 424 `NETWORK_UNAVAILABLE`, `recoverable:true` | CALLER'S EXCHANGE (3b FLAT — §2.1) | **424** `SIGN_IN_FAILED`, **`recoverable:false`** — DIVERGES from this class's `recoverable:true` default: a retry re-sends the same credential to a terminal that refused it, or that a wrong password put behind a modal login dialog (D-08, D-17) | **167-CREDTRUST plan 01** | ✅ |
 | S-28 | `routers/cron.py` `benchmark_refresh()` and `_benchmark_refresh_once()`, all six failure arms | `/api/benchmark-refresh` | raw `500` `{detail:"<string>"}` (Phase 169.2 as first shipped) | the BTC refresh returned no series, a stale or empty series, or raised; the stored-date read-back raised or is older than yesterday (UTC); or the 80 s `_BENCHMARK_REFRESH_DEADLINE_S` expired | SERVICE-PERMANENT (W2: never 503, so a stale benchmark cannot trip the shared breaker) | **500** `BENCHMARK_REFRESH_FAILED`, `retryable:false`, no `dependency` | **169.2** | ✅ |
 | S-29 | `routers/exchange.py` `_validate_mt5_key_probe()`, the `assert_mt5_server_known` pre-check (also reached via `rotate_key_secret`'s `_validate_mt5_key` call; the worker adapter `Mt5Adapter.validate` carries the same check and answers through the validation verdict instead of an HTTP raise) | `/api/validate-key`, `/internal/keys/{id}/rotate-secret` | 424 `SIGN_IN_FAILED` after a 45.6 s `login()` hang (the terminal never attempted the unlisted server) | the requested MT5 server is not on `MT5_KNOWN_SERVERS` plus the house `MT5_SERVER`; fires BEFORE the client, the lease and `login_attempted`, so no terminal is touched | CALLER'S EXCHANGE (3b FLAT — §2.1) | **424** `MT5_SERVER_UNKNOWN`, `recoverable:true` (a corrected spelling, or the operator adding the server per runbook Step 2d, clears it) | **164.6.6.3** | ✅ |
+| S-30 | `routers/exchange.py` `_validate_mt5_key_probe()`, TWO raise sites that share one code: the owed-scrub gate (`trace.outcome = "scrub_owed"`, before any connect, login or probe) and the held-lease refusal (`except Mt5TerminalBusyError`, `trace.outcome = "lease_busy"`). Also reached via `rotate_key_secret`'s `_validate_mt5_key` call | `/api/validate-key`, `/internal/keys/{id}/rotate-secret` | 424 `NETWORK_UNAVAILABLE` (the wizard told the user a network timeout while OUR terminal was refusing the check) | the validation terminal owes a scrub or a relaunch from an earlier check (`scrub_owed`), or its lease was still held when the interactive acquisition bound expired (`lease_busy`); nothing was sent to the broker at either site | CALLER'S EXCHANGE (3b FLAT — §2.1) | **424** `MT5_TERMINAL_BUSY`, `recoverable:true`, no `dependency`; the detail is the hoisted constant `MT5_TERMINAL_BUSY_DETAIL` (`services/closed_sets.py`), true at BOTH sites because it never says another check is running. `trace.outcome` still tells the sites apart in Railway logs. A 424 never counts toward the breaker, so the move is breaker-inert | **164.6.6.3.2** | ✅ |
 
 **Tally (as of S-28; S-29 follows below):** 28 rows = **25 explicit editable sites** (S-01…S-20 plus S-25/S-26
 `HTTPException` raises, plus S-28 the six `benchmark-refresh` arms counted as one site because they share one code, plus S-23 the `JSONResponse` literal, plus S-27 the
@@ -436,7 +445,12 @@ unhandled-500s (S-21, S-22, no edit possible or needed) + 1 deliberately unchang
 spelled `raise VenueTransientHTTPException`. That sweep predates S-28 and is not re-measured here; S-28's arms are spelled
 `raise service_error(`.
 
+⛔ **CORRECTED 2026-10-07 (Phase 164.6.6.3.2) — the tally above is kept as lineage.** The table now has
+**30 rows** (`grep -c '^| S-' analytics-service/docs/STATUS_CONTRACT.md` prints 30). Counting S-29 and S-30 each as one editable site, as S-28's six arms are counted as one because they share one code, that is **27 explicit editable sites**. S-30 has TWO raise sites (`scrub_owed`, `lease_busy`) that share `MT5_TERMINAL_BUSY`, so a grep sweep for `raise VenueTransientHTTPException` finds more raises than this tally has sites. S-30 is a 424-only site like S-27 and S-29: breaker-inert.
+
 **S-29 (Phase 164.6.6.3)** is a 424-only site like S-27: `VenueTransientHTTPException`, recoverable. It is a new raise placed BEFORE the MT5 client, lease and `login_attempted`, so it adds one editable site on top of the 25 above (26 now). The empty known-server list (`MT5_KNOWN_SERVERS` and `MT5_SERVER` both unset) is OUR misconfiguration and does not use this row: it reuses the existing `MT5_GATEWAY_UNCONFIGURED` 500 body, so that code now has a fifth router emitter and no new site.
+
+⛔ **CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01) — the sentence above is kept as lineage.** The empty known-server list no longer reuses the `MT5_GATEWAY_UNCONFIGURED` body. It answers `MT5_VALIDATION_UNCONFIGURED` (500, same body shape, `dependency:mt5-gateway`, `retryable:false`), as do the unset or malformed validation endpoint (S-02, S-03) and the inverted IPC timeout chain in `_connect_and_probe`. Those are the three env-gap arms, and they share one wire code and one wizard card (`KEY_MT5_VALIDATION_UNCONFIGURED`), which pages. Only the D-31 `undetermined` arm (terminal ran and refused to classify) keeps `MT5_GATEWAY_UNCONFIGURED`, and it still renders `SEAM_INTERNAL_FAULT`. So the old code has ONE router emitter now, not five (`grep -n 'MT5_GATEWAY_UNCONFIGURED' analytics-service/routers/exchange.py` finds a single non-comment code line).
 
 **S-25 and S-26 were added by Phase 164.5.1**, and both are the same shape: a
 Supabase read that has already exhausted `db_read_with_retry`'s gateway-timeout

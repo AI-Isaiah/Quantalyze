@@ -59,6 +59,7 @@ from services.audit import log_audit_event
 from services.benchmark import get_btc_closes
 from services.db import get_supabase, one, rows
 from services.native_to_usd import UsdSeriesConverter, native_units_by_id
+from services.wealth_returns import daily_returns_from_row
 # PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
 from services.error_contract import service_error
 from services.portfolio_limits import assert_portfolio_within_cap
@@ -178,70 +179,6 @@ class SimulatorRequest(BaseModel):
     user_id: str = Field(min_length=1)
 
 
-def _records_to_series(raw: list[Any] | None, name: str = "") -> pd.Series | None:
-    """Convert [{date, value}, ...] records to a DatetimeIndex pd.Series.
-
-    Duplicates `routers.portfolio._records_to_series` — kept local so the
-    simulator router doesn't cross-import from another router.
-
-    G15-006 (audit-2026-05-07): the returned Series is `.sort_index()`-ed
-    and deduped (keep='last') so storage drift — duplicate-date backfill
-    writes or out-of-order imports — cannot silently break the downstream
-    `cumprod()` in `simulator_scoring._cumulative_curve`. cumprod is path-
-    dependent; an unsorted index produces a garbage equity curve, and a
-    duplicate index entry inflates the compounded factor for that date.
-    These guards exist for storage-drift safety, not for the happy-path.
-
-    G15-008/G15-009 (audit-2026-05-07, M-0975/M-0976): tolerate malformed
-    records. ``returns_series`` is JSONB written by the analytics worker;
-    a single row missing ``date`` or ``value`` (legacy schema, partial
-    backfill, manual SQL fixup) previously raised KeyError in the list
-    comprehension, propagating up through ``portfolio_simulator`` as an
-    unhandled 500 — taking down the simulator for any portfolio that
-    contained one corrupted strategy row. We now skip malformed entries,
-    warn once, and return None when nothing usable remains so the router
-    falls into its "No returns data available" 400 path with a clear
-    message instead of a 500. Mirrors the hardened
-    ``routers.portfolio._records_to_series``.
-    """
-    if not isinstance(raw, list) or not raw:
-        return None
-
-    dates: list[Any] = []
-    vals: list[Any] = []
-    skipped = 0
-    for r in raw:
-        if not isinstance(r, dict):
-            skipped += 1
-            continue
-        d = r.get("date")
-        v = r.get("value")
-        if d is None or v is None:
-            skipped += 1
-            continue
-        dates.append(d)
-        vals.append(v)
-
-    if skipped:
-        logger.warning(
-            "_records_to_series: skipped %d malformed records for %s",
-            skipped, name or "<unnamed>",
-        )
-
-    if not dates:
-        return None
-
-    series = pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
-    # G15-006 — sort then dedupe (keep='last'). Order matters: dedupe BEFORE
-    # sort would keep the last-by-input occurrence rather than the
-    # last-by-date occurrence; in practice the two coincide on a well-formed
-    # input but the contract is "last value on a given date wins" — which
-    # only holds after sort.
-    series = series.sort_index()
-    series = series[~series.index.duplicated(keep="last")]
-    return series
-
-
 @router.post("/simulator")
 @limiter.limit("20/hour", key_func=partial(tenant_or_platform_key, scope="simulator"))
 async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[str, Any]:
@@ -300,7 +237,7 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
         ),
         asyncio.to_thread(
             lambda: supabase.table("strategies")
-            .select("id, name, status")
+            .select("id, name, status, asset_class")
             .eq("id", req.candidate_strategy_id)
             .eq("status", "published")
             .maybe_single()
@@ -308,7 +245,7 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
         ),
         asyncio.to_thread(
             lambda: supabase.table("portfolio_strategies")
-            .select("strategy_id, current_weight")
+            .select("strategy_id, current_weight, strategies(asset_class)")
             .eq("portfolio_id", req.portfolio_id)
             .execute()
         ),
@@ -374,7 +311,7 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
     portfolio_ids = list(existing_ids)
     sa_result = await asyncio.to_thread(
         lambda: supabase.table("strategy_analytics")
-        .select("strategy_id, returns_series, data_quality_flags")
+        .select("strategy_id, returns_series, daily_returns, data_quality_flags")
         .in_("strategy_id", portfolio_ids + [req.candidate_strategy_id])
         .execute()
     )
@@ -400,7 +337,7 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
         sa_row = rows_by_id.get(sid)
         if sa_row is None:
             continue
-        s = _records_to_series(sa_row.get("returns_series"), name=sid)
+        s = daily_returns_from_row(sa_row, name=sid, keep_absent=True)
         if s is not None:
             portfolio_returns[sid] = s
 
@@ -426,9 +363,10 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
             status_code=400,
             detail="No returns data available for the candidate",
         )
-    candidate_series = _records_to_series(
-        rows_by_id[req.candidate_strategy_id].get("returns_series"),
+    candidate_series = daily_returns_from_row(
+        rows_by_id[req.candidate_strategy_id],
         name=req.candidate_strategy_id,
+        keep_absent=True,
     )
     if candidate_series is not None:
         _converted, _ = await _usd.convert(
@@ -455,6 +393,16 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
             candidate_id=req.candidate_strategy_id,
             candidate_returns=candidate_series,
             weights=weights,
+            # WR-01 + D-08: both Sharpes are annualized on the EXISTING BOOK's
+            # risk clock (365 if a book leg is crypto, else 252); the candidate's
+            # own class is passed along but never read by the scorer.
+            asset_classes={
+                **{
+                    row["strategy_id"]: (row.get("strategies") or {}).get("asset_class")
+                    for row in portfolio_strategies
+                },
+                req.candidate_strategy_id: candidate.get("asset_class"),
+            },
         )
     except Exception as exc:
         logger.exception(

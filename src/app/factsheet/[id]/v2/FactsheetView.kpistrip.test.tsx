@@ -495,6 +495,48 @@ describe("FactsheetView hero strip — HARD-04 insufficient_window server-truth 
   });
 });
 
+describe("FactsheetView hero strip — D-25 small_base_measured server-truth caveat", () => {
+  // n=300 (>=252) so the client-count n<252 heuristic caveat does NOT fire, and a
+  // single-key payload (composite:false) because a BTC MT5 account is single-key.
+  const SMALL_BASE_COPY =
+    "Some days were measured on a very small balance, so their returns can be extreme.";
+
+  function smallBasePayload(smallBaseMeasured: boolean | undefined): FactsheetPayload {
+    const p = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturnsSeries(300),
+      benchmark: null,
+    });
+    return {
+      ...p,
+      dataQuality: {
+        composite: false,
+        ...(smallBaseMeasured === undefined ? {} : { smallBaseMeasured }),
+      },
+    } as unknown as FactsheetPayload;
+  }
+
+  it("renders the founder's copy when dataQuality.smallBaseMeasured is true", () => {
+    const { getByText } = renderComposite(smallBasePayload(true));
+    expect(getByText(new RegExp(SMALL_BASE_COPY))).toBeInTheDocument();
+  });
+
+  it("does NOT render it when the flag is false or absent", () => {
+    for (const flag of [false, undefined]) {
+      const { queryByText, unmount } = renderComposite(smallBasePayload(flag));
+      expect(queryByText(/measured on a very small balance/)).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("uses the existing amber caveat styling, not a new component", () => {
+    const { getByText } = renderComposite(smallBasePayload(true));
+    const el = getByText(new RegExp(SMALL_BASE_COPY));
+    expect(el.tagName).toBe("P");
+    expect(el.className).toContain("text-micro");
+    expect(el.getAttribute("style") ?? "").toContain("var(--color-warning");
+  });
+});
+
 describe("FactsheetView hero strip — HARD-05 degraded_members server-truth caveat", () => {
   // n=300 (>=252) so the client-count n<252 heuristic caveat does NOT fire —
   // isolating the SERVER-truth degraded-member signal.

@@ -1510,6 +1510,70 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/composite/add-key — Sen
     expect(options.tags?.surface).toBe("strategies-composite-add-key");
     expect(options.tags?.step).toBe("unclassified-key-error");
   });
+
+  /**
+   * 164.6.6.3.2 D-07 — the add-key twin of the create-with-key case. An unset
+   * validation gateway is our operator configuration and must page from EVERY
+   * key route; removing the wizard code from `OUR_DEFECT_KEY_ERROR_CODES` leaves
+   * `src/lib` green, so this route test is the gate for this route.
+   */
+  it("[164.6.6.3.2 D-07] an unconfigured validation gateway renders KEY_MT5_VALIDATION_UNCONFIGURED/500 AND IS captured", async () => {
+    validateKeyMock.mockRejectedValue(
+      Object.assign(
+        new Error("The MetaTrader validation gateway is not set up."),
+        {
+          name: "AnalyticsUpstreamError",
+          status: 500,
+          seamCode: "MT5_VALIDATION_UNCONFIGURED",
+          dependency: "mt5-gateway",
+        },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_MT5_VALIDATION_UNCONFIGURED");
+    expect(json.code).not.toBe("UNKNOWN");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+
+    const { options } = await nextCapture();
+    expect(sentryState.captured).toHaveLength(1);
+    expect(options.tags?.surface).toBe("strategies-composite-add-key");
+    expect(options.tags?.step).toBe("unclassified-key-error");
+  });
+
+  /**
+   * 164.6.6.3.2 D-02 — NO-PAGE TWIN. A busy terminal is contention, recoverable
+   * in a minute; a genuinely missed scrub pages from its own alert.
+   */
+  it("[164.6.6.3.2 D-02] a busy MT5 terminal renders KEY_MT5_TERMINAL_BUSY/424 and is NOT captured", async () => {
+    validateKeyMock.mockRejectedValue(
+      Object.assign(
+        new Error("The MetaTrader check is briefly busy."),
+        {
+          name: "AnalyticsUpstreamError",
+          status: 424,
+          seamCode: "MT5_TERMINAL_BUSY",
+          recoverable: true,
+        },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(424);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_MT5_TERMINAL_BUSY");
+    expect(json.code).not.toBe("UNKNOWN");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    await expectNoCapture();
+  });
 });
 
 /**

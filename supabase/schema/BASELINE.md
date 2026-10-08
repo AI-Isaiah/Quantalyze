@@ -84,10 +84,10 @@ replay it, and boot green on a schema missing it. A full list cannot make that m
 
 | | |
 |---|---|
-| Taken | 2026-10-07 |
+| Taken | 2026-10-08 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
-| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `37656080684`) |
-| sha256 | `5870bb2a4cbf157d2c50dd6d9eb1d9e090c6ac656b224c00ed325ced9388a3ff` |
+| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `37765078161`) |
+| sha256 | `cae5e2965a205449840c17c8d2b6081282439e1f9caed81ae0b2160e2e6c0e23` |
 | Shape | 63 tables, 155 policies, 125 function statements (123 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
@@ -95,6 +95,46 @@ Secret-scanned before commit with the exact pattern recorded in
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-10-08 — automated re-dump after Supabase Migrate run 37765078161
+
+Taken read-only by the `redump-dump` job of Supabase Migrate run `37765078161`, after that run's `apply` job applied merge `f2d8c8da` to PRODUCTION, and composed onto `main` by the `redump-pr` job. Every value below is measured.
+
+**Which migrations the new dump now carries** — from the marker diff:
+
+- `20261009120000_sync_status_analytics_scope.sql`
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Taken | 2026-10-08 |
+| Supabase CLI | 2.98.2 |
+| Shape | tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123 |
+| Data statements | 0 → 0 |
+| sha256 | `28f356c4…` → `cae5e296…` |
+| Currency gate | `baseline-currency: carried=288 replay=0 marker-sha=match defects=0` |
+| Body drift | `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`; `baseline-content-drift: findings 0` |
+
+### Regenerated 2026-10-07 — automated re-dump after Supabase Migrate run 37667399720
+
+Taken read-only by the `redump-dump` job of Supabase Migrate run `37667399720`, after that run's `apply` job applied merge `239106dc` to PRODUCTION, and composed onto `main` by the `redump-pr` job. Every value below is measured.
+
+**Which migrations the new dump now carries** — from the marker diff:
+
+- `20261008120000_for_quants_leads_contact_source.sql`
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Taken | 2026-10-07 |
+| Supabase CLI | 2.98.2 |
+| Shape | tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123 |
+| Data statements | 0 → 0 |
+| sha256 | `5870bb2a…` → `28f356c4…` |
+| Currency gate | `baseline-currency: carried=287 replay=0 marker-sha=match defects=0` |
+| Body drift | `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`; `baseline-content-drift: findings 0` |
 
 ### Regenerated 2026-10-07 — automated re-dump after Supabase Migrate run 37656080684
 

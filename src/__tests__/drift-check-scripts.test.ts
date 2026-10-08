@@ -4818,7 +4818,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=14 and ARMS_FLOOR=256 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=15 and ARMS_FLOOR=277 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -4936,9 +4936,32 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // 2026-10-03: a row branch (a) KEEPS holds computed_at, its sentence and both
     // provenance markers), so its sentinel reads `ALL 16 ARMS EXECUTED` and
     // ARMS_FLOOR moves by three. No file joined, so SENTINEL_FLOOR stays 14.
+    //
+    // RAISED 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 01), 14/256 -> 15/269.
+    // SENTINEL_FLOOR moves: the NEW gate file test_sync_status_analytics_scope.sql
+    // declares `ALL 13 ARMS EXECUTED` (S1..S6, C1..C4, G1..G3), so the sentinel-bearing
+    // FILE SET grows by one, and ARMS_FLOOR moves by its THIRTEEN arms, read off the
+    // file's own first sentinel. The runner's own floors (scripts/mutation-floors.mjs)
+    // are moved by plan 03 of that phase, not here.
+    //
+    // RAISED 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, founder D-09), 15/269 -> 15/271.
+    // test_sync_status_analytics_scope.sql gains D9 and D10 (a failed side-kind job
+    // never stamps computed_at; a genuine compute after it still does), so its
+    // sentinel reads `ALL 15 ARMS EXECUTED` and ARMS_FLOOR moves by two. No file
+    // joined, so SENTINEL_FLOOR stays 15.
+    //
+    // RAISED 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, round 3 of the D-09 rework), 15/271 -> 15/275.
+    // test_sync_status_analytics_scope.sql gains D11 to D14, so its sentinel reads
+    // `ALL 19 ARMS EXECUTED` and ARMS_FLOOR moves by four. No file joined, so
+    // SENTINEL_FLOOR stays 15.
+    //
+    // RAISED 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, round 4, founder D-10), 15/275 -> 15/277.
+    // test_sync_status_analytics_scope.sql gains D15 and D16, so its sentinel reads
+    // `ALL 21 ARMS EXECUTED` and ARMS_FLOOR moves by two. No file joined, so
+    // SENTINEL_FLOOR stays 15.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=14", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=15", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -4949,7 +4972,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=256", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=277", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

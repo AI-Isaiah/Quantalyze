@@ -8,6 +8,8 @@ import { DailyHeatmap } from "@/components/charts/DailyHeatmap";
 import { ReturnHistogram } from "@/components/charts/ReturnHistogram";
 import { ReturnQuantiles } from "@/components/charts/ReturnQuantiles";
 import { YearlyReturns } from "@/components/charts/YearlyReturns";
+import { curveMethodFromFlags } from "@/lib/factsheet/resolve-series";
+import type { AnalyticsDataQualityFlags } from "@/lib/types";
 
 interface ReturnsDistributionPanelProps {
   strategyId: string;
@@ -15,6 +17,12 @@ interface ReturnsDistributionPanelProps {
   monthly_returns: Record<string, Record<string, number>> | null;
   return_quantiles: Record<string, number[]> | null;
   returns_series: { date: string; value: number }[] | null;
+  /**
+   * The row's `data_quality_flags`. Only `cumulative_method` is read, to tell
+   * the histogram whether `returns_series` (a stored CURVE) is geometric or
+   * simple. Absent reads as the platform default, geometric.
+   */
+  data_quality_flags?: AnalyticsDataQualityFlags | null;
   benchmark_returns?: { date: string; value: number }[] | null;
 }
 
@@ -122,6 +130,7 @@ export function ReturnsDistributionPanel(props: ReturnsDistributionPanelProps) {
             {props.returns_series && props.returns_series.length >= 10 ? (
               <ReturnHistogram
                 returns={props.returns_series}
+                curveMethod={curveMethodFromFlags(props.data_quality_flags)}
                 benchmarkReturns={props.benchmark_returns ?? undefined}
               />
             ) : (

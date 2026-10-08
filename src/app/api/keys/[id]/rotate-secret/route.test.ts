@@ -788,6 +788,71 @@ describe("PATCH /api/keys/[id]/rotate-secret — 164.6.5 R2-SFH-10: our-defect v
     expect(options.secrets).toContain(SYNTHETIC_NEW_SECRET);
   });
 
+  /**
+   * 164.6.6.3.2 D-07 — an unset validation gateway pages from THIS route too.
+   * The sibling D-31 case (`MT5_GATEWAY_UNCONFIGURED`, the trade-disabled
+   * terminal) is a different fault with a different code and is untouched; this
+   * is the endpoint / server-list / timeout-chain class. The emitter's shape is
+   * the nested envelope `service_error` produces.
+   */
+  it("[164.6.6.3.2 D-07] an unconfigured validation gateway answers KEY_MT5_VALIDATION_UNCONFIGURED/500 AND IS captured", async () => {
+    mockResilientFetch.mockResolvedValue(
+      seamResponse(false, 500, {
+        detail: {
+          code: "MT5_VALIDATION_UNCONFIGURED",
+          detail:
+            "The MetaTrader validation gateway is not set up. This needs an operator, not a retry.",
+          retryable: false,
+          dependency: "mt5-gateway",
+        },
+      }),
+    );
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(500);
+    const envelope = (await res.json()) as Record<string, unknown>;
+    expect(envelope.code).toBe("KEY_MT5_VALIDATION_UNCONFIGURED");
+    expect(envelope.code).not.toBe("UNKNOWN");
+    expect(envelope.code).not.toBe("SEAM_INTERNAL_FAULT");
+    // D-04: a failed validation mutates nothing.
+    expect(ADMIN_STATE.updates).toHaveLength(0);
+
+    expect(
+      vi.mocked(captureToSentry),
+      "nothing was captured — an unset validation gateway reached this route and told only console.error",
+    ).toHaveBeenCalledTimes(1);
+    const [err, options] = vi.mocked(captureToSentry).mock.calls[0];
+    expect(err).toBeInstanceOf(Error);
+    expect(options.tags.surface).toBe("keys-rotate-secret");
+    expect(options.tags.step).toBe("unclassified-key-error");
+  });
+
+  /**
+   * 164.6.6.3.2 D-02 — NO-PAGE TWIN. The busy refusal is the flat 424 body
+   * (`VenueTransientHTTPException`), not the nested envelope. Contention is not
+   * our defect.
+   */
+  it("[164.6.6.3.2 D-02] a busy MT5 terminal answers KEY_MT5_TERMINAL_BUSY/424 and is NOT captured", async () => {
+    mockResilientFetch.mockResolvedValue(
+      seamResponse(false, 424, {
+        detail:
+          "Our MetaTrader connection was busy and could not take this check yet. Try again in a minute.",
+        code: "MT5_TERMINAL_BUSY",
+        recoverable: true,
+      }),
+    );
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(424);
+    const envelope = (await res.json()) as Record<string, unknown>;
+    expect(envelope.code).toBe("KEY_MT5_TERMINAL_BUSY");
+    expect(envelope.code).not.toBe("UNKNOWN");
+    // D-04: a failed validation mutates nothing.
+    expect(ADMIN_STATE.updates).toHaveLength(0);
+    // The capture is lazy on the other two routes; here it is awaited inline by
+    // the time the response is built, so a synchronous read is the whole check.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+  });
+
   it("a caller-fault verdict (KEY_AUTH_FAILED) is NOT captured — the predicate is the our-defect set, not every failure", async () => {
     mockResilientFetch.mockResolvedValue(
       seamResponse(false, 400, {

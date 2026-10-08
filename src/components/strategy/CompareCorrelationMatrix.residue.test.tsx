@@ -14,13 +14,13 @@
 import { describe, it, expect } from "vitest";
 import { render } from "@testing-library/react";
 import { CompareCorrelationMatrix } from "./CompareCorrelationMatrix";
-import { CONSTANT_YIELDS, navConstantYield } from "@/__tests__/fixtures/dispersion-nav";
+import { CONSTANT_YIELDS, navLevelsConstantYield } from "@/__tests__/fixtures/dispersion-nav";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
 const N = 366;
 
-/** One shared calendar so every pair overlaps on all trailing 365 days. */
-const DATES: string[] = Array.from({ length: N }, (_, i) =>
+/** One shared calendar (N + 1 curve levels) so every pair overlaps on all trailing 365 days. */
+const DATES: string[] = Array.from({ length: N + 1 }, (_, i) =>
   new Date(Date.UTC(2025, 0, 1) + i * 86_400_000).toISOString().slice(0, 10),
 );
 
@@ -34,11 +34,21 @@ function noisy(phase: number): number[] {
 
 type Item = { strategy: Strategy; analytics: StrategyAnalytics };
 
-function item(id: string, returns: number[]): Item {
+/**
+ * `returns_series` is the stored cumulative CURVE (WR-05), so a pick is built
+ * from curve levels: N daily returns compound into N + 1 levels seeded at 1.
+ */
+function levelsFromReturns(returns: number[]): number[] {
+  const out = [1];
+  for (const r of returns) out.push(out[out.length - 1] * (1 + r));
+  return out;
+}
+
+function item(id: string, levels: number[]): Item {
   return {
     strategy: { id, name: id } as unknown as Strategy,
     analytics: {
-      returns_series: returns.map((value, i) => ({ date: DATES[i], value })),
+      returns_series: levels.map((value, i) => ({ date: DATES[i], value })),
     } as unknown as StrategyAnalytics,
   };
 }
@@ -58,11 +68,11 @@ function pairCell(items: Item[]): { text: string; title: string | null; bg: stri
   return out;
 }
 
-const ZERO = Array<number>(N).fill(0);
+const ZERO = Array<number>(N + 1).fill(1); // a flat curve: every daily return is 0
 
 describe("T6 CompareCorrelationMatrix: a constant yield renders the all-zero pick's cell", () => {
   it("the all-zero pick's cell is the flat-window null (the reference)", () => {
-    const ref = pairCell([item("flat", ZERO), item("noisy", noisy(0))]);
+    const ref = pairCell([item("flat", ZERO), item("noisy", levelsFromReturns(noisy(0)))]);
     expect(ref.text).toBe("—");
     expect(ref.title).toBe("Insufficient data");
   });
@@ -70,22 +80,22 @@ describe("T6 CompareCorrelationMatrix: a constant yield renders the all-zero pic
   it.each(Object.entries(CONSTANT_YIELDS))(
     "%s: constant-yield pick's cell equals the all-zero pick's cell",
     (_id, dailyYield) => {
-      const constant = pairCell([item("flat", navConstantYield(dailyYield, N)), item("noisy", noisy(0))]);
-      const zero = pairCell([item("flat", ZERO), item("noisy", noisy(0))]);
+      const constant = pairCell([item("flat", navLevelsConstantYield(dailyYield, N)), item("noisy", levelsFromReturns(noisy(0)))]);
+      const zero = pairCell([item("flat", ZERO), item("noisy", levelsFromReturns(noisy(0)))]);
       expect(constant).toEqual(zero);
     },
   );
 
   it("control: two noisy picks keep a finite cell", () => {
-    const cell = pairCell([item("a", noisy(0)), item("b", noisy(0.9))]);
+    const cell = pairCell([item("a", levelsFromReturns(noisy(0))), item("b", levelsFromReturns(noisy(0.9)))]);
     expect(cell.text).not.toBe("—");
     expect(Number.isFinite(Number(cell.text))).toBe(true);
     expect(cell.title).toBeNull();
   });
 
   it("control: a cent-rounded constant-yield NAV (real dispersion) keeps a finite cell", () => {
-    const cents = navConstantYield(CONSTANT_YIELDS["apy_1pct"], N, 10_000, true);
-    const cell = pairCell([item("cents", cents), item("noisy", noisy(0))]);
+    const cents = navLevelsConstantYield(CONSTANT_YIELDS["apy_1pct"], N, 10_000, true);
+    const cell = pairCell([item("cents", cents), item("noisy", levelsFromReturns(noisy(0)))]);
     expect(cell.text).not.toBe("—");
     expect(Number.isFinite(Number(cell.text))).toBe(true);
   });

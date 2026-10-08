@@ -811,6 +811,39 @@ describe("GET /api/strategies/[id]/returns", () => {
     expect(body.series_state).toBe("available");
   });
 
+  it("R12c — 164.6.6.2.2 D-05: a `simple` curve is served as DIFFERENCES, not ratios", async () => {
+    // 1 + cumsum curve: levels 1.00, 1.05, 0.95, 1.05. Hand-computed:
+    //   1.05 - 1.00 = +0.05 ; 0.95 - 1.05 = -0.10 ; 1.05 - 0.95 = +0.10
+    // Read by ratio (the geometric default) the middle day would be
+    // 0.95 / 1.05 - 1 = -0.0952..., a different number, so the two readings
+    // cannot be confused.
+    STATE.analyticsRow = {
+      daily_returns: null,
+      returns_series: [
+        { date: "2026-01-01", value: 1.0 },
+        { date: "2026-01-02", value: 1.05 },
+        { date: "2026-01-03", value: 0.95 },
+        { date: "2026-01-04", value: 1.05 },
+      ],
+      data_quality_flags: { cumulative_method: "simple" },
+      computation_status: "complete",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.daily_returns.map((p: { date: string }) => p.date)).toEqual([
+      "2026-01-02",
+      "2026-01-03",
+      "2026-01-04",
+    ]);
+    expect(body.daily_returns[0].value).toBeCloseTo(0.05, 10);
+    expect(body.daily_returns[1].value).toBeCloseTo(-0.1, 10);
+    expect(body.daily_returns[2].value).toBeCloseTo(0.1, 10);
+    // The raw flags blob never ships.
+    expect(JSON.stringify(body)).not.toContain("cumulative_method");
+  });
+
   it("R13 — SC3: a wealth index starting at exactly 1.0 is NEVER forwarded raw (no +100% day one)", async () => {
     // The failure mode this pins: forwarding the cumprod curve as if it were a
     // return series makes day one read as +100% (value 1.0 = "the strategy
@@ -1223,6 +1256,45 @@ describe("GET /api/strategies/[id]/returns — 164.6.6.2 native-unit legs", () =
     expect(body.daily_returns_usd).toHaveLength(1);
     expect(body.daily_returns_usd[0].date).toBe("2026-01-02");
     expect(body.daily_returns_usd[0].value).toBeCloseTo(0.21, 12);
+  });
+
+  it("WR-02: a native curve with an absent day prices the day after it over its OWN day (+10%, not +340%)", async () => {
+    // Curve 1.0, 1.1, null, 1.2, 1.32 on 03-02..03-06; BTC closes 100, 100, 200,
+    // 400, 400. 03-06's native return is 1.32 / 1.2 - 1 = 0.1 on a flat BTC day, so
+    // USD is (1 + 0.1) * (400 / 400) - 1 = 0.1; priced across the gap it was 3.4.
+    btcClosesMock.mockResolvedValue({
+      prices: [
+        { date: "2026-03-02", close: 100 },
+        { date: "2026-03-03", close: 100 },
+        { date: "2026-03-04", close: 200 },
+        { date: "2026-03-05", close: 400 },
+        { date: "2026-03-06", close: 400 },
+      ],
+      dropped: [] as string[],
+      through: "2026-03-06",
+    });
+    STATE.analyticsRow = {
+      daily_returns: null,
+      returns_series: [
+        { date: "2026-03-02", value: 1.0 },
+        { date: "2026-03-03", value: 1.1 },
+        { date: "2026-03-04", value: null },
+        { date: "2026-03-05", value: 1.2 },
+        { date: "2026-03-06", value: 1.32 },
+      ],
+      computation_status: "complete",
+      data_quality_flags: { native_unit: "BTC" },
+    };
+    const body = await call();
+    expect(body.daily_returns_usd).toHaveLength(1);
+    expect(body.daily_returns_usd[0].date).toBe("2026-03-06");
+    expect(body.daily_returns_usd[0].value).toBeCloseTo(0.1, 12);
+    // The shipped native series carries no placeholder: absent days are deleted.
+    expect(body.daily_returns.map((p: { date: string }) => p.date)).toEqual([
+      "2026-03-03",
+      "2026-03-06",
+    ]);
+    expect(body.native_unpriced).toBe(false);
   });
 
   it("parity: daily_returns_usd is exactly convertNativeReturnsToUsd on the same inputs", async () => {

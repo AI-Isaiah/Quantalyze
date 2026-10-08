@@ -1,5 +1,384 @@
 # Changelog
 
+## [0.129.1.1] - 2026-10-08 — BASELINE: automated re-dump after the PROD apply of f2d8c8da
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `37765078161`, after the PROD apply of merge `f2d8c8da`: sha256 `28f356c4…` → `cae5e296…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261009120000_sync_status_analytics_scope.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-08` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.129.1.0 → 0.129.1.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=288 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `37765078161` succeeded, and this entry was composed by the `redump-pr` job. Run `37765078161` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.129.1.0] - 2026-10-08 — STATUSBRIDGE: a strategy's analytics status reads `failed` only for an analytics failure
+
+Phase 164.6.6.3.4. A PROD investigation found strategies whose analytics status read `failed` although every derive and compute job after the failure had finished `done`:
+- AI-FX-35 was pinned by a `process_key_long` resync that failed on an MT5 password rotation and was never re-run.
+- Eclipse was pinned by twelve transient `sync_funding` timeouts.
+
+The bridge counted every unsuperseded `failed_final` job of any kind. Migration `20261009120000` re-bases `sync_strategy_analytics_status` and both mark RPCs. ⚠️ PROD applies it automatically after `apply-test`.
+
+### Fixed
+- **Side kinds never pin the status (D-05).** `sync_funding`, `poll_positions`, `reconcile_strategy` and `compute_intro_snapshot` produce no analytics and are spelled once as `v_side_kinds`. Their failures no longer enter the analytics live-failure set. Any kind not on the list still counts, including future ones. They stay visible on the key card, the job surface and Sentry (D-07).
+- **A failed `process_key_long` is superseded by its follow-on chain (D-06).** It is cleared only when both `derive_broker_dailies` and `compute_analytics_from_csv` for the same strategy finished `done` strictly after it. A later compute alone does not clear it. For every other kind the per-kind rule is unchanged (D-04).
+- **A failing side job never makes stale analytics look fresh (D-09, founder).** The bridge now takes `p_trigger_job_id` (the mark RPCs pass the job they just terminalised). When only a side job's failure caused the call, the bridge leaves `computed_at` and a `computation_error` it did not write untouched, including through transient side retries.
+- **A genuine recompute is not held back (D-10, round 4).** The D-09 hold stands only while no counting job reached `done` after the row's `computed_at`.
+- **The DEFERRED path names its job (round 4).** `analytics_status.sync_strategy_analytics_status` forwards `trigger_job_id`, and `dispatch` passes it on DEFERRED. A side job deferred by the exchange circuit breaker therefore leaves the row alone instead of stamping it.
+
+### Tests
+- New gate `supabase/tests/test_sync_status_analytics_scope.sql` with 21 arms and twins: S1-S6 (side kinds), C1-C4 (supersession), G1-G3 (guards), D9-D16 (D-09/D-10 holds and releases).
+- Five existing gates and the lane probe no longer hardcode the one-argument signature.
+- `status-bridge-side-kinds-drift.test.ts` pins the side-kind classification against the job kinds.
+- Census moved to the values a full runner run measured: `ARMS_FLOOR` 599 and the `ci.yml` sentinel. Read them by symbol from `scripts/mutation-floors.mjs`, not from this entry.
+- Manual rollback `down/20261009120000-rollback.sql`. It was measured on a throwaway lane: before-migration and after-rollback function definitions, ACLs, owner and config dumped byte-identical.
+
+### Notes
+- Four review rounds ran: the 3-round cap plus one founder-authorised round (D-10). Migration-reviewer and rls-policy-auditor are clean at round 4. Security is SECURED (16 closed, 5 deferred to the post-deploy plan 04). Verification is `human_needed`, for plan 04's PROD re-sync only.
+- **Known gaps, recorded rather than fixed:**
+  - WR-R4-01 (MEDIUM): no arm pins the equal boundary of the D-09 release (`updated_at > computed_at`). Only a text anchor catches a `>=`.
+  - A successful side job whose sibling side job is still in flight still stamps stale analytics through branch (a). This is routed to Phase 166.5 COMPUTEDATSTAMP, which owns the successful-side-job stamp.
+- ⚠️ **Deploy order.** The Python DEFERRED call now sends `p_trigger_job_id`. If Railway deploys before the PROD apply, or after a rollback, that one best-effort status refresh fails with a logged warning until the migration is in place.
+- Post-deploy: plan 04 re-syncs the PROD rows that read `failed` and have jobs, before and after recorded (D-08).
+
+## [0.129.0.0] - 2026-10-08 — WIZARDCODES: the MT5 wizard names the real cause instead of "the fault is in our pipeline"
+
+Phase 164.6.6.3.2. Three MT5 situations that the wizard used to report as a network fault or a pipeline fault now get their own wire code, their own copy, and their own tests. The 2026-10-03 PROD UAT showed all three.
+
+### Added
+- **`MT5_VALIDATION_UNCONFIGURED` → `KEY_MT5_VALIDATION_UNCONFIGURED`.** When the validation endpoint is unset, its terminal list is empty, or its timeouts are inverted, `_validate_mt5_key_probe` now answers 500 `MT5_VALIDATION_UNCONFIGURED`. The wizard shows a "not set up yet" card with no Retry, on create-with-key, add-key and rotate-secret. The card says we have been alerted, and every alert claim rests on a Sentry capture that a vitest source pin names by arm. The D-31 `undetermined` arm is unchanged.
+- **`MT5_TERMINAL_BUSY` → `KEY_MT5_TERMINAL_BUSY`.** An owed scrub or relaunch, and a lease still held at the interactive bound, now answer a flat 424 `MT5_TERMINAL_BUSY` instead of `NETWORK_UNAVAILABLE`. The wizard shows a recoverable "briefly busy, try again in a minute" card, and this case does not page anyone. The other eight `NETWORK_UNAVAILABLE` sites are unchanged.
+- **`GATE_HISTORY_NOT_SETTLED`.** A fresh MT5 account whose deal history is still arriving at the derive job's last attempt now reads "Your broker is still sending this account's history". It offers Retry and points to the contact form, not an email address. The cause rides on a final-attempt failed stamp in the existing 164.2 provenance columns (`_MT5_HISTORY_UNSETTLED_USER_SENTENCE`). No migration, no new `error_kind`, and no stamp on a non-final attempt or in key mode.
+
+### Changed
+- `analytics-service/docs/STATUS_CONTRACT.md`, `deploy/mt5-gateway/railway-gateway.md` and the `SEAM_BUDGETS` docblock in `src/lib/resilient-fetch.ts` describe the new mapping. The old text is kept as dated lineage.
+- Census pins moved to the values their own guards printed: `EXPECTED_EMITTED_CODES` 45 → 47, `DERIVED_FLOOR` 27 → 28, both `EXPECTED_TABLE_SIZE` 98 → 101, dialog `checked` 35 → 37, parity `TOTAL_CASES` 16 → 18, `DISTINCT_WIRE_CODES` 9 → 10.
+
+### Tests
+- All three key routes have a test that fails when `KEY_MT5_VALIDATION_UNCONFIGURED` stops paging, and a twin that fails when `KEY_MT5_TERMINAL_BUSY` starts paging. A single neuter of the paging set reddens all three routes.
+- Fixture sites C9/C10 cover the busy wire. Derive tests cover the final, non-final, missing-count and key-mode history stamps. Scrub-invariance and no-`@` pins are added, and the `test_stamp_io_exhaustive` resolver is fixed.
+
+### Notes
+- Review round 1: worst finding MEDIUM, so no fixer round ran. Security: SECURED 16/16. Verification: passed.
+- **Known gap, recorded rather than fixed:** WR-01 (MEDIUM). No test pins `heal_series=False` on the new final-attempt stamp. The property holds in the code today, but no test would catch it if it changed. Booked as a follow-up.
+
+## [0.128.0.2] - 2026-10-08 — BTC dust floor 1e-7: a BTC account is measured down to a ten millionth of a coin
+
+Founder decision D-24 for Phase 164.6.6.2 BTCNATIVE (gap closure, plan 14). The BTC row's dust-NAV
+floor drops from 0.001 BTC to 1e-7 BTC. The founder, reading MM-2x on PROD: "it should measure
+more. at least to 0.0000001". Measured before the change, MM-2x read `dust_nav_guard` with 355
+unguarded days and every earlier day guarded, so the opening stretch of its track record was lost to
+a floor that D-20 had set for a different reason (guarding real dust, about $100). **This is a
+behaviour change for BTC-denominated MT5 accounts only:** a day whose prior NAV is anywhere in
+[1e-7, 0.001) BTC is now measured instead of guarded. USD-family accounts and every other venue read
+the unchanged USD row. Nothing is backfilled; the next derive of a BTC account replaces its series.
+
+### Changed
+- **`analytics-service/services/account_unit.py`: BTC `dust_nav` 0.001 to 1e-7** (D-24, superseding
+  D-20's value; D-20's line stays in CONTEXT as lineage). It is the only value that moved.
+- **BTC accounts with equity between 0.0001 and 0.001 no longer fail permanently** (code review
+  IN-02). Under the old row, `material_equity` (0.0001) sat below `dust_nav` (0.001), so an account
+  whose equity was in that band was dust-guarded on every day and then hit the "material equity but
+  fewer than two usable days" refusal, a permanent failure. The inverted row removes that zone; those
+  accounts now derive. This is a behaviour change the first draft of this entry did not name.
+
+### Added
+- **A visible "measured on a very small balance" warning** (D-25, founder, after code review WR-01).
+  With the floor at 1e-7 a day can be measured on a tiny base: a near-total withdrawal while a
+  winning position is open leaves a realized base of a few millionths of a coin, and the next day
+  reads +500%. The founder's call is to keep that day exact AND say so. Whenever a MEASURED day's
+  starting balance is below the unit's `material_equity` (BTC 1e-4), `chain_linked_twr` now records
+  `small_base_measured` (with the number of such days and the smallest prior NAV in the in-process
+  meta). The factsheet shows, beside its other data-quality caveats and in the same amber style,
+  "Some days were measured on a very small balance, so their returns can be extreme."
+  - **Informational only.** It never breaks the chain (it is not counted as `twr_chain_broken`), never
+    drops a day, and never changes a number. It is deliberately NOT a `NAV_TWR_GUARD_KEYS` member, so it
+    does not promote the status to `complete_with_warnings`; a clean tiny-balance account stays
+    `complete`, exactly as `native_unit` and `insufficient_window` do. It rides its own present-only
+    carry: `nav_twr._build_nav_meta`, the derive's pre-stamp in `job_worker`, and the wholesale rebuild
+    in `analytics_runner`; in the browser `singleKeyDataQuality` lifts it (strict `=== true`) to
+    `dataQuality.smallBaseMeasured`, which `FactsheetView` renders. Only the bool is persisted: the
+    smallest prior NAV is an account-size magnitude.
+  - **USD is unchanged by construction.** The USD row has `dust_nav` 1000 above `material_equity` 100,
+    so every prior NAV under 100 is dust-guarded before the check runs: the flag can never fire for
+    a USD-family account or any other venue, and no existing USD flag set, return or status moved.
+  - No payload cache key move: the field is optional-absent, and a flagged series only appears on a
+    re-derive, which moves `computed_at`, which is already a member of the cache key.
+
+### Tests
+- A BTC account whose prev_nav sits between 1e-7 and 0.001 is measured, not guarded (hand
+  arithmetic: 0.0001 / 0.0008 = 0.125 and -0.0002 / 0.0009 = -2/9; a base of 4e-7 reads 0.25 and
+  -0.2), and one below 1e-7 is still guarded. The first goes RED on the old value; the second goes
+  RED when the floor is neutered to 1e-9.
+- An exact-arithmetic oracle of MM-2x's shape: a 0.1 BTC deposit, a 1.0 BTC deposit, trading, a
+  near-total withdrawal, then small-balance trading to 0.00961461 BTC with per-trade P&L down to
+  2e-5. Expected returns are `pnl / prior NAV` in `Fraction`, sharing no code with the reconstruction,
+  and every day after the second ledger day matches to 1e-12. Two lower-balance variants of the same
+  shape (5e-4 and 3e-6 BTC) are RED on the old floor.
+- No return before the first deposit: for a residue of 0, 5e-8, 1e-7, 3e-5, 5e-4, 0.02 and 0.2 BTC
+  left by the backward roll at the account's opening, the series starts on the first deposit day and
+  that day books NaN (or exactly 0.0 once the residue exceeds the deposit), never a gain. RED when the
+  denominator guards are neutered.
+- The BTC residual tolerance still catches a dropped 2e-5 BTC flow at MM-2x's balance.
+- D-25, with exact `Fraction` oracles that share no code with the float backward roll: the
+  reviewer's +500% ledger (deposit 0.01, +0.0001, withdraw 0.01009, close +0.00005) is measured at
+  exactly 5 AND flagged (one day, smallest prior NAV 1e-5, no chain break); a day at 1e-4 or above is
+  not flagged; the MM-2x shape (base about 0.0096) carries no flag, while the 3e-6 variant of the same
+  shape is flagged on exactly the days whose exact prior NAV is under 1e-4 and keeps every return; the
+  boundary at exactly 1e-4 distinguishes `<` from `<=`; the status stays `complete` for the annotation
+  alone and `complete_with_warnings` beside a real guard. Each goes RED when the change is reverted,
+  when the comparison is loosened, when the day is dropped, when the flag promotes the status and when
+  it is counted as a chain break.
+- Code review IN-03: a prior NAV of exactly 1e-7 is a usable denominator and the next float below it is
+  dust (`_guard_denominator`, and the same boundary through `chain_linked_twr`); a `<=` mutant now fails.
+- Code review IN-04: the pre-inception test no longer asserts an account-wide `any(...)` over guard
+  keys. A day-0-isolated ledger names the guard that decides day 0 for each residue (negative or dust
+  for float noise, dust for 5e-8, the flow guard from 3e-5 up to the deposit, none and exactly 0.0 above it).
+- The tests that pinned 0.001 are updated (`test_account_unit.py`, `test_mt5_deal_reconstruction.py`,
+  and the comments in `test_nav_twr.py` and `test_mt5_derive_branch.py`). The old "BTC row is the USD
+  row scaled by one ratio" assertion is gone for `dust_nav`, because the founder value is not that
+  ratio; the other two values are pinned as literals.
+
+### Notes
+- **`material_equity` (0.0001 BTC) and `residual_abs_tol` (1e-6 BTC) did not move, and were measured,
+  not assumed.** They were orchestrator-scaled from D-20, not founder values. Every consumer was read:
+  `dust_nav` feeds the NAV denominator guard and the terminal uPnL-wedge materiality test;
+  `material_equity` feeds the history settle wait and the "material equity but fewer than two usable
+  days" refusal; `residual_abs_tol` feeds the construction self-check. None compares one floor with
+  another, so nothing forces a move. There is no TypeScript or SQL mirror of any of the three.
+- The BTC row is no longer one ratio of the USD row: `dust_nav` (1e-7) is now below
+  `residual_abs_tol` (1e-6), which is below `material_equity` (1e-4), the reverse of the USD row's
+  1000, 100, 1.00. Nothing asserts an ordering, and the row's comment says so. Recorded so the next
+  person who scales the row knows the inversion is deliberate.
+- At MM-2x's scale neither value distorts a real day: its balance is 9.6e-3 BTC, 96 times
+  `material_equity`, and its smallest trade (2e-5) is 20 times `residual_abs_tol`. Below roughly 1e-5
+  BTC the residual band is a large share of the balance, so the self-check there is blunt; recorded,
+  not changed.
+- Existing behaviour the oracle makes visible, unchanged: the second ledger day of MM-2x (the 1.0 BTC
+  deposit on a 0.1 BTC base) reads `flow_dominated_guard` and is NaN, because a flow at least as large
+  as the prior NAV is not a usable denominator (`FLOW_DOM_RATIO` 1.0).
+- **D-26 (founder, 2026-10-08), recorded here and changed nowhere in code:** the supported phone
+  widths are 360 px (small Android), 375 px (iPhone mini) and 390 px (iPhone 12/13/14) and up. 320 px
+  is not a target, and the UI-SPEC's 320 px backstops are superseded by 360 px. This release adds one
+  caveat line to the factsheet header; it wraps in the existing caveat style at those widths.
+- Not fixed, recorded (code review IN-01): the terminal uPnL-wedge flag now fires on a tiny BTC anchor
+  (`anchor > dust_nav`, 1e-7), which can only add `unrealized_pnl_in_anchor` and never changes a return.
+  Gating it on `material_equity` instead is a separate decision.
+- Plan numbering: `164.6.6.2-13` is the Python conversion twin that merged in 0.126.0.0, so this gap
+  closure is `164.6.6.2-14`.
+
+## [0.128.0.1] - 2026-10-08 — ROADMAP repair, a lint rule that keeps every phase closable, and the 2026-10-08 verification records
+
+A phase could pass verification and never be marked done: 25 of 145 phases in `.planning/ROADMAP.md`
+had no checklist bullet and 26 had no Progress-table row, and `gsd-tools phase complete` ticks only
+those two, so it silently did nothing for them. This release repairs the drift, adds a lint rule
+that fails on it, and records the human-verification runs of 2026-10-08.
+
+### Fixed
+- **ROADMAP format drift** (`87613ed7b`). Every `### Phase N:` heading now has a checklist bullet the
+  tooling matches and a Progress-table row (145 headings, 145 bullets, 142 rows; the three retired
+  165-family phases carry a struck-through bullet and no row, by design). Three stale rows corrected
+  (164.6.6.1, 164.6.6.2, 164.6.6.3 read "Queued"/"Waiting" though they shipped).
+
+### Added
+- **Lint rule 6 ROADMAP-STRUCTURE** in `scripts/check-planning-hygiene.ts` (`1da5f6892`), run by
+  `npm run lint` in the always-on `frontend-lint` job. It fails when (a) a phase heading has no
+  bullet the tooling would match, (b) a heading has no Progress-table row, or (c) a phase whose
+  VERIFICATION says `passed` has an unticked bullet. Shown RED on the pre-repair ROADMAP (51
+  violations) and on a neutered 6c; 14 new tests in `check-planning-hygiene.test.ts`.
+
+### Changed
+- **164.6.6.3.5 DOMAINONE closed** (`0f28ee0b4`, `1435dd9dc`, `09e3f64e2`, `5da0cbd11`, `c09e95ae3`,
+  `bac93aef3`): plan 13's live records (LIVE-IMPACT, the production site URL moved to the canonical
+  host, the unread badge measured live) land on main, verification `passed`, phase complete.
+- **164.5.3 MT5CREDS closed** (`66f974cc1`): the visual QA item re-read in the production session on
+  2026-10-08 passed; the disconnected-section and NULL em-dash shapes, absent on PROD, stay covered by
+  the render tests.
+- **2026-10-08 runs recorded, phases still `human_needed`** (`1a52cf1f0`): 164.6.6.3.1 (key card,
+  eyebrow, focus PASS; phone-width check pending on the founder's phone), 164.6.6.3
+  (`MT5_KNOWN_SERVERS` present, names-only; SC1/SC4 need the founder's credentials and VNC),
+  164.6.6.2 (MM-2x reads BTC, +76.3% cumulative in BTC; share card, tear sheet and AUM serve only a
+  published strategy, so their live check waits for publication), 164.6.6.1 (two founder decisions:
+  scrub scope kept as shipped; the relaunch-debt lease wait booked as `MT5-RELAUNCH-DEBT-LEASE-WAIT-01`).
+
+### Notes
+- The `gsd-tools phase complete` runs were each followed by reverting their collateral (stray blank
+  lines, unrelated `state.json` flips, a `STATE.md` current-phase move); `state.json` was left as it
+  was on main.
+- Founder decision 2026-10-08: supported phone widths are 360/375/390 px; 320 px is not a target
+  (recorded as D-26 on the BTCNATIVE branch, which ships separately).
+
+## [0.128.0.0] - 2026-10-07 — WEALTHRETURNS: every Python blend reads daily returns, not the stored wealth curve
+
+Phase 164.6.6.2.2 closes the pre-existing defect the 164.6.6.2 review recorded as CR-01.
+`strategy_analytics.returns_series` holds the strategy's cumulative wealth curve (a compounded curve
+starting near 1.0, or a running sum on the simple method), and five Python code paths weighted it as
+if it were daily returns. A curve level of 1.4 was blended as a 140% daily return. This release puts
+one shared boundary between the stored row and every blend, makes the TypeScript resolver agree with
+it, and rebuilds the fixtures from curve-shaped data so a test can finally tell a curve from returns.
+**This is a behaviour change:** portfolio analytics, the optimizer, the replacement bridge, the
+simulator, the match engine and the duplicate and verify matchers now score on real daily returns, so
+their outputs move once the analytics service recomputes. Nothing is backfilled (D-03): the next
+scheduled runs replace the stored outputs.
+
+### Added
+- **One shared boundary, `daily_returns_from_row`** (`analytics-service/services/wealth_returns.py`,
+  `6378b7c05`). It turns a stored `strategy_analytics` row into daily returns. A non-empty
+  `daily_returns` wins (D-02); otherwise it derives them from the curve by the curve's own method
+  (D-01): ratio `w_k / w_{k-1} - 1` for a compounded curve, difference `w_k - w_{k-1}` for a simple
+  one. Day 0 is dropped. A non-finite or non-positive level makes the days that depend on it absent,
+  never 0 and never bridged. A row with nothing derivable reads as `None`, never an empty series.
+- **A shared oracle both runtimes read.** `wealth_to_returns_oracle.json` carries 21 hand-computed
+  cases (`a07450ee9`), read by pytest and by vitest, so the Python and TypeScript conversions cannot
+  drift apart unnoticed. Its simulator suite runs on curve-shaped fixtures and the router's private
+  copy of the parser is deleted (`48de5faa4`).
+- **The single-key analytics run stamps `cumulative_method`** into `data_quality_flags`
+  (`2c33ef1d6`, `807904bde`), from the same variable passed to the curve builder, so the stamp cannot
+  disagree with how the curve was built (D-05). No migration; a row without the stamp reads
+  geometric, which is exact for every curve on PROD today.
+- **`blend_periods_per_year`** in `services/metrics.py` (`07ec054dc`): the one place the rule
+  "a blend annualizes risk on 365 if any leg is crypto, else 252" lives.
+- **Test infrastructure that can fail.** `_curve_fixtures.curve_from_returns` builds real curve
+  shapes, and `_schema_columns` parses the committed baseline plus migrations so a fake select naming
+  a column the table does not have fails loudly (`84a5be628`). `test_blend_annualization_clock.py`
+  pins the risk clock, and `test_wealth_returns_router_method.py` pins that each router honours the
+  stored method (`a63c6a36a`).
+- **A no-bypass census** (`test_wealth_returns_census.py`, `32a107ddb`, tightened in `0ef048958`).
+  It AST-scans `routers/` and `services/` and classifies each `returns_series` reference against an
+  exact allowlist. It requires `data_quality_flags` in every select that reads the curve, requires
+  the method to reach the boundary, and checks `keep_absent`. A future read that bypasses the boundary
+  goes RED. Two end-to-end tests invert the real runner's curve back through the boundary.
+
+### Fixed
+- **Portfolio analytics read columns that do not exist.** `_compute_portfolio_analytics` (also run by
+  the cron and the job worker) selected `equity_curve` and `total_aum` from `strategy_analytics`,
+  neither of which exists there, so it could not complete on PROD. It now selects real columns and
+  blends boundary-derived returns (`50519d0ef`). Every strategy's time-weighted return comes from
+  its blended daily returns on one day convention (`4b15f0ef8`). Total AUM is the sum of
+  `portfolio_strategies.allocated_amount`, null unless every strategy has one, and a 0 counts (D-07).
+- **The simulator blended curve levels as returns** (`6378b7c05`).
+- **The match engine scored on curve levels.** The allocator book and the candidate universe are now
+  scored on daily returns derived from the stored curve (`4b596882b`, `1826756a3`); the router's
+  parser copy is gone and the integration fixtures are curve-shaped (`f82953e81`).
+- **The two correlation matchers compared levels with returns.** The duplicate matcher compares
+  daily returns with daily returns (`7f6146631`), and `verify_strategy` matching trims the published
+  series first and then reads it through the boundary (`ef99e97d1`, D-06).
+- **The optimizer and the replacement bridge read curve levels**, and the portfolio parser copy is
+  gone (`5dddbdb7d`).
+- **The TypeScript resolver now reads a stored curve by the row's method** on the shared oracle
+  (`1ffd7e574`). The dashboard, factsheet, OG card and own-capital readers pass the row's method
+  (`f8623931c`), and the scenario share forwards each leg's parsed method (`d21a16838`). Raw
+  `data_quality_flags` never cross to the client; the compare read projects one scalar,
+  `cumulative_method`.
+- **Blend risk was annualized on the square root of 252 whatever the asset class** (review WR-01,
+  HIGH). Blend scorers now annualize on the blend's clock (`07ec054dc`), and the portfolio headline
+  plus the optimizer, bridge and simulator routes read each strategy's `asset_class` (`32d6b29a5`).
+- **The native-to-USD converter mispriced the day after an absent day** (WR-02): it priced a one-day
+  native return over the whole gap. It now prices that day over its own single day (`371f0e42f`).
+- **The compare correlation matrix correlated curve levels** (WR-05, `17833ecbc`), and the return
+  histogram read the stored curve without its method and kept unusable days (`2be601822`). Both now
+  read daily returns by the stored method and drop unusable days.
+- **A usable row with no derivable day dropped a strategy silently** (silent-failure review M1). The
+  boundary now warns, with the strategy's name and counts only and never a stored value (`31e233860`).
+
+### Changed
+- **One risk clock per candidate comparison (founder decision D-08, review round 2 R2-01 and R2-02).**
+  The optimizer, bridge and simulator score every candidate in one list, and both sides of every
+  delta, on the EXISTING BOOK's clock (365 if a book leg is crypto, else 252). Before, a crypto
+  candidate against a book with no crypto leg earned about a 20% Sharpe bonus from its label alone,
+  and a book's "current" Sharpe changed with the candidate it was compared against (`8167e34dd`).
+  The decision is recorded in CONTEXT (`534ec7993`). It narrows the risk-by-frequency rule for
+  candidate comparisons only; the portfolio headline keeps the rule as written.
+- `usd_equity_from_converted_returns` and the four per-router `_records_to_series` copies are removed;
+  they have no remaining callers.
+- **Merged `origin/main`** (PR #972 baseline re-dump, the contact form, v0.127.0.1) with no
+  conflicts and nothing under `supabase/schema/` touched by this branch. No migration in this phase.
+
+### Tests
+- Full analytics suite from `analytics-service/`: 8363 passed, 90 skipped, 0 failed (the 90 skips are
+  existing skips, none added by this phase). Phase-touched vitest set plus
+  `critical-regressions.test.ts`: 35 files, 878 tests, all passed.
+- The verifier neutered the boundary at eight sites in a scratch copy (optimizer, match allocator
+  context, strategy matching, AUM source, D-02 order, the stamp, the optimizer's clock, the
+  simulator's clock) and each went RED. The ninth, the bridge's book clock excluding the incumbent,
+  was not caught (see Notes).
+- Known local artefact, unchanged: `compute.conventions.test.ts` fixtures B and C differ from their
+  FROZEN snapshots by one ulp in `skew` on Node 25. The phase does not touch `compute.ts` or
+  `return-stats`; CI's Node decides them, and the snapshots were not loosened.
+
+### Security
+- Phase security audit: SECURED, 21 of 21 register entries closed, 0 open at or above `high`
+  (`b8231b42d`). Warning logs carry names, counts and the validated method only. The diff touches
+  nothing under `supabase/`, and the PROD readings were SELECT-only with the marker query first.
+
+### Notes
+- **The D-03 post-deploy PROD reading is still PENDING, so the phase verification is
+  `human_needed`, not `passed`** (`e9b62bba1`). After merge, a green main CI on the merge sha, and the
+  Railway analytics deploy, the reading must be filled into `164.6.6.2.2-MEASUREMENT.md`: confirm
+  `/health` `git_sha` equals the merge sha, run the marker query first, take the first personalized
+  `match_batches` row per allocator with a `computed_at` after the deploy (never the pg_net cron
+  status), and rerun statements 3 and 4 unchanged. Expected: personalized `portfolio_fit` stays 0,
+  scores are unchanged unless a non-book input moved, screening rows are unchanged. If no personalized
+  batch has landed yet, the reading says so. The "before" reading and an old-versus-new replay on 22
+  PROD rows are recorded (`57a80b03c`): Sharpe 30.7 with an infinite final equity became 2.32 with
+  4.36, and the optimizer's top candidate moved from C3 to C1. The restated backstop is a
+  no-regression check: the three personalized allocators hold no strategies today, so the fix cannot
+  be shown to move a stored match score.
+- **Known limits, not fixed (LOW or INFO, recorded rather than fixed).** R3-02: nothing pins that the
+  bridge's book clock includes the incumbent; excluding it leaves 94 tests green though the code is
+  correct. R3-01: two comments over-claim that the simulator's `current.sharpe` equals the portfolio
+  headline; it shares the clock only. R2-03 and IN-07: the unusable-row and unknown-method warnings
+  repeat per read. IN-01 and F-1: a mixed-timezone stored date raises in the boundary (availability
+  only; the pre-phase code raised too). F-2: `_trim_returns_series` leaves a dict-shaped
+  `daily_returns` uncapped in verify (service-role written). IN-04 and F-5: the writer fills interior
+  chain-break NaN days as 0.0, so "absent, never 0" does not hold for those days. IN-02: the Python
+  and TypeScript twins differ on an overflowing derived return. IN-05 and R2-05: the census scans
+  `routers/` and `services/` only. Parity gaps outside the oracle: a dict-shaped `returns_series`, a
+  numeric-string level, and duplicate dates deduped in Python only.
+- **Routed follow-ups, from the review and silent-failure hunts.** (1) The portfolio page's
+  `buildWealthPoints` plots a stored simple-method `returns_series` as a cumulative product; no
+  simple-method row exists on PROD. (2) TypeScript readers that may still treat curve levels as
+  returns, not traced (confidence 6): `CorrelationWithBenchmark.tsx`, and the `/compare` matrix
+  correlating BTC-native raw returns against USD with no native unit projected; to be booked against
+  FACTSHEETTRUTH or a 170.x phase. (3) The analytics runner's failure upserts overwrite
+  `data_quality_flags` and drop `cumulative_method` while the old curve persists, so a simple curve
+  would read geometric after a failed run. (4) `strategy_matching.find_matched_strategy` conflates
+  "matching down" with "no duplicate" (pre-existing). (5) WR-01 residue: `match_engine`'s
+  portfolio-fit `sharpe_lift` still uses 252 (no asset class in that flow), and `verify_strategy`'s
+  single-account Sharpe is on 252. (6) WR-02 residue: the converter drops its own first element, so a
+  native leg loses its first real return (pinned by the oracle), and the verify-path correlation
+  compares raw native returns with USD (pre-existing). (7) Silent-failure round 2 and 3, confidence 5
+  to 8: no router test that a gapped native curve is converted before the scorer; `ReturnHistogram`
+  shows a blank body or a tiny-sample histogram with no banner; a book leg with no `asset_class`
+  silently reads 252 with no log; no test with the incumbent as the sole crypto leg in the bridge
+  clock. These follow-ups are recorded here and in the phase artifacts, not yet booked in TODOS.
+- **CI defect observed, separate from this phase, to be booked after this ship.** The "Install psql
+  client" step hung for 36 minutes in `apply-test` of a Supabase Migrate run and for over 68 minutes in
+  an `e2e-seeded` job of a CI run. It is an apt install with no step timeout. The remedy is a
+  step-level `timeout-minutes` and apt retry options.
+- **Planning-only commits in this release** (no source change): the phase's context, research,
+  validation strategy and pattern map, seven plans in four waves with two checker revisions, the seven
+  plan summaries, the plan 07 PROD measurement doc and its home-path regex fix so the planning-hygiene
+  gate passes (`3d01fae51`), the review (three rounds, round 3 at 0 HIGH or MEDIUM), the security
+  audit, the verification, the founder-dated booking of Phase 167.1.2.2 DERIVECRON in the roadmap, the
+  merges of the seven worktree branches that carried the plans and review fixes, and the merge of
+  `origin/main`.
+
+## [0.127.0.1] - 2026-10-07 — BASELINE: automated re-dump after the PROD apply of 239106dc
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `37667399720`, after the PROD apply of merge `239106dc`: sha256 `5870bb2a…` → `28f356c4…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261008120000_for_quants_leads_contact_source.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-07` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.127.0.0 → 0.127.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=287 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `37667399720` succeeded, and this entry was composed by the `redump-pr` job. Run `37667399720` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.127.0.0] - 2026-10-07 — DOMAINONE: one canonical address, and a contact form instead of an email address
 
 Phase 164.6.6.3.5 makes `quantalyze.xyz` the product's one address. `quantalyze.com` is a domain we do

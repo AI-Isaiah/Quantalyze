@@ -3,7 +3,7 @@ import quantstats as qs
 import pandas as pd
 import numpy as np
 import math
-from collections.abc import Callable, ItemsView, KeysView, ValuesView
+from collections.abc import Callable, ItemsView, Iterable, KeysView, ValuesView
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
@@ -50,6 +50,22 @@ PERIODS_PER_YEAR_CRYPTO = 365
 def periods_per_year_for_asset_class(asset_class: str | None) -> int:
     """Annualization periods/year for a strategy's asset class (see #597)."""
     return PERIODS_PER_YEAR_CRYPTO if asset_class == "crypto" else DEFAULT_PERIODS_PER_YEAR
+
+
+def blend_periods_per_year(asset_classes: Iterable[str | None]) -> int:
+    """Risk-annualization clock of a BLEND of strategies (founder rule, Phase 164.6.6.2.2 WR-01).
+
+    Risk is annualized by frequency: a blend uses 365 if ANY constituent is
+    crypto, else 252. A blend that posts a return every calendar day because one
+    leg trades 24/7 is a calendar-day series, so annualizing it on √252 would
+    understate its vol and Sharpe by √(252/365). An empty or all-unknown set is
+    252 (``periods_per_year_for_asset_class(None)``). RETURN annualization is a
+    separate calendar clock (TWR-05) and is not touched by this.
+    """
+    return max(
+        (periods_per_year_for_asset_class(c) for c in asset_classes),
+        default=DEFAULT_PERIODS_PER_YEAR,
+    )
 
 # TWR-05 (founder decision 2026-07-05): RETURN/CAGR and Calmar annualize on the
 # true CALENDAR clock — 365 calendar-days per year over the real DatetimeIndex
@@ -2696,9 +2712,11 @@ def total_return_from_equity(equity: pd.Series | None) -> float | None:
     deleted forward-TWR scalar normalised the index and built
     ``breakpoints=sorted({start}|cf_dates|{end})``; with no cash flows a series
     whose observations all fall on ONE calendar day collapses to a single
-    breakpoint, yields no sub-period, and returned None. Duplicate-date JSONB is a
-    documented reachable shape (``_records_to_series`` does not dedupe), so this
-    returns None there rather than a spurious endpoint ratio.
+    breakpoint, yields no sub-period, and returned None. A series whose observations
+    all share one calendar day is a reachable shape (the shared parser
+    ``services.wealth_returns.records_to_series`` sorts and dedupes keep-last, but a
+    caller can hand in any equity Series), so this returns None there rather than
+    a spurious endpoint ratio.
 
     INPUT CONTRACT: ``equity`` should be a float64 Series on a sorted, datetime-
     like index (all four call sites satisfy this). The index is normalised via

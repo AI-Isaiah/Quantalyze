@@ -178,7 +178,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (B1-SETUP): the committed seed for arm B1 is missing, so no call below would run and every assertion would read nothing.';
   END IF;
   IF to_regprocedure('public.mark_compute_job_done(uuid, uuid)') IS NULL
-     OR to_regprocedure('public.sync_strategy_analytics_status(uuid)') IS NULL THEN
+     OR (SELECT p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'sync_strategy_analytics_status') IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (B1-SETUP): mark_compute_job_done(uuid, uuid) or sync_strategy_analytics_status(uuid) does not resolve on this lane, so the apply list did not produce the functions under test.';
   END IF;
 

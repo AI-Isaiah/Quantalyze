@@ -1487,6 +1487,34 @@ a wrong server name during the 2026-10-05 live check.
 **What closing it means.** The wizard says the terminal is briefly busy and to retry in a moment,
 with a test pinning the mapping from `scrub_owed` to that copy.
 
+### MT5-RELAUNCH-DEBT-LEASE-WAIT-01 — the heal's lease wait is the same 2.0 s while a relaunch debt is owed (booked 2026-10-08, Phase 164.6.6.1 D-15)
+
+**Why it is open.** Phase 164.6.6.1 leaves a relaunch debt when the service ends the jobs terminal and
+has not seen it house-verified since. The debt is paid only by a heal tick that WINS the terminal
+lease, and the heal's acquire is bounded at `_MT5_RELOGIN_LEASE_WAIT_DEFAULT_S` (2.0 s,
+`analytics-service/services/mt5_relogin.py`). Job traffic that holds the lease through every tick
+starves the payment while the terminal is account-less. The founder decided on 2026-10-08
+(AskUserQuestion, "Book a fix"): log ERROR while a debt is owed and the lease cannot be taken, and wait
+longer for the lease while a debt is owed. This supersedes the last sentence of D-12 ("The lease wait
+is not lengthened"), recorded as D-15 in `164.6.6.1-CONTEXT.md`.
+
+**What is already done (measured at HEAD 2026-10-08).** The ERROR half shipped under D-12, fix
+`377353b2c`: the `Mt5TerminalBusyError` arm of `heal_mt5_terminal_session` reads
+`mt5_relaunch_debt(...)` and logs ERROR ("relaunch debt OUTSTANDING and the heal could not get the
+terminal lease"), never the "session is fine" INFO. Only the longer wait is open.
+
+**Owner: the founder, no phase yet.** Book with `/gsd-phase --insert` when picked up; until then the
+next phase that edits the heal in `services/mt5_relogin.py` owns it.
+**Trigger:** the first production log line carrying `relaunch debt OUTSTANDING and the heal could not
+get the terminal lease`, OR the next phase that edits `heal_mt5_terminal_session`, whichever is first.
+**Gate (what closes it):** while `mt5_relaunch_debt` is set for the terminal, the heal's lease acquire
+waits longer than the default, still bounded by `_MT5_RELOGIN_LEASE_WAIT_CEILING_S`; with no debt owed
+the wait is unchanged at the default. A test pins both arms and is seen RED with the longer wait
+removed. The ERROR line test (`test_T15_a_BUSY_tick_with_a_relaunch_debt_owed_logs_ERROR_and_never_session_is_fine`)
+stays green.
+⛔ **Not a close:** raising the default wait for every tick (a healthy busy terminal would then queue
+the heal ahead of real work, which the heal's busy arm refuses, D-29), or editing only the log text.
+
 ### UPSTASH-RATELIMIT-KEY-LOCKING-01 — @upstash/ratelimit is held at 2.0.8; 2.2.0's scripts are refused by the CI Redis (booked 2026-10-05, Dependabot #951)
 
 **Why it is open.** Dependabot #951 bumped @upstash/ratelimit 2.0.8 → 2.2.0. The `frontend-seam-redis`

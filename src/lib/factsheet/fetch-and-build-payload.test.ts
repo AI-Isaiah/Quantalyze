@@ -807,3 +807,29 @@ describe("164.6.6.2 plan 05 — native_unit on the analytics row becomes payload
     expect(src).not.toMatch(/account_currency|account_balance_native/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 164.6.6.2 (D-25) — `data_quality_flags.small_base_measured` on the analytics
+// row becomes `payload.dataQuality.smallBaseMeasured` through the ONE shared owner
+// (`singleKeyDataQuality`), present only when the persisted flag is literally true.
+// ---------------------------------------------------------------------------
+describe("164.6.6.2 D-25 — small_base_measured on the analytics row reaches the payload", () => {
+  it("a flagged row carries dataQuality.smallBaseMeasured true", async () => {
+    seed(single({ daily_returns: points(30), data_quality_flags: { native_unit: "BTC", small_base_measured: true } }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.dataQuality?.smallBaseMeasured).toBe(true);
+  });
+
+  it.each([
+    ["absent flag", null],
+    ["a flags blob without it", { native_unit: "BTC" }],
+    ["false", { small_base_measured: false }],
+    ["the string true", { small_base_measured: "true" }],
+    ["a number", { small_base_measured: 1 }],
+  ])("%s: the payload has no smallBaseMeasured KEY", async (_label, flags) => {
+    seed(single({ daily_returns: points(30), data_quality_flags: flags }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload).not.toBeNull();
+    expect(payload?.dataQuality && "smallBaseMeasured" in payload.dataQuality).toBe(false);
+  });
+});
