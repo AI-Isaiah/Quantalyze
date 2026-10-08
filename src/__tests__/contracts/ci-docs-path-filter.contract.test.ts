@@ -1312,6 +1312,12 @@ describe("[164.9.4 WR-01 / CR-01] TEST_READ_PLANNING_PATHS matches the planning 
       ],
     ],
     [
+      "analytics-service/tests/test_allocator_equity_dropped_day_pnl.py",
+      [
+        [".planning/debug/derivecron-compose-divergence.md", DOCSTRING],
+      ],
+    ],
+    [
       "analytics-service/tests/test_position_reconstruction_fifo_flip.py",
       [
         [".planning/audit-2026-05-07/INVEST-PATTERN-2-POSITIONS.md", DOCSTRING],
