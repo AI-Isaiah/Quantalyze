@@ -520,6 +520,33 @@ def chain_linked_twr(
     return pd.Series(returns, index=index, name="returns"), flags
 
 
+def level_day_pnl(
+    nav: pd.Series, flows_by_day: pd.Series, *, prev0: float
+) -> pd.Series:
+    """The account's actual P&L on every NAV day: ``pnl_t = NAV_t - NAV_{t-1} - F_t``
+    (day 0 against ``prev0``, the capital before the first day).
+
+    167.1.2.2 D-15. This is the numerator ``chain_linked_twr`` divides by the prior
+    NAV, so it is defined on EVERY day, including the ones that function breaks
+    (``negative_nav_guard``, ``flow_dominated_guard``, ...). A broken day has no
+    return but it still has this P&L, and it is already inside ``NAV_t``. The
+    allocator compose needs it on those days: with only the stored returns it can
+    only assume the day was flat, which mis-states every earlier level by it.
+
+    Pure bookkeeping on levels already built, so it shares ``chain_linked_twr``'s
+    day-0 convention (``prev0``) and its flow alignment, and adds no guard of its
+    own. Indexed like ``nav``."""
+    index = nav.index
+    flows = _align_flows(flows_by_day, index).to_numpy(dtype=float)
+    nav_vals = nav.to_numpy(dtype=float)
+    prev = _coerce_float(prev0, field="prev0", row={"day": str(index[0])})
+    pnl = np.empty(len(index), dtype=float)
+    for t in range(len(index)):
+        pnl[t] = nav_vals[t] - prev - flows[t]
+        prev = nav_vals[t]
+    return pd.Series(pnl, index=index, name="day_pnl")
+
+
 def _guard_denominator(
     prev_nav: float, flow: float, dust_floor: float = DUST_NAV_FLOOR
 ) -> str | None:

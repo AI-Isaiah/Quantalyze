@@ -38,6 +38,7 @@ from services.nav_twr import (
     _union_flow_days,
     chain_linked_twr,
     cumulative_twr_segmented,
+    level_day_pnl,
     reconstruct_nav,
 )
 
@@ -576,24 +577,20 @@ def _prev0_usd(rolled: list[_Bucket], day0: pd.Timestamp) -> float:
     return total
 
 
-def reconstruct_native_nav_and_twr(
+def _native_nav_levels(
     ledger: NativeLedger,
     *,
     indexable_currencies: frozenset[str],
-    venue: str = "",
-) -> tuple[pd.Series, NavTWRMeta]:
-    """Per-currency native backward roll → daily USD NAV via day marks →
-    chain-linked TWR with the same DQ-01 guards (contract §1.3, six pure steps).
+    venue: str,
+) -> tuple[pd.Series, pd.Series, pd.Series, float] | None:
+    """Steps 1-4 of ``reconstruct_native_nav_and_twr``: ``(nav_usd, pnl_usd,
+    flows_usd, prev0_usd)`` — the daily USD NAV, the USD-composed native P&L, the
+    USD flows and the day-0 prior capital — or ``None`` when no bucket rolled. The
+    §5 inception gate runs here, before any level is returned.
 
-    ``venue`` is exception-metadata ONLY (G2, §9.1) — no venue string reaches the
-    valuation math. Mixed accounts are the base case (§8): a USD-native account
-    is zero branch-2 buckets (⇒ §4 byte-identity), a pure-coin account zero
-    branch-1 — the same code, all three.
-
-    Raises ``NavReconstructionError`` subclasses (``UnmarkableCurrencyError`` §3.4,
-    ``InceptionReconciliationError`` §5) — permanent/structural, matching the
-    worker-retry discipline. Purity: stdlib + pandas + numpy; no I/O; no logging
-    of raw values (§1.1)."""
+    Moved out of ``reconstruct_native_nav_and_twr`` unchanged (167.1.2.2 D-15) so
+    ``native_day_pnl`` reads the SAME levels the returns are chained from, rather
+    than a second copy of the roll."""
     # Step 1 — classify (families disjoint, G1) + coalesce branch-1 into "USD".
     _assert_families_disjoint(USD_FAMILY, indexable_currencies)
     buckets = _build_buckets(ledger, indexable_currencies, venue)
@@ -635,7 +632,7 @@ def reconstruct_native_nav_and_twr(
     )
 
     if not rolled:
-        return pd.Series(dtype=float, name="returns"), _build_nav_meta({})
+        return None
 
     # Step 4 — value NAV(d) = Σ_c B_c(d)×mark_c(d) over the union calendar.
     union_index = rolled[0].balance.index
@@ -644,18 +641,101 @@ def reconstruct_native_nav_and_twr(
     nav_usd, composed_pnl_usd, composed_flows_usd = _value_over_calendar(
         rolled, union_index, venue
     )
+    # ``composed_pnl_usd`` is only the day-0 fail-loud coercion's input in
+    # ``chain_linked_twr``; the day-0 denominator is ``prev0_usd``.
+    return (
+        nav_usd,
+        composed_pnl_usd,
+        composed_flows_usd,
+        _prev0_usd(rolled, union_index[0]),
+    )
+
+
+def reconstruct_native_nav_and_twr(
+    ledger: NativeLedger,
+    *,
+    indexable_currencies: frozenset[str],
+    venue: str = "",
+) -> tuple[pd.Series, NavTWRMeta]:
+    """Per-currency native backward roll → daily USD NAV via day marks →
+    chain-linked TWR with the same DQ-01 guards (contract §1.3, six pure steps).
+
+    ``venue`` is exception-metadata ONLY (G2, §9.1) — no venue string reaches the
+    valuation math. Mixed accounts are the base case (§8): a USD-native account
+    is zero branch-2 buckets (⇒ §4 byte-identity), a pure-coin account zero
+    branch-1 — the same code, all three.
+
+    Raises ``NavReconstructionError`` subclasses (``UnmarkableCurrencyError`` §3.4,
+    ``InceptionReconciliationError`` §5) — permanent/structural, matching the
+    worker-retry discipline. Purity: stdlib + pandas + numpy; no I/O; no logging
+    of raw values (§1.1)."""
+    # Steps 1-4 — classify, roll, §5 gate, value (``_native_nav_levels``).
+    levels = _native_nav_levels(
+        ledger, indexable_currencies=indexable_currencies, venue=venue
+    )
+    if levels is None:
+        return pd.Series(dtype=float, name="returns"), _build_nav_meta({})
+    nav_usd, composed_pnl_usd, composed_flows_usd, prev0_usd = levels
 
     # Step 5 — chain-link with the native day-0 capital injected as prev0_usd.
     returns, flags = chain_linked_twr(
         nav_usd,
         composed_pnl_usd,
         composed_flows_usd,
-        prev0=_prev0_usd(rolled, union_index[0]),
+        prev0=prev0_usd,
     )
 
     # Step 6 — meta + the §6 interior-chain-break key (79-03 merge, one detector).
     flags = {**flags, **cumulative_twr_segmented(returns)[1]}
     return returns, _build_nav_meta(flags)
+
+
+def native_day_pnl(
+    ledger: NativeLedger,
+    *,
+    indexable_currencies: frozenset[str],
+    venue: str = "",
+) -> pd.Series:
+    """The account's actual USD P&L on every NAV day, ``NAV_t - NAV_{t-1} - F_t``
+    (day 0 against ``prev0_usd``), off the SAME levels
+    ``reconstruct_native_nav_and_twr`` chains its returns from (167.1.2.2 D-15).
+
+    The days that function breaks (``negative_nav_guard`` on the funding day,
+    ``flow_dominated_guard`` ...) have no return and still have this P&L. Empty
+    when no bucket rolled. Raises what ``reconstruct_native_nav_and_twr`` raises,
+    including the §5 inception refusal."""
+    levels = _native_nav_levels(
+        ledger, indexable_currencies=indexable_currencies, venue=venue
+    )
+    if levels is None:
+        return pd.Series(dtype=float, name="day_pnl")
+    nav_usd, _composed_pnl_usd, composed_flows_usd, prev0_usd = levels
+    return level_day_pnl(nav_usd, composed_flows_usd, prev0=prev0_usd)
+
+
+def native_realized_terminal(
+    ledger: NativeLedger,
+    *,
+    indexable_currencies: frozenset[str],
+    venue: str = "",
+) -> tuple[pd.Timestamp, float] | None:
+    """The level ``reconstruct_native_nav_and_twr`` rolls its USD NAV back from, and the
+    NAV day it sits on: ``(last NAV day, NAV_usd there)`` (167.1.2.2 round-1 CR-01).
+
+    That level is the REALIZED terminal, ``Σ_c (terminal_native_c - upnl_native_c) ×
+    mark_c(last day)``: it excludes the open positions' uPnL and values the coin held at the
+    mark of the LAST LEDGER DAY, not at today's index. The collapsed live equity the derive
+    stores as ``anchor_usd`` differs from it by both, so a consumer that rolls the writer's
+    returns back from the live anchor shifts every level by that wedge. Read off the SAME
+    levels the returns are chained from (``_native_nav_levels``), never a second roll.
+    ``None`` when no bucket rolled; raises what the reconstruction raises."""
+    levels = _native_nav_levels(
+        ledger, indexable_currencies=indexable_currencies, venue=venue
+    )
+    if levels is None:
+        return None
+    nav_usd = levels[0]
+    return pd.Timestamp(nav_usd.index[-1]), float(nav_usd.iloc[-1])
 
 
 def _assert_inception_reconciled(

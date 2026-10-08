@@ -4046,13 +4046,34 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # combine and writes no per-key series; ``_run_key_mode_compose_epilogue`` reads this
         # to persist ``anchor_null_reason: "native_unit"`` and no flows.
         _native_unit_key_skip: bool = False
+        # Phase 167.1.2.2 / D-15 — set ONLY in key-mode by a venue whose reconstruction
+        # builds a NAV (deribit's native core, MT5's deal ledger): the account's actual P&L per
+        # NAV day, in USD. ``_run_key_mode_compose_epilogue`` persists it for the days the TWR
+        # left out of the stored returns. ``None`` for every other venue and for the
+        # allocated-capital path, whose key_inputs row then carries no such field.
+        _day_pnl_usd: "pd.Series | None" = None
+        # CR-01 (167.1.2.2 round 1): the REALIZED terminal the NAV above was rolled back from,
+        # ``(last NAV day, USD)``. It is NOT the live equity the epilogue stores as
+        # ``anchor_usd``: MT5 rolls from ``equity - upnl``, Deribit from the native balance less
+        # the terminal uPnL at the last ledger day's mark, a ccxt venue from ``equity - upnl``
+        # (R2-WR-02: set after the combine, below). The compose rolls the stored returns
+        # back from THIS level so it does not shift every level by the open-position wedge.
+        _realized_terminal: "tuple[pd.Timestamp, float] | None" = None
+        # D-15: the native §5 inception verdict, where one exists. Only a deribit ledger that
+        # reaches inception (``full_history``) runs the gate, and a breach raises before this is
+        # set, so a value here means the gate ran and passed.
+        _native_inception_verdict: str | None = None
 
         if venue == "deribit":
             # D-08: realized returns come from the ONE txn-log ledger pass
             # (funding-inclusive settlement cash deltas) — NEVER fetch_all_trades
             # / the fills endpoint. Funding is INSIDE the settlement sum (A3/D-10)
             # → EMPTY funding_rows, no funding_fees write (count-once, DRB-07).
-            from services.broker_dailies import combine_native_ledger
+            from services.broker_dailies import (
+                combine_native_ledger,
+                native_ledger_day_pnl,
+                native_ledger_realized_terminal,
+            )
             from services.deribit_ingest import (
                 CurrencyEnumerationError,
                 DeribitTransientReadError,
@@ -4240,6 +4261,18 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     _completeness.indexable_currencies,
                     denominator_config=denominator_config,
                 )
+                # D-15 (key-mode only): the per-day P&L off the SAME NAV levels the returns
+                # were just chained from, for the days the TWR drops. The allocated-capital
+                # path builds no NAV, so it has none to give.
+                if is_key_mode and denominator_config is None:
+                    _day_pnl_usd = native_ledger_day_pnl(
+                        native_ledger, _completeness.indexable_currencies
+                    )
+                    _realized_terminal = native_ledger_realized_terminal(
+                        native_ledger, _completeness.indexable_currencies
+                    )
+                    if native_ledger.full_history:
+                        _native_inception_verdict = "reconciled"
                 # FLOW-04 materiality: the pure native core does not emit
                 # unrealized_pnl_in_anchor (it subtracts the wedge per-currency, App
                 # A #6). Preserve the v1.8 warning using the collapsed USD anchor +
@@ -4990,7 +5023,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     error_message=f"derive_broker_dailies: {MT5_DISABLED_DETAIL}",
                     error_kind="permanent",
                 )
-            from services.broker_dailies import combine_mt5_deal_ledger
+            from services.broker_dailies import combine_mt5_deal_ledger, mt5_day_pnl
             from services.mt5_client import (
                 Mt5AccountMismatchError,
                 Mt5ClientError,
@@ -5581,6 +5614,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
                         floors=_mt5_unit.floors,
                     )
+                    if is_key_mode:
+                        # D-15: the deal ledger's P&L per NAV day, for the days the TWR drops.
+                        _day_pnl_usd = mt5_day_pnl(
+                            _mt5_deals,
+                            server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+                        )
+                        if not _day_pnl_usd.empty:
+                            # CR-01: the level ``reconstruct_nav_and_twr`` rolled from, the
+                            # byte-identical ``anchor - upnl`` (the balance), on the last NAV day.
+                            _realized_terminal = (
+                                _day_pnl_usd.index[-1],
+                                _mt5_equity - (_mt5_equity - _mt5_balance),
+                            )
             except Mt5DealClassificationError as exc:
                 _scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_strategy_analytics_failed(
@@ -6045,6 +6091,51 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         if _coverage_flags.get("flow_coverage_incomplete"):
             meta["flow_coverage_incomplete"] = True
 
+    # R2-WR-02 (167.1.2.2 round 2): the ccxt key-mode path's realized terminal. For a ccxt
+    # venue the writer rolled its NAV back from ``equity - open_unrealized_usd`` (OKX subtracts
+    # the real wedge above; Bybit and Binance passed 0.0), on the last NAV day, so its stored
+    # returns are on the realized basis exactly as MT5's are. Store that same level and day, so
+    # the compose rolls from it rather than from the live equity (which would shift every level
+    # before the anchor day by U / G and skew the D-06 book-return weights). The expression is
+    # the one ``reconstruct_nav_and_twr`` evaluates (``terminal_nav = anchor - upnl``) on the
+    # same ``equity`` the combine received, and only where the combine used it as the anchor
+    # (``trades_to_daily_returns_with_status``: a balance above the dust floor).
+    #
+    # Gated on a non-zero wedge: with none, the terminal IS the anchor and the replay already
+    # rolls from it, so storing it would only add a way to disagree with the returns' last day.
+    # Gated on the last NAV day having a stored return: a day the TWR drops (a guard NaN) is
+    # not a csv row, and a ccxt key stores no dropped-day P&L to bring it back, so the compose's
+    # last day would not be the terminal's and the key would read ``key_inputs_mismatch`` for a
+    # reason that is not a race. That case keeps the shifted levels of an older row, and says so.
+    # sFOX needs none of this: its NAV is the observed ``usd_value`` series, the anchor is its
+    # last point and ``open_unrealized_usd`` is 0.0, so writer and replay share one level.
+    if (
+        is_key_mode
+        and venue not in _NATIVE_RETURNS_VENUES
+        and _realized_terminal is None
+        and not returns.empty
+        and not balance_error
+        and equity is not None
+        and math.isfinite(float(equity))
+        and float(equity) > DUST_NAV_FLOOR
+        and math.isfinite(float(open_unrealized_usd))
+        and float(open_unrealized_usd) != 0.0
+    ):
+        _ccxt_terminal_usd = float(equity) - float(open_unrealized_usd)
+        # A non-positive terminal would make the replay refuse the whole allocator
+        # (``NavReconstructionError``, permanent), which is worse than one key's shifted
+        # levels; such a key keeps the older-row behaviour, and says so.
+        if math.isfinite(float(returns.iloc[-1])) and _ccxt_terminal_usd > 0.0:
+            _realized_terminal = (returns.index[-1], _ccxt_terminal_usd)
+        else:
+            logger.warning(
+                "derive_broker_dailies: ccxt key-mode realized terminal not stored for "
+                "api_key %s (venue=%s): the last NAV day has no stored return or the "
+                "realized terminal is not positive, so the open-position wedge stays "
+                "inside this key's earlier levels",
+                api_key_id, venue,
+            )
+
     async def _run_key_mode_compose_epilogue() -> None:
         # ── 115.1 RD-3 OPTION B — key-mode compose epilogue ──────────────────
         # This derive ALREADY crawled the real external flows and read the live
@@ -6143,6 +6234,27 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             "anchor_asof": datetime.now(timezone.utc).isoformat(),
             "venue": venue,
         }
+        # 167.1.2.2 D-15 — ADDITIVE optional fields; a reader that does not know them, and
+        # a row written before them, are both fine (the compose reads a missing field as no
+        # dropped-day P&L and composes as before). No payload version exists on this row,
+        # so none is bumped. ``dropped_day_pnl`` holds the actual P&L of each day the TWR
+        # left out of the stored returns (the funding day, a flow-dominated day): those
+        # days have no return but their P&L is already inside the account's NAV.
+        if _day_pnl_usd is not None:
+            from services.allocator_equity_derive import dropped_day_pnl_payload
+
+            _key_inputs_payload["dropped_day_pnl"] = dropped_day_pnl_payload(
+                returns, _day_pnl_usd
+            )
+        if _realized_terminal is not None:
+            # CR-01: the writer's own terminal, on its own day. The compose rolls the
+            # stored returns back from it, so the zero-start verdict and every historical
+            # level are independent of the open position at the moment of this derive.
+            from services.allocator_equity_derive import realized_terminal_payload
+
+            _key_inputs_payload.update(realized_terminal_payload(*_realized_terminal))
+        if _native_inception_verdict is not None:
+            _key_inputs_payload["native_inception"] = _native_inception_verdict
 
         def _persist_key_inputs(
             payload: dict[str, Any] = _key_inputs_payload,
@@ -11310,10 +11422,14 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
 
     from services.allocator_equity_compose import compose_allocator_equity
     from services.allocator_equity_derive import (
+        FULL_HISTORY_VENUES,
         SHARED_ACCOUNT_KINDS,
         DegradeReason,
         account_groups,
         eligible_key_predicate,
+        read_dropped_day_pnl,
+        read_realized_terminal,
+        stitch_dropped_day_pnl,
         stitch_shared_account,
         working_holder_predicate,
     )
@@ -11358,6 +11474,28 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     key_rows = await db_execute(_load_keys)
     eligible_ids = {r["id"] for r in key_rows if eligible_key_predicate(r)}
     rows_by_id = {r["id"]: r for r in key_rows}
+
+    # R2-WR-01 (167.1.2.2 round 2): the key_inputs rows are read BEFORE the returns, and
+    # that order is the point. A key-mode derive writes a key's csv_daily_returns first and
+    # its key_inputs row last, with no transaction between the two. Read in that same order
+    # (returns, then inputs) the pair can be skewed either way, and a skew the compose could
+    # not tell from corruption was stored as a blocking verdict. Read in the opposite order,
+    # a key_inputs row that is visible here means its returns were already written when we
+    # read them below, so the only skew left is the one a derive that is still mid-write
+    # leaves: returns NEWER than the inputs. That one is recognised (below) and retried.
+    def _load_key_inputs() -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            supabase.table("allocator_equity_derived")
+            .select("kind,payload")
+            .eq("allocator_id", allocator_id)
+            .like("kind", "key_inputs:%")
+            .execute()
+            .data
+            or []
+        )
+
+    ki_rows = await db_execute(_load_key_inputs)
 
     # D-01 / D-04 / D-18: one exchange account is ONE counted key. Keys that read
     # one account form a group (account_groups: a holder plus every key marked
@@ -11503,20 +11641,6 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         duplicate_counted_once = duplicate_counted_once or "duplicate" in kinds
     counted_ids = eligible_ids - excluded_shared
     counted_rows = [row for row in key_rows if row["id"] in counted_ids]
-
-    def _load_key_inputs() -> list[dict[str, Any]]:
-        return cast(
-            list[dict[str, Any]],
-            supabase.table("allocator_equity_derived")
-            .select("kind,payload")
-            .eq("allocator_id", allocator_id)
-            .like("kind", "key_inputs:%")
-            .execute()
-            .data
-            or []
-        )
-
-    ki_rows = await db_execute(_load_key_inputs)
 
     # WR-R2-02: which departed keys can be levelled is decided BEFORE the D-09
     # rule, from the same key_inputs rows the compose reads. A departed key
@@ -11754,6 +11878,14 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     key_inputs_ids: set[str] = set()
     # SFH-R2-03: a stitch source's flows, when its key_inputs row is usable.
     source_flows: dict[str, list[ExternalFlow]] = {}
+    # 167.1.2.2 D-15: the P&L of the days each key's TWR left out of its stored
+    # returns ({ISO day: USD}). An older row has none and composes as before.
+    dropped_pnl_by_key: dict[str, dict[str, float]] = {}
+    source_dropped_pnl: dict[str, dict[str, float]] = {}
+    # CR-01: ``(ISO day, USD)`` — the level each key's NAV was rolled back from by its
+    # writer. An older row has none and is replayed from its live anchor as before. A
+    # stitch source needs none: the account's terminal is the counted (newest) key's.
+    realized_terminal_by_key: dict[str, tuple[str, float]] = {}
     orphan_kinds: list[str] = []
     # M3: the JSONB→python coercions below (float(usd_signed), float(anchor_usd))
     # sit OUTSIDE the compose NavReconstructionError catch — a corrupt persisted
@@ -11787,6 +11919,10 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                         for _f in (departed_payload.get("flows") or [])
                     ]
                     anchors_by_key[api_key_id] = float(departed_payload["anchor_usd"])
+                    dropped_pnl_by_key[api_key_id] = read_dropped_day_pnl(departed_payload)
+                    _departed_terminal = read_realized_terminal(departed_payload)
+                    if _departed_terminal is not None:
+                        realized_terminal_by_key[api_key_id] = _departed_terminal
                 continue
             if api_key_id not in counted_ids:
                 # A shared-account key left out by the group resolution: still
@@ -11809,6 +11945,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                         )
                         for _f in (source_payload.get("flows") or [])
                     ]
+                    source_dropped_pnl[api_key_id] = read_dropped_day_pnl(source_payload)
                 continue
             key_inputs_ids.add(api_key_id)
             payload = row.get("payload") or {}
@@ -11821,6 +11958,10 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 )
                 for _f in (payload.get("flows") or [])
             ]
+            dropped_pnl_by_key[api_key_id] = read_dropped_day_pnl(payload)
+            _terminal = read_realized_terminal(payload)
+            if _terminal is not None:
+                realized_terminal_by_key[api_key_id] = _terminal
             _anchor = payload.get("anchor_usd")
             anchors_by_key[api_key_id] = None if _anchor is None else float(_anchor)
             if _anchor is None:
@@ -11831,6 +11972,59 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                     null_anchor_reasons[api_key_id] = _reason
     except (ValueError, TypeError, KeyError) as exc:
         return await _permanent_corrupt_input(exc)
+
+    # R2-WR-01 (167.1.2.2 round 2): a counted key whose stored returns run PAST the day its
+    # key_inputs row says its realized terminal sits on. The derive writes the returns, then
+    # the inputs; with the inputs read first (above) this is exactly the state a derive that
+    # is still between those two writes leaves, and it is what moving the last NAV day
+    # forward does on nearly every daily run. It is a read race, not a verdict about the
+    # data: composing it would persist a blocking ``key_inputs_mismatch`` that nothing heals
+    # until that key's next derive, because the sibling's own corrective compose request is
+    # dropped by ``compute_jobs_one_inflight_per_kind_allocator`` while this job is 'running'.
+    #
+    # So the job ends transient instead, and the queue's backoff (30 s, then 2 min) re-reads
+    # after the sibling's inputs have landed. 'failed_retry' is outside that index's
+    # predicate, so a request that arrives while this job waits is enqueued as its own
+    # pending twin (164.9.3, claim_pair_pre_rank_exclusion) rather than lost. A mismatch
+    # that outlives the retries is a genuine one: on the last attempt the compose runs on
+    # what is stored and the replay's own check blocks it, loudly, as it did before.
+    # The opposite skew (inputs NEWER than the returns) cannot come from a race given the
+    # read order, so it is never retried and blocks at once.
+    # The stored row, if any, is left alone: yesterday's curve is a truthful older reading.
+    lagging_inputs = [
+        k
+        for k in counted_ids
+        if k in realized_terminal_by_key
+        and k in last_return_day
+        and last_return_day[k] > realized_terminal_by_key[k][0]
+    ]
+    if lagging_inputs:
+        _attempts = int(job.get("attempts") or 0)
+        _max_attempts = int(job.get("max_attempts") or 3)
+        if _attempts < _max_attempts:
+            # Counts only (no key id, no day, no USD — T-167.1.2-22).
+            logger.warning(
+                "derive_allocator_equity: %d key(s) of allocator %s have returns newer "
+                "than their key_inputs row (a sibling derive is between its two writes) "
+                "— ending transient so the retry re-reads (attempt %d of %d)",
+                len(lagging_inputs), allocator_id, _attempts, _max_attempts,
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=(
+                    f"derive_allocator_equity: {len(lagging_inputs)} key(s) have returns "
+                    "newer than their key_inputs row — a sibling derive is mid-write; "
+                    "retrying so the compose reads a consistent pair"
+                ),
+                error_kind="transient",
+            )
+        logger.warning(
+            "derive_allocator_equity: %d key(s) of allocator %s still have returns newer "
+            "than their key_inputs row on the last attempt (%d of %d) — composing what is "
+            "stored; the curve will read %s",
+            len(lagging_inputs), allocator_id, _attempts, _max_attempts,
+            DegradeReason.KEY_INPUTS_MISMATCH.value,
+        )
 
     # SFH-R2-03: join each stitched account's older members onto its kept key.
     stitched_accounts = 0
@@ -11848,6 +12042,12 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         if stitched is None:
             truncated_accounts += 1
             continue
+        # D-15: the dropped days follow the same ownership as the flows.
+        dropped_pnl_by_key[kept_id] = stitch_dropped_day_pnl(
+            [source_returns[k] for k in source_ids] + [kept_series],
+            [source_dropped_pnl.get(k, {}) for k in source_ids]
+            + [dropped_pnl_by_key.get(kept_id, {})],
+        )
         returns_by_key[kept_id], flows_by_key[kept_id] = stitched
         stitched_accounts += 1
     if truncated_accounts:
@@ -11961,6 +12161,21 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             ]
             or None,
             departed_end_by_key=departed_end_by_key or None,
+            # D-13: the venue is known here and not in the pure compose. A key on a
+            # venue whose history reaches the account's start gets the zero-start
+            # check on its opening flows instead of the positional rule.
+            full_history_keys={
+                str(row["id"])
+                for row in key_rows
+                if str(row.get("exchange") or "").strip().lower() in FULL_HISTORY_VENUES
+            },
+            # D-15: the P&L of the days the TWR left out of the stored returns. An
+            # older key_inputs row has none, and its key composes as before.
+            dropped_day_pnl_by_key=dropped_pnl_by_key,
+            # CR-01: the level each writer rolled its NAV back from. The replay rolls
+            # the stored returns back from it, so the open position at the moment of the
+            # derive neither shifts a level nor moves the zero-start verdict.
+            realized_terminal_by_key=realized_terminal_by_key,
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3

@@ -115,6 +115,13 @@ class DegradeReason(str, Enum):
     UNCLASSIFIED_ROTATION = "unclassified_rotation"
     EXCLUSIVE_FILL = "exclusive_fill"
     OUT_OF_WINDOW_FLOW = "out_of_window_flow"
+    # 167.1.2.2 D-13: a full-history venue's opening deposit run (consecutive flow
+    # days ending the day before the first return day) after which the replay
+    # implies capital that was NOT near zero before the first flow. The curve starts
+    # from money the ledger never funded, so the early levels are suspect. This is
+    # the honest name for the fact; ``out_of_window_flow`` says only where a flow
+    # sits, not whether the account reconciles to a zero start.
+    INCEPTION_UNRECONCILED = "inception_unreconciled"
     DROPPED_KEY = "dropped_key"
     # 167.1.2 C2 silent-failure SFH-10: a book-return day whose level, return or
     # sum was non-finite. It was reported under the benign
@@ -132,6 +139,14 @@ class DegradeReason(str, Enum):
     # book's return with frozen capital. Round 1 raised a benign flag of the
     # same name that nothing reads, so the book read "ready".
     SHARED_ACCOUNT_NO_WORKING_KEY = "shared_account_no_working_key"
+    # 167.1.2.2 round-1 review (SFH M2): a key's ``key_inputs`` row and its stored
+    # return series describe different derive runs. The dropped-day P&L the row carries
+    # sits on a day that now HAS a return, so it could not be used and was ignored. The
+    # two writes are not atomic, so a compose between them reads a stale/fresh mix, and
+    # the levels it rebuilds from it are not the writer's. Counted in
+    # ``dropped_day_pnl_ignored_days``; blocking because the curve is suspect, not
+    # because any one number is wrong.
+    KEY_INPUTS_MISMATCH = "key_inputs_mismatch"
 
 
 # The BLOCKING subset: any of these present -> ``is_trustworthy`` is False.
@@ -140,10 +155,12 @@ _BLOCKING_REASONS: frozenset[DegradeReason] = frozenset(
         DegradeReason.UNCLASSIFIED_ROTATION,
         DegradeReason.EXCLUSIVE_FILL,
         DegradeReason.OUT_OF_WINDOW_FLOW,
+        DegradeReason.INCEPTION_UNRECONCILED,
         DegradeReason.DROPPED_KEY,
         DegradeReason.NONFINITE_RETURN,
         DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED,
         DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY,
+        DegradeReason.KEY_INPUTS_MISMATCH,
     }
 )
 
@@ -694,6 +711,25 @@ def _finish_segment(keys: frozenset[str], days: list[str]) -> Segment:
 _SELF_CHECK_ABS = 1e-6
 _SELF_CHECK_REL = 1e-9
 
+# 167.1.2.2 D-13 / D-14 (founder 2026-10-08): the zero-start band. On a venue whose
+# history reaches the account's start, an opening run of pre-window flows is the
+# normal funding shape iff the capital the replay implies existed BEFORE the first
+# flow is within this fraction of the level on the window's first return day. The
+# founder chose 0.01% (tighter than the 1% recommended); do not loosen it to make a
+# key pass, the verdict on a key that lands outside is the point of the check.
+_INCEPTION_ZERO_START_BAND = 1e-4
+
+# Venues whose history reaches the account's start, by the code's own statements:
+#   * deribit: ``NativeLedger(full_history=True)`` (deribit_ingest) — the txn-log
+#     reaches inception, and native_nav's §5 inception gate enforces it.
+#   * mt5: ``combine_mt5_deal_ledger`` — ``history_deals_get`` is a FULL-HISTORY
+#     fetch (epoch 0 -> now, mt5_read.read_mt5_deal_ledger), stamped
+#     ``ledger_complete``. It has NO §5 inception gate of its own, so the zero-start
+#     check below is the only inception evidence an MT5 key gets.
+# Every other venue keeps the positional OUT_OF_WINDOW_FLOW rule unchanged: sfox is a
+# sampled NAV, and the ccxt venues carry retention caps (OKX ~90d, Bybit ~365d).
+FULL_HISTORY_VENUES: frozenset[str] = frozenset({"deribit", "mt5"})
+
 
 @dataclass(frozen=True)
 class KeyEquity:
@@ -810,6 +846,10 @@ def replay_key_equity(
     returns: pd.Series,
     flows: Sequence[Any] | None,
     anchor: float | None,
+    *,
+    history_reaches_inception: bool = False,
+    dropped_day_pnl: Mapping[str, float] | None = None,
+    realized_terminal: tuple[str, float] | None = None,
 ) -> KeyEquity:
     """Reconstruct one key's $-equity series BACKWARD from ``anchor`` (STITCH-04).
 
@@ -826,6 +866,57 @@ def replay_key_equity(
     so a first-day flow does NOT separately move the base. It is self-consistent
     (the forward self-check absorbs it identically) and correct for level
     reconstruction, but has no distinguishable effect on ``equity[0]``.
+
+    167.1.2.2 D-13 / D-14 — OPENING FLOWS. A return series starts the day AFTER the
+    account's first ledger event (the funding day's return is undefined, the prior
+    capital being zero), so on a venue whose history reaches the account's start
+    (``history_reaches_inception``, see ``FULL_HISTORY_VENUES``) the first flows
+    legitimately sit before the first return day. Position alone cannot tell that
+    from a suspect flow, so such a run is judged by the invariant it implies: the
+    capital before its first flow, ``equity - pnl - F`` on that day (the day has no
+    return; ``pnl`` is its stored P&L, see D-15 below), must be within
+    ``_INCEPTION_ZERO_START_BAND`` of the level on the first return day. Within the
+    band the run is the normal opening shape and
+    does not block; outside it the key blocks as ``INCEPTION_UNRECONCILED``. The run
+    is the consecutive calendar days of flows that END the day before the first
+    return day. Every other flow outside the return window — an earlier,
+    non-adjacent one, or one after the last return day — stays
+    ``OUT_OF_WINDOW_FLOW``, and so does every out-of-window flow on a venue without
+    full history (the default).
+
+    167.1.2.2 D-15 — DROPPED DAYS. The TWR writer leaves a day out of the stored
+    returns when its prior capital cannot be a denominator (the funding day under
+    ``negative_nav_guard``, a day whose flow dominates the prior NAV). Such a day has
+    no return but it still has P&L, and that P&L is already inside the venue's NAV.
+    ``dropped_day_pnl`` ({ISO day: P&L in USD}, stored by the derive) carries it. The
+    replay then uses it on those days instead of reading them as flat (``r = 0``),
+    which moved the day's P&L into every earlier level and, on the funding day, into
+    the zero-start check below as "missing start capital". A day that also has a
+    return row keeps the return and its stored P&L is ignored (counted in the
+    ``dropped_day_pnl_ignored_days`` flag, and the key degrades as ``KEY_INPUTS_MISMATCH``,
+    blocking): the two cannot both describe it, so the row and the returns come from
+    different derive runs. Absent or empty (every row written before D-15) behaves
+    exactly as before.
+
+    167.1.2.2 round-1 review CR-01 — THE WRITER'S OWN BASIS. The venue writers do not
+    roll their NAV from the live equity ``anchor``: MT5 rolls from ``anchor - upnl`` (the
+    balance), Deribit from ``terminal_native - upnl_native`` per currency at the mark of
+    the last ledger day. Everything stored (the returns, the dropped-day P&L) lives on
+    that REALIZED basis. Rolling it back from the live anchor shifts every level by
+    ``U / G(t -> T)`` (``U`` = the open uPnL plus, on Deribit, any coin mark move since
+    the last ledger day), and makes the zero-start check measure ``U`` instead of the
+    inception: a clean account reads trustworthy one day and untrustworthy the next,
+    depending on whether a position is open when the derive runs.
+    ``realized_terminal`` = ``(ISO day, USD)`` is that terminal level, stored by the
+    derive. When it is given and its day is the last day of the series, the roll starts
+    from it, so every historical level (and the inception residual) is the writer's own,
+    independent of the anchor and of any open position. The anchor then enters ONLY on
+    the last day: the curve's last point is the live equity, and ``U`` is a step on that
+    one day, never spread back across history (the writer's own endpoint convention). A
+    row without it (written before this) rolls from the anchor exactly as before. A
+    terminal day that is not the series' last day means the row and the returns come
+    from different derive runs: the roll falls back to the anchor and the key degrades
+    as ``KEY_INPUTS_MISMATCH``.
 
     Structural refusals raise ``NavReconstructionError`` (permanent, mirroring
     ``nav_twr``): a return factor ``1 + r_t <= 0`` (an un-replayable ≤ −100% day)
@@ -852,6 +943,12 @@ def replay_key_equity(
             "NaN/inf terminal equity (distinct from the flow-dominance guard)"
         )
 
+    if realized_terminal is not None and not math.isfinite(float(realized_terminal[1])):
+        raise NavReconstructionError(
+            "allocator equity replay: non-finite realized terminal — refusing a "
+            "data-quality NaN/inf terminal equity"
+        )
+
     # C-idx: enforce the ISO-day-string index contract before any day keying.
     _assert_iso_day_index(returns.index, "allocator equity replay")
 
@@ -869,8 +966,10 @@ def replay_key_equity(
 
     fbd = _flows_by_day(flows)
     r = {str(d): float(v) for d, v in returns.items()}
-    # HIGH-1: union flow days into the return index BEFORE the roll.
-    days = sorted(set(r) | set(fbd))
+    pnl_by_day, ignored_pnl_days = _dropped_pnl_by_day(dropped_day_pnl, r)
+    # HIGH-1: union flow days into the return index BEFORE the roll. D-15: so are the
+    # dropped days, which carry P&L and no return.
+    days = sorted(set(r) | set(fbd) | set(pnl_by_day))
     n = len(days)
     if n == 0:
         return KeyEquity(
@@ -884,12 +983,22 @@ def replay_key_equity(
     # consumer can refuse when nonzero. Return-day window bounds the check.
     ret_days = sorted(r)
     out_of_window_flows = 0
+    opening_run: list[str] = []
     if ret_days:
         lo, hi = ret_days[0], ret_days[-1]
-        out_of_window_flows = sum(1 for fd in fbd if fd < lo or fd > hi)
+        if history_reaches_inception:
+            opening_run = _opening_flow_run(fbd, lo)
+        out_of_window_flows = sum(1 for fd in fbd if fd < lo or fd > hi) - len(opening_run)
 
     equity = [0.0] * n
-    equity[n - 1] = float(anchor)
+    # CR-01: start from the writer's realized terminal when it is on the series' last
+    # day; otherwise from the live anchor (an older row, or a row/returns mismatch).
+    terminal_level = float(anchor)
+    from_realized = False
+    if realized_terminal is not None and realized_terminal[0] == days[-1]:
+        terminal_level = float(realized_terminal[1])
+        from_realized = True
+    equity[n - 1] = terminal_level
     for t in range(n - 1, 0, -1):
         day_t = days[t]
         factor = 1.0 + r.get(day_t, 0.0)
@@ -900,7 +1009,9 @@ def replay_key_equity(
                 f"allocator equity replay: non-positive return factor at "
                 f"day-index {t} of {n} — cannot roll backward through a ≤−100% day"
             )
-        equity[t - 1] = (equity[t] - fbd.get(day_t, 0.0)) / factor
+        equity[t - 1] = (
+            equity[t] - fbd.get(day_t, 0.0) - pnl_by_day.get(day_t, 0.0)
+        ) / factor
 
     bad = sum(1 for e in equity if not (e > 0.0))
     if bad:
@@ -911,14 +1022,212 @@ def replay_key_equity(
         )
 
     series = pd.Series(equity, index=days, name=getattr(returns, "name", None))
-    _assert_forward_agreement(series, r, fbd, days)
-    flags = {"out_of_window_flows": out_of_window_flows} if out_of_window_flows else {}
-    reasons = (
-        frozenset({DegradeReason.OUT_OF_WINDOW_FLOW})
-        if out_of_window_flows
-        else frozenset()
-    )
-    return KeyEquity(series, None, flags, degrade_reasons=reasons)
+    _assert_forward_agreement(series, r, fbd, days, pnl_by_day)
+    flags: dict[str, Any] = {}
+    reasons: set[DegradeReason] = set()
+    if realized_terminal is not None and not from_realized:
+        flags["realized_terminal_day_mismatch"] = True
+        reasons.add(DegradeReason.KEY_INPUTS_MISMATCH)
+    if from_realized and equity[n - 1] != float(anchor):
+        # The live equity enters on the anchor day only. The check above ran on the
+        # writer's own levels (the step into the last day is the writer's identity); this
+        # is the one point the open position and any later mark move are added to.
+        if not (float(anchor) > 0.0):
+            raise NavReconstructionError(
+                "allocator equity replay: non-positive reconstructed equity on 1 of "
+                f"{n} day(s) — a flow dominates prior capital (refusing to fabricate "
+                "a floor)"
+            )
+        series = series.copy()
+        series.iloc[n - 1] = float(anchor)
+    if pnl_by_day:
+        flags["dropped_day_pnl_days"] = len(pnl_by_day)
+    if ignored_pnl_days:
+        flags["dropped_day_pnl_ignored_days"] = ignored_pnl_days
+        # M2: a stored P&L that sits on a day with a return is a data-consistency
+        # fault (the row and the returns are from different runs), not a note.
+        reasons.add(DegradeReason.KEY_INPUTS_MISMATCH)
+    if out_of_window_flows:
+        flags["out_of_window_flows"] = out_of_window_flows
+        reasons.add(DegradeReason.OUT_OF_WINDOW_FLOW)
+    if opening_run:
+        # The capital the replay implies before the run's first flow. That day has
+        # no return row (it precedes the first return day): its level is the capital
+        # before it, plus its P&L, plus its flow. D-15: the P&L is the stored one
+        # (the funding day's trading result is real and is inside the level), so the
+        # residue is the capital the ledger never funded, not a day's P&L. Without a
+        # stored P&L (a row from before D-15) it is 0 and this is ``equity - F``.
+        first_open = opening_run[0]
+        implied_start = (
+            equity[days.index(first_open)]
+            - fbd[first_open]
+            - pnl_by_day.get(first_open, 0.0)
+        )
+        level_first_return = equity[days.index(ret_days[0])]
+        if abs(implied_start) > _INCEPTION_ZERO_START_BAND * level_first_return:
+            flags["inception_unreconciled_flows"] = len(opening_run)
+            reasons.add(DegradeReason.INCEPTION_UNRECONCILED)
+        else:
+            flags["opening_flows_reconciled"] = len(opening_run)
+    return KeyEquity(series, None, flags, degrade_reasons=frozenset(reasons))
+
+
+def dropped_day_pnl_payload(
+    returns: pd.Series, day_pnl: pd.Series
+) -> list[dict[str, Any]]:
+    """The ``key_inputs`` payload rows for D-15: one ``{utc_day_iso, pnl_usd}`` per
+    day the TWR left out of the stored returns (a NaN in ``returns``) that has a P&L.
+
+    ``returns`` is the series the derive is about to persist, NaN where it writes no
+    row; ``day_pnl`` is the venue's actual P&L per NAV day. A NaN day absent from
+    ``day_pnl`` has nothing to store and is left out (the compose then reads it as
+    flat, as before). A non-finite P&L is refused: JSONB cannot hold it, and a poison
+    value would fail the upsert and loop the derive."""
+    rows: list[dict[str, Any]] = []
+    for ts in returns.index[returns.isna().to_numpy()]:
+        if ts not in day_pnl.index:
+            continue
+        amount = float(day_pnl.loc[ts])
+        if not math.isfinite(amount):
+            raise NavReconstructionError(
+                "key_inputs dropped-day P&L: non-finite amount — refusing to persist it"
+            )
+        rows.append({"utc_day_iso": pd.Timestamp(ts).date().isoformat(), "pnl_usd": amount})
+    return rows
+
+
+def read_dropped_day_pnl(payload: Mapping[str, Any]) -> dict[str, float]:
+    """{ISO day: P&L in USD} from a ``key_inputs`` payload; ``{}`` when the row
+    predates D-15 or has none to carry. The reader of the additive ``dropped_day_pnl``
+    field: an absent or null field is the old row, not an error. A present but
+    malformed one raises ``ValueError``/``TypeError``/``KeyError`` like the neighbouring
+    ``flows`` parse, so the job disposes it as a corrupt input instead of reading a
+    guess. Malformed includes a boolean or non-numeric amount and a repeated day."""
+    raw = payload.get("dropped_day_pnl")
+    if raw is None:
+        return {}
+    out: dict[str, float] = {}
+    for row in raw:
+        day = date.fromisoformat(str(row["utc_day_iso"])).isoformat()
+        raw_amount = row["pnl_usd"]
+        # ``float(True) == 1.0``: a JSON boolean would be read as a dollar. The MT5
+        # flow channel already refuses it (``_fold_mt5_deals``); so does this one.
+        if isinstance(raw_amount, bool) or not isinstance(raw_amount, (int, float)):
+            raise TypeError("key_inputs dropped_day_pnl: non-numeric amount")
+        amount = float(raw_amount)
+        if not math.isfinite(amount):
+            raise ValueError("key_inputs dropped_day_pnl: non-finite amount")
+        # The writer emits one row per day. A repeated day is corruption, and
+        # summing it would move every earlier level by the duplicate: refuse it
+        # rather than read a guess.
+        if day in out:
+            raise ValueError("key_inputs dropped_day_pnl: duplicate day")
+        out[day] = amount
+    return out
+
+
+def realized_terminal_payload(day: Any, usd: float) -> dict[str, Any]:
+    """The ``key_inputs`` fields for CR-01: the level the venue writer rolled its NAV from
+    (``realized_terminal_usd``) and the NAV day it sits on (``realized_terminal_day``).
+
+    ``usd`` is the writer's REALIZED terminal: MT5 ``anchor - upnl`` (the balance),
+    Deribit ``terminal_native - upnl_native`` per currency at the last ledger day's mark.
+    It differs from ``anchor_usd`` (the live equity) by the open uPnL and, on Deribit, by
+    any coin mark move since that day. A non-finite value is refused: JSONB cannot hold
+    it, and a poison value would fail the upsert and loop the derive."""
+    amount = float(usd)
+    if not math.isfinite(amount):
+        raise NavReconstructionError(
+            "key_inputs realized terminal: non-finite amount — refusing to persist it"
+        )
+    return {
+        "realized_terminal_usd": amount,
+        "realized_terminal_day": pd.Timestamp(day).date().isoformat(),
+    }
+
+
+def read_realized_terminal(payload: Mapping[str, Any]) -> tuple[str, float] | None:
+    """``(ISO day, USD)`` from a ``key_inputs`` payload; ``None`` when the row predates
+    CR-01 (both fields absent or null), which the replay then composes from the live
+    anchor exactly as before. The two fields travel together: one without the other, a
+    boolean or non-numeric amount, a non-finite amount or a bad day raises
+    ``ValueError``/``TypeError`` like the neighbouring parses, so the job disposes it as a
+    corrupt input instead of reading a guess."""
+    raw_day = payload.get("realized_terminal_day")
+    raw_usd = payload.get("realized_terminal_usd")
+    if raw_day is None and raw_usd is None:
+        return None
+    if raw_day is None or raw_usd is None:
+        raise ValueError("key_inputs realized terminal: day and amount must come together")
+    if isinstance(raw_usd, bool) or not isinstance(raw_usd, (int, float)):
+        raise TypeError("key_inputs realized terminal: non-numeric amount")
+    amount = float(raw_usd)
+    if not math.isfinite(amount):
+        raise ValueError("key_inputs realized terminal: non-finite amount")
+    return date.fromisoformat(str(raw_day)).isoformat(), amount
+
+
+def stitch_dropped_day_pnl(
+    returns_links: Sequence[pd.Series],
+    pnl_links: Sequence[Mapping[str, float]],
+) -> dict[str, float]:
+    """The dropped-day P&L of a stitched shared account, by the SAME ownership rule
+    ``stitch_shared_account`` applies to flows: each member owns the days from its own
+    first return day up to, not including, the next member's; the last member owns
+    every day from its own first day on; the FIRST member also keeps its days before
+    its first return day (the funding day is one). ``links`` are ordered as for
+    ``stitch_shared_account`` (first return day, the counted member last). A day is
+    taken from one member only, so a newer key that crawls back over an older key's
+    days does not count its P&L twice."""
+    firsts = [min(str(d) for d in series.index) for series in returns_links]
+    out: dict[str, float] = {}
+    for index, pnl in enumerate(pnl_links):
+        own_first = firsts[index]
+        next_first = firsts[index + 1] if index + 1 < len(firsts) else None
+        for day, amount in pnl.items():
+            if next_first is not None and day >= next_first:
+                continue
+            if index > 0 and day < own_first:
+                continue
+            out[day] = out.get(day, 0.0) + float(amount)
+    return out
+
+
+def _dropped_pnl_by_day(
+    dropped_day_pnl: Mapping[str, float] | None, returns_by_day: Mapping[str, float]
+) -> tuple[dict[str, float], int]:
+    """The usable dropped-day P&L, and how many entries were not usable.
+
+    An entry on a day that has a return row is not used: the return already says
+    what the day did, and a P&L added to it would count the day twice. Counted, not
+    silent. A non-finite amount is refused like a non-finite flow (D-15)."""
+    usable: dict[str, float] = {}
+    ignored = 0
+    for day, amount in (dropped_day_pnl or {}).items():
+        value = float(amount)
+        if not math.isfinite(value):
+            raise NavReconstructionError(
+                "allocator equity replay: non-finite dropped-day P&L — refusing a "
+                "data-quality NaN/inf amount"
+            )
+        if str(day) in returns_by_day:
+            ignored += 1
+            continue
+        usable[str(day)] = value
+    return usable, ignored
+
+
+def _opening_flow_run(fbd: Mapping[str, float], first_return_day: str) -> list[str]:
+    """The consecutive calendar days of flows ending the day BEFORE
+    ``first_return_day``, oldest first (empty when that day carries no flow).
+    Adjacency is by calendar day, so a one-day gap ends the run (D-13)."""
+    run: list[str] = []
+    day = date.fromisoformat(first_return_day) - timedelta(days=1)
+    while day.isoformat() in fbd:
+        run.append(day.isoformat())
+        day -= timedelta(days=1)
+    run.reverse()
+    return run
 
 
 def _assert_forward_agreement(
@@ -926,15 +1235,30 @@ def _assert_forward_agreement(
     r: Mapping[str, float],
     fbd: Mapping[str, float],
     days: Sequence[str],
+    pnl: Mapping[str, float] | None = None,
 ) -> None:
     """DQ-02 construction self-check (``nav_twr.reconcile_flow_residual`` spirit):
-    replay FORWARD from day-0 and assert byte-agreement with the backward roll.
-    Reddens ONLY on a roll-vs-identity code divergence — never on an economically
-    wrong anchor (which shifts every level together). Counts/day-indices only."""
+    every adjacent pair of rolled levels must satisfy the FORWARD identity
+    ``equity_t = equity_{t-1} * (1 + r_t) + F_t + P_t`` inside the band (``P_t`` the
+    stored P&L of a dropped day, D-15; 0 elsewhere). Reddens ONLY on
+    a roll-vs-identity code divergence, at the step where it happens — never on an
+    economically wrong anchor (which shifts every level together).
+    Counts/day-indices only.
+
+    D-12 (167.1.2.2): the check is PER STEP, from the STORED previous level. It
+    used to recompute ``equity_t`` by replaying forward from ``equity_0``, which
+    multiplies ``equity_0``'s rounding by ``equity_0 * prod(1 + r) / equity_t``.
+    After strong growth with the gains withdrawn and then a near-total withdrawal
+    that factor passed 1e7 on PROD data, and a correct roll was refused (an exact
+    rational replay from the same ``equity_0`` missed by the same order). The band
+    is unchanged."""
     vals = series.to_numpy(dtype=float)
-    fwd = float(vals[0])
     for t in range(1, len(days)):
-        fwd = fwd * (1.0 + r.get(days[t], 0.0)) + fbd.get(days[t], 0.0)
+        fwd = (
+            float(vals[t - 1]) * (1.0 + r.get(days[t], 0.0))
+            + fbd.get(days[t], 0.0)
+            + (pnl or {}).get(days[t], 0.0)
+        )
         tol = _SELF_CHECK_ABS + _SELF_CHECK_REL * abs(float(vals[t]))
         if abs(fwd - float(vals[t])) > tol:
             raise NavReconstructionError(

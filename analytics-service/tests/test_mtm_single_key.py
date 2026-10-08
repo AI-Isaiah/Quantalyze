@@ -275,6 +275,20 @@ def _base_patches(
             new=state_spy or AsyncMock(return_value=_account_state()),
         ),
         patch("services.broker_dailies.combine_native_ledger", new=combine_mock),
+        # 167.1.2.2 D-15: the key-mode epilogue also asks for the per-day P&L off the
+        # same ledger. The combine is mocked here and the ledger is a stub that cannot
+        # be valued, so the sibling is mocked with it (it is covered on real ledgers in
+        # test_allocator_equity_dropped_day_pnl.py).
+        patch(
+            "services.broker_dailies.native_ledger_day_pnl",
+            new=MagicMock(return_value=pd.Series(dtype="float64")),
+        ),
+        # CR-01 (round 1): and the realized terminal the NAV was rolled from, for the same
+        # reason; its real-ledger coverage is in test_allocator_equity_dropped_day_pnl.py.
+        patch(
+            "services.broker_dailies.native_ledger_realized_terminal",
+            new=MagicMock(return_value=None),
+        ),
         patch(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),

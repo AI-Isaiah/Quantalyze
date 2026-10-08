@@ -4,9 +4,13 @@
 
 This runbook takes the derived-allocator-equity path from **dormant** (every allocator renders the legacy snapshot curve) to **live** (trustworthy backfilled keys render the derived cash-basis curve), WITHOUT ever showing an unvalidated curve and WITHOUT re-wedging the sequential prod worker.
 
+> ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON):** the "dormant" framing above is stale (decision D-04). The derived path is no longer dormant behind a legacy curve: 167.1.2 plan 11 removed the legacy render, the SSR reader (`src/lib/queries.ts`) accepts only a version-2 trustworthy `equity_curve` row, and the alternative to a derived curve is now the rebuilding panel. The live procedure for the daily fan-out moved to `docs/runbooks/derivecron-go-live.md`; this file stays as the record of the original staged gate. Original text kept below.
+
 ## Why this document exists (the v1.11 root cause)
 
 At v1.11 close, `phase35_backfill_enqueue` fanned out 24 keys onto the **single** sequential prod worker. A slow/hanging live exchange crawl (deribit native ledger ~inception; bybit 19k rows) blocked the asyncio event loop on an `await` → `LAST_TICK_AT` froze → healthz was stale for 12 min → the 90s auto-restart never fired. Recovery: deleted the flip jobs, emptied `allocator_equity_derived` (0 curves had ever been shown), and **unscheduled the `derive-allocator-key-dailies` cron**. The derived path has been DORMANT on legacy ever since.
+
+> ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON):** "DORMANT on legacy" described the state until 2026-10-07 and no longer describes the product (decision D-04). There is no legacy curve to fall back to; a book without a version-2 trustworthy row shows the rebuilding panel, so the unscheduled cron is now the reason that panel never clears. Phase 167.1.2.2 re-registers it through `docs/runbooks/derivecron-go-live.md`, as a runbook step and never a migration (D-02). The two structural fixes listed below were verified live on PROD that day (the dedicated backfill service and the `interactive` role on the other service).
 
 Plans 123-01 and 123-02 landed the structural fixes that make go-live safe:
 
@@ -25,6 +29,8 @@ The flip is **data-driven, no flag**: `extractTrustworthyDerivedCurve` (`src/lib
 4. The SSR flip reads the persisted `is_trustworthy` at request time (no per-request live read).
 
 CI carries the committed harness + fixtures (`tests/test_e2_ground_truth_harness.py`, `src/lib/queries.test.ts`); the live legs below are founder-gated and must never be faked.
+
+> ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON):** the gate sequence above is partly superseded (decisions D-04 and D-07). Step 4 (the E2GT-01 live E2 harness) is WAIVED as a pre-gate, founder decision 2026-10-07, and registration no longer waits on it. The independent safety evidence is now the derivecron runbook's rehearsal (its Step A) and the D-06 next-morning reads, both judged on `computed_at` inside the run window. The reader rule in item 4 is unchanged except that the "otherwise legacy" branch no longer exists.
 
 ---
 
@@ -85,6 +91,8 @@ SELECT enqueue_compute_job(
 Watch, simultaneously:
 
 1. **The dedicated worker's crawl duration vs the `BROKER_CRAWL_TIMEOUT_S` (300s) bound (A1).** If a *healthy* heavy crawl legitimately exceeds 300s, **raise the env bound on the backfill service** (`BROKER_CRAWL_TIMEOUT_S`, and `SFOX_CRAWL_TIMEOUT_S` for an active sfox account) BEFORE the full enqueue — otherwise every heavy key will transient-loop and never complete (the F5 failure mode). Do NOT lower it below the observed healthy crawl time.
+
+   > ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON):** the A1 "300 s" bound named here and in the Step 3 bullet above is obsolete (decision D-04). The per-crawl bound is now `_BROKER_CRAWL_TIMEOUT_S` in `analytics-service/services/job_worker.py`, derived from the per-kind outer budget (`TIMEOUT_PER_KIND`) minus a post-crawl reserve; re-read its value there, do not trust a number in this file. The pilot this step describes was run on 2026-10-02 (one deribit key-mode derive plus its compose, no crawl-timeout retry). Whether okx, bybit and key-mode MT5 crawls fit the bound is measured by the derivecron rehearsal, not by a second pilot.
 2. **The PROD worker's healthz stays 200/fresh the entire time** — this is the FLIPRETRY-04 live proof that backfill no longer touches the prod loop.
 
 - **Verify:** the pilot key produces a `derive_allocator_equity` follow-on and an `allocator_equity_derived` row; prod healthz never went stale.
@@ -93,6 +101,8 @@ Watch, simultaneously:
 ## Step 4 — LIVE E2 ground-truth gate (E2GT-01 — founder LIVE op, `human_needed`)
 
 **This is the E2GT-01 live-acceptance run.** It is a founder LIVE op against a real read-only exchange key — it can NEVER be claimed done from CI or without the emitted evidence JSON. The Phase-127 fixture gates (below) carry the *display* proof; this step carries the *live anchor-consistency* proof that gates the FLIP.
+
+> ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON):** Step 4 is WAIVED as a pre-gate (decision D-07, founder 2026-10-07). One line each: (1) the harness cannot run for a Deribit key-mode allocator (`scripts/e2_allocator_ground_truth.py` skips it with exit 3, and its `--member` filter keys on `strategy_id` while key-mode series carry `api_key_id`); (2) the legacy fallback this gate protected is gone (167.1.2 plan 11), so an unvalidated curve can no longer "show over" a legacy one; (3) the derivecron rehearsal and the D-06 next-morning reads replace it as the safety evidence. E2GT-01 stays an after-the-fact audit item once the harness supports key-mode, and the requirement records stay open. The "E2 gate MUST be GREEN before the FLIP" sentence in item 4 below no longer binds.
 
 **1. Provision the read-only creds (Railway env only — never argv, never a tracked file).** Set on the worker service that has the allocator account's egress:
 
@@ -140,6 +150,8 @@ SELECT enqueue_derive_broker_dailies_for_allocator_keys();
 ```
 
 - **Safe to re-run:** an advisory lock (`pg_try_advisory_lock(hashtext('derive_broker_dailies_key_fanout'))`) makes concurrent runs skip; a per-`(api_key_id, UTC-date)` idempotency key + `EXCEPTION WHEN unique_violation THEN NULL` + the `compute_jobs_one_inflight_per_kind_api_key` index guarantee one in-flight `derive_broker_dailies` per key per day (pinned by the SQL gates in `supabase/tests/`).
+
+  > ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON):** "one in-flight per key per day" holds only while jobs are open (decision D-04). The idempotency key is correlation only; the sole dedup is the partial unique index over open rows. A second call AFTER the first batch finished enqueues a second full crawl for every key, so this statement is not casually repeatable. The "Only after Step 4" clause at the head of this step falls with Step 4 (D-07). Running this step by hand is the derivecron runbook's Step A (the rehearsal), which wraps it in a database-marker guard, a DB-side readback and the merge hold.
 - **Verify:** watch prod healthz stays fresh AND the dedicated worker burns the queue down. Spot-check that `allocator_equity_derived` repopulates.
 - **Abort path:** **[Step 8 — ROLLBACK]** at any sign of prod-loop starvation.
 
@@ -148,6 +160,8 @@ SELECT enqueue_derive_broker_dailies_for_allocator_keys();
 Phase 125 landed a recurring safety sweep that keeps the queue clean and, as a side effect, kills the recurring `python` fence-test CI flake at its root:
 
 - **`retention_compute_jobs_orphaned_running`** — a pg_cron job (`15 4 * * *`, 04:15 UTC, in the safe 1–22 hour band) that `DELETE`s `status='running'` rows whose `claimed_at` is older than `interval '2 hours'`. This one **lands as a MIGRATION** (`20260719120000`), safe on BOTH projects: the 2h window is ~3× the longest per-kind watchdog threshold (`process_key_long = 40 min`), so it never touches a legit in-flight prod job, while on the workerless TEST project (which has no watchdog) it clears the daily orphan accumulation.
+
+  > ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON):** this describes the older migration (decision D-04). PROD now runs the orphan sweep hourly at minute 50 and terminalizes `running` rows claimed more than 4 hours ago as `failed_final` (migration `20260817120000_retention_orphaned_running_terminalize.sql`); the daily 2-hour `DELETE` text above and the "safe 1–22 hour band" claim no longer describe PROD. The reference `cron.job` set is `scripts/prod-prober/cron-manifest.json`.
   - **TEST-first apply (plan 125-03):** the migration was MCP-applied to the TEST project `qmnijlgmdhviwzwfyzlc` BEFORE merge (so the RED-guarded SQL test asserts green there), and it **auto-applies to PROD `khslejtfbuezsmvmtsdn` at merge — the founder watches the migration land** and confirms the `retention_compute_jobs_orphaned_running` `cron.job` row appears.
   - **One-time TEST cleanup (plan 125-03):** a scoped `DELETE FROM compute_jobs WHERE status='running' AND created_at < now() - interval '1 hour'` was run on `qmnijlgmdhviwzwfyzlc` alongside the migration to green CI immediately (verified no-op at execution — the project was already clean; the recurring cron prevents re-accumulation nightly). **⚠️ TEST-ONLY — never run this snippet against a live-worker project (incl. prod `khslejtfbuezsmvmtsdn`).** Its `created_at < 1h` window is looser than the recurring cron's `claimed_at < 2h` safe predicate; on a project with a running worker it could delete a legit in-flight job before the watchdog resets it. On prod the recurring migration cron (2h/`claimed_at` window) is the only orphan-purge mechanism — this one-time snippet is exclusively for the workerless TEST project.
 - **Why the purge is a migration but the Step 6 reschedule is NOT:** the purge has **no worker-readiness dependency** — it is prod-safe the moment it applies (it only ever deletes definitively-orphaned rows). The Step 6 cron reschedule DOES have that dependency — if it auto-applied via a migration and the worker deploy were skipped, it would fan out backfill jobs onto the old unfiltered worker and re-wedge prod (see Step 6). So the purge auto-applies; the reschedule is a hand-run LIVE op gated on Steps 1–5.
@@ -168,6 +182,8 @@ SELECT cron.schedule(
 
 **⚠️ This is a founder-executed live SQL op, NOT a repo migration — on purpose.** The repo migration `20260717233529` STILL contains this schedule; the cron was UNSCHEDULED live at the v1.11 recovery, so live pg_cron state and git DIVERGE intentionally. If we instead committed a new forward migration to reschedule it, that migration would **auto-apply to PROD at merge**. If the Railway worker deploy for the same merge were then **silently skipped** (the red-main-CI skip failure mode), the cron would start fanning out backfill jobs onto the OLD, unfiltered, unwrapped worker — recreating the v1.11 wedge **verbatim**. The cron may only exist once the dedicated worker + role cutover (Steps 1–2) are proven live. So it is a hand-run SQL op gated on human verification, never an auto-applying migration.
 
+> ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON):** Step 6 moved to `docs/runbooks/derivecron-go-live.md` (its Steps B and C), decisions D-02 and D-04. The orchestrator runs it, not the founder by hand, behind a database-marker guard and a readback. The "never a migration" rule STANDS. Once Step B there has run, live pg_cron state and git agree again (the paragraph above about them diverging intentionally describes 2026-07 to 2026-10). The re-registration is followed in the same session by a manifest re-capture so the cron-drift oracle learns the job.
+
 - **Verify:** `SELECT jobname, schedule, active FROM cron.job WHERE jobname = 'derive-allocator-key-dailies';` shows the job scheduled at `30 5 * * *`.
 
 ---
@@ -175,6 +191,8 @@ SELECT cron.schedule(
 ## Step 8 — ROLLBACK (verbatim v1.11 recovery — executable at ANY step)
 
 Returns the system to the dormant-legacy state (0 user impact — the TS flip degrades to legacy on an empty/absent derived surface):
+
+> ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON):** do not use the deletes below (decisions D-04 and D-05). There is no dormant-legacy state to return to (167.1.2 plan 11), and a version-2 row is valid data. Use the derivecron runbook's Rollback instead: `cron.unschedule` by NAME behind the database-marker guard, let pending derives drain (they are the same work), then re-capture the manifest in the same session. If role isolation itself is suspect, the final paragraph of this step (`WORKER_CLAIM_ROLE=all` on the prod worker) still applies.
 
 ```sql
 -- 1. Delete in-flight/pending flip jobs.

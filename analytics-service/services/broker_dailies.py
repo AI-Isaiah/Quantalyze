@@ -67,7 +67,12 @@ from services.mt5_deals import (
     deal_cash_effect,
     deal_utc_day,
 )
-from services.native_nav import NativeLedger, reconstruct_native_nav_and_twr
+from services.native_nav import (
+    NativeLedger,
+    native_day_pnl,
+    native_realized_terminal,
+    reconstruct_native_nav_and_twr,
+)
 from services.nav_twr import (
     _build_nav_meta,
     _flows_to_daily_usd,
@@ -859,3 +864,47 @@ def reconstruct_mt5_nav_levels(
     # to truncate against, and every deal was classified before any series existed.
     out_meta["series_completeness"] = "ledger_complete"
     return nav, out_meta
+
+
+def mt5_day_pnl(
+    deals: Sequence[Mapping[str, Any]],
+    *,
+    server_utc_offset_s: int = 0,
+) -> pd.Series:
+    """The MT5 account's actual P&L on every NAV day, from the deal ledger
+    (167.1.2.2 D-15): per UTC day, the trading deals' cash effect
+    (``profit + swap + commission + fee``) on the union of trading days and
+    external-flow days, a flow-only day being a zero-P&L day.
+
+    This is ``NAV_t - NAV_{t-1} - F_t`` on the series ``combine_mt5_deal_ledger``
+    chains its returns from: ``reconstruct_nav`` rolls
+    ``NAV_{t-1} = NAV_t - pnl_t - F_t``, so the unioned daily P&L IS that number, day
+    0 included. It is defined on the days the TWR breaks too (the funding day, a day
+    whose deposit exceeds the prior NAV), which carry a real P&L and no return.
+    The fold and the union are the shared ones (``_fold_mt5_deals``,
+    ``_union_flow_days``), not a second copy. Empty for a ledger with no trading deal,
+    like the returns path. Raises what the fold raises."""
+    daily_pnl_series, flows = _fold_mt5_deals(deals, server_utc_offset_s)
+    if daily_pnl_series.empty:
+        return pd.Series(dtype="float64", name="day_pnl")
+    unioned = _union_flow_days(daily_pnl_series, _flows_to_daily_usd(flows))
+    return unioned.rename("day_pnl")
+
+
+def native_ledger_day_pnl(
+    ledger: NativeLedger, indexable: frozenset[str]
+) -> pd.Series:
+    """The Deribit account's actual USD P&L on every NAV day (167.1.2.2 D-15) — the
+    sibling of ``combine_native_ledger``'s NAV path, off the same levels
+    (``native_nav.native_day_pnl``, ``venue="deribit"``). Not defined for the
+    allocated-capital (``denominator_config``) path, which builds no NAV."""
+    return native_day_pnl(ledger, indexable_currencies=indexable, venue="deribit")
+
+
+def native_ledger_realized_terminal(
+    ledger: NativeLedger, indexable: frozenset[str]
+) -> tuple[pd.Timestamp, float] | None:
+    """The Deribit account's realized terminal NAV and its day (167.1.2.2 round-1 CR-01):
+    the level ``combine_native_ledger``'s NAV path rolls from, which is NOT the live equity
+    (``native_nav.native_realized_terminal``, ``venue="deribit"``). Key-mode NAV path only."""
+    return native_realized_terminal(ledger, indexable_currencies=indexable, venue="deribit")

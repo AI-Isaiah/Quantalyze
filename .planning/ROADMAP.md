@@ -412,6 +412,13 @@ they will correctly discover is untrue, and then discard along with the real con
     `docs/runbooks/flipretry-derived-equity-go-live.md:171` forbids scheduling it from a migration
     (auto-apply + a silently-skipped worker deploy recreates the v1.11 wedge verbatim). A migration
     doing exactly this was written and deleted unmerged on 2026-08-24.
+    ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON, D-01/D-02/D-05):** the cron is being
+    re-registered by 167.1.2.2, see its runbook `docs/runbooks/derivecron-go-live.md` (a runbook
+    step the orchestrator runs, never a migration). It is re-registered because 167.1.2 PR C2's
+    reader accepts only the version-2 row this job produces. The "never from a migration"
+    prohibition stands unchanged. The reason this fence gave (the job is key-mode and never
+    stamps `strategy_analytics`) is still true: re-registering it does not fix the
+    ledger-backed strategy refresh this fence was about.
 
 **⚠️ Risk shape:** fanning jobs at a fixed hour carries the v1.11 worker-wedge shape — MT5
 serializes on ONE shared terminal (`services/mt5_concurrency.py`) at a 15-min timeout per key.
@@ -4753,14 +4760,37 @@ version-2 `equity_curve` row and My Allocation leaves "being rebuilt".
    re-register" notes are superseded by this booking and must be amended where they stand).
 3. The first 05:30 UTC run after registration writes a version-2 `equity_curve` row for every eligible allocator,
    measured counts-only, and My Allocation renders the history (browser check).
+   ⛔ **AMENDED 2026-10-07 (planning, D-06/D-09):** SC-3's "every eligible allocator" is read as
+   every eligible allocator not held by an earlier named gate (census e reasons
+   `rebuilding:duplicate_account`, `rebuilding:key_not_syncing`,
+   `rebuilding:account_identity_pending`); held owners are listed by reason and count, never
+   hidden; per D-09, owners whose only gap is an okx crawl-bound hit are counted under the
+   booked okx follow-up (verdict `PASS-WITH-D09-OKX`). Accepted by the orchestrator under
+   D-06/D-09.
 4. 167.1.2's remaining browser UAT (Overview, Scenario, Exchanges notes, `/allocations` tab switch, 390px / 200%)
    is completed against real rebuilt books.
+**Founder decisions 2026-10-07 (after research):** FLIP Step 4 (E2GT-01) waived as a pre-gate; one manual fan-out rehearsal before registering; okx bound hits do not hold the cron (booked follow-up); backfill staleness alarm routed to OUTAGEALERT. Detail: `167.1.2.2-CONTEXT.md` D-07..D-10.
 **Requirements**: TBD
 **Depends on:** Phase 167.1.2
-**Plans:** 0 plans
+**Plans:** 9 plans (04 and 05 conditional on the rehearsal showing reclaims)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 167.1.2.2 to break down)
+- [x] 167.1.2.2-01-PLAN.md — the derivecron runbook with its PROD statement forms proven read-only (tracer); dated FLIP runbook notes (D-04, D-07)
+- [x] 167.1.2.2-02-PLAN.md — the D-08 rehearsal: one manual fan-out on PROD, watched to drain, per-venue readings and a verdict
+- [x] 167.1.2.2-03-PLAN.md — D-05 lineage notes in ROADMAP and TODOS; D-10 staleness alarm booked to OUTAGEALERT; MT5 cross-service contention booked
+- [x] 167.1.2.2-04-PLAN.md — NOT TAKEN (0 reclaims measured) — CONDITIONAL (verdict RECLAIMS): backfill-role claim batch of 1, shipped and deployed
+- [ ] 167.1.2.2-05-PLAN.md — CONDITIONAL (plan 04 taken): re-rehearsal on the batch-of-1 worker
+- [ ] 167.1.2.2-06-PLAN.md — register the cron through the runbook (never a migration) and re-capture the cron manifest in the same session
+- [ ] 167.1.2.2-07-PLAN.md — resolve the 164.4.2 test-vs-ROADMAP entry, book the okx follow-up if earned (D-09), planning-reading tests, ship the phase PR
+- [ ] 167.1.2.2-08-PLAN.md — the first 05:30 UTC run: D-06 reads judged on computed_at, SC-3 verdict
+- [ ] 167.1.2.2-09-PLAN.md — 167.1.2's remaining browser UAT against rebuilt books (SC-4), recorded as a dated addendum
+
+
+⭐ **Rehearsal 2026-10-07 UNCLEAN (2 failed_final): founder D-11/D-12 (CONTEXT).** The bybit key's IP allow-list gains the backfill egress (founder action), and the compose divergence is root-caused before the cron is registered. Plans 04-06 wait on both.
+
+⭐ **Founder 2026-10-08 (D-13/D-14, CONTEXT):** opening deposits are judged by a zero-start check with a 0.01% band, not by their position; outside the band they block under an unreconciled-start reason. D-12's self-check fix is `cf73bf7a1`.
+⚠️ **Founder 2026-10-08 (D-16, CONTEXT) — DEVIATION from the worst-MEDIUM-no-fixer rule:** review round 2's R2-WR-01 (a compose read race leaves the book untrustworthy until the next day) and R2-WR-02 (OKX levels carry the open-uPnL shift) are fixed before the cron is registered.
+⭐ **Orchestrator 2026-10-08 (CONTEXT):** plan 04 not taken (0 reclaims). The D-12..D-16 code ships in its own PR before plan 05, and plan 05 re-runs the rehearsal on the deployed code.
 
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
