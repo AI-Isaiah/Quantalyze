@@ -11,6 +11,9 @@ import {
   deriveLocalUsername,
   corroborate,
   MAX_ENDEMIC_FILES,
+  checkRoadmapStructure,
+  readVerificationStatus,
+  runRoadmapCheck,
 } from "../../scripts/check-planning-hygiene";
 
 /**
@@ -583,5 +586,148 @@ describe("the live repository", () => {
       [...hits].sort(),
       "tracked files encode the local machine identity in a recoverable form — redact the occurrence; do NOT add it to an exemption list",
     ).toEqual([]);
+  });
+});
+
+/**
+ * Rule 6 — ROADMAP-STRUCTURE. `gsd-tools phase complete N` flips only the
+ * `- [ ] **Phase N: …**` bullet and the phase's Progress-table row, and a phase
+ * with neither stays "open" with no error. Each arm below is one way the roadmap
+ * can drift so that closing a phase silently does nothing. The fixtures are
+ * strings, so each arm can fail without touching the real roadmap.
+ */
+describe("Rule 6 ROADMAP-STRUCTURE — a phase heading must be closable by phase complete", () => {
+  const TABLE_HEAD = [
+    "| Phase | Plans Complete | Status | Completed |",
+    "|-------|----------------|--------|-----------|",
+  ];
+  const roadmap = (parts: { bullets?: string[]; rows?: string[]; headings?: string[] }) =>
+    [
+      "## Current Milestone: v9.9",
+      "",
+      ...(parts.bullets ?? []),
+      "",
+      ...(parts.headings ?? []),
+      "",
+      ...TABLE_HEAD,
+      ...(parts.rows ?? []),
+      "",
+    ].join("\n");
+  const H7 = "### Phase 7: ALPHA - the goal (INSERTED)";
+  const B7 = "- [ ] **Phase 7: ALPHA - the goal** (INSERTED) - not yet verified";
+  const R7 = "| 7 ALPHA | 0/? | Queued | - |";
+
+  it("is GREEN when the heading has a bullet and a row", () => {
+    const r = checkRoadmapStructure(roadmap({ headings: [H7], bullets: [B7], rows: [R7] }));
+    expect(r.violations).toEqual([]);
+    expect([r.headings, r.bullets, r.rows]).toEqual([1, 1, 1]);
+  });
+
+  it("(a) is RED when a heading has no checklist bullet", () => {
+    const r = checkRoadmapStructure(roadmap({ headings: [H7], rows: [R7] }));
+    expect(r.violations).toHaveLength(1);
+    expect(r.violations[0]).toContain("rule 6a");
+    expect(r.violations[0]).toContain("Phase 7");
+  });
+
+  it("(a) a bullet inside a fenced code block does not count, as updateBullet ignores it", () => {
+    const fenced = ["```", B7, "```"];
+    const r = checkRoadmapStructure(roadmap({ headings: [H7], bullets: fenced, rows: [R7] }));
+    expect(r.violations.map((v) => v.slice(0, 40))).toEqual([expect.stringContaining("rule 6a")]);
+  });
+
+  it("(a) a bullet for a DIFFERENT phase number does not satisfy the heading (2 is not 2.5)", () => {
+    const r = checkRoadmapStructure(
+      roadmap({
+        headings: ["### Phase 2: A", "### Phase 2.5: B"],
+        bullets: ["- [ ] **Phase 2.5: B**"],
+        rows: ["| 2 A | 0/? | Q | - |", "| 2.5 B | 0/? | Q | - |"],
+      }),
+    );
+    expect(r.violations).toHaveLength(1);
+    expect(r.violations[0]).toContain("Phase 2)");
+  });
+
+  it("(b) is RED when a heading has no Progress-table row", () => {
+    const r = checkRoadmapStructure(roadmap({ headings: [H7], bullets: [B7] }));
+    expect(r.violations).toHaveLength(1);
+    expect(r.violations[0]).toContain("rule 6b");
+  });
+
+  it("(b) a row for 2.5 does not satisfy phase 2", () => {
+    const r = checkRoadmapStructure(
+      roadmap({ headings: ["### Phase 2: A"], bullets: ["- [ ] **Phase 2: A**"], rows: ["| 2.5 Extra | 0/? | Q | - |"] }),
+    );
+    expect(r.violations.map((v) => v.slice(0, 40))).toEqual([expect.stringContaining("rule 6b")]);
+  });
+
+  it("(b) a table without the four progress columns is not a Progress table", () => {
+    const other = ["| Phase | Requirements |", "|---|---|", "| 7 | REQ-1 |"];
+    const text = [H7, B7, ...other].join("\n");
+    expect(checkRoadmapStructure(text).violations.map((v) => v.slice(0, 40))).toEqual([
+      expect.stringContaining("rule 6b"),
+    ]);
+  });
+
+  it("(c) is RED when VERIFICATION says passed and the bullet is unticked", () => {
+    const r = checkRoadmapStructure(roadmap({ headings: [H7], bullets: [B7], rows: [R7] }), (p) =>
+      p === "7" ? "passed" : null,
+    );
+    expect(r.violations).toHaveLength(1);
+    expect(r.violations[0]).toContain("rule 6c");
+  });
+
+  it("(c) is GREEN once the bullet is ticked, and a human_needed phase may stay unticked", () => {
+    const ticked = B7.replace("[ ]", "[x]");
+    expect(
+      checkRoadmapStructure(roadmap({ headings: [H7], bullets: [ticked], rows: [R7] }), () => "passed").violations,
+    ).toEqual([]);
+    expect(
+      checkRoadmapStructure(roadmap({ headings: [H7], bullets: [B7], rows: [R7] }), () => "human_needed").violations,
+    ).toEqual([]);
+  });
+
+  it("a carried bullet counts as present: the phase is not missing, it is parked", () => {
+    const carried = "- [\u2192] **Phase 7: ALPHA - the goal** - CARRIED to v9.10";
+    expect(checkRoadmapStructure(roadmap({ headings: [H7], bullets: [carried], rows: [R7] })).violations).toEqual([]);
+  });
+
+  it("a struck-through retired bullet satisfies (a) and (b) with no row, and no phase number is hard-coded", () => {
+    const retired = "- [x] **~~Phase 7~~: ALPHA - the goal** (INSERTED) - RETIRED by the founder";
+    const r = checkRoadmapStructure(roadmap({ headings: [H7], bullets: [retired] }), () => "passed");
+    expect(r.violations).toEqual([]);
+    // ...but an UNTICKED strike-through with a passed verification is still a (c) failure.
+    const half = checkRoadmapStructure(
+      roadmap({ headings: [H7], bullets: [retired.replace("[x]", "[ ]")] }),
+      () => "passed",
+    );
+    expect(half.violations.map((v) => v.slice(0, 40))).toEqual([expect.stringContaining("rule 6c")]);
+  });
+
+  it("reads status from VERIFICATION frontmatter only", () => {
+    expect(readVerificationStatus("---\nphase: x\nstatus: passed\n---\nbody\nstatus: gaps_found\n")).toBe("passed");
+    expect(readVerificationStatus("---\nstatus: human_needed\n---\n")).toBe("human_needed");
+    expect(readVerificationStatus("no frontmatter\nstatus: passed\n")).toBeNull();
+  });
+
+  it("runRoadmapCheck reads <phase>-VERIFICATION.md from disk, and is silent when there is no roadmap", () => {
+    expect(runRoadmapCheck(fixtureRoot)).toBeNull();
+    mkdirSync(join(fixtureRoot, ".planning", "phases", "7-alpha"), { recursive: true });
+    writeFileSync(
+      join(fixtureRoot, ".planning", "ROADMAP.md"),
+      roadmap({ headings: [H7], bullets: [B7], rows: [R7] }),
+    );
+    expect(runRoadmapCheck(fixtureRoot)?.violations).toEqual([]);
+    writeFileSync(join(fixtureRoot, ".planning", "phases", "7-alpha", "7-VERIFICATION.md"), "---\nstatus: passed\n---\n");
+    const r = runRoadmapCheck(fixtureRoot);
+    expect(r?.violations).toHaveLength(1);
+    expect(r?.violations[0]).toContain("rule 6c");
+  });
+
+  it("the live ROADMAP.md has a bullet and a row for every phase heading, and every passed phase is ticked", () => {
+    const r = runRoadmapCheck(process.cwd());
+    expect(r, "no .planning/ROADMAP.md in this checkout").not.toBeNull();
+    expect(r!.headings).toBeGreaterThan(100);
+    expect(r!.violations).toEqual([]);
   });
 });
