@@ -714,7 +714,8 @@ describe("corpus re-derivation", () => {
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 556 -> 574. EIGHTEEN arms in TWO NEW gates, supabase/tests/test_sync_status_bridge_residues.sql (16) and supabase/tests/test_sync_status_bridge_lock.sql (2). MEASURED: this file's own run read `expected 574 to be 556`, and one full lane run on the tree merged with origin/main printed `arms: 574/574/0`, `biting: 574`.
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 578 -> 591. THIRTEEN arms, all in the NEW gate supabase/tests/test_sync_status_analytics_scope.sql. MEASURED: this file's own run read `expected 591 to be 578`, and one full lane run printed `arms: 591/591/0`, `biting: 591`.
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, founder D-09): 591 -> 593. TWO arms, D9 and D10, in the ALREADY-ANNOTATED supabase/tests/test_sync_status_analytics_scope.sql (a failed side-kind job never stamps computed_at; a genuine compute after it still does). MEASURED: one full lane run printed `arms: 593/593/0`, `biting: 593`.
-    expect(totalAnchored).toBe(593);
+    // ⭐ CURRENCY 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, round 3 of the D-09 rework): 593 -> 597. FOUR arms, D11 to D14, in the ALREADY-ANNOTATED supabase/tests/test_sync_status_analytics_scope.sql (a transient side failure holds freshness through every retry; a counting success after a fast side failure still stamps; a failed row that carries a sentence stays failed; no row is manufactured). MEASURED: one full lane run read `arms: 597/597/0`.
+    expect(totalAnchored).toBe(597);
   });
 });
 
@@ -2066,9 +2067,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 574 -> 578 in arms/biting/lane-invocations, the leg counts 58 -> 59, the NEW per-file row and the lane-time line below, copied from ONE full lane run (tree frozen).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 578 -> 591 in arms/biting/lane-invocations, the leg counts 59 -> 60, the NEW per-file row and the lane-time line below, copied from ONE full lane run on the tree merged with origin/main (tree frozen).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, founder D-09): 591 -> 593 in arms/biting/lane-invocations and the new gate row 13 -> 15 (arms D9, D10), copied from one full lane run (mean 3.1s -> 1.9s over 593, an idle host).
-    "arms: 593/593/0   (executed/annotated/waived)",
-    "biting: 593   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
-    "lane-invocations: 593   (arm lanes actually spawned — tallied inside runLane, independent of the 593 the verdict loop counted; plus 60 baseline / 60 restore leg(s))",
+    // ⭐ CURRENCY 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, round 3): 593 -> 597 in arms/biting/lane-invocations and the gate row 15 -> 19 (arms D11 to D14), copied from ONE full lane run (mean 1.9s -> 1.6s over 597).
+    "arms: 597/597/0   (executed/annotated/waived)",
+    "biting: 597   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 597   (arm lanes actually spawned — tallied inside runLane, independent of the 597 the verdict loop counted; plus 60 baseline / 60 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -2179,7 +2181,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_strategy_sync_cursors_rls.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     "  file test_strategy_verifications_wizard_session_tenant_scope.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
     // ⭐ ADDED 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): the side-kind scope gate, copied from the full run's own per-file line.
-    "  file test_sync_status_analytics_scope.sql: sections 15 / judged 15 / annotated 15 / waived 0 / biting 15",
+    "  file test_sync_status_analytics_scope.sql: sections 19 / judged 19 / annotated 19 / waived 0 / biting 19",
     "  file test_sync_status_bridge_lock.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
     "  file test_sync_status_bridge_residues.sql: sections 16 / judged 16 / annotated 16 / waived 0 / biting 16",
     "  file test_sync_status_curated_sentence_survives.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8",
@@ -2203,7 +2205,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): copied from the full run that measured the floors (mean 1.2s -> 1.1s over 574).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): copied from the full run that measured the floors (mean 1.1s -> 2.6s over 578, a loaded host: sibling worktrees were running lanes).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): copied from the full run that measured the floors (mean 2.6s -> 3.1s over 591; sibling lanes were running on the host).
-    "per-arm lane time: mean 1.9s over 593 arm run(s)",
+    "per-arm lane time: mean 1.6s over 597 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -2233,7 +2235,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 553 -> 555.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 555 -> 556.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 556 -> 574.
-    expect(r.out).toContain("593 arm lane(s) spawned");
+    expect(r.out).toContain("597 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -2497,8 +2499,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 552/553 -> 554/555, both halves together, so the gap stays exactly one (offset -1 kept).
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 554/555 -> 555/556, both halves together, so the gap stays exactly one (offset -1 kept).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 555/556 -> 573/574, both halves together, so the gap stays exactly one (offset -1 kept).
-    expect(r.out).toContain("rows sum to 592 biting arm(s) but the aggregate");
-    expect(r.out).toContain("reports 593");
+    expect(r.out).toContain("rows sum to 596 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 597");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2539,14 +2541,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 555 in the NEEDLE and in `executed`/`biting`; the severed value stays 0.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556 in the NEEDLE and in `executed`/`biting`; the severed value stays 0.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574 in the NEEDLE and in `executed`/`biting`; the severed value stays 0.
-    const severed = GREEN_LOG.replace(/^lane-invocations: 593 /m, "lane-invocations: 0 ");
+    const severed = GREEN_LOG.replace(/^lane-invocations: 597 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
     expect(r.out).toContain("GATE failing, not the corpus");
     // ⭐ CURRENCY 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): 449 -> 453 in the
     // NEEDLE and in `executed`/`biting`; the severed value stays 0.
-    expect(r.out).toContain("executed=593 lane-invocations=0 biting=593");
+    expect(r.out).toContain("executed=597 lane-invocations=0 biting=597");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2588,10 +2590,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): NEEDLE 555 and DELIBERATE MISMATCH 556, both halves, gap of one kept (offset +1).
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): NEEDLE 556 and DELIBERATE MISMATCH 557, both halves, gap of one kept (offset +1).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): NEEDLE 574 and DELIBERATE MISMATCH 575, both halves, gap of one kept (offset +1).
-    const extra = GREEN_LOG.replace(/^lane-invocations: 593 /m, "lane-invocations: 594 ");
+    const extra = GREEN_LOG.replace(/^lane-invocations: 597 /m, "lane-invocations: 598 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("executed=593 lane-invocations=594 biting=593");
+    expect(r.out).toContain("executed=597 lane-invocations=598 biting=597");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
@@ -2611,7 +2613,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 555.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574.
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 593 /m, "lane-invocations: abc ");
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 597 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -2659,7 +2661,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 555 in BOTH the needle and the replacement; only the W field differs.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556 in BOTH the needle and the replacement; only the W field differs.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574 in BOTH the needle and the replacement; only the W field differs.
-    const waived = GREEN_LOG.replace(/^arms: 593\/593\/0 /m, `arms: 593/593/${WAIVED_CEILING + 1} `);
+    const waived = GREEN_LOG.replace(/^arms: 597\/597\/0 /m, `arms: 597/597/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -2731,14 +2733,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 555, moved INDIVIDUALLY: executed-is-zero keeps its literal 0; the biting-above-executed arm's NEEDLE 555 and MISMATCH 556 (offset +1 kept).
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556, moved INDIVIDUALLY: executed-is-zero keeps its literal 0; the biting-above-executed arm's NEEDLE 556 and MISMATCH 557 (offset +1 kept).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574, moved INDIVIDUALLY: executed-is-zero keeps its literal 0; the biting-above-executed arm's NEEDLE 574 and MISMATCH 575 (offset +1 kept).
-    const zero = GREEN_LOG.replace(/^arms: 593\/593\/0 /m, "arms: 0/593/0 ");
+    const zero = GREEN_LOG.replace(/^arms: 597\/597\/0 /m, "arms: 0/597/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
-    const spliced = GREEN_LOG.replace(/^biting: 593 /m, "biting: 594 ");
+    const spliced = GREEN_LOG.replace(/^biting: 597 /m, "biting: 598 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
-    expect(s.out).toContain("biting (594) exceeds executed (593)");
+    expect(s.out).toContain("biting (598) exceeds executed (597)");
   });
 
   // ── 164.4.2-09, DECISION D: the step judges WHAT THE RUN COVERED ─────────
@@ -2854,7 +2856,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 553 -> 555.
       // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 555 -> 556, the floor and the measured biting count together.
       // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 556 -> 574, the floor and the measured biting count together.
-      expect(r.out).toContain("biting arms 593 >= 593");
+      expect(r.out).toContain("biting arms 597 >= 597");
     }
   });
 

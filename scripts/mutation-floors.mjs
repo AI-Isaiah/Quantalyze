@@ -2824,7 +2824,25 @@ export const FILES_FLOOR = 60;
 // mutation-annotation-parser.test.ts (`armsSeen`, `stepsSeen`, needles),
 // drift-check-scripts.test.ts and ci.yml (ARMS_FLOOR=271 over the sentinel sum) and
 // gate-family-meta.test.ts (the threshold-site string). WAIVED_CEILING stays 0.
-export const ARMS_FLOOR = 593;
+// RAISED 593 -> 597 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, round 3 of the founder D-09
+// rework): FOUR arms, D11 to D14, added to the ALREADY-ANNOTATED
+// test_sync_status_analytics_scope.sql (so FILES_FLOOR stays 60 and the denominator stays
+// 87). D11: a TRANSIENT side failure (a sync_funding timeout) holds computed_at, the
+// sentence, the markers and the status through every failed_retry hop. D12 (guard): a
+// counting success after a side job created later failed fast still advances computed_at
+// (the hold is keyed on the trigger, not on recency). D13: a failed row that carries a
+// sentence stays failed. D14: no strategy_analytics row is manufactured for a side-only
+// failure. MEASURED by ONE full lane run of `node scripts/mutation-runner/run.mjs`, no
+// file edited during it, constants still at 60 / 593 (the floors read the measurement,
+// never the other way round): `scope: FULL 60/60 annotated files`, `coverage: files
+// 60/87`, `arms: 597/597/0`, `biting: 597`, `lane-invocations: 597 ... plus 60 baseline /
+// 60 restore leg(s)` (the two tallies AGREE), `unreachable: 27`, `lane-blocked: 0`,
+// `per-arm lane time: mean 1.6s over 597 arm run(s)`, `No defects.` Per-file line:
+// `test_sync_status_analytics_scope.sql: sections 19 / judged 19 / annotated 19 / waived 0
+// / biting 19`. The census pins moved in the same commit: mutation-runner-floors.test.ts,
+// mutation-annotation-parser.test.ts, drift-check-scripts.test.ts, ci.yml (ARMS_FLOOR=275
+// over the sentinel sum) and gate-family-meta.test.ts. WAIVED_CEILING stays 0.
+export const ARMS_FLOOR = 597;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
