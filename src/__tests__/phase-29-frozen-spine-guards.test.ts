@@ -318,8 +318,17 @@ describe("Phase 29 frozen-spine exit-gate guards", () => {
   });
 
   it("exit gate (no-schema-change): no new scenario-spine migration shipped this phase", () => {
+    // Reviewed act 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE): `supabase/migrations/down/`
+    // is excluded. `db push` never applies those files, and a rollback can only restore
+    // a state that already existed, so it cannot ship NEW spine schema — the one thing
+    // this gate exists to stop. 164.9.7's rollback must name `scenarios` /
+    // `scenario_shares` to restore their exact pre-revoke TRUNCATE holders. Every
+    // applied migration under `supabase/migrations/` is still scanned.
     const offendingMigrations = CHANGED.filter(
-      (f) => f.startsWith("supabase/migrations/") && touchesScenarioSpine(f),
+      (f) =>
+        f.startsWith("supabase/migrations/") &&
+        !f.startsWith("supabase/migrations/down/") &&
+        touchesScenarioSpine(f),
     );
     expect(
       offendingMigrations,
