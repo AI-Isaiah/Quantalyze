@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.129.2.1] - 2026-10-08 — BASELINE: automated re-dump after the PROD apply of 1c8e79fb
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `37820135534`, after the PROD apply of merge `1c8e79fb`: sha256 `cae5e296…` → `2c0fb148…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261009130000_revoke_truncate_anon_authenticated.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-08` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.129.2.0 → 0.129.2.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=289 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `37820135534` succeeded, and this entry was composed by the `redump-pr` job. Run `37820135534` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.129.2.0] - 2026-10-08 — TRUNCATEREVOKE: anon and authenticated no longer hold TRUNCATE on public tables
 
 Phase 164.9.7. Row-level security never evaluates TRUNCATE, so the grant layer is the only control, and it was wide open. Measured read-only on PROD on 2026-10-07: anon held TRUNCATE on 53 of 63 base tables, and authenticated on 56. Any SQL-capable path running as either role could empty a table whatever its policies said, and `TRUNCATE ... CASCADE` reaches foreign-key children. The source was the Supabase bootstrap's default ACL on schema `public` (`ALL` includes TRUNCATE), not this repo's migrations. Migration `20261009130000` fixes the class. ⚠️ PROD applies it automatically after `apply-test`.
