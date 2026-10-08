@@ -101,7 +101,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.5.1.4: SYNCCURSOR — the sync cursor is per-KEY while stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies trade window** (INSERTED)
 - [x] **Phase 164.5.2: BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required** (INSERTED)
 - [x] **Phase 164.5.2.1: BRIDGERESIDUE — the two 164.6.7 bridge residues in sync_strategy_analytics_status** (INSERTED) — 5 plans, shipped PR #937 v0.121.0.0 (completed 2026-10-03)
-- [ ] **Phase 164.5.3: MT5CREDS — show the MT5 account number on the key card and add a credential-update path** (INSERTED) — verification: human_needed
+- [x] **Phase 164.5.3: MT5CREDS — show the MT5 account number on the key card and add a credential-update path** (INSERTED) — verification: passed (completed 2026-10-08)
 - [x] **Phase 164.5.4: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently** (INSERTED)
 - [x] **Phase 164.6: GATE-HYGIENE — every gate-hygiene item that left 164.1: the OPS-08 residue, the composite-stamp twin, the reviewer execution-status rule, the RED-UNDER convention's discoverability and the audit allowlist** (INSERTED)
 - [x] **Phase 164.6.1: MYPYSTRICT — the strict gate claims to cover all running-service code and does not cover the module that IS the service** (INSERTED)
@@ -2313,15 +2313,15 @@ Plans:
 **Goal:** A founder (and a first-time client) can tell which MT5 account a key card belongs to, and can correct a wrong password without deleting the key. Two measured gaps (2026-09-16): `src/app/api/` has ONLY create routes — no update/rotate path — so a wrong password is fixable only by Delete + Add Key; and the MT5 login lands in `api_key`, whose SELECT migration `20260410225608_api_keys_column_revoke.sql` revokes from `authenticated`, so `API_KEY_USER_COLUMNS` (`src/lib/constants.ts:171`) cannot expose it and the card shows only `label` — sourced from the OPTIONAL "Key nickname" field (`ConnectKeyStep.tsx:1188`, fallback `"mt5 key"`). Several MT5 accounts therefore render indistinguishably. ⭐ The MT5 login is NOT a secret (the password is): expose it via a READABLE display column rather than by decrypting the existing one, and add a card action that re-encrypts `api_secret` ONLY, leaving the row and its sync history intact.
 **Requirements**: D-01-PRIME, D-02-PRIME, D-03, D-04, D-05, D-06, D-07 (from `164.5.3-CONTEXT.md`'s locked decisions — no `REQUIREMENTS.md` entries exist for this inserted phase, so the decision IDs are the requirement set, per `164.5.3-RESEARCH.md`'s own framing).
 **Depends on:** Phase 164.5.1 — placed AFTER its go-live; neither blocks the other.
-**Plans:** 5 plans
+**Plans:** 5/5 plans complete
 
 Plans:
 
-- [ ] 164.5.3-01-PLAN.md — Wave 1: GRANT-extend migration (reuse `venue_account_id`, no new column) + three-way sync + render the identifier on both key cards
-- [ ] 164.5.3-02-PLAN.md — Wave 1: populate `venue_account_id` at the non-wizard "Add Key" create chokepoint (`validate-and-encrypt`), with the new venue-identity 23505 arm
-- [ ] 164.5.3-03-PLAN.md — Wave 1: new analytics-service internal endpoint — decrypt, re-validate the new password against the live broker, re-encrypt; plaintext never leaves Python
-- [ ] 164.5.3-04-PLAN.md — Wave 1: new `PATCH /api/keys/[id]/rotate-secret` route — password-only, validate-before-persist, admin-client write, D-05 status-clear
-- [ ] 164.5.3-05-PLAN.md — Wave 2 (depends on 01, 04): the "Update password" dialog wired into both key cards
+- [x] 164.5.3-01-PLAN.md — Wave 1: GRANT-extend migration (reuse `venue_account_id`, no new column) + three-way sync + render the identifier on both key cards
+- [x] 164.5.3-02-PLAN.md — Wave 1: populate `venue_account_id` at the non-wizard "Add Key" create chokepoint (`validate-and-encrypt`), with the new venue-identity 23505 arm
+- [x] 164.5.3-03-PLAN.md — Wave 1: new analytics-service internal endpoint — decrypt, re-validate the new password against the live broker, re-encrypt; plaintext never leaves Python
+- [x] 164.5.3-04-PLAN.md — Wave 1: new `PATCH /api/keys/[id]/rotate-secret` route — password-only, validate-before-persist, admin-client write, D-05 status-clear
+- [x] 164.5.3-05-PLAN.md — Wave 2 (depends on 01, 04): the "Update password" dialog wired into both key cards
 
 ### Phase 164.5.4: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently (INSERTED)
 
@@ -5425,7 +5425,7 @@ kept verbatim.
 | 164.5.1.4 SYNCCURSOR | 4/4 | Complete | v0.81.0.0 · #829 |
 | 164.5.2 BRIDGELOCK (the per-strategy advisory lock 161.1-D1 asked for) | 3/3 | Complete | v0.104.0.0 · #873 |
 | 164.5.2.1 BRIDGERESIDUE | 5/5 | Complete    | 2026-10-03 |
-| 164.5.3 MT5CREDS | 5/5 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.82.1.0 · #831/#832 |
+| 164.5.3 MT5CREDS | 5/5 | Complete | v0.82.1.0 · #831/#832 |
 | 164.5.4 MT5RECON-GAP | 6/6 | Complete | #835 |
 | 164.6 GATE-HYGIENE | 5/5 | Complete | v0.90.0.0 · #854 |
 | 164.6.1 MYPYSTRICT | 2/2 | Complete | v0.87.1.0 · #847 |
