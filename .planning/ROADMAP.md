@@ -118,7 +118,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8)** (INSERTED) — shipped v0.125.2.1 (#968, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
 - [x] **Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy)** (INSERTED) — verification: passed (v0.129.0.0) (completed 2026-10-08)
 - [ ] **Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b)** (INSERTED) — not yet planned (164.6.6.3 split C, founder 2026-10-06)
-- [ ] **Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status** (INSERTED) — not yet planned (booked 2026-10-06, founder)
+- [ ] **Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status** (INSERTED) — shipped v0.129.1.0 (merged 2026-10-08); verification: human_needed (post-deploy plan 04 PROD re-sync only)
 - [x] **Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults** (INSERTED) — verification: passed (PR #971, v0.127.0.0) (completed 2026-10-08)
 - [ ] **Phase 164.6.6.3.6: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed** (INSERTED) — not yet planned (booked 2026-10-06, founder)
 - [x] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
@@ -2961,12 +2961,12 @@ analytics status, while a genuine analytics failure is still never masked.
 **Depends on:** Phase 164.6.6.3
 **Gates:** a migration, so migration-reviewer and rls-policy-auditor must be clean before merge. PROD auto-applies
 after `apply-test` with no human stop.
-**Plans:** 4 plans
+**Plans:** 3/4 plans complete (plan 04 runs after deploy)
 
 Plans:
-- [ ] 164.6.6.3.4-01-PLAN.md — the re-based bridge migration (side-kind NOT IN list, process_key_long chain supersession), pg-lane fixture, 13-arm gate with twins, sql-tests roster pins
-- [ ] 164.6.6.3.4-02-PLAN.md — the four new verify anchors shown refusing an apply, and the rollback proven on the lane
-- [ ] 164.6.6.3.4-03-PLAN.md — snapshot and earned VAC-04 ack, kind-classification drift test, local-stack bridge family, mutation census, release commit
+- [x] 164.6.6.3.4-01-PLAN.md — the re-based bridge migration (side-kind NOT IN list, process_key_long chain supersession), pg-lane fixture, 13-arm gate with twins, sql-tests roster pins
+- [x] 164.6.6.3.4-02-PLAN.md — the four new verify anchors shown refusing an apply, and the rollback proven on the lane
+- [x] 164.6.6.3.4-03-PLAN.md — snapshot and earned VAC-04 ack, kind-classification drift test, local-stack bridge family, mutation census, release commit
 - [ ] 164.6.6.3.4-04-PLAN.md — post-deploy PROD re-sync of the `failed` rows that have jobs (D-08 as amended), before/after recorded, founder checkpoint
 
 
@@ -5456,7 +5456,7 @@ kept verbatim.
 | 164.6.6.3.1 UIPOLISH | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.125.2.1 · #968 |
 | 164.6.6.3.2 WIZARDCODES | 4/4 | Complete — verification passed (WR-01 MEDIUM recorded as a known gap) | 2026-10-08 · v0.129.0.0 |
 | 164.6.6.3.3 FACTSHEETTRUTH | 0/? | Queued — 164.6.6.3 split C (founder 2026-10-06) | - |
-| 164.6.6.3.4 STATUSBRIDGE | 0/? | Queued — booked 2026-10-06 (founder) | - |
+| 164.6.6.3.4 STATUSBRIDGE | 3/4 | Shipped — verification `human_needed`: post-deploy plan 04 PROD re-sync only, not closed | v0.129.1.0 |
 | 164.6.6.3.5 DOMAINONE | 13/13 | Complete — verification passed after plan 13's live checks | 2026-10-08 · v0.127.0.0 · #971 |
 | 164.6.6.3.6 MT5SERVERLEARN | 0/? | Queued — booked 2026-10-06 (founder); BROKER-SERVERS.md measured, no plans | - |
 | 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Complete    | 2026-10-04 |
