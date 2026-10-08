@@ -16,7 +16,8 @@
  * This test is the forcing function. It compares three sources that have no
  * compiler between them:
  *
- *   1. the NEWEST bridge definition's `kind NOT IN (...)` side list (the SQL);
+ *   1. the NEWEST bridge definition's side list (the SQL): the one
+ *      `v_side_kinds CONSTANT TEXT[] := ARRAY[...]` declaration;
  *   2. the NEWEST `compute_jobs_kind_target_coherence` CHECK, restricted to the
  *      kinds that carry a strategy (`strategy_id IS NOT NULL`), i.e. every kind
  *      that can ever reach the bridge;
@@ -62,13 +63,18 @@ const BRIDGE_CREATE_RE =
 const DOLLAR_BODY_RE = /\bAS\s+(\$[A-Za-z_]*\$)([\s\S]*?)\1/i;
 const SQL_LINE_COMMENT_RE = /--[^\n]*/g;
 const SNAPSHOT_SOURCE_RE = /^-- source migration: (\S+)$/m;
-const SIDE_LIST_RE = /\bkind\s+NOT\s+IN\s*\(([^)]*)\)/gi;
+// The side list is declared ONCE, as a plpgsql CONSTANT array, and read by every
+// site that needs it (the live_failures CTE, the D-09 trigger test, the in-flight
+// counting count). A second spelling, in any shape, is how the sites drift apart.
+const SIDE_DECL_RE = /\bv_side_kinds\s+CONSTANT\s+TEXT\[\]\s*:=\s*ARRAY\s*\[([^\]]*)\]/gi;
+const SIDE_USE_RE = /ANY\s*\(\s*v_side_kinds\s*\)/gi;
+const SIDE_NOT_IN_RE = /\bkind\s+NOT\s+IN\s*\(/gi;
 const LITERAL_RE = /'([a-z_]+)'/g;
 const COHERENCE_ADD_RE =
   /ALTER\s+TABLE\s+(?:public\.)?compute_jobs\s+ADD\s+CONSTRAINT\s+compute_jobs_kind_target_coherence\s+CHECK\s*\(/i;
 
 const HUMAN =
-  "A human must classify it: either add it to the side list in a NEW bridge migration " +
+  "A human must classify it: either add it to the side list (v_side_kinds) in a NEW bridge migration " +
   "(a kind that produces no analytics, D-05), or to FACTSHEET_CHAIN_KINDS in " +
   "src/lib/compute-state.ts (a kind that feeds the factsheet).";
 
@@ -113,14 +119,23 @@ function newestBridgeDefinition(): { file: string; body: string } {
   );
 }
 
-/** The side-kind literals of the ONE `kind NOT IN (...)` list in a bridge body. */
+/** The side-kind literals of the ONE `v_side_kinds CONSTANT TEXT[]` declaration in a bridge body. */
 function sideKinds(body: string): string[] {
-  const lists = [...body.matchAll(SIDE_LIST_RE)];
+  const decls = [...body.matchAll(SIDE_DECL_RE)];
   expect(
-    lists.length,
-    `expected exactly ONE kind NOT IN (...) list in the newest bridge body, found ${lists.length}`,
+    decls.length,
+    `expected exactly ONE v_side_kinds CONSTANT TEXT[] := ARRAY[...] declaration in the newest bridge body, found ${decls.length}`,
   ).toBe(1);
-  const kinds = literals(lists[0][1]);
+  // The list is READ at several sites; none of them may carry a spelling of its own.
+  expect(
+    [...body.matchAll(SIDE_NOT_IN_RE)].length,
+    "the newest bridge body still spells a `kind NOT IN (...)` list; the side kinds must be read from the one declared constant",
+  ).toBe(0);
+  expect(
+    [...body.matchAll(SIDE_USE_RE)].length,
+    "the declared v_side_kinds constant is read at no site; the failure filter would not use the list this test classifies",
+  ).toBeGreaterThan(0);
+  const kinds = literals(decls[0][1]);
   // Non-empty only, never "exactly four": a side kind REMOVED from the list must
   // fail the classification test below naming the kind, not a bare count here.
   expect(kinds.length, "the side list parsed to no kinds; the extraction has drifted").toBeGreaterThan(0);

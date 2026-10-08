@@ -2,18 +2,27 @@
 -- ROLLBACK for 20261009120000_sync_status_analytics_scope.sql
 -- Phase 164.6.6.3.4 STATUSBRIDGE, plan 02 (D-05, D-06).
 -- ============================================================================
--- Manual, off the auto-apply path. It re-creates sync_strategy_analytics_status
--- as 20261003120000_sync_status_bridge_residues.sql defined it: the block from
--- the CREATE OR REPLACE through its closing delimiter, and the REVOKE and GRANT,
--- are copied from that file byte for byte.
+-- Manual, off the auto-apply path. It undoes everything the migration did:
+--   * sync_strategy_analytics_status goes back to its ONE-argument signature
+--     (uuid). The two-argument form (uuid, uuid DEFAULT NULL) is DROPPED, its
+--     COMMENT is carried across, and the one-argument function is created as
+--     20261003120000_sync_status_bridge_residues.sql defined it: the block from
+--     the CREATE OR REPLACE through its closing delimiter, and the REVOKE and
+--     GRANT, are copied from that file byte for byte.
+--   * mark_compute_job_done and mark_compute_job_failed are replaced by their
+--     20261001120000 definitions, byte for byte, which call the bridge with one
+--     argument. (They must be replaced: left as they are, they would call a
+--     two-argument bridge that no longer exists.) Their signatures, COMMENTs and
+--     ACLs never moved.
 --
--- WHAT IT RESTORES. The D-05 side-kind exclusion and the D-06 process_key_long
--- supersession are removed from the live_failures CTE. After this runs, a failed
--- sync_funding, poll_positions, reconcile_strategy or compute_intro_snapshot job
--- pins strategy_analytics.computation_status 'failed' again, and a failed
--- process_key_long is cleared only by a later done job of its own kind.
+-- WHAT IT RESTORES. The D-05 side-kind exclusion, the D-06 process_key_long
+-- supersession and the D-09 trigger-keyed freshness hold are removed. After this
+-- runs, a failed sync_funding, poll_positions, reconcile_strategy or
+-- compute_intro_snapshot job pins strategy_analytics.computation_status 'failed'
+-- again, a failed process_key_long is cleared only by a later done job of its own
+-- kind, and a failing side job re-stamps computed_at again.
 --
--- NO DATA IS TOUCHED. Only the function body is replaced. But the status of a
+-- NO DATA IS TOUCHED. Only function bodies are replaced. But the status of a
 -- strategy is a function of its jobs, so each strategy re-derives its status
 -- under the OLD rule at its next terminal compute-job mark (or its next direct
 -- call of the function). A row that read 'complete' because of the new rule can
@@ -22,25 +31,26 @@
 --
 -- ⚠️ THE MIGRATION LEDGER ROW IS LEFT IN PLACE. This file does not touch
 -- supabase_migrations.schema_migrations, so after it runs the ledger still
--- records version 20261009120000 as applied while the function body no longer
--- carries it. `supabase db push` will therefore NOT re-apply the migration. To
+-- records version 20261009120000 as applied while the function bodies no longer
+-- carry it. `supabase db push` will therefore NOT re-apply the migration. To
 -- re-apply it, mark the version reverted with
 -- `supabase migration repair --status reverted 20261009120000`, and only after
 -- the marker query in CLAUDE.md names the database you intend to repair. Until
 -- then VAC-08's ledger check reports the version as present, which is true of the
--- ledger and false of the function.
+-- ledger and false of the functions.
 --
 -- The DO block at the top is a catalogue-only PRECONDITION: it RAISEs, before
--- anything is replaced, unless the live comment-stripped body carries the
--- `kind NOT IN (` side list the migration added. CREATE OR REPLACE succeeds on
--- any database, so without it this file run against a database that never had
--- 20261009120000 would replace a body with an identical one and still report
--- success.
+-- anything is replaced, unless the live two-argument bridge exists and its
+-- comment-stripped body carries the `v_side_kinds` constant the migration added.
+-- CREATE OR REPLACE succeeds on any database, so without it this file run against
+-- a database that never had 20261009120000 would replace a body with an identical
+-- one and still report success.
 --
 -- The DO block at the end is catalogue-only: it RAISEs, and so aborts the whole
--- rollback, if the side list or the D-06 derive clause survives, or if the
--- function's ACL is not the one the old migration declared. It reads the function
--- body and the privilege catalogue and never a table.
+-- rollback, if the side list, the D-06 derive clause or the trigger argument
+-- survives, if more than one bridge overload exists, if the bridge's COMMENT was
+-- lost, or if a function's ACL is not the one the old migrations declared. It
+-- reads function bodies and the privilege catalogue and never a table.
 -- ============================================================================
 
 BEGIN;
@@ -55,17 +65,29 @@ DECLARE
 BEGIN
   v_body := regexp_replace(
               regexp_replace(
-                pg_get_functiondef('public.sync_strategy_analytics_status(uuid)'::regprocedure),
+                pg_get_functiondef('public.sync_strategy_analytics_status(uuid, uuid)'::regprocedure),
                 '/\*.*?\*/', '', 'gs'),
               '--.*', '', 'gn');
   IF v_body IS NULL THEN
     RAISE EXCEPTION 'Rollback 20261009120000 refused: the body of sync_strategy_analytics_status could not be read. Nothing was replaced.';
   END IF;
-  IF v_body !~ '\mkind\s+NOT\s+IN\s*\(' THEN
-    RAISE EXCEPTION 'Rollback 20261009120000 refused: the live body of sync_strategy_analytics_status carries no kind NOT IN side list, so this database does not carry 20261009120000. Nothing was replaced. Run the marker query in CLAUDE.md to see which database this is.';
+  IF v_body !~ '\mv_side_kinds\s+CONSTANT' THEN
+    RAISE EXCEPTION 'Rollback 20261009120000 refused: the live body of sync_strategy_analytics_status carries no v_side_kinds side list, so this database does not carry 20261009120000. Nothing was replaced. Run the marker query in CLAUDE.md to see which database this is.';
   END IF;
 END
 $precondition$;
+
+-- --------------------------------------------------------------------------
+-- the bridge's signature moves back: (uuid, uuid DEFAULT NULL) -> (uuid)
+-- --------------------------------------------------------------------------
+-- The two-argument function is DROPPED (left in place it would make every
+-- one-argument call, including the one-argument bridge's own callers, fail with
+-- "function is not unique"). Its COMMENT is carried through a temp table to the
+-- one-argument function, exactly as the migration carried the other direction.
+CREATE TEMP TABLE statusbridge_new_comment (c TEXT);
+INSERT INTO statusbridge_new_comment
+  SELECT obj_description(to_regprocedure('public.sync_strategy_analytics_status(uuid, uuid)'), 'pg_proc');
+DROP FUNCTION IF EXISTS public.sync_strategy_analytics_status(uuid, uuid);
 
 -- --------------------------------------------------------------------------
 -- the bridge, re-based on 20260906120000 STEP 2
@@ -853,10 +875,233 @@ $$;
 REVOKE ALL ON FUNCTION sync_strategy_analytics_status FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.sync_strategy_analytics_status(uuid) TO service_role;
 
+DO $comment$
+DECLARE
+  v_c TEXT;
+BEGIN
+  SELECT c INTO v_c FROM statusbridge_new_comment LIMIT 1;
+  IF v_c IS NOT NULL THEN
+    EXECUTE format('COMMENT ON FUNCTION public.sync_strategy_analytics_status(uuid) IS %L', v_c);
+  END IF;
+END
+$comment$;
+DROP TABLE statusbridge_new_comment;
+
+-- --------------------------------------------------------------------------
+-- the two mark RPCs, back to their 20261001120000 definitions (one-argument bridge call)
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION mark_compute_job_done(
+  p_job_id     UUID,
+  p_claim_token UUID DEFAULT NULL
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_catalog
+AS $$
+DECLARE
+  v_strategy_id      UUID;
+  v_current_status   TEXT;
+  v_current_token    UUID;
+BEGIN
+  -- audit-2026-05-07 B5: token is now mandatory. NULL was a documented
+  -- pre-mig-117 back-compat path; the only production caller (main_worker)
+  -- threads the token uniformly post-PR-#347.
+  IF p_claim_token IS NULL THEN
+    RAISE EXCEPTION 'mark_compute_job_done: p_claim_token is required (post-mig-117 strict fence)'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Atomic flip running → done with token fence + strategy capture.
+  UPDATE compute_jobs
+     SET status = 'done'
+   WHERE id = p_job_id
+     AND status = 'running'
+     AND claim_token = p_claim_token
+  RETURNING strategy_id INTO v_strategy_id;
+
+  IF NOT FOUND THEN
+    -- Row may exist but isn't running, OR row missing, OR token mismatch.
+    SELECT status, strategy_id, claim_token
+      INTO v_current_status, v_strategy_id, v_current_token
+      FROM compute_jobs
+      WHERE id = p_job_id;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'mark_compute_job_done: job % not found', p_job_id
+        USING ERRCODE = 'no_data_found';
+    END IF;
+
+    -- mig 109 P6 / mig 117 second-pass fix #2: idempotent retry on
+    -- already-done row ONLY when the caller's token matches the recorded
+    -- one. The pre-B5 path also accepted NULL — removed now that NULL is
+    -- rejected at the entrypoint above.
+    IF v_current_status = 'done' THEN
+      IF v_current_token IS NOT DISTINCT FROM p_claim_token THEN
+        RETURN;
+      END IF;
+      RAISE EXCEPTION 'mark_compute_job_done: job % preempted by watchdog reclaim (late mark on already-done row, caller token=%, current token=%)',
+        p_job_id, p_claim_token, v_current_token
+        USING ERRCODE = '55006';
+    END IF;
+
+    -- mig 117 P97: token mismatch on a still-running row.
+    IF v_current_status = 'running'
+       AND v_current_token IS DISTINCT FROM p_claim_token THEN
+      RAISE EXCEPTION 'mark_compute_job_done: job % preempted by watchdog reclaim (caller token=%, current token=%)',
+        p_job_id, p_claim_token, v_current_token
+        USING ERRCODE = '55006';
+    END IF;
+
+    -- Row in some other state (failed_retry, failed_final, pending,
+    -- done_pending_children). Surface loudly.
+    RAISE EXCEPTION 'mark_compute_job_done: job % in unexpected status % (expected running)',
+      p_job_id, v_current_status
+      USING ERRCODE = 'no_data_found';
+  END IF;
+
+  -- audit-2026-05-07 G23-187-mig-01/03 RE-APPLY: set-based fan-in advance
+  -- with the GIN-supported containment predicate. The strict-token rewrite
+  -- (20260528183100) had copied a pre-20260516131500 body and silently
+  -- reverted this to a per-child `p_job_id = ANY(parent_job_ids)` FOR-loop,
+  -- which the planner CANNOT push to the GIN index compute_jobs_parent_lookup
+  -- (only `@>` containment is GIN-supported) -- re-introducing the H-0864
+  -- seq-scan + N+1 check_fan_in_ready overhead. The NOT EXISTS sub-query
+  -- enforces "all parents done" identically to check_fan_in_ready
+  -- (count(parents WHERE status <> 'done') = 0). This form was live in prod
+  -- 2026-05-16..2026-05-28 (mig 20260516131500) before the silent revert.
+  UPDATE compute_jobs c
+     SET status          = 'pending',
+         next_attempt_at = now()
+   WHERE c.status = 'done_pending_children'
+     AND c.parent_job_ids @> ARRAY[p_job_id]::uuid[]
+     AND NOT EXISTS (
+       SELECT 1
+         FROM compute_jobs p
+        WHERE p.id = ANY(c.parent_job_ids)
+          AND p.status <> 'done'
+     );
+
+  -- Phase 18: atomic UI bridge (preserved from mig 099).
+  IF v_strategy_id IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));
+    PERFORM sync_strategy_analytics_status(v_strategy_id);
+  END IF;
+END;
+$$;
+
+
+REVOKE ALL ON FUNCTION mark_compute_job_done(UUID, UUID) FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION mark_compute_job_failed(
+  p_job_id      UUID,
+  p_error       TEXT,
+  p_error_kind  TEXT DEFAULT 'unknown',
+  p_claim_token UUID DEFAULT NULL
+)
+RETURNS TIMESTAMPTZ
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_catalog
+AS $$
+DECLARE
+  v_attempts      INTEGER;
+  v_max_attempts  INTEGER;
+  v_next_attempt  TIMESTAMPTZ;
+  v_new_status    TEXT;
+  v_strategy_id   UUID;
+  v_current_token UUID;
+  v_current_status TEXT;
+BEGIN
+  -- audit-2026-05-07 B5: token mandatory (see mark_compute_job_done above).
+  IF p_claim_token IS NULL THEN
+    RAISE EXCEPTION 'mark_compute_job_failed: p_claim_token is required (post-mig-117 strict fence)'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  IF p_error_kind IS NOT NULL
+     AND p_error_kind NOT IN ('transient', 'permanent', 'unknown') THEN
+    RAISE EXCEPTION 'mark_compute_job_failed: p_error_kind must be transient/permanent/unknown, got %', p_error_kind
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  SELECT attempts, max_attempts, strategy_id
+    INTO v_attempts, v_max_attempts, v_strategy_id
+    FROM compute_jobs
+    WHERE id = p_job_id
+      AND status = 'running'
+      AND claim_token = p_claim_token
+    FOR UPDATE;
+
+  IF NOT FOUND THEN
+    SELECT status, claim_token
+      INTO v_current_status, v_current_token
+      FROM compute_jobs
+      WHERE id = p_job_id;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'mark_compute_job_failed: job % not found', p_job_id
+        USING ERRCODE = 'no_data_found';
+    END IF;
+
+    -- mig 117 P97: token mismatch on a still-running row.
+    IF v_current_status = 'running'
+       AND v_current_token IS DISTINCT FROM p_claim_token THEN
+      RAISE EXCEPTION 'mark_compute_job_failed: job % preempted by watchdog reclaim (caller token=%, current token=%)',
+        p_job_id, p_claim_token, v_current_token
+        USING ERRCODE = '55006';
+    END IF;
+
+    RAISE EXCEPTION 'mark_compute_job_failed: job % not running (status=%)', p_job_id, v_current_status
+      USING ERRCODE = 'no_data_found';
+  END IF;
+
+  IF p_error_kind = 'permanent' THEN
+    v_new_status := 'failed_final';
+    v_next_attempt := now();
+  ELSIF v_attempts >= v_max_attempts THEN
+    v_new_status := 'failed_final';
+    v_next_attempt := now();
+  ELSE
+    v_new_status := 'failed_retry';
+    CASE
+      WHEN v_attempts <= 1 THEN v_next_attempt := now() + interval '30 seconds';
+      WHEN v_attempts = 2 THEN v_next_attempt := now() + interval '2 minutes';
+      WHEN v_attempts = 3 THEN v_next_attempt := now() + interval '10 minutes';
+      WHEN v_attempts = 4 THEN v_next_attempt := now() + interval '1 hour';
+      ELSE                     v_next_attempt := now() + interval '6 hours';
+    END CASE;
+  END IF;
+
+  -- HOTFIX 2026-05-29: write `error_kind` (the real column + CHECK target),
+  -- NOT the non-existent `last_error_kind` that mig 20260528183100 introduced.
+  UPDATE compute_jobs
+     SET status = v_new_status,
+         last_error = p_error,
+         error_kind = p_error_kind,
+         next_attempt_at = v_next_attempt
+   WHERE id = p_job_id;
+
+  -- Phase 18: atomic UI bridge (preserved from mig 099).
+  IF v_strategy_id IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));
+    PERFORM sync_strategy_analytics_status(v_strategy_id);
+  END IF;
+
+  RETURN v_next_attempt;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION mark_compute_job_failed(UUID, TEXT, TEXT, UUID) FROM PUBLIC, anon, authenticated;
+
 -- ───────────── verify — CATALOGUE ONLY
 DO $verify$
 DECLARE
-  v_body TEXT;
+  v_body        TEXT;
+  v_done        TEXT;
+  v_failed      TEXT;
+  v_overloads   INTEGER;
+  v_comment     TEXT;
 BEGIN
   v_body := regexp_replace(
               regexp_replace(
@@ -866,11 +1111,24 @@ BEGIN
   IF v_body IS NULL THEN
     RAISE EXCEPTION 'Rollback 20261009120000 failed: the replaced body could not be read';
   END IF;
-  IF v_body ~ '\mkind\s+NOT\s+IN\s*\(' THEN
-    RAISE EXCEPTION 'Rollback 20261009120000 failed: the kind NOT IN side list survives in sync_strategy_analytics_status';
+  IF v_body ~ '\mkind\s+NOT\s+IN\s*\(' OR v_body ~ '\mv_side_kinds\M' THEN
+    RAISE EXCEPTION 'Rollback 20261009120000 failed: the side-kind list survives in sync_strategy_analytics_status';
+  END IF;
+  IF v_body ~ '\mp_trigger_job_id\M' OR v_body ~ '\mv_side_failed_only\M' THEN
+    RAISE EXCEPTION 'Rollback 20261009120000 failed: the D-09 trigger survives in sync_strategy_analytics_status';
   END IF;
   IF v_body ~ '\mc1\.kind\s*=' THEN
     RAISE EXCEPTION 'Rollback 20261009120000 failed: the D-06 derive supersession (alias c1) survives in sync_strategy_analytics_status';
+  END IF;
+  SELECT count(*) INTO v_overloads
+    FROM pg_proc p
+   WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'sync_strategy_analytics_status';
+  IF v_overloads <> 1 THEN
+    RAISE EXCEPTION 'Rollback 20261009120000 failed: % overload(s) of sync_strategy_analytics_status exist, not exactly the one-argument function', v_overloads;
+  END IF;
+  v_comment := COALESCE(obj_description('public.sync_strategy_analytics_status(uuid)'::regprocedure, 'pg_proc'), '');
+  IF v_comment !~ '20260826120000' THEN
+    RAISE EXCEPTION 'Rollback 20261009120000 failed: the one-argument bridge lost its COMMENT in the signature move (it must carry 20260826120000)';
   END IF;
   IF NOT has_function_privilege('service_role', 'public.sync_strategy_analytics_status(uuid)', 'EXECUTE') THEN
     RAISE EXCEPTION 'Rollback 20261009120000 failed: service_role cannot EXECUTE sync_strategy_analytics_status(uuid)';
@@ -880,7 +1138,22 @@ BEGIN
     RAISE EXCEPTION 'Rollback 20261009120000 failed: anon or authenticated can EXECUTE sync_strategy_analytics_status(uuid)';
   END IF;
 
-  RAISE NOTICE 'Rollback 20261009120000: sync_strategy_analytics_status is the 20261003120000 body again; the side list and the D-06 clause are gone and the ACL holds. The migration ledger row is left in place (see the header).';
+  v_done   := regexp_replace(regexp_replace(pg_get_functiondef('public.mark_compute_job_done(uuid, uuid)'::regprocedure), '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
+  v_failed := regexp_replace(regexp_replace(pg_get_functiondef('public.mark_compute_job_failed(uuid, text, text, uuid)'::regprocedure), '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
+  IF v_done IS NULL OR v_failed IS NULL
+     OR v_done   !~ 'PERFORM\s+sync_strategy_analytics_status\s*\(\s*v_strategy_id\s*\)\s*;'
+     OR v_failed !~ 'PERFORM\s+sync_strategy_analytics_status\s*\(\s*v_strategy_id\s*\)\s*;'
+     OR v_done ~ 'sync_strategy_analytics_status\s*\(\s*v_strategy_id\s*,' OR v_failed ~ 'sync_strategy_analytics_status\s*\(\s*v_strategy_id\s*,' THEN
+    RAISE EXCEPTION 'Rollback 20261009120000 failed: a mark RPC does not call the bridge with exactly one argument again';
+  END IF;
+  IF has_function_privilege('anon', 'public.mark_compute_job_done(uuid, uuid)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.mark_compute_job_done(uuid, uuid)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.mark_compute_job_failed(uuid, text, text, uuid)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.mark_compute_job_failed(uuid, text, text, uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'Rollback 20261009120000 failed: anon or authenticated can EXECUTE a mark RPC';
+  END IF;
+
+  RAISE NOTICE 'Rollback 20261009120000: sync_strategy_analytics_status is the one-argument 20261003120000 body again (comment and ACL intact, no other overload), and the mark RPCs call it with one argument; the side list, the D-06 clause and the D-09 trigger are gone. The migration ledger row is left in place (see the header).';
 END
 $verify$;
 

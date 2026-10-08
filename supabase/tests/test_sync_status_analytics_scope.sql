@@ -52,17 +52,34 @@
 --                 scoped to process_key_long alone.
 --   G3  (guard)   D-04: a genuine compute_analytics_from_csv failure followed by
 --                 a side-kind job driven done stays failed on both.
---   D9            D-09 (founder 2026-10-07): a ten-day-old row carrying the
---                 writer-stamped sentence of a real earlier compute failure, then
---                 a nightly sync_funding that fails. computed_at, the sentence and
---                 both provenance markers are unchanged. Without the hold the
---                 branch (c) fall-through stamps computed_at = now() and blanks
---                 all three: stale analytics read freshly updated.
---   D10 (guard)   the same row and a lingering failed sync_funding, then a genuine
---                 compute created after it driven done: computed_at advances and
---                 the sentence and markers clear. The hold is for the call a side
---                 job FAILED in, not for any strategy that has a side failure.
--- The completion sentinel at the foot counts these fifteen sections.
+--   D9            D-09 (founder 2026-10-07): a ten-day-old complete row carrying
+--                 the writer-stamped sentence of a real earlier compute failure,
+--                 then a nightly sync_funding that fails PERMANENTLY.
+--                 computed_at, the sentence and both provenance markers are
+--                 unchanged. Without the hold the branch (c) fall-through stamps
+--                 computed_at = now() and blanks all three: stale analytics read
+--                 freshly updated.
+--   D10 (guard)   a ten-day-old failed row, a lingering failed sync_funding, then
+--                 a genuine compute created after it driven done: computed_at
+--                 advances and the sentence and markers clear. The hold is for
+--                 the call a side job FAILED in, not for any strategy that has a
+--                 side failure.
+--   D11           the founder's named example, a sync_funding TIMEOUT: a TRANSIENT
+--                 failure retries failed_retry, failed_retry, failed_final, and
+--                 every hop reaches the bridge. computed_at, the sentence, the
+--                 markers and the status are unchanged after EACH attempt. D9
+--                 drives 'permanent', which never runs the in-flight branch.
+--   D12 (guard)   the recency trap: a marked compute created first and still
+--                 running, a sync_funding created later that fails fast, then the
+--                 compute driven done. The latest-created terminal job is a failed
+--                 side job, yet computed_at MUST advance: the hold is keyed on the
+--                 job that triggered the call, not on creation order.
+--   D13           a failed row that carries a writer sentence stays failed after a
+--                 side-only failure (S1..S4 seed failed rows with NO sentence and
+--                 still resolve to complete: the stale Eclipse shape).
+--   D14           a strategy with no strategy_analytics row gets none from a
+--                 side-only failure.
+-- The completion sentinel at the foot counts these nineteen sections.
 --
 -- UNKNOWN KIND, RESOLVED LOUD. An unregistered kind cannot be inserted into
 -- compute_jobs at all (the kind column references compute_job_kinds and the
@@ -70,8 +87,8 @@
 -- would be a fabrication. The behavioural proof that "a kind not on the side list
 -- counts" is G1 (a registered, unlisted kind) and S5 (stitch_composite); the
 -- structural proof is the migration's verify anchor on the list (set equality on
--- the one NOT-IN list), which RAISES on apply if the list gains, loses or
--- re-spells a literal.
+-- the one declared constant v_side_kinds), which RAISES on apply if the list gains,
+-- loses or re-spells a literal.
 --
 -- ⭐ ARM 0 (APPLIED-NESS) IS DELIBERATELY OMITTED, for the reason the residue
 -- gate gives: this migration adds no catalog object outside the function body, so
@@ -177,9 +194,10 @@ BEGIN
   SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
   -- RED-UNDER: conjunct (1), the closed side-kind list, deleted from the live_failures
   --            CTE: every failed sync_funding counts again and the row reads failed, which
-  --            is the pre-fix body. ⚠️ LAYERED: the two list anchors (xv) and (xvi) are
-  --            stood down, otherwise the apply RAISES before the gate runs.
-  -- RED-UNDER-M: {"arm":"S1","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot')\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF v_counting_in_side THEN","replace":"IF FALSE AND v_counting_in_side THEN","occurrences":1}]}
+  --            is the pre-fix body. ⚠️ LAYERED: anchor (xv-b), the three-read-sites check on
+  --            the one declared list, is stood down, otherwise the apply RAISES before the
+  --            gate runs.
+  -- RED-UNDER-M: {"arm":"S1","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"       AND NOT COALESCE(f.kind = ANY (v_side_kinds), FALSE)\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_sites_ok THEN","replace":"IF FALSE AND NOT v_side_sites_ok THEN","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'complete' THEN
     RAISE EXCEPTION 'TEST FAILED (S1): the row reads % after a sync_funding failure that no analytic depends on. sync_funding writes funding_fees and nothing in strategy_analytics, so its failure must not pin the analytics status failed over healthy analytics (the Eclipse shape).', COALESCE(v_status, 'NULL');
   END IF;
@@ -238,8 +256,8 @@ BEGIN
 
   SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
   -- RED-UNDER: 'poll_positions' dropped from the closed side list: its failures count again and the row reads failed.
-  --            ⚠️ LAYERED: anchor (xv), the exact-set check on the list, is stood down.
-  -- RED-UNDER-M: {"arm":"S2","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot')\n","replace":"       AND f.kind NOT IN ('sync_funding', 'reconcile_strategy', 'compute_intro_snapshot')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1}]}
+  --            ⚠️ LAYERED: anchors (xv) and (xv-b), the exact-set check on the list and the literal count, are stood down.
+  -- RED-UNDER-M: {"arm":"S2","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"ARRAY['sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot'];\n","replace":"ARRAY['sync_funding', 'reconcile_strategy', 'compute_intro_snapshot'];\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_sites_ok THEN","replace":"IF FALSE AND NOT v_side_sites_ok THEN","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'complete' THEN
     RAISE EXCEPTION 'TEST FAILED (S2): the row reads % after a poll_positions failure that no analytic depends on. poll_positions persists position_snapshots and writes nothing in strategy_analytics, so its failure must not pin the analytics status failed.', COALESCE(v_status, 'NULL');
   END IF;
@@ -298,8 +316,8 @@ BEGIN
 
   SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
   -- RED-UNDER: 'reconcile_strategy' dropped from the closed side list: its failures count again and the row reads failed.
-  --            ⚠️ LAYERED: anchor (xv), the exact-set check on the list, is stood down.
-  -- RED-UNDER-M: {"arm":"S3","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot')\n","replace":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'compute_intro_snapshot')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1}]}
+  --            ⚠️ LAYERED: anchors (xv) and (xv-b), the exact-set check on the list and the literal count, are stood down.
+  -- RED-UNDER-M: {"arm":"S3","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"ARRAY['sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot'];\n","replace":"ARRAY['sync_funding', 'poll_positions', 'compute_intro_snapshot'];\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_sites_ok THEN","replace":"IF FALSE AND NOT v_side_sites_ok THEN","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'complete' THEN
     RAISE EXCEPTION 'TEST FAILED (S3): the row reads % after a reconcile_strategy failure that no analytic depends on. reconcile_strategy writes reconciliation_reports, portfolio_alerts and trades, and nothing in strategy_analytics, so its failure must not pin the analytics status failed.', COALESCE(v_status, 'NULL');
   END IF;
@@ -358,8 +376,8 @@ BEGIN
 
   SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
   -- RED-UNDER: 'compute_intro_snapshot' dropped from the closed side list: its failures count again and the row reads failed.
-  --            ⚠️ LAYERED: anchor (xv), the exact-set check on the list, is stood down.
-  -- RED-UNDER-M: {"arm":"S4","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot')\n","replace":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1}]}
+  --            ⚠️ LAYERED: anchors (xv) and (xv-b), the exact-set check on the list and the literal count, are stood down.
+  -- RED-UNDER-M: {"arm":"S4","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"ARRAY['sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot'];\n","replace":"ARRAY['sync_funding', 'poll_positions', 'reconcile_strategy'];\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_sites_ok THEN","replace":"IF FALSE AND NOT v_side_sites_ok THEN","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'complete' THEN
     RAISE EXCEPTION 'TEST FAILED (S4): the row reads % after a compute_intro_snapshot failure that no analytic depends on. compute_intro_snapshot reads strategy_analytics and writes contact_requests, and its strategy_id is only the intro target, so its failure must not pin the analytics status failed.', COALESCE(v_status, 'NULL');
   END IF;
@@ -416,7 +434,7 @@ BEGIN
   SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
   -- RED-UNDER: 'stitch_composite' added to the side list: a genuine composite failure is dropped from the failure set and the row reads complete.
   --            ⚠️ LAYERED: anchors (xv) and (xvi) are stood down.
-  -- RED-UNDER-M: {"arm":"S5","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot')\n","replace":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot', 'stitch_composite')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF v_counting_in_side THEN","replace":"IF FALSE AND v_counting_in_side THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S5","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"ARRAY['sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot'];\n","replace":"ARRAY['sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot', 'stitch_composite'];\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF v_counting_in_side THEN","replace":"IF FALSE AND v_counting_in_side THEN","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'failed' THEN
     RAISE EXCEPTION 'TEST FAILED (S5): the row reads % beside a live stitch_composite failure. stitch_composite writes strategy_analytics, so its failure is a genuine analytics failure, and a side-kind failure next to it must never launder it.', COALESCE(v_status, 'NULL');
   END IF;
@@ -738,7 +756,7 @@ BEGIN
   SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
   -- RED-UNDER: 'compute_analytics' added to the side list: a failure of the retired analytics kind is dropped from the failure set and the row reads complete.
   --            ⚠️ LAYERED: anchors (xv) and (xvi) are stood down.
-  -- RED-UNDER-M: {"arm":"G1","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot')\n","replace":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot', 'compute_analytics')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF v_counting_in_side THEN","replace":"IF FALSE AND v_counting_in_side THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"G1","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"ARRAY['sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot'];\n","replace":"ARRAY['sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot', 'compute_analytics'];\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF v_counting_in_side THEN","replace":"IF FALSE AND v_counting_in_side THEN","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'failed' THEN
     RAISE EXCEPTION 'TEST FAILED (G1): the row reads % after a failed compute_analytics. The retired kind is a registered kind that is NOT on the closed side list, so it counts toward failed; a kind that is not named must resolve loud, never silently healthy (D-05).', COALESCE(v_status, 'NULL');
   END IF;
@@ -838,7 +856,7 @@ BEGIN
   SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
   -- RED-UNDER: 'compute_analytics_from_csv' added to the side list: the genuine compute failure is dropped from the failure set and the row reads complete.
   --            ⚠️ LAYERED: anchors (xv) and (xvi) are stood down.
-  -- RED-UNDER-M: {"arm":"G3","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot')\n","replace":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot', 'compute_analytics_from_csv')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF v_counting_in_side THEN","replace":"IF FALSE AND v_counting_in_side THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"G3","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"ARRAY['sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot'];\n","replace":"ARRAY['sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot', 'compute_analytics_from_csv'];\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF v_counting_in_side THEN","replace":"IF FALSE AND v_counting_in_side THEN","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'failed' THEN
     RAISE EXCEPTION 'TEST FAILED (G3): the row reads % although a genuine compute_analytics_from_csv failure is followed only by a done side-kind job. D-04: a later done of a DIFFERENT kind never masks a real analytics failure.', COALESCE(v_status, 'NULL');
   END IF;
@@ -873,7 +891,9 @@ BEGIN
   INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'sscope D9') RETURNING id INTO s;
 
   -- A real earlier analytics failure (superseded by a later done compute, so it is
-  -- no longer live) whose writer-stamped sentence still sits on a ten-day-old row.
+  -- no longer live) whose writer-stamped sentence still sits on a ten-day-old
+  -- COMPLETE row (the shape branch (b-prime) leaves behind: a sentence over a
+  -- terminal-success row).
   INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, last_error, error_kind, created_at)
   VALUES (s, 'compute_analytics_from_csv', 'failed_final', 3, 3, 'seeded failure', 'permanent', now() - interval '8 hours')
   RETURNING id INTO fj;
@@ -881,16 +901,18 @@ BEGIN
   VALUES (s, 'compute_analytics_from_csv', 'done', 1, 3, now() - interval '4 hours');
   INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, computation_error,
                                   computation_error_source, computation_error_job_id, computed_at)
-  VALUES (s, 'failed', FALSE, v_err, 'writer', fj, v_old_at);
+  VALUES (s, 'complete', FALSE, v_err, 'writer', fj, v_old_at);
   INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, last_error, error_kind, created_at)
-  VALUES (s, 'sync_funding', 'failed_final', 3, 3, 'handler timeout', 'permanent', now() - interval '2 hours');
+  VALUES (s, 'sync_funding', 'failed_final', 3, 3, 'seeded failure', 'permanent', now() - interval '2 hours');
 
-  -- The nightly sync_funding that fails now, through the real mark RPC.
+  -- A nightly sync_funding that fails PERMANENTLY now, through the real mark RPC
+  -- (a permanent classification goes straight to failed_final; the transient
+  -- timeout path, which retries, is D11).
   tok := gen_random_uuid();
   INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, created_at)
   VALUES (s, 'sync_funding', 'running', tok, 1, 3, now())
   RETURNING id INTO j;
-  PERFORM mark_compute_job_failed(j, 'handler timeout', 'permanent', tok);
+  PERFORM mark_compute_job_failed(j, 'seeded permanent failure', 'permanent', tok);
 
   SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j;
   IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
@@ -908,7 +930,7 @@ BEGIN
   --            pre-D-09 body, so a failing nightly side job makes stale analytics look
   --            freshly updated. No anchor needs standing down: the flag read and the four
   --            CASEs stay intact for (xix); only the value is forced.
-  -- RED-UNDER-M: {"arm":"D9","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"    INTO v_side_failed_only;\n","replace":"    INTO v_side_failed_only;\n  v_side_failed_only := FALSE;\n","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"D9","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"                                     AND t.strategy_id = p_strategy_id), FALSE);\n","replace":"                                     AND t.strategy_id = p_strategy_id), FALSE);\n  v_side_failed_only := FALSE;\n","occurrences":1}]}
   IF v_at IS DISTINCT FROM v_old_at THEN
     RAISE EXCEPTION 'TEST FAILED (D9): computed_at is % after a failed side-kind job, seeded % (ten days old). A side job that failed computed nothing, so it must not stamp the analytics fresh (D-09, founder 2026-10-07).', COALESCE(v_at::text, 'NULL'), v_old_at;
   END IF;
@@ -974,18 +996,281 @@ BEGIN
   --            old sentence for good, so a genuine recompute that finishes done never reads
   --            fresh. The hold is for the call a side job FAILED in, not for the strategy.
   --            The flag read and the four CASEs stay intact for (xix); only the value is forced.
-  -- RED-UNDER-M: {"arm":"D10","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"    INTO v_side_failed_only;\n","replace":"    INTO v_side_failed_only;\n  v_side_failed_only := TRUE;\n","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"D10","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"                                     AND t.strategy_id = p_strategy_id), FALSE);\n","replace":"                                     AND t.strategy_id = p_strategy_id), FALSE);\n  v_side_failed_only := TRUE;\n","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'complete' OR v_at IS NULL OR v_at <= v_old_at OR v_msg IS NOT NULL OR v_src IS NOT NULL OR v_mjob IS NOT NULL THEN
     RAISE EXCEPTION 'TEST FAILED (D10): after a genuine compute finished done (created after the failed sync_funding) the row reads status %, computed_at %, sentence %, markers % / %. Branch (c) must still stamp computed_at and clear the sentence and its markers; D-09 holds them only when the latest terminal job is a failed side-kind job.', COALESCE(v_status, 'NULL'), COALESCE(v_at::text, 'NULL'), COALESCE(v_msg, 'NULL'), COALESCE(v_src, 'NULL'), COALESCE(v_mjob::text, 'NULL');
   END IF;
 END $$;
 
+-- ===== ARM D11 — a TRANSIENT side failure holds freshness through every retry =====
+-- The founder's named example: a nightly sync_funding TIMEOUT. A timeout is
+-- classified transient, so it goes running -> failed_retry -> running ->
+-- failed_retry -> running -> failed_final (max_attempts 3), and every hop reaches
+-- the bridge. D9 drives error_kind 'permanent', which jumps straight to
+-- failed_final and never runs the in-flight branch, so it cannot see this path.
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  fj         UUID;
+  tok        UUID;
+  i          INTEGER;
+  v_old_at   TIMESTAMPTZ := now() - interval '10 days';
+  v_err      TEXT := 'seeded sentence of a real earlier compute failure';
+  v_want     TEXT[] := ARRAY['failed_retry', 'failed_retry', 'failed_final'];
+  v_jobstat  TEXT;
+  v_status   TEXT;
+  v_at       TIMESTAMPTZ;
+  v_msg      TEXT;
+  v_src      TEXT;
+  v_mjob     UUID;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'sscope-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'sscope', 'sscope-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'sscope mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'sscope D11') RETURNING id INTO s;
+
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, last_error, error_kind, created_at)
+  VALUES (s, 'compute_analytics_from_csv', 'failed_final', 3, 3, 'seeded failure', 'permanent', now() - interval '8 hours')
+  RETURNING id INTO fj;
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, created_at)
+  VALUES (s, 'compute_analytics_from_csv', 'done', 1, 3, now() - interval '4 hours');
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, computation_error,
+                                  computation_error_source, computation_error_job_id, computed_at)
+  VALUES (s, 'complete', FALSE, v_err, 'writer', fj, v_old_at);
+
+  -- The nightly sync_funding, claimed for the first time.
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, created_at)
+  VALUES (s, 'sync_funding', 'running', tok, 1, 3, now())
+  RETURNING id INTO j;
+
+  FOR i IN 1..3 LOOP
+    IF i > 1 THEN
+      -- The claim RPC's effect, reproduced: the retry is re-claimed running with a
+      -- fresh token and its attempt counter advanced.
+      tok := gen_random_uuid();
+      UPDATE compute_jobs SET status = 'running', claim_token = tok, attempts = i WHERE id = j;
+    END IF;
+    PERFORM mark_compute_job_failed(j, 'handler timeout', 'transient', tok);
+
+    SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j;
+    IF v_jobstat IS DISTINCT FROM v_want[i] THEN
+      RAISE EXCEPTION 'TEST FAILED (D11-SETUP): after transient failure % the sync_funding is % rather than %, so the retry path (failed_retry, failed_retry, failed_final) was not driven and the held-column reads below would pass vacuously.', i, COALESCE(v_jobstat, 'NULL'), v_want[i];
+    END IF;
+
+    SELECT computation_status, computed_at, computation_error, computation_error_source, computation_error_job_id
+      INTO v_status, v_at, v_msg, v_src, v_mjob
+      FROM strategy_analytics WHERE strategy_id = s;
+    -- RED-UNDER: the early return for an in-flight-only side failure deleted: every
+    --            failed_retry hop runs branch (a), which stamps computed_at = now()
+    --            and blanks the sentence and markers over the ten-day-old analytics.
+    --            ⚠️ LAYERED: anchor (xix)'s early-return check is stood down.
+  -- RED-UNDER-M: {"arm":"D11","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"  IF v_side_failed_only\n     AND COALESCE(v_nonterminal_count, 0) > 0\n     AND COALESCE(v_nonterminal_counting_count, 1) = 0 THEN\n    RETURN;\n  END IF;\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_a_hold_ok THEN","replace":"IF FALSE AND NOT v_a_hold_ok THEN","occurrences":1}]}
+    IF v_status IS DISTINCT FROM 'complete' OR v_at IS DISTINCT FROM v_old_at
+       OR v_msg IS DISTINCT FROM v_err OR v_src IS DISTINCT FROM 'writer' OR v_mjob IS DISTINCT FROM fj THEN
+      RAISE EXCEPTION 'TEST FAILED (D11): after transient sync_funding failure % of 3 (job now %) the row reads status %, computed_at % (seeded % ten days old), sentence %, source %, job %. A side job that timed out computed nothing, so no retry hop may stamp the analytics fresh, blank the sentence of a real earlier failure or move the status (D-09, founder 2026-10-07).', i, v_jobstat, COALESCE(v_status, 'NULL'), COALESCE(v_at::text, 'NULL'), v_old_at, COALESCE(v_msg, 'NULL'), COALESCE(v_src, 'NULL'), COALESCE(v_mjob::text, 'NULL');
+    END IF;
+  END LOOP;
+END $$;
+
+-- ===== ARM D12 — guard: a counting success after a fast side failure still stamps ==
+-- The recency trap. A marked ledger-refresh compute C is created first and is
+-- still running; a nightly sync_funding S is created later and fails at once. C
+-- then finishes done. The latest-CREATED terminal job is now S (failed_final),
+-- yet the call was caused by C succeeding, so computed_at MUST advance. C is
+-- marked so that S's failure, with C in flight, leaves the row alone through the
+-- refresh keep: the old value survives to the point C is marked.
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  c          UUID;
+  sj         UUID;
+  ctok       UUID := gen_random_uuid();
+  stok       UUID := gen_random_uuid();
+  v_old_at   TIMESTAMPTZ := now() - interval '10 days';
+  v_jobstat  TEXT;
+  v_status   TEXT;
+  v_at       TIMESTAMPTZ;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'sscope-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'sscope', 'sscope-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'sscope mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'sscope D12') RETURNING id INTO s;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, computed_at)
+  VALUES (s, 'complete', FALSE, v_old_at);
+
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata, created_at)
+  VALUES (s, 'compute_analytics_from_csv', 'running', ctok, 1, 3, '{"source":"ledger-refresh"}'::jsonb, now() - interval '3 hours')
+  RETURNING id INTO c;
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, created_at)
+  VALUES (s, 'sync_funding', 'running', stok, 1, 3, now() - interval '2 hours')
+  RETURNING id INTO sj;
+
+  PERFORM mark_compute_job_failed(sj, 'seeded permanent failure', 'permanent', stok);
+
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = sj;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'TEST FAILED (D12-SETUP): the driven sync_funding is % rather than failed_final, so the later-created failed side job the recency trap needs does not exist.', COALESCE(v_jobstat, 'NULL');
+  END IF;
+  SELECT computation_status, computed_at INTO v_status, v_at FROM strategy_analytics WHERE strategy_id = s;
+  IF v_status IS DISTINCT FROM 'complete' OR v_at IS DISTINCT FROM v_old_at THEN
+    RAISE EXCEPTION 'TEST FAILED (D12-SETUP): after the side failure with the marked compute still running the row reads % with computed_at % (seeded %), so the old value did not survive to the compute''s own mark and the advance asserted below would hold vacuously.', COALESCE(v_status, 'NULL'), COALESCE(v_at::text, 'NULL'), v_old_at;
+  END IF;
+
+  PERFORM mark_compute_job_done(c, ctok);
+
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = c;
+  IF v_jobstat IS DISTINCT FROM 'done' THEN
+    RAISE EXCEPTION 'TEST FAILED (D12-SETUP): the driven compute_analytics_from_csv is % rather than done, so the bridge was never asked to decide after a genuine success.', COALESCE(v_jobstat, 'NULL');
+  END IF;
+  SELECT computation_status, computed_at INTO v_status, v_at FROM strategy_analytics WHERE strategy_id = s;
+  -- RED-UNDER: the hold keyed on recency in addition to the trigger (the latest-created
+  --            terminal job is a failed_final): the failed side job created AFTER the
+  --            compute freezes computed_at when the compute itself finishes done.
+  -- RED-UNDER-M: {"arm":"D12","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"                                     AND t.strategy_id = p_strategy_id), FALSE);\n","replace":"                                     AND t.strategy_id = p_strategy_id), FALSE);\n  v_side_failed_only := v_side_failed_only OR COALESCE((SELECT j.status = 'failed_final' FROM compute_jobs j WHERE j.strategy_id = p_strategy_id AND j.status IN ('done', 'failed_final') ORDER BY j.created_at DESC, j.id DESC LIMIT 1), FALSE);\n","occurrences":1}]}
+  IF v_status IS DISTINCT FROM 'complete' OR v_at IS NULL OR v_at <= v_old_at THEN
+    RAISE EXCEPTION 'TEST FAILED (D12): after a genuine compute finished done the row reads status %, computed_at % (seeded % ten days old). The call was caused by a counting job succeeding, so computed_at must advance even though a side job created later had failed; D-09 holds freshness only for a call a side job FAILED in.', COALESCE(v_status, 'NULL'), COALESCE(v_at::text, 'NULL'), v_old_at;
+  END IF;
+END $$;
+
+-- ===== ARM D13 — a failed row that carries a sentence stays failed ================
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  fj         UUID;
+  tok        UUID;
+  v_old_at   TIMESTAMPTZ := now() - interval '10 days';
+  v_err      TEXT := 'seeded sentence of a real earlier compute failure';
+  v_jobstat  TEXT;
+  v_status   TEXT;
+  v_at       TIMESTAMPTZ;
+  v_msg      TEXT;
+  v_src      TEXT;
+  v_mjob     UUID;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'sscope-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'sscope', 'sscope-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'sscope mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'sscope D13') RETURNING id INTO s;
+
+  -- A real earlier analytics failure, superseded (no longer live), whose writer
+  -- sentence still sits on a row that reads FAILED. The sentence is the reason the
+  -- row is failed; nothing a side job does can have resolved it.
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, last_error, error_kind, created_at)
+  VALUES (s, 'compute_analytics_from_csv', 'failed_final', 3, 3, 'seeded failure', 'permanent', now() - interval '8 hours')
+  RETURNING id INTO fj;
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, created_at)
+  VALUES (s, 'compute_analytics_from_csv', 'done', 1, 3, now() - interval '4 hours');
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, computation_error,
+                                  computation_error_source, computation_error_job_id, computed_at)
+  VALUES (s, 'failed', FALSE, v_err, 'writer', fj, v_old_at);
+
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, created_at)
+  VALUES (s, 'sync_funding', 'running', tok, 1, 3, now())
+  RETURNING id INTO j;
+  PERFORM mark_compute_job_failed(j, 'seeded permanent failure', 'permanent', tok);
+
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'TEST FAILED (D13-SETUP): the driven sync_funding is % rather than failed_final, so the bridge was never asked to decide a side-only failure.', COALESCE(v_jobstat, 'NULL');
+  END IF;
+
+  SELECT computation_status, computed_at, computation_error, computation_error_source, computation_error_job_id
+    INTO v_status, v_at, v_msg, v_src, v_mjob
+    FROM strategy_analytics WHERE strategy_id = s;
+  -- RED-UNDER: the failed-row hold deleted from branch (c)'s status CASE: the side-only
+  --            failure flips the failed row to complete while its failure sentence is
+  --            held, so a failed analytic reads healthy.
+  --            ⚠️ LAYERED: anchor (xix)'s status-hold check is stood down.
+  -- RED-UNDER-M: {"arm":"D13","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"           WHEN v_side_failed_only\n                AND strategy_analytics.computation_status = 'failed'\n                AND strategy_analytics.computation_error IS NOT NULL\n           THEN 'failed'\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_c_status_hold_ok THEN","replace":"IF FALSE AND NOT v_c_status_hold_ok THEN","occurrences":1}]}
+  IF v_status IS DISTINCT FROM 'failed' OR v_at IS DISTINCT FROM v_old_at
+     OR v_msg IS DISTINCT FROM v_err OR v_src IS DISTINCT FROM 'writer' OR v_mjob IS DISTINCT FROM fj THEN
+    RAISE EXCEPTION 'TEST FAILED (D13): after a failed side-kind job the failed row reads status % (expected failed), computed_at % (seeded %), sentence %, source %, job %. A side job that failed resolved nothing, so a failed row that carries a failure sentence must stay failed (D-09).', COALESCE(v_status, 'NULL'), COALESCE(v_at::text, 'NULL'), v_old_at, COALESCE(v_msg, 'NULL'), COALESCE(v_src, 'NULL'), COALESCE(v_mjob::text, 'NULL');
+  END IF;
+END $$;
+
+-- ===== ARM D14 — no strategy_analytics row is written for a side-only failure ======
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  tok        UUID;
+  v_before   INTEGER;
+  v_after    INTEGER;
+  v_jobstat  TEXT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'sscope-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'sscope', 'sscope-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'sscope mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'sscope D14') RETURNING id INTO s;
+
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, created_at)
+  VALUES (s, 'compute_analytics_from_csv', 'done', 1, 3, now() - interval '4 hours');
+  SELECT count(*) INTO v_before FROM strategy_analytics WHERE strategy_id = s;
+  IF v_before <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (D14-SETUP): % strategy_analytics row(s) exist before the driving mark, not 0, so the no-row shape was not seeded.', v_before;
+  END IF;
+
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, created_at)
+  VALUES (s, 'sync_funding', 'running', tok, 1, 3, now())
+  RETURNING id INTO j;
+  PERFORM mark_compute_job_failed(j, 'seeded permanent failure', 'permanent', tok);
+
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'TEST FAILED (D14-SETUP): the driven sync_funding is % rather than failed_final, so the bridge was never asked to decide a side-only failure.', COALESCE(v_jobstat, 'NULL');
+  END IF;
+
+  SELECT count(*) INTO v_after FROM strategy_analytics WHERE strategy_id = s;
+  -- RED-UNDER: the no-row guard deleted from branch (c): the side-only failure INSERTs a
+  --            fresh complete row stamped now(), i.e. analytics that were never computed
+  --            read freshly computed.
+  --            ⚠️ LAYERED: anchor (xix)'s row-guard check is stood down.
+  -- RED-UNDER-M: {"arm":"D14","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"  IF v_side_failed_only\n     AND NOT EXISTS (SELECT 1 FROM strategy_analytics WHERE strategy_id = p_strategy_id) THEN\n    RETURN;\n  END IF;\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_c_row_guard_ok THEN","replace":"IF FALSE AND NOT v_c_row_guard_ok THEN","occurrences":1}]}
+  IF v_after <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (D14): a side-only failure on a strategy with no strategy_analytics row left % row(s). The bridge must not manufacture a fresh complete row stamped now() for analytics that were never computed (D-09).', v_after;
+  END IF;
+END $$;
+
 -- ===== COMPLETION SENTINEL ==================================================
--- Reached only if every arm above passed. Counts the fifteen sections the
+-- Reached only if every arm above passed. Counts the nineteen sections the
 -- mutation runner counts: the -SETUP sub-arms fold into their parent section.
 DO $$
 BEGIN
-  RAISE NOTICE 'ALL 15 ARMS EXECUTED (S1, S2, S3, S4, S5, S6, C1, C2, C3, C4, G1, G2, G3, D9, D10): [164.6.6.3.4 STATUSBRIDGE] a failed side-kind job (sync_funding, poll_positions, reconcile_strategy, compute_intro_snapshot) never pins strategy_analytics.computation_status failed (S1..S4), while a live stitch_composite failure beside it still does (S5) and a warned row keeps complete_with_warnings (S6); a failed process_key_long is cleared only by a later done derive AND a later done compute, ledger-refresh chains included (C1), never by either alone (C2, C3) nor by a chain that predates the failure (C4); and the per-kind rule holds for everything else: the retired compute_analytics still counts (G1), a done chain does not clear a failed sync_trades (G2), and a done side kind does not clear a genuine compute_analytics_from_csv failure (G3); a failed side-kind job never stamps computed_at or blanks the sentence of a real earlier failure (D9, D-09), while a genuine compute finished done after it still does (D10).';
+  RAISE NOTICE 'ALL 19 ARMS EXECUTED (S1, S2, S3, S4, S5, S6, C1, C2, C3, C4, G1, G2, G3, D9, D10, D11, D12, D13, D14): [164.6.6.3.4 STATUSBRIDGE] a failed side-kind job (sync_funding, poll_positions, reconcile_strategy, compute_intro_snapshot) never pins strategy_analytics.computation_status failed (S1..S4), while a live stitch_composite failure beside it still does (S5) and a warned row keeps complete_with_warnings (S6); a failed process_key_long is cleared only by a later done derive AND a later done compute, ledger-refresh chains included (C1), never by either alone (C2, C3) nor by a chain that predates the failure (C4); and the per-kind rule holds for everything else: the retired compute_analytics still counts (G1), a done chain does not clear a failed sync_trades (G2), and a done side kind does not clear a genuine compute_analytics_from_csv failure (G3); a failed side-kind job never stamps computed_at or blanks the sentence of a real earlier failure (D9, D-09), also through every retry of a transient failure (D11), while a genuine compute finished done after it still does, even with a side job created later that failed fast (D10, D12); a failed row that carries a sentence stays failed (D13) and no row is manufactured for a strategy that has none (D14).';
 END $$;
 
 ROLLBACK;

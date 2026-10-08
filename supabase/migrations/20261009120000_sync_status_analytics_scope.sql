@@ -2,14 +2,22 @@
 -- Phase 164.6.6.3.4 (STATUSBRIDGE): a strategy's analytics status reads
 -- `failed` only for a LIVE ANALYTICS failure.
 --
--- WHAT IT CHANGES. One function, `public.sync_strategy_analytics_status(uuid)`,
--- the SQL bridge every terminal compute-job mark ends in, re-based on its
--- latest body (20261003120000, see RE-BASE). The executable delta is two added
--- conjuncts in the `WHERE` clause of the `live_failures` CTE, the one place a
--- failure enters the verdict, plus one flag and four assignments in branch (c)
--- (item (3), founder D-09). Filtering in the CTE keeps is_protected,
--- has_live_successor, the aggregate picks and branches (a), (b) and (b-prime)
--- correct without editing any of them.
+-- WHAT IT CHANGES. The SQL bridge every terminal compute-job mark ends in,
+-- `public.sync_strategy_analytics_status`, re-based on its latest body
+-- (20261003120000, see RE-BASE), and the two mark RPCs that call it. The bridge's
+-- signature moves from (uuid) to (uuid, uuid DEFAULT NULL): the second argument
+-- names the job whose terminal transition caused the call (item (3), founder
+-- D-09). The old one-argument signature is DROPPED (an overload would make every
+-- one-argument call ambiguous), its COMMENT is carried across and its ACL
+-- re-issued. mark_compute_job_done and mark_compute_job_failed are re-based on
+-- their latest bodies (20261001120000) with ONE change each: they pass p_job_id.
+-- The executable delta in the bridge is two added conjuncts in the `WHERE` clause
+-- of the `live_failures` CTE, the one place a failure enters the verdict, plus the
+-- D-09 trigger flag, an early return ahead of branch (a), and three holds in
+-- branch (c). Filtering in the CTE keeps is_protected, has_live_successor, the
+-- aggregate picks and branches (b) and (b-prime) correct without editing any of
+-- them. The side-kind list is declared ONCE (a CONSTANT array) and read at the
+-- three sites that need it.
 --
 --   (1) D-05, side kinds never fail the analytics status. A `failed_final` job
 --       whose kind is one of FOUR named side kinds is dropped from the failure
@@ -55,33 +63,42 @@
 --       Strict comparison: a chain job stamped in the same transaction as the
 --       failure does not supersede it, the safe direction.
 --
---   (3) D-09 (founder 2026-10-07, after review round 1), a side-kind failure
---       never stamps freshness. Once (1) drops a side failure from the failure
---       set, a call whose only failed job is a side kind reaches branch (c), and
---       branch (c) wrote computed_at = now() and blanked computation_error. A
+--   (3) D-09 (founder 2026-10-07, after review round 1; rebuilt in round 3), a
+--       side-kind failure never stamps freshness. Once (1) drops a side failure
+--       from the failure set, a call caused by a failing side job fell through to
+--       branch (c), which wrote computed_at = now() and blanked computation_error,
+--       and a TRANSIENT side failure (a sync_funding timeout retries through
+--       failed_retry) did the same on every retry hop through branch (a). A
 --       failing nightly sync_funding therefore made STALE analytics read freshly
---       computed, and erased the sentence of a real earlier failure. Branch (c)
---       now reads one flag, v_side_failed_only, immediately before its write:
---       TRUE when the MOST RECENTLY CREATED terminal job (done or failed_final)
---       of the strategy is a failed_final, ordered by created_at DESC, id DESC
---       like the aggregate picks. Branch (c) is reached only when no counting
---       failure is live, so a failed_final that is the latest terminal job there
---       can only be a side kind (a counting failure would be live, and a
---       superseded one has a LATER done, which would be the latest instead). The
---       flag therefore names no kind and does not respell the D-05 list. When it
---       is TRUE the branch still resolves computation_status exactly as before
---       (complete, or complete_with_warnings for a warned row) and still clears
---       computing_started_at, but HOLDS computed_at, computation_error and both
---       provenance markers, because nothing was computed and the bridge wrote
---       none of that sentence. A later job of any other outcome (a done compute,
---       a done side job) is created after the failure, so the flag reads FALSE
---       and branch (c) behaves as it always did: the booked stated limit of Phase
---       166.5 COMPUTEDATSTAMP for a SUCCESSFUL side job is untouched. A genuine
---       analytics run stamps computed_at itself (job_worker.py), so the hold
---       costs a recompute nothing. Gate arm D9 of
---       supabase/tests/test_sync_status_analytics_scope.sql pins it.
---       Scope note: a strategy with NO strategy_analytics row still gets the
---       fresh INSERT of branch (c) (the held columns have nothing to hold).
+--       computed, and erased the sentence of a real earlier failure.
+--       THE DECISION IS KEYED ON THE TRIGGER, NOT ON RECENCY. Round 2 used "the
+--       latest-created terminal job is a failed_final", which also read TRUE when
+--       a genuine counting job finished done after a side job created later had
+--       failed fast, and froze computed_at after a real recompute. The bridge is
+--       the only writer of strategy_analytics.computed_at (job_worker.py writes
+--       allocator_equity_derived.computed_at, never this column), so nothing else
+--       ever re-stamps it. The mark RPCs now pass the job they just terminalised
+--       as p_trigger_job_id, and v_side_failed_only is TRUE only when THAT job is
+--       a side-kind job in failed_retry or failed_final (NULL, a job of another
+--       strategy, a done side job and any counting job all read FALSE). Every
+--       other caller (the Python DEFERRED path, a status re-sync) passes NULL and
+--       gets the pre-D-09 behaviour. When the flag is TRUE:
+--         * (a-hold) with only side kinds in flight, the call returns before
+--           branch (a): the row, and a missing row, stay exactly as they were. A
+--           failed_retry hop therefore changes nothing; the terminal hop reaches
+--           branch (c) with nothing in flight. With a counting job in flight,
+--           branch (a) runs as it always did, because that job is why the row moves.
+--         * branch (c) resolves the status as before (computing -> complete or
+--           complete_with_warnings), but HOLDS computed_at, computation_error and
+--           both provenance markers; a `failed` row that carries a sentence stays
+--           `failed` (a `failed` row with NO sentence is the stale Eclipse shape
+--           D-05 exists for and still resolves to complete); and no
+--           strategy_analytics row is written when none exists.
+--       Gate arms D9 to D14 of supabase/tests/test_sync_status_analytics_scope.sql
+--       pin it.
+--       Known limit, unchanged by this file: a SUCCESSFUL side-kind job still
+--       takes branch (c) unchanged and stamps computed_at (the booked Phase
+--       166.5 COMPUTEDATSTAMP limit).
 --
 -- WHY THE KIND FILTER SITS IN THE CTE, DESPITE THE CARRIED CTE COMMENT. The
 -- carried body says the refresh-marker kind scope belongs to is_protected and
@@ -92,19 +109,19 @@
 -- deliberate, founder-decided narrowing of who may fail, for kinds that cannot
 -- make an analytic wrong. The two scopes stay in different places and different
 -- spellings on purpose: the marker scope is an IN list on is_protected, the side
--- list is a NOT-IN list in the CTE, and the carried kind-scope anchor and the
--- Python drift reader see only the former.
+-- list is a declared constant array (`v_side_kinds`) read through `= ANY (...)`,
+-- and the carried kind-scope anchor and the Python drift reader see only the
+-- former. The TypeScript drift test reads the latter.
 --
 -- WHAT IT DOES NOT CHANGE.
---   * Read 1 and branch (a). An in-flight side job still counts as non-terminal,
---     so a running sync_funding still moves a plain row to `computing`. D-05
---     scopes the FAILURE set only (RESEARCH Q-B, left for the founder as
---     awareness).
---   * Branch (c)'s status resolution and the SUCCESSFUL-side-job transition. A
---     strategy whose only failing job is a side kind falls through to branch (c)
---     and reads `complete`, or `complete_with_warnings` when the row is warned
---     (SI-02), but since D-09 (item (3) above) it no longer blanks
---     `computation_error` or stamps `computed_at`. A SUCCESSFUL side-kind job
+--   * Read 1 and branch (a) for every call a side-kind failure did not cause. An
+--     in-flight side job still counts as non-terminal, so a running sync_funding
+--     still moves a plain row to `computing` when another job's mark reaches the
+--     bridge. D-05 scopes the FAILURE set only (RESEARCH Q-B, left for the
+--     founder as awareness). Since D-09 the call a side job's own FAILURE causes
+--     is the exception (item (3)).
+--   * Branch (c)'s status resolution for every call a side-kind failure did not
+--     cause, and the SUCCESSFUL-side-job transition. A SUCCESSFUL side-kind job
 --     still takes branch (c) unchanged, and the booked stated limit of Phase
 --     166.5 COMPUTEDATSTAMP applies to it as before.
 --   * Per-kind supersession for every other kind (D-04). A later `done` of a
@@ -112,65 +129,91 @@
 --     followed by a done derive and a done compute stays `failed`, and so does a
 --     genuine compute_analytics_from_csv failure followed by a done side kind.
 --   * No UI (D-07). Every side-kind failure stays on the admin job surface.
---   * The mark RPCs, computation_error_copy, the ACL and the COMMENT on the
---     function. There is NO COMMENT ON FUNCTION statement in this file: the
---     carried comment anchor keys on 20260826120000's comment surviving
---     CREATE OR REPLACE.
+--   * The mark RPCs' signatures, error handling, locks and fan-in; computation_error_copy;
+--     the bridge's ACL (re-issued identically) and its COMMENT (carried across the
+--     DROP byte for byte). There is NO literal COMMENT ON FUNCTION text in this
+--     file: the carried comment anchor keys on 20260826120000's comment surviving.
 --
--- RE-BASE. The function body below is copied BYTE-FOR-BYTE from
+-- RE-BASE. The bridge body below is copied BYTE-FOR-BYTE from
 -- 20261003120000_sync_status_bridge_residues.sql (Phase 164.5.2.1), which is the
 -- latest CREATE of this function on main and was re-grepped when this file was
--- written: no later CREATE or ALTER of it exists. The REVOKE and GRANT are
--- re-issued verbatim and the whole carried self-verify block follows, byte for
--- byte except its final NOTICE, then this phase's anchors (xv) to (xix). That
--- block is the proof that the re-base dropped no hardening (membership sites,
--- hold CASEs, the in-bridge lock, the service_role grant). Transaction style is
+-- written: no later CREATE or ALTER of it exists. The two mark RPCs are copied
+-- byte for byte from 20261001120000_compute_job_fence_errcode_55006.sql (the
+-- latest definition of each, re-grepped: no later CREATE or ALTER), changing only
+-- the bridge call. The bridge's REVOKE and GRANT are re-issued (the GRANT now
+-- names the new signature), the mark RPCs' REVOKEs are restated exactly as
+-- 20261001120000 issued them, and the whole carried self-verify block follows,
+-- byte for byte except the signature in its ACL probes and its final NOTICE, then
+-- this phase's anchors (xv) to (xix). That block is the proof that the re-base
+-- dropped no hardening (membership sites, hold CASEs, the in-bridge lock, the
+-- service_role grant, the anon and authenticated denials). Transaction style is
 -- the carried one: no explicit BEGIN or COMMIT, the migration runner's own
--- transaction applies.
+-- transaction applies. (Statements may also run outside a transaction, as the
+-- pg-lane runs them, so nothing here depends on ON COMMIT behaviour.)
+--
+-- CALLERS OF THE CHANGED SIGNATURE. The second argument is optional, so every
+-- existing caller keeps working unchanged: the two mark RPCs (this file passes
+-- p_job_id), the Python DEFERRED path (analytics-service/services/analytics_status.py
+-- and the other `rpc("sync_strategy_analytics_status", {"p_strategy_id": ...})`
+-- sites), the TypeScript sites that call the same RPC with `p_strategy_id`, and the
+-- test corpus. Named-argument and one-positional-argument calls both resolve.
 --
 -- ==========================================================================
--- VAC-04 ACKNOWLEDGEMENT -- the PROD body this CREATE OR REPLACE overwrites
+-- VAC-04 ACKNOWLEDGEMENT -- the PROD bodies this migration overwrites
 -- ==========================================================================
 -- The gate compares the COMMITTED SNAPSHOT (supabase/schema/functions/) against
 -- PROD's live body. On a function-changing migration PR the two necessarily
 -- disagree: the snapshot must carry the body the MIGRATIONS produce (the new
--- one), while VAC-04 requires it to match what PROD has TODAY (the
--- 20261003120000 body). The pragma means "I read PROD's body and intend to
--- overwrite it". This migration changes ONE function, so it carries ONE pragma.
+-- one), while VAC-04 requires it to match what PROD has TODAY. The pragma means
+-- "I read PROD's body and intend to overwrite it". This migration changes THREE
+-- functions, so it carries THREE pragmas, one per function; VAC-04 greps the
+-- changed files once per drifting function, each matched by its own hash. It
+-- pairs by function NAME, so the bridge's move from one argument to two is a
+-- DRIFT row (the old body against the new), not a missing snapshot.
 --
--- MEASURED 2026-10-07 UTC, reproduced LOCALLY with the gate's own normalizer,
+-- MEASURED 2026-10-08 UTC, reproduced LOCALLY with the gate's own normalizer,
 -- aiming its `live` argument at origin/main's snapshot rather than at PROD
--- (origin/main = 239106dc59e19619b54c9d8ed48a9815c851d781, whose snapshot is the
--- 20261003120000 body):
+-- (origin/main = 52928d955e0744cc6000183039155ed97394f09d; none of the three
+-- snapshots differs between it and 239106dc5, the base this file was first
+-- measured against), once per function:
 --
---   git show origin/main:supabase/schema/functions/sync_strategy_analytics_status.sql > <scratch>
+--   git show origin/main:supabase/schema/functions/<fn>.sql > <scratch>
 --   node scripts/sql-body-normalize.mjs --diff-bodies \
---     supabase/schema/functions/sync_strategy_analytics_status.sql <scratch>
+--     supabase/schema/functions/<fn>.sql <scratch>
 --
--- The row reported 36 differing lines (the normalizer counts lines of the
--- function body only; the verify block sits outside it): the one-line side-kind
--- exclusion and the 19-line process_key_long supersession, both conjuncts of
--- the live_failures CTE, plus the D-09 flag and the four branch (c) assignments.
--- (It read 20 before D-09 was folded in. The `live` column, which is the hash
--- acked below, did not move: it is origin/main's body, which D-09 does not touch.)
+-- The rows read: sync_strategy_analytics_status 54 differing lines (the
+-- normalizer counts lines of the function body only; the verify block sits
+-- outside it: the one-line side-kind exclusion and the 19-line process_key_long
+-- supersession, both conjuncts of the live_failures CTE, plus the D-09 trigger,
+-- the early return and the branch (c) holds), mark_compute_job_done 2 and
+-- mark_compute_job_failed 2 (the bridge call). The hunk counts have moved with
+-- each round of the D-09 rework; the `live` columns, which are the hashes acked
+-- below, never move: they are origin/main's bodies.
 --
--- THE ACKED HASH IS THE `live` COLUMN OF --diff-bodies FOR THE DRIFT ROW (the
--- fifth tab-separated field), NOT `--hash` OF THE SNAPSHOT FILE (a whole-file
--- digest no gate ever greps).
+-- ⭐ EACH ACKED HASH IS THE `live` COLUMN OF --diff-bodies FOR THAT FUNCTION'S
+-- DRIFT ROW (the fifth tab-separated field), NOT `--hash` OF THE SNAPSHOT FILE (a
+-- whole-file digest no gate ever greps).
 --
--- sync_strategy_analytics_status (1 arg), the DRIFT row's `live` column:
+-- sync_strategy_analytics_status (1 arg on PROD), the DRIFT row's `live` column:
 -- prod-body-ack: 09d94dc584563299306051344a044f1327e82d5d752a3740d1e7ac67d40e9edb
 --
--- WARNING: THE ACK IS OF origin/main, WHICH STANDS IN FOR PROD. It is EARNED only
--- if VAC-04 on the PR reports that SAME hash for PROD. If it reports a
--- different one, PROD drifted OUT OF BAND and the correct action is to FOLD
--- the difference into this migration and re-derive, never to edit the pragma
--- to match a gate log. It is EARNED, not pasted.
+-- mark_compute_job_done (2 args), the DRIFT row's `live` column:
+-- prod-body-ack: 819702421d709628c85735e3893ecd3d02705df1426bd28edd87b3145ab7e9c1
+--
+-- mark_compute_job_failed (4 args), the DRIFT row's `live` column:
+-- prod-body-ack: 0f63a7c756a5577f1648d5c78b3d3c1ae4db906ba4c846611c9f40771ec06d5a
+--
+-- WARNING: EACH ACK IS OF origin/main, WHICH STANDS IN FOR PROD. It is EARNED only
+-- if VAC-04 on the PR reports that SAME hash for PROD for that function. If it
+-- reports a different one, PROD drifted OUT OF BAND and the correct action is
+-- to FOLD the difference into this migration and re-derive, never to edit the
+-- pragma to match a gate log. It is EARNED, not pasted.
 -- WARNING: VAC-08 (repo-vs-TEST body pairing, in `test-db-drift`) goes RED on
--- the PR by construction: one DRIFT row, sync_strategy_analytics_status/1,
--- whose TEST hash is the pre-change hash above, until apply-on-merge brings
--- TEST forward.
--- WARNING: `baseline-content-drift` carries the same one DRIFT row until the
+-- the PR by construction: one DRIFT row per function
+-- (sync_strategy_analytics_status, mark_compute_job_done/2 and
+-- mark_compute_job_failed/4), whose TEST hash is the pre-change hash above, until
+-- apply-on-merge brings TEST forward.
+-- WARNING: `baseline-content-drift` carries the same DRIFT rows until the
 -- post-apply re-dump of supabase/schema/baseline.sql. Neither is allowlisted.
 --
 -- VERIFY SCOPE. The DO block at the foot reads the catalogue and the function
@@ -193,9 +236,31 @@ SET LOCAL search_path = public, pg_catalog;
 SET LOCAL lock_timeout = '3s';
 
 -- --------------------------------------------------------------------------
+-- the bridge's signature moves: (uuid) -> (uuid, uuid DEFAULT NULL)
+-- --------------------------------------------------------------------------
+-- CREATE OR REPLACE cannot add a parameter, and leaving the one-argument form
+-- beside the two-argument one would make every one-argument call (the Python
+-- DEFERRED path, the wizard, every in-database caller) fail with "function is
+-- not unique". So the old signature is DROPPED, not kept as an overload.
+-- A DROP destroys the function's COMMENT, and that comment is a load-bearing
+-- applied-ness key (arms 0a/0b of test_sync_status_marked_refresh_protected.sql
+-- and assumption A1 in the verify block below). It is read off the old function
+-- first and re-issued, byte for byte, on the new one. The pg_description row is
+-- carried through a session temp table (no ON COMMIT DROP, so a runner that
+-- executes statements outside one transaction still finds it) that is dropped
+-- after the COMMENT is restored. The ACL is re-issued explicitly below.
+CREATE TEMP TABLE statusbridge_old_comment (c TEXT);
+INSERT INTO statusbridge_old_comment
+  SELECT obj_description(to_regprocedure('public.sync_strategy_analytics_status(uuid)'), 'pg_proc');
+DROP FUNCTION IF EXISTS public.sync_strategy_analytics_status(uuid);
+
+-- --------------------------------------------------------------------------
 -- the bridge, re-based on 20260906120000 STEP 2
 -- --------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION sync_strategy_analytics_status(p_strategy_id UUID)
+CREATE OR REPLACE FUNCTION sync_strategy_analytics_status(
+  p_strategy_id    UUID,
+  p_trigger_job_id UUID DEFAULT NULL
+)
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -227,7 +292,15 @@ DECLARE
   v_unprotected_job_ids UUID[];
   v_nonterminal_unmarked_count INTEGER;
   v_refresh_keep       BOOLEAN;
+  -- D-09 (founder 2026-10-07), keyed on the TRIGGER: TRUE only when the job whose
+  -- terminal transition caused THIS call is a side-kind job that did not succeed.
   v_side_failed_only   BOOLEAN;
+  v_nonterminal_counting_count INTEGER;
+  -- D-05, the closed side-kind list, spelled ONCE. Every use below reads this
+  -- constant (the live_failures CTE, the trigger test, the in-flight count), so
+  -- the list cannot drift between them, and the verify block asserts it is the
+  -- four kinds D-05 names and that no other spelling of it exists.
+  v_side_kinds         CONSTANT TEXT[] := ARRAY['sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot'];
 BEGIN
   IF p_strategy_id IS NULL THEN
     RAISE EXCEPTION 'sync_strategy_analytics_status: p_strategy_id is required'
@@ -247,9 +320,10 @@ BEGIN
 
   -- ---- the NON-TERMINAL counts — FIRST of this function's two compute_jobs --
   -- ---- reads, and the ORDER IS THE CORRECTNESS ------------------------------
-  -- One statement, one snapshot, two counts: every in-flight job, and the
-  -- in-flight jobs that do NOT carry an in-scope refresh marker (the second
-  -- feeds the keep flag; see RETRY-PLAIN-COMPLETE in the file header).
+  -- One statement, one snapshot, three counts: every in-flight job, the in-flight
+  -- jobs that do NOT carry an in-scope refresh marker (the second feeds the keep
+  -- flag; see RETRY-PLAIN-COMPLETE in the file header), and the in-flight jobs
+  -- that are NOT side kinds (the third feeds the D-09 early return below).
   -- Consumed by branch (a) far below. They are read HERE, and that placement is a
   -- data-integrity fix (161.1 migration re-review, HIGH), not tidiness.
   --
@@ -326,11 +400,27 @@ BEGIN
            AND kind IN ('derive_broker_dailies',
                         'compute_analytics_from_csv',
                         'stitch_composite'),
-           FALSE))
-    INTO v_nonterminal_count, v_nonterminal_unmarked_count
+           FALSE)),
+         count(*) FILTER (WHERE NOT COALESCE(kind = ANY (v_side_kinds), FALSE))
+    INTO v_nonterminal_count, v_nonterminal_unmarked_count, v_nonterminal_counting_count
     FROM compute_jobs
    WHERE strategy_id = p_strategy_id
      AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry');
+
+  -- ---- D-09: did a SIDE-KIND job's FAILURE cause this call? -----------------
+  -- The decision is keyed on the job that TRIGGERED the call, never on recency.
+  -- The mark RPCs pass the job they just terminalised; every other caller (the
+  -- Python DEFERRED path, a status re-sync) passes NULL and gets today's
+  -- behaviour. TRUE only for a side-kind job that is failed_retry or
+  -- failed_final: a side job that succeeded, any counting job in any state, a
+  -- NULL id and a job of another strategy all read FALSE. (A recency key, "the
+  -- latest-created terminal job is a failed_final", froze computed_at after a
+  -- genuine counting success whenever a side job created later had failed fast.)
+  v_side_failed_only := COALESCE((SELECT t.status IN ('failed_retry', 'failed_final')
+                                         AND t.kind = ANY (v_side_kinds)
+                                    FROM compute_jobs t
+                                   WHERE t.id = p_trigger_job_id
+                                     AND t.strategy_id = p_strategy_id), FALSE);
 
   -- ---- Phase 161.1 / CR-01: is the published row still HEALTHY? -------------
   -- Conjunct (ii) of the protection predicate — see this file's header. Read
@@ -544,7 +634,7 @@ BEGIN
       FROM compute_jobs f
      WHERE f.strategy_id = p_strategy_id
        AND f.status = 'failed_final'
-       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot')
+       AND NOT COALESCE(f.kind = ANY (v_side_kinds), FALSE)
        AND NOT (
          f.kind = 'process_key_long'
          AND EXISTS (
@@ -667,6 +757,23 @@ BEGIN
   v_refresh_keep := v_publish_healthy
                     AND COALESCE(v_nonterminal_unmarked_count, 1) = 0
                     AND COALESCE(v_failed_count, 1) = 0;
+
+  -- (a-hold) D-09: a side-kind job FAILED and nothing that counts is in flight.
+  -- A transient side failure (a sync_funding timeout is the founder's example)
+  -- retries through failed_retry, and each retry mark reaches branch (a), which
+  -- stamps computed_at = now() and blanks the sentence while the side job is
+  -- merely in flight. Nothing that produces analytics is running, so the call has
+  -- nothing to say about a stored analytic: it leaves the row exactly as it is,
+  -- computation_status, computed_at, the sentence and both markers included, and
+  -- writes no row when none exists. The terminal hop (failed_final) reaches
+  -- branch (c) with nothing in flight and holds there. When a counting job IS in
+  -- flight, branch (a) below runs as it always did, because that job, not the
+  -- side failure, is why the row moves.
+  IF v_side_failed_only
+     AND COALESCE(v_nonterminal_count, 0) > 0
+     AND COALESCE(v_nonterminal_counting_count, 1) = 0 THEN
+    RETURN;
+  END IF;
 
   -- (a) any non-terminal row → 'computing', UNLESS the runner has already
   -- written 'complete_with_warnings' OR set its runner-owned computation_warned
@@ -952,34 +1059,33 @@ BEGIN
     RETURN;
   END IF;
 
-  -- D-09 (Phase 164.6.6.3.4): is the latest terminal job a failed side-kind job?
-  -- Reaching here means no counting failure is live, so a failed_final that is the
-  -- most recently created terminal job can only be a side kind (a superseded
-  -- failure has a LATER done, which would be the latest instead). TRUE holds
-  -- computed_at, computation_error and both markers below, because nothing was
-  -- computed and the bridge wrote none of that sentence. NULL (no terminal job)
-  -- is FALSE, i.e. today's behaviour.
-  SELECT COALESCE((SELECT j.status = 'failed_final'
-                     FROM compute_jobs j
-                    WHERE j.strategy_id = p_strategy_id
-                      AND j.status IN ('done', 'failed_final')
-                    ORDER BY j.created_at DESC, j.id DESC
-                    LIMIT 1), FALSE)
-    INTO v_side_failed_only;
+  -- D-09 (Phase 164.6.6.3.4), branch (c) when v_side_failed_only is TRUE: this call
+  -- was caused by a side-kind job that failed, no counting failure is live and
+  -- nothing is in flight. Nothing was computed and the bridge wrote none of the
+  -- sentence, so the branch HOLDS computed_at, computation_error and both
+  -- provenance markers; it still clears computing_started_at and still resolves
+  -- computing to complete (or complete_with_warnings for a warned row). Two more
+  -- holds, both for a row the call has no business improving:
+  --   * a `failed` row that carries a sentence stays `failed` (it would
+  --     otherwise read `complete` over a held failure sentence); a `failed` row
+  --     with no sentence is the stale Eclipse shape D-05 exists for and resolves
+  --     to complete as it always did;
+  --   * no strategy_analytics row is written when none exists (the held columns
+  --     have nothing to hold, and a row stamped now() would be the fresh-looking
+  --     analytics D-09 forbids).
+  IF v_side_failed_only
+     AND NOT EXISTS (SELECT 1 FROM strategy_analytics WHERE strategy_id = p_strategy_id) THEN
+    RETURN;
+  END IF;
 
-  -- (c) all rows 'done' → terminal SUCCESS. PRESERVE an existing
-  -- 'complete_with_warnings' OR a runner-owned computation_warned marker (a
-  -- more-informative success the analytics worker already wrote — the marker
-  -- read is what closes the failed_final-bounce launder, since branch (b) may
-  -- have bounced computation_status to 'failed' in between); otherwise resolve
-  -- to 'complete'. Clears any stale computation_error either way, EXCEPT when
-  -- v_side_failed_only holds it (D-09, above).
-  -- JOB-01 (Phase 142): SQL exit transition #2 — clear the stamp. Both arms of
-  -- the status CASE are terminal, so the clear is unconditional here.
   INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
   VALUES (p_strategy_id, 'complete', NULL, NULL, NULL, NULL)
   ON CONFLICT (strategy_id) DO UPDATE
      SET computation_status = CASE
+           WHEN v_side_failed_only
+                AND strategy_analytics.computation_status = 'failed'
+                AND strategy_analytics.computation_error IS NOT NULL
+           THEN 'failed'
            WHEN strategy_analytics.computation_status = 'complete_with_warnings'
                 OR strategy_analytics.computation_warned
            THEN 'complete_with_warnings'
@@ -1013,8 +1119,241 @@ $$;
 -- (the pg-lane, measured: proacl {postgres=X/postgres}) has none. On PROD and
 -- TEST the GRANT is a no-op, since EXECUTE is the only privilege a function
 -- carries. The verify block asserts it held.
+-- The signature moved to (uuid, uuid): a CREATE of a NEW signature starts from the
+-- default ACL, not from the dropped function's, so both statements are what
+-- re-converges the ACL (the verify block's anon and authenticated denials and the
+-- service_role grant read it back).
 REVOKE ALL ON FUNCTION sync_strategy_analytics_status FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.sync_strategy_analytics_status(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.sync_strategy_analytics_status(uuid, uuid) TO service_role;
+
+-- The COMMENT the DROP destroyed, restored byte for byte from the old function
+-- (captured above). When the old function was already gone (a re-apply), the
+-- CREATE OR REPLACE above kept the comment and there is nothing to restore.
+DO $comment$
+DECLARE
+  v_c TEXT;
+BEGIN
+  SELECT c INTO v_c FROM statusbridge_old_comment LIMIT 1;
+  IF v_c IS NOT NULL THEN
+    EXECUTE format('COMMENT ON FUNCTION public.sync_strategy_analytics_status(uuid, uuid) IS %L', v_c);
+  END IF;
+END
+$comment$;
+DROP TABLE statusbridge_old_comment;
+
+-- --------------------------------------------------------------------------
+-- the two mark RPCs: they pass the job they just terminalised (D-09)
+-- --------------------------------------------------------------------------
+-- Each body is the LATEST definition (20261001120000, Phase 164.9.3.2), byte for
+-- byte, with ONE change: the bridge call passes p_job_id as the trigger. Their
+-- signatures, COMMENTs and ACLs are unchanged (CREATE OR REPLACE keeps the
+-- COMMENT; the REVOKE is restated exactly as 20261001120000 issued it). Before
+-- this file the bridge called by them had one argument, so nothing could tell it
+-- WHICH job's transition caused the call, and D-09 had to guess from recency.
+
+CREATE OR REPLACE FUNCTION mark_compute_job_done(
+  p_job_id     UUID,
+  p_claim_token UUID DEFAULT NULL
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_catalog
+AS $$
+DECLARE
+  v_strategy_id      UUID;
+  v_current_status   TEXT;
+  v_current_token    UUID;
+BEGIN
+  -- audit-2026-05-07 B5: token is now mandatory. NULL was a documented
+  -- pre-mig-117 back-compat path; the only production caller (main_worker)
+  -- threads the token uniformly post-PR-#347.
+  IF p_claim_token IS NULL THEN
+    RAISE EXCEPTION 'mark_compute_job_done: p_claim_token is required (post-mig-117 strict fence)'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Atomic flip running → done with token fence + strategy capture.
+  UPDATE compute_jobs
+     SET status = 'done'
+   WHERE id = p_job_id
+     AND status = 'running'
+     AND claim_token = p_claim_token
+  RETURNING strategy_id INTO v_strategy_id;
+
+  IF NOT FOUND THEN
+    -- Row may exist but isn't running, OR row missing, OR token mismatch.
+    SELECT status, strategy_id, claim_token
+      INTO v_current_status, v_strategy_id, v_current_token
+      FROM compute_jobs
+      WHERE id = p_job_id;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'mark_compute_job_done: job % not found', p_job_id
+        USING ERRCODE = 'no_data_found';
+    END IF;
+
+    -- mig 109 P6 / mig 117 second-pass fix #2: idempotent retry on
+    -- already-done row ONLY when the caller's token matches the recorded
+    -- one. The pre-B5 path also accepted NULL — removed now that NULL is
+    -- rejected at the entrypoint above.
+    IF v_current_status = 'done' THEN
+      IF v_current_token IS NOT DISTINCT FROM p_claim_token THEN
+        RETURN;
+      END IF;
+      RAISE EXCEPTION 'mark_compute_job_done: job % preempted by watchdog reclaim (late mark on already-done row, caller token=%, current token=%)',
+        p_job_id, p_claim_token, v_current_token
+        USING ERRCODE = '55006';
+    END IF;
+
+    -- mig 117 P97: token mismatch on a still-running row.
+    IF v_current_status = 'running'
+       AND v_current_token IS DISTINCT FROM p_claim_token THEN
+      RAISE EXCEPTION 'mark_compute_job_done: job % preempted by watchdog reclaim (caller token=%, current token=%)',
+        p_job_id, p_claim_token, v_current_token
+        USING ERRCODE = '55006';
+    END IF;
+
+    -- Row in some other state (failed_retry, failed_final, pending,
+    -- done_pending_children). Surface loudly.
+    RAISE EXCEPTION 'mark_compute_job_done: job % in unexpected status % (expected running)',
+      p_job_id, v_current_status
+      USING ERRCODE = 'no_data_found';
+  END IF;
+
+  -- audit-2026-05-07 G23-187-mig-01/03 RE-APPLY: set-based fan-in advance
+  -- with the GIN-supported containment predicate. The strict-token rewrite
+  -- (20260528183100) had copied a pre-20260516131500 body and silently
+  -- reverted this to a per-child `p_job_id = ANY(parent_job_ids)` FOR-loop,
+  -- which the planner CANNOT push to the GIN index compute_jobs_parent_lookup
+  -- (only `@>` containment is GIN-supported) -- re-introducing the H-0864
+  -- seq-scan + N+1 check_fan_in_ready overhead. The NOT EXISTS sub-query
+  -- enforces "all parents done" identically to check_fan_in_ready
+  -- (count(parents WHERE status <> 'done') = 0). This form was live in prod
+  -- 2026-05-16..2026-05-28 (mig 20260516131500) before the silent revert.
+  UPDATE compute_jobs c
+     SET status          = 'pending',
+         next_attempt_at = now()
+   WHERE c.status = 'done_pending_children'
+     AND c.parent_job_ids @> ARRAY[p_job_id]::uuid[]
+     AND NOT EXISTS (
+       SELECT 1
+         FROM compute_jobs p
+        WHERE p.id = ANY(c.parent_job_ids)
+          AND p.status <> 'done'
+     );
+
+  -- Phase 18: atomic UI bridge (preserved from mig 099).
+  IF v_strategy_id IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));
+    PERFORM sync_strategy_analytics_status(v_strategy_id, p_job_id);
+  END IF;
+END;
+$$;
+
+
+REVOKE ALL ON FUNCTION mark_compute_job_done(UUID, UUID) FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION mark_compute_job_failed(
+  p_job_id      UUID,
+  p_error       TEXT,
+  p_error_kind  TEXT DEFAULT 'unknown',
+  p_claim_token UUID DEFAULT NULL
+)
+RETURNS TIMESTAMPTZ
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_catalog
+AS $$
+DECLARE
+  v_attempts      INTEGER;
+  v_max_attempts  INTEGER;
+  v_next_attempt  TIMESTAMPTZ;
+  v_new_status    TEXT;
+  v_strategy_id   UUID;
+  v_current_token UUID;
+  v_current_status TEXT;
+BEGIN
+  -- audit-2026-05-07 B5: token mandatory (see mark_compute_job_done above).
+  IF p_claim_token IS NULL THEN
+    RAISE EXCEPTION 'mark_compute_job_failed: p_claim_token is required (post-mig-117 strict fence)'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  IF p_error_kind IS NOT NULL
+     AND p_error_kind NOT IN ('transient', 'permanent', 'unknown') THEN
+    RAISE EXCEPTION 'mark_compute_job_failed: p_error_kind must be transient/permanent/unknown, got %', p_error_kind
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  SELECT attempts, max_attempts, strategy_id
+    INTO v_attempts, v_max_attempts, v_strategy_id
+    FROM compute_jobs
+    WHERE id = p_job_id
+      AND status = 'running'
+      AND claim_token = p_claim_token
+    FOR UPDATE;
+
+  IF NOT FOUND THEN
+    SELECT status, claim_token
+      INTO v_current_status, v_current_token
+      FROM compute_jobs
+      WHERE id = p_job_id;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'mark_compute_job_failed: job % not found', p_job_id
+        USING ERRCODE = 'no_data_found';
+    END IF;
+
+    -- mig 117 P97: token mismatch on a still-running row.
+    IF v_current_status = 'running'
+       AND v_current_token IS DISTINCT FROM p_claim_token THEN
+      RAISE EXCEPTION 'mark_compute_job_failed: job % preempted by watchdog reclaim (caller token=%, current token=%)',
+        p_job_id, p_claim_token, v_current_token
+        USING ERRCODE = '55006';
+    END IF;
+
+    RAISE EXCEPTION 'mark_compute_job_failed: job % not running (status=%)', p_job_id, v_current_status
+      USING ERRCODE = 'no_data_found';
+  END IF;
+
+  IF p_error_kind = 'permanent' THEN
+    v_new_status := 'failed_final';
+    v_next_attempt := now();
+  ELSIF v_attempts >= v_max_attempts THEN
+    v_new_status := 'failed_final';
+    v_next_attempt := now();
+  ELSE
+    v_new_status := 'failed_retry';
+    CASE
+      WHEN v_attempts <= 1 THEN v_next_attempt := now() + interval '30 seconds';
+      WHEN v_attempts = 2 THEN v_next_attempt := now() + interval '2 minutes';
+      WHEN v_attempts = 3 THEN v_next_attempt := now() + interval '10 minutes';
+      WHEN v_attempts = 4 THEN v_next_attempt := now() + interval '1 hour';
+      ELSE                     v_next_attempt := now() + interval '6 hours';
+    END CASE;
+  END IF;
+
+  -- HOTFIX 2026-05-29: write `error_kind` (the real column + CHECK target),
+  -- NOT the non-existent `last_error_kind` that mig 20260528183100 introduced.
+  UPDATE compute_jobs
+     SET status = v_new_status,
+         last_error = p_error,
+         error_kind = p_error_kind,
+         next_attempt_at = v_next_attempt
+   WHERE id = p_job_id;
+
+  -- Phase 18: atomic UI bridge (preserved from mig 099).
+  IF v_strategy_id IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));
+    PERFORM sync_strategy_analytics_status(v_strategy_id, p_job_id);
+  END IF;
+
+  RETURN v_next_attempt;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION mark_compute_job_failed(UUID, TEXT, TEXT, UUID) FROM PUBLIC, anon, authenticated;
 
 -- --------------------------------------------------------------------------
 -- self-verify: the 20260906120000 block carried verbatim, then this file's own
@@ -1028,7 +1367,7 @@ DECLARE
   v_atthasdef   BOOLEAN;
   v_condef      TEXT;
   v_comment     TEXT;
-  v_fn          TEXT := pg_get_functiondef('sync_strategy_analytics_status(uuid)'::regprocedure);
+  v_fn          TEXT := pg_get_functiondef('sync_strategy_analytics_status(uuid, uuid)'::regprocedure);
   -- STEP 3's trigger. Read into its own variable rather than reusing v_fn: the
   -- two bodies share almost every identifier, and one anchor accidentally run
   -- against the other body is an anchor that reports on the wrong object.
@@ -1070,6 +1409,17 @@ DECLARE
   v_pkl_sites                  INTEGER;
   v_side_flag_ok               BOOLEAN;
   v_side_hold_ok               BOOLEAN;
+  v_side_uses                  INTEGER;
+  v_side_lit_sites             INTEGER;
+  v_side_sites_ok              BOOLEAN;
+  v_a_hold_ok                  BOOLEAN;
+  v_c_status_hold_ok           BOOLEAN;
+  v_c_row_guard_ok             BOOLEAN;
+  v_bridge_overloads           INTEGER;
+  v_bridge_ndefaults           SMALLINT;
+  v_bridge_argtypes            TEXT;
+  v_mark_done                  TEXT;
+  v_mark_failed                TEXT;
 BEGIN
   -- ======================================================================
   -- ⭐ COMMENT-STRIP FIRST (Phase 164.5.2.1 review, SFH L-1). Every anchor in
@@ -1192,7 +1542,7 @@ BEGIN
   -- `TEST FAILED (0a)`. Twin 0a leaves '20260826120000' intact, so keying A1 on
   -- that id alone keeps A1 measured AND leaves the twin biting.
   v_comment := COALESCE(
-    obj_description('sync_strategy_analytics_status(uuid)'::regprocedure, 'pg_proc'),
+    obj_description('sync_strategy_analytics_status(uuid, uuid)'::regprocedure, 'pg_proc'),
     ''
   );
   IF v_comment !~ '20260826120000' THEN
@@ -1226,10 +1576,10 @@ BEGIN
   -- pre-existing ACL, so a re-apply over a drifted grant would carry the drift
   -- forward silently. This is a cross-tenant SECURITY DEFINER *writer* with no
   -- ownership predicate anywhere in its body.
-  IF has_function_privilege('anon', 'public.sync_strategy_analytics_status(uuid)', 'EXECUTE') THEN
+  IF has_function_privilege('anon', 'public.sync_strategy_analytics_status(uuid, uuid)', 'EXECUTE') THEN
     RAISE EXCEPTION 'Criterion 2 re-base failed: role anon can EXECUTE sync_strategy_analytics_status -- the REVOKE above did not take, and this function writes strategy_analytics for ANY strategy_id with no ownership check';
   END IF;
-  IF has_function_privilege('authenticated', 'public.sync_strategy_analytics_status(uuid)', 'EXECUTE') THEN
+  IF has_function_privilege('authenticated', 'public.sync_strategy_analytics_status(uuid, uuid)', 'EXECUTE') THEN
     RAISE EXCEPTION 'Criterion 2 re-base failed: role authenticated can EXECUTE sync_strategy_analytics_status -- the REVOKE above did not take, and this function writes strategy_analytics for ANY strategy_id with no ownership check';
   END IF;
 
@@ -1766,8 +2116,8 @@ BEGIN
   -- (xiv) RLS-LOW-01: the Python DEFERRED path calls this function DIRECTLY
   -- over PostgREST as service_role, so service_role must hold EXECUTE. The
   -- carried ACL arms above prove only that anon and authenticated do NOT.
-  IF NOT has_function_privilege('service_role', 'public.sync_strategy_analytics_status(uuid)', 'EXECUTE') THEN
-    RAISE EXCEPTION 'bridge-residue: service_role cannot EXECUTE sync_strategy_analytics_status(uuid). The Python DEFERRED path (analytics-service/services/analytics_status.py) calls it directly over PostgREST as service_role; without the grant that call answers 42501, the caller logs a warning, and strategy_analytics keeps its pre-DEFER status.';
+  IF NOT has_function_privilege('service_role', 'public.sync_strategy_analytics_status(uuid, uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'bridge-residue: service_role cannot EXECUTE sync_strategy_analytics_status(uuid, uuid). The Python DEFERRED path (analytics-service/services/analytics_status.py) calls it directly over PostgREST as service_role; without the grant that call answers 42501, the caller logs a warning, and strategy_analytics keeps its pre-DEFER status.';
   END IF;
 
   -- ======================================================================
@@ -1777,14 +2127,15 @@ BEGIN
   -- function body only and never a table ([164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]).
   -- ======================================================================
 
-  -- The one NOT-IN list on the kind column: how many spellings exist, and the
+  -- The ONE side-kind list: a CONSTANT TEXT[] declared in the function and read by
+  -- every site that needs the closed list. How many declarations exist, and the
   -- literals of the first. The carried kind-scope anchor (ix) counts only the
-  -- IN-list spelling, so this list is invisible to it by construction.
+  -- `kind IN (...)` spelling, so this list is invisible to it by construction.
   SELECT count(*) INTO v_side_lists
-    FROM regexp_matches(v_body, '\mkind\s+NOT\s+IN\s*\(([^)]*)\)', 'g');
+    FROM regexp_matches(v_body, '\mv_side_kinds\s+CONSTANT\s+TEXT\[\]\s*:=\s*ARRAY\s*\[([^\]]*)\]', 'g');
   SELECT array_agg(m[1] ORDER BY m[1]) INTO v_side_kinds
     FROM regexp_matches(
-           (SELECT l[1] FROM regexp_matches(v_body, '\mkind\s+NOT\s+IN\s*\(([^)]*)\)') AS l LIMIT 1),
+           (SELECT l[1] FROM regexp_matches(v_body, '\mv_side_kinds\s+CONSTANT\s+TEXT\[\]\s*:=\s*ARRAY\s*\[([^\]]*)\]') AS l LIMIT 1),
            '''([a-z_]+)''', 'g') AS m;
 
   -- (xvi) NEGATIVE, placed above its positive: no kind that COUNTS toward failed
@@ -1792,7 +2143,7 @@ BEGIN
   -- genuine analytics failure.
   v_counting_in_side := COALESCE(v_side_kinds && ARRAY['process_key_long', 'sync_trades', 'derive_broker_dailies', 'compute_analytics_from_csv', 'stitch_composite', 'compute_analytics'], FALSE);
   IF v_counting_in_side THEN
-    RAISE EXCEPTION 'status-bridge: the side-kind NOT-IN list names a kind that counts toward failed. The counting kinds are process_key_long, sync_trades, derive_broker_dailies, compute_analytics_from_csv, stitch_composite and the retired compute_analytics; the list found is %. A failure of any of them is a live analytics failure, and dropping it from the failure set reports a failed run as healthy.', v_side_kinds;
+    RAISE EXCEPTION 'status-bridge: the side-kind list names a kind that counts toward failed. The counting kinds are process_key_long, sync_trades, derive_broker_dailies, compute_analytics_from_csv, stitch_composite and the retired compute_analytics; the list found is %. A failure of any of them is a live analytics failure, and dropping it from the failure set reports a failed run as healthy.', v_side_kinds;
   END IF;
 
   -- (xv) the side list is CLOSED, EXACT and spelled ONCE: a count of spellings
@@ -1800,7 +2151,26 @@ BEGIN
   -- extra, a missing or a re-spelled literal all raise.
   v_side_list_ok := COALESCE(v_side_lists = 1 AND v_side_kinds = ARRAY['compute_intro_snapshot', 'poll_positions', 'reconcile_strategy', 'sync_funding'], FALSE);
   IF NOT v_side_list_ok THEN
-    RAISE EXCEPTION 'status-bridge: the side-kind NOT-IN list is not the four kinds D-05 names, spelled once. Found % spelling(s) with literals %; expected exactly one list of compute_intro_snapshot, poll_positions, reconcile_strategy and sync_funding. A list that gains a literal hides a failure, one that loses a literal pins an analytics status failed over a job that wrote no analytic, and a second spelling is how two lists drift apart.', v_side_lists, v_side_kinds;
+    RAISE EXCEPTION 'status-bridge: the side-kind list is not the four kinds D-05 names, spelled once. Found % spelling(s) with literals %; expected exactly one list of compute_intro_snapshot, poll_positions, reconcile_strategy and sync_funding. A list that gains a literal hides a failure, one that loses a literal pins an analytics status failed over a job that wrote no analytic, and a second spelling is how two lists drift apart.', v_side_lists, v_side_kinds;
+  END IF;
+
+  -- (xv-b) the constant is READ at exactly the three sites that need it, each as
+  -- a whole expression (the live_failures CTE, the D-09 trigger test, the in-flight
+  -- counting count), and no side kind is spelled anywhere else in the body. A
+  -- second NOT-IN or IN list, or a respelled literal, is how two copies of the
+  -- list drift apart; that is the defect the single declaration removes.
+  SELECT count(*) INTO v_side_uses
+    FROM regexp_matches(v_body, 'ANY\s*\(\s*v_side_kinds\s*\)', 'g');
+  SELECT count(*) INTO v_side_lit_sites
+    FROM regexp_matches(v_body, '''(sync_funding|poll_positions|reconcile_strategy|compute_intro_snapshot)''', 'g');
+  v_side_sites_ok := v_side_uses = 3
+    AND v_side_lit_sites = 4
+    AND v_body !~ '\mkind\s+NOT\s+IN\s*\('
+    AND v_body ~ 'AND\s+NOT\s+COALESCE\s*\(\s*f\.kind\s*=\s*ANY\s*\(\s*v_side_kinds\s*\)\s*,\s*FALSE\s*\)'
+    AND v_body ~ 'AND\s+t\.kind\s*=\s*ANY\s*\(\s*v_side_kinds\s*\)\s+FROM\s+compute_jobs\s+t'
+    AND v_body ~ 'count\s*\(\s*\*\s*\)\s*FILTER\s*\(\s*WHERE\s+NOT\s+COALESCE\s*\(\s*kind\s*=\s*ANY\s*\(\s*v_side_kinds\s*\)\s*,\s*FALSE\s*\)\s*\)\s+INTO\s+v_nonterminal_count\s*,\s*v_nonterminal_unmarked_count\s*,\s*v_nonterminal_counting_count';
+  IF NOT v_side_sites_ok THEN
+    RAISE EXCEPTION 'status-bridge: the side-kind constant is not read at exactly the three D-05/D-09 sites (the live_failures CTE, the trigger test, the in-flight counting count) as whole expressions, or a side kind is spelled outside its one declaration (found % read(s) of the constant and % literal(s) of the four kinds, expected 3 and 4, and no NOT-IN list). A second spelling is how the failure filter and the freshness hold come to disagree about what a side kind is.', v_side_uses, v_side_lit_sites;
   END IF;
 
   -- (xvii) D-06, the supersession as ONE whole expression: a failed
@@ -1824,20 +2194,85 @@ BEGIN
     RAISE EXCEPTION 'status-bridge: the body names the process_key_long literal at % code site(s), not 1. The chain supersession is scoped to that one kind (D-04: a later done of a different kind never masks a real analytics failure); a second site extends it to another kind.', v_pkl_sites;
   END IF;
 
-  -- (xix) D-09, branch (c) holds freshness for a failed side-kind job. Each piece
-  -- is its own whole-expression regex over the comment-stripped body, so no prose
-  -- can satisfy it. The FLAG (the latest-created terminal job is a failed_final,
-  -- ordered like the aggregate picks) and the two columns the markers do not
-  -- cover: the sentence and computed_at. The marker clears are anchored at the
-  -- re-keyed (P2d) counts above.
-  v_side_flag_ok := v_body ~ 'SELECT\s+COALESCE\s*\(\s*\(\s*SELECT\s+j\.status\s*=\s*''failed_final''\s+FROM\s+compute_jobs\s+j\s+WHERE\s+j\.strategy_id\s*=\s*p_strategy_id\s+AND\s+j\.status\s+IN\s*\(\s*''done''\s*,\s*''failed_final''\s*\)\s+ORDER\s+BY\s+j\.created_at\s+DESC\s*,\s*j\.id\s+DESC\s+LIMIT\s+1\s*\)\s*,\s*FALSE\s*\)\s+INTO\s+v_side_failed_only';
+  -- (xix) D-09, a failed side-kind job never stamps freshness. Each piece is its
+  -- own whole-expression regex over the comment-stripped body, so no prose can
+  -- satisfy it. (a) the TRIGGER flag: the job that caused this call is a side-kind
+  -- job that is failed_retry or failed_final, NULL read as FALSE, never a recency
+  -- pick; (b) the early return for an in-flight-only side failure, directly ahead
+  -- of branch (a); (c) branch (c) holds the sentence and computed_at (the marker
+  -- clears are anchored at the re-keyed (P2d) counts above), keeps a failed row
+  -- that carries a sentence failed, and writes no row when none exists.
+  v_side_flag_ok := v_body ~ 'v_side_failed_only\s*:=\s*COALESCE\s*\(\s*\(\s*SELECT\s+t\.status\s+IN\s*\(\s*''failed_retry''\s*,\s*''failed_final''\s*\)\s+AND\s+t\.kind\s*=\s*ANY\s*\(\s*v_side_kinds\s*\)\s+FROM\s+compute_jobs\s+t\s+WHERE\s+t\.id\s*=\s*p_trigger_job_id\s+AND\s+t\.strategy_id\s*=\s*p_strategy_id\s*\)\s*,\s*FALSE\s*\)\s*;';
   IF NOT v_side_flag_ok THEN
-    RAISE EXCEPTION 'status-bridge: the v_side_failed_only flag is not the latest-created terminal job being a failed_final (ORDER BY created_at DESC, id DESC LIMIT 1, NULL read as FALSE). A flag that is TRUE too often freezes computed_at after a genuine success, and one that is FALSE too often lets a failing nightly side job make stale analytics look freshly updated (D-09).';
+    RAISE EXCEPTION 'status-bridge: v_side_failed_only is not "the trigger job (p_trigger_job_id, of THIS strategy) is a side-kind job in failed_retry or failed_final, NULL read as FALSE". A flag keyed on recency (the latest-created terminal job) freezes computed_at after a genuine counting success; one that is FALSE too often lets a failing nightly side job make stale analytics look freshly updated (D-09).';
+  END IF;
+  v_a_hold_ok := v_body ~ 'IF\s+v_side_failed_only\s+AND\s+COALESCE\s*\(\s*v_nonterminal_count\s*,\s*0\s*\)\s*>\s*0\s+AND\s+COALESCE\s*\(\s*v_nonterminal_counting_count\s*,\s*1\s*\)\s*=\s*0\s+THEN\s+RETURN\s*;\s*END\s+IF\s*;\s*IF\s+v_nonterminal_count\s*>\s*0\s+AND\s+NOT\s+v_protect_hold\s+THEN';
+  IF NOT v_a_hold_ok THEN
+    RAISE EXCEPTION 'status-bridge: the early return for a failed side-kind trigger with only side kinds in flight is missing or not directly ahead of branch (a). Without it every failed_retry hop of a timing-out sync_funding runs branch (a), which stamps computed_at = now() and blanks the sentence (D-09: a failing nightly side job must never make stale analytics look freshly updated).';
   END IF;
   v_side_hold_ok := v_body ~ 'computation_error\s*=\s*CASE\s+WHEN\s+v_side_failed_only\s+THEN\s+strategy_analytics\.computation_error\s+ELSE\s+NULL\s+END'
                 AND v_body ~ 'computed_at\s*=\s*CASE\s+WHEN\s+v_side_failed_only\s+THEN\s+strategy_analytics\.computed_at\s+ELSE\s+now\(\)\s+END';
   IF NOT v_side_hold_ok THEN
     RAISE EXCEPTION 'status-bridge: branch (c) does not hold computation_error and computed_at when v_side_failed_only is TRUE (each as CASE WHEN v_side_failed_only THEN <the stored value> ELSE NULL / now() END). Without both, a failed side-kind job stamps freshness over stale analytics and blanks the sentence of a real earlier failure (D-09).';
+  END IF;
+  -- (xix-b) no BARE marker clear anywhere in the body (review 164.6.6.3.4 round 2,
+  -- IN-R2-01). The re-keyed (P2d) counts pin the clear that exists in branch (c) as
+  -- its held-or-cleared CASE; they cannot see an unconditional `... = NULL` added in
+  -- a NEW write path, which would blank a held writer sentence's markers.
+  IF v_body ~ 'computation_error_(source|job_id)\s*=\s*NULL' THEN
+    RAISE EXCEPTION 'status-bridge: the body carries an unconditional computation_error_source or computation_error_job_id = NULL. Every marker clear must travel with its sentence on the same predicate (a CASE), or a write path added later blanks the markers of a sentence the bridge holds (D-09).';
+  END IF;
+  v_c_status_hold_ok := v_body ~ 'SET\s+computation_status\s*=\s*CASE\s+WHEN\s+v_side_failed_only\s+AND\s+strategy_analytics\.computation_status\s*=\s*''failed''\s+AND\s+strategy_analytics\.computation_error\s+IS\s+NOT\s+NULL\s+THEN\s+''failed''\s+WHEN\s+strategy_analytics\.computation_status\s*=\s*''complete_with_warnings''';
+  IF NOT v_c_status_hold_ok THEN
+    RAISE EXCEPTION 'status-bridge: branch (c) does not keep a failed row that carries a sentence failed when v_side_failed_only is TRUE. Without it a side-only failure flips a failed row to complete while its failure sentence is held (D-09).';
+  END IF;
+  v_c_row_guard_ok := v_body ~ 'IF\s+v_side_failed_only\s+AND\s+NOT\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+strategy_analytics\s+WHERE\s+strategy_id\s*=\s*p_strategy_id\s*\)\s+THEN\s+RETURN\s*;\s*END\s+IF\s*;\s*INSERT\s+INTO\s+strategy_analytics';
+  IF NOT v_c_row_guard_ok THEN
+    RAISE EXCEPTION 'status-bridge: branch (c) does not refuse to INSERT a strategy_analytics row when v_side_failed_only is TRUE and none exists. Without it a side-only failure writes a fresh complete row stamped now() (D-09).';
+  END IF;
+
+  -- (xx) the signature move and the two mark RPCs, catalogue and body reads only.
+  -- (a) exactly ONE function of that name exists in public and it is
+  -- (uuid, uuid) with ONE defaulted argument: a surviving one-argument overload
+  -- would make every one-argument call fail with "function is not unique", and a
+  -- second argument without its default would break the Python DEFERRED path and
+  -- every caller that passes only p_strategy_id.
+  SELECT count(*) INTO v_bridge_overloads
+    FROM pg_proc p
+   WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'sync_strategy_analytics_status';
+  SELECT p.pronargdefaults, pg_get_function_identity_arguments(p.oid)
+    INTO v_bridge_ndefaults, v_bridge_argtypes
+    FROM pg_proc p
+   WHERE p.oid = 'public.sync_strategy_analytics_status(uuid, uuid)'::regprocedure;
+  IF v_bridge_overloads <> 1 OR v_bridge_ndefaults IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'status-bridge: sync_strategy_analytics_status has % overload(s) in public (expected exactly 1) and % defaulted argument(s) on (uuid, uuid) (expected 1; arguments %). The old one-argument signature must be dropped, not left beside the new one, and p_trigger_job_id must default to NULL so every existing caller keeps working.', v_bridge_overloads, COALESCE(v_bridge_ndefaults::text, 'NULL'), COALESCE(v_bridge_argtypes, 'NULL');
+  END IF;
+  -- (b) both mark RPCs pass the job they just terminalised as the trigger, and are
+  -- still SECURITY DEFINER with a pinned search_path and no EXECUTE for anon or
+  -- authenticated (CREATE OR REPLACE kept the ACL; this proves it did).
+  v_mark_done   := regexp_replace(regexp_replace(pg_get_functiondef('public.mark_compute_job_done(uuid, uuid)'::regprocedure), '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
+  v_mark_failed := regexp_replace(regexp_replace(pg_get_functiondef('public.mark_compute_job_failed(uuid, text, text, uuid)'::regprocedure), '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
+  IF v_mark_done IS NULL OR v_mark_failed IS NULL
+     OR v_mark_done   !~ 'PERFORM\s+sync_strategy_analytics_status\s*\(\s*v_strategy_id\s*,\s*p_job_id\s*\)\s*;'
+     OR v_mark_failed !~ 'PERFORM\s+sync_strategy_analytics_status\s*\(\s*v_strategy_id\s*,\s*p_job_id\s*\)\s*;' THEN
+    RAISE EXCEPTION 'status-bridge: mark_compute_job_done or mark_compute_job_failed does not call sync_strategy_analytics_status(v_strategy_id, p_job_id). Without the trigger the bridge cannot tell a side-kind failure from a counting success and D-09 falls back to guessing from creation order.';
+  END IF;
+  IF v_mark_done !~ 'pg_advisory_xact_lock\s*\(\s*hashtext\s*\(\s*''mark_compute_job_bridge''\s*\)\s*,\s*hashtext\s*\(\s*v_strategy_id::text\s*\)\s*\)'
+     OR v_mark_failed !~ 'pg_advisory_xact_lock\s*\(\s*hashtext\s*\(\s*''mark_compute_job_bridge''\s*\)\s*,\s*hashtext\s*\(\s*v_strategy_id::text\s*\)\s*\)'
+     OR v_mark_done !~ '55006' OR v_mark_failed !~ '55006' THEN
+    RAISE EXCEPTION 'status-bridge: a mark RPC lost the per-strategy bridge lock or the 55006 fence errcode in the re-base (both were carried from 20261001120000).';
+  END IF;
+  IF NOT (SELECT bool_and(p.prosecdef AND array_to_string(p.proconfig, ',') LIKE '%search_path=public%')
+            FROM pg_proc p
+           WHERE p.oid IN ('public.mark_compute_job_done(uuid, uuid)'::regprocedure,
+                           'public.mark_compute_job_failed(uuid, text, text, uuid)'::regprocedure)) THEN
+    RAISE EXCEPTION 'status-bridge: a mark RPC lost SECURITY DEFINER or its pinned search_path in the re-base.';
+  END IF;
+  IF has_function_privilege('anon', 'public.mark_compute_job_done(uuid, uuid)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.mark_compute_job_done(uuid, uuid)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.mark_compute_job_failed(uuid, text, text, uuid)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.mark_compute_job_failed(uuid, text, text, uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'status-bridge: anon or authenticated can EXECUTE a mark RPC. Both are SECURITY DEFINER writers keyed on a job id with no ownership check; the REVOKE above did not take.';
   END IF;
 
   RAISE NOTICE 'Migration 20261009120000: sync_strategy_analytics_status re-based on its latest body (STATUSBRIDGE, Phase 164.6.6.3.4); every carried anchor passed on the new comment-stripped body, and this file''s own anchors passed after them.';
