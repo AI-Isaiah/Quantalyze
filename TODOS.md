@@ -11306,3 +11306,13 @@ its measurement confirms the crash on PROD, it moves to `## 🔴 FIX NOW` and ge
 **Fix when picked up.** Measure the per-arm time on a CI shard, cache file reads across arms (reset only the mutation buffers), and keep the assertion unchanged. Do not raise the timeout to hide it.
 **Owner:** whoever next touches the mutation tooling; it reds unrelated PRs until fixed.
 **Resolution (measured, 2026-10-08).** The suspected cause was wrong in emphasis. Disk reads were 38 ms. 3.66 of 3.74 s went to `failureBranches` re-parsing the same migration text, once per arm and again as each step's next input. `failureBranches` is now memoized by text (FIFO, cap 64, results frozen) in `scripts/mutation-runner/run.mjs`: the walk takes 1.99 s and every assertion is unchanged. Shipped in PR #980 (164.9.7). The timeout was not raised.
+
+### TRUNCREVOKE-ADMIN-DETECTOR-01 — a read-only PROD check for the `supabase_admin` TRUNCATE residual (booked 2026-10-08, founder D-05 of 164.9.7)
+
+**Why.** Phase 164.9.7 revoked TRUNCATE from `anon` and `authenticated` on every `public` relation and in the `postgres` default privileges. It cannot touch the platform admin role's default-ACL row on `public`, which still grants `arwdDxtm` (TRUNCATE included) to anon and authenticated on any table that role creates. Measured on PROD 2026-10-08 18:16 UTC: that role owns 0 `public` relations, so the grant is latent. The founder accepted the residual on 2026-10-07 on condition that a PROD check exists ("Accept, add a PROD check").
+**What to build.** A read-only check, run on the existing prober cadence or the nightly, that fails loud when either of these holds:
+- (a) any relation in `public` is not owned by `postgres`;
+- (b) any non-`postgres` `pg_default_acl` row on `public` grants TRUNCATE to anon or authenticated **and** that role owns at least one `public` relation.
+
+It runs the marker query first and reports counts only.
+**Owner:** the next phase that touches the prod prober (route with 164.9.7.1 TRIGGERREVOKE, which shares the catalogue reads).
