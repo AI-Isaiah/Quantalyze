@@ -26,8 +26,12 @@
 #      kill (exit 124/137) and any apt exit 100 whose output carries no known
 #      deterministic signature (a 5xx, a closed connection, "Mirror sync in progress",
 #      a resolver error and so on all retry). A typo'd package, a held dpkg lock, a
-#      bad or unsigned source, a failed dpkg or a bad operation fail at once with apt's
-#      own exit code and a "failed deterministically" MEASURE_FAIL, never as a mirror
+#      bad or unsigned source, a failed dpkg, a bad operation, a full or read-only disk,
+#      a file apt cannot open, a source whose Origin changed and a pinned version that
+#      does not exist fail at once with apt's own exit code and a "failed
+#      deterministically" MEASURE_FAIL, never as a mirror failure. An exit 100 nobody
+#      has classified yet retries until the budget ends, and then the MEASURE_FAIL
+#      quotes it and does NOT blame the mirror unless the detail names a network
 #      failure. A 404 ("Not Found") on either phase, or a package the index does not
 #      list on the fetch, earns ONE fresh `update` (the index may simply be stale).
 #   An `update` that exits 0 with `W:` lines (a flaky THIRD-PARTY source) is a
@@ -88,7 +92,16 @@ APT_NET_OPTS=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::htt
 # exit 100), so the classifier is INVERTED: exit 100 is retryable UNLESS the output
 # carries a signature that a retry cannot fix. Add to this list when a new
 # deterministic failure is seen; do not add network wording to a list instead.
-DETERMINISTIC_RE='Unable to locate package|has no installation candidate|Could not get lock|dpkg returned an error code|dpkg was interrupted|NO_PUBKEY|EXPKEYSIG|is not signed|The following signatures|Malformed|Conflicts:|unmet dependencies|Invalid operation'
+# The local-state group (free space, a read-only fs, a lock or file apt cannot open) and the
+# source-change group (`changed its 'Origin' value`, a pinned `Version 'x' for 'y' was not
+# found`) fail identically on every attempt. Bare `Permission denied` is deliberately NOT here:
+# apt also prints it for a network policy block (`connect (13: Permission denied)`), which
+# a retry can outlive; the permission failures that are local arrive as `Could not open
+# (lock )?file ... (13: Permission denied)` and are matched by that wording.
+DETERMINISTIC_RE='Unable to locate package|has no installation candidate|Could not get lock|dpkg returned an error code|dpkg was interrupted|NO_PUBKEY|EXPKEYSIG|is not signed|The following signatures|Malformed|Conflicts:|unmet dependencies|Invalid operation|enough free space|No space left on device|Read-only file system|Could not open (lock )?file|changed its '"'"'|Version '"'"'[^'"'"']*'"'"' for '"'"'[^'"'"']*'"'"' was not found'
+# Wording that names a network or download failure: the only detail the closing message
+# may answer with "a dead or trickling mirror" (apt exit 124/137 is a kill and also counts).
+NET_DETAIL_RE='Failed to fetch|Err:|Could not (resolve|connect)|Connection (timed out|refused|failed|reset)|Temporary failure|unreachable|No route to host|Cannot initiate|Remote end closed|Error reading from server|Service Unavailable|Bad Gateway|Gateway Time|Mirror sync|unexpected size|Hash Sum mismatch|Undetermined Error|Some index files failed|Some files failed to download|Unable to fetch some archives'
 # apt exits 0 on an `update` where any source failed and prints these two `W:` lines.
 UPDATE_WARN_RE='^W: (Failed to fetch|Some index files failed)'
 # A 404 anywhere means the index and the mirror disagree: worth ONE fresh update.
@@ -285,7 +298,7 @@ do_install() {
   # Ubuntu mirror can serve. A stale index for the package we DO need surfaces in the
   # fetch phase and takes the stale path below.
   local lists_updated=0 stale_retries=0 remaining cap phase last_rc=0 last_phase=none last_detail="(none)" urc=0
-  local update_warn=""
+  local update_warn="" warned_locate=0
   SECONDS=0
   while :; do
     remaining=$((budget - SECONDS))
@@ -323,7 +336,7 @@ do_install() {
       return 0
     fi
 
-    last_rc="${PHASE_RC}"; last_phase="${phase}"
+    last_rc="${PHASE_RC}"; last_phase="${phase}"; warned_locate=0
     classify "${PHASE_RC}" "${PHASE_LOG}" "${phase}"
     case "${PHASE_RC}" in
       124|137) last_detail="killed at its ${cap} s wall-clock cap" ;;
@@ -335,6 +348,7 @@ do_install() {
       # the index: the source that failed may be the one that serves it (the primary mirror
       # down for a few seconds looks exactly like this). That is a transient the budget
       # rides out, NOT the stale-index case, so the single stale credit is left unspent.
+      warned_locate=1
       lists_updated=0
       echo "::warning::apt fetch cannot find the package after an update that exited 0 with a failed source (rc=${PHASE_RC}); re-running update (${SECONDS} s of ${budget} s budget used): ${last_detail} | update warning: ${update_warn}"
       sleep "${RETRY_SLEEP}"
@@ -360,10 +374,20 @@ do_install() {
     sleep "${RETRY_SLEEP}"
   done
 
-  # (f) Budget spent, every failure so far a retryable (timeout / network) one.
-  local update_note=""
+  # (f) Budget spent, every failure so far a retryable one. Blame the mirror only when the
+  # evidence says so: a wall-clock kill, a failure naming a fetch or network error, a
+  # package missing after a source failed during update, or only time running out (no
+  # failed phase at all). Anything else is an exit 100 this wrapper does not recognise:
+  # quote it and say so, so the next reader adds its wording to DETERMINISTIC_RE.
+  local update_note="" blame
   [ -z "${update_warn}" ] || update_note=" The last update exited 0 but reported: ${update_warn}."
-  echo "::error::MEASURE_FAIL: apt could not fetch '${pkgs[*]}' within the ${budget} s budget (update cap ${update_cap} s, fetch cap ${fetch_cap} s; last failure: ${last_phase} rc=${last_rc}: ${last_detail}).${update_note} A dead or trickling package mirror, not a repo defect."
+  if [ "${last_phase}" = none ] || [ "${warned_locate}" -eq 1 ] || [ "${last_rc}" = 124 ] || [ "${last_rc}" = 137 ] \
+    || grep -a -E -q "${NET_DETAIL_RE}" <<<"${last_detail}"; then
+    blame="A dead or trickling package mirror, not a repo defect."
+  else
+    blame="apt kept exiting ${last_rc} with an error this wrapper does not recognise as a network failure, so the mirror is not blamed; if the quoted error cannot clear by itself, add its wording to DETERMINISTIC_RE in scripts/ci-apt.sh."
+  fi
+  echo "::error::MEASURE_FAIL: apt could not fetch '${pkgs[*]}' within the ${budget} s budget (update cap ${update_cap} s, fetch cap ${fetch_cap} s; last failure: ${last_phase} rc=${last_rc}: ${last_detail}).${update_note} ${blame}"
   return 1
 }
 
@@ -427,7 +451,9 @@ esac
 # INSTANTLY the way a real apt does. Modes (all exit 100 unless noted):
 #   retryable by shape: netfail, net502, net503, net504, resolve, closed, unreach, sync
 #   deterministic:      locate, lock, interrupted, nopubkey, expkey, malformed, unmet,
-#                       badop, candidate, dpkg
+#                       badop, candidate, dpkg, disk, nospace, rofs, openlock, openfile,
+#                       origin, version
+#   unclassified:       unknown100 (exit 100, wording in neither list: retries to the budget)
 #   stale404 (a 404); whalf (exit 0: a flaky third-party source, only W: lines).
 IFS=, read -r -a specs <<<"${STUB_FAIL:-}"
 for spec in "${specs[@]}"; do
@@ -445,6 +471,14 @@ for spec in "${specs[@]}"; do
       unmet) echo "The following packages have unmet dependencies:"; echo " x : Conflicts: y"; echo "E: Unable to correct problems, you have held broken packages."; exit 100 ;;
       badop) echo "E: Invalid operation foo"; exit 100 ;;
       dpkg) echo "E: Sub-process /usr/bin/dpkg returned an error code (1)"; exit 100 ;;
+      disk) echo "E: You don't have enough free space in /var/cache/apt/archives/."; exit 100 ;;
+      nospace) echo "E: Failed to fetch http://mirror.invalid/dists/noble/main/Packages  Error writing to file - write (28: No space left on device) [IP: 192.0.2.1 80]"; exit 100 ;;
+      rofs) echo "E: List directory /var/lib/apt/lists/partial is missing. - Acquire (30: Read-only file system)"; exit 100 ;;
+      openlock) echo "E: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission denied)"; exit 100 ;;
+      openfile) echo "E: Could not open file /var/lib/apt/lists/x_Packages - open (2: No such file or directory)"; exit 100 ;;
+      origin) echo "E: Repository 'http://mirror.invalid noble InRelease' changed its 'Origin' value from 'A' to 'B'"; exit 100 ;;
+      version) echo "E: Version '9.9' for 'x' was not found"; exit 100 ;;
+      unknown100) echo "E: Some brand new apt complaint nobody has classified"; exit 100 ;;
       netfail) echo "E: Failed to fetch http://mirror.invalid/x.deb  Connection timed out [IP: 192.0.2.1 80]"; exit 100 ;;
       net502|net503|net504)
         case "${mode}" in net502) c="502  Bad Gateway" ;; net503) c="503  Service Unavailable" ;; *) c="504  Gateway Time-out" ;; esac
@@ -546,6 +580,9 @@ EOF
   [ "$(count_lines '^::warning::apt update' "${out}")" -ge 2 ] || fail "expected at least two '::warning::apt update' lines"
   { [ "${elapsed}" -ge 6 ] && [ "${elapsed}" -le 13 ]; } \
     || fail "elapsed ${elapsed}s outside 6..13s"
+  # A wall-clock kill IS the mirror's doing: the closing sentence says so.
+  grep -a '^::error::MEASURE_FAIL' <<<"${out}" | grep -a -q 'not a repo defect' \
+    || fail "a budget spent on wall-clock kills did not say it was a dead or trickling mirror"
 
   # 3. no-update-rerun: update ok, first fetch hangs, second fetch ok.
   run_scenario no-update-rerun fetch:1 \
@@ -620,7 +657,7 @@ EOF
   # call of that phase, apt's own code, and a message that does not blame the mirror.
   local phase
   for phase in update fetch; do
-    for mode in locate candidate lock interrupted nopubkey expkey malformed unmet badop dpkg; do
+    for mode in locate candidate lock interrupted nopubkey expkey malformed unmet badop dpkg disk nospace rofs openlock openfile origin version; do
       # A missing package on the fetch is the stale-index shape, covered by scenario 11.
       [ "${phase}:${mode}" != "fetch:locate" ] || continue
       stub_fail="${phase}:all:${mode}"
@@ -675,7 +712,7 @@ EOF
   # the W: URL instead of "failed deterministically: Unable to locate package".
   stub_fail="update:all:whalf,fetch:all:locate"
   retry_sleep=1
-  run_scenario warned-update-then-missing-bounded "" --budget 4 --update-timeout 2 --fetch-timeout 2 x
+  run_scenario warned-update-then-missing-bounded "" --budget 3 --update-timeout 2 --fetch-timeout 2 x
   retry_sleep=0
   stub_fail=""
   [ "${rc}" -eq 1 ] || fail "expected exit 1 (budget spent), got ${rc}"
@@ -685,7 +722,9 @@ EOF
   if grep -a -q 're-running update once' <<<"${out}"; then fail "a warned update spent the stale-index credit"; fi
   grep -a '^::error::MEASURE_FAIL' <<<"${out}" | grep -a -q 'W: Failed to fetch http://thirdparty.invalid/InRelease' \
     || fail "the MEASURE_FAIL line does not quote the saved update warning's URL"
-  { [ "${elapsed}" -ge 3 ] && [ "${elapsed}" -le 8 ]; } || fail "elapsed ${elapsed}s outside 3..8s"
+  grep -a '^::error::MEASURE_FAIL' <<<"${out}" | grep -a -q 'not a repo defect' \
+    || fail "a package missing after a warned update (a source failed) was not attributed to the mirror"
+  { [ "${elapsed}" -ge 2 ] && [ "${elapsed}" -le 7 ]; } || fail "elapsed ${elapsed}s outside 2..7s"
   stub_fail="fetch:all:locate"
   run_scenario missing-package-bounded "" --budget 30 --update-timeout 5 --fetch-timeout 5 x
   stub_fail=""
@@ -763,8 +802,25 @@ EOF
     || fail "the MEASURE_FAIL line does not quote the failing URL and cause"
   grep -a -q '^::warning::apt update attempt failed (rc=100).*Failed to fetch http://mirror.invalid/dists/noble/InRelease' <<<"${out}" \
     || fail "the retry warning does not quote the failing URL"
+  grep -a '^::error::MEASURE_FAIL' <<<"${out}" | grep -a -q 'not a repo defect' \
+    || fail "a budget spent on a 503 did not say it was a dead or trickling mirror"
 
-  echo "ci-apt self-test OK: retry-after-hang, fail-on-budget, no-update-rerun, skip-when-present, fall-through-when-absent, deterministic-fail, network-fail-retries, retryable-by-default, deterministic-signatures, update-half-failure, stale-index, unpack-fails, provides-broken-version, budget-below-floor, fetch-budget-exhausted, unpack-unbounded, measure-fail-names-the-source, warned-update-then-missing-bounded."
+  # 18. unclassified-exit-100: wording in neither list retries for the budget (the classifier
+  # is inverted on purpose), and the closing message quotes it WITHOUT blaming the mirror.
+  stub_fail="update:all:unknown100"
+  retry_sleep=1
+  run_scenario unclassified-exit-100-no-mirror-blame "" --budget 2 --update-timeout 1 --fetch-timeout 1 x
+  retry_sleep=0
+  stub_fail=""
+  [ "${rc}" -eq 1 ] || fail "expected exit 1 (budget spent), got ${rc}"
+  [ "$(count_lines '^update' "${log}")" -ge 2 ] || fail "an unclassified exit 100 was not retried"
+  grep -a '^::error::MEASURE_FAIL' <<<"${out}" | grep -a -q 'E: Some brand new apt complaint nobody has classified' \
+    || fail "the MEASURE_FAIL line does not quote the unclassified error"
+  grep -a '^::error::MEASURE_FAIL' <<<"${out}" | grep -a -q 'add its wording to DETERMINISTIC_RE' \
+    || fail "the MEASURE_FAIL line does not tell the reader to classify the wording"
+  if grep -a -q 'not a repo defect' <<<"${out}"; then fail "an unclassified exit 100 was blamed on the mirror"; fi
+
+  echo "ci-apt self-test OK: retry-after-hang, fail-on-budget, no-update-rerun, skip-when-present, fall-through-when-absent, deterministic-fail, network-fail-retries, retryable-by-default, deterministic-signatures, update-half-failure, stale-index, unpack-fails, provides-broken-version, budget-below-floor, fetch-budget-exhausted, unpack-unbounded, measure-fail-names-the-source, warned-update-then-missing-bounded, unclassified-exit-100-no-mirror-blame."
 }
 
 case "${1:-}" in
