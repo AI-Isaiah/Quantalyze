@@ -15,6 +15,7 @@ Phase 164.9.7. Row-level security never evaluates TRUNCATE, so the grant layer i
 
 ### Changed
 - Mutation census re-measured on the tree merged with STATUSBRIDGE (one full run, exit 0, no defects). Read `FILES_FLOOR` and `ARMS_FLOOR` by symbol from `scripts/mutation-floors.mjs`.
+- **The mutation tooling's `failureBranches` is memoized by text** (`scripts/mutation-runner/run.mjs`). The REAL CORPUS rule-3b walk timed out at vitest's 30 s on CI shard 2 three times on 2026-10-08 (PRs #978 and #980, twice on #980). It took 3.74 s locally, 98% of it re-parsing the same migrations once per arm. Now 1.99 s. Results are frozen and every assertion is unchanged. This closes `MUTPARSER-CORPUS-TIMEOUT-01`.
 - **The phase-29 frozen-spine gate now scans applied migrations only.** It skips `supabase/migrations/down/`, which `db push` never applies and which can only restore an earlier state. An applied migration that touches the scenario spine still trips it; this was shown with a probe file.
 
 ### Notes

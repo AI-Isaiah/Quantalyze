@@ -1400,6 +1400,25 @@ function blockOpenerIndex(statements, closerIdx, depth, kind) {
  * than two that can drift apart.
  */
 export function failureBranches(text) {
+  const hit = failureBranchesMemo.get(text);
+  if (hit !== undefined) return hit;
+  const out = Object.freeze(failureBranchesUncached(text).map((b) => Object.freeze(b)));
+  if (failureBranchesMemo.size >= FAILURE_BRANCHES_MEMO_CAP) {
+    failureBranchesMemo.delete(failureBranchesMemo.keys().next().value);
+  }
+  failureBranchesMemo.set(text, out);
+  return out;
+}
+
+// ponytail: FIFO memo keyed on the whole text. The function is pure, and the corpus
+// walk parses the same pristine migration once per arm and each step's output again
+// as the next step's input: 98% of the walk's time before this (measured 2026-10-08,
+// 716 steps, 3.66 of 3.74 s). Results are frozen, so no caller can corrupt a cached
+// entry. Raise the cap if a single arm ever touches more files than it holds.
+const FAILURE_BRANCHES_MEMO_CAP = 64;
+const failureBranchesMemo = new Map();
+
+function failureBranchesUncached(text) {
   const lines = text.split("\n");
   const statements = tokenizeStatements(text);
   const out = [];
