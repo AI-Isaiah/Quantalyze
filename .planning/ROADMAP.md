@@ -4710,6 +4710,8 @@ Plans:
 
 
 ⭐ **Rehearsal 2026-10-07 UNCLEAN (2 failed_final): founder D-11/D-12 (CONTEXT).** The bybit key's IP allow-list gains the backfill egress (founder action), and the compose divergence is root-caused before the cron is registered. Plans 04-06 wait on both.
+
+⭐ **Founder 2026-10-08 (D-13/D-14, CONTEXT):** opening deposits are judged by a zero-start check with a 0.01% band, not by their position; outside the band they block under an unreconciled-start reason. D-12's self-check fix is `cf73bf7a1`.
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
 **Goal:** Each API key's equity-history reconstruct state is recorded durably, per key, so no key's history is skipped, wiped or left unreconstructed. Today that state is inferred from allocator-wide snapshot counts.
