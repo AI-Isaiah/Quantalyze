@@ -741,6 +741,15 @@ export type FactsheetCommon = {
      * continue it from L=1, so `leverageEligibleFor` withholds the what-if.
      */
     returnsConventionOverride?: boolean;
+    /**
+     * Phase 164.6.6.2 (D-25, founder 2026-10-08) — single-key only, present only
+     * when true: `data_quality_flags.small_base_measured`. At least one MEASURED day
+     * started from a balance under the unit's material equity (BTC 1e-4), so its
+     * return is exact but can be extreme. INFORMATIONAL: the day is kept, the chain
+     * is not broken, and the row is not a warning. The factsheet says so beside the
+     * other data-quality caveats.
+     */
+    smallBaseMeasured?: boolean;
   };
   /** Phase 90.5 (LEV-01/D2): #597 annualization basis (365 crypto / 252 traditional) — enables the client leverage recompute. Optional: absent (stale v4 cache drain) => leverage control hidden, fail-closed. */
   periodsPerYear?: number;

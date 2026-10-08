@@ -21,6 +21,111 @@ Phase 164.6.6.3.2. Three MT5 situations that the wizard used to report as a netw
 - Review round 1: worst finding MEDIUM, so no fixer round ran. Security: SECURED 16/16. Verification: passed.
 - **Known gap, recorded rather than fixed:** WR-01 (MEDIUM). No test pins `heal_series=False` on the new final-attempt stamp. The property holds in the code today, but no test would catch it if it changed. Booked as a follow-up.
 
+## [0.128.0.2] - 2026-10-08 — BTC dust floor 1e-7: a BTC account is measured down to a ten millionth of a coin
+
+Founder decision D-24 for Phase 164.6.6.2 BTCNATIVE (gap closure, plan 14). The BTC row's dust-NAV
+floor drops from 0.001 BTC to 1e-7 BTC. The founder, reading MM-2x on PROD: "it should measure
+more. at least to 0.0000001". Measured before the change, MM-2x read `dust_nav_guard` with 355
+unguarded days and every earlier day guarded, so the opening stretch of its track record was lost to
+a floor that D-20 had set for a different reason (guarding real dust, about $100). **This is a
+behaviour change for BTC-denominated MT5 accounts only:** a day whose prior NAV is anywhere in
+[1e-7, 0.001) BTC is now measured instead of guarded. USD-family accounts and every other venue read
+the unchanged USD row. Nothing is backfilled; the next derive of a BTC account replaces its series.
+
+### Changed
+- **`analytics-service/services/account_unit.py`: BTC `dust_nav` 0.001 to 1e-7** (D-24, superseding
+  D-20's value; D-20's line stays in CONTEXT as lineage). It is the only value that moved.
+- **BTC accounts with equity between 0.0001 and 0.001 no longer fail permanently** (code review
+  IN-02). Under the old row, `material_equity` (0.0001) sat below `dust_nav` (0.001), so an account
+  whose equity was in that band was dust-guarded on every day and then hit the "material equity but
+  fewer than two usable days" refusal, a permanent failure. The inverted row removes that zone; those
+  accounts now derive. This is a behaviour change the first draft of this entry did not name.
+
+### Added
+- **A visible "measured on a very small balance" warning** (D-25, founder, after code review WR-01).
+  With the floor at 1e-7 a day can be measured on a tiny base: a near-total withdrawal while a
+  winning position is open leaves a realized base of a few millionths of a coin, and the next day
+  reads +500%. The founder's call is to keep that day exact AND say so. Whenever a MEASURED day's
+  starting balance is below the unit's `material_equity` (BTC 1e-4), `chain_linked_twr` now records
+  `small_base_measured` (with the number of such days and the smallest prior NAV in the in-process
+  meta). The factsheet shows, beside its other data-quality caveats and in the same amber style,
+  "Some days were measured on a very small balance, so their returns can be extreme."
+  - **Informational only.** It never breaks the chain (it is not counted as `twr_chain_broken`), never
+    drops a day, and never changes a number. It is deliberately NOT a `NAV_TWR_GUARD_KEYS` member, so it
+    does not promote the status to `complete_with_warnings`; a clean tiny-balance account stays
+    `complete`, exactly as `native_unit` and `insufficient_window` do. It rides its own present-only
+    carry: `nav_twr._build_nav_meta`, the derive's pre-stamp in `job_worker`, and the wholesale rebuild
+    in `analytics_runner`; in the browser `singleKeyDataQuality` lifts it (strict `=== true`) to
+    `dataQuality.smallBaseMeasured`, which `FactsheetView` renders. Only the bool is persisted: the
+    smallest prior NAV is an account-size magnitude.
+  - **USD is unchanged by construction.** The USD row has `dust_nav` 1000 above `material_equity` 100,
+    so every prior NAV under 100 is dust-guarded before the check runs: the flag can never fire for
+    a USD-family account or any other venue, and no existing USD flag set, return or status moved.
+  - No payload cache key move: the field is optional-absent, and a flagged series only appears on a
+    re-derive, which moves `computed_at`, which is already a member of the cache key.
+
+### Tests
+- A BTC account whose prev_nav sits between 1e-7 and 0.001 is measured, not guarded (hand
+  arithmetic: 0.0001 / 0.0008 = 0.125 and -0.0002 / 0.0009 = -2/9; a base of 4e-7 reads 0.25 and
+  -0.2), and one below 1e-7 is still guarded. The first goes RED on the old value; the second goes
+  RED when the floor is neutered to 1e-9.
+- An exact-arithmetic oracle of MM-2x's shape: a 0.1 BTC deposit, a 1.0 BTC deposit, trading, a
+  near-total withdrawal, then small-balance trading to 0.00961461 BTC with per-trade P&L down to
+  2e-5. Expected returns are `pnl / prior NAV` in `Fraction`, sharing no code with the reconstruction,
+  and every day after the second ledger day matches to 1e-12. Two lower-balance variants of the same
+  shape (5e-4 and 3e-6 BTC) are RED on the old floor.
+- No return before the first deposit: for a residue of 0, 5e-8, 1e-7, 3e-5, 5e-4, 0.02 and 0.2 BTC
+  left by the backward roll at the account's opening, the series starts on the first deposit day and
+  that day books NaN (or exactly 0.0 once the residue exceeds the deposit), never a gain. RED when the
+  denominator guards are neutered.
+- The BTC residual tolerance still catches a dropped 2e-5 BTC flow at MM-2x's balance.
+- D-25, with exact `Fraction` oracles that share no code with the float backward roll: the
+  reviewer's +500% ledger (deposit 0.01, +0.0001, withdraw 0.01009, close +0.00005) is measured at
+  exactly 5 AND flagged (one day, smallest prior NAV 1e-5, no chain break); a day at 1e-4 or above is
+  not flagged; the MM-2x shape (base about 0.0096) carries no flag, while the 3e-6 variant of the same
+  shape is flagged on exactly the days whose exact prior NAV is under 1e-4 and keeps every return; the
+  boundary at exactly 1e-4 distinguishes `<` from `<=`; the status stays `complete` for the annotation
+  alone and `complete_with_warnings` beside a real guard. Each goes RED when the change is reverted,
+  when the comparison is loosened, when the day is dropped, when the flag promotes the status and when
+  it is counted as a chain break.
+- Code review IN-03: a prior NAV of exactly 1e-7 is a usable denominator and the next float below it is
+  dust (`_guard_denominator`, and the same boundary through `chain_linked_twr`); a `<=` mutant now fails.
+- Code review IN-04: the pre-inception test no longer asserts an account-wide `any(...)` over guard
+  keys. A day-0-isolated ledger names the guard that decides day 0 for each residue (negative or dust
+  for float noise, dust for 5e-8, the flow guard from 3e-5 up to the deposit, none and exactly 0.0 above it).
+- The tests that pinned 0.001 are updated (`test_account_unit.py`, `test_mt5_deal_reconstruction.py`,
+  and the comments in `test_nav_twr.py` and `test_mt5_derive_branch.py`). The old "BTC row is the USD
+  row scaled by one ratio" assertion is gone for `dust_nav`, because the founder value is not that
+  ratio; the other two values are pinned as literals.
+
+### Notes
+- **`material_equity` (0.0001 BTC) and `residual_abs_tol` (1e-6 BTC) did not move, and were measured,
+  not assumed.** They were orchestrator-scaled from D-20, not founder values. Every consumer was read:
+  `dust_nav` feeds the NAV denominator guard and the terminal uPnL-wedge materiality test;
+  `material_equity` feeds the history settle wait and the "material equity but fewer than two usable
+  days" refusal; `residual_abs_tol` feeds the construction self-check. None compares one floor with
+  another, so nothing forces a move. There is no TypeScript or SQL mirror of any of the three.
+- The BTC row is no longer one ratio of the USD row: `dust_nav` (1e-7) is now below
+  `residual_abs_tol` (1e-6), which is below `material_equity` (1e-4), the reverse of the USD row's
+  1000, 100, 1.00. Nothing asserts an ordering, and the row's comment says so. Recorded so the next
+  person who scales the row knows the inversion is deliberate.
+- At MM-2x's scale neither value distorts a real day: its balance is 9.6e-3 BTC, 96 times
+  `material_equity`, and its smallest trade (2e-5) is 20 times `residual_abs_tol`. Below roughly 1e-5
+  BTC the residual band is a large share of the balance, so the self-check there is blunt; recorded,
+  not changed.
+- Existing behaviour the oracle makes visible, unchanged: the second ledger day of MM-2x (the 1.0 BTC
+  deposit on a 0.1 BTC base) reads `flow_dominated_guard` and is NaN, because a flow at least as large
+  as the prior NAV is not a usable denominator (`FLOW_DOM_RATIO` 1.0).
+- **D-26 (founder, 2026-10-08), recorded here and changed nowhere in code:** the supported phone
+  widths are 360 px (small Android), 375 px (iPhone mini) and 390 px (iPhone 12/13/14) and up. 320 px
+  is not a target, and the UI-SPEC's 320 px backstops are superseded by 360 px. This release adds one
+  caveat line to the factsheet header; it wraps in the existing caveat style at those widths.
+- Not fixed, recorded (code review IN-01): the terminal uPnL-wedge flag now fires on a tiny BTC anchor
+  (`anchor > dust_nav`, 1e-7), which can only add `unrealized_pnl_in_anchor` and never changes a return.
+  Gating it on `material_equity` instead is a separate decision.
+- Plan numbering: `164.6.6.2-13` is the Python conversion twin that merged in 0.126.0.0, so this gap
+  closure is `164.6.6.2-14`.
+
 ## [0.128.0.1] - 2026-10-08 — ROADMAP repair, a lint rule that keeps every phase closable, and the 2026-10-08 verification records
 
 A phase could pass verification and never be marked done: 25 of 145 phases in `.planning/ROADMAP.md`

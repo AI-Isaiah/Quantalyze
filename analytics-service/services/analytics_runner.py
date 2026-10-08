@@ -218,6 +218,14 @@ class DataQualityFlags(TypedDict, total=False):
     # NAV_TWR_GUARD_KEYS nor ALLOCATED_CAPITAL_GUARD_KEYS, so it can never promote
     # computation_status or set computation_warned. ---
     native_unit: str
+    # --- Phase 164.6.6.2 (D-25): at least one MEASURED day started from a balance below the
+    # unit's material equity (BTC 1e-4), so its return can be extreme. Stamped by the broker
+    # derive's pre-stamp and carried present-only by run_csv_strategy_analytics. An
+    # INFORMATIONAL annotation, never a warning: it is in neither NAV_TWR_GUARD_KEYS nor
+    # ALLOCATED_CAPITAL_GUARD_KEYS, so it can never promote computation_status or set
+    # computation_warned, and it is not a chain break (no day is dropped). The factsheet
+    # says "measured on a very small balance". A BOOL only (T-73-02). ---
+    small_base_measured: bool
     # --- Phase 164.6.6.2.2 (D-05): the cumulative method this row's returns_series
     # was built with, RAW ('geometric' | 'simple'). Stamped by
     # run_csv_strategy_analytics beside the curve (the composite stitch already wrote
@@ -1986,6 +1994,15 @@ async def run_csv_strategy_analytics(
             # "complete" and computation_warned False.
             if _native_unit is not None:
                 data_quality_flags["native_unit"] = _native_unit
+
+            # Phase 164.6.6.2 (D-25): carry the small-base annotation PRESENT-ONLY and
+            # OUTSIDE both `_warned` loops above, exactly like native_unit. The rebuild of
+            # data_quality_flags is wholesale, so an unbridged pre-stamp would be wiped
+            # seconds after the derive wrote it. It is informational: the measured days keep
+            # their exact returns, so a clean tiny-balance account stays exact-string
+            # "complete" with computation_warned False.
+            if existing_flags.get("small_base_measured") is True:
+                data_quality_flags["small_base_measured"] = True
 
             csv_status = "complete_with_warnings" if _warned else "complete"
 
