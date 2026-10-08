@@ -1860,7 +1860,7 @@ def _scaled_deals(scale: float) -> list[dict]:
 
 def _btc_account(currency: str = "BTC") -> dict:
     # Canonical anchor 110_500 scaled by 1e-6: initial NAV 0.1 BTC, terminal 0.1105,
-    # every NAV above the 0.001 BTC dust floor and far below the 1000 USD one.
+    # every NAV above the 1e-7 BTC dust floor (D-24) and far below the 1000 USD one.
     return {
         "equity": 0.1105,
         "balance": 0.1105,

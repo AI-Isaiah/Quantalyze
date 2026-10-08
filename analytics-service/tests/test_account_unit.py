@@ -1,8 +1,9 @@
 """Phase 164.6.6.2 BTCNATIVE plan 01 — the account-unit classifier and its floor table.
 
 ORACLE DISCIPLINE: every expected number below is a literal written from the decisions
-(D-01, D-04, D-06, D-07, D-20), never read back from the module under test. The BTC row is
-the USD row scaled by D-20's own ratio, 0.001 / 1000 = 1e-6, and each product is shown on
+(D-01, D-04, D-06, D-07, D-20, D-24), never read back from the module under test. The BTC
+``dust_nav`` is the founder's D-24 value (1e-7); the other two BTC values are the
+orchestrator-scaled D-20 values (USD row x 1e-6) that D-24 left in place, each shown on
 paper in the test that pins it.
 
 This module imports only ``services.account_unit`` and ``services.nav_twr`` (both pure), so
@@ -81,7 +82,7 @@ def test_btc_with_whitespace_is_native_btc() -> None:
     unit = classify_account_currency("btc ")
     assert unit.code == "BTC"
     assert unit.native is True
-    assert unit.floors.dust_nav == 0.001
+    assert unit.floors.dust_nav == 1e-7
     assert unit.floors is not USD_FLOORS
 
 
@@ -107,22 +108,26 @@ def test_usd_floors_are_todays_constants() -> None:
     )
 
 
-def test_btc_floor_is_0_001() -> None:
-    """D-20: the BTC dust floor is 0.001 BTC (supersedes D-05's 0.01). The other two
-    thresholds are the USD row scaled by D-20's own ratio 0.001 / 1000 = 1e-6:
-      material_equity  100  * 1e-6 = 0.0001 BTC
-      residual_abs_tol 1.00 * 1e-6 = 0.000001 BTC
+def test_btc_floors_are_the_d24_dust_floor_and_the_unchanged_d20_scaled_pair() -> None:
+    """D-24 (founder, 2026-10-08, "it should measure more. at least to 0.0000001"): the BTC
+    ``dust_nav`` is 1e-7 BTC, superseding D-20's 0.001.
+
+    ``material_equity`` 0.0001 and ``residual_abs_tol`` 1e-6 are the D-20-scaled values
+    (USD row x 0.001 / 1000 = 1e-6: 100 -> 0.0001, 1.00 -> 1e-6). They are orchestrator
+    discretion, NOT founder values, and D-24 required measuring whether they must follow
+    the floor. The gap-closure plan (164.6.6.2-14) measured every consumer: none compares
+    them to ``dust_nav`` or to each other, so they are left as they were and pinned here as
+    literals. A later change to either is its own decision, not a side effect of D-24.
     """
     btc = classify_account_currency("BTC").floors
     assert btc == UnitFloors(
-        dust_nav=0.001, material_equity=0.0001, residual_abs_tol=1e-6
+        dust_nav=1e-7, material_equity=0.0001, residual_abs_tol=1e-6
     )
-    # The ratio the BTC row is derived by, pinned as an invariant so a hand-edited
-    # row that breaks the scaling shows up here rather than in a PROD factsheet.
-    ratio = btc.dust_nav / USD_FLOORS.dust_nav
-    assert ratio == pytest.approx(1e-6, rel=1e-12)
-    assert btc.material_equity == pytest.approx(USD_FLOORS.material_equity * ratio)
-    assert btc.residual_abs_tol == pytest.approx(USD_FLOORS.residual_abs_tol * ratio)
+    # The D-20-scaled pair still derives from the USD row by 1e-6, shown on paper above.
+    assert btc.material_equity == pytest.approx(USD_FLOORS.material_equity * 1e-6)
+    assert btc.residual_abs_tol == pytest.approx(USD_FLOORS.residual_abs_tol * 1e-6)
+    # D-24's intent: BTC is judged at a far smaller base than 0.001 BTC (D-20's value).
+    assert btc.dust_nav < 0.001
 
 
 def test_dust_nav_floor_name_is_an_alias_of_the_usd_row() -> None:

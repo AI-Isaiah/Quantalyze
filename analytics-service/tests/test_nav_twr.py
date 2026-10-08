@@ -1573,6 +1573,30 @@ def test_reconcile_residual_tolerance_is_per_unit() -> None:
     ) == pytest.approx(0.0, abs=1e-12)
 
 
+def test_reconcile_residual_tolerance_catches_the_smallest_mm2x_trade() -> None:
+    """D-24 follow-up: MM-2x holds 0.00961461 BTC and its smallest trade is about 2e-5 BTC.
+    The BTC absolute band 1e-6 is 1/20 of that trade and 1e-4 of the balance, so a roll
+    that drops a 2e-5 BTC flow still raises, and a clean roll at that balance is accepted.
+      terminal 0.00961461, pnl [2e-5, -2e-5, 5e-4] (sum 5e-4), flow +2e-5 on day 2.
+      true start = 0.00961461 - 0.0005 - 0.00002 = 0.00909461
+      mutant start (flow dropped from the roll) = 0.00909461 + 0.00002 = 0.00911461
+      residual = 0.00961461 - 0.00911461 - 0.0005 - 0.00002 = -0.00002
+    |-2e-5| > max(1e-6, 1e-6 * 0.00961461) = 1e-6, so it raises."""
+    daily_pnl = _pnl([0.00002, -0.00002, 0.0005])
+    flows = _flows_to_daily_usd([("2026-01-02", 0.00002)])
+    terminal = 0.00961461
+    true_start = _reconstructed_start(daily_pnl, terminal, flows)
+    assert true_start == pytest.approx(0.00909461, abs=1e-15)
+    with pytest.raises(NavReconstructionError):
+        reconcile_flow_residual(
+            terminal, true_start + 0.00002, daily_pnl, flows,
+            abs_tol=_BTC_FLOORS.residual_abs_tol,
+        )
+    assert reconcile_flow_residual(
+        terminal, true_start, daily_pnl, flows, abs_tol=_BTC_FLOORS.residual_abs_tol
+    ) == pytest.approx(0.0, abs=1e-15)
+
+
 def test_reconcile_wired_with_unit_tolerance(monkeypatch) -> None:
     """The tolerance is threaded THROUGH ``reconstruct_nav_and_twr``, not merely available:
     a roll that corrupts early NAV by 0.001 BTC is refused when the BTC floors are passed
@@ -1596,7 +1620,7 @@ def test_reconcile_wired_with_unit_tolerance(monkeypatch) -> None:
 def test_upnl_materiality_reads_unit_dust_floor() -> None:
     """The uPnL wedge ratio is only evaluated on a non-dust anchor, and 'non-dust' is
     per unit. Anchor 0.02 BTC, open uPnL 0.004: |0.004| / 0.02 = 0.20 > the 0.05 ratio.
-    Under BTC floors the anchor (0.02 > 0.001) is material, so the flag fires; under the
+    Under BTC floors the anchor (0.02 > 1e-7) is material, so the flag fires; under the
     USD default 0.02 is below $1000, the ratio is not evaluated, no flag."""
     pnl = _pnl([0.001])
     _, btc_meta = reconstruct_nav_and_twr(

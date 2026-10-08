@@ -30,7 +30,8 @@ Run: cd analytics-service && pytest tests/test_mt5_deal_reconstruction.py -x
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -793,8 +794,9 @@ def test_guard_broken_day_still_has_an_honest_level() -> None:
 # Phase 164.6.6.2 BTCNATIVE plan 01 — a BTC-sized ledger is judged against BTC floors.
 #
 # The USD $1000 dust floor flattened every NAV of a BTC account (a 0.02 BTC account is
-# "$0.02" to it). The thresholds now come from the account's unit (D-07, D-20: BTC dust
-# floor 0.001). The arithmetic core is unchanged; only the floors are handed in.
+# "$0.02" to it). The thresholds now come from the account's unit (D-07; D-24: BTC dust
+# floor 1e-7, superseding D-20's 0.001). The arithmetic core is unchanged; only the floors
+# are handed in.
 # ---------------------------------------------------------------------------
 
 _BTC = classify_account_currency("BTC").floors
@@ -818,7 +820,7 @@ def test_btc_account_gets_real_returns_under_btc_floors() -> None:
       returns r_t = pnl_t / NAV_{t-1}:
         day1: 0.002 / 0.018 = 1/9 = 0.1111...
         day2: -0.005 / 0.020 = -0.25
-    Every prior NAV (0.018, 0.020) is above the 0.001 BTC dust floor: no guard.
+    Every prior NAV (0.018, 0.020) is above the 1e-7 BTC dust floor: no guard.
     Under the DEFAULT (USD) floors the same input is dust-guarded on both days, which is
     the defect: 0.018 BTC < 1000.
     """
@@ -840,33 +842,74 @@ def test_btc_account_gets_real_returns_under_btc_floors() -> None:
     assert usd_meta.get("dust_nav_guard") is True
 
 
-def test_btc_account_below_btc_dust_floor_is_dust_guarded() -> None:
-    """The same shape one decade under the floor. equity 0.0007, day1 +0.0001,
-    day2 -0.0002.
+def test_btc_account_between_1e7_and_0_001_is_measured_not_guarded() -> None:
+    """D-24 (founder, 2026-10-08): "it should measure more. at least to 0.0000001".
+
+    WHY it matters: under D-20's 0.001 floor the opening stretch of an account like MM-2x
+    (a prev_nav of a few thousandths of a BTC and below) read ``dust_nav_guard`` on every
+    day, so a real track record began months late. The floor is 1e-7 BTC now: a prev_nav
+    anywhere in [1e-7, 0.001) is a usable return denominator and the day is MEASURED.
+
+    Case A, the decade the old floor guarded. equity 0.0007, day1 +0.0001, day2 -0.0002.
       NAV(06-03) = 0.0007
       NAV(06-02) = 0.0007 - (-0.0002) = 0.0009
       base       = 0.0009 - 0.0001    = 0.0008
-    Both prior NAVs (0.0008, 0.0009) are under 0.001 BTC, so dust_nav_guard fires on both
-    days: 0 usable days. A BTC account this small is dust, exactly as a $500 USD one is."""
-    deals = [_btc_deal(0.0001, 2), _btc_deal(-0.0002, 3)]
+      r1 = 0.0001 / 0.0008 = 0.125      r2 = -0.0002 / 0.0009 = -2/9
+    Both prior NAVs (0.0008, 0.0009) are under the OLD 0.001 floor and over the new 1e-7.
+
+    Case B, a base 3 decades lower still, just above the floor. equity 4e-7, day1 +1e-7,
+      day2 -1e-7.
+      NAV(06-03) = 4e-7     NAV(06-02) = 4e-7 + 1e-7 = 5e-7     base = 5e-7 - 1e-7 = 4e-7
+      r1 = 1e-7 / 4e-7 = 0.25            r2 = -1e-7 / 5e-7 = -0.2
+    """
+    a_deals = [_btc_deal(0.0001, 2), _btc_deal(-0.0002, 3)]
+    a_returns, a_meta = combine_mt5_deal_ledger(
+        a_deals, account_equity=0.0007, account_balance=0.0007, floors=_BTC
+    )
+    assert not a_meta.get("dust_nav_guard")
+    assert int(a_returns.notna().sum()) == 2
+    assert a_returns.to_numpy()[0] == pytest.approx(0.125, abs=1e-12)
+    assert a_returns.to_numpy()[1] == pytest.approx(-2 / 9, abs=1e-12)
+
+    b_deals = [_btc_deal(1e-7, 2), _btc_deal(-1e-7, 3)]
+    b_returns, b_meta = combine_mt5_deal_ledger(
+        b_deals, account_equity=4e-7, account_balance=4e-7, floors=_BTC
+    )
+    assert not b_meta.get("dust_nav_guard")
+    assert int(b_returns.notna().sum()) == 2
+    assert b_returns.to_numpy()[0] == pytest.approx(0.25, abs=1e-9)
+    assert b_returns.to_numpy()[1] == pytest.approx(-0.2, abs=1e-9)
+
+
+def test_btc_account_below_1e7_is_still_dust_guarded() -> None:
+    """D-24 moves the floor down, it does not remove it: a base under 1e-7 BTC (a ten
+    millionth of a coin, about a cent) is still not a percentage-return denominator.
+
+    equity 6e-8, day1 +1e-8, day2 -2e-8.
+      NAV(06-03) = 6e-8     NAV(06-02) = 6e-8 + 2e-8 = 8e-8     base = 8e-8 - 1e-8 = 7e-8
+    Both prior NAVs (7e-8, 8e-8) are under 1e-7, so ``dust_nav_guard`` fires on both days:
+    0 usable days, never a substituted base."""
+    deals = [_btc_deal(1e-8, 2), _btc_deal(-2e-8, 3)]
     returns, meta = combine_mt5_deal_ledger(
-        deals, account_equity=0.0007, account_balance=0.0007, floors=_BTC
+        deals, account_equity=6e-8, account_balance=6e-8, floors=_BTC
     )
     assert meta.get("dust_nav_guard") is True
-    assert int(returns.notna().sum()) < 2
+    assert int(returns.notna().sum()) == 0
     assert meta.get("computation_status_hint") == "complete_with_warnings"
 
 
 def test_scaled_usd_fixture_under_btc_floors_equals_unscaled_under_usd_floors() -> None:
     """The unit-invariance twin (the MM-2x defect in a test). Take the USD fixture of
     ``test_sub_1000_equity_reconstructs_off_real_anchor_not_fabricated_base`` (NAVs 2000,
-    1400, 900 and day PnLs -600, -500) and scale every money value by 1e-6, D-20's own
-    ratio: NAVs 0.002, 0.0014, 0.0009 and PnLs -0.0006, -0.0005.
+    1400, 900 and day PnLs -600, -500) and scale every money value by 1e-6: NAVs 0.002,
+    0.0014, 0.0009 and PnLs -0.0006, -0.0005.
 
-    Every threshold scales by the same 1e-6, so the guard decisions are identical: the
-    return series must match to 1e-12 and the flag set must match exactly. Under the
-    DEFAULT floors the scaled fixture is dust-guarded on every day, which is what flattened
-    MM-2x."""
+    The 1e-6 is a FIXTURE scale, no longer the ratio between the two dust floors (D-24 put
+    the BTC floor at 1e-7, so BTC is measured far below the scaled USD floor). It is still
+    an honest twin here because every prior NAV of both fixtures clears its own floor
+    (USD 1000; BTC 1e-7): the guard decisions are identical, the return series must match
+    to 1e-12 and the flag set must match exactly. Under the DEFAULT floors the scaled
+    fixture is dust-guarded on every day, which is what flattened MM-2x."""
     usd = [_btc_deal(-600.0, 2, kind=1), _btc_deal(-500.0, 3, kind=1)]
     scaled = [_btc_deal(-0.0006, 2, kind=1), _btc_deal(-0.0005, 3, kind=1)]
 
@@ -920,3 +963,157 @@ def test_nav_levels_meta_reads_the_same_floors_as_the_returns_path() -> None:
         deals, account_equity=0.015, account_balance=0.015
     )
     assert blind_meta.get("dust_nav_guard") is True
+
+
+# ---------------------------------------------------------------------------
+# D-24 follow-up (founder, 2026-10-08, from his own MT5 screenshots of MM-2x): the account
+# opens with a 0.1 BTC deposit on 2025-10-16 and a 1.0 BTC deposit on 2025-10-17, trades,
+# withdraws nearly everything, and today holds 0.00961461 BTC with trades of about
+# 0.00002 to 0.0005 BTC each. "There really is a very small equity ... those amounts
+# should be exactly represented." The oracle below is built in EXACT Fraction arithmetic
+# (forward NAV, returns = pnl / prior NAV) and shares no code with the reconstruction,
+# which rolls floats BACKWARD from the terminal.
+# ---------------------------------------------------------------------------
+
+_MM2X_FIRST_DEPOSIT = date(2025, 10, 16)
+_MM2X_MIN_BAL_SCALED = [
+    # (terminal balance, scale on the small-balance trades). Scale 1 is MM-2x today; the
+    # other two keep the same SHAPE at a balance under D-20's old 0.001 floor (5e-4) and
+    # 4 decades under MM-2x (3e-6), where the old floor would have guarded every day.
+    (Fraction("0.00961461"), Fraction(1)),
+    (Fraction("0.0005"), Fraction("0.05")),
+    (Fraction("0.000003"), Fraction("0.0005")),
+]
+
+
+def _mm2x_ledger(terminal: Fraction, scale: Fraction):
+    """MM-2x's shape as exact events ``(day, kind, Fraction)`` plus the exact expectation.
+
+    Returns ``(events, expected, small_days)``: ``expected[day]`` is the exact return
+    ``pnl_day / NAV_{day-1}`` (a flat gap day is exactly 0), for every day from the third
+    ledger day on. The withdrawal is DERIVED so the ledger closes to ``terminal`` with no
+    residue: NAV after the withdrawal day = terminal - sum(small-balance pnl).
+    """
+    d0 = _MM2X_FIRST_DEPOSIT
+    big = [Fraction(x) for x in ("0.021", "-0.013", "0.047", "-0.020", "0.009")]
+    small = [
+        Fraction(x) * scale
+        for x in ("0.00002", "-0.00002", "0.0005", "-0.00025", "0.00012",
+                  "0.00003", "-0.00004", "0.00031", "-0.0001", "0.000045")
+    ]
+    nav_after_withdrawal = terminal - sum(small)
+    nav_before = Fraction("1.1") + sum(big)
+    # A LOSS on the withdrawal day keeps |withdrawal| < the prior NAV, so the day is not
+    # flow-dominated (FLOW_DOM_RATIO 1.0). A gain larger than the balance left behind would
+    # make |withdrawal| >= prior NAV and guard that day, which is existing, unchanged
+    # behaviour and not what this oracle is about.
+    withdrawal_day_pnl = Fraction("-0.004")
+    withdrawal = nav_after_withdrawal - nav_before - withdrawal_day_pnl  # negative
+    wd = d0 + timedelta(8)
+    events = [(d0, "flow", Fraction("0.1")), (d0 + timedelta(1), "flow", Fraction(1))]
+    events += [(d0 + timedelta(2 + i), "pnl", p) for i, p in enumerate(big)]
+    events += [(wd, "pnl", withdrawal_day_pnl), (wd, "flow", withdrawal)]
+    small_days = [wd + timedelta(1 + i) for i in range(len(small))]
+    events += [(d, "pnl", p) for d, p in zip(small_days, small)]
+
+    pnl_by_day: dict[date, Fraction] = {}
+    flow_by_day: dict[date, Fraction] = {}
+    for day, kind, amount in events:
+        book = flow_by_day if kind == "flow" else pnl_by_day
+        book[day] = book.get(day, Fraction(0)) + amount
+    last = max(d for d, _k, _a in events)
+    expected: dict[date, Fraction] = {}
+    nav = Fraction(0)
+    day = d0
+    while day <= last:
+        prev = nav
+        nav = prev + pnl_by_day.get(day, Fraction(0)) + flow_by_day.get(day, Fraction(0))
+        if day >= d0 + timedelta(2):
+            expected[day] = pnl_by_day.get(day, Fraction(0)) / prev
+        day += timedelta(1)
+    assert nav == terminal  # the exact ledger closes with no residue
+    return events, expected, small_days
+
+
+def _mm2x_deals(events) -> list[dict]:
+    deals = []
+    for day, kind, amount in events:
+        row = {"profit": float(amount), "swap": 0.0, "commission": 0.0, "fee": 0.0,
+               "time": _epoch(day.year, day.month, day.day)}
+        if kind == "flow":
+            deals.append({**row, "type": 2})  # BALANCE: deposit +, withdrawal -
+        else:
+            deals.append({**row, "type": 0 if amount >= 0 else 1, "entry": 1})
+    return deals
+
+
+@pytest.mark.parametrize(("terminal", "scale"), _MM2X_MIN_BAL_SCALED)
+def test_mm2x_shape_every_small_balance_day_is_measured_and_exact(
+    terminal: Fraction, scale: Fraction
+) -> None:
+    """The founder's account, exactly. Deposit 0.1, deposit 1.0, trading, a near-total
+    withdrawal, then small-balance trading ending at ``terminal`` with per-trade P&L down to
+    2e-5 (scaled with the balance in the two lower variants).
+
+    Every day after the second ledger day must be MEASURED (never ``dust_nav_guard`` NaN) at
+    the 1e-7 floor and equal ``pnl / prior NAV`` computed in exact Fraction arithmetic to
+    1e-12. The first two ledger days are NaN by design and are asserted as such, not skipped:
+    day 0 has no opening capital (see the pre-inception test) and day 1's 1.0 deposit is not
+    below the prior 0.1 NAV, so it is flow-dominated (FLOW_DOM_RATIO 1.0). A variant below
+    D-20's 0.001 floor is the case D-24 exists for: the old floor guarded every one of its
+    small-balance days."""
+    events, expected, small_days = _mm2x_ledger(terminal, scale)
+    returns, meta = combine_mt5_deal_ledger(
+        _mm2x_deals(events),
+        account_equity=float(terminal),
+        account_balance=float(terminal),
+        floors=_BTC,
+    )
+    first = pd.Timestamp(_MM2X_FIRST_DEPOSIT)
+    assert returns.index[0] == first
+    assert returns.iloc[:2].isna().all()  # deposit-only day, and the flow-dominated deposit
+    for day, exact in expected.items():
+        got = returns.loc[pd.Timestamp(day)]
+        assert not math.isnan(got), f"{day} was guarded, not measured"
+        assert got == pytest.approx(float(exact), abs=1e-12), f"{day}"
+    assert all(pd.Timestamp(d) in returns.index for d in small_days)
+    # No P&L-dominated day, and no NaN beyond the first two: the count of NaN is exactly 2.
+    # (dust_nav_guard may be set by day 0 alone, when float noise leaves a positive 1e-17.)
+    assert "pnl_dominated_guard" not in meta
+    assert int(returns.isna().sum()) == 2
+
+
+@pytest.mark.parametrize("residue", ["0", "5e-8", "1e-7", "3e-5", "5e-4", "0.02", "0.2"])
+def test_no_return_is_emitted_before_the_first_deposit(residue: str) -> None:
+    """The pre-inception guard (founder follow-up to D-24). The account holds NOTHING before
+    its first deposit, so the backward roll's opening capital ``NAV_0 - pnl_0 - F_0`` is
+    exactly zero in theory and only float noise or an incomplete ledger leaves a residue R.
+    The old 0.001 floor hid any 0 < R < 0.001 as dust; at 1e-7 the range [1e-7, 0.001) is
+    measurable, so this pins that R is still never turned into a return.
+
+    Measured behaviour (this test is the pin):
+      * the reconstructed series STARTS on the first ledger day: no row exists for any
+        earlier calendar day, so no return can be booked before the first deposit;
+      * that first day's own return is guarded for every R below the deposit itself
+        (negative / dust guard for float noise, ``flow_dominated_guard`` once R >= 1e-7
+        because the 0.1 deposit exceeds the base R, FLOW_DOM_RATIO 1.0);
+      * only when R is LARGER than the deposit (0.2 > 0.1) is the day measured, and then it
+        is exactly 0.0: a deposit-only day has no P&L, so it is flat, never a gain.
+    """
+    terminal = Fraction("0.00961461")
+    events, _expected, _small = _mm2x_ledger(terminal, Fraction(1))
+    equity = float(terminal + Fraction(residue))
+    returns, meta = combine_mt5_deal_ledger(
+        _mm2x_deals(events), account_equity=equity, account_balance=equity, floors=_BTC
+    )
+    first = pd.Timestamp(_MM2X_FIRST_DEPOSIT)
+    assert returns.index.min() == first, "a row exists before the first deposit"
+    assert not (returns.index < first).any()
+    day0 = returns.loc[first]
+    assert math.isnan(day0) or day0 == 0.0, "the first deposit day booked a return"
+    if Fraction(residue) <= Fraction("0.1"):
+        assert math.isnan(day0)
+        assert any(
+            meta.get(k)
+            for k in ("negative_nav_guard", "dust_nav_guard", "flow_dominated_guard")
+        )
