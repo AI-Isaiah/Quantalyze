@@ -116,7 +116,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend** (INSERTED) — shipped v0.128.0.0 (#973, merged 2026-10-08); verification: human_needed (post-deploy D-03 reading only)
 - [ ] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8)** (INSERTED) — shipped v0.125.2.1 (#968, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
-- [ ] **Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy)** (INSERTED) — not yet planned (164.6.6.3 split B, founder 2026-10-06)
+- [x] **Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy)** (INSERTED) — verification: passed (v0.129.0.0) (completed 2026-10-08)
 - [ ] **Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b)** (INSERTED) — not yet planned (164.6.6.3 split C, founder 2026-10-06)
 - [ ] **Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status** (INSERTED) — not yet planned (booked 2026-10-06, founder)
 - [x] **Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults** (INSERTED) — verification: passed (PR #971, v0.127.0.0) (completed 2026-10-08)
@@ -3054,13 +3054,13 @@ settled, each with its own wire code and copy, pinned by tests.
 **Requirements**: none in REQUIREMENTS.md; the items above are the spec.
 **Depends on:** Phase 164.6.6.3 (it emits the history-not-ready `error_kind` this phase words)
 **Orchestrator note 2026-10-07 (after plan check):** D-03's backfill carrier `_MT5_BACKFILL_MESSAGES["history_unsettled"]` is excluded from the wizard surface: nothing in `src/` reads it, so it stays operator-side (recorded in `164.6.6.3.2-CONTEXT.md`). The derive carrier is stamped on the final attempt only (D-06, founder C2).
-**Plans:** 4 plans
+**Plans:** 4/4 plans complete
 
 Plans:
-- [ ] 164.6.6.3.2-01-PLAN.md — env-gap: three emitters to `MT5_VALIDATION_UNCONFIGURED` / `KEY_MT5_VALIDATION_UNCONFIGURED`, D-31 stays, paging and the inverted-timeout capture (D-01, D-07) — wave 1
-- [ ] 164.6.6.3.2-02-PLAN.md — busy: `scrub_owed` and `lease_busy` to recoverable `MT5_TERMINAL_BUSY` / `KEY_MT5_TERMINAL_BUSY`, a test per emitter (D-02) — wave 2
-- [ ] 164.6.6.3.2-03-PLAN.md — both new codes proven at every key route and component; STATUS_CONTRACT and runbooks (D-01, D-02, D-07) — wave 3
-- [ ] 164.6.6.3.2-04-PLAN.md — history not settled: final-attempt provenance stamp and `GATE_HISTORY_NOT_SETTLED` (D-03, D-06) — wave 4
+- [x] 164.6.6.3.2-01-PLAN.md — env-gap: three emitters to `MT5_VALIDATION_UNCONFIGURED` / `KEY_MT5_VALIDATION_UNCONFIGURED`, D-31 stays, paging and the inverted-timeout capture (D-01, D-07) — wave 1
+- [x] 164.6.6.3.2-02-PLAN.md — busy: `scrub_owed` and `lease_busy` to recoverable `MT5_TERMINAL_BUSY` / `KEY_MT5_TERMINAL_BUSY`, a test per emitter (D-02) — wave 2
+- [x] 164.6.6.3.2-03-PLAN.md — both new codes proven at every key route and component; STATUS_CONTRACT and runbooks (D-01, D-02, D-07) — wave 3
+- [x] 164.6.6.3.2-04-PLAN.md — history not settled: final-attempt provenance stamp and `GATE_HISTORY_NOT_SETTLED` (D-03, D-06) — wave 4
 
 ### Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8) (INSERTED)
 
@@ -5446,7 +5446,7 @@ kept verbatim.
 | 164.6.6.2.2 WEALTHRETURNS | 7/7 | Shipped — verification `human_needed`: post-deploy D-03 reading only, not closed | v0.128.0.0 · #973 |
 | 164.6.6.3 UATFIXES | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.125.2.0 · #967 |
 | 164.6.6.3.1 UIPOLISH | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.125.2.1 · #968 |
-| 164.6.6.3.2 WIZARDCODES | 0/? | Queued — 164.6.6.3 split B (founder 2026-10-06) | - |
+| 164.6.6.3.2 WIZARDCODES | 4/4 | Complete — verification passed (WR-01 MEDIUM recorded as a known gap) | 2026-10-08 · v0.129.0.0 |
 | 164.6.6.3.3 FACTSHEETTRUTH | 0/? | Queued — 164.6.6.3 split C (founder 2026-10-06) | - |
 | 164.6.6.3.4 STATUSBRIDGE | 0/? | Queued — booked 2026-10-06 (founder) | - |
 | 164.6.6.3.5 DOMAINONE | 13/13 | Complete — verification passed after plan 13's live checks | 2026-10-08 · v0.127.0.0 · #971 |
