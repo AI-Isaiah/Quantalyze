@@ -545,6 +545,26 @@ describe("Finding B — singleKeyDataQuality single-key DQ opt (one owner)", () 
     expect(singleKeyDataQuality({ insufficient_window: true }).composite).toBe(false);
   });
 
+  it("D-25: small_base_measured is lifted present-only under strict `=== true` coercion", () => {
+    // The persisted truth lifts to the payload opt.
+    expect(singleKeyDataQuality({ small_base_measured: true })).toEqual({
+      composite: false,
+      insufficientWindow: false,
+      smallBaseMeasured: true,
+    });
+    // A clean row's opt is byte-unchanged: the key is ABSENT, not false.
+    expect(singleKeyDataQuality({})).toEqual({ composite: false, insufficientWindow: false });
+    expect("smallBaseMeasured" in singleKeyDataQuality({ small_base_measured: false })).toBe(false);
+    expect("smallBaseMeasured" in singleKeyDataQuality(null)).toBe(false);
+    // Tampering guard (T-92-05): a non-boolean value never prints the caveat.
+    expect("smallBaseMeasured" in singleKeyDataQuality({ small_base_measured: "true" })).toBe(false);
+    expect("smallBaseMeasured" in singleKeyDataQuality({ small_base_measured: 1 })).toBe(false);
+    // Informational: it rides beside, and never replaces, the chain-break marker.
+    expect(
+      singleKeyDataQuality({ twr_chain_broken: true, small_base_measured: true }),
+    ).toMatchObject({ twrChainBroken: true, smallBaseMeasured: true });
+  });
+
   it("regression: threaded single-key opts surface insufficientWindow on the payload; the pre-fix undefined opts (buildOpts unassigned) drop it", () => {
     const series: DailyReturn[] = [
       { date: "2025-08-01", value: 0.01 },
