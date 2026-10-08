@@ -142,7 +142,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — verification: passed (completed 2026-10-02, PR #875, v0.106.0.0; first bot re-dump PR #920)
 - [x] **Phase 164.9.6: SUBSETMAIN — a push to main runs only its PR's changed SQL gates; a nightly job runs the full corpus and enforces the floors** (INSERTED 2026-10-03) — planned 2026-10-03, 5 plans in 4 waves (completed 2026-10-03)
 - [x] **Phase 164.9.6.1: SUBSETSHARD — a FULL sql-mutation run fits well under its 20-minute cap again, and a stale-baseline-drift red no longer forces one** (INSERTED 2026-10-03) — verification: passed (completed 2026-10-03, PR #941, v0.123.0.0; SS-1 measured 5m01s on main run 37151757248, closed in #942)
-- [ ] **Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables** (INSERTED 2026-10-03) — not yet planned
+- [ ] **Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables** (INSERTED 2026-10-03) — shipped v0.129.2.0 (merged 2026-10-08); verification: human_needed (plan 04 post-merge PROD after-reading only)
 - [ ] **Phase 164.9.8: APTHANG — a CI job's apt step never hangs on a dead package mirror** (INSERTED 2026-10-07) — shipped v0.129.1.2 (merged 2026-10-08); verification: human_needed (post-ship real-runner measurement only)
 - [x] **~~Phase 165~~: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"), as 165 ACTIONSDEPS: #643 (superseded by #916), #627, #626 and #612 landed green; deviations in `165-VERIFICATION.md`.
 - [x] **~~Phase 165.1~~: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"): the maintenance landings meet the criteria, C1 in substance and not to the letter (the pandas fix rode inside #898); deviations in `165.1-VERIFICATION.md`.
@@ -3741,9 +3741,9 @@ Plans:
 **Plans:** 4 plans (planned 2026-10-07, revised round 1; 4 waves: W1 01 · W2 02 · W3 03 · W4 04; 04 is post-merge and non-autonomous)
 
 Plans:
-- [ ] 164.9.7-01-PLAN.md — migration (schema-wide + default-privilege revoke, catalogue self-check), gate TRUNC 1..6, each guard shown RED
-- [ ] 164.9.7-02-PLAN.md — exact-prior-set rollback; local-stack full-dump proof (PG 17.6: corpus green, counts 0/0, rollback back to 56/59, gate RED)
-- [ ] 164.9.7-03-PLAN.md — floors and censuses from one full measured run; D-04 BEFORE reading on PROD; TODOS api_keys annotation
+- [x] 164.9.7-01-PLAN.md — migration (schema-wide + default-privilege revoke, catalogue self-check), gate TRUNC 1..6, each guard shown RED
+- [x] 164.9.7-02-PLAN.md — exact-prior-set rollback; local-stack full-dump proof (PG 17.6: corpus green, counts 0/0, rollback back to 56/59, gate RED)
+- [x] 164.9.7-03-PLAN.md — floors and censuses from one full measured run; D-04 BEFORE reading on PROD; TODOS api_keys annotation
 - [ ] 164.9.7-04-PLAN.md — post-merge: apply-test and apply confirmed, D-04 AFTER reading on PROD, founder confirms the residual
 
 ⭐ **Founder 2026-10-07 (after review round 1), recorded in CONTEXT D-05/D-06:** the `supabase_admin` residual is CONFIRMED before merge, with a read-only PROD detector booked. TRIGGER and MAINTAIN on `public` (anon/authenticated) go to a new phase inserted after this one. TRUNCATE on `storage.*`/`net.*` is an accepted platform residual (not revocable by `postgres`); this phase's guarantee is schema `public` only.
@@ -5509,7 +5509,7 @@ kept verbatim.
 | 164.9.5 AUTOREDUMP | 9/9 | Complete | v0.106.0.0 · #875 · verification passed 2026-10-02 |
 | 164.9.6 SUBSETMAIN | 5/5 | Complete    | 2026-10-03 |
 | 164.9.6.1 SUBSETSHARD | 3/3 | Complete | v0.123.0.0 · #941 · verification passed 2026-10-03 |
-| 164.9.7 TRUNCATEREVOKE | 0/? | Queued — security, booked 2026-10-03 | - |
+| 164.9.7 TRUNCATEREVOKE | 3/4 | Shipped — verification `human_needed`: plan 04 post-merge PROD after-reading only, not closed | v0.129.2.0 |
 | 164.9.8 APTHANG | 4/5 | Shipped — verification `human_needed`: post-ship plan 05 runner measurement only, not closed | v0.129.1.2 |
 | 166. QSTATS-TRUTH | 10/10 | Complete    | 2026-10-04 |
 | 166.1 ENGINEFLOOR | 4/4 | Complete    | 2026-10-04 |

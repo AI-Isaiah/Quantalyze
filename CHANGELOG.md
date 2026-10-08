@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.129.2.0] - 2026-10-08 — TRUNCATEREVOKE: anon and authenticated no longer hold TRUNCATE on public tables
+
+Phase 164.9.7. Row-level security never evaluates TRUNCATE, so the grant layer is the only control, and it was wide open. Measured read-only on PROD on 2026-10-07: anon held TRUNCATE on 53 of 63 base tables, and authenticated on 56. Any SQL-capable path running as either role could empty a table whatever its policies said, and `TRUNCATE ... CASCADE` reaches foreign-key children. The source was the Supabase bootstrap's default ACL on schema `public` (`ALL` includes TRUNCATE), not this repo's migrations. Migration `20261009130000` fixes the class. ⚠️ PROD applies it automatically after `apply-test`.
+
+### Security
+- **TRUNCATE is revoked from `anon` and `authenticated` on every relation in `public`** (tables, partitioned tables, views, materialised views, foreign tables) (D-01). `service_role` and `postgres` keep it.
+- **The default privilege is changed `FOR ROLE postgres`**, so no table created later inherits the grant. It is written explicitly because an unqualified `ALTER DEFAULT PRIVILEGES` targets `current_user`.
+- **The migration checks itself (D-02).** The apply fails if any public relation still grants TRUNCATE to anon or authenticated, or if the `service_role` holder count moved.
+
+### Added
+- Gate `supabase/tests/test_truncate_revoke_anon_authenticated.sql` (D-03), arms TRUNC 1–6: the catalogue sweep, default privileges, a positive control, and behavioural arms where a TRUNCATE as anon or authenticated is refused.
+- Manual rollback `down/20261009130000-rollback.sql`, which restores the exact prior holder set.
+
+### Changed
+- Mutation census re-measured on the tree merged with STATUSBRIDGE (one full run, exit 0, no defects). Read `FILES_FLOOR` and `ARMS_FLOOR` by symbol from `scripts/mutation-floors.mjs`.
+- **The phase-29 frozen-spine gate now scans applied migrations only.** It skips `supabase/migrations/down/`, which `db push` never applies and which can only restore an earlier state. An applied migration that touches the scenario spine still trips it; this was shown with a probe file.
+
+### Notes
+- Reviews clean. Security SECURED. Verification `human_needed`, for plan 04's post-merge PROD after-reading only (D-04).
+- **Founder decisions:**
+  - D-05: the `supabase_admin` residual is accepted, and a read-only PROD detector is booked.
+  - D-06: the same RLS-exempt class with a larger blast radius goes to a new phase inserted after this one. That covers TRIGGER held by anon and authenticated (a client role could make a BYPASSRLS writer run its code) and PG17 MAINTAIN. TRUNCATE on `storage.*` and `net.*` is accepted as a platform residual.
+
 ## [0.129.1.2] - 2026-10-08 — APTHANG: a CI job's apt step never hangs on a dead package mirror
 
 Phase 164.9.8. CI jobs were hanging for most of their timeout on an apt install. The runner image's own retries and 15 s timeouts fail over to the Azure mirror in about 30 s, but the fallback then trickles bytes and never times out. Every apt call in the workflows now goes through one bounded wrapper, and a guard test keeps it that way.
