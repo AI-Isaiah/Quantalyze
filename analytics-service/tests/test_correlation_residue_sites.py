@@ -363,8 +363,14 @@ def test_c5_two_correlated_noisy_legs_keep_a_correlation() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _c6_supabase(returns: pd.Series) -> tuple[MagicMock, MagicMock]:
+def _c6_supabase(
+    returns: pd.Series, *, final_update_rows: list[dict] | None = None
+) -> tuple[MagicMock, MagicMock]:
     """A stub client for _compute_portfolio_analytics: one strategy at weight 1.
+
+    ``final_update_rows`` is what the closing ``portfolio_analytics`` update
+    returns; the default is the one row its insert created, because Phase 166.4.1
+    D-06 makes an update that matches no row raise.
 
     The strategy row carries the stored SHAPE (Phase 164.6.6.2.2): ``returns_series``
     is the cumulative wealth curve, not the daily returns. A base day one calendar
@@ -381,7 +387,9 @@ def _c6_supabase(returns: pd.Series) -> tuple[MagicMock, MagicMock]:
     pa = MagicMock()
     pa.insert.return_value.execute.return_value = MagicMock(data=[{"id": "analytics-1"}])
     pa.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(data=[])
-    pa.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+    pa.update.return_value.eq.return_value.execute.return_value = MagicMock(
+        data=final_update_rows if final_update_rows is not None else [{"id": "analytics-1"}]
+    )
     # Column-strict (tests/_schema_columns.py): a select naming a column the real
     # table lacks raises, as PostgREST would refuse it.
     ps_chain = MagicMock()

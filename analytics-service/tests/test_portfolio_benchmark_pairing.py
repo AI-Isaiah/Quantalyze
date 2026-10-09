@@ -342,3 +342,37 @@ class TestNamedBenchmarkNotes:
         dq = result["data_quality"]
         assert dq["benchmark_unavailable"] is False
         assert dq["benchmark_note"] is None
+
+
+# ---------------------------------------------------------------------------
+# Task 3 - a final update that matches no row raises (D-06)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("_fresh_semaphore", "_router_pinned_in_sys_modules")
+class TestLostFinalWrite:
+    @pytest.mark.asyncio
+    async def test_final_update_matching_no_row_raises_and_writes_no_alert(self):
+        # The closing update returns data=[]: the analytics row was deleted under us.
+        sb, tables = _two_strategy_fake(final_update_rows=[])
+        alerts = MagicMock()
+        with patch.object(portfolio_mod, "_generate_alerts", alerts):
+            with pytest.raises(HTTPException) as caught:
+                await _compute(sb, benchmark=None, stale=True)
+        assert caught.value.status_code == 500
+        assert caught.value.detail["code"] == "PORTFOLIO_ANALYTICS_FAILED"
+        assert caught.value.detail["retryable"] is False
+        # Analytics that did not persist must not generate an alert.
+        alerts.assert_not_called()
+        tables["portfolio_alerts"].insert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_update_that_matched_its_row_still_completes(self):
+        # The control: the default fake returns the one row, so the same fixture
+        # completes. Without it the raise above could be a fixture artefact.
+        sb, tables = _two_strategy_fake()
+        alerts = MagicMock()
+        with patch.object(portfolio_mod, "_generate_alerts", alerts):
+            result = await _compute(sb, benchmark=None, stale=True)
+        assert result["computation_status"] == "complete"
+        alerts.assert_called_once()
