@@ -1373,6 +1373,18 @@ def _benchmark_pair(returns: pd.Series, benchmark: pd.Series) -> tuple[pd.Series
     return r[mask], paired_benchmark[mask]
 
 
+def interval_matched_benchmark_pair(
+    returns: pd.Series, benchmark: pd.Series
+) -> tuple[pd.Series, pd.Series]:
+    """Public entry to the ONE interval pair (166.4 D-A): see ``_benchmark_pair``.
+
+    Identical behaviour. Added by Phase 166.4.1 D-02 so ``routers/portfolio.py``
+    pairs the portfolio with BTC exactly as every strategy-level metric does,
+    instead of a second pairing that drops the benchmark's weekend moves.
+    """
+    return _benchmark_pair(returns, benchmark)
+
+
 def strategy_calendar_is_sparse(index: pd.DatetimeIndex) -> bool:
     """True iff some two consecutive strategy dates are more than one calendar day apart (166.4 D-03, SC7).
 
