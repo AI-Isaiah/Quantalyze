@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.129.6.1] - 2026-10-09 — BOOKKEEPING: TRIGGERREVOKE close-out and the 2026-10-09 no-browser UAT readings
+
+### Changed
+- Phase 164.9.7.1 TRIGGERREVOKE is closed. Its PROD AFTER reading (0 0 0 0: no anon or authenticated TRIGGER or MAINTAIN grant remains on a public table) and main CI for the merge sha are recorded in `164.9.7.1-PROD-READINGS.md`. The plan 05 SUMMARY is written, SECURITY reads 21/21 closed, and VERIFICATION reads passed. The one human_needed item, the reviewer-verdict provenance, is attested by the orchestrator. The ROADMAP plans and phase are ticked.
+- Phase 166.1.1 DDSIGN VERIFICATION reads passed and the phase is ticked in the ROADMAP.
+- Phase 166.4.1 PORTFOLIOANALYTICS VERIFICATION records UAT items 1-3. The browser width and zoom items stay open.
+- UAT files record the readings that need no browser: 164.8 is complete, 164.4.2 #2 passes, and 169.2 #1 is recorded as an issue (the BTC benchmark refresh, which Phase 170.2 SC-2 owns). 161.1 and 164 stay blocked on their recorded preconditions.
+
+### Notes
+- Planning and docs only. No code, migration or workflow changes. VERSION and package.json 0.129.6.0 → 0.129.6.1.
+
 ## [0.129.6.0] - 2026-10-09 — DDSIGN: a shallower drawdown reads as an improvement in the simulator, the optimizer and the match engine
 
 Phase 166.1.1. Four scorers computed "drawdown improvement" and three of them had the sign backwards: a portfolio whose maximum drawdown got shallower was reported as a loss, and one whose drawdown got deeper was reported as a gain. The bridge scorer had been corrected under H-1065; the simulator, the optimizer and the match engine never were. All four now share one definition, and every renderer of these fields was audited.
