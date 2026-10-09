@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.129.8.1] - 2026-10-09 — BASELINE: automated re-dump after the PROD apply of b226da99
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `37970216345`, after the PROD apply of merge `b226da99`: sha256 `4fb6fb2c…` → `48fa55a2…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261010120000_btcusdview_native_balance.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-09` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.129.8.0 → 0.129.8.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=291 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `37970216345` succeeded, and this entry was composed by the `redump-pr` job. Run `37970216345` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.129.8.0] - 2026-10-09 — BTCUSDVIEW (1/2): the owner can read a native-unit key's balance, its USD close date has a home, and a holdings row stores its unit
 
 Phase 164.6.6.2.1, first of two PRs. A native-unit (BTC-denominated) MT5 account gets a USD view in this phase, and three of its surfaces need a database home first. This PR carries the schema and an owner-only column GRANT and **nothing that reads them**. The code PR (plans 02-17) adds the columns to `API_KEY_USER_COLUMNS_ARR` and merges only after PROD has applied this migration. A roster ahead of the GRANT would make every user-scoped `api_keys` SELECT answer PostgREST 42501, the 20260920120000 hazard. Migration `20261010120000`.
