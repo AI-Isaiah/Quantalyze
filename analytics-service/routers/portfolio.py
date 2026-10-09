@@ -1265,7 +1265,9 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # row stays in COMPUTING forever and the new partial_data/computed_*
         # fields the caller reads from the inline response will never make it
         # to the DB — the "computed from N of M" badge will appear correct in
-        # the API response but be absent from all subsequent DB reads.
+        # the API response but be absent from all subsequent DB reads.  Phase
+        # 166.4.1 D-06: that is why a result with no row now RAISES (below)
+        # instead of logging and reporting success.
         _analytics_update_result = supabase.table("portfolio_analytics").update(
             update_payload
         ).eq("id", analytics_id).execute()
@@ -1274,6 +1276,18 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                 "portfolio %s: analytics update returned no data — analytics_id=%s "
                 "may have been concurrently deleted; row may remain in COMPUTING state",
                 portfolio_id, analytics_id,
+            )
+            # Phase 166.4.1 D-06: the row is gone, so `_fail` (which updates the
+            # same id) would write to nothing; the outer `except HTTPException:
+            # raise` passes this through. It sits BEFORE `_generate_alerts`, so no
+            # alert fires for analytics that did not persist. Not retryable: an id
+            # that matches no row was deleted, and a retry would insert a new row
+            # rather than complete this one.
+            raise service_error(
+                500,
+                "PORTFOLIO_ANALYTICS_FAILED",
+                retryable=False,
+                detail="Portfolio analytics computation failed",
             )
 
         # Generate alerts. Wrapped in its own try so an alert-side failure
