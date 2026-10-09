@@ -4595,7 +4595,7 @@ Plans:
   3. Every renderer of these fields reads the corrected sign and its copy ("Positive = shallower", "improve drawdown by") stays true.
 
 Plans:
-- [ ] 166.1.1-01-PLAN.md — wave 1 · one `drawdown_improvement` helper; the simulator, optimizer and match engine (and the bridge) route through it; per-site, ranking and parity oracles RED first; no ENGINE_VERSION bump (D-01, D-02, A3)
+- [ ] 166.1.1-01-PLAN.md — wave 1 · one `drawdown_improvement` helper; the simulator, optimizer and match engine (and the bridge) route through it; per-site, ranking and parity oracles RED first; ENGINE_VERSION v2.2.0 per the in-code bump rule (D-01, D-02, W5)
 - [ ] 166.1.1-02-PLAN.md — wave 1 · D-03 renderer audit, two negative-value renderer pins proven to bite, `SimulatorDeltas` doc formula (D-03)
 - [ ] 166.1.1-03-PLAN.md — wave 2 · D-04 PROD re-measure (read-only, counts only), whole-phase sweep, the one release commit (D-04)
 
