@@ -164,6 +164,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — not yet verified
 - [ ] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — not yet planned (data integrity; after 167.1.2 PR C)
 - [ ] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — not yet planned (booked 2026-10-07, founder)
+- [ ] **Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital** (INSERTED 2026-10-08) — not yet planned (founder D-18, 167.1.2.2)
 - [x] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
@@ -4818,6 +4819,28 @@ Plans:
 ⚠️ **Founder 2026-10-08 (D-16, CONTEXT) — DEVIATION from the worst-MEDIUM-no-fixer rule:** review round 2's R2-WR-01 (a compose read race leaves the book untrustworthy until the next day) and R2-WR-02 (OKX levels carry the open-uPnL shift) are fixed before the cron is registered.
 ⭐ **Orchestrator 2026-10-08 (CONTEXT):** plan 04 not taken (0 reclaims). The D-12..D-16 code ships in its own PR before plan 05, and plan 05 re-runs the rehearsal on the deployed code.
 
+
+### Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital instead of refusing the allocator's book (INSERTED)
+
+**Goal:** A Deribit account's cash-basis NAV equals what the account holds, with no phantom balance carried from an open option book, and an allocator whose account was emptied and refilled still gets a published book.
+**Booked:** founder D-18 (167.1.2.2 CONTEXT, 2026-10-08), Wave 2, after the DERIVECRON plan 05 re-rehearsal read UNCLEAN. Root cause: `.planning/debug/derivecron-compose-refusal.md` (branch `debug/derivecron-compose-refusal`).
+**Evidence (counts and verdicts only):** one Deribit+MT5 allocator's compose refused with "non-positive reconstructed equity on 755 of 1200 day(s)". Replaying the stored inputs reproduces it from one Deribit key. On every empty-account day the reconstructed level divided by the BTC price is a constant, so the writer carries a native BTC balance the account does not hold. Under cash_settlement, `build_deribit_native_ledger` in `analytics-service/services/deribit_ingest.py` builds the terminal wedge as combined session uPnL plus `options_value`, which subtracts `options_session_upl` twice. Phase 131's review recorded this as "Residual #2" and froze it. `native_nav`'s `is_dust` inception allowance, which is relative to lifetime turnover, let the offset pass as reconciled. The derive also changes between runs with live account state: 372 of 1187 returns differed between two derives with identical flows.
+**Requirements**: TBD (phase-local)
+**Depends on:** Phase 167.1.2.2
+
+## Success Criteria
+
+1. Under cash_settlement the wedge counts the session move once, and a fixture with `options_session_upl` set fails on today's code. The identity is confirmed first with one Deribit account-summary read at the account's next derive.
+2. The inception `is_dust` allowance is also bounded by an absolute or NAV-relative cap, so the measured offset no longer reads `native_inception: reconciled`. A test fails on today's code.
+3. An emptied stretch, a level within a small band of zero, composes as zero capital with no return, and the book continues on re-deposit. It is neither refused nor degraded (founder D-18(b)). A synthetic withdraw-100%, sit-at-zero, re-deposit key fails on today's compose.
+4. Every Deribit account whose cash-basis returns move is named and re-baselined, with before and after readings on PROD (marker first, counts and verdicts only). The recompute runs in the Wave 5 consolidated recompute, and the refused allocator then reads a trustworthy v2 book.
+5. The remaining `inception_unreconciled` on that key (+1.3% implied pre-deposit capital, not explained by the offset) is measured and either fixed here or routed by name.
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 167.1.2.2.1 to break down)
+
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
 **Goal:** Each API key's equity-history reconstruct state is recorded durably, per key, so no key's history is skipped, wiped or left unreconstructed. Today that state is inferred from allocator-wide snapshot counts.
@@ -5600,6 +5623,7 @@ kept verbatim.
 | 167.1.2 ACCOUNTTRUTH | PR A + PR B shipped | In progress — PR A v0.92.0.0 (#859), PR B v0.103.0.0 (#870); PR C executing | - |
 | 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
 | 167.1.2.2 DERIVECRON | 0/? | Queued — booked 2026-10-07 (founder) | - |
+| 167.1.2.2.1 DERIBITWEDGE | 0/? | Queued — booked 2026-10-08 (founder D-18) | - |
 | 167.2 KEYCARDSYNC | 10/10 | Complete    | 2026-10-04 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |
