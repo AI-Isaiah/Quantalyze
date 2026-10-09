@@ -177,3 +177,168 @@ def test_router_reads_the_public_pair_and_no_inner_join() -> None:
             and c.args[0].value.id == "benchmark_rets"
         ):
             pytest.fail("routers/portfolio.py still inner-joins on benchmark_rets.index")
+
+
+# ---------------------------------------------------------------------------
+# Task 2 - the three quiet benchmark exits are named (D-04, D-05, R-02)
+# ---------------------------------------------------------------------------
+
+NOTE_STALE = "benchmark unavailable: stale"
+NOTE_THIN = "benchmark unavailable: fewer than 30 shared days"
+NOTE_ERROR = "benchmark unavailable: computation failed"
+
+_CANARY = "canary-166-4-1-boom"
+_COMPUTE_DATES = pd.bdate_range("2026-01-01", periods=60)  # `_curve_records` default calendar
+
+
+@pytest.fixture
+def _fresh_semaphore():
+    """A fresh compute semaphore per test: the module-level one is bound to the
+    event loop it was first awaited on. Copied from test_portfolio_compute_integration.
+    """
+    portfolio_mod._compute_semaphore = asyncio.Semaphore(3)
+    yield
+
+
+@pytest.fixture
+def _router_pinned_in_sys_modules():
+    """Pin `routers.portfolio` in sys.modules so `patch.object` hits the loaded
+    module; save and restore the prior state. Copied from
+    test_portfolio_compute_integration (a module's autouse fixtures do not travel
+    with an import)."""
+    prior = sys.modules.get("routers.portfolio")
+    sys.modules["routers.portfolio"] = portfolio_mod
+    try:
+        yield
+    finally:
+        if prior is None:
+            sys.modules.pop("routers.portfolio", None)
+        else:
+            sys.modules["routers.portfolio"] = prior
+
+
+def _two_strategy_fake(**kwargs):
+    """Two strategies at weights 0.6 / 0.4 over 60 business days of real curves."""
+    return _make_supabase_for_compute(
+        portfolio_strategies=_ps_rows({"s1": 0.6, "s2": 0.4}),
+        analytics_rows=[
+            {"strategy_id": "s1", "returns_series": _curve_records(seed=21)},
+            {"strategy_id": "s2", "returns_series": _curve_records(seed=22)},
+        ],
+        **kwargs,
+    )
+
+
+def _seven_day_btc(first, last, *, seed: int) -> pd.Series:
+    cal = pd.date_range(first, last, freq="D")
+    rng = np.random.default_rng(seed)
+    return pd.Series(rng.normal(0.0005, 0.02, len(cal)), index=cal)
+
+
+async def _compute(sb, *, benchmark, stale: bool) -> dict:
+    async def _fake_benchmark(symbol):
+        return benchmark, stale
+
+    with patch.object(portfolio_mod, "get_supabase", return_value=sb), \
+         patch.object(portfolio_mod, "get_benchmark_returns", side_effect=_fake_benchmark):
+        return await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+
+
+@pytest.mark.usefixtures("_fresh_semaphore", "_router_pinned_in_sys_modules")
+class TestNamedBenchmarkNotes:
+    @pytest.mark.asyncio
+    async def test_stale_series_writes_the_named_stale_note(self):
+        sb, _ = _two_strategy_fake()
+        valid = _seven_day_btc("2025-12-20", "2026-03-31", seed=5)
+        result = await _compute(sb, benchmark=valid, stale=True)
+        assert result["benchmark_comparison"] == {
+            "symbol": "BTC",
+            "correlation": None,
+            "benchmark_twr": None,
+            "portfolio_twr": result["total_return_twr"],
+            "stale": True,
+            "note": NOTE_STALE,
+        }
+        dq = result["data_quality"]
+        assert dq["benchmark_unavailable"] is True
+        assert dq["benchmark_note"] == NOTE_STALE
+        # A stale benchmark is not a partial portfolio: it must not flip the flag.
+        assert dq["partial_data"] is False
+
+    @pytest.mark.asyncio
+    async def test_missing_benchmark_writes_the_named_stale_note(self):
+        sb, _ = _two_strategy_fake()
+        # `get_benchmark_returns` returns (None, True) on total failure.
+        result = await _compute(sb, benchmark=None, stale=True)
+        assert result["benchmark_comparison"] == {
+            "symbol": "BTC",
+            "correlation": None,
+            "benchmark_twr": None,
+            "portfolio_twr": result["total_return_twr"],
+            "stale": True,
+            "note": NOTE_STALE,
+        }
+        dq = result["data_quality"]
+        assert dq["benchmark_unavailable"] is True
+        assert dq["benchmark_note"] == NOTE_STALE
+        assert dq["partial_data"] is False
+
+    @pytest.mark.asyncio
+    async def test_fewer_than_30_paired_days_writes_the_named_thin_note(self):
+        sb, _ = _two_strategy_fake()
+        # BTC (seven days a week) covers only the last 20 of the portfolio's dates,
+        # so at most 20 rows can pair.
+        thin = _seven_day_btc(_COMPUTE_DATES[-20], _COMPUTE_DATES[-1], seed=6)
+        result = await _compute(sb, benchmark=thin, stale=False)
+        bc = result["benchmark_comparison"]
+        assert bc is not None, "a thin overlap must write a flagged-empty comparison, not null"
+        assert bc["note"] == NOTE_THIN
+        assert bc["stale"] is False
+        assert bc["correlation"] is None
+        assert bc["benchmark_twr"] is None
+        assert bc["portfolio_twr"] == result["total_return_twr"]
+        assert result["data_quality"]["benchmark_unavailable"] is True
+        assert result["data_quality"]["benchmark_note"] == NOTE_THIN
+
+    @pytest.mark.asyncio
+    async def test_benchmark_crash_keeps_own_numbers_and_writes_a_fixed_note(self):
+        # Reference: the same fixture on the stale path (no benchmark arithmetic).
+        sb_ref, _ = _two_strategy_fake()
+        reference = await _compute(sb_ref, benchmark=None, stale=True)
+
+        sb, _ = _two_strategy_fake()
+        with patch.object(portfolio_mod, "get_supabase", return_value=sb), \
+             patch.object(
+                 portfolio_mod, "get_benchmark_returns",
+                 side_effect=RuntimeError(_CANARY),
+             ):
+            result = await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+
+        assert result["computation_status"] == "complete"
+        assert result["total_return_twr"] == reference["total_return_twr"]
+        bc = result["benchmark_comparison"]
+        assert bc is not None and bc["note"] == NOTE_ERROR
+        assert bc["stale"] is False
+        assert bc["correlation"] is None and bc["benchmark_twr"] is None
+        dq = result["data_quality"]
+        assert dq["benchmark_unavailable"] is True
+        assert dq["benchmark_note"] == NOTE_ERROR
+        # HONEST-01 / D-162-4: the exception text is for operators only.
+        assert _CANARY not in json.dumps(bc)
+        assert _CANARY not in dq["benchmark_note"]
+        assert _CANARY in dq["benchmark_error"]
+
+    @pytest.mark.asyncio
+    async def test_a_full_comparison_carries_no_note_and_benchmark_available(self):
+        sb, _ = _two_strategy_fake()
+        full = _seven_day_btc("2025-12-20", "2026-03-31", seed=8)
+        result = await _compute(sb, benchmark=full, stale=False)
+        bc = result["benchmark_comparison"]
+        assert bc is not None
+        assert "note" not in bc
+        assert bc["stale"] is False
+        assert isinstance(bc["correlation"], float)
+        assert isinstance(bc["benchmark_twr"], float)
+        dq = result["data_quality"]
+        assert dq["benchmark_unavailable"] is False
+        assert dq["benchmark_note"] is None
