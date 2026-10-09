@@ -78,13 +78,17 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from services.external_flows import ExternalFlow
 from services.nav_twr import NavReconstructionError
+
+if TYPE_CHECKING:  # annotation only: this module stays free of the exchange adapter at runtime
+    from services.deribit_ingest import DeribitNativeAccountState
 # STITCH-05: the KEPT cashflow/IRR surface the unified backbone cannot reproduce
 # gets its first production caller via ``mwr_and_dietz_from_ledger`` (thread-only).
 from services.portfolio_metrics import compute_modified_dietz, compute_mwr
@@ -1165,6 +1169,347 @@ def read_realized_terminal(payload: Mapping[str, Any]) -> tuple[str, float] | No
     if not math.isfinite(amount):
         raise ValueError("key_inputs realized terminal: non-finite amount")
     return date.fromisoformat(str(raw_day)).isoformat(), amount
+
+
+# ── Phase 167.1.2.2.1 (DERIBITWEDGE, PR-1): the stored account-summary read ──────────────────
+#
+# The Deribit key-mode derive reads ``get_account_summaries`` once. These helpers STORE that
+# one read in the key's ``key_inputs`` payload as ``account_summary`` (D-03: a live read is a
+# stored input, never a silent one) together with a per-currency verdict on the documented
+# identity ``equity = balance + futures_session_upl + futures_session_rpl + options_value``
+# (Deribit's own field semantics, standard margin). No value a derive computes reads them.
+
+_IDENTITY_PLACES_CAP: int = 12
+# Four addends each rounded to ``d`` places contribute at most 2.5 units of the last place to
+# a residual; ``4 * 10**-d`` is the tolerance that reading allows. It is set by the fields'
+# OWN decimal precision rather than a flat constant, so a coin reported to 8 places and a USD
+# stable reported to 2 are each judged against their own rounding.
+_IDENTITY_TOL_UNITS: int = 4
+_SUMMARY_STR_FIELDS: frozenset[str] = frozenset({"margin_model"})
+_SUMMARY_BOOL_FIELDS: frozenset[str] = frozenset({"cross_collateral_enabled"})
+
+
+def _decimal_places(value: float) -> int:
+    """Decimal places of ``value``'s shortest round-trip form (``repr``), which reproduces
+    the decimal the exchange sent."""
+    exponent = Decimal(repr(value)).as_tuple().exponent
+    return -exponent if isinstance(exponent, int) and exponent < 0 else 0
+
+
+def _account_identity(snap: Mapping[str, Any]) -> dict[str, Any]:
+    """The identity verdict of ONE currency's snapshot.
+
+    ``identity_ok`` / ``identity_resid_ratio`` are ``None`` when the identity cannot be
+    computed (no readable ``balance`` or ``equity``): not computable is never ``True``. A
+    missing ``futures_session_rpl`` or ``options_value`` counts as 0.0 and a missing
+    ``futures_session_upl`` falls back to ``session_upl`` (the order
+    ``_combined_session_upl`` uses). The residual is exact decimal arithmetic."""
+    options_value = snap.get("options_value")
+    ident: dict[str, Any] = {
+        "identity_ok": None,
+        "identity_resid_ratio": None,
+        "options_session_upl_nonzero": snap.get("options_session_upl", 0.0) != 0.0,
+        "has_open_options": options_value is not None and options_value != 0.0,
+    }
+    equity = snap.get("equity")
+    balance = snap.get("balance")
+    if equity is None or balance is None:
+        return ident
+    upl = snap.get("futures_session_upl")
+    if upl is None:
+        upl = snap.get("session_upl")
+    parts = [equity, balance]
+    parts.extend(v for v in (upl, snap.get("futures_session_rpl"), options_value) if v is not None)
+    places = min(max(_decimal_places(float(v)) for v in parts), _IDENTITY_PLACES_CAP)
+    tolerance = Decimal(_IDENTITY_TOL_UNITS) * Decimal(10) ** -places
+    total = sum(
+        (Decimal(repr(float(v))) for v in parts[1:]),
+        Decimal(0),
+    )
+    residual = Decimal(repr(float(equity))) - total
+    ratio = float(abs(residual) / tolerance)
+    ident["identity_resid_ratio"] = ratio
+    ident["identity_ok"] = ratio <= 1.0
+    return ident
+
+
+def account_summary_payload(state: DeribitNativeAccountState) -> dict[str, Any]:
+    """The ``key_inputs`` field ``account_summary``: the derive's ONE summaries read as stored
+    numbers, the instant it was read, the ``{ccy}_usd`` index it resolved, and the identity
+    verdict per currency.
+
+    The snapshot is already whitelisted by the adapter; this writer additionally refuses a
+    non-finite number (JSONB cannot hold NaN/inf, and a poison value would fail the upsert
+    and loop the derive), as ``realized_terminal_payload`` does."""
+    summaries: list[dict[str, Any]] = []
+    identity: dict[str, dict[str, Any]] = {}
+    for ccy in sorted(state.summary_snapshot):
+        snap = state.summary_snapshot[ccy]
+        for key, value in snap.items():
+            if isinstance(value, float) and not math.isfinite(value):
+                raise NavReconstructionError(
+                    "key_inputs account_summary: non-finite amount — refusing to persist it"
+                )
+        summaries.append({"currency": ccy, **snap})
+        identity[ccy] = _account_identity(snap)
+    index_usd: dict[str, float] = {}
+    for ccy in sorted(state.index_usd_snapshot):
+        price = float(state.index_usd_snapshot[ccy])
+        if not math.isfinite(price):
+            raise NavReconstructionError(
+                "key_inputs account_summary: non-finite index — refusing to persist it"
+            )
+        index_usd[ccy] = price
+    return {
+        "account_summary": {
+            "read_at": state.read_at_iso,
+            "summaries": summaries,
+            "index_usd": index_usd,
+            "identity": identity,
+        }
+    }
+
+
+def _strict_finite_number(raw: Any, what: str) -> float:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise TypeError(f"key_inputs account_summary: non-numeric {what}")
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError(f"key_inputs account_summary: non-finite {what}")
+    return value
+
+
+def read_account_summary(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The stored ``account_summary`` from a ``key_inputs`` payload; ``None`` when the row
+    predates it (absent or null) or the derive recorded ``account_summary_error`` instead.
+
+    A present but malformed record raises ``TypeError``/``ValueError`` like the neighbouring
+    parses, so the job disposes it as a corrupt input instead of reading a guess. Malformed
+    includes a boolean or non-finite number, a string anywhere but ``margin_model``, a
+    non-boolean ``cross_collateral_enabled``, a repeated currency and a verdict that is not a
+    boolean (or null)."""
+    raw = payload.get("account_summary")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise TypeError("key_inputs account_summary: not an object")
+    read_at = raw.get("read_at")
+    if read_at is not None and not isinstance(read_at, str):
+        raise TypeError("key_inputs account_summary: read_at is not a string")
+    raw_summaries = raw.get("summaries")
+    if not isinstance(raw_summaries, Sequence) or isinstance(raw_summaries, (str, bytes)):
+        raise TypeError("key_inputs account_summary: summaries is not a list")
+    summaries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in raw_summaries:
+        if not isinstance(row, Mapping):
+            raise TypeError("key_inputs account_summary: a summary is not an object")
+        ccy = row["currency"]
+        if not isinstance(ccy, str) or not ccy:
+            raise TypeError("key_inputs account_summary: bad currency")
+        if ccy in seen:
+            raise ValueError("key_inputs account_summary: duplicate currency")
+        seen.add(ccy)
+        out: dict[str, Any] = {"currency": ccy}
+        for key, value in row.items():
+            if key == "currency":
+                continue
+            if key in _SUMMARY_STR_FIELDS:
+                if not isinstance(value, str):
+                    raise TypeError(f"key_inputs account_summary: {key} is not a string")
+                out[key] = value
+            elif key in _SUMMARY_BOOL_FIELDS:
+                if not isinstance(value, bool):
+                    raise TypeError(f"key_inputs account_summary: {key} is not a boolean")
+                out[key] = value
+            else:
+                out[key] = _strict_finite_number(value, key)
+        summaries.append(out)
+    raw_index = raw.get("index_usd")
+    if not isinstance(raw_index, Mapping):
+        raise TypeError("key_inputs account_summary: index_usd is not an object")
+    index_usd = {str(k): _strict_finite_number(v, "index") for k, v in raw_index.items()}
+    raw_identity = raw.get("identity")
+    if not isinstance(raw_identity, Mapping):
+        raise TypeError("key_inputs account_summary: identity is not an object")
+    identity: dict[str, dict[str, Any]] = {}
+    for ccy, verdict in raw_identity.items():
+        if not isinstance(verdict, Mapping):
+            raise TypeError("key_inputs account_summary: a verdict is not an object")
+        ok = verdict["identity_ok"]
+        if ok is not None and not isinstance(ok, bool):
+            raise TypeError("key_inputs account_summary: identity_ok is not a boolean")
+        ratio = verdict["identity_resid_ratio"]
+        for flag in ("options_session_upl_nonzero", "has_open_options"):
+            if not isinstance(verdict[flag], bool):
+                raise TypeError(f"key_inputs account_summary: {flag} is not a boolean")
+        identity[str(ccy)] = {
+            "identity_ok": ok,
+            "identity_resid_ratio": (
+                None if ratio is None else _strict_finite_number(ratio, "ratio")
+            ),
+            "options_session_upl_nonzero": verdict["options_session_upl_nonzero"],
+            "has_open_options": verdict["has_open_options"],
+        }
+    return {
+        "read_at": read_at,
+        "summaries": summaries,
+        "index_usd": index_usd,
+        "identity": identity,
+    }
+
+
+_LEDGER_DIGEST_KEYS: frozenset[str] = frozenset({"row_count", "max_timestamp_ms", "sha256"})
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+def _validated_ledger_digest(raw: Any) -> dict[str, Any]:
+    """Strictly validate a digest object: exactly ``row_count`` (non-negative int),
+    ``max_timestamp_ms`` (int or null) and ``sha256`` (64 lowercase hex). Booleans are not
+    integers here. Raises ``TypeError``/``ValueError``."""
+    if not isinstance(raw, Mapping):
+        raise TypeError("key_inputs ledger_digest: not an object")
+    if set(raw) != _LEDGER_DIGEST_KEYS:
+        raise ValueError("key_inputs ledger_digest: unexpected key set")
+    count = raw["row_count"]
+    if isinstance(count, bool) or not isinstance(count, int):
+        raise TypeError("key_inputs ledger_digest: row_count is not an integer")
+    if count < 0:
+        raise ValueError("key_inputs ledger_digest: negative row_count")
+    max_ts = raw["max_timestamp_ms"]
+    if max_ts is not None and (isinstance(max_ts, bool) or not isinstance(max_ts, int)):
+        raise TypeError("key_inputs ledger_digest: max_timestamp_ms is not an integer")
+    digest = raw["sha256"]
+    if not isinstance(digest, str):
+        raise TypeError("key_inputs ledger_digest: sha256 is not a string")
+    if _SHA256_HEX.fullmatch(digest) is None:
+        raise ValueError("key_inputs ledger_digest: sha256 is not 64 lowercase hex")
+    return {"row_count": count, "max_timestamp_ms": max_ts, "sha256": digest}
+
+
+def ledger_digest_payload(digest: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``key_inputs`` field ``ledger_digest`` (DERIBITWEDGE PR-1, D-03): the row count,
+    max timestamp and sha256 of the transaction-log rows the derive crawled. It holds no raw
+    row value. A malformed digest is refused before the upsert, like the neighbouring writers."""
+    return {"ledger_digest": _validated_ledger_digest(digest)}
+
+
+def read_ledger_digest(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The stored ``ledger_digest``; ``None`` for a row that predates it (absent or null) or
+    that recorded ``ledger_digest_error`` instead. A present but malformed one raises
+    ``TypeError``/``ValueError`` so the job disposes it as a corrupt input."""
+    raw = payload.get("ledger_digest")
+    if raw is None:
+        return None
+    return _validated_ledger_digest(raw)
+
+
+# --- 167.1.2.2.1 (DERIBITWEDGE PR-1): the native inception diagnostics ------------------------
+_INCEPTION_DIAG_KEYS: frozenset[str] = frozenset(
+    {
+        "cap_usd", "currencies", "prev0_usd_current", "prev0_usd_balance_anchor",
+        "first_nav_usd_current", "breach_ratio_current", "breach_ratio_current_with_cap",
+        "breach_ratio_balance_anchor", "breach_ratio_balance_anchor_with_cap",
+        "orphan_unvaluable",
+    }
+)
+_INCEPTION_DIAG_NULLABLE_TOP: frozenset[str] = frozenset(
+    {
+        "prev0_usd_current", "prev0_usd_balance_anchor", "first_nav_usd_current",
+        "breach_ratio_current", "breach_ratio_current_with_cap",
+        "breach_ratio_balance_anchor", "breach_ratio_balance_anchor_with_cap",
+    }
+)
+_INCEPTION_ROW_KEYS: frozenset[str] = frozenset(
+    {
+        "currency", "resid_native_current", "resid_native_balance_anchor", "mark0_usd",
+        "throughput_native", "dust_rel_current", "dust_rel_balance_anchor",
+    }
+)
+_INCEPTION_ROW_NULLABLE: frozenset[str] = frozenset(
+    {"resid_native_balance_anchor", "dust_rel_current", "dust_rel_balance_anchor"}
+)
+
+
+def _refuse_non_finite(value: Any) -> None:
+    """Walk a diagnostics record and refuse any non-finite number (JSONB cannot hold NaN/inf,
+    and a poison value would fail the upsert and loop the derive)."""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise NavReconstructionError(
+            "key_inputs native_inception_diagnostics: non-finite amount — refusing to persist it"
+        )
+    if isinstance(value, Mapping):
+        for item in value.values():
+            _refuse_non_finite(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _refuse_non_finite(item)
+
+
+def _validated_inception_diagnostics(raw: Any) -> dict[str, Any]:
+    """Strictly validate a diagnostics record: exactly the documented keys, every number a
+    finite non-boolean, nulls only where a reading can be absent. Raises
+    ``TypeError``/``ValueError`` and returns a plain-dict copy."""
+    if not isinstance(raw, Mapping):
+        raise TypeError("key_inputs native_inception_diagnostics: not an object")
+    if set(raw) != _INCEPTION_DIAG_KEYS:
+        raise ValueError("key_inputs native_inception_diagnostics: unexpected key set")
+    out: dict[str, Any] = {}
+    out["cap_usd"] = _strict_finite_number(raw["cap_usd"], "cap_usd")
+    for key in sorted(_INCEPTION_DIAG_NULLABLE_TOP):
+        value = raw[key]
+        out[key] = None if value is None else _strict_finite_number(value, key)
+    flag = raw["orphan_unvaluable"]
+    if not isinstance(flag, bool):
+        raise TypeError("key_inputs native_inception_diagnostics: orphan_unvaluable is not a boolean")
+    out["orphan_unvaluable"] = flag
+    rows = raw["currencies"]
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        raise TypeError("key_inputs native_inception_diagnostics: currencies is not a list")
+    out_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise TypeError("key_inputs native_inception_diagnostics: a currency is not an object")
+        if set(row) != _INCEPTION_ROW_KEYS:
+            raise ValueError("key_inputs native_inception_diagnostics: unexpected currency keys")
+        ccy = row["currency"]
+        if not isinstance(ccy, str) or not ccy:
+            raise TypeError("key_inputs native_inception_diagnostics: bad currency")
+        out_row: dict[str, Any] = {"currency": ccy}
+        for key in sorted(_INCEPTION_ROW_KEYS - {"currency"}):
+            value = row[key]
+            if value is None:
+                if key not in _INCEPTION_ROW_NULLABLE:
+                    raise TypeError(f"key_inputs native_inception_diagnostics: {key} is null")
+                out_row[key] = None
+            else:
+                out_row[key] = _strict_finite_number(value, key)
+        out_rows.append(out_row)
+    out["currencies"] = out_rows
+    return out
+
+
+def native_inception_diagnostics_payload(diag: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``key_inputs`` field ``native_inception_diagnostics`` (DERIBITWEDGE PR-1): the
+    rolled pre-history residual per currency under today's wedge and a balance-anchored one,
+    the inception-day mark, the native throughput, both day-0 capitals and four breach ratios.
+
+    Refuses a non-finite value with ``NavReconstructionError`` before the upsert (an infinite
+    breach is carried as null plus ``orphan_unvaluable``), and a malformed record with
+    ``TypeError``/``ValueError``, like the neighbouring writers."""
+    _refuse_non_finite(diag)
+    return {"native_inception_diagnostics": _validated_inception_diagnostics(diag)}
+
+
+def read_native_inception_diagnostics(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The stored ``native_inception_diagnostics``; ``None`` for a row that predates it
+    (absent or null) or that recorded ``native_inception_diagnostics_error`` instead. A
+    present but malformed one raises ``TypeError``/``ValueError`` so the job disposes it as a
+    corrupt input."""
+    raw = payload.get("native_inception_diagnostics")
+    if raw is None:
+        return None
+    return _validated_inception_diagnostics(raw)
 
 
 def stitch_dropped_day_pnl(

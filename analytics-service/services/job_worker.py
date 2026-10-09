@@ -4063,6 +4063,25 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # reaches inception (``full_history``) runs the gate, and a breach raises before this is
         # set, so a value here means the gate ran and passed.
         _native_inception_verdict: str | None = None
+        # 167.1.2.2.1 D-03 (DERIBITWEDGE PR-1): the derive's ONE ``get_account_summaries`` read,
+        # stored in the key's ``key_inputs`` so the live read is a recorded input and never a
+        # silent one. Set ONLY by the deribit key-mode branch, from the SAME ``account_state``
+        # (no second exchange read). It is either ``{"account_summary": {...}}`` or, if the
+        # capture itself failed, ``{"account_summary_error": <exception class>}``: an additive
+        # capture never fails a working derive, and never fails silently.
+        _account_summary_snapshot: "dict[str, Any] | None" = None
+        # 167.1.2.2.1 D-03: the digest (row count, max timestamp, sha256) of the transaction
+        # log this derive crawled, so a later diff can tell a ledger change from a wedge
+        # change. Same shape as above: ``{"ledger_digest": {...}}`` or ``{"ledger_digest_error":
+        # <exception class>}``, deribit key-mode only.
+        _ledger_digest: "dict[str, Any] | None" = None
+        # 167.1.2.2.1 D-03: the numbers behind the §5 inception verdict (the rolled pre-history
+        # residual per currency under today's wedge and a balance-anchored one, the inception
+        # mark, the throughput, the day-0 capitals, four breach ratios), read off the SAME
+        # rolled buckets the gate judged. Deribit key-mode, full-history ledgers only:
+        # ``{"native_inception_diagnostics": {...}}`` or ``{"native_inception_diagnostics_error":
+        # <exception class>}``. No gate reads it yet, and a failure never fails the derive.
+        _native_inception_diagnostics: "dict[str, Any] | None" = None
 
         if venue == "deribit":
             # D-08: realized returns come from the ONE txn-log ledger pass
@@ -4072,6 +4091,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             from services.broker_dailies import (
                 combine_native_ledger,
                 native_ledger_day_pnl,
+                native_ledger_inception_diagnostics,
                 native_ledger_realized_terminal,
             )
             from services.deribit_ingest import (
@@ -4273,6 +4293,79 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     )
                     if native_ledger.full_history:
                         _native_inception_verdict = "reconciled"
+                        # D-03: store the numbers that verdict rested on. The ONLY broad except
+                        # this phase adds: the diagnostic is an additive measurement and must
+                        # never fail a working derive. It is not silent: the class name lands in
+                        # the payload and in one WARNING (class and venue, never a magnitude).
+                        try:
+                            from services.allocator_equity_derive import (
+                                native_inception_diagnostics_payload,
+                            )
+
+                            # The balance-anchored wedge: equity - balance, per currency that
+                            # has both (balance is present-only, never a coerced zero).
+                            _alt_wedge = {
+                                _c: account_state.native_equity[_c]
+                                - account_state.native_balance[_c]
+                                for _c in account_state.native_balance
+                                if _c in account_state.native_equity
+                            }
+                            _diag = native_ledger_inception_diagnostics(
+                                native_ledger,
+                                _completeness.indexable_currencies,
+                                alt_terminal_upnl_native=_alt_wedge or None,
+                            )
+                            if _diag is not None:
+                                _native_inception_diagnostics = (
+                                    native_inception_diagnostics_payload(_diag)
+                                )
+                        except Exception as _diag_exc:  # noqa: BLE001 - additive measurement
+                            logger.warning(
+                                "derive_broker_dailies: native_inception_diagnostics failed "
+                                "(venue=%s, error=%s)",
+                                venue,
+                                type(_diag_exc).__name__,
+                            )
+                            _native_inception_diagnostics = {
+                                "native_inception_diagnostics_error": type(_diag_exc).__name__
+                            }
+                    # D-03: store the ONE summaries read this derive already made. A
+                    # capture failure is recorded by class name and never fails the derive.
+                    try:
+                        from services.allocator_equity_derive import account_summary_payload
+
+                        _account_summary_snapshot = account_summary_payload(account_state)
+                    except Exception as _capture_exc:  # noqa: BLE001 - additive capture
+                        logger.warning(
+                            "derive_broker_dailies: account_summary capture failed "
+                            "(venue=%s, error=%s)",
+                            venue,
+                            type(_capture_exc).__name__,
+                        )
+                        _account_summary_snapshot = {
+                            "account_summary_error": type(_capture_exc).__name__
+                        }
+                    # The digest was computed by the ledger build (it holds the crawled rows):
+                    # either it is there, or the build recorded the CLASS NAME it failed with.
+                    _digest_err: str | None = _completeness.ledger_digest_error
+                    if _digest_err is None and _completeness.ledger_digest is not None:
+                        try:
+                            from services.allocator_equity_derive import (
+                                ledger_digest_payload,
+                            )
+
+                            _ledger_digest = ledger_digest_payload(_completeness.ledger_digest)
+                        except Exception as _digest_exc:  # noqa: BLE001 - additive capture
+                            _digest_err = type(_digest_exc).__name__
+                    if _digest_err is not None:
+                        # Class name only, never the message (T-115-05).
+                        logger.warning(
+                            "derive_broker_dailies: ledger_digest capture failed "
+                            "(venue=%s, error=%s)",
+                            venue,
+                            _digest_err,
+                        )
+                        _ledger_digest = {"ledger_digest_error": _digest_err}
                 # FLOW-04 materiality: the pure native core does not emit
                 # unrealized_pnl_in_anchor (it subtracts the wedge per-currency, App
                 # A #6). Preserve the v1.8 warning using the collapsed USD anchor +
@@ -6255,6 +6348,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             _key_inputs_payload.update(realized_terminal_payload(*_realized_terminal))
         if _native_inception_verdict is not None:
             _key_inputs_payload["native_inception"] = _native_inception_verdict
+        # 167.1.2.2.1 D-03: Deribit-only and present-only (the ccxt payload keeps its 5 keys).
+        if _account_summary_snapshot is not None:
+            _key_inputs_payload.update(_account_summary_snapshot)
+        if _ledger_digest is not None:
+            _key_inputs_payload.update(_ledger_digest)
+        if _native_inception_diagnostics is not None:
+            _key_inputs_payload.update(_native_inception_diagnostics)
 
         def _persist_key_inputs(
             payload: dict[str, Any] = _key_inputs_payload,
