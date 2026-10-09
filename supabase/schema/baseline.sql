@@ -16309,8 +16309,8 @@ GRANT ALL ON FUNCTION "public"."get_allocator_recommendations"("p_allocator_id" 
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."portfolio_analytics" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."portfolio_analytics" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."portfolio_analytics" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."portfolio_analytics" TO "authenticated";
 GRANT ALL ON TABLE "public"."portfolio_analytics" TO "service_role";
 
 
@@ -16702,38 +16702,38 @@ GRANT ALL ON FUNCTION "public"."verification_requests_view_readonly_trigger"() T
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."allocation_events" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."allocation_events" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."allocation_events" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."allocation_events" TO "authenticated";
 GRANT ALL ON TABLE "public"."allocation_events" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."allocator_equity_derived" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."allocator_equity_derived" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."allocator_equity_derived" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."allocator_equity_derived" TO "authenticated";
 GRANT ALL ON TABLE "public"."allocator_equity_derived" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."allocator_equity_snapshots" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."allocator_equity_snapshots" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."allocator_equity_snapshots" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."allocator_equity_snapshots" TO "authenticated";
 GRANT ALL ON TABLE "public"."allocator_equity_snapshots" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."allocator_holdings" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."allocator_holdings" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."allocator_holdings" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."allocator_holdings" TO "authenticated";
 GRANT ALL ON TABLE "public"."allocator_holdings" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."allocator_preferences" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."allocator_preferences" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."allocator_preferences" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."allocator_preferences" TO "authenticated";
 GRANT ALL ON TABLE "public"."allocator_preferences" TO "service_role";
 
 
 
-GRANT REFERENCES,DELETE,TRIGGER,MAINTAIN ON TABLE "public"."api_keys" TO "anon";
-GRANT REFERENCES,DELETE,TRIGGER,MAINTAIN ON TABLE "public"."api_keys" TO "authenticated";
+GRANT REFERENCES,DELETE ON TABLE "public"."api_keys" TO "anon";
+GRANT REFERENCES,DELETE ON TABLE "public"."api_keys" TO "authenticated";
 GRANT ALL ON TABLE "public"."api_keys" TO "service_role";
 
 
@@ -16802,32 +16802,32 @@ GRANT SELECT("history_inclusion") ON TABLE "public"."api_keys" TO "authenticated
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."audit_log" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,TRIGGER,MAINTAIN ON TABLE "public"."audit_log" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."audit_log" TO "anon";
+GRANT SELECT,INSERT,REFERENCES ON TABLE "public"."audit_log" TO "authenticated";
 GRANT SELECT,INSERT,REFERENCES,TRIGGER,TRUNCATE,MAINTAIN ON TABLE "public"."audit_log" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."audit_log_cold" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,TRIGGER,MAINTAIN ON TABLE "public"."audit_log_cold" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."audit_log_cold" TO "anon";
+GRANT SELECT,INSERT,REFERENCES ON TABLE "public"."audit_log_cold" TO "authenticated";
 GRANT SELECT,INSERT,REFERENCES,TRIGGER,TRUNCATE,MAINTAIN ON TABLE "public"."audit_log_cold" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."benchmark_prices" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."benchmark_prices" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."benchmark_prices" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."benchmark_prices" TO "authenticated";
 GRANT ALL ON TABLE "public"."benchmark_prices" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."bridge_outcome_dismissals" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."bridge_outcome_dismissals" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."bridge_outcome_dismissals" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."bridge_outcome_dismissals" TO "authenticated";
 GRANT ALL ON TABLE "public"."bridge_outcome_dismissals" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."bridge_outcomes" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."bridge_outcomes" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."bridge_outcomes" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."bridge_outcomes" TO "authenticated";
 GRANT ALL ON TABLE "public"."bridge_outcomes" TO "service_role";
 
 
@@ -16837,14 +16837,14 @@ GRANT SELECT ON TABLE "public"."compute_job_kinds" TO "authenticated";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."portfolios" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."portfolios" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."portfolios" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."portfolios" TO "authenticated";
 GRANT ALL ON TABLE "public"."portfolios" TO "service_role";
 
 
 
-GRANT REFERENCES,TRIGGER,MAINTAIN ON TABLE "public"."profiles" TO "anon";
-GRANT REFERENCES,TRIGGER,MAINTAIN ON TABLE "public"."profiles" TO "authenticated";
+GRANT REFERENCES ON TABLE "public"."profiles" TO "anon";
+GRANT REFERENCES ON TABLE "public"."profiles" TO "authenticated";
 GRANT ALL ON TABLE "public"."profiles" TO "service_role";
 
 
@@ -16948,32 +16948,32 @@ GRANT SELECT("partner_tag") ON TABLE "public"."profiles" TO "authenticated";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."strategies" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."strategies" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."strategies" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."strategies" TO "authenticated";
 GRANT ALL ON TABLE "public"."strategies" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."compute_jobs_admin" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."compute_jobs_admin" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."compute_jobs_admin" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."compute_jobs_admin" TO "authenticated";
 GRANT ALL ON TABLE "public"."compute_jobs_admin" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."contact_requests" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."contact_requests" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."contact_requests" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."contact_requests" TO "authenticated";
 GRANT ALL ON TABLE "public"."contact_requests" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE "public"."cron_runs" TO "anon";
-GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE "public"."cron_runs" TO "authenticated";
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE "public"."cron_runs" TO "anon";
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE "public"."cron_runs" TO "authenticated";
 GRANT ALL ON TABLE "public"."cron_runs" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."csv_daily_returns" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."csv_daily_returns" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."csv_daily_returns" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."csv_daily_returns" TO "authenticated";
 GRANT ALL ON TABLE "public"."csv_daily_returns" TO "service_role";
 
 
@@ -16984,32 +16984,32 @@ GRANT ALL ON SEQUENCE "public"."csv_daily_returns_id_seq" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."data_deletion_requests" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."data_deletion_requests" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."data_deletion_requests" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."data_deletion_requests" TO "authenticated";
 GRANT ALL ON TABLE "public"."data_deletion_requests" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."deck_strategies" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."deck_strategies" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."deck_strategies" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."deck_strategies" TO "authenticated";
 GRANT ALL ON TABLE "public"."deck_strategies" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."decks" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."decks" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."decks" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."decks" TO "authenticated";
 GRANT ALL ON TABLE "public"."decks" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."discovery_categories" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."discovery_categories" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."discovery_categories" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."discovery_categories" TO "authenticated";
 GRANT ALL ON TABLE "public"."discovery_categories" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."feature_flags" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."feature_flags" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."feature_flags" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."feature_flags" TO "authenticated";
 GRANT ALL ON TABLE "public"."feature_flags" TO "service_role";
 
 
@@ -17018,37 +17018,37 @@ GRANT ALL ON TABLE "public"."for_quants_leads" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."funding_fees" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."funding_fees" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."funding_fees" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."funding_fees" TO "authenticated";
 GRANT ALL ON TABLE "public"."funding_fees" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."investor_attestations" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."investor_attestations" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."investor_attestations" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."investor_attestations" TO "authenticated";
 GRANT ALL ON TABLE "public"."investor_attestations" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."key_permission_audit" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."key_permission_audit" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."key_permission_audit" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."key_permission_audit" TO "authenticated";
 GRANT ALL ON TABLE "public"."key_permission_audit" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."strategy_analytics" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."strategy_analytics" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."strategy_analytics" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."strategy_analytics" TO "authenticated";
 GRANT ALL ON TABLE "public"."strategy_analytics" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."strategy_analytics_series" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."strategy_analytics_series" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."strategy_analytics_series" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."strategy_analytics_series" TO "authenticated";
 GRANT ALL ON TABLE "public"."strategy_analytics_series" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."strategy_keys" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."strategy_keys" TO "authenticated";
 GRANT ALL ON TABLE "public"."strategy_keys" TO "service_role";
 
 
@@ -17057,98 +17057,98 @@ GRANT ALL ON TABLE "public"."ledger_refresh_staleness" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."match_batches" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."match_batches" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."match_batches" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."match_batches" TO "authenticated";
 GRANT ALL ON TABLE "public"."match_batches" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."match_candidates" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."match_candidates" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."match_candidates" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."match_candidates" TO "authenticated";
 GRANT ALL ON TABLE "public"."match_candidates" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."match_decisions" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."match_decisions" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."match_decisions" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."match_decisions" TO "authenticated";
 GRANT ALL ON TABLE "public"."match_decisions" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."notification_dispatches" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."notification_dispatches" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."notification_dispatches" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."notification_dispatches" TO "authenticated";
 GRANT ALL ON TABLE "public"."notification_dispatches" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."organization_invites" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."organization_invites" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."organization_invites" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."organization_invites" TO "authenticated";
 GRANT ALL ON TABLE "public"."organization_invites" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."organization_members" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."organization_members" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."organization_members" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."organization_members" TO "authenticated";
 GRANT ALL ON TABLE "public"."organization_members" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."organizations" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."organizations" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."organizations" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."organizations" TO "authenticated";
 GRANT ALL ON TABLE "public"."organizations" TO "service_role";
 
 
 
-GRANT SELECT,REFERENCES,TRIGGER,MAINTAIN ON TABLE "public"."phase19_soak_daily" TO "anon";
-GRANT SELECT,REFERENCES,TRIGGER,MAINTAIN ON TABLE "public"."phase19_soak_daily" TO "authenticated";
+GRANT SELECT,REFERENCES ON TABLE "public"."phase19_soak_daily" TO "anon";
+GRANT SELECT,REFERENCES ON TABLE "public"."phase19_soak_daily" TO "authenticated";
 GRANT ALL ON TABLE "public"."phase19_soak_daily" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."portfolio_alerts" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."portfolio_alerts" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."portfolio_alerts" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."portfolio_alerts" TO "authenticated";
 GRANT ALL ON TABLE "public"."portfolio_alerts" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."portfolio_strategies" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."portfolio_strategies" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."portfolio_strategies" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."portfolio_strategies" TO "authenticated";
 GRANT ALL ON TABLE "public"."portfolio_strategies" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."position_snapshots" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."position_snapshots" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."position_snapshots" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."position_snapshots" TO "authenticated";
 GRANT ALL ON TABLE "public"."position_snapshots" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."positions" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."positions" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."positions" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."positions" TO "authenticated";
 GRANT ALL ON TABLE "public"."positions" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."public_profiles" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."public_profiles" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."public_profiles" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."public_profiles" TO "authenticated";
 GRANT ALL ON TABLE "public"."public_profiles" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."reconciliation_reports" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."reconciliation_reports" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."reconciliation_reports" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."reconciliation_reports" TO "authenticated";
 GRANT ALL ON TABLE "public"."reconciliation_reports" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."relationship_documents" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."relationship_documents" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."relationship_documents" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."relationship_documents" TO "authenticated";
 GRANT ALL ON TABLE "public"."relationship_documents" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."resend_message_correlation" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."resend_message_correlation" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."resend_message_correlation" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."resend_message_correlation" TO "authenticated";
 GRANT ALL ON TABLE "public"."resend_message_correlation" TO "service_role";
 
 
@@ -17159,18 +17159,18 @@ GRANT ALL ON SEQUENCE "public"."resend_message_correlation_id_seq" TO "service_r
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."scenario_commit_idempotency" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."scenario_commit_idempotency" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."scenario_commit_idempotency" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."scenario_commit_idempotency" TO "authenticated";
 GRANT ALL ON TABLE "public"."scenario_commit_idempotency" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."scenario_shares" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."scenario_shares" TO "authenticated";
 GRANT ALL ON TABLE "public"."scenario_shares" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."scenarios" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."scenarios" TO "authenticated";
 GRANT ALL ON TABLE "public"."scenarios" TO "service_role";
 
 
@@ -17200,73 +17200,73 @@ GRANT ALL ON TABLE "public"."strategy_sync_cursors" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."strategy_verifications" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."strategy_verifications" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."strategy_verifications" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."strategy_verifications" TO "authenticated";
 GRANT ALL ON TABLE "public"."strategy_verifications" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."system_flags" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."system_flags" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."system_flags" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."system_flags" TO "authenticated";
 GRANT ALL ON TABLE "public"."system_flags" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE "public"."system_settings" TO "authenticated";
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE "public"."system_settings" TO "authenticated";
 GRANT ALL ON TABLE "public"."system_settings" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."token_price_history" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."token_price_history" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."token_price_history" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."token_price_history" TO "authenticated";
 GRANT ALL ON TABLE "public"."token_price_history" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."trades" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."trades" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."trades" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."trades" TO "authenticated";
 GRANT ALL ON TABLE "public"."trades" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."used_ack_tokens" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."used_ack_tokens" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."used_ack_tokens" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."used_ack_tokens" TO "authenticated";
 GRANT ALL ON TABLE "public"."used_ack_tokens" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."user_app_roles" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."user_app_roles" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."user_app_roles" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."user_app_roles" TO "authenticated";
 GRANT ALL ON TABLE "public"."user_app_roles" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."user_favorites" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."user_favorites" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."user_favorites" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."user_favorites" TO "authenticated";
 GRANT ALL ON TABLE "public"."user_favorites" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."user_notes" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."user_notes" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."user_notes" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."user_notes" TO "authenticated";
 GRANT ALL ON TABLE "public"."user_notes" TO "service_role";
 
 
 
-GRANT INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."verification_requests" TO "anon";
-GRANT INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."verification_requests" TO "authenticated";
+GRANT INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."verification_requests" TO "anon";
+GRANT INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."verification_requests" TO "authenticated";
 GRANT ALL ON TABLE "public"."verification_requests" TO "service_role";
 
 
 
-GRANT INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."verification_requests_legacy" TO "anon";
-GRANT REFERENCES,TRIGGER,MAINTAIN ON TABLE "public"."verification_requests_legacy" TO "authenticated";
+GRANT INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."verification_requests_legacy" TO "anon";
+GRANT REFERENCES ON TABLE "public"."verification_requests_legacy" TO "authenticated";
 GRANT ALL ON TABLE "public"."verification_requests_legacy" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."weight_snapshots" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLE "public"."weight_snapshots" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."weight_snapshots" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."weight_snapshots" TO "authenticated";
 GRANT ALL ON TABLE "public"."weight_snapshots" TO "service_role";
 
 
@@ -17298,8 +17298,8 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUN
 
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "postgres";
-ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLES TO "anon";
-ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,MAINTAIN,UPDATE ON TABLES TO "authenticated";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLES TO "anon";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
 
 
