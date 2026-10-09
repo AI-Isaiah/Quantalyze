@@ -3759,7 +3759,7 @@ Plans:
 
 ### Phase 164.9.7.1: TRIGGERREVOKE — anon and authenticated no longer hold TRIGGER or MAINTAIN on public tables (INSERTED)
 
-**Goal:** Close the rest of the RLS-exempt privilege class that 164.9.7 opened for TRUNCATE. A client role holding TRIGGER on a table can attach code that a BYPASSRLS writer then runs (RLS audit HIGH, 164.9.7 review), and PG17 MAINTAIN lets a role LOCK and VACUUM FULL a table, which is an outage. Revoke both from `anon` and `authenticated` on every `public` relation and in the `postgres` default privileges, with a catalogue self-check and a gate, the same shape as 164.9.7.
+**Goal:** Close the rest of the RLS-exempt privilege class that 164.9.7 opened for TRUNCATE. A client role holding TRIGGER on a table can attach code that a BYPASSRLS writer then runs (RLS audit HIGH, 164.9.7 review), and PG17 MAINTAIN lets a role run VACUUM FULL, CLUSTER, REINDEX and REFRESH MATERIALIZED VIEW on it. Revoke both from `anon` and `authenticated` on every `public` relation and in the `postgres` default privileges, with a catalogue self-check and a gate, the same shape as 164.9.7. Revoking MAINTAIN does not close the client lock-hold, because PG17 lets any UPDATE or DELETE holder take a table-wide lock, so that outage stays open and is booked as `TRIGGERREVOKE-LOCKHOLD-01` (D-08; goal corrected 2026-10-09 by `/gsd-phase --edit`; the earlier lock-outage claim is superseded).
 **Booked:** founder D-06 (164.9.7 CONTEXT, 2026-10-08): its own phase, not folded into the TRUNCATE migration. TRUNCATE on `storage.*` and `net.*` stays an accepted platform residual. Re-measure the per-role holder counts on PROD at plan time (marker query first).
 **Requirements**: none assigned; plans trace to CONTEXT D-01..D-09
 **Depends on:** Phase 164.9.7
