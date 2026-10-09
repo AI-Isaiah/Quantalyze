@@ -187,6 +187,16 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
+// 2026-10-09 Phase 170.5 (D-07): getStrategyDetailV2 now reads the factsheet's live
+// joint through an admin chain this file's thin mock does not model. The helper is
+// replaced here (default: computed with null values); queries.v2-joint.test.ts
+// owns the real wiring assertions.
+const jointMock = vi.hoisted(() => ({ read: vi.fn() }));
+vi.mock("@/lib/factsheet/v2-joint", async (importActual) => ({
+  ...(await importActual<typeof import("@/lib/factsheet/v2-joint")>()),
+  readV2BenchmarkJoint: jointMock.read,
+}));
+
 import {
   getStrategiesByCategory,
   getStrategyDetail,
@@ -242,6 +252,11 @@ beforeEach(() => {
   recorders.listRows = null;
   recorders.listError = null;
   recorders.sentryCalls = [];
+  jointMock.read.mockReset();
+  jointMock.read.mockResolvedValue({
+    values: { alpha: null, beta: null, correlation: null, ir: null, treynor: null },
+    status: { kind: "computed", paired: 0, flatLeg: false },
+  });
 });
 
 describe("getStrategyDetail — disclosure tier redaction", () => {
@@ -983,33 +998,51 @@ describe("getStrategyDetailV2 — Plan 14b-06 panel4..7 mappings", () => {
     ]);
   });
 
-  it("Test 4: panel7Inputs.benchmark_greeks reads alpha/beta/IR/Treynor from metrics_json (long names preferred)", async () => {
-    recorders.strategyData = buildStrategyRow();
+  // 2026-10-09 Phase 170.5 (D-07): stored metrics_json greeks are no longer the source
+  it("Test 4: panel7Inputs.benchmark_greeks is the live joint's five values; stored metrics_json greeks (long names, and the producer's info_ratio) do not reach it", async () => {
+    jointMock.read.mockResolvedValue({
+      values: { alpha: 0.2, beta: 0.38, correlation: 0.4, ir: 0.5, treynor: 0.1 },
+      status: { kind: "computed", paired: 111, flatLeg: false },
+    });
+    recorders.strategyData = buildStrategyRow({
+      strategy_analytics: buildAnalyticsRow({
+        metrics_json: { info_ratio: -1.8457, treynor: -2.8659 },
+      }),
+    });
     const result = await getStrategyDetailV2(STRAT_ID);
+    // The fixture stores alpha 0.05, beta 0.92, information_ratio 0.42, treynor_ratio 0.18.
     expect(result!.panel7Inputs.benchmark_greeks).toEqual({
-      alpha: 0.05,
-      beta: 0.92,
-      ir: 0.42, // information_ratio (long name)
-      treynor: 0.18, // treynor_ratio (long name)
+      alpha: 0.2,
+      beta: 0.38,
+      correlation: 0.4,
+      ir: 0.5,
+      treynor: 0.1,
+    });
+    expect(result!.panel7Inputs.benchmark_joint).toEqual({
+      kind: "computed",
+      paired: 111,
+      flatLeg: false,
     });
   });
 
-  it("Test 4b: greeks fallback — short names accepted when long names absent", async () => {
+  // 2026-10-09 Phase 170.5 (D-07): stored metrics_json greeks are no longer the source
+  it("Test 4b: stored short-name greeks (ir, treynor) are not a fallback any more; a helper null stays null", async () => {
     recorders.strategyData = buildStrategyRow({
       strategy_analytics: buildAnalyticsRow({
         metrics_json: {
           history_days: 365,
           alpha: 0.01,
           beta: 0.5,
-          // information_ratio + treynor_ratio absent; use ir + treynor short names
           ir: 0.3,
           treynor: 0.15,
         },
       }),
     });
     const result = await getStrategyDetailV2(STRAT_ID);
-    expect(result!.panel7Inputs.benchmark_greeks.ir).toBe(0.3);
-    expect(result!.panel7Inputs.benchmark_greeks.treynor).toBe(0.15);
+    expect(result!.panel7Inputs.benchmark_greeks.ir).toBeNull();
+    expect(result!.panel7Inputs.benchmark_greeks.treynor).toBeNull();
+    expect(result!.panel7Inputs.benchmark_greeks.alpha).toBeNull();
+    expect(result!.panel7Inputs.benchmark_greeks.beta).toBeNull();
   });
 
   it("Test 5: panel5Inputs.rolling_metrics maps from analytics.rolling_metrics; sharpe scalar passes through", async () => {
@@ -1035,12 +1068,16 @@ describe("getStrategyDetailV2 — Plan 14b-06 panel4..7 mappings", () => {
     expect(result!.panel5Inputs.rolling_metrics).toBeNull();
     expect(result!.panel5Inputs.sharpe).toBeNull();
     expect(result!.panel6Inputs.trade_metrics).toBeNull();
+    // 2026-10-09 Phase 170.5 (D-07): five values incl. correlation, and a status
     expect(result!.panel7Inputs.benchmark_greeks).toEqual({
       alpha: null,
       beta: null,
+      correlation: null,
       ir: null,
       treynor: null,
     });
+    expect(result!.panel7Inputs.benchmark_joint).toEqual({ kind: "not_computed" });
+    expect(jointMock.read).not.toHaveBeenCalled();
     expect(result!.panel7Inputs.correlation_analytics.returns_series).toBeNull();
     expect(result!.panel7Inputs.correlation_analytics.metrics_json).toBeNull();
   });

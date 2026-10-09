@@ -1,6 +1,10 @@
+import type { ReactNode } from "react";
+
 interface PartialDataBannerProps {
   heading: string;
   body: string;
+  /** Optional recovery control (e.g. a Retry button) rendered below the body. */
+  action?: ReactNode;
 }
 
 /**
@@ -11,7 +15,7 @@ interface PartialDataBannerProps {
  * threshold. The panel heading + outer card chrome remain unchanged —
  * the banner replaces only the body region.
  */
-export function PartialDataBanner({ heading, body }: PartialDataBannerProps) {
+export function PartialDataBanner({ heading, body, action }: PartialDataBannerProps) {
   return (
     <div
       role="status"
@@ -21,6 +25,7 @@ export function PartialDataBanner({ heading, body }: PartialDataBannerProps) {
         {heading}
       </p>
       <p className="mt-1 text-xs font-normal text-text-muted">{body}</p>
+      {action ? <div className="mt-3">{action}</div> : null}
     </div>
   );
 }

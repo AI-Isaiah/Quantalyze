@@ -28,6 +28,12 @@ import {
   isNativeLegUnpriced,
 } from "@/lib/factsheet/native-to-usd";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import {
+  readV2BenchmarkJoint,
+  V2_JOINT_NULL_VALUES,
+  type V2BenchmarkJoint,
+  type V2JointStatus,
+} from "@/lib/factsheet/v2-joint";
 import type { BenchmarkPricesOpt } from "@/lib/factsheet/types";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
 import {
@@ -1490,8 +1496,8 @@ export async function getStrategyDetail(
  * at runtime while TypeScript says they exist. Define the projection type
  * here so a consumer reading `result.strategy.aum` becomes a compile-time error.
  * NOTE: this Pick intentionally includes ONE field beyond the 9 SELECTed —
- * `trust_tier` — which is likewise `undefined` at runtime on the v2 path (see
- * the inline DEFERRED-CROSSFILE note on that member below).
+ * `trust_tier` — which is not a `strategies` column. Phase 170.5 (D-05):
+ * `getStrategyDetailV2` projects it from `readPublicVerificationSignals`.
  */
 export type StrategyV2ProjectedColumns = Pick<
   Strategy,
@@ -1504,11 +1510,9 @@ export type StrategyV2ProjectedColumns = Pick<
   | "markets"
   | "leverage_range"
   | "avg_daily_turnover"
-  // trust_tier is NOT in STRATEGY_V2_STRATEGY_COLUMNS — it arrives via the
-  // strategy_verifications join in `getStrategyDetail` but NOT in `getStrategyDetailV2`.
-  // StrategyV2Shell.tsx reads it, so it is `undefined` at runtime on the v2 path.
-  // DEFERRED-CROSSFILE: to fix, add strategy_verifications to the v2 SELECT and
-  // backfill STRATEGY_V2_STRATEGY_COLUMNS (touch to the migration constant).
+  // trust_tier is NOT in STRATEGY_V2_STRATEGY_COLUMNS. Phase 170.5 (D-05):
+  // getStrategyDetailV2 projects it from readPublicVerificationSignals (the
+  // published-gated get_published_trust_signals RPC), as getStrategyDetail does.
   | "trust_tier"
 >;
 
@@ -1568,12 +1572,21 @@ export interface StrategyV2Detail {
     data_quality_flags: AnalyticsDataQualityFlags | null;
   };
   panel7Inputs: {
+    /**
+     * Phase 170.5 (D-07): the factsheet's own alpha, beta, correlation, IR and
+     * Treynor (`readV2BenchmarkJoint`, or the builder path for a composite),
+     * never the stored Python values. `correlation` is optional so fixtures typed
+     * `StrategyV2Detail` keep compiling.
+     */
     benchmark_greeks: {
       alpha: number | null;
       beta: number | null;
       ir: number | null;
       treynor: number | null;
+      correlation?: number | null;
     };
+    /** Why the five figures are what they are; optional for the same reason. */
+    benchmark_joint?: V2JointStatus;
     correlation_analytics: {
       returns_series: { date: string; value: number }[] | null;
       metrics_json: Record<string, unknown> | null;
@@ -1595,10 +1608,14 @@ export interface StrategyV2Detail {
  *
  * Analytics columns: every field that getStrategyDetailV2 unpacks below.
  * `metrics_json` is intentionally a single blob fetch — its keys
- * (history_days, equity_series_1y, btc_benchmark_returns, benchmark_returns,
- * alpha/beta/IR/Treynor) drive multiple panels, so pulling the blob once beats
+ * (history_days, equity_series_1y, btc_benchmark_returns, benchmark_returns)
+ * drive multiple panels, so pulling the blob once beats
  * enumerating a dozen key aliases. Trimming the surrounding scalar/array
  * columns is the bandwidth win the p95<50ms detail-fetch contract requires.
+ *
+ * 2026-10-09 Phase 170.5 (D-07): alpha/beta/IR/Treynor are no longer read from
+ * `metrics_json` here; `getStrategyDetailV2` takes them from the factsheet's own
+ * live joint (`readV2BenchmarkJoint`), so v2 and the factsheet print one number.
  *
  * ⚠️ CORRECTION (Phase 159 / 159-03). This docblock previously asserted that
  * "PostgREST cannot project a JSONB sub-tree without an RPC". That is FALSE
@@ -1657,8 +1674,8 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
 
   // audit-2026-05-07 H-1255: narrowed to StrategyV2ProjectedColumns (the 9
   // columns SELECTed above, plus trust_tier which the type intentionally
-  // includes but the v2 SELECT does NOT fetch — undefined at runtime, see the
-  // DEFERRED note on the type def) so TypeScript catches any consumer that
+  // includes but the v2 SELECT does NOT fetch — it is projected below from
+  // readPublicVerificationSignals, Phase 170.5 D-05) so TypeScript catches any consumer that
   // reads a non-projected field (e.g. .aum, .status, .user_id) — those
   // fields are undefined at runtime even though the full Strategy type permits
   // them. This replaces the prior `as unknown as Strategy` which widened
@@ -1673,6 +1690,38 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
   // Terminal SUCCESS includes complete_with_warnings — else warned strategies
   // render every metric panel blank (migration 20260707120000 surfacing).
   const isComplete = isComputedAnalytics(a?.computation_status);
+
+  // Phase 170.5 (D-05): the tier comes from the one public reader (the
+  // published-gated get_published_trust_signals RPC), exactly as
+  // getStrategyDetail does, so the footer and the Verified chip follow the
+  // same source as the factsheet's TrustTierLabel. The helper is fail-soft
+  // (Sentry capture, empty map), so a failure leaves trust_tier null: no chip,
+  // and Disclaimer's unknown-tier default (Q5) — never an invented API claim.
+  //
+  // Phase 170.5 (D-07): the benchmark greeks are the factsheet's own, from its
+  // TypeScript chain. The two reads are independent, so they run together and
+  // the detail fetch adds one round of latency, not two. A non-computed
+  // strategy skips the admin read. A composite answers `needs_builder`; the
+  // page resolves that through the factsheet builder. Failure is not absence:
+  // a rejected joint read is the `error` status with a stable stage tag, never
+  // `not_computed` and never a 500 for the whole page.
+  const [signals, joint] = await Promise.all([
+    readPublicVerificationSignals([s.id]),
+    isComplete
+      ? (async (): Promise<V2BenchmarkJoint> => {
+          try {
+            return await readV2BenchmarkJoint(createAdminClient(), s.id);
+          } catch (err) {
+            console.error("[v2-joint] getStrategyDetailV2 joint read threw", { id: s.id });
+            captureToSentry(err, { tags: { stage: "v2-joint", strategy_id: s.id } });
+            return { values: { ...V2_JOINT_NULL_VALUES }, status: { kind: "error" } };
+          }
+        })()
+      : Promise.resolve<V2BenchmarkJoint>({
+          values: { ...V2_JOINT_NULL_VALUES },
+          status: { kind: "not_computed" },
+        }),
+  ]);
   const metricsJson = (a?.metrics_json ?? {}) as Record<string, unknown>;
 
   const panel1 = {
@@ -1743,33 +1792,12 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
       : null,
   };
 
-  // Greeks scalars: metrics.py emits both `information_ratio` and `treynor_ratio`
-  // (long names). Prefer those; fall back to short names if they ever appear.
-  const panel7Inputs = {
-    benchmark_greeks: isComplete
-      ? {
-          alpha:
-            typeof metricsJson["alpha"] === "number"
-              ? (metricsJson["alpha"] as number)
-              : null,
-          beta:
-            typeof metricsJson["beta"] === "number"
-              ? (metricsJson["beta"] as number)
-              : null,
-          ir:
-            typeof metricsJson["information_ratio"] === "number"
-              ? (metricsJson["information_ratio"] as number)
-              : typeof metricsJson["ir"] === "number"
-                ? (metricsJson["ir"] as number)
-                : null,
-          treynor:
-            typeof metricsJson["treynor_ratio"] === "number"
-              ? (metricsJson["treynor_ratio"] as number)
-              : typeof metricsJson["treynor"] === "number"
-                ? (metricsJson["treynor"] as number)
-                : null,
-        }
-      : { alpha: null, beta: null, ir: null, treynor: null },
+  // Phase 170.5 (D-07): the five greeks are the factsheet's live joint, not the
+  // stored `metrics_json` Python values (which never carried IR or Treynor under
+  // the keys this query used to read).
+  const panel7Inputs: StrategyV2Detail["panel7Inputs"] = {
+    benchmark_greeks: joint.values,
+    benchmark_joint: joint.status,
     correlation_analytics: {
       returns_series: isComplete ? (a?.returns_series ?? null) : null,
       metrics_json: isComplete ? metricsJson : null,
@@ -1789,7 +1817,10 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
     // the internal `s` binding narrow (StrategyV2ProjectedColumns). The interface
     // field will be narrowed to StrategyV2ProjectedColumns once test fixtures
     // are updated — see DEFERRED-CROSSFILE note on StrategyV2Detail above.
-    strategy: s as unknown as Strategy,
+    strategy: {
+      ...s,
+      trust_tier: signals.get(s.id)?.trust_tier ?? null,
+    } as unknown as Strategy,
     panel1,
     panel2Headline,
     panel2Equity,

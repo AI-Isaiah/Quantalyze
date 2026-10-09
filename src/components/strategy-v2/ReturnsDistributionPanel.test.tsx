@@ -139,7 +139,7 @@ describe("ReturnsDistributionPanel — Phase 14b-02", () => {
     expect(queryByTestId("yearly-returns")).toBeNull();
   });
 
-  it("Test 3: placeholder before intersection — data-panel-status='placeholder', no sub-charts", () => {
+  it("Test 3: placeholder before intersection — data-panel-status='placeholder'; eager sub-charts render, daily heatmap waits (R2-02)", () => {
     mockHookReturn = { ref: () => {}, data: null, status: "idle" };
     const { container, queryByTestId } = render(
       <ReturnsDistributionPanel
@@ -152,10 +152,12 @@ describe("ReturnsDistributionPanel — Phase 14b-02", () => {
     );
     const section = container.querySelector('section[data-panel="returns-distribution"]');
     expect(section?.getAttribute("data-panel-status")).toBe("placeholder");
-    expect(queryByTestId("monthly-heatmap")).toBeNull();
+    // R2-02: the eager sub-sections do not wait for the lazy fetch.
+    expect(queryByTestId("monthly-heatmap")).not.toBeNull();
+    expect(queryByTestId("daily-heatmap")).toBeNull();
   });
 
-  it("Test 4: loading state — H2 + 'Loading…' under aria-live=polite, no sub-charts", () => {
+  it("Test 4: loading state — 'Loading…' under aria-live=polite inside the daily heatmap only; eager sub-charts render (R2-02)", () => {
     mockHookReturn = { ref: () => {}, data: null, status: "loading" };
     const { container, queryByTestId } = render(
       <ReturnsDistributionPanel
@@ -169,7 +171,12 @@ describe("ReturnsDistributionPanel — Phase 14b-02", () => {
     const live = container.querySelector('[aria-live="polite"]');
     expect(live).not.toBeNull();
     expect(live?.textContent).toContain("Loading…");
-    expect(queryByTestId("monthly-heatmap")).toBeNull();
+    // R2-02: only the lazy daily heatmap waits; the four eager sub-charts draw.
+    expect(queryByTestId("daily-heatmap")).toBeNull();
+    expect(queryByTestId("monthly-heatmap")).not.toBeNull();
+    expect(queryByTestId("return-histogram")).not.toBeNull();
+    expect(queryByTestId("return-quantiles")).not.toBeNull();
+    expect(queryByTestId("yearly-returns")).not.toBeNull();
   });
 
   it("Test 5: ready full — all 5 sub-charts render in order", () => {
@@ -249,7 +256,7 @@ describe("ReturnsDistributionPanel — Phase 14b-02", () => {
     expect(queryByTestId("return-quantiles")).not.toBeNull();
   });
 
-  it("Test 8: error state renders error banner", () => {
+  it("Test 8: error state renders the retry banner on the daily heatmap only; eager sub-charts still render (R2-02)", () => {
     mockHookReturn = { ref: () => {}, data: null, status: "error" };
     const { container, queryByTestId } = render(
       <ReturnsDistributionPanel
@@ -262,7 +269,13 @@ describe("ReturnsDistributionPanel — Phase 14b-02", () => {
     );
     expect(container.textContent).toContain("Couldn’t load this section");
     expect(container.textContent).toContain("Refresh the page to retry. The other panels still work.");
-    expect(queryByTestId("monthly-heatmap")).toBeNull();
+    // R2-02: one banner, in the lazy Daily heatmap sub-section; nothing eager is hidden.
+    expect(container.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(queryByTestId("daily-heatmap")).toBeNull();
+    expect(queryByTestId("monthly-heatmap")).not.toBeNull();
+    expect(queryByTestId("return-histogram")).not.toBeNull();
+    expect(queryByTestId("return-quantiles")).not.toBeNull();
+    expect(queryByTestId("yearly-returns")).not.toBeNull();
   });
 
   it("Test 9: H3 sub-headings use canonical class set; forbidden classes absent", () => {

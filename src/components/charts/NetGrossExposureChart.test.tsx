@@ -14,7 +14,8 @@ import {
  *
  * ComposedChart with: gross filled area (CHART_ACCENT, fillOpacity 0.2) +
  * net solid line (CHART_ACCENT, 1.5px) + reference line at y=0
- * (CHART_TEXT_MUTED, dashed). Y-axis tickFormatter renders percent.
+ * (CHART_TEXT_MUTED, dashed). Y-axis ticks are compact USD (Phase 170.5 D-03;
+ * pinned in NetGrossExposureChart.axis-unit.test.tsx).
  */
 
 vi.mock("recharts", () => {
@@ -106,10 +107,11 @@ vi.mock("recharts", () => {
 import { NetGrossExposureChart } from "./NetGrossExposureChart";
 
 describe("NetGrossExposureChart — Phase 14b-05 Task 1", () => {
+  // 2026-10-09 Phase 170.5 (D-03): the producer writes USD notional (ExposurePoint in position_reconstruction.py), not a ratio
   const sample = [
-    { date: "2024-01-01", gross: 0.8, net: 0.5 },
-    { date: "2024-01-02", gross: 0.85, net: 0.4 },
-    { date: "2024-01-03", gross: 0.9, net: -0.1 },
+    { date: "2024-01-01", gross: 53505.06, net: 53505.06 },
+    { date: "2024-01-02", gross: 67717.84, net: -48544.8 },
+    { date: "2024-01-03", gross: 18169.56, net: 12000 },
   ];
 
   it("Test 1: renders one Area + one Line (returns null when data empty)", () => {
@@ -152,12 +154,13 @@ describe("NetGrossExposureChart — Phase 14b-05 Task 1", () => {
     expect(getByTestId("y-axis").getAttribute("data-tick-tabular")).toBe("tabular-nums");
   });
 
-  it("Test 5: outer wrapper has role='img' + aria-label='Net and gross exposure over time'", () => {
+  it("Test 5: outer wrapper has role='img' + aria-label='Net and gross exposure over time, USD notional'", () => {
     const { container } = render(<NetGrossExposureChart data={sample} />);
     const wrapper = container.querySelector('[role="img"]');
     expect(wrapper).not.toBeNull();
+    // 2026-10-09 Phase 170.5 (D-03): the label now names the unit
     expect(wrapper?.getAttribute("aria-label")).toBe(
-      "Net and gross exposure over time",
+      "Net and gross exposure over time, USD notional",
     );
   });
 

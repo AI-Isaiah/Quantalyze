@@ -19,6 +19,15 @@
 /** 90-day rolling correlation needs at least one full Sharpe-ratio year of aligned points. */
 export const CORRELATION_90D_MIN_DAYS = 250;
 
+/**
+ * Window, in paired daily intervals, of the Python worker's rolling alpha/beta
+ * and rolling-correlation series (analytics-service). The first point exists
+ * only after this many paired intervals, and a line needs 2 points, so the
+ * history needed to draw one is `BENCHMARK_ROLLING_WINDOW_DAYS + 1`. Distinct
+ * from CORRELATION_90D_MIN_DAYS above (a different, stricter floor).
+ */
+export const BENCHMARK_ROLLING_WINDOW_DAYS = 90;
+
 /** Top-N drawdown table needs a full year of history to produce meaningful peak-trough episodes. */
 export const WORST_DRAWDOWNS_MIN_DAYS = 365;
 

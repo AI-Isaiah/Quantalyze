@@ -255,8 +255,11 @@ function inclusiveDayCount(start: string, end: string): number {
  * value), and dedupe by date (keeping the first occurrence). The ONE normalize
  * both the cash series and the Phase-103 MTM series pass through, so they share
  * the exact same sanitize (no second implementation to drift).
+ *
+ * Exported (Phase 170.5 D-07) so `v2-joint.ts` runs the factsheet's own
+ * normalize rather than a second one; the builder's behaviour is unchanged.
  */
-function normalizeDailyReturns(rows: DailyReturn[]): DailyReturn[] {
+export function normalizeDailyReturns(rows: DailyReturn[]): DailyReturn[] {
   const sorted = [...rows]
     .filter(d => d && typeof d.date === "string" && Number.isFinite(d.value))
     .sort((a, b) => a.date.localeCompare(b.date));

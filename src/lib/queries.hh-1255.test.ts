@@ -66,6 +66,17 @@ vi.mock("@/lib/sentry-capture", () => ({
   captureToSentry: vi.fn(),
 }));
 
+// 2026-10-09 Phase 170.5 (D-07): isolate the H-1255 narrowing tests from the joint read
+// (getStrategyDetailV2 now reads the factsheet's live joint through an admin chain this
+// file's thin mock does not model). Default: computed with null values.
+vi.mock("@/lib/factsheet/v2-joint", async (importActual) => ({
+  ...(await importActual<typeof import("@/lib/factsheet/v2-joint")>()),
+  readV2BenchmarkJoint: vi.fn(async () => ({
+    values: { alpha: null, beta: null, correlation: null, ir: null, treynor: null },
+    status: { kind: "computed", paired: 0, flatLeg: false },
+  })),
+}));
+
 // Seed the single-row response (the strategy row).
 let mockSingleResponse: { data: unknown; error: unknown } = {
   data: null,

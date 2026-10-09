@@ -1,13 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { useLazyPanelMetrics } from "@/hooks/useLazyPanelMetrics";
+import { useLazyPanelMetrics, type LazyStatus } from "@/hooks/useLazyPanelMetrics";
 import { SegmentedControl } from "./SegmentedControl";
 import { PartialDataBanner } from "./PartialDataBanner";
 import { RollingMetrics } from "@/components/charts/RollingMetrics";
 import { RollingVolatilityChart } from "@/components/charts/RollingVolatilityChart";
 import { RollingSortinoChart } from "@/components/charts/RollingSortinoChart";
 import { RollingAlphaBetaChart } from "@/components/charts/RollingAlphaBetaChart";
+import { rollingAlphaBetaWhy } from "@/lib/benchmark-why";
+import type { AnalyticsDataQualityFlags } from "@/lib/types";
 
 type WindowId = "3M" | "6M" | "12M";
 
@@ -57,6 +59,11 @@ interface RollingMetricsPanelProps {
   rolling_metrics: Record<string, { date: string; value: number }[]> | null;
   /** Eager scalar — overall (all-time) Sharpe for the avg reference line on RollingMetrics. */
   sharpe?: number | null;
+  /**
+   * Untrusted jsonb off strategy_analytics. Read only through
+   * rollingAlphaBetaWhy, which parses native_unit before it reaches text.
+   */
+  data_quality_flags?: AnalyticsDataQualityFlags | null;
 }
 
 interface Panel5LazyPayload {
@@ -80,6 +87,15 @@ interface Panel5LazyPayload {
  * body when history_days < threshold for that window. Lazy-fetches series
  * via useLazyPanelMetrics; eager Sharpe series are passed in as props from
  * getStrategyDetailV2's analytics.rolling_metrics blob.
+ *
+ * Phase 170.5 R2-02: eager content renders whatever the lazy status is. The
+ * window toggle and Rolling Sharpe read props only, so they are always drawn
+ * (also while loading and after a failed fetch). The lazy status gates ONLY
+ * the sub-sections that read the panel5 payload (volatility, Sortino, alpha &
+ * beta): "Loading…" while idle/loading inside each of them; on error the panel
+ * shows ONE retry banner above them (R3-02) and they render nothing. A
+ * window-gated sub-section (history shorter than the window, eager) keeps
+ * saying so under any lazy status.
  */
 export function RollingMetricsPanel(props: RollingMetricsPanelProps) {
   const { ref, data, status } = useLazyPanelMetrics<Panel5LazyPayload>("panel5", {
@@ -116,6 +132,10 @@ export function RollingMetricsPanel(props: RollingMetricsPanelProps) {
       | { date: string; value: number }[]
       | undefined) ?? [];
 
+  // D-01 (Phase 170.5): the alpha/beta chart draws only with 2+ dates carrying a
+  // finite alpha or beta; anything less is the say-why block, never a blank chart.
+  const alphaBetaDrawable = countFinitePoints(data?.rolling_alpha, data?.rolling_beta) >= 2;
+
   return (
     <section
       ref={ref}
@@ -133,21 +153,6 @@ export function RollingMetricsPanel(props: RollingMetricsPanelProps) {
           <PartialDataBanner
             heading="Awaiting more data"
             body="This strategy needs at least 90 days of trading history for rolling 3M metrics."
-          />
-        </div>
-      ) : status === "idle" || status === "loading" ? (
-        <div
-          aria-live="polite"
-          className="mt-4 flex items-center justify-center text-xs font-normal text-text-muted"
-          style={{ minHeight: 180 }}
-        >
-          {"Loading…"}
-        </div>
-      ) : status === "error" ? (
-        <div className="mt-4">
-          <PartialDataBanner
-            heading="Couldn’t load this section"
-            body="Refresh the page to retry. The other panels still work."
           />
         </div>
       ) : (
@@ -176,10 +181,22 @@ export function RollingMetricsPanel(props: RollingMetricsPanelProps) {
             />
           </SubChartSection>
 
+          {status === "error" ? (
+            // R3-02: ONE notice for the one failed panel5 fetch, at the start of
+            // the lazy sub-sections. They render nothing on error (a window-gated
+            // one still states its eager gate), so a single failure is not drawn
+            // as three.
+            <PartialDataBanner
+              heading="Couldn’t load this section"
+              body="Refresh the page to retry. The other panels still work."
+            />
+          ) : null}
+
           <SubChartSection
             title="Rolling volatility"
             gated={windowGated}
             gatedBody={subBannerBody}
+            lazyStatus={status}
           >
             <RollingVolatilityChart data={volSeries} />
           </SubChartSection>
@@ -188,19 +205,38 @@ export function RollingMetricsPanel(props: RollingMetricsPanelProps) {
             title="Rolling Sortino"
             gated={windowGated}
             gatedBody={subBannerBody}
+            lazyStatus={status}
           >
             <RollingSortinoChart data={sortinoSeries} />
           </SubChartSection>
 
           <SubChartSection
             title="Rolling alpha & beta"
-            gated={false}
-            gatedBody=""
+            caption={ALPHA_BETA_CAPTION}
+            lazyStatus={status}
           >
-            <RollingAlphaBetaChart
-              alpha={data?.rolling_alpha ?? []}
-              beta={data?.rolling_beta ?? []}
-            />
+            {alphaBetaDrawable ? (
+              <RollingAlphaBetaChart
+                alpha={data?.rolling_alpha ?? []}
+                beta={data?.rolling_beta ?? []}
+              />
+            ) : (
+              // minHeight 250 = RollingAlphaBetaChart's ResponsiveContainer
+              // height, so toggling never shifts the page. Same text at every
+              // window: the series is window-independent (90 paired intervals).
+              <div
+                className="flex items-center"
+                style={{ minHeight: 250 }}
+                data-testid="rolling-alpha-beta-why"
+              >
+                <p className="text-xs font-normal text-text-muted">
+                  {rollingAlphaBetaWhy({
+                    flags: props.data_quality_flags,
+                    historyDays: props.history_days,
+                  })}
+                </p>
+              </div>
+            )}
           </SubChartSection>
         </div>
       )}
@@ -238,24 +274,73 @@ function pickSharpeForWindow(
   return {};
 }
 
+const ALPHA_BETA_CAPTION =
+  "90-day rolling window, paired with BTC. The 3M / 6M / 12M toggle sets the charts above, not this one.";
+
+/**
+ * Dates that carry a finite alpha or a finite beta, merged across both series.
+ * The lazy payload is untrusted jsonb: a non-string date or a non-finite value
+ * never counts, so it can never make a chart draw.
+ */
+function countFinitePoints(
+  alpha: { date: string; value: number }[] | undefined,
+  beta: { date: string; value: number }[] | undefined,
+): number {
+  const dates = new Set<string>();
+  for (const series of [alpha, beta]) {
+    if (!Array.isArray(series)) continue;
+    for (const p of series) {
+      if (typeof p?.date === "string" && Number.isFinite(p.value)) dates.add(p.date);
+    }
+  }
+  return dates.size;
+}
+
 function SubChartSection({
   title,
-  gated,
-  gatedBody,
+  gated = false,
+  gatedBody = "",
+  caption,
+  lazyStatus,
   children,
 }: {
   title: string;
-  gated: boolean;
-  gatedBody: string;
+  /** Omitted for a section that never swaps its body for a banner line (alpha & beta says why itself). */
+  gated?: boolean;
+  gatedBody?: string;
+  caption?: string;
+  /**
+   * Passed ONLY by a sub-section that reads the lazy panel5 payload. Omitted
+   * by an eager one (Rolling Sharpe), which then renders whatever the lazy
+   * status is (R2-02). Eager `gated` wins over it: a window the history does
+   * not cover is not a fetch problem.
+   */
+  lazyStatus?: LazyStatus;
   children: React.ReactNode;
 }) {
+  // A failed lazy fetch is announced once by the panel (R3-02), not per
+  // sub-section. An eager window gate still renders: it is not a fetch problem.
+  if (!gated && lazyStatus === "error") return null;
   return (
     <div>
-      <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
+      <h3
+        className={`${caption ? "mb-1" : "mb-4"} text-xs font-normal uppercase tracking-wider text-text-secondary`}
+      >
         {title}
       </h3>
+      {caption ? (
+        <p className="mb-4 text-xs font-normal text-text-muted">{caption}</p>
+      ) : null}
       {gated ? (
         <p className="text-xs font-normal text-text-muted">{gatedBody}</p>
+      ) : lazyStatus === "idle" || lazyStatus === "loading" ? (
+        <div
+          aria-live="polite"
+          className="flex items-center justify-center text-xs font-normal text-text-muted"
+          style={{ minHeight: 180 }}
+        >
+          {"Loading…"}
+        </div>
       ) : (
         children
       )}
