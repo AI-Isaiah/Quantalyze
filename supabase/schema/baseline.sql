@@ -11262,7 +11262,9 @@ CREATE TABLE IF NOT EXISTS "public"."allocator_holdings" (
     "raw_payload" "jsonb",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "quantity_unit" "text",
     CONSTRAINT "allocator_holdings_holding_type_check" CHECK (("holding_type" = ANY (ARRAY['spot'::"text", 'derivative'::"text"]))),
+    CONSTRAINT "allocator_holdings_quantity_unit_code" CHECK ((("quantity_unit" IS NULL) OR ("quantity_unit" ~ '^[A-Z]{2,10}$'::"text"))),
     CONSTRAINT "allocator_holdings_side_check" CHECK (("side" = ANY (ARRAY['long'::"text", 'short'::"text", 'flat'::"text"])))
 );
 
@@ -11279,6 +11281,10 @@ COMMENT ON COLUMN "public"."allocator_holdings"."holding_type" IS 'Discriminator
 
 
 COMMENT ON COLUMN "public"."allocator_holdings"."cost_basis_usd" IS 'Derivative rows only (entry_price * abs(quantity)). Spot rows are NULL until Phase 08 notes / manual override backfills. Phase 9 Bridge logic gates spot P&L on NOT NULL (D-06).';
+
+
+
+COMMENT ON COLUMN "public"."allocator_holdings"."quantity_unit" IS 'Phase 164.6.6.2.1 UI-SPEC F. The unit this row''s quantity is in, for a native-unit MT5 account row: an upper-case code, 2 to 10 letters (allocator_holdings_quantity_unit_code), e.g. BTC. Written only by the positions poll (service role) for a native-unit account row. NULL keeps the meaning every existing row already has (quantity in the row''s own asset or contract units), and is NORMAL. The Holdings page renders a unit only from this column, never inferred from the symbol or the mark.';
 
 
 
@@ -11366,6 +11372,7 @@ CREATE TABLE IF NOT EXISTS "public"."api_keys" (
     "history_inclusion" "text",
     "account_currency" "text",
     "account_balance_native" numeric,
+    "account_balance_usdt_close_date" "date",
     CONSTRAINT "api_keys_account_currency_code" CHECK ((("account_currency" IS NULL) OR ("account_currency" ~ '^[A-Z]{2,10}$'::"text"))),
     CONSTRAINT "api_keys_account_share_both_or_neither" CHECK ((("account_shared_with_api_key_id" IS NULL) = ("account_share_kind" IS NULL))),
     CONSTRAINT "api_keys_account_share_kind_valid" CHECK ((("account_share_kind" IS NULL) OR ("account_share_kind" = ANY (ARRAY['duplicate'::"text", 'composite_member'::"text"])))),
@@ -11437,11 +11444,15 @@ COMMENT ON COLUMN "public"."api_keys"."history_inclusion" IS 'Phase 167.1.2 D-05
 
 
 
-COMMENT ON COLUMN "public"."api_keys"."account_currency" IS 'Phase 164.6.6.2 D-02. The account''s own currency code as the MT5 gateway reports it (upper-case, 2 to 10 letters; api_keys_account_currency_code), e.g. USD or BTC. Written only by the analytics worker''s derive (service role); no client INSERT or UPDATE path exists. NULL is NORMAL: every non-MT5 key, and an MT5 key before its first post-deploy derive. A later read that disagrees with a stored value is refused by the worker (D-03), never silently re-denominated. Deliberately UN-GRANTED to anon and authenticated (20260410225608 column-revoke model); nothing user-scoped reads it.';
+COMMENT ON COLUMN "public"."api_keys"."account_currency" IS 'Phase 164.6.6.2 D-02, RE-STAMPED by 164.6.6.2.1 D-07. The account''s own currency code as the MT5 gateway reports it (upper-case, 2 to 10 letters; api_keys_account_currency_code), e.g. USD or BTC. Written only by the analytics worker''s derive (service role); no client INSERT or UPDATE path exists. NULL is NORMAL: every non-MT5 key, and an MT5 key before its first post-deploy derive. A later read that disagrees with a stored value is refused by the worker (D-03), never silently re-denominated. READABLE BY authenticated (column GRANT, 20261010120000), scoped by the owner RLS on api_keys, so the key''s owner sees its currency on the key card. The prior form of this comment said it was un-granted and that nothing user-scoped read it: both are now false by design. anon still has NO grant (20260410225608 column-revoke model).';
 
 
 
-COMMENT ON COLUMN "public"."api_keys"."account_balance_native" IS 'Phase 164.6.6.2 D-14. The account''s live equity in account_currency units (e.g. a BTC amount for a BTC-denominated account), written only by the analytics worker''s derive (service role). A USD-family key leaves this NULL and account_balance_usdt stays the USD figure: a non-USD amount is never written into account_balance_usdt. NULL is NORMAL for every non-MT5 key and for an MT5 key before its first post-deploy derive. Deliberately UN-GRANTED to anon and authenticated (a live balance); nothing user-scoped reads it.';
+COMMENT ON COLUMN "public"."api_keys"."account_balance_native" IS 'Phase 164.6.6.2 D-14, RE-STAMPED by 164.6.6.2.1 D-07. The account''s live equity in account_currency units (e.g. a BTC amount for a BTC-denominated account), written only by the analytics worker''s derive (service role). A USD-family key leaves this NULL and account_balance_usdt stays the USD figure: a non-USD amount is never written into account_balance_usdt. NULL is NORMAL for every non-MT5 key and for an MT5 key before its first post-deploy derive. READABLE BY authenticated (column GRANT, 20261010120000), scoped by the owner RLS on api_keys, so the key''s owner sees its native balance on the key card. The prior form of this comment said it was un-granted and that nothing user-scoped read it: both are now false by design. anon still has NO grant (20260410225608 column-revoke model); it is a live balance.';
+
+
+
+COMMENT ON COLUMN "public"."api_keys"."account_balance_usdt_close_date" IS 'Phase 164.6.6.2.1 D-17. For a native-unit key, the date of the stored daily BTC close that priced account_balance_usdt: the latest completed UTC day''s close at derive time. The key card prints it as "at {Mon D} close", so it is a STORED date and never the viewer''s clock. Written only by the analytics worker''s derive beside account_balance_usdt (service role); no client INSERT or UPDATE path exists. NULL means no USD value was priced, and is NORMAL for every USD-family and non-MT5 key. READABLE BY authenticated (column GRANT, 20261010120000), scoped by the owner RLS on api_keys. anon has NO grant.';
 
 
 
@@ -16799,6 +16810,18 @@ GRANT SELECT("account_share_kind") ON TABLE "public"."api_keys" TO "authenticate
 
 
 GRANT SELECT("history_inclusion") ON TABLE "public"."api_keys" TO "authenticated";
+
+
+
+GRANT SELECT("account_currency") ON TABLE "public"."api_keys" TO "authenticated";
+
+
+
+GRANT SELECT("account_balance_native") ON TABLE "public"."api_keys" TO "authenticated";
+
+
+
+GRANT SELECT("account_balance_usdt_close_date") ON TABLE "public"."api_keys" TO "authenticated";
 
 
 
