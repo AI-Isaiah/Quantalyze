@@ -39,6 +39,7 @@ from services.portfolio_optimizer import (
     _compute_sharpe,
     _leg_is_flat,
     _max_drawdown,
+    drawdown_improvement,
 )
 
 logger = logging.getLogger(__name__)
@@ -729,11 +730,7 @@ def _compute_portfolio_fit_components(
         and not _leg_is_flat(aligned, "__cand__")
         else None
     )
-    dd_improvement = (
-        current_max_dd - new_max_dd
-        if current_max_dd is not None and new_max_dd is not None
-        else None
-    )
+    dd_improvement = drawdown_improvement(current_max_dd, new_max_dd)
 
     corr_with_portfolio = _compute_corr_with_portfolio(current_port, candidate_returns)
 

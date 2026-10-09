@@ -154,11 +154,11 @@ def find_improvement_candidates(
             if current_avg_corr is not None and new_avg_corr is not None
             else 0
         )
-        dd_improvement = (current_max_dd - new_max_dd) if current_max_dd is not None else 0
+        dd_improvement = drawdown_improvement(current_max_dd, new_max_dd)
         score = (
             w1 * (sharpe_lift if sharpe_lift is not None else 0.0)
             + w2 * corr_reduction
-            + w3 * dd_improvement
+            + w3 * (dd_improvement if dd_improvement is not None else 0.0)
         )
         results.append({
             "strategy_id": cid,
