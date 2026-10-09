@@ -177,6 +177,43 @@ describe("adaptPortfolioAnalytics", () => {
     expect(parsed.risk_decomposition?.[1].weight_pct).toBeNull();
   });
 
+  // Phase 166.4.1 D-04 / D-05: a stored named reason travels to the page; a
+  // non-string or absent one yields NO key (an always-present `note: null`
+  // would break the toEqual pin above for every full comparison).
+  it("carries a string benchmark note and drops a non-string or absent one", () => {
+    const withNote = adaptPortfolioAnalytics({
+      ...complete,
+      benchmark_comparison: {
+        symbol: "BTC",
+        correlation: null,
+        benchmark_twr: null,
+        portfolio_twr: 0.12,
+        stale: true,
+        note: "benchmark unavailable: stale",
+      },
+    });
+    expect(withNote?.benchmark_comparison?.note).toBe(
+      "benchmark unavailable: stale",
+    );
+
+    const badNote = adaptPortfolioAnalytics({
+      ...complete,
+      benchmark_comparison: {
+        symbol: "BTC",
+        correlation: null,
+        benchmark_twr: null,
+        portfolio_twr: 0.12,
+        stale: false,
+        note: 42,
+      },
+    });
+    expect(badNote?.benchmark_comparison).not.toBeNull();
+    expect("note" in (badNote?.benchmark_comparison ?? {})).toBe(false);
+
+    const noNote = adaptPortfolioAnalytics(complete);
+    expect("note" in (noNote?.benchmark_comparison ?? {})).toBe(false);
+  });
+
   it("handles a row with benchmark_comparison set to null", () => {
     const parsed = adaptPortfolioAnalytics(partialNullBenchmark);
     expect(parsed).not.toBeNull();
