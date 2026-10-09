@@ -96,8 +96,15 @@ const PANEL5_LAZY_FULL = {
   rolling_sortino_3m: [{ date: "2024-01-01", value: 1.2 }],
   rolling_sortino_6m: [{ date: "2024-01-01", value: 1.4 }],
   rolling_sortino_12m: [{ date: "2024-01-01", value: 1.6 }],
-  rolling_alpha: [{ date: "2024-01-01", value: 0.05 }],
-  rolling_beta: [{ date: "2024-01-01", value: 0.92 }],
+  // 2026-10-09 Phase 170.5 (D-01): the alpha/beta chart draws only with 2+ finite points
+  rolling_alpha: [
+    { date: "2024-01-01", value: 0.05 },
+    { date: "2024-01-02", value: 0.06 },
+  ],
+  rolling_beta: [
+    { date: "2024-01-01", value: 0.92 },
+    { date: "2024-01-02", value: 0.91 },
+  ],
 };
 
 beforeEach(() => {
@@ -380,6 +387,8 @@ describe("RollingMetricsPanel — Phase 14b-03 Task 2", () => {
     const live = loadingContainer.querySelector('[aria-live="polite"]');
     expect(live).not.toBeNull();
     expect(live?.textContent).toContain("Loading…");
+    // R2-02: the eager Rolling Sharpe chart renders while the lazy part loads.
+    expect(loadingContainer.querySelector('[data-testid="rolling-metrics"]')).not.toBeNull();
 
     mockHookReturn = { ref: () => {}, data: null, status: "error" };
     const { container: errorContainer } = render(
@@ -391,6 +400,8 @@ describe("RollingMetricsPanel — Phase 14b-03 Task 2", () => {
       />,
     );
     expect(errorContainer.textContent).toContain("Couldn’t load this section");
+    // R2-02: ... and after a failed lazy fetch too.
+    expect(errorContainer.querySelector('[data-testid="rolling-metrics"]')).not.toBeNull();
   });
 
   it("Test 13: source contains zero inline tick={{...}} object literals", () => {

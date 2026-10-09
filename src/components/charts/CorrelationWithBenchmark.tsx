@@ -15,6 +15,7 @@ import {
   CORRELATION_90D_MIN_DAYS,
   insufficientHistoryMessage,
 } from "@/lib/min-history";
+import { btcCorrelationWhy } from "@/lib/benchmark-why";
 import {
   CHART_ACCENT,
   CHART_BORDER,
@@ -104,7 +105,35 @@ function inferActualDays(
  */
 export type CorrelationResolverInput =
   Pick<StrategyAnalytics, "returns_series" | "metrics_json"> &
-    Partial<Pick<StrategyAnalytics, "computation_status">>;
+    Partial<Pick<StrategyAnalytics, "computation_status">> & {
+      /**
+       * Phase 170.5 (D-07 remainder). Optional: when present, an absent key or a
+       * well-formed series of fewer than 2 points resolves to the cause-naming
+       * `btcCorrelationWhy` ladder instead of the bare sentence. When
+       * absent (v1 `PerformanceReport`) every branch is unchanged.
+       */
+      context?: {
+        historyDays: number;
+        nativeUnit: string | null;
+        benchmarkUnavailable: boolean;
+      };
+    };
+
+/** The v2 reason for a rolling correlation with nothing to draw (context only). */
+function whyFromContext(
+  context: NonNullable<CorrelationResolverInput["context"]>,
+): ResolvedBenchmarkCorrelation {
+  return {
+    kind: "unavailable",
+    message: btcCorrelationWhy({
+      flags: {
+        native_unit: context.nativeUnit ?? undefined,
+        benchmark_unavailable: context.benchmarkUnavailable,
+      },
+      historyDays: context.historyDays,
+    }),
+  };
+}
 
 /**
  * Pure helper that resolves the correlation series from a StrategyAnalytics
@@ -131,6 +160,7 @@ export function resolveBenchmarkCorrelation(
       // so the same status reads identically across surfaces.
       return { kind: "computing", message: "Computing analytics…" };
     }
+    if (analytics.context) return whyFromContext(analytics.context);
     return {
       kind: "unavailable",
       message: "Benchmark correlation unavailable.",
@@ -169,7 +199,11 @@ export function resolveBenchmarkCorrelation(
     };
   }
 
-  // 4. Well-formed precomputed series.
+  // 4. Well-formed precomputed series. With a v2 context a 1-point line draws
+  //    nothing, so it takes the same ladder as an absent key.
+  if (analytics.context && precomputed.length < 2) {
+    return whyFromContext(analytics.context);
+  }
   return { kind: "ok", series: precomputed };
 }
 

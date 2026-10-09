@@ -127,6 +127,7 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
           history_days={history_days}
           rolling_metrics={panel5Inputs.rolling_metrics}
           sharpe={panel5Inputs.sharpe}
+          data_quality_flags={panel6Inputs.data_quality_flags}
         />
 
         <TradeAndPositionPanel
@@ -141,7 +142,9 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
           strategyId={strategy.id}
           history_days={history_days}
           benchmark_greeks={panel7Inputs.benchmark_greeks}
+          benchmark_joint={panel7Inputs.benchmark_joint}
           correlation_analytics={panel7Inputs.correlation_analytics}
+          data_quality_flags={panel6Inputs.data_quality_flags}
         />
 
         <div className="mt-8">

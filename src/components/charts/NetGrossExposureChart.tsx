@@ -10,6 +10,8 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { formatUsd } from "@/lib/dollar-validation";
+import { formatCurrency } from "@/lib/utils";
 import { TouchTooltip } from "./TouchTooltip";
 import {
   CHART_ACCENT,
@@ -32,17 +34,20 @@ interface NetGrossExposureChartProps {
  *   - Net:   solid <Line> at CHART_ACCENT 1.5px (no dot).
  *
  * Reference line at y=0 in dashed CHART_TEXT_MUTED so allocators can read
- * net long vs net short at a glance. Y-axis tickFormatter renders percent.
+ * net long vs net short at a glance. Y-axis ticks render compact dollars.
  *
  * Returns null on empty data — caller renders the empty-state banner.
  *
- * Decimal-fraction convention: `gross`/`net` are dimensionless ratios.
- * Y-axis multiplies by 100 for display.
+ * Unit: `gross`/`net` are USD notional, summed from position snapshots and
+ * rounded to cents by the analytics worker (ExposurePoint in
+ * position_reconstruction.py). The axis formats them compactly ($53.5K) and the
+ * tooltip in whole dollars ($53,505). They are never converted to a percent:
+ * no NAV is in the series, so there is no denominator to divide by.
  */
 export function NetGrossExposureChart({ data }: NetGrossExposureChartProps) {
   if (!data || data.length === 0) return null;
   return (
-    <div role="img" aria-label="Net and gross exposure over time">
+    <div role="img" aria-label="Net and gross exposure over time, USD notional">
       <ResponsiveContainer width="100%" height={240}>
         <ComposedChart accessibilityLayer={false} data={data} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
           <XAxis
@@ -57,11 +62,11 @@ export function NetGrossExposureChart({ data }: NetGrossExposureChartProps) {
             tick={CHART_TICK_STYLE}
             tickLine={false}
             axisLine={false}
-            tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
+            tickFormatter={(v: number) => formatCurrency(v)}
           />
           <TouchTooltip
             contentStyle={CHART_TOOLTIP_STYLE}
-            formatter={(v, name) => [`${(Number(v) * 100).toFixed(1)}%`, String(name)]}
+            formatter={(v, name) => [formatUsd(Number.isFinite(Number(v)) ? Number(v) : null), String(name)]}
           />
           <Legend />
           <ReferenceLine

@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 import {
   CHART_AXIS_TICK,
   CHART_NEGATIVE_100,
@@ -62,8 +63,11 @@ function cellStyle(value: number): CellStyle {
 export function MonthlyHeatmap({ data }: MonthlyHeatmapProps) {
   const years = Object.keys(data).sort();
 
+  // The 13-column grid overflows a phone, so the scroller must be reachable by
+  // keyboard (axe scrollable-region-focusable): ResponsiveTable is the shared
+  // focusable, named scroll region.
   return (
-    <div className="overflow-x-auto">
+    <ResponsiveTable label="Monthly returns">
       <div
         className="grid gap-px bg-border"
         style={{ gridTemplateColumns: `80px repeat(12, minmax(48px, 1fr))` }}
@@ -114,6 +118,6 @@ export function MonthlyHeatmap({ data }: MonthlyHeatmapProps) {
           </Fragment>
         ))}
       </div>
-    </div>
+    </ResponsiveTable>
   );
 }

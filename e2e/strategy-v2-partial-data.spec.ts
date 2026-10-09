@@ -179,7 +179,7 @@ test.describe("Phase 14a — partial-data history bands (KPI-23a)", () => {
           await exposure.scrollIntoViewIfNeeded();
           await expect(
             exposure.getByText(
-              /at least 30 days of trading history to compute exposure and benchmark greeks/,
+              /at least 30 days of trading history to compute exposure and turnover/,
             ),
           ).toBeVisible();
         }

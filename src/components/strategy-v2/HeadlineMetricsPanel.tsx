@@ -8,6 +8,7 @@ import { RollingMetrics } from "@/components/charts/RollingMetrics";
 import { fetchStrategyLazyMetricsClient } from "@/lib/queries-client";
 import { SegmentedControl } from "./SegmentedControl";
 import { PartialDataBanner } from "./PartialDataBanner";
+import { Button } from "@/components/ui/Button";
 import { withUnit } from "@/lib/factsheet/returns-unit";
 
 interface HeadlineMetricsPanelProps {
@@ -81,8 +82,11 @@ type ActiveView = "cumulative" | "underwater" | "rolling_sharpe" | "log_returns"
  *     strategyId, "equity")` on first activation (migration 087 maps
  *     'equity' → ARRAY['log_returns_series'] — see
  *     supabase/migrations/20260428120919_strategy_analytics_series.sql:165). Result
- *     is cached in component state; subsequent toggles do NOT re-fetch.
- *     Empty payload / error path renders the standard PartialDataBanner.
+ *     is cached in component state; subsequent toggles do NOT re-fetch once it
+ *     resolved.
+ *     An empty payload renders the "Awaiting more data" banner; a failed
+ *     fetch renders the "Couldn’t load this section" banner and re-selecting
+ *     the view retries.
  *
  * NOTE: We use `fetchStrategyLazyMetricsClient` (the client-safe mirror at
  * src/lib/queries-client.ts) NOT the server-only `fetchStrategyLazyMetrics`
@@ -110,7 +114,9 @@ export function HeadlineMetricsPanel({
   //   loading → fetch in flight; show centered "Loading…"
   //   ready   → payload resolved; render EquityCurve OR PartialDataBanner
   //             (when log_returns_series is empty)
-  //   error   → fetch threw; render PartialDataBanner; do not retry
+  //   error   → fetch failed; render the retry banner ("Couldn’t load this
+  //             section"), NOT the empty-series copy. Re-selecting Log returns
+  //             (including clicking it while already active) refetches.
   const [logReturns, setLogReturns] = useState<
     { date: string; value: number }[] | null
   >(null);
@@ -144,11 +150,13 @@ export function HeadlineMetricsPanel({
   // the partial-data banner if the payload is empty.
   function handleViewChange(nextView: ActiveView) {
     setActiveView(nextView);
-    // Lazy-fetch the log-returns series exactly once, on first activation
-    // of the Log returns view. Cached on subsequent toggles via the
-    // `logReturnsStatus !== "idle"` guard.
+    // Lazy-fetch the log-returns series on first activation of the Log
+    // returns view. A resolved payload is cached on subsequent toggles; only
+    // "idle" (never asked) and "error" (the last attempt failed) fetch, so a
+    // failure is recoverable by re-selecting the view without a page reload
+    // (Phase 170.5 R2-01). "loading" and "ready" never refetch.
     if (nextView !== "log_returns") return;
-    if (logReturnsStatus !== "idle") return;
+    if (logReturnsStatus !== "idle" && logReturnsStatus !== "error") return;
     setLogReturnsStatus("loading");
     // Capture the version at dispatch; ignore the resolve if the panel
     // unmounted or strategyId changed while the fetch was in flight (H-1252).
@@ -345,9 +353,27 @@ export function HeadlineMetricsPanel({
             >
               {"Loading…"}
             </div>
-          ) : logReturnsStatus === "error" ||
-            !logReturns ||
-            logReturns.length === 0 ? (
+          ) : logReturnsStatus === "error" ? (
+            // A failed fetch is not an empty series: say it failed, with the
+            // same banner the lazy panels use, never "unavailable for this
+            // strategy" (R2-01). Unlike those hook-driven panels this one CAN
+            // retry (handleViewChange refetches from "error"), so the banner
+            // offers it instead of telling the user to reload (R3-01).
+            <PartialDataBanner
+              heading="Couldn’t load this section"
+              body="Log returns didn’t load. Retry, or refresh the page."
+              action={
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  type="button"
+                  onClick={() => handleViewChange("log_returns")}
+                >
+                  Retry
+                </Button>
+              }
+            />
+          ) : !logReturns || logReturns.length === 0 ? (
             <PartialDataBanner
               heading="Awaiting more data"
               body="Log returns series unavailable for this strategy."

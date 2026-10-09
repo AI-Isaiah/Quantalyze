@@ -59,7 +59,10 @@ vi.mock("@/components/charts/TurnoverChart", () => ({
 }));
 
 let lastCorrelationAnalytics: unknown = null;
-vi.mock("@/components/charts/CorrelationWithBenchmark", () => ({
+// 2026-10-09 Phase 170.5-05: the panel now calls the REAL resolver itself, so the
+// module mock spreads the actual exports and replaces only the chart component.
+vi.mock("@/components/charts/CorrelationWithBenchmark", async (importActual) => ({
+  ...(await importActual<typeof import("@/components/charts/CorrelationWithBenchmark")>()),
   CorrelationWithBenchmark: ({ analytics }: { analytics: unknown }) => {
     lastCorrelationAnalytics = analytics;
     return <div data-testid="correlation-with-benchmark" />;
@@ -76,9 +79,10 @@ vi.mock("./BenchmarkGreeksTable", () => ({
 
 import { ExposureAndGreeksPanel } from "./ExposureAndGreeksPanel";
 
+// 2026-10-09 Phase 170.5 (D-03): producer writes USD notional
 const SAMPLE_EXPOSURE = [
-  { date: "2024-01-01", gross: 0.8, net: 0.5 },
-  { date: "2024-01-02", gross: 0.85, net: 0.4 },
+  { date: "2024-01-01", gross: 53505.06, net: 53505.06 },
+  { date: "2024-01-02", gross: 18164.46, net: -48544.8 },
 ];
 const SAMPLE_TURNOVER = [
   { date: "2024-01-01", value: 0.21 },
@@ -87,6 +91,8 @@ const SAMPLE_TURNOVER = [
 const SAMPLE_GREEKS = {
   alpha: 0.05,
   beta: 1.2,
+  // 2026-10-09 Phase 170.5 (D-07): the fifth figure
+  correlation: 0.4,
   ir: 0.8,
   treynor: 0.04,
 };
@@ -95,7 +101,15 @@ const SAMPLE_CORRELATION_ANALYTICS = {
     { date: "2024-01-01", value: 1.0 },
     { date: "2024-01-02", value: 1.01 },
   ],
-  metrics_json: { benchmark_returns: [] },
+  // 2026-10-09 Phase 170.5-05: the panel mounts the chart only for a resolved
+  // 2-point series, so the fixture carries the producer key (metrics.py).
+  metrics_json: {
+    benchmark_returns: [],
+    btc_rolling_correlation_90d: [
+      { date: "2024-01-01", value: 0.4 },
+      { date: "2024-01-02", value: 0.5 },
+    ],
+  },
 };
 
 beforeEach(() => {
@@ -133,7 +147,7 @@ describe("ExposureAndGreeksPanel — Phase 14b-05 Task 2", () => {
     expect(cls).toContain("shadow-card");
   });
 
-  it("Test 6: panel-level partial data when history_days < 30", () => {
+  it("Test 6: panel-level partial data when history_days < 30 (exposure and turnover only; greeks are not gated, 170.5 WR-01; correlation is not gated, 170.5 R2-03)", () => {
     mockHookReturn = { ref: () => {}, data: null, status: "ready" };
     const { container, queryByTestId } = render(
       <ExposureAndGreeksPanel
@@ -147,13 +161,17 @@ describe("ExposureAndGreeksPanel — Phase 14b-05 Task 2", () => {
     expect(banner).not.toBeNull();
     expect(banner?.textContent).toContain("Awaiting more data");
     expect(banner?.textContent).toContain(
-      "This strategy needs at least 30 days of trading history to compute exposure and benchmark greeks.",
+      "This strategy needs at least 30 days of trading history to compute exposure and turnover.",
     );
-    // No sub-components rendered
+    // The 30-day gate replaces the lazy sub-sections only
     expect(queryByTestId("net-gross-chart")).toBeNull();
     expect(queryByTestId("turnover-chart")).toBeNull();
-    expect(queryByTestId("correlation-with-benchmark")).toBeNull();
-    expect(queryByTestId("benchmark-greeks-table")).toBeNull();
+    // 170.5 R2-03: correlation reads eager props (its resolver is given history_days
+    // and names a short history itself), so the exposure gate leaves it. This
+    // assertion was `toBeNull()` and encoded the gate swallowing it.
+    expect(queryByTestId("correlation-with-benchmark")).not.toBeNull();
+    // 170.5 WR-01: the greeks come from the factsheet's joint (10-day floor), so the gate leaves them
+    expect(queryByTestId("benchmark-greeks-table")).not.toBeNull();
   });
 
   it("Test 7: ready full — 4 sub-sections render in order with verbatim H3 titles", () => {
@@ -170,6 +188,7 @@ describe("ExposureAndGreeksPanel — Phase 14b-05 Task 2", () => {
         strategyId="s1"
         history_days={365}
         benchmark_greeks={SAMPLE_GREEKS}
+        benchmark_joint={{ kind: "computed", paired: 120, flatLeg: false }}
         correlation_analytics={SAMPLE_CORRELATION_ANALYTICS}
       />,
     );
@@ -191,11 +210,14 @@ describe("ExposureAndGreeksPanel — Phase 14b-05 Task 2", () => {
     expect(lastNetGrossData).toEqual(SAMPLE_EXPOSURE);
     expect(lastTurnoverData).toEqual(SAMPLE_TURNOVER);
     expect(lastCorrelationAnalytics).toEqual(SAMPLE_CORRELATION_ANALYTICS);
+    // 2026-10-09 Phase 170.5 (D-07): five live figures plus the reason line
     expect(lastBenchmarkGreeksProps).toEqual({
       alpha: SAMPLE_GREEKS.alpha,
       beta: SAMPLE_GREEKS.beta,
+      correlation: SAMPLE_GREEKS.correlation,
       ir: SAMPLE_GREEKS.ir,
       treynor: SAMPLE_GREEKS.treynor,
+      reason: null,
     });
   });
 
@@ -217,8 +239,9 @@ describe("ExposureAndGreeksPanel — Phase 14b-05 Task 2", () => {
       />,
     );
     expect(queryByTestId("net-gross-chart")).toBeNull();
+    // 2026-10-09 Phase 170.5 (D-03, D-04): reason by cause
     expect(container.textContent).toContain(
-      "Net & gross exposure unavailable for this strategy.",
+      "Net and gross exposure isn’t available for this strategy: no position-snapshot exposure series is stored for it.",
     );
     // Other 3 sub-sections still render
     expect(queryByTestId("turnover-chart")).not.toBeNull();
@@ -244,7 +267,10 @@ describe("ExposureAndGreeksPanel — Phase 14b-05 Task 2", () => {
       />,
     );
     expect(queryByTestId("turnover-chart")).toBeNull();
-    expect(container.textContent).toContain("Turnover unavailable for this strategy.");
+    // 2026-10-09 Phase 170.5 (D-03, D-04): reason by cause
+    expect(container.textContent).toContain(
+      "Turnover isn’t available for this strategy: no turnover series is computed for it.",
+    );
     expect(queryByTestId("net-gross-chart")).not.toBeNull();
   });
 
@@ -260,14 +286,19 @@ describe("ExposureAndGreeksPanel — Phase 14b-05 Task 2", () => {
     );
     expect(queryByTestId("net-gross-chart")).toBeNull();
     expect(queryByTestId("turnover-chart")).toBeNull();
-    expect(container.textContent).toContain("Net & gross exposure unavailable");
-    expect(container.textContent).toContain("Turnover unavailable");
+    // 2026-10-09 Phase 170.5 (D-03, D-04): reason by cause
+    expect(container.textContent).toContain(
+      "Net and gross exposure isn’t available for this strategy: no position-snapshot exposure series is stored for it.",
+    );
+    expect(container.textContent).toContain(
+      "Turnover isn’t available for this strategy: no turnover series is computed for it.",
+    );
     // Correlation + Greeks still render — they do not depend on lazy data
     expect(queryByTestId("correlation-with-benchmark")).not.toBeNull();
     expect(queryByTestId("benchmark-greeks-table")).not.toBeNull();
   });
 
-  it("Test 9a: status='loading' → centered Loading…; no sub-components", () => {
+  it("Test 9a: status='loading' → centered Loading…; lazy sub-components absent, greeks (eager) render", () => {
     mockHookReturn = { ref: () => {}, data: null, status: "loading" };
     const { container, queryByTestId } = render(
       <ExposureAndGreeksPanel
@@ -279,10 +310,11 @@ describe("ExposureAndGreeksPanel — Phase 14b-05 Task 2", () => {
     );
     expect(container.textContent).toContain("Loading");
     expect(queryByTestId("net-gross-chart")).toBeNull();
-    expect(queryByTestId("benchmark-greeks-table")).toBeNull();
+    // 170.5 WR-02: nothing is loading for the greeks, they are already in the props
+    expect(queryByTestId("benchmark-greeks-table")).not.toBeNull();
   });
 
-  it("Test 9b: status='error' → error PartialDataBanner; no sub-components", () => {
+  it("Test 9b: status='error' → error PartialDataBanner on the lazy part; greeks (eager) still render", () => {
     mockHookReturn = { ref: () => {}, data: null, status: "error" };
     const { container, queryByTestId } = render(
       <ExposureAndGreeksPanel
@@ -296,6 +328,7 @@ describe("ExposureAndGreeksPanel — Phase 14b-05 Task 2", () => {
     expect(banner).not.toBeNull();
     expect(banner?.textContent).toContain("Couldn");
     expect(queryByTestId("net-gross-chart")).toBeNull();
+    expect(queryByTestId("benchmark-greeks-table")).not.toBeNull();
   });
 
   it("Test 10: no forbidden type-scale classes in rendered output", () => {

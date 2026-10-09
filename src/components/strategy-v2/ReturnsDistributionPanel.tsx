@@ -35,7 +35,9 @@ interface Panel4LazyPayload {
  *
  * Lazy-fetches `daily_returns_grid` via `useLazyPanelMetrics<Panel4LazyPayload>("panel4")`
  * (migration 087 sibling-table contract) on first viewport intersection.
- * Mounts 5 sub-charts when status==="ready" and `history_days >= 30`:
+ * Mounts 5 sub-charts when `history_days >= 30`. The four eager ones render
+ * under every lazy status (Phase 170.5 R2-02); only the daily heatmap waits on
+ * the fetch, showing "Loading…" while idle/loading and the retry banner on error:
  *
  *   1. MonthlyHeatmap (eager — `monthly_returns` from getStrategyDetailV2)
  *   2. DailyHeatmap   (lazy  — `daily_returns_grid` from sibling table; <30d sub-banner)
@@ -92,23 +94,10 @@ export function ReturnsDistributionPanel(props: ReturnsDistributionPanelProps) {
             body="This strategy needs at least 30 days of trading history to populate Returns distribution."
           />
         </div>
-      ) : status === "idle" || status === "loading" ? (
-        <div
-          aria-live="polite"
-          className="mt-4 flex items-center justify-center text-xs font-normal text-text-muted"
-          style={{ minHeight: 180 }}
-        >
-          {"Loading…"}
-        </div>
-      ) : status === "error" ? (
-        <div className="mt-4">
-          <PartialDataBanner
-            heading="Couldn’t load this section"
-            body="Refresh the page to retry. The other panels still work."
-          />
-        </div>
       ) : (
-        // status === 'ready'
+        // Every eager sub-section renders under any lazy status (R2-02); only
+        // the Daily heatmap reads the panel4 payload and owns the loading and
+        // error states.
         <div className="mt-4 space-y-6">
           <SubSection title="Monthly heatmap">
             {props.monthly_returns ? (
@@ -119,7 +108,20 @@ export function ReturnsDistributionPanel(props: ReturnsDistributionPanelProps) {
           </SubSection>
 
           <SubSection title="Daily heatmap">
-            {dailyReturnsData.length > 0 ? (
+            {status === "idle" || status === "loading" ? (
+              <div
+                aria-live="polite"
+                className="flex items-center justify-center text-xs font-normal text-text-muted"
+                style={{ minHeight: 180 }}
+              >
+                {"Loading…"}
+              </div>
+            ) : status === "error" ? (
+              <PartialDataBanner
+                heading="Couldn’t load this section"
+                body="Refresh the page to retry. The other panels still work."
+              />
+            ) : dailyReturnsData.length > 0 ? (
               <DailyHeatmap data={dailyReturnsData} />
             ) : (
               <SubBanner body="Daily heatmap activates after 30 days of trading history." />

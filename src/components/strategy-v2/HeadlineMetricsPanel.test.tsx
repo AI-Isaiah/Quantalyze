@@ -387,19 +387,160 @@ describe("HeadlineMetricsPanel — Phase 14b-06 Task 3", () => {
     errorSpy.mockRestore();
   });
 
-  it("Test 10 (Grok B-03): fetch error path renders PartialDataBanner; console.error logged once", async () => {
+  it("Test 10 (Grok B-03, R2-01): fetch error path renders the retry banner, NOT the empty-series copy; console.error logged once", async () => {
     fetchMock.mockRejectedValue(new Error("network down"));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const { container } = render(<HeadlineMetricsPanel {...BASE_PROPS} />);
+    const { container, queryByTestId } = render(<HeadlineMetricsPanel {...BASE_PROPS} />);
     const lr = Array.from(container.querySelectorAll("button")).find(
       (b) => b.textContent?.trim() === "Log returns",
     )!;
     fireEvent.click(lr);
     await waitFor(() => {
-      expect(container.textContent).toContain("Log returns series unavailable for this strategy.");
+      expect(container.textContent).toContain("Couldn’t load this section");
     });
+    // R3-01: this banner can retry, so it says so (no "Refresh the page to
+    // retry" claim, which is only accurate for the hook-driven lazy panels).
+    expect(container.textContent).toContain("Log returns didn’t load. Retry, or refresh the page.");
+    expect(container.textContent).not.toContain("Refresh the page to retry");
+    expect(
+      Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.trim() === "Retry"),
+    ).toBe(true);
+    // A failure is not an empty series: the "unavailable for this strategy"
+    // sentence is a claim about the strategy and must never be shown for it.
+    expect(container.textContent).not.toContain("Log returns series unavailable");
+    expect(container.textContent).not.toContain("Awaiting more data");
+    expect(queryByTestId("equity-curve")).toBeNull();
     expect(errorSpy).toHaveBeenCalledTimes(1);
     errorSpy.mockRestore();
+  });
+
+  describe("R2-01: a failed Log returns fetch is recoverable without a page reload", () => {
+    const clickLabel = (container: HTMLElement, label: string) =>
+      fireEvent.click(
+        Array.from(container.querySelectorAll("button")).find(
+          (b) => b.textContent?.trim() === label,
+        )!,
+      );
+    const SERIES = [
+      { date: "2025-01-01", value: 0.0 },
+      { date: "2025-01-02", value: 0.01 },
+    ];
+
+    it("re-selecting the view after leaving it refetches and draws the series", async () => {
+      fetchMock
+        .mockRejectedValueOnce(new Error("network down"))
+        .mockResolvedValueOnce({ log_returns_series: SERIES });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { container, getByTestId } = render(<HeadlineMetricsPanel {...BASE_PROPS} />);
+
+      clickLabel(container, "Log returns");
+      await waitFor(() => expect(container.textContent).toContain("Couldn’t load this section"));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      clickLabel(container, "Cumulative");
+      clickLabel(container, "Log returns");
+      await waitFor(() => expect(getByTestId("equity-curve").getAttribute("data-len")).toBe("2"));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(container.textContent).not.toContain("Couldn’t load this section");
+      errorSpy.mockRestore();
+    });
+
+    it("clicking Log returns while it is already the active failed view retries too", async () => {
+      fetchMock
+        .mockRejectedValueOnce(new Error("network down"))
+        .mockResolvedValueOnce({ log_returns_series: SERIES });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { container, getByTestId } = render(<HeadlineMetricsPanel {...BASE_PROPS} />);
+
+      clickLabel(container, "Log returns");
+      await waitFor(() => expect(container.textContent).toContain("Couldn’t load this section"));
+
+      clickLabel(container, "Log returns");
+      await waitFor(() => expect(getByTestId("equity-curve")).not.toBeNull());
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      errorSpy.mockRestore();
+    });
+
+    it("a retry that fails again shows the banner again, not the empty-series copy", async () => {
+      fetchMock.mockRejectedValue(new Error("still down"));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { container } = render(<HeadlineMetricsPanel {...BASE_PROPS} />);
+
+      clickLabel(container, "Log returns");
+      await waitFor(() => expect(container.textContent).toContain("Couldn’t load this section"));
+      clickLabel(container, "Log returns");
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(container.textContent).toContain("Couldn’t load this section"));
+      expect(container.textContent).not.toContain("Log returns series unavailable");
+      errorSpy.mockRestore();
+    });
+
+    it("R3-01: the banner's Retry button refetches and, on success, shows the chart", async () => {
+      fetchMock
+        .mockRejectedValueOnce(new Error("network down"))
+        .mockResolvedValueOnce({ log_returns_series: SERIES });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { container, getByTestId, queryByTestId } = render(<HeadlineMetricsPanel {...BASE_PROPS} />);
+
+      clickLabel(container, "Log returns");
+      await waitFor(() => expect(container.textContent).toContain("Couldn’t load this section"));
+      expect(queryByTestId("equity-curve")).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      clickLabel(container, "Retry");
+      await waitFor(() => expect(getByTestId("equity-curve").getAttribute("data-len")).toBe("2"));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(container.textContent).not.toContain("Couldn’t load this section");
+      errorSpy.mockRestore();
+    });
+
+    it("R3-01: a Retry that fails again shows the banner (and Retry) again", async () => {
+      fetchMock.mockRejectedValue(new Error("still down"));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { container, queryByTestId } = render(<HeadlineMetricsPanel {...BASE_PROPS} />);
+
+      clickLabel(container, "Log returns");
+      await waitFor(() => expect(container.textContent).toContain("Couldn’t load this section"));
+      clickLabel(container, "Retry");
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(container.textContent).toContain("Couldn’t load this section"));
+      expect(
+        Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.trim() === "Retry"),
+      ).toBe(true);
+      expect(queryByTestId("equity-curve")).toBeNull();
+      expect(container.textContent).not.toContain("Log returns series unavailable");
+      errorSpy.mockRestore();
+    });
+
+    it("a resolved empty series is cached: re-selecting does NOT refetch and keeps the empty copy", async () => {
+      fetchMock.mockResolvedValue({});
+      const { container } = render(<HeadlineMetricsPanel {...BASE_PROPS} />);
+
+      clickLabel(container, "Log returns");
+      await waitFor(() =>
+        expect(container.textContent).toContain("Log returns series unavailable for this strategy."),
+      );
+      clickLabel(container, "Cumulative");
+      clickLabel(container, "Log returns");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(container.textContent).toContain("Log returns series unavailable for this strategy.");
+      expect(container.textContent).not.toContain("Couldn’t load this section");
+    });
+
+    it("clicking Log returns while a fetch is in flight does not fire a second fetch", async () => {
+      let resolveFetch!: (v: unknown) => void;
+      fetchMock.mockImplementation(
+        () => new Promise((r) => { resolveFetch = r; }),
+      );
+      const { container, getByTestId } = render(<HeadlineMetricsPanel {...BASE_PROPS} />);
+      clickLabel(container, "Log returns");
+      clickLabel(container, "Log returns");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        resolveFetch({ log_returns_series: SERIES });
+      });
+      await waitFor(() => expect(getByTestId("equity-curve")).not.toBeNull());
+    });
   });
 });
 

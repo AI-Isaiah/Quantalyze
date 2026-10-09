@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { getStrategyDetailV2 } from "@/lib/queries";
 import { StrategyV2Shell } from "@/components/strategy-v2/StrategyV2Shell";
+import { readCompositeV2Joint, withV2Joint } from "./composite-joint";
 
 export async function generateMetadata({
   params,
@@ -46,6 +47,13 @@ export default async function StrategyV2Page({
   const { id } = await params;
   const result = await getStrategyDetailV2(id);
   if (!result) notFound();
+  // Phase 170.5 (D-07): a composite's greeks come from the factsheet's own
+  // builder, because the light read cannot reach a composite's series. Only a
+  // composite pays for the (uncached) build.
+  const detail =
+    result.panel7Inputs.benchmark_joint?.kind === "needs_builder"
+      ? withV2Joint(result, await readCompositeV2Joint(id))
+      : result;
   return (
     <>
       <nav aria-label="Page sections" className="strategy-v2-skip-nav">
@@ -55,7 +63,7 @@ export default async function StrategyV2Page({
           </a>
         ))}
       </nav>
-      <StrategyV2Shell detail={result} />
+      <StrategyV2Shell detail={detail} />
     </>
   );
 }

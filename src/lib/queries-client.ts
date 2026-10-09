@@ -29,8 +29,18 @@ export type { LazyMetricsPanelId };
  * RLS gates the same way: the `fetch_strategy_lazy_metrics` SECURITY
  * DEFINER RPC enforces strategy visibility internally (migration 087);
  * the browser client passes the user's anon JWT and the RPC returns `{}`
- * for invisible strategies — same silent-fallback behaviour as the
- * server-side function.
+ * for invisible strategies (and for a visible strategy with no stored rows) —
+ * that `{}` is a VALID payload and resolves normally.
+ *
+ * FAILURE CONTRACT (Phase 170.5 SFH-01): a fetch that FAILED must not be
+ * indistinguishable from "nothing stored". The RPC's own contract is a JSONB
+ * object on every path (`jsonb_build_object()` for invisible / empty, COALESCEd
+ * so it is never SQL NULL), so an RPC error, a null/undefined payload, or a
+ * non-object payload is a failure and THROWS. `useLazyPanelMetrics` maps the
+ * rejection to status "error", which the panels render as the retry banner
+ * instead of a false "no series is stored" say-why sentence. The server mirror
+ * `fetchStrategyLazyMetrics` keeps its `{}` fallback (its callers have no
+ * retry surface).
  */
 export async function fetchStrategyLazyMetricsClient(
   strategyId: string,
@@ -49,7 +59,9 @@ export async function fetchStrategyLazyMetricsClient(
       code: error.code,
       message: error.message,
     });
-    return {};
+    throw new Error(
+      `fetch_strategy_lazy_metrics RPC failed (${panelId}): ${error.message}`,
+    );
   }
 
   // audit-2026-05-07 silent-failure HIGH (red-team apply): the prior
@@ -58,10 +70,18 @@ export async function fetchStrategyLazyMetricsClient(
   // SECURITY DEFINER RPC drift that returned a SQL NULL, an array, or a
   // primitive would sail through the client mirror untouched and corrupt
   // every downstream destructuring consumer. Mirror the server guard:
-  // reject anything that isn't a plain object; treat null/undefined as
-  // legitimate empty.
+  // reject anything that isn't a plain object. null/undefined is NOT a
+  // legitimate empty here: the RPC COALESCEs to an empty object, so a null
+  // means the contract drifted (or the call was short-circuited) and the
+  // caller must see a failure, not an empty-but-valid payload.
   if (data === null || data === undefined) {
-    return {};
+    console.error("fetchStrategyLazyMetricsClient: RPC returned no payload", {
+      strategyId,
+      panelId,
+    });
+    throw new Error(
+      `fetch_strategy_lazy_metrics returned no payload (${panelId})`,
+    );
   }
   if (typeof data !== "object" || Array.isArray(data)) {
     const shapeType = Array.isArray(data) ? "array" : typeof data;
@@ -70,7 +90,9 @@ export async function fetchStrategyLazyMetricsClient(
       panelId,
       type: shapeType,
     });
-    return {};
+    throw new Error(
+      `fetch_strategy_lazy_metrics returned an unexpected payload shape (${panelId}): ${shapeType}`,
+    );
   }
   // The RPC's `data` is typed `any` by supabase-js; after the guard
   // above we know it's a plain object. The server-side
