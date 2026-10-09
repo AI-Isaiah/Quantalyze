@@ -124,6 +124,10 @@ DECLARE
   v_state    TEXT;
   v_sqlstate TEXT;
   v_msg      TEXT;
+  v_probe    TEXT;
+  v_sr_miss  TEXT;
+  v_dml_miss TEXT;
+  v_trg_cnt  INTEGER;
   -- Same CASE as migration 20261009150000. The literal MAINTAIN is only ever a
   -- datum inside this array, and the array only holds it on PostgreSQL 17 and later.
   v_verbs    TEXT[] := CASE WHEN current_setting('server_version_num')::int >= 170000
@@ -274,7 +278,82 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (TRUNC 6): an authenticated user''s TRUNCATE of public.cron_runs was % (SQLSTATE %, message %), expected a 42501 refusal naming the table. Row security was never consulted and could not have been: TRUNCATE is refused or allowed at the grant layer alone, so this is the statement an injected query or a pooled session running as the client role would issue.', COALESCE(v_state, 'permitted'), COALESCE(v_sqlstate, 'none'), COALESCE(v_msg, 'none');
   END IF;
 
-  RAISE NOTICE 'TRUNCATE grants OK: no public relation lets anon or authenticated TRUNCATE (TRUNC 1), a new postgres-created table grants them none (TRUNC 2) while service_role keeps it (TRUNC 3) and the client roles keep SELECT (TRUNC 4), service_role still holds it on cron_runs (TRUNC 5), and authenticated is refused 42501 (TRUNC 6).';
+  -- The verb arms sit AFTER TRUNC 6 on purpose: a VERB twin can then never be
+  -- stolen by a TRUNC arm, and a TRUNC twin never by a VERB arm.
+
+  -- ===== ARM VERB 2 — a new table grants the client roles no TRIGGER/MAINTAIN
+  SELECT string_agg(r.rolname || '/' || vb.verb, ', ' ORDER BY r.rolname, vb.verb) INTO v_probe
+    FROM (VALUES ('anon'), ('authenticated')) AS r(rolname) CROSS JOIN unnest(v_verbs) AS vb(verb)
+   WHERE has_table_privilege(r.rolname, 'public.truncate_revoke_probe_16497'::regclass, vb.verb);
+  -- RED-UNDER: hand a verb back through the DEFAULT, not through a table —
+  --            `ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT
+  --            TRIGGER ON TABLES TO authenticated`. That is the regression where a
+  --            later migration or a platform change restores the bootstrap default
+  --            and every future table is born holding the verb.
+  -- RED-UNDER-M: {"arm":"VERB 2","apply":[{"kind":"sql","stmt":"ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT TRIGGER ON TABLES TO authenticated"}]}
+  IF v_probe IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (VERB 2): a table postgres created in public after the migration grants (role/verb) %. The postgres default privilege for tables still carries the verb, so every table a future migration creates will be born with it and the existing-table sweep (VERB 1) will only catch it after the fact.', v_probe;
+  END IF;
+
+  -- ===== ARM VERB 3 — a new table still grants service_role every verb ====
+  SELECT string_agg(vb.verb, ', ' ORDER BY vb.verb) INTO v_sr_miss
+    FROM unnest(v_verbs) AS vb(verb)
+   WHERE NOT has_table_privilege('service_role', 'public.truncate_revoke_probe_16497'::regclass, vb.verb);
+  -- RED-UNDER: remove a verb from the default for the role that must keep it —
+  --            `ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  --            REVOKE TRIGGER ON TABLES FROM service_role` — the realistic
+  --            over-broad edit of the migration's own default-privilege line.
+  -- RED-UNDER-M: {"arm":"VERB 3","apply":[{"kind":"sql","stmt":"ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE TRIGGER ON TABLES FROM service_role"}]}
+  IF v_sr_miss IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (VERB 3): a table postgres created in public after the migration does NOT grant service_role (verbs) %. The default-privilege change removed a verb from a role that must keep it; the service path loses it on every new table. The revoke takes TRIGGER and MAINTAIN from anon and authenticated and from nobody else.', v_sr_miss;
+  END IF;
+
+  -- ===== ARM VERB 4 — authenticated keeps INSERT, UPDATE, DELETE on an existing table
+  -- An EXISTING table, not the probe: what a NEW table inherits changes when the
+  -- platform withdraws the default data grants on 2026-10-30.
+  SELECT string_agg(vb.verb, ', ' ORDER BY vb.verb) INTO v_dml_miss
+    FROM unnest(ARRAY['INSERT','UPDATE','DELETE']) AS vb(verb)
+   WHERE NOT has_table_privilege('authenticated', 'public.cron_runs'::regclass, vb.verb);
+  -- RED-UNDER: take a different verb from authenticated on the existing table —
+  --            `REVOKE UPDATE ON public.cron_runs FROM authenticated` — the shape
+  --            of a REVOKE that went further than the two verbs it was written for.
+  -- RED-UNDER-M: {"arm":"VERB 4","apply":[{"kind":"sql","stmt":"REVOKE UPDATE ON public.cron_runs FROM authenticated"}]}
+  IF v_dml_miss IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (VERB 4): authenticated no longer holds (verbs) % on public.cron_runs. The migration removes TRIGGER and MAINTAIN from anon and authenticated and nothing else; every RLS-scoped write the client roles make is a verb this check names.', v_dml_miss;
+  END IF;
+
+  -- ===== ARM VERB 5 — the grant layer refuses an authenticated CREATE TRIGGER
+  -- ⛔ Same shape as TRUNC 6: the handler records state and the SQLSTATE and nothing
+  -- else; the assertion is read AFTER RESET ROLE (lint rule R1) and matches the
+  -- SQLSTATE, not the message text (lc_messages can translate it).
+  SET LOCAL ROLE authenticated;
+  v_state := NULL;
+  v_sqlstate := NULL;
+  BEGIN
+    CREATE TRIGGER verb_probe_trg BEFORE UPDATE ON public.profiles
+      FOR EACH ROW EXECUTE FUNCTION suppress_redundant_updates_trigger();
+  EXCEPTION WHEN OTHERS THEN
+    v_state := 'denied';
+    v_sqlstate := SQLSTATE;
+  END;
+  RESET ROLE;
+
+  SELECT count(*) INTO v_trg_cnt
+    FROM pg_trigger t
+   WHERE t.tgrelid = 'public.profiles'::regclass AND t.tgname = 'verb_probe_trg';
+
+  -- RED-UNDER: hand TRIGGER back on the live lane —
+  --            `GRANT TRIGGER ON public.profiles TO authenticated`. VERB 1 fires
+  --            first on that grant, so this arm is observed with VERB 1 neutered
+  --            (GRAMMAR Shape 2): the statement then SUCCEEDS and the behavioural
+  --            arm is what names it, which proves the catalogue sweep and the real
+  --            statement agree.
+  -- RED-UNDER-M: {"arm":"VERB 5","apply":[{"kind":"sql","stmt":"GRANT TRIGGER ON public.profiles TO authenticated"}],"neuter":[{"arm":"VERB 1"}]}
+  IF v_state IS DISTINCT FROM 'denied' OR v_sqlstate IS DISTINCT FROM '42501' OR v_trg_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (VERB 5): an authenticated user''s CREATE TRIGGER on public.profiles was % (SQLSTATE %, trigger rows left behind %), expected a 42501 refusal and no trigger. Row security was never consulted and could not have been: TRIGGER is refused or allowed at the grant layer alone, and a trigger a client role attaches is run by whichever role later writes the table.', COALESCE(v_state, 'permitted'), COALESCE(v_sqlstate, 'none'), v_trg_cnt;
+  END IF;
+
+  RAISE NOTICE 'TRUNCATE, TRIGGER and MAINTAIN grants OK: no public relation lets anon or authenticated TRUNCATE (TRUNC 1) or hold any verb in % (VERB 1), a new postgres-created table grants them none of the three (TRUNC 2, VERB 2) while service_role keeps all (TRUNC 3, VERB 3) and the client roles keep SELECT (TRUNC 4) and INSERT, UPDATE, DELETE on cron_runs (VERB 4), service_role still holds TRUNCATE on cron_runs (TRUNC 5), and authenticated is refused 42501 for TRUNCATE (TRUNC 6) and for CREATE TRIGGER (VERB 5).', v_verbs;
 END $$;
 
 ROLLBACK;
