@@ -286,3 +286,12 @@ crossing is answered by `[REDUNDER-SUBSET-SPLIT]`, never by raising again.
 Read the run's own `coverage:` and `arms:` lines rather than any number restated
 in prose.
 
+
+⚠️ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): the gate file
+`supabase/tests/test_btcusdview_native_balance.sql` (migration 20261010120000: the owner-only
+column GRANT on three `api_keys` columns, the `account_balance_usdt_close_date` and
+`quantity_unit` columns, the unit CHECK) arrived with five arms, each on a `sql` step, none
+waived. A DATED reading of one full `node scripts/mutation-runner/run.mjs` on that branch
+alone, no file edited during it: `coverage: files 62/89`, `arms: 615/615/0`, `biting: 615`,
+`lane-invocations: 615` plus 62 baseline / 62 restore legs, `unreachable: 27`, `lane-blocked: 0`,
+`No defects.`, exit 0. Not a live constant: read `FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
