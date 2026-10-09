@@ -333,7 +333,10 @@ SELECT m.marker_is_prod,
 node scripts/prod-prober/run.mjs --preflight-repoint
 ```
 
-Needs `PROBER_POOLER_URL` and `PGPASSWORD` (the founder exports the database password). Expected
+Needs `PROBER_POOLER_URL` and `SUPABASE_DB_PASSWORD` (the founder exports the database password).
+⛔ **CORRECTED 2026-10-09 (plan 06 execution):** this line said `PGPASSWORD`. The prober reads
+`SUPABASE_DB_PASSWORD` and passes it to psql as `PGPASSWORD` in its own child environment; with only
+`PGPASSWORD` exported it refuses with nothing written. Expected
 exit 0. Exit 1 means a defect was found, read the printed remedy; exit 3 means nothing was
 measured, fix that first. Required before Step B, not before Step A (Step A writes no `cron.job`
 row).
