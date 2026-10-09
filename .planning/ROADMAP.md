@@ -4847,6 +4847,7 @@ Plans:
 3. An emptied stretch, a level within a small band of zero, composes as zero capital with no return, and the book continues on re-deposit. It is neither refused nor degraded (founder D-18(b)). A synthetic withdraw-100%, sit-at-zero, re-deposit key fails on today's compose.
 4. Every Deribit account whose cash-basis returns move is named and re-baselined, with before and after readings on PROD (marker first, counts and verdicts only). The recompute runs in the Wave 5 consolidated recompute, and the refused allocator then reads a trustworthy v2 book.
 5. The remaining `inception_unreconciled` on that key (+1.3% implied pre-deposit capital, not explained by the offset) is measured and either fixed here or routed by name.
+6. Two derives over the same stored inputs produce identical returns (today 372 of 1187 days differ, because the derive reads live account state). A test runs the derive twice on frozen inputs and fails on today's code. Any live read the derive needs is captured as a stored input. (Added 2026-10-09, founder: fix here, not a new phase; 167.1.2.2.1 CONTEXT D-03.)
 
 **Plans:** 0 plans
 
