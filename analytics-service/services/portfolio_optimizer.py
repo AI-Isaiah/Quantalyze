@@ -358,6 +358,26 @@ def _leg_is_flat(df: pd.DataFrame, col: str) -> bool:
     return not dispersion_is_real(float(df[col].std()), float(df[col].mean()))
 
 
+def drawdown_improvement(
+    before_max_dd: Optional[float], after_max_dd: Optional[float]
+) -> Optional[float]:
+    """Signed drawdown improvement: POSITIVE when ``after`` is shallower.
+
+    ``_max_drawdown`` returns a value <= 0, so a shallower drawdown is closer
+    to 0 and the improvement is ``after - before``: -0.236 minus -0.464 is
+    +0.228. None when either side is None: a delta against a drawdown that
+    does not exist does not exist either (166.1 D7).
+
+    This is the ONE definition of the sign. Every scorer that reports a
+    drawdown improvement (the simulator, the optimizer, the match engine and
+    the bridge) must call it rather than subtract inline (Phase 166.1.1,
+    H-1065).
+    """
+    if before_max_dd is None or after_max_dd is None:
+        return None
+    return after_max_dd - before_max_dd
+
+
 def _max_drawdown(returns: pd.Series) -> Optional[float]:
     if returns.empty:
         return None

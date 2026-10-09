@@ -36,6 +36,7 @@ from services.portfolio_optimizer import (
     _leg_is_flat,
     _max_drawdown,
     blend_clock,
+    drawdown_improvement,
 )
 from services.window_alignment import align_current_and_proposed
 
@@ -94,10 +95,11 @@ def simulate_add_candidate(
 
     Deltas are oriented so POSITIVE = improvement for every chip:
       - sharpe_delta:        proposed - current   (higher Sharpe is better)
-      - dd_delta:            current  - proposed  (less drawdown is better;
-                                                   MaxDD is negative so this
-                                                   measures how far the
-                                                   trough shrinks toward 0)
+      - dd_delta:            proposed - current   (a shallower drawdown is
+                                                   better; MaxDD is negative,
+                                                   so this measures how far
+                                                   the trough shrinks toward
+                                                   0 - see drawdown_improvement)
       - corr_delta:          current  - proposed  (lower correlation is
                                                    better for diversification)
       - concentration_delta: current  - proposed  (lower HHI is better for
@@ -198,9 +200,10 @@ def simulate_add_candidate(
     # Both sides are now scored over the same `aligned` window (the
     # candidate∩portfolio intersection) so the deltas are window-coincident.
     sharpe_delta = _delta(proposed_sharpe, current_sharpe)
-    # MaxDD is a negative number; "less drawdown" means closer to 0, so
-    # current - proposed is positive when the candidate reduces drawdown.
-    dd_delta = _delta(current_max_dd, proposed_max_dd)
+    # MaxDD is a negative number; a shallower drawdown is closer to 0, so
+    # proposed - current is positive when the candidate reduces drawdown. The
+    # sign lives in drawdown_improvement (Phase 166.1.1, H-1065).
+    dd_delta = drawdown_improvement(current_max_dd, proposed_max_dd)
     # NEW-C11-02 (audit-2026-05-26): a single-strategy "current" portfolio has
     # NO existing correlation pair, so _avg_corr(port_aligned) is None. Routing
     # that through the old _delta coerced None -> 0.0, which the panel renders as a

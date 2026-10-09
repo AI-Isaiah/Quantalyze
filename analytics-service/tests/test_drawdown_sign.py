@@ -24,7 +24,7 @@ Every comparison uses ``pytest.approx``: 0.5 * -0.464 + 0.5 * -0.008 is
 import pandas as pd
 import pytest
 
-from services.portfolio_optimizer import _max_drawdown
+from services.portfolio_optimizer import _max_drawdown, drawdown_improvement
 from services.simulator_scoring import simulate_add_candidate
 
 
@@ -83,3 +83,17 @@ def test_simulator_worse_is_negative():
         {"s1": _s(BOOK_B)}, "c1", _s(CAND_B), {"s1": 1.0}, add_weight=0.10
     )
     assert r["deltas"]["dd_delta"] == pytest.approx(-0.0087)
+
+
+def test_drawdown_improvement_helper_contract():
+    """The one definition of the sign: shallower after => positive.
+
+    -0.464 -> -0.236 is +0.228; 0.0 -> -0.0087 is -0.0087 (the drawdown got
+    worse); either side None gives None, because a delta against a drawdown
+    that does not exist does not exist either (166.1 D7).
+    """
+    assert drawdown_improvement(-0.464, -0.236) == pytest.approx(0.228)
+    assert drawdown_improvement(0.0, -0.0087) == pytest.approx(-0.0087)
+    assert drawdown_improvement(None, -0.236) is None
+    assert drawdown_improvement(-0.464, None) is None
+    assert drawdown_improvement(None, None) is None
