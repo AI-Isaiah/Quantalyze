@@ -83,9 +83,15 @@ def _make_supabase_for_compute(
     insert_returns_id: str = "analytics-1",
     benchmark_returns=None,
     prev_optimizer: list[dict] | None = None,
+    final_update_rows: list[dict] | None = None,
 ):
     """Build a supabase MagicMock that responds to _compute_portfolio_analytics's
     sequence of calls.
+
+    ``final_update_rows`` is what the closing ``portfolio_analytics`` update returns.
+    Default: ONE row, as PostgREST returns for an update that matched the row.
+    Phase 166.4.1 D-06 made an update that matches nothing (``[]``) raise, so a
+    fake that defaulted to ``[]`` would model a deleted row in every test.
     """
     sb = MagicMock()
 
@@ -101,7 +107,9 @@ def _make_supabase_for_compute(
     pa.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
         data=prev_optimizer or []
     )
-    pa.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+    pa.update.return_value.eq.return_value.execute.return_value = MagicMock(
+        data=final_update_rows if final_update_rows is not None else [{"id": insert_returns_id}]
+    )
     table_mocks["portfolio_analytics"] = pa
 
     # Column-strict: a select naming a column the real table lacks RAISES here,

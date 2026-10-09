@@ -1509,3 +1509,36 @@ describe("[164.9.4 IN-02 / LOW-10] every lane reader reads the handoff run.sh wr
     }
   });
 });
+
+// ── Phase 164.9.7.1 TRIGGERREVOKE, D-07 control 3: the MAINTAIN half of the gate must keep RUNNING.
+// MAINTAIN exists only from PostgreSQL 17. The sql-mutation pg-lane is PostgreSQL 16 and
+// cannot even name the verb (`unrecognized privilege type`), so the SQL gate
+// test_truncate_revoke_anon_authenticated.sql builds its verb list from server_version_num
+// and evaluates MAINTAIN only where the server can. The local-stack lane (this file's
+// subject, image pinned by LANE_PG_VERSION) is the ONLY CI place that is PG17 and loads the
+// full dump, so it is the only place the MAINTAIN half of the gate and of the migration's
+// self-check ever runs. Two edits turn that half off while every job stays green: someone
+// narrows the gate's PG17 branch to TRIGGER alone, or someone repins the lane image below
+// 17. Neither fails any SQL arm (a verb list that stops naming MAINTAIN reports no
+// MAINTAIN holder, which is exactly "none"), so this pin is the guard.
+describe("D-07 (Phase 164.9.7.1 TRIGGERREVOKE): the gate's MAINTAIN half runs on a PG17 lane", () => {
+  it("the gate's PG17 verb list names MAINTAIN and the lane image major is at least 17", () => {
+    const lane = read(RUN_SH);
+    const pin = lane.match(/^LANE_PG_VERSION="(\d+\.\d+\.\d+\.\d+)"$/m);
+    expect(pin, `${RUN_SH} carries no LANE_PG_VERSION pin, so no one can say which major evaluates MAINTAIN`).not.toBeNull();
+    const major = Number(pin![1].split(".")[0]);
+    expect(
+      major,
+      `LANE_PG_VERSION is ${pin![1]} (major ${major}). No lane would then evaluate MAINTAIN: the sql-mutation pg-lane is PostgreSQL 16 and cannot name the verb, so the local-stack lane is the only CI place the MAINTAIN half of the gate runs, and the migration's self-check is otherwise its only guard. Keep the pin at 17 or later.`,
+    ).toBeGreaterThanOrEqual(17);
+
+    const gate = read("supabase/tests/test_truncate_revoke_anon_authenticated.sql")
+      .split("\n")
+      .filter((l) => !/^\s*--/.test(l))
+      .join("\n");
+    expect(
+      gate,
+      "the gate's v_verbs CASE no longer yields ARRAY['TRIGGER','MAINTAIN'] under server_version_num >= 170000, so its MAINTAIN half would silently stop running: every MAINTAIN arm would sweep an empty verb list and report 'no holder', and no SQL arm can tell that from a real pass. Restore the two-verb array on the PG17 branch.",
+    ).toMatch(/>=\s*170000\s+THEN\s+ARRAY\['TRIGGER',\s*'MAINTAIN'\]/);
+  });
+});

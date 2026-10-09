@@ -1811,7 +1811,7 @@ per-metric decision.
       compute() of its slice, keeps its inert comparator blocks, renders no leverage control, and
       resets exactly (D-82, W2)", commit `c78baf846`.
 
-- [ ] **`[169-PORTFOLIO-ANALYTICS-COLUMNS]` The portfolio analytics compute behind `/portfolios/[id]`
+- [x] **`[169-PORTFOLIO-ANALYTICS-COLUMNS]` The portfolio analytics compute behind `/portfolios/[id]`
       may never refresh (booked 2026-09-27, Phase 169 D-53; inferred from source, NOT measured).**
       `_compute_portfolio_analytics` (`analytics-service/routers/portfolio.py`) selects
       `strategy_analytics` columns that `supabase/schema/baseline.sql` does not carry, and reads
@@ -1825,6 +1825,80 @@ per-metric decision.
       analytics logs for "Portfolio analytics computation failed" confirms or clears it.
       **Closed when:** the compute selects only real columns, derives daily returns from the stored
       series, and a test that fails on today's select pins both.
+      ✅ **CLOSED 2026-10-09 by Phase 164.6.6.2.2 WEALTHRETURNS (#973); cited, not re-done, by Phase
+      166.4.1 PORTFOLIOANALYTICS (D-01).** `_compute_portfolio_analytics` now selects
+      `strategy_id, returns_series, daily_returns, data_quality_flags`, takes AUM from
+      `portfolio_strategies.allocated_amount`, and reads each strategy's series through
+      `daily_returns_from_row`. The column-strict fake (`tests/_schema_columns.py`) rejects a column
+      the schema lacks, so the select is pinned; 164.6.6.2.2's `VERIFICATION.md` rows SC-5 and D-04
+      carry the reading. The original text above is kept as lineage.
+      **The trigger question ("is it called at all?") was answered by 166.4.1's research: it is NOT.**
+      Nothing schedules `/cron-sync`, the Next.js `computePortfolioAnalytics` has zero call sites and
+      PROD holds 0 `compute_portfolio` jobs. See `[166.4.1-CRON-SYNC-UNSCHEDULED]` below.
+
+- [ ] **`[166.4.1-CRON-SYNC-UNSCHEDULED]` Nothing schedules the analytics service's `/cron-sync`, so
+      portfolio analytics never recompute and the trade sync it carries does not run (booked
+      2026-10-09, Phase 166.4.1 D-03).** Evidence, counts and verdicts only (`166.4.1-RESEARCH.md`
+      Q2, read-only PROD reads with the marker query first): no schedule in `vercel.json`, the GitHub
+      workflow schedules, `supabase/functions/`, `analytics-service/railway.toml`, PROD `cron.job`
+      (0 jobs or functions mentioning it) or the Railway services. PROD `strategy_sync_cursors`
+      holds 0 rows although `routers/cron.py` writes one per strategy per tick. PROD holds 0
+      `compute_portfolio` jobs and the Next.js `computePortfolioAnalytics` has zero call sites. PROD's
+      6 `complete` `portfolio_analytics` rows were written by `scripts/seed-full-app-demo.ts`, not by
+      a compute (so no failure line was logged 2026-09-13..27). `docs/architecture/adr-0008-cron-architecture.md`
+      still names a Python-side cron_sync trigger and is stale. Nothing was built in 166.4.1.
+      **The first question (R-03) has an answer: live-key trade ingestion has no other path.**
+      `.planning/debug/cron-sync-unscheduled.md` (diagnosed 2026-10-09) found that the 4 live ccxt
+      strategy keys on PROD have had no trade ingestion for 14 to 156 days, hidden because the
+      "Synced Nd ago" pill reads `strategy_analytics.computed_at`. That root cause and its fix are
+      not repeated here.
+      **Owner:** Phase 167.1.2.2.2 TRADESYNC (booked 2026-10-09, on main via #985; ROADMAP section
+      `### Phase 167.1.2.2.2`), which owns the schedule, the cursor seeding and the "Synced" label.
+      **Trigger:** TRADESYNC's planning. **Closed when:** `/cron-sync` is either scheduled with a PROD
+      reading showing ticks (`strategy_sync_cursors` rows), or deliberately retired with its docstring
+      and ADR-0008 corrected. TRADESYNC's success criteria decide which; close this entry when its
+      verification passes.
+
+- [ ] **`[166.4.1-SERIES-CURVE-DATETIME]` The writers of the portfolio curve fields still emit ISO
+      datetime strings; only one reader normalises them (booked 2026-10-09, Phase 166.4.1 plan 03).**
+      `_series_to_curve` (`analytics-service/routers/portfolio.py`) stores `Timestamp.isoformat()`
+      ("yyyy-mm-ddT00:00:00") for `portfolio_equity_curve`, and `compute_rolling_correlation`
+      (`analytics-service/services/portfolio_risk.py`) does the same for `rolling_correlation`.
+      `verify_strategy` also uses `_series_to_curve` for its `equity_curve`. lightweight-charts accepts
+      only `yyyy-mm-dd`, so any portfolio computed by the real service crashed `/portfolios/[id]` into
+      its error boundary (found on the seeded local lane; PROD never met it because its 6 rows are
+      seeder rows with date-only strings and the compute selected phantom columns until #973).
+      **What 166.4.1 did:** the reader was fixed, not the writer. `parseTimeSeriesPoint` in
+      `src/lib/portfolio-analytics-adapter.ts` keeps the calendar date of a stored timestamp, as a
+      tolerant reader that also covers rows already stored, with a failing-first test. The stored shape
+      is unchanged.
+      **Still open:** the writer still emits datetime strings, so any OTHER reader of these curve fields
+      (a new page, an export, a script, a reader of `verify_strategy`'s `equity_curve`) must normalise
+      the same way or will meet the same crash. The readers were not enumerated beyond the adapter.
+      **Owner:** the founder, to route. **Trigger:** the first new consumer of `portfolio_equity_curve`,
+      `rolling_correlation` or `verify_strategy`'s `equity_curve`, or the next edit of either writer.
+      **Closed when:** either the writers emit `yyyy-mm-dd` (with the adapter kept as the tolerant
+      reader and a test that fails on today's `isoformat()`), or the list of readers is enumerated and
+      each is shown to normalise.
+
+- [ ] **`[166.4.1-BENCHMARK-OUTAGE-LABEL]` A total benchmark source failure is labelled "stale", so an
+      outage reads as stale data (booked 2026-10-09, Phase 166.4.1 silent-failure review, MEDIUM M1).**
+      `get_benchmark_returns` (`analytics-service/services/benchmark.py`) returns `(None, True)` when
+      every price source failed and no recent cached day exists. `_compute_portfolio_analytics`
+      (`analytics-service/routers/portfolio.py`) tests `benchmark_rets is None or benchmark_stale` and
+      writes `BENCHMARK_NOTE_STALE` ("benchmark unavailable: stale") with `stale: true`. The page
+      therefore shows the stale wording where there is no benchmark data at all, and a reader cannot
+      tell a lagging cache from an outage. The comparison is honestly shown as unavailable and no
+      figure is wrong; the cause it names is the weaker of the two.
+      **Why not fixed in 166.4.1:** the worst finding of the review was MEDIUM, so by the founder's
+      rule there was no fixer round. The fix adds a fourth fixed sentence on both sides (the Python
+      constant and the page's colour rule), which is a wording call.
+      **Owner:** the founder, to route. **Trigger:** the next edit of the benchmark block in
+      `_compute_portfolio_analytics`, or the first report of a "stale" portfolio comparison that was
+      in fact an outage.
+      **Closed when:** the `(None, True)` exit writes its own named note, distinct from the stale-cache
+      note; the card renders it in the muted treatment, not amber; and a test that fails on today's
+      single label pins both exits.
 
 - [x] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
       queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
@@ -7193,6 +7267,7 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   - ⚠️ **Correction to the original TRUNCATE framing** (from the Phase-160 RLS audit): a bare `TRUNCATE public.api_keys` **fails** — Postgres refuses to truncate a table referenced by foreign keys, and `api_keys` is referenced by `strategies`, `strategy_keys`, `key_permission_audit`, `allocator_holdings` and `csv_daily_returns`. The attacker needs `TRUNCATE … CASCADE`, which requires TRUNCATE on every cascaded table too. So the real blast radius is a function of the grants on *those* tables — measure that before sizing this.
   - Next step: `REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON public.api_keys FROM anon` (and TRUNCATE/REFERENCES/TRIGGER from `authenticated`) is functionally free. Note the Phase-160 post-verify asserts DELETE survives **for `authenticated` only**, so an anon-scoped revoke will not trip it. Audit which other public tables carry the same default residue first — a one-table fix is a point-fix of a class.
   - ✅ **2026-10-07, TRUNCATE closed by Phase 164.9.7 TRUNCATEREVOKE (migration `20261009130000`).** `TRUNCATE` on `public.api_keys` is revoked for `anon` and `authenticated`, along with every other `public` relation, and the postgres default privilege no longer grants it to them on new tables. **Still open and still owned by this entry:** `REFERENCES` and `TRIGGER` on both roles, and `DELETE` on `anon`. The entry stays unticked.
+  - **2026-10-09, `TRIGGER` queued to close by Phase 164.9.7.1 TRIGGERREVOKE (migration `20261009150000`).** The migration revokes `TRIGGER` for `anon` and `authenticated` on every `public` relation, `api_keys` included, and in the `postgres` default privileges. It is a branch change until the PROD apply: this note does not claim the PROD apply happened, and the PROD AFTER reading in `164.9.7.1-PROD-READINGS.md` is what will. **Still open and still owned by this entry:** `REFERENCES` on both roles and `DELETE` on `anon`. The entry stays unticked.
 - **⚖️ ARCHITECTURE DECISION OWED: `api_keys` writes have left the RLS-enforced plane entirely** (raised by the Phase-160 RLS audit, 2026-08-23; MEDIUM, no leak today). With UPDATE revoked (`20260810120000`) and now INSERT revoked (Phase 160), **no RLS-subject role can write `api_keys` at all** — so `api_keys_owner`'s `WITH CHECK (user_id = auth.uid())` (`20260405061912_rls_policies.sql:22`) is dead on every path, and the sole writer is a `createAdminClient()` route running BYPASSRLS. That contradicts ADR-0001's "RLS is THE authorization layer". The *current* writer is correctly gated (uid comes only from `withAuth`'s `user.id`; the `...encrypted` spread is closed by a strip-mode Zod schema plus the `quantalyze/no-passthrough-on-ipc` lint rule, with a hostile-`user_id` oracle in `route.test.ts`). The residual is structural: any FUTURE admin-client route inserting `api_keys` with a request-supplied uid would write into another tenant's key list with **nothing in the database** to stop it.
   - ⛔ `FORCE RLS` is NOT the remedy: a service_role insert has no `sub` claim, so `user_id = auth.uid()` is NULL and every connect would fail.
   - The available DB-level backstop is a `BEFORE INSERT` trigger (BYPASSRLS skips RLS, not triggers). The repo already has this exact pattern twice for this exact class: `enforce_strategy_keys_owner_coherence` (`20260710120000:66`) and `check_strategy_api_key_ownership` (`20260410225609`). Decide whether `api_keys.user_id` warrants the same now that the last non-bypassed writer is gone.
@@ -11377,12 +11452,32 @@ its measurement confirms the crash on PROD, it moves to `## 🔴 FIX NOW` and ge
 **Owner:** whoever next touches the mutation tooling; it reds unrelated PRs until fixed.
 **Resolution (measured, 2026-10-08).** The suspected cause was wrong in emphasis. Disk reads were 38 ms. 3.66 of 3.74 s went to `failureBranches` re-parsing the same migration text, once per arm and again as each step's next input. `failureBranches` is now memoized by text (FIFO, cap 64, results frozen) in `scripts/mutation-runner/run.mjs`: the walk takes 1.99 s and every assertion is unchanged. Shipped in PR #980 (164.9.7). The timeout was not raised.
 
-### TRUNCREVOKE-ADMIN-DETECTOR-01 — a read-only PROD check for the `supabase_admin` TRUNCATE residual (booked 2026-10-08, founder D-05 of 164.9.7)
+### TRUNCREVOKE-ADMIN-DETECTOR-01 — a read-only PROD check for the `supabase_admin` TRUNCATE, TRIGGER and MAINTAIN residual (booked 2026-10-08, founder D-05 of 164.9.7; widened 2026-10-09, founder D-09 of 164.9.7.1)
 
-**Why.** Phase 164.9.7 revoked TRUNCATE from `anon` and `authenticated` on every `public` relation and in the `postgres` default privileges. It cannot touch the platform admin role's default-ACL row on `public`, which still grants `arwdDxtm` (TRUNCATE included) to anon and authenticated on any table that role creates. Measured on PROD 2026-10-08 18:16 UTC: that role owns 0 `public` relations, so the grant is latent. The founder accepted the residual on 2026-10-07 on condition that a PROD check exists ("Accept, add a PROD check").
+**Why.** Phase 164.9.7 revoked TRUNCATE, and Phase 164.9.7.1 TRIGGERREVOKE then revoked TRIGGER and MAINTAIN, from `anon` and `authenticated` on every `public` relation and in the `postgres` default privileges. Neither can touch the platform admin role's default-ACL row on `public`, which still grants `arwdDxtm` (TRUNCATE, TRIGGER and MAINTAIN included) to anon and authenticated on any table that role creates. Measured on PROD 2026-10-08 18:16 UTC: that role owns 0 `public` relations, so the grant is latent. The founder accepted the residual on 2026-10-07 on condition that a PROD check exists ("Accept, add a PROD check"), and on 2026-10-08 accepted the same residual for TRIGGER and MAINTAIN (D-09 of 164.9.7.1).
+**2026-10-09, Phase 164.9.7.1 measured the same row.** The PROD BEFORE reading (`164.9.7.1-PROD-READINGS.md`, read through `aclexplode(...).privilege_type`) shows the platform admin role's table row granting both `TRIGGER` (`t`) and `MAINTAIN` (`m`) to anon and authenticated, exactly as it grants TRUNCATE. `postgres` is not a member of that role and cannot alter the row, so the migration does not name it.
 **What to build.** A read-only check, run on the existing prober cadence or the nightly, that fails loud when either of these holds:
 - (a) any relation in `public` is not owned by `postgres`;
-- (b) any non-`postgres` `pg_default_acl` row on `public` grants TRUNCATE to anon or authenticated **and** that role owns at least one `public` relation.
+- (b) any non-`postgres` `pg_default_acl` row on `public` grants TRUNCATE, TRIGGER or MAINTAIN to anon or authenticated **and** that role owns at least one `public` relation.
 
 It runs the marker query first and reports counts only.
-**Owner:** the next phase that touches the prod prober (route with 164.9.7.1 TRIGGERREVOKE, which shares the catalogue reads).
+**Owner:** the next phase that touches the prod prober (the detector is not built by 164.9.7 or 164.9.7.1; neither phase scopes prober work).
+
+### MAINTAIN-LANE-PG17-01 — move the sql-mutation pg-lane to PostgreSQL 17 so the gate's MAINTAIN half can be twinned (booked 2026-10-09, founder D-07 of 164.9.7.1)
+
+**Why.** `MAINTAIN` exists only from PostgreSQL 17. The `sql-mutation` pg-lane boots PostgreSQL 16 (`/usr/lib/postgresql/16/bin` on the CI runner), where `GRANT MAINTAIN` raises `unrecognized privilege type`, so none of the gate's MAINTAIN half (`test_truncate_revoke_anon_authenticated.sql`, the `v_verbs` branch behind `server_version_num >= 170000`) can carry a `RED-UNDER-M` twin: the mutation corpus cannot show a MAINTAIN regression RED. The half runs on the PG17 local-stack lane (image pinned `17.6.1.113`, `LANE_PG_VERSION` in `scripts/local-stack/run.sh`), which asserts but does not mutate.
+**What to build.** Move the pg-lane to PostgreSQL 17: install `postgresql-17` and its pg_cron package on the runner, point `PGBIN` at it, re-prove every annotated gate file on the new major (an arm that bit on 16 may not bite on 17), then add the missing twins for the MAINTAIN branches of VERB 1 to VERB 5 and read the new floor from one full run.
+**Until then (D-07 compensating controls).** The migration's own self-check raises on any remaining MAINTAIN holder on every PG17 apply; one manual PG17 RED was recorded in the 164.9.7.1 plan 02 SUMMARY; `src/__tests__/local-stack-lane-wiring.test.ts` pins that the gate lists MAINTAIN in its PG17 branch and that the local-stack lane stays at major 17 or newer; and this booking.
+**Owner:** whoever next touches `scripts/pg-lane` or the `sql-mutation` job in `.github/workflows/ci.yml`. **Trigger:** the runner image resolving PostgreSQL 17 for the pg-lane, or the next MAINTAIN-related gate edit.
+
+### TRIGGERREVOKE-LOCKHOLD-01 — a client role can still hold a table-wide ACCESS EXCLUSIVE lock through UPDATE or DELETE (booked 2026-10-09, founder D-08 of 164.9.7.1)
+
+**Why.** Phase 164.9.7.1 revokes MAINTAIN, but `LOCK TABLE ... IN ACCESS EXCLUSIVE MODE` is also permitted to a holder of UPDATE, DELETE or TRUNCATE (PostgreSQL 17 `LOCK` documentation). Measured on PG 17.6: `authenticated` holding UPDATE and DELETE and no MAINTAIN took an ACCESS EXCLUSIVE lock; `VACUUM` and `ANALYZE` as that role only warned and skipped, and `REFRESH MATERIALIZED VIEW` raised `permission denied`. So the phase closes the TRIGGER attach vector and VACUUM, CLUSTER, REINDEX and REFRESH MATERIALIZED VIEW as a client, and does NOT close the lock-hold outage the 164.9.7 review and the ROADMAP goal sentence described. A client connection that opens a transaction, takes the lock and idles blocks every other reader and writer of that table until it ends. Row-level policies cannot stop it: they never evaluate `LOCK`.
+**What to build.** A role-level `statement_timeout` and `idle_in_transaction_session_timeout` on `anon` and `authenticated`, bounding how long any client transaction can hold a lock. This is an **unmeasured assumption** (RESEARCH A5): measure that the PostgREST path honours a role-level setting and that no legitimate client request needs longer, on TEST first, before relying on it. Revoking UPDATE and DELETE is not an option (they are the product's write path).
+**Owner:** the next phase that touches client-role session settings or the database hardening backlog. **Trigger:** any report of a lock stall on a client-facing table, or the first phase that sets role-level timeouts.
+
+### TRUNC4-DEFAULT-WITHDRAWAL-01 — the gate's TRUNC 4 asserts client SELECT on a fresh probe table, which the 2026-10-30 platform default withdrawal removes (booked 2026-10-09, 164.9.7.1 RESEARCH Pitfall 6)
+
+**Why.** Arm `TRUNC 4` of `supabase/tests/test_truncate_revoke_anon_authenticated.sql` creates a probe table as `postgres` and asserts that `anon` and `authenticated` still hold SELECT on it (the positive control that the revoke did not widen into a blanket withdrawal). The Supabase default-grant withdrawal dated 2026-10-30 stops new tables from inheriting S/I/U/D for the client roles. After the first re-dump of `supabase/schema/baseline.sql` taken after that date, `TRUNC 4` is expected to go RED on the lane although nothing in the revoke regressed. How the platform applies the change to each project's `pg_default_acl` is not documented (RESEARCH A2), so the exact moment is unmeasured. The 164.9.7.1 arms VERB 1 to VERB 5 avoid the shape on purpose: their positive controls read EXISTING tables.
+**What to build.** Re-point `TRUNC 4`'s positive control at an existing table (as `VERB 4` does with `cron_runs`), or assert the default-ACL row the project actually has, keeping the twin biting.
+**Owner:** the next edit of that gate after the first re-dump taken after 2026-10-30. **Trigger:** `sql-tests` going RED on `TRUNC 4` after that re-dump; read it as this entry, not as a regression of the revoke.

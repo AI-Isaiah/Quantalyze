@@ -3787,14 +3787,18 @@ Plans:
 
 ### Phase 164.9.7.1: TRIGGERREVOKE — anon and authenticated no longer hold TRIGGER or MAINTAIN on public tables (INSERTED)
 
-**Goal:** Close the rest of the RLS-exempt privilege class that 164.9.7 opened for TRUNCATE. A client role holding TRIGGER on a table can attach code that a BYPASSRLS writer then runs (RLS audit HIGH, 164.9.7 review), and PG17 MAINTAIN lets a role LOCK and VACUUM FULL a table, which is an outage. Revoke both from `anon` and `authenticated` on every `public` relation and in the `postgres` default privileges, with a catalogue self-check and a gate, the same shape as 164.9.7.
+**Goal:** Close the rest of the RLS-exempt privilege class that 164.9.7 opened for TRUNCATE. A client role holding TRIGGER on a table can attach code that a BYPASSRLS writer then runs (RLS audit HIGH, 164.9.7 review), and PG17 MAINTAIN lets a role run VACUUM FULL, CLUSTER, REINDEX and REFRESH MATERIALIZED VIEW on it. Revoke both from `anon` and `authenticated` on every `public` relation and in the `postgres` default privileges, with a catalogue self-check and a gate, the same shape as 164.9.7. Revoking MAINTAIN does not close the client lock-hold, because PG17 lets any UPDATE or DELETE holder take a table-wide lock, so that outage stays open and is booked as `TRIGGERREVOKE-LOCKHOLD-01` (D-08; goal corrected 2026-10-09 by `/gsd-phase --edit`; the earlier lock-outage claim is superseded).
 **Booked:** founder D-06 (164.9.7 CONTEXT, 2026-10-08): its own phase, not folded into the TRUNCATE migration. TRUNCATE on `storage.*` and `net.*` stays an accepted platform residual. Re-measure the per-role holder counts on PROD at plan time (marker query first).
-**Requirements**: TBD
+**Requirements**: none assigned; plans trace to CONTEXT D-01..D-09
 **Depends on:** Phase 164.9.7
-**Plans:** 0 plans
+**Plans:** 5 plans (planned 2026-10-09; 5 waves: W1 01 · W2 02 · W3 03 · W4 04 · W5 05; 04 holds the pre-merge review checkpoint, 05 is post-merge and non-autonomous)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.9.7.1 to break down)
+- [ ] 164.9.7.1-01-PLAN.md — migration (TRIGGER always, MAINTAIN behind server_version_num >= 170000, default-privilege revoke, catalogue self-check); gate extended with VERB 1..5, each TRIGGER guard shown RED on the PG16 pg-lane
+- [ ] 164.9.7.1-02-PLAN.md — per-verb exact-prior-set rollback; PG 17.6 local-stack proof (corpus green, counts 0, the D-07 manual MAINTAIN RED, rollback back to 56/59/57/61); D-07 vitest pin
+- [ ] 164.9.7.1-03-PLAN.md — ARMS_FLOOR and censuses from one full measured run; D-04 BEFORE on PROD and the pre-merge TEST read; TODOS (detector widened, api_keys annotation, MAINTAIN-LANE-PG17-01, TRIGGERREVOKE-LOCKHOLD-01, TRUNC4-DEFAULT-WITHDRAWAL-01)
+- [ ] 164.9.7.1-04-PLAN.md — D-08 goal correction via /gsd-phase --edit; migration-reviewer + rls-policy-auditor clean before merge; CHANGELOG + VERSION re-picked from origin/main
+- [ ] 164.9.7.1-05-PLAN.md — post-merge: apply-test and apply confirmed, D-04 AFTER reading on PROD, main CI ran the gate
 
 ### Phase 164.9.6: SUBSETMAIN — a push to main runs only the SQL gate files its PR changed, and a nightly scheduled job runs the full mutation corpus and enforces FILES_FLOOR / ARMS_FLOOR; the split is printed on every run. Founder decision 2026-10-03 after sql-mutation crossed its 20-minute ceiling on push 98f04db16 (prior main runs 15.2-16.9 min); the timeout is never raised again. (INSERTED)
 
@@ -4583,12 +4587,14 @@ Plans:
 **Priority:** data integrity (founder priority rule, 2026-09-27: data integrity ahead of features). Registered through `/gsd-phase --insert 166.4`; gsd-tools numbered it 166.4.1 and the number is kept. It is independent of 166.4 BENCHALIGN in code; 166.4 is only its anchor in the list.
 **Requirements**: TBD (criteria below)
 **Depends on:** nothing.
-**Plans:** 0 plans
+**⭐ RE-SCOPED 2026-10-08/09 (`/gsd-phase --edit`, CONTEXT D-01, D-03):** success criteria 2 and 3 are DELIVERED by Phase 164.6.6.2.2 WEALTHRETURNS (#973) and are cited, not re-planned. `_compute_portfolio_analytics` now selects `strategy_id, returns_series, daily_returns, data_quality_flags`, takes AUM from `portfolio_strategies.allocated_amount`, and reads each series through `daily_returns_from_row` (164.6.6.2.2 VERIFICATION rows SC-5 and D-04). Criterion 1 is answered (D-03): nothing schedules `/cron-sync` on any surface checked, and the compute has no live caller (Next.js `computePortfolioAnalytics` has zero call sites; PROD holds 0 `compute_portfolio` jobs). PROD's 6 `complete` `portfolio_analytics` rows were written by `scripts/seed-full-app-demo.ts`, which is why no failure line was logged 2026-09-13..27. This was answered from code, logs and read-only PROD reads with the marker query first, which D-03 authorised in place of the criterion's original "no remote database command by an agent" clause. It is booked as `TODOS.md` `[166.4.1-CRON-SYNC-UNSCHEDULED]` and not built here; the schedule itself is Phase 167.1.2.2.2 TRADESYNC's (booked 2026-10-09). This phase delivers criteria 4, 5 and 6: the BTC comparison uses the 166.4 interval pair, the quiet benchmark exits write named notes, an unmatched final write raises, and the page check ran on the local stack (D-07).
+
+**Plans:** 4 plans
 
 **Evidence (verified by the orchestrator, 2026-09-27; counts and verdicts only):**
 
-- **Missing columns.** `_compute_portfolio_analytics` in `analytics-service/routers/portfolio.py` selects `strategy_id, returns_series, equity_curve, total_aum` from `strategy_analytics`. `supabase/schema/baseline.sql` has neither `equity_curve` nor `total_aum` on that table (0 matches in its `CREATE TABLE`). A select naming a column that does not exist fails the whole read.
-- **Cumulative read as daily (inferred, not yet measured).** The `TODOS.md` entry `[169-PORTFOLIO-ANALYTICS-COLUMNS]` (booked by Phase 169 D-53 on `feat/169-pagetruth`) infers that the compute reads `returns_series` as daily returns while `analytics-service/services/metrics.py` writes it as a cumulative series.
+- **Missing columns.** *(describes the code before #973; kept as lineage)* `_compute_portfolio_analytics` in `analytics-service/routers/portfolio.py` selects `strategy_id, returns_series, equity_curve, total_aum` from `strategy_analytics`. `supabase/schema/baseline.sql` has neither `equity_curve` nor `total_aum` on that table (0 matches in its `CREATE TABLE`). A select naming a column that does not exist fails the whole read.
+- **Cumulative read as daily (inferred, not yet measured).** *(describes the code before #973; kept as lineage)* The `TODOS.md` entry `[169-PORTFOLIO-ANALYTICS-COLUMNS]` (booked by Phase 169 D-53 on `feat/169-pagetruth`) infers that the compute reads `returns_series` as daily returns while `analytics-service/services/metrics.py` writes it as a cumulative series.
 - **Is it called at all?** The analytics service logs show 0 lines of `Portfolio analytics computation failed` between 2026-09-13 and 2026-09-27. With a select that should fail, that silence means either the endpoint is not being called, or its failure is not reaching that log line. The phase's research answers this FIRST, before any fix is planned.
 - **Related:** Phase 169's RISKUNIT plan (169-09, D-49) fixes the risk-attribution display's double percent; its browser item records an empty `/portfolios/[id]` panel as this defect, not as evidence against the unit fix (169 D-53).
 - **Routed 2026-09-27, from the 166.4 BENCHALIGN research:** the `benchmark_comparison` block in `_compute_portfolio_analytics` (`analytics-service/routers/portfolio.py`) pairs the portfolio with BTC by an inner-join correlation, and BTC's own TWR there is compounded over the joined dates only, so it drops weekend moves. It must use the founder's D-A interval-matched pairing (166.4 D-A in its ROADMAP entry; D-04, D-05 and D-07 are recorded in `166.4-CONTEXT.md` on `feat/166.4-benchalign`). Found by 166.4's research as a same-class site outside 166.4's locked scope.
@@ -4604,7 +4610,10 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 166.4.1 to break down)
+- [ ] 166.4.1-01-PLAN.md — BTC comparison on the 166.4 interval pair via a public helper (D-02, tracer), named stale/thin/crash benchmark notes mirrored into data_quality (D-04, D-05, R-02), a lost final write raises (D-06); failing-first tests and neuter proofs
+- [ ] 166.4.1-02-PLAN.md — the stored benchmark note parsed and rendered on /portfolios/[id] as a status line, amber only when stale (D-04, D-05, DESIGN.md)
+- [ ] 166.4.1-03-PLAN.md — seeded local-stack check of /portfolios/[id] at desktop, 390 px and 200% zoom in the computed and stale-note states, plus the PROD read-only empty-state reading (D-07)
+- [ ] 166.4.1-04-PLAN.md — TODOS tick citing #973 and the /cron-sync booking (D-01, D-03, R-03), ROADMAP re-word via /gsd-phase --edit (orchestrator checkpoint), CHANGELOG with R-01 as a known limit and the version bump
 
 ### Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine (INSERTED)
 
