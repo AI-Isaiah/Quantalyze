@@ -177,6 +177,43 @@ describe("adaptPortfolioAnalytics", () => {
     expect(parsed.risk_decomposition?.[1].weight_pct).toBeNull();
   });
 
+  // Phase 166.4.1 D-04 / D-05: a stored named reason travels to the page; a
+  // non-string or absent one yields NO key (an always-present `note: null`
+  // would break the toEqual pin above for every full comparison).
+  it("carries a string benchmark note and drops a non-string or absent one", () => {
+    const withNote = adaptPortfolioAnalytics({
+      ...complete,
+      benchmark_comparison: {
+        symbol: "BTC",
+        correlation: null,
+        benchmark_twr: null,
+        portfolio_twr: 0.12,
+        stale: true,
+        note: "benchmark unavailable: stale",
+      },
+    });
+    expect(withNote?.benchmark_comparison?.note).toBe(
+      "benchmark unavailable: stale",
+    );
+
+    const badNote = adaptPortfolioAnalytics({
+      ...complete,
+      benchmark_comparison: {
+        symbol: "BTC",
+        correlation: null,
+        benchmark_twr: null,
+        portfolio_twr: 0.12,
+        stale: false,
+        note: 42,
+      },
+    });
+    expect(badNote?.benchmark_comparison).not.toBeNull();
+    expect("note" in (badNote?.benchmark_comparison ?? {})).toBe(false);
+
+    const noNote = adaptPortfolioAnalytics(complete);
+    expect("note" in (noNote?.benchmark_comparison ?? {})).toBe(false);
+  });
+
   it("handles a row with benchmark_comparison set to null", () => {
     const parsed = adaptPortfolioAnalytics(partialNullBenchmark);
     expect(parsed).not.toBeNull();
@@ -312,6 +349,31 @@ describe("adaptPortfolioAnalytics", () => {
       correlation_matrix: {},
     });
     expect(parsed?.correlation_matrix).toBeNull();
+  });
+
+  // Phase 166.4.1 D-07 (found by the seeded local browser check): the Python
+  // writer serializes a DatetimeIndex with `Timestamp.isoformat()`, so a computed
+  // row stores "2026-06-11T00:00:00". lightweight-charts rejects anything but
+  // yyyy-mm-dd and the equity-curve effect threw into the page's error boundary.
+  // The adapter is the fetch boundary, so it hands the charts a calendar date.
+  it("normalizes a stored timestamp to its calendar date on every time series", () => {
+    const parsed = adaptPortfolioAnalytics({
+      ...allNull,
+      portfolio_equity_curve: [
+        { date: "2026-06-11T00:00:00", value: 1 },
+        { date: "2026-06-12", value: 1.01 },
+      ],
+      rolling_correlation: {
+        "sid-a:sid-b": [{ date: "2026-07-22T00:00:00", value: 0.5 }],
+      },
+    });
+    expect(parsed?.portfolio_equity_curve?.map((p) => p.date)).toEqual([
+      "2026-06-11",
+      "2026-06-12",
+    ]);
+    expect(parsed?.rolling_correlation?.["sid-a:sid-b"]?.[0].date).toBe(
+      "2026-07-22",
+    );
   });
 
   it("strips dangerous keys from rolling correlation", () => {

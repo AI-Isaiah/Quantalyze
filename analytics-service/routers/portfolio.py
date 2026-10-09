@@ -40,6 +40,7 @@ from services.error_contract import VenueTransientHTTPException
 from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions, PERMANENT_VALIDATION_ERROR_CODES
 from services.metrics import (
     _safe_float,
+    interval_matched_benchmark_pair,
     blend_periods_per_year,
     sanitize_metrics,
     sharpe_vol_status_from_backbone,
@@ -101,6 +102,14 @@ PORTFOLIO_COMPUTE_FAILED_COPY = (
     "Portfolio analytics could not complete due to an unexpected error. "
     "Retry the computation."
 )
+
+# Phase 166.4.1 D-04 / D-05 (HONEST-01): why `benchmark_comparison` is empty.
+# FIXED sentences, never `str(exc)`: both the comparison's `note` and
+# `data_quality.benchmark_note` reach the account holder, and the exception text
+# stays on the operator surface (`data_quality.benchmark_error`, the log).
+BENCHMARK_NOTE_STALE = "benchmark unavailable: stale"
+BENCHMARK_NOTE_THIN = "benchmark unavailable: fewer than 30 shared days"
+BENCHMARK_NOTE_ERROR = "benchmark unavailable: computation failed"
 
 
 # Audit M-0620 — canonical enums for the literal strings the DB CHECK
@@ -1018,12 +1027,26 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # Benchmark comparison (BTC)
         benchmark_comparison = None
         benchmark_error: str | None = None
+        # Phase 166.4.1 D-04 / D-05 / R-02: one fixed sentence names why the
+        # comparison is empty. Initialised before the `try` so neither local is
+        # unbound when `get_benchmark_returns` itself raises.
+        benchmark_stale: bool = False
+        benchmark_note: str | None = None
         try:
             benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
-            if benchmark_rets is not None and not benchmark_stale:
-                aligned = portfolio_returns_series.reindex(benchmark_rets.index).dropna()
-                b_aligned = benchmark_rets.reindex(aligned.index).dropna()
-                if len(aligned) >= 30:
+            if benchmark_rets is None or benchmark_stale:
+                benchmark_note = BENCHMARK_NOTE_STALE
+            else:
+                # Phase 166.4.1 D-02: the 166.4 D-A interval pair, the same one
+                # every strategy-level benchmark metric reads. A weekday-only
+                # portfolio pairs each Monday with BTC's compounded return over
+                # (Friday, Monday], so the weekend moves are no longer dropped
+                # by an inner join on the two date indexes. The 30-day gate
+                # below counts PAIRED rows.
+                aligned, b_aligned = interval_matched_benchmark_pair(portfolio_returns_series, benchmark_rets)
+                if len(aligned) < 30:
+                    benchmark_note = BENCHMARK_NOTE_THIN
+                else:
                     # Phase 166.1 (C6, D-02): no correlation when either leg
                     # does not disperse (a constant-yield portfolio), as for
                     # an all-zero one; pandas divides by the residue std.
@@ -1031,6 +1054,8 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                     # Same day convention as `portfolio_twr` (days 1..n, first day
                     # INCLUDED): BenchmarkComparison.tsx shows the two side by
                     # side as a delta, so the pair must cover the same convention.
+                    # `b_aligned` is the 166.4 D-A interval pair (Phase 166.4.1
+                    # D-02), so this TWR includes the weekend moves.
                     btc_twr = total_return_from_equity(
                         equity_from_daily_returns(b_aligned)
                     )
@@ -1049,10 +1074,23 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
             # lands in Sentry; persist a sentinel so the UI can distinguish
             # "fetch failed" from "no benchmark overlap".
             benchmark_error = f"{type(exc).__name__}: {exc}"
+            benchmark_note = BENCHMARK_NOTE_ERROR
             logger.exception(
                 "Benchmark fetch failed for portfolio %s: %s",
                 portfolio_id, exc,
             )
+        if benchmark_note is not None:
+            # A flagged-empty comparison: the figures are unavailable (None, an
+            # em-dash on the page, never 0), the portfolio's OWN TWR is kept, and
+            # the note names the reason. `stale` is True only on the stale exit.
+            benchmark_comparison = {
+                "symbol": "BTC",
+                "correlation": None,
+                "benchmark_twr": None,
+                "portfolio_twr": portfolio_twr,
+                "stale": benchmark_note == BENCHMARK_NOTE_STALE,
+                "note": benchmark_note,
+            }
 
         # Portfolio equity curve
         cumulative = (1 + portfolio_returns_series).cumprod()
@@ -1193,6 +1231,8 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
             "avg_pairwise_correlation_pairs_used": avg_corr_pairs_used,
             "avg_pairwise_correlation_pairs_total": avg_corr_pairs_total,
             "benchmark_error": benchmark_error,
+            "benchmark_unavailable": benchmark_note is not None,
+            "benchmark_note": benchmark_note,
             "matching_status": None,  # populated only on verify_strategy
         }
 
@@ -1225,7 +1265,9 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # row stays in COMPUTING forever and the new partial_data/computed_*
         # fields the caller reads from the inline response will never make it
         # to the DB — the "computed from N of M" badge will appear correct in
-        # the API response but be absent from all subsequent DB reads.
+        # the API response but be absent from all subsequent DB reads.  Phase
+        # 166.4.1 D-06: that is why a result with no row now RAISES (below)
+        # instead of logging and reporting success.
         _analytics_update_result = supabase.table("portfolio_analytics").update(
             update_payload
         ).eq("id", analytics_id).execute()
@@ -1234,6 +1276,18 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                 "portfolio %s: analytics update returned no data — analytics_id=%s "
                 "may have been concurrently deleted; row may remain in COMPUTING state",
                 portfolio_id, analytics_id,
+            )
+            # Phase 166.4.1 D-06: the row is gone, so `_fail` (which updates the
+            # same id) would write to nothing; the outer `except HTTPException:
+            # raise` passes this through. It sits BEFORE `_generate_alerts`, so no
+            # alert fires for analytics that did not persist. Not retryable: an id
+            # that matches no row was deleted, and a retry would insert a new row
+            # rather than complete this one.
+            raise service_error(
+                500,
+                "PORTFOLIO_ANALYTICS_FAILED",
+                retryable=False,
+                detail="Portfolio analytics computation failed",
             )
 
         # Generate alerts. Wrapped in its own try so an alert-side failure

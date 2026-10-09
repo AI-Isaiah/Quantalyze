@@ -77,7 +77,10 @@ function parseTimeSeriesPoint(v: Json): TimeSeriesPoint | null {
   const date = asString(v.date);
   const value = asNumber(v.value);
   if (date == null || value == null) return null;
-  return { date, value };
+  // The Python writer stores a DatetimeIndex via `Timestamp.isoformat()`
+  // ("2026-06-11T00:00:00"); the charts take only yyyy-mm-dd. Keep the calendar
+  // date the writer stored (Phase 166.4.1 D-07).
+  return { date: /^\d{4}-\d{2}-\d{2}T/.test(date) ? date.slice(0, 10) : date, value };
 }
 
 function parseTimeSeries(v: Json): TimeSeriesPoint[] {
@@ -138,12 +141,16 @@ function parseBenchmarkComparison(v: Json): BenchmarkComparison | null {
   if (!isObject(v)) return null;
   const symbol = asString(v.symbol);
   if (symbol == null) return null;
+  // Phase 166.4.1 D-04 / D-05: conditional key, not `note: null`. An
+  // always-present key would change the shape of every full comparison.
+  const note = asString(v.note);
   return {
     symbol,
     correlation: asNumber(v.correlation),
     benchmark_twr: asNumber(v.benchmark_twr),
     portfolio_twr: asNumber(v.portfolio_twr),
     stale: asBoolean(v.stale),
+    ...(note != null ? { note } : {}),
   };
 }
 

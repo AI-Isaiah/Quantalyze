@@ -1811,7 +1811,7 @@ per-metric decision.
       compute() of its slice, keeps its inert comparator blocks, renders no leverage control, and
       resets exactly (D-82, W2)", commit `c78baf846`.
 
-- [ ] **`[169-PORTFOLIO-ANALYTICS-COLUMNS]` The portfolio analytics compute behind `/portfolios/[id]`
+- [x] **`[169-PORTFOLIO-ANALYTICS-COLUMNS]` The portfolio analytics compute behind `/portfolios/[id]`
       may never refresh (booked 2026-09-27, Phase 169 D-53; inferred from source, NOT measured).**
       `_compute_portfolio_analytics` (`analytics-service/routers/portfolio.py`) selects
       `strategy_analytics` columns that `supabase/schema/baseline.sql` does not carry, and reads
@@ -1825,6 +1825,80 @@ per-metric decision.
       analytics logs for "Portfolio analytics computation failed" confirms or clears it.
       **Closed when:** the compute selects only real columns, derives daily returns from the stored
       series, and a test that fails on today's select pins both.
+      ✅ **CLOSED 2026-10-09 by Phase 164.6.6.2.2 WEALTHRETURNS (#973); cited, not re-done, by Phase
+      166.4.1 PORTFOLIOANALYTICS (D-01).** `_compute_portfolio_analytics` now selects
+      `strategy_id, returns_series, daily_returns, data_quality_flags`, takes AUM from
+      `portfolio_strategies.allocated_amount`, and reads each strategy's series through
+      `daily_returns_from_row`. The column-strict fake (`tests/_schema_columns.py`) rejects a column
+      the schema lacks, so the select is pinned; 164.6.6.2.2's `VERIFICATION.md` rows SC-5 and D-04
+      carry the reading. The original text above is kept as lineage.
+      **The trigger question ("is it called at all?") was answered by 166.4.1's research: it is NOT.**
+      Nothing schedules `/cron-sync`, the Next.js `computePortfolioAnalytics` has zero call sites and
+      PROD holds 0 `compute_portfolio` jobs. See `[166.4.1-CRON-SYNC-UNSCHEDULED]` below.
+
+- [ ] **`[166.4.1-CRON-SYNC-UNSCHEDULED]` Nothing schedules the analytics service's `/cron-sync`, so
+      portfolio analytics never recompute and the trade sync it carries does not run (booked
+      2026-10-09, Phase 166.4.1 D-03).** Evidence, counts and verdicts only (`166.4.1-RESEARCH.md`
+      Q2, read-only PROD reads with the marker query first): no schedule in `vercel.json`, the GitHub
+      workflow schedules, `supabase/functions/`, `analytics-service/railway.toml`, PROD `cron.job`
+      (0 jobs or functions mentioning it) or the Railway services. PROD `strategy_sync_cursors`
+      holds 0 rows although `routers/cron.py` writes one per strategy per tick. PROD holds 0
+      `compute_portfolio` jobs and the Next.js `computePortfolioAnalytics` has zero call sites. PROD's
+      6 `complete` `portfolio_analytics` rows were written by `scripts/seed-full-app-demo.ts`, not by
+      a compute (so no failure line was logged 2026-09-13..27). `docs/architecture/adr-0008-cron-architecture.md`
+      still names a Python-side cron_sync trigger and is stale. Nothing was built in 166.4.1.
+      **The first question (R-03) has an answer: live-key trade ingestion has no other path.**
+      `.planning/debug/cron-sync-unscheduled.md` (diagnosed 2026-10-09) found that the 4 live ccxt
+      strategy keys on PROD have had no trade ingestion for 14 to 156 days, hidden because the
+      "Synced Nd ago" pill reads `strategy_analytics.computed_at`. That root cause and its fix are
+      not repeated here.
+      **Owner:** Phase 167.1.2.2.2 TRADESYNC (booked 2026-10-09, on main via #985; ROADMAP section
+      `### Phase 167.1.2.2.2`), which owns the schedule, the cursor seeding and the "Synced" label.
+      **Trigger:** TRADESYNC's planning. **Closed when:** `/cron-sync` is either scheduled with a PROD
+      reading showing ticks (`strategy_sync_cursors` rows), or deliberately retired with its docstring
+      and ADR-0008 corrected. TRADESYNC's success criteria decide which; close this entry when its
+      verification passes.
+
+- [ ] **`[166.4.1-SERIES-CURVE-DATETIME]` The writers of the portfolio curve fields still emit ISO
+      datetime strings; only one reader normalises them (booked 2026-10-09, Phase 166.4.1 plan 03).**
+      `_series_to_curve` (`analytics-service/routers/portfolio.py`) stores `Timestamp.isoformat()`
+      ("yyyy-mm-ddT00:00:00") for `portfolio_equity_curve`, and `compute_rolling_correlation`
+      (`analytics-service/services/portfolio_risk.py`) does the same for `rolling_correlation`.
+      `verify_strategy` also uses `_series_to_curve` for its `equity_curve`. lightweight-charts accepts
+      only `yyyy-mm-dd`, so any portfolio computed by the real service crashed `/portfolios/[id]` into
+      its error boundary (found on the seeded local lane; PROD never met it because its 6 rows are
+      seeder rows with date-only strings and the compute selected phantom columns until #973).
+      **What 166.4.1 did:** the reader was fixed, not the writer. `parseTimeSeriesPoint` in
+      `src/lib/portfolio-analytics-adapter.ts` keeps the calendar date of a stored timestamp, as a
+      tolerant reader that also covers rows already stored, with a failing-first test. The stored shape
+      is unchanged.
+      **Still open:** the writer still emits datetime strings, so any OTHER reader of these curve fields
+      (a new page, an export, a script, a reader of `verify_strategy`'s `equity_curve`) must normalise
+      the same way or will meet the same crash. The readers were not enumerated beyond the adapter.
+      **Owner:** the founder, to route. **Trigger:** the first new consumer of `portfolio_equity_curve`,
+      `rolling_correlation` or `verify_strategy`'s `equity_curve`, or the next edit of either writer.
+      **Closed when:** either the writers emit `yyyy-mm-dd` (with the adapter kept as the tolerant
+      reader and a test that fails on today's `isoformat()`), or the list of readers is enumerated and
+      each is shown to normalise.
+
+- [ ] **`[166.4.1-BENCHMARK-OUTAGE-LABEL]` A total benchmark source failure is labelled "stale", so an
+      outage reads as stale data (booked 2026-10-09, Phase 166.4.1 silent-failure review, MEDIUM M1).**
+      `get_benchmark_returns` (`analytics-service/services/benchmark.py`) returns `(None, True)` when
+      every price source failed and no recent cached day exists. `_compute_portfolio_analytics`
+      (`analytics-service/routers/portfolio.py`) tests `benchmark_rets is None or benchmark_stale` and
+      writes `BENCHMARK_NOTE_STALE` ("benchmark unavailable: stale") with `stale: true`. The page
+      therefore shows the stale wording where there is no benchmark data at all, and a reader cannot
+      tell a lagging cache from an outage. The comparison is honestly shown as unavailable and no
+      figure is wrong; the cause it names is the weaker of the two.
+      **Why not fixed in 166.4.1:** the worst finding of the review was MEDIUM, so by the founder's
+      rule there was no fixer round. The fix adds a fourth fixed sentence on both sides (the Python
+      constant and the page's colour rule), which is a wording call.
+      **Owner:** the founder, to route. **Trigger:** the next edit of the benchmark block in
+      `_compute_portfolio_analytics`, or the first report of a "stale" portfolio comparison that was
+      in fact an outage.
+      **Closed when:** the `(None, True)` exit writes its own named note, distinct from the stale-cache
+      note; the card renders it in the muted treatment, not amber; and a test that fails on today's
+      single label pins both exits.
 
 - [x] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
       queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**

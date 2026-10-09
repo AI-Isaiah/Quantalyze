@@ -1521,6 +1521,9 @@ export interface BenchmarkComparison {
   benchmark_twr: number | null;
   portfolio_twr: number | null;
   stale: boolean;
+  /** The named reason the comparison is empty (Phase 166.4.1 D-04 / D-05).
+   *  Written only on a flagged-empty comparison, absent on a full one. */
+  note?: string;
 }
 
 export interface OptimizerSuggestionRow {
