@@ -4555,7 +4555,7 @@ Plans:
 **Priority:** data integrity (founder priority rule, 2026-09-27: data integrity ahead of features). Registered through `/gsd-phase --insert 166.4`; gsd-tools numbered it 166.4.1 and the number is kept. It is independent of 166.4 BENCHALIGN in code; 166.4 is only its anchor in the list.
 **Requirements**: TBD (criteria below)
 **Depends on:** nothing.
-**Plans:** 0 plans
+**Plans:** 4 plans
 
 **Evidence (verified by the orchestrator, 2026-09-27; counts and verdicts only):**
 
@@ -4576,7 +4576,10 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 166.4.1 to break down)
+- [ ] 166.4.1-01-PLAN.md — BTC comparison on the 166.4 interval pair via a public helper (D-02, tracer), named stale/thin/crash benchmark notes mirrored into data_quality (D-04, D-05, R-02), a lost final write raises (D-06); failing-first tests and neuter proofs
+- [ ] 166.4.1-02-PLAN.md — the stored benchmark note parsed and rendered on /portfolios/[id] as a status line, amber only when stale (D-04, D-05, DESIGN.md)
+- [ ] 166.4.1-03-PLAN.md — seeded local-stack check of /portfolios/[id] at desktop, 390 px and 200% zoom in the computed and stale-note states, plus the PROD read-only empty-state reading (D-07)
+- [ ] 166.4.1-04-PLAN.md — TODOS tick citing #973 and the /cron-sync booking (D-01, D-03, R-03), ROADMAP re-word via /gsd-phase --edit (orchestrator checkpoint), CHANGELOG with R-01 as a known limit and the version bump
 
 ### Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine (INSERTED)
 
