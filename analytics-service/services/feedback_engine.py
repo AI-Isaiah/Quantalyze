@@ -85,7 +85,7 @@ RATE_CEILING_THRESHOLD = 0.7
 
 # H-0678: single source of truth for the feedback-engine output version emitted
 # in audit metadata. Uses the vMAJOR.MINOR.PATCH form to match
-# match_engine.ENGINE_VERSION's convention (currently "v2.1.0"), so audit
+# match_engine.ENGINE_VERSION's convention (currently "v2.2.0"), so audit
 # consumers see one consistent version format. This is the FEEDBACK engine's
 # version and is independent of match_engine.ENGINE_VERSION (which versions
 # match_batches rows). Bump on any change to the attribution/shape contract.

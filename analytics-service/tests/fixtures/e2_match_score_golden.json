@@ -232,7 +232,7 @@
     "min_sharpe": 0.5,
     "min_track_record_days": 180
   },
-  "engine_version": "v2.1.0",
+  "engine_version": "v2.2.0",
   "excluded": [],
   "excluded_total": 0,
   "filter_relaxed": false,

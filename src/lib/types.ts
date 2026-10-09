@@ -1619,9 +1619,11 @@ export type SimulatorStatus =
  * Deltas follow the "positive = improvement" sign convention, oriented
  * so all four chips render green when the candidate improves the portfolio:
  *   - sharpe_delta:        proposed_sharpe - current_sharpe
- *   - dd_delta:            current_max_dd  - proposed_max_dd
+ *   - dd_delta:            proposed_max_dd - current_max_dd
  *                          (MaxDD is a negative number; positive delta =
- *                           shallower drawdown in the proposed portfolio)
+ *                           shallower drawdown in the proposed portfolio;
+ *                           the sign is defined once, in the analytics
+ *                           service's drawdown_improvement, Phase 166.1.1)
  *   - corr_delta:          current_avg_corr - proposed_avg_corr
  *                          (lower correlation = better diversification)
  *   - concentration_delta: current_hhi - proposed_hhi
