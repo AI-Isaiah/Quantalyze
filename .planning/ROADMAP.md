@@ -165,6 +165,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — not yet planned (data integrity; after 167.1.2 PR C)
 - [ ] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — not yet planned (booked 2026-10-07, founder)
 - [ ] **Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital** (INSERTED 2026-10-08) — not yet planned (founder D-18, 167.1.2.2)
+- [ ] **Phase 167.1.2.2.2: TRADESYNC — live strategy keys ingest trades daily again** (INSERTED 2026-10-09) — not yet planned (founder, data integrity)
 - [x] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
@@ -4841,6 +4842,28 @@ Plans:
 Plans:
 - [ ] TBD (run /gsd-plan-phase 167.1.2.2.1 to break down)
 
+### Phase 167.1.2.2.2: TRADESYNC — live strategy keys ingest trades daily again: /cron-sync gets a runbook-registered pg_cron tick, each stale key's cursor is seeded at its last stored trade so the gap backfills, and "Synced" reads the last trade fetch (INSERTED)
+
+**Goal:** Every live strategy key on a ccxt venue (OKX, Bybit) ingests its trades and daily returns every day, the days it missed are backfilled, and the factsheet's "Synced" label tells the truth about when trades were last fetched.
+**Booked:** founder 2026-10-09 (AskUserQuestion: "New phase, pg_cron"). Data integrity. Root cause: `.planning/debug/cron-sync-unscheduled.md`.
+**Evidence (PROD, read-only, marker first, counts only, 2026-10-09):** nothing calls `POST /api/cron-sync` (`analytics-service/routers/cron.py`). No migration, `vercel.json` entry, GitHub schedule, Railway cron or PROD `cron.job` row has ever scheduled it; a Railway probe outside git called it in June 2026 and is gone. ADR-0008 claims a pg_cron trigger that does not exist. 4 live strategy keys (3 okx, 1 bybit; one strategy published) have their newest trade 14 to 156 days old while their accounts are live (funding rows 0.3 days old; bybit open positions on 13 of the last 14 days). The UI hides it: `SyncBadge` "Synced Nd ago" reads `strategy_analytics.computed_at`, and `api_keys.last_sync_at` is overwritten daily about 04:05 UTC by `poll_allocator_positions`, strategy keys included. PROD `strategy_sync_cursors` has 0 rows, so the route's resume fallback (`_strategy_resume_point` / `_resume_floor_ms`) would start from that overwritten `last_sync_at`, and the first tick would silently skip the whole gap.
+**Requirements**: TBD (phase-local)
+**Depends on:** Phase 167.1.2.2 (the same runbook-registration route for PROD crons)
+
+## Success Criteria
+
+1. A `cron_sync_tick()` SQL function (shaped like `match_engine_cron_tick`, URL from `system_settings`, key from the vault, via `pg_net`) is shipped by migration. Its `cron.schedule` registration goes through a go-live runbook, never a migration (the 164.7 rule and the derivecron/ledger-refresh runbooks). The registration and a re-captured cron manifest are recorded.
+2. Before the first tick, each stale strategy gets a `strategy_sync_cursors` row at or before its newest stored trade, through a guarded runbook step with before/after counts. After the first tick, each of the 4 keys has trades and daily returns up to the previous day, and no day in the gap is missing. A test fails on today's code: with 0 cursor rows and a fresh `last_sync_at`, the gap is skipped.
+3. `poll_allocator_positions` no longer moves a strategy key's `last_sync_at`, or the resume fallback no longer reads it. Whichever the research picks, a test fails on today's code.
+4. "Synced Nd ago" reads the last successful trade fetch, never `computed_at`, and a stale key shows as stale. A test fails on today's badge.
+5. The tick's effect on allocator keys and on revoked-but-active keys is measured, and each is either intended or excluded. The pg_net timeout fits a full tick, or the tick is made asynchronous.
+6. ADR-0008 is corrected, and a staleness alarm is booked with OUTAGEALERT if one is not built here.
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 167.1.2.2.2 to break down)
+
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
 **Goal:** Each API key's equity-history reconstruct state is recorded durably, per key, so no key's history is skipped, wiped or left unreconstructed. Today that state is inferred from allocator-wide snapshot counts.
@@ -5624,6 +5647,7 @@ kept verbatim.
 | 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
 | 167.1.2.2 DERIVECRON | 0/? | Queued — booked 2026-10-07 (founder) | - |
 | 167.1.2.2.1 DERIBITWEDGE | 0/? | Queued — booked 2026-10-08 (founder D-18) | - |
+| 167.1.2.2.2 TRADESYNC | 0/? | Queued — booked 2026-10-09 (founder) | - |
 | 167.2 KEYCARDSYNC | 10/10 | Complete    | 2026-10-04 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |
