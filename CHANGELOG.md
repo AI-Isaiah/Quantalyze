@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.129.4.0] - 2026-10-09 — DDSIGN: a shallower drawdown reads as an improvement in the simulator, the optimizer and the match engine
+
+Phase 166.1.1. Four scorers computed "drawdown improvement" and three of them had the sign backwards: a portfolio whose maximum drawdown got shallower was reported as a loss, and one whose drawdown got deeper was reported as a gain. The bridge scorer had been corrected under H-1065; the simulator, the optimizer and the match engine never were. All four now share one definition, and every renderer of these fields was audited.
+
+### Fixed
+- **The simulator** (`simulate_add_candidate`) reports a shallower maximum drawdown as a positive `dd_delta`. The measured case, -0.464 to -0.236, now reads +0.228 (it read -0.228). The Portfolio Impact chip sits under the hint "Positive = shallower maximum drawdown", which was false until now.
+- **The optimizer** (`find_improvement_candidates`) emits a positive `dd_improvement` for a shallower book and a negative one for a book whose drawdown got worse, so the card no longer says "improve drawdown by" for a candidate that deepens the drawdown. Its score term and its ranking follow the corrected sign.
+- **The match engine** (`_compute_portfolio_fit_components`) rewards the shallower book on the drawdown axis of `portfolio_fit`. The measured ranking flip: the shallower book scores 57.5 and the deeper one 49.5, an 8-point swing on a 100-point scale; before the fix the order was reversed. `_normalize_min_max` still maps an unmeasurable drawdown to 0.0.
+
+### Root cause
+- Four independent copies of one subtraction, `before - after`, applied to a value that is always <= 0 (max drawdown is stored as a negative fraction). With that storage, improvement is `after - before`. The bridge's copy was fixed under H-1065 and nothing connected the other three to it, so they stayed wrong. The sign now lives in ONE helper, `drawdown_improvement(before_max_dd, after_max_dd)` in `services/portfolio_optimizer.py`, which returns `None` when either side is `None`. The simulator, the optimizer, the match engine and the bridge all call it, and a parity test pins that all three scorers return the same value for the same pair.
+
+### Changed
+- `ENGINE_VERSION` is v2.2.0 (was v2.1.0); `WEIGHTS_VERSION` stays v2.0.0. See Notes for why.
+- The `SimulatorDeltas` doc formula in `src/lib/types.ts` now reads `dd_delta = proposed_max_dd - current_max_dd`. The simulator docstring and its inline comment were corrected the same way. `feedback_engine.py`'s comment naming the current engine version follows.
+- `bridge_scoring.py` calls the shared helper. Its behaviour is identical, `None` handling included.
+
+### Tests
+- `tests/test_drawdown_sign.py` (new): a Case A oracle (shallower is positive) and a Case B oracle (worse is negative) for the simulator, the optimizer and the match engine, a ranking oracle for the optimizer and for the match engine (shallower book first), the helper's contract, and the three-scorer parity test. Each was RED at its own test-only commit and was run from a `git archive` of that commit; each also goes RED under a one-line neuter (argument swap at each call site, and a reversed helper body, which also turns the bridge's H-1065 test RED).
+- `test_engine_version_phase09_bump` pins v2.2.0 and the unchanged `WEIGHTS_VERSION`. Both golden fixtures were regenerated and differ from the previous ones only in `engine_version`; the sign fix moved no scored value in either.
+- Two renderer pins: `WhatWedDoCard` never claims "improve drawdown by" for a negative `dd_improvement`, and `PortfolioOptimizer` renders it as `-0.87%` without `text-positive`. Each fails under an absolute-value neuter of its renderer.
+- Gate sweep at the merge with origin/main: analytics-service pytest 8575 passed (90 skipped, none of them in this phase's files), mypy strict clean over CI's file list, ruff with no new finding in any touched Python file, vitest over `src/components/portfolio` and `src/__tests__` 4272 passed, plan anchors OK, planning hygiene OK.
+
+### Notes
+- **`ENGINE_VERSION` moved to v2.2.0 on purpose.** `services/match_engine.py` says to bump it on any change to the scoring math, and this changes the `portfolio_fit` drawdown axis. The reason is reproducibility: match batches scored before and after the fix are distinguishable by `match_batches.engine_version`. The cost is that `_should_skip_allocator` trigger 2 re-scores every allocator once on the first cron run after deploy. The phase research recommended no bump; the orchestrator reversed that (W5) to follow the in-code rule. `WEIGHTS_VERSION` is unchanged, because no weight moved.
+- **Stored values (D-04), read from PROD on 2026-10-09, read-only, counts only.** The database marker named production. `portfolio_analytics`: 6 rows, 0 with `optimizer_suggestions` not null, 0 with a non-empty array. `match_candidates` with a non-null `score_breakdown.raw.dd_improvement`: 0. `match_batches`: 119 rows, one distinct `engine_version` (v2.1.0). `portfolio_analytics.optimizer_suggestions` is the one persisted value that is never recomputed on its own: it is written only by `POST /portfolio-optimizer` and carried forward verbatim into every new analytics row. With 0 non-empty rows there is nothing stale to refresh, so no founder question arose and nothing was written or backfilled. `match_candidates` rows re-score every 12 hours and the newest 7 batches are kept, so any old-sign row ages out on its own.
+- **No renderer needed a change (D-03).** All 10 non-test files that read `dd_delta` or `dd_improvement` were audited and none compensated for the old sign: 0 uses of `Math.abs` or a leading minus on either field. The renderer copy became true by itself.
+- **Known limits, recorded rather than fixed (pre-merge review: worst finding MEDIUM, so no fixer round):**
+  - **WR-01 (code review).** The `WhatWedDoCard` test added here asserts the fallback "diversify the portfolio" for a candidate whose only measured effect is to worsen the drawdown. That pins the thin fallback below as current behaviour. When the fallback is changed, that assertion must change with it.
+  - **M1 (silent-failure review).** The optimizer now emits `dd_improvement: null` when the baseline drawdown is unmeasurable, but `src/lib/portfolio-analytics-adapter.ts` coalesces it with `?? 0` and `types.ts` types the field `number`, so the card renders "+0.00%" instead of "not computable".
+  - **M2 (silent-failure review).** The optimizer's `None -> 0.0` fallback in its score ranks a candidate with an unknown drawdown ahead of a candidate with a measured worsening, and no test covers that ordering.
+  - **Thin fallback.** For a constant-yield one-strategy book, `sharpe_lift` and `corr_with_portfolio` are `None`, the score is `0.3 * dd_improvement`, and the top suggestion is the least-bad dip. Its `dd_improvement` is now negative, so `WhatWedDoCard` drops the drawdown clause and falls back to "... to diversify the portfolio" with a negative optimizer score. The sentence is not false, only thin; whether to hide the card in that case is a founder question.
+  - **First-day loss.** `_max_drawdown` ignores a loss on the first day of a series, so a book whose worst day is its first reads as having no drawdown. Pre-existing and out of scope.
+- The Python change reaches users only after Railway deploys from a green main; check `/health` `git_sha` afterwards.
+
 ## [0.129.3.1] - 2026-10-09 — DERIVECRON (registration): the daily allocator derive runs on PROD again; two new phases booked from what its rehearsal found
 
 Phase 167.1.2.2, registration half (plans 05, 06 and 07), plus the planning records from the 2026-10-08 UAT pass. No application code changes. The only non-planning file that changes behaviour is the prober's cron oracle.
