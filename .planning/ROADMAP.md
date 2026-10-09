@@ -4582,7 +4582,7 @@ Plans:
 
 **Goal:** Every "drawdown improvement" number means shallower-is-positive, and ranking rewards a shallower drawdown, never a deeper one.
 **Depends on:** Phase 166.1
-**Plans:** 0 plans
+**Plans:** 3 plans
 **Status:** booked 2026-09-26 under the new-phase freeze — NOT started.
 
 **Origin:** the 166.1 round-2 code review (outside its diff; the same code is at the phase base, so it predates 166.1). Measured there: a book whose max drawdown improved from -0.464 to -0.236 shows `dd_delta -0.228` under a hint reading "Positive = shallower", and a constant-yield book whose drawdown got worse shows `dd_improvement +0.0087`, rendered as "improve drawdown by 0.87%". The match score therefore rewards a deeper drawdown. The bridge already carries the correct sign (H-1065).
@@ -4595,7 +4595,9 @@ Plans:
   3. Every renderer of these fields reads the corrected sign and its copy ("Positive = shallower", "improve drawdown by") stays true.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 166.1.1 to break down)
+- [ ] 166.1.1-01-PLAN.md — wave 1 · one `drawdown_improvement` helper; the simulator, optimizer and match engine (and the bridge) route through it; per-site, ranking and parity oracles RED first; no ENGINE_VERSION bump (D-01, D-02, A3)
+- [ ] 166.1.1-02-PLAN.md — wave 1 · D-03 renderer audit, two negative-value renderer pins proven to bite, `SimulatorDeltas` doc formula (D-03)
+- [ ] 166.1.1-03-PLAN.md — wave 2 · D-04 PROD re-measure (read-only, counts only), whole-phase sweep, the one release commit (D-04)
 
 ### Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error
 
