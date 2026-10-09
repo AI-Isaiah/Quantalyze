@@ -1404,6 +1404,114 @@ def read_ledger_digest(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     return _validated_ledger_digest(raw)
 
 
+# --- 167.1.2.2.1 (DERIBITWEDGE PR-1): the native inception diagnostics ------------------------
+_INCEPTION_DIAG_KEYS: frozenset[str] = frozenset(
+    {
+        "cap_usd", "currencies", "prev0_usd_current", "prev0_usd_balance_anchor",
+        "first_nav_usd_current", "breach_ratio_current", "breach_ratio_current_with_cap",
+        "breach_ratio_balance_anchor", "breach_ratio_balance_anchor_with_cap",
+        "orphan_unvaluable",
+    }
+)
+_INCEPTION_DIAG_NULLABLE_TOP: frozenset[str] = frozenset(
+    {
+        "prev0_usd_current", "prev0_usd_balance_anchor", "first_nav_usd_current",
+        "breach_ratio_current", "breach_ratio_current_with_cap",
+        "breach_ratio_balance_anchor", "breach_ratio_balance_anchor_with_cap",
+    }
+)
+_INCEPTION_ROW_KEYS: frozenset[str] = frozenset(
+    {
+        "currency", "resid_native_current", "resid_native_balance_anchor", "mark0_usd",
+        "throughput_native", "dust_rel_current", "dust_rel_balance_anchor",
+    }
+)
+_INCEPTION_ROW_NULLABLE: frozenset[str] = frozenset(
+    {"resid_native_balance_anchor", "dust_rel_current", "dust_rel_balance_anchor"}
+)
+
+
+def _refuse_non_finite(value: Any) -> None:
+    """Walk a diagnostics record and refuse any non-finite number (JSONB cannot hold NaN/inf,
+    and a poison value would fail the upsert and loop the derive)."""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise NavReconstructionError(
+            "key_inputs native_inception_diagnostics: non-finite amount — refusing to persist it"
+        )
+    if isinstance(value, Mapping):
+        for item in value.values():
+            _refuse_non_finite(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _refuse_non_finite(item)
+
+
+def _validated_inception_diagnostics(raw: Any) -> dict[str, Any]:
+    """Strictly validate a diagnostics record: exactly the documented keys, every number a
+    finite non-boolean, nulls only where a reading can be absent. Raises
+    ``TypeError``/``ValueError`` and returns a plain-dict copy."""
+    if not isinstance(raw, Mapping):
+        raise TypeError("key_inputs native_inception_diagnostics: not an object")
+    if set(raw) != _INCEPTION_DIAG_KEYS:
+        raise ValueError("key_inputs native_inception_diagnostics: unexpected key set")
+    out: dict[str, Any] = {}
+    out["cap_usd"] = _strict_finite_number(raw["cap_usd"], "cap_usd")
+    for key in sorted(_INCEPTION_DIAG_NULLABLE_TOP):
+        value = raw[key]
+        out[key] = None if value is None else _strict_finite_number(value, key)
+    flag = raw["orphan_unvaluable"]
+    if not isinstance(flag, bool):
+        raise TypeError("key_inputs native_inception_diagnostics: orphan_unvaluable is not a boolean")
+    out["orphan_unvaluable"] = flag
+    rows = raw["currencies"]
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        raise TypeError("key_inputs native_inception_diagnostics: currencies is not a list")
+    out_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise TypeError("key_inputs native_inception_diagnostics: a currency is not an object")
+        if set(row) != _INCEPTION_ROW_KEYS:
+            raise ValueError("key_inputs native_inception_diagnostics: unexpected currency keys")
+        ccy = row["currency"]
+        if not isinstance(ccy, str) or not ccy:
+            raise TypeError("key_inputs native_inception_diagnostics: bad currency")
+        out_row: dict[str, Any] = {"currency": ccy}
+        for key in sorted(_INCEPTION_ROW_KEYS - {"currency"}):
+            value = row[key]
+            if value is None:
+                if key not in _INCEPTION_ROW_NULLABLE:
+                    raise TypeError(f"key_inputs native_inception_diagnostics: {key} is null")
+                out_row[key] = None
+            else:
+                out_row[key] = _strict_finite_number(value, key)
+        out_rows.append(out_row)
+    out["currencies"] = out_rows
+    return out
+
+
+def native_inception_diagnostics_payload(diag: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``key_inputs`` field ``native_inception_diagnostics`` (DERIBITWEDGE PR-1): the
+    rolled pre-history residual per currency under today's wedge and a balance-anchored one,
+    the inception-day mark, the native throughput, both day-0 capitals and four breach ratios.
+
+    Refuses a non-finite value with ``NavReconstructionError`` before the upsert (an infinite
+    breach is carried as null plus ``orphan_unvaluable``), and a malformed record with
+    ``TypeError``/``ValueError``, like the neighbouring writers."""
+    _refuse_non_finite(diag)
+    return {"native_inception_diagnostics": _validated_inception_diagnostics(diag)}
+
+
+def read_native_inception_diagnostics(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The stored ``native_inception_diagnostics``; ``None`` for a row that predates it
+    (absent or null) or that recorded ``native_inception_diagnostics_error`` instead. A
+    present but malformed one raises ``TypeError``/``ValueError`` so the job disposes it as a
+    corrupt input."""
+    raw = payload.get("native_inception_diagnostics")
+    if raw is None:
+        return None
+    return _validated_inception_diagnostics(raw)
+
+
 def stitch_dropped_day_pnl(
     returns_links: Sequence[pd.Series],
     pnl_links: Sequence[Mapping[str, float]],

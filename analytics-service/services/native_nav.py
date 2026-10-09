@@ -22,8 +22,9 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -198,6 +199,18 @@ INCEPTION_REL_TOL: float = 1e-4       # wider than the tautology's 1e-6: this ga
 # fails loud. Loosening requires evidence (this is the evidence); tightening after
 # more keys is expected.
 INCEPTION_NATIVE_DUST_REL: float = 1e-4
+# 167.1.2.2.1 (DERIBITWEDGE, SC-2): an ABSOLUTE ceiling on what the relative allowance above may
+# excuse, ANDed into ``is_dust``: a residual is dust only if it is ALSO worth at most this many
+# USD at the inception-day mark. The relative allowance scales with throughput, so an account
+# that rolled a lot of coin can excuse an offset worth hundreds of dollars (the measured case:
+# a phantom offset about 60 times the $1 floor, hidden by a throughput of thousands of coin).
+# Two pinned data points bound the value: the production dust shape of about $1.06
+# (test_inception_dust_relative_to_throughput_passes) must stay green, and that measured offset
+# must breach. Any value in about [2, 300) satisfies both; 5 is the founder's pick. THE GATE DOES
+# NOT READ THIS CONSTANT YET: it is only reported (``native_inception_diagnostics`` computes the
+# ``*_with_cap`` ratios from it). Plan 06 wires it into ``_assert_inception_reconciled``, and only
+# after the stored PROD reading shows the options-holding account still passes under it (OQ-3).
+INCEPTION_DUST_CAP_USD: float = 5.0
 # Both constants are tuned against the three real Deribit keys at the P78-style
 # live acceptance gate (the FLOW_DOM_RATIO precedent, nav_twr.py:64-65); real-key
 # green is Phase 80's INCEPT-01, NOT claimed here. Tightening after calibration is
@@ -577,20 +590,17 @@ def _prev0_usd(rolled: list[_Bucket], day0: pd.Timestamp) -> float:
     return total
 
 
-def _native_nav_levels(
+def _roll_buckets(
     ledger: NativeLedger,
-    *,
-    indexable_currencies: frozenset[str],
+    indexable_currencies: AbstractSet[str],
     venue: str,
-) -> tuple[pd.Series, pd.Series, pd.Series, float] | None:
-    """Steps 1-4 of ``reconstruct_native_nav_and_twr``: ``(nav_usd, pnl_usd,
-    flows_usd, prev0_usd)`` — the daily USD NAV, the USD-composed native P&L, the
-    USD flows and the day-0 prior capital — or ``None`` when no bucket rolled. The
-    §5 inception gate runs here, before any level is returned.
+) -> tuple[list[_Bucket], list[_Bucket]]:
+    """Steps 1-2 of the reconstruction: classify, build and roll every bucket. Returns
+    ``(rolled, orphans)``: the buckets that rolled, and the value-carrying ones that did not.
 
-    Moved out of ``reconstruct_native_nav_and_twr`` unchanged (167.1.2.2 D-15) so
-    ``native_day_pnl`` reads the SAME levels the returns are chained from, rather
-    than a second copy of the roll."""
+    Shared by ``_native_nav_levels`` (which judges them) and ``native_inception_diagnostics``
+    (which reports them), so the numbers a diagnostic stores are the numbers the gate judged:
+    the roll is deterministic and there is no second implementation of it."""
     # Step 1 — classify (families disjoint, G1) + coalesce branch-1 into "USD".
     _assert_families_disjoint(USD_FAMILY, indexable_currencies)
     buckets = _build_buckets(ledger, indexable_currencies, venue)
@@ -623,6 +633,33 @@ def _native_nav_levels(
             b for b in unrolled
             if b.terminal_native != 0.0 or b.upnl_native != 0.0
         ]
+    return rolled, orphans
+
+
+def _union_calendar(rolled: list[_Bucket]) -> pd.DatetimeIndex:
+    """The union of every rolled bucket's balance days (``rolled`` is non-empty)."""
+    union_index = rolled[0].balance.index
+    for bucket in rolled[1:]:
+        union_index = union_index.union(bucket.balance.index)
+    return union_index
+
+
+def _native_nav_levels(
+    ledger: NativeLedger,
+    *,
+    indexable_currencies: frozenset[str],
+    venue: str,
+) -> tuple[pd.Series, pd.Series, pd.Series, float] | None:
+    """Steps 1-4 of ``reconstruct_native_nav_and_twr``: ``(nav_usd, pnl_usd,
+    flows_usd, prev0_usd)`` — the daily USD NAV, the USD-composed native P&L, the
+    USD flows and the day-0 prior capital — or ``None`` when no bucket rolled. The
+    §5 inception gate runs here, before any level is returned.
+
+    Moved out of ``reconstruct_native_nav_and_twr`` unchanged (167.1.2.2 D-15) so
+    ``native_day_pnl`` reads the SAME levels the returns are chained from, rather
+    than a second copy of the roll."""
+    # Steps 1-2 — classify and roll (``_roll_buckets``).
+    rolled, orphans = _roll_buckets(ledger, indexable_currencies, venue)
 
     # Step 3 — inception-reconciliation refuse gate (§5). Run BEFORE the empty-rolled
     # short-circuit so a MATERIAL orphan on an otherwise-empty ledger still refuses
@@ -635,9 +672,7 @@ def _native_nav_levels(
         return None
 
     # Step 4 — value NAV(d) = Σ_c B_c(d)×mark_c(d) over the union calendar.
-    union_index = rolled[0].balance.index
-    for bucket in rolled[1:]:
-        union_index = union_index.union(bucket.balance.index)
+    union_index = _union_calendar(rolled)
     nav_usd, composed_pnl_usd, composed_flows_usd = _value_over_calendar(
         rolled, union_index, venue
     )
@@ -738,38 +773,50 @@ def native_realized_terminal(
     return pd.Timestamp(nav_usd.index[-1]), float(nav_usd.iloc[-1])
 
 
-def _assert_inception_reconciled(
-    ledger: NativeLedger,
+@dataclass(frozen=True)
+class _InceptionRow:
+    """One bucket's line in an inception reading. ``resid_native`` is SIGNED (the rolled
+    pre-history balance, or for an orphan the unexplained held balance); ``resid_usd`` is what
+    the bucket contributes to the §5.2 breach sum (zero when it is dust)."""
+
+    code: str
+    resid_native: float
+    mark0: float
+    throughput: float
+    is_dust: bool
+    resid_usd: float
+
+
+@dataclass(frozen=True)
+class _InceptionReading:
+    """The arithmetic of the §5.2 inception gate, separated from its verdict so the gate and
+    the stored diagnostic are computed by the same code: per-bucket rows, the breach sum
+    ``resid_usd_total``, the anchor NAV and the tolerance ``tol`` the sum is judged against."""
+
+    rows: tuple[_InceptionRow, ...]
+    resid_usd_total: float
+    anchor_nav: float
+    tol: float
+
+
+def _inception_reading(
     rolled: list[_Bucket],
-    indexable: AbstractSet[str],
     *,
+    orphans: list[_Bucket] | None,
+    dust_cap_usd: float | None,
     venue: str,
-    orphans: list[_Bucket] | None = None,
-) -> None:
-    """Step 3 (§5) — the FIRST non-tautological reconciliation gate, run AFTER the
-    rolls and BEFORE valuation.
+) -> _InceptionReading:
+    """The §5 residual arithmetic over already-rolled buckets (no verdict, no
+    non-finite refusal: ``_assert_inception_reconciled`` owns those).
 
-    For a ``full_history=True`` ledger (Deribit — the txn-log reaches inception),
-    the backward roll from today's venue-reported native equity through the ENTIRE
-    ledger must land at a pre-history balance of ~0 per currency. Each bucket's
-    rolled pre-history residual ``resid_c = B_c(d0_c) − pnl_c(d0_c) − flowqty_c(d0_c)``
-    is valued at its INCEPTION-day mark (the earliest mark held — never a current
-    price, D-07 discipline; branch-1 × 1.0), summed, and compared per §5.2. A
-    breach means the reported equity and the summed ledger disagree (missing rows,
-    a mis-classified type, a wrong scope) — a permanent, loud
-    ``InceptionReconciliationError`` carrying CODES + venue + the RELATIVE breach
-    ratio ONLY (no raw residuals — leak discipline).
-
-    ``full_history=False`` (retention-capped venues, P3) SKIPS this gate entirely
-    (§5.3): a truncated ledger can never reconcile to zero and must not be
-    punished; those venues stay on the existing DQ-02 evidence-gated terminus
-    (nav_twr.py:585). Live tuning + real-key green are Phase 80's gate
-    (INCEPT-01) — NOT claimed here.
-    """
-    if not ledger.full_history:
-        return  # §5.3 — a truncated ledger legitimately cannot reconcile to zero.
-
-    per_bucket_resid_usd: list[tuple[str, float]] = []
+    Each bucket's rolled pre-history residual ``resid_c = B_c(d0_c) − pnl_c(d0_c) −
+    flowqty_c(d0_c)`` is valued at its INCEPTION-day mark (the earliest mark held — never a
+    current price, D-07 discipline; branch-1 × 1.0). ``dust_cap_usd=None`` is today's rule: a
+    residual within ``INCEPTION_NATIVE_DUST_REL`` of the bucket's own throughput is dust. A
+    number additionally requires the dust to be worth at most that many USD at the inception
+    mark (SC-2). Raises ``InceptionReconciliationError`` (``breach_ratio=inf``) for an orphan it
+    cannot value, exactly where the gate always did."""
+    rows: list[_InceptionRow] = []
     resid_usd_total = 0.0
     anchor_nav = 0.0
     for bucket in rolled:
@@ -804,8 +851,10 @@ def _assert_inception_reconciled(
             bucket.flow_qty.abs().sum()
         )
         is_dust = abs(resid) <= INCEPTION_NATIVE_DUST_REL * throughput
+        if dust_cap_usd is not None:
+            is_dust = is_dust and abs(resid) * mark0 <= dust_cap_usd
         resid_usd = 0.0 if is_dust else abs(resid) * mark0
-        per_bucket_resid_usd.append((bucket.code, resid_usd))
+        rows.append(_InceptionRow(bucket.code, resid, mark0, throughput, is_dust, resid_usd))
         resid_usd_total += resid_usd
         anchor_nav += float(bucket.balance.iloc[-1]) * markN
 
@@ -828,15 +877,58 @@ def _assert_inception_reconciled(
         else:
             anchor_mark = float(bucket.mark.iloc[-1])
         resid_usd = abs(resid) * anchor_mark
-        per_bucket_resid_usd.append((bucket.code, resid_usd))
+        rows.append(_InceptionRow(bucket.code, resid, anchor_mark, 0.0, False, resid_usd))
         resid_usd_total += resid_usd
         anchor_nav += resid * anchor_mark  # signed, matches the rolled contribution
+
+    tol = max(INCEPTION_ABS_TOL_USD, INCEPTION_REL_TOL * abs(anchor_nav))
+    return _InceptionReading(tuple(rows), resid_usd_total, anchor_nav, tol)
+
+
+def _assert_inception_reconciled(
+    ledger: NativeLedger,
+    rolled: list[_Bucket],
+    indexable: AbstractSet[str],
+    *,
+    venue: str,
+    orphans: list[_Bucket] | None = None,
+) -> None:
+    """Step 3 (§5) — the FIRST non-tautological reconciliation gate, run AFTER the
+    rolls and BEFORE valuation.
+
+    For a ``full_history=True`` ledger (Deribit — the txn-log reaches inception),
+    the backward roll from today's venue-reported native equity through the ENTIRE
+    ledger must land at a pre-history balance of ~0 per currency. Each bucket's
+    rolled pre-history residual (see ``_inception_reading``) is valued at its
+    INCEPTION-day mark, summed, and compared per §5.2. A breach means the reported
+    equity and the summed ledger disagree (missing rows, a mis-classified type, a
+    wrong scope) — a permanent, loud ``InceptionReconciliationError`` carrying CODES +
+    venue + the RELATIVE breach ratio ONLY (no raw residuals — leak discipline).
+
+    ``full_history=False`` (retention-capped venues, P3) SKIPS this gate entirely
+    (§5.3): a truncated ledger can never reconcile to zero and must not be
+    punished; those venues stay on the existing DQ-02 evidence-gated terminus
+    (nav_twr.py:585). Live tuning + real-key green are Phase 80's gate
+    (INCEPT-01) — NOT claimed here.
+
+    167.1.2.2.1: the arithmetic lives in ``_inception_reading`` so the diagnostic stored with
+    each derive is computed by the same code. This gate passes ``dust_cap_usd=None``: it does
+    not read ``INCEPTION_DUST_CAP_USD`` yet.
+    """
+    if not ledger.full_history:
+        return  # §5.3 — a truncated ledger legitimately cannot reconcile to zero.
+
+    reading = _inception_reading(
+        rolled, orphans=orphans, dust_cap_usd=None, venue=venue
+    )
+    per_bucket_resid_usd = [(row.code, row.resid_usd) for row in reading.rows]
+    resid_usd_total = reading.resid_usd_total
 
     # F-3: a non-finite residual/anchor (e.g. a NaN inception-day mark) makes
     # `resid_usd_total > tol` evaluate `NaN > tol → False` — a SILENT pass. Refuse
     # explicitly rather than let the breach sail past this gate and surface later as
     # a misleading generic non-finite error (or, worse, a silent NaN track record).
-    if not (np.isfinite(resid_usd_total) and np.isfinite(anchor_nav)):
+    if not (np.isfinite(resid_usd_total) and np.isfinite(reading.anchor_nav)):
         offenders = [
             code for code, r in per_bucket_resid_usd if not np.isfinite(r)
         ] or [code for code, _ in per_bucket_resid_usd]
@@ -844,7 +936,7 @@ def _assert_inception_reconciled(
             currencies=offenders, venue=venue, breach_ratio=float("inf"),
         )
 
-    tol = max(INCEPTION_ABS_TOL_USD, INCEPTION_REL_TOL * abs(anchor_nav))
+    tol = reading.tol
     if resid_usd_total > tol:
         # Name the materially-offending buckets (each above the $1 floor); fall
         # back to every nonzero contributor for a sum-of-dust breach.
@@ -858,3 +950,130 @@ def _assert_inception_reconciled(
             venue=venue,
             breach_ratio=resid_usd_total / tol,
         )
+
+
+# ===========================================================================
+# 167.1.2.2.1 (DERIBITWEDGE PR-1) — the inception numbers, exposed (never raising).
+# ===========================================================================
+
+
+def _breach_ratio(reading: _InceptionReading | None) -> float | None:
+    """``Σ resid_usd / tol`` (the number ``InceptionReconciliationError.breach_ratio``
+    carries), 0.0 for a zero total; ``None`` when there is no reading to speak of."""
+    if reading is None:
+        return None
+    if reading.resid_usd_total == 0.0:
+        return 0.0
+    return reading.resid_usd_total / reading.tol
+
+
+def _readings_or_none(
+    rolled: list[_Bucket], orphans: list[_Bucket], venue: str
+) -> tuple[_InceptionReading | None, _InceptionReading | None]:
+    """``(today's rule, the rule with the USD cap)`` over one rolled set, or ``(None, None)``
+    when an orphan cannot be valued (the gate raises ``breach_ratio=inf`` there; JSON cannot
+    hold inf, so the caller reports it as a flag)."""
+    try:
+        return (
+            _inception_reading(rolled, orphans=orphans, dust_cap_usd=None, venue=venue),
+            _inception_reading(
+                rolled, orphans=orphans, dust_cap_usd=INCEPTION_DUST_CAP_USD, venue=venue
+            ),
+        )
+    except InceptionReconciliationError:
+        return None, None
+
+
+def _day0_capitals(
+    rolled: list[_Bucket], venue: str
+) -> tuple[float | None, float | None]:
+    """``(prev0_usd, first NAV level in USD)`` of a rolled set, or ``(None, None)`` when no
+    bucket rolled. Read off the same helpers the valuation uses (``_prev0_usd``,
+    ``_value_over_calendar``), never a gate: a breaching ledger still reports."""
+    if not rolled:
+        return None, None
+    union_index = _union_calendar(rolled)
+    nav_usd, _pnl, _flows = _value_over_calendar(rolled, union_index, venue)
+    return _prev0_usd(rolled, union_index[0]), float(nav_usd.iloc[0])
+
+
+def native_inception_diagnostics(
+    ledger: NativeLedger,
+    *,
+    indexable_currencies: frozenset[str],
+    venue: str = "",
+    alt_terminal_upnl_native: Mapping[str, float] | None = None,
+) -> dict[str, Any] | None:
+    """The numbers behind the §5 inception verdict, for the derive to store (DERIBITWEDGE).
+
+    ``None`` for a ``full_history=False`` ledger (the gate skips it). Otherwise the rolled
+    pre-history residual per currency under the ledger as given (today's wedge), the
+    inception-day mark, the native throughput, the day-0 capital, and four breach ratios:
+    today's rule, today's rule with ``INCEPTION_DUST_CAP_USD``, and the same two under a
+    balance-anchored wedge when ``alt_terminal_upnl_native`` (``equity - balance`` per currency)
+    is given. Ratios are ``Σ resid_usd / tol``, so 1.0 is exactly at the gate's limit.
+
+    It rolls through ``_roll_buckets`` and reads through ``_inception_reading``: the very code
+    the gate judges, not a second copy. Unlike the gate it NEVER raises
+    ``InceptionReconciliationError``: an orphan it cannot value reports ``orphan_unvaluable:
+    True`` with null ratios. The balance-anchored reading replaces the wedge only for the
+    currencies in ``alt_terminal_upnl_native``; any other keeps its current wedge.
+
+    The result is for the key's own ``key_inputs`` row. Nothing here is logged: the caller logs
+    a class name and the venue only, never a magnitude."""
+    if not ledger.full_history:
+        return None
+
+    rolled, orphans = _roll_buckets(ledger, indexable_currencies, venue)
+    cur, cur_cap = _readings_or_none(rolled, orphans, venue)
+    prev0_current, first_nav_current = _day0_capitals(rolled, venue)
+
+    alt: _InceptionReading | None = None
+    alt_cap: _InceptionReading | None = None
+    prev0_alt: float | None = None
+    orphan_unvaluable = cur is None
+    if alt_terminal_upnl_native:
+        alt_ledger = replace(
+            ledger,
+            terminal_upnl_native={**ledger.terminal_upnl_native, **alt_terminal_upnl_native},
+        )
+        alt_rolled, alt_orphans = _roll_buckets(alt_ledger, indexable_currencies, venue)
+        alt, alt_cap = _readings_or_none(alt_rolled, alt_orphans, venue)
+        orphan_unvaluable = orphan_unvaluable or alt is None
+        prev0_alt = _day0_capitals(alt_rolled, venue)[0]
+
+    alt_by_code = {row.code: row for row in alt.rows} if alt is not None else {}
+    currencies: list[dict[str, Any]] = []
+    for row in cur.rows if cur is not None else ():
+        other = alt_by_code.get(row.code)
+        currencies.append(
+            {
+                "currency": row.code,
+                "resid_native_current": row.resid_native,
+                "resid_native_balance_anchor": (
+                    None if other is None else other.resid_native
+                ),
+                "mark0_usd": row.mark0,
+                "throughput_native": row.throughput,
+                "dust_rel_current": (
+                    abs(row.resid_native) / row.throughput if row.throughput > 0.0 else None
+                ),
+                "dust_rel_balance_anchor": (
+                    abs(other.resid_native) / other.throughput
+                    if other is not None and other.throughput > 0.0
+                    else None
+                ),
+            }
+        )
+    return {
+        "cap_usd": INCEPTION_DUST_CAP_USD,
+        "currencies": currencies,
+        "prev0_usd_current": prev0_current,
+        "prev0_usd_balance_anchor": prev0_alt,
+        "first_nav_usd_current": first_nav_current,
+        "breach_ratio_current": _breach_ratio(cur),
+        "breach_ratio_current_with_cap": _breach_ratio(cur_cap),
+        "breach_ratio_balance_anchor": _breach_ratio(alt),
+        "breach_ratio_balance_anchor_with_cap": _breach_ratio(alt_cap),
+        "orphan_unvaluable": orphan_unvaluable,
+    }

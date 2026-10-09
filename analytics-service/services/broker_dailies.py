@@ -70,6 +70,7 @@ from services.mt5_deals import (
 from services.native_nav import (
     NativeLedger,
     native_day_pnl,
+    native_inception_diagnostics,
     native_realized_terminal,
     reconstruct_native_nav_and_twr,
 )
@@ -908,3 +909,21 @@ def native_ledger_realized_terminal(
     the level ``combine_native_ledger``'s NAV path rolls from, which is NOT the live equity
     (``native_nav.native_realized_terminal``, ``venue="deribit"``). Key-mode NAV path only."""
     return native_realized_terminal(ledger, indexable_currencies=indexable, venue="deribit")
+
+
+def native_ledger_inception_diagnostics(
+    ledger: NativeLedger,
+    indexable: frozenset[str],
+    *,
+    alt_terminal_upnl_native: Mapping[str, float] | None = None,
+) -> dict[str, Any] | None:
+    """The numbers behind the Deribit account's §5 inception verdict, for the derive to store
+    (167.1.2.2.1): ``native_nav.native_inception_diagnostics``, ``venue="deribit"``. ``None``
+    for a ledger that does not reach inception. Never raises the inception refusal. Key-mode
+    NAV path only."""
+    return native_inception_diagnostics(
+        ledger,
+        indexable_currencies=indexable,
+        venue="deribit",
+        alt_terminal_upnl_native=alt_terminal_upnl_native,
+    )
