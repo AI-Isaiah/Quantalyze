@@ -103,6 +103,14 @@ PORTFOLIO_COMPUTE_FAILED_COPY = (
     "Retry the computation."
 )
 
+# Phase 166.4.1 D-04 / D-05 (HONEST-01): why `benchmark_comparison` is empty.
+# FIXED sentences, never `str(exc)`: both the comparison's `note` and
+# `data_quality.benchmark_note` reach the account holder, and the exception text
+# stays on the operator surface (`data_quality.benchmark_error`, the log).
+BENCHMARK_NOTE_STALE = "benchmark unavailable: stale"
+BENCHMARK_NOTE_THIN = "benchmark unavailable: fewer than 30 shared days"
+BENCHMARK_NOTE_ERROR = "benchmark unavailable: computation failed"
+
 
 # Audit M-0620 — canonical enums for the literal strings the DB CHECK
 # constraints enforce. The literals used to be hard-coded across the
@@ -1019,9 +1027,16 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # Benchmark comparison (BTC)
         benchmark_comparison = None
         benchmark_error: str | None = None
+        # Phase 166.4.1 D-04 / D-05 / R-02: one fixed sentence names why the
+        # comparison is empty. Initialised before the `try` so neither local is
+        # unbound when `get_benchmark_returns` itself raises.
+        benchmark_stale: bool = False
+        benchmark_note: str | None = None
         try:
             benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
-            if benchmark_rets is not None and not benchmark_stale:
+            if benchmark_rets is None or benchmark_stale:
+                benchmark_note = BENCHMARK_NOTE_STALE
+            else:
                 # Phase 166.4.1 D-02: the 166.4 D-A interval pair, the same one
                 # every strategy-level benchmark metric reads. A weekday-only
                 # portfolio pairs each Monday with BTC's compounded return over
@@ -1029,7 +1044,9 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                 # by an inner join on the two date indexes. The 30-day gate
                 # below counts PAIRED rows.
                 aligned, b_aligned = interval_matched_benchmark_pair(portfolio_returns_series, benchmark_rets)
-                if len(aligned) >= 30:
+                if len(aligned) < 30:
+                    benchmark_note = BENCHMARK_NOTE_THIN
+                else:
                     # Phase 166.1 (C6, D-02): no correlation when either leg
                     # does not disperse (a constant-yield portfolio), as for
                     # an all-zero one; pandas divides by the residue std.
@@ -1057,10 +1074,23 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
             # lands in Sentry; persist a sentinel so the UI can distinguish
             # "fetch failed" from "no benchmark overlap".
             benchmark_error = f"{type(exc).__name__}: {exc}"
+            benchmark_note = BENCHMARK_NOTE_ERROR
             logger.exception(
                 "Benchmark fetch failed for portfolio %s: %s",
                 portfolio_id, exc,
             )
+        if benchmark_note is not None:
+            # A flagged-empty comparison: the figures are unavailable (None, an
+            # em-dash on the page, never 0), the portfolio's OWN TWR is kept, and
+            # the note names the reason. `stale` is True only on the stale exit.
+            benchmark_comparison = {
+                "symbol": "BTC",
+                "correlation": None,
+                "benchmark_twr": None,
+                "portfolio_twr": portfolio_twr,
+                "stale": benchmark_note == BENCHMARK_NOTE_STALE,
+                "note": benchmark_note,
+            }
 
         # Portfolio equity curve
         cumulative = (1 + portfolio_returns_series).cumprod()
@@ -1201,6 +1231,8 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
             "avg_pairwise_correlation_pairs_used": avg_corr_pairs_used,
             "avg_pairwise_correlation_pairs_total": avg_corr_pairs_total,
             "benchmark_error": benchmark_error,
+            "benchmark_unavailable": benchmark_note is not None,
+            "benchmark_note": benchmark_note,
             "matching_status": None,  # populated only on verify_strategy
         }
 

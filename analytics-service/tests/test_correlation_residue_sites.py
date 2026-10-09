@@ -454,6 +454,13 @@ def _c6_correlation(strategy_returns: pd.Series, btc: pd.Series) -> object:
     payload = pa.update.call_args_list[-1][0][0]
     bc = payload["benchmark_comparison"]
     assert bc is not None and bc["symbol"] == "BTC", "the benchmark block must have run"
+    # Phase 166.4.1 D-04: a stale / thin / crashed benchmark now writes a
+    # flagged-empty comparison whose correlation is None. Without this assert the
+    # C6 "correlation is None" verdicts would pass vacuously on such a comparison.
+    assert "note" not in bc, (
+        "a flagged-empty comparison would make the C6 None-correlation verdicts "
+        f"pass vacuously (166.4.1 D-04): {bc.get('note')!r}"
+    )
     return bc["correlation"]
 
 
