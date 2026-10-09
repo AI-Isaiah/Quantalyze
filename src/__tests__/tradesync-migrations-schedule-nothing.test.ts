@@ -38,7 +38,7 @@ const PHASE_MIGRATIONS = [
 
 const SCHEDULE_TOKENS = ["cron.schedule", "cron.unschedule"] as const;
 
-const SQL_CONCAT_RE = /'((?:[^']|'')*)'\s*\|\|\s*'((?:[^']|'')*)'/gs;
+const SQL_CONCAT_RE = /'((?:[^']|'')*)'\s*\|\|\s*'((?:[^']|'')*)'/g;
 
 /** Collapse `'a' || 'b'` into `'ab'`, repeatedly (mirror of the python gate). */
 function foldSqlConcatenations(text: string): string {
