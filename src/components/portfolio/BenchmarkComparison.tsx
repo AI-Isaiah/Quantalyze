@@ -10,6 +10,7 @@ interface BenchmarkComparisonProps {
     benchmark_twr: number | null;
     portfolio_twr: number | null;
     stale: boolean;
+    note?: string;
   } | null;
 }
 
@@ -30,7 +31,8 @@ export function BenchmarkComparison({ benchmarkComparison }: BenchmarkComparison
     );
   }
 
-  const { symbol, correlation, benchmark_twr, portfolio_twr, stale } = benchmarkComparison;
+  const { symbol, correlation, benchmark_twr, portfolio_twr, stale, note } =
+    benchmarkComparison;
   const alpha =
     portfolio_twr != null && benchmark_twr != null
       ? portfolio_twr - benchmark_twr
@@ -48,6 +50,18 @@ export function BenchmarkComparison({ benchmarkComparison }: BenchmarkComparison
           </span>
         )}
       </div>
+
+      {/* Phase 166.4.1 D-04 / D-05: the stored reason the BTC figures are empty,
+          rendered verbatim as a text node. */}
+      {note ? (
+        <p
+          role="status"
+          aria-live="polite"
+          className="mb-4 text-small break-words first-letter:uppercase"
+        >
+          {note}
+        </p>
+      ) : null}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="text-center">

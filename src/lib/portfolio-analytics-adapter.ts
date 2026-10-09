@@ -138,12 +138,16 @@ function parseBenchmarkComparison(v: Json): BenchmarkComparison | null {
   if (!isObject(v)) return null;
   const symbol = asString(v.symbol);
   if (symbol == null) return null;
+  // Phase 166.4.1 D-04 / D-05: conditional key, not `note: null`. An
+  // always-present key would change the shape of every full comparison.
+  const note = asString(v.note);
   return {
     symbol,
     correlation: asNumber(v.correlation),
     benchmark_twr: asNumber(v.benchmark_twr),
     portfolio_twr: asNumber(v.portfolio_twr),
     stale: asBoolean(v.stale),
+    ...(note != null ? { note } : {}),
   };
 }
 
