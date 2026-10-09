@@ -35,6 +35,19 @@ Phase 166.1.1. Four scorers computed "drawdown improvement" and three of them ha
   - **First-day loss.** `_max_drawdown` ignores a loss on the first day of a series, so a book whose worst day is its first reads as having no drawdown. Pre-existing and out of scope.
 - The Python change reaches users only after Railway deploys from a green main; check `/health` `git_sha` afterwards.
 
+## [0.129.5.1] - 2026-10-09 — BASELINE: automated re-dump after the PROD apply of 2982177f
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `37928464477`, after the PROD apply of merge `2982177f`: sha256 `2c0fb148…` → `4fb6fb2c…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261009150000_revoke_trigger_maintain_anon_authenticated.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-09` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.129.5.0 → 0.129.5.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=290 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `37928464477` succeeded, and this entry was composed by the `redump-pr` job. Run `37928464477` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.129.5.0] - 2026-10-09 — TRIGGERREVOKE: anon and authenticated no longer hold TRIGGER or MAINTAIN on public tables
 
 Phase 164.9.7.1, the sequel to TRUNCATEREVOKE (0.129.2.0) and the same class: row-level security never evaluates TRIGGER or MAINTAIN, so the grant layer is the only control. Measured read-only on PROD on 2026-10-09 (09:19 UTC, behind the database-identity marker, PostgreSQL 17.6): `anon` held TRIGGER on 56 `public` relations and `authenticated` on 59; MAINTAIN on 57 and 61. `service_role` and `postgres` hold both on all 67. With TRIGGER a client role can attach a trigger whose body runs as whichever role later writes the table, including the BYPASSRLS service path. With MAINTAIN (PostgreSQL 17 and later) it can VACUUM, ANALYZE, CLUSTER, REINDEX and REFRESH MATERIALIZED VIEW a table. The source is the Supabase bootstrap's default ACL on `public`, not this repo's migrations. Migration `20261009150000` fixes the class. ⚠️ PROD applies it automatically after `apply-test` succeeds, with no human stop in between, so the reviews below happened before the merge. This entry does not claim the PROD apply: the PROD after-reading (plan 05) is what will.
