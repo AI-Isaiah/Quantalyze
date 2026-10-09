@@ -1108,7 +1108,22 @@
 // `--file supabase/tests/test_strategy_shares_rls.sql` over that gate then read 45/45/0
 // biting, and the next full run read 605. That is a lane flake, not a census value, and
 // it is recorded here rather than discarded. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 61;
+// RAISED 61 -> 62 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): the new gate
+// supabase/tests/test_btcusdview_native_balance.sql (five annotated arms, BTCUSD-grant,
+// BTCUSD-noanon, BTCUSD-nowrite, BTCUSD-closedate-type and BTCUSD-unit-check, all on `sql`
+// steps; migration 20261010120000) took the corpus from 61 to 62 annotated files and
+// from 88 to 89 files. MEASURED by ONE full lane run of `node scripts/mutation-runner/run.mjs`
+// on this branch alone (origin/main merged, the TRADESYNC branch's gate files NOT counted),
+// no file edited during it: `scope: FULL 62/62 annotated files`, `lane-concurrency: 4`,
+// `coverage: files 62/89`, `arms: 615/615/0`, `biting: 615`, `lane-invocations: 615 ... plus
+// 62 baseline / 62 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`,
+// `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean 4.3s over 615
+// arm run(s)`, `No defects. Every annotated arm bit its own arm first.`, exit 0. Per-file
+// line: `test_btcusdview_native_balance.sql: sections 5 / judged 5 / annotated 5 / waived 0 /
+// biting 5`. Both directions are recorded under ARMS_FLOOR below. WAIVED_CEILING stays 0.
+// A branch that merges another gate-adding branch (TRADESYNC) re-measures both constants on
+// the merged tree; they are never added by hand.
+export const FILES_FLOOR = 62;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2909,7 +2924,20 @@ export const FILES_FLOOR = 61;
 // annotated 11 / waived 0 / biting 11`. The stale-low direction was observed first: the
 // census vitest files failed with `The corpus declares 610 twin(s) of which 0 are waivers, so
 // a green run bites 610. ARMS_FLOOR is 605.`
-export const ARMS_FLOOR = 610;
+// RAISED 610 -> 615 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): FIVE arms, all in the
+// NEW gate supabase/tests/test_btcusdview_native_balance.sql (so FILES_FLOOR moves 61 -> 62, the
+// denominator 88 -> 89 and WAIVED_CEILING stays 0). Each is a `sql` step on the live lane
+// database: a column REVOKE (BTCUSD-grant), a GRANT to anon (BTCUSD-noanon), a GRANT UPDATE to
+// authenticated (BTCUSD-nowrite), ALTER COLUMN TYPE text (BTCUSD-closedate-type) and DROP
+// CONSTRAINT allocator_holdings_quantity_unit_code (BTCUSD-unit-check), so stepsSeen did not
+// move for file edits. MEASURED by the same ONE full lane run recorded under FILES_FLOOR above,
+// constants still at 61 / 610: `arms: 615/615/0`, `biting: 615`, `lane-invocations: 615 ... plus
+// 62 baseline / 62 restore leg(s)` (the two tallies AGREE), `unreachable: 27`, `lane-blocked: 0`,
+// `No defects.`, exit 0. The narrowed run over the new file alone printed `arms: 5/5/0` and
+// `biting: 5` first. The census vitest files read the corpus, so the stale-low direction is
+// observed by `The corpus declares 615 twin(s) of which 0 are waivers, so a green run bites 615.
+// ARMS_FLOOR is 610.` until this constant moves.
+export const ARMS_FLOOR = 615;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

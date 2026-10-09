@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.129.8.0] - 2026-10-09 — BTCUSDVIEW (1/2): the owner can read a native-unit key's balance, its USD close date has a home, and a holdings row stores its unit
+
+Phase 164.6.6.2.1, first of two PRs. A native-unit (BTC-denominated) MT5 account gets a USD view in this phase, and three of its surfaces need a database home first. This PR carries the schema and an owner-only column GRANT and **nothing that reads them**. The code PR (plans 02-17) adds the columns to `API_KEY_USER_COLUMNS_ARR` and merges only after PROD has applied this migration. A roster ahead of the GRANT would make every user-scoped `api_keys` SELECT answer PostgREST 42501, the 20260920120000 hazard. Migration `20261010120000`.
+
+### Added
+- **`GRANT SELECT (account_currency, account_balance_native, account_balance_usdt_close_date) ON api_keys TO authenticated` (commit `89cdd08b6`, D-07).** The key's owner can read the native balance in the browser. Row scope is the existing owner RLS on `api_keys`. `anon` is granted nothing, and no INSERT or UPDATE grant is issued, so the analytics worker (service role) stays the only writer.
+- **`api_keys.account_balance_usdt_close_date` (date, NULL; D-17).** This is the stored date of the daily BTC close that priced `account_balance_usdt`, so the key card can print "≈ $X at <date> close" from data rather than the viewer's clock. NULL means no USD value was priced.
+- **`allocator_holdings.quantity_unit` (text, NULL, CHECK `^[A-Z]{2,10}$`).** A native-unit account's holdings row names its unit on the row itself. Every existing row stays NULL and keeps its meaning. The table's existing table-level SELECT and owner RLS cover the column, so no grant changes there.
+- **Rollback** `supabase/migrations/down/20261010120000-rollback.sql`. Order matters: revert the roster and writers first and let that deploy land, then run the rollback.
+
+### Tests
+- **New SQL gate `supabase/tests/test_btcusdview_native_balance.sql`** with five annotated arms, each biting: `BTCUSD-grant`, `BTCUSD-noanon`, `BTCUSD-nowrite`, `BTCUSD-closedate-type` and `BTCUSD-unit-check`.
+- **Census moves for the new gate file (commit `acb3f1d80`).** `FILES_FLOOR` and `ARMS_FLOOR` in `scripts/mutation-floors.mjs` are raised to the measured full-lane reading, and the lint-sql-gates, mutation-annotation-parser, mutation-runner-floors and gate-family-meta counts move with them. The dated reading is in `docs/sql-gate-lineage.md`. `WAIVED_CEILING` stays 0.
+
+### Notes
+- **No data-reading DO block.** Every check in the migration reads the catalogue. Shared TEST holds no PROD data, and a refusing TEST apply would block the PROD apply.
+- **Planning artifacts** stay on the phase branch and are not in this PR: the phase context, research, UI-SPEC, the 17 plans and the plan 01 SUMMARY.
+- **After merge:** the TEST then PROD apply runs with no human stop. Plans 07, 10, 15 and 17 are gated on PROD carrying these columns and the GRANT.
+
 ## [0.129.7.0] - 2026-10-09 — DERIBITWEDGE (1/2): each Deribit derive stores its account-summary read, an identity verdict, a ledger digest and the inception numbers
 
 Phase 167.1.2.2.1, first of two PRs. A Deribit key-mode derive rolls the whole history back from one live `get_account_summaries` read and kept nothing of it, so two derives a day apart over the same ledger could differ and nobody could say whether the wedge or the ledger had moved. This PR stores the inputs. It changes no computed value: no return, no equity level, no gate verdict. Every new field is additive and present-only on the Deribit key's `key_inputs` row (the ccxt payload keeps its 5 keys), a row written before it reads as absent, and a capture that fails writes `<field>_error` (the exception class name) and one class-name-only WARNING instead of failing the derive. No migration.
