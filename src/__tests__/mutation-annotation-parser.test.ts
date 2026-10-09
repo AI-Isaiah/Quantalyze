@@ -1068,11 +1068,13 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): `armsSeen` 599 -> 605: the NEW gate test_truncate_revoke_anon_authenticated.sql (6 arms, TRUNC 1 to TRUNC 6, every twin a single `sql` step, so `stepsSeen` stays 716). MEASURED: one full lane run on the merged tree printed `arms: 605/605/0` and `biting: 605`, and this file reads `armsSeen` 605 / `stepsSeen` 716.
     // ⭐ CURRENCY 2026-10-09 (Phase 164.9.7.1 TRIGGERREVOKE, merge with origin/main): `armsSeen` 605 -> 610: FIVE arms, VERB 1 to VERB 5, added to test_truncate_revoke_anon_authenticated.sql. Every twin is a `sql` step, so `stepsSeen` and the file counts do not move.
     // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): `armsSeen` 610 -> 615: the NEW gate test_btcusdview_native_balance.sql (5 arms, every twin a single `sql` step, so `stepsSeen` is unchanged). MEASURED: this file's run read `expected 615 to be 610`.
-    expect(armsSeen).toBe(615);
+    // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): `armsSeen` 615 -> 630 on the tree merged with origin/main: the TWO NEW gates test_cron_sync_tick.sql (8 arms) and test_strategy_analytics_trade_fetch_provenance.sql (7 arms), beside the BTCUSDVIEW gate main already counted. MEASURED by one full runner run of the merged tree (`arms: 630/630/0`); `stepsSeen` is read below.
+    expect(armsSeen).toBe(630);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
-    expect(stepsSeen).toBe(716);
+    // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): `stepsSeen` 716 -> 729: +13 file steps across the two NEW gates across the 15 new arms (the delta is the measured value, not a per-arm count). MEASURED: this file's run read `expected 729 to be 716`.
+    expect(stepsSeen).toBe(729);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1993,7 +1995,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-10-07 (founder D-09): 700 -> 702, moving WITH `stepsSeen` (D9 and D10, one file step each). MEASURED: `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): 702 -> 711, moving WITH `stepsSeen`. MEASURED: `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): 711 -> 716, moving WITH `stepsSeen`. MEASURED: `expected 716 to be 711`.
-    expect(needles.length).toBe(716);
+    // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): 716 -> 729, moving WITH `stepsSeen` (the 13 file steps of the two new gates). MEASURED: `expected 729 to be 716`.
+    expect(needles.length).toBe(729);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2579,7 +2582,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 86 -> 87, the side-kind scope gate file. MEASURED: this file's run read `expected 87 to be 86`, and the full lane run printed `coverage: files 60/87`.
     // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 87 -> 88, the truncate-revoke gate file beside the side-kind scope gate. MEASURED: the full lane run on the merged tree printed `coverage: files 61/88`.
     // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): 88 -> 89, the native-balance GRANT gate file beside the truncate-revoke gate. MEASURED: the full lane run on this branch printed `coverage: files 62/89`.
-    expect(corpus.filesTotal).toBe(89);
+    expect(corpus.filesTotal).toBe(91);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2645,7 +2648,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 59 -> 60 (test_sync_status_analytics_scope.sql), with the denominator and the by-name list below.
     // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 60 -> 61 (test_truncate_revoke_anon_authenticated.sql), with the denominator above and the by-name list below.
     // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): 61 -> 62 (test_btcusdview_native_balance.sql), with the denominator and the by-name list below. MEASURED off the full lane run: `coverage: files 62/89`.
-    expect(corpus.filesAnnotated).toBe(62);
+    // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): 62 -> 64 (test_cron_sync_tick.sql, test_strategy_analytics_trade_fetch_provenance.sql), with the denominator and the by-name list below. MEASURED off the full lane run of the merged tree: `coverage: files 64/91`.
+    expect(corpus.filesAnnotated).toBe(64);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2687,6 +2691,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       // annotated file: anon and a non-admin authenticated user read ZERO
       // cron_runs rows, beside a platform-admin anti-vacuity control.
       "test_cron_runs_rls.sql",
+      // ⭐ ADDED 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): the cron_sync_tick gate (8 arms).
+      "test_cron_sync_tick.sql",
       "test_csv_daily_returns_perkey_rls.sql",
       "test_csv_finalize_atomic_fold.sql",
       "test_csv_finalize_auth_guard.sql",
@@ -2725,6 +2731,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_strategies_private_owner_isolation.sql",
       "test_strategy_analytics_series_completeness.sql",
       "test_strategy_analytics_stuck_computing_reaper.sql",
+      // ⭐ ADDED 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): the trade-fetch and provenance column gate (7 arms).
+      "test_strategy_analytics_trade_fetch_provenance.sql",
       "test_strategy_keys_publish_integrity.sql",
       "test_strategy_keys_rls.sql",
       "test_strategy_shares_rls.sql",
@@ -3156,7 +3164,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 86 -> 87, the side-kind scope gate file. MEASURED: this file's run read `expected 87 to be 86`, and the full lane run printed `coverage: files 60/87`.
     // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 87 -> 88, the truncate-revoke gate file. MEASURED off the full lane run: annotated 61 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 88.
     // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): 88 -> 89, the native-balance GRANT gate file. MEASURED off the full lane run: annotated 62 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 89.
-    expect(corpus.filesTotal).toBe(89);
+    expect(corpus.filesTotal).toBe(91);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3178,7 +3186,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 59 -> 60 (test_sync_status_analytics_scope.sql).
     // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 60 -> 61 (test_truncate_revoke_anon_authenticated.sql).
     // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): 61 -> 62 (test_btcusdview_native_balance.sql).
-    expect(corpus.annotatedFiles).toHaveLength(62);
+    // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): 62 -> 64, the same two files.
+    expect(corpus.annotatedFiles).toHaveLength(64);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

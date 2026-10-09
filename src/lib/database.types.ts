@@ -2628,6 +2628,7 @@ export type Database = {
           returns_series: Json | null
           rolling_metrics: Json | null
           series_completeness: string | null
+          series_provenance: Json | null
           sharpe: number | null
           six_month_return: number | null
           sortino: number | null
@@ -2635,6 +2636,7 @@ export type Database = {
           sparkline_returns: Json | null
           strategy_id: string
           trade_metrics: Json | null
+          trades_fetched_at: string | null
           volatility: number | null
           volume_metrics: Json | null
         }
@@ -2664,6 +2666,7 @@ export type Database = {
           returns_series?: Json | null
           rolling_metrics?: Json | null
           series_completeness?: string | null
+          series_provenance?: Json | null
           sharpe?: number | null
           six_month_return?: number | null
           sortino?: number | null
@@ -2671,6 +2674,7 @@ export type Database = {
           sparkline_returns?: Json | null
           strategy_id: string
           trade_metrics?: Json | null
+          trades_fetched_at?: string | null
           volatility?: number | null
           volume_metrics?: Json | null
         }
@@ -2700,6 +2704,7 @@ export type Database = {
           returns_series?: Json | null
           rolling_metrics?: Json | null
           series_completeness?: string | null
+          series_provenance?: Json | null
           sharpe?: number | null
           six_month_return?: number | null
           sortino?: number | null
@@ -2707,6 +2712,7 @@ export type Database = {
           sparkline_returns?: Json | null
           strategy_id?: string
           trade_metrics?: Json | null
+          trades_fetched_at?: string | null
           volatility?: number | null
           volume_metrics?: Json | null
         }

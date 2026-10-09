@@ -8772,6 +8772,91 @@ stays out of tracked text: record it only in the Bybit key's settings and the Ra
 reads `ready` in census e on the next scheduled run.
 ⛔ **Not a close:** a green Railway setting without a Bybit derive that reads `done`.
 
+### [167.1.2.2.2-CRON-TICK-RESIDUALS] — four MEDIUM residuals of `public.cron_sync_tick()` that the plan 01 review round recorded and did not fix (booked 2026-10-09, Phase 167.1.2.2.2 plan 01 Task 3)
+
+**Why it is open.** The three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter)
+reported the tick migration CLEAN with no CRITICAL or HIGH. The worst finding was MEDIUM, so under the
+review rule no fixer round ran. Four of those MEDIUMs are carried here rather than lost:
+
+1. **The destination allow-list is a suffix wildcard.** The allow-list is `https://<host>.up.railway.app`
+   for any host. An app-admin, or any `service_role` holder (every Next.js `createAdminClient()` route and
+   the Python analytics service write `system_settings`), can point `system_settings.analytics_service_url`
+   at another Railway subdomain, and the Vault service key is then posted there. The tick inherits this
+   from `match_engine_cron_tick` and from the `system_settings` CHECK constraint, and so does
+   `prod_prober_cadence_check`: three spellings of one rule. The exact-origin tightening of all three
+   (CHECK constraint, and each in-body re-test) belongs to a later forward migration, not to this tick.
+2. **Gate arm P1 never compares the posted key to the Vault secret.** It asserts the `X-Service-Key`
+   header is non-blank, not that it equals the secret the Vault holds, so a body that posted some other
+   non-blank string would pass.
+3. **The blank-key guard trims spaces only.** `btrim(v_key) = ''` leaves a key of tabs or newlines
+   through, and the analytics service answers it 401. Already recorded as a comment in the sibling
+   `match_engine_cron_tick`; widening it is a decision with its own evidence and touches the sibling too.
+4. **Nothing reads `cron.job_run_details` for this job.** The returned BIGINT is a pg_net request id, and
+   a 401 or a timeout still leaves the pg_cron run green, so a daily tick that stops syncing is only
+   noticed by a human reading the table.
+
+Not in the list because it is a runbook item and not a migration edit: the 180000 ms timeout is a plan
+figure, not a measurement. The go-live rehearsal (plans 14 and 17, the PGNET-TOO-SLOW and KEY-TIMEOUT
+verdicts) measures it.
+
+**Owner:** unrouted; THE FOUNDER routes it. Items 1 and 3 ride one forward migration that tightens the
+tick, the cadence check and the match-engine tick together; item 2 rides the next edit of
+`supabase/tests/test_cron_sync_tick.sql`; item 4 rides Phase 164.6.8 (OUTAGEALERT) if the founder routes it
+there, and otherwise stays the by-hand read in the go-live runbook.
+**Trigger:** the first of (a) any migration that touches `system_settings.analytics_service_url` or its
+CHECK constraint, or re-bases `match_engine_cron_tick` or `prod_prober_cadence_check`, (b) the first
+scheduled `cron-sync-trades` run whose `cron.job_run_details` row reads green while `/api/cron-sync` did
+not sync, (c) the start of 164.6.8 planning. Booked 2026-10-09.
+**Gate (what closes it):** per item. (1) the CHECK and all three in-body re-tests accept one exact origin,
+proven by a gate arm that fails first when a different `*.up.railway.app` host is stored. (2) a P1
+assertion that the recorded header equals the Vault secret, observed RED under a mutant posting a fixed
+string. (3) a key of a tab or a newline is refused by name, observed RED under the old guard. (4) a
+failed or timed-out tick reaches a human without anyone running a query, with a test that fails first when
+the reader is removed.
+⛔ **Not a close:** the review round's CLEAN verdicts, or a rehearsal that happened to read green once.
+
+### [167.1.2.2.2-PROVENANCE-GATE-RESIDUALS] — MEDIUM residuals of the `trades_fetched_at` / `series_provenance` column migration and its gate that the plan 02 review round recorded and did not fix (booked 2026-10-09, Phase 167.1.2.2.2 plan 02 Task 3)
+
+**Why it is open.** migration-reviewer, rls-policy-auditor and silent-failure-hunter reported
+`20261010130000_strategy_analytics_trade_fetch_provenance.sql` and `test_strategy_analytics_trade_fetch_provenance.sql`
+CLEAN with no CRITICAL or HIGH, so no fixer round ran. The MEDIUMs carried here rather than lost:
+
+1. **Arms 1 to 3 have no twin for the `series_provenance` half.** Each arm asserts both columns but its
+   twin mutates `trades_fetched_at` only, so a regression that makes `series_provenance` NOT NULL, typed
+   `json`, or defaulted is caught by the migration's own verify block at apply time and by no biting twin.
+2. **The CHECK is verified by name only.** The verify block proves
+   `strategy_analytics_series_provenance_is_object` exists with `contype = 'c'`, not that its definition is
+   the object-or-NULL predicate. Arm 4 measures behaviour on the pg-lane and the baseline, which is what
+   covers it; the apply-time block does not.
+3. **The rollback drops provenance data with no count or backup.** Every recorded legacy range and
+   unrecovered gap is lost with the column, and the rollback header says so but takes no copy.
+   `series_provenance` is runbook-written by hand, so it does not refill itself the way
+   `trades_fetched_at` does.
+4. **No gate arm proves the read boundary or the write denial for the new columns.** The RLS audit found no
+   live leak (reads go through `analytics_read`, published or owner; writes are service_role only through
+   `analytics_insert_deny` and `analytics_update_deny`; no ACL drift), but the gate asserts only that
+   `anon` can SELECT. Nothing fails first if `authenticated` could UPDATE `trades_fetched_at`, or if a
+   non-owner could read an unpublished row's value.
+5. **Arm 5 seeds only a `complete` row, so "no trigger reacts to a `trades_fetched_at`-only UPDATE" is
+   unproven for the other states.** On the baseline, a `computing` row with NULL `computing_started_at`
+   gets `computing_started_at := now()` from `strategy_analytics_stamp_computing_started_trigger`, and a
+   non-computing row with a stale stamp has it cleared. **Routed to plan 05 (the every-tick
+   `trades_fetched_at` stamp, SC-4 writer): it must either exclude `computing` rows from the stamp or
+   accept and document the trigger's repair stamp, and either way carries a red-first test.**
+
+**Owner:** items 1 to 4 are unrouted; THE FOUNDER routes them, and they ride the next edit of the column
+migration's gate or the next migration that touches `strategy_analytics`. Item 5 is owned by plan 05 of
+Phase 167.1.2.2.2.
+**Trigger:** the first of (a) any migration or gate edit that touches `strategy_analytics.series_provenance`
+or `trades_fetched_at`, including OKXHISTORY (167.1.2.2.2.1) adding `reconstructed_ranges`, (b) the first
+PROD rollback of `20261010130000`, (c) plan 05 execution (item 5, which cannot wait). Booked 2026-10-09.
+**Gate (what closes it):** per item. (1) a twin per arm for the `series_provenance` half, observed RED. (2)
+the verify block compares the CHECK's `pg_get_constraintdef` to the expected predicate, observed RED under a
+weakened CHECK. (3) the rollback copies the column to a named table or the runbook records a pre-rollback
+export step. (4) arms that fail first when `authenticated` can UPDATE either column and when a non-owner
+reads an unpublished row's value. (5) plan 05's red-first test on a `computing` row.
+⛔ **Not a close:** the review round's CLEAN verdicts, or arm 5 reading green on a `complete` row.
+
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
 - **"Do NOT implement" landmines (keep documented, do not touch):** bridge-scoring precompute;

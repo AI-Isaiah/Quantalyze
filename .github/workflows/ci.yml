@@ -4915,6 +4915,7 @@ jobs:
           #   test_analytics_service_settings_and_vault_tick.sql 13
           #   test_compute_job_fence_errcode.sql              8
           #   test_create_wizard_strategy_for_key.sql         9
+          #   test_cron_sync_tick.sql                         8
           #   test_enqueue_race_loss_40001.sql                3
           #   test_get_verified_cohort_rank_gate.sql          6
           #   test_ledger_refresh_composite_arm.sql          23
@@ -5029,14 +5030,22 @@ jobs:
           #   recompute on a warned row is stamped by the side failure that follows it;
           #   a deferred side job leaves the row alone), so its sentinel reads ALL 21
           #   and ARMS_FLOOR moves 275 -> 277. No file joined, so SENTINEL_FLOOR stays 15.
+          # Re-measured 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03), ONE file joined:
+          #   test_cron_sync_tick.sql declares `ALL 8 ARMS EXECUTED`, so SENTINEL_FLOOR moves
+          #   15 -> 16 and ARMS_FLOOR 277 -> 285. The file is LANE-ONLY (it asserts against
+          #   the pg-net stand-in), so this step DECLARES it without checking it against a
+          #   run, exactly as test_prod_prober_cadence.sql is: it stays in the static
+          #   accounting. The plan expected the LANE-ONLY file to sit outside this census;
+          #   ci-anti-skip-gate.contract.test.ts re-derives the table from the corpus and
+          #   read 16 files declaring a sentinel, not 15.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_analytics_scope.sql             21
           #   test_sync_status_bridge_residues.sql             16
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=15  # files declaring a sentinel
-          ARMS_FLOOR=277     # 13 + 8 + 9 + 3 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 21 + 16 + 7 + 23
+          SENTINEL_FLOOR=16  # files declaring a sentinel
+          ARMS_FLOOR=285     # 13 + 8 + 9 + 8 + 3 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 21 + 16 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

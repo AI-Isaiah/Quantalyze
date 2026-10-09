@@ -4818,7 +4818,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=15 and ARMS_FLOOR=277 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=16 and ARMS_FLOOR=285 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -4959,9 +4959,15 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // test_sync_status_analytics_scope.sql gains D15 and D16, so its sentinel reads
     // `ALL 21 ARMS EXECUTED` and ARMS_FLOOR moves by two. No file joined, so
     // SENTINEL_FLOOR stays 15.
+    //
+    // RAISED 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03), 15/277 -> 16/285.
+    // test_cron_sync_tick.sql JOINED (a LANE-ONLY gate, declared but not checked against a
+    // run, so it is still inside this static accounting) and declares `ALL 8 ARMS EXECUTED`.
+    // MEASURED: ci-anti-skip-gate.contract.test.ts read 16 sentinel-bearing files against
+    // the table's 15 and the sum 285 against 277.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=15", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=16", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -4972,7 +4978,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=277", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=285", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

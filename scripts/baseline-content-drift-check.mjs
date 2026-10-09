@@ -129,6 +129,17 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * is regenerated from PROD after the apply. Raising this floor records the two
  * functions joining the corpus; it does NOT suppress those findings.
  *
+ * MOVED 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC plan 03), 125 -> 126: one
+ * ADDITION, not a removal. `public.cron_sync_tick()` enters the chain via forward
+ * migration 20261010140000_cron_sync_tick.sql. MEASURED on the real corpus by
+ * `node scripts/baseline-content-drift-check.mjs`: `functions compared 126 — MATCH
+ * 122, DRIFT 3, SNAPSHOT_MISSING 1`. ⚠️ Same shape as the 164.1.1 and 167.1.2
+ * moves above: the function is compared but NOT matched, so it is the gate's one
+ * SNAPSHOT_MISSING finding until baseline.sql is regenerated from PROD after the
+ * apply (recorded as a dated `snapshot-only` row in NAME_SET_RATCHET in
+ * scripts/dump-sql-functions.ts, cleared by that re-dump). Raising this floor
+ * records the function joining the corpus; it does NOT suppress that finding.
+ *
  * MEASURED 2026-09-08 at this tree: 122. Same contract as `FILES_FLOOR` /
  * `ARMS_FLOOR` in scripts/mutation-runner/run.mjs — pinned AT the measured
  * value, so a drop is a hard failure and a legitimate removal is an EXPLICIT
@@ -136,7 +147,7 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * run green; a drop means either a real removal (say so, in the same commit) or
  * the parser blinding itself, which is the whole defect.
  */
-export const COMPARED_FLOOR = 125;
+export const COMPARED_FLOOR = 126;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */
