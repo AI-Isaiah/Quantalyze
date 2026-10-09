@@ -1622,6 +1622,70 @@ class DeribitNativeAccountState:
     # 0.0 (never fabricated; SC-4 byte-safe). Defaulted so every existing positional
     # constructor stays valid. A failed/empty read yields an EMPTY map (→ 0.0).
     native_options_session_upl: Mapping[str, float] = field(default_factory=dict)
+    # Phase 167.1.2.2.1 (DERIBITWEDGE, PR-1) — the CAPTURE of this same single summaries
+    # read, so a derive can STORE what it read (D-03) instead of leaving it a silent live
+    # input. Purely additive: nothing a derive computes reads these four fields.
+    #   * ``native_balance`` — per-UPPERCASE-ccy ``balance`` (the cash balance), PRESENT-ONLY:
+    #     a currency whose ``balance`` is absent, null, boolean or non-finite is OMITTED,
+    #     never coalesced to 0.0 (absent is not "the cash balance is exactly nil").
+    #   * ``summary_snapshot`` — per currency, the WHITELISTED raw fields as read
+    #     (``ACCOUNT_SUMMARY_NUMERIC_FIELDS`` + ``margin_model`` + ``cross_collateral_enabled``).
+    #     No account id, email, username or system name ever enters it.
+    #   * ``index_usd_snapshot`` — the ``{ccy}_usd`` index prices this same function resolved
+    #     for the collapsed anchor (no new fetch).
+    #   * ``read_at_iso`` — UTC ISO time taken immediately after the summaries response.
+    native_balance: Mapping[str, float] = field(default_factory=dict)
+    summary_snapshot: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    index_usd_snapshot: Mapping[str, float] = field(default_factory=dict)
+    read_at_iso: str | None = None
+
+
+# The numeric ``get_account_summaries`` fields a stored snapshot may carry. This is the
+# WHITELIST (T-167.1.2.2.1-01): every field the derive reads off a summary is here, plus the
+# documented components of the equity identity. A field not named here is never stored.
+ACCOUNT_SUMMARY_NUMERIC_FIELDS: tuple[str, ...] = (
+    "equity",
+    "balance",
+    "session_upl",
+    "session_rpl",
+    "futures_session_upl",
+    "futures_session_rpl",
+    "options_session_upl",
+    "options_session_rpl",
+    "options_value",
+    "total_pl",
+    "margin_balance",
+)
+
+
+def _present_finite_number(raw: Any) -> float | None:
+    """``raw`` as a float iff it is a present, non-boolean, finite ``int``/``float``.
+
+    The present-numeric discipline of :func:`_combined_session_upl`, without its
+    ``float(x or 0.0)`` coercion: absent, ``None``, a boolean (``float(True) == 1.0``), a
+    string and NaN/inf all read as "not read" (``None``), never as 0.0."""
+    if raw is None or isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    value = float(raw)
+    return value if math.isfinite(value) else None
+
+
+def _account_summary_snapshot_row(summ: Mapping[str, Any]) -> dict[str, Any]:
+    """The whitelisted, type-checked fields of ONE summary (T-167.1.2.2.1-01). A numeric
+    field is kept only when it is a finite non-boolean number, ``margin_model`` only as a
+    ``str`` and ``cross_collateral_enabled`` only as a ``bool``. An absent field stays absent."""
+    row: dict[str, Any] = {}
+    for key in ACCOUNT_SUMMARY_NUMERIC_FIELDS:
+        value = _present_finite_number(summ.get(key))
+        if value is not None:
+            row[key] = value
+    margin_model = summ.get("margin_model")
+    if isinstance(margin_model, str):
+        row["margin_model"] = margin_model
+    cross = summ.get("cross_collateral_enabled")
+    if isinstance(cross, bool):
+        row["cross_collateral_enabled"] = cross
+    return row
 
 
 async def fetch_deribit_native_account_state(
@@ -1655,6 +1719,8 @@ async def fetch_deribit_native_account_state(
         resp = await exchange.private_get_get_account_summaries({})
     except Exception:  # noqa: BLE001 - a failed read is a DQ flag, not a crash
         return DeribitNativeAccountState(empty, {}, None, 0.0, True, False, {})
+    # Taken immediately after the response returns: the instant the stored snapshot describes.
+    read_at_iso = datetime.now(timezone.utc).isoformat()
     result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
     summaries = result.get("summaries", []) if isinstance(result, Mapping) else []
     if not isinstance(summaries, Sequence) or not summaries:
@@ -1666,12 +1732,20 @@ async def fetch_deribit_native_account_state(
     native_upnl: dict[str, float] = {}
     native_options_value: dict[str, float] = {}
     native_options_session_upl: dict[str, float] = {}
+    native_balance: dict[str, float] = {}
+    summary_snapshot: dict[str, dict[str, Any]] = {}
     for summ in summaries:
         if not isinstance(summ, Mapping):
             continue
         ccy = str(summ.get("currency", "")).upper()
         if not ccy:
             continue
+        # DERIBITWEDGE PR-1 capture: PRESENT-ONLY balance (never the ``or 0.0`` coercion the
+        # sibling maps use) and the whitelisted snapshot of this same summary.
+        _balance = _present_finite_number(summ.get("balance"))
+        if _balance is not None:
+            native_balance[ccy] = _balance
+        summary_snapshot[ccy] = _account_summary_snapshot_row(summ)
         native_equity[ccy] = float(summ.get("equity", 0.0) or 0.0)
         # Task 2b: COMBINED futures + options session uPnL (§2 Q5), byte-safe for
         # perp-only (options component absent → 0.0 → unchanged value → SC-4).
@@ -1757,6 +1831,10 @@ async def fetch_deribit_native_account_state(
             native_equity, native_upnl, None, 0.0, True, False,
             native_options_value,
             native_options_session_upl,
+            native_balance,
+            summary_snapshot,
+            index_prices,
+            read_at_iso,
         )
     open_unrealized_usd, upnl_unreadable = _deribit_session_upl_to_usd(
         summaries, index_prices
@@ -1770,6 +1848,10 @@ async def fetch_deribit_native_account_state(
         upnl_unreadable,
         native_options_value,
         native_options_session_upl,
+        native_balance,
+        summary_snapshot,
+        index_prices,
+        read_at_iso,
     )
 
 

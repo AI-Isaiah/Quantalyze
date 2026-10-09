@@ -4063,6 +4063,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # reaches inception (``full_history``) runs the gate, and a breach raises before this is
         # set, so a value here means the gate ran and passed.
         _native_inception_verdict: str | None = None
+        # 167.1.2.2.1 D-03 (DERIBITWEDGE PR-1): the derive's ONE ``get_account_summaries`` read,
+        # stored in the key's ``key_inputs`` so the live read is a recorded input and never a
+        # silent one. Set ONLY by the deribit key-mode branch, from the SAME ``account_state``
+        # (no second exchange read). It is either ``{"account_summary": {...}}`` or, if the
+        # capture itself failed, ``{"account_summary_error": <exception class>}``: an additive
+        # capture never fails a working derive, and never fails silently.
+        _account_summary_snapshot: "dict[str, Any] | None" = None
 
         if venue == "deribit":
             # D-08: realized returns come from the ONE txn-log ledger pass
@@ -4273,6 +4280,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     )
                     if native_ledger.full_history:
                         _native_inception_verdict = "reconciled"
+                    # D-03: store the ONE summaries read this derive already made. A
+                    # capture failure is recorded by class name and never fails the derive.
+                    try:
+                        from services.allocator_equity_derive import account_summary_payload
+
+                        _account_summary_snapshot = account_summary_payload(account_state)
+                    except Exception as _capture_exc:  # noqa: BLE001 - additive capture
+                        logger.warning(
+                            "derive_broker_dailies: account_summary capture failed "
+                            "(venue=%s, error=%s)",
+                            venue,
+                            type(_capture_exc).__name__,
+                        )
+                        _account_summary_snapshot = {
+                            "account_summary_error": type(_capture_exc).__name__
+                        }
                 # FLOW-04 materiality: the pure native core does not emit
                 # unrealized_pnl_in_anchor (it subtracts the wedge per-currency, App
                 # A #6). Preserve the v1.8 warning using the collapsed USD anchor +
@@ -6255,6 +6278,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             _key_inputs_payload.update(realized_terminal_payload(*_realized_terminal))
         if _native_inception_verdict is not None:
             _key_inputs_payload["native_inception"] = _native_inception_verdict
+        # 167.1.2.2.1 D-03: Deribit-only and present-only (the ccxt payload keeps its 5 keys).
+        if _account_summary_snapshot is not None:
+            _key_inputs_payload.update(_account_summary_snapshot)
 
         def _persist_key_inputs(
             payload: dict[str, Any] = _key_inputs_payload,
