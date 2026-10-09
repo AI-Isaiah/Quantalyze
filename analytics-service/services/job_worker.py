@@ -4070,6 +4070,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # capture itself failed, ``{"account_summary_error": <exception class>}``: an additive
         # capture never fails a working derive, and never fails silently.
         _account_summary_snapshot: "dict[str, Any] | None" = None
+        # 167.1.2.2.1 D-03: the digest (row count, max timestamp, sha256) of the transaction
+        # log this derive crawled, so a later diff can tell a ledger change from a wedge
+        # change. Same shape as above: ``{"ledger_digest": {...}}`` or ``{"ledger_digest_error":
+        # <exception class>}``, deribit key-mode only.
+        _ledger_digest: "dict[str, Any] | None" = None
 
         if venue == "deribit":
             # D-08: realized returns come from the ONE txn-log ledger pass
@@ -4296,6 +4301,27 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         _account_summary_snapshot = {
                             "account_summary_error": type(_capture_exc).__name__
                         }
+                    # The digest was computed by the ledger build (it holds the crawled rows):
+                    # either it is there, or the build recorded the CLASS NAME it failed with.
+                    _digest_err: str | None = _completeness.ledger_digest_error
+                    if _digest_err is None and _completeness.ledger_digest is not None:
+                        try:
+                            from services.allocator_equity_derive import (
+                                ledger_digest_payload,
+                            )
+
+                            _ledger_digest = ledger_digest_payload(_completeness.ledger_digest)
+                        except Exception as _digest_exc:  # noqa: BLE001 - additive capture
+                            _digest_err = type(_digest_exc).__name__
+                    if _digest_err is not None:
+                        # Class name only, never the message (T-115-05).
+                        logger.warning(
+                            "derive_broker_dailies: ledger_digest capture failed "
+                            "(venue=%s, error=%s)",
+                            venue,
+                            _digest_err,
+                        )
+                        _ledger_digest = {"ledger_digest_error": _digest_err}
                 # FLOW-04 materiality: the pure native core does not emit
                 # unrealized_pnl_in_anchor (it subtracts the wedge per-currency, App
                 # A #6). Preserve the v1.8 warning using the collapsed USD anchor +
@@ -6281,6 +6307,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # 167.1.2.2.1 D-03: Deribit-only and present-only (the ccxt payload keeps its 5 keys).
         if _account_summary_snapshot is not None:
             _key_inputs_payload.update(_account_summary_snapshot)
+        if _ledger_digest is not None:
+            _key_inputs_payload.update(_ledger_digest)
 
         def _persist_key_inputs(
             payload: dict[str, Any] = _key_inputs_payload,

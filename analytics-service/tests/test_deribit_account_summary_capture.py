@@ -16,7 +16,9 @@ Root-cause note: see the debug note named derivecron-compose-divergence.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -24,9 +26,12 @@ import pytest
 
 from services.allocator_equity_derive import (
     account_summary_payload,
+    ledger_digest_payload,
     read_account_summary,
+    read_ledger_digest,
 )
 from services.deribit_ingest import (
+    CompletenessReport,
     DeribitNativeAccountState,
     fetch_deribit_native_account_state,
 )
@@ -376,3 +381,278 @@ async def test_an_account_with_no_snapshot_still_stores_an_empty_but_valid_one()
     payload, _spy = await _run_deribit_key_mode_derive(bare)
     got = read_account_summary(payload)
     assert got is not None and got["summaries"] == []
+
+
+# ── the ledger digest ────────────────────────────────────────────────────────────
+
+
+def _expected_digest(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Restated by hand: sort (timestamp, str(id)), canonical JSON, newline-join, sha256."""
+    ordered = sorted(rows, key=lambda r: (int(r["timestamp"]), str(r.get("id"))))
+    body = "\n".join(
+        json.dumps(r, sort_keys=True, separators=(",", ":"), default=str) for r in ordered
+    )
+    return {
+        "row_count": len(rows),
+        "max_timestamp_ms": max(int(r["timestamp"]) for r in rows),
+        "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+    }
+
+
+_ROWS = [
+    {"id": 3, "timestamp": 1_700_000_300_000, "type": "settlement", "change": 0.5},
+    {"id": 1, "timestamp": 1_700_000_100_000, "type": "deposit", "change": 2.0},
+    {"id": 2, "timestamp": 1_700_000_200_000, "type": "trade", "change": -0.1},
+]
+
+
+def test_the_digest_matches_the_hand_restated_canonical_form() -> None:
+    from services.deribit_ingest import deribit_ledger_digest
+
+    assert deribit_ledger_digest(_ROWS) == _expected_digest(_ROWS)
+
+
+def test_the_digest_is_stable_under_page_order() -> None:
+    from services.deribit_ingest import deribit_ledger_digest
+
+    assert deribit_ledger_digest(_ROWS) == deribit_ledger_digest(list(reversed(_ROWS)))
+
+
+def test_an_added_row_moves_the_count_and_the_hash() -> None:
+    from services.deribit_ingest import deribit_ledger_digest
+
+    base = deribit_ledger_digest(_ROWS)
+    more = deribit_ledger_digest(
+        [*_ROWS, {"id": 4, "timestamp": 1_700_000_400_000, "type": "trade", "change": 0.01}]
+    )
+    assert more["row_count"] == base["row_count"] + 1
+    assert more["sha256"] != base["sha256"]
+    assert more["max_timestamp_ms"] == 1_700_000_400_000
+
+
+def test_the_digest_holds_no_raw_row_value() -> None:
+    from services.deribit_ingest import deribit_ledger_digest
+
+    d = deribit_ledger_digest(_ROWS)
+    assert set(d) == {"row_count", "max_timestamp_ms", "sha256"}
+    assert isinstance(d["row_count"], int) and isinstance(d["max_timestamp_ms"], int)
+    assert len(d["sha256"]) == 64 and set(d["sha256"]) <= set("0123456789abcdef")
+    blob = json.dumps(d)
+    for row in _ROWS:
+        assert str(row["change"]) not in blob
+
+
+def test_no_rows_digest_has_no_max_timestamp() -> None:
+    from services.deribit_ingest import deribit_ledger_digest
+
+    d = deribit_ledger_digest([])
+    assert d["row_count"] == 0 and d["max_timestamp_ms"] is None
+    assert d["sha256"] == hashlib.sha256(b"").hexdigest()
+
+
+def test_missing_and_mixed_type_ids_digest_without_raising() -> None:
+    from services.deribit_ingest import deribit_ledger_digest
+
+    rows = [
+        {"timestamp": 1_700_000_000_000, "type": "a"},
+        {"id": "x", "timestamp": 1_700_000_000_000, "type": "b"},
+        {"id": 7, "timestamp": 1_700_000_000_000, "type": "c"},
+        {"id": None, "timestamp": 1_700_000_000_000, "type": "d"},
+    ]
+    assert deribit_ledger_digest(rows) == deribit_ledger_digest(list(reversed(rows)))
+
+
+def test_equal_timestamp_and_id_rows_still_digest_order_independently() -> None:
+    """Two rows can share (timestamp, id) across subaccount scopes. The tie is broken by the
+    row content, so page order still cannot move the hash."""
+    from services.deribit_ingest import deribit_ledger_digest
+
+    rows = [
+        {"id": 1, "timestamp": 1_700_000_000_000, "scope": "a", "change": 1.0},
+        {"id": 1, "timestamp": 1_700_000_000_000, "scope": "b", "change": 2.0},
+    ]
+    assert deribit_ledger_digest(rows) == deribit_ledger_digest(list(reversed(rows)))
+
+
+def test_the_digest_payload_round_trips_and_the_reader_is_strict() -> None:
+    from services.deribit_ingest import deribit_ledger_digest
+
+    digest = deribit_ledger_digest(_ROWS)
+    stored = json.loads(json.dumps(ledger_digest_payload(digest)))
+    assert read_ledger_digest(stored) == digest
+    assert read_ledger_digest({}) is None
+    assert read_ledger_digest({"ledger_digest": None}) is None
+    assert read_ledger_digest({"ledger_digest_error": "TypeError"}) is None
+    for bad in (
+        {**digest, "row_count": "3"},
+        {**digest, "row_count": True},
+        {**digest, "row_count": -1},
+        {**digest, "max_timestamp_ms": 1.5},
+        {**digest, "sha256": "ZZ" * 32},
+        {**digest, "sha256": digest["sha256"].upper()},
+        {**digest, "sha256": digest["sha256"][:-1]},
+        {**digest, "extra": 1},
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            read_ledger_digest({"ledger_digest": bad})
+
+
+def test_the_digest_payload_writer_refuses_a_malformed_digest() -> None:
+    with pytest.raises((TypeError, ValueError)):
+        ledger_digest_payload({"row_count": 1, "max_timestamp_ms": None, "sha256": "short"})
+
+
+@pytest.mark.asyncio
+async def test_a_key_mode_derive_stores_the_digest_of_the_ledger_it_crawled() -> None:
+    from services.deribit_ingest import deribit_ledger_digest
+    from tests.test_mtm_single_key import _report
+
+    report = _report(has_option_activity=False)
+    report.ledger_digest = deribit_ledger_digest(_ROWS)
+    bare = DeribitNativeAccountState(
+        native_equity={"BTC": 1.0}, native_upnl={}, collapsed_equity_usd=100_000.0,
+        collapsed_upnl_usd=0.0, balance_error=False, upnl_unreadable=False,
+        native_options_value={},
+    )
+    payload, _spy = await _run_deribit_key_mode_derive(bare, report=report)
+    assert read_ledger_digest(payload) == report.ledger_digest
+    assert "ledger_digest_error" not in payload
+
+
+@pytest.mark.asyncio
+async def test_a_digest_that_could_not_be_computed_is_named_and_the_derive_completes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from tests.test_mtm_single_key import _report
+
+    report = _report(has_option_activity=False)
+    report.ledger_digest_error = "TypeError"
+    bare = DeribitNativeAccountState(
+        native_equity={"BTC": 1.0}, native_upnl={}, collapsed_equity_usd=100_000.0,
+        collapsed_upnl_usd=0.0, balance_error=False, upnl_unreadable=False,
+        native_options_value={},
+    )
+    with caplog.at_level("WARNING"):
+        payload, _spy = await _run_deribit_key_mode_derive(bare, report=report)
+    assert "ledger_digest" not in payload
+    assert payload["ledger_digest_error"] == "TypeError"
+    assert len([r for r in caplog.records if "ledger_digest" in r.getMessage()]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_poison_digest_does_not_fail_the_derive() -> None:
+    from tests.test_mtm_single_key import _report
+
+    report = _report(has_option_activity=False)
+    report.ledger_digest = {"row_count": 1, "max_timestamp_ms": None, "sha256": "not-hex"}
+    bare = DeribitNativeAccountState(
+        native_equity={"BTC": 1.0}, native_upnl={}, collapsed_equity_usd=100_000.0,
+        collapsed_upnl_usd=0.0, balance_error=False, upnl_unreadable=False,
+        native_options_value={},
+    )
+    payload, _spy = await _run_deribit_key_mode_derive(bare, report=report)
+    assert "ledger_digest" not in payload
+    assert payload["ledger_digest_error"] in ("ValueError", "TypeError")
+
+
+@pytest.mark.asyncio
+async def test_a_ccxt_key_payload_carries_neither_new_field() -> None:
+    from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
+    from tests.test_derive_broker_dailies_dualmode import (
+        _build_ctx,
+        _patches,
+        _two_day_returns,
+    )
+
+    ctx, capture = _build_ctx(
+        key_row={"id": "key-b", "exchange": "binance", "user_id": "alloc-b"}, strategy_row=None
+    )
+    patches = _patches(ctx, key_mode=True, returns=_two_day_returns())
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        result = await run_derive_broker_dailies_job(
+            {"id": "j", "kind": "derive_broker_dailies", "api_key_id": "key-b"}
+        )
+    assert result.outcome == DispatchOutcome.DONE
+    payload = _key_inputs_payload(capture, "key-b")
+    assert "account_summary" not in payload and "ledger_digest" not in payload
+    assert "account_summary_error" not in payload and "ledger_digest_error" not in payload
+
+
+# ── the digest is wired into the real ledger build ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_real_build_digests_the_crawled_rows_and_is_page_order_stable(
+    monkeypatch: Any,
+) -> None:
+    import services.deribit_ingest as di
+    from tests.test_deribit_ingest import (
+        _open_book_paginate,
+        _patch_jul_index,
+        _patch_pipeline,
+    )
+
+    async def _build(reverse: bool) -> Any:
+        base = _open_book_paginate()
+
+        async def _paginate(*a: Any, **k: Any) -> list[Any]:
+            rows = await base(*a, **k)
+            return list(reversed(rows)) if reverse else rows
+
+        _patch_pipeline(
+            monkeypatch, scopes=[di.Scope("main", None, True)],
+            currencies={"main": ["BTC"]}, paginate=_paginate,
+        )
+        _patch_jul_index(monkeypatch)
+        ex = _NativeAnchorStub(
+            summaries=[{"currency": "BTC", "equity": 3.0, "session_upl": 0.5,
+                        "options_value": 0.5}],
+            index_price={"BTC": 60000.0},
+        )
+        _ledger, report = await di.build_deribit_native_ledger(ex)
+        return report
+
+    forward = await _build(False)
+    backward = await _build(True)
+    assert forward.ledger_digest is not None
+    assert forward.ledger_digest["row_count"] == 4
+    assert forward.ledger_digest == backward.ledger_digest
+    assert forward.ledger_digest_error is None
+
+
+@pytest.mark.asyncio
+async def test_a_digest_failure_inside_the_build_leaves_the_build_complete(
+    monkeypatch: Any,
+) -> None:
+    import services.deribit_ingest as di
+    from tests.test_deribit_ingest import (
+        _open_book_paginate,
+        _patch_jul_index,
+        _patch_pipeline,
+    )
+
+    _patch_pipeline(
+        monkeypatch, scopes=[di.Scope("main", None, True)],
+        currencies={"main": ["BTC"]}, paginate=_open_book_paginate(),
+    )
+    _patch_jul_index(monkeypatch)
+
+    def _boom(_rows: Any) -> Any:
+        raise TypeError("canonicalisation failed")
+
+    monkeypatch.setattr(di, "deribit_ledger_digest", _boom)
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 3.0, "session_upl": 0.5,
+                    "options_value": 0.5}],
+        index_price={"BTC": 60000.0},
+    )
+    ledger, report = await di.build_deribit_native_ledger(ex)
+    assert ledger is not None
+    assert report.ledger_digest is None
+    assert report.ledger_digest_error == "TypeError"
+
+
+def test_report_defaults_leave_every_existing_constructor_valid() -> None:
+    r = CompletenessReport(total_return_rows=2)
+    assert r.ledger_digest is None and r.ledger_digest_error is None
+    assert math.isfinite(r.total_return_rows)

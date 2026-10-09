@@ -26,6 +26,8 @@ complete track record. Two guards make that impossible:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import math
 import os
@@ -987,6 +989,52 @@ class CompletenessReport:
     # on the cash basis — the instrument-name fallback covers that case). Default
     # False (perp-only / USD-native) — additive, no existing constructor changes.
     has_option_activity: bool = False
+    # Phase 167.1.2.2.1 (DERIBITWEDGE PR-1, D-03) — a digest of the transaction-log rows this
+    # crawl read (``deribit_ledger_digest``): row count, max timestamp and a sha256 of the
+    # canonical rows, NO raw row value. It lets a later diff of two derives say "the ledger
+    # changed" apart from "the account-summary wedge changed". Set by
+    # ``build_deribit_native_ledger`` (the crawl itself does not compute it). If the digest
+    # could not be computed, ``ledger_digest`` stays ``None`` and ``ledger_digest_error``
+    # carries the exception CLASS NAME: an additive digest never fails the ledger build, and
+    # never fails silently. Both default ``None`` so every existing constructor stays valid.
+    ledger_digest: Mapping[str, Any] | None = None
+    ledger_digest_error: str | None = None
+
+
+def deribit_ledger_digest(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """``{row_count, max_timestamp_ms, sha256}`` over the crawled transaction-log rows.
+
+    Canonical form: the rows are sorted by ``(timestamp, str(id), canonical JSON)`` and each
+    is serialised with ``json.dumps(row, sort_keys=True, separators=(",", ":"), default=str)``;
+    the lines are joined by ``"\\n"`` and hashed with sha256 over UTF-8. The sort therefore does
+    not depend on page order: a missing or mixed-type ``id`` is sortable through ``str``, and
+    two rows sharing a timestamp and id (two subaccount scopes) are ordered by their content.
+    ``max_timestamp_ms`` is ``None`` when no row carries a readable integer timestamp. Only
+    the count, that timestamp and the hash leave this function: no raw row value."""
+    keyed: list[tuple[int, str, str]] = []
+    max_ts: int | None = None
+    for row in rows:
+        ts: int | None = None
+        row_id: Any = None
+        if isinstance(row, Mapping):
+            row_id = row.get("id")
+            raw_ts = row.get("timestamp")
+            if not isinstance(raw_ts, bool):
+                try:
+                    ts = int(raw_ts)  # type: ignore[arg-type]
+                except (TypeError, ValueError, OverflowError):
+                    ts = None
+        if ts is not None and (max_ts is None or ts > max_ts):
+            max_ts = ts
+        line = json.dumps(row, sort_keys=True, separators=(",", ":"), default=str)
+        keyed.append((ts if ts is not None else -1, str(row_id), line))
+    keyed.sort()
+    body = "\n".join(line for _ts, _id, line in keyed)
+    return {
+        "row_count": len(keyed),
+        "max_timestamp_ms": max_ts,
+        "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+    }
 
 
 def deribit_raw_rows_have_option_activity(
@@ -2370,6 +2418,13 @@ async def build_deribit_native_ledger(
     _daily_records, raw_rows, indexable, report = await _crawl_deribit_ledger(
         exchange, since_ms, sleep=sleep
     )
+    # DERIBITWEDGE PR-1 (D-03): digest the crawled rows so a later diff can tell a ledger
+    # change from a wedge change. Additive: a failure here is recorded by class name on the
+    # report (the worker logs it and stores ``ledger_digest_error``) and never fails the build.
+    try:
+        report.ledger_digest = deribit_ledger_digest(raw_rows)
+    except Exception as exc:  # noqa: BLE001 - an additive digest must not fail the build
+        report.ledger_digest_error = type(exc).__name__
     # Keep the plain (day, ccy)-keyed native dict for the balance-identity guard
     # (which reconciles against Σchange over cash-bearing rows) BEFORE the
     # pd.Series conversion. ``pnl_basis`` (cash_settlement DEFAULT — zavara-

@@ -1359,6 +1359,51 @@ def read_account_summary(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+_LEDGER_DIGEST_KEYS: frozenset[str] = frozenset({"row_count", "max_timestamp_ms", "sha256"})
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+def _validated_ledger_digest(raw: Any) -> dict[str, Any]:
+    """Strictly validate a digest object: exactly ``row_count`` (non-negative int),
+    ``max_timestamp_ms`` (int or null) and ``sha256`` (64 lowercase hex). Booleans are not
+    integers here. Raises ``TypeError``/``ValueError``."""
+    if not isinstance(raw, Mapping):
+        raise TypeError("key_inputs ledger_digest: not an object")
+    if set(raw) != _LEDGER_DIGEST_KEYS:
+        raise ValueError("key_inputs ledger_digest: unexpected key set")
+    count = raw["row_count"]
+    if isinstance(count, bool) or not isinstance(count, int):
+        raise TypeError("key_inputs ledger_digest: row_count is not an integer")
+    if count < 0:
+        raise ValueError("key_inputs ledger_digest: negative row_count")
+    max_ts = raw["max_timestamp_ms"]
+    if max_ts is not None and (isinstance(max_ts, bool) or not isinstance(max_ts, int)):
+        raise TypeError("key_inputs ledger_digest: max_timestamp_ms is not an integer")
+    digest = raw["sha256"]
+    if not isinstance(digest, str):
+        raise TypeError("key_inputs ledger_digest: sha256 is not a string")
+    if _SHA256_HEX.fullmatch(digest) is None:
+        raise ValueError("key_inputs ledger_digest: sha256 is not 64 lowercase hex")
+    return {"row_count": count, "max_timestamp_ms": max_ts, "sha256": digest}
+
+
+def ledger_digest_payload(digest: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``key_inputs`` field ``ledger_digest`` (DERIBITWEDGE PR-1, D-03): the row count,
+    max timestamp and sha256 of the transaction-log rows the derive crawled. It holds no raw
+    row value. A malformed digest is refused before the upsert, like the neighbouring writers."""
+    return {"ledger_digest": _validated_ledger_digest(digest)}
+
+
+def read_ledger_digest(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The stored ``ledger_digest``; ``None`` for a row that predates it (absent or null) or
+    that recorded ``ledger_digest_error`` instead. A present but malformed one raises
+    ``TypeError``/``ValueError`` so the job disposes it as a corrupt input."""
+    raw = payload.get("ledger_digest")
+    if raw is None:
+        return None
+    return _validated_ledger_digest(raw)
+
+
 def stitch_dropped_day_pnl(
     returns_links: Sequence[pd.Series],
     pnl_links: Sequence[Mapping[str, float]],
