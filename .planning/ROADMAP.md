@@ -114,6 +114,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series** (INSERTED) — shipped v0.126.0.0 (#969, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — not yet planned (booked 2026-10-07 by 164.6.6.2 D-15)
 - [x] **Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend** (INSERTED) — shipped v0.128.0.0 (#973, merged 2026-10-08); verification: passed (D-03 post-deploy reading 2026-10-08) (completed 2026-10-08)
+- [ ] **Phase 164.6.6.2.3: FLOWTIMING — a deposit never breaks a return, and an account's first day is its inception, not a warning** (INSERTED 2026-10-08) — not yet planned (founder D-01/D-02, 2026-10-08)
 - [ ] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8)** (INSERTED) — shipped v0.125.2.1 (#968, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
 - [x] **Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy)** (INSERTED) — verification: passed (v0.129.0.0) (completed 2026-10-08)
@@ -163,6 +164,8 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — not yet verified
 - [ ] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — not yet planned (data integrity; after 167.1.2 PR C)
 - [ ] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — not yet planned (booked 2026-10-07, founder)
+- [ ] **Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital** (INSERTED 2026-10-08) — not yet planned (founder D-18, 167.1.2.2)
+- [ ] **Phase 167.1.2.2.2: TRADESYNC — live strategy keys ingest trades daily again** (INSERTED 2026-10-09) — not yet planned (founder, data integrity)
 - [x] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
@@ -3172,6 +3175,31 @@ Plans:
 - [x] 164.6.6.2.2-06-PLAN.md — the match engine's two loaders on the boundary (wave 2)
 - [x] 164.6.6.2.2-07-PLAN.md — no-bypass census, write-to-read end-to-end test, PROD before/after measurement (D-03) (wave 4)
 
+### Phase 164.6.6.2.3: FLOWTIMING — a deposit never breaks a return, and an account's first day is its inception, not a warning (INSERTED)
+
+**Goal:** Returns are measured against the capital that was in the account when each position was opened, using the hour-and-minute timestamps of deposits, withdrawals and position opens. A deposit or withdrawal is not "the day's return being uninterpretable", and an account's own start is not a data-quality defect. Today two guards in `analytics-service/services/nav_twr.py` turn both into warnings and drop the day's return.
+**Measured 2026-10-08** (PROD read-only, marker checked; debug note `.planning/debug/mm2x-dust-guard-after-floor.md`):
+- MM-2x re-derived on the plan 14 code (1e-7 BTC floor) and still carries `dust_nav_guard` and `flow_dominated_guard`, at `complete_with_warnings`. The numbers themselves are complete: 356 of 356 daily returns from 2025-10-18 are measured, and the BTC floors are threaded end to end (`job_worker.py:5615` → `chain_linked_twr` → `_guard_denominator`).
+- **Day 0 (first deposit, 2025-10-16):** with no prior NAV, `chain_linked_twr` (`nav_twr.py:483-489`) rolls back to a pre-inception capital that is exactly 0. In floats that is noise of about 1e-16, and `_guard_denominator` (`:579`) labels it by its sign: dust if positive, negative-NAV if not. No positive floor can clear it. 12 of 24 `csv_source` rows on PROD carry `dust_nav_guard` or `negative_nav_guard`, which fits this cause across venues. Not yet confirmed row by row.
+- **Day 1 (2025-10-17):** a 1.0 BTC deposit on a 0.1 BTC base trips `flow_dominated_guard` (`|flow| >= 1.0 x prev_nav`). The day's return is dropped and the account warns.
+
+**Founder decisions 2026-10-08 (AskUserQuestion, verbatim intent):**
+- **D-01 (day 0):** "Fix it, own phase." On a full-history account (MT5 and ledger-complete venues), day 0 is the inception day. Its near-zero start is not a warning, whatever the noise's sign. Retention-windowed venues, where day 0's base is real capital, keep today's behaviour unless research shows otherwise.
+- **D-02 (deposits and positions):** "The Return is based on the Capital that was in the Account When the Trade opened. The Strategy Looses at the Capital in the Account and then opened the Position. Then deposit. That is Idee, as it has notjing to do with the Open Position. When Position closed relative Performance is relative to what was in the sccount at Time of opening the Position." And: "Deposits and Trade/position opens have timestamps with Hour and Minutes. Use it."
+  So a position's P&L is measured against the account capital at the position's open time. A deposit or withdrawal changes the base only for positions opened after it. A large flow is never by itself a reason to drop a return or warn. The current `flow_dominated_guard` rule is replaced, not tuned.
+
+**Scope to settle in discuss/research:**
+- Which venues expose intraday timestamps for flows and position opens: MT5 deals, Deribit, OKX, Bybit, Binance, sFOX.
+- What to do where one is missing. Never invent a time: fall back to the current day-level rule, named.
+- How this interacts with `pnl_dominated_guard`, the negative-NAV guard, the allocator compose replay (Phase 167.1.2.2's realized basis and dropped-day P&L), and the TS factsheet readers.
+- Re-derive and re-measure every affected PROD strategy, not just MM-2x. Before and after readings, marker first.
+**Requirements**: TBD
+**Depends on:** Phase 164.6.6.2.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.2.3 to break down)
+
 ### Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view (INSERTED)
 
 Booked 2026-10-07 by Phase 164.6.6.2 decision D-15 (founder 2026-10-06: "BTC only first, USD later").
@@ -4792,6 +4820,50 @@ Plans:
 ⚠️ **Founder 2026-10-08 (D-16, CONTEXT) — DEVIATION from the worst-MEDIUM-no-fixer rule:** review round 2's R2-WR-01 (a compose read race leaves the book untrustworthy until the next day) and R2-WR-02 (OKX levels carry the open-uPnL shift) are fixed before the cron is registered.
 ⭐ **Orchestrator 2026-10-08 (CONTEXT):** plan 04 not taken (0 reclaims). The D-12..D-16 code ships in its own PR before plan 05, and plan 05 re-runs the rehearsal on the deployed code.
 
+
+### Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital instead of refusing the allocator's book (INSERTED)
+
+**Goal:** A Deribit account's cash-basis NAV equals what the account holds, with no phantom balance carried from an open option book, and an allocator whose account was emptied and refilled still gets a published book.
+**Booked:** founder D-18 (167.1.2.2 CONTEXT, 2026-10-08), Wave 2, after the DERIVECRON plan 05 re-rehearsal read UNCLEAN. Root cause: `.planning/debug/derivecron-compose-refusal.md` (branch `debug/derivecron-compose-refusal`).
+**Evidence (counts and verdicts only):** one Deribit+MT5 allocator's compose refused with "non-positive reconstructed equity on 755 of 1200 day(s)". Replaying the stored inputs reproduces it from one Deribit key. On every empty-account day the reconstructed level divided by the BTC price is a constant, so the writer carries a native BTC balance the account does not hold. Under cash_settlement, `build_deribit_native_ledger` in `analytics-service/services/deribit_ingest.py` builds the terminal wedge as combined session uPnL plus `options_value`, which subtracts `options_session_upl` twice. Phase 131's review recorded this as "Residual #2" and froze it. `native_nav`'s `is_dust` inception allowance, which is relative to lifetime turnover, let the offset pass as reconciled. The derive also changes between runs with live account state: 372 of 1187 returns differed between two derives with identical flows.
+**Requirements**: TBD (phase-local)
+**Depends on:** Phase 167.1.2.2
+
+## Success Criteria
+
+1. Under cash_settlement the wedge counts the session move once, and a fixture with `options_session_upl` set fails on today's code. The identity is confirmed first with one Deribit account-summary read at the account's next derive.
+2. The inception `is_dust` allowance is also bounded by an absolute or NAV-relative cap, so the measured offset no longer reads `native_inception: reconciled`. A test fails on today's code.
+3. An emptied stretch, a level within a small band of zero, composes as zero capital with no return, and the book continues on re-deposit. It is neither refused nor degraded (founder D-18(b)). A synthetic withdraw-100%, sit-at-zero, re-deposit key fails on today's compose.
+4. Every Deribit account whose cash-basis returns move is named and re-baselined, with before and after readings on PROD (marker first, counts and verdicts only). The recompute runs in the Wave 5 consolidated recompute, and the refused allocator then reads a trustworthy v2 book.
+5. The remaining `inception_unreconciled` on that key (+1.3% implied pre-deposit capital, not explained by the offset) is measured and either fixed here or routed by name.
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 167.1.2.2.1 to break down)
+
+### Phase 167.1.2.2.2: TRADESYNC — live strategy keys ingest trades daily again: /cron-sync gets a runbook-registered pg_cron tick, each stale key's cursor is seeded at its last stored trade so the gap backfills, and "Synced" reads the last trade fetch (INSERTED)
+
+**Goal:** Every live strategy key on a ccxt venue (OKX, Bybit) ingests its trades and daily returns every day, the days it missed are backfilled, and the factsheet's "Synced" label tells the truth about when trades were last fetched.
+**Booked:** founder 2026-10-09 (AskUserQuestion: "New phase, pg_cron"). Data integrity. Root cause: `.planning/debug/cron-sync-unscheduled.md`.
+**Evidence (PROD, read-only, marker first, counts only, 2026-10-09):** nothing calls `POST /api/cron-sync` (`analytics-service/routers/cron.py`). No migration, `vercel.json` entry, GitHub schedule, Railway cron or PROD `cron.job` row has ever scheduled it; a Railway probe outside git called it in June 2026 and is gone. ADR-0008 claims a pg_cron trigger that does not exist. 4 live strategy keys (3 okx, 1 bybit; one strategy published) have their newest trade 14 to 156 days old while their accounts are live (funding rows 0.3 days old; bybit open positions on 13 of the last 14 days). The UI hides it: `SyncBadge` "Synced Nd ago" reads `strategy_analytics.computed_at`, and `api_keys.last_sync_at` is overwritten daily about 04:05 UTC by `poll_allocator_positions`, strategy keys included. PROD `strategy_sync_cursors` has 0 rows, so the route's resume fallback (`_strategy_resume_point` / `_resume_floor_ms`) would start from that overwritten `last_sync_at`, and the first tick would silently skip the whole gap.
+**Requirements**: TBD (phase-local)
+**Depends on:** Phase 167.1.2.2 (the same runbook-registration route for PROD crons)
+
+## Success Criteria
+
+1. A `cron_sync_tick()` SQL function (shaped like `match_engine_cron_tick`, URL from `system_settings`, key from the vault, via `pg_net`) is shipped by migration. Its `cron.schedule` registration goes through a go-live runbook, never a migration (the 164.7 rule and the derivecron/ledger-refresh runbooks). The registration and a re-captured cron manifest are recorded.
+2. Before the first tick, each stale strategy gets a `strategy_sync_cursors` row at or before its newest stored trade, through a guarded runbook step with before/after counts. After the first tick, each of the 4 keys has trades and daily returns up to the previous day, and no day in the gap is missing. A test fails on today's code: with 0 cursor rows and a fresh `last_sync_at`, the gap is skipped.
+3. `poll_allocator_positions` no longer moves a strategy key's `last_sync_at`, or the resume fallback no longer reads it. Whichever the research picks, a test fails on today's code.
+4. "Synced Nd ago" reads the last successful trade fetch, never `computed_at`, and a stale key shows as stale. A test fails on today's badge.
+5. The tick's effect on allocator keys and on revoked-but-active keys is measured, and each is either intended or excluded. The pg_net timeout fits a full tick, or the tick is made asynchronous.
+6. ADR-0008 is corrected, and a staleness alarm is booked with OUTAGEALERT if one is not built here.
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 167.1.2.2.2 to break down)
+
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
 **Goal:** Each API key's equity-history reconstruct state is recorded durably, per key, so no key's history is skipped, wiped or left unreconstructed. Today that state is inferred from allocator-wide snapshot counts.
@@ -5384,7 +5456,7 @@ Plans:
 
 ### Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity (INSERTED)
 
-**Goal:** Five user-facing items are fixed, four from Phase 170's post-deploy pass and one from Phase 166.3's recompute. The Allocations Holdings tab never scrolls sideways. The daily BTC benchmark refresh still lands a day when Binance fails. The /compare equity chart shows each strategy's real cumulative return. A CSV-ingested strategy's factsheet masthead states its venue as self-reported. Every benchmark-relative metric is measured over the strategy's full history wherever BTC prices exist.
+**Goal:** Six user-facing items are fixed (the sixth, the Discovery page's phone overflow, routed 2026-10-08), four from Phase 170's post-deploy pass and one from Phase 166.3's recompute. The Allocations Holdings tab never scrolls sideways. The daily BTC benchmark refresh still lands a day when Binance fails. The /compare equity chart shows each strategy's real cumulative return. A CSV-ingested strategy's factsheet masthead states its venue as self-reported. Every benchmark-relative metric is measured over the strategy's full history wherever BTC prices exist.
 **Founder decision, 2026-10-01 (AskUserQuestion):** one inserted phase with three plans. Phases 169, 169.2 and 170 are closed, and nothing is added to them.
 **Evidence (measured 2026-10-01 on PROD, after the Phase 170 merge e3b4542da deployed):**
 (1) On `/allocations?tab=holdings` at 735 CSS px (desktop 200% zoom), `#main-content` scrollWidth is 885 against clientWidth 735. `HoldingsTabPanel.tsx`'s `<div data-tab-panel="holdings" className="grid gap-8">` has no column template, so its implicit track resolves to the min-content of its widest item (845 px). The Holdings and Open Positions tables (843 px) and the Exposure drill-down table (811 px) sit in `overflow-x-auto` scrollers. Those scrollers grow with their tables because their grid-item ancestors keep `min-width: auto`. The floor does not depend on the viewport, so every width below about 1000 CSS px overflows. CI missed it because the seeded book has no wide positions table.
@@ -5402,10 +5474,13 @@ Plans:
 3. The /compare overlay's last point equals each strategy's stored cumulative return (+14.5% for the measured example). A test fails on the old compounding.
 4. On `/factsheet/[id]`, a CSV-ingested strategy with a declared venue shows `{venue} · self-reported` in the masthead. One with no declared venue shows no venue label. A test that fails on the current masthead pins both.
 5. Every benchmark-relative metric pairs over the strategy's FULL history wherever BTC prices exist: the benchmark read covers the strategy's first date, not a fixed trailing count. A test with a strategy older than 1000 days fails on today's code. The recompute that restores the stored rows is named: every benchmarked strategy, through the normal compute-job path.
+6. At 360, 375 and 390 CSS px the Crypto SMA Discovery page (the strategy ranking list) has no horizontal page scroll: the search and All Filters row, the Sort row and the intro callout fit the viewport, and the ranking table scrolls inside its own scroller with its "Columns" hint unclipped. When the table is scrolled sideways, the pinned Strategy column never covers the metric columns: every Return %, CAGR and Sharpe value of every row stays readable, and each pinned body cell is exactly as wide as the pinned header cell above it. A test that fails on the current page pins both, and the page is re-checked on a phone after deploy.
 
 **⭐ ROUTED IN 2026-10-01 (founder, FC-2; edited by `/gsd-phase --edit`):** this is Phase 170 plan 14's FC-2 answer. Asked to name the site for the CSV-ingested venue label, the founder chose "Factsheet masthead". Phase 170 is closed and gets nothing added, so this became item (4) and criterion 4 of this phase.
 
 **⭐ ROUTED IN 2026-10-01 (founder, 1000-day benchmark window; edited by `/gsd-phase --edit`):** found by the orchestrator while checking Phase 166.3's recomputes. Asked where it goes, the founder chose "Add to 170.2" (AskUserQuestion), since item (2) is in the same file. It became item (5) and criterion 5.
+
+**⭐ ROUTED IN 2026-10-08 (founder phone UAT; edited by `/gsd-phase --edit`):** on PROD at 22:32 local, the founder's phone screenshots of the Crypto SMA Discovery page show the page scrolling sideways: the search and All Filters row, the Sort row and the intro callout run past the right edge, and the table's "Columns" hint is clipped. Worse, the founder pointed out that scrolling the table sideways hides the data behind the strategy name: the header's pinned STRATEGY cell is clipped to about a third of the width, but each row's pinned name cell (name, badges, venue and sync line) is opaque across most of the viewport, so Return %, CAGR and Sharpe slide under it and read blank or as a faint "0". This regresses Phase 170 LAYOUT criterion 3 (no horizontal page scroll), and Phase 170 is closed, so it became criterion 6 here, beside criterion 1's same class on Holdings. Supported phone widths are 360, 375 and 390 px (164.6.6.2 D-26).
 
 **Plans:** 0 plans
 
@@ -5524,6 +5599,7 @@ kept verbatim.
 | 164.6.6.2 BTCNATIVE | 12/13 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.126.0.0 · #969 |
 | 164.6.6.2.1 BTCUSDVIEW | 0/? | Queued — booked 2026-10-07 by 164.6.6.2 D-15 | - |
 | 164.6.6.2.2 WEALTHRETURNS | 7/7 | Complete — verification passed after the D-03 post-deploy reading | 2026-10-08 · v0.128.0.0 · #973 |
+| 164.6.6.2.3 FLOWTIMING | 0/? | Queued — founder 2026-10-08 (D-01/D-02) | - |
 | 164.6.6.3 UATFIXES | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.125.2.0 · #967 |
 | 164.6.6.3.1 UIPOLISH | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.125.2.1 · #968 |
 | 164.6.6.3.2 WIZARDCODES | 4/4 | Complete — verification passed (WR-01 MEDIUM recorded as a known gap) | 2026-10-08 · v0.129.0.0 |
@@ -5570,6 +5646,8 @@ kept verbatim.
 | 167.1.2 ACCOUNTTRUTH | PR A + PR B shipped | In progress — PR A v0.92.0.0 (#859), PR B v0.103.0.0 (#870); PR C executing | - |
 | 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
 | 167.1.2.2 DERIVECRON | 0/? | Queued — booked 2026-10-07 (founder) | - |
+| 167.1.2.2.1 DERIBITWEDGE | 0/? | Queued — booked 2026-10-08 (founder D-18) | - |
+| 167.1.2.2.2 TRADESYNC | 0/? | Queued — booked 2026-10-09 (founder) | - |
 | 167.2 KEYCARDSYNC | 10/10 | Complete    | 2026-10-04 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |

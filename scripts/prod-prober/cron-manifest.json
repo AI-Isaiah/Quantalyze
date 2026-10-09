@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "normalization": "ws-collapse-v2",
-  "captured_at": "2026-09-18T18:02:50.335Z",
+  "captured_at": "2026-10-09T07:53:47.574Z",
   "database_marker": "⛔ PRODUCTION — real customer data. No seeds, no fixtures, no DELETE without a scoped id.",
   "jobs": [
     {
@@ -43,6 +43,16 @@
       "username": "postgres",
       "command_sha256": "4aa649d3e652f1989dabcbb1fed1561d24e21feca812241ba878d3a560b410f0",
       "command": "SELECT public.compute_bridge_outcome_deltas();"
+    },
+    {
+      "jobid": 42,
+      "jobname": "derive-allocator-key-dailies",
+      "schedule": "30 5 * * *",
+      "active": true,
+      "database": "postgres",
+      "username": "postgres",
+      "command_sha256": "f5b3b242b93dd4a760c76306ca783be72fa71cda98d8658e1825de51be24a540",
+      "command": "SELECT enqueue_derive_broker_dailies_for_allocator_keys();"
     },
     {
       "jobid": 40,

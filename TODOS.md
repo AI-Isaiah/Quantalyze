@@ -8678,6 +8678,25 @@ a test that fails first when the guard is removed.
 ⛔ **Not a close:** a measurement of zero mismatches so far; the fail-closed bracket is why none
 show, and it is not a serialization.
 
+### 167.1.2.2-BYBIT-STATIC-EGRESS — the Bybit key's IP allow-list needs a stable egress address, and the founder step is still pending (booked 2026-10-09, Phase 167.1.2.2 D-17(a))
+
+**Why it is open.** The plan 05 re-rehearsal read the one Bybit owner INCOMPLETE twice, on the
+exchange's 'Unmatched IP' refusal: the key is bound to an IP allow-list, and Railway's live config
+showed no static outbound IP on `quantalyze-analytics-backfill` or `quantalyze-analytics`, so the
+egress address the exchange sees can change. The daily cron was registered anyway under D-18(c)
+(2026-10-09), so until this lands that owner's derive ends in error every day and its book stays
+rebuilding.
+
+**The act (founder action, pending).** Turn on Railway Static Outbound IPs for both services, add
+the resulting address to the Bybit key's allow-list, then re-run one Bybit derive. ⛔ The address
+stays out of tracked text: record it only in the Bybit key's settings and the Railway dashboard.
+
+**Owner:** THE FOUNDER. Plan 08's first-scheduled-run reading will show whether that owner still reads `awaiting`.
+**Trigger:** now.
+**Gate (what closes it):** one Bybit derive reads `done` after the allow-list change, and the owner
+reads `ready` in census e on the next scheduled run.
+⛔ **Not a close:** a green Railway setting without a Bybit derive that reads `done`.
+
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
 - **"Do NOT implement" landmines (keep documented, do not touch):** bridge-scoring precompute;
@@ -11326,7 +11345,7 @@ its measurement confirms the crash on PROD, it moves to `## 🔴 FIX NOW` and ge
       **Trigger:** now. It is a measurement, and only the founder can take it.
       **Owner:** THE FOUNDER.
 
-- [ ] **`[164.4.2-DERIVE-KEY-DAILIES-TEST-VS-ROADMAP]` The lane registers
+- [x] **`[164.4.2-DERIVE-KEY-DAILIES-TEST-VS-ROADMAP]` The lane registers
       `derive-allocator-key-dailies` because a corpus file asserts it, while PROD deliberately
       lacks that job (booked 2026-09-24, Phase 164.4.2 plan 10; surfaced by plan 11).**
       DECISION G replays every `cron.schedule` the carried migrations declare, so the lane
@@ -11340,6 +11359,15 @@ its measurement confirms the crash on PROD, it moves to `## 🔴 FIX NOW` and ge
       **Trigger:** the next edit to that test, to the migration that schedules the job, or to
       `scripts/prod-prober/cron-manifest.json`.
       **Owner:** THE FOUNDER.
+      ✅ **RESOLVED 2026-10-09 (Phase 167.1.2.2 DERIVECRON):** the test states the invariant and
+      PROD now agrees with it. PROD carries `derive-allocator-key-dailies` again since 2026-10-09
+      (schedule `30 5 * * *`), registered through the runbook `docs/runbooks/derivecron-go-live.md`
+      Step B and not through a migration, so the "never from a migration" prohibition stands
+      unchanged. The ROADMAP fence carries its dated amendment (167.1.2.2 plan 03, "AMENDED
+      2026-10-07"). `supabase/tests/test_derive_allocator_keys_fanout.sql` case (6) needs no edit.
+      The owed decision was taken by the founder under 167.1.2.2 D-01/D-02/D-05, and plan 06
+      registered the job under D-18(c) with the plan 05 verdict still recorded as UNCLEAN. The
+      entry's original text above is kept as lineage.
 
 ### ✅ RESOLVED 2026-10-08 (PR #980) — MUTPARSER-CORPUS-TIMEOUT-01 — the REAL CORPUS rule-3b walk times out on CI shards (booked 2026-10-08)
 
