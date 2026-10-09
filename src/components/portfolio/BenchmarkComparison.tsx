@@ -52,12 +52,18 @@ export function BenchmarkComparison({ benchmarkComparison }: BenchmarkComparison
       </div>
 
       {/* Phase 166.4.1 D-04 / D-05: the stored reason the BTC figures are empty,
-          rendered verbatim as a text node. */}
+          rendered verbatim as a text node. Amber (recoverable) only when the
+          stored `stale` is true; otherwise muted. Never red: absence is not
+          a failure (DESIGN.md Color). */}
       {note ? (
         <p
           role="status"
           aria-live="polite"
-          className="mb-4 text-small break-words first-letter:uppercase"
+          className={`mb-4 text-small break-words first-letter:uppercase ${
+            stale
+              ? "text-warning bg-warning-bg border border-warning-border rounded px-2 py-1"
+              : "text-text-muted"
+          }`}
         >
           {note}
         </p>
