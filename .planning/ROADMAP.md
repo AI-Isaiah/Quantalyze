@@ -4849,10 +4849,34 @@ Plans:
 5. The remaining `inception_unreconciled` on that key (+1.3% implied pre-deposit capital, not explained by the offset) is measured and either fixed here or routed by name.
 6. Two derives over the same stored inputs produce identical returns (today 372 of 1187 days differ, because the derive reads live account state). A test runs the derive twice on frozen inputs and fails on today's code. Any live read the derive needs is captured as a stored input. (Added 2026-10-09, founder: fix here, not a new phase; 167.1.2.2.1 CONTEXT D-03.)
 
-**Plans:** 0 plans
+**Plans:** 8 plans (6 waves: W1 01 · W2 02 · W3 03, 04, 05 · W4 06 · W5 07 · W6 08). Two ships: PR-1 after plan 02 (additive capture, no value change), PR-2 after plan 07. Plans 05, 06 and 08 wait on PROD readings (not autonomous).
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 167.1.2.2.1 to break down)
+**Wave 1**
+
+- [ ] 167.1.2.2.1-01-PLAN.md — (A) each Deribit key-mode derive stores its one account-summary read (`account_summary`, per-currency identity verdict) and a ledger digest in `key_inputs` (D-03, SC-1, SC-6)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 167.1.2.2.1-02-PLAN.md — (A) the stored inception numbers that decide the cap and SC-5 (`native_inception_diagnostics`, gate verdicts unchanged), then the PR-1 release commit
+
+**Wave 3** *(blocked on Wave 2 completion; plan 05 also waits on PR-1 deployed and a 05:30 UTC derive)*
+
+- [ ] 167.1.2.2.1-03-PLAN.md — (B) cash wedge anchored on `balance` (SC-1, D-18) and derive determinism: perturbation matrix plus stored-snapshot replay (SC-6, D-03), RED first
+- [ ] 167.1.2.2.1-04-PLAN.md — (B) emptied stretch composes as zero capital at below 1% of prior peak, peak restarts on re-deposit, data faults still refuse (SC-3, D-01, D-02, D-04), RED first
+- [ ] 167.1.2.2.1-05-PLAN.md — read-only re-baseline runbook; PROD reading of the stored capture: `identity-verdict`, `cap-verdict`, SC-5 prediction (non-autonomous)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 167.1.2.2.1-06-PLAN.md — (D) SC-5 decided by replaying stored PROD inputs (H-I fixed here, H-L routed to 166.3.1 NAVBREACH, H-D stops for a gap replan); (C) the $5 inception dust cap, merged only on `cap-verdict: passes` (SC-2, OQ-3) (non-autonomous)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 167.1.2.2.1-07-PLAN.md — (E) Wave 5 hand-off (keys re-baseline at the first post-deploy derive; composites after NAVBREACH), owned residue in TODOS, PR-2 release commit
+
+**Wave 6** *(blocked on PR-2 deployed)*
+
+- [ ] 167.1.2.2.1-08-PLAN.md — post-ship PROD BEFORE/AFTER around the first post-deploy 05:30 UTC derive; verdicts for SC-1..SC-6 (non-autonomous)
 
 ### Phase 167.1.2.2.2: TRADESYNC — live strategy keys ingest trades daily again: /cron-sync gets a runbook-registered pg_cron tick, each stale key's cursor is seeded at its last stored trade so the gap backfills, and "Synced" reads the last trade fetch (INSERTED)
 
