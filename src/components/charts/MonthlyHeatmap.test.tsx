@@ -58,3 +58,16 @@ describe("MonthlyHeatmap — DESIGN-01 identity (14b-02)", () => {
     expect(matches.length).toBe(0);
   });
 });
+
+describe("MonthlyHeatmap — keyboard-reachable scroller (170.5, axe scrollable-region-focusable)", () => {
+  it("the horizontal scroller is a focusable, named region", () => {
+    const { container } = render(<MonthlyHeatmap data={{ "2024": { Jan: 0.01 } }} />);
+    const scroller = container.firstElementChild as HTMLElement;
+    // The grid overflows a phone; a bare overflow box with no focusable content
+    // fails WCAG 2.1.1 on the v2 page at mobile (axe-app-wide A11Y-01).
+    expect(scroller.className).toContain("overflow-x-auto");
+    expect(scroller.getAttribute("tabindex")).toBe("0");
+    expect(scroller.getAttribute("role")).toBe("region");
+    expect(scroller.getAttribute("aria-label")).toMatch(/^Monthly returns: /);
+  });
+});
