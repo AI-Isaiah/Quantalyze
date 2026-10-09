@@ -40,6 +40,7 @@ from services.error_contract import VenueTransientHTTPException
 from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions, PERMANENT_VALIDATION_ERROR_CODES
 from services.metrics import (
     _safe_float,
+    interval_matched_benchmark_pair,
     blend_periods_per_year,
     sanitize_metrics,
     sharpe_vol_status_from_backbone,
@@ -1021,8 +1022,13 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         try:
             benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
             if benchmark_rets is not None and not benchmark_stale:
-                aligned = portfolio_returns_series.reindex(benchmark_rets.index).dropna()
-                b_aligned = benchmark_rets.reindex(aligned.index).dropna()
+                # Phase 166.4.1 D-02: the 166.4 D-A interval pair, the same one
+                # every strategy-level benchmark metric reads. A weekday-only
+                # portfolio pairs each Monday with BTC's compounded return over
+                # (Friday, Monday], so the weekend moves are no longer dropped
+                # by an inner join on the two date indexes. The 30-day gate
+                # below counts PAIRED rows.
+                aligned, b_aligned = interval_matched_benchmark_pair(portfolio_returns_series, benchmark_rets)
                 if len(aligned) >= 30:
                     # Phase 166.1 (C6, D-02): no correlation when either leg
                     # does not disperse (a constant-yield portfolio), as for
@@ -1031,6 +1037,8 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                     # Same day convention as `portfolio_twr` (days 1..n, first day
                     # INCLUDED): BenchmarkComparison.tsx shows the two side by
                     # side as a delta, so the pair must cover the same convention.
+                    # `b_aligned` is the 166.4 D-A interval pair (Phase 166.4.1
+                    # D-02), so this TWR includes the weekend moves.
                     btc_twr = total_return_from_equity(
                         equity_from_daily_returns(b_aligned)
                     )
