@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.129.3.1] - 2026-10-09 — DERIVECRON (registration): the daily allocator derive runs on PROD again; two new phases booked from what its rehearsal found
+
+Phase 167.1.2.2, registration half (plans 05, 06 and 07), plus the planning records from the 2026-10-08 UAT pass. No application code changes. The only non-planning file that changes behaviour is the prober's cron oracle.
+
+### Changed
+- `scripts/prod-prober/cron-manifest.json` was re-captured from PROD in the same session the daily `derive-allocator-key-dailies` job (05:30 UTC, `SELECT enqueue_derive_broker_dailies_for_allocator_keys();`) was registered through the runbook's guarded Step B, never by a migration. The diff against the old file is exactly one added job and no other change, and `--preflight-repoint` exits 0 against it. Until this merges, the hourly prober on `main` reports that job as cron drift. That report is expected, and this merge ends it. The first cron day is 2026-10-10.
+- `docs/runbooks/derivecron-go-live.md` step P4 now names `SUPABASE_DB_PASSWORD`, the variable the prober actually reads. The old `PGPASSWORD` wording made the prober refuse with exit 2. Plan 06's `user_setup` carries the same dated correction.
+
+### Notes
+- **Registered under founder override D-18(c), and the rehearsal stays UNCLEAN as recorded.** Plan 05 re-ran the fan-out on the deployed code. 4 of 7 eligible owners got trustworthy version-2 books and 1 is held by design (duplicate account, D-06). The other two were refused:
+  - The Bybit key failed with "Unmatched IP". The backfill service had no static egress. Static outbound IPs are now enabled on both analytics services, and the key's allow-list update is pending with the founder (`167.1.2.2-BYBIT-STATIC-EGRESS` in TODOS).
+  - A Deribit+MT5 allocator's compose was refused with "non-positive reconstructed equity". The root cause is in `.planning/debug/derivecron-compose-refusal.md`: under cash_settlement the Deribit wedge subtracts `options_session_upl` twice (Phase 131 "Residual #2"). That leaves a phantom BTC balance, which becomes the whole level whenever the account is emptied.
+  The queue, role isolation, watchdog headroom (1035 s of 1800 s) and MT5 gating were all clean. No okx crawl-bound hits were recorded, so no okx follow-up is booked (D-09).
+- `[164.4.2-DERIVE-KEY-DAILIES-TEST-VS-ROADMAP]` is resolved: PROD carries the job again, so the lane's test and PROD agree.
+
+### Added (planning)
+- **Phase 167.1.2.2.1 DERIBITWEDGE** (founder D-18): it removes the phantom balance and caps the inception dust allowance that let the balance pass. An emptied account then composes as zero capital, so the allocator's book is not refused. Affected Deribit returns are re-baselined in the Wave 5 recompute.
+- **Phase 167.1.2.2.2 TRADESYNC** (founder 2026-10-09): nothing has ever scheduled the analytics service's `/cron-sync` tick. As a result, 4 live strategy keys (3 okx, 1 bybit; one published) have ingested no trades for 14 to 156 days. The "Synced Nd ago" pill hides this because it reads `computed_at`. The phase adds a runbook-registered pg_cron tick. Each strategy's cursor is seeded at its last stored trade so the gap backfills. "Synced" will then read the last trade fetch. Root cause: `.planning/debug/cron-sync-unscheduled.md`.
+- **Phase 164.6.6.2.3 FLOWTIMING** (founder D-01/D-02): a return is measured against the capital in the account when the position opened, using the hour and minute timestamps of deposits and trades. MM-2x's day-0 dust flag and day-1 flow-dominated flag are routed there (`.planning/debug/mm2x-dust-guard-after-floor.md`).
+- **Phase 170.2 PROBEFIXES criterion 6:** at 360, 375 and 390 px, the Crypto SMA Discovery page scrolls sideways. When its ranking table scrolls, the pinned strategy-name cells cover the Return %, CAGR and Sharpe values. Both were found on the founder's phone on 2026-10-08 and regress Phase 170 LAYOUT's no-sideways-scroll criterion.
+
+### Tests
+- No code changed. The planning-reading vitest files (19 files, 785 tests), the other `.planning`/ROADMAP readers (8 files, 451 tests), `npm run lint`, `check-planning-hygiene` (ROADMAP rule 6: 150 headings, 150 bullets, 147 Progress rows) and `verify-plan-anchors --pending` all pass on the branch.
+- BTCNATIVE (164.6.6.2): the founder checked the factsheet on a phone at the supported widths and it passed.
+
+
 ## [0.129.3.0] - 2026-10-08 — DERIVECRON (code): My Allocation's equity history is rebuilt on the realized basis, and a curve it cannot reconcile says so
 
 Phase 167.1.2.2, code half. The allocator derive/compose that the daily cron will run (from plan 06) refused or mis-stated books in its PROD rehearsal (plan 02, UNCLEAN). This release fixes the compose before the cron is registered. The cron itself is a later, separate step, registered through the runbook and never by a migration.
