@@ -21,6 +21,7 @@ from services.portfolio_optimizer import (
     _leg_is_flat,
     _max_drawdown,
     blend_clock,
+    drawdown_improvement,
 )
 
 # H-1066: per-axis "excellent" reference magnitudes for a single-strategy swap.
@@ -178,8 +179,9 @@ def find_replacement_candidates(
         # means new_dd > current_dd. Use (new_dd - current_dd) so positive = improvement,
         # consistent with sharpe_delta and corr_delta. The old (current_dd - new_dd)
         # made improvement negative, which the positive-weighted composite penalized —
-        # inverting the REPLACE ranking on the drawdown axis.
-        dd_delta = _delta(new_dd, current_dd)  # positive = shallower drawdown (good)
+        # inverting the REPLACE ranking on the drawdown axis. The sign now lives in
+        # drawdown_improvement, shared with the ADD scorers (Phase 166.1.1).
+        dd_delta = drawdown_improvement(current_dd, new_dd)  # positive = shallower drawdown (good)
 
         # H-1066: normalize each axis to [-1, 1] before weighting so the composite is
         # scale-stable and the fit-label thresholds are reachable for realistic deltas.

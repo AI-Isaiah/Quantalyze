@@ -34,7 +34,7 @@ from services.match_engine import (
 )
 
 # Phase 3 / D-15: _compute_mandate_fit_score ships in services/match_engine.py
-# (Wave 1 has landed; ENGINE_VERSION == v2.1.0). Lazy import is retained as a
+# (Wave 1 has landed; ENGINE_VERSION == v2.2.0). Lazy import is retained as a
 # defensive guard so that if a future refactor renames or removes the helper,
 # the mandate-fit tests degrade to skips with a clear flag rather than collapsing
 # the whole module on collection. Under normal operation MANDATE_FIT_IMPORTED is
@@ -1555,14 +1555,17 @@ def test_v2_golden_composite_score_matches_independent_recomposition():
 
 
 def test_engine_version_phase09_bump():
-    """Phase 09 D-17: ENGINE_VERSION must be v2.1.0 after the input-layer rewire.
+    """Phase 09 D-17 bumped ENGINE_VERSION to v2.1.0 after the input-layer rewire;
+    Phase 166.1.1 DDSIGN bumps it to v2.2.0.
 
-    _should_skip_allocator trigger #2 auto-invalidates cached v2.0.0 batches
-    on first post-ship cron run via engine_version != ENGINE_VERSION check.
-    WEIGHTS_VERSION stays v2.0.0 (weight composition identical; only input layer changed).
+    _should_skip_allocator trigger #2 auto-invalidates cached v2.0.0 / v2.1.0
+    batches on first post-ship cron run via engine_version != ENGINE_VERSION check.
+    Phase 166.1.1 DDSIGN: the drawdown axis of portfolio_fit changed sign, so
+    batches scored before and after the fix must be distinguishable by
+    match_batches.engine_version. WEIGHTS_VERSION stays v2.0.0 (no weight changed).
     """
-    assert ENGINE_VERSION == "v2.1.0", (
-        f"Phase 09 D-17: expected ENGINE_VERSION='v2.1.0', got '{ENGINE_VERSION}'. "
+    assert ENGINE_VERSION == "v2.2.0", (
+        f"Phase 166.1.1 DDSIGN: expected ENGINE_VERSION='v2.2.0', got '{ENGINE_VERSION}'. "
         "Bump ENGINE_VERSION in services/match_engine.py."
     )
     # WEIGHTS_VERSION unchanged per D-17 (weight composition identical; only input layer changed)

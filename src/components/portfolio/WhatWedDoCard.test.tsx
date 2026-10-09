@@ -98,6 +98,29 @@ describe("<WhatWedDoCard>", () => {
     expect(screen.getByText(/improve drawdown by/)).toBeInTheDocument();
   });
 
+  // 166.1.1 D-03: -0.0087 is the ROADMAP's measured Case B, a constant-yield
+  // book whose drawdown got WORSE. Before Phase 166.1.1 the optimizer reported
+  // it as +0.0087 and this card rendered "improve drawdown by 0.87%". The pin
+  // stops a UI-side absolute-value compensation from bringing that sentence
+  // back; the sign is fixed once, in the analytics service.
+  it("does not claim a drawdown improvement when the drawdown got worse (166.1.1 D-03)", () => {
+    const { container } = render(
+      <WhatWedDoCard
+        suggestions={[
+          suggestion({
+            sharpe_lift: null,
+            corr_with_portfolio: null,
+            dd_improvement: -0.0087,
+          }),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("improve drawdown by");
+    expect(text).not.toContain("0.87%");
+    expect(text).toContain("diversify the portfolio");
+  });
+
   it("hides the card when sharpe_lift is non-finite", () => {
     const { container } = render(
       <WhatWedDoCard

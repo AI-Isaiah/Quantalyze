@@ -94,6 +94,28 @@ describe("PortfolioOptimizer metric formatting (F-2 honesty)", () => {
     expect(metricValue("DD improve")).toBe("+3.00%");
   });
 
+  // 166.1.1 D-03: before Phase 166.1.1 the optimizer emitted +0.0087 for a
+  // constant-yield book whose drawdown got WORSE (the ROADMAP's measured Case
+  // B), and this cell showed a green "+0.87%" under the tooltip "Modeled
+  // reduction in your portfolio's maximum drawdown". The sign is fixed once, in
+  // the analytics service; this pin stops a UI-side absolute-value
+  // compensation from hiding the next regression behind a green number.
+  it("renders a worsening drawdown as a negative, un-highlighted DD improve (166.1.1 D-03)", () => {
+    render(
+      <PortfolioOptimizer
+        portfolioId="p1"
+        initialSuggestions={[{ ...SUGGESTION, dd_improvement: -0.0087 }]}
+        computedAt="2026-07-11T00:00:00Z"
+        computationStatus="complete"
+      />,
+    );
+    expect(metricValue("DD improve")).toBe("-0.87%");
+    const valueEl = screen
+      .getByText("DD improve")
+      .parentElement?.querySelectorAll("p")[1] as HTMLElement;
+    expect(valueEl.className).not.toContain("text-positive");
+  });
+
   it("does not render a raw correlation anywhere as a signed percentage", () => {
     const { container } = renderOptimizer();
     expect(container.textContent).not.toContain("+45.00%");

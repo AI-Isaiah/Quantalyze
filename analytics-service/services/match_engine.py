@@ -39,6 +39,7 @@ from services.portfolio_optimizer import (
     _compute_sharpe,
     _leg_is_flat,
     _max_drawdown,
+    drawdown_improvement,
 )
 
 logger = logging.getLogger(__name__)
@@ -152,7 +153,11 @@ max_drawdown = _max_drawdown
 # now feed score_candidates) — _should_skip_allocator trigger #2 auto-invalidates
 # cached v2.0.0 batches on first post-ship cron run. WEIGHTS_VERSION stays
 # v2.0.0 (weight composition identical; only input layer changed).
-ENGINE_VERSION = "v2.1.0"
+# Phase 166.1.1 (DDSIGN) bumps ENGINE_VERSION to v2.2.0 because the drawdown axis
+# of portfolio_fit changed sign (a shallower drawdown is now positive, through
+# drawdown_improvement); trigger #2 re-scores cached v2.1.0 batches on the first
+# post-deploy cron run, and WEIGHTS_VERSION stays v2.0.0 because no weight changed.
+ENGINE_VERSION = "v2.2.0"
 WEIGHTS_VERSION = "v2.0.0"
 
 # Top-N candidates returned per batch
@@ -729,11 +734,7 @@ def _compute_portfolio_fit_components(
         and not _leg_is_flat(aligned, "__cand__")
         else None
     )
-    dd_improvement = (
-        current_max_dd - new_max_dd
-        if current_max_dd is not None and new_max_dd is not None
-        else None
-    )
+    dd_improvement = drawdown_improvement(current_max_dd, new_max_dd)
 
     corr_with_portfolio = _compute_corr_with_portfolio(current_port, candidate_returns)
 
