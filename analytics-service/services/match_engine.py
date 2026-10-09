@@ -153,7 +153,11 @@ max_drawdown = _max_drawdown
 # now feed score_candidates) — _should_skip_allocator trigger #2 auto-invalidates
 # cached v2.0.0 batches on first post-ship cron run. WEIGHTS_VERSION stays
 # v2.0.0 (weight composition identical; only input layer changed).
-ENGINE_VERSION = "v2.1.0"
+# Phase 166.1.1 (DDSIGN) bumps ENGINE_VERSION to v2.2.0 because the drawdown axis
+# of portfolio_fit changed sign (a shallower drawdown is now positive, through
+# drawdown_improvement); trigger #2 re-scores cached v2.1.0 batches on the first
+# post-deploy cron run, and WEIGHTS_VERSION stays v2.0.0 because no weight changed.
+ENGINE_VERSION = "v2.2.0"
 WEIGHTS_VERSION = "v2.0.0"
 
 # Top-N candidates returned per batch
