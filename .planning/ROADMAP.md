@@ -3761,12 +3761,16 @@ Plans:
 
 **Goal:** Close the rest of the RLS-exempt privilege class that 164.9.7 opened for TRUNCATE. A client role holding TRIGGER on a table can attach code that a BYPASSRLS writer then runs (RLS audit HIGH, 164.9.7 review), and PG17 MAINTAIN lets a role LOCK and VACUUM FULL a table, which is an outage. Revoke both from `anon` and `authenticated` on every `public` relation and in the `postgres` default privileges, with a catalogue self-check and a gate, the same shape as 164.9.7.
 **Booked:** founder D-06 (164.9.7 CONTEXT, 2026-10-08): its own phase, not folded into the TRUNCATE migration. TRUNCATE on `storage.*` and `net.*` stays an accepted platform residual. Re-measure the per-role holder counts on PROD at plan time (marker query first).
-**Requirements**: TBD
+**Requirements**: none assigned; plans trace to CONTEXT D-01..D-09
 **Depends on:** Phase 164.9.7
-**Plans:** 0 plans
+**Plans:** 5 plans (planned 2026-10-09; 5 waves: W1 01 · W2 02 · W3 03 · W4 04 · W5 05; 04 holds the pre-merge review checkpoint, 05 is post-merge and non-autonomous)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.9.7.1 to break down)
+- [ ] 164.9.7.1-01-PLAN.md — migration (TRIGGER always, MAINTAIN behind server_version_num >= 170000, default-privilege revoke, catalogue self-check); gate extended with VERB 1..5, each TRIGGER guard shown RED on the PG16 pg-lane
+- [ ] 164.9.7.1-02-PLAN.md — per-verb exact-prior-set rollback; PG 17.6 local-stack proof (corpus green, counts 0, the D-07 manual MAINTAIN RED, rollback back to 56/59/57/61); D-07 vitest pin
+- [ ] 164.9.7.1-03-PLAN.md — ARMS_FLOOR and censuses from one full measured run; D-04 BEFORE on PROD and the pre-merge TEST read; TODOS (detector widened, api_keys annotation, MAINTAIN-LANE-PG17-01, TRIGGERREVOKE-LOCKHOLD-01, TRUNC4-DEFAULT-WITHDRAWAL-01)
+- [ ] 164.9.7.1-04-PLAN.md — D-08 goal correction via /gsd-phase --edit; migration-reviewer + rls-policy-auditor clean before merge; CHANGELOG + VERSION re-picked from origin/main
+- [ ] 164.9.7.1-05-PLAN.md — post-merge: apply-test and apply confirmed, D-04 AFTER reading on PROD, main CI ran the gate
 
 ### Phase 164.9.6: SUBSETMAIN — a push to main runs only the SQL gate files its PR changed, and a nightly scheduled job runs the full mutation corpus and enforces FILES_FLOOR / ARMS_FLOOR; the split is printed on every run. Founder decision 2026-10-03 after sql-mutation crossed its 20-minute ceiling on push 98f04db16 (prior main runs 15.2-16.9 min); the timeout is never raised again. (INSERTED)
 
