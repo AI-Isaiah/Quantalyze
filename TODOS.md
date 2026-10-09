@@ -1881,6 +1881,25 @@ per-metric decision.
       reader and a test that fails on today's `isoformat()`), or the list of readers is enumerated and
       each is shown to normalise.
 
+- [ ] **`[166.4.1-BENCHMARK-OUTAGE-LABEL]` A total benchmark source failure is labelled "stale", so an
+      outage reads as stale data (booked 2026-10-09, Phase 166.4.1 silent-failure review, MEDIUM M1).**
+      `get_benchmark_returns` (`analytics-service/services/benchmark.py`) returns `(None, True)` when
+      every price source failed and no recent cached day exists. `_compute_portfolio_analytics`
+      (`analytics-service/routers/portfolio.py`) tests `benchmark_rets is None or benchmark_stale` and
+      writes `BENCHMARK_NOTE_STALE` ("benchmark unavailable: stale") with `stale: true`. The page
+      therefore shows the stale wording where there is no benchmark data at all, and a reader cannot
+      tell a lagging cache from an outage. The comparison is honestly shown as unavailable and no
+      figure is wrong; the cause it names is the weaker of the two.
+      **Why not fixed in 166.4.1:** the worst finding of the review was MEDIUM, so by the founder's
+      rule there was no fixer round. The fix adds a fourth fixed sentence on both sides (the Python
+      constant and the page's colour rule), which is a wording call.
+      **Owner:** the founder, to route. **Trigger:** the next edit of the benchmark block in
+      `_compute_portfolio_analytics`, or the first report of a "stale" portfolio comparison that was
+      in fact an outage.
+      **Closed when:** the `(None, True)` exit writes its own named note, distinct from the stale-cache
+      note; the card renders it in the muted treatment, not amber; and a test that fails on today's
+      single label pins both exits.
+
 - [x] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
       queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
       ✅ **CLOSED 2026-10-03 by Phase 164.9.4 CIOFFMUTEX (v0.119.0.0).** `ci.yml` holds the key 0×; both jobs
