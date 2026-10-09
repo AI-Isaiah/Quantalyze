@@ -351,6 +351,31 @@ describe("adaptPortfolioAnalytics", () => {
     expect(parsed?.correlation_matrix).toBeNull();
   });
 
+  // Phase 166.4.1 D-07 (found by the seeded local browser check): the Python
+  // writer serializes a DatetimeIndex with `Timestamp.isoformat()`, so a computed
+  // row stores "2026-06-11T00:00:00". lightweight-charts rejects anything but
+  // yyyy-mm-dd and the equity-curve effect threw into the page's error boundary.
+  // The adapter is the fetch boundary, so it hands the charts a calendar date.
+  it("normalizes a stored timestamp to its calendar date on every time series", () => {
+    const parsed = adaptPortfolioAnalytics({
+      ...allNull,
+      portfolio_equity_curve: [
+        { date: "2026-06-11T00:00:00", value: 1 },
+        { date: "2026-06-12", value: 1.01 },
+      ],
+      rolling_correlation: {
+        "sid-a:sid-b": [{ date: "2026-07-22T00:00:00", value: 0.5 }],
+      },
+    });
+    expect(parsed?.portfolio_equity_curve?.map((p) => p.date)).toEqual([
+      "2026-06-11",
+      "2026-06-12",
+    ]);
+    expect(parsed?.rolling_correlation?.["sid-a:sid-b"]?.[0].date).toBe(
+      "2026-07-22",
+    );
+  });
+
   it("strips dangerous keys from rolling correlation", () => {
     const parsed = adaptPortfolioAnalytics({
       ...allNull,
