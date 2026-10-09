@@ -2889,7 +2889,27 @@ export const FILES_FLOOR = 61;
 // naming `ARMS_FLOOR regression: 604 biting arm(s) < floor 605` (the lane flake recorded
 // under FILES_FLOOR). The stale-low direction was measured on the branch alone at 59 /
 // 578 (`RATCHET STALE: 60 of 87 gate files are now annotated but FILES_FLOOR is still 59`). WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 605;
+// RAISED 605 -> 610 2026-10-09 (Phase 164.9.7.1 TRIGGERREVOKE, merge with origin/main, which
+// was 0 commits ahead): FIVE arms, VERB 1 to VERB 5, added to the ALREADY-ANNOTATED
+// test_truncate_revoke_anon_authenticated.sql (so FILES_FLOOR stays 61, the denominator stays
+// 88 and WAIVED_CEILING stays 0). VERB 1 is the catalogue sweep over every public relation
+// for TRIGGER and MAINTAIN, VERB 2 a table postgres creates after the migration, VERB 3
+// service_role still holding each verb on that table, VERB 4 authenticated keeping
+// INSERT/UPDATE/DELETE on cron_runs, VERB 5 the SQLSTATE refusal of a CREATE TRIGGER issued as
+// authenticated on profiles. Every twin is a `sql` step on TRIGGER, so stepsSeen did not move.
+// MAINTAIN is NOT machine-twinned: the sql-mutation pg-lane is PostgreSQL 16, where the verb
+// does not exist (founder decision D-07); its half of the gate runs on the PG17 local-stack
+// lane and is held by the migration's own self-check, a manual PG17 RED and a vitest pin.
+// MEASURED by ONE full lane run of `node scripts/mutation-runner/run.mjs`, no file edited
+// during it, constants still at 61 / 605: `scope: FULL 61/61 annotated files`, `coverage:
+// files 61/88`, `arms: 610/610/0`, `biting: 610`, `lane-invocations: 610 ... plus 61 baseline
+// / 61 restore leg(s)` (the two tallies AGREE), `unreachable: 27`, `lane-blocked: 0`,
+// `per-arm lane time: mean 2.0s over 610 arm run(s)`, `No defects.`, exit 0, 395 s wall clock.
+// Per-file line: `test_truncate_revoke_anon_authenticated.sql: sections 11 / judged 11 /
+// annotated 11 / waived 0 / biting 11`. The stale-low direction was observed first: the
+// census vitest files failed with `The corpus declares 610 twin(s) of which 0 are waivers, so
+// a green run bites 610. ARMS_FLOOR is 605.`
+export const ARMS_FLOOR = 610;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

@@ -717,7 +717,8 @@ describe("corpus re-derivation", () => {
     // ⭐ CURRENCY 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, round 3 of the D-09 rework): 593 -> 597. FOUR arms, D11 to D14, in the ALREADY-ANNOTATED supabase/tests/test_sync_status_analytics_scope.sql (a transient side failure holds freshness through every retry; a counting success after a fast side failure still stamps; a failed row that carries a sentence stays failed; no row is manufactured). MEASURED: one full lane run read `arms: 597/597/0`.
     // ⭐ CURRENCY 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, review fix round 4, founder D-10): 597 -> 599. TWO arms, D15 and D16, in the ALREADY-ANNOTATED supabase/tests/test_sync_status_analytics_scope.sql (a genuine recompute on a warned row is stamped by the side failure that follows it; a deferred side job leaves the row alone).
     // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 599 -> 605: SIX arms, TRUNC 1 to TRUNC 6, all in the NEW gate supabase/tests/test_truncate_revoke_anon_authenticated.sql. MEASURED: this file's own run read `expected 605 to be 599`, and one full lane run printed `arms: 605/605/0`, `biting: 605`.
-    expect(totalAnchored).toBe(605);
+    // ⭐ CURRENCY 2026-10-09 (Phase 164.9.7.1 TRIGGERREVOKE, merge with origin/main): 605 -> 610: FIVE arms, VERB 1 to VERB 5, added to the ALREADY-ANNOTATED test_truncate_revoke_anon_authenticated.sql. MEASURED by one full runner run (arms: 610/610/0).
+    expect(totalAnchored).toBe(610);
   });
 });
 
@@ -2074,9 +2075,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, round 3): 593 -> 597 in arms/biting/lane-invocations and the gate row 15 -> 19 (arms D11 to D14), copied from ONE full lane run (mean 1.9s -> 1.6s over 597).
     // ⭐ CURRENCY 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, round 4): 597 -> 599 in arms/biting/lane-invocations and the gate row 19 -> 21 (arms D15 and D16), copied from ONE full lane run (mean 1.6s -> 1.7s over 599).
     // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 599 -> 605 in arms/biting/lane-invocations, the leg counts 60 -> 61, the NEW per-file row (test_truncate_revoke_anon_authenticated.sql) and the lane-time line below, copied from one full lane run: `arms: 605/605/0`, `biting: 605`, `lane-invocations: 605 ... plus 60 baseline / 60 restore leg(s)`, `per-arm lane time: mean 3.2s over 605 arm run(s)`.
-    "arms: 605/605/0   (executed/annotated/waived)",
-    "biting: 605   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
-    "lane-invocations: 605   (arm lanes actually spawned — tallied inside runLane, independent of the 605 the verdict loop counted; plus 61 baseline / 61 restore leg(s))",
+    // ⭐ CURRENCY 2026-10-09 (Phase 164.9.7.1 TRIGGERREVOKE, merge with origin/main): 605 -> 610 in arms/biting/lane-invocations, the per-file row for test_truncate_revoke_anon_authenticated.sql 6 -> 11 and the mean 1.7s -> 2.0s, all copied from one full run's own lines. The leg counts stay 61 (an extension adds no file).
+    "arms: 610/610/0   (executed/annotated/waived)",
+    "biting: 610   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "lane-invocations: 610   (arm lanes actually spawned — tallied inside runLane, independent of the 610 the verdict loop counted; plus 61 baseline / 61 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -2192,7 +2194,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_sync_status_bridge_residues.sql: sections 16 / judged 16 / annotated 16 / waived 0 / biting 16",
     "  file test_sync_status_curated_sentence_survives.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8",
     "  file test_sync_status_marked_refresh_protected.sql: sections 1 / judged 1 / annotated 1 / waived 0 / biting 1",
-    "  file test_truncate_revoke_anon_authenticated.sql: sections 6 / judged 6 / annotated 6 / waived 0 / biting 6",
+    "  file test_truncate_revoke_anon_authenticated.sql: sections 11 / judged 11 / annotated 11 / waived 0 / biting 11",
     "  file test_user_notes_dashboard_scope.sql: sections 6 / judged 6 / annotated 6 / waived 0 / biting 6",
     "  file test_weight_snapshot_seed_secdef.sql: sections 4 / judged 4 / annotated 4 / waived 0 / biting 4",
     "  file test_wizard_composite_fence.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5",
@@ -2212,7 +2214,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): copied from the full run that measured the floors (mean 1.2s -> 1.1s over 574).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): copied from the full run that measured the floors (mean 1.1s -> 2.6s over 578, a loaded host: sibling worktrees were running lanes).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): copied from the full run that measured the floors (mean 2.6s -> 3.1s over 591; sibling lanes were running on the host).
-    "per-arm lane time: mean 1.7s over 605 arm run(s)",
+    "per-arm lane time: mean 2.0s over 610 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -2242,7 +2244,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 553 -> 555.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 555 -> 556.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 556 -> 574.
-    expect(r.out).toContain("605 arm lane(s) spawned");
+    expect(r.out).toContain("610 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -2508,8 +2510,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 554/555 -> 555/556, both halves together, so the gap stays exactly one (offset -1 kept).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 555/556 -> 573/574, both halves together, so the gap stays exactly one (offset -1 kept).
     // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 598/599 -> 604/605, both halves together, so the gap stays exactly one (offset -1 kept).
-    expect(r.out).toContain("rows sum to 604 biting arm(s) but the aggregate");
-    expect(r.out).toContain("reports 605");
+    // ⭐ CURRENCY 2026-10-09 (Phase 164.9.7.1 TRIGGERREVOKE, merge with origin/main): 604/605 -> 609/610, both halves together, so the gap stays exactly one (offset -1 kept).
+    expect(r.out).toContain("rows sum to 609 biting arm(s) but the aggregate");
+    expect(r.out).toContain("reports 610");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2550,14 +2553,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 555 in the NEEDLE and in `executed`/`biting`; the severed value stays 0.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556 in the NEEDLE and in `executed`/`biting`; the severed value stays 0.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574 in the NEEDLE and in `executed`/`biting`; the severed value stays 0.
-    const severed = GREEN_LOG.replace(/^lane-invocations: 605 /m, "lane-invocations: 0 ");
+    const severed = GREEN_LOG.replace(/^lane-invocations: 610 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
     expect(r.out).toContain("GATE failing, not the corpus");
     // ⭐ CURRENCY 2026-09-26 (Phase 164.5.2 BRIDGELOCK, plan 03): 449 -> 453 in the
     // NEEDLE and in `executed`/`biting`; the severed value stays 0.
-    expect(r.out).toContain("executed=605 lane-invocations=0 biting=605");
+    expect(r.out).toContain("executed=610 lane-invocations=0 biting=610");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2599,10 +2602,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): NEEDLE 555 and DELIBERATE MISMATCH 556, both halves, gap of one kept (offset +1).
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): NEEDLE 556 and DELIBERATE MISMATCH 557, both halves, gap of one kept (offset +1).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): NEEDLE 574 and DELIBERATE MISMATCH 575, both halves, gap of one kept (offset +1).
-    const extra = GREEN_LOG.replace(/^lane-invocations: 605 /m, "lane-invocations: 606 ");
+    const extra = GREEN_LOG.replace(/^lane-invocations: 610 /m, "lane-invocations: 611 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("executed=605 lane-invocations=606 biting=605");
+    expect(r.out).toContain("executed=610 lane-invocations=611 biting=610");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
@@ -2622,7 +2625,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 555.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574.
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 605 /m, "lane-invocations: abc ");
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 610 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -2670,7 +2673,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 555 in BOTH the needle and the replacement; only the W field differs.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556 in BOTH the needle and the replacement; only the W field differs.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574 in BOTH the needle and the replacement; only the W field differs.
-    const waived = GREEN_LOG.replace(/^arms: 605\/605\/0 /m, `arms: 605/605/${WAIVED_CEILING + 1} `);
+    const waived = GREEN_LOG.replace(/^arms: 610\/610\/0 /m, `arms: 610/610/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -2742,14 +2745,14 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 555, moved INDIVIDUALLY: executed-is-zero keeps its literal 0; the biting-above-executed arm's NEEDLE 555 and MISMATCH 556 (offset +1 kept).
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 556, moved INDIVIDUALLY: executed-is-zero keeps its literal 0; the biting-above-executed arm's NEEDLE 556 and MISMATCH 557 (offset +1 kept).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 574, moved INDIVIDUALLY: executed-is-zero keeps its literal 0; the biting-above-executed arm's NEEDLE 574 and MISMATCH 575 (offset +1 kept).
-    const zero = GREEN_LOG.replace(/^arms: 605\/605\/0 /m, "arms: 0/605/0 ");
+    const zero = GREEN_LOG.replace(/^arms: 610\/610\/0 /m, "arms: 0/610/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
-    const spliced = GREEN_LOG.replace(/^biting: 605 /m, "biting: 606 ");
+    const spliced = GREEN_LOG.replace(/^biting: 610 /m, "biting: 611 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
-    expect(s.out).toContain("biting (606) exceeds executed (605)");
+    expect(s.out).toContain("biting (611) exceeds executed (610)");
   });
 
   // ── 164.4.2-09, DECISION D: the step judges WHAT THE RUN COVERED ─────────
@@ -2868,7 +2871,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 555 -> 556, the floor and the measured biting count together.
       // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 556 -> 574, the floor and the measured biting count together.
       // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 599 -> 605, the floor and the measured biting count together.
-      expect(r.out).toContain("biting arms 605 >= 605");
+      // ⭐ CURRENCY 2026-10-09 (Phase 164.9.7.1 TRIGGERREVOKE, merge with origin/main): 605 -> 610, the floor and the measured biting count together.
+      expect(r.out).toContain("biting arms 610 >= 610");
     }
   });
 
