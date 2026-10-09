@@ -31,7 +31,8 @@ Phase 166.4.1. The portfolio analytics compute behind `/portfolios/[id]` was re-
 - **Known limits, recorded rather than fixed:**
   - **R-01:** the comparison's `portfolio_twr` is the whole-window headline, while the BTC TWR covers paired intervals only, so the on-screen Alpha can span different windows. Pre-existing and unchanged here.
   - **M1:** a total benchmark source failure (`get_benchmark_returns` returns `(None, True)`) is labelled with the "stale" note, so an outage reads as stale data. No figure is wrong. Booked as `[166.4.1-BENCHMARK-OUTAGE-LABEL]`.
-  - **M2 and M3:** two further MEDIUM error-path observations from the silent-failure pass, not itemised in the committed review file.
+  - **M2:** a final update that matches no row (the portfolio was deleted mid-compute) raises a 500. The cron tick counts it as `failed` and the job worker retries it as `unknown`, even though deleting a portfolio is a benign state. The comment calling it "not retryable" is not honoured by the queue, and the code does not prove that an empty update result means the row is gone.
+  - **M3:** a systemic benchmark crash (for example `_benchmark_pair` refusing mismatched time-zone labels or duplicate dates) writes the error note and still reports the compute as `ok` to the cron and the job worker. The only operator trace is the log.
   - `[166.4.1-SERIES-CURVE-DATETIME]`: the curve writers still emit datetime strings; only the page's adapter normalises them, so any other reader must do the same.
   - On the stale exit the card shows both the existing muted "Stale" chip and the new amber note (cosmetic, two colours for one state).
   - `AlertsList` formats its timestamp with no fixed time zone, which can trip hydration when the server and browser zones differ. Pre-existing and logged in the phase's `deferred-items.md`.
