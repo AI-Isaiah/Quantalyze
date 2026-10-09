@@ -151,7 +151,7 @@ phases below carry the corrections, not the bullets.
 - [x] **~~Phase 165.2~~: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
 - [x] **Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given** — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
-- [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
+- [x] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — verification: passed (PR #988, v0.129.6.0, post-merge items measured 2026-10-09)
 - [x] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
 - [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — complete with routed residuals 2026-10-01 (halted 2026-09-27, resumed after 166.4); verification pending
 - [ ] **Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds** (INSERTED) — not planned; inserted 2026-10-01 (founder); 166.3's R5 recompute waits on it
@@ -4632,9 +4632,9 @@ Plans:
   3. Every renderer of these fields reads the corrected sign and its copy ("Positive = shallower", "improve drawdown by") stays true.
 
 Plans:
-- [ ] 166.1.1-01-PLAN.md — wave 1 · one `drawdown_improvement` helper; the simulator, optimizer and match engine (and the bridge) route through it; per-site, ranking and parity oracles RED first; ENGINE_VERSION v2.2.0 per the in-code bump rule (D-01, D-02, W5)
-- [ ] 166.1.1-02-PLAN.md — wave 1 · D-03 renderer audit, two negative-value renderer pins proven to bite, `SimulatorDeltas` doc formula (D-03)
-- [ ] 166.1.1-03-PLAN.md — wave 2 · D-04 PROD re-measure (read-only, counts only), whole-phase sweep, the one release commit (D-04)
+- [x] 166.1.1-01-PLAN.md — wave 1 · one `drawdown_improvement` helper; the simulator, optimizer and match engine (and the bridge) route through it; per-site, ranking and parity oracles RED first; ENGINE_VERSION v2.2.0 per the in-code bump rule (D-01, D-02, W5)
+- [x] 166.1.1-02-PLAN.md — wave 1 · D-03 renderer audit, two negative-value renderer pins proven to bite, `SimulatorDeltas` doc formula (D-03)
+- [x] 166.1.1-03-PLAN.md — wave 2 · D-04 PROD re-measure (read-only, counts only), whole-phase sweep, the one release commit (D-04)
 
 ### Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error
 
@@ -5644,7 +5644,7 @@ kept verbatim.
 | 164.9.8 APTHANG | 5/5 | Complete — verification passed after the D-04 runner measurement | 2026-10-08 · v0.129.1.2 · #979 |
 | 166. QSTATS-TRUTH | 10/10 | Complete    | 2026-10-04 |
 | 166.1 ENGINEFLOOR | 4/4 | Complete    | 2026-10-04 |
-| 166.1.1 DDSIGN | 0/? | Queued — feature | - |
+| 166.1.1 DDSIGN | 3/3 | Complete | v0.129.6.0 · #988 · verification passed 2026-10-09 |
 | 166.2 COMPUTEONCE | 7/7 | Complete    | 2026-10-04 |
 | 166.3 RECOMPUTE | 0/1 | HALTED 2026-09-27 at Task 3 — resumes after 166.4 ships | - |
 | 166.3.1 NAVBREACH | 0/? | Queued | - |
