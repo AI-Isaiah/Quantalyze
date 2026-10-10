@@ -38,9 +38,19 @@ vi.mock("@/components/layout/Breadcrumb", () => ({
 }));
 
 // Mock CompareEquityOverlay + CompareCorrelationMatrix (heavy chart deps)
+// Phase 170.2 (SC-3): records the items the page hands the overlay, so the
+// covered-from fields can be asserted without rendering recharts.
+type OverlayItem = {
+  strategy: { id: string };
+  headlineCoversFrom?: string | null;
+  headlineCoversFromStatus?: string;
+};
+let overlayItems: OverlayItem[] = [];
 vi.mock("@/components/strategy/CompareEquityOverlay", () => ({
-  CompareEquityOverlay: () =>
-    React.createElement("div", { "data-testid": "equity-overlay" }),
+  CompareEquityOverlay: ({ items }: { items: OverlayItem[] }) => {
+    overlayItems = items;
+    return React.createElement("div", { "data-testid": "equity-overlay" });
+  },
 }));
 vi.mock("@/components/strategy/CompareCorrelationMatrix", () => ({
   CompareCorrelationMatrix: () =>
@@ -143,6 +153,52 @@ vi.mock("@/lib/supabase/server", () => ({
     };
   }),
 }));
+
+// Phase 170.2 (SC-3, T-170.2-10): the service-role read of a chain-broken row's
+// stored cash_settlement series. `strategy_analytics_series` is deny-all RLS, so
+// the page reaches it through the admin client; the mock records which strategy
+// ids were read and answers per-id, so a read for any OTHER row is observable.
+type AdminAnswer =
+  | { kind: "payload"; payload: unknown }
+  | { kind: "none" }
+  | { kind: "error" };
+const adminReadIds: string[] = [];
+let adminAnswer: AdminAnswer = { kind: "none" };
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: vi.fn(() => ({
+    from: (table: string) => {
+      const filters: Record<string, unknown> = {};
+      const builder = {
+        select: () => builder,
+        eq: (col: string, val: unknown) => {
+          filters[col] = val;
+          return builder;
+        },
+        maybeSingle: async () => {
+          if (table === "strategy_analytics_series") {
+            adminReadIds.push(String(filters.strategy_id));
+          }
+          if (adminAnswer.kind === "error") {
+            return { data: null, error: { code: "57014", message: "pg-boom-secret" } };
+          }
+          if (adminAnswer.kind === "payload") {
+            return { data: { payload: adminAnswer.payload }, error: null };
+          }
+          return { data: null, error: null };
+        },
+      };
+      return builder;
+    },
+  })),
+}));
+
+// A cash_settlement payload whose last gap ends 2026-08-21: the headline return
+// compounds from the first stored row after it, 2026-08-22.
+const BROKER_NAN_PAYLOAD = {
+  conventions: { densify: "broker_nan" },
+  gap_spans: [{ start: "2026-08-10", end: "2026-08-21" }],
+  rows: [{ date: "2026-08-09" }, { date: "2026-08-22" }, { date: "2026-08-23" }],
+};
 
 // ---------------------------------------------------------------------------
 // Import page AFTER mocks are registered
@@ -405,7 +461,9 @@ describe("ComparePage — RANK-02 explicit analytics projection", () => {
     // Only the one-scalar alias form (`data_quality_flags->>cumulative_method`)
     // is allowed; a bare `data_quality_flags` would ship the whole blob
     // cross-tenant.
-    expect(embed).not.toMatch(/data_quality_flags(?!->>cumulative_method)/);
+    // Phase 170.2 widened the lookahead to the second scalar alias; a bare blob
+    // still reds it.
+    expect(embed).not.toMatch(/data_quality_flags(?!->>(?:cumulative_method|twr_chain_broken))/);
     expect(embed).not.toMatch(/metrics_json(?!->)/);
   });
 
@@ -414,6 +472,144 @@ describe("ComparePage — RANK-02 explicit analytics projection", () => {
     expect(embed).toContain(
       "cumulative_method:data_quality_flags->>cumulative_method",
     );
+  });
+});
+
+describe("ComparePage — the chain-break flag is projected as a scalar alias (SC-3, T-170.2-11)", () => {
+  beforeEach(() => {
+    strategySelectCalls.length = 0;
+    mockStrategyData = [
+      makeSampleStrategy("11111111-2222-4333-8444-555555555555", "Strategy Alpha"),
+    ];
+    mockSnapshotData = [];
+  });
+
+  it("projects twr_chain_broken as a one-scalar JSONB alias", async () => {
+    const ComparePage = await getComparePage();
+    await ComparePage({
+      searchParams: Promise.resolve({ ids: "11111111-2222-4333-8444-555555555555" }),
+    });
+    const cols = strategySelectCalls.find((c) => c.includes("strategy_analytics")) ?? "";
+    const embed = /strategy_analytics \(([^)]*)\)/.exec(cols)?.[1] ?? "";
+    expect(embed).toContain("twr_chain_broken:data_quality_flags->>twr_chain_broken");
+  });
+
+  it("the widened negative pin still rejects a bare blob (it can fail)", () => {
+    const pin = /data_quality_flags(?!->>(?:cumulative_method|twr_chain_broken))/;
+    expect("returns_series, data_quality_flags").toMatch(pin);
+    expect("data_quality_flags->>twr_chain_broken").not.toMatch(pin);
+    expect("data_quality_flags->>something_else").toMatch(pin);
+  });
+});
+
+/**
+ * Phase 170.2 (SC-3, D-07, T-170.2-10). The overlay draws a chain-broken row
+ * over the span its headline return compounds, which needs the covered-from date
+ * out of the stored cash series. The page reads it (service role, deny-all RLS
+ * table) ONLY for a row the visibility-gated read already returned AND whose
+ * alias is exactly the string "true", and hands the overlay the DATE and a
+ * status, never the series. The three non-clean outcomes stay distinct because
+ * the reader's contract is that an outage is never rendered as "the span cannot
+ * be named".
+ */
+describe("ComparePage — covered-from read for chain-broken rows (SC-3, D-07)", () => {
+  const ID = "11111111-2222-4333-8444-555555555555";
+  const OTHER = "22222222-3333-4444-8555-666666666666";
+  const chainBroken = (id: string, alias: unknown) => {
+    const base = makeSampleStrategy(id, `Strategy ${id.slice(0, 2)}`);
+    return {
+      ...base,
+      strategy_analytics: { ...base.strategy_analytics, twr_chain_broken: alias },
+    };
+  };
+  const render2 = async (ids: string) => {
+    const ComparePage = await getComparePage();
+    const Page = await ComparePage({ searchParams: Promise.resolve({ ids }) });
+    render(Page as React.ReactElement);
+  };
+
+  beforeEach(() => {
+    adminReadIds.length = 0;
+    adminAnswer = { kind: "payload", payload: BROKER_NAN_PAYLOAD };
+    overlayItems = [];
+    mockSnapshotData = [];
+    mockStrategyError = null;
+  });
+
+  it('a row whose alias is "true" is read once and the overlay gets the date as "dated"', async () => {
+    mockStrategyData = [chainBroken(ID, "true")];
+    await render2(ID);
+    expect(adminReadIds).toEqual([ID]);
+    expect(overlayItems).toHaveLength(1);
+    expect(overlayItems[0].headlineCoversFrom).toBe("2026-08-22");
+    expect(overlayItems[0].headlineCoversFromStatus).toBe("dated");
+  });
+
+  it.each([["false"], [null], ["TRUE"], [true], ["1"]])(
+    "an alias of %j triggers no admin read and the overlay row carries no covered-from fields",
+    async (alias) => {
+      mockStrategyData = [chainBroken(ID, alias)];
+      await render2(ID);
+      expect(adminReadIds).toEqual([]);
+      expect(overlayItems).toHaveLength(1);
+      expect(overlayItems[0]).not.toHaveProperty("headlineCoversFrom");
+      expect(overlayItems[0]).not.toHaveProperty("headlineCoversFromStatus");
+    },
+  );
+
+  it("reads only the chain-broken row of a mixed pair", async () => {
+    mockStrategyData = [chainBroken(ID, "true"), chainBroken(OTHER, "false")];
+    await render2(`${ID},${OTHER}`);
+    expect(adminReadIds).toEqual([ID]);
+    const byId = new Map(overlayItems.map((it) => [it.strategy.id, it]));
+    expect(byId.get(ID)?.headlineCoversFromStatus).toBe("dated");
+    expect(byId.get(OTHER)).not.toHaveProperty("headlineCoversFromStatus");
+  });
+
+  it('a missing or undatable series is "undatable" with no date', async () => {
+    mockStrategyData = [chainBroken(ID, "true")];
+    adminAnswer = { kind: "none" };
+    await render2(ID);
+    expect(overlayItems[0].headlineCoversFrom).toBeNull();
+    expect(overlayItems[0].headlineCoversFromStatus).toBe("undatable");
+  });
+
+  it('a payload that echoes another densify convention is "undatable"', async () => {
+    mockStrategyData = [chainBroken(ID, "true")];
+    adminAnswer = {
+      kind: "payload",
+      payload: { ...BROKER_NAN_PAYLOAD, conventions: { densify: "zero_fill" } },
+    };
+    await render2(ID);
+    expect(overlayItems[0].headlineCoversFromStatus).toBe("undatable");
+  });
+
+  it('a failed read is "read_failed", logs the message only, and the page still renders', async () => {
+    mockStrategyData = [chainBroken(ID, "true")];
+    adminAnswer = { kind: "error" };
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await render2(ID);
+      expect(overlayItems[0].headlineCoversFrom).toBeNull();
+      expect(overlayItems[0].headlineCoversFromStatus).toBe("read_failed");
+      expect(screen.getByTestId("equity-overlay")).toBeInTheDocument();
+      const logged = spy.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
+      expect(logged).toContain("[compare/page] covered-from read failed");
+      // the database message rides only as the error's cause; it is not logged
+      expect(logged).not.toContain("pg-boom-secret");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("never hands the overlay the series payload, only the date and a status", async () => {
+    mockStrategyData = [chainBroken(ID, "true")];
+    await render2(ID);
+    const keys = Object.keys(overlayItems[0]).sort();
+    expect(keys).toEqual(
+      ["analytics", "headlineCoversFrom", "headlineCoversFromStatus", "kind", "strategy"].sort(),
+    );
+    expect(JSON.stringify(overlayItems[0])).not.toContain("gap_spans");
   });
 });
 

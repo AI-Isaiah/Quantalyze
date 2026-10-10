@@ -54,11 +54,11 @@ vi.mock("@/lib/sentry-capture", async (importActual) => ({
 
 /**
  * The route refuses a `through` older than yesterday (UTC), so every case runs
- * on a PINNED clock: 00:10 UTC on 2026-09-26, the cron's schedule, which makes
+ * on a PINNED clock: 00:30 UTC on 2026-09-26, the cron's schedule (D-08), which makes
  * yesterday 2026-09-25. Only `Date` is faked, so the mocked transport promises
  * still resolve.
  */
-const NOW = "2026-09-26T00:10:00Z";
+const NOW = "2026-09-26T00:30:00Z";
 const YESTERDAY = "2026-09-25";
 const DAY_BEFORE_YESTERDAY = "2026-09-24";
 

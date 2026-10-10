@@ -1854,7 +1854,17 @@ async def run_csv_strategy_analytics(
             benchmark_rets, benchmark_stale = None, True
             if _native_unit is None:
                 try:
-                    benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
+                    # Phase 170.2 (SC-5): the benchmark window starts at the
+                    # strategy's first return date, not a fixed trailing 1000
+                    # days, so a long-lived strategy keeps its full history.
+                    _bench_since = (
+                        returns.index.min().date()
+                        if not returns.empty and isinstance(returns.index, pd.DatetimeIndex)
+                        else None
+                    )
+                    benchmark_rets, benchmark_stale = await get_benchmark_returns(
+                        "BTC", since=_bench_since
+                    )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "csv analytics: benchmark fetch failed for %s: %s",

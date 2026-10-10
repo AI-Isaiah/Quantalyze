@@ -309,3 +309,63 @@ describe("HoldingsTabPanel — Watchlist/Optimizer + Notes (100-04 wiring)", () 
     expect(container.querySelector('[data-testid="suggested-chip"]')).toBeNull();
   });
 });
+
+// Phase 170.2 (SC-1, UI-SPEC H-1, H-2) — a cheap class guard; the seeded
+// SC1-HOLDINGS e2e is the proof. `grid` with no template declares an implicit
+// `auto` track, which sizes to the widest table's MIN-CONTENT, so each
+// ResponsiveTable scroller grows with its table and #main-content scrolls
+// sideways instead. RESEARCH measured that fixing only the root leaves the
+// nested section grids blowing out, so all four carry `grid-cols-1`
+// (`minmax(0, 1fr)`). Notes is not a grid and stays as it was.
+describe("HoldingsTabPanel — grid tracks have a zero minimum (SC-1 H-1, H-2)", () => {
+  function renderEmpty() {
+    return renderP100({
+      ...P100_BASE,
+      favorites: [],
+      optimizer: EMPTY_OPTIMIZER,
+      note: { initialContent: "", initialLastSavedAt: null },
+    });
+  }
+  const classesOf = (el: Element | null) => (el?.getAttribute("class") ?? "").split(/\s+/);
+
+  it("the root panel grid declares grid-cols-1", () => {
+    const { container } = renderEmpty();
+    const root = container.querySelector('[data-tab-panel="holdings"]');
+    expect(root).not.toBeNull();
+    expect(classesOf(root)).toContain("grid");
+    expect(classesOf(root)).toContain("grid-cols-1");
+  });
+
+  it.each(["Exposure", "Watchlist & Optimizer"])(
+    "the %s section grid declares grid-cols-1",
+    (label) => {
+      const { container } = renderEmpty();
+      // getAttribute match: a literal `&` in a CSS attribute selector trips jsdom.
+      const section = Array.from(container.querySelectorAll("section")).find(
+        (s) => s.getAttribute("aria-label") === label,
+      );
+      expect(section, `${label} section missing`).toBeDefined();
+      expect(classesOf(section!)).toContain("grid");
+      expect(classesOf(section!)).toContain("grid-cols-1");
+    },
+  );
+
+  it("the Exchange Positions section grid declares grid-cols-1", () => {
+    const { container } = renderEmpty();
+    const section = Array.from(container.querySelectorAll("section")).find(
+      (s) => s.querySelector("h3")?.textContent === "Exchange Positions",
+    );
+    expect(section, "Exchange Positions section missing").toBeDefined();
+    expect(classesOf(section!)).toContain("grid");
+    expect(classesOf(section!)).toContain("grid-cols-1");
+  });
+
+  it("the Notes section is untouched (no grid)", () => {
+    const { container } = renderEmpty();
+    const notes = Array.from(container.querySelectorAll("section")).find(
+      (s) => s.getAttribute("aria-label") === "Notes",
+    );
+    expect(notes).toBeDefined();
+    expect(classesOf(notes!)).not.toContain("grid");
+  });
+});

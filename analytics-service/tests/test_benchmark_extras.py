@@ -177,6 +177,63 @@ async def test_fetch_from_coingecko() -> None:
 
     assert len(prices) == 2
     assert prices.iloc[0] == 105.5
+    # Phase 170.2: the 2024-01-01 00:00 UTC stamp is the close of 2023-12-31.
+    assert prices.index[0].date().isoformat() == "2023-12-31"
+
+
+class _RecordingCoingeckoClient:
+    """CoinGecko-only stub that serves ``payload`` and records the request."""
+
+    payload: dict = {}
+    seen_params: list[dict] = []
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    async def __aenter__(self) -> "_RecordingCoingeckoClient":
+        return self
+
+    async def __aexit__(self, *args) -> None:
+        return None
+
+    async def get(self, url: str, params=None):
+        type(self).seen_params.append(dict(params))
+        return _FakeResponse(type(self).payload)
+
+
+@pytest.mark.asyncio
+async def test_coingecko_stamps_are_shifted_one_day() -> None:
+    """Phase 170.2 (SC-2). CoinGecko's ``D 00:00 UTC`` stamp is the price at the
+    START of day D, i.e. Binance's close of ``D-1``, so it is stored under
+    ``D-1``. Points that are not closes are dropped: the intraday "now" point
+    (not a whole UTC day), a zero or negative price, and a NaN. The body is
+    untrusted, so malformed points are skipped rather than raised on. A request
+    for more than the free tier's 365 days is sent as 365."""
+    from services.benchmark import _fetch_from_coingecko
+
+    day = 86_400_000
+    jan1 = 1704067200000  # 2024-01-01 00:00:00 UTC
+    _RecordingCoingeckoClient.seen_params = []
+    _RecordingCoingeckoClient.payload = {
+        "prices": [
+            [jan1, 105.5],
+            [jan1 + day, 108.2],
+            [jan1 + 2 * day, 0.0],            # zero price
+            [jan1 + 3 * day, -5.0],           # negative price
+            [jan1 + 4 * day, float("nan")],   # not finite
+            [jan1 + 5 * day, float("inf")],   # not finite
+            [jan1 + 7 * day + 13 * 3_600_000, 111.0],  # intraday "now" point
+            None,                             # malformed
+            [jan1 + 6 * day],                 # malformed
+            ["x", "y"],                       # malformed
+        ]
+    }
+    with patch("services.benchmark.httpx.AsyncClient", _RecordingCoingeckoClient):
+        prices = await _fetch_from_coingecko(1001)
+
+    assert _RecordingCoingeckoClient.seen_params[0]["days"] == "365"
+    assert [d.date().isoformat() for d in prices.index] == ["2023-12-31", "2024-01-01"]
+    assert list(prices.values) == [105.5, 108.2]
 
 
 @pytest.mark.asyncio
@@ -188,6 +245,8 @@ async def test_fetch_btc_daily_prices_falls_back_to_coingecko() -> None:
 
     assert len(prices) == 2
     assert prices.iloc[0] == 105.5
+    # Phase 170.2: the 2024-01-01 00:00 UTC stamp is the close of 2023-12-31.
+    assert prices.index[0].date().isoformat() == "2023-12-31"
 
 
 @pytest.mark.asyncio
@@ -265,7 +324,10 @@ async def test_get_benchmark_returns_stale_cache_refreshes_from_network() -> Non
          patch("services.benchmark.httpx.AsyncClient", _BinanceSingleBatchClient):
         returns, stale = await get_benchmark_returns(days=7)
 
-    assert stale is False
+    # Phase 170.2 (SC-2): the stub's two klines cannot span the 7-day window and
+    # the cached rows are older than a gap, so the answer is served flagged
+    # stale. This test is about the write path, below.
+    assert stale is True
     assert returns is not None
     # The upsert cache-write path was taken.
     assert mock_supabase.table.call_args_list, "expected supabase.table() calls"

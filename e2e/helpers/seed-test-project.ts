@@ -518,8 +518,40 @@ export async function seedStrategyWithHistory(opts: {
    * strategy-v2 golden fixtures (which share this helper) stay byte-identical.
    */
   withDailyReturns?: boolean;
+  /**
+   * Phase 170.2 (SC-6) — place the published strategy in a discovery category
+   * (`discovery_categories.slug`, e.g. "crypto-sma") so `/discovery/<slug>`
+   * renders it. OPT-IN: without it `category_id` stays unset and every existing
+   * caller (the svg-chart-parity goldens included) is byte-identical. A caller
+   * that sets it MUST delete its rows in a `finally`
+   * (`cleanupStrategiesByNamePrefix`), or the row leaks into
+   * discovery-hide-examples-default.spec.ts's empty-category assertion.
+   */
+  categorySlug?: string;
+  /** Phase 170.2 — override the hard-coded `strategy_types: ["spot"]`. OPT-IN. */
+  strategyTypes?: string[];
+  /** Phase 170.2 — override the hard-coded `supported_exchanges: ["binance"]`. OPT-IN. */
+  supportedExchanges?: string[];
 }): Promise<string> {
   const admin = getAdmin();
+
+  // Resolve category_id with the same lookup seedBridgeCandidate uses, BEFORE
+  // the owner is created, so a bad slug fails without leaving an orphan user.
+  let categoryId: string | null = null;
+  if (opts.categorySlug) {
+    const { data: cat, error: catErr } = await admin
+      .from("discovery_categories")
+      .select("id, slug")
+      .eq("slug", opts.categorySlug)
+      .single();
+    if (catErr || !cat) {
+      throw new Error(
+        `seedStrategyWithHistory: discovery_categories slug="${opts.categorySlug}" not found — ${catErr?.message ?? "no row"}`,
+      );
+    }
+    categoryId = cat.id as string;
+  }
+
   // Date anchor — see `anchorMs` doc above. Default keeps the historical
   // time-relative behaviour for the non-screenshot callers.
   const anchorMs = opts.anchorMs ?? Date.now();
@@ -561,11 +593,12 @@ export async function seedStrategyWithHistory(opts: {
       status: "published",
       benchmark: "BTC",
       start_date: startDate,
-      supported_exchanges: ["binance"],
-      strategy_types: ["spot"],
+      supported_exchanges: opts.supportedExchanges ?? ["binance"],
+      strategy_types: opts.strategyTypes ?? ["spot"],
       subtypes: [],
       markets: ["BTC"],
       ...(opts.codename ? { codename: opts.codename } : {}),
+      ...(categoryId ? { category_id: categoryId } : {}),
     })
     .select("id")
     .single();
@@ -742,6 +775,15 @@ export async function seedStrategyWithHistory(opts: {
 export async function seedAllocatorBook(opts: {
   allocatorUserId: string;
   days?: number;
+  /**
+   * Phase 170.2 (SC-1): seed a book whose Holdings and Open positions tables
+   * are WIDER than a phone. The default book has one narrow BTC row, which is
+   * why CI never saw the Holdings tab scroll sideways (RESEARCH Pitfall 1).
+   * Adds spot rows with 8-digit values and derivative rows with long contract
+   * symbols (about 60 characters, no break opportunity), long and short.
+   * Omitted = the book is byte-identical to before: other specs call this.
+   */
+  wide?: boolean;
 }): Promise<{ apiKeyId: string }> {
   const admin = getAdmin();
   const days = opts.days ?? 120;
@@ -782,6 +824,59 @@ export async function seedAllocatorBook(opts: {
   });
   if (hErr) {
     throw new Error(`seedAllocatorBook (holding) failed: ${hErr.message}`);
+  }
+
+  if (opts.wide) {
+    // Symbols are long single tokens (about 60 characters) on purpose: with no break
+    // opportunity they set the Holdings, Open positions and Exposure tables'
+    // min-content widths (a 3-letter ticker leaves them narrower than a phone,
+    // and the spec asserts the widths before it measures).
+    // Distinct `symbol` per row (UNIQUE allocator_id, venue, symbol, asof), the
+    // same asof / api_key_id / allocator_id as the BTC row above. Spot rows
+    // mirror that row's `side: "long"`. Derivative rows carry entry_price,
+    // mark_price and unrealized_pnl_usd (the migration's derivative columns).
+    const wideSpot = [
+      "WRAPPEDETHEREUMLIQUIDSTAKINGYIELDVAULTRESERVESHARETOKENX1",
+      "WRAPPEDSOLANALIQUIDSTAKINGYIELDVAULTRESERVESHARETOKENX2",
+      "WRAPPEDAVALANCHELIQUIDSTAKINGYIELDVAULTRESERVESHARETOKENX3",
+      "WRAPPEDCHAINLINKLIQUIDSTAKINGYIELDVAULTRESERVESHARETOKENX4",
+    ].map((symbol, i) => ({
+      allocator_id: opts.allocatorUserId,
+      api_key_id: key.id,
+      venue: "binance",
+      symbol,
+      asof: asofToday,
+      holding_type: "spot",
+      side: "long",
+      quantity: 1_000 + i,
+      value_usd: 12_345_678 + i * 1_111_111,
+      mark_price: 3_456.78 + i,
+    }));
+    const wideDerivatives = [
+      ["BTCUSDT250627C100000PERPETUALFUTURESCONTRACTSHARETOKENRESERVEX1", "long"],
+      ["ETHUSDT250627P003500QUARTERLYFUTURESCONTRACTSHARETOKENRESERVEX2", "short"],
+      ["SOLUSDT250926C000250PERPETUALFUTURESCONTRACTSHARETOKENRESERVEX3", "long"],
+      ["AVAXUSDT250926P000045QUARTERLYFUTURESCONTRACTSHARETOKENRESERVEX4", "short"],
+    ].map(([symbol, side], i) => ({
+      allocator_id: opts.allocatorUserId,
+      api_key_id: key.id,
+      venue: "binance",
+      symbol,
+      asof: asofToday,
+      holding_type: "derivative",
+      side,
+      quantity: 12.5 + i,
+      value_usd: 23_456_789 + i * 1_000_000,
+      entry_price: 98_765.4321 + i,
+      mark_price: 101_234.5678 + i,
+      unrealized_pnl_usd: 1_234_567.89 - i * 100_000,
+    }));
+    const { error: wErr } = await admin
+      .from("allocator_holdings")
+      .insert([...wideSpot, ...wideDerivatives]);
+    if (wErr) {
+      throw new Error(`seedAllocatorBook (wide holdings) failed: ${wErr.message}`);
+    }
   }
 
   // 3. A daily equity curve so EquityChart has a real series to draw.

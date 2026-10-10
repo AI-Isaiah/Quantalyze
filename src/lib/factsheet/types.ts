@@ -773,6 +773,15 @@ export type FactsheetCommon = {
    */
   returnsUnit?: string;
   /**
+   * Phase 170.2 (SC-4, D-09) — `strategies.source`, present ONLY when it is
+   * `"csv"` (a conditional spread: any other source leaves the key out, so a
+   * non-CSV payload is byte-identical). The masthead venue label keys on this.
+   * It is NOT `ingestSource`, which is derived from `strategy_analytics.daily_returns`
+   * (NULL on every PROD strategy, so "api") and is forced to "csv" for composites.
+   * Optional so fixtures that spell out the common fields keep type-checking.
+   */
+  source?: "csv";
+  /**
    * Phase 169.1 (D-30) — the strategy's day basis as the engine computed it,
    * resolved by the same read path. Present ONLY when "active" (vol, Sharpe and
    * Sortino over the non-zero days); absent means calendar, so a calendar

@@ -229,7 +229,7 @@ class TestComputePortfolioAnalyticsHappyPath:
         )
 
         # Patch get_supabase + benchmark fetch
-        async def _fake_benchmark(symbol):
+        async def _fake_benchmark(symbol, **_kwargs):
             return None, True  # stale → no benchmark_comparison
         with patch("routers.portfolio.get_supabase", return_value=sb), \
              patch("routers.portfolio.get_benchmark_returns", side_effect=_fake_benchmark):
@@ -258,7 +258,7 @@ async def _run_compute(sb, *, benchmark=None, stale: bool = True, portfolio_id: 
     resolved at call time and patched with ``patch.object`` (some tests evict and
     re-import routers.portfolio, so a dotted-string patch can hit a stale copy).
     """
-    async def _fake_benchmark(symbol):
+    async def _fake_benchmark(symbol, **_kwargs):
         return benchmark, stale
 
     with patch.object(portfolio_mod, "get_supabase", return_value=sb), \
@@ -624,7 +624,7 @@ class TestRenormalizationRegression:
             analytics_rows=sa_rows,
         )
 
-        async def _fake_benchmark(symbol):
+        async def _fake_benchmark(symbol, **_kwargs):
             return None, True
         with patch("routers.portfolio.get_supabase", return_value=sb), \
              patch("routers.portfolio.get_benchmark_returns", side_effect=_fake_benchmark):
@@ -707,7 +707,7 @@ class TestCorrelationHistorySufficientFlag:
         ]
         sb, _ = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa_rows)
 
-        async def _fake_benchmark(symbol):
+        async def _fake_benchmark(symbol, **_kwargs):
             return None, True
         with patch("routers.portfolio.get_supabase", return_value=sb), \
              patch("routers.portfolio.get_benchmark_returns", side_effect=_fake_benchmark):
@@ -729,7 +729,7 @@ class TestCorrelationHistorySufficientFlag:
         ]
         sb, _ = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa_rows)
 
-        async def _fake_benchmark(symbol):
+        async def _fake_benchmark(symbol, **_kwargs):
             return None, True
         with patch("routers.portfolio.get_supabase", return_value=sb), \
              patch("routers.portfolio.get_benchmark_returns", side_effect=_fake_benchmark):
@@ -1000,7 +1000,7 @@ class TestAlertFailureKeepsAnalyticsComplete:
             analytics_rows=sa_rows,
         )
 
-        async def _fake_benchmark(symbol):
+        async def _fake_benchmark(symbol, **_kwargs):
             return None, True
 
         # Inject a poisoned _generate_alerts that raises.
@@ -1275,7 +1275,7 @@ class TestAvgPairwiseCorrelationPairCount:
         ]
         sb, _ = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa_rows)
 
-        async def _fake_benchmark(symbol):
+        async def _fake_benchmark(symbol, **_kwargs):
             return None, True
         with patch("routers.portfolio.get_supabase", return_value=sb), \
              patch("routers.portfolio.get_benchmark_returns", side_effect=_fake_benchmark):

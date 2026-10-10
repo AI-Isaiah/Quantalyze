@@ -419,8 +419,16 @@ export function HoldingsTabPanel(
     ? { max_weight: props.mandate.max_weight }
     : null;
 
+  // Phase 170.2 (SC-1, UI-SPEC H-1, H-2): a bare `grid` has an implicit `auto`
+  // track, which sizes to the widest table's MIN-CONTENT, so every ResponsiveTable
+  // scroller below grows with its table and #main-content scrolls sideways
+  // instead. `grid-cols-1` is `minmax(0, 1fr)`: the track can shrink, and each
+  // table scrolls inside its own region. The root AND the three nested section
+  // grids need it (RESEARCH measured that the root alone leaves the nested ones
+  // blowing out). No overflow-x-hidden and no px max-w: they would hide the
+  // table instead of containing it (UI-SPEC scroller rule 4).
   return (
-    <div data-tab-panel="holdings" className="grid gap-8">
+    <div data-tab-panel="holdings" className="grid grid-cols-1 gap-8">
       {/* Section 1 — onboarded strategies (renders its own "Strategies" header). */}
       <HoldingsTable
         strategyRows={strategyRows}
@@ -448,7 +456,7 @@ export function HoldingsTabPanel(
           the 99-UI-SPEC placement (the 100-04 Watchlist/Notes sections now follow
           it, before Exchange Positions). Additive: fed by the distinct `exposure`
           prop; renders honest-empty when the trio is empty. */}
-      <section aria-label="Exposure" className="grid gap-4">
+      <section aria-label="Exposure" className="grid grid-cols-1 gap-4">
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Exposure
         </h3>
@@ -469,7 +477,7 @@ export function HoldingsTabPanel(
           SEPARATE ancestor from the @5xl:grid-cols-2 variant — the CompareTable
           idiom (DESIGN.md 2026-06-29). The parent grid's gap-8 gives the 32px
           section gap the UI-SPEC pins. */}
-      <section aria-label="Watchlist & Optimizer" className="grid gap-4">
+      <section aria-label="Watchlist & Optimizer" className="grid grid-cols-1 gap-4">
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Watchlist &amp; Optimizer
         </h3>
@@ -492,7 +500,7 @@ export function HoldingsTabPanel(
       </section>
 
       {/* Section 5 — raw exchange positions (always shown). */}
-      <section className="grid gap-4">
+      <section className="grid grid-cols-1 gap-4">
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Exchange Positions
         </h3>

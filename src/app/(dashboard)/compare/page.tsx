@@ -6,6 +6,8 @@ import {
   EMPTY_ANALYTICS,
   extractAnalytics,
 } from "@/lib/queries";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { readHeadlineCoversFrom } from "@/lib/factsheet/composite-read-path";
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { CompareTable } from "@/components/strategy/CompareTable";
@@ -168,6 +170,47 @@ export default async function ComparePage({
       it.kind === "strategy",
   );
 
+  // Phase 170.2 (SC-3, D-07): the overlay draws a chain-broken row over the span
+  // its headline cumulative return compounds, which starts on the day the stored
+  // cash series names. That series sits behind deny-all RLS, so it is read with
+  // the service role (T-170.2-10), and ONLY for a row the visibility-gated read
+  // above already returned whose flag alias is exactly the string "true". Only
+  // the derived DATE and a status leave this function; the series never does.
+  //
+  // The reader keeps two non-dated outcomes apart (a missing or undatable series
+  // is `null`; a FAILED read throws CompositeSeriesReadError, "so an outage is
+  // never rendered as 'the span cannot be named'"), and so does the page. A failed
+  // read degrades that ONE row's chart, never the whole page: one chart must not
+  // hide the comparison table, and the row is never drawn as a bridged curve.
+  const overlayItems = await Promise.all(
+    strategyOnlyItems.map(async (it) => {
+      if (it.analytics.twr_chain_broken !== "true") return it;
+      try {
+        const headlineCoversFrom = await readHeadlineCoversFrom(
+          createAdminClient(),
+          it.strategy.id,
+        );
+        return {
+          ...it,
+          headlineCoversFrom,
+          headlineCoversFromStatus:
+            headlineCoversFrom === null ? ("undatable" as const) : ("dated" as const),
+        };
+      } catch (err) {
+        // House rule: the message, never the error object.
+        console.error(
+          "[compare/page] covered-from read failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+        return {
+          ...it,
+          headlineCoversFrom: null,
+          headlineCoversFromStatus: "read_failed" as const,
+        };
+      }
+    }),
+  );
+
   return (
     <>
       <PageHeader
@@ -187,7 +230,7 @@ export default async function ComparePage({
       <div>
         <div className="space-y-8">
           <CompareTable items={items} />
-          <CompareEquityOverlay items={strategyOnlyItems} />
+          <CompareEquityOverlay items={overlayItems} />
           <CompareCorrelationMatrix items={strategyOnlyItems} />
         </div>
       </div>

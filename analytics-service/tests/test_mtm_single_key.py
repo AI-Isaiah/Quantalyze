@@ -1381,6 +1381,57 @@ async def test_single_key_routes_through_shared_derive_and_persists() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stale", [True, False])
+async def test_stale_benchmark_is_not_paired_with_mtm_or_smoothed(stale: bool) -> None:
+    """170.2 review LW-05 / SFH-01. ``get_benchmark_returns`` answers
+    ``(returns, is_stale)``, and a stale answer can be a SHORTER run than the
+    series it is paired with. Both derive blocks used to discard the flag
+    (``_mtm_benchmark_rets, _ = ...``), so alpha / beta / Treynor / R-squared were
+    measured over a different window than the cash basis, with nothing recording
+    it. The CSV run treats ``benchmark_stale`` as an unavailable benchmark; so must
+    these two blocks: stale -> ``derive_basis_series`` gets ``None`` (the family
+    persists null); fresh -> the series, unchanged."""
+    import services.basis_series as _bs
+
+    bench = pd.Series(
+        [0.005, -0.004, 0.006] * 10,
+        index=pd.date_range("2024-05-01", periods=30, freq="D"),
+        dtype="float64",
+    )
+    ctx, _capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=True) for _ in range(3)]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+    ])
+    derive_spy = MagicMock(side_effect=_bs.derive_basis_series)
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [
+        patch(
+            "services.benchmark.get_benchmark_returns",
+            new=AsyncMock(return_value=(bench, stale)),
+        ),
+        patch("services.basis_series.derive_basis_series", new=derive_spy),
+    ]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    # Call order at this seam: MTM (0), smoothed_mtm (1), cash (2, never paired).
+    assert derive_spy.call_count == 3
+    for idx, basis in ((0, "mark_to_market"), (1, "smoothed_mtm")):
+        paired = derive_spy.call_args_list[idx].args[1]
+        if stale:
+            assert paired is None, (
+                f"{basis} was paired with a STALE benchmark: its alpha / beta / R-squared "
+                "would be measured over a window the cash basis does not share"
+            )
+        else:
+            pd.testing.assert_series_equal(paired, bench)
+
+
+@pytest.mark.asyncio
 async def test_single_key_derive_helper_valueerror_degrades_and_heals() -> None:
     """WIRING FALSIFIABILITY: patch derive_basis_series to RAISE ValueError → the
     seam degrades EXACTLY like the compute-reject path (DONE, SQL-NULL by-basis,

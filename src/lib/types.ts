@@ -368,6 +368,16 @@ export interface StrategyAnalytics {
    * absent value reads as the platform default (geometric).
    */
   cumulative_method?: string | null;
+  /**
+   * Phase 170.2 (SC-3, D-07) — NOT a `strategy_analytics` column. The scalar
+   * `data_quality_flags->>twr_chain_broken`, projected as a JSONB alias
+   * (`twr_chain_broken:data_quality_flags->>twr_chain_broken`) by the
+   * cross-tenant compare read, which must not ship the whole flags blob. The
+   * string `"true"` marks a chain-broken row; read it strictly
+   * (`=== "true"`). OPTIONAL like `cumulative_method`: reads that do not
+   * project it stay valid, and an absent value reads as not chain-broken.
+   */
+  twr_chain_broken?: string | null;
   drawdown_series: { date: string; value: number }[] | null;
   monthly_returns: Record<string, Record<string, number>> | null;
   daily_returns: Record<string, Record<string, number>> | null;

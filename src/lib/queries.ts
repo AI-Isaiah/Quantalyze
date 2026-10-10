@@ -263,18 +263,24 @@ export { extractAnalytics, EMPTY_ANALYTICS };
  *     page.test.tsx.
  *   - `returns_series`, read by BOTH CompareEquityOverlay (:40) and
  *     CompareCorrelationMatrix (:26). Dropping it blanks both charts.
- *   - `cumulative_method:data_quality_flags->>cumulative_method` (Phase
- *     164.6.6.2.2 WR-05): ONE scalar out of the flags blob, a JSONB-key alias in
- *     the `three_month` form, so CompareCorrelationMatrix can difference the
- *     curve by the row's own method (`curveMethodFromFlags`). The blob itself
- *     stays out of this projection.
+ *   - Two scalars out of the flags blob, each a JSONB-key alias in the
+ *     `three_month` form. The blob itself stays out of this projection.
+ *       - `cumulative_method:data_quality_flags->>cumulative_method` (Phase
+ *         164.6.6.2.2 WR-05): lets CompareCorrelationMatrix and
+ *         CompareEquityOverlay read the curve by the row's own method
+ *         (`curveMethodFromFlags`).
+ *       - `twr_chain_broken`, the `->>` scalar of the flag of the same name
+ *         (Phase 170.2 SC-3, D-07): arrives as the string `"true"` (coerce strictly
+ *         `=== "true"`). It tells the compare page which published rows need
+ *         their covered-from date read, so the overlay draws the span the
+ *         headline cumulative return compounds.
  *
  * Lives here (not in the page file) so every "which analytics columns may
  * leave the DB" list is auditable with one grep of this module, alongside
  * PUBLIC_ANALYTICS_COLUMNS and the STRATEGY_DETAIL_* constants.
  */
 export const COMPARE_ANALYTICS_COLUMNS =
-  "cumulative_return, cagr, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, volatility, six_month_return, returns_series, cumulative_method:data_quality_flags->>cumulative_method";
+  "cumulative_return, cagr, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, volatility, six_month_return, returns_series, cumulative_method:data_quality_flags->>cumulative_method, twr_chain_broken:data_quality_flags->>twr_chain_broken";
 
 /**
  * Phase 159 (159-03, RANK-02 / decision D-02) — the RANKED-LIST analytics

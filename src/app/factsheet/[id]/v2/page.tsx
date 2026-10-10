@@ -226,7 +226,8 @@ function buildFactsheetPayloadCached(
     // Bumped v9→v10 (Phase 169.4 D-71): 169.4-05 and 169.4-06 changed the api-arm panels (null-honest signatures and allocator blends).
     // Bumped v10→v11 (Phase 169.1 D-80): 169.1-03 to 169.1-07 changed the payload's conventions fields and the per-basis, bucket, rolling, bootstrap and stress values.
     // Bumped v11→v12 (Phase 164.6.6.2 BTCNATIVE, 2026-10-07): the payload gained `returnsUnit` (the unit the strategy's returns are measured in, from `data_quality_flags.native_unit`). A v11 entry lacks it, so for the 1 h TTL drain a BTC account's factsheet would read as USD with no chip and bare return labels.
-    ["factsheet-v2-payload-v12", id, computedAt],
+    // Bumped v12→v13 (Phase 170.2 PROBEFIXES SC-4, D-09): payload gains the optional source field
+    ["factsheet-v2-payload-v13", id, computedAt],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
