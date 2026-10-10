@@ -440,7 +440,7 @@ def _c6_correlation(strategy_returns: pd.Series, btc: pd.Series) -> object:
 
     sb, pa = _c6_supabase(strategy_returns)
 
-    async def _btc(symbol: str) -> tuple[pd.Series, bool]:
+    async def _btc(symbol: str, **_kwargs: object) -> tuple[pd.Series, bool]:
         return btc, False
 
     prior = sys.modules.get("routers.portfolio")

@@ -318,3 +318,31 @@ describe("169.5 CR-01 — stress windows take BTC null-honest (SC3), not through
     expect(tariffs!.benchReturn).not.toBe(0);
   });
 });
+
+describe("170.2 SC-4 / D-09 — the stored CSV source reaches the payload by conditional spread", () => {
+  // WHY: the masthead venue label keys on `strategies.source = 'csv'`, NOT on
+  // `ingestSource` (derived from daily_returns, which is NULL on every PROD
+  // strategy, so it reads "api"). The field must exist for a csv row and must
+  // be ABSENT (not undefined) for anything else, so the three whole-payload
+  // snapshots above stay byte-identical for every non-csv strategy.
+  it("a strategy row with source 'csv' carries source: 'csv'", () => {
+    const payload = buildFactsheetPayload({ ...API_STRATEGY, source: "csv" }, CASH_SERIES)!;
+    expect(payload.source).toBe("csv");
+  });
+
+  it("a wizard row carries no source key at all", () => {
+    const payload = buildFactsheetPayload({ ...API_STRATEGY, source: "wizard" }, CASH_SERIES)!;
+    expect("source" in payload).toBe(false);
+  });
+
+  it("an absent or null source carries no source key at all", () => {
+    expect("source" in buildFactsheetPayload(API_STRATEGY, CASH_SERIES)!).toBe(false);
+    expect("source" in buildFactsheetPayload({ ...API_STRATEGY, source: null }, CASH_SERIES)!).toBe(false);
+  });
+
+  it("the key is independent of ingestSource (PROD reads api for a csv-source strategy)", () => {
+    const payload = buildFactsheetPayload({ ...API_STRATEGY, source: "csv" }, CASH_SERIES)!;
+    expect(payload.ingestSource).toBe("api");
+    expect(payload.source).toBe("csv");
+  });
+});

@@ -17,6 +17,8 @@
  * test names its own anchor.
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -628,14 +630,94 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     // The leading rank ("#") column is now the sticky-left corner — the
     // highest-ranked cell (z-30) that pins left-0.
     const rankHeader = screen.getByRole("columnheader", { name: /Rank/ });
-    expect(rankHeader.className).toContain("left-0");
+    // 2026-10-09 Phase 170.2 D-05: pinning keys on the table's own width (@3xl)
+    expect(rankHeader.className).toContain("@3xl:left-0");
+    expect(rankHeader.className).not.toMatch(/(^|\s)left-/);
     expect(rankHeader.className).toContain("z-30");
     // The Strategy identity column stays sticky as the SECOND pinned column
-    // (to the right of the rank column, which is w-14/left-0), one z-tier below
-    // the corner — so it pins at left-14 when there is no star column.
+    // (to the right of the rank column, which owns left-0).
     const strategyHeader = screen.getByRole("columnheader", { name: /Strategy/ });
-    expect(strategyHeader.className).toContain("left-14");
-    expect(strategyHeader.className).toContain("z-20");
+    // 2026-10-09 Phase 170.2 D-05: pinning keys on the table's own width (@3xl)
+    // 2026-10-09 Phase 170.2 UI-SPEC P-1 / X-1 / D-06: pinned header at z-30; widths stay natural and offsets follow the measured header widths at runtime
+    expect(strategyHeader.className).toContain("@3xl:left-(--pin-strategy-left)");
+    expect(strategyHeader.className).toContain("@3xl:border-r");
+    expect(strategyHeader.className).not.toMatch(/(^|\s)left-/);
+    expect(strategyHeader.className).not.toMatch(/(^|\s)border-r(\s|$)/);
+    // Level with the rank and star headers, above every scrolling header: at
+    // z-20 it tied with them and the later cells painted over it (X-1).
+    expect(strategyHeader.className).toContain("z-30");
+    expect(strategyHeader.className).not.toContain("z-20");
+    expect(rankHeader.className).toContain("z-30");
+    // Every NON-pinned header stays z-20.
+    const cagrHeader = screen.getByRole("columnheader", { name: /CAGR/ });
+    expect(cagrHeader.className).toContain("z-20");
+    expect(cagrHeader.className).not.toContain("z-30");
+    expect(cagrHeader.className).not.toMatch(/left-/);
+    // D-06: the rank cell keeps its natural, unconstrained width (no min-w, no
+    // arbitrary w-[Npx]); the offsets follow the measured width instead.
+    expect(rankHeader.className).toContain("w-14");
+    expect(rankHeader.className).toContain("px-2");
+    expect(rankHeader.className).not.toMatch(/(^|\s)min-w-/);
+    expect(rankHeader.className).not.toMatch(/\bw-\[/);
+    // D-06: the Strategy column is content-sized — no width class of any kind.
+    expect(strategyHeader.className).not.toMatch(/(^|\s)(min-|max-)?w-/);
+  });
+
+  it("with the star column, the star header and cells keep their natural widths and read the measured rank width as their offset (D-06, P-1)", () => {
+    render(
+      <StrategyTable
+        strategies={STRATEGIES}
+        categorySlug="crypto-sma"
+        userId="u-1"
+        initialWatchedSet={new Set()}
+      />,
+    );
+    // 2026-10-09 Phase 170.2 UI-SPEC P-1 / X-1 / D-06: pinned header at z-30; widths stay natural and offsets follow the measured header widths at runtime
+    const starHeader = screen.getByRole("columnheader", { name: /Watchlist/ });
+    expect(starHeader.className).toContain("@3xl:left-(--pin-star-left)");
+    expect(starHeader.className).toContain("z-30");
+    expect(starHeader.className).toContain("w-11");
+    expect(starHeader.className).toContain("px-2");
+    expect(starHeader.className).not.toMatch(/(^|\s)min-w-/);
+    expect(starHeader.className).not.toMatch(/\bw-\[/);
+    expect(starHeader.className).not.toMatch(/(^|\s)left-/);
+    // The Strategy header reads the combined offset, with or without a star.
+    const strategyHeader = screen.getByRole("columnheader", { name: /Strategy/ });
+    expect(strategyHeader.className).toContain("@3xl:left-(--pin-strategy-left)");
+    expect(strategyHeader.className).toContain("z-30");
+    // Body cells: star cell offset, Strategy cell offset, both behind @3xl:.
+    const starCell = screen.getAllByRole("button", { name: /to watchlist|from watchlist/ })[0].closest("td")!;
+    expect(starCell.className).toContain("@3xl:left-(--pin-star-left)");
+    expect(starCell.className).toContain("w-11");
+    expect(starCell.className).toContain("px-2");
+    expect(starCell.className).not.toMatch(/(^|\s)min-w-/);
+    expect(starCell.className).not.toMatch(/(^|\s)left-/);
+    const nameCell = screen.getByRole("link", { name: "Alpha Stellar" }).closest("td")!;
+    expect(nameCell.className).toContain("@3xl:left-(--pin-strategy-left)");
+    expect(nameCell.className).not.toMatch(/(^|\s)left-/);
+  });
+
+  it("the table frame carries the previous fixed offsets as its pre-measure values for both custom properties (jsdom has no layout; the measured values are proven by the e2e)", () => {
+    // 2026-10-09 Phase 170.2 UI-SPEC P-1 / X-1 / D-06: pinned header at z-30; widths stay natural and offsets follow the measured header widths at runtime
+    const { unmount } = render(
+      <StrategyTable strategies={STRATEGIES} categorySlug="crypto-sma" />,
+    );
+    let frame = document.querySelector<HTMLElement>("[data-strategy-table]")!;
+    expect(frame.style.getPropertyValue("--pin-star-left")).toBe("3.5rem");
+    // No star column: the Strategy cell sits right after the rank cell.
+    expect(frame.style.getPropertyValue("--pin-strategy-left")).toBe("3.5rem");
+    unmount();
+    render(
+      <StrategyTable
+        strategies={STRATEGIES}
+        categorySlug="crypto-sma"
+        userId="u-1"
+        initialWatchedSet={new Set()}
+      />,
+    );
+    frame = document.querySelector<HTMLElement>("[data-strategy-table]")!;
+    expect(frame.style.getPropertyValue("--pin-star-left")).toBe("3.5rem");
+    expect(frame.style.getPropertyValue("--pin-strategy-left")).toBe("6.25rem");
   });
 
   it("50-REVIEW — sortable headers are keyboard-operable <button>s with aria-sort (WCAG 2.1.1 / 4.1.2)", () => {
@@ -660,9 +742,14 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     const firstCell = nameLink.closest("td");
     expect(firstCell).not.toBeNull();
     expect(firstCell!.className).toContain("sticky");
-    // The identity column is the second sticky column (pinned at left-14, to the
-    // right of the leading w-14 rank cell which owns left-0).
-    expect(firstCell!.className).toContain("left-14");
+    // The identity column is the second sticky column (pinned to the right of
+    // the leading rank cell, which owns left-0).
+    // 2026-10-09 Phase 170.2 D-05: pinning keys on the table's own width (@3xl)
+    // 2026-10-09 Phase 170.2 UI-SPEC P-1 / X-1 / D-06: pinned header at z-30; widths stay natural and offsets follow the measured header widths at runtime
+    expect(firstCell!.className).toContain("@3xl:left-(--pin-strategy-left)");
+    expect(firstCell!.className).toContain("@3xl:border-r");
+    expect(firstCell!.className).not.toMatch(/(^|\s)left-/);
+    expect(firstCell!.className).not.toMatch(/(^|\s)border-r(\s|$)/);
     expect(firstCell!.className).toContain("bg-surface");
     // The translucent hover lives on the OTHER cells (group-hover:bg-page/50);
     // the sticky first column must not carry it or scrolled cells bleed through.
@@ -671,7 +758,14 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     // backing, so it doesn't bleed under horizontal scroll either.
     const rankCell = within(firstCell!.closest("tr")!).getByText(/^#\d+$/).closest("td");
     expect(rankCell!.className).toContain("sticky");
-    expect(rankCell!.className).toContain("left-0");
+    // 2026-10-09 Phase 170.2 D-05: pinning keys on the table's own width (@3xl)
+    expect(rankCell!.className).toContain("@3xl:left-0");
+    expect(rankCell!.className).not.toMatch(/(^|\s)left-/);
+    // D-06: natural width, no min-w-* and no arbitrary w-[Npx].
+    expect(rankCell!.className).toContain("w-14");
+    expect(rankCell!.className).toContain("px-2");
+    expect(rankCell!.className).not.toMatch(/(^|\s)min-w-/);
+    expect(rankCell!.className).not.toMatch(/\bw-\[/);
     expect(rankCell!.className).toContain("bg-surface");
     expect(rankCell!.className).not.toContain("group-hover:bg-page/50");
   });
@@ -1185,5 +1279,91 @@ describe("StrategyTable — N-TABLE sticky header and whole words (170-10)", () 
     expect(tokens).toContain("top-12");
     expect(tokens).toContain("md:top-0");
     expect(tokens).not.toContain("top-0");
+  });
+});
+
+// 2026-10-09 Phase 170.2 D-05: pinning keys on the table's own width (@3xl).
+//
+// WHY a source-reading test: the render fixtures above draw the header and the
+// data rows but never the placeholder (Founder-Pin / Reserved) rows, so a pinned
+// placeholder cell could regain a viewport-independent offset unseen. On a phone
+// the name cell stack (rank + star + Strategy) is as wide as the scroller and
+// leaves 0 px for Return %, CAGR and Sharpe; every horizontal offset must sit
+// behind `@3xl:` so below the table's own 48rem nothing is pinned.
+describe("StrategyTable — container-gated pinning (170.2 D-05)", () => {
+  // Every pinned class string in the source, comments excluded. Each of the three
+  // pinned columns (rank, star, Strategy) appears as a header cell, a data-row
+  // cell and a placeholder-row cell: nine strings.
+  const pinnedStrings = (): string[] => {
+    const src = readFileSync(
+      join(process.cwd(), "src/components/strategy/StrategyTable.tsx"),
+      "utf8",
+    );
+    const offsetToken =
+      /\S*\bleft-(?:0|14|\[6\.25rem\]|\(--pin-(?:star|strategy)-left\))\S*/g;
+    const tokens: string[] = [];
+    for (const line of src.split("\n")) {
+      const t = line.trim();
+      // Comments may name the offsets; only class strings are contracted.
+      if (t.startsWith("//") || t.startsWith("*") || t.startsWith("{/*")) continue;
+      // Drop the string / JSX delimiters the \S* run drags along (`"`, backtick, `}`).
+      for (const m of line.matchAll(offsetToken)) tokens.push(m[0].replace(/["'`}{,;]+$/g, ""));
+    }
+    return tokens;
+  };
+
+  it("every sticky horizontal offset in the source is behind @3xl:", () => {
+    const tokens = pinnedStrings();
+    // Floor against vacuity: rank, star and Strategy, each as header, data row
+    // and placeholder row. 2026-10-09 (170.2-08): the Strategy header's two
+    // star / no-star arms became ONE string because --pin-strategy-left already
+    // accounts for the star column, so the count is the nine cells, not twelve.
+    expect(tokens.length).toBeGreaterThanOrEqual(9);
+    const bare = tokens.filter((tok) => !tok.includes("@3xl:left-"));
+    expect(bare, `un-gated pinned offsets: ${bare.join(", ")}`).toEqual([]);
+  });
+
+  it("rank cells pin at 0; star and Strategy cells read the measured offsets, in the header, the data row AND the placeholder row", () => {
+    // 2026-10-09 Phase 170.2 UI-SPEC P-1 / X-1 / D-06: pinned header at z-30; widths stay natural and offsets follow the measured header widths at runtime
+    // The render fixtures never draw the placeholder (Founder-Pin / Reserved)
+    // rows, so a fixed offset left on one placeholder cell would put its star or
+    // name cell off the header cell's edge unseen. Three of each, exactly.
+    const tokens = pinnedStrings();
+    const count = (want: string) => tokens.filter((t) => t === want).length;
+    expect(count("@3xl:left-0")).toBe(3);
+    expect(count("@3xl:left-(--pin-star-left)")).toBe(3);
+    expect(count("@3xl:left-(--pin-strategy-left)")).toBe(3);
+    // Nothing else (no fixed 14 / 6.25rem survives next to the variables).
+    expect(tokens.length).toBe(9);
+  });
+
+  it("the placeholder star and Strategy cells carry the same widths and offsets as the data row", () => {
+    const src = readFileSync(
+      join(process.cwd(), "src/components/strategy/StrategyTable.tsx"),
+      "utf8",
+    );
+    const placeholderSrc = src.slice(src.indexOf("placeholders.map("));
+    expect(placeholderSrc.length).toBeGreaterThan(0);
+    // Rank, star: same width and padding as the data row, subtle background.
+    expect(placeholderSrc).toContain(
+      "sticky @3xl:left-0 z-10 w-14 bg-surface-subtle px-2",
+    );
+    expect(placeholderSrc).toContain(
+      "sticky @3xl:left-(--pin-star-left) z-10 w-11 bg-surface-subtle px-2",
+    );
+    expect(placeholderSrc).toContain(
+      "sticky z-10 bg-surface-subtle px-4 py-3 @3xl:border-r @3xl:border-border @3xl:left-(--pin-strategy-left)",
+    );
+    // The data row's counterparts, with the surface background.
+    expect(src).toContain("sticky @3xl:left-0 z-10 w-14 bg-surface px-2");
+    expect(src).toContain(
+      "sticky @3xl:left-(--pin-star-left) z-10 w-11 bg-surface px-2",
+    );
+    expect(src).toContain(
+      "sticky z-10 bg-surface px-4 py-3 @3xl:border-r @3xl:border-border @3xl:left-(--pin-strategy-left)",
+    );
+    // D-06: no min-w-* and no arbitrary w-[Npx] on any rank / star cell.
+    expect(src).not.toMatch(/left-0 [^"`]*\bmin-w-/);
+    expect(src).not.toMatch(/left-\(--pin-star-left\) [^"`]*\b(min-w-|w-\[)/);
   });
 });

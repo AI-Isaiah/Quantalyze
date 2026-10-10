@@ -136,7 +136,25 @@ describe("<ExposureByClass> — drilldown table", () => {
     expect(netCell.className).not.toContain("text-negative");
   });
 
-  it("wraps the table in a max-h-64 scroll region only when slices exceed 12", () => {
+  // 2026-10-09 Phase 170.2 H-3: the cap moved onto the ResponsiveTable region.
+  // The vertical 12-row cap is unchanged; only the element that carries it moved
+  // from the testid wrapper to the focusable, named scroll region.
+  const REGION_NAME =
+    "Exposure by venue and symbol: Table scrolls horizontally. Swipe or use arrow keys to see more columns.";
+
+  it("is a named, focusable ResponsiveTable region inside the drilldown wrapper (H-3)", () => {
+    render(<ExposureByClass snapshot={HEDGED} />);
+    const region = screen.getByRole("region", { name: REGION_NAME });
+    expect(region.getAttribute("tabindex")).toBe("0");
+    // The region holds the table, and the wrapper keeps the testid + min-w-0.
+    expect(within(region).getByRole("table")).toBeTruthy();
+    const wrapper = screen.getByTestId("drilldown");
+    expect(wrapper.className).toContain("mt-4");
+    expect(wrapper.className).toContain("min-w-0");
+    expect(wrapper.contains(region)).toBe(true);
+  });
+
+  it("caps the region at max-h-64 with a vertical scroll only when slices exceed 12", () => {
     const many = snap(
       Array.from({ length: 14 }, (_, i) => ({
         holdingType: "spot" as const,
@@ -147,10 +165,10 @@ describe("<ExposureByClass> — drilldown table", () => {
         signedValueUsd: (14 - i) * 1000,
       })),
     );
-    const { getByTestId, unmount } = render(<ExposureByClass snapshot={many} />);
-    const wrapper = getByTestId("drilldown");
-    expect(wrapper.className).toContain("max-h-64");
-    expect(wrapper.className).toContain("overflow-y-auto");
+    const { unmount } = render(<ExposureByClass snapshot={many} />);
+    const region = screen.getByRole("region", { name: REGION_NAME });
+    expect(region.className).toContain("max-h-64");
+    expect(region.className).toContain("overflow-y-auto");
     unmount();
 
     const few = snap(
@@ -164,7 +182,14 @@ describe("<ExposureByClass> — drilldown table", () => {
       })),
     );
     render(<ExposureByClass snapshot={few} />);
-    expect(screen.getByTestId("drilldown").className).not.toContain("max-h-64");
+    const fewRegion = screen.getByRole("region", { name: REGION_NAME });
+    expect(fewRegion.className).not.toContain("max-h-64");
+    expect(fewRegion.className).not.toContain("overflow-y-auto");
+  });
+
+  it("the scroller is the ResponsiveTable's own: the testid wrapper no longer scrolls", () => {
+    render(<ExposureByClass snapshot={HEDGED} />);
+    expect(screen.getByTestId("drilldown").className).not.toContain("overflow-x-auto");
   });
 });
 

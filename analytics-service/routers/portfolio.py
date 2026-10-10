@@ -1033,7 +1033,17 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         benchmark_stale: bool = False
         benchmark_note: str | None = None
         try:
-            benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
+            # Phase 170.2 (SC-5): read the benchmark from the first date of the
+            # series it is paired with, not a fixed trailing window.
+            _bench_since = (
+                portfolio_returns_series.index.min().date()
+                if not portfolio_returns_series.empty
+                and isinstance(portfolio_returns_series.index, pd.DatetimeIndex)
+                else None
+            )
+            benchmark_rets, benchmark_stale = await get_benchmark_returns(
+                "BTC", since=_bench_since
+            )
             if benchmark_rets is None or benchmark_stale:
                 benchmark_note = BENCHMARK_NOTE_STALE
             else:

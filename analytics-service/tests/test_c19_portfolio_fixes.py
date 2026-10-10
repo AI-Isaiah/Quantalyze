@@ -267,7 +267,7 @@ class TestAumCollectionC19:
         ]
         sb, tables = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa)
 
-        async def _no_benchmark(symbol):
+        async def _no_benchmark(symbol, **_kwargs):
             return None, True
 
         with patch.object(portfolio_mod, "get_supabase", return_value=sb), \

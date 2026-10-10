@@ -20,6 +20,7 @@ import {
   assertFitsOrScrollsInside,
   assertNotClippedByAncestors,
   assertNotCovered,
+  assertPinnedStackDoesNotCover,
   assertScrollsInside,
   rectsIntersect,
   type Rect,
@@ -850,6 +851,813 @@ test.describe("factsheet KPI — N-KPI", () => {
       }
       await assertKpiTilesRead(page, `${vp.id} published factsheet N-KPI`);
       await assertNoReflow(page, "#factsheet-main");
+    });
+  }
+});
+
+// Phase 170.2 (PROBEFIXES) SC-1 — the Holdings tab stops scrolling sideways.
+//
+// WHY a LOCAL viewport array: V735 is the width the founder's probe measured
+// (885 vs 735 on PROD), and the shared `VIEWPORTS` is pinned by many describes
+// above, so it is never widened here.
+//
+// WHY the seed is wide and the case asserts so BEFORE measuring: CI missed this
+// overflow because the seeded book has one narrow BTC row, so the tables fit and
+// there was nothing to overflow (RESEARCH Pitfall 1). A seeded case that passes on
+// a narrow seed proves nothing, so the table widths are a precondition.
+//
+// The contract (UI-SPEC "The scroller contract"): #main-content and the document
+// do not overflow (assertNoReflow), and each wide table scrolls INSIDE its own
+// ResponsiveTable region, whose right edge is inside the viewport.
+const HOLDINGS_VIEWPORTS: { id: string; width: number; height: number }[] = [
+  { id: "V390", width: 390, height: 844 },
+  { id: "V640", width: 640, height: 400 },
+  { id: "V735", width: 735, height: 450 },
+];
+const WIDE_TABLE_MIN_PX = 780;
+
+test.describe("/allocations holdings — SC1-HOLDINGS", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+
+  for (const vp of HOLDINGS_VIEWPORTS) {
+    test(`${vp.id}: a wide book does not scroll #main-content; each wide table scrolls inside its own region`, async ({
+      page,
+    }) => {
+      test.setTimeout(120_000);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      const allocator = await seedTestAllocator();
+      await seedAllocatorBook({ allocatorUserId: allocator.userId, wide: true });
+      await loginViaForm(page, allocator.email, allocator.password);
+
+      await page.goto("/allocations?tab=holdings");
+      await expect(page.locator(ALLOC_ANCHOR)).toBeVisible({ timeout: 15_000 });
+
+      const holdings = page.getByRole("region", { name: /^Holdings:/ });
+      const open = page.getByRole("region", { name: /^Open positions:/ });
+      // UI-SPEC H-3: the Exposure drill-down is a named ResponsiveTable region too.
+      const exposure = page.getByRole("region", { name: /^Exposure by venue and symbol:/ });
+      await expect(exposure.first(), `${vp.id}: Exposure by venue and symbol region missing`).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(holdings.first(), `${vp.id}: Holdings region missing`).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(open.first(), `${vp.id}: Open positions region missing`).toBeVisible({
+        timeout: 15_000,
+      });
+
+      // Precondition: the seed must make each table wider than a phone, else
+      // this case could pass on a narrow seed (the HEAD blind spot).
+      const widths: Record<string, number> = {};
+      for (const [label, region] of [
+        ["Holdings", holdings],
+        ["Open positions", open],
+        ["Exposure by venue and symbol", exposure],
+      ] as const) {
+        // The table's INTRINSIC width (min-content), not its laid-out width: a
+        // `w-full` table is stretched to whatever track it gets, so the laid-out
+        // width says nothing about whether the seed is wide.
+        const w = await region
+          .first()
+          .locator("table")
+          .first()
+          .evaluate((el) => {
+            const t = el as HTMLElement;
+            const prev = t.style.width;
+            t.style.width = "min-content";
+            const intrinsic = t.getBoundingClientRect().width;
+            t.style.width = prev;
+            return intrinsic;
+          });
+        widths[label] = Math.round(w);
+        expect(
+          w,
+          `${vp.id}: precondition: the ${label} table is ${Math.round(w)} px wide at min-content, under ${WIDE_TABLE_MIN_PX}; the seed is too narrow to prove anything (RESEARCH Pitfall 1)`,
+        ).toBeGreaterThanOrEqual(WIDE_TABLE_MIN_PX);
+      }
+      console.log(
+        `SC1-HOLDINGS ${vp.id} precondition table min-content widths: ${JSON.stringify(widths)}`,
+      );
+
+      // #main-content and the document do not overflow.
+      await assertNoReflow(page, ALLOC_ANCHOR);
+
+      // Each wide table scrolls inside its own region and its right edge is
+      // inside the viewport (UI-SPEC scroller contract rules 2 and 3).
+      const regions: [string, import("@playwright/test").Locator][] = [
+        ["Holdings", holdings.first()],
+        ["Open positions", open.first()],
+        ["Exposure by venue and symbol", exposure.first()],
+      ];
+      // The Strategies region exists only for an allocator with onboarded
+      // strategies; when it is present its right edge must be inside too.
+      const strategies = page.getByRole("region", { name: /^Strategies:/ });
+      if ((await strategies.count()) > 0) {
+        regions.push(["Strategies", strategies.first()]);
+      }
+      // Every region on the tab has a unique accessible name (axe landmark-unique,
+      // and the screen-reader landmark rotor): Strategies, Holdings, Open
+      // positions and Exposure by venue and symbol must not read alike.
+      const names = await page
+        .locator('[data-tab-panel="holdings"] [role="region"]')
+        .evaluateAll((els) => els.map((el) => el.getAttribute("aria-label") ?? ""));
+      expect(
+        names.length,
+        `${vp.id}: expected at least the Holdings, Open positions and Exposure regions, got ${JSON.stringify(names)}`,
+      ).toBeGreaterThanOrEqual(3);
+      expect(
+        new Set(names).size,
+        `${vp.id}: region accessible names are not unique: ${JSON.stringify(names)}`,
+      ).toBe(names.length);
+      for (const [label, region] of regions) {
+        const box = await boxOf(region, `${vp.id} ${label} region`);
+        expect(
+          box.x + box.width <= vp.width + 1,
+          `${vp.id}: ${label} region right edge ${Math.round(box.x + box.width)} is outside the ${vp.width} px viewport`,
+        ).toBe(true);
+        if (label !== "Strategies") {
+          await assertScrollsInside(region, `${vp.id} ${label} region`);
+        }
+      }
+    });
+  }
+});
+
+// Phase 170.2 (PROBEFIXES) SC-6, first half — the Discovery ranking table below
+// its `@3xl` container step.
+//
+// WHY a LOCAL viewport array: V360 and V375 are not in the shared `VIEWPORTS`,
+// which is pinned by many describes above and is never widened here.
+//
+// WHY each check collects instead of throwing at once: the HEAD RED run must name
+// EVERY failing contract per viewport (page overflow offender, hint, filter row,
+// pinned stack), and a first-failure throw would hide the rest. The case still
+// fails if any check failed; the aggregate is the assertion.
+//
+// What the contract says (UI-SPEC D-1, D-4, D-5, D-6, scroller rules): no
+// horizontal page scroll; the `Strategies` region scrolls inside itself with its
+// right edge in the viewport; the `Scroll for more columns` hint is inside the
+// viewport and the table frame on one line; below `@3xl` NOTHING is pinned, so the
+// Strategy name moves left with the row and every Return %, CAGR and Sharpe cell
+// can be scrolled into plain view (D-01, D-05).
+const DISCOVERY_VIEWPORTS: { id: string; width: number; height: number }[] = [
+  { id: "V360", width: 360, height: 780 },
+  { id: "V375", width: 375, height: 667 },
+  { id: "V390", width: 390, height: 844 },
+  { id: "V768", width: 768, height: 1024 },
+  { id: "V1080", width: 1080, height: 800 },
+];
+// Tailwind v4 `@3xl` container query step: 48rem = 768 px of CONTAINER width.
+const AT_3XL_PX = 768;
+const PAGE_PAD_PX = 16;
+
+test.describe("/discovery — SC6-DISCOVERY unpinned", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+
+  for (const vp of DISCOVERY_VIEWPORTS) {
+    test(`${vp.id}: no page scroll, the Strategies region scrolls inside, the hint fits, nothing is pinned`, async ({
+      page,
+    }) => {
+      test.setTimeout(180_000);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      const prefix = `${NAME_PREFIX} disc-${vp.id} `;
+      const failures: string[] = [];
+      const collect = async (label: string, fn: () => Promise<void>) => {
+        try {
+          await fn();
+        } catch (e) {
+          failures.push(`${label}: ${(e as Error).message.split("\n")[0]}`);
+        }
+      };
+
+      // Hermetic: the seeded rows are published and sit in crypto-sma, the one
+      // category discovery-hide-examples-default.spec.ts expects empty. Deleted
+      // in the finally below (axe-app-wide.spec.ts precedent).
+      try {
+        const names = [
+          "Alpha Momentum Trend Following Basket",
+          "Beta Neutral Statistical Arbitrage Fund",
+          "Gamma Volatility Carry Overlay Program",
+        ];
+        for (const [i, n] of names.entries()) {
+          await seedStrategyWithHistory({
+            days: 200,
+            name: `${prefix}${n}`,
+            categorySlug: "crypto-sma",
+            strategyTypes: i === 0 ? ["spot", "perpetuals"] : ["spot"],
+            supportedExchanges:
+              i === 0 ? ["binance", "okx", "bybit"] : ["binance", "okx"],
+          });
+        }
+        const allocator = await seedTestAllocator();
+        await loginViaForm(page, allocator.email, allocator.password);
+        await page.goto("/discovery/crypto-sma");
+        const frame = page.locator("[data-strategy-table]");
+        await expect(frame, `${vp.id}: strategy table missing`).toBeVisible({
+          timeout: 15_000,
+        });
+        const region = page.getByRole("region", { name: /^Strategies:/ });
+        await expect(region, `${vp.id}: Strategies region missing`).toBeVisible();
+        // Precondition: the seed must put real rows in the table, else every
+        // check below could pass on an empty table.
+        const rowCount = await region.locator("tbody tr").count();
+        expect(
+          rowCount,
+          `${vp.id}: precondition: expected the 3 seeded crypto-sma rows, got ${rowCount}`,
+        ).toBeGreaterThanOrEqual(3);
+
+        // 1. No horizontal page scroll (names the offender when there is one).
+        await collect("page overflow", () =>
+          assertNoReflow(page, "[data-strategy-table]"),
+        );
+
+        // 2. The region scrolls inside itself, right edge inside the viewport.
+        const geo = await region.evaluate((el) => {
+          const r = el.getBoundingClientRect();
+          return {
+            left: r.left,
+            right: r.right,
+            scrollWidth: el.scrollWidth,
+            clientWidth: el.clientWidth,
+          };
+        });
+        console.log(
+          `SC6-DISCOVERY ${vp.id} region left=${geo.left.toFixed(1)} right=${geo.right.toFixed(1)} clientWidth=${geo.clientWidth} scrollWidth=${geo.scrollWidth} container-lt-3xl=${geo.clientWidth < AT_3XL_PX}`,
+        );
+        await collect("region scrolls inside", () =>
+          assertScrollsInside(region, `${vp.id} Strategies region`),
+        );
+        if (geo.right > vp.width + 1) {
+          failures.push(
+            `region right edge ${geo.right.toFixed(1)} is outside the ${vp.width} px viewport`,
+          );
+        }
+
+        // 3. The hint is inside the viewport and the frame, on one line.
+        const hint = page.getByText("Scroll for more columns");
+        await collect("hint", async () => {
+          expect(
+            await hint.count(),
+            `${vp.id}: the Scroll for more columns hint is not shown although the region overflows`,
+          ).toBeGreaterThan(0);
+          const h = await hint.first().evaluate((el) => {
+            const r = el.getBoundingClientRect();
+            const cs = getComputedStyle(el);
+            const f = el.closest("[data-strategy-table]")!.getBoundingClientRect();
+            const lineHeight =
+              cs.lineHeight === "normal"
+                ? parseFloat(cs.fontSize) * 1.2
+                : parseFloat(cs.lineHeight);
+            return {
+              left: r.left,
+              right: r.right,
+              height: r.height,
+              lineHeight,
+              frameLeft: f.left,
+              frameRight: f.right,
+            };
+          });
+          const problems: string[] = [];
+          if (h.left < -1 || h.right > vp.width + 1)
+            problems.push(
+              `hint x ${h.left.toFixed(1)}..${h.right.toFixed(1)} outside the ${vp.width} px viewport`,
+            );
+          if (h.left < h.frameLeft - 1 || h.right > h.frameRight + 1)
+            problems.push(
+              `hint x ${h.left.toFixed(1)}..${h.right.toFixed(1)} outside the table frame ${h.frameLeft.toFixed(1)}..${h.frameRight.toFixed(1)}`,
+            );
+          if (h.height > h.lineHeight * 1.5)
+            problems.push(
+              `hint wraps (height ${h.height.toFixed(1)} vs line height ${h.lineHeight.toFixed(1)})`,
+            );
+          if (problems.length) throw new Error(problems.join("; "));
+        });
+
+        // 4. Filter row, Sort group and intro callout end inside the page padding
+        //    (UI-SPEC D-4, D-5), at the phone widths only.
+        if (vp.width <= 390) {
+          await collect("filter row / callout inside the page padding", async () => {
+            const over = await page.evaluate((limit) => {
+              const out: string[] = [];
+              const sort = document.querySelector('[aria-label="Sort by"]');
+              const bar = sort?.closest(".sticky") ?? null;
+              if (!bar) return ["filter bar not found"];
+              for (const c of Array.from(bar.children)) {
+                const r = c.getBoundingClientRect();
+                if (r.width === 0 && r.height === 0) continue;
+                if (r.right > limit + 1) {
+                  const cls =
+                    typeof (c as HTMLElement).className === "string"
+                      ? String((c as HTMLElement).className)
+                          .split(" ")
+                          .filter(Boolean)
+                          .slice(0, 2)
+                          .join(".")
+                      : "";
+                  out.push(`${c.tagName}.${cls} right=${r.right.toFixed(1)}`);
+                }
+              }
+              const callout = document.querySelector("#main-content .bg-accent\\/5");
+              if (!callout) out.push("intro callout not found");
+              else {
+                const r = callout.getBoundingClientRect();
+                if (r.right > limit + 1)
+                  out.push(`intro callout right=${r.right.toFixed(1)}`);
+              }
+              return out;
+            }, vp.width - PAGE_PAD_PX);
+            if (over.length)
+              throw new Error(
+                `ends past ${vp.width - PAGE_PAD_PX}: ${over.join("; ")}`,
+              );
+          });
+        }
+
+        // 5. Unpinned below @3xl, and every metric cell reachable (D-01, D-05).
+        await collect("unpinned + metrics reachable", async () => {
+          const res = await page.evaluate((at3xl) => {
+            const region = document.querySelector<HTMLElement>(
+              '[role="region"][aria-label^="Strategies:"]',
+            )!;
+            const main = document.getElementById("main-content")!;
+            const heads = Array.from(region.querySelectorAll<HTMLElement>("thead th"));
+            const idx = (label: string) =>
+              heads.findIndex((h) => (h.textContent ?? "").trim().startsWith(label));
+            const strategyIdx = idx("Strategy");
+            const metricCols = ["Return %", "CAGR", "Sharpe"].map((l) => ({
+              label: l,
+              i: idx(l),
+            }));
+            const rows = Array.from(
+              region.querySelectorAll<HTMLElement>("tbody tr"),
+            ).filter((r) => r.querySelector("td"));
+            const cell = (r: HTMLElement, i: number) =>
+              r.querySelectorAll<HTMLElement>(":scope > td")[i];
+            const problems: string[] = [];
+            if (strategyIdx < 0 || metricCols.some((m) => m.i < 0))
+              return {
+                problems: [
+                  `header lookup failed strategy=${strategyIdx} metrics=${JSON.stringify(metricCols)}`,
+                ],
+                containerPx: region.clientWidth,
+              };
+
+            const containerPx = region.clientWidth;
+            // Pinning is only contracted below the container step.
+            const below = containerPx < at3xl;
+
+            // (a) After scrolling to the maximum, the Strategy header and every
+            //     Strategy body cell have moved left with the row.
+            region.scrollLeft = 0;
+            const strategyCells = [
+              heads[strategyIdx],
+              ...rows.map((r) => cell(r, strategyIdx)),
+            ];
+            const before = strategyCells.map((c) => c.getBoundingClientRect().left);
+            region.scrollLeft = region.scrollWidth;
+            const scrolled = region.scrollLeft;
+            const after = strategyCells.map((c) => c.getBoundingClientRect().left);
+            if (below) {
+              strategyCells.forEach((_, k) => {
+                const moved = before[k] - after[k];
+                if (Math.abs(moved - scrolled) > 1)
+                  problems.push(
+                    `Strategy ${k === 0 ? "header" : `cell ${k}`} is pinned: moved ${moved.toFixed(1)} px of ${scrolled} px scrolled`,
+                  );
+              });
+            }
+
+            // (b) Every Return %, CAGR and Sharpe cell is fully inside the region
+            //     and not covered at some scroll position.
+            const maxLeft = region.scrollWidth - region.clientWidth;
+            const stops = [0, 60, 150, 300, maxLeft];
+            const reached = new Map<string, boolean>();
+            for (const left of stops) {
+              region.scrollLeft = left;
+              const rr = region.getBoundingClientRect();
+              for (const m of metricCols) {
+                rows.forEach((row, ri) => {
+                  const key = `${m.label} row ${ri + 1}`;
+                  if (reached.get(key)) return;
+                  const c = cell(row, m.i);
+                  // Bring the cell's row to mid-viewport vertically so a
+                  // sticky bar or the viewport fold cannot hide it.
+                  const r0 = c.getBoundingClientRect();
+                  main.scrollTop += r0.top + r0.height / 2 - window.innerHeight / 2;
+                  const r = c.getBoundingClientRect();
+                  const inside = r.left >= rr.left - 1 && r.right <= rr.right + 1;
+                  if (!inside) return;
+                  const t = document.elementFromPoint(
+                    r.left + r.width / 2,
+                    r.top + r.height / 2,
+                  );
+                  if (t && (t === c || c.contains(t))) reached.set(key, true);
+                });
+              }
+            }
+            for (const m of metricCols) {
+              rows.forEach((_, ri) => {
+                const key = `${m.label} row ${ri + 1}`;
+                if (!reached.get(key))
+                  problems.push(
+                    `${key} is never fully visible and uncovered at scrollLeft ${stops.join("/")} (container ${containerPx} px)`,
+                  );
+              });
+            }
+            return { problems, containerPx };
+          }, AT_3XL_PX);
+          console.log(
+            `SC6-DISCOVERY ${vp.id} unpinned check container=${res.containerPx} problems=${res.problems.length}`,
+          );
+          if (res.problems.length) throw new Error(res.problems.join("; "));
+        });
+      } finally {
+        await cleanupStrategiesByNamePrefix(prefix);
+      }
+
+      for (const f of failures) {
+        console.log(`SC6-DISCOVERY ${vp.id} FAILED ${f}`);
+      }
+      expect(
+        failures,
+        `${vp.id}: SC-6 Discovery contracts that failed`,
+      ).toEqual([]);
+    });
+  }
+});
+
+// Phase 170.2 (PROBEFIXES) SC-6, second half — the Discovery ranking table at and
+// above its `@3xl` container step, where the rank, star and Strategy columns pin.
+//
+// WHY LOCAL viewports again: V1100 and V1280 are not in the shared `VIEWPORTS`.
+// V1100 is the narrowest pinned table (RESEARCH: a 774 px region), V1280 the
+// ordinary desktop.
+//
+// What the contract says (UI-SPEC P-1..P-5, X-1, D-06): the pinned Strategy header
+// is never painted over; no Return %, CAGR or Sharpe cell is covered by the pinned
+// stack at any scroll position; rank right edge = star left edge, star right edge =
+// Strategy left edge; each pinned body cell is as wide as its header cell and
+// nothing paints past it; a whole metric column fits right of the pinned edge; and
+// the desktop table is unchanged (P-5).
+//
+// P-5 compares IN THE PAGE, not against px literals. `playwright.config.ts` notes
+// font hinting shifts between macOS dev runners and Linux CI runners, and the
+// Strategy column is content-sized, so a px literal measured on a developer machine
+// could be red on CI for no defect. The spec instead reverts the pinned rank and
+// star cells' box CSS to the plan-07 values inline, re-measures, and fails when any
+// edge or width moves by more than 1 px. The tolerance is 1 px and is never widened.
+const PINNED_VIEWPORTS: { id: string; width: number; height: number }[] = [
+  { id: "V1100", width: 1100, height: 800 },
+  { id: "V1280", width: 1280, height: 800 },
+];
+
+// Hand-typed from the plan-07 class strings of the rank and star cells
+// (`w-14 px-2` and `w-11 px-2`, no `min-w-*`): width 3.5rem / 2.75rem, min-width 0,
+// horizontal padding 0.5rem. Applied inline to every pinned rank and star cell to
+// rebuild the plan-07 layout inside the same page, then removed.
+type PinnedBoxCss = { width: string; minWidth: string; paddingLeft: string; paddingRight: string };
+const PLAN_07_PINNED_BOX_CSS: { rank: PinnedBoxCss; star: PinnedBoxCss } = {
+  rank: { width: "3.5rem", minWidth: "0", paddingLeft: "0.5rem", paddingRight: "0.5rem" },
+  star: { width: "2.75rem", minWidth: "0", paddingLeft: "0.5rem", paddingRight: "0.5rem" },
+};
+
+test.describe("/discovery — SC6-DISCOVERY pinned", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+
+  for (const vp of PINNED_VIEWPORTS) {
+    test(`${vp.id}: the pinned stack covers no metric nor its own header, widths agree, the desktop table is unchanged`, async ({
+      page,
+    }) => {
+      test.setTimeout(180_000);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      const prefix = `${NAME_PREFIX} disc-pinned-${vp.id} `;
+      const failures: string[] = [];
+      const collect = async (label: string, fn: () => Promise<void>) => {
+        try {
+          await fn();
+        } catch (e) {
+          failures.push(`${label}: ${(e as Error).message.split("\n")[0]}`);
+        }
+      };
+
+      // Hermetic, same as the unpinned describe: published crypto-sma rows, deleted
+      // in the finally below.
+      try {
+        const names = [
+          "Alpha Momentum Trend Following Basket",
+          "Beta Neutral Statistical Arbitrage Fund",
+          "Gamma Volatility Carry Overlay Program",
+        ];
+        for (const [i, n] of names.entries()) {
+          await seedStrategyWithHistory({
+            days: 200,
+            name: `${prefix}${n}`,
+            categorySlug: "crypto-sma",
+            strategyTypes: i === 0 ? ["spot", "perpetuals"] : ["spot"],
+            supportedExchanges:
+              i === 0 ? ["binance", "okx", "bybit"] : ["binance", "okx"],
+          });
+        }
+        // Signed in, so the star column shows (the corner stack is rank + star + name).
+        const allocator = await seedTestAllocator();
+        await loginViaForm(page, allocator.email, allocator.password);
+        await page.goto("/discovery/crypto-sma");
+        const frame = page.locator("[data-strategy-table]");
+        await expect(frame, `${vp.id}: strategy table missing`).toBeVisible({
+          timeout: 15_000,
+        });
+        const region = page.getByRole("region", { name: /^Strategies:/ });
+        await expect(region, `${vp.id}: Strategies region missing`).toBeVisible();
+        const rowCount = await region.locator("tbody tr").count();
+        expect(
+          rowCount,
+          `${vp.id}: precondition: expected the 3 seeded crypto-sma rows, got ${rowCount}`,
+        ).toBeGreaterThanOrEqual(3);
+
+        // The table's column widths keep moving after first paint (measured: the
+        // rank cell read 38.5 px and the region scrolled 1338 px wide early on,
+        // then 31.0 px and 1184 px, on the same page; web fonts and the
+        // sparklines settle late). Wait until every header edge and the region's
+        // scrollWidth have held still for 500 ms, then two more frames so the
+        // table's ResizeObserver has applied its offsets, before reading anything.
+        await page.evaluate(async () => {
+          await document.fonts.ready;
+          const snap = () => {
+            const reg = document.querySelector<HTMLElement>('[role="region"][aria-label^="Strategies:"]');
+            if (!reg) return "<no region>";
+            const heads = Array.from(reg.querySelectorAll<HTMLElement>("thead th"));
+            return `${reg.scrollWidth}|${heads.map((h) => h.getBoundingClientRect().width.toFixed(2)).join(",")}`;
+          };
+          const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+          let last = snap();
+          let stableSince = performance.now();
+          const deadline = performance.now() + 10_000;
+          while (performance.now() < deadline) {
+            await frame();
+            const now = snap();
+            if (now !== last) {
+              last = now;
+              stableSince = performance.now();
+            } else if (performance.now() - stableSince >= 500) {
+              break;
+            }
+          }
+          await frame();
+          await frame();
+        });
+
+        // Precondition: pinning is active (the container is at or above @3xl) and
+        // the star column shows. Without both, every contract below is vacuous.
+        const pre = await region.evaluate((el, at3xl) => {
+          const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
+          return {
+            clientWidth: el.clientWidth,
+            scrollWidth: el.scrollWidth,
+            star: (heads[1]?.textContent ?? "").trim().startsWith("Watchlist"),
+            pinned: el.clientWidth >= at3xl,
+          };
+        }, AT_3XL_PX);
+        console.log(
+          `SC6-DISCOVERY pinned ${vp.id} region clientWidth=${pre.clientWidth} scrollWidth=${pre.scrollWidth} scrollable=${pre.scrollWidth - pre.clientWidth} star=${pre.star}`,
+        );
+        expect(pre.pinned, `${vp.id}: precondition: the table must be at or above @3xl (clientWidth ${pre.clientWidth})`).toBe(true);
+        expect(pre.star, `${vp.id}: precondition: the star column must show (signed in)`).toBe(true);
+
+        // 0. Absolute readings for the record (nothing from them is written into code).
+        const readings = await region.evaluate((el) => {
+          el.scrollLeft = 0;
+          const rr = el.getBoundingClientRect();
+          const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
+          return heads.map((h) => {
+            const r = h.getBoundingClientRect();
+            return `${(h.textContent ?? "").trim().slice(0, 10) || "?"}:${(r.left - rr.left).toFixed(1)}..${(r.right - rr.left).toFixed(1)}(w${r.width.toFixed(1)})`;
+          });
+        });
+        console.log(`SC6-DISCOVERY pinned ${vp.id} header edges (region-relative) ${readings.join(" | ")}`);
+
+        // 1. X-1: at maximum scroll the point just inside the Strategy th's right
+        //    edge hits the th itself or a descendant, never a later header cell.
+        await collect("X-1 header not painted over", async () => {
+          const res = await region.evaluate((el) => {
+            const main = document.getElementById("main-content");
+            const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
+            const th = heads.find((h) => (h.textContent ?? "").trim().startsWith("Strategy"));
+            if (!th) return { error: "Strategy header not found" };
+            el.scrollLeft = el.scrollWidth;
+            const r0 = th.getBoundingClientRect();
+            if (main) main.scrollTop += r0.top + r0.height / 2 - window.innerHeight / 2;
+            const r = th.getBoundingClientRect();
+            const hit = document.elementFromPoint(r.right - 2, r.top + r.height / 2);
+            const cls =
+              hit && typeof (hit as HTMLElement).className === "string"
+                ? String((hit as HTMLElement).className).split(" ").filter(Boolean).slice(0, 2).join(".")
+                : "";
+            return {
+              scrolled: el.scrollLeft,
+              ok: !!hit && (hit === th || th.contains(hit)),
+              hit: hit ? `${hit.tagName}.${cls} "${(hit.textContent ?? "").trim().slice(0, 20)}"` : "<null>",
+              thRight: r.right,
+            };
+          });
+          if ("error" in res) throw new Error(String(res.error));
+          console.log(`SC6-DISCOVERY pinned ${vp.id} X-1 scrolled=${res.scrolled} ok=${res.ok} hit=${res.hit}`);
+          if (!res.ok) {
+            throw new Error(
+              `at scrollLeft ${res.scrolled} the point 2 px inside the Strategy header's right edge (${res.thRight.toFixed(1)}) is covered by ${res.hit}`,
+            );
+          }
+        });
+
+        // 2. SC-6 second half: the pinned stack covers no Return %, CAGR or Sharpe
+        //    cell at scrollLeft 0/60/150/300/max.
+        await collect("pinned stack covers no metric", async () => {
+          const r = await assertPinnedStackDoesNotCover(
+            page,
+            region,
+            `${vp.id} pinned stack`,
+            { metrics: ["Return %", "CAGR", "Sharpe"] },
+          );
+          console.log(
+            `SC6-DISCOVERY pinned ${vp.id} occlusion probes=${r.probes} stops=${r.stops.join("/")}`,
+          );
+        });
+
+        // 3. P-1 (edge equalities), P-2 (per-row width and right edge), P-3 (no
+        //    descendant past the pinned edge), P-4 (room for a metric), at
+        //    scrollLeft 0 and at the maximum.
+        await collect("P-1..P-4 pinned geometry", async () => {
+          const res = await region.evaluate((el) => {
+            const problems: string[] = [];
+            const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
+            const idx = (t: string) =>
+              heads.findIndex((h) => (h.textContent ?? "").trim().startsWith(t));
+            const rankI = 0;
+            const starI = 1;
+            const nameI = idx("Strategy");
+            const metricI = ["Return %", "CAGR", "Sharpe"].map((l) => idx(l));
+            const rows = Array.from(el.querySelectorAll<HTMLElement>("tbody tr")).filter(
+              (r) => r.querySelector("td"),
+            );
+            const tds = (r: HTMLElement) => Array.from(r.querySelectorAll<HTMLElement>(":scope > td"));
+            const stops: [string, number][] = [["0", 0], ["max", el.scrollWidth]];
+            let room = 0;
+            let widest = 0;
+            for (const [tag, left] of stops) {
+              el.scrollLeft = left;
+              const rr = el.getBoundingClientRect();
+              const R = (n: Element) => n.getBoundingClientRect();
+              const rank = R(heads[rankI]);
+              const star = R(heads[starI]);
+              const name = R(heads[nameI]);
+              // P-1
+              if (Math.abs(rank.right - star.left) > 1)
+                problems.push(`P-1 @${tag}: rank right ${rank.right.toFixed(1)} != star left ${star.left.toFixed(1)} (delta ${(rank.right - star.left).toFixed(1)})`);
+              if (Math.abs(star.right - name.left) > 1)
+                problems.push(`P-1 @${tag}: star right ${star.right.toFixed(1)} != Strategy left ${name.left.toFixed(1)} (delta ${(star.right - name.left).toFixed(1)})`);
+              // P-1b: at rest the pinned stack ends where Return % begins, so the
+              // Strategy cell never covers the first pixels of the first metric.
+              if (tag === "0") {
+                const first = R(heads[metricI[0]]);
+                if (name.right > first.left + 1)
+                  problems.push(`P-1b @0: the Strategy header's right edge ${name.right.toFixed(1)} covers the first ${(name.right - first.left).toFixed(1)} px of Return % (left ${first.left.toFixed(1)})`);
+              }
+              // P-2 and P-3 on every row
+              rows.forEach((row, ri) => {
+                const cells = tds(row);
+                ([[rankI, "rank"], [starI, "star"], [nameI, "Strategy"]] as [number, string][]).forEach(([i, n]) => {
+                  const th = R(heads[i]);
+                  const td = R(cells[i]);
+                  if (Math.abs(td.width - th.width) > 1)
+                    problems.push(`P-2 @${tag}: ${n} row ${ri + 1} td width ${td.width.toFixed(1)} != th width ${th.width.toFixed(1)}`);
+                  if (Math.abs(td.right - th.right) > 1)
+                    problems.push(`P-2 @${tag}: ${n} row ${ri + 1} td right ${td.right.toFixed(1)} != th right ${th.right.toFixed(1)}`);
+                });
+                const nameTd = cells[nameI];
+                const nameRect = R(nameTd);
+                const walker = document.createTreeWalker(nameTd, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+                let node: Node | null = walker.nextNode();
+                while (node) {
+                  let right = -Infinity;
+                  let what = "";
+                  if (node.nodeType === Node.ELEMENT_NODE) {
+                    const b = (node as Element).getBoundingClientRect();
+                    if (b.width > 0 || b.height > 0) {
+                      right = b.right;
+                      what = (node as Element).tagName;
+                    }
+                  } else if ((node.textContent ?? "").trim()) {
+                    const range = document.createRange();
+                    range.selectNodeContents(node);
+                    right = range.getBoundingClientRect().right;
+                    what = "TEXT";
+                  }
+                  if (right > nameRect.right + 1)
+                    problems.push(`P-3 @${tag}: row ${ri + 1} ${what} paints to ${right.toFixed(1)}, past the pinned edge ${nameRect.right.toFixed(1)}`);
+                  node = walker.nextNode();
+                }
+              });
+              // P-4 (measured once, at scroll 0, where the stack and the metrics are laid out naturally)
+              if (tag === "0") {
+                const edge = name.right - (rr.left + el.clientLeft);
+                room = el.clientWidth - edge;
+                for (const i of metricI) {
+                  widest = Math.max(widest, R(heads[i]).width);
+                  rows.forEach((row) => { widest = Math.max(widest, R(tds(row)[i]).width); });
+                }
+              }
+            }
+            if (room < widest)
+              problems.push(`P-4: room right of the pinned edge ${room.toFixed(1)} < the widest metric cell ${widest.toFixed(1)}`);
+            el.scrollLeft = 0;
+            return { problems, room, widest };
+          });
+          console.log(`SC6-DISCOVERY pinned ${vp.id} P-4 room=${res.room.toFixed(1)} widest-metric=${res.widest.toFixed(1)} problems=${res.problems.length}`);
+          if (res.problems.length) throw new Error(res.problems.join("; "));
+        });
+
+        // 4. P-5 (D-06): the desktop table is unchanged. Measure every header cell,
+        //    rebuild the plan-07 box CSS of the pinned rank and star cells inline,
+        //    re-measure, remove the inline CSS. Non-pinned cells: left and right
+        //    edge; pinned cells: width. 1 px, never widened.
+        await collect("P-5 desktop unchanged", async () => {
+          const res = await region.evaluate((el, css) => {
+            el.scrollLeft = 0;
+            const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
+            const nameI = heads.findIndex((h) => (h.textContent ?? "").trim().startsWith("Strategy"));
+            const pinnedIdx = new Set([0, 1, nameI]);
+            const measure = () =>
+              heads.map((h) => {
+                const r = h.getBoundingClientRect();
+                return { left: r.left, right: r.right, width: r.width };
+              });
+            const before = measure();
+            const rows = Array.from(el.querySelectorAll<HTMLElement>("tbody tr")).filter(
+              (r) => r.querySelector("td"),
+            );
+            const targets: [HTMLElement, PinnedBoxCss][] = [
+              [heads[0], css.rank],
+              [heads[1], css.star],
+              ...rows.flatMap((row) => {
+                const c = Array.from(row.querySelectorAll<HTMLElement>(":scope > td"));
+                return [[c[0], css.rank], [c[1], css.star]] as [HTMLElement, PinnedBoxCss][];
+              }),
+            ];
+            const saved = targets.map(([t]) => t.getAttribute("style"));
+            for (const [t, c] of targets) {
+              t.style.width = c.width;
+              t.style.minWidth = c.minWidth;
+              t.style.paddingLeft = c.paddingLeft;
+              t.style.paddingRight = c.paddingRight;
+            }
+            void (el as HTMLElement).offsetWidth;
+            const after = measure();
+            targets.forEach(([t], k) => {
+              if (saved[k] === null) t.removeAttribute("style");
+              else t.setAttribute("style", saved[k] as string);
+            });
+            let maxDelta = 0;
+            const problems: string[] = [];
+            heads.forEach((h, i) => {
+              const label = (h.textContent ?? "").trim().slice(0, 12) || `#${i}`;
+              const deltas = pinnedIdx.has(i)
+                ? [["width", Math.abs(before[i].width - after[i].width)]]
+                : [
+                    ["left", Math.abs(before[i].left - after[i].left)],
+                    ["right", Math.abs(before[i].right - after[i].right)],
+                  ];
+              for (const [what, d] of deltas as [string, number][]) {
+                maxDelta = Math.max(maxDelta, d);
+                if (d > 1)
+                  problems.push(`${label} ${what} differs from the plan-07 box CSS by ${d.toFixed(2)} px`);
+              }
+            });
+            return { problems, maxDelta, headers: heads.length };
+          }, PLAN_07_PINNED_BOX_CSS);
+          console.log(
+            `SC6-DISCOVERY pinned ${vp.id} P-5 max delta=${res.maxDelta.toFixed(3)} px over ${res.headers} headers problems=${res.problems.length}`,
+          );
+          if (res.problems.length) throw new Error(res.problems.join("; "));
+        });
+      } finally {
+        await cleanupStrategiesByNamePrefix(prefix);
+      }
+
+      for (const f of failures) {
+        console.log(`SC6-DISCOVERY pinned ${vp.id} FAILED ${f}`);
+      }
+      expect(
+        failures,
+        `${vp.id}: SC-6 pinned-stack contracts that failed`,
+      ).toEqual([]);
     });
   }
 });

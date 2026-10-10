@@ -553,10 +553,12 @@ export function deriveHeadlineCoversFrom(raw: unknown): string | null {
  * service-role handle and deny-all RLS posture as {@link readMtmSeries}. A missing
  * row is a fact (`null`); a FAILED read throws {@link CompositeSeriesReadError}
  * (`read: "cash_settlement"`), so an outage is never rendered as "the span cannot
- * be named". Review round 2 (WR-R2-03): its one caller reaches it only through
+ * be named". Review round 2 (WR-R2-03): its first caller reaches it only through
  * {@link shouldReadSingleKeyCashSeries}, the MED-1 family's single-key gate.
+ * Phase 170.2 (SC-3): the /compare page is its second caller, reaching it for
+ * chain-broken published rows only; it is exported for that and for nothing else.
  */
-async function readHeadlineCoversFrom(admin: SupabaseClient, strategyId: string): Promise<string | null> {
+export async function readHeadlineCoversFrom(admin: SupabaseClient, strategyId: string): Promise<string | null> {
   const { data, error } = await admin
     .from("strategy_analytics_series")
     .select("payload")

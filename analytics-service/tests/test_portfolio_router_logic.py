@@ -566,7 +566,7 @@ async def _run_compute(ps: list[dict], sa: list[dict], closes: pd.Series | None)
     sb, tables = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa)
     closes_mock = AsyncMock(return_value=closes)
 
-    async def _no_benchmark(symbol):
+    async def _no_benchmark(symbol, **_kwargs):
         return None, True
 
     portfolio_mod._compute_semaphore = asyncio.Semaphore(3)

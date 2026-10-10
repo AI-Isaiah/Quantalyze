@@ -319,7 +319,7 @@ async function resolveFactsheetInputs(
       `id, name, codename, disclosure_tier, status, markets, strategy_types,
        description, subtypes, supported_exchanges, leverage_range, aum,
        max_capacity, avg_daily_turnover, start_date, benchmark, asset_class,
-       returns_denominator_config,
+       returns_denominator_config, source,
        strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis, computation_status,
          cumulative_return, volatility, max_drawdown, cagr, sharpe, sortino, calmar )`,
     )
@@ -653,7 +653,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v12", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v13", id,
  * computedAt], a `null` computedAt included. 167.2.1-REVIEW-R2 IN-01: the key
  * moves more often than "once per successful run". The status bridge
  * `sync_strategy_analytics_status` (latest definition: migration
@@ -849,6 +849,11 @@ async function buildFromResolved(
       description: strategy.description ?? null,
       subtypes: strategy.subtypes ?? [],
       supportedExchanges: strategy.supported_exchanges ?? [],
+      // Phase 170.2 (SC-4, D-09): the stored provenance marker. The masthead
+      // venue label keys on THIS (`strategies.source = 'csv'`), never on
+      // `ingestSource`, which is derived from `daily_returns` and so reads "api"
+      // for every PROD strategy.
+      source: strategy.source ?? null,
       leverageRange: strategy.leverage_range ?? null,
       aum: strategy.aum ?? null,
       maxCapacity: strategy.max_capacity ?? null,

@@ -1,6 +1,15 @@
 "use client";
 
-import { useState, useMemo, useCallback, useEffect, useId, useRef } from "react";
+import {
+  useState,
+  useMemo,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  type CSSProperties,
+} from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
 import { NowrapWords } from "@/components/ui/NowrapWords";
@@ -78,6 +87,59 @@ type PercentileMetric = keyof PercentileMap[string];
 // every column header so the table header reads as a label, not another data
 // row. Sortable headers layer the sort color on top of this.
 const HEADER_LABEL = "text-micro font-mono uppercase tracking-[0.14em]";
+
+// 2026-10-09 Phase 170.2 SC-6 (UI-SPEC P-1) / D-06: the pinned stack is rank, star,
+// then Strategy, and each pinned cell's `left` offset must equal the combined width
+// of the cells to its left, or the stack overlaps itself and the Strategy cell
+// covers the first pixels of Return %. The rank and star cells keep their natural,
+// unconstrained widths (a table cell never renders below its content, and the
+// rendered widths differ by viewport), so forcing 56 px / 44 px would move every
+// column to the right of them: the desktop table must not change (D-06). The
+// offsets therefore follow the widths. The two header cells are measured at
+// runtime (ResizeObserver, attached in a layout effect so the first paint is
+// already right) and written to two custom properties on the table frame:
+//   --pin-star-left     = rank width
+//   --pin-strategy-left = rank width + star width (star column shown) or rank width
+// The pinned cells read them behind `@3xl:`. The frame's inline values below are
+// the previous fixed offsets: the server render and the pre-measure paint are
+// exactly what shipped before, and an unmeasurable table (zero-width, e.g. not
+// laid out) keeps them. No measured px literal lives in this file.
+const PIN_RANK_FALLBACK = "3.5rem";
+const PIN_STRATEGY_FALLBACK_WITH_STAR = "6.25rem";
+
+function usePinnedStackOffsets(showStarColumn: boolean) {
+  const [frame, setFrame] = useState<HTMLDivElement | null>(null);
+  const rankThRef = useRef<HTMLTableCellElement | null>(null);
+  const starThRef = useRef<HTMLTableCellElement | null>(null);
+
+  useLayoutEffect(() => {
+    const rankTh = rankThRef.current;
+    if (!frame || !rankTh) return;
+    const starTh = showStarColumn ? starThRef.current : null;
+    const apply = () => {
+      const rank = rankTh.getBoundingClientRect().width;
+      const star = starTh ? starTh.getBoundingClientRect().width : 0;
+      // Zero width = not laid out (jsdom, display:none): keep the fallbacks.
+      if (rank <= 0 || (starTh && star <= 0)) return;
+      frame.style.setProperty("--pin-star-left", `${rank}px`);
+      frame.style.setProperty("--pin-strategy-left", `${rank + star}px`);
+    };
+    apply();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(apply);
+    observer.observe(rankTh);
+    if (starTh) observer.observe(starTh);
+    return () => observer.disconnect();
+  }, [frame, showStarColumn]);
+
+  const frameStyle = {
+    "--pin-star-left": PIN_RANK_FALLBACK,
+    "--pin-strategy-left": showStarColumn
+      ? PIN_STRATEGY_FALLBACK_WITH_STAR
+      : PIN_RANK_FALLBACK,
+  } as CSSProperties;
+  return { setFrame, rankThRef, starThRef, frameStyle };
+}
 
 // Phase 149 Delta 4 — the 147 chip BASE, copied VERBATIM from
 // CoverageStateChip.tsx:58 (tokens, not the component: importing an
@@ -420,6 +482,11 @@ export function StrategyTable({
   // resize, and whenever the rendered column set changes (density/paging).
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const [isOverflowing, setIsOverflowing] = useState(false);
+
+  // 2026-10-09 Phase 170.2 SC-6: pinned-stack offsets that follow the measured
+  // rank and star header widths (see usePinnedStackOffsets).
+  const { setFrame, rankThRef, starThRef, frameStyle } =
+    usePinnedStackOffsets(userId !== undefined);
 
   // Column header sort (uses a superset of SortKey)
   const [tableSortKey, setTableSortKey] = useState<TableSortKey>("sharpe");
@@ -820,6 +887,8 @@ export function StrategyTable({
           <div
             data-strategy-table=""
             data-density={density === "compact" ? "tight" : undefined}
+            ref={setFrame}
+            style={frameStyle}
             className="relative isolate border border-border bg-surface"
           >
             {/* Density control \u2014 table-SCOPED (drives the data-density on this
@@ -877,16 +946,18 @@ export function StrategyTable({
                         by it is meaningless. Its visible glyph is "#"; the
                         accessible name is the sr-only "Rank". */}
                     <th
+                      ref={rankThRef}
                       scope="col"
-                      className={`sticky left-0 top-0 z-30 w-14 bg-surface px-2 py-3 text-right ${HEADER_LABEL} text-text-muted`}
+                      className={`sticky @3xl:left-0 top-0 z-30 w-14 bg-surface px-2 py-3 text-right ${HEADER_LABEL} text-text-muted`}
                     >
                       <span className="sr-only">Rank</span>
                       <span aria-hidden="true">#</span>
                     </th>
                     {showStarColumn && (
                       <th
+                        ref={starThRef}
                         scope="col"
-                        className={`sticky left-14 top-0 z-30 w-11 bg-surface px-2 py-3 text-left ${HEADER_LABEL} text-text-muted`}
+                        className={`sticky @3xl:left-(--pin-star-left) top-0 z-30 w-11 bg-surface px-2 py-3 text-left ${HEADER_LABEL} text-text-muted`}
                       >
                         <span className="sr-only">Watchlist</span>
                       </th>
@@ -902,11 +973,21 @@ export function StrategyTable({
                       // It pins to the right of the rank column (and the star
                       // column when present) so the identity stays visible on
                       // horizontal scroll.
+                      // 2026-10-09 Phase 170.2 D-05: every pinned offset (and the
+                      // hairline) sits behind @3xl: so below the table's own
+                      // 48rem width nothing is pinned and Return %, CAGR and
+                      // Sharpe scroll into plain view instead of hiding behind
+                      // the name.
                       const isFirstCol = i === 0;
+                      // 2026-10-09 Phase 170.2 X-1 / P-1: the pinned Strategy header
+                      // is z-30, level with the rank and star headers. At z-20 it
+                      // tied with the scrolling header cells after it, which paint
+                      // over it (later in the DOM) as they scroll under it. Its
+                      // offset follows the measured rank (+ star) widths whether or
+                      // not the star column shows: --pin-strategy-left already
+                      // accounts for it. Every other header stays z-20.
                       const stickyLeft = isFirstCol
-                        ? showStarColumn
-                          ? "sticky left-[6.25rem] top-0 z-20 bg-surface border-r border-border"
-                          : "sticky left-14 top-0 z-20 bg-surface border-r border-border"
+                        ? "sticky @3xl:left-(--pin-strategy-left) top-0 z-30 bg-surface @3xl:border-r @3xl:border-border"
                         : "sticky top-0 z-20 bg-surface";
                       const sortedHere = tableSortKey === col.key;
                       return (
@@ -1070,11 +1151,11 @@ export function StrategyTable({
                             Phase 149 rule that a public row must never be
                             shouted at is honoured by saying LESS here, not by
                             adding a public error state. */}
-                        <td className="sticky left-0 z-10 w-14 bg-surface px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted">
+                        <td className="sticky @3xl:left-0 z-10 w-14 bg-surface px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted">
                           {hasComputedAnalytics ? `#${rank}` : "—"}
                         </td>
                         {showStarColumn && (
-                          <td className="sticky left-14 z-10 w-11 bg-surface px-2 py-3 align-middle">
+                          <td className="sticky @3xl:left-(--pin-star-left) z-10 w-11 bg-surface px-2 py-3 align-middle">
                             <StarToggle
                               strategyId={s.id}
                               name={s.name}
@@ -1088,7 +1169,7 @@ export function StrategyTable({
                             translucent hover:bg-page/50, so scrolled cells do not
                             bleed through (Pitfall 5). */}
                         <td
-                          className={`sticky z-10 bg-surface px-4 py-3 border-r border-border ${showStarColumn ? "left-[6.25rem]" : "left-14"}`}
+                          className="sticky z-10 bg-surface px-4 py-3 @3xl:border-r @3xl:border-border @3xl:left-(--pin-strategy-left)"
                         >
                           <div className="flex items-center gap-1.5">
                             <Link
@@ -1356,7 +1437,7 @@ export function StrategyTable({
                         className="bg-surface-subtle border-b border-border last:border-0"
                         style={{ height: "var(--row-h)" }}
                       >
-                        <td className="sticky left-0 z-10 w-14 bg-surface-subtle px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted">
+                        <td className="sticky @3xl:left-0 z-10 w-14 bg-surface-subtle px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted">
                           —
                         </td>
                         {/* The owner surface passes no `userId`, so this is
@@ -1365,10 +1446,10 @@ export function StrategyTable({
                             configuration, so a future watchlist-enabled owner
                             table cannot silently misalign these columns. */}
                         {showStarColumn && (
-                          <td className="sticky left-14 z-10 w-11 bg-surface-subtle px-2 py-3 align-middle" />
+                          <td className="sticky @3xl:left-(--pin-star-left) z-10 w-11 bg-surface-subtle px-2 py-3 align-middle" />
                         )}
                         <td
-                          className={`sticky z-10 bg-surface-subtle px-4 py-3 border-r border-border ${showStarColumn ? "left-[6.25rem]" : "left-14"}`}
+                          className="sticky z-10 bg-surface-subtle px-4 py-3 @3xl:border-r @3xl:border-border @3xl:left-(--pin-strategy-left)"
                         >
                           <div className="flex items-center gap-1.5">
                             {/* No link: no strategy exists, so there is no
@@ -1440,7 +1521,7 @@ export function StrategyTable({
                 aria-hidden="true"
                 className="pointer-events-none absolute inset-y-0 right-0 flex items-end justify-end rounded-r-sm bg-gradient-to-l from-surface to-transparent pb-3 pr-3 pl-12"
               >
-                <span className="text-caption text-text-muted">
+                <span className="whitespace-nowrap text-caption text-text-muted">
                   Scroll for more columns &rarr;
                 </span>
               </div>

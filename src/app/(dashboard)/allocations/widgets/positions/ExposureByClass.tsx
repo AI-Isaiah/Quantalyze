@@ -4,6 +4,7 @@ import type { ExposureSnapshot, HoldingClass } from "@/lib/portfolio-exposure";
 import { Card } from "@/components/ui/Card";
 import { formatCurrency } from "@/lib/utils";
 import { CHART_ACCENT } from "@/components/charts/chart-tokens";
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 
 /**
  * PI-01 — Exposure by asset class (99-UI-SPEC § Widget 1).
@@ -136,48 +137,56 @@ export function ExposureByClass({ snapshot }: { snapshot: ExposureSnapshot | nul
       {/* Drilldown table — per (venue, symbol, type, side) slice, valueUsd desc.
           Table idiom copied from CompositionDonut. Class identity is carried by
           label + swatch, never color alone (WCAG 1.4.1). Side/Net never colored
-          by direction. Scrolls only past 12 rows. */}
-      <div
-        data-testid="drilldown"
-        className={`mt-4 overflow-x-auto ${snapshot.slices.length > 12 ? "max-h-64 overflow-y-auto" : ""}`}
-      >
-        <table className="w-full text-small">
-          <thead>
-            <tr className="border-b border-border text-left text-caption text-text-muted uppercase tracking-wider">
-              <th className="py-2 pr-4">Venue</th>
-              <th className="py-2 pr-4">Symbol</th>
-              <th className="py-2 pr-4">Type</th>
-              <th className="py-2 pr-4">Side</th>
-              <th className="py-2 pr-4 text-right font-metric">Gross</th>
-              <th className="py-2 text-right font-metric">Net</th>
-            </tr>
-          </thead>
-          <tbody>
-            {[...snapshot.slices]
-              .sort((a, b) => b.valueUsd - a.valueUsd)
-              .map((s) => (
-                <tr
-                  key={`${s.holdingType}|${s.venue}|${s.symbol}|${s.side}`}
-                  className="border-b border-border/50 transition-colors hover:bg-page/50"
-                >
-                  <td className="py-2 pr-4">{s.venue}</td>
-                  <td className="py-2 pr-4">{s.symbol}</td>
-                  <td className="py-2 pr-4">
-                    <span className="flex items-center gap-1.5">
-                      <span
-                        className="inline-block h-2.5 w-2.5 rounded-sm"
-                        style={{ backgroundColor: CLASS_COLOR[s.holdingType] }}
-                      />
-                      {CLASS_LABEL_SHORT[s.holdingType]}
-                    </span>
-                  </td>
-                  <td className="py-2 pr-4 text-caption text-text-secondary">{s.side}</td>
-                  <td className="py-2 pr-4 text-right font-metric">{formatCurrency(s.valueUsd)}</td>
-                  <td className="py-2 text-right font-metric">{formatCurrency(s.signedValueUsd)}</td>
-                </tr>
-              ))}
-          </tbody>
-        </table>
+          by direction. Scrolls only past 12 rows.
+
+          Phase 170.2 (SC-1, UI-SPEC H-3): the scroller is a named, focusable
+          ResponsiveTable region, so a wide drilldown scrolls inside itself like
+          every other table on the Holdings tab. The wrapper keeps the testid and
+          carries `min-w-0` so a grid item can shrink below its table. The 12-row
+          vertical cap rides on the region (it is the element that scrolls). */}
+      <div data-testid="drilldown" className="mt-4 min-w-0">
+        <ResponsiveTable
+          label="Exposure by venue and symbol"
+          className={snapshot.slices.length > 12 ? "max-h-64 overflow-y-auto" : undefined}
+        >
+          <table className="w-full text-small">
+            <thead>
+              <tr className="border-b border-border text-left text-caption text-text-muted uppercase tracking-wider">
+                <th className="py-2 pr-4">Venue</th>
+                <th className="py-2 pr-4">Symbol</th>
+                <th className="py-2 pr-4">Type</th>
+                <th className="py-2 pr-4">Side</th>
+                <th className="py-2 pr-4 text-right font-metric">Gross</th>
+                <th className="py-2 text-right font-metric">Net</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...snapshot.slices]
+                .sort((a, b) => b.valueUsd - a.valueUsd)
+                .map((s) => (
+                  <tr
+                    key={`${s.holdingType}|${s.venue}|${s.symbol}|${s.side}`}
+                    className="border-b border-border/50 transition-colors hover:bg-page/50"
+                  >
+                    <td className="py-2 pr-4">{s.venue}</td>
+                    <td className="py-2 pr-4">{s.symbol}</td>
+                    <td className="py-2 pr-4">
+                      <span className="flex items-center gap-1.5">
+                        <span
+                          className="inline-block h-2.5 w-2.5 rounded-sm"
+                          style={{ backgroundColor: CLASS_COLOR[s.holdingType] }}
+                        />
+                        {CLASS_LABEL_SHORT[s.holdingType]}
+                      </span>
+                    </td>
+                    <td className="py-2 pr-4 text-caption text-text-secondary">{s.side}</td>
+                    <td className="py-2 pr-4 text-right font-metric">{formatCurrency(s.valueUsd)}</td>
+                    <td className="py-2 text-right font-metric">{formatCurrency(s.signedValueUsd)}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </ResponsiveTable>
       </div>
     </Card>
   );

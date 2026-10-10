@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import datetime
 import json
 import pathlib
 import sys
@@ -45,16 +46,26 @@ from tests.test_portfolio_compute_integration import (
 _ROUTER_PATH = pathlib.Path(portfolio_mod.__file__)
 
 
-def _run_with_btc(strat: pd.Series, btc: pd.Series, *, stale: bool = False) -> dict:
+def _run_with_btc(
+    strat: pd.Series,
+    btc: pd.Series,
+    *,
+    stale: bool = False,
+    benchmark_calls: list[dict] | None = None,
+) -> dict:
     """Drive the real router for a one-strategy portfolio against ``btc``.
 
     Returns the LAST ``portfolio_analytics`` update payload (the persisted row).
     Same driver as ``_c6_correlation``: a fresh ``Semaphore(3)`` scoped to the call,
-    the router module pinned in ``sys.modules`` and restored on exit.
+    the router module pinned in ``sys.modules`` and restored on exit. When
+    ``benchmark_calls`` is given, every ``get_benchmark_returns`` call's keywords are
+    appended to it.
     """
     sb, pa = _c6_supabase(strat)
 
-    async def _btc(symbol: str) -> tuple[pd.Series, bool]:
+    async def _btc(symbol: str, **kwargs: object) -> tuple[pd.Series, bool]:
+        if benchmark_calls is not None:
+            benchmark_calls.append(kwargs)
         return btc, stale
 
     prior = sys.modules.get("routers.portfolio")
@@ -105,6 +116,24 @@ def test_delegate_returns_the_same_pair_as_benchmark_pair() -> None:
     dup = pd.concat([r, r.iloc[:1]])
     with pytest.raises(ValueError):
         interval_matched_benchmark_pair(dup, b)
+
+
+def test_portfolio_benchmark_read_starts_at_the_first_portfolio_date() -> None:
+    """Phase 170.2 (SC-5): the portfolio's BTC comparison reads the benchmark from the
+    FIRST date of the portfolio series it pairs, not a fixed trailing window, so a
+    portfolio older than the window is compared over its whole history. The oracle
+    is the literal first date the fixture strategy was built on.
+
+    Neuter (drop ``since=`` at the router) -> no ``since`` keyword and this reddens."""
+    wd = pd.bdate_range("2023-02-06", periods=40)  # long before any trailing window
+    rng = np.random.default_rng(5)
+    strat = pd.Series(rng.normal(0.001, 0.01, len(wd)), index=wd)
+    cal = pd.date_range(wd[0] - pd.Timedelta(days=7), wd[-1] + pd.Timedelta(days=3), freq="D")
+    btc = pd.Series(rng.normal(0.0, 0.02, len(cal)), index=cal)
+    calls: list[dict] = []
+    _run_with_btc(strat, btc, benchmark_calls=calls)
+    assert len(calls) == 1
+    assert calls[0].get("since") == datetime.date(2023, 2, 6)
 
 
 def test_btc_twr_includes_weekend_moves_for_a_weekday_only_portfolio() -> None:
@@ -236,7 +265,7 @@ def _seven_day_btc(first, last, *, seed: int) -> pd.Series:
 
 
 async def _compute(sb, *, benchmark, stale: bool) -> dict:
-    async def _fake_benchmark(symbol):
+    async def _fake_benchmark(symbol, **_kwargs):
         return benchmark, stale
 
     with patch.object(portfolio_mod, "get_supabase", return_value=sb), \

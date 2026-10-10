@@ -346,3 +346,137 @@ export async function assertChildrenInside(
       : `${label}: a child rect lies outside the container`,
   ).toBeNull();
 }
+
+/**
+ * Phase 170.2 SC-6, second half (UI-SPEC P-1..P-4, X-1): where the Discovery
+ * table pins its name column, the pinned stack never covers a metric.
+ *
+ * For each scrollLeft in [0, 60, 150, 300, max] and each body cell of each
+ * metric column, the visible interval is `[max(cell.left, stackRight,
+ * region.left), min(cell.right, region.right)]`, with `stackRight` the pinned
+ * name header's right edge. An interval narrower than 4 px is scrolled out or
+ * fully under the stack and is not probed; any other must hit the cell (or a
+ * descendant) at its centre, or the covering element is named with the column,
+ * the row and the scroll position.
+ *
+ * Non-vacuity (W-02): a region with no row, a metric header that is missing,
+ * or a (column, row) pair that never had a probeable interval at ANY scroll
+ * position throws, so an empty or fully-hidden table cannot pass as "nothing
+ * was covered". Every problem is collected and thrown together, so one RED run
+ * names every contract that fails.
+ */
+export async function assertPinnedStackDoesNotCover(
+  page: Page,
+  region: Locator,
+  label: string,
+  opts: { metrics: string[]; pinnedLabel?: string },
+): Promise<{ probes: number; stops: number[] }> {
+  const count = await region.count();
+  if (count === 0) {
+    throw new Error(
+      `${label}: locator resolved to 0 elements — an empty page must not pass (W-02)`,
+    );
+  }
+  const result = await region.first().evaluate(
+    (el, args) => {
+      const region = el as HTMLElement;
+      const main = document.getElementById("main-content");
+      const heads = Array.from(region.querySelectorAll<HTMLElement>("thead th"));
+      const idx = (text: string) =>
+        heads.findIndex((h) => (h.textContent ?? "").trim().startsWith(text));
+      const pinnedIdx = idx(args.pinnedLabel);
+      const metricCols = args.metrics.map((m) => ({ label: m, i: idx(m) }));
+      const rows = Array.from(
+        region.querySelectorAll<HTMLElement>("tbody tr"),
+      ).filter((r) => r.querySelector("td"));
+      const problems: string[] = [];
+      if (pinnedIdx < 0 || metricCols.some((m) => m.i < 0)) {
+        return {
+          problems: [
+            `header lookup failed pinned=${pinnedIdx} metrics=${JSON.stringify(metricCols)}`,
+          ],
+          probes: 0,
+          stops: [] as number[],
+        };
+      }
+      if (rows.length === 0) {
+        return {
+          problems: ["no body row to probe (W-02)"],
+          probes: 0,
+          stops: [] as number[],
+        };
+      }
+      const cell = (r: HTMLElement, i: number) =>
+        r.querySelectorAll<HTMLElement>(":scope > td")[i];
+      const name = (t: Element | null) => {
+        if (!t) return "<null>";
+        const cls =
+          typeof (t as HTMLElement).className === "string"
+            ? String((t as HTMLElement).className)
+                .split(" ")
+                .filter(Boolean)
+                .slice(0, 2)
+                .join(".")
+            : "";
+        return `${t.tagName}${cls ? `.${cls}` : ""} "${(t.textContent ?? "").trim().slice(0, 24)}"`;
+      };
+      const maxLeft = region.scrollWidth - region.clientWidth;
+      const stops = Array.from(new Set([0, 60, 150, 300, maxLeft]))
+        .filter((s) => s >= 0 && s <= maxLeft)
+        .sort((a, b) => a - b);
+      const probed = new Set<string>();
+      let probes = 0;
+      for (const left of stops) {
+        region.scrollLeft = left;
+        const rr = region.getBoundingClientRect();
+        const regionLeft = rr.left + region.clientLeft;
+        const regionRight = regionLeft + region.clientWidth;
+        const stackRight = heads[pinnedIdx].getBoundingClientRect().right;
+        for (const m of metricCols) {
+          rows.forEach((row, ri) => {
+            const c = cell(row, m.i);
+            // Bring the row to mid-viewport vertically so a sticky bar or the
+            // fold cannot hide it. Only main's scrollTop moves: scrolling the
+            // cell into view would change the region's scrollLeft.
+            const r0 = c.getBoundingClientRect();
+            if (main) {
+              main.scrollTop += r0.top + r0.height / 2 - window.innerHeight / 2;
+            }
+            const b = c.getBoundingClientRect();
+            const l = Math.max(b.left, stackRight, regionLeft);
+            const r = Math.min(b.right, regionRight);
+            if (r - l < 4) return;
+            probes += 1;
+            probed.add(`${m.label}|${ri}`);
+            const hit = document.elementFromPoint(
+              (l + r) / 2,
+              b.top + b.height / 2,
+            );
+            if (!(hit && (hit === c || c.contains(hit)))) {
+              problems.push(
+                `${m.label} row ${ri + 1} is covered at scrollLeft ${left} by ${name(hit)} (visible ${l.toFixed(1)}..${r.toFixed(1)}, stack right ${stackRight.toFixed(1)})`,
+              );
+            }
+          });
+        }
+      }
+      for (const m of metricCols) {
+        rows.forEach((_, ri) => {
+          if (!probed.has(`${m.label}|${ri}`)) {
+            problems.push(
+              `${m.label} row ${ri + 1} never had a visible interval of 4 px or more at scrollLeft ${stops.join("/")} — the probe did not run (W-02)`,
+            );
+          }
+        });
+      }
+      region.scrollLeft = 0;
+      return { problems, probes, stops };
+    },
+    { metrics: opts.metrics, pinnedLabel: opts.pinnedLabel ?? "Strategy" },
+  );
+  void page;
+  if (result.problems.length) {
+    throw new Error(`${label}: ${result.problems.join("; ")}`);
+  }
+  return { probes: result.probes, stops: result.stops };
+}

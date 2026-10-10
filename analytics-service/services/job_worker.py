@@ -6819,7 +6819,30 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 
         _mtm_benchmark_rets: pd.Series | None = None
         try:
-            _mtm_benchmark_rets, _ = await get_benchmark_returns("BTC")
+            # Phase 170.2 (SC-5): read the benchmark from the first date of the
+            # series this call pairs it with, not a fixed trailing window.
+            _bench_since = (
+                mtm_returns.index.min().date()
+                if not mtm_returns.empty and isinstance(mtm_returns.index, pd.DatetimeIndex)
+                else None
+            )
+            _mtm_benchmark_rets, _mtm_bench_stale = await get_benchmark_returns(
+                "BTC", since=_bench_since
+            )
+            # Review LW-05 / SFH-01: a stale result can be a SHORTER run than the
+            # series it is paired with (a cold cache with the primary source down),
+            # so alpha / beta / Treynor / R-squared would be measured over a
+            # different window than the cash basis with no flag. Same rule as the
+            # CSV run (analytics_runner, `benchmark_stale or benchmark_rets is
+            # None` -> benchmark unavailable): a stale benchmark is an unavailable
+            # one, so the family persists null, like the failed-fetch arm below.
+            if _mtm_bench_stale:
+                logger.warning(
+                    "derive_broker_dailies: MTM benchmark is stale for strategy %s "
+                    "(computing mark_to_market without the benchmark family)",
+                    strategy_id,
+                )
+                _mtm_benchmark_rets = None
         except Exception as _bench_exc:  # noqa: BLE001
             logger.warning(
                 "derive_broker_dailies: MTM benchmark fetch failed for strategy "
@@ -6901,7 +6924,26 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 
         _smoothed_benchmark_rets: pd.Series | None = None
         try:
-            _smoothed_benchmark_rets, _ = await get_benchmark_returns("BTC")
+            # Phase 170.2 (SC-5): read the benchmark from the first date of the
+            # series this call pairs it with, not a fixed trailing window.
+            _bench_since = (
+                smoothed_returns.index.min().date()
+                if not smoothed_returns.empty and isinstance(smoothed_returns.index, pd.DatetimeIndex)
+                else None
+            )
+            _smoothed_benchmark_rets, _smoothed_bench_stale = await get_benchmark_returns(
+                "BTC", since=_bench_since
+            )
+            # Review LW-05 / SFH-01: a stale benchmark is an unavailable one (see
+            # the MTM block above): the benchmark family persists null.
+            if _smoothed_bench_stale:
+                logger.warning(
+                    "derive_broker_dailies: smoothed_mtm benchmark is stale for "
+                    "strategy %s (computing smoothed_mtm without the benchmark "
+                    "family)",
+                    strategy_id,
+                )
+                _smoothed_benchmark_rets = None
         except Exception as _bench_exc:  # noqa: BLE001
             logger.warning(
                 "derive_broker_dailies: smoothed_mtm benchmark fetch failed for "
@@ -8835,7 +8877,16 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
     benchmark_rets, benchmark_stale = None, True
     try:
-        benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
+        # Phase 170.2 (SC-5): read the benchmark from the first date of the
+        # series this call pairs it with, not a fixed trailing window.
+        _bench_since = (
+            stitched_cash.index.min().date()
+            if not stitched_cash.empty and isinstance(stitched_cash.index, pd.DatetimeIndex)
+            else None
+        )
+        benchmark_rets, benchmark_stale = await get_benchmark_returns(
+            "BTC", since=_bench_since
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "stitch_composite: benchmark fetch failed for %s: %s",

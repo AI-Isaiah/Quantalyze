@@ -58,6 +58,32 @@ const PUBLISHED_STRATEGY = {
   status: "published",
   strategy_analytics: null,
 };
+// Phase 170.2 (SC-3): the strategies read answers whatever this holds, so a
+// chain-broken row can be served; reset to the clean row before each case.
+let strategyRows: unknown[] = [PUBLISHED_STRATEGY];
+
+// Phase 170.2 (SC-3): the page reads a chain-broken row's covered-from date
+// through the admin client (deny-all RLS table). Answers a broker_nan cash
+// series whose last gap ends 2026-08-21.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => {
+    const builder: Record<string, unknown> = {
+      select: () => builder,
+      eq: () => builder,
+      maybeSingle: async () => ({
+        data: {
+          payload: {
+            conventions: { densify: "broker_nan" },
+            gap_spans: [{ start: "2026-08-10", end: "2026-08-21" }],
+            rows: [{ date: "2026-08-22" }, { date: "2026-08-23" }],
+          },
+        },
+        error: null,
+      }),
+    };
+    return { from: () => builder };
+  },
+}));
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
@@ -83,7 +109,7 @@ vi.mock("@/lib/supabase/server", () => ({
         return {
           select: () => ({
             in: () => ({
-              eq: () => Promise.resolve({ data: [PUBLISHED_STRATEGY], error: null }),
+              eq: () => Promise.resolve({ data: strategyRows, error: null }),
             }),
           }),
         };
@@ -116,6 +142,7 @@ async function getComparePage() {
 describe("ComparePage — UAT-03 strategy-only charts regression", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    strategyRows = [PUBLISHED_STRATEGY];
   });
 
   it("passes strategy-only items to CompareEquityOverlay when mixed ids present", async () => {
@@ -172,5 +199,32 @@ describe("ComparePage — UAT-03 strategy-only charts regression", () => {
     expect(tableItems).toHaveLength(2);
     expect(tableItems.some((it) => it.kind === "holding")).toBe(true);
     expect(tableItems.some((it) => it.kind === "strategy")).toBe(true);
+  });
+
+  it("hands the overlay (and only the overlay) the covered-from date of a chain-broken row (SC-3, D-07)", async () => {
+    strategyRows = [
+      { ...PUBLISHED_STRATEGY, strategy_analytics: { twr_chain_broken: "true" } },
+    ];
+    const ComparePage = await getComparePage();
+    const Page = await ComparePage({
+      searchParams: Promise.resolve({
+        ids: "holding:okx:BTC:spot,22222222-3333-4444-8555-666666666666",
+      }),
+    });
+    render(Page as React.ReactElement);
+
+    const callItems = (c: unknown) =>
+      (c as unknown as { mock: { calls: Array<[{ items: Array<Record<string, unknown>> }]> } })
+        .mock.calls[0][0].items;
+    const overlay = callItems(CompareEquityOverlay);
+    expect(overlay).toHaveLength(1);
+    expect(overlay[0].headlineCoversFrom).toBe("2026-08-22");
+    expect(overlay[0].headlineCoversFromStatus).toBe("dated");
+    for (const other of [CompareCorrelationMatrix, CompareTable]) {
+      for (const it of callItems(other)) {
+        expect(it).not.toHaveProperty("headlineCoversFrom");
+        expect(it).not.toHaveProperty("headlineCoversFromStatus");
+      }
+    }
   });
 });

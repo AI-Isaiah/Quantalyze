@@ -1015,6 +1015,13 @@ function FactsheetHeader({
   // Phase 164.6.6.2 (D-08, D-09): the ONE field every unit surface reads.
   const returnsUnit = payload.returnsUnit ?? null;
   const exchanges = payload.supportedExchanges.length > 0 ? payload.supportedExchanges.join(", ") : null;
+  // Phase 170.2 (SC-4, D-09, UI-SPEC M-1..M-3): a CSV-ingested strategy that
+  // declares a venue states it once, in the tier row. The marker is the STORED
+  // `strategies.source` (payload.source), NOT `ingestSource`, which is derived
+  // from `daily_returns` (NULL on every PROD strategy, so "api") and forced to
+  // "csv" for composites. The venue is verbatim and in stored order, exactly as
+  // the chip line prints exchanges.
+  const venueLabel = payload.source === "csv" ? exchanges : null;
   const leverage = payload.leverageRange;
   // Lead chip line — types / markets / subtypes / exchanges / leverage. Drop
   // empty members so the line stays tight when the registry row is sparse.
@@ -1022,7 +1029,9 @@ function FactsheetHeader({
   if (payload.strategyTypes.length > 0) chips.push(payload.strategyTypes.join(", "));
   if (payload.subtypes.length > 0) chips.push(payload.subtypes.map(s => s.replace(/_/g, " ")).join(", "));
   if (payload.markets.length > 0) chips.push(payload.markets.join(" · "));
-  if (exchanges) chips.push(exchanges);
+  // M-5: when the venue label renders, the venue is stated there and leaves the
+  // chip line, so it is stated once.
+  if (exchanges && !venueLabel) chips.push(exchanges);
   if (leverage) chips.push(`leverage ${leverage}`);
 
   // Only api_verified strategies have AUM/capacity/leverage/exchanges
@@ -1098,7 +1107,17 @@ function FactsheetHeader({
             {/* READ-ONLY here (D-09: the mark is SET from /my-strategies).
                 Absent prop or an unmarked row ⇒ zero nodes. */}
             <OwnershipTag mark={ownershipMark} />
-            <span className="text-caption text-text-secondary">{chips.length > 0 ? chips.join(" · ") : "—"}</span>
+            {venueLabel && (
+              <span data-testid="masthead-venue-label" className="text-caption text-text-secondary">
+                {`${venueLabel} · self-reported`}
+              </span>
+            )}
+            {/* M-5: with the venue label present, an emptied chip line is omitted
+                rather than printing "—". Every masthead without the label keeps
+                today's "—" fallback byte-for-byte. */}
+            {(chips.length > 0 || !venueLabel) && (
+              <span className="text-caption text-text-secondary">{chips.length > 0 ? chips.join(" · ") : "—"}</span>
+            )}
             {isSelfReported && chips.length > 0 && (
               <span
                 className="text-micro font-mono uppercase tracking-[0.14em] px-1.5 py-0.5 rounded-sm"
@@ -1106,7 +1125,11 @@ function FactsheetHeader({
                   color: "var(--color-warning, #B45309)",
                   background: "color-mix(in srgb, var(--color-warning, #B45309) 12%, transparent)",
                 }}
-                title="These fields (exchanges, leverage, markets) are author-declared and have not been verified by Quantalyze"
+                title={
+                  venueLabel
+                    ? "These fields (leverage, markets) are author-declared and have not been verified by Quantalyze"
+                    : "These fields (exchanges, leverage, markets) are author-declared and have not been verified by Quantalyze"
+                }
               >
                 self-reported
               </span>

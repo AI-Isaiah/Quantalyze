@@ -104,6 +104,7 @@ class _Query:
         self._desc = False
         self._limit: int | None = None
         self._upsert: list[dict[str, Any]] | None = None
+        self._upsert_kwargs: dict[str, Any] = {}
 
     def select(self, _cols: str) -> "_Query":
         return self
@@ -124,17 +125,38 @@ class _Query:
         self._limit = n
         return self
 
-    def upsert(self, payload: list[dict[str, Any]]) -> "_Query":
+    def upsert(
+        self,
+        payload: list[dict[str, Any]],
+        *,
+        on_conflict: str = "",
+        ignore_duplicates: bool = False,
+    ) -> "_Query":
+        # Models the two PostgREST upsert modes: the default is
+        # ``ON CONFLICT DO UPDATE`` (an existing row IS overwritten);
+        # ``ignore_duplicates=True`` is ``ON CONFLICT DO NOTHING``.
         self._upsert = payload
+        self._upsert_kwargs = {
+            "on_conflict": on_conflict,
+            "ignore_duplicates": ignore_duplicates,
+        }
         return self
 
     def execute(self) -> _Resp:
         if self._upsert is not None:
             if self._t.upsert_error is not None:
                 raise self._t.upsert_error
+            self._t.upserts.append(list(self._upsert))
+            self._t.upsert_kwargs.append(dict(self._upsert_kwargs))
             for r in self._upsert:
-                self._t.store[(r["symbol"], r["date"])] = float(r["close_price"])
+                key = (r["symbol"], r["date"])
+                if self._upsert_kwargs["ignore_duplicates"] and key in self._t.store:
+                    continue
+                self._t.store[key] = float(r["close_price"])
             return _Resp(list(self._upsert))
+        if self._t.read_error is not None:
+            raise self._t.read_error
+        self._t.requests.append((self._limit, list(self._filters)))
         out = [
             {"symbol": s, "date": d, "close_price": c}
             for (s, d), c in self._t.store.items()
@@ -147,15 +169,31 @@ class _Query:
         out.sort(key=lambda r: r["date"], reverse=self._desc)
         if self._limit is not None:
             out = out[: self._limit]
+        # Phase 170.2 (SC-5): a PostgREST server caps a response at its
+        # `max_rows` setting whatever `limit` asked for, and answers 200 with
+        # the partial body. Applied AFTER the limit slice, like the server.
+        if self._t.max_rows is not None:
+            out = out[: self._t.max_rows]
         return _Resp(out)
 
 
 class _FakeTable:
     """An in-memory ``benchmark_prices`` behind a Supabase-client-shaped object."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_rows: int | None = None) -> None:
         self.store: dict[tuple[str, str], float] = {}
+        # Server-side response cap (PostgREST `max_rows`); None = uncapped.
+        self.max_rows = max_rows
+        # Every select request issued, as (limit, [(op, col, val), ...]).
+        self.requests: list[tuple[int | None, list[tuple[str, str, Any]]]] = []
         self.upsert_error: BaseException | None = None
+        # Every payload that reached a successful upsert, in call order.
+        self.upserts: list[list[dict[str, Any]]] = []
+        # The ``on_conflict`` / ``ignore_duplicates`` each upsert was issued with.
+        self.upsert_kwargs: list[dict[str, Any]] = []
+        # When set, every select ``execute`` raises it (a failed cache read);
+        # an upsert is unaffected.
+        self.read_error: BaseException | None = None
 
     def seed_through(self, last: date, n: int = 5) -> None:
         for i in range(n):
@@ -359,13 +397,17 @@ def test_failed_upsert_through_the_real_fetcher_answers_500(client, monkeypatch,
 
 def test_successful_upsert_through_the_real_fetcher_answers_200(client, monkeypatch, table):
     """The control for the case above: same fetch, the upsert lands, so the
-    table reaches yesterday and ``through`` is read back from it."""
+    table reaches yesterday and ``through`` is read back from it.
+
+    The fetch spans the whole 1000-day window (``n=1001``): since Phase 170.2 a
+    window the merged series cannot span is served flagged stale, so a short
+    fetch would answer 500 here for a reason this test is not about."""
     table.store.clear()
     table.seed_through(_yesterday() - timedelta(days=3))
     monkeypatch.setattr(
         benchmark_mod,
         "fetch_btc_daily_prices",
-        AsyncMock(return_value=_prices_ending(_yesterday())),
+        AsyncMock(return_value=_prices_ending(_yesterday(), n=1001)),
     )
 
     resp = client.post(ROUTE)
@@ -532,10 +574,11 @@ async def test_other_callers_keep_the_lenient_write(monkeypatch, table):
     """``require_persist`` defaults to False: an analytics compute still gets
     the fresh series when the cache write fails (its pre-phase behaviour)."""
     table.upsert_error = RuntimeError("write failed")
+    # Spans the whole window: a short fetch is served stale since Phase 170.2.
     monkeypatch.setattr(
         benchmark_mod,
         "fetch_btc_daily_prices",
-        AsyncMock(return_value=_prices_ending(_yesterday())),
+        AsyncMock(return_value=_prices_ending(_yesterday(), n=1001)),
     )
 
     series, is_stale = await benchmark_mod.get_benchmark_returns("BTC")
@@ -616,3 +659,250 @@ async def test_missing_service_key_is_refused_by_the_middleware(monkeypatch):
 
     assert resp.status_code == 401, resp.text
     mock.assert_not_awaited()
+
+
+# --- Phase 170.2 plan 01 (SC-2): Binance down, CoinGecko free tier ----------
+#
+# CoinGecko's free tier refuses any ``days`` above 365 with an HTTP 401 (measured
+# 2026-10-09: 365 -> 200, 366 -> 401, error_code 10012). The refresh asked for
+# ``days + 1`` = 1001, so ANY Binance failure lost that day's close. These cases
+# drive the real route -> ``get_benchmark_returns`` -> fetch -> merge -> table
+# chain with only the two upstream HTTP calls stubbed.
+
+_DAY_MS = 86_400_000
+
+
+def _ms(d: date) -> int:
+    """UTC midnight of ``d`` in epoch milliseconds."""
+    return int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _coingecko_price(close_day: date) -> float:
+    """A deterministic price for the close of ``close_day``: distinct per day
+    and never equal to the seeded cache closes (50_000.x), so a wrongly
+    overwritten or wrongly dated row is visible."""
+    return 70_000.0 + (close_day - date(2019, 1, 1)).days
+
+
+class _Resp401:
+    """The status line the free tier answers an over-window request with."""
+
+    status_code = 401
+
+    def raise_for_status(self) -> None:
+        raise httpx.HTTPStatusError(
+            "401 Unauthorized",
+            request=httpx.Request("GET", "https://api.coingecko.com/"),
+            response=httpx.Response(401),
+        )
+
+    def json(self) -> Any:  # pragma: no cover - raise_for_status fires first
+        raise AssertionError("a 401 body must never be parsed")
+
+
+class _Resp200:
+    def __init__(self, data: Any) -> None:
+        self._data = data
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> Any:
+        return self._data
+
+
+class _BinanceDownCoingeckoFreeTier:
+    """Binance raises. CoinGecko answers like its free tier: 401 above 365
+    days, else one midnight-aligned stamp per day from ``days - 1`` days ago
+    through today 00:00 UTC, plus the intraday "now" point.
+
+    ``today`` is read from the pinned module clock, never ``datetime.now``.
+    ``up`` False makes CoinGecko raise too (a total outage)."""
+
+    requested_days: list[int] = []
+    up: bool = True
+
+    def __init__(self, *_a: Any, **_k: Any) -> None:
+        pass
+
+    async def __aenter__(self) -> "_BinanceDownCoingeckoFreeTier":
+        return self
+
+    async def __aexit__(self, *_a: Any) -> None:
+        return None
+
+    async def get(self, url: str, params: Any = None) -> Any:
+        if "binance" in url:
+            raise RuntimeError("geo-blocked")
+        if not type(self).up:
+            raise httpx.ConnectError("coingecko down")
+        days = int(params["days"])
+        type(self).requested_days.append(days)
+        if days > 365:
+            return _Resp401()
+        today = benchmark_mod._utc_now().date()
+        points: list[list[float]] = [
+            [_ms(today - timedelta(days=k)), _coingecko_price(today - timedelta(days=k + 1))]
+            for k in range(days - 1, -1, -1)
+        ]
+        # The intraday "now" point: not a whole UTC day, not a close.
+        points.append(
+            [int(benchmark_mod._utc_now().timestamp() * 1000), 99_999.0]
+        )
+        return _Resp200({"prices": points})
+
+
+@pytest.fixture
+def coingecko_only(monkeypatch: pytest.MonkeyPatch) -> type[_BinanceDownCoingeckoFreeTier]:
+    stub = _BinanceDownCoingeckoFreeTier
+    stub.requested_days = []
+    stub.up = True
+    monkeypatch.setattr(benchmark_mod.httpx, "AsyncClient", stub)
+    return stub
+
+
+def test_binance_down_coingecko_free_tier_keeps_the_cache_current(
+    client, table, coingecko_only
+):
+    """SC-2 tracer. Binance raises, CoinGecko refuses ``days`` above 365. The
+    cache holds the older part of the 1000-day window, three days short of
+    yesterday. The refresh must answer 200 through yesterday with every
+    CoinGecko request inside the free window. On the old code it requested
+    ``days=1001``, got the 401, and answered 500 "no BTC series"."""
+    table.store.clear()
+    table.seed_through(_yesterday() - timedelta(days=3), n=1000)
+
+    resp = client.post(ROUTE)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["through"] == _yesterday().isoformat()
+    assert resp.json()["stale"] is False
+    assert coingecko_only.requested_days, "the CoinGecko fallback was never reached"
+    assert all(d <= 365 for d in coingecko_only.requested_days), coingecko_only.requested_days
+    assert table.newest() == _yesterday().isoformat()
+    # The stamp-shift rule at route level: yesterday's stored close is the
+    # fallback point stamped today 00:00 (the close of yesterday), never the
+    # point stamped yesterday 00:00 (the close of the day before).
+    assert table.store[("BTC", _yesterday().isoformat())] == _coingecko_price(_yesterday())
+
+
+def _stored_dates(table: _FakeTable) -> list[date]:
+    return sorted(date.fromisoformat(d) for (s, d) in table.store if s == "BTC")
+
+
+def test_cache_closes_win_over_the_fallback(coingecko_only, table):
+    """SC-2 data-integrity rule: a close already in ``benchmark_prices`` is the
+    source of record (Binance's) and a fallback value never replaces it.
+
+    The cache holds 1000 days through yesterday minus 3 at closes near 50_000;
+    the fallback quotes every date near 70_000. Three things must hold: the
+    cached rows are untouched, ONLY the three dates absent from the cache are in
+    the upsert payload, and the SERVED series is built from the cached closes on
+    the overlap (its returns equal the cached ratios, an invariant that does
+    not depend on how the merge is coded)."""
+    table.store.clear()
+    last_cached = _yesterday() - timedelta(days=3)
+    table.seed_through(last_cached, n=1000)
+    cached_before = dict(table.store)
+
+    returns, stale = asyncio.run(
+        benchmark_mod.get_benchmark_returns("BTC", require_persist=True)
+    )
+
+    assert stale is False
+    assert returns is not None
+    for key, close in cached_before.items():
+        assert table.store[key] == close, f"cached close for {key[1]} was overwritten"
+    assert len(table.upserts) == 1
+    written = {r["date"] for r in table.upserts[0]}
+    assert written == {
+        (last_cached + timedelta(days=k)).isoformat() for k in (1, 2, 3)
+    }
+    # Independent invariant: on a day inside the cached stretch the served
+    # return is the cached ratio close[d] / close[d-1] - 1, not the fallback's.
+    probe = last_cached - timedelta(days=10)
+    expected = (
+        cached_before[("BTC", probe.isoformat())]
+        / cached_before[("BTC", (probe - timedelta(days=1)).isoformat())]
+        - 1.0
+    )
+    assert returns.loc[pd.Timestamp(probe)] == pytest.approx(expected)
+
+
+def test_nothing_new_writes_nothing(coingecko_only, table):
+    """When every fetched date is already cached the upsert is skipped, not
+    sent empty. The cache holds 400 days through yesterday (a window miss for
+    1000 days, so the fetch runs) and the free-tier window lies inside it."""
+    table.store.clear()
+    table.seed_through(_yesterday(), n=400)
+    before = dict(table.store)
+
+    returns, stale = asyncio.run(benchmark_mod.get_benchmark_returns("BTC"))
+
+    assert table.upserts == []
+    assert table.store == before
+    # 400 days cannot span the 1000-day window: honest, flagged stale.
+    assert stale is True
+    assert returns is not None and len(returns) == 399
+
+
+def test_a_missed_day_is_backfilled_by_the_next_run(
+    client, monkeypatch, table, coingecko_only
+):
+    """SC-2: "a missed day is backfilled by the next run".
+
+    Run 1: every source is down, the table is one day short of yesterday, the
+    cron answers 500 and writes nothing. Run 2, one day later, with only
+    CoinGecko up: its window still covers the day run 1 missed, so the table
+    gains BOTH the missed day and the new yesterday, with no gap."""
+    table.store.clear()
+    table.seed_through(_yesterday() - timedelta(days=1), n=1000)
+    coingecko_only.up = False
+
+    first = client.post(ROUTE)
+
+    assert first.status_code == 500, first.text
+    assert table.newest() == (_yesterday() - timedelta(days=1)).isoformat()
+    assert table.upserts == []
+
+    next_day = _NOW + timedelta(days=1)
+    monkeypatch.setattr(benchmark_mod, "_utc_now", lambda: next_day)
+    coingecko_only.up = True
+
+    second = client.post(ROUTE)
+
+    assert second.status_code == 200, second.text
+    new_yesterday = _yesterday() + timedelta(days=1)
+    assert second.json()["through"] == new_yesterday.isoformat()
+    stored = _stored_dates(table)
+    assert _yesterday() in stored, "the day run 1 missed was not backfilled"
+    assert new_yesterday in stored
+    assert all(
+        (b - a).days == 1 for a, b in zip(stored, stored[1:])
+    ), "the stored run has a gap"
+
+
+def test_cold_cache_binance_down_answers_500_naming_the_stale_series(
+    client, table, coingecko_only
+):
+    """RESEARCH Q-4. An empty cache with Binance down: CoinGecko's 365 days
+    cannot span the 1000-day window, so the series is stale and the cron pages
+    instead of reading green."""
+    table.store.clear()
+
+    resp = client.post(ROUTE)
+
+    assert resp.status_code == 500, resp.text
+    assert resp.status_code != 503
+    assert resp.json()["detail"]["detail"].startswith("Benchmark refresh stale")
+
+
+def test_cold_cache_binance_down_is_served_stale(coingecko_only, table):
+    """The service half of the case above: the series is returned (the 365 days
+    it has) but is never flagged fresh."""
+    table.store.clear()
+
+    returns, stale = asyncio.run(benchmark_mod.get_benchmark_returns("BTC"))
+
+    assert stale is True
+    assert returns is not None and len(returns) == 364

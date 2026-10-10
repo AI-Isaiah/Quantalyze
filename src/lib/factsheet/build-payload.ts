@@ -534,6 +534,8 @@ type FactsheetStrategyInput = {
     description?: string | null;
     subtypes?: string[];
     supportedExchanges?: string[];
+    /** Phase 170.2 (SC-4, D-09) — `strategies.source`. Only `"csv"` reaches the payload. */
+    source?: string | null;
     leverageRange?: string | null;
     aum?: number | null;
     maxCapacity?: number | null;
@@ -817,6 +819,11 @@ function buildFromBuildableSeries(
     // Phase 164.6.6.2 (D-08, D-09) — by spread, so a USD payload has no `returnsUnit`
     // key at all (not `undefined`) and its snapshot and cache entry are unchanged.
     ...(opts?.returnsUnit ? { returnsUnit: opts.returnsUnit } : {}),
+    // Phase 170.2 (SC-4, D-09) — by spread, so a non-CSV payload has no `source`
+    // key at all (not `undefined`) and its snapshot is byte-identical. The marker
+    // is the STORED `strategies.source`, not `ingestSource`: that is derived from
+    // `daily_returns`, which is NULL on every PROD strategy and so reads "api".
+    ...(strategy.source === "csv" ? { source: "csv" as const } : {}),
     ...(opts?.dayBasis === "active" ? { dayBasis: "active" as const } : {}),
     // Phase 90.5 (LEV-01/D2) — emit the #597 annualization basis so the client
     // leverage recompute annualizes on the SAME basis the server did. Additive-

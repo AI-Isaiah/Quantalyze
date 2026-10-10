@@ -847,6 +847,44 @@ async def test_gap_days_absent_from_csv_upsert_but_dense_for_metrics() -> None:
 
 
 @pytest.mark.asyncio
+async def test_composite_benchmark_read_starts_at_the_first_stitched_date() -> None:
+    """Phase 170.2 (SC-5): the composite's BTC benchmark is read from the FIRST date
+    of the series it pairs, not from a fixed trailing window. A trailing window
+    silently drops the alpha/beta/correlation history of any composite older than
+    the window. The oracle is independent of the worker's own index: the earliest
+    date the worker PERSISTED to csv_daily_returns for this stitched series.
+
+    Neuter (drop ``since=`` at the stitched site) -> ``since`` is absent and this
+    reddens."""
+    from datetime import date
+
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-03-05", "2024-03-20"),
+        _member(2, "2024-03-20", None),
+    ])
+    m1 = _returns([("2024-03-05", 0.02), ("2024-03-06", 0.01)])
+    m2 = _returns([("2024-03-20", 0.03), ("2024-03-21", -0.01)])
+    bench_spy = AsyncMock(return_value=(None, True))
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )), patch("services.benchmark.get_benchmark_returns", new=bench_spy):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+
+    persisted = sorted(
+        row["date"]
+        for table, payload, _ in fake.upserts
+        if table == "csv_daily_returns" and isinstance(payload, list)
+        for row in payload
+    )
+    assert persisted[0] == "2024-03-05"
+
+    bench_spy.assert_awaited_once()
+    assert bench_spy.await_args.args == ("BTC",)
+    assert bench_spy.await_args.kwargs.get("since") == date.fromisoformat(persisted[0])
+
+
+@pytest.mark.asyncio
 async def test_degenerate_under_two_day_composite_permanent_not_raised() -> None:
     """F2 (Phase 86): a near-fully-clipped / ≤1-day-history composite yields a
     stitched series with <2 PRESENT days. The <2-day guard must fire BEFORE
