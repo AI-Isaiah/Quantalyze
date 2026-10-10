@@ -24,7 +24,10 @@ import { EXCHANGE_DISPLAY } from "./closed-sets";
 import type { ComputeState, RecipientArm } from "./compute-state";
 // Type-only (Phase 167.2.1): erased at build, so this copy module pulls in
 // none of the builder's server-side imports.
-import type { NotBuildableReason } from "./factsheet/fetch-and-build-payload";
+import type {
+  NotBuildableDetail,
+  NotBuildableReason,
+} from "./factsheet/fetch-and-build-payload";
 import type { ShareAffordanceMode } from "./share-affordance";
 import type { StrategyShape } from "./strategy-shape";
 import { STALL_THRESHOLD_MS } from "./sync-progress";
@@ -55,6 +58,7 @@ type StateLineKey =
   | "failed_other"
   | "finished"
   | "finished_build_unreadable"
+  | "finished_analytics_failed"
   | "never_started"
   | "unreadable";
 
@@ -138,6 +142,17 @@ const STATE_LINES = {
     tone: "muted",
     text: "The last computation finished. We could not read its results to build the factsheet.",
   },
+  // 164.6.6.3.3 D-08 (UI-SPEC section 4.1) — the jobs finished, but the stored
+  // analytics row reads `failed`: the data itself could not be computed from,
+  // and waiting does not change that, so the tone is red (DESIGN.md: red is a
+  // permanent failure). Names the cause the owner can act on and nothing
+  // internal: no status, job or error word. The "logged" promise is made true
+  // by the writer-failure census (plan 07).
+  finished_analytics_failed: {
+    id: "KCS09-FINISHED-ANALYTICS-FAILED",
+    tone: "red",
+    text: "Analytics couldn't be computed from this data. We've logged the error.",
+  },
   never_started: {
     id: "KCS09-NEVER",
     tone: "muted",
@@ -161,7 +176,17 @@ const STATE_LINES = {
  * outcome, so it is the only line this changes; every other line is about the
  * jobs alone and stays true.
  */
-export type OwnerBuildFacts = { buildUnreadable: boolean };
+export type OwnerBuildFacts = {
+  buildUnreadable: boolean;
+  /**
+   * 164.6.6.3.3 D-08 — the stored analytics row's `computation_status` is
+   * `failed`. Optional so callers that never learn it keep compiling. Like
+   * `buildUnreadable` it changes only KCS09-FINISHED, the one line that claims
+   * a build outcome; `buildUnreadable` wins when both are set, because an
+   * unread row cannot be called failed.
+   */
+  analyticsFailed?: boolean;
+};
 
 function stateLineKeyOf(
   state: ComputeState,
@@ -193,7 +218,9 @@ function stateLineKeyOf(
           return "failed_other";
       }
     case "finished":
-      return build?.buildUnreadable ? "finished_build_unreadable" : "finished";
+      if (build?.buildUnreadable) return "finished_build_unreadable";
+      if (build?.analyticsFailed) return "finished_analytics_failed";
+      return "finished";
     case "never_started":
       return "never_started";
     case "unreadable":
@@ -286,6 +313,8 @@ const REMEDY_RULES = {
   // A read failure is not a data fault: "have it checked" would send the owner
   // to support for an outage. The one remedy is to read again.
   finished_build_unreadable: "retry_read",
+  // The data is the cause (UI-SPEC section 4.1): retrying alone will not help.
+  finished_analytics_failed: "contact_permanent",
   never_started: "shape",
   unreadable: "retry_read",
 } as const satisfies Record<StateLineKey, RemedyRule>;
@@ -393,12 +422,14 @@ export function recipientShareNote(
  * composite, or since 167.2.1-REVIEW-SFH M-3 a single-key series whose stored
  * entries are malformed.
  */
-export type UnbuildableNoteKind = "too_short" | "cannot_build";
+export type UnbuildableNoteKind = "too_short" | "cannot_build" | "analytics_failed";
 
 /**
  * The note kind for a probe reason, or null when the reason is not a
- * build-time refusal of a computed row (`read_error`, `not_visible` and
- * `not_computed` are decided by the caller, D-05).
+ * build-time refusal of a computed row (`read_error` and `not_visible` are
+ * decided by the caller, D-05). `not_computed` is `analytics_failed` only when
+ * the resolve stage said the analytics row FAILED (`detail.analyticsFailed`,
+ * 164.6.6.3.3 D-08); otherwise it is null and the caller keeps the arm note.
  *
  * 167.2.1-REVIEW-SFH L-1: every reason is listed and the switch ends in a
  * `never` check, so a new `NotBuildableReason` is a compile error here instead
@@ -407,6 +438,7 @@ export type UnbuildableNoteKind = "too_short" | "cannot_build";
  */
 export function unbuildableNoteKindOf(
   reason: NotBuildableReason,
+  detail?: Pick<NotBuildableDetail, "analyticsFailed">,
 ): UnbuildableNoteKind | null {
   switch (reason) {
     case "too_few_points":
@@ -416,8 +448,13 @@ export function unbuildableNoteKindOf(
       return "cannot_build";
     case "read_error":
     case "not_visible":
-    case "not_computed":
       return null;
+    // 164.6.6.3.3 D-08: an analytics row that FAILED is a fact about the data,
+    // and the recipient's page is the same placeholder whatever the jobs say.
+    // A running or pending row (no `analyticsFailed`) keeps the arm-derived
+    // note, decided by the caller.
+    case "not_computed":
+      return detail?.analyticsFailed ? "analytics_failed" : null;
     default: {
       const unhandled: never = reason;
       throw new Error(`unbuildableNoteKindOf: unhandled reason ${String(unhandled)}`);
@@ -441,11 +478,18 @@ export function unbuildableNoteKindOf(
 // valid `daily_returns` beside a long `returns_series` is too short: the
 // builder reads `daily_returns` and never falls back, so "its stored results
 // hold fewer than 2 days" was false about that row's other column.
+//
+// 164.6.6.3.3 D-08 (UI-SPEC section 4.2): `analytics_failed` states what the
+// recipient sees without the words "not available" in its first sentence, then
+// uses D-08's public sentence verbatim as the second. Neither names a status,
+// a job, an error or a computation. Apostrophes are ASCII U+0027.
 const MINT_UNBUILDABLE_NOTES = {
   too_short:
     "Right now, a private link to this strategy shows that its factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.",
   cannot_build:
     "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Use the contact form to have them checked.",
+  analytics_failed:
+    "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy yet.",
 } as const satisfies Record<UnbuildableNoteKind, string>;
 
 const PUBLIC_UNBUILDABLE_NOTES = {
@@ -453,6 +497,8 @@ const PUBLIC_UNBUILDABLE_NOTES = {
     "Right now, this strategy's factsheet link shows that the factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.",
   cannot_build:
     "Right now, this strategy's factsheet link shows that the factsheet is not available. We cannot build a factsheet from its stored results. Use the contact form to have them checked.",
+  analytics_failed:
+    "Right now, this strategy's factsheet link opens a page without the numbers. Analytics are not available for this strategy yet.",
 } as const satisfies Record<UnbuildableNoteKind, string>;
 
 // 167.2.1-REVIEW-SFH H-2 — a private link to an unbuildable row whose job
@@ -466,6 +512,8 @@ const MINT_UNBUILDABLE_UNREADABLE_NOTES = {
     "Right now, a private link to this strategy shows a placeholder page instead of the numbers. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.",
   cannot_build:
     "Right now, a private link to this strategy shows a placeholder page instead of the numbers. We cannot build a factsheet from its stored results. Use the contact form to have them checked.",
+  analytics_failed:
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. Analytics are not available for this strategy yet.",
 } as const satisfies Record<UnbuildableNoteKind, string>;
 
 // 167.2.1-REVIEW-SFH H-2 — the buildability check itself failed (the probe

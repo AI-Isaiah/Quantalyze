@@ -410,6 +410,16 @@ class MetricsResult:
     # (PostgREST failure) and mutate every full-dict golden. Annotation-only: the
     # CAGR value it flags is byte-identical with or without this field set.
     insufficient_window: bool = False
+    # FACTSHEETTRUTH D-01: the ISO date (YYYY-MM-DD) of the first day of the
+    # post-break suffix every headline stat was computed on, set ONLY when the
+    # series carries an INTERIOR chain break (an integrity guard NaN'd a day with
+    # valid returns on both sides). None on a clean, leading-NaN-only or
+    # trailing-NaN-only series, where the suffix is the whole valid record. A
+    # FIELD, not a `metrics_json` key, for the same spread-into-upsert reason as
+    # `insufficient_window` above; lifted by BOTH writers into
+    # strategy_analytics.data_quality_flags.headline_since so the read path can
+    # tell a measured headline from a legacy mixed-basis one (D-03).
+    headline_since: str | None = None
 
     def __getitem__(self, key: str) -> Any:
         # Backward-compat shim: old callers expected a bare dict; proxy
@@ -1717,10 +1727,38 @@ def compute_all_metrics(
     # would otherwise dilute mean & std); on "calendar" it IS the full series, so
     # every existing caller is byte-identical. NaN gap days are dropped for the
     # active view (they are neither activity nor a real 0).
+    #
+    # FACTSHEETTRUTH D-01 — ONE headline series. To the compute every integrity
+    # guard (negative / dust / flow-dominated / P&L-dominated NAV) is just a NaN
+    # day. When one leaves an INTERIOR NaN, the headline cumulative return and CAGR
+    # already compound only the post-break suffix, while every other stat used to
+    # read the whole record: the stored row mixed two bases (Sharpe 8.1 beside a
+    # cumulative of 0.0). `headline` is that suffix, taken from the ONE shared
+    # nav_twr boundary source (no second detector), and EVERY headline-class stat
+    # below reads it. On a clean / leading-NaN-only / trailing-NaN-only series the
+    # suffix is the whole valid record, `headline` stays the SAME `returns` object,
+    # and every output is byte-identical. The chart objects (returns_series,
+    # drawdown_series, sparklines, monthly grid, rolling, quantiles, sibling_kinds)
+    # keep the whole record on purpose; they are not headline scalars.
+    _suffix = _last_interior_break_suffix(returns)
+    # The break predicate `cumulative_twr_segmented` uses: a valid day lies before
+    # the retained suffix.
+    _chain_broken = (not _suffix.empty) and int(returns.notna().sum()) > len(_suffix)
+    headline = _suffix if _chain_broken else returns
+    headline_since: str | None = (
+        _suffix.index[0].strftime("%Y-%m-%d") if _chain_broken else None
+    )
+    # D-02: a chain-broken suffix of fewer than 2 valid days cannot measure a
+    # drawdown, a downside deviation or any dispersion. Those stats are None, never
+    # a measured-looking 0. The cumulative return stays finite down to a one-day
+    # suffix on purpose: the composite read gate needs a finite cumulative or the
+    # whole factsheet blanks. Scoped to a BROKEN series so every clean series keeps
+    # its exact HEAD outputs.
+    _headline_too_short = _chain_broken and len(headline) < 2
     stat_returns = (
-        returns[returns.notna() & (returns != 0.0)]
+        headline[headline.notna() & (headline != 0.0)]
         if day_basis == "active"
-        else returns
+        else headline
     )
 
     # Fix A / Finding 2 — SINGLE-CONVENTION bucket accumulator for the period
@@ -1907,13 +1945,33 @@ def compute_all_metrics(
         # skip a NaN without truncating every later point — which is the same
         # rationale `returns_for_chart` documents at F3 above. This is exactly what
         # `_prepare_prices` did, so no fixture can move on this account.
-        _wealth = (1.0 + returns.fillna(0)).cumprod()
-        max_dd = _safe_float(_max_drawdown_from_wealth(_wealth))
+        # FACTSHEETTRUTH D-01: the headline drawdown rides the headline suffix (the
+        # same days cumulative and CAGR compound), NaN carried forward as 0 exactly
+        # as before. On a clean series `headline is returns`: byte-identical.
+        _wealth = (1.0 + headline.fillna(0)).cumprod()
+        max_dd = (
+            None
+            if _headline_too_short
+            else _safe_float(_max_drawdown_from_wealth(_wealth))
+        )
         # Drawdown series — chart continuity per F3 (same fillna(0) rationale);
         # `returns_for_chart` is already NaN-free and floored above -100%. See
         # `_drawdown_series_from_wealth`. Reuses the `cumulative` wealth curve bound
         # above (same operand, same block); the two wealth curves are NOT unified.
         dd_series = _drawdown_series_from_wealth(cumulative)
+
+    # FACTSHEETTRUTH D-01: `dd_series` above feeds the CHART and the drawdown
+    # details, so it keeps the whole record. The drawdown DURATION is a headline
+    # stat and reads the suffix's own underwater curve, built with the same clip and
+    # NaN-as-0 steps `cumulative` uses so it is bit-equal to a suffix-only compute.
+    # Clean series (and the arithmetic branch, which refuses any NaN) reuse
+    # `dd_series` itself.
+    if headline is returns or cumulative_method == "simple":
+        headline_dd_series = dd_series
+    else:
+        headline_dd_series = _drawdown_series_from_wealth(
+            (1 + headline.fillna(0).clip(lower=_LOG_RETURN_FLOOR)).cumprod()
+        )
 
     # Headline annualized RISK on the day-basis series (Fix A): `stat_returns` IS
     # `returns` on the calendar basis (byte-identical), or the nonzero-day series on
@@ -2009,7 +2067,7 @@ def compute_all_metrics(
             (_sortino_excess.mean() * periods_per_year)
             / (_downside * math.sqrt(periods_per_year))
         )
-        if _downside > 0.0
+        if _downside > 0.0 and not _headline_too_short
         else None
     )
     # TWR-05: calmar = CAGR / |max_drawdown|, computed DIRECTLY so it shares the
@@ -2024,7 +2082,7 @@ def compute_all_metrics(
         else _safe_float(float("nan"))
     )
 
-    dd_duration = _max_dd_duration(dd_series)
+    dd_duration = None if _headline_too_short else _max_dd_duration(headline_dd_series)
 
     # Monthly returns (computed once, reused for grid + best/worst + VaR)
     # NEW-C02-04: filter empty calendar buckets (fabricated 0.0 from sparse
@@ -2093,7 +2151,9 @@ def compute_all_metrics(
 
     # Six month return (single-convention: arithmetic Σr on "simple", geometric
     # compound otherwise — byte-identical on the default geometric path).
-    six_month = _safe_float(_bucket_return(returns.tail(126))) if len(returns) >= 126 else None
+    # FACTSHEETTRUTH D-01: the window returns are headline stats, so they ride the
+    # suffix and its length (the 126 / 63 day minimums now apply to the suffix).
+    six_month = _safe_float(_bucket_return(headline.tail(126))) if len(headline) >= 126 else None
 
     # Extended metrics
     metrics_json: dict[str, Any] = {}
@@ -2176,11 +2236,13 @@ def compute_all_metrics(
 
     # MTD / YTD / 3M single-convention (arithmetic Σr on "simple", geometric
     # compound otherwise — byte-identical on the default geometric path).
-    metrics_json["mtd"] = _safe_float(_bucket_return(returns[returns.index >= pd.Timestamp(returns.index[-1].replace(day=1))]))
-    metrics_json["ytd"] = _safe_float(_bucket_return(returns[returns.index >= pd.Timestamp(f"{returns.index[-1].year}-01-01")]))
+    # FACTSHEETTRUTH D-01: anchored on the headline's LAST index, which on an
+    # interior-plus-trailing-NaN series is the last valid day, not the last row.
+    metrics_json["mtd"] = _safe_float(_bucket_return(headline[headline.index >= pd.Timestamp(headline.index[-1].replace(day=1))]))
+    metrics_json["ytd"] = _safe_float(_bucket_return(headline[headline.index >= pd.Timestamp(f"{headline.index[-1].year}-01-01")]))
     metrics_json["best_day"] = _safe_float(returns.max())
     metrics_json["worst_day"] = _safe_float(returns.min())
-    metrics_json["three_month"] = _safe_float(_bucket_return(returns.tail(63))) if len(returns) >= 63 else None
+    metrics_json["three_month"] = _safe_float(_bucket_return(headline.tail(63))) if len(headline) >= 63 else None
 
     if len(monthly_rets) > 0:
         metrics_json["best_month"] = _safe_float(monthly_rets.max())
@@ -2694,6 +2756,7 @@ def compute_all_metrics(
         metrics_json=sanitized,
         sibling_kinds=sibling_kinds,
         insufficient_window=insufficient_window,
+        headline_since=headline_since,
     )
 
 

@@ -1202,6 +1202,68 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
   });
 });
 
+// 164.6.6.3.3 D-08 (plan 05): the jobs finished and the analytics row reads
+// `failed`. Typed out from UI-SPEC section 4, never imported.
+const ANALYTICS_FAILED_LINE =
+  "Analytics couldn't be computed from this data. We've logged the error.";
+const SHARE_ANALYTICS_FAILED =
+  "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy yet.";
+
+describe("164.6.6.3.3 D-08 — a finished job whose analytics failed", () => {
+  it("B23 KCS09-FINISHED-ANALYTICS-FAILED: the red line and the permanent contact remedy, not the generic 'could not be built' line", async () => {
+    givenOwnerPendingDraft();
+    STATE.adminRow = adminRowWith({ computation_status: "failed" });
+    givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+
+    const { section, stateLine, remedyLine } = await renderOwnerPending();
+
+    expect(section!.querySelectorAll("p")).toHaveLength(2);
+    expect(stateLine!.textContent).toBe(ANALYTICS_FAILED_LINE);
+    expect(stateLine!.className).toBe("mt-6 text-fixed-13 text-negative");
+    expect(remedyLine!.textContent).toBe(CONTACT_PERMANENT);
+    expect(remedyLine!.className).toBe("mt-3 text-fixed-12 text-text-muted");
+    expect(section!.textContent).not.toContain(FINISHED_LINE);
+  });
+
+  it("B24 the share note on a failed row is the analytics-failed note, with no internal word", async () => {
+    givenOwnerPendingDraft();
+    STATE.adminRow = adminRowWith({ computation_status: "failed" });
+    givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+
+    const { container } = await renderOwnerPending();
+    const last = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(last.textContent).toBe(SHARE_ANALYTICS_FAILED);
+    expect(last.className).toBe(SHARE_NOTE_CLASS);
+    // One resolve, no probe: the fact rides the owner build's own result.
+    expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
+  });
+
+  it("a computing row keeps KCS09-FINISHED and its generic note: only `failed` sets the fact", async () => {
+    givenOwnerPendingDraft();
+    STATE.adminRow = adminRowWith({ computation_status: "computing" });
+    givenJobs([chainJob("compute_analytics_from_csv", "done")]);
+
+    const { container, stateLine, remedyLine } = await renderOwnerPending();
+
+    expect(stateLine!.textContent).toBe(FINISHED_LINE);
+    expect(stateLine!.className).toBe("mt-6 text-fixed-13 text-warning");
+    expect(remedyLine!.textContent).toBe(CONTACT_CHECK);
+    expect(panelOf(container).lastElementChild!.textContent).not.toContain("Analytics are not available");
+  });
+
+  it("a running recompute on a failed row keeps KCS12-MINT-A and states the running job", async () => {
+    givenOwnerPendingDraft();
+    STATE.adminRow = adminRowWith({ computation_status: "failed" });
+    givenJobs([chainJob("process_key_long", "running")]);
+
+    const { container, stateLine } = await renderOwnerPending();
+
+    expect(stateLine!.textContent).not.toBe(ANALYTICS_FAILED_LINE);
+    expect(panelOf(container).lastElementChild!.textContent).toBe(MINT_A);
+  });
+});
+
 describe("KCS-10 (S8) — the public pending placeholder says one neutral sentence", () => {
   it("PUBLIC-PENDING: masthead, H1 and exactly one sentence; no italic, no banner, no owner read", async () => {
     STATE.sessionUser = null;

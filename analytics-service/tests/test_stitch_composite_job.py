@@ -1895,10 +1895,247 @@ async def test_insufficient_window_drop_stale_on_long_restitch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_headline_since_stamped_on_a_broken_stitch_and_flag_agrees() -> None:
+    """FACTSHEETTRUTH D-01: a member series with an INTERIOR guard NaN breaks the
+    chain, so the composite stores data_quality_flags.headline_since (the first
+    day of the suffix every headline stat is measured on). D-13: the composite's
+    `twr_chain_broken` is derived from that SAME stitched series, so the two keys
+    agree even when the member meta carries no flag, and the flag promotes the row
+    to complete_with_warnings exactly like the single-key path (`headline_since`
+    alone is an annotation and promotes nothing). Neuter the lift → the key is
+    absent → this reddens."""
+    # No returns_denominator_config → geometric/calendar (the default fake row is
+    # the allocated-capital 'simple' convention, which refuses an interior NaN).
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-02-01"),
+            _member(2, "2024-02-01", None),
+        ],
+        strategy_row={"id": _STRATEGY_ID, "asset_class": "crypto"},
+    )
+    # m1 carries an interior guard NaN on 01-02: the suffix starts on 01-03.
+    m1 = _returns([
+        ("2024-01-01", 0.02), ("2024-01-02", float("nan")),
+        ("2024-01-03", 0.01), ("2024-01-04", 0.015),
+    ])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", 0.03)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    headline = _headline_row(fake)
+    assert headline is not None
+    assert headline["data_quality_flags"].get("headline_since") == "2024-01-03"
+    assert headline["data_quality_flags"].get("twr_chain_broken") is True
+    assert headline["computation_status"] == "complete_with_warnings"
+    assert headline["computation_warned"] is True
+
+
+@pytest.mark.asyncio
+async def test_headline_since_dropped_on_a_clean_restitch() -> None:
+    """Heal-on-re-stitch (T-164.6.6.3.3-02): the composite path MERGES into the
+    existing flags, so a clean re-stitch must POP a stale headline_since while an
+    unrelated seeded flag survives. Neuter the pop → the stale date lingers."""
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-02-01"),
+            _member(2, "2024-02-01", None),
+        ],
+        existing_flags={
+            "headline_since": "2020-01-01",   # stale from a prior broken stitch
+            "twr_chain_broken": True,          # stale too: D-13 drops it with the date
+            "benchmark_unavailable": True,     # unrelated — must survive the merge
+        },
+    )
+    m1 = _returns([("2024-01-01", 0.02), ("2024-01-02", 0.01)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", 0.03)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    assert "headline_since" not in dq  # healed (drop-stale)
+    assert "twr_chain_broken" not in dq  # D-13: the flag may not outlive its date
+    assert dq.get("benchmark_unavailable") is True  # unrelated key preserved
+
+
+@pytest.mark.asyncio
+async def test_d13_member_break_outside_its_window_does_not_mark_the_composite() -> None:
+    """FACTSHEETTRUTH D-13 (a): a member's guard meta is judged on its full,
+    unclipped reconstruction. Its interior NaN lies AFTER its window end, so the
+    clip drops it and the stitched series the factsheet shows has no interior
+    break. The composite must not carry `twr_chain_broken` (it would have no
+    `headline_since`, and the read path would withhold a clean headline forever).
+    Neuter the member union back in → the flag reappears → this reddens."""
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-02-01"),
+            _member(2, "2024-02-01", None),
+        ],
+        strategy_row={"id": _STRATEGY_ID, "asset_class": "crypto"},
+    )
+    # NaN on 02-05 is flanked by valid days but lies outside seq 1's [01-01, 02-01).
+    m1 = _returns([
+        ("2024-01-01", 0.02), ("2024-01-02", 0.01),
+        ("2024-02-04", 0.01), ("2024-02-05", float("nan")), ("2024-02-06", 0.01),
+    ])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", 0.03)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {"twr_chain_broken": True}), (m2, {})],
+        has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    headline = _headline_row(fake)
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    assert "twr_chain_broken" not in dq
+    assert "headline_since" not in dq
+    assert headline["computation_status"] == "complete"
+    assert headline["computation_warned"] is False
+
+
+@pytest.mark.asyncio
+async def test_d13_break_inside_the_window_marks_flag_and_date_together() -> None:
+    """FACTSHEETTRUTH D-13 (b): a break INSIDE the stitched window keeps
+    `twr_chain_broken` true WITH a valid ISO `headline_since`, from the one series,
+    and still promotes complete_with_warnings (single-key parity). Neuter the
+    series-derived flag → the flag is absent while the date is present → reddens."""
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-02-01"),
+            _member(2, "2024-02-01", None),
+        ],
+        strategy_row={"id": _STRATEGY_ID, "asset_class": "crypto"},
+    )
+    m1 = _returns([
+        ("2024-01-01", 0.02), ("2024-01-02", float("nan")),
+        ("2024-01-03", 0.01), ("2024-01-04", 0.015),
+    ])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", 0.03)])
+    # The member meta carries no flag at all: the composite must not need it.
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    headline = _headline_row(fake)
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    assert dq.get("twr_chain_broken") is True
+    assert dq.get("headline_since") == "2024-01-03"
+    assert headline["computation_status"] == "complete_with_warnings"
+    assert headline["computation_warned"] is True
+
+
+@pytest.mark.asyncio
+async def test_d13_other_guard_keys_still_union_from_members() -> None:
+    """FACTSHEETTRUTH D-13 (c): only `twr_chain_broken` left the member union. A
+    clean stitched series with members carrying other NAV_TWR_GUARD_KEYS flags
+    keeps every one of them and the status promotion."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[
+            (m1, {"negative_nav_guard": True, "flow_dominated_guard": True}),
+            (m2, {"pnl_dominated_guard": True}),
+        ],
+        has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    headline = _headline_row(fake)
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    for k in ("negative_nav_guard", "flow_dominated_guard", "pnl_dominated_guard"):
+        assert dq.get(k) is True, k
+    assert "twr_chain_broken" not in dq
+    assert headline["computation_status"] == "complete_with_warnings"
+
+
+@pytest.mark.asyncio
+async def test_wr02_stale_guard_flags_dropped_on_a_clean_restitch() -> None:
+    """FACTSHEETTRUTH WR-02 (the D-13 class, applied to the public reason keys): the
+    composite path MERGES into the existing flags, and the four reason keys become
+    PUBLIC text ("it includes {R}"). A guard flag an earlier stitch set, or a member
+    since removed, must not outlive its cause: every NAV_TWR_GUARD_KEYS member is
+    cleared before this stitch's verdict is re-applied. An unrelated seeded flag
+    survives. Neuter the clear → the stale keys linger → this reddens."""
+    from services.nav_twr import NAV_TWR_GUARD_KEYS
+
+    stale = {k: True for k in NAV_TWR_GUARD_KEYS}
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-02-01"),
+            _member(2, "2024-02-01", None),
+        ],
+        existing_flags={**stale, "benchmark_unavailable": True},
+    )
+    m1 = _returns([("2024-01-01", 0.02), ("2024-01-02", 0.01)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", 0.03)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    headline = _headline_row(fake)
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    for k in NAV_TWR_GUARD_KEYS:
+        assert k not in dq, f"stale guard flag {k} outlived the stitch that set it"
+    assert dq.get("benchmark_unavailable") is True  # unrelated key preserved
+    assert headline["computation_status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_wr02_restitch_that_still_has_the_condition_keeps_its_guard_flag() -> None:
+    """FACTSHEETTRUTH WR-02: the clear is not a blanket delete. A re-stitch whose
+    members STILL carry a guard condition re-applies it, while a stale reason the
+    members no longer carry is dropped in the same write. The residual (a member
+    flag computed on its unclipped history cannot be scoped to the shown window; meta
+    carries no dates) is documented at the union site, not asserted away here."""
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-02-01"),
+            _member(2, "2024-02-01", None),
+        ],
+        existing_flags={
+            "negative_nav_guard": True,      # stale: no member carries it any more
+            "dust_nav_guard": True,          # still present on a member below
+        },
+    )
+    m1 = _returns([("2024-01-01", 0.02), ("2024-01-02", 0.01)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", 0.03)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {"dust_nav_guard": True}), (m2, {})],
+        has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    headline = _headline_row(fake)
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    assert dq.get("dust_nav_guard") is True
+    assert "negative_nav_guard" not in dq
+    assert headline["computation_status"] == "complete_with_warnings"
+
+
+@pytest.mark.asyncio
 async def test_member_guard_meta_promotes_complete_with_warnings() -> None:
     """Finding 3: run_stitch_composite_job previously DISCARDED each member's
     NavTWRMeta (`returns, _meta = combine_native_ledger(...)`). A composite built
-    from a guard-day / heuristic-capital / chain-broken member must union those
+    from a guard-day / heuristic-capital member must union those
     flags into the composite DQ flags and promote status to
     complete_with_warnings (mirror the single-key bridge). Neuter (drop the meta
     union) → the row stamps a clean 'complete' with no caveat → this reddens."""
@@ -1908,11 +2145,11 @@ async def test_member_guard_meta_promotes_complete_with_warnings() -> None:
     ])
     m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
     m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
-    # seq-1 member reconstructed with a chain-broken guard day + heuristic capital.
+    # seq-1 member reconstructed with a dust-NAV guard day + heuristic capital.
     with _apply(_deribit_patches(
         fake,
         combine_returns=[
-            (m1, {"twr_chain_broken": True, "used_heuristic_capital": True}),
+            (m1, {"dust_nav_guard": True, "used_heuristic_capital": True}),
             (m2, {}),
         ],
         has_option_activity=True,  # gate CLOSED → single cash pass, metas honored
@@ -1933,8 +2170,11 @@ async def test_member_guard_meta_promotes_complete_with_warnings() -> None:
     assert headline["computation_status"] == "complete_with_warnings"
     assert headline["computation_warned"] is True
     dq = headline["data_quality_flags"]
-    assert dq.get("twr_chain_broken") is True
+    # D-13: the OTHER guard keys still union from members; twr_chain_broken does
+    # not (it is judged on the stitched series, pinned by the D-13 tests below).
+    assert dq.get("dust_nav_guard") is True
     assert dq.get("used_heuristic_capital") is True
+    assert "twr_chain_broken" not in dq
 
 
 # ---------------------------------------------------------------------------

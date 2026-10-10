@@ -607,6 +607,32 @@ def test_insufficient_window_mirrors_metrics_result() -> None:
     assert r.insufficient_window == expected
 
 
+def test_basis_series_result_carries_headline_since() -> None:
+    """FACTSHEETTRUTH D-01: BasisSeriesResult.headline_since mirrors the
+    MetricsResult annotation (the single-key and composite writers both read it
+    off this result). A series with an interior NaN gives the first suffix day;
+    a clean one gives None. Neuter (hard-code None in the constructor) → RED on
+    the broken case."""
+    idx = pd.date_range("2024-01-01", periods=20, freq="D")
+    vals = [0.01 * ((-1) ** i) + 0.002 for i in range(20)]
+    broken = pd.Series(vals, index=idx, dtype="float64")
+    broken.iloc[9] = float("nan")
+    # The break rides `scalar_returns` (the conditioned scalar input): the sparse
+    # rows drop the NaN day, so only the scalar input can carry a chain break.
+    r = derive_basis_series(
+        broken, None,
+        periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+        scalar_returns=broken, densify_policy="broker_nan",
+    )
+    assert r.headline_since == "2024-01-11"  # day 9 is the last NaN → day 10 is 01-11
+    clean = pd.Series(vals, index=idx, dtype="float64")
+    r_clean = derive_basis_series(
+        clean, None,
+        periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+    )
+    assert r_clean.headline_since is None
+
+
 # ── Task 2 (D1): densify_policy-aware round-trip guard + the 3-policy fixtures ──
 
 

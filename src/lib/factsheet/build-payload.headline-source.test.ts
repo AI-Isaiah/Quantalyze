@@ -23,6 +23,8 @@ vi.mock("@/lib/queries", () => ({ getStrategyDetail: vi.fn() }));
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { readSingleKeyBasisOpts, singleKeyDataQuality } from "./composite-read-path";
 import { buildFactsheetPayload } from "./build-payload";
+import { compute, recordCoversWindow } from "./compute";
+import { annualizationPeriods } from "@/lib/closed-sets";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { fetchAndBuildPayload } from "./fetch-and-build-payload";
 import type { DailyReturn, FactsheetPayload } from "./types";
@@ -239,6 +241,34 @@ describe("169 D-10 / SC4 — the single-key factsheet headline reads the persist
     try {
       const p = await headlineFor(analyticsRow({ metrics_json_by_basis: { cash_settlement: { sharpe: 9 } } }));
       expect(p.strategyMetrics.sharpe).toBe(CLIENT.strategyMetrics.sharpe);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("cash_settlement"),
+        expect.objectContaining({ strategyId: STRATEGY.id }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("SFH-01: a CHAIN-BROKEN row whose raw cash_settlement object blocks the stored headline is Withheld, and nothing whole-record leaks", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const p = await headlineFor(
+        analyticsRow({
+          metrics_json_by_basis: { cash_settlement: { sharpe: 9 } },
+          data_quality_flags: { twr_chain_broken: true, headline_since: isoDay(388), dust_nav_guard: true },
+        }),
+      );
+      expect(p.dataQuality?.headlineWithheld).toBe(true);
+      expect(p.dataQuality?.headlineCoversFrom).toBeUndefined();
+      expect(p.dataQuality?.headlineGuardReasons).toEqual(["dust_nav"]);
+      // The seven headline figures and the seven windows read null, not the TypeScript whole record.
+      const m = p.strategyMetrics as unknown as Record<string, number | null>;
+      for (const k of ["cum_ret", "cagr", "ann_vol", "max_dd", "sharpe", "sortino", "calmar"]) {
+        expect(m[k], k).toBeNull();
+      }
+      for (const k of ["mtd", "ytd", "p3m", "p6m", "p1y", "p3y", "p5y"]) expect(m[k], k).toBeNull();
+      // The raw-object refusal still logs, naming the strategy.
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining("cash_settlement"),
         expect.objectContaining({ strategyId: STRATEGY.id }),
@@ -479,5 +509,145 @@ describe("169 SFH H-2 — a single-key allocated-capital strategy draws the curv
     expect(simple.cumulativeMethod).toBe("arithmetic");
     const none = await readSingleKeyBasisOpts(neverAdmin, "s", {}, null, "complete", row, null);
     expect("cumulativeMethod" in none).toBe(false);
+  });
+});
+
+/**
+ * Phase 164.6.6.3.3 plan 08 (D-01 "window returns", D-12, T-164.6.6.3.3-11).
+ *
+ * The Returns panel's trailing windows are computed in TypeScript over the whole
+ * record and are NOT overlaid from the stored scalars. Beside suffix figures
+ * (every stored headline scalar of a Dated row covers the post-break span only)
+ * they would be the mixed basis D-01 forbids. On a Dated row they are recomputed
+ * on the same suffix. The oracle here slices the series ITSELF and calls
+ * `compute()`, so it does not borrow the builder's slice index.
+ *
+ * D-12: a 12-day suffix on a 400-day record leaves 3 Month and 6 Month with no
+ * coverage, so they are null ("—"), never the whole-record value.
+ */
+describe("164.6.6.3.3 plan 08 — a Dated row's trailing windows cover the suffix", () => {
+  const SUFFIX_START = 388; // days 388..399 = a 12-day suffix
+  const WINDOW_KEYS = ["mtd", "ytd", "p3m", "p6m", "p1y", "p3y", "p5y"] as const;
+  /** Stored cash headline: seven finite scalars, deliberately unlike the TS values. */
+  const STORED = {
+    cumulative_return: 0.0,
+    volatility: 0.0,
+    max_drawdown: 0.0,
+    cagr: 0.0,
+    sharpe: null,
+    sortino: null,
+    calmar: null,
+  };
+  const dated = {
+    composite: false,
+    insufficientWindow: false,
+    twrChainBroken: true,
+    headlineCoversFrom: isoDay(SUFFIX_START),
+  };
+
+  function build(dataQuality: BuildFactsheetOpts["dataQuality"]): FactsheetPayload {
+    return viaCache(
+      buildFactsheetPayload(STRATEGY, SERIES, {
+        dataQuality,
+        metricsByBasis: { cash_settlement: STORED },
+      } as BuildFactsheetOpts)!,
+    );
+  }
+
+  const suffix = SERIES.slice(SUFFIX_START);
+  const onSuffix = compute(
+    suffix.map((d) => d.value),
+    suffix.map((d) => d.date),
+    0,
+    annualizationPeriods("crypto"),
+    { cumulativeMethod: "geometric" },
+  );
+
+  it("fixture guard: whole-record windows are finite and differ from the suffix's", () => {
+    const whole = build({ composite: false, insufficientWindow: false }).strategyMetrics;
+    expect(whole.p3m).not.toBeNull();
+    expect(whole.p6m).not.toBeNull();
+    expect(whole.p1y).not.toBeNull();
+    // YTD begins 1 Jan: the whole record covers it, the 23 Jan suffix does not.
+    expect(whole.ytd).not.toBeNull();
+    expect(onSuffix.ytd).toBeNull();
+  });
+
+  it("D-12: YTD, 3M, 6M, 1Y, 3Y and 5Y are null on the 12-day suffix; MTD equals compute() over the slice", () => {
+    const m = build(dated).strategyMetrics;
+    for (const k of ["ytd", "p3m", "p6m", "p1y", "p3y", "p5y"] as const) {
+      expect(m[k], `${k} must be null, the suffix does not cover it`).toBeNull();
+    }
+    // The suffix spans the month end, so MTD (the returns after 31 Jan) is covered.
+    expect(onSuffix.mtd).not.toBeNull();
+    expect(m.mtd).toBe(onSuffix.mtd);
+  });
+
+  it("every non-window field of strategyMetrics is the no-flag build's", () => {
+    const flagged = build(dated).strategyMetrics as unknown as Record<string, unknown>;
+    const control = build({ composite: false, insufficientWindow: false, twrChainBroken: true } as BuildFactsheetOpts["dataQuality"])
+      .strategyMetrics as unknown as Record<string, unknown>;
+    for (const k of WINDOW_KEYS) {
+      delete flagged[k];
+      delete control[k];
+    }
+    expect(flagged).toEqual(control);
+  });
+
+  it("WR-01: a Withheld row withholds the trailing windows too (all seven null), where the whole record has them", () => {
+    const whole = build({ composite: false, insufficientWindow: false }).strategyMetrics;
+    // Guard: the whole record has finite windows, so a null here is a decision, not an absence.
+    for (const k of ["mtd", "ytd", "p3m", "p6m", "p1y"] as const) {
+      expect(whole[k], `${k} is finite on the whole record`).not.toBeNull();
+    }
+    const withheldDq = {
+      composite: false,
+      insufficientWindow: false,
+      twrChainBroken: true,
+      headlineWithheld: true,
+    } as const;
+    const withheld = build(withheldDq).strategyMetrics as unknown as Record<string, unknown>;
+    for (const k of WINDOW_KEYS) expect(withheld[k], `${k} must be withheld`).toBeNull();
+    // Only the windows move: every other field is the no-flag build's, as on a Dated row.
+    const wholeRec = { ...whole } as unknown as Record<string, unknown>;
+    for (const k of WINDOW_KEYS) {
+      delete withheld[k];
+      delete wholeRec[k];
+    }
+    expect(withheld).toEqual(wholeRec);
+  });
+
+  it("WR-01: the withheld flag without twrChainBroken sets nothing (a clean row is never withheld)", () => {
+    const m = build({
+      composite: false,
+      insufficientWindow: false,
+      headlineWithheld: true,
+    }).strategyMetrics;
+    expect(m.p3m).not.toBeNull();
+    expect(m.mtd).not.toBeNull();
+  });
+
+  it("a clean row keeps the whole-record windows", () => {
+    const clean = build({ composite: false, insufficientWindow: false }).strategyMetrics;
+    expect(clean.p3m).not.toBeNull();
+    expect(clean.p1y).not.toBeNull();
+  });
+
+  it("the rail and compute() share ONE coverage rule: p6m is null exactly when recordCoversWindow says no", () => {
+    const dates = SERIES.map((d) => d.date);
+    const rets = SERIES.map((d) => d.value);
+    // Whole record: covers 182 days and 365 days.
+    expect(recordCoversWindow(dates, 182)).toBe(true);
+    expect(recordCoversWindow(dates, 365)).toBe(true);
+    expect(recordCoversWindow(dates, 3 * 365)).toBe(false);
+    // The 12-day suffix covers neither 90 nor 182 days.
+    const sd = suffix.map((d) => d.date);
+    expect(recordCoversWindow(sd, 90)).toBe(false);
+    expect(recordCoversWindow(sd, 182)).toBe(false);
+    // Agreement with compute() on a window it can and cannot cover.
+    const whole = compute(rets, dates, 0, 365);
+    expect(whole.p6m === null).toBe(!recordCoversWindow(dates, 182));
+    expect(whole.p3y === null).toBe(!recordCoversWindow(dates, 3 * 365));
+    expect(onSuffix.p3m === null).toBe(!recordCoversWindow(sd, 90));
   });
 });

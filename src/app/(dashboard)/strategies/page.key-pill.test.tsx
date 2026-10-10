@@ -663,6 +663,13 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   const UNBUILDABLE_SHORT =
     "Right now, a private link to this strategy shows that its factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
 
+  // 164.6.6.3.3 D-08 (UI-SPEC section 4.2), typed out, never imported: the
+  // analytics row FAILED. The second sentence is D-08's public sentence.
+  const ANALYTICS_FAILED =
+    "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy yet.";
+  const PUBLIC_ANALYTICS_FAILED =
+    "Right now, this strategy's factsheet link opens a page without the numbers. Analytics are not available for this strategy yet.";
+
   function noteOf(container: HTMLElement, strategyName: string): string | null {
     const card = [...container.querySelectorAll("a")]
       .find((a) => a.textContent === strategyName)
@@ -1134,7 +1141,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   it("PROBE-NOT-COMPUTED (D-05, SFH M-5): the embed says complete but the builder's read says failed, so the row takes the uncomputed path, logged at warn", async () => {
     state.strategies = [row("c-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
     state.adminRows = {
-      "c-1": { data: adminStrategy("c-1", { computation_status: "failed" }), error: null },
+      "c-1": { data: adminStrategy("c-1", { computation_status: "pending" }), error: null },
     };
     state.jobs = {
       "c-1": [
@@ -1209,7 +1216,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   });
 
   it("MINT-B: an unpublished row whose stitch failed permanently says the private link shows it not available", async () => {
-    state.strategies = [row("c-1", { status: "draft", strategy_analytics: [{ computation_status: "failed" }] })];
+    state.strategies = [row("c-1", { status: "draft", strategy_analytics: [{ computation_status: "pending" }] })];
     state.jobs = {
       "c-1": [
         {
@@ -1224,6 +1231,89 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     const container = await renderPage();
 
     expect(noteOf(container, "Strategy c-1")).toBe(MINT_B);
+  });
+
+  // 164.6.6.3.3 D-08 / B24: a `failed` analytics row takes the uncomputed
+  // branch (never probed). Its note says analytics are not available, in the
+  // recipient's own terms, and names no status, job or error.
+  it("B24 ANALYTICS-FAILED private link: a draft row whose analytics failed (stitch failed, arm not_available) takes the analytics-failed note, not MINT-B", async () => {
+    state.strategies = [row("c-1", { status: "draft", strategy_analytics: [{ computation_status: "failed" }] })];
+    state.jobs = {
+      "c-1": [
+        {
+          kind: "stitch_composite",
+          status: "failed_final",
+          error_kind: "permanent",
+          created_at: "2026-02-01T00:00:00.000Z",
+        },
+      ],
+    };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy c-1")).toBe(ANALYTICS_FAILED);
+    expect(state.adminStrategyReads).toEqual([]);
+  });
+
+  it("B24 ANALYTICS-FAILED public URL: a published row whose analytics failed says its public link opens a page without the numbers, and reads no jobs", async () => {
+    state.strategies = [row("s-pub", { status: "published", strategy_analytics: { computation_status: "failed" } })];
+    state.jobsError = { message: "synthetic rpc failure" };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC_ANALYTICS_FAILED);
+    expect(state.rpcCalls).toEqual([]);
+  });
+
+  it("B24 ANALYTICS-FAILED while a recompute runs keeps MINT-A: the recipient sees 'being prepared'", async () => {
+    state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "failed" } })];
+    state.jobs = { "s-1": [running] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-1")).toBe(MINT_A);
+  });
+
+  it("B24 a computing or pending row keeps today's note: only `failed` sets the analytics-failed note", async () => {
+    state.strategies = [
+      row("s-comp", { status: "draft", strategy_analytics: { computation_status: "computing" } }),
+      row("s-pend", { status: "draft", strategy_analytics: { computation_status: "pending" } }),
+    ];
+    state.jobs = {
+      "s-comp": [
+        { kind: "stitch_composite", status: "failed_final", error_kind: "permanent", created_at: "2026-02-01T00:00:00.000Z" },
+      ],
+      "s-pend": [
+        { kind: "stitch_composite", status: "failed_final", error_kind: "permanent", created_at: "2026-02-01T00:00:00.000Z" },
+      ],
+    };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-comp")).toBe(MINT_B);
+    expect(noteOf(container, "Strategy s-pend")).toBe(MINT_B);
+  });
+
+  it("B24 PROBE-NOT-COMPUTED race: the embed says complete but the builder's read says failed -> the analytics-failed note", async () => {
+    state.strategies = [row("c-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = {
+      "c-1": { data: adminStrategy("c-1", { computation_status: "failed" }), error: null },
+    };
+    state.jobs = {
+      "c-1": [
+        { kind: "stitch_composite", status: "failed_final", error_kind: "permanent", created_at: "2026-02-01T00:00:00.000Z" },
+      ],
+    };
+
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const container = await renderPage();
+
+      expect(noteOf(container, "Strategy c-1")).toBe(ANALYTICS_FAILED);
+      expect(captureToSentryMock).not.toHaveBeenCalled();
+    } finally {
+      consoleWarn.mockRestore();
+    }
   });
 
   it("UNREADABLE: an RPC error renders KCS12-UNREADABLE and is logged, never an in-progress claim", async () => {
@@ -1257,7 +1347,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   });
 
   it("PUBLIC: a published row without a computed factsheet says what its public link shows, whatever the RPC answers", async () => {
-    state.strategies = [row("s-pub", { status: "published", strategy_analytics: { computation_status: "failed" } })];
+    state.strategies = [row("s-pub", { status: "published", strategy_analytics: { computation_status: "pending" } })];
     // Running would be MINT-A on a private link; the public URL renders the
     // public placeholder, which never says "being prepared".
     state.jobs = { "s-pub": [running] };
@@ -1299,7 +1389,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
   it("PUBLIC-NO-READ (167.2-REVIEW IN-04): a published row's note is the public-URL line whatever the arm, so its jobs are never read", async () => {
     state.strategies = [
-      row("s-pub", { status: "published", strategy_analytics: { computation_status: "failed" } }),
+      row("s-pub", { status: "published", strategy_analytics: { computation_status: "pending" } }),
     ];
     state.jobsError = { message: "synthetic rpc failure" };
 

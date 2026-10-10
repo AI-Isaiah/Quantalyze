@@ -20,7 +20,6 @@ import {
   shouldReadSingleKeySmoothedSeries,
   shouldReadCashSettlementSeries,
   shouldReadSingleKeyCashSeries,
-  deriveHeadlineCoversFrom,
 } from "./composite-read-path";
 import type { ParsedMtmSeries } from "./composite-read-path";
 import { buildFactsheetPayload, deriveIngestSource } from "./build-payload";
@@ -1744,59 +1743,21 @@ describe("169 D-10 readSingleKeyBasisOpts — the persisted single-key cash head
 });
 
 /**
- * Review round 1, SFH H-1. On a single-key row with an INTERIOR chain break
- * (`data_quality_flags.twr_chain_broken`), Python's stored
- * `cumulative_return` and CAGR compound only the stretch AFTER the last break
- * (`nav_twr._last_interior_break_suffix`, `metrics._cagr_index`), while the
- * chart, the windows and Years Observed cover the whole series. D-25 keeps the
- * stored value (the lists show it), so the page must SAY which span the
- * headline covers. These pin the data half: the flag reaches the payload, and
- * the start of the covered span is read from the stored cash series row, never
- * guessed.
- *
- * WHY the stored row names it. On the broker path the runner reindexes the
- * series to a dense daily calendar, so a refused (guard) day becomes NaN; the
- * persisted `cash_settlement` series row (`basis_series.derive_basis_series`)
- * drops NaN from `rows` and records every absent in-span day in `gap_spans`,
- * and echoes `conventions.densify = "broker_nan"`. Under that echo an absent
- * day can only be a refused day, so the covered span starts at the first row
- * after the LAST gap span: exactly the suffix `_last_interior_break_suffix`
- * compounds. Under any other echo (a user CSV is "sparse": weekends are absent
- * too) the rows cannot name it, and the answer is null.
+ * Review round 1, SFH H-1, re-based by Phase 164.6.6.3.3 (D-01, D-03). On a
+ * single-key row with an INTERIOR chain break (`data_quality_flags.twr_chain_broken`),
+ * Python's stored `cumulative_return` and CAGR compound only the stretch AFTER the
+ * last break (`nav_twr._last_interior_break_suffix`, `metrics._cagr_index`), while
+ * the chart, the windows and Years Observed cover the whole series. D-25 keeps the
+ * stored value (the lists show it), so the page must SAY which span the headline
+ * covers. These pin the data half: the flag reaches the payload, and the start of
+ * the covered span comes from `data_quality_flags.headline_since` ALONE. The
+ * series-derived read (`deriveHeadlineCoversFrom`, which inferred it from the
+ * stored cash series' gap spans) is gone: a row without the marker is Withheld
+ * (UI-SPEC §7 item 5), so that fallback could feed no note. The detailed
+ * Dated / Withheld matrix for both arms is in
+ * `composite-read-path.headline-basis.test.ts`.
  */
-describe("169 SFH H-1 — the span a chain-broken headline covers, read from the stored series", () => {
-  const BROKER_SERIES = {
-    schema: 2,
-    basis: "cash_settlement",
-    rows: [
-      { date: "2024-01-01", return: 0.01 },
-      { date: "2024-01-02", return: 0.01 },
-      { date: "2024-01-04", return: 0.01 },
-      { date: "2024-01-05", return: 0.01 },
-      { date: "2024-01-09", return: 0.01 },
-      { date: "2024-01-10", return: 0.01 },
-    ],
-    gap_spans: [
-      { start: "2024-01-03", end: "2024-01-03" },
-      { start: "2024-01-06", end: "2024-01-08" },
-    ],
-    conventions: { periods_per_year: 365, cumulative_method: "geometric", day_basis: "calendar", densify: "broker_nan" },
-  };
-
-  it("broker_nan series with interior gaps → the first stored day after the last gap", () => {
-    expect(deriveHeadlineCoversFrom(BROKER_SERIES)).toBe("2024-01-09");
-  });
-
-  it.each([
-    ["a sparse (user CSV) series, where an absent day may be a weekend", { ...BROKER_SERIES, conventions: { ...BROKER_SERIES.conventions, densify: "sparse" } }],
-    ["a series with no densify echo (written before Phase 105)", { ...BROKER_SERIES, conventions: { periods_per_year: 365 } }],
-    ["a series with no gap", { ...BROKER_SERIES, gap_spans: [] }],
-    ["a malformed payload", { rows: "x" }],
-    ["no payload", null],
-  ])("%s → null (the stored data cannot name the span; never a guess)", (_label, payload) => {
-    expect(deriveHeadlineCoversFrom(payload)).toBeNull();
-  });
-
+describe("169 SFH H-1 — the span a chain-broken headline covers, named by headline_since", () => {
   it("singleKeyDataQuality carries the flag strictly (=== true), and is unchanged without it", () => {
     expect(singleKeyDataQuality({ twr_chain_broken: true }).twrChainBroken).toBe(true);
     expect("twrChainBroken" in singleKeyDataQuality({ twr_chain_broken: "true" })).toBe(false);
@@ -1814,62 +1775,48 @@ describe("169 SFH H-1 — the span a chain-broken headline covers, read from the
   };
   const row = { ...PERSISTED, computation_status: "complete", metrics_json_by_basis: null };
 
-  function seriesAdmin(answer: { data: unknown; error: { message: string; code?: string } | null }) {
-    const kinds: string[] = [];
-    const getAdmin = vi.fn(
-      () =>
-        ({
-          from: () => {
-            const chain = {
-              select: () => chain,
-              eq: (column: string, value: string) => {
-                if (column === "kind") kinds.push(value);
-                return chain;
-              },
-              maybeSingle: () => Promise.resolve(answer),
-            };
-            return chain;
-          },
-        }) as unknown as SupabaseClient,
-    );
-    return { getAdmin, kinds };
+  /** An admin handle that fails the test if the read path reaches for it. */
+  function noSeriesRead() {
+    return vi.fn((): SupabaseClient => {
+      throw new Error("the covered span comes from headline_since: no service-role handle, no series read");
+    });
   }
 
-  it("a rankable chain-broken row threads the flag and the covered span's start from the stored cash series", async () => {
-    const { getAdmin, kinds } = seriesAdmin({ data: { payload: BROKER_SERIES }, error: null });
-    const out = await readSingleKeyBasisOpts(getAdmin, "s-1", { twr_chain_broken: true }, null, "complete", row);
+  it("a rankable Dated chain-broken row threads the flag, the span's start and the reasons, and reads no series", async () => {
+    const getAdmin = noSeriesRead();
+    const out = await readSingleKeyBasisOpts(
+      getAdmin,
+      "s-1",
+      { twr_chain_broken: true, headline_since: "2024-01-09", dust_nav_guard: true },
+      null,
+      "complete",
+      row,
+    );
     expect(out.dataQuality).toEqual({
       composite: false,
       insufficientWindow: false,
       twrChainBroken: true,
       headlineCoversFrom: "2024-01-09",
+      headlineGuardReasons: ["dust_nav"],
     });
-    expect(kinds).toEqual(["cash_settlement"]);
-    // D-25 / SC4: the headline stays the stored value the lists show.
+    expect(getAdmin).not.toHaveBeenCalled();
+    // D-25 / SC4: a Dated headline stays the stored value the lists show.
     expect(out.metricsByBasis?.cash_settlement).toEqual(PERSISTED);
   });
 
-  it("a chain-broken row whose stored series cannot name the span → headlineCoversFrom null, warned", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const { getAdmin } = seriesAdmin({ data: null, error: null });
-      const out = await readSingleKeyBasisOpts(getAdmin, "s-1", { twr_chain_broken: true }, null, "complete", row);
-      expect(out.dataQuality?.twrChainBroken).toBe(true);
-      expect(out.dataQuality?.headlineCoversFrom).toBeNull();
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining("covered span"), expect.objectContaining({ strategyId: "s-1" }));
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it("a failed stored-series read is a read error, never a guessed or missing span", async () => {
-    const { getAdmin } = seriesAdmin({ data: null, error: { message: "boom", code: "57014" } });
-    const err = await readSingleKeyBasisOpts(getAdmin, "s-1", { twr_chain_broken: true }, null, "complete", row).then(
-      () => null,
-      (e: unknown) => e,
+  it("a rankable chain-broken row WITHOUT headline_since is Withheld: stored scalars null, no date, no series read", async () => {
+    const getAdmin = noSeriesRead();
+    const out = await readSingleKeyBasisOpts(getAdmin, "s-1", { twr_chain_broken: true }, null, "complete", row);
+    expect(out.dataQuality).toEqual({
+      composite: false,
+      insufficientWindow: false,
+      twrChainBroken: true,
+      headlineWithheld: true,
+    });
+    expect(Object.values(out.metricsByBasis?.cash_settlement ?? { sentinel: 1 })).toEqual(
+      Array(7).fill(null),
     );
-    expect(err).toBeInstanceOf(CompositeSeriesReadError);
-    expect((err as CompositeSeriesReadError).read).toBe("cash_settlement");
+    expect(getAdmin).not.toHaveBeenCalled();
   });
 
   it("a row without the flag reads nothing and adds no dataQuality (byte-identical)", async () => {

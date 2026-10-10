@@ -789,3 +789,160 @@ describe("FactsheetView KPI strip — 164.6.6.3.1 D-09: the alpha eyebrow keeps 
     expect(tokens(sharpe!)).toContain("uppercase");
   });
 });
+
+/**
+ * Phase 164.6.6.3.3 plan 09 (B1-B6, D-07, UI-SPEC 3.4). The strip's five toned
+ * cells (Cum. Return, CAGR, Max DD, α, IR) take their printed sign and their tone
+ * from the value ROUNDED to the cell's precision: 1dp of a percent for the three
+ * returns and Max DD, 2dp for IR. A value that rounds to zero is neutral and
+ * unsigned, so -0.0004 prints "0.0%" in the primary colour instead of a red
+ * "-0.0%", and an exact 0 is no longer a green "+0.0%". Every other value keeps
+ * today's tone (the Test 3 gate above stays true).
+ *
+ * Expected strings are hand-typed, never produced by the formatter under test.
+ */
+describe("FactsheetView KPI strip — 164.6.6.3.3 plan 09: tone and sign from the rounded value", () => {
+  const DAY = 86_400_000;
+  const addDays = (d: string, n: number) =>
+    new Date(Date.parse(`${d}T00:00:00Z`) + n * DAY).toISOString().slice(0, 10);
+  const POS = "var(--color-positive)";
+  const NEG = "var(--color-negative)";
+  const PRIMARY = "var(--color-text-primary)";
+
+  type Over = {
+    cum_ret?: number;
+    cagr?: number;
+    max_dd?: number;
+    alpha?: number;
+    info_ratio?: number;
+  };
+
+  /** A real 30-day payload paired with BTC, then the five cells overridden (cash view returns it by reference). */
+  function mountWith(over: Over) {
+    const start = "2026-04-27";
+    const n = 30;
+    const rows: DailyReturn[] = Array.from({ length: n }, (_, i) => ({
+      date: addDays(start, i),
+      value: ((i % 7) - 3) / 1000,
+    }));
+    const btc: DailyPrice[] = Array.from({ length: n + 1 }, (_, i) => ({
+      date: addDays(start, i - 1),
+      close: 90000 + ((i * 37) % 11) * 250,
+    }));
+    const opt: BenchmarkPricesOpt = { prices: btc, through: btc[btc.length - 1].date, dropped: [] };
+    const base = buildFactsheetPayload(
+      {
+        id: "s-164-6-6-3-3-09-tone",
+        name: "Tone Strategy",
+        types: ["quant"],
+        markets: ["crypto"],
+        computedAt: "2026-10-09T00:00:00Z",
+        trustTier: null,
+        assetClass: "crypto",
+        ingestSource: "api" as const,
+      },
+      rows,
+      { benchmarkPrices: opt },
+    );
+    if (!base) throw new Error("fixture must build a payload");
+    const { alpha, info_ratio, ...metrics } = over;
+    const btcBlock = base.comparators.btc;
+    const payload: FactsheetPayload = {
+      ...base,
+      activeComparator: "btc",
+      strategyMetrics: { ...base.strategyMetrics, ...metrics },
+      comparators: {
+        ...base.comparators,
+        btc: {
+          ...btcBlock,
+          joint: {
+            ...btcBlock.joint!,
+            ...(alpha !== undefined ? { alpha } : {}),
+            ...(info_ratio !== undefined ? { info_ratio } : {}),
+          },
+        },
+      },
+    };
+    return render(
+      <FactsheetProvider payload={payload} persist={false}>
+        <FactsheetBody payload={payload} hideHeader hideAllocatorSection hideFooter />
+      </FactsheetProvider>,
+    );
+  }
+
+  function strip(label: string): { text: string; color: string } {
+    const lab = screen.getAllByTestId("factsheet-kpi-label").find((l) => l.textContent === label);
+    if (!lab) throw new Error(`no strip cell ${label}`);
+    const val = lab.parentElement!.querySelector('[data-testid="factsheet-kpi-value"]') as HTMLElement;
+    return { text: val.textContent ?? "", color: val.style.color };
+  }
+
+  it.each([
+    ["Cum. Return", "cum_ret"],
+    ["CAGR", "cagr"],
+  ] as const)("%s: exactly 0 and a value that rounds to 0 print 0.0% in the primary colour", (label, key) => {
+    for (const v of [0, -0, -0.0004, 0.0004]) {
+      const { unmount } = mountWith({ [key]: v });
+      expect(strip(label), `${key}=${v}`).toEqual({ text: "0.0%", color: PRIMARY });
+      unmount();
+    }
+  });
+
+  it.each([
+    ["Cum. Return", "cum_ret"],
+    ["CAGR", "cagr"],
+  ] as const)("%s: a real gain is signed green, a real loss red (today's tone, unchanged)", (label, key) => {
+    const up = mountWith({ [key]: 0.0512 });
+    expect(strip(label)).toEqual({ text: "+5.1%", color: POS });
+    up.unmount();
+    const down = mountWith({ [key]: -0.0512 });
+    expect(strip(label)).toEqual({ text: "-5.1%", color: NEG });
+    down.unmount();
+  });
+
+  it("Max DD: -0.0004 and exactly 0 print 0.0% uncoloured; a real drawdown is red; a dash stays uncoloured", () => {
+    for (const v of [-0.0004, 0, -0]) {
+      const { unmount } = mountWith({ max_dd: v });
+      expect(strip("Max DD"), `max_dd=${v}`).toEqual({ text: "0.0%", color: PRIMARY });
+      unmount();
+    }
+    const real = mountWith({ max_dd: -0.0368 });
+    expect(strip("Max DD")).toEqual({ text: "-3.7%", color: NEG });
+    real.unmount();
+    mountWith({ max_dd: NaN });
+    expect(strip("Max DD")).toEqual({ text: "—", color: PRIMARY });
+  });
+
+  it("α vs BTC: +/-0.0004 prints 0.0% uncoloured; a real alpha keeps its sign and tone", () => {
+    for (const v of [-0.0004, 0.0004, 0]) {
+      const { unmount } = mountWith({ alpha: v });
+      expect(strip("α vs BTC"), `alpha=${v}`).toEqual({ text: "0.0%", color: PRIMARY });
+      unmount();
+    }
+    const up = mountWith({ alpha: 0.1234 });
+    expect(strip("α vs BTC")).toEqual({ text: "+12.3%", color: POS });
+    up.unmount();
+    mountWith({ alpha: -0.1234 });
+    expect(strip("α vs BTC")).toEqual({ text: "-12.3%", color: NEG });
+  });
+
+  it("IR vs BTC (2dp): -0.004 and 0.004 print 0.00 uncoloured; -0.006 prints -0.01 red; 0.5 prints 0.50 green", () => {
+    for (const v of [-0.004, 0.004, 0]) {
+      const { unmount } = mountWith({ info_ratio: v });
+      expect(strip("IR vs BTC"), `ir=${v}`).toEqual({ text: "0.00", color: PRIMARY });
+      unmount();
+    }
+    const down = mountWith({ info_ratio: -0.006 });
+    expect(strip("IR vs BTC")).toEqual({ text: "-0.01", color: NEG });
+    down.unmount();
+    mountWith({ info_ratio: 0.5 });
+    expect(strip("IR vs BTC")).toEqual({ text: "0.50", color: POS });
+  });
+
+  it("Sharpe, Sortino, Calmar and Ann. Vol are unchanged: no tone, ratios at toFixed(2)", () => {
+    mountWith({});
+    for (const label of ["Sharpe", "Sortino", "Calmar", "Ann. Vol"]) {
+      expect(strip(label).color, label).toBe(PRIMARY);
+    }
+  });
+});

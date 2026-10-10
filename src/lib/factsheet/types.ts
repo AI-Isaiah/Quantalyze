@@ -7,6 +7,8 @@
  * chart engine.
  */
 
+import type { GuardReason } from "./headline-basis";
+
 /** One day of strategy or benchmark returns. `value` is a decimal return (not %). */
 export type DailyReturn = { date: string; value: number };
 
@@ -124,12 +126,27 @@ export type JointMetrics = {
 };
 
 /** One comparator slice consumed by the chart engine on picker swap. */
+/** The comparator's own scalar summary: the shape of {@link ComparatorBlock.summary} and `summarySince`. */
+export type ComparatorSummary = Pick<ComputeResult,
+  "cum_ret" | "cagr" | "ann_vol" | "sharpe" | "sortino" | "calmar" | "max_dd" | "longest_dd"
+  | "mtd" | "ytd" | "p3m" | "p6m" | "p1y" | "win_rate" | "profit_factor">;
+
 export type ComparatorBlock = {
   name: string;
   shortName: string;
-  summary: Pick<ComputeResult,
-    "cum_ret" | "cagr" | "ann_vol" | "sharpe" | "sortino" | "calmar" | "max_dd" | "longest_dd"
-    | "mtd" | "ytd" | "p3m" | "p6m" | "p1y" | "win_rate" | "profit_factor"> | null;
+  summary: ComparatorSummary | null;
+  /**
+   * Phase 164.6.6.3.3 plan 10 (B19, UI-SPEC 1.5): present-only, on a Dated row's cash
+   * bundle. The same summary as `summary`, computed over the covered comparator
+   * returns dated on or after `headlineCoversFrom` (the span the strategy's headline
+   * figures cover), with the same past-coverage nulling of the window fields. The rail's
+   * headline rows read it so each row compares two figures over ONE span; Win Rate,
+   * Profit Factor and Longest DD keep `summary` (whole record). `null` (key present)
+   * when the comparator has no covered return on or after the start. Absent on a clean
+   * row, a Withheld row, the MTM and smoothed bundles and every re-derived view
+   * (leverage, selected range), where the strategy's figures are whole-record too.
+   */
+  summarySince?: ComparatorSummary | null;
   joint: JointMetrics | null;
   /**
    * 169.4 review round 2 (SFH-R2 MEDIUM-2): set when `joint` is null ONLY
@@ -141,6 +158,18 @@ export type ComparatorBlock = {
    * their null joint has another cause.
    */
   jointWithheld?: { paired: number; floor: number } | null;
+  /**
+   * Phase 164.6.6.3.3 (D-04, B13): set, present-only, when `joint` was computed but
+   * the paired STRATEGY slice has no dispersion (`dispersion(paired, 0).sd === 0`:
+   * an all-zero leg, or a compounding constant yield whose only spread is float
+   * residue). `beta`, `alpha`, `info_ratio`, `up_capture` and `down_capture` are
+   * then NaN on this block, "—" on the factsheet; `tracking_error`, `corr`, `r2`
+   * and `treynor` are untouched. The strip and §IV read THIS marker to pick the
+   * flat-leg reason, never by testing the values for NaN. The gate lives in
+   * `buildComparatorBlock`, not `jointMetrics`, which the Allocations alpha/beta
+   * widget also calls (T16 pins its beta at +0 for a flat leg).
+   */
+  flatLeg?: true;
   /**
    * Comparator's own cumulative equity (strategy line stays in payload.strategyEquity).
    * Phase 169.5-02 (SC3, D-09): null at an index the comparator has no return for,
@@ -716,23 +745,51 @@ export type FactsheetCommon = {
     insufficientWindow?: boolean;
     degradedMembers?: Array<{ seq: number; venue: string }>;
     /**
-     * Phase 169 review round 1 (SFH H-1) — single-key only, present only when
-     * true: `data_quality_flags.twr_chain_broken`, an INTERIOR chain break. The
-     * stored `cumulative_return` and CAGR then compound only the stretch after
-     * the last break, while the chart, the return windows and Years Observed
-     * cover the whole series. The headline stays the stored value (D-25, SC4);
-     * the page must say which span it covers.
+     * Phase 169 review round 1 (SFH H-1) — present only when true:
+     * `data_quality_flags.twr_chain_broken`, an INTERIOR chain break. The stored
+     * `cumulative_return` and CAGR then compound only the stretch after the last
+     * break, while the chart, the return windows and Years Observed cover the
+     * whole series. The headline stays the stored value (D-25, SC4) when it is
+     * Dated; the page must say which span it covers. Phase 164.6.6.3.3: set on the
+     * composite arm too, both arms through `readHeadlineBasis`.
      */
     twrChainBroken?: boolean;
     /**
-     * Phase 169 review round 1 (SFH H-1) — present only on a chain-broken row
-     * whose persisted cash headline is overlaid: the first day (ISO date) of the
-     * span that headline covers, read from the stored `cash_settlement` series
-     * row (`deriveHeadlineCoversFrom`). `null` when the stored data cannot name
-     * it: a reader must then say the headline covers part of the record without
-     * a date, never invent one.
+     * Phase 164.6.6.3.3 (D-01) — present only on a chain-broken row whose stored
+     * cash headline is overlaid and carries a valid `data_quality_flags.headline_since`:
+     * the first day (ISO date) of the one span that headline covers. It is the ONLY
+     * source of the date (UI-SPEC §7 item 5): the series-derived read is gone. The
+     * `null` member stays in the type for payloads cached before this phase and is
+     * never produced.
      */
     headlineCoversFrom?: string | null;
+    /**
+     * Phase 164.6.6.3.3 (D-03) — present only when true: a chain-broken row with
+     * an absent or malformed `headline_since` (a legacy mixed-basis row). The
+     * read path has set the seven stored headline scalars to null, so the page
+     * shows "—" and says the figures are withheld. Mutually exclusive with a
+     * valid {@link headlineCoversFrom} (UI-SPEC §1.3).
+     */
+    headlineWithheld?: true;
+    /**
+     * Phase 164.6.6.3.3 D-14 (founder, review round 2 R2-03) — why the headline is
+     * withheld, present only on a {@link headlineWithheld} row and only when the
+     * cause is NOT the original one (a chain-broken row with no valid
+     * `headline_since`, which stays absent): `recomputing` (the analytics row is
+     * `computing` or `pending`) or `failed`. The note beside the headline reads
+     * "Headline figures are being recomputed." for the first and says nothing for
+     * the second, because the page already states the failed status once. A
+     * payload cached before this field reads as absent, i.e. the original note.
+     */
+    headlineWithheldCause?: "recomputing" | "failed";
+    /**
+     * Phase 164.6.6.3.3 (D-01) — present only on a chain-broken row whose stored
+     * cash headline is overlaid and that has at least one guard reason (Dated and
+     * Withheld notes both name it, UI-SPEC §1.3): the closed {@link GuardReason}
+     * set, in the UI-SPEC §1.2 order. Public text is built only from
+     * `GUARD_REASON_PHRASES`; no flag name travels.
+     */
+    headlineGuardReasons?: ReadonlyArray<GuardReason>;
     /**
      * Phase 169 review round 1 (SFH M-2) — single-key only, present only when
      * true: the stored headline was computed under a `returns_denominator_config`

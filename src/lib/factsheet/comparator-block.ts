@@ -1,7 +1,7 @@
-import type { ComparatorBlock } from "./types";
+import type { ComparatorBlock, ComparatorSummary, ComputeResult } from "./types";
 import type { CoveredAlignment } from "./align";
 import { compute, cumEq } from "./compute";
-import { jointMetrics, MIN_PAIRED_OBSERVATIONS } from "./joint";
+import { gateFlatLeg, jointMetrics, MIN_PAIRED_OBSERVATIONS } from "./joint";
 import { rollingVol, rollingSharpe, rollingSortino, rollingBeta } from "./rolling";
 
 /**
@@ -65,6 +65,10 @@ export function buildComparatorBlock(
   periodsPerYear = 252,
   // Phase 169.5 D-59 (as amended 2026-09-27): the comparator's own summary basis.
   benchPeriodsPerYear = periodsPerYear,
+  // Phase 164.6.6.3.3 plan 10 (B19): the first date of the span the strategy's headline
+  // figures cover (a Dated row's `headlineCoversFrom`). Null (default) adds nothing, so
+  // every existing call is unchanged.
+  spanStart: string | null = null,
 ): ComparatorBlock {
   const aligned = toAlignment(bench, dates);
   const benchReturns = aligned.returns;
@@ -84,6 +88,35 @@ export function buildComparatorBlock(
   // (`isPastCoverage` in align.ts, the rule the picker caption also calls), never a
   // raw-date compare: a weekday comparator's Friday close covers a weekend last date.
   const pastThrough = aligned.coveredToEnd !== true;
+  const summaryOf = (b: ComputeResult): ComparatorSummary => ({
+    cum_ret: b.cum_ret,
+    cagr: b.cagr,
+    ann_vol: b.ann_vol,
+    sharpe: b.sharpe,
+    sortino: b.sortino,
+    calmar: b.calmar,
+    max_dd: b.max_dd,
+    longest_dd: b.longest_dd,
+    mtd: pastThrough ? null : b.mtd,
+    ytd: pastThrough ? null : b.ytd,
+    p3m: pastThrough ? null : b.p3m,
+    p6m: pastThrough ? null : b.p6m,
+    p1y: pastThrough ? null : b.p1y,
+    win_rate: b.win_rate,
+    profit_factor: b.profit_factor,
+  });
+  // B19: the same summary over the covered returns dated on or after `spanStart` (dates
+  // are ISO, so a string compare is a date compare), on the same comparator basis. The
+  // slice is of the COMPARATOR's covered returns; the strategy leg is not involved.
+  let summarySince: ComparatorSummary | null = null;
+  if (spanStart != null) {
+    const from = coveredDates.findIndex(d => d >= spanStart);
+    if (from >= 0) {
+      summarySince = summaryOf(
+        compute(coveredReturns.slice(from), coveredDates.slice(from), 0, benchPeriodsPerYear),
+      );
+    }
+  }
 
   const pairedIdx: number[] = [];
   for (let i = 0; i < aligned.paired.length; i++) if (aligned.paired[i]) pairedIdx.push(i);
@@ -93,15 +126,15 @@ export function buildComparatorBlock(
   // and §IV render "—" with the widget's reason instead of dropping silently.
   const belowFloor = pairedIdx.length < MIN_PAIRED_OBSERVATIONS;
   const jointWithheld = belowFloor ? { paired: pairedIdx.length, floor: MIN_PAIRED_OBSERVATIONS } : null;
-  const joint =
+  const pairedStrat = pairedIdx.map(i => stratReturns[i]);
+  const rawJoint =
     !belowFloor
-      ? jointMetrics(
-          pairedIdx.map(i => stratReturns[i]),
-          pairedIdx.map(i => benchReturns[i] as number),
-          0,
-          periodsPerYear,
-        )
+      ? jointMetrics(pairedStrat, pairedIdx.map(i => benchReturns[i] as number), 0, periodsPerYear)
       : null;
+  // Phase 164.6.6.3.3 (D-04, B13): a flat strategy leg reads NaN ("—") for beta, alpha,
+  // information ratio and captures, and the block carries `flatLeg`. The gate is the
+  // shared `gateFlatLeg` (see joint.ts), the one `computeV2Joint` also calls.
+  const { joint, flatLeg } = gateFlatLeg(rawJoint, pairedStrat);
 
   const coveredEquity = cumEq(coveredReturns);
   const cumulative = scatterCovered(benchReturns, coveredEquity);
@@ -132,27 +165,11 @@ export function buildComparatorBlock(
   return {
     name: label,
     shortName: short,
-    summary: benchSummary
-      ? {
-          cum_ret: benchSummary.cum_ret,
-          cagr: benchSummary.cagr,
-          ann_vol: benchSummary.ann_vol,
-          sharpe: benchSummary.sharpe,
-          sortino: benchSummary.sortino,
-          calmar: benchSummary.calmar,
-          max_dd: benchSummary.max_dd,
-          longest_dd: benchSummary.longest_dd,
-          mtd: pastThrough ? null : benchSummary.mtd,
-          ytd: pastThrough ? null : benchSummary.ytd,
-          p3m: pastThrough ? null : benchSummary.p3m,
-          p6m: pastThrough ? null : benchSummary.p6m,
-          p1y: pastThrough ? null : benchSummary.p1y,
-          win_rate: benchSummary.win_rate,
-          profit_factor: benchSummary.profit_factor,
-        }
-      : null,
+    summary: benchSummary ? summaryOf(benchSummary) : null,
+    ...(spanStart != null ? { summarySince } : {}),
     joint,
     jointWithheld,
+    ...(flatLeg ? { flatLeg: true as const } : {}),
     cumulative,
     cumVsBench,
     dailyReturns: benchReturns.slice(),

@@ -5,6 +5,8 @@ import { MTM_DAILY_RETURNS_SERIES_KIND, SMOOTHED_MTM_DAILY_RETURNS_SERIES_KIND }
 import { deriveSegmentMarkers } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { BASIS_KPI_MAP, hasBasisHeadline } from "./basis-metrics";
+import { headlineVerdict, readHeadlineBasis, storedCashHeadlineGate } from "./headline-basis";
+import type { StoredCashHeadlineGate } from "./headline-basis";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { attributionBasisFromConfig } from "@/lib/composite/compositeAttribution";
 import { isComputedAnalytics, isRankableAnalyticsRow } from "@/lib/closed-sets";
@@ -191,9 +193,10 @@ export type FactsheetSeriesRead =
 
 /**
  * The `strategy_analytics_series.kind` of the persisted cash series row
- * (`basis_series.KIND_CASH_SETTLEMENT` in the analytics service). Read only on a
- * chain-broken single-key row, to name the span its stored headline covers
- * (Phase 169 review round 1, SFH H-1).
+ * (`basis_series.KIND_CASH_SETTLEMENT` in the analytics service). Read for its
+ * `conventions` echo only ({@link readCashConventions}). Since Phase 164.6.6.3.3
+ * it no longer names a chain-broken headline's span: that date comes from
+ * `data_quality_flags.headline_since` alone.
  */
 const CASH_SETTLEMENT_SERIES_KIND = "cash_settlement" as const;
 
@@ -341,6 +344,12 @@ export async function readCompositeFactsheet(
           insufficient_window?: unknown;
           degraded_members?: unknown;
           cumulative_method?: unknown;
+          twr_chain_broken?: unknown;
+          headline_since?: unknown;
+          negative_nav_guard?: unknown;
+          dust_nav_guard?: unknown;
+          flow_dominated_guard?: unknown;
+          pnl_dominated_guard?: unknown;
         }
       | null
       | undefined;
@@ -396,6 +405,17 @@ export async function readCompositeFactsheet(
     (metricsByBasis as { smoothed_mtm?: unknown } | undefined)?.smoothed_mtm,
   );
   const markers = deriveSegmentMarkers(dqf);
+  // Phase 164.6.6.3.3 (D-01, D-03): the span a chain-broken stored headline covers
+  // and the reasons it broke, from the ONE marker, through the ONE applier the
+  // single-key arm also uses. It runs AFTER the gate above, which read the RAW
+  // object, so a withheld composite is still buildable (not the still-computing
+  // placeholder). A withheld headline is a redacted COPY; the stored object is
+  // never mutated.
+  const cashHeadline = metricsByBasis?.cash_settlement as Record<string, number | null>;
+  const applied = applyHeadlineBasis(cashHeadline, dqf, { composite: true });
+  const effectiveMetricsByBasis: BuildFactsheetOpts["metricsByBasis"] = applied.redacted
+    ? { ...metricsByBasis, cash_settlement: applied.headline }
+    : metricsByBasis;
 
   // MTM-04 (Phase 103): read the persisted MTM daily series ONLY when the scalar
   // MTM basis is available (skip the extra roundtrip for every non-MTM composite);
@@ -434,7 +454,7 @@ export async function readCompositeFactsheet(
       dayBasis,
       segmentBoundaries: markers.segmentBoundaries,
       missingSegments: markers.missingSegments,
-      metricsByBasis,
+      metricsByBasis: effectiveMetricsByBasis,
       ...(mtmSeries ? { mtmSeries } : {}),
       ...(smoothedSeries ? { smoothedSeries } : {}),
       // HARD-04 (#67): server-truth short-window flag. Strict `=== true`
@@ -448,6 +468,8 @@ export async function readCompositeFactsheet(
         // renders nothing (T-92-05 / T-93-03-02). The server `reason` enum is dropped
         // — the components own the user copy.
         degradedMembers: parseDegradedMembers(dqf?.degraded_members),
+        // Phase 164.6.6.3.3: present-only, so a clean row's opts are unchanged.
+        ...applied.quality,
       },
       mtmGate: {
         available: mtmAvailable,
@@ -462,6 +484,86 @@ export async function readCompositeFactsheet(
       },
     },
   };
+}
+
+/**
+ * Phase 164.6.6.3.3 (D-01, D-03; UI-SPEC §1.3) — the ONE place a stored cash
+ * headline is dated or withheld, called by the composite arm
+ * ({@link readCompositeFactsheet}) and the single-key arm
+ * ({@link readSingleKeyBasisOpts}) so they cannot diverge.
+ *
+ * Call it only when a stored cash headline IS overlaid: when the TypeScript
+ * computes the whole record, no stored figure is shown and there is nothing to
+ * date or withhold.
+ *
+ * On a chain-broken row (`readHeadlineBasis`):
+ *   - a valid `headline_since` → Dated: the figures are kept, and `quality`
+ *     carries `headlineCoversFrom` (and the guard reasons);
+ *   - an absent or malformed one → Withheld: a COPY of the headline has each
+ *     {@link BASIS_KPI_MAP} server key set to null (the strict overlay renders a
+ *     stored null "—"), and `quality` carries `headlineWithheld: true`.
+ * `quality` always carries `twrChainBroken: true` on a chain-broken row, and
+ * carries exactly one of `headlineWithheld` or `headlineCoversFrom`: the third
+ * arm (neither) cannot come out of this function. It CAN arise in the caller,
+ * though: a chain-broken single-key row whose stored headline is not applied
+ * (a raw `cash_settlement` object, unprojected keys) never reaches this
+ * function at all, and used to leave the page on the whole-record headline with
+ * no note (SFH-01). That caller now passes `options.gate` (the refusal) and the row's
+ * `computationStatus`, which make the row Withheld whatever its `headline_since`
+ * says (D-14: and name the cause, `headlineWithheldCause`), because there is no stored
+ * headline for a date to describe. A clean row returns the headline itself and an
+ * empty `quality`, so its opts are byte-identical to before.
+ *
+ * WR-02 (review 164.6.6.3.3): `options.composite` drops the named guard reasons.
+ * A composite's `negative_nav_guard`, `dust_nav_guard`, `flow_dominated_guard`
+ * and `pnl_dominated_guard` are a union of member flags computed on each
+ * member's UNCLIPPED history, and they are bare booleans with no dated span, so
+ * neither Python nor this reader can tell whether the cause lies inside the
+ * window the composite shows (and a flag from an earlier stitch outlives its
+ * cause). Naming one on a public page could name a cause the shown series never
+ * contains. `quality` therefore carries no `headlineGuardReasons` for a
+ * composite, and every consumer (strip, Main Metrics) falls to the existing
+ * no-reason phrase, "a break in the return chain" (UI-SPEC 1.2). A single-key
+ * row's flags are judged on its own series, so it keeps naming its reasons.
+ */
+export function applyHeadlineBasis(
+  headline: Record<string, number | null>,
+  dqf: unknown,
+  options: {
+    /** The stored-headline gate and the row's status; absent means "applicable" (the composite arm). */
+    gate?: StoredCashHeadlineGate;
+    computationStatus?: unknown;
+    composite?: boolean;
+  } = {},
+): {
+  headline: Record<string, number | null>;
+  /** True when {@link headline} is a redacted copy (the Withheld arm). */
+  redacted: boolean;
+  quality: Pick<
+    NonNullable<BuildFactsheetOpts["dataQuality"]>,
+    "twrChainBroken" | "headlineCoversFrom" | "headlineWithheld" | "headlineWithheldCause" | "headlineGuardReasons"
+  >;
+} {
+  // SFH-R2-01: the verdict is the shared `headlineVerdict`, the same call the OG
+  // card makes, so the two surfaces cannot drift. `options.gate` is the stored
+  // headline's applicability (see the docblock above); absent, it is applicable.
+  const verdict = headlineVerdict(dqf, options.gate ?? { applicable: true }, options.computationStatus);
+  if (verdict.kind === "clean") return { headline, redacted: false, quality: {} };
+  const basis = readHeadlineBasis(dqf);
+  const withheld = verdict.kind === "withheld";
+  const quality: ReturnType<typeof applyHeadlineBasis>["quality"] = {
+    twrChainBroken: true,
+    ...(basis.reasons.length > 0 && options.composite !== true ? { headlineGuardReasons: basis.reasons } : {}),
+    ...(verdict.kind === "dated" ? { headlineCoversFrom: verdict.since } : {}),
+    ...(withheld ? { headlineWithheld: true as const } : {}),
+    // D-14 (R2-03): the cause rides only when it is not the original one, so a
+    // legacy Withheld payload keeps its shape (absent means "unmeasured").
+    ...(verdict.kind === "withheld" && verdict.cause !== "unmeasured" ? { headlineWithheldCause: verdict.cause } : {}),
+  };
+  if (!withheld) return { headline, redacted: false, quality };
+  const redacted: Record<string, number | null> = { ...headline };
+  for (const { serverKey } of BASIS_KPI_MAP) redacted[serverKey] = null;
+  return { headline: redacted, redacted: true, quality };
 }
 
 /**
@@ -710,9 +812,10 @@ export function singleKeyBasisOpts(
  * The factsheet resolve stage's G1 gate already refuses a non-computed row, and
  * since Phase 169.1 plan 01 every page builds through that stage, so no page
  * reaches the not-rankable arm today; it stays as this owner's own guard. It adds no read for a clean
- * row, so the admin thunk posture above is unchanged there; a chain-broken row
- * (review round 1, SFH H-1) reads its stored `cash_settlement` series once, to name
- * the span its headline covers, and returns `dataQuality` with that start date.
+ * row, so the admin thunk posture above is unchanged there. A chain-broken row's
+ * overlaid headline is dated or withheld by {@link applyHeadlineBasis} from the
+ * flags alone (Phase 164.6.6.3.3, D-01, D-03); the stored cash series is no longer
+ * read to name its span.
  * Omitting `persistedRow` keeps the pre-169 result.
  *
  * Review round 1 (SFH H-2), re-routed by Phase 169.1 (D-83, D-30): the Python
@@ -738,10 +841,8 @@ export function singleKeyBasisOpts(
  * event storm 167.2.1-REVIEW-R2 WR-01 removed. A build captures once.
  *
  * @throws {CompositeSeriesReadError} when a gated MTM or smoothed series read FAILS
- *          (review round 1, WR-05), or when the chain-broken row's `cash_settlement`
- *          series read FAILS (review round 1, SFH H-1; `read: "cash_settlement"`). The
- *          factsheet resolve stage answers it `read_error`, which the discovery page
- *          shows as its read-failure sentence.
+ *          (review round 1, WR-05). The factsheet resolve stage answers it
+ *          `read_error`, which the discovery page shows as its read-failure sentence.
  */
 export async function readSingleKeyBasisOpts(
   getAdmin: () => SupabaseClient,
@@ -752,6 +853,11 @@ export async function readSingleKeyBasisOpts(
         insufficient_window?: unknown;
         twr_chain_broken?: unknown;
         cumulative_method?: unknown;
+        headline_since?: unknown;
+        negative_nav_guard?: unknown;
+        dust_nav_guard?: unknown;
+        flow_dominated_guard?: unknown;
+        pnl_dominated_guard?: unknown;
       }
     | null
     | undefined,
@@ -817,42 +923,62 @@ export async function readSingleKeyBasisOpts(
   // `leverageEligibleFor` withholds the what-if, as it does for a composite.
   if (arithmetic || activeDays) addedQuality.returnsConventionOverride = true;
   const captureDefects = options.captureDefects ?? true;
+  // SFH-R2-01: the structural gate is decided ONCE, by the helper the OG card also
+  // asks (`storedCashHeadlineGate`), and its answer feeds both the headline built
+  // from the row and the Withheld verdict below.
+  const gate = storedCashHeadlineGate(persistedRow, metricsJsonByBasis, computationStatus);
   const cashHeadline = persistedCashHeadline(
     strategyId,
     persistedRow,
-    metricsJsonByBasis,
+    gate,
     computationStatus,
     captureDefects,
   );
-  const withHeadline = cashHeadline
-    ? { ...opts, metricsByBasis: { ...(opts.metricsByBasis ?? {}), cash_settlement: cashHeadline } }
-    : opts;
-  // Review round 1 (SFH H-1): on a chain-broken row the stored headline covers only
-  // the stretch after the last break, and it is still the value shown (D-25, SC4).
-  // Name the start of that span from the stored cash series, so the page can say it.
-  // Review round 2 (WR-R2-03): the read goes through the MED-1 family's single-key
-  // gate, so the DONE check sits at the read site and not only upstream in
-  // `persistedCashHeadline` (which implies it today).
-  if (
-    cashHeadline &&
-    dqf?.twr_chain_broken === true &&
-    shouldReadSingleKeyCashSeries(metricsJsonByBasis, computationStatus)
-  ) {
-    const headlineCoversFrom = await readHeadlineCoversFrom(resolveAdmin(), strategyId);
-    if (headlineCoversFrom === null) {
-      console.warn(
-        "[factsheet] readSingleKeyBasisOpts — a chain-broken headline's covered span cannot be named from the stored cash series",
-        { strategyId },
+  // Phase 164.6.6.3.3 (D-01, D-03): a chain-broken row's stored headline either
+  // covers one marked span (Dated: kept, span and reasons named) or is a legacy
+  // mixed-basis row (Withheld: the seven scalars read null). The same applier as
+  // the composite arm; the date comes ONLY from `headline_since` (UI-SPEC §7 item
+  // 5), so the stored cash series is no longer read to name the span.
+  let shownHeadline = cashHeadline;
+  if (cashHeadline) {
+    const applied = applyHeadlineBasis(cashHeadline, dqf);
+    shownHeadline = applied.headline;
+    Object.assign(addedQuality, applied.quality);
+  } else if (dqf?.twr_chain_broken === true) {
+    // SFH-01 (D-03): the row is chain-broken but its stored headline is NOT applied
+    // (a raw `cash_settlement` object, unprojected keys, or a row that is not
+    // rankable). The page would then build the TypeScript whole-record headline,
+    // which compounds across the very break the flag names, and
+    // `singleKeyDataQuality` carries the flag alone, so no note would speak. There
+    // is no stored headline for a `headline_since` to describe, so the row is
+    // Withheld, the same verdict the OG card reaches (`headlineVerdict`, SFH-R2-01):
+    // the seven scalars read null and the note renders.
+    // `gate` is never applicable here (the headline is built from an applicable
+    // gate and a row), so the verdict is Withheld; it carries the D-14 cause.
+    const applied = applyHeadlineBasis({}, dqf, { gate, computationStatus });
+    shownHeadline = applied.headline;
+    Object.assign(addedQuality, applied.quality);
+    // Review round 2 (LOW): ONE log per defect, through Sentry like the
+    // neighbouring missing_keys branch. A raw object and unprojected keys were
+    // already logged by `persistedCashHeadline`, and a row that is not rankable is
+    // an expected state (a run in flight or failed) that the status surfaces
+    // already show, so neither logs again. Only a caller that passed NO row is a
+    // defect nothing else has reported.
+    if (!gate.applicable && gate.reason === "no_row") {
+      console.error(
+        "[factsheet] readSingleKeyBasisOpts — a chain-broken single-key row was read without its analytics row; withholding the headline figures (D-03)",
+        { strategyId, reason: "chain_broken_no_row" },
       );
       if (captureDefects) {
-        captureToSentry(new Error("factsheet: chain-broken headline span cannot be named"), {
-          level: "warning",
-          tags: { stage: "factsheet-persisted-headline", reason: "covered_span_unnamed", strategy_id: strategyId },
+        captureToSentry(new Error("factsheet: chain-broken single-key row read without its analytics row"), {
+          tags: { stage: "factsheet-persisted-headline", reason: "chain_broken_no_row", strategy_id: strategyId },
         });
       }
     }
-    addedQuality.headlineCoversFrom = headlineCoversFrom;
   }
+  const withHeadline = shownHeadline
+    ? { ...opts, metricsByBasis: { ...(opts.metricsByBasis ?? {}), cash_settlement: shownHeadline } }
+    : opts;
   if (Object.keys(addedQuality).length === 0) return withHeadline;
   return { ...withHeadline, dataQuality: { ...singleKeyDataQuality(dqf), ...addedQuality } };
 }
@@ -866,7 +992,7 @@ export async function readSingleKeyBasisOpts(
  * caller's own visibility gate; this read widens nothing.
  *
  * It CHOOSES a convention; it does not decide whether the factsheet builds. So,
- * unlike {@link readMtmSeries} and {@link readHeadlineCoversFrom}, it never throws
+ * unlike {@link readMtmSeries}, it never throws
  * {@link CompositeSeriesReadError}: an `error` result AND a thrown query chain
  * (a client that does not answer this query, a network fault) both log a
  * `console.error` and answer `conventions: null`, and {@link resolveMetricsConventions}
@@ -1036,38 +1162,34 @@ export function resolveMetricsConventions(input: {
 function persistedCashHeadline(
   strategyId: string,
   persistedRow: Record<string, unknown> | null | undefined,
-  metricsJsonByBasis: unknown,
+  gate: StoredCashHeadlineGate,
   computationStatus: unknown,
   captureDefects: boolean,
 ): Record<string, number | null> | undefined {
-  if (persistedRow == null) return undefined;
-  if (!isRankableAnalyticsRow({ computation_status: computationStatus as string | null | undefined })) {
-    return undefined;
-  }
-  if (metricsJsonByBasis !== null && typeof metricsJsonByBasis === "object" && !Array.isArray(metricsJsonByBasis)) {
-    const rawCash = (metricsJsonByBasis as Record<string, unknown>).cash_settlement;
-    if (rawCash !== null && typeof rawCash === "object" && !Array.isArray(rawCash)) {
+  // The structural gate itself is `storedCashHeadlineGate` (headline-basis.ts),
+  // shared with the OG card; this function owns only what each refusal LOGS.
+  if (gate.applicable === false) {
+    if (gate.reason === "raw_cash_settlement") {
       console.warn(
         "[factsheet] readSingleKeyBasisOpts — a single-key row carries a raw metrics_json_by_basis.cash_settlement object; keeping the computed headline",
         { strategyId },
       );
-      return undefined;
-    }
-  }
-  const missing = BASIS_KPI_MAP.filter(({ serverKey }) => !(serverKey in persistedRow)).map((k) => k.serverKey);
-  if (missing.length > 0) {
-    console.error(
-      "[factsheet] readSingleKeyBasisOpts — the analytics select did not project the persisted headline; keeping the computed one",
-      { strategyId, reason: "missing_keys", missing },
-    );
-    if (captureDefects) {
-      captureToSentry(new Error("factsheet: persisted headline not projected (missing_keys)"), {
-        tags: { stage: "factsheet-persisted-headline", reason: "missing_keys", strategy_id: strategyId },
-        extra: { missing },
-      });
+    } else if (gate.reason === "missing_keys") {
+      const missing = gate.missing ?? [];
+      console.error(
+        "[factsheet] readSingleKeyBasisOpts — the analytics select did not project the persisted headline; keeping the computed one",
+        { strategyId, reason: "missing_keys", missing },
+      );
+      if (captureDefects) {
+        captureToSentry(new Error("factsheet: persisted headline not projected (missing_keys)"), {
+          tags: { stage: "factsheet-persisted-headline", reason: "missing_keys", strategy_id: strategyId },
+          extra: { missing },
+        });
+      }
     }
     return undefined;
   }
+  if (persistedRow == null) return undefined;
   const cumulativeReturn = persistedRow.cumulative_return;
   if (typeof cumulativeReturn !== "number" || !Number.isFinite(cumulativeReturn)) {
     const nonFinite = BASIS_KPI_MAP.filter(({ serverKey }) => {
@@ -1181,11 +1303,12 @@ export function shouldReadSingleKeySmoothedSeries(
  * tripwire is NOT — it misses a reader imported via a constant).
  *
  * 169 review round 2 (WR-R2-03), the contract as it stands: this function still
- * has no production caller. The first production reader of a `cash_settlement`
- * series row is the single-key H-1 reader, {@link readHeadlineCoversFrom}, and it
- * routes through the family's single-key member,
- * {@link shouldReadSingleKeyCashSeries}, not through this one. This one cannot
- * serve it: its object half requires a raw `metrics_json_by_basis.cash_settlement`
+ * has no production caller. The one production reader of a `cash_settlement`
+ * series row was the single-key H-1 span reader, which routed through the family's
+ * single-key member, {@link shouldReadSingleKeyCashSeries}, not through this one;
+ * Phase 164.6.6.3.3 removed that reader (the span now comes from `headline_since`),
+ * so that member is currently without a production caller too. This one cannot
+ * serve a single-key row: its object half requires a raw `metrics_json_by_basis.cash_settlement`
  * object, which a single-key row never carries (SC-4), so it is false on every row
  * the H-1 reader targets. The invariant both members enforce is the one this
  * block exists for, the DONE gate at the READ point. 105-FOLD-DECISION.md has no
@@ -1214,8 +1337,9 @@ export function shouldReadCashSettlementSeries(
 
 /**
  * 169 review round 2 (WR-R2-03) — the SINGLE-KEY member of the MED-1 predicate
- * family ({@link shouldReadCashSettlementSeries}), and the gate the H-1 reader
- * ({@link readHeadlineCoversFrom}) reads through. True ONLY when the status is
+ * family ({@link shouldReadCashSettlementSeries}), and the gate any single-key
+ * reader of the cash series row must read through (its one caller, the H-1 span
+ * reader, was removed in Phase 164.6.6.3.3). True ONLY when the status is
  * terminal success (the same DONE half, so a series row a failure arm left behind
  * is never read) AND `metrics_json_by_basis` carries NO raw `cash_settlement`
  * object. A single-key row never carries one (SC-4); a row that does is a

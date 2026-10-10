@@ -1381,6 +1381,57 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### 164.6.6.3.3-WAVE5-RECOMPUTE — the guarded rows' headlines are withheld until the Wave 5 recompute writes headline_since (booked 2026-10-09, Phase 164.6.6.3.3)
+
+**Why it is open.** Phase 164.6.6.3.3 plan 01 changes the stored metrics of a guarded row (every
+headline stat on one post-break suffix, with `data_quality_flags.headline_since` stored). Plan 02
+withholds a legacy chain-broken row's headline ("—") until `headline_since` exists. Until a recompute
+writes it, those rows read blank. The phase names the recompute and does not run it ("FACTSHEETTRUTH
+item 2"); the consolidated Wave 5 PROD recompute owns running it. Same id and acceptance reading as the
+`### Phase 164.6.6.3.3` ROADMAP section.
+
+**The set (counts only, re-measured read-only on PROD behind the marker query, 2026-10-09).** The union
+of 11 `strategy_analytics` rows: 7 with `twr_chain_broken: true` (6 `private`, 1 `draft`, none published,
+none with `headline_since`) and 4 guard-only rows (a guard flag, no `twr_chain_broken`). This equals
+RESEARCH 1.8. The 7 are the rows whose stored values change; the 4 should be a no-op, and the dry-run
+diff proves it.
+
+**Trigger.** The merge's analytics deploy.
+
+**Order.** This phase merges; main CI is green; the analytics deploy is confirmed by `/health`
+`git_sha` containing the merge; then the recompute runs, inside the Wave 5 consolidated PROD recompute.
+
+**Acceptance reading.** Zero rows with `twr_chain_broken: true` and no `headline_since`; a dry-run diff
+shows the 4 guard-only rows' stored scalars unchanged; Quantum Drift then reads "Measured since Apr 18,
+2026" (D-12).
+
+**Owner: the Wave 5 consolidated PROD recompute.**
+
+### 164.6.6.3.3-COMPARE-SPAN-SOURCE — /compare names its "Measured since" span from the stored cash series, the factsheet from `headline_since` (booked 2026-10-10, Phase 164.6.6.3.3 release)
+
+**Why it is open.** Phase 164.6.6.3.3 (FACTSHEETTRUTH) removed `deriveHeadlineCoversFrom` and
+`readHeadlineCoversFrom` from `src/lib/factsheet/composite-read-path.ts`, because the factsheet's span
+now comes from `data_quality_flags.headline_since`, written by both analytics writers. Phase 170.2's
+`/compare` page (`src/app/(dashboard)/compare/page.tsx`) calls `readHeadlineCoversFrom`, so merging
+`main` KEPT both helpers. `/compare` therefore still derives its span from the stored cash series (the
+last gap span of a densified broker series), while the factsheet reads `headline_since`. On a legacy
+chain-broken row the two can disagree until the Wave 5 recompute (`164.6.6.3.3-WAVE5-RECOMPUTE`) writes
+`headline_since`. After it they should agree on a densified broker series, but nothing asserts it, and a
+row the series reader cannot date (a sparse CSV series, a row written before Phase 105) reads
+"undatable" on `/compare` where the factsheet is Dated.
+
+**Owner: none routed.** The next phase that touches `/compare` owns it; book with `/gsd-phase --insert`
+when picked up.
+**Trigger:** the next phase that edits `/compare/page.tsx` or its chart overlay, OR a reading in which
+`/compare` and the factsheet name different "Measured since" dates for one strategy, whichever is first.
+**Gate (what closes it):** `/compare` reads the same span source as the factsheet (`headline_since`
+through `readHeadlineBasis`), `readHeadlineCoversFrom` and `deriveHeadlineCoversFrom` are deleted, and a
+test that names one strategy on both surfaces fails first when they diverge. It is seen RED with the
+`/compare` read pointed back at the stored series, then restored from a byte backup.
+⛔ **Not a close:** pinning the two helpers' current outputs, or copying the factsheet's date into the
+`/compare` payload by hand for one strategy. Deleting the helpers without moving `/compare` to the new
+source would turn every chain-broken `/compare` row "undatable".
+
 ### CONTACT-SUPPORT-POINTERS-01 — fifteen user-facing strings tell a user to "contact support" without saying how (booked 2026-10-07, Phase 164.6.6.3.5)
 
 **Why it is open.** These strings send a user to "contact support" and name no channel. Before Phase

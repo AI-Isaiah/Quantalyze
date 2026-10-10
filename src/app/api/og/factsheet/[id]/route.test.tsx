@@ -14,8 +14,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  *   O1  — SC1-OG wiring: a returns_series-ONLY analytics embed reaches
  *         computeOgHeadline as the DIFFERENCED series (N−1 rows), not [] and
  *         not the raw wealth index
- *   O1b — SC1-OG outcome: with a real-length track (≥ 30 obs spanning > 1
- *         calendar year) in returns_series ONLY, the headline metrics are
+ *   O1b — SC1-OG outcome: with a real-length track (spanning > 1 calendar
+ *         year) in returns_series ONLY, the headline metrics are
  *         FINITE and the card renders real numbers instead of "—". This is the
  *         assertion that fails on the pre-147 route
  *   O2  — a populated daily_returns still wins (resolver direct-first contract;
@@ -202,8 +202,8 @@ const WEALTH_INDEX = [
 
 /**
  * A real-length wealth curve: 400 calendar days from 2024-01-01, so the
- * differenced series clears BOTH headline gates (≥ 30 observations for Sharpe /
- * Max DD, and > 0.95 calendar years with positive cumulative growth for CAGR).
+ * differenced series clears the card's one display rule (a span over 0.95
+ * calendar years, for CAGR; Sharpe and Max DD have no card-only floor, D-06).
  * Deterministic by construction — a fixed drift plus a fixed oscillation, no
  * randomness — so the finiteness assertions can never flake.
  */
@@ -365,8 +365,44 @@ describe("GET /api/og/factsheet/[id]", () => {
   it("O1e — review round 1 CR-01: a chain-broken row's stored CAGR is hidden on the card; Sharpe and Max DD still show", async () => {
     // Same stored figures as O1d, plus the flag the analytics service stamps
     // when the stored CAGR covers only the suffix after an interior TWR chain
-    // break. The 400-day series passes the 0.95-year gate, so only the flag can
-    // hide the figure.
+    // break, and the `headline_since` it stamps with it (a Dated row, D-01). The
+    // 400-day series passes the 0.95-year rule, so only the flag can hide the
+    // figure.
+    STATE.strategyRow!.strategy_analytics = [
+      {
+        daily_returns: null,
+        returns_series: LONG_WEALTH_INDEX,
+        computation_status: "complete",
+        sharpe: 2.34,
+        cagr: 0.567,
+        max_drawdown: -0.089,
+        // SFH-R2-01: the other four stored headline keys, so the page's own
+        // applicability gate passes and this stays a genuine Dated row.
+        cumulative_return: 0.4,
+        volatility: 0.12,
+        sortino: 2.1,
+        calmar: 3,
+        metrics_json_by_basis: null,
+        data_quality_flags: { twr_chain_broken: true, headline_since: "2024-06-01" },
+      },
+    ];
+    const { GET } = await import("./route");
+    await GET(makeRequest(), ctx(PUBLISHED_ID));
+
+    expect(STATE.observed.select).toMatch(/strategy_analytics \([^)]*\bdata_quality_flags\b/);
+    expect(headlineCalls).toHaveLength(1);
+    expect(headlineCalls[0].persisted).toMatchObject({
+      data_quality_flags: { twr_chain_broken: true, headline_since: "2024-06-01" },
+    });
+
+    const strings = latestCardStrings();
+    expect(strings).not.toContain("+56.7%");
+    expect(strings).toContain("2.34");
+    expect(strings).toContain("-8.9%");
+    expect(strings.filter(s => s === "—")).toHaveLength(1);
+  });
+
+  it("O1f — D-03: a legacy chain-broken row (no headline_since) prints three dashes, exactly as the factsheet withholds it", async () => {
     STATE.strategyRow!.strategy_analytics = [
       {
         daily_returns: null,
@@ -381,17 +417,40 @@ describe("GET /api/og/factsheet/[id]", () => {
     const { GET } = await import("./route");
     await GET(makeRequest(), ctx(PUBLISHED_ID));
 
-    expect(STATE.observed.select).toMatch(/strategy_analytics \([^)]*\bdata_quality_flags\b/);
     expect(headlineCalls).toHaveLength(1);
-    expect(headlineCalls[0].persisted).toMatchObject({
-      data_quality_flags: { twr_chain_broken: true },
-    });
-
     const strings = latestCardStrings();
+    expect(strings).not.toContain("2.34");
     expect(strings).not.toContain("+56.7%");
-    expect(strings).toContain("2.34");
-    expect(strings).toContain("-8.9%");
-    expect(strings.filter(s => s === "—")).toHaveLength(1);
+    expect(strings).not.toContain("-8.9%");
+    expect(strings.filter(s => s === "—")).toHaveLength(3);
+  });
+
+  it("O1g — SFH-R2-01: a chain-broken Dated row whose stored headline is NOT applicable (a raw cash_settlement object) prints three dashes, as the page withholds it", async () => {
+    STATE.strategyRow!.strategy_analytics = [
+      {
+        daily_returns: null,
+        returns_series: LONG_WEALTH_INDEX,
+        computation_status: "complete",
+        sharpe: 2.34,
+        cagr: 0.567,
+        max_drawdown: -0.089,
+        cumulative_return: 0.4,
+        volatility: 0.12,
+        sortino: 2.1,
+        calmar: 3,
+        metrics_json_by_basis: { cash_settlement: { sharpe: 9 } },
+        data_quality_flags: { twr_chain_broken: true, headline_since: "2024-06-01" },
+      },
+    ];
+    const { GET } = await import("./route");
+    await GET(makeRequest(), ctx(PUBLISHED_ID));
+
+    expect(STATE.observed.select).toMatch(/\bmetrics_json_by_basis\b/);
+    const strings = latestCardStrings();
+    expect(strings).not.toContain("2.34");
+    expect(strings).not.toContain("+56.7%");
+    expect(strings).not.toContain("-8.9%");
+    expect(strings.filter(s => s === "—")).toHaveLength(3);
   });
 
   it("O2 — a populated daily_returns still wins over returns_series (direct-first contract)", async () => {

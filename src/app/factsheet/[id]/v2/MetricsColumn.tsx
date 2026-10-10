@@ -2,11 +2,13 @@
 
 import type { ReactNode } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
-import type { FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
+import type { ComparatorBlock, ComparatorSummary, FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
 import { formatRecordLength } from "@/lib/factsheet/record-length";
+import { recordCoversWindow } from "@/lib/factsheet/compute";
 import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
-import { pairedFloorReason } from "@/lib/factsheet/joint";
-import { benchmarkWithheldReason, withUnit } from "@/lib/factsheet/returns-unit";
+import { flatLegReason, pairedFloorReason } from "@/lib/factsheet/joint";
+import { joinGuardPhrases } from "@/lib/factsheet/headline-basis";
+import { benchmarkWithheldReason, nativeUnitReason, withUnit } from "@/lib/factsheet/returns-unit";
 import { usePayload, useActiveComparator } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, useWindowedView, type Basis, type RangeScope } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel, FULL_HISTORY_NOTE, ScopeNote } from "./AnalyticalPanels";
@@ -14,81 +16,180 @@ import { StyleDriftPanel, PeerPercentilePanel, OwnBookDeltaPanel } from "./Batch
 import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentMandatePanel } from "./MandatePanels";
 
 /**
- * Phase 169 review round 1 (SFH H-1) — the caveat for a chain-broken single-key
- * row, authored once and rendered beside the headline (the KPI strip in
- * FactsheetView.tsx) and in the two panels here that state those figures.
+ * Phase 164.6.6.3.3 FACTSHEETTRUTH (D-01, D-03, UI-SPEC 1.3) — the note that says
+ * which span the headline figures cover. It replaces Phase 169's SFH H-1 caveat
+ * (`headlineCoverageCaveat`), which named three figures and only for a single key.
  *
- * Python compounds the stored `cumulative_return` and annualizes CAGR over the
- * record after its last interior break (`nav_twr._last_interior_break_suffix`),
- * and Calmar is that CAGR over the max drawdown. The page shows those stored
- * values (D-25, SC4), while the chart, the return windows and Years Observed
- * cover the whole series, so the page says which span the three cover.
+ * Since plan 01 every stored headline stat is computed on ONE post-break suffix
+ * (`headline_since`), and plan 02 carries the date and the closed guard-reason set
+ * into `dataQuality` on both the composite and the single-key arm. So the note is
+ * the same for both, and it names the span in each slot that shows headline
+ * figures. The sentences are UI-SPEC 1.3, verbatim; `{D}`, `{R}` and `{B}` are the
+ * only slots.
  *
- * Returns null (no caveat) unless the STORED headline is the one shown:
- *   - `twrChainBroken` is true;
- *   - `headlineCoversFrom` is present. The resolve stage sets it, to a date or
- *     `null`, exactly when it overlaid the persisted cash headline on a
- *     chain-broken row. Absent means the headline was computed in TypeScript
- *     over the whole series, and a caveat would be false;
- *   - the basis is cash. Under mark_to_market or smoothed the figures come
- *     from that basis's series, not from the stored cash headline.
- * With a date it names the date; with `null` it says the same without one. It
- * never invents a date.
+ * Gates (UI-SPEC 1.1): the basis is cash settlement (under mark-to-market or
+ * smoothed the figures come from that basis's series, not the stored headline),
+ * and `twrChainBroken === true`. Then, once (UI-SPEC 1.3):
+ *   1. `headlineWithheld === true`  -> "withheld": a legacy mixed-basis row whose
+ *      figures the read path has already nulled. Strip and Main Metrics only.
+ *      D-14 (R2-03): `headlineWithheldCause` picks the sentence: "recomputing"
+ *      reads "Headline figures are being recomputed."; "failed" has no note (the
+ *      page's failed status line is the one cause); absent is the original.
+ *   2. a valid `headlineCoversFrom` -> "dated": the figures are shown, the span is named.
+ *   3. otherwise                    -> null. The read path never produces this
+ *      state (a unit test pins it); it is not a rendering state.
+ * There is no full-history undated variant, and the date is never invented.
  *
- * Round 2, IN-R2-02: `subject` names the figures by the labels the calling
- * surface shows (the Cumulative Return Metrics panel calls the stored
- * cumulative return "Since Inception" and shows no Calmar; the KPI strip says
- * "Cum. Return"), so a reader never has to infer that two names are one number.
+ * The text carries no warning glyph. The slot renders `WITHHELD_GLYPH` on the
+ * "withheld" variant only (B17); a Dated note is a steady-state statement.
  */
-export function headlineCoverageCaveat(
+export type HeadlineNoteSlot = "strip" | "stripRelative" | "main" | "returns" | "maxdd" | "cumulative";
+
+export interface HeadlineNote {
+  variant: "dated" | "withheld";
+  text: string;
+}
+
+/** The warning glyph (U+26A0 and a space): rendered on the "withheld" variant only. */
+const WITHHELD_GLYPH = "⚠ ";
+
+/** Muted for a Dated note (a broken chain is permanent), amber for a Withheld one (recoverable). */
+export function headlineNoteColor(variant: HeadlineNote["variant"]): string {
+  return variant === "withheld" ? "var(--color-warning, #B45309)" : "var(--color-text-muted, #64748B)";
+}
+
+export function headlineNoteGlyph(variant: HeadlineNote["variant"]): string {
+  return variant === "withheld" ? WITHHELD_GLYPH : "";
+}
+
+/** `{D}` is a real date or nothing: a malformed value is an absent one. */
+function coveredFromDate(dataQuality: NonNullable<FactsheetPayload["dataQuality"]>): string | null {
+  const from = dataQuality.headlineCoversFrom;
+  if (typeof from !== "string") return null;
+  const date = isoToMonthDay(from);
+  return date === "—" ? null : date;
+}
+
+export function headlineCoverageNote(
   dataQuality: FactsheetPayload["dataQuality"],
   basis: Basis,
-  subject: string,
-): string | null {
+  slot: HeadlineNoteSlot,
+  opts: { benchShown?: boolean } = {},
+): HeadlineNote | null {
   if (basis !== "cash_settlement") return null;
   if (dataQuality?.twrChainBroken !== true) return null;
-  const from = dataQuality.headlineCoversFrom;
-  if (from === undefined) return null;
-  const date = from === null ? null : isoToMonthDay(from);
-  return date === null || date === "—"
-    ? `${subject} cover only the record after its last break in the return chain. The chart shows the whole record.`
-    : `${subject} cover the record from ${date}, after its last break in the return chain. The chart shows the whole record.`;
+  const reasons = joinGuardPhrases(dataQuality.headlineGuardReasons ?? []);
+  if (dataQuality.headlineWithheld === true) {
+    if (slot !== "strip" && slot !== "stripRelative" && slot !== "main") return null;
+    // D-14 (R2-03): the cause picks the sentence. A recompute says so and names no
+    // span or reason; a failed row says nothing, because the page already states
+    // that the analytics could not be computed and a second cause would contradict it.
+    if (dataQuality.headlineWithheldCause === "recomputing") {
+      return { variant: "withheld", text: "Headline figures are being recomputed." };
+    }
+    if (dataQuality.headlineWithheldCause === "failed") return null;
+    return {
+      variant: "withheld",
+      text: `Headline figures withheld: earlier history is unreliable (it includes ${reasons}), and the span after it has not been measured yet.`,
+    };
+  }
+  const date = coveredFromDate(dataQuality);
+  if (date === null) return null;
+  const both = opts.benchShown === true ? " in both columns" : "";
+  const lead = `Measured since ${date}; earlier history is unreliable (it includes ${reasons}).`;
+  switch (slot) {
+    case "strip":
+      return {
+        variant: "dated",
+        text: `${lead} Every figure in this strip covers only that span; the chart shows the whole record.`,
+      };
+    case "stripRelative":
+      return {
+        variant: "dated",
+        text: `${lead} Every figure in this strip except α and IR covers only that span; α, IR and the chart cover the whole record.`,
+      };
+    case "main":
+      return {
+        variant: "dated",
+        text: `${lead} Cumulative Return, CAGR, Ann. Volatility, Sharpe, Sortino and Calmar cover only that span${both}; Skew, Kurtosis and the chart cover the whole record.`,
+      };
+    case "returns":
+      return {
+        variant: "dated",
+        text: `Measured since ${date}. The trailing returns cover only that span${both}; Win Rate and Profit Factor cover the whole record.`,
+      };
+    case "maxdd":
+      return {
+        variant: "dated",
+        text: `Measured since ${date}. Max Drawdown covers only that span${both}; the other figures in this panel cover the whole record.`,
+      };
+    case "cumulative":
+      return { variant: "dated", text: `Measured since ${date}. Every return in this panel covers only that span.` };
+  }
 }
 
 /**
- * Phase 169.1 review round 1 (SFH MEDIUM-2) — the chain-broken caveat for a
- * SELECTED range, rendered in place of {@link headlineCoverageCaveat} while a
- * range is selected (the strip in FactsheetView.tsx and Main Metrics here).
+ * Phase 164.6.6.3.3 (UI-SPEC 1.3, "Selected range") — the note for a SELECTED
+ * range, rendered in place of {@link headlineCoverageNote} in the strip and Main
+ * Metrics while a range is selected (it replaces Phase 169.1's SFH MEDIUM-2 caveat).
  *
  * A window's figures are re-derived on the slice (`windowView`), which compounds
- * every return in it. The engine compounds only the record after the last break
- * (`nav_twr._last_interior_break_suffix`), and `headlineCoversFrom` is that
- * span's first day. So a range starting ON or AFTER that day compounds only days
- * the engine also compounds: no caveat. A range starting before it compounds days
- * the engine leaves out, and the page says so. The sentence holds whether or not
- * the range also reaches past the date.
+ * every return in it, while the full-history figures cover only the record from
+ * `{D}`. After D-01 every headline figure is on that suffix, so the subject is
+ * "Its figures". A range starting ON or AFTER `{D}` compounds only days the
+ * full-history figures also compound: no note. A range starting before it says so.
+ * A Withheld row has no `{D}` at all, but a range is re-derived from the stored
+ * series, so its figures DO show and may span the break; that is the one undated
+ * sentence left, and it is reachable.
  *
- * The gates are those of {@link headlineCoverageCaveat}: cash basis, a
- * chain-broken row, and `headlineCoversFrom` present. With `null` the break
- * cannot be placed, so every range gets the caveat, without a date. It never
- * invents one.
+ * Same gates as {@link headlineCoverageNote}. A chain-broken row with neither a
+ * valid date nor the withheld flag (the unreachable arm 3) gets none.
  */
-export function windowCoverageCaveat(
+export function windowCoverageNote(
   dataQuality: FactsheetPayload["dataQuality"],
   basis: Basis,
   rangeStart: string,
-  subject: string,
-): string | null {
+): HeadlineNote | null {
   if (basis !== "cash_settlement") return null;
   if (dataQuality?.twrChainBroken !== true) return null;
-  const from = dataQuality.headlineCoversFrom;
-  if (from === undefined) return null;
-  const date = from === null ? null : isoToMonthDay(from);
-  if (from === null || date === null || date === "—") {
-    return `The record has a break in the return chain at a date this view cannot name, so this range may span it. Its ${subject} compound across any break inside it.`;
+  if (dataQuality.headlineWithheld === true) {
+    return {
+      variant: "withheld",
+      text: "The record has a break in the return chain at a date this view cannot name, so this range may span it. Its figures compound across any break inside it.",
+    };
   }
+  const date = coveredFromDate(dataQuality);
+  const from = dataQuality.headlineCoversFrom;
+  if (date === null || typeof from !== "string") return null;
   if (rangeStart.slice(0, 10) >= from.slice(0, 10)) return null;
-  return `This range starts before ${date}, where the record resumes after its last break in the return chain. Its ${subject} compound returns from before that date, which the full-history figures leave out.`;
+  return {
+    variant: "dated",
+    text: `This range starts before ${date}, where the full-history figures begin. Its figures include returns from before that date, which the full-history figures leave out.`,
+  };
+}
+
+/**
+ * Phase 164.6.6.3.3 plan 10 (B19, UI-SPEC 1.5) — the comparator summary the rail's
+ * HEADLINE rows read, so each row compares two figures over ONE span. Same gates as
+ * {@link headlineCoverageNote}: the cash basis, a chain-broken row, full history.
+ *   - a Withheld row has no measured span to compare against: `null`, so every headline
+ *     benchmark cell prints "—";
+ *   - a Dated row reads `summarySince`, the comparator over the covered returns from
+ *     `{D}`. A block without the member (a re-derived view, whose strategy figures are
+ *     whole-record too) keeps the whole-record summary;
+ *   - anything else (a clean row, MTM or smoothed, a selected range, where the windowed
+ *     view already slices both legs) keeps the whole-record summary.
+ * Win Rate, Profit Factor and Longest DD never read this: they stay whole-record.
+ */
+function headlineBenchSource(
+  dataQuality: FactsheetPayload["dataQuality"],
+  basis: Basis,
+  selected: boolean,
+  block: ComparatorBlock,
+): ComparatorSummary | null {
+  if (selected || basis !== "cash_settlement" || dataQuality?.twrChainBroken !== true) return block.summary;
+  if (dataQuality.headlineWithheld === true) return null;
+  return block.summarySince !== undefined ? block.summarySince : block.summary;
 }
 
 /**
@@ -136,6 +237,13 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // the eq/dd curves the rail never reads), so every consumed field is present.
   const m = view.strategyMetrics;
   const b = jointCmp.summary;
+  const railBasis = useBasisOrCash();
+  // B19: the benchmark cells beside the headline rows (see headlineBenchSource).
+  const hb = headlineBenchSource(payload.dataQuality, railBasis, selected, jointCmp);
+  // UI-SPEC 1.6 (B20): 6 Month / 1 Year row presence follows the record's length (the
+  // view's own dates, not a range), never the value.
+  const covers6m = recordCoversWindow(view.dates, 182);
+  const covers1y = recordCoversWindow(view.dates, 365);
   // shortName is "—" when no comparator selected — Panel.benchHeader treats
   // any non-empty string as a real comparator and renders "vs —" in the
   // header. Pass undefined instead so the "vs" label disappears entirely
@@ -166,15 +274,22 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // calendar years compute() reports, at Years Observed and in the warning below.
   // Dividing the observation count by the basis read a sparse record short.
   const recordLength = formatRecordLength({ n: m.n, years: m.years });
-  // The stored-headline caveat describes the STORED headline, which a selected range
-  // does not show (D-78). A selected range that starts before the last break gets
-  // its own caveat instead: its re-derived figures compound across days the engine
-  // leaves out (169.1 review round 1, SFH MEDIUM-2; the KPI strip's rule).
-  const railBasis = useBasisOrCash();
-  const railSubject = "Cumulative Return, CAGR and Calmar";
-  const coverageCaveat = selected
-    ? windowCoverageCaveat(payload.dataQuality, railBasis, scope.start, railSubject)
-    : headlineCoverageCaveat(payload.dataQuality, railBasis, railSubject);
+  // The span note describes the STORED headline, which a selected range does not
+  // show (D-78). A selected range that starts before `{D}` gets its own sentence
+  // instead: its re-derived figures include returns the full-history figures leave
+  // out (169.1 review round 1, SFH MEDIUM-2; the KPI strip's rule). S2, S3 and S4 pass
+  // `benchShown` when a comparator is selected: the headline rows' benchmark cells
+  // cover the same span (`headlineBenchSource`, UI-SPEC 1.5), so the `{B}` clause is
+  // true. It ships with that change and nowhere else.
+  const benchShown = cmpKey !== "none";
+  const spanNote = selected
+    ? windowCoverageNote(payload.dataQuality, railBasis, scope.start)
+    : headlineCoverageNote(payload.dataQuality, railBasis, "main", { benchShown });
+  // UI-SPEC 1.3 S3 and S4, full history only: while a range is selected the trailing
+  // rows are hidden (the `window-trailing-note` speaks) and the range sentence above
+  // carries the span, so the labels would restate a span the panel no longer shows.
+  const returnsSpan = selected ? null : headlineCoverageNote(payload.dataQuality, railBasis, "returns", { benchShown });
+  const maxDdSpan = selected ? null : headlineCoverageNote(payload.dataQuality, railBasis, "maxdd", { benchShown });
 
   return (
     <aside className="flex flex-col gap-12">
@@ -203,26 +318,29 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
               ≥ {obsPerYear} observations (1 year).
             </p>
           )}
-          {coverageCaveat && (
-            <p className="mb-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
-              ⚠ {coverageCaveat}
+          {spanNote && (
+            <p className="mb-2 text-fixed-10 italic" style={{ color: headlineNoteColor(spanNote.variant) }}>
+              {headlineNoteGlyph(spanNote.variant)}
+              {spanNote.text}
             </p>
           )}
           <Kpm>
-            <Row label={withUnit("Cumulative Return", payload.returnsUnit ?? null)} value={pct(m.cum_ret, true)} bench={pct(b?.cum_ret, true)} />
-            <Row label={withUnit("CAGR", payload.returnsUnit ?? null)} value={pct(m.cagr, true)} bench={pct(b?.cagr, true)} />
-            <Row label="Ann. Volatility" value={pct(m.ann_vol)} bench={pct(b?.ann_vol)} />
-            <Row label="Sharpe" value={num(m.sharpe)} bench={num(b?.sharpe)} accent />
-            <Row label="Sortino" value={num(m.sortino)} bench={num(b?.sortino)} />
-            <Row label="Calmar" value={num(m.calmar)} bench={num(b?.calmar)} />
+            <Row label={withUnit("Cumulative Return", payload.returnsUnit ?? null)} value={pct(m.cum_ret, true)} bench={pct(hb?.cum_ret, true)} />
+            <Row label={withUnit("CAGR", payload.returnsUnit ?? null)} value={pct(m.cagr, true)} bench={pct(hb?.cagr, true)} />
+            <Row label="Ann. Volatility" value={pct(m.ann_vol)} bench={pct(hb?.ann_vol)} />
+            <Row label="Sharpe" value={num(m.sharpe)} bench={num(hb?.sharpe)} accent />
+            <Row label="Sortino" value={num(m.sortino)} bench={num(hb?.sortino)} />
+            <Row label="Calmar" value={num(m.calmar)} bench={num(hb?.calmar)} />
             <Row label="Skew" value={signed(m.skew)} bench="" />
             <Row label="Kurtosis" value={num(m.kurt)} bench="" />
           </Kpm>
         </Panel>
         <Panel title="Returns" benchHeader={bnDated}>
-          {/* Phase 169 D-57: 6 Month / 1 Year are omitted when the STRATEGY's
-              window is null (the record is shorter), exactly as in Cumulative
-              Return Metrics; a null bench value alone keeps the row. */}
+          {/* Phase 169 D-57, changed by 164.6.6.3.3 UI-SPEC 1.6 (B20, D-12): 6 Month /
+              1 Year are omitted only when the WHOLE record is shorter than the window
+              (`recordCoversWindow`, the rule compute() uses), and read "—" when the
+              record covers it but the value is null (a Dated row's short suffix). A
+              null bench value alone keeps the row. 3 Year / 5 Year keep D-17's null rule. */}
           {/* Phase 169.1 (D-27): the month, YTD, 3 Month, 6 Month and 1 Year rows end on
               the RECORD's last date, not the window's, so while a range is selected
               they are omitted, chosen by the compute() field each reads (never by
@@ -232,14 +350,15 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
               The trailing and since-inception returns end on the record&apos;s last date, so they are hidden while a range is selected; resetting the range shows them.
             </p>
           )}
+          {returnsSpan && <p className="mb-2 text-fixed-10 italic text-text-muted">{returnsSpan.text}</p>}
           <Kpm>
             {!selected && (
               <>
-                <Row windowKey="mtd" label={monthRowLabel(m.end)} value={pct(m.mtd, true)} bench={pct(b?.mtd, true)} />
-                <Row windowKey="ytd" label="Year-to-date" value={pct(m.ytd, true)} bench={pct(b?.ytd, true)} />
-                <Row windowKey="p3m" label="3 Month" value={pct(m.p3m, true)} bench={pct(b?.p3m, true)} />
-                {m.p6m != null && <Row windowKey="p6m" label="6 Month" value={pct(m.p6m, true)} bench={pct(b?.p6m, true)} />}
-                {m.p1y != null && <Row windowKey="p1y" label="1 Year" value={pct(m.p1y, true)} bench={pct(b?.p1y, true)} />}
+                <Row windowKey="mtd" label={monthRowLabel(m.end)} value={pct(m.mtd, true)} bench={pct(hb?.mtd, true)} />
+                <Row windowKey="ytd" label="Year-to-date" value={pct(m.ytd, true)} bench={pct(hb?.ytd, true)} />
+                <Row windowKey="p3m" label="3 Month" value={pct(m.p3m, true)} bench={pct(hb?.p3m, true)} />
+                {(m.p6m != null || covers6m) && <Row windowKey="p6m" label="6 Month" value={pct(m.p6m, true)} bench={pct(hb?.p6m, true)} />}
+                {(m.p1y != null || covers1y) && <Row windowKey="p1y" label="1 Year" value={pct(m.p1y, true)} bench={pct(hb?.p1y, true)} />}
               </>
             )}
             <Row label="Win Rate (days)" value={pct(m.win_rate)} bench={pct(b?.win_rate)} />
@@ -255,8 +374,9 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         {/* SFH-M-05: this panel carries no bench header at full coverage; it gains
             the dated one only when the comparator's figures stop early. */}
         <Panel title="Max Drawdown" benchHeader={benchThrough != null ? bnDated : undefined}>
+          {maxDdSpan && <p className="mb-2 text-fixed-10 italic text-text-muted">{maxDdSpan.text}</p>}
           <Kpm>
-            <Row label="Max Drawdown" value={pctNeg(m.max_dd)} bench={pctNeg(b?.max_dd)} accent />
+            <Row label="Max Drawdown" value={pctNeg(m.max_dd)} bench={pctNeg(hb?.max_dd)} accent />
             <Row label="Longest DD (days)" value={count(m.longest_dd)} bench={count(b?.longest_dd)} />
             <Row label="VaR 95%" value={pct(m.var95, true)} bench="" />
             <Row label="CVaR 95%" value={pct(m.cvar95, true)} bench="" />
@@ -341,7 +461,14 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         </EditorialSection>
       ) : jointCmp.joint ? (
         <EditorialSection label="IV" name={`Benchmark — vs ${bn}`}>
-          <BenchmarkMetricsBody joint={jointCmp.joint} />
+          {/* Phase 164.6.6.3.3 (D-04, UI-SPEC 2.2): a flat strategy leg's joint carries NaN for
+              alpha, beta, IR and the captures ("—") and the block's `flatLeg` marker picks the
+              one muted reason line. The marker, never the NaN values, selects it. */}
+          <BenchmarkMetricsBody
+            joint={jointCmp.joint}
+            withheldReason={jointCmp.flatLeg ? flatLegReason(selected ? "range" : "record") : undefined}
+            reasonTestId="joint-flat-leg-reason"
+          />
         </EditorialSection>
       ) : jointCmp.jointWithheld && bn != null ? (
         // 169.4 review round 2 (SFH-R2 MEDIUM-2): below the paired floor §IV
@@ -392,9 +519,19 @@ function EditorialSection({
   );
 }
 
-function BenchmarkMetricsBody({ joint, withheldReason }: { joint: JointMetrics | null; withheldReason?: string }) {
-  // A null joint (withheld below the paired floor) reads "—" in every row,
-  // with no accent colour on the alpha dash.
+function BenchmarkMetricsBody({
+  joint,
+  withheldReason,
+  reasonTestId = "joint-floor-reason",
+}: {
+  joint: JointMetrics | null;
+  withheldReason?: string;
+  /** `joint-floor-reason` for the native-unit and paired-floor arms; the flat-leg arm passes its own. */
+  reasonTestId?: "joint-floor-reason" | "joint-flat-leg-reason";
+}) {
+  // A null joint (withheld below the paired floor) reads "—" in every row.
+  // The dash-never-accent rule (UI-SPEC §6) lives in `Row` itself, so the alpha
+  // dash is plain text whatever `accent` says.
   const v = (f: (j: JointMetrics) => string) => (joint ? f(joint) : "—");
   return (
     <Panel title="Joint Metrics" hideHeaderRule>
@@ -410,7 +547,7 @@ function BenchmarkMetricsBody({ joint, withheldReason }: { joint: JointMetrics |
         <Row label="Down Capture" value={v(j => num(j.down_capture))} bench="" />
       </Kpm>
       {withheldReason && (
-        <p className="mt-2 text-fixed-11 text-text-muted" data-testid="joint-floor-reason">
+        <p className="mt-2 text-fixed-11 text-text-muted" data-testid={reasonTestId}>
           {withheldReason}
         </p>
       )}
@@ -472,6 +609,8 @@ function Kpm({ children }: { children: ReactNode }) {
   );
 }
 
+// UI-SPEC §6 (164.6.6.3.3): an `accent` row whose value is "—" renders as plain
+// primary text at weight 400, here and in `RollingRow` and the quantile `Kpi`.
 function Row({
   label,
   value,
@@ -492,7 +631,7 @@ function Row({
       <td
         className={
           "py-1.5 px-2 text-right font-mono tabular-nums " +
-          (accent ? "text-accent font-medium" : "text-text-primary")
+          (accent && value !== "—" ? "text-accent font-medium" : "text-text-primary")
         }
       >
         {value}
@@ -714,7 +853,7 @@ function RollingRow({
   return (
     <tr className="border-b border-border/30 last:border-0">
       <td className="py-1 pr-2 text-text-2">{label}</td>
-      <td className={"py-1 px-2 text-right font-mono tabular-nums " + (accent ? "text-accent font-medium" : "text-text-primary")}>
+      <td className={"py-1 px-2 text-right font-mono tabular-nums " + (accent && f(stats.current) !== "—" ? "text-accent font-medium" : "text-text-primary")}>
         {f(stats.current)}
       </td>
       <td className="py-1 px-2 text-right font-mono tabular-nums text-text-2">{f(stats.avg)}</td>
@@ -736,27 +875,31 @@ function CumulativeReturnsPanel() {
   // mark_to_market; `payload` by reference under cash), and a multi-year row
   // exists only when the record covers its window (compute() reports it null).
   // Phase 169 D-17, 2026-09-25: 3 Year / 5 Year rows are omitted, not em-dashed, when the window is absent or null; SC6 read literally.
-  // Phase 169 D-57, 2026-09-27: 6 Month / 1 Year rows are omitted like 3 Year / 5 Year when the record is shorter, in this panel and in Returns, on every mount including the scenario payload; YTD is a calendar window and keeps the em-dash (D-11).
+  // Phase 169 D-57, 2026-09-27: 6 Month / 1 Year rows are omitted when the record is shorter, in this panel and in Returns, on every mount including the scenario payload; YTD is a calendar window and keeps the em-dash (D-11).
+  // 164.6.6.3.3 UI-SPEC 1.6 (B20, D-12): the omission follows the RECORD's length (`recordCoversWindow`), not the value, so a covered window whose suffix value is null reads "—"; 3 Year / 5 Year keep the null rule above.
   const payload = usePayload();
   const view = useBasisSeriesView(payload);
   const m = view.strategyMetrics;
+  const covers6m = recordCoversWindow(view.dates, 182);
+  const covers1y = recordCoversWindow(view.dates, 365);
   // Phase 169 review round 1 (SFH H-1): Since Inception and CAGR are the stored
   // headline on a chain-broken row, so the panel says which span they cover.
-  const coverageCaveat = headlineCoverageCaveat(payload.dataQuality, useBasisOrCash(), "Since Inception and CAGR");
+  // Phase 164.6.6.3.3 (UI-SPEC 1.3 S5, B17): every return in this panel is on the
+  // suffix, so the label is muted with no warning glyph; a Withheld row shows no label
+  // here (the Main Metrics note speaks). Since Inception and CAGR read "—" from the
+  // withheld stored scalars, and the trailing windows read "—" because the build
+  // nulls them on a Withheld row (WR-01, `withSuffixWindows`).
+  const spanNote = headlineCoverageNote(payload.dataQuality, useBasisOrCash(), "cumulative");
   // Inception return = cum_ret (no need to recompute).
   return (
     <Panel title="Cumulative Return Metrics">
-      {coverageCaveat && (
-        <p className="mb-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
-          ⚠ {coverageCaveat}
-        </p>
-      )}
+      {spanNote && <p className="mb-2 text-fixed-10 italic text-text-muted">{spanNote.text}</p>}
       <Kpm>
         <Row label={monthRowLabel(m.end)} value={pct(m.mtd, true)} bench="" />
         <Row label="3 Month" value={pct(m.p3m, true)} bench="" />
-        {m.p6m != null && <Row label="6 Month" value={pct(m.p6m, true)} bench="" />}
+        {(m.p6m != null || covers6m) && <Row label="6 Month" value={pct(m.p6m, true)} bench="" />}
         <Row label="Year-to-date" value={pct(m.ytd, true)} bench="" />
-        {m.p1y != null && <Row label="1 Year" value={pct(m.p1y, true)} bench="" />}
+        {(m.p1y != null || covers1y) && <Row label="1 Year" value={pct(m.p1y, true)} bench="" />}
         {m.p3y != null && <Row label="3 Year" value={pct(m.p3y, true)} bench="" />}
         {m.p5y != null && <Row label="5 Year" value={pct(m.p5y, true)} bench="" />}
         <Row label="Since Inception" value={pct(m.cum_ret, true)} bench="" accent />

@@ -36,6 +36,46 @@ export function pairedFloorReason(
 }
 
 /**
+ * Phase 164.6.6.3.3 (D-04, B13): the flat-leg gate, shared by every caller that
+ * shows the FACTSHEET's joint figures (`buildComparatorBlock`, and the v2 strategy
+ * page's `computeV2Joint`), so both print one number. A strategy leg with no
+ * dispersion on the paired slice has no beta, alpha, information ratio or capture
+ * to report. `beta()` answers 0 for the allocation math, and everything built on
+ * that 0 (alpha equal to the leg's own annualised mean, an IR number, captures of
+ * 0) is a figure the data cannot support, so those five read NaN here. The gate is
+ * applied AFTER `jointMetrics` and NOT inside it: the Allocations alpha/beta widget
+ * also calls `jointMetrics` (T16 pins its beta at +0). The shared residue floor
+ * (`dispersion`), never a raw `sd === 0`, so a compounding constant yield answers
+ * as an all-zero leg does. Tracking error, corr, r2 and treynor are left as
+ * `jointMetrics` gave them. `joint` null (below the paired floor) is never flat.
+ */
+export function gateFlatLeg<J extends JointMetrics | null>(
+  joint: J,
+  pairedStrat: number[],
+): { joint: J; flatLeg: boolean } {
+  const flatLeg = joint != null && dispersion(pairedStrat, 0).sd === 0;
+  return {
+    joint:
+      joint != null && flatLeg
+        ? ({ ...joint, beta: NaN, alpha: NaN, info_ratio: NaN, up_capture: NaN, down_capture: NaN } as J)
+        : joint,
+    flatLeg,
+  };
+}
+
+/**
+ * Phase 164.6.6.3.3 (D-04, UI-SPEC section 2.2): the ONE sentence naming why a flat
+ * strategy leg's alpha, beta, information ratio and capture read "—" on the
+ * factsheet. The KPI strip and §IV both print it, selected by the block's
+ * `flatLeg` marker. "record" is the full history, "range" a selected zoom window:
+ * the same noun switch `pairedFloorReason` makes.
+ */
+export function flatLegReason(scope: "record" | "range"): string {
+  const subject = scope === "range" ? "the selected range's" : "this record's";
+  return `Alpha, beta, information ratio and capture need daily returns that vary; ${subject} do not.`;
+}
+
+/**
  * Port of `joint_metrics()` from `/tmp/gen_factsheet_v3.py`. Computes
  * strategy-vs-benchmark joint statistics on daily-return series of equal
  * length. Up/down capture is the ratio of cumulative strategy return to

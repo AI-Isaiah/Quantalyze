@@ -16,7 +16,7 @@ import type { DailyPrice, DailyReturn, FactsheetPayload } from "@/lib/factsheet/
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider, useXRange } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
-import { headlineCoverageCaveat, isoToMonthDay, windowCoverageCaveat } from "./MetricsColumn";
+import { headlineCoverageNote, isoToMonthDay } from "./MetricsColumn";
 import { useWindowedView, type WindowedView } from "./basis-context";
 import { pct, pctSigned, ratio as num } from "./format";
 
@@ -371,74 +371,80 @@ describe("the window holds across basis and leverage and never fabricates a figu
 
   // 169.1 review round 1 (SFH MEDIUM-2). D-78 dropped the chain-broken caveat inside
   // a window, but the window re-derive compounds every return in the slice, while the
-  // engine compounds only the record from `headlineCoversFrom` on. A range starting
-  // before that day showed a break-spanning Cum. Return / CAGR / Calmar with nothing
-  // on the page saying so. The strip and the rail are asserted SEPARATELY, by each
-  // surface's own subject, so a fix to only one of them stays red.
-  function chainBroken(headlineCoversFrom: string | null | undefined): FactsheetPayload {
+  // full-history figures cover only the record from `headlineCoversFrom` on. A range
+  // starting before that day showed break-spanning figures with nothing on the page
+  // saying so. The strip and the rail are asserted SEPARATELY, so a fix to only one of
+  // them stays red.
+  // Phase 164.6.6.3.3 plan 04 (UI-SPEC 1.3 "Selected range", B16, B17): after D-01 every
+  // headline figure is on the suffix, so the subject is "Its figures" on both surfaces
+  // and the sentence is the same on both. A Dated row's sentence is muted with no
+  // glyph; the one undated sentence belongs to a Withheld row (amber, with the glyph).
+  function chainBroken(extra: Record<string, unknown>): FactsheetPayload {
     const base = build400();
     return {
       ...base,
-      dataQuality: { ...(base.dataQuality ?? {}), twrChainBroken: true, headlineCoversFrom },
+      dataQuality: { ...(base.dataQuality ?? {}), twrChainBroken: true, ...extra },
     } as FactsheetPayload;
   }
-  const STRIP_SUBJECT = "Cum. Return, CAGR and Calmar";
-  const RAIL_SUBJECT = "Cumulative Return, CAGR and Calmar";
+  const BEFORE_JUN_1 =
+    "This range starts before Jun 1, 2024, where the full-history figures begin. Its figures include returns from before that date, which the full-history figures leave out.";
+  const UNNAMEABLE =
+    "The record has a break in the return chain at a date this view cannot name, so this range may span it. Its figures compound across any break inside it.";
+  const ANY_SPAN_NOTE = /Measured since|This range starts before|a date this view cannot name|Headline figures withheld/;
+  const paragraphsWith = (container: HTMLElement, text: string) =>
+    [...container.querySelectorAll<HTMLElement>("p")].filter((p) => (p.textContent ?? "").trim() === text);
 
-  it("on a chain-broken record a range starting before the break keeps a caveat on the strip and the rail; the stored-headline caveat returns on reset", async () => {
-    const payload = chainBroken("2024-06-01");
-    const stored = headlineCoverageCaveat(payload.dataQuality, "cash_settlement", "Cum. Return, CAGR and Calmar");
-    expect(stored).not.toBeNull();
+  it("on a chain-broken record a range starting before the break keeps a sentence on the strip and the rail; the full-history note returns on reset", async () => {
+    const payload = chainBroken({ headlineCoversFrom: "2024-06-01" });
+    const stored = headlineCoverageNote(payload.dataQuality, "cash_settlement", "stripRelative")?.text;
+    expect(stored).toContain("Measured since Jun 1, 2024;");
     const { container } = mount(payload); // zoom [100, 299]: 2024-04-10 to 2024-10-26
-    expect(container.textContent).toContain(`⚠ ${stored}`);
+    expect(container.textContent).toContain(stored!);
     await click("zoom");
     expect(container.textContent).not.toContain(stored!);
-    const strip = windowCoverageCaveat(payload.dataQuality, "cash_settlement", payload.dates[100], STRIP_SUBJECT);
-    const rail = windowCoverageCaveat(payload.dataQuality, "cash_settlement", payload.dates[100], RAIL_SUBJECT);
-    // The sentence is pinned literally once, so the date and the claim are read, not just echoed.
-    expect(strip).toBe(
-      "This range starts before Jun 1, 2024, where the record resumes after its last break in the return chain. Its Cum. Return, CAGR and Calmar compound returns from before that date, which the full-history figures leave out.",
-    );
-    expect(container.textContent, "the KPI strip names the break").toContain(`⚠ ${strip}`);
-    expect(container.textContent, "the rail's Main Metrics names the break").toContain(`⚠ ${rail}`);
+    // The rail's span labels (Returns, Max Drawdown, Cumulative Return Metrics) are full-history
+    // only: the trailing rows are hidden in a range, so the labels would restate a span the
+    // panels no longer show.
+    expect(container.textContent).not.toContain("Measured since");
+    // The sentence is pinned literally, so the date and the claim are read, not just echoed.
+    const found = paragraphsWith(container, BEFORE_JUN_1);
+    expect(found, "one on the KPI strip, one in the rail's Main Metrics").toHaveLength(2);
+    for (const p of found) {
+      expect(p.getAttribute("style")).toContain("var(--color-text-muted, #64748B)");
+      expect(p.textContent).not.toContain("⚠");
+    }
     await click("reset");
-    expect(container.textContent).toContain(`⚠ ${stored}`);
-    expect(container.textContent).not.toContain(strip!);
-    expect(container.textContent).not.toContain(rail!);
+    expect(container.textContent).toContain(stored!);
+    expect(container.textContent).not.toContain(BEFORE_JUN_1);
   });
 
-  it("on a chain-broken record a range starting after the break, or on its first day, shows no caveat", async () => {
+  it("on a chain-broken record a range starting after the break, or on its first day, shows no span sentence", async () => {
     for (const range of [[200, 299], [152, 299]] as const) {
-      const payload = chainBroken("2024-06-01");
+      const payload = chainBroken({ headlineCoversFrom: "2024-06-01" });
       expect(payload.dates[152]).toBe("2024-06-01");
       const { container, unmount } = mount(payload, range);
       await click("zoom");
       expect(screen.getByTestId("range-eyebrow-strip").textContent).toMatch(/^Selected range/);
-      expect(container.textContent, `range ${range.join("-")}`).not.toMatch(/break in the return chain/);
+      expect(container.textContent, `range ${range.join("-")}`).not.toMatch(ANY_SPAN_NOTE);
       unmount();
     }
   });
 
-  it("on a chain-broken record whose break date cannot be named, every range keeps a caveat with no date", async () => {
-    const payload = chainBroken(null);
+  it("on a Withheld row (the break date cannot be named) every range keeps the undated sentence, amber, with the glyph", async () => {
+    const payload = chainBroken({ headlineWithheld: true });
     const { container } = mount(payload, [200, 299]);
     await click("zoom");
-    const strip = windowCoverageCaveat(payload.dataQuality, "cash_settlement", payload.dates[200], STRIP_SUBJECT);
-    expect(strip).toBe(
-      "The record has a break in the return chain at a date this view cannot name, so this range may span it. Its Cum. Return, CAGR and Calmar compound across any break inside it.",
-    );
-    expect(container.textContent).toContain(`⚠ ${strip}`);
-    expect(container.textContent).toContain(
-      `⚠ ${windowCoverageCaveat(payload.dataQuality, "cash_settlement", payload.dates[200], RAIL_SUBJECT)}`,
-    );
+    const found = paragraphsWith(container, `⚠ ${UNNAMEABLE}`);
+    expect(found, "one on the KPI strip, one in the rail's Main Metrics").toHaveLength(2);
+    for (const p of found) expect(p.getAttribute("style")).toContain("var(--color-warning, #B45309)");
   });
 
-  it("a chain-broken record with no stored headline overlay (headlineCoversFrom absent) shows no caveat in a window, as at full history", async () => {
-    const payload = chainBroken(undefined);
+  it("a chain-broken record with neither a date nor the withheld flag shows no sentence in a window, as at full history (the unreachable arm)", async () => {
+    const payload = chainBroken({});
     const { container } = mount(payload);
-    expect(container.textContent).not.toMatch(/break in the return chain/);
+    expect(container.textContent).not.toMatch(ANY_SPAN_NOTE);
     await click("zoom");
-    expect(container.textContent).not.toMatch(/break in the return chain/);
+    expect(container.textContent).not.toMatch(ANY_SPAN_NOTE);
   });
 
   it("the short-track caveat states a 60-observation window's count; an 800-observation record with no zoom shows none", async () => {

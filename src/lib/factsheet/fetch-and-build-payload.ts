@@ -103,6 +103,14 @@ export type NotBuildableReason =
  * present only on the reasons it describes. None of them identifies anyone.
  */
 export type NotBuildableDetail = {
+  /**
+   * 164.6.6.3.3 D-08 — present (and `true`) only on a `not_computed` refusal
+   * whose analytics row reads `computation_status === "failed"`. A boolean,
+   * never the error text: the owner page and /strategies use it to say
+   * "analytics could not be computed" instead of the generic copy. A
+   * `computing` or `pending` row does not carry it.
+   */
+  analyticsFailed?: true;
   code?: string;
   gate?: "headline" | "empty_series" | "short_series";
   source?: "daily_returns" | "returns_series";
@@ -136,6 +144,7 @@ type NotBuildable = { ok: false; reason: NotBuildableReason } & NotBuildableDeta
  */
 function notBuildable(reason: NotBuildableReason, detail: NotBuildableDetail = {}): NotBuildable {
   const out: NotBuildable = { ok: false, reason };
+  if (detail.analyticsFailed !== undefined) out.analyticsFailed = detail.analyticsFailed;
   if (detail.code !== undefined) out.code = detail.code;
   if (detail.gate !== undefined) out.gate = detail.gate;
   if (detail.source !== undefined) out.source = detail.source;
@@ -409,7 +418,10 @@ async function resolveFactsheetInputs(
       `[factsheet] resolve(${caller}) — analytics row is not a terminal success; withholding the payload`,
       { id, caller, computationStatus: analytics?.computation_status ?? null },
     );
-    return notBuildable("not_computed");
+    return notBuildable(
+      "not_computed",
+      analytics?.computation_status === "failed" ? { analyticsFailed: true } : {},
+    );
   }
 
   const dailyRaw = analytics?.daily_returns;
@@ -423,7 +435,7 @@ async function resolveFactsheetInputs(
   // 164.6.6.2.2 D-05: the curve is read by the row's own method, so the flags
   // are read BEFORE the series is resolved.
   const dqf = analytics?.data_quality_flags as
-    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown; native_unit?: unknown }
+    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown; native_unit?: unknown; twr_chain_broken?: unknown; headline_since?: unknown; negative_nav_guard?: unknown; dust_nav_guard?: unknown; flow_dominated_guard?: unknown; pnl_dominated_guard?: unknown }
     | null
     | undefined;
   let dailyReturns = resolveDailyReturnSeries(
@@ -656,7 +668,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v14", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v15", id,
  * computedAt], a `null` computedAt included. 167.2.1-REVIEW-R2 IN-01: the key
  * moves more often than "once per successful run". The status bridge
  * `sync_strategy_analytics_status` (latest definition: migration
@@ -702,7 +714,12 @@ export type FactsheetBuildResult =
        */
       conventionsDegraded?: true;
     }
-  | { payload: null; reason: NotBuildableReason };
+  | {
+      payload: null;
+      reason: NotBuildableReason;
+      /** 164.6.6.3.3 D-08: see `NotBuildableDetail.analyticsFailed`. Absent unless `true`. */
+      analyticsFailed?: true;
+    };
 
 /**
  * 167.2.1-REVIEW WR-03 — `fetchAndBuildPayload` plus the reason its payload is
@@ -734,7 +751,8 @@ async function resolveAndBuild(
 ): Promise<FactsheetBuildResult> {
   const supabase = createAdminClient();
   const resolved = await resolveFactsheetInputs(supabase, id, visibility, "build");
-  if (!resolved.ok) return { payload: null, reason: resolved.reason };
+  // D-08: the one detail key the owner lane needs rides out beside the reason.
+  if (!resolved.ok) return { payload: null, reason: resolved.reason, ...(resolved.analyticsFailed ? { analyticsFailed: true as const } : {}) };
   const payload = await buildFromResolved(supabase, id, resolved);
   return resolved.conventionsDegraded
     ? { payload, reason: null, conventionsDegraded: true }

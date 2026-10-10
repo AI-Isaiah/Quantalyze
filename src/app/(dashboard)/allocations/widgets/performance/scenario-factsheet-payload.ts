@@ -267,9 +267,13 @@ function emptyStressWindows(): FactsheetCsvPayload["stressWindows"] {
   };
 }
 
-/** Safe-empty quantile summary — every percentile zero. */
+/**
+ * Safe-empty quantile summary — every percentile NaN, rendered "—", never 0 (mirrors
+ * `emptyBootstrapCI`). A zero here would draw a quantile box from eight invented
+ * values (Phase 164.6.6.3.3 D-10).
+ */
 function emptyQuantiles(): FactsheetCsvPayload["quantiles"] {
-  return { p05: 0, p25: 0, p50: 0, p75: 0, p95: 0, min: 0, max: 0, mean: 0 };
+  return { p05: NaN, p25: NaN, p50: NaN, p75: NaN, p95: NaN, min: NaN, max: NaN, mean: NaN };
 }
 
 /**

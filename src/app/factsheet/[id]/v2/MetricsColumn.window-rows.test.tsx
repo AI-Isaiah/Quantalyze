@@ -19,7 +19,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render } from "@testing-library/react";
-import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
+import { buildFactsheetPayload, type BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 
@@ -62,7 +62,7 @@ const SHORT = () => dailies("2024-03-01", 100);
 /** About 400 calendar days: covers 6 Month and 1 Year. */
 const LONG = () => dailies("2023-03-01", 400);
 
-function factsheetPayload(points: { date: string; value: number }[]): FactsheetPayload {
+function factsheetPayload(points: { date: string; value: number }[], opts?: BuildFactsheetOpts): FactsheetPayload {
   const built = buildFactsheetPayload(
     {
       id: "window-rows-test",
@@ -74,6 +74,7 @@ function factsheetPayload(points: { date: string; value: number }[]): FactsheetP
       ingestSource: "api",
     },
     points,
+    opts,
   );
   if (!built) throw new Error("buildFactsheetPayload returned null in test");
   return built;
@@ -197,6 +198,75 @@ describe("factsheet mount: 6 Month / 1 Year rows exist only when the record cove
     const row = cells(section(renderColumn(withGap).container, RETURNS), "6 Month");
     expect(row.value).toBe(pctSigned(payload.strategyMetrics.p6m));
     expect(row.bench).toBe("—");
+  });
+});
+
+/**
+ * Phase 164.6.6.3.3 plan 08 (UI-SPEC 1.6, B20, D-12): the 6 Month and 1 Year rows
+ * follow the RECORD's length, not the value. A long chain-broken record whose
+ * Dated suffix is too short for the window has a null p6m / p1y, and the row
+ * reads "—" instead of disappearing. 3 Year and 5 Year keep Phase 169 D-17's null
+ * rule (UI-SPEC 7 item 6, a founder decision this phase does not amend).
+ */
+describe("a long Dated record whose suffix is short (D-12, B20)", () => {
+  const points = LONG();
+  const datedPayload = factsheetPayload(points, {
+    dataQuality: {
+      composite: false,
+      insufficientWindow: false,
+      twrChainBroken: true,
+      headlineCoversFrom: points[points.length - 12].date,
+    },
+    metricsByBasis: {
+      cash_settlement: {
+        cumulative_return: 0,
+        volatility: 0,
+        max_drawdown: 0,
+        cagr: 0,
+        sharpe: null,
+        sortino: null,
+        calmar: null,
+      },
+    },
+  });
+
+  it("fixture guard: the suffix leaves p3m, p6m and p1y null while the record is 400 days long", () => {
+    const m = datedPayload.strategyMetrics;
+    expect(m.p3m).toBeNull();
+    expect(m.p6m).toBeNull();
+    expect(m.p1y).toBeNull();
+    expect(points.length).toBe(400);
+  });
+
+  it.each([CUMULATIVE, RETURNS])("%s: 6 Month and 1 Year rows are present and read an em-dash", (title) => {
+    const panel = section(renderColumn(datedPayload).container, title);
+    expect(rowLabels(panel), title).toContain("6 Month");
+    expect(rowLabels(panel), title).toContain("1 Year");
+    expect(cells(panel, "6 Month").value, title).toBe("—");
+    expect(cells(panel, "1 Year").value, title).toBe("—");
+  });
+
+  it("Cumulative Return Metrics: 3 Year and 5 Year stay omitted (D-17's null rule)", () => {
+    const labels = rowLabels(section(renderColumn(datedPayload).container, CUMULATIVE));
+    expect(labels).not.toContain("3 Year");
+    expect(labels).not.toContain("5 Year");
+  });
+
+  it("a SHORT Dated record still omits 6 Month and 1 Year: the record is shorter than the window", () => {
+    const short = SHORT();
+    const payload = factsheetPayload(short, {
+      dataQuality: {
+        composite: false,
+        insufficientWindow: false,
+        twrChainBroken: true,
+        headlineCoversFrom: short[short.length - 12].date,
+      },
+    });
+    const { container } = renderColumn(payload);
+    for (const title of [CUMULATIVE, RETURNS]) {
+      expect(rowLabels(section(container, title)), title).not.toContain("6 Month");
+      expect(rowLabels(section(container, title)), title).not.toContain("1 Year");
+    }
   });
 });
 
