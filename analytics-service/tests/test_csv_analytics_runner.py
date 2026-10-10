@@ -87,9 +87,10 @@ def _make_supabase_mock(rows: list[dict]) -> MagicMock:
     return sb
 
 
-def _make_metrics_result() -> MetricsResult:
+def _make_metrics_result(headline_since: str | None = None) -> MetricsResult:
     """compute_all_metrics output stub — minimal shape that satisfies the
-    runner's payload spread (no sibling_kinds → no batch RPC fired)."""
+    runner's payload spread (no sibling_kinds → no batch RPC fired).
+    ``headline_since`` is the FACTSHEETTRUTH chain-break annotation (D-01)."""
     return MetricsResult(
         metrics_json={
             "cumulative_return": 0.1,
@@ -111,6 +112,7 @@ def _make_metrics_result() -> MetricsResult:
             "return_quantiles": {},
         },
         sibling_kinds={},
+        headline_since=headline_since,
     )
 
 
@@ -1478,6 +1480,60 @@ async def test_mtm_gated_reason_absence_is_absence() -> None:
         "no prestamped reason → the key must be ABSENT (not None-valued); "
         f"got {dq!r}"
     )
+
+
+async def _run_single_key_completed_flags(
+    metrics_result: MetricsResult, existing_flags: dict[str, object]
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Drive the single-key runner with a stubbed metrics result; return the
+    completed upsert's (payload, data_quality_flags)."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1", existing_flags=existing_flags,
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.basis_series.compute_all_metrics",
+               return_value=metrics_result):
+        await run_csv_strategy_analytics("headline-since-uuid")
+    sa = sb.table("strategy_analytics")
+    completed = [
+        c for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and str(c.args[0].get("computation_status", "")).startswith("complete")
+    ]
+    assert completed, "expected a completed headline upsert"
+    payload = completed[0].args[0]
+    return payload, payload["data_quality_flags"]
+
+
+@pytest.mark.asyncio
+async def test_headline_since_lifted_into_single_key_flags() -> None:
+    """FACTSHEETTRUTH D-01: the suffix's first day rides data_quality_flags so the
+    read path can tell a measured headline from a legacy mixed-basis one. It is an
+    ANNOTATION: it must not promote computation_status. Neuter (drop the lift) →
+    the key is absent → this reddens."""
+    payload, dq = await _run_single_key_completed_flags(
+        _make_metrics_result(headline_since="2026-04-18"), {"csv_source": True},
+    )
+    assert dq.get("headline_since") == "2026-04-18"
+    assert payload["computation_status"] == "complete"
+    assert payload["computation_warned"] is False
+    assert "headline_since" not in payload  # a flag, never a column
+
+
+@pytest.mark.asyncio
+async def test_headline_since_absence_is_absence_and_heals_by_omission() -> None:
+    """A recompute whose series is no longer chain-broken carries NO headline_since
+    key (not a None-valued one), even when the prior row held a stale date: the
+    single-key flags are rebuilt wholesale, so absence heals."""
+    _payload, dq = await _run_single_key_completed_flags(
+        _make_metrics_result(headline_since=None),
+        {"csv_source": True, "headline_since": "2020-01-01"},
+    )
+    assert "headline_since" not in dq, f"stale or None-valued key survived: {dq!r}"
 
 
 # ===========================================================================

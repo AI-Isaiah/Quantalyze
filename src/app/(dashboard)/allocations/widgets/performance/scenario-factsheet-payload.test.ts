@@ -334,15 +334,16 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
     expect(p.strategyMetrics.ann_vol).toBeNaN();
     expect(p.strategyReturns).toEqual([]);
     expect(p.calmarByYear).toEqual([]);
+    // D-10: an absent quantile is NaN, never a zero standing in for one.
     expect(p.quantiles).toEqual({
-      p05: 0,
-      p25: 0,
-      p50: 0,
-      p75: 0,
-      p95: 0,
-      min: 0,
-      max: 0,
-      mean: 0,
+      p05: NaN,
+      p25: NaN,
+      p50: NaN,
+      p75: NaN,
+      p95: NaN,
+      min: NaN,
+      max: NaN,
+      mean: NaN,
     });
   });
 

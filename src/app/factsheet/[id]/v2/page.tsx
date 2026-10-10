@@ -20,6 +20,7 @@ import {
 // that makes the cached wrapper safe lives in this file, and only here.
 import {
   fetchAndBuildPayloadWithReason,
+  type NotBuildableDetail,
   type NotBuildableReason,
 } from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
@@ -230,7 +231,8 @@ function buildFactsheetPayloadCached(
     // Bumped v12→v13 (Phase 164.6.6.2.1 BTCUSDVIEW, 2026-10-09): the payload gained `usdView` / `usdViewUnavailable` (the server-built USD view of a native-unit strategy). A v12 entry lacks them, so for the 1 h TTL drain a BTC account's factsheet could not toggle to USD and would show no reason why.
     // Bumped v12→v13 (Phase 170.2 PROBEFIXES SC-4, D-09): payload gains the optional source field
     // Bumped v13→v14 (Phase 164.6.6.2.1 BTCUSDVIEW, 2026-10-10, on merging main): 170.2 shipped v13 with `source` but without `usdView` / `usdViewUnavailable`, so this branch's payload is a different shape under the same key. A v13 entry written by main would hide the USD toggle for the 1 h TTL drain.
-    ["factsheet-v2-payload-v14", id, computedAt],
+    // Bumped v14→v15 (re-keyed on merging main, 2026-10-10; originally drafted as v12→v13) (Phase 164.6.6.3.3 FACTSHEETTRUTH, 2026-10-09): the payload's `dataQuality` gains `headlineWithheld` and `headlineGuardReasons`, a composite now carries `twrChainBroken` and `headlineCoversFrom`, and a legacy chain-broken row's seven stored scalars are withheld; a stale entry would show mixed-basis figures under the new one-span note during the 1 h drain.
+    ["factsheet-v2-payload-v15", id, computedAt],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
@@ -634,7 +636,7 @@ export default async function FactsheetV2Page({
     // reaches the payload or the cached wrapper.
     const ownerBuildability =
       ownerBuild && ownerBuild.reason !== null
-        ? ownerBuildabilityOf(id, ownerBuild.reason)
+        ? ownerBuildabilityOf(id, ownerBuild.reason, ownerBuild)
         : null;
     // 167.2.1-REVIEW-R2 WR-03: the state line is about the compute JOBS, the
     // share note about the owner BUILD. When the build could not read the row,
@@ -642,8 +644,16 @@ export default async function FactsheetV2Page({
     // build outcome the page never learned, beside a note that says it could
     // not check. The build's facts go to the copy module so that line becomes
     // KCS09-FINISHED-UNREADABLE with the read-again remedy.
+    //
+    // 164.6.6.3.3 D-08: the same facts object carries `analyticsFailed`, set
+    // only when the build's own resolve stage read `computation_status` as
+    // `failed`, so KCS09-FINISHED becomes KCS09-FINISHED-ANALYTICS-FAILED. A
+    // boolean from the build result: the lane's gate and every `select` are
+    // unchanged.
     const ownerBuildFacts = {
       buildUnreadable: ownerBuildability?.unreadable === true,
+      analyticsFailed:
+        ownerBuild !== null && ownerBuild.reason !== null && ownerBuild.analyticsFailed === true,
     };
     const ownerLine =
       ownerStatus && ownerStateLine(ownerStatus.state, ownerBuildFacts);
@@ -980,6 +990,7 @@ async function readOwnerPendingStatus(
 function ownerBuildabilityOf(
   id: string,
   reason: NotBuildableReason,
+  detail?: Pick<NotBuildableDetail, "analyticsFailed">,
 ): { unreadable: boolean; kind: UnbuildableNoteKind | null } {
   if (reason === "read_error") return { unreadable: true, kind: null };
   if (reason === "not_visible") {
@@ -992,5 +1003,5 @@ function ownerBuildabilityOf(
     });
     return { unreadable: true, kind: null };
   }
-  return { unreadable: false, kind: unbuildableNoteKindOf(reason) };
+  return { unreadable: false, kind: unbuildableNoteKindOf(reason, detail) };
 }

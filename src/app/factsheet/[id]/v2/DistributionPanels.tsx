@@ -220,6 +220,29 @@ export function QuantileBoxPlotPanel() {
   const view = useBasisSeriesView(usePayload());
   const isMobile = useBreakpoint() === "mobile";
   const q = view.quantiles;
+  // Phase 164.6.6.3.3 (D-10, UI-SPEC §5): a view with no usable daily returns has no
+  // quantiles (NaN, or null after a JSON round trip). Drawing the box from them would
+  // paint a chart of invented values, so the header stays and the body says so.
+  const hasQuantiles = [q.p05, q.p25, q.p50, q.p75, q.p95, q.min, q.max, q.mean].every(Number.isFinite);
+  if (!hasQuantiles) {
+    return (
+      <figure className="flex flex-col gap-2">
+        <header>
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
+            Daily-Return Quantile Box
+          </h3>
+          <p className="text-micro text-text-muted">This view has no usable daily returns to summarise.</p>
+        </header>
+        <div className="grid grid-cols-5 gap-3 text-micro tabular-nums font-mono mt-1">
+          <Kpi label="P5" value="—" tone="muted" />
+          <Kpi label="P25" value="—" tone="muted" />
+          <Kpi label="Median" value="—" tone="accent" />
+          <Kpi label="P75" value="—" tone="muted" />
+          <Kpi label="P95" value="—" tone="muted" />
+        </div>
+      </figure>
+    );
+  }
   // Use min/max as the visible range; clamp at twice the P95-P05 IQR-ish so
   // a 50% tail-event day doesn't push the box into a tiny sliver.
   const span = Math.max(Math.abs(q.p95 - q.p05), 0.005);
@@ -335,7 +358,7 @@ function Kpi({ label, value, tone }: { label: string; value: string; tone: "mute
       <p className="text-micro uppercase tracking-[0.18em] text-text-muted">{label}</p>
       <p
         className="text-small"
-        style={{ color: tone === "accent" ? "var(--color-accent)" : "var(--color-text-primary)", fontWeight: 600 }}
+        style={{ color: tone === "accent" && value !== "—" ? "var(--color-accent)" : "var(--color-text-primary)", fontWeight: 600 }}
       >
         {value}
       </p>

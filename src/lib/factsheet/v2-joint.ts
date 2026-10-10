@@ -7,7 +7,7 @@ import { alignCoveredReturns, COMPARATOR_CALENDARS } from "./align";
 import { hasBuildableSeries, normalizeDailyReturns } from "./build-payload";
 import type { BenchmarkPricesOpt } from "./build-payload";
 import { readFactsheetBenchmark } from "./benchmark-read";
-import { jointMetrics, MIN_PAIRED_OBSERVATIONS } from "./joint";
+import { gateFlatLeg, jointMetrics, MIN_PAIRED_OBSERVATIONS } from "./joint";
 import { parseReturnsUnit } from "./returns-unit";
 import { curveMethodFromFlags, resolveDailyReturnSeries } from "./resolve-series";
 import type { DailyReturn, FactsheetPayload } from "./types";
@@ -23,7 +23,8 @@ import type { DailyReturn, FactsheetPayload } from "./types";
  *   normalizeDailyReturns -> alignCoveredReturns with COMPARATOR_CALENDARS.btc
  *   -> paired indices (as `buildComparatorBlock` collects them)
  *   -> MIN_PAIRED_OBSERVATIONS floor
- *   -> jointMetrics with rf 0 and annualizationPeriods(asset_class).
+ *   -> jointMetrics with rf 0 and annualizationPeriods(asset_class)
+ *   -> gateFlatLeg (164.6.6.3.3): a flat strategy leg withholds alpha, beta and IR.
  * `v2-joint.parity.test.ts` pins it `toBe`-equal to `buildFactsheetPayload`'s
  * `comparators.btc.joint` on the same rows and the same BenchmarkPricesOpt.
  *
@@ -100,7 +101,7 @@ function pairedLegs(
   return { strat, bench };
 }
 
-/** A flat leg is a reason input only: it never changes a value. */
+/** The reason input for `flatLeg`. The VALUES are gated by `gateFlatLeg` (strategy leg only); this also reads a flat BTC leg. */
 const hasFlatLeg = (strat: number[], bench: number[]): boolean =>
   dispersion(strat, 0).sd === 0 || dispersion(bench, 0).sd === 0;
 
@@ -119,7 +120,12 @@ export function computeV2Joint(
   if (legs.strat.length < MIN_PAIRED_OBSERVATIONS) {
     return withheld({ kind: "below_floor", paired: legs.strat.length, floor: MIN_PAIRED_OBSERVATIONS });
   }
-  const joint = jointMetrics(legs.strat, legs.bench, 0, annualizationPeriods(assetClass));
+  // The builder's flat-leg gate (Phase 164.6.6.3.3 D-04), the same helper: a flat
+  // strategy leg has no alpha, beta or IR, so they are NaN here and null below.
+  const { joint } = gateFlatLeg(
+    jointMetrics(legs.strat, legs.bench, 0, annualizationPeriods(assetClass)),
+    legs.strat,
+  );
   return {
     values: {
       alpha: finiteOrNull(joint.alpha),

@@ -1,4 +1,4 @@
-import type { BenchmarkPricesOpt, CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, BasisSeriesBundle, TrustTierKind, IngestSource } from "./types";
+import type { BenchmarkPricesOpt, ComputeResult, CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, BasisSeriesBundle, TrustTierKind, IngestSource } from "./types";
 import { alignCoveredReturns, COMPARATOR_CALENDARS } from "./align";
 import type { CoveredAlignment } from "./align";
 import { compute, cumEq, metricsBasisSeries, worstDrawdowns } from "./compute";
@@ -352,6 +352,14 @@ export function deriveSeriesBundle(
      * bundle never falls back to the bundled fixture on its own.
      */
     benchmarkPrices: BenchmarkPricesOpt;
+    /**
+     * Phase 164.6.6.3.3 plan 10 (B19): the first date of the span a Dated row's headline
+     * figures cover. Passed ONLY by the cash bundle of `buildFromBuildableSeries`; each
+     * comparator block then also carries `summarySince`. The MTM and smoothed bundles
+     * and `rederiveArgs` (leverage, selected range) never set it: their strategy
+     * figures are whole-record, so their comparator figures are too.
+     */
+    headlineCoversFrom?: string;
   },
 ): BasisSeriesBundle {
   const { periodsPerYear, isArithmetic, dayBasis, calendarDense, markets, strategyName } = args;
@@ -474,8 +482,8 @@ export function deriveSeriesBundle(
     // a weekday comparator ~252 times a year, a weekday strategy sees 7-day BTC ~252
     // times a year); the joint metrics keep the strategy's basis (166.4 D-A).
     comparators: {
-      btc: al.btc === null ? unavailableComparatorBlock("BTC-USD", "BTC") : buildComparatorBlock("BTC-USD", "BTC", al.btc, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear, Math.min(periodsPerYear, annualizationPeriods("crypto"))),
-      spx: buildComparatorBlock("S&P 500", "SPX", al.spx, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear, Math.min(periodsPerYear, annualizationPeriods("traditional"))),
+      btc: al.btc === null ? unavailableComparatorBlock("BTC-USD", "BTC") : buildComparatorBlock("BTC-USD", "BTC", al.btc, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear, Math.min(periodsPerYear, annualizationPeriods("crypto")), args.headlineCoversFrom),
+      spx: buildComparatorBlock("S&P 500", "SPX", al.spx, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear, Math.min(periodsPerYear, annualizationPeriods("traditional")), args.headlineCoversFrom),
       none: noneComparatorBlock,
     },
     // Phase 169.1 (D-31): the heatmap and Calmar by Year follow the method too,
@@ -605,6 +613,53 @@ export function buildFactsheetPayload(
   return buildFromBuildableSeries(strategy, dailyReturns, opts);
 }
 
+/** The seven trailing-window fields of `ComputeResult` (D-01 "window returns"). */
+type WindowFields = Pick<ComputeResult, "mtd" | "ytd" | "p3m" | "p6m" | "p1y" | "p3y" | "p5y">;
+
+/**
+ * Phase 164.6.6.3.3 plan 08: the trailing windows of a Dated row, computed by the
+ * engine's own `compute()` over the slice from `headlineCoversFrom` (the first
+ * index whose date is on or after it), with the build's own conventions. Only the
+ * windows are copied; every other field of `metrics` is returned untouched. With
+ * no date (a clean row) or a date at the first observation, `metrics` is returned
+ * as is. A date past the last observation covers nothing, so every window is null
+ * rather than a whole-record figure under a suffix label.
+ *
+ * Review round 1 (WR-01, D-01, D-03): a WITHHELD row (`headlineWithheld`) has no
+ * measured span, and its whole-record windows compound across the break that
+ * caused the withhold, so all seven read null ("—") there too. The benchmark cells
+ * beside them already read "—" (`headlineBenchSource`), so the strategy and the
+ * benchmark columns follow one rule: the seven stored headline scalars and the
+ * seven trailing windows are withheld together.
+ */
+function withSuffixWindows<T extends WindowFields>(
+  metrics: T,
+  a: {
+    dates: string[];
+    stratRet: number[];
+    periodsPerYear: number;
+    isArithmetic: boolean;
+    dayBasis: "calendar" | "active" | undefined;
+    calendarDense: boolean;
+    headlineCoversFrom: string | null | undefined;
+    headlineWithheld?: boolean;
+  },
+): T {
+  const noWindows = { mtd: null, ytd: null, p3m: null, p6m: null, p1y: null, p3y: null, p5y: null };
+  if (a.headlineWithheld === true) return { ...metrics, ...noWindows };
+  const from = a.headlineCoversFrom;
+  if (typeof from !== "string") return metrics;
+  const idx = a.dates.findIndex((d) => d >= from);
+  if (idx === 0) return metrics;
+  if (idx < 0) return { ...metrics, ...noWindows };
+  const s = compute(a.stratRet.slice(idx), a.dates.slice(idx), 0, a.periodsPerYear, {
+    cumulativeMethod: a.isArithmetic ? "arithmetic" : "geometric",
+    dayBasis: a.dayBasis,
+    calendarDense: a.calendarDense,
+  });
+  return { ...metrics, mtd: s.mtd, ytd: s.ytd, p3m: s.p3m, p6m: s.p6m, p1y: s.p1y, p3y: s.p3y, p5y: s.p5y };
+}
+
 /**
  * The build body of `buildFactsheetPayload`, past its two gates. Its return
  * type is `FactsheetPayload` on purpose (167.2.1-REVIEW WR-04): it has no null
@@ -654,7 +709,29 @@ function buildFromBuildableSeries(
   // composite AND on a rankable single-key row (built from its persisted
   // top-level scalars by `readSingleKeyBasisOpts`); only where it is absent is
   // this a no-op (overlayBasisScalars returns base unchanged).
-  const strategyMetrics = overlayBasisScalars(computedMetrics, opts?.metricsByBasis?.cash_settlement);
+  const overlaid = overlayBasisScalars(computedMetrics, opts?.metricsByBasis?.cash_settlement);
+  // Phase 164.6.6.3.3 (D-01 "window returns", D-12): on a Dated row every stored
+  // headline scalar covers the post-break suffix from `headlineCoversFrom`, so the
+  // trailing windows are recomputed on that same suffix. Left on the whole record
+  // they would sit beside suffix figures on a different basis. Only the seven
+  // window fields move; the engine's coverage rule (D-11) is unchanged, so a
+  // suffix too short for a window reads null ("—"), never the whole-record value.
+  // A clean row keeps its whole-record windows. A Withheld row (WR-01) has no valid
+  // date and nulls all seven, as its seven stored scalars and its benchmark cells.
+  const suffixStart =
+    opts?.dataQuality?.twrChainBroken === true && typeof opts.dataQuality.headlineCoversFrom === "string"
+      ? opts.dataQuality.headlineCoversFrom
+      : undefined;
+  const strategyMetrics = withSuffixWindows(overlaid, {
+    dates,
+    stratRet,
+    periodsPerYear,
+    isArithmetic,
+    dayBasis,
+    calendarDense,
+    headlineCoversFrom: suffixStart,
+    headlineWithheld: opts?.dataQuality?.twrChainBroken === true && opts.dataQuality.headlineWithheld === true,
+  });
 
   // Phase 169.5 (SC3, D-09, D-21): the ONE BTC input of this build. The route's
   // opt is carried verbatim (already bounded over every axis and trimmed); with no
@@ -695,6 +772,8 @@ function buildFromBuildableSeries(
     comparatorAnnVol: strategyMetrics.ann_vol,
     missingSegments: opts?.missingSegments,
     benchmarkPrices,
+    // B19: a Dated row's comparators also carry the summary over the same suffix.
+    headlineCoversFrom: suffixStart,
   });
 
   // Phase 103 (MTM-04) — the MTM per-basis bundle, derived by the SAME function

@@ -3,7 +3,7 @@
 import React, { type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import type { FactsheetPayload, FactsheetUsdView, RollWindowPick } from "@/lib/factsheet/types";
-import { pairedFloorReason } from "@/lib/factsheet/joint";
+import { flatLegReason, pairedFloorReason } from "@/lib/factsheet/joint";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 // Phase 163 / HONEST-08 — the SERIES ladder (3d/7d) is shared with the
 // discovery-list badge, which must judge the same fact about the same rows.
@@ -63,7 +63,14 @@ import { SMOOTHED_MTM_UI_ENABLED } from "@/lib/closed-sets";
 import { ComparatorPicker } from "./ComparatorPicker";
 import { TimeSeriesChart } from "./TimeSeriesChart";
 import { HistogramChart } from "./HistogramChart";
-import { MetricsColumn, RangeEyebrow, headlineCoverageCaveat, windowCoverageCaveat } from "./MetricsColumn";
+import {
+  MetricsColumn,
+  RangeEyebrow,
+  headlineCoverageNote,
+  headlineNoteColor,
+  headlineNoteGlyph,
+  windowCoverageNote,
+} from "./MetricsColumn";
 import { AllocatorSection } from "./BatchDPanels";
 import { StreakDistributionPanel } from "./AnalyticalPanels";
 import { EndOfYearBarsPanel, QuantileBoxPlotPanel, CorrelationStripPanel, CorrelationsMatrixPanel } from "./DistributionPanels";
@@ -75,7 +82,17 @@ import { LazyMount } from "./LazyMount";
 // formatters from format.ts so FactsheetView uses the same implementation that
 // the audit tests cover. The private pct/pctSigned/num copies below were
 // equivalent today but divergences would silently escape test coverage.
-import { pct, pctSigned, ratio as num } from "./format";
+import { pct, ratio as num } from "./format";
+// Phase 164.6.6.3.3 (plan 09, B1-B6, UI-SPEC 3.4): the strip's five toned cells take their
+// printed sign and tone from the value rounded to the cell's precision, the same helper
+// the OG share card uses, so the two surfaces print and colour a rounded zero alike.
+import {
+  formatRatio,
+  formatSignedPercent,
+  formatUnsignedPercent,
+  percentTone,
+  ratioTone,
+} from "@/lib/factsheet/display-sign";
 
 /**
  * Code-split the three heaviest panels off the initial route bundle. These
@@ -1642,21 +1659,6 @@ function KpiStrip() {
   const { view: wv, scope } = useWindowedView(payload);
   const selected = scope.kind === "selected";
   const m = selected ? wv.strategyMetrics : leverageApplied ? view.strategyMetrics : basisM;
-  // Phase 169 review round 1 (SFH H-1): on a chain-broken row the stored cash
-  // headline covers only the record after its last break. Said beside it, only
-  // while the stored figures are the ones shown (cash basis, no what-if; a
-  // chain-broken row has no what-if anyway, `leverageEligibleFor`). Round 2,
-  // IN-R2-02: named by the strip's own labels.
-  // 169.1 review round 1 (SFH MEDIUM-2): a window shows no stored figure (D-78),
-  // but unlike the leverage arm it DOES compute on a chain-broken row, so a range
-  // starting before the last break compounds days the engine leaves out. It keeps a
-  // caveat that says so, naming the same three figures as the full-history caveat:
-  // the engine's Max DD already spans the whole record (`compute_all_metrics`).
-  const coverageCaveat = selected
-    ? windowCoverageCaveat(payload.dataQuality, basis, scope.start, "Cum. Return, CAGR and Calmar")
-    : leverageApplied
-      ? null
-      : headlineCoverageCaveat(payload.dataQuality, basis, "Cum. Return, CAGR and Calmar");
   const j = wv.comparators[cmpKey].joint;
   // 169.4 review round 2 (SFH-R2 MEDIUM-2): below the paired floor the joint is
   // withheld, not absent. The α/IR cells stay (9 cells) and read "—", and one
@@ -1673,15 +1675,14 @@ function KpiStrip() {
   // 9 cells when a comparator is active (mockup contract). When NONE, the
   // α + IR slots collapse — render 7 cells instead of leaving empty space.
   //
-  // Tone is computed ONLY when the underlying value is finite — a NaN/Inf
-  // metric formats to "—" but would otherwise render that dash with a red
-  // "negative" tint, which conveys a false signal. Also: max_dd at exactly
-  // 0 (no drawdown observed) gets no negative tint — a zero isn't bad. (NEW-C20-09)
-  const signTone = (v: number | null | undefined): "positive" | "negative" | undefined =>
-    v != null && Number.isFinite(v) ? (v >= 0 ? "positive" : "negative") : undefined;
-  const maxDdTone = (v: number | null | undefined): "negative" | undefined =>
-    v != null && Number.isFinite(v) && v < 0 ? "negative" : undefined;
-
+  // Phase 164.6.6.3.3 (plan 09, B1-B6, UI-SPEC 3.4): at the five toned cells the printed
+  // sign AND the tone come from the value ROUNDED to the cell's precision (1dp of a
+  // percent for Cum. Return, CAGR, α and Max DD; 2dp for IR), through the helper the OG
+  // card shares. A value that rounds to zero is neutral and unsigned ("0.0%", never a
+  // green "+0.0%" or a red "-0.0%"), and a NaN/Inf/missing value is a dash with no tone,
+  // which conveys no false signal (NEW-C20-09: a zero drawdown is not bad). Max DD is
+  // only ever red or neutral, so it discards the helper's `positive`.
+  //
   // Phase 164.6.6.2 (D-09, UI-SPEC A2, A3): a native-unit strategy's two return
   // cells name the unit. `unitLabel` marks them so ONLY those labels swap the
   // bounded-label clip for a wrap (the longer text would ellipsise in the
@@ -1689,14 +1690,19 @@ function KpiStrip() {
   const returnsUnit = payload.returnsUnit ?? null;
   const unitLabel = returnsUnit != null;
   const items: Array<{ label: string; value: string; tone?: "positive" | "negative"; unitLabel?: boolean }> = [
-    { label: withUnit("Cum. Return", returnsUnit), value: pctSigned(m.cum_ret, 1), tone: signTone(m.cum_ret), unitLabel },
-    { label: withUnit("CAGR", returnsUnit), value: pctSigned(m.cagr, 1), tone: signTone(m.cagr), unitLabel },
+    { label: withUnit("Cum. Return", returnsUnit), value: formatSignedPercent(m.cum_ret, 1), tone: percentTone(m.cum_ret, 1), unitLabel },
+    { label: withUnit("CAGR", returnsUnit), value: formatSignedPercent(m.cagr, 1), tone: percentTone(m.cagr, 1), unitLabel },
     { label: "Sharpe", value: num(m.sharpe) },
     { label: "Sortino", value: num(m.sortino) },
     { label: "Calmar", value: num(m.calmar) },
-    { label: "Max DD", value: pct(m.max_dd, 1), tone: maxDdTone(m.max_dd) },
+    { label: "Max DD", value: formatUnsignedPercent(m.max_dd, 1), tone: percentTone(m.max_dd, 1) === "negative" ? "negative" : undefined },
     { label: "Ann. Vol", value: pct(m.ann_vol, 1) },
   ];
+  // Hoisted from the α/IR block below: the flat-leg line under the strip is shown only
+  // when those cells show the joint, so it reads the same predicate.
+  const suppressRelative =
+    (basis === "mark_to_market" && !mtmBundlePresent) ||
+    (basis === "smoothed_mtm" && !smoothedBundlePresent);
   if ((j || jointWithheld || keepRelativeSlots) && cmpKey !== "none") {
     // F5 (phase 103) + Phase 107 (LEV-BB): α / β / IR FOLLOW the active basis AND
     // leverage via the view's joint (above), matching §IV. At L≠1 the view re-derives
@@ -1711,24 +1717,45 @@ function KpiStrip() {
     // bundle is absent — a bundle-absent read yields the CASH joint, and showing it
     // under a non-cash story mislabels cash (the F4 rail-eyebrow discipline). Cash is
     // never suppressed. Each basis consults ITS OWN bundle-present flag.
-    const suppressRelative =
-      (basis === "mark_to_market" && !mtmBundlePresent) ||
-      (basis === "smoothed_mtm" && !smoothedBundlePresent);
     const shown = suppressRelative ? null : j;
     items.push({
       label: `α vs ${cn}`,
-      value: shown ? pctSigned(shown.alpha, 1) : "—",
-      tone: shown ? signTone(shown.alpha) : undefined,
+      value: shown ? formatSignedPercent(shown.alpha, 1) : "—",
+      tone: shown ? percentTone(shown.alpha, 1) : undefined,
     });
     items.push({
       label: `IR vs ${cn}`,
-      value: shown ? num(shown.info_ratio) : "—",
-      tone: shown ? signTone(shown.info_ratio) : undefined,
+      value: shown ? formatRatio(shown.info_ratio, 2) : "—",
+      tone: shown ? ratioTone(shown.info_ratio, 2) : undefined,
     });
   }
+  // Phase 164.6.6.3.3 (D-01, D-03, UI-SPEC 1.3 S1): the note under the strip says which
+  // span the figures cover. Since D-01 EVERY stored headline stat covers the one
+  // post-break suffix (Max DD and the rest included); only alpha and IR, which are
+  // joint with the comparator, cover the whole record, so the note names them when
+  // their cells are shown. It describes the STORED headline, so it appears only
+  // while that is what is shown: cash basis, no what-if (a chain-broken row has no
+  // what-if anyway, `leverageEligibleFor`). 169.1 review round 1 (SFH MEDIUM-2): a
+  // window shows no stored figure (D-78) but does compute on a chain-broken row, so a
+  // range starting before `{D}` keeps a sentence saying its figures reach back past it.
+  const spanNote = selected
+    ? windowCoverageNote(payload.dataQuality, basis, scope.start)
+    : leverageApplied
+      ? null
+      : headlineCoverageNote(payload.dataQuality, basis, items.length > 7 ? "stripRelative" : "strip");
   const jointFloorReason =
     jointWithheld && cmpKey !== "none"
       ? pairedFloorReason(cn, jointWithheld.paired, selected ? "range" : "record", jointWithheld.floor)
+      : null;
+  // Phase 164.6.6.3.3 (D-04, UI-SPEC 2.1): a flat strategy leg's α and IR cells read "—"
+  // (the block's joint carries NaN for them) and ONE muted line says why. It is picked by
+  // the block's present-only `flatLeg` marker, never by testing the values for NaN, and
+  // only while the α/IR cells show the joint. Precedence, first match: the native-unit arm
+  // (no comparator, so no α/IR cells), then the paired floor (the joint is null, so
+  // `j` fails), then this. The floor line and this one therefore can never co-render.
+  const flatLegLine =
+    j != null && !suppressRelative && items.length > 7 && cmpKey !== "none" && wv.comparators[cmpKey].flatLeg === true
+      ? flatLegReason(selected ? "range" : "record")
       : null;
   // Phase 52-06 / TYPE-04 — the strip reflows on ITS OWN width via `@container`
   // (`@`-prefixed variants), NOT the viewport. The KPI strip sits in the
@@ -1869,6 +1896,15 @@ function KpiStrip() {
           {jointFloorReason}
         </p>
       )}
+      {flatLegLine && (
+        <p
+          className="px-3 sm:px-4 py-2 text-micro font-mono"
+          data-testid="joint-flat-leg-reason"
+          style={{ borderTop: "1px solid var(--color-border)", color: "var(--color-text-muted)" }}
+        >
+          {flatLegLine}
+        </p>
+      )}
       {/* Short-track caveat: annualized CAGR/Sharpe/Sortino/Calmar/Ann.Vol
           are statistically unreliable with fewer than 252 observations (~1y).
           Surface the same warning here at the hero strip so mobile users who
@@ -1925,15 +1961,16 @@ function KpiStrip() {
           ⚠ Some days were measured on a very small balance, so their returns can be extreme.
         </p>
       )}
-      {coverageCaveat && (
+      {spanNote && (
         <p
           className="px-3 sm:px-4 py-2 text-micro font-mono"
           style={{
             borderTop: "1px solid var(--color-border)",
-            color: "var(--color-warning, #B45309)",
+            color: headlineNoteColor(spanNote.variant),
           }}
         >
-          ⚠ {coverageCaveat}
+          {headlineNoteGlyph(spanNote.variant)}
+          {spanNote.text}
         </p>
       )}
       {/* HARD-05 (Phase 93): server-truth degraded-member flag from
@@ -2820,7 +2857,7 @@ function FactsheetFooter({
   );
 }
 
-// pct / pctSigned / num are imported from "./format" at the top of this file.
+// pct / num are imported from "./format" at the top of this file (the strip's five toned cells use display-sign).
 // (IMPORTANT-1/FINDING-8 — b06-codereview/silentfailure): removed private
 // copies to ensure a single implementation is tested by audit-c20.test.ts.
 

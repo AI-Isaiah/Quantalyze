@@ -28,11 +28,11 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import {
   KEY_STATUS_UNREADABLE_NOTE,
   probeUnreadableShareNote,
-  recipientShareNote,
   recipientShareNoteFor,
   STRATEGIES_LIST_UNREADABLE,
   unbuildableNoteKindOf,
   untrustedKeyCaption,
+  type UnbuildableNoteKind,
 } from "@/lib/status-surface-copy";
 // Phase 167.2.1 (D-04, D-08): the builder's own resolve stage, so the list and
 // the share page decide "can this factsheet build?" from the same code.
@@ -580,10 +580,14 @@ export default async function StrategiesPage() {
             apiKeyId: s.api_key_id,
           },
         );
+  // 164.6.6.3.3 D-08: `kind` is `analytics_failed` for a row whose analytics
+  // FAILED, else null (`recipientShareNoteFor` with no kind is exactly
+  // `recipientShareNote`). A running recompute keeps KCS12-MINT-A.
   const uncomputedNote = async (
     s: NonNullable<typeof strategies>[number],
     mode: ReturnType<typeof shareAffordanceMode>,
-  ): Promise<string> => recipientShareNote(mode, await armOf(s, mode));
+    kind: UnbuildableNoteKind | null = null,
+  ): Promise<string> => recipientShareNoteFor(mode, await armOf(s, mode), kind);
 
   // WR-01: the probes share one limiter per page load, and a probe that
   // THROWS is recorded here and captured after the fan-out, one event per
@@ -600,8 +604,12 @@ export default async function StrategiesPage() {
         (strategies ?? []).map(async (s): Promise<readonly [string, string | null]> => {
           const mode = shareAffordanceMode(isPublishedStatus(s.status));
           // D-08: an uncomputed row is never probed; it keeps today's path.
-          if (!isComputedAnalytics(computationStatusOf(s.strategy_analytics))) {
-            return [s.id, await uncomputedNote(s, mode)] as const;
+          const embedStatus = computationStatusOf(s.strategy_analytics);
+          if (!isComputedAnalytics(embedStatus)) {
+            return [
+              s.id,
+              await uncomputedNote(s, mode, embedStatus === "failed" ? "analytics_failed" : null),
+            ] as const;
           }
           // D-08: a computed row is probed, uncached, under the owner
           // predicate. Only ids from the owner-filtered list reach here.
@@ -624,7 +632,7 @@ export default async function StrategiesPage() {
             // a type lie). Out here, that throw rejected `Promise.all` and put
             // the whole list behind the error boundary; in here it fails this
             // row's check, and is captured with the other throws.
-            kind = probe.buildable ? null : unbuildableNoteKindOf(probe.reason);
+            kind = probe.buildable ? null : unbuildableNoteKindOf(probe.reason, probe);
           } catch (err) {
             if (err instanceof FactsheetProbeTimeoutError) {
               // 167.2.1-REVIEW-SFH-R2 N-3: no answer within the probe's
@@ -695,7 +703,9 @@ export default async function StrategiesPage() {
               id: s.id,
               reason: probe.reason,
             });
-            return [s.id, await uncomputedNote(s, mode)] as const;
+            // D-08: when the builder's read says the row FAILED, the same
+            // analytics-failed note as the embed path (`kind` is that or null).
+            return [s.id, await uncomputedNote(s, mode, kind)] as const;
           }
           // D-02: computed, but the builder refuses it (`kind`, above).
           return [s.id, recipientShareNoteFor(mode, await armOf(s, mode), kind)] as const;

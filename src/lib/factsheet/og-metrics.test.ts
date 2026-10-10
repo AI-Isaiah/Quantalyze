@@ -20,6 +20,17 @@ function alternating(n: number, startMs = Date.parse("2023-01-01")): Array<{ dat
   }));
 }
 
+/** The stored headline keys the page's `storedCashHeadlineGate` requires (SFH-R2-01). */
+const SEVEN_STORED = {
+  cumulative_return: 0.4,
+  volatility: 0.12,
+  max_drawdown: -0.1,
+  cagr: 0.6,
+  sharpe: 1.5,
+  sortino: 2.1,
+  calmar: 3,
+} as const;
+
 /** N consecutive-day rows starting at `startMs`, each carrying `value`. */
 function consecutive(
   n: number,
@@ -98,14 +109,23 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
     expect(Number.isNaN(cagr)).toBe(true);
   });
 
-  it("Sharpe hidden (NaN) below the 30-observation floor", () => {
-    // Dispersing rows, so the Sharpe is hidden by the observation gate alone:
-    // the same fixture one row longer shows it.
+  it("no card-only observation floor (D-06): 29 dispersing rows still show Sharpe and Max DD; CAGR is NaN for the span (E1)", () => {
+    // The card used to hide Sharpe and Max DD below 30 observations while the
+    // factsheet printed them, so one strategy read two ways. Any minimum-history
+    // rule now belongs in compute. CAGR keeps its span rule (E1): 29 days is
+    // well under 0.95 calendar years.
     const { sharpe, cagr, maxDd } = computeOgHeadline(alternating(29), "crypto");
-    expect(Number.isNaN(sharpe)).toBe(true);
+    expect(Number.isFinite(sharpe)).toBe(true);
+    expect(Number.isFinite(maxDd)).toBe(true);
+    expect(maxDd).toBeLessThanOrEqual(0);
     expect(Number.isNaN(cagr)).toBe(true);
-    expect(Number.isNaN(maxDd)).toBe(true);
-    expect(Number.isFinite(computeOgHeadline(alternating(30), "crypto").sharpe)).toBe(true);
+  });
+
+  it("a pure call on fewer than two finite values returns no measured-looking Max DD", () => {
+    // Dropping the observation gate must not turn "nothing to measure" into a 0.
+    expect(Number.isNaN(computeOgHeadline([], "crypto").maxDd)).toBe(true);
+    expect(Number.isNaN(computeOgHeadline([{ date: "2023-01-01", value: 0.01 }], "crypto").maxDd)).toBe(true);
+    expect(Number.isNaN(computeOgHeadline([{ date: "2023-01-01", value: Number.NaN }], "crypto").maxDd)).toBe(true);
   });
 
   it("single / duplicate / unsorted dates never produce Infinity", () => {
@@ -146,10 +166,11 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
  * Sharpe and max drawdown for a rankable row, so a shared card says what the
  * factsheet headline and every list say. Before this, the card recomputed them
  * from the raw series and could disagree with the stored values the lists rank
- * on. The card keeps its OWN display policy over the stored value (Sharpe and
- * max drawdown need 30 observations, CAGR a 0.95-calendar-year span with
- * positive growth), a stored null hides, and a key the caller never projected
- * (undefined) falls back to the computation. A non-rankable row (a failed or
+ * on. Since 164.6.6.3.3 (D-06) the card shows the stored Sharpe and max drawdown
+ * with no card-only floor, and keeps only CAGR's two named exceptions (E1 a span
+ * under 0.95 calendar years, E2 a chain-broken or short-window headline); a
+ * stored null hides, and a key the caller never projected (undefined) falls back
+ * to the computation. A non-rankable row (a failed or
  * computing run still carries the previous run's scalars) is never read.
  */
 describe("computeOgHeadline — persisted scalars for a rankable row (169.4.1)", () => {
@@ -180,11 +201,24 @@ describe("computeOgHeadline — persisted scalars for a rankable row (169.4.1)",
     expect(got.maxDd).toBe(-0.1);
   });
 
-  it("a 20-observation series hides the stored Sharpe AND max drawdown (the 30-observation gate)", () => {
+  it("a 20-observation series shows the stored Sharpe AND max drawdown (no card-only floor, D-06); CAGR is NaN for the span (E1)", () => {
     const got = computeOgHeadline(alternating(20), "crypto", { ...STORED, computation_status: "complete" });
-    expect(Number.isNaN(got.sharpe)).toBe(true);
-    expect(Number.isNaN(got.maxDd)).toBe(true);
+    expect(got.sharpe).toBe(1.5);
+    expect(got.maxDd).toBe(-0.1);
     expect(Number.isNaN(got.cagr)).toBe(true);
+  });
+
+  it("B10: a stored CAGR shows on a 400-day row whose computed cumulative growth is not positive; a computed fallback stays NaN", () => {
+    // A wipeout day drives the computed cumulative product to 0. The old rule hid
+    // the STORED CAGR too, though the stored figure never touches that product.
+    const rows = alternating(400);
+    rows[200] = { date: rows[200].date, value: -1 };
+    const stored = computeOgHeadline(rows, "crypto", { ...STORED, computation_status: "complete" });
+    expect(stored.cagr).toBe(0.2);
+    // The positive-growth guard protects only the power of a non-positive base,
+    // which only the computed fallback (stored key absent) takes.
+    const fallback = computeOgHeadline(rows, "crypto", { sharpe: 1.5, computation_status: "complete" });
+    expect(Number.isNaN(fallback.cagr)).toBe(true);
   });
 
   it.each(["failed", "computing", null, undefined])(
@@ -228,10 +262,12 @@ describe("computeOgHeadline — persisted scalars for a rankable row (169.4.1)",
    * +60%; the card must not show it as if it covered the full record.
    */
   describe("a stored CAGR whose span the card cannot see is hidden (CR-01)", () => {
-    const CHAIN_BROKEN_STORED = { sharpe: 1.5, cagr: 0.6, max_drawdown: -0.1, computation_status: "complete" } as const;
+    // SFH-R2-01: the card asks the page's own applicability question, so a row
+    // that stands for a stored headline carries all seven stored keys.
+    const CHAIN_BROKEN_STORED = { ...SEVEN_STORED, sharpe: 1.5, cagr: 0.6, max_drawdown: -0.1, computation_status: "complete" } as const;
 
     it.each([
-      ["twr_chain_broken", { twr_chain_broken: true }],
+      ["twr_chain_broken", { twr_chain_broken: true, headline_since: "2023-02-01" }],
       ["insufficient_window", { insufficient_window: true }],
     ])("%s: the stored CAGR is hidden, the stored Sharpe and max drawdown still show", (_name, flags) => {
       const got = computeOgHeadline(alternating(400), "crypto", {
@@ -255,6 +291,40 @@ describe("computeOgHeadline — persisted scalars for a rankable row (169.4.1)",
         data_quality_flags: flags,
       });
       expect(got.cagr).toBe(0.6);
+    });
+  });
+
+  /**
+   * D-03 / D-06: a chain-broken row WITHOUT a valid `headline_since` is a legacy
+   * mixed-basis row. The factsheet withholds all seven of its stored scalars
+   * (`readHeadlineBasis`), so the card, which shows exactly the factsheet's value,
+   * withholds the three it prints. Never the computed value in their place.
+   */
+  describe("a legacy chain-broken row (no valid headline_since) withholds every stored figure (D-03)", () => {
+    const LEGACY = { ...SEVEN_STORED, sharpe: 1.5, cagr: 0.6, max_drawdown: -0.1, computation_status: "complete" } as const;
+
+    it.each([
+      ["absent", { twr_chain_broken: true }],
+      ["null", { twr_chain_broken: true, headline_since: null }],
+      ["malformed", { twr_chain_broken: true, headline_since: "2023-02-30" }],
+    ])("headline_since %s: Sharpe, Max DD and CAGR are all NaN, not the computed values", (_name, flags) => {
+      const rows = alternating(400);
+      const computed = computeOgHeadline(rows, "crypto");
+      expect(Number.isFinite(computed.sharpe) && Number.isFinite(computed.cagr) && Number.isFinite(computed.maxDd)).toBe(true);
+      const got = computeOgHeadline(rows, "crypto", { ...LEGACY, data_quality_flags: flags });
+      expect(Number.isNaN(got.sharpe)).toBe(true);
+      expect(Number.isNaN(got.cagr)).toBe(true);
+      expect(Number.isNaN(got.maxDd)).toBe(true);
+    });
+
+    it("a Dated row (valid headline_since) shows its stored Sharpe and Max DD; only the CAGR is withheld (E2)", () => {
+      const got = computeOgHeadline(alternating(400), "crypto", {
+        ...LEGACY,
+        data_quality_flags: { twr_chain_broken: true, headline_since: "2023-02-01" },
+      });
+      expect(got.sharpe).toBe(1.5);
+      expect(got.maxDd).toBe(-0.1);
+      expect(Number.isNaN(got.cagr)).toBe(true);
     });
   });
 });

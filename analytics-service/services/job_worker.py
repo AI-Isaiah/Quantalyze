@@ -3921,6 +3921,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     "%s — %s | detail: %s",
                     strategy_id, message, str(scrub_freeform_string(detail)),
                 )
+            else:
+                # Plan 164.6.6.3.3-07 (D-08): the owner page says "We've logged
+                # the error", and a stamp given no detail logged nothing at all.
+                # WARNING, this closure's own level for the cause: ERROR stays
+                # reserved for a person-needing stamp (see the round 3 note
+                # below), and tests/test_stamp_io_exhaustive.py pins that.
+                logger.warning(
+                    "derive_broker_dailies: terminal analytics stamp for strategy "
+                    "%s — %s",
+                    strategy_id, scrubbed,
+                )
 
             # ---- Phase 161.1 / D-15: a maintenance refresh may NOT un-publish --
             # The stamp below is an AUTHORITATIVE clear — status 'failed', warned
@@ -8026,6 +8037,13 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 "%s — %s | detail: %s",
                 strategy_id, message, str(scrub_freeform_string(detail)),
             )
+        else:
+            # Plan 164.6.6.3.3-07 (D-08): see the derive sibling.
+            logger.warning(
+                "run_stitch_composite_job: terminal analytics stamp for strategy "
+                "%s — %s",
+                strategy_id, scrubbed,
+            )
 
         # ONE select, BOTH columns: the flags for M-2's merge above, and the
         # CURRENT status for the non-destructive guard below.
@@ -9754,6 +9772,13 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     member_warned = False
     for _member_meta in member_metas:
         for _flag in NAV_TWR_GUARD_KEYS:
+            # FACTSHEETTRUTH D-13: `twr_chain_broken` is NOT unioned from members.
+            # A member's meta is judged on its full, unclipped reconstruction, but
+            # the composite shows the stitched, clipped series; a break outside the
+            # window must not mark it broken. It is derived below from the series
+            # the headline was computed on. Every OTHER guard key keeps the union.
+            if _flag == "twr_chain_broken":
+                continue
             if _member_meta.get(_flag):
                 member_warn_flags[_flag] = True
                 member_warned = True
@@ -9767,6 +9792,16 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         if _member_meta.get("used_heuristic_capital"):
             member_warn_flags["used_heuristic_capital"] = True
             member_warned = True
+    # FACTSHEETTRUTH D-13: the composite's chain-break verdict comes from the ONE
+    # series its headline was computed on. `headline_since` is set by
+    # `compute_all_metrics` exactly when that series has an interior break (the
+    # `cumulative_twr_segmented` predicate the single-key path's flag uses), so the
+    # flag and the date can never disagree. It rides the same warn promotion as every
+    # NAV_TWR_GUARD_KEYS member (single-key parity: complete_with_warnings).
+    _composite_chain_broken = _cash_basis_result.headline_since is not None
+    if _composite_chain_broken:
+        member_warn_flags["twr_chain_broken"] = True
+        member_warned = True
     # MED-01 (132 review): union the ONE smoothed-owned caveat from the smoothed-
     # pass metas — the pre_mark_retention_option_dailies bucket bridged in
     # _reconstruct_deribit (registered in NAV_TWR_GUARD_KEYS; single-key parity:
@@ -9838,6 +9873,15 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         merged_flags["insufficient_window"] = True
     else:
         merged_flags.pop("insufficient_window", None)
+    # FACTSHEETTRUTH (D-01): lift the first day of the post-break suffix every
+    # composite headline stat was measured on. This path MERGES into the existing
+    # flags, so a clean re-stitch must POP a stale date explicitly (the insufficient
+    # window / mtm_gated_reason drop-stale twin above). Annotation only: it never
+    # touches computation_status (not a NAV_TWR_GUARD_KEYS member).
+    if _cash_basis_result.headline_since is not None:
+        merged_flags["headline_since"] = _cash_basis_result.headline_since
+    else:
+        merged_flags.pop("headline_since", None)
     # HARD-05 (#): lift the degraded-member records (ccxt members excluded from the
     # stitch this phase) so the user SEES the exclusion on both DQ surfaces. Drop-stale
     # heals on re-stitch (mtm_gated_reason / insufficient_window mirror): an all-Deribit
@@ -9871,6 +9915,32 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     else:
         merged_flags.pop("benchmark_unavailable", None)
         merged_flags.pop("benchmark_note", None)
+    # D-13 drop-stale: this path MERGES into the existing flags, so a clean
+    # re-stitch must remove a `twr_chain_broken` an earlier stitch (or a pre-D-13
+    # member union) left behind, or the flag would outlive its `headline_since`.
+    if not _composite_chain_broken:
+        merged_flags.pop("twr_chain_broken", None)
+    # FACTSHEETTRUTH WR-02: the same drop-stale step for EVERY NAV_TWR_GUARD_KEYS
+    # member. The four reason keys (negative_nav / dust_nav / flow_dominated /
+    # pnl_dominated) are now public text ("it includes {R}",
+    # src/lib/factsheet/headline-basis.ts), and this path MERGES, so a guard flag an
+    # earlier stitch set, or one a since-removed member carried, would otherwise
+    # outlive its cause forever. Clear them all, then re-apply THIS stitch's verdict
+    # below (member_warn_flags holds every guard key the current members carry, and
+    # the series-derived twr_chain_broken). Only NAV_TWR_GUARD_KEYS: those are all
+    # recomputed from this stitch's member metas. `used_heuristic_capital` and the
+    # ALLOCATED_CAPITAL_GUARD_KEYS are not public reason text and are left as-is.
+    #
+    # ⚠️ RESIDUAL (recorded, not fixed): the member union above reads each member's
+    # meta, which is judged on that member's full, UNCLIPPED reconstruction. A reason
+    # key can therefore still name a cause that lies outside the composite's shown
+    # window. NavTWRMeta guard flags are bare booleans with no dated span (the dated
+    # `{ccy}:{day}` lists collapse to bools at the broker boundary, T-73-02), so there
+    # is nothing here to scope them to [window_start, window_end) with, and a window
+    # attribution would have to be invented. The fix for that is upstream: the guard
+    # NaN days must carry their cause per day through the clip.
+    for _flag in NAV_TWR_GUARD_KEYS:
+        merged_flags.pop(_flag, None)
     for _flag, _val in member_warn_flags.items():
         merged_flags[_flag] = _val
 

@@ -444,6 +444,39 @@ describe("167.2.1 SC2 — probeFactsheetBuildable agrees with fetchAndBuildPaylo
     }
   });
 
+  // 164.6.6.3.3 D-08: a `failed` analytics row carries one extra fact out of the
+  // resolve stage, so the owner page and /strategies can say "analytics could
+  // not be computed" instead of the generic "factsheet could not be built". A
+  // `computing` row (same reason, same series) must not carry it.
+  it("D-08 analyticsFailed: set for a failed analytics row only, on the probe and the reason-carrying build; the failed and computing fixtures differ by that key alone", async () => {
+    const failedFx = PARITY.find((f) => f.name === "status failed with a good series")!;
+    const computingFx = PARITY.find((f) => f.name === "status computing")!;
+
+    seed(failedFx.row, [], null, null);
+    const failedProbe = await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
+    seed(computingFx.row, [], null, null);
+    const computingProbe = await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
+    expect(failedProbe).toEqual({ buildable: false, reason: "not_computed", analyticsFailed: true });
+    expect(computingProbe).toEqual({ buildable: false, reason: "not_computed" });
+    expect("analyticsFailed" in computingProbe).toBe(false);
+
+    seed(failedFx.row, [], null, null);
+    const failedBuilt = await fetchAndBuildPayloadWithReason(STRATEGY_ID, ownerVisibility);
+    seed(computingFx.row, [], null, null);
+    const computingBuilt = await fetchAndBuildPayloadWithReason(STRATEGY_ID, ownerVisibility);
+    expect(failedBuilt).toEqual({ payload: null, reason: "not_computed", analyticsFailed: true });
+    expect(computingBuilt).toEqual({ payload: null, reason: "not_computed" });
+    expect("analyticsFailed" in computingBuilt).toBe(false);
+  });
+
+  it("D-08 PROBE CONTRACT: no other refusal carries analyticsFailed, so a reason with no detail still equals { buildable: false, reason }", async () => {
+    for (const f of PARITY.filter((x) => x.reason !== null && x.name !== "status failed with a good series")) {
+      seed(f.row, f.csv ?? [], f.error ?? null, f.csvError ?? null);
+      const probe = await probeFactsheetBuildable(STRATEGY_ID, ownerVisibility);
+      expect("analyticsFailed" in probe, f.name).toBe(false);
+    }
+  });
+
   it("SFH M-1 LOG LABEL: a probe's resolve logs as a probe, never as a factsheet build, and a build logs as a build", async () => {
     const warn = vi.mocked(console.warn);
     const lines = () => warn.mock.calls.map((c) => String(c[0]));

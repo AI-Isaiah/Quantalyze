@@ -152,6 +152,53 @@ describe("S6 — KCS09-FINISHED-UNREADABLE (167.2.1-REVIEW-R2 WR-03)", () => {
   });
 });
 
+describe("S6 — KCS09-FINISHED-ANALYTICS-FAILED (164.6.6.3.3 D-08)", () => {
+  // The jobs finished, but the stored analytics row reads `failed`. Typed out
+  // from UI-SPEC section 4.1, never imported. Apostrophes are ASCII U+0027.
+  const failed = { buildUnreadable: false, analyticsFailed: true };
+
+  it("KCS09-FINISHED-ANALYTICS-FAILED: text and tone", () => {
+    expect(ownerStateLine({ state: "finished" }, failed)).toEqual({
+      id: "KCS09-FINISHED-ANALYTICS-FAILED",
+      text: "Analytics couldn't be computed from this data. We've logged the error.",
+      tone: "red",
+    });
+    expect(ownerStateLine({ state: "finished" }, failed).text).not.toContain("\u2019");
+  });
+
+  it("its remedy is the permanent contact line, whatever the shape", () => {
+    for (const shape of ["single", "unlinked", "composite", "csv", "unknown"] as const) {
+      const r = ownerRemedy({ state: "finished" }, shape, SID, failed);
+      expect(r.id).toBe("KCS09-CONTACT-PERMANENT");
+      expect(rendered(r)).toBe("Use the contact form to have it resolved.");
+    }
+  });
+
+  it("an unreadable build wins over a failed analytics row (nothing was read to call it failed)", () => {
+    const both = { buildUnreadable: true, analyticsFailed: true };
+    expect(ownerStateLine({ state: "finished" }, both).id).toBe("KCS09-FINISHED-UNREADABLE");
+    expect(ownerRemedy({ state: "finished" }, "single", SID, both).id).toBe("KCS09-UNREADABLE");
+  });
+
+  it("analyticsFailed absent or false keeps KCS09-FINISHED, and no other state line changes", () => {
+    expect(ownerStateLine({ state: "finished" }, { buildUnreadable: false }).id).toBe("KCS09-FINISHED");
+    expect(
+      ownerStateLine({ state: "finished" }, { buildUnreadable: false, analyticsFailed: false }).id,
+    ).toBe("KCS09-FINISHED");
+    const others: ComputeState[] = [
+      { state: "queued" },
+      { state: "running", phase: "compute" },
+      { state: "failed", errorKind: "permanent" },
+      { state: "never_started" },
+      { state: "unreadable" },
+    ];
+    for (const s of others) {
+      expect(ownerStateLine(s, failed)).toEqual(ownerStateLine(s));
+      expect(ownerRemedy(s, "single", SID, failed)).toEqual(ownerRemedy(s, "single", SID));
+    }
+  });
+});
+
 describe("S6 — KCS-21 shape remedies", () => {
   const shapeStates: ComputeState[] = [
     { state: "stalled" },
@@ -282,6 +329,53 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     }
   });
 
+  // 164.6.6.3.3 D-08 (UI-SPEC section 4.2): the analytics row failed. Typed out,
+  // never imported. The second sentence is D-08's public sentence verbatim.
+  const ANALYTICS_FAILED =
+    "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy yet.";
+  const ANALYTICS_FAILED_UNREADABLE =
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. Analytics are not available for this strategy yet.";
+  const PUBLIC_ANALYTICS_FAILED =
+    "Right now, this strategy's factsheet link opens a page without the numbers. Analytics are not available for this strategy yet.";
+
+  it("KCS12-UNBUILDABLE-ANALYTICS-FAILED: private link, arm not_available", () => {
+    expect(recipientShareNoteFor("mint-token", "not_available", "analytics_failed")).toBe(
+      ANALYTICS_FAILED,
+    );
+  });
+
+  it("KCS12-UNBUILDABLE-UNREADABLE-ANALYTICS-FAILED: private link, arm unreadable", () => {
+    expect(recipientShareNoteFor("mint-token", "unreadable", "analytics_failed")).toBe(
+      ANALYTICS_FAILED_UNREADABLE,
+    );
+  });
+
+  it("KCS12-PUBLIC-UNBUILDABLE-ANALYTICS-FAILED: public URL, any arm", () => {
+    for (const arm of ARMS) {
+      expect(recipientShareNoteFor("public-url", arm, "analytics_failed")).toBe(
+        PUBLIC_ANALYTICS_FAILED,
+      );
+    }
+  });
+
+  it("a running recompute keeps KCS12-MINT-A for an analytics-failed row", () => {
+    expect(recipientShareNoteFor("mint-token", "in_progress", "analytics_failed")).toBe(
+      "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.",
+    );
+  });
+
+  it("no analytics-failed note names a status, a job, an error or a computation (T-12)", () => {
+    for (const mode of ["mint-token", "public-url"] as const) {
+      for (const arm of ["not_available", "unreadable"] as const) {
+        const note = recipientShareNoteFor(mode, arm, "analytics_failed").toLowerCase();
+        for (const word of ["computation", "computing", "failed", "pending", "job", "error", "stored results"]) {
+          expect(note).not.toContain(word);
+        }
+        expect(note.endsWith("analytics are not available for this strategy yet.")).toBe(true);
+      }
+    }
+  });
+
   it("SELECTION: no unbuildable kind is exactly recipientShareNote, for both modes and every arm", () => {
     for (const mode of ["mint-token", "public-url"] as const) {
       for (const arm of ARMS) {
@@ -325,7 +419,7 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     // The row's computation DID succeed; waiting for one changes nothing.
     for (const mode of ["mint-token", "public-url"] as const) {
       for (const arm of ARMS) {
-        for (const kind of ["too_short", "cannot_build"] as const) {
+        for (const kind of ["too_short", "cannot_build", "analytics_failed"] as const) {
           if (mode === "mint-token" && arm === "in_progress") continue; // MINT-A, D-02
           expect(recipientShareNoteFor(mode, arm, kind)).not.toContain(
             "once a computation succeeds",
@@ -348,6 +442,15 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     for (const [reason, kind] of table) {
       expect(unbuildableNoteKindOf(reason)).toBe(kind);
     }
+  });
+
+  it("unbuildableNoteKindOf: not_computed is analytics_failed only with the analyticsFailed detail", () => {
+    expect(unbuildableNoteKindOf("not_computed", { analyticsFailed: true })).toBe("analytics_failed");
+    expect(unbuildableNoteKindOf("not_computed", {})).toBeNull();
+    expect(unbuildableNoteKindOf("not_computed", undefined)).toBeNull();
+    // The detail never changes a reason it does not belong to.
+    expect(unbuildableNoteKindOf("too_few_points", { analyticsFailed: true })).toBe("too_short");
+    expect(unbuildableNoteKindOf("read_error", { analyticsFailed: true })).toBeNull();
   });
 
   it("L-1 EXHAUSTIVE: a reason the switch does not list fails loud instead of reading as 'no kind'", () => {
@@ -575,7 +678,7 @@ describe("Phase 164.6.6.3.5 DOMAINONE — no status surface names an address", (
   it("no share note names an address", () => {
     for (const mode of ["mint-token", "public-url"] as const) {
       for (const arm of ["in_progress", "not_available", "unreadable"] as const) {
-        for (const kind of [null, "too_short", "cannot_build"] as const) {
+        for (const kind of [null, "too_short", "cannot_build", "analytics_failed"] as const) {
           expect(recipientShareNoteFor(mode, arm, kind)).not.toMatch(/@quantalyze\./);
         }
       }

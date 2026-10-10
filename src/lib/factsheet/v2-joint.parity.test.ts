@@ -163,6 +163,11 @@ describe("computeV2Joint equals the factsheet builder's BTC joint (D-07)", () =>
     expect(Number.isNaN(j.corr)).toBe(true);
     // ... and leave the helper as null, never as a substituted 0.
     expect(got.values.correlation).toBeNull();
+    // 164.6.6.3.3 (D-04): the builder withholds a flat leg's alpha, beta and IR, so v2 does
+    // too. Pinned as null so the toBe-equalities below cannot pass on a shared 0.
+    expect(got.values.alpha).toBeNull();
+    expect(got.values.beta).toBeNull();
+    expect(got.values.ir).toBeNull();
     expect(got.values.alpha).toBe(fin(j.alpha));
     expect(got.values.beta).toBe(fin(j.beta));
     expect(got.values.ir).toBe(fin(j.info_ratio));

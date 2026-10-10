@@ -2,6 +2,84 @@ import type { ComputeResult } from "./types";
 import { dispersion, sharpe as sharpeRatio } from "@/lib/return-stats";
 
 /**
+ * Phase 169 D-11 (SC6) + 164.6.6.3.3 plan 08: ONE coverage rule for every return
+ * window, shared by `compute()` and the factsheet rail so no second calendar rule
+ * exists. `cutoff` is the window's cutoff date, or a number of days back from the
+ * record's last date (182 for 6 Month, 365 for 1 Year; the offsets `compute` uses).
+ *
+ * A window is shown only when the record covers it, i.e. the first observation date is
+ * on or before the window's cutoff plus one UTC day; otherwise it is null.
+ * Without this, a record shorter than the window compounded its WHOLE history
+ * under the window's label (a 5-month record printed a "1 Year" return).
+ * Multi-year windows are calendar days (3 x 365, 5 x 365), never an
+ * observation count: 756 observations is three years on a weekday venue and
+ * about two on a 24/7 one.
+ *
+ * 169 review WR-02 (2026-09-29): "cutoff plus one day" is the window's first
+ * SESSION only on a 7-day venue. On a weekday venue (see WR-R2-01 below) the first
+ * session after the cutoff is the first day that is not a Saturday, a Sunday,
+ * 1 January or 25 December, and a record starting there misses nothing. So
+ * the rule is: covered iff every UTC day strictly between the cutoff and the
+ * first observation is a day the venue did not trade. The 7-day basis has no
+ * such day, which keeps its rule exactly "cutoff + 1 day". Without this a
+ * weekday strategy launched on 2 January showed YTD as the em-dash all year,
+ * and a Monday start after a Saturday cutoff dropped rows the record covers.
+ * Only those four days are assumed closed, because every weekday venue this
+ * product carries (equities, FX / CFD via MT5) is shut on them; any other
+ * holiday differs by venue, and assuming it would admit a window missing a
+ * session that traded. Known limit: a start after another holiday (a Labor
+ * Day Monday on the 1st, an observed New Year Monday) is the em-dash.
+ *
+ * 169 review round 2, WR-R2-01 (2026-09-29): the calendar is a property of
+ * the SERIES, never of the asset class. It was `periodsPerYear === 252`, but
+ * 252 is what every non-crypto class gets, including the DB default
+ * 'traditional', so a 24/7 record left on the default borrowed the weekend
+ * tolerance and could show a window missing up to three traded days. It also
+ * let a change of asset class move a return number, which closed-sets.ts
+ * (#597) forbids. Now: a record is on the weekday calendar only when it spans
+ * at least one Saturday and has no Saturday or Sunday observation at all. A
+ * single weekend print anywhere proves the venue trades weekends; a record
+ * too short to span a weekend proves nothing. Both keep the strict rule
+ * (cutoff + 1 day), so the failure direction is always the em-dash.
+ */
+export function recordCoversWindow(dates: string[], cutoff: Date | number): boolean {
+  const n = dates.length;
+  if (n === 0) return false;
+  const startDate = new Date(dates[0]);
+  const lastDate = new Date(dates[n - 1]);
+  const cutoffDate =
+    typeof cutoff === "number"
+      ? (() => {
+          const d = new Date(lastDate);
+          d.setUTCDate(d.getUTCDate() - cutoff);
+          return d;
+        })()
+      : cutoff;
+  const tradesWeekends = dates.some((d) => {
+    const w = new Date(d).getUTCDay();
+    return w === 0 || w === 6;
+  });
+  const firstDow = startDate.getUTCDay();
+  const spanDays = Math.round((lastDate.getTime() - startDate.getTime()) / 86_400_000);
+  const spansSaturday = (6 - firstDow + 7) % 7 <= spanDays;
+  const weekdayVenue = spansSaturday && !tradesWeekends;
+  const isNonTradingDay = (d: Date): boolean => {
+    if (!weekdayVenue) return false;
+    const dow = d.getUTCDay();
+    const md = d.getUTCMonth() * 100 + d.getUTCDate();
+    return dow === 0 || dow === 6 || md === 1 || md === 1125;
+  };
+  const firstSession = new Date(cutoffDate);
+  firstSession.setUTCDate(firstSession.getUTCDate() + 1);
+  // At most three non-trading days run together (a weekend beside 1 Jan or
+  // 25 Dec); 7 is only a bound on the loop.
+  for (let i = 0; i < 7 && isNonTradingDay(firstSession); i++) {
+    firstSession.setUTCDate(firstSession.getUTCDate() + 1);
+  }
+  return !(startDate > firstSession);
+}
+
+/**
  * Headline per-series metrics for the strategy and each benchmark. Mirrors the
  * Python reference's numerical conventions:
  *
@@ -218,7 +296,7 @@ export function compute(
   // ARITHMETIC sums, mirroring `_bucket_return` in `compute_all_metrics` (`s.sum()`
   // under the `simple` method), which feeds the engine's MTD, YTD, 3M and 6M
   // (Phase 169.1 D-31). Only the accumulation follows the method: the cutoffs and
-  // D-11's coverage rule below stay the one implementation for both.
+  // D-11's coverage rule (`recordCoversWindow`) stay the one implementation for both.
   const returnFrom = (cutoff: Date): number => {
     if (arithmetic) {
       let s = 0;
@@ -242,65 +320,10 @@ export function compute(
     d.setUTCDate(d.getUTCDate() - days);
     return d;
   };
-  // Phase 169 D-11 (SC6): ONE coverage rule for every return window. A window
-  // is shown only when the record covers it, i.e. the first observation date is
-  // on or before the window's cutoff plus one UTC day; otherwise it is null.
-  // Without this, a record shorter than the window compounded its WHOLE history
-  // under the window's label (a 5-month record printed a "1 Year" return).
-  // Multi-year windows are calendar days (3 x 365, 5 x 365), never an
-  // observation count: 756 observations is three years on a weekday venue and
-  // about two on a 24/7 one.
-  //
-  // 169 review WR-02 (2026-09-29): "cutoff plus one day" is the window's first
-  // SESSION only on a 7-day venue. On a weekday venue (see WR-R2-01 below) the first
-  // session after the cutoff is the first day that is not a Saturday, a Sunday,
-  // 1 January or 25 December, and a record starting there misses nothing. So
-  // the rule is: covered iff every UTC day strictly between the cutoff and the
-  // first observation is a day the venue did not trade. The 7-day basis has no
-  // such day, which keeps its rule exactly "cutoff + 1 day". Without this a
-  // weekday strategy launched on 2 January showed YTD as the em-dash all year,
-  // and a Monday start after a Saturday cutoff dropped rows the record covers.
-  // Only those four days are assumed closed, because every weekday venue this
-  // product carries (equities, FX / CFD via MT5) is shut on them; any other
-  // holiday differs by venue, and assuming it would admit a window missing a
-  // session that traded. Known limit: a start after another holiday (a Labor
-  // Day Monday on the 1st, an observed New Year Monday) is the em-dash.
-  //
-  // 169 review round 2, WR-R2-01 (2026-09-29): the calendar is a property of
-  // the SERIES, never of the asset class. It was `periodsPerYear === 252`, but
-  // 252 is what every non-crypto class gets, including the DB default
-  // 'traditional', so a 24/7 record left on the default borrowed the weekend
-  // tolerance and could show a window missing up to three traded days. It also
-  // let a change of asset class move a return number, which closed-sets.ts
-  // (#597) forbids. Now: a record is on the weekday calendar only when it spans
-  // at least one Saturday and has no Saturday or Sunday observation at all. A
-  // single weekend print anywhere proves the venue trades weekends; a record
-  // too short to span a weekend proves nothing. Both keep the strict rule
-  // (cutoff + 1 day), so the failure direction is always the em-dash.
-  const tradesWeekends = dates.some((d) => {
-    const w = new Date(d).getUTCDay();
-    return w === 0 || w === 6;
-  });
-  const firstDow = startDate.getUTCDay();
-  const spanDays = Math.round((lastDate.getTime() - startDate.getTime()) / 86_400_000);
-  const spansSaturday = (6 - firstDow + 7) % 7 <= spanDays;
-  const weekdayVenue = spansSaturday && !tradesWeekends;
-  const isNonTradingDay = (d: Date): boolean => {
-    if (!weekdayVenue) return false;
-    const dow = d.getUTCDay();
-    const md = d.getUTCMonth() * 100 + d.getUTCDate();
-    return dow === 0 || dow === 6 || md === 1 || md === 1125;
-  };
-  const windowReturn = (cutoff: Date): number | null => {
-    const firstSession = new Date(cutoff);
-    firstSession.setUTCDate(firstSession.getUTCDate() + 1);
-    // At most three non-trading days run together (a weekend beside 1 Jan or
-    // 25 Dec); 7 is only a bound on the loop.
-    for (let i = 0; i < 7 && isNonTradingDay(firstSession); i++) {
-      firstSession.setUTCDate(firstSession.getUTCDate() + 1);
-    }
-    return startDate > firstSession ? null : returnFrom(cutoff);
-  };
+  // Phase 169 D-11 (SC6): ONE coverage rule for every return window, owned by
+  // `recordCoversWindow` above (164.6.6.3.3 plan 08: the rail shares it).
+  const windowReturn = (cutoff: Date): number | null =>
+    recordCoversWindow(dates, cutoff) ? returnFrom(cutoff) : null;
 
   const yearlyObj: Record<string, number> = {};
   yearly.forEach((v, k) => {

@@ -55,12 +55,19 @@ def test_metrics_result_dataclass_contract_shape():
     assert dataclasses.is_dataclass(MetricsResult)
 
     field_names = {f.name for f in dataclasses.fields(MetricsResult)}
-    assert field_names == {"metrics_json", "sibling_kinds", "insufficient_window"}, (
+    assert field_names == {
+        "metrics_json",
+        "sibling_kinds",
+        "insufficient_window",
+        "headline_since",
+    }, (
         "MetricsResult contract drifted. The mock literals in this module "
         "encode `MetricsResult(metrics_json=..., sibling_kinds=...)`; a new "
         "or renamed field means those mocks no longer match production. "
         "HARD-04 (#67) added `insufficient_window: bool = False` — a DQ "
         "annotation lifted into data_quality_flags, NOT a metrics_json key. "
+        "FACTSHEETTRUTH (D-01) added `headline_since: str | None = None`, the "
+        "same kind of annotation (the first day of the post-break suffix). "
         f"Got fields: {sorted(field_names)}"
     )
 
@@ -70,6 +77,7 @@ def test_metrics_result_dataclass_contract_shape():
     assert empty.metrics_json == {}
     assert empty.sibling_kinds == {}
     assert empty.insufficient_window is False
+    assert empty.headline_since is None
 
     # Split-storage invariant: subscript / `in` proxy ONLY to metrics_json.
     # A series key that lives in sibling_kinds must NOT be visible via the

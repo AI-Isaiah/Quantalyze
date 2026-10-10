@@ -33,11 +33,34 @@ export function ksStatPValue(a: number[], b: number[]): { d: number; p: number }
   // Asymptotic p with Stephens (1970) finite-n correction.
   const en = Math.sqrt((na * nb) / (na + nb));
   const lam = (en + 0.12 + 0.11 / en) * d;
-  let p = 0;
-  for (let k = 1; k <= 100; k++) {
-    p += (k % 2 === 1 ? 1 : -1) * Math.exp(-2 * k * k * lam * lam);
+  return { d, p: ksTailProbability(lam) };
+}
+
+/**
+ * Kolmogorov distribution tail, Q_KS(lambda) = 2 * sum_{j>=1} (-1)^(j-1) exp(-2 j^2 lambda^2).
+ *
+ * Numerical Recipes `probks`: stop once a term is negligible against the previous
+ * term or the running sum, and answer 1 when the series has not converged in 100
+ * terms. A fixed 100-term alternating sum is wrong near lambda = 0, where the terms
+ * barely decay and cancel to 0, so identical samples (D = 0) read p = 0 and a flat
+ * strategy was reported as "distributions differ" (Phase 164.6.6.3.3, D-05).
+ */
+export function ksTailProbability(lam: number): number {
+  if (!(lam > 0)) return 1;
+  const a2 = -2 * lam * lam;
+  let fac = 2;
+  let sum = 0;
+  let prevTerm = 0;
+  for (let j = 1; j <= 100; j++) {
+    const term = fac * Math.exp(a2 * j * j);
+    sum += term;
+    if (Math.abs(term) <= 1e-3 * prevTerm || Math.abs(term) <= 1e-8 * sum) {
+      return Math.max(0, Math.min(1, sum));
+    }
+    fac = -fac;
+    prevTerm = Math.abs(term);
   }
-  return { d, p: Math.max(0, Math.min(1, 2 * p)) };
+  return 1;
 }
 
 export type StyleDriftMetrics = {

@@ -16,6 +16,10 @@ import {
 // Phase 164.6.6.2 plan 07 (D-12) — the one validator and label composer every
 // unit surface shares.
 import { parseReturnsUnit, withUnit } from "@/lib/factsheet/returns-unit";
+// Phase 164.6.6.3.3 (B7, B8, D-07): the sign and the tone of CAGR and Max DD come
+// from the value rounded to the printed precision, so a dash or a rounded zero is
+// never printed with a sign nor coloured.
+import { formatSignedPercent, formatUnsignedPercent, percentTone } from "@/lib/factsheet/display-sign";
 
 /**
  * Dynamic OG card for the v2 factsheet. Renders strategy name + headline
@@ -57,7 +61,9 @@ function reportOgFailure(stage: "read" | "compute", id: string, err: unknown): v
  *  object for a to-one embed and an array for a to-many one — both handled).
  *  STALE-01 widened it by `computation_status` — see the gate at the compute.
  *  169.4.1 OGSHARPE widened it by the stored `cagr` / `sharpe` / `max_drawdown`,
- *  and review round 1 (CR-01) by `data_quality_flags`. */
+ *  and review round 1 (CR-01) by `data_quality_flags`. Round 2 (SFH-R2-01) widened
+ *  it by `metrics_json_by_basis` and the four stored scalars the page's headline
+ *  also needs, so the card asks the page's own applicability question. */
 type AnalyticsEmbed = {
   daily_returns?: unknown;
   returns_series?: unknown;
@@ -66,6 +72,11 @@ type AnalyticsEmbed = {
   sharpe?: unknown;
   max_drawdown?: unknown;
   data_quality_flags?: unknown;
+  metrics_json_by_basis?: unknown;
+  cumulative_return?: unknown;
+  volatility?: unknown;
+  sortino?: unknown;
+  calmar?: unknown;
 };
 
 export async function GET(
@@ -112,7 +123,13 @@ export async function GET(
           // chain-broken row the stored `cagr` covers only the suffix after the
           // break, so computeOgHeadline hides it (see its docblock). Read-only;
           // the flags never leave the server (this response is a PNG).
-          "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status, cagr, sharpe, max_drawdown, data_quality_flags )",
+          // Round 2 (SFH-R2-01): `metrics_json_by_basis`, `cumulative_return`,
+          // `volatility`, `sortino` and `calmar` join the embed, so the card can
+          // ask the page's own question (is the stored cash headline applicable?)
+          // and withhold a chain-broken row the page withholds. Same published-
+          // gated read of the same row; the columns are already public on the
+          // factsheet page and never leave the server (this response is a PNG).
+          "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status, cumulative_return, volatility, cagr, sharpe, sortino, calmar, max_drawdown, data_quality_flags, metrics_json_by_basis )",
         )
         .eq("id", id),
     )
@@ -192,7 +209,7 @@ export async function GET(
     // show it to people who never open the page and never see a correction.
     //
     // Not computing is ALREADY this card's designed answer to "analytics
-    // aren't ready" — the docblock says so and `fmtNum`/`fmtPct` render the
+    // aren't ready" — the docblock says so and `fmtNum` and the display-sign formatters render the
     // NaN sentinel as "—". A non-terminal row is the same answer to the same
     // question, so it reuses the same path: name + description + three
     // em-dashes. No new layout, no error card, and the route still cannot 500.
@@ -202,28 +219,31 @@ export async function GET(
         : null;
     const analyticsComputed = isComputedAnalytics(computationStatus);
     // Two points is the floor for any of the three metrics to mean anything
-    // (computeOgHeadline enforces its own stricter gates above that and returns
-    // NaN — the "—" sentinel — when they are not met).
+    // (computeOgHeadline returns NaN — the "—" sentinel — for a figure it cannot
+    // support).
     // Phase 169.4.1 OGSHARPE (SC4, D-10, D-25): the stored scalars travel with
-    // the status, so a rankable row shows its PERSISTED figures under the card's
-    // own display gates (computeOgHeadline's docblock); only a key the embed did
-    // not carry falls back to the computation, and a stored null hides.
+    // the status, so a rankable row shows its PERSISTED figures, the values the
+    // factsheet shows (164.6.6.3.3 D-06), with CAGR's two named exceptions
+    // (computeOgHeadline's docblock); only a key the embed did not carry falls
+    // back to the computation, and a stored null hides.
     if (analyticsComputed && rows.length >= 2) {
-      ({ sharpe, cagr, maxDd } = computeOgHeadline(rows, data?.asset_class, {
-        cagr: analytics?.cagr,
-        sharpe: analytics?.sharpe,
-        max_drawdown: analytics?.max_drawdown,
-        computation_status: computationStatus,
-        data_quality_flags: analytics?.data_quality_flags,
-      }));
+      // SFH-R2-01: the embed row itself, so a key PostgREST did not answer is
+      // ABSENT from it (the page's `missing_keys` gate reads presence), not
+      // undefined-valued as a picked literal would make it.
+      ({ sharpe, cagr, maxDd } = computeOgHeadline(rows, data?.asset_class, analytics));
     }
   } catch (err) {
     failed = true;
     reportOgFailure("compute", id, err);
   }
 
-  const fmtPct = (x: number) => (Number.isFinite(x) ? `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%` : "—");
   const fmtNum = (x: number) => (Number.isFinite(x) ? x.toFixed(2) : "—");
+
+  // CAGR: signed, tone from the rounded value. Max DD: unsigned, and only a real
+  // (rounded below zero) drawdown is `neg`; a drawdown is never "good", so it has
+  // no positive tone. NaN and rounded zeros carry no tone (D-07).
+  const cagrTone = percentTone(cagr, 1);
+  const maxDdTone = percentTone(maxDd, 1);
 
   const response = new ImageResponse(
     (
@@ -254,8 +274,16 @@ export async function GET(
         )}
         <div style={{ marginTop: 48, display: "flex", gap: 56 }}>
           <Stat label="Sharpe" value={fmtNum(sharpe)} />
-          <Stat label={withUnit("CAGR", unit)} value={fmtPct(cagr)} tone={cagr >= 0 ? "pos" : "neg"} />
-          <Stat label="Max DD" value={fmtPct(maxDd)} tone="neg" />
+          <Stat
+            label={withUnit("CAGR", unit)}
+            value={formatSignedPercent(cagr, 1)}
+            tone={cagrTone === "positive" ? "pos" : cagrTone === "negative" ? "neg" : undefined}
+          />
+          <Stat
+            label="Max DD"
+            value={formatUnsignedPercent(maxDd, 1)}
+            tone={maxDdTone === "negative" ? "neg" : undefined}
+          />
         </div>
         <div style={{ marginTop: "auto", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ fontSize: 18, color: "#64748B" }}>quantalyze.xyz</div>

@@ -106,5 +106,26 @@ describe("scenario factsheet body with no observations shows '—', never 0.00 (
 
       expect(container.innerHTML).not.toMatch(/NaN|Infinity|>null</);
     });
+
+    // Phase 164.6.6.3.3 (D-10, B15): the quantile box drew an SVG from eight zeros
+    // and the Extended Metrics rows beside it read "0.00%". An empty view has no
+    // quantiles; the box keeps its header, says so, and draws nothing.
+    it(`Daily-Return Quantile Box is a captioned "—" row with no chart for ${c.name}`, () => {
+      const { container } = renderBody(c.payload());
+
+      // The panel is a <figure>; its enclosing <section> also holds sibling charts.
+      const heading = [...container.querySelectorAll("h3")].find(el => el.textContent === "Daily-Return Quantile Box");
+      const box = heading?.closest("figure") as HTMLElement;
+      expect(box).not.toBeNull();
+      expect(box.textContent).toContain("This view has no usable daily returns to summarise.");
+      expect(box.querySelector("svg")).toBeNull();
+      const kpis = [...box.querySelectorAll("div.grid > div")].map(d => d.querySelector("p:last-child")?.textContent);
+      expect(kpis).toEqual(["—", "—", "—", "—", "—"]);
+
+      const ext = section(container, "Extended Metrics");
+      for (const label of ["P5 (daily)", "P95 (daily)", "Median (daily)", "Tail Ratio (P95/|P5|)"]) {
+        expect(rowValue(ext, label), label).toBe("—");
+      }
+    });
   }
 });

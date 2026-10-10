@@ -179,6 +179,12 @@ class BasisSeriesResult:
         (`_cash_basis_result.insufficient_window` → `merged_flags`) and
         `analytics_runner.run_csv_strategy_analytics`
         (`metrics_result.insufficient_window` → `data_quality_flags`).
+    headline_since:
+        Pass-through of the `MetricsResult.headline_since` annotation (NOT persisted
+        here): the ISO date of the first day of the post-break suffix every headline
+        stat was computed on, set only on a chain-broken series (FACTSHEETTRUTH
+        D-01). Lifted by the same two writers into `data_quality_flags.headline_since`
+        beside `insufficient_window`.
     """
 
     metrics_json: dict[str, Any]
@@ -188,6 +194,7 @@ class BasisSeriesResult:
     conventions: dict[str, Any]
     nan_dates: list[str] | None = None
     insufficient_window: bool = False
+    headline_since: str | None = None
 
 
 def derive_basis_series(
@@ -300,6 +307,7 @@ def derive_basis_series(
         conventions=conventions,
         nan_dates=nan_dates,
         insufficient_window=metrics.insufficient_window,
+        headline_since=metrics.headline_since,
     )
 
 

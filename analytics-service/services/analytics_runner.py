@@ -202,6 +202,14 @@ class DataQualityFlags(TypedDict, total=False):
     # every young account complete_with_warnings would be factsheet-wide blast
     # radius (roadmap Pitfall #12). The CAGR value it annotates is unchanged. ---
     insufficient_window: bool
+    # --- FACTSHEETTRUTH (D-01): the ISO date (YYYY-MM-DD) of the first day of the
+    # post-break suffix every headline stat was computed on, present ONLY when the
+    # series carries an interior chain break (an integrity guard NaN'd a day with
+    # valid returns on both sides). Lets the read path tell a measured headline from
+    # a legacy mixed-basis one (D-03). A DQ annotation, annotation ONLY, never
+    # promotes computation_status: deliberately NOT a NAV_TWR_GUARD_KEYS member (that
+    # registry would turn a young clean account complete_with_warnings). ---
+    headline_since: str
     # --- Phase 101 (MTM-01): the machine reason stamped by the broker derive
     # (job_worker._prestamp_dq_flags) when a single-key options book's
     # mark_to_market pass structurally degrades. run_csv_strategy_analytics is now
@@ -1741,6 +1749,14 @@ async def run_csv_strategy_analytics(
             data = await db_execute(_load_series)
 
             if len(data) < 2:
+                # Plan 164.6.6.3.3-07 (D-08): the owner page says "We've logged
+                # the error", so this terminal stamp must leave the record too.
+                # Row count only; no row payload.
+                logger.error(
+                    "csv analytics: insufficient history for %s (%d row(s), "
+                    "at least 2 required)",
+                    strategy_id, len(data),
+                )
                 # WR-05 (19.1-REVIEW): stamp csv_source=True so the
                 # provenance pill renders "CSV upload failed — insufficient
                 # history" instead of falling through to generic "missing
@@ -2023,6 +2039,14 @@ async def run_csv_strategy_analytics(
             # member). The CAGR value it annotates is unchanged.
             if metrics_result.insufficient_window:
                 data_quality_flags["insufficient_window"] = True
+
+            # FACTSHEETTRUTH (D-01): lift the suffix's first day, present-only and
+            # additive, AFTER csv_status and NOT touching `_warned` (an annotation,
+            # never a status promoter). data_quality_flags is rebuilt wholesale
+            # above, so a recompute whose series is no longer chain-broken heals by
+            # OMISSION: no pop is needed on this path.
+            if metrics_result.headline_since is not None:
+                data_quality_flags["headline_since"] = metrics_result.headline_since
 
             # Finding 5 (non-composite direction): a strategy that STOPS being a
             # composite (members removed → single-key path) — or ANY non-composite CSV
