@@ -44,6 +44,20 @@ Phase 170.2, the build half. Six defects the founder's 2026-10-08 PROD probe fou
 - **Known local-only test noise, on `main` too:** `compute.conventions.test.ts` fixtures B and C (one ULP on macOS) and the "no scratch worktree left behind" case in `sql-mutation-scope-step.test.ts`.
 - **Planning-only and merge commits on this branch**, listed so every commit is accounted for: `29d346a5c`, `863090285`, `aa24617f0`, `f8fc8b9db`, `067b8de4b`, `e315815e1`, `6036d5f63`, `6e76df55b`, `afdb1529c` (phase context, founder decisions D-05 to D-07, research, UI-SPEC, pattern map, plan revisions), `b74365883`, `2c7e79520`, `8b93efb0a`, `1f9f8587d`, `a4e1b700c`, `3f4a6683f`, `b53c2f0a5`, `cc8124a64`, `b433594fe` (plan SUMMARYs), and the merges `1d88c85b6`, `d008b895c`, `c33cc0ff6`, `5ddd58d89`, `11396bf31`, `76d5d963d` and `c1f71d8ff`.
 
+## [0.129.10.1] - 2026-10-10 — BASELINE: automated re-dump after the PROD apply of 09d5049b
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38027977271`, after the PROD apply of merge `09d5049b`: sha256 `48fa55a2…` → `2eefab3e…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 126, distinct function names 123 → 124, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261010130000_strategy_analytics_trade_fetch_provenance.sql`, `20261010140000_cron_sync_tick.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-10` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.129.10.0 → 0.129.10.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=293 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 126 — MATCH 123, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+- `scripts/dump-sql-functions.ts`: the dated `snapshot-only` `NAME_SET_RATCHET` row for `cron_sync_tick` (captured 2026-10-09, Phase 167.1.2.2.2) is deleted. Its clearing condition was exactly this re-dump; with the function now on both sides the snapshot gate reported it `ratchet-stale` and required the deletion. Gate (a) now reads 124 vs 124 names with 0 ratcheted disagreements.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38027977271` succeeded, and this entry was composed by the `redump-pr` job. Run `38027977271` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.129.10.0] - 2026-10-09 — TRADESYNC (1/2): the daily trade-sync tick exists, strategy_analytics gets its trade-fetch and provenance columns, and neither is wired to anything yet
 
 Phase 167.1.2.2.2, first of two PRs. The analytics service has carried a `POST /api/cron-sync` route and the per-key sync code behind it for a long time, and nothing has ever called it, so live strategy keys have not had their trades ingested on a schedule. This PR ships the callable and the two columns the later readers need, **and nothing that reads them or schedules anything**. The code PR (plans 05 onward) adds the readers and merges only after PROD has applied these two migrations, so a select that names a column never meets a PROD that lacks it.

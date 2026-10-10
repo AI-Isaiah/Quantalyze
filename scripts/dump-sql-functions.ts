@@ -392,26 +392,10 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  {
-    name: "cron_sync_tick",
-    side: "snapshot-only",
-    capturedAt: "2026-10-09",
-    clearedBy:
-      "a regeneration of supabase/schema/baseline.sql taken AFTER " +
-      "20261010140000_cron_sync_tick.sql has applied to PROD (Phase " +
-      "167.1.2.2.2 PR-A ships the function ahead of every reader; the " +
-      "post-apply baseline re-dump is a later plan of that phase). The " +
-      "function lands in PROD's catalogue at merge, via apply-test then the " +
-      "automatic PROD apply, independent of the go-live runbook step that " +
-      "registers the daily job.",
-    reason:
-      "Phase 167.1.2.2.2 plan 01 ships public.cron_sync_tick() in a forward " +
-      "migration. supabase/schema/baseline.sql is a dated PROD dump (see " +
-      "supabase/schema/BASELINE.md) that predates this migration, so the " +
-      "function exists in the migration-replay snapshot and not yet in the " +
-      "baseline until the next refresh (the Phase 167.1.2 PR B and 164.1.1 " +
-      "precedent).",
-  },
+  // ⭐ 2026-10-10: the Phase 167.1.2.2.2 TRADESYNC row (`cron_sync_tick`,
+  // `snapshot-only`, captured 2026-10-09) was DELETED on the re-dump taken
+  // after 20261010140000 applied to PROD, its own clearing condition.
+  //
   // EMPTY (of any OTHER row), and that is a MEASURED state, not an unused
   // feature.
   //

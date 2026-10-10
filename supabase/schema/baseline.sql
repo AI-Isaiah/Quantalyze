@@ -3446,6 +3446,90 @@ COMMENT ON FUNCTION "public"."create_wizard_strategy_for_key"("p_user_id" "uuid"
 
 
 
+CREATE OR REPLACE FUNCTION "public"."cron_sync_tick"() RETURNS bigint
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $_$
+DECLARE
+  v_key TEXT;
+  -- ⛔ DECLAREd because plpgsql compiles the body WHOLE: a missing DECLARE does
+  --    not weaken the one statement that uses it, it raises 42601 and the
+  --    function does not compile at all.
+  v_cnt INTEGER;
+  v_url TEXT;
+  v_req BIGINT;
+  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b). BYTE-IDENTICAL to the CHECK
+  --    constraint's expression on system_settings and to the constant in
+  --    match_engine_cron_tick(). The constraint is one ALTER TABLE away from
+  --    gone, and this is what still refuses the POST when it is.
+  c_url_allowed CONSTANT TEXT :=
+    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
+BEGIN
+  -- THE VAULT READ — ONE statement, count and value off the SAME scan.
+  -- Not `INTO STRICT`: STRICT would replace the by-name absent-key message with
+  -- a generic P0002. The count form refuses a duplicate BY NAME and leaves the
+  -- absent-secret message intact. count = 0 leaves v_key NULL and the guard
+  -- below fires.
+  SELECT count(*), max(decrypted_secret) INTO v_cnt, v_key
+    FROM vault.decrypted_secrets
+   WHERE name = 'analytics_service_key';
+  IF v_cnt > 1 THEN
+    RAISE EXCEPTION 'analytics_service_key is not unique in vault (% rows) — refusing to pick one', v_cnt;
+  END IF;
+  -- btrim() with no character set trims SPACES ONLY. A key of tabs or newlines
+  -- still passes and still produces a header the analytics service answers 401
+  -- to. Recorded, not closed: widening it is a decision with its own evidence.
+  IF v_key IS NULL OR btrim(v_key) = '' THEN
+    RAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';
+  END IF;
+
+  SELECT s.value INTO v_url
+    FROM public.system_settings s
+   WHERE s.key = 'analytics_service_url';
+  IF v_url IS NULL OR v_url = '' THEN
+    RAISE EXCEPTION 'analytics_service_url missing from system_settings — refusing to post to a null url';
+  END IF;
+
+  -- ⛔ AND IT MUST BE A DESTINATION THE ALLOW-LIST PERMITS (T-164.7-06, layer
+  -- (b)). This re-test is the last thing between an admin-writable row and a
+  -- live service key in an outbound header.
+  --
+  -- ⚠️ THE MESSAGE DOES NOT ECHO THE OFFENDING URL. RAISE text lands in the cron
+  -- job-run row, the Postgres log and whatever ships those onward; echoing an
+  -- attacker-chosen string writes their collector's hostname into every
+  -- downstream reader. Name the SETTING, never its value (T-161.1-10).
+  IF v_url !~ c_url_allowed THEN
+    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';
+  END IF;
+
+  -- ⚠️ net.http_post is ASYNC. The BIGINT returned here is a REQUEST ID, not an
+  -- HTTP status: a request that ends in a 401 or a timeout returns a perfectly
+  -- ordinary id and leaves the caller looking successful. Whether the POST
+  -- landed is read out of net._http_response. NOTHING below is wrapped in an
+  -- exception handler that swallows: if net.http_post is absent or errors, this
+  -- function RAISES and the tick is red. Do not add a success message here —
+  -- nothing at this point knows whether it succeeded.
+  SELECT net.http_post(
+           url := v_url || '/api/cron-sync',
+           headers := jsonb_build_object(
+                        'Content-Type', 'application/json',
+                        'X-Service-Key', v_key
+                      ),
+           body := '{}'::jsonb,
+           timeout_milliseconds := 180000
+         ) INTO v_req;
+  RETURN v_req;
+END
+$_$;
+
+
+ALTER FUNCTION "public"."cron_sync_tick"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."cron_sync_tick"() IS 'Phase 167.1.2.2.2 / SC-1: the CALLABLE that asks the analytics service to run the daily trade sync. Reads the analytics service key from the Vault in ONE scan that counts and takes the value together, so a duplicate secret name is REFUSED BY NAME; reads the service url from public.system_settings; RAISES when either is absent, empty or (for the key) whitespace; RAISES when the url is not a destination the allow-list permits, without echoing it; and fires one ASYNC net.http_post of an empty JSON body to /api/cron-sync. The returned BIGINT is a pg_net REQUEST ID and NOT a delivery or an HTTP success: a 401 or a timeout returns an ordinary id. EXECUTE is held by the owner alone. This function registers nothing and is invoked by NOTHING until the go-live runbook registers the job cron-sync-trades at 30 4 * * * UTC after the rehearsal; until then no scheduler calls it.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."current_user_has_app_role"("p_roles" "text"[]) RETURNS boolean
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
@@ -12197,10 +12281,13 @@ CREATE TABLE IF NOT EXISTS "public"."strategy_analytics" (
     "series_completeness" "text",
     "computation_error_source" "text",
     "computation_error_job_id" "uuid",
+    "trades_fetched_at" timestamp with time zone,
+    "series_provenance" "jsonb",
     CONSTRAINT "strategy_analytics_computation_error_markers_together_check" CHECK ((("computation_error_source" IS NULL) = ("computation_error_job_id" IS NULL))),
     CONSTRAINT "strategy_analytics_computation_error_source_check" CHECK (("computation_error_source" = 'writer'::"text")),
     CONSTRAINT "strategy_analytics_computation_status_check" CHECK (("computation_status" = ANY (ARRAY['pending'::"text", 'computing'::"text", 'complete'::"text", 'complete_with_warnings'::"text", 'failed'::"text"]))),
-    CONSTRAINT "strategy_analytics_metrics_by_basis_shape" CHECK ((("metrics_json_by_basis" IS NULL) OR ("jsonb_typeof"("metrics_json_by_basis") = 'object'::"text")))
+    CONSTRAINT "strategy_analytics_metrics_by_basis_shape" CHECK ((("metrics_json_by_basis" IS NULL) OR ("jsonb_typeof"("metrics_json_by_basis") = 'object'::"text"))),
+    CONSTRAINT "strategy_analytics_series_provenance_is_object" CHECK ((("series_provenance" IS NULL) OR ("jsonb_typeof"("series_provenance") = 'object'::"text")))
 );
 
 
@@ -12232,6 +12319,14 @@ COMMENT ON COLUMN "public"."strategy_analytics"."computation_error_source" IS 'P
 
 
 COMMENT ON COLUMN "public"."strategy_analytics"."computation_error_job_id" IS 'Phase 164.2 / criterion 2: the compute_jobs.id whose failure the computation_error sentence describes. NULL means BRIDGE-OR-LEGACY provenance (see computation_error_source). Deliberately NOT a foreign key: compute_jobs rows are retained for audit under their own retention policy, and an FK would couple that retention to this column; the bridge''s test is an equality, so an id that no longer resolves simply fails to match and the per-kind generic wins. This id is what makes the preference DECIDABLE -- a presence test on the source column alone cannot tell THIS failure''s sentence from one left by an OLDER unresolved failure, which is the reason 20260826120000''s header gave for recording the fix as owed work rather than doing it there. Written by the analytics-service strategy_analytics failure writers in the same statement as the sentence; NULLed by the bridge on every overwrite and every blank.';
+
+
+
+COMMENT ON COLUMN "public"."strategy_analytics"."trades_fetched_at" IS 'Phase 167.1.2.2.2 SC-4 / D-07. The instant of the last /api/cron-sync tick that fetched and stored this strategy''s trades (strategy_advances). Single writer: analytics-service routers/cron.py (service role). NULL = no fetch recorded, which the UI renders as no claim. Never derived from computed_at or api_keys.last_sync_at.';
+
+
+
+COMMENT ON COLUMN "public"."strategy_analytics"."series_provenance" IS 'Phase 167.1.2.2.2 D-03 / D-08 / D-02. A jsonb OBJECT (series_provenance_is_object enforces object-ness only; the reader validates the arrays and renders nothing on a malformed value) with two optional arrays: legacy_ranges [{from, to, source, recorded_at}] where source = returns_grid_carry_forward, and unrecovered_gaps [{from, to, recorded_at}]. Dates are YYYY-MM-DD, inclusive. A later phase (OKXHISTORY) may add reconstructed_ranges. Writers: the go-live runbook and, later, OKXHISTORY. It lives OUTSIDE data_quality_flags because run_csv_strategy_analytics rebuilds that field wholesale on every run, which would erase a runbook write. NULL = no range record, which is the normal state.';
 
 
 
@@ -16152,6 +16247,10 @@ GRANT ALL ON FUNCTION "public"."create_wizard_strategy"("p_user_id" "uuid", "p_e
 
 REVOKE ALL ON FUNCTION "public"."create_wizard_strategy_for_key"("p_user_id" "uuid", "p_api_key_id" "uuid", "p_placeholder_name" "text", "p_wizard_session_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."create_wizard_strategy_for_key"("p_user_id" "uuid", "p_api_key_id" "uuid", "p_placeholder_name" "text", "p_wizard_session_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."cron_sync_tick"() FROM PUBLIC;
 
 
 
