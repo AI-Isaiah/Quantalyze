@@ -114,6 +114,9 @@ const state = vi.hoisted(() => ({
     // Phase 36 / 36-03 — api_key_id is the per-key WEIGHT source for the
     // per-key blend (D1). Optional so existing seeds (which omit it) compile.
     api_key_id?: string;
+    // Phase 164.6.6.2.1 plan 17 — the stored unit of a native-unit account's
+    // row (migration 20261010120000). Optional so existing seeds compile.
+    quantity_unit?: string | null;
   }>,
   // Phase 36 / 36-03 — per-key csv_daily_returns rows read by
   // getMyAllocationDashboard for the Overview-stats repoint (D1/D2/D3).
@@ -4796,6 +4799,118 @@ describe("getMyAllocationDashboard — Open Positions reads each key's own lates
     ]);
   });
 
+  // 164.6.6.2.1 CR-01 (D-02, D-08, D-17). A BTC account's row is priced at the close of
+  // the day BEFORE its poll. When a later poll finds that close missing it writes NO row
+  // (allocator_holdings.value_usd is NOT NULL) and records the fact in a SERVICE-written
+  // `allocator_equity_derived` row (`native_unpriced:<key>`). Before this, the earlier
+  // priced row stayed the key's latest and the Holdings tab and the AUM kept counting it,
+  // under a note that said "left out of holdings". The oracle is the dashboard payload,
+  // not the fetcher's return value. The evidence is never the audit log: an owner can
+  // write any event there through `log_audit_event`.
+  describe("CR-01: a native key the newest poll left unpriced is not counted at an older close", () => {
+    const nativeRow = (asof: string, quantity: number, value_usd: number) => ({
+      ...holding("key-btc", "mt5", asof, "ACCOUNT-0123abcd", value_usd),
+      quantity,
+      quantity_unit: "BTC",
+    });
+    const unpricedRecord = (asof: string) => ({
+      allocator_id: "user-1",
+      kind: "native_unpriced:key-btc",
+      payload: { native_unpriced: true, asof },
+      computed_at: `${asof}T04:00:05+00:00`,
+    });
+    const seed = () => {
+      state.portfolios = [P7_PORTFOLIO];
+      state.apiKeys = [key("key-btc", "mt5"), key("key-usd", "binance")];
+      state.allocatorHoldings = [
+        // Oct 9 poll: 0.4213 BTC at the Oct 8 close of 61950 = 26099.535.
+        nativeRow("2026-10-09", 0.4213, 26099.535),
+        holding("key-usd", "binance", "2026-10-10", "USDT", 500),
+      ];
+    };
+
+    it("the Oct 10 poll found no Oct 9 close: the Oct 9 row leaves the Holdings payload and the AUM, the other key stays", async () => {
+      seed();
+      state.allocatorEquityDerived = [unpricedRecord("2026-10-10")] as never;
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(
+        result.holdingsSummary.map((h) => `${h.api_key_id}:${h.symbol}:${h.value_usd}`),
+      ).toEqual(["key-usd:USDT:500"]);
+      expect(result.liveBaselineMetrics.aum).toBe(500);
+    });
+
+    it("control: with no record the same rows are counted (the record is what changes the read)", async () => {
+      seed();
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(result.holdingsSummary.map((h) => h.api_key_id).sort()).toEqual([
+        "key-btc",
+        "key-usd",
+      ]);
+      expect(result.liveBaselineMetrics.aum).toBe(26599.535);
+    });
+
+    it("a user-forged audit event cannot hide a key's rows (the owner can write any event through log_audit_event)", async () => {
+      seed();
+      // Inserted the way `public.log_audit_event` would: user_id pinned to the caller,
+      // every other field the caller's choice. Every shape a reader of the old
+      // marker could have honoured.
+      const forged = (metadata: Record<string, unknown>) => ({
+        user_id: "user-1",
+        action: "allocator.holdings.sync_completed",
+        entity_type: "api_key",
+        entity_id: "key-btc",
+        created_at: "2026-10-10T04:00:05+00:00",
+        metadata,
+        "metadata->>final_status": metadata.final_status ?? null,
+      });
+      state.auditLog = [
+        forged({
+          final_status: "complete_with_warnings",
+          row_count: 0,
+          asof: "2026-10-10",
+          native_unpriced: true,
+        }),
+      ];
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(
+        result.holdingsSummary.find((h) => h.api_key_id === "key-btc")?.value_usd,
+      ).toBe(26099.535);
+      expect(result.liveBaselineMetrics.aum).toBe(26599.535);
+    });
+
+    it("a later poll that DID price the day supersedes the record: its row is the key's latest and shows", async () => {
+      seed();
+      state.allocatorHoldings = [
+        ...state.allocatorHoldings,
+        nativeRow("2026-10-11", 0.4213, 26500),
+      ];
+      state.allocatorEquityDerived = [unpricedRecord("2026-10-10")] as never;
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(
+        result.holdingsSummary.find((h) => h.api_key_id === "key-btc")?.value_usd,
+      ).toBe(26500);
+    });
+
+    it("a record of the SAME day as the row does not hide it (that row is not older than the poll)", async () => {
+      seed();
+      state.allocatorEquityDerived = [unpricedRecord("2026-10-09")] as never;
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(
+        result.holdingsSummary.find((h) => h.api_key_id === "key-btc")?.value_usd,
+      ).toBe(26099.535);
+    });
+  });
+
   it("SFH-C4-01: after a key rotation on one account, the departed key's older rows leave holdingsSummary", async () => {
     // Old key D read the account until 2026-08-31 and held BTC-PERP. New key N
     // reads the SAME account (same venue account id) and no longer holds it.
@@ -5044,5 +5159,87 @@ describe("getMyAllocationDashboard — 164.6.6.2 BTC-native book rows convert to
     const row = result.strategies.find((s) => s.strategy_id === "sc")!;
     expect(JSON.stringify(row)).not.toContain("data_quality_flags");
     expect(JSON.stringify(row)).not.toContain("native_unit");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 164.6.6.2.1 plan 17 (D-01, D-17, D-21). A native-unit account's
+// Holdings row travels from the read to the table with its STORED unit. The
+// dashboard names no unit of its own: it reads `allocator_holdings.quantity_unit`
+// (plan 01's column, written by plan 10's poll) and passes it through the same
+// `parseReturnsUnit` every other surface uses.
+// ---------------------------------------------------------------------------
+describe("getMyAllocationDashboard — a native account's Holdings row carries its stored unit (164.6.6.2.1 plan 17)", () => {
+  beforeEach(resetState);
+
+  const key = (id: string) => ({
+    id,
+    user_id: "user-1",
+    exchange: "mt5",
+    label: `Key ${id}`,
+    is_active: true,
+    sync_status: "complete",
+    last_sync_at: "2026-10-09T00:00:00Z",
+    disconnected_at: null,
+    account_balance_usdt: 26099.54,
+    created_at: "2026-04-01T00:00:00Z",
+  });
+  const accountRow = (quantity_unit: string | null | undefined) => ({
+    allocator_id: "user-1",
+    api_key_id: "key-btc",
+    symbol: "ACCOUNT-1a2b3c4d",
+    quantity: 0.4213,
+    mark_price: 61950,
+    value_usd: 26099.54,
+    venue: "mt5",
+    holding_type: "spot" as const,
+    asof: "2026-10-09",
+    ...(quantity_unit === undefined ? {} : { quantity_unit }),
+  });
+
+  it("projects quantity_unit on the rows read (an unprojected column is NULL for every row, whatever is stored)", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [key("key-btc")];
+    state.allocatorHoldings = [accountRow("BTC")];
+    const { getMyAllocationDashboard } = await import("./queries");
+    await getMyAllocationDashboard("user-1");
+
+    const rowsRead = chainAudit.entries.filter(
+      (e) => e.table === "allocator_holdings" && (e.select ?? "").includes("symbol"),
+    );
+    expect(rowsRead).toHaveLength(1);
+    expect(rowsRead[0].select).toContain("quantity_unit");
+    expect(rowsRead[0].select).toContain("mark_price");
+  });
+
+  it("holdingsSummary carries the stored unit and the mark", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [key("key-btc")];
+    state.allocatorHoldings = [accountRow("BTC")];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.holdingsSummary).toHaveLength(1);
+    expect(result.holdingsSummary[0]).toMatchObject({
+      symbol: "ACCOUNT-1a2b3c4d",
+      quantity: 0.4213,
+      mark_price_usd: 61950,
+      quantity_unit: "BTC",
+    });
+  });
+
+  it.each([
+    ["a USD-family row (NULL)", null],
+    ["a row the column never reached (absent)", undefined],
+    ["a lower-case code", "btc"],
+    ["markup", "<b>X</b>"],
+  ])("holdingsSummary reads %s as no unit, never as label text", async (_label, stored) => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [key("key-btc")];
+    state.allocatorHoldings = [accountRow(stored)];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.holdingsSummary[0].quantity_unit).toBeNull();
   });
 });

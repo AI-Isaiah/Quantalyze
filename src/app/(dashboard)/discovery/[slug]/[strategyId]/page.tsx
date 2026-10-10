@@ -11,6 +11,7 @@ import { KCS10_PUBLIC_SENTENCE } from "@/lib/status-surface-copy";
 import { createClient } from "@/lib/supabase/server";
 import { fetchAndBuildPayloadWithReason } from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
+import { withTrustTier } from "@/lib/factsheet/with-trust-tier";
 import { withPublishedOnly } from "@/lib/visibility";
 import { notFound, redirect } from "next/navigation";
 
@@ -86,8 +87,10 @@ export default async function StrategyDetailPage({
   // overlays it (`payloadWithTrust`): the shared builder passes null, and the
   // tier comes from the published-gated verification signal `getStrategyDetail`
   // already read. The spread keeps the `ingestSource` discriminant.
+  // 164.6.6.2.1 review CR-02: `withTrustTier` also reaches `usdView.payload`, so
+  // the tier survives the toggle to the USD view.
   const factsheetPayload: FactsheetPayload | null = built.payload
-    ? { ...built.payload, trustTier: (strategy.trust_tier ?? null) as TrustTierKind | null }
+    ? withTrustTier(built.payload, (strategy.trust_tier ?? null) as TrustTierKind | null)
     : null;
   const seriesReadFailed = built.reason === "read_error";
 

@@ -34,6 +34,8 @@ import { EmptyWatchlist } from "./EmptyWatchlist";
 import { CustomizeDrawer } from "./CustomizeDrawer";
 import { SimulateImpactButton } from "@/components/discovery/SimulateImpactButton";
 import { OwnershipTag } from "./OwnershipTag";
+import { ReturnsUnitChip } from "./ReturnsUnitChip";
+import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import { formatPercent, formatNumber, formatCurrency } from "@/lib/utils";
 import {
   isComputedAnalytics,
@@ -1223,6 +1225,17 @@ export function StrategyTable({
                           </div>
                           <div className="flex items-center gap-2 mt-1">
                             <div className="flex flex-wrap gap-1">
+                              {/* Phase 164.6.6.2.1 (D-05, D-12) — a native-unit
+                                  (BTC) strategy says so, first in the badge row,
+                                  so a BTC return is never read as a USD one.
+                                  Never on the name Link row, and no width class
+                                  on the pinned cell (UI-SPEC D). A null,
+                                  malformed or lower-case unit renders nothing,
+                                  so a USD row's DOM is unchanged. */}
+                              <ReturnsUnitChip
+                                unit={parseReturnsUnit(s.analytics.native_unit)}
+                                variant="compact"
+                              />
                               {s.strategy_types.map((t) => (
                                 <Badge key={t} label={t} className="whitespace-nowrap" />
                               ))}

@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { unitTag } from "@/lib/factsheet/returns-unit";
 
 interface ReturnsUnitChipProps {
   /**
@@ -7,6 +8,12 @@ interface ReturnsUnitChipProps {
    */
   unit: string | null;
   className?: string;
+  /**
+   * `"masthead"` (default) is the long `Returns in BTC` chip beside the strategy
+   * name. `"compact"` (Phase 164.6.6.2.1 D-05, UI-SPEC D) is the table-row chip:
+   * visible `in BTC`, with `Returns ` carried for screen readers only.
+   */
+  variant?: "masthead" | "compact";
 }
 
 /**
@@ -20,8 +27,23 @@ interface ReturnsUnitChipProps {
  *
  * The DOM text is `Returns in BTC`; CSS uppercases it, tests match the DOM.
  */
-export function ReturnsUnitChip({ unit, className }: ReturnsUnitChipProps) {
+export function ReturnsUnitChip({ unit, className, variant = "masthead" }: ReturnsUnitChipProps) {
   if (unit == null) return null;
+  if (variant === "compact") {
+    return (
+      <span
+        className={cn(
+          "inline-flex items-center rounded-sm px-2 py-0.5 text-fixed-11 font-medium uppercase tracking-wide whitespace-nowrap text-text-secondary bg-track",
+          className,
+        )}
+        data-returns-unit={unit}
+        title={`Returns on this row are in ${unit}, not USD.`}
+      >
+        <span className="sr-only">Returns </span>
+        {unitTag(unit)}
+      </span>
+    );
+  }
   return (
     <span
       className={cn(

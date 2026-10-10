@@ -536,9 +536,11 @@ def test_every_select_of_the_curve_also_names_the_method_flags() -> None:
 # series to the native -> USD converter next, so they read absent days deleted.
 # Every other router call must ask for ``keep_absent=True``: without it an absent
 # day vanishes and the converter prices the day after it over the whole gap.
-_ROUTER_CALLS_THAT_DO_NOT_CONVERT: dict[str, int] = {
-    "routers/portfolio.py": 1,  # verify_strategy's correlation read of the existing book
-}
+#
+# Phase 164.6.6.2.1 (D-04, D-10): empty now. ``verify_strategy``'s correlation read
+# of the existing book was the one entry; it converts its BTC-unit candidates to
+# USD (after the memory-cap trim), so it keeps absent days like every other read.
+_ROUTER_CALLS_THAT_DO_NOT_CONVERT: dict[str, int] = {}
 
 
 def test_every_converting_router_read_keeps_absent_days_for_the_converter() -> None:

@@ -508,7 +508,33 @@ _BTC_CLOSES_PAGE_SIZE = 1000
 _BTC_CLOSES_MAX_PAGES = 50
 
 
+class BtcClosesReadError(RuntimeError):
+    """The stored BTC closes could not be READ (164.6.6.2.1 SFH-01).
+
+    Distinct from "nothing usable is stored", which :func:`read_btc_closes` answers with
+    ``None``. A caller that acts on the ABSENCE of a close (the reconstruct that ends a
+    one-time rebuild as "no data", the derive that writes a ``native_unpriced`` anchor,
+    the positions poll that tells the allocator "no close stored for Oct 8") must not
+    read an outage as that absence. The cause is chained (``__cause__``) and has been
+    logged where it was caught.
+    """
+
+
 async def get_btc_closes() -> pd.Series | None:
+    """:func:`read_btc_closes`, with a failed read folded into ``None``.
+
+    The contract of every blend that treats "no price source" as one answer (the
+    routers' ``UsdSeriesConverter`` loaders): a read failure was logged, and the BTC leg
+    is converted to an empty series. A caller that must tell an outage from an empty
+    table calls :func:`read_btc_closes`.
+    """
+    try:
+        return await read_btc_closes()
+    except BtcClosesReadError:
+        return None
+
+
+async def read_btc_closes() -> pd.Series | None:
     """Every stored BTC close, ascending, for the native -> USD conversion.
 
     The Python twin of TypeScript ``readBtcCloses``: DB-only (``benchmark_prices``
@@ -518,14 +544,17 @@ async def get_btc_closes() -> pd.Series | None:
     missing, never as bridged). Paged by a keyset on ``date`` newest first,
     strictly decreasing across pages.
 
-    Returns None when there is no price source: the read failed (logged), or no
-    stored close is usable. The caller converts a BTC leg to an empty series then;
-    nothing is fabricated.
+    Returns None when the read SUCCEEDED and no stored close is usable: the honest
+    "no close stored". Nothing is fabricated. Raises :class:`BtcClosesReadError` when the
+    read itself failed (logged here; the store is unconfigured, unreachable or errored),
+    so the caller can retry rather than act on an absence nobody checked.
     """
+    supabase = _benchmark_client()
+    if supabase is None:
+        # Already logged by `_benchmark_client`. A store that cannot be reached is a
+        # read that could not happen, not an empty table.
+        raise BtcClosesReadError("benchmark store unavailable")
     try:
-        supabase = _benchmark_client()
-        if supabase is None:
-            return None  # already logged by `_benchmark_client`
         found: dict[date, float] = {}
         before: str | None = None
         for page in range(_BTC_CLOSES_MAX_PAGES):
@@ -561,7 +590,7 @@ async def get_btc_closes() -> pd.Series | None:
             )
     except _CACHE_READ_ERRORS as e:
         logger.warning("BTC closes read failed: %s", str(e))
-        return None
+        raise BtcClosesReadError("benchmark_prices read failed") from e
     except Exception as e:  # noqa: BLE001 — a programming error: loud, then no price source
         logger.error(
             "BTC closes read raised a non-DB error (%s); no price source.",
@@ -569,7 +598,7 @@ async def get_btc_closes() -> pd.Series | None:
             exc_info=True,
         )
         sentry_sdk.capture_exception(e)
-        return None
+        raise BtcClosesReadError("benchmark_prices read raised") from e
 
     if not found:
         return None

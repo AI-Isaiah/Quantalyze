@@ -27,7 +27,7 @@ import {
   convertNativeReturnsToUsd,
   isNativeLegUnpriced,
 } from "@/lib/factsheet/native-to-usd";
-import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import { formatCloseDay, parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import {
   readV2BenchmarkJoint,
   V2_JOINT_NULL_VALUES,
@@ -368,9 +368,18 @@ export const COMPARE_ANALYTICS_COLUMNS =
  * change and out of this fix's scope. Recorded rather than left implicit: the
  * consequence of the assumption breaking is a wrong date, not an error, and an
  * unstated assumption is how it would go unnoticed.
+ *
+ * Phase 164.6.6.2.1 (D-05, D-12) — the trailing `native_unit` alias (the
+ * `->>native_unit` key of the flags blob) is ONE enumerated scalar out of a private blob, exactly like `three_month`
+ * and `series_end` above: it lets the list label a BTC-denominated strategy
+ * "in BTC" so a BTC return is never read as a USD one. The `data_quality_flags`
+ * column itself is still never projected, and `queries.test.ts` pins that with a
+ * regex that allows only this one `->>native_unit` form. A non-rankable row
+ * (`failed` / `computing`) is blanked by `shapeRowAnalytics` and so loses the
+ * alias: such a row shows no figures to misread.
  */
 const CATEGORY_RANKING_ANALYTICS_COLUMNS =
-  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date";
+  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date, native_unit:data_quality_flags->>native_unit";
 
 export async function getStrategiesByCategory(categorySlug: string): Promise<RankedStrategyRow[]> {
   const supabase = await createClient();
@@ -598,7 +607,16 @@ export function shapeRowAnalytics(
   // Terminal SUCCESS (`complete` / `complete_with_warnings`) — the values
   // describe a run that finished. Handed through with `series_end` resolved
   // (a no-op on the ranked anon path, which projects the alias already).
-  if (isRankableAnalyticsRow(a)) return withResolvedSeriesEnd(a);
+  if (isRankableAnalyticsRow(a)) {
+    // Phase 164.6.6.2.1 (D-05, D-12): the unit the StrategyTable chip reads.
+    // The anon ranked read projects the scalar alias; the owner's wildcard embed
+    // carries the flags blob instead. Either way the unit leaves here as a
+    // parsed code or null, and only that ONE scalar is derived: the blob is
+    // never copied into the shape. A non-rankable row (below) loses it: it
+    // shows no figures to misread.
+    const native_unit = parseReturnsUnit(a.native_unit ?? a.data_quality_flags?.native_unit);
+    return { ...withResolvedSeriesEnd(a), native_unit };
+  }
 
   // failed / pending / computing — a run that did not produce these numbers.
   //
@@ -2380,6 +2398,35 @@ export async function getOwnCapitalStrategies(
     return null;
   }
 
+  // Phase 164.6.6.2.1 D-11 (T-164.6.6.2.1-15): the own-capital MTD is in USD,
+  // like the positioned half of the same table (`getMyAllocationDashboard`
+  // converts its series before `toStrategyRows` reduces it), so one strategy no
+  // longer reads a USD MTD while allocated and an unlabelled BTC MTD while not.
+  // The BTC closes are read ONCE, and only when some row carries a native unit,
+  // so a USD-only list costs no extra read. `null` is "no price source", never
+  // a flat account: a native row then has no MTD (D-02), not the BTC figure.
+  const analyticsOf = (row: unknown) => {
+    const raw = (row as Record<string, unknown>).strategy_analytics;
+    return (Array.isArray(raw) ? raw[0] : raw) as
+      | Record<string, unknown>
+      | null
+      | undefined;
+  };
+  const nativeUnitOf = (a: Record<string, unknown> | null | undefined) =>
+    parseReturnsUnit(
+      (a?.data_quality_flags as { native_unit?: unknown } | null | undefined)
+        ?.native_unit,
+    );
+  const bookHasNativeUnit = (data ?? []).some(
+    (row) => nativeUnitOf(analyticsOf(row)) !== null,
+  );
+  const btcCloses = bookHasNativeUnit ? await readBtcCloses(supabase) : null;
+  if (bookHasNativeUnit && btcCloses === null) {
+    console.error(
+      "[queries.getOwnCapitalStrategies] BTC closes unavailable; native-unit rows get no MTD (no price, nothing invented)",
+    );
+  }
+
   // Review WR-01 — resolve the series HERE, server-side, so an API-ingested
   // strategy (daily_returns NULL, track in returns_series) is not stranded.
   // Review round 3 E2 — and REDUCE it here too: `computeMtd` is the shared
@@ -2391,10 +2438,7 @@ export async function getOwnCapitalStrategies(
   // as an array; the dashboard path (:3941) tolerates both and so does this.
   return (data ?? []).map((row) => {
     const rowObj = row as unknown as Record<string, unknown>;
-    const rawAnalytics = rowObj.strategy_analytics;
-    const analyticsObj = (Array.isArray(rawAnalytics)
-      ? rawAnalytics[0]
-      : rawAnalytics) as Record<string, unknown> | null | undefined;
+    const analyticsObj = analyticsOf(rowObj);
 
     let strategy_analytics: OwnCapitalStrategy["strategy_analytics"] = null;
     let mtd: number | null = null;
@@ -2408,12 +2452,30 @@ export async function getOwnCapitalStrategies(
         data_quality_flags: _dqf,
         ...analyticsRest
       } = analyticsObj;
+      // Phase 164.6.6.2.1 D-11: the MTD below is in USD for a native-unit row,
+      // like the positioned half (`getMyAllocationDashboard`), so the table's two
+      // halves agree. The unit is parsed from the flags BEFORE they are dropped.
+      const returns_unit = nativeUnitOf(analyticsObj);
+      const dqf = analyticsObj.data_quality_flags;
       mtd = computeMtd(
-        resolveDailyReturnSeries(
-          analyticsObj.daily_returns,
-          analyticsObj.returns_series,
-          curveMethodFromFlags(analyticsObj.data_quality_flags),
-        ),
+        returns_unit != null
+          ? // WR-02: absent days stay NaN placeholders so the day after a gap is
+            // priced over its own interval, as in `getMyAllocationDashboard`.
+            convertNativeReturnsToUsd(
+              resolveDailyReturnSeries(
+                analyticsObj.daily_returns,
+                analyticsObj.returns_series,
+                curveMethodFromFlags(dqf),
+                true,
+              ),
+              returns_unit,
+              btcCloses,
+            )
+          : resolveDailyReturnSeries(
+              analyticsObj.daily_returns,
+              analyticsObj.returns_series,
+              curveMethodFromFlags(dqf),
+            ),
       );
       strategy_analytics =
         analyticsRest as OwnCapitalStrategy["strategy_analytics"];
@@ -2909,6 +2971,17 @@ export interface MyAllocationDashboardPayload {
     entry_price: number | null;
     unrealized_pnl_usd: number | null;
     /**
+     * Phase 164.6.6.2.1 plan 17 (D-01, D-17, D-21). The unit `quantity` is
+     * counted in, as the positions poll stored it (`allocator_holdings.quantity_unit`,
+     * plan 01's column; plan 10 writes it for a native-unit account). NULL for
+     * every USD-family row. Read through `parseReturnsUnit`, so a value that is
+     * not a well-formed code is NULL here. The unit is never inferred from the
+     * symbol or from the mark. Optional so the many legacy fixtures compile
+     * (the same reason `asof` is); the dashboard read always sets it, and an
+     * absent value reads as no unit.
+     */
+    quantity_unit?: string | null;
+    /**
      * Review C4 SFH-C4-08: the day this row's key read it (`allocator_holdings.asof`,
      * the key's own latest read under D-16). Open Positions dates a key's rows
      * when that day is older than the newest read. Optional so legacy fixtures
@@ -3031,6 +3104,24 @@ export interface MyAllocationDashboardPayload {
    * Optional so legacy fixtures compile; the producer always sets it.
    */
   departedHistoryUnavailable?: boolean;
+  /**
+   * Phase 164.6.6.2.1 plan 17 (D-09, D-20). The native-unit accounts the derive
+   * left out of the dollar total because the BTC close for one of their days is
+   * not stored yet (the writer's `native_unpriced_key_omitted` flag plus its
+   * `unpriced_native_keys` list). Each entry is the owner's own key (id and
+   * label from their key list) and the day the writer recorded, never a client
+   * clock. `kind` says which fact the writer recorded (R2-WR-02): "dated" is
+   * out of the total on `day`; "whole" is out of the total entirely (the writer
+   * could not date it); "history" is out of interior days of the equity history
+   * only, `holeDays` of them, while the account IS in the current total. `day`
+   * is `null` for "whole" and "history": the account is still named, the note
+   * states no date. Sorted ascending by label, one
+   * entry per key (the earliest day if the writer listed a key twice). An entry
+   * naming a key that is not the owner's is dropped, and the drop is logged. `[]` whenever the curve is not shown
+   * (rebuilding) or nothing was omitted. Optional so legacy fixtures compile;
+   * the producer always sets it.
+   */
+  unpricedNativeAccounts?: UnpricedNativeAccount[];
   /**
    * Review C4 round 2 WR-R2-03. The keys whose rows in `holdingsSummary` were
    * written, on `asof`, by a poll that could not read their open positions
@@ -3731,6 +3822,139 @@ const DERIVED_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const DEPARTED_HISTORY_UNAVAILABLE_FLAG = "departed_history_unavailable";
 
 /**
+ * Phase 164.6.6.2.1 plan 17 (D-09, D-20). The benign flag the derive raises when
+ * a native-unit account is left out of the dollar total on a day whose BTC close
+ * is not stored, with the `unpriced_native_keys` list naming which key and day
+ * (`allocator_equity_compose.py`). The name is the writer's; do not rename it
+ * here.
+ */
+const NATIVE_UNPRICED_KEY_OMITTED_FLAG = "native_unpriced_key_omitted";
+
+/**
+ * R2-WR-02. One account the derive names under `native_unpriced_key_omitted`.
+ * The writer lists three different facts in `unpriced_native_keys`, and each
+ * needs its own sentence on the Overview:
+ *   - "dated": the account is out of the curve's last day (so out of the total
+ *     shown) because that day's BTC close is not stored; `day` is that day.
+ *   - "whole": the account is out of the total entirely. The writer could not
+ *     read its native row (`reason: "day_unknown"`), or the entry is too damaged
+ *     to say anything narrower, so the safe claim is the stronger one.
+ *   - "history": the account has interior unpriced days (`hole_days`) and no
+ *     missing last day, so it IS in the current total and only the equity
+ *     history skips it on `holeDays` days.
+ */
+export type UnpricedNativeAccount = { apiKeyId: string; label: string } & (
+  | { kind: "dated"; day: string }
+  | { kind: "whole"; day: null }
+  | { kind: "history"; day: null; holeDays: number }
+);
+
+type UnpricedFact =
+  | { kind: "dated"; day: string }
+  | { kind: "whole" }
+  | { kind: "history"; holeDays: number };
+
+/** A valid calendar `YYYY-MM-DD` (2026-02-31 passes the shape only; formatCloseDay is the calendar check). */
+function isCalendarDay(v: unknown): v is string {
+  return typeof v === "string" && DERIVED_DAY.test(v) && formatCloseDay(v) !== "—";
+}
+
+/** Classify one writer entry; the key is already known to be the owner's. */
+function classifyUnpricedEntry(entry: Record<string, unknown>): UnpricedFact {
+  const { day, reason, hole_days: holeDays } = entry;
+  if (isCalendarDay(day)) return { kind: "dated", day }; // hole_days beside it are subordinate
+  if (reason === "day_unknown") return { kind: "whole" };
+  // History needs an honestly absent last day AND at least one readable interior day. A day that
+  // is present but unreadable, or unreadable hole_days, is damage: claim the stronger fact.
+  if ((day === null || day === undefined) && Array.isArray(holeDays)) {
+    const valid = new Set(holeDays.filter(isCalendarDay));
+    if (valid.size > 0) return { kind: "history", holeDays: valid.size };
+  }
+  return { kind: "whole" };
+}
+
+/** dated beats whole beats history; among dated the earliest day, among history the larger count. */
+function strongerUnpricedFact(a: UnpricedFact, b: UnpricedFact): UnpricedFact {
+  const rank = { dated: 0, whole: 1, history: 2 } as const;
+  if (a.kind !== b.kind) return rank[a.kind] < rank[b.kind] ? a : b;
+  if (a.kind === "dated" && b.kind === "dated") return b.day < a.day ? b : a;
+  if (a.kind === "history" && b.kind === "history") return b.holeDays > a.holeDays ? b : a;
+  return a;
+}
+
+/**
+ * Phase 164.6.6.2.1 plan 17 (D-20). The accounts named by the writer's
+ * `unpriced_native_keys`, resolved against the owner's own key list. Pure and
+ * defensive: `[]` unless `flags` (undefined when the curve is not shown) holds
+ * `native_unpriced_key_omitted`. An entry that is not an object with a string
+ * `api_key_id` the owner holds is dropped (it names no account of theirs).
+ *
+ * SFH-02 / WR-02: an entry for the owner's own key whose `day` is missing, null
+ * or not a calendar-valid `YYYY-MM-DD` is still NAMED, because the account is
+ * out of the total or of its history either way and a date is never printed as
+ * a guess. R2-WR-02: what it is named AS is kept (`UnpricedNativeAccount.kind`),
+ * so a key with an old two-day gap is not reported as missing from today's
+ * total. One entry per key, the strongest fact winning; sorted ascending by
+ * label, then key id. When entries are dropped (or the flag has no list at all)
+ * the count received vs kept is logged to the console and Sentry, so a name the
+ * writer raised never disappears quietly. The log carries counts only: no key
+ * id, label or day.
+ */
+function readUnpricedNativeAccounts(
+  flags: unknown,
+  derivedPayload: unknown,
+  apiKeys: ReadonlyArray<{ id: string; exchange: string; label?: string | null }>,
+): UnpricedNativeAccount[] {
+  if (!Array.isArray(flags) || !flags.includes(NATIVE_UNPRICED_KEY_OMITTED_FLAG)) {
+    return [];
+  }
+  const raw =
+    derivedPayload !== null && typeof derivedPayload === "object"
+      ? (derivedPayload as Record<string, unknown>).unpriced_native_keys
+      : undefined;
+  const entries: unknown[] = Array.isArray(raw) ? raw : [];
+  const byId = new Map(apiKeys.map((k) => [k.id, k]));
+  const named = new Map<string, UnpricedFact>();
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== "object") continue;
+    const id = (entry as Record<string, unknown>).api_key_id;
+    if (typeof id !== "string" || !byId.has(id)) continue;
+    const fact = classifyUnpricedEntry(entry as Record<string, unknown>);
+    const seen = named.get(id);
+    named.set(id, seen === undefined ? fact : strongerUnpricedFact(seen, fact));
+  }
+  const kept = entries.filter((entry) => {
+    if (entry === null || typeof entry !== "object") return false;
+    const id = (entry as Record<string, unknown>).api_key_id;
+    return typeof id === "string" && byId.has(id);
+  }).length;
+  if (!Array.isArray(raw) || kept < entries.length) {
+    const message =
+      `[queries.readUnpricedNativeAccounts] the derive flagged ${NATIVE_UNPRICED_KEY_OMITTED_FLAG} ` +
+      `but its list could not all be named: received ${entries.length}, kept ${kept}` +
+      (Array.isArray(raw) ? "" : " (the list is missing or not an array)");
+    console.error(message);
+    captureToSentry(new Error(message), {
+      tags: { op: "readUnpricedNativeAccounts" },
+      level: "warning",
+    });
+  }
+  return Array.from(named, ([apiKeyId, fact]): UnpricedNativeAccount => {
+    const k = byId.get(apiKeyId)!;
+    const trimmed = typeof k.label === "string" ? k.label.trim() : "";
+    const label = trimmed !== "" ? trimmed : k.exchange;
+    if (fact.kind === "dated") return { apiKeyId, label, kind: "dated", day: fact.day };
+    if (fact.kind === "history") {
+      return { apiKeyId, label, kind: "history", day: null, holeDays: fact.holeDays };
+    }
+    return { apiKeyId, label, kind: "whole", day: null };
+  }).sort(
+    (a, b) =>
+      a.label.localeCompare(b.label) || (a.apiKeyId < b.apiKeyId ? -1 : a.apiKeyId > b.apiKeyId ? 1 : 0),
+  );
+}
+
+/**
  * The pre-167.1.2 curve check: trustworthy + a non-empty well-formed curve.
  * Does NOT require version 2. `extractTrustworthyDerivedSeries` builds on it
  * and adds the version-2 returns check. The producer also stamps
@@ -4113,6 +4337,10 @@ export function derivePhase07Fields(
     id: string;
     is_active: boolean;
     exchange: string;
+    // Phase 164.6.6.2.1 plan 17: the owner's own name for the key, read by the
+    // D-20 unpriced-account note. Optional so fixtures that predate it compile;
+    // getUserApiKeys projects it.
+    label?: string | null;
     sync_status: string | null;
     last_sync_at: string | null;
     // DOGFOOD-1 (Phase 110.1): required by isPerKeyDailiesEligibleKey to
@@ -4142,6 +4370,9 @@ export function derivePhase07Fields(
     side: "long" | "short" | "flat" | null;
     entry_price: number | null;
     unrealized_pnl_usd: number | null;
+    // Phase 164.6.6.2.1 plan 17: optional here so a fixture that predates the
+    // column compiles; the dashboard read projects it on every row.
+    quantity_unit?: string | null;
   }>,
   // CL9 / NEW-C01-11: computed at the read boundary (any flagged row present),
   // threaded through so both payload branches surface it via the `...phase07`
@@ -4174,6 +4405,7 @@ export function derivePhase07Fields(
   | "equityHistoryRebuildReason"
   | "equityHistoryNotSyncingKeyIds"
   | "departedHistoryUnavailable"
+  | "unpricedNativeAccounts"
   | "partialPositionReads"
   | "minHistoryDepthMonths"
   | "activeVenues"
@@ -4237,6 +4469,15 @@ export function derivePhase07Fields(
     equityHistoryState === "ready" &&
     Array.isArray(payloadFlags) &&
     payloadFlags.includes(DEPARTED_HISTORY_UNAVAILABLE_FLAG);
+  // Phase 164.6.6.2.1 plan 17 (D-20): the accounts the total leaves out on an
+  // unpriced day, named. Same defensive read as the flag above: the JSONB is
+  // worker-written and untrusted, so only a string key id the owner holds and a
+  // real `YYYY-MM-DD` day get through, and only for the curve on screen.
+  const unpricedNativeAccounts = readUnpricedNativeAccounts(
+    equityHistoryState === "ready" ? payloadFlags : undefined,
+    derivedPayload,
+    apiKeys,
+  );
   const equityDailyPoints: DailyPoint[] =
     equityHistoryState === "ready" && series ? series.curve : [];
   const equityDailyReturns: DailyPoint[] =
@@ -4317,6 +4558,7 @@ export function derivePhase07Fields(
     side: r.side,
     entry_price: r.entry_price,
     unrealized_pnl_usd: r.unrealized_pnl_usd,
+    quantity_unit: parseReturnsUnit(r.quantity_unit),
     asof: r.asof,
   }));
 
@@ -4341,6 +4583,7 @@ export function derivePhase07Fields(
     equityHistoryRebuildReason,
     equityHistoryNotSyncingKeyIds,
     departedHistoryUnavailable,
+    unpricedNativeAccounts,
     partialPositionReads: partialReads.map((p) => ({ ...p })),
     minHistoryDepthMonths,
     activeVenues,
@@ -4518,7 +4761,7 @@ export const getMyAllocationDashboard = cache(
         // Positions section without conflating notional `value_usd`
         // with equity contribution (only `unrealized_pnl_usd` counts
         // toward the equity curve for derivatives).
-        "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id, side, entry_price, unrealized_pnl_usd",
+        "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id, side, entry_price, unrealized_pnl_usd, quantity_unit",
       ),
       getUserApiKeys(userId),
       admin
@@ -4889,6 +5132,7 @@ export const getMyAllocationDashboard = cache(
       side: "long" | "short" | "flat" | null;
       entry_price: number | null;
       unrealized_pnl_usd: number | null;
+      quantity_unit: string | null;
     }>;
 
     const phase07 = derivePhase07Fields(

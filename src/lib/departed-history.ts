@@ -330,6 +330,11 @@ function unavailableSentence(anchor: DepartedAnchor): string {
       // 164.6.6.2 D-13: the derive stamps this for an account denominated in a non-USD
       // currency (a BTC MT5 account). The read worked; the balance simply is not dollars.
       return "History not available: this account is measured in its own currency, not USD, so it cannot be added to a USD history.";
+    case "native_unpriced":
+      // Phase 164.6.6.2.1 D-09: the derive stamps this when a native-unit account's
+      // last balance has no stored close for its day. The currency is supported and
+      // the read worked; what is missing is a price for that one day.
+      return "History not available: no BTC close is stored for this account's last day, so its last balance cannot be priced in USD.";
     default:
       return "History not available: the last balance read before this key stopped gave no usable balance to measure its history from.";
   }

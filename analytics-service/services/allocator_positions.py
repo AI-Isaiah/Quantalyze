@@ -52,6 +52,8 @@ import json
 import logging
 import math
 import re
+from collections.abc import Sequence
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, ClassVar, Literal, cast
 
 import ccxt.async_support as ccxt
@@ -71,6 +73,7 @@ from services.closed_sets import (
     mt5_enabled_server,
     sfox_enabled_server,
 )
+from services.benchmark import BtcClosesReadError, read_btc_closes
 from services.db import db_execute
 from services.mt5_client import (
     Mt5AccountMismatchError,
@@ -79,6 +82,7 @@ from services.mt5_client import (
     Mt5Session,
 )
 from services.mt5_validation import classify_mt5_login_error, is_mt5_login_refusal
+from services.native_to_usd import latest_completed_close_day, price_live_balance
 # MT5CONC-02 — the ONE terminal-lock registry, imported from the leaf module
 # plan 151-01 extracted it into. NEVER re-declare a terminal-lock dict here: a
 # second registry hands out perfectly functional Locks while the derive job and
@@ -148,6 +152,42 @@ MT5_NON_USD_NOTE = (
     "MT5 account currency is {ccy} — USD conversion isn't supported yet, so "
     "this account was skipped."
 )
+# 164.6.6.2.1 / D-17, D-09 -- end-user copy rendered VERBATIM in the browser, at most 60
+# characters at its longest (``Sep 30``: 57). ``{day}`` is the MISSING close's day: the
+# latest completed UTC day, never today's. Transient (the daily close lands later), so it
+# rides ``complete_with_warnings`` and is never an ``error``. Only a formatted date is
+# interpolated; no broker text and no amount ever reaches it.
+MT5_NATIVE_UNPRICED_NOTE = "No BTC close stored for {day} yet; left out of holdings."
+
+
+class NativeUnpricedNote(str):
+    """The ``MT5_NATIVE_UNPRICED_NOTE`` warning, typed (164.6.6.2.1 CR-01).
+
+    A native-unit poll with no stored close for the latest completed day writes NO row
+    (``allocator_holdings.value_usd`` is NOT NULL, and a zero would state a value no close
+    backs), so the key's EARLIER row, priced at an older close, stays its latest. The
+    poll handler must record that where the readers can trust it
+    (``persist_native_unpriced_marker``). It decides that from this type and never from
+    the words, which are end-user copy and get reworded. Still a ``str``: it is stored,
+    compared and rendered exactly as before.
+    """
+
+    __slots__ = ()
+
+
+# 164.6.6.2.1 CR-01. The ``allocator_equity_derived.kind`` prefix of the poll's record that a
+# native account's latest completed day was unpriced. The table is written by the service
+# role only (its sole policy for writes is ``allocator_equity_derived_service_all``), so an
+# owner cannot forge it; the owner may read it. Read by ``nativeUnpricedDay`` and
+# ``fetchNativeUnpricedDays`` in ``src/lib/latest-holdings-per-key.ts``, which pins this
+# literal in its own test.
+NATIVE_UNPRICED_KIND_PREFIX = "native_unpriced:"
+
+
+# 164.6.6.2.1 SFH-01 -- the closes READ failed, which is not "no close stored": the close may
+# well be there. Names the real cause; transient, so the poll retries. At most 60 characters,
+# like the unpriced note it must never be mistaken for.
+MT5_BTC_CLOSES_UNREADABLE_NOTE = "Couldn't read BTC prices — sync will retry automatically."
 MT5_UNREACHABLE_NOTE = "MT5 terminal unreachable — sync will retry automatically."
 MT5_MISSING_ACCOUNT_REF_NOTE = (
     "MT5 holdings sync couldn't identify this account — sync will retry "
@@ -701,6 +741,18 @@ async def _fetch_derivative_rows(exchange_name: str, exchange: Any) -> list[dict
 _HOLDING_SYMBOL_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
+_MONTH_ABBR = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)  # fixed English labels: ``strftime("%b")`` follows the process locale
+
+
+def _utc_now() -> datetime:
+    """The poll's clock seam: tz-aware UTC, so a test freezes the day a live
+    balance is priced at (D-17)."""
+    return datetime.now(timezone.utc)
+
+
 async def _fetch_mt5_account_rows(
     exchange_name: str, exchange: Any, api_key_id: str | None
 ) -> tuple[list[dict[str, Any]], str | None]:
@@ -1028,7 +1080,10 @@ async def _fetch_mt5_account_rows(
         )
         raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE)
     ccy = unit.code
-    if ccy != "USD":
+    # 164.6.6.2.1 / D-17 -- a NATIVE unit (BTC) is no longer skipped: it is priced at the
+    # stored close of the latest completed UTC day below. Every OTHER non-"USD" code (the
+    # USD family that is not exactly USD, and the codes with no floors) keeps this skip.
+    if ccy != "USD" and not unit.native:
         logger.info(
             "poll_allocator_positions: mt5 account denominated in %s — honest "
             "skip (no FX rate available)",
@@ -1121,6 +1176,56 @@ async def _fetch_mt5_account_rows(
         non_positive_note = None
     equity_usd = max(equity, 0.0)
 
+    # 164.6.6.2.1 / D-17, D-09 -- a native balance is valued at the stored close of the
+    # latest COMPLETED UTC day (``benchmark_prices`` never holds today's row), never at an
+    # older close and never at $1.00. No close for that day means NO ROW and a named,
+    # transient note: a quantity of BTC written as dollars would inflate AUM, and a carried
+    # price would state a value no stored close backs. ``price_live_balance`` owns the
+    # exact-day lookup; pricing ONE unit yields the close itself, so the row's value is
+    # ``quantity x mark_price`` by construction. The log carries the unit only, no amount.
+    #
+    # ⚠️ CR-01: "no row" leaves the key's EARLIER row (priced at an older close) as its
+    # latest, because ``persist_allocator_holdings`` never deletes and ``value_usd`` is
+    # NOT NULL. The returned ``NativeUnpricedNote`` is how the handler knows to write the
+    # service-only ``native_unpriced:<key>`` record; the readers honour it.
+    native_close: float | None = None
+    if unit.native:
+        now = _utc_now()
+        try:
+            closes = await read_btc_closes()
+        except BtcClosesReadError as exc:
+            if _must_reach_handler_unwrapped(exc):
+                raise
+            # SFH-01: an outage is not an absence. Raising keeps it from being told to the
+            # allocator as "no close stored" and from being recorded as an unpriced day
+            # (CR-01), which would pull the key's row out of the readers on a guess.
+            logger.warning(
+                "poll_allocator_positions: stored %s closes unreadable (%s) -- "
+                "retrying rather than treating the day as unpriced",
+                unit.code,
+                exc,
+            )
+            raise AllocatorHoldingsSyncTransientError(
+                MT5_BTC_CLOSES_UNREADABLE_NOTE
+            ) from exc
+        one_unit = price_live_balance(1.0, unit.code, closes, now)
+        if one_unit is None:
+            missing_day = latest_completed_close_day(now)
+            logger.info(
+                "poll_allocator_positions: no stored %s close for the latest completed "
+                "day -- account left out of holdings",
+                unit.code,
+            )
+            return (
+                [],
+                NativeUnpricedNote(
+                    MT5_NATIVE_UNPRICED_NOTE.format(
+                        day=f"{_MONTH_ABBR[missing_day.month - 1]} {missing_day.day}"
+                    )
+                ),
+            )
+        native_close = one_unit[0]
+
     # (h) THE row. `symbol` is ACCOUNT-SCOPED because allocator_holdings is
     # UNIQUE (allocator_id, venue, symbol, asof) with NO api_key_id in the key:
     # a per-venue constant token (e.g. the currency) would make the founder's
@@ -1140,33 +1245,36 @@ async def _fetch_mt5_account_rows(
         # the commit route's ref parser would later reject.
         raise AllocatorHoldingsSyncTransientError(MT5_MISSING_ACCOUNT_REF_NOTE)
 
-    return (
-        [
-            {
-                "venue": exchange_name,
-                "symbol": symbol,
-                # A USD account balance is cash-equivalent: quantity IS the USD
-                # amount and the mark is 1.0, the same convention the ccxt spot
-                # path uses for stablecoins.
-                "holding_type": "spot",
-                "side": "flat",
-                "quantity": equity_usd,
-                "value_usd": equity_usd,
-                "mark_price": 1.0,
-                # No basis, and no derivative uPnL to report: None is the
-                # conforming value. A 0.0 here would read downstream as a real
-                # measured zero rather than "not applicable".
-                "entry_price": None,
-                "unrealized_pnl_usd": None,
-                "cost_basis_usd": None,
-                # REPORTED, never floored — raw_payload is what the venue said.
-                "raw_payload": _cap_raw_payload(
-                    {"currency": ccy, "equity": equity, "balance": balance}
-                ),
-            }
-        ],
-        non_positive_note,
-    )
+    row: dict[str, Any] = {
+        "venue": exchange_name,
+        "symbol": symbol,
+        # A USD account balance is cash-equivalent: quantity IS the USD
+        # amount and the mark is 1.0, the same convention the ccxt spot
+        # path uses for stablecoins.
+        "holding_type": "spot",
+        "side": "flat",
+        "quantity": equity_usd,
+        "value_usd": equity_usd,
+        "mark_price": 1.0,
+        # No basis, and no derivative uPnL to report: None is the
+        # conforming value. A 0.0 here would read downstream as a real
+        # measured zero rather than "not applicable".
+        "entry_price": None,
+        "unrealized_pnl_usd": None,
+        "cost_basis_usd": None,
+        # REPORTED, never floored — raw_payload is what the venue said.
+        "raw_payload": _cap_raw_payload(
+            {"currency": ccy, "equity": equity, "balance": balance}
+        ),
+    }
+    if native_close is not None:
+        # A native row: quantity stays in its own unit, the stored unit rides the
+        # row so the table never prints a BTC amount as dollars, and the USD value
+        # is quantity x the close of the latest completed day (D-17).
+        row["mark_price"] = native_close
+        row["value_usd"] = equity_usd * native_close
+        row["quantity_unit"] = unit.code
+    return ([row], non_positive_note)
 
 
 # A plain ASSET code and nothing else. sFOX's `currency` is VENUE-controlled
@@ -1573,3 +1681,87 @@ async def persist_allocator_holdings(
 
     await db_execute(_upsert)
     return len(rows)
+
+
+_ISO_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def native_unpriced_day(payload: Any) -> str | None:
+    """The day a ``native_unpriced:<key>`` record names, or ``None`` when ``payload`` is not
+    one. Mirrors ``nativeUnpricedDay`` in ``src/lib/latest-holdings-per-key.ts``: the record
+    needs ``native_unpriced`` true AND a recorded ISO day."""
+    if not isinstance(payload, dict) or payload.get("native_unpriced") is not True:
+        return None
+    asof = payload.get("asof")
+    return asof if isinstance(asof, str) and _ISO_DAY_RE.match(asof) else None
+
+
+def read_native_unpriced_days(
+    supabase_client: Client,
+    allocator_id: str,
+    api_key_ids: Sequence[str],
+) -> dict[str, str]:
+    """R2-WR-01 (D-02, D-08, D-17): for each of ``api_key_ids``, the LATEST day a poll
+    declared that native-unit account unpriced (``persist_native_unpriced_marker``).
+
+    The one Python reader of the marker, so the rule has one definition per runtime (the TS
+    one is ``fetchNativeUnpricedDays``). A reader of a key's latest ``allocator_holdings`` row
+    drops a key's rows dated BEFORE the returned day: they are priced at an older close than
+    the poll just named. Rows on or after it stand (a later priced poll writes rows at its
+    own, later, day), so the rule needs no "newest poll" bookkeeping.
+
+    Synchronous, like the sibling helpers of its callers (``db_execute`` wraps it in the
+    async ones). It RAISES on a failed read and never reports "no markers" for one: the
+    caller decides what a failure costs it (the daily refresh fails its job, because its
+    snapshot is first-writer-wins and a short read would pin the stale value for the day;
+    a request-time reader logs and keeps its rows).
+    """
+    if not api_key_ids:
+        return {}
+    kinds = [NATIVE_UNPRICED_KIND_PREFIX + k for k in api_key_ids]
+    res = (
+        supabase_client.table("allocator_equity_derived")
+        .select("kind, payload")
+        .eq("allocator_id", allocator_id)
+        .in_("kind", kinds)
+        .execute()
+    )
+    day_by_key: dict[str, str] = {}
+    for row in getattr(res, "data", None) or []:
+        kind = row.get("kind")
+        day = native_unpriced_day(row.get("payload"))
+        if not isinstance(kind, str) or not kind.startswith(NATIVE_UNPRICED_KIND_PREFIX):
+            continue
+        if day is not None:
+            day_by_key[kind[len(NATIVE_UNPRICED_KIND_PREFIX):]] = day
+    return day_by_key
+
+
+async def persist_native_unpriced_marker(
+    supabase_client: Client,
+    allocator_id: str,
+    api_key_id: str,
+    asof_date: str,
+) -> None:
+    """CR-01 (D-02, D-08, D-17): record that this poll, on ``asof_date``, found a native
+    account's latest completed day unpriced and so wrote no row.
+
+    One row per key (``native_unpriced:<api_key_id>``), overwritten by each such poll. It
+    is never cleared: a reader drops only the key's rows dated BEFORE ``asof``, and a
+    later priced poll writes rows dated on or after it, so a stale record hides nothing.
+    A failed write raises into the handler's persist arm, so the poll fails loudly
+    instead of leaving the earlier row counted at an older close.
+    """
+
+    def _upsert() -> None:
+        supabase_client.table("allocator_equity_derived").upsert(
+            {
+                "allocator_id": allocator_id,
+                "kind": NATIVE_UNPRICED_KIND_PREFIX + api_key_id,
+                "payload": {"native_unpriced": True, "asof": asof_date},
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="allocator_id,kind",
+        ).execute()
+
+    await db_execute(_upsert)

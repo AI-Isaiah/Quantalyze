@@ -145,6 +145,20 @@ describe("SEC-005: api_keys column projection", () => {
     expect(API_KEY_USER_COLUMNS).toBe(API_KEY_USER_COLUMNS_ARR.join(", "));
   });
 
+  // Phase 164.6.6.2.1 plan 15 (D-07, D-17). Migration 20261010120000 GRANTs
+  // SELECT on the native unit, the native balance and the stored close day to
+  // authenticated. The key card reads all three from this projection, so a
+  // column missing here means a BTC key can never show its balance: the list
+  // reads undefined and the card falls back to a dollar figure or a dash.
+  it("projects the native unit, the native balance and the stored close day", () => {
+    const cols = API_KEY_USER_COLUMNS.split(", ");
+    expect(cols).toContain("account_currency");
+    expect(cols).toContain("account_balance_native");
+    expect(cols).toContain("account_balance_usdt_close_date");
+    // The three joined as a unit; none of them is an encrypted column.
+    expect(API_KEY_USER_COLUMNS).toBe(API_KEY_USER_COLUMNS_ARR.join(", "));
+  });
+
   it("no source file uses .from(\"api_keys\").select(\"*\") or api_keys(*) embed", () => {
     const files = walk(SRC_ROOT);
     const offenders: Array<{ file: string; snippet: string; kind: string }> = [];

@@ -1,13 +1,14 @@
 "use client";
 
 import { useMemo } from "react";
-import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import type { MyAllocationDashboardPayload, UnpricedNativeAccount } from "@/lib/queries";
 import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
 import EquityChartWidget from "./widgets/performance/EquityChart";
 import { EquityHistoryRebuilding } from "./components/EquityHistoryRebuilding";
 import { buildAllocatorPortfolioFactsheetPayload } from "@/lib/factsheet/allocator-portfolio-payload";
+import { formatCloseDay } from "@/lib/factsheet/returns-unit";
 import {
   FactsheetProvider,
 } from "@/app/factsheet/[id]/v2/factsheet-context";
@@ -83,6 +84,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // Review C4 SFH-C4-04: the ready curve left out at least one departed
     // account's history (its anchor balance is gone). False when absent.
     departedHistoryUnavailable = false,
+    // Phase 164.6.6.2.1 plan 17 (D-20): the native-unit accounts the total
+    // leaves out on an unpriced day. Empty when absent.
+    unpricedNativeAccounts = [],
     apiKeys = [],
   } = props;
   // Fail-closed: ONLY an explicit "ready" may show the curve. A missing field,
@@ -208,6 +212,13 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           line a ready book reads as the whole book. Ready only: nothing is
           drawn while the history is rebuilding. */}
       {departedHistoryUnavailable && !isRebuilding && <DepartedHistoryNote />}
+      {/* Phase 164.6.6.2.1 plan 17 (D-09, D-20): the total in dollars drops an
+          account whose BTC close is not stored for a day, so it is named here
+          rather than left as an unexplained drop. Ready only, like the note
+          above. */}
+      {!isRebuilding && unpricedNativeAccounts.length > 0 && (
+        <UnpricedAccountNote accounts={unpricedNativeAccounts} />
+      )}
       <InsightStrip
         analytics={analytics}
         portfolioId={portfolio?.id ?? null}
@@ -405,6 +416,82 @@ function DepartedHistoryNote() {
     >
       This curve leaves out the history of at least one disconnected account,
       because the balance that history is measured from is not available.
+    </p>
+  );
+}
+
+/** `A`, `A and B`, `A, B and C`: no serial comma. */
+function joinAnd(parts: readonly string[]): string {
+  if (parts.length <= 1) return parts.join("");
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+/**
+ * Phase 164.6.6.2.1 plan 17 (D-09, D-20, D-21). One muted note when the dollar
+ * total, or its history, leaves out a native-unit account because a BTC close is
+ * not stored. Names the owner's own labels (sorted ascending), never a client
+ * clock. R2-WR-02: the writer records three different facts, so there are three
+ * sentences and each claims only its own:
+ *   - dated: the total leaves the account out for the day the writer recorded.
+ *     Accounts sharing a day are joined by "and"; when the days differ, each
+ *     day's accounts are stated in turn (separated by "; ") so no account is tied
+ *     to a date it was not left out on.
+ *   - whole: the total leaves the account out entirely, right now.
+ *   - history: ONLY the equity history skips the account, on a count of days. The
+ *     account is in the current total, so this sentence never says "the total".
+ * "BTC close" is the stored daily close, the only fact the data guarantees about
+ * the price. Muted, not a warning: the total shown is right for the accounts it
+ * covers.
+ */
+function UnpricedAccountNote({
+  accounts,
+}: {
+  accounts: ReadonlyArray<UnpricedNativeAccount>;
+}) {
+  const sorted = [...accounts].sort(
+    (a, b) => a.label.localeCompare(b.label) || a.apiKeyId.localeCompare(b.apiKeyId),
+  );
+  const dated = sorted.filter((a) => a.kind === "dated");
+  const whole = sorted.filter((a) => a.kind === "whole");
+  const history = sorted.filter((a) => a.kind === "history");
+  const byDay = new Map<string, string[]>();
+  for (const a of dated) {
+    const day = formatCloseDay(a.day as string);
+    byDay.set(day, [...(byDay.get(day) ?? []), a.label]);
+  }
+  const sentences: string[] = [];
+  if (dated.length > 0) {
+    const clauses = Array.from(byDay, ([day, labels]) => `${joinAnd(labels)} for ${day}`);
+    const days = byDay.size > 1 ? "those days" : "that day";
+    const pronoun = dated.length > 1 ? "they" : "it";
+    sentences.push(
+      `The total leaves out ${clauses.join("; ")}: no BTC close is stored for ${days} yet, so ${pronoun} cannot be priced in USD.`,
+    );
+  }
+  if (whole.length > 0) {
+    // The writer could not date this account (an unreadable row): it is out of the total whole.
+    sentences.push(
+      `The total ${dated.length > 0 ? "also leaves" : "leaves"} out ${joinAnd(whole.map((a) => a.label))} entirely: ${whole.length > 1 ? "they" : "it"} cannot be priced in USD right now.`,
+    );
+  }
+  if (history.length > 0) {
+    // Interior gaps only: the account IS in the current total, so this is about the curve.
+    const counts = history.map((a) => (a.kind === "history" ? a.holeDays : 0));
+    const clauses = history.map(
+      (a, i) => `${a.label} on ${counts[i]} ${counts[i] === 1 ? "day" : "days"}`,
+    );
+    const many = history.length > 1 || counts.some((n) => n > 1);
+    sentences.push(
+      `The equity history leaves out ${joinAnd(clauses)}: no BTC close is stored for ${many ? "those days" : "that day"}, so ${history.length > 1 ? "they" : "it"} could not be priced in USD.`,
+    );
+  }
+  return (
+    <p
+      role="status"
+      data-testid="dashboard-unpriced-account-note"
+      className="mb-3 px-1 text-sm text-text-secondary"
+    >
+      {sentences.join(" ")}
     </p>
   );
 }

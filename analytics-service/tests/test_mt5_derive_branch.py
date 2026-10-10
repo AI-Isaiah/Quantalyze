@@ -2025,49 +2025,133 @@ def _api_key_updates(capture: dict) -> list[dict]:
     return [p for (name, p) in capture["updates"] if name == "api_keys"]
 
 
+# 164.6.6.2.1 / plan 07 (D-17, D-02, D-08) — the frozen clock the live balance is priced
+# against. ``_utc_now`` is the derive's own seam (never a naive local clock), so the latest
+# COMPLETED UTC day is the previous one: 2026-10-08.
+_FROZEN_NOW = datetime(2026, 10, 9, 10, 0, tzinfo=timezone.utc)
+_CLOSE_DAY = "2026-10-08"
+
+
+def _btc_closes_on(*days_and_closes: tuple[str, float]) -> pd.Series:
+    return pd.Series(
+        [c for _, c in days_and_closes],
+        index=pd.DatetimeIndex([pd.Timestamp(d) for d, _ in days_and_closes]),
+        dtype=float,
+    )
+
+
 @pytest.mark.asyncio
-async def test_btc_account_derives_a_native_series_end_to_end(monkeypatch) -> None:
-    """THE tracer (D-01, D-02, D-08, D-14, D-20). An MT5 account whose PRE
+@pytest.mark.parametrize(
+    ("closes", "expected_usdt", "expected_date"),
+    [
+        pytest.param(
+            _btc_closes_on((_CLOSE_DAY, 61950.00)),
+            # 0.4213 x 61950.00 = 24780 + 1319.535, the plan's hand literal (D-17).
+            26099.535,
+            _CLOSE_DAY,
+            id="priced-at-the-latest-completed-close",
+        ),
+        pytest.param(
+            # Only the day BEFORE the latest completed one: an older close exists and must
+            # NOT be used (D-02, D-08 as refined by D-17).
+            _btc_closes_on(("2026-10-07", 61950.00)),
+            None,
+            None,
+            id="unpriced-an-older-close-is-never-used",
+        ),
+        pytest.param(None, None, None, id="no-price-source"),
+    ],
+)
+async def test_btc_account_derives_a_native_series_end_to_end(
+    monkeypatch, closes, expected_usdt, expected_date
+) -> None:
+    """THE tracer (D-01, D-02, D-08, D-14, D-17, D-20). An MT5 account whose PRE
     ``account_info`` says BTC is judged against BTC floors, not the 1000 USD dust NAV
-    that read every day of a 0.1 BTC account as dust. Hand literals are the canonical
-    USD ones (the ledger is that ledger times 1e-6): 400/100_000 etc. are RATIOS, so
-    they survive the change of unit exactly.
+    that read every day of a 0.1 BTC account as dust. The return oracles are hand
+    literals from the ledger times 1e-6 on a 0.4213 BTC anchor: initial NAV
+    0.4213 - 0.0005 - 0.01 = 0.4108, then 0.4112, 0.4112, 0.4215 (the deposit is not a
+    return), 0.4213.
 
     Also pins the persisted unit: ONE service-role ``api_keys`` UPDATE that stores the
-    code and the native balance AND nulls ``account_balance_usdt`` in the same
-    statement (the sync arm may have written BTC there before this phase), and the
-    ``native_unit`` flag in the pre-stamp, which is a flag and never a dust guard."""
+    code, the native balance, the balance priced in USD at the latest completed close
+    AND that close's date, or the NULL pair when that one close is missing (never an
+    older one) and when there is no price source at all. The ``native_unit`` flag in
+    the pre-stamp is a flag and never a dust guard."""
     monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setattr(jw, "_utc_now", lambda: _FROZEN_NOW)
     transport = _FakeMt5Transport(
-        account=_btc_account(), deals=_scaled_deals(_BTC_SCALE)
+        account={"equity": 0.4213, "balance": 0.4213, "currency": "BTC", "login": 123456},
+        deals=_scaled_deals(_BTC_SCALE),
     )
     ctx, capture = _build_ctx(transport, asset_class="traditional")
-    with _apply(_patches(ctx)):
+    with _apply(_patches(ctx)), patch(
+        "services.benchmark.read_btc_closes", new=AsyncMock(return_value=closes)
+    ):
         result = await run_derive_broker_dailies_job(_job())
 
     assert result.outcome == DispatchOutcome.DONE, (
         f"kind={result.error_kind!r} msg={result.error_message!r}"
     )
     rows = _csv_rows(capture)
-    assert rows["2025-06-02"] == pytest.approx(400 / 100_000, abs=1e-12)
+    assert rows["2025-06-02"] == pytest.approx(0.0004 / 0.4108, abs=1e-9)
     assert rows["2025-06-03"] == pytest.approx(0.0, abs=1e-12)
-    assert rows["2025-06-04"] == pytest.approx(300 / 100_400, abs=1e-12)
-    assert rows["2025-06-05"] == pytest.approx(-200 / 110_700, abs=1e-12)
+    assert rows["2025-06-04"] == pytest.approx(0.0003 / 0.4112, abs=1e-9)
+    assert rows["2025-06-05"] == pytest.approx(-0.0002 / 0.4215, abs=1e-9)
 
     flags = _dq_flags(capture)
     assert flags.get("native_unit") == "BTC"
     assert "dust_nav_guard" not in flags, (
-        "a 0.1 BTC account is not dust; the guard fired against a USD-sized floor"
+        "a 0.4 BTC account is not dust; the guard fired against a USD-sized floor"
     )
-    # D-25: every NAV of this account is ~0.1 BTC, far above the 1e-4 material equity.
+    # D-25: every NAV of this account is ~0.4 BTC, far above the 1e-4 material equity.
     assert "small_base_measured" not in flags
-    assert _api_key_updates(capture) == [
-        {
-            "account_currency": "BTC",
-            "account_balance_native": 0.1105,
-            "account_balance_usdt": None,
-        }
-    ]
+    (update,) = _api_key_updates(capture)
+    assert set(update) == {
+        "account_currency",
+        "account_balance_native",
+        "account_balance_usdt",
+        "account_balance_usdt_close_date",
+    }
+    assert update["account_currency"] == "BTC"
+    assert update["account_balance_native"] == 0.4213
+    assert update["account_balance_usdt_close_date"] == expected_date
+    if expected_usdt is None:
+        assert update["account_balance_usdt"] is None
+    else:
+        assert update["account_balance_usdt"] == pytest.approx(expected_usdt, abs=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_btc_strategy_derive_survives_a_closes_outage_with_the_pair_null_and_says_why(
+    monkeypatch, caplog
+) -> None:
+    """SFH-01, the STRATEGY path. Its returns are native and need no close; the closes only
+    price the displayed USD balance. So an outage there stays best-effort (a failed read
+    must not fail a derive that does not depend on it), but it is logged with its cause
+    and never reads as a missing close: the USD pair is NULL because nothing could be
+    priced, and the warning names the read. (The KEY path retries instead; see
+    test_derive_allocator_equity_job.)"""
+    from services.benchmark import BtcClosesReadError
+
+    caplog.set_level("WARNING")
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setattr(jw, "_utc_now", lambda: _FROZEN_NOW)
+    transport = _FakeMt5Transport(
+        account={"equity": 0.4213, "balance": 0.4213, "currency": "BTC", "login": 123456},
+        deals=_scaled_deals(_BTC_SCALE),
+    )
+    ctx, capture = _build_ctx(transport, asset_class="traditional")
+    with _apply(_patches(ctx)), patch(
+        "services.benchmark.read_btc_closes",
+        new=AsyncMock(side_effect=BtcClosesReadError("benchmark read failed")),
+    ):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, (result.error_kind, result.error_message)
+    (update,) = _api_key_updates(capture)
+    assert update["account_balance_usdt"] is None
+    assert update["account_balance_usdt_close_date"] is None
+    assert any("closes unreadable" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -2123,7 +2207,8 @@ async def test_usd_account_derives_as_before_and_writes_only_its_code(
         deals=_canonical_deals(),
     )
     ctx, capture = _build_ctx(transport, asset_class="traditional")
-    with _apply(_patches(ctx)):
+    closes_reader = AsyncMock(return_value=None)
+    with _apply(_patches(ctx)), patch("services.benchmark.read_btc_closes", new=closes_reader):
         result = await run_derive_broker_dailies_job(_job())
 
     assert result.outcome == DispatchOutcome.DONE
@@ -2132,6 +2217,8 @@ async def test_usd_account_derives_as_before_and_writes_only_its_code(
     assert rows["2025-06-05"] == pytest.approx(-200 / 110_700, abs=1e-12)
     assert "native_unit" not in _dq_flags(capture)
     assert _api_key_updates(capture) == [{"account_currency": "USD"}]
+    # 164.6.6.2.1 / plan 07: a USD-family key never reads the closes (D-04).
+    closes_reader.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -2373,6 +2460,7 @@ def test_every_new_derive_message_is_blame_free_for_the_mt5_classifier() -> None
     assert _WRONG_SERVER_PHRASES and _AUTH_PHRASES
     texts = [
         jw._MT5_CURRENCY_BLANK_MESSAGE,
+        jw._MT5_BTC_CLOSES_UNREADABLE_MESSAGE,
         jw._MT5_CURRENCY_CHANGED_MESSAGE,
         jw._MT5_CURRENCY_REFUSED_MESSAGE,
         _MALFORMED_STAMP,

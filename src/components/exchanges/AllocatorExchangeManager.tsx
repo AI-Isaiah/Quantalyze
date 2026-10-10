@@ -28,7 +28,7 @@
  *     client-only fields (queued_next_attempt_at, helper_override).
  */
 
-import { useState, useTransition, useEffect } from "react";
+import { useState, useTransition, useEffect, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -51,6 +51,11 @@ import {
 // Phase 169 review round 1 IN-04: the balance is an amount, so it renders
 // through the ONE money module in whole dollars (DESIGN.md Currency row).
 import { formatUsd } from "@/lib/dollar-validation";
+import {
+  formatCloseDay,
+  nativeAmount,
+  parseReturnsUnit,
+} from "@/lib/factsheet/returns-unit";
 import { AllocatorSyncStatus } from "./AllocatorSyncStatus";
 
 interface ExchangeConnection {
@@ -89,6 +94,13 @@ interface ExchangeConnection {
   account_shared_with_api_key_id: string | null;
   account_share_kind: string | null;
   history_inclusion: string | null;
+  // Migration 20261010120000 (Phase 164.6.6.2.1, D-07 / D-17). The account's
+  // native unit code (NULL = USD family), its balance in that unit, and the
+  // stored UTC day of the daily close `account_balance_usdt` was priced at.
+  // PostgREST may deliver the numeric as a string; normalizeInitialKey coerces.
+  account_currency: string | null;
+  account_balance_native: number | null;
+  account_balance_usdt_close_date: string | null;
   // f8 (client-only — NOT persisted to DB): captured from the sync route's
   // `already_inflight` response. When syncing AND ≥30s out, the pill renders
   // the Queued helper via AllocatorSyncStatus.
@@ -126,6 +138,9 @@ type InitialKey = Omit<
   | "account_shared_with_api_key_id"
   | "account_share_kind"
   | "history_inclusion"
+  | "account_currency"
+  | "account_balance_native"
+  | "account_balance_usdt_close_date"
   | "queued_next_attempt_at"
   | "helper_override"
 > & {
@@ -136,6 +151,10 @@ type InitialKey = Omit<
   account_shared_with_api_key_id?: string | null;
   account_share_kind?: string | null;
   history_inclusion?: string | null;
+  account_currency?: string | null;
+  // `string` covers PostgREST's numeric-as-string; see numericOrNull.
+  account_balance_native?: number | string | null;
+  account_balance_usdt_close_date?: string | null;
 };
 
 interface Props {
@@ -238,9 +257,20 @@ function balanceBearers(
       k.account_share_kind === "composite_member") &&
     k.account_shared_with_api_key_id !== null &&
     k.account_shared_with_api_key_id !== k.id;
+  // UI-SPEC E: a native key with a native balance HAS a balance even while its
+  // USD value is null (an unpriced day). Ranking it as "none" would move the
+  // balance to a sibling row for a day and back, and a BTC figure on one row
+  // beside a dollar figure on another is the misreading this rule prevents.
+  function hasBalance(k: ExchangeConnection): boolean {
+    return (
+      k.account_balance_usdt != null ||
+      (parseReturnsUnit(k.account_currency) !== null &&
+        k.account_balance_native !== null)
+    );
+  }
   const rank = (k: ExchangeConnection): [number, number, number, string] => [
     isWorkingHolder(k) ? 0 : 1,
-    k.account_balance_usdt == null ? 1 : 0,
+    hasBalance(k) ? 0 : 1,
     isMarked(k) ? 1 : 0,
     k.id,
   ];
@@ -259,6 +289,50 @@ function balanceBearers(
     if (current === undefined || before(k, current)) bearerByGroup.set(group, k);
   }
   return { groupOf, bearerByGroup };
+}
+
+/**
+ * UI-SPEC E: the balance segment of a key line (D-07, D-17, D-21).
+ *
+ * A USD-family key keeps today's exact text node, no wrapper and no title. A
+ * native key (a well-formed `account_currency`) leads with its native balance,
+ * the truth (D-01, D-03), in its own `<span>` so the `title` attaches to the
+ * balance alone. The USD value follows behind `≈` only when both it and the
+ * STORED close date it was priced at are present; the date is that stored day,
+ * never one computed from the viewer's clock, and without it the card renders
+ * the unpriced form rather than guess one. No balance read at all is `—`.
+ */
+function balanceSegment(key: ExchangeConnection): ReactNode {
+  const unit = parseReturnsUnit(key.account_currency);
+  // The worker writes `account_balance_native` ONLY for a native account (a
+  // USD-family account stores its code alone and keeps `account_balance_usdt`),
+  // and nulls `account_balance_usdt` in the same statement. So "a well-formed
+  // code AND a native balance" is the native key, and a code with no native
+  // balance (USD, or a native key before its first balance) falls through to
+  // today's expression, which reads `—` while `account_balance_usdt` is null.
+  if (unit === null || key.account_balance_native === null) {
+    return ` · Balance ${formatUsd(key.account_balance_usdt)}`;
+  }
+  const native = nativeAmount(key.account_balance_native, unit);
+  const closeDate = key.account_balance_usdt_close_date;
+  const priced =
+    key.account_balance_usdt !== null &&
+    closeDate !== null &&
+    formatCloseDay(closeDate) !== "—";
+  if (!priced) {
+    return (
+      <span title="No USD value yet: the latest daily BTC close is not stored.">
+        {` · Balance ${native}`}
+      </span>
+    );
+  }
+  return (
+    <span
+      title={`Converted from ${unit} at the stored daily BTC close for ${formatCloseDay(closeDate)}.`}
+    >
+      {` · Balance ${native} · ≈ ${formatUsd(key.account_balance_usdt)} at ${formatCloseDay(closeDate, { year: false })} close`}
+    </span>
+  );
 }
 
 const SYNC_FAILED_HELPER =
@@ -364,6 +438,20 @@ function isQueuedHold(k: InitialKey, prev?: ExchangeConnection): boolean {
   return k.last_sync_at === prev.last_sync_at;
 }
 
+/**
+ * A PostgREST `numeric` may arrive as a JSON string. A finite number, or a
+ * non-blank string that parses to one, is a number; everything else is absent,
+ * never 0 (an unreadable balance must not render as a zero balance).
+ */
+function numericOrNull(v: number | string | null | undefined): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
 function normalizeInitialKey(
   k: InitialKey,
   prev?: ExchangeConnection,
@@ -414,6 +502,9 @@ function normalizeInitialKey(
     account_shared_with_api_key_id: k.account_shared_with_api_key_id ?? null,
     account_share_kind: k.account_share_kind ?? null,
     history_inclusion: k.history_inclusion ?? null,
+    account_currency: k.account_currency ?? null,
+    account_balance_native: numericOrNull(k.account_balance_native),
+    account_balance_usdt_close_date: k.account_balance_usdt_close_date ?? null,
     // Landmine 8 + f8/f4 preservation: client-only fields carry over across
     // router.refresh() server-state cycles when the row id matches, unless the
     // row changed section (R2-1, R2-2 above).
@@ -1342,9 +1433,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     </p>
                     <p className="text-fixed-10 text-text-muted uppercase tracking-wider mt-0.5">
                       {key.exchange} · Read-only
-                      {showBalance
-                        ? ` · Balance ${formatUsd(key.account_balance_usdt)}`
-                        : null}
+                      {showBalance ? balanceSegment(key) : null}
                     </p>
                     {/* Founder D-74: this account's balance is on another
                         row; say which, in the muted caption tone. */}

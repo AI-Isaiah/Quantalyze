@@ -24,6 +24,7 @@ import {
 } from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import { withTrustTier } from "@/lib/factsheet/with-trust-tier";
 import {
   deriveComputeState,
   recipientArm,
@@ -226,8 +227,10 @@ function buildFactsheetPayloadCached(
     // Bumped v9→v10 (Phase 169.4 D-71): 169.4-05 and 169.4-06 changed the api-arm panels (null-honest signatures and allocator blends).
     // Bumped v10→v11 (Phase 169.1 D-80): 169.1-03 to 169.1-07 changed the payload's conventions fields and the per-basis, bucket, rolling, bootstrap and stress values.
     // Bumped v11→v12 (Phase 164.6.6.2 BTCNATIVE, 2026-10-07): the payload gained `returnsUnit` (the unit the strategy's returns are measured in, from `data_quality_flags.native_unit`). A v11 entry lacks it, so for the 1 h TTL drain a BTC account's factsheet would read as USD with no chip and bare return labels.
+    // Bumped v12→v13 (Phase 164.6.6.2.1 BTCUSDVIEW, 2026-10-09): the payload gained `usdView` / `usdViewUnavailable` (the server-built USD view of a native-unit strategy). A v12 entry lacks them, so for the 1 h TTL drain a BTC account's factsheet could not toggle to USD and would show no reason why.
     // Bumped v12→v13 (Phase 170.2 PROBEFIXES SC-4, D-09): payload gains the optional source field
-    ["factsheet-v2-payload-v13", id, computedAt],
+    // Bumped v13→v14 (Phase 164.6.6.2.1 BTCUSDVIEW, 2026-10-10, on merging main): 170.2 shipped v13 with `source` but without `usdView` / `usdViewUnavailable`, so this branch's payload is a different shape under the same key. A v13 entry written by main would hide the USD toggle for the 1 h TTL drain.
+    ["factsheet-v2-payload-v14", id, computedAt],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
@@ -747,7 +750,10 @@ export default async function FactsheetV2Page({
   // `ingestSource` discriminant, so the result stays a valid FactsheetApiPayload |
   // FactsheetCsvPayload — both narrowing and the no-invented-data compile error
   // survive the spread (verified: tsc 0).
-  const payloadWithTrust: FactsheetPayload = { ...payload, trustTier };
+  // 164.6.6.2.1 review CR-02: `withTrustTier` is that same spread, and it also
+  // reaches `usdView.payload` (built with a null tier like its parent), so the
+  // tier does not vanish when the viewer toggles to the USD view.
+  const payloadWithTrust: FactsheetPayload = withTrustTier(payload, trustTier);
 
   // JSON-LD FinancialProduct schema — helps Google + LLMs identify the page
   // as a structured financial-product listing. Content is server-built and

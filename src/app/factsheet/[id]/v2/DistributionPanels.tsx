@@ -7,7 +7,7 @@ import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { comparatorPartialYear, isoToMonthDay } from "./MetricsColumn";
 import { COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
-import { nativeUnitReason } from "@/lib/factsheet/returns-unit";
+import { benchmarkWithheldReason } from "@/lib/factsheet/returns-unit";
 
 /**
  * Three compact analytical panels sharing a common visual language:
@@ -389,7 +389,7 @@ export function CorrelationStripPanel() {
         </h3>
         <p className="text-micro text-text-muted">
           Pearson ρ on aligned daily returns · ρ near 0 implies diversification benefit
-          {unit !== null && `. BTC row not measurable: ${nativeUnitReason(unit)}.`}
+          {unit !== null && `. BTC row not measurable: ${benchmarkWithheldReason(unit, payload.convertedFrom)}.`}
         </p>
       </header>
       <ResponsiveChartFrame
@@ -609,7 +609,7 @@ export function CorrelationsMatrixPanel() {
       </div>
       {unit !== null && btcCol > 0 && (
         <p className="text-micro text-text-muted">
-          Strategy × BTC not measurable: {nativeUnitReason(unit)}.
+          Strategy × BTC not measurable: {benchmarkWithheldReason(unit, payload.convertedFrom)}.
         </p>
       )}
     </figure>

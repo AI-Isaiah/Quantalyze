@@ -2748,9 +2748,13 @@ from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
 
 from tests.test_mt5_derive_branch import (  # noqa: E402
     _BTC_SCALE,
+    _CLOSE_DAY,
+    _FROZEN_NOW,
     _FakeMt5Transport,
     _btc_account,
+    _btc_closes_on,
     _canonical_deals,
+    _epoch as _mt5_epoch,
     _reset_mt5_terminal_locks,  # noqa: F401  (autouse fixture: clears the terminal registry)
     _scaled_deals,
 )
@@ -2765,8 +2769,13 @@ async def _derive_mt5_key(
     *,
     deals: list[dict] | None = None,
     stored: str | None = None,
+    btc_closes: Any = None,
+    closes_reader: AsyncMock | None = None,
 ):
-    """Run the REAL key-mode derive over the offline MT5 transport double."""
+    """Run the REAL key-mode derive over the offline MT5 transport double.
+
+    The stored BTC closes are always patched (164.6.6.2.1 / plan 07): ``None`` is "no price
+    source", so a derive here never reaches for the real ``benchmark_prices`` table."""
     from services.job_worker import run_derive_broker_dailies_job
 
     monkeypatch.setenv("MT5_ENABLED", "true")
@@ -2786,6 +2795,11 @@ async def _derive_mt5_key(
             "services.job_worker.db_execute",
             new=AsyncMock(side_effect=lambda fn: fn()),
         ),
+        patch(
+            "services.benchmark.read_btc_closes",
+            new=closes_reader or AsyncMock(return_value=btc_closes),
+        ),
+        patch("services.job_worker._utc_now", new=lambda: _FROZEN_NOW),
     ]
     with ExitStack() as stack:
         for p in patchers:
@@ -2798,32 +2812,357 @@ def _api_keys_updates(capture: dict) -> list[dict]:
     return [p for (name, p) in capture["updates"] if name == "api_keys"]
 
 
+def _btc_key_deal(day: tuple[int, int, int], profit: float, *, flow: bool = False) -> dict:
+    """One MT5 deal in BTC on a UTC day: a closed trade (``profit`` is its P&L) or, with
+    ``flow=True``, a BALANCE deposit (+) / withdrawal (-) booked in ``profit``."""
+    base = {"swap": 0.0, "commission": 0.0, "fee": 0.0, "time": _mt5_epoch(*day)}
+    if flow:
+        return {**base, "type": 2, "profit": profit}
+    return {**base, "type": 1, "entry": 1, "profit": profit}
+
+
+def _csv_rows_by_date(capture: dict) -> dict[str, float]:
+    return {
+        row["date"]: row["daily_return"]
+        for (name, payload, _oc) in capture["upserts"]
+        if name == "csv_daily_returns"
+        for row in payload
+    }
+
+
+# The four-day BTC ledger the 164.6.6.2.1 plan-08 tests share. NAV (native, end of day):
+# 10-04 1.0, 10-05 1.0, 10-06 1.0, 10-07 1.1 with only the last day trading (+0.1 BTC). The
+# derive's clock is frozen on 2026-10-09, so 2026-10-07 is NOT the latest completed day
+# (10-08 is); the closes below are what decide which days are priced.
+_D0, _D1, _D2, _D3 = (2026, 10, 4), (2026, 10, 5), (2026, 10, 6), (2026, 10, 7)
+
+
+def _four_day_btc_deals(*, last_profit: float = 0.1, last_flow: float | None = None) -> list[dict]:
+    deals = [
+        _btc_key_deal(_D0, 0.0),
+        _btc_key_deal(_D1, 0.0),
+        _btc_key_deal(_D2, 0.0),
+        _btc_key_deal(_D3, last_profit),
+    ]
+    if last_flow is not None:
+        deals.append(_btc_key_deal(_D3, last_flow, flow=True))
+    return deals
+
+
+def _btc_key_account(equity: float) -> dict:
+    return {"equity": equity, "balance": equity, "currency": "BTC", "login": 123456}
+
+
 @pytest.mark.asyncio
-async def test_key_mode_btc_key_stores_its_unit_and_a_null_native_anchor(
+async def test_key_mode_btc_key_writes_usd_inputs_or_names_the_unpriced_day(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """TRACER (D-03, D-13, D-14): a key-mode derive of a BTC MT5 key runs no combine,
-    writes no per-key series, and issues the SAME api_keys UPDATE the strategy-mode path
-    does, so D-03 has a stored code to compare on the next read. Its key_inputs row names
-    the reason, never a USD anchor and never a BTC flow."""
+    """TRACER (D-03, D-17; T-164.6.6.2.1-45): a key-mode BTC key is no longer skipped. Its
+    per-key returns are USD returns, its anchor is the live balance priced at the latest
+    completed close, its realized terminal is the native realized level at the last USD
+    return day times that day's close, and the payload names its unit and how far it is
+    priced.
+
+    Hand literals. Native NAV 1.0 on 10-04..10-06 and 1.1 on 10-07 (native return 0.10).
+    Closes 60000 on 10-04..10-06 and 66000 on 10-07, and the clock is 2026-10-09 so 10-07
+    is NOT the latest completed day: the close of 10-08 is also 66000.
+      USD return 10-07 = (1 + 0.10) x 66000 / 60000 - 1 = 1.21 - 1 = 0.21 (NOT 0.10)
+      USD return 10-05, 10-06 = 0.0 (a flat balance at a flat price)
+      anchor = 1.1 BTC x 66000 = 66000 + 6600 = 72600.0 (priced at 10-08's close)
+      realized terminal = 1.1 x 66000 = 72600.0 at the last USD return day, 10-07."""
+    closes = _btc_closes_on(
+        ("2026-10-04", 60000.0), ("2026-10-05", 60000.0), ("2026-10-06", 60000.0),
+        ("2026-10-07", 66000.0), (_CLOSE_DAY, 66000.0),
+    )
+    result, capture = await _derive_mt5_key(
+        monkeypatch, _btc_key_account(1.1), deals=_four_day_btc_deals(), btc_closes=closes
+    )
+
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    rows = _csv_rows_by_date(capture)
+    assert set(rows) == {"2026-10-05", "2026-10-06", "2026-10-07"}
+    assert rows["2026-10-07"] == pytest.approx(0.21, abs=1e-9), (
+        "the per-key series must be USD returns: 1.10 x 66000 / 60000 - 1, not the BTC 0.10"
+    )
+    assert rows["2026-10-06"] == pytest.approx(0.0, abs=1e-12)
+    payload = _persisted_ki_payload(capture)
+    assert payload["anchor_usd"] == pytest.approx(72600.0, abs=1e-9)
+    assert payload["anchor_null_reason"] is None
+    assert payload["native_unit"] == "BTC"
+    assert payload["priced_through"] == "2026-10-07"
+    assert payload["unpriced_days"] == []
+    assert payload["segment_terminals"] == []  # no interior hole, nothing to segment
+    assert "unpriced_close_day" not in payload
+    assert payload["realized_terminal_usd"] == pytest.approx(72600.0, abs=1e-9)
+    assert payload["realized_terminal_day"] == "2026-10-07"
+    assert payload["venue"] == "mt5"
+    assert _api_keys_updates(capture) == [
+        {
+            "account_currency": "BTC",
+            "account_balance_native": 1.1,
+            "account_balance_usdt": pytest.approx(72600.0, abs=1e-9),
+            "account_balance_usdt_close_date": _CLOSE_DAY,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_key_mode_btc_deposit_is_a_usd_flow_at_its_days_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-164.6.6.2.1-45: each flow is ``amount x close(flow day)``, and the deposit is NOT a
+    return. Same ledger as the tracer but 10-07 trades +0.05 BTC and receives a 0.05 BTC
+    deposit, so the NAV is 1.0 BTC before and 1.1 after.
+      flow = 0.05 x 66000 = 3300.0 on 10-07
+      USD return 10-07 = (1 + 0.05) x 66000 / 60000 - 1 = 1.155 - 1 = 0.155 (the deposit
+      is in the numerator, so it adds nothing to the return)."""
+    closes = _btc_closes_on(
+        ("2026-10-04", 60000.0), ("2026-10-05", 60000.0), ("2026-10-06", 60000.0),
+        ("2026-10-07", 66000.0), (_CLOSE_DAY, 66000.0),
+    )
+    result, capture = await _derive_mt5_key(
+        monkeypatch,
+        _btc_key_account(1.1),
+        deals=_four_day_btc_deals(last_profit=0.05, last_flow=0.05),
+        btc_closes=closes,
+    )
+
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    payload = _persisted_ki_payload(capture)
+    assert payload["flows"] == [{"utc_day_iso": "2026-10-07", "usd_signed": pytest.approx(3300.0)}]
+    assert _csv_rows_by_date(capture)["2026-10-07"] == pytest.approx(0.155, abs=1e-9)
+    assert payload["unpriced_days"] == []
+
+
+@pytest.mark.asyncio
+async def test_key_mode_btc_key_with_the_live_close_missing_is_unpriced_never_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-09, D-17; T-164.6.6.2.1-46. The latest completed day is 2026-10-08, and no close is
+    stored for it (or for 10-07): the newest close is 10-06's 60000. The anchor is NULL with
+    the reason ``native_unpriced``, NOT 1.1 x 60000 = 66000 at the older close. The payload
+    names the missing close's day and how far the key is priced, and the per-key USD
+    returns that CAN be formed are still written (10-05, 10-06)."""
+    closes = _btc_closes_on(
+        ("2026-10-04", 60000.0), ("2026-10-05", 60000.0), ("2026-10-06", 60000.0)
+    )
+    result, capture = await _derive_mt5_key(
+        monkeypatch, _btc_key_account(1.1), deals=_four_day_btc_deals(), btc_closes=closes
+    )
+
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    payload = _persisted_ki_payload(capture)
+    assert payload["anchor_usd"] is None
+    assert payload["anchor_null_reason"] == "native_unpriced"
+    assert payload["unpriced_close_day"] == _CLOSE_DAY
+    assert payload["priced_through"] == "2026-10-06"
+    # 10-07 is after the last stored close: the live tail, not an interior hole.
+    assert payload["unpriced_days"] == []
+    assert set(_csv_rows_by_date(capture)) == {"2026-10-05", "2026-10-06"}
+    # The realized terminal is the native level on the last USD return day, 10-06: 1.0 x 60000.
+    assert payload["realized_terminal_usd"] == pytest.approx(60000.0, abs=1e-9)
+    assert payload["realized_terminal_day"] == "2026-10-06"
+    (update,) = _api_keys_updates(capture)
+    assert update["account_balance_usdt"] is None
+
+
+def _hole_deals(*, deposit_on_hole: float | None = None) -> list[dict]:
+    """Five trading days 10-04..10-08 (+0.0, +0.01, +0.02, +0.0, +0.03 BTC). The terminal
+    balance is 1.06 BTC, so the native NAV (end of day) is 1.0, 1.01, 1.03, 1.03, 1.06."""
+    deals = [
+        _btc_key_deal((2026, 10, 4), 0.0),
+        _btc_key_deal((2026, 10, 5), 0.01),
+        _btc_key_deal((2026, 10, 6), 0.02),
+        _btc_key_deal((2026, 10, 7), 0.0),
+        _btc_key_deal((2026, 10, 8), 0.03),
+    ]
+    if deposit_on_hole is not None:
+        deals.append(_btc_key_deal((2026, 10, 6), deposit_on_hole, flow=True))
+    return deals
+
+
+# No close on 2026-10-06 (the hole). 10-05 pairs with 10-04, 10-08 with 10-07; 10-06 has no
+# close of its own and 10-07 has no usable 10-06 to pair against.
+_HOLE_CLOSES = (
+    ("2026-10-04", 60000.0), ("2026-10-05", 61000.0),
+    ("2026-10-07", 63000.0), ("2026-10-08", 64000.0),
+)
+
+
+@pytest.mark.asyncio
+async def test_key_mode_btc_interior_hole_is_named_never_written_as_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-09; T-164.6.6.2.1-46. A missing close on 10-06 leaves two native return days with no
+    USD return: 10-06 (no close of its own) and 10-07 (it pairs against 10-06). Both are
+    listed in ``unpriced_days`` and neither is written as r = 0. The key is priced through
+    10-08, so the anchor (1.06 x 64000 = 67840.0) is unaffected.
+      USD 10-05 = (1 + 0.01/1.0) x 61000 / 60000 - 1 = 61610 / 60000 - 1 = 0.0268333...
+      USD 10-08 = (1 + 0.03/1.03) x 64000 / 63000 - 1 = 67840 / 64890 - 1 = 0.0454615..."""
+    result, capture = await _derive_mt5_key(
+        monkeypatch,
+        _btc_key_account(1.06),
+        deals=_hole_deals(),
+        btc_closes=_btc_closes_on(*_HOLE_CLOSES),
+    )
+
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    rows = _csv_rows_by_date(capture)
+    assert set(rows) == {"2026-10-05", "2026-10-08"}, rows
+    assert rows["2026-10-05"] == pytest.approx(0.026833333333, abs=1e-9)
+    assert rows["2026-10-08"] == pytest.approx(0.0454615503, abs=1e-9)
+    payload = _persisted_ki_payload(capture)
+    assert payload["unpriced_days"] == ["2026-10-06", "2026-10-07"]
+    assert payload["priced_through"] == "2026-10-08"
+    # Plan 09: the allocator compose replays this key in two segments split at the hole, and the
+    # first rolls back from the realized USD level on the last priced day before it: the native
+    # NAV there (1.01) x that day's close (61000) = 61610.0, worked by hand.
+    assert payload["segment_terminals"] == [
+        {"utc_day_iso": "2026-10-05", "level_usd": pytest.approx(61610.0, abs=1e-9)}
+    ]
+    assert payload["anchor_usd"] == pytest.approx(67840.0, abs=1e-9)
+    assert payload["anchor_null_reason"] is None
+    # No P&L is carried for a day the key could not price: 10-06 has no close, and 10-07 is
+    # named unpriced (its 63000 close exists but its return cannot be formed).
+    assert {row["utc_day_iso"] for row in payload["dropped_day_pnl"]}.isdisjoint(
+        {"2026-10-06", "2026-10-07"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_key_mode_btc_deposit_on_an_unpriced_day_is_named_and_not_persisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MEASUREMENT I2=build: a deposit on a day with no close cannot be priced, so no flow is
+    persisted for it and the day is named in ``unpriced_days`` (it is never priced at a
+    neighbouring close). The hole ledger above plus a 0.05 BTC deposit on 10-06."""
+    result, capture = await _derive_mt5_key(
+        monkeypatch,
+        _btc_key_account(1.06),
+        deals=_hole_deals(deposit_on_hole=0.05),
+        btc_closes=_btc_closes_on(*_HOLE_CLOSES),
+    )
+
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    payload = _persisted_ki_payload(capture)
+    assert payload["flows"] == []
+    assert "2026-10-06" in payload["unpriced_days"]
+
+
+@pytest.mark.asyncio
+async def test_key_mode_btc_key_with_no_price_source_names_it_and_writes_no_series(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-09: with no stored closes at all (a SUCCESSFUL ``read_btc_closes`` that found none, None) nothing is priced: no per-key series, a NULL anchor with ``native_unpriced``, no
+    flow, and the same api_keys UPDATE as before. The pre-164.6.6.2.1 skip used the reason
+    ``native_unit`` for this fixture; that reason is now reserved for an unsupported code."""
     result, capture = await _derive_mt5_key(monkeypatch, _btc_account())
 
     assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
-    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"]), (
-        "a BTC key must not write a per-key series (its returns are BTC, the table is USD)"
-    )
+    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"])
     assert _api_keys_updates(capture) == [
         {
             "account_currency": "BTC",
             "account_balance_native": 0.1105,
             "account_balance_usdt": None,
+            "account_balance_usdt_close_date": None,
         }
     ]
     payload = _persisted_ki_payload(capture)
     assert payload["anchor_usd"] is None
-    assert payload["anchor_null_reason"] == "native_unit"
-    assert payload["flows"] == [], "BTC flows must never enter the USD curve"
+    assert payload["anchor_null_reason"] == "native_unpriced"
+    assert payload["unpriced_close_day"] == _CLOSE_DAY
+    assert payload["priced_through"] is None
+    assert payload["flows"] == [], "a BTC flow must never enter the USD curve unpriced"
     assert payload["venue"] == "mt5"
+
+
+@pytest.mark.asyncio
+async def test_key_mode_btc_key_retries_when_the_closes_read_fails_and_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """SFH-01. A closes READ that failed is not "no price source": the previous behaviour
+    persisted ``native_unpriced`` with an ``unpriced_close_day`` that was never checked, and
+    the allocator compose then dropped the key from the book by name for a close that may
+    exist. It is a TRANSIENT failure instead (the derive retries), with the account unit,
+    the series and the key_inputs row all untouched, so the last good inputs stand."""
+    from services.benchmark import BtcClosesReadError
+
+    caplog.set_level("WARNING")
+    result, capture = await _derive_mt5_key(
+        monkeypatch,
+        _btc_account(),
+        closes_reader=AsyncMock(side_effect=BtcClosesReadError("benchmark read failed")),
+    )
+
+    assert result.outcome.name == "FAILED"
+    assert result.error_kind == "transient"
+    assert "BTC prices" in (result.error_message or "")
+    assert _api_keys_updates(capture) == []
+    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"])
+    assert not any(u[0] == "allocator_equity_derived" for u in capture["upserts"])
+    assert any("closes unreadable" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_key_mode_funded_btc_key_is_not_dust_against_the_usd_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dust, non-positive and non-finite checks judge the USD anchor. 0.4213 BTC is far
+    below the 1000 USD dust floor as a NUMBER but is worth 0.4213 x 61950.00 = 24780 +
+    1319.535 = 26099.535 USD, so it is a real anchor, not ``dust``."""
+    closes = _btc_closes_on(
+        ("2025-06-01", 61950.00), ("2025-06-02", 61950.00), ("2025-06-03", 61950.00),
+        ("2025-06-04", 61950.00), ("2025-06-05", 61950.00), (_CLOSE_DAY, 61950.00),
+    )
+    result, capture = await _derive_mt5_key(
+        monkeypatch, _btc_key_account(0.4213), btc_closes=closes
+    )
+
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    payload = _persisted_ki_payload(capture)
+    assert payload["anchor_null_reason"] is None
+    assert payload["anchor_usd"] == pytest.approx(26099.535, abs=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_key_mode_btc_key_prices_its_balance_at_the_latest_completed_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """164.6.6.2.1 / plan 07 (D-17): the key-mode path persists the SAME dated USD balance
+    as the strategy path. 0.1105 BTC x 61950.00 = 6845.475 (6195 + 650.475), dated the
+    latest completed UTC day; the per-key series is still not written."""
+    result, capture = await _derive_mt5_key(
+        monkeypatch, _btc_account(), btc_closes=_btc_closes_on((_CLOSE_DAY, 61950.00))
+    )
+
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    (update,) = _api_keys_updates(capture)
+    assert update["account_balance_usdt"] == pytest.approx(6845.475, abs=1e-9)
+    assert update["account_balance_usdt_close_date"] == _CLOSE_DAY
+    assert update["account_balance_native"] == 0.1105
+
+
+@pytest.mark.asyncio
+async def test_key_mode_a_non_btc_native_code_is_never_priced_with_btc_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """164.6.6.2.1 / plan 07 (T-164.6.6.2.1-17): a key-mode EUR key is ``native`` only
+    because it has no floors; 12345.67 EUR x a BTC close would be a confident wrong dollar
+    figure. Its USD balance stays NULL even when BTC closes exist for the completed day, and
+    the closes are not even read."""
+    account = _btc_account("EUR")
+    account["equity"], account["balance"] = 12_345.67, 12_345.67
+    reader = AsyncMock(return_value=_btc_closes_on((_CLOSE_DAY, 61950.00)))
+    result, capture = await _derive_mt5_key(
+        monkeypatch, account, deals=_canonical_deals(), closes_reader=reader
+    )
+
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    (update,) = _api_keys_updates(capture)
+    assert update["account_balance_usdt"] is None
+    assert update["account_balance_usdt_close_date"] is None
+    reader.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2844,6 +3183,7 @@ async def test_key_mode_unsupported_currency_is_skipped_like_a_native_one(
             "account_currency": "EUR",
             "account_balance_native": 12_345.67,
             "account_balance_usdt": None,
+            "account_balance_usdt_close_date": None,
         }
     ]
     payload = _persisted_ki_payload(capture)
@@ -2926,8 +3266,11 @@ def _seed_native_sibling(*, with_returns: bool) -> dict[str, list[dict]]:
 async def test_compose_omits_a_native_unit_key_without_degrading(
     with_returns: bool,
 ) -> None:
-    """D-13: the book stays trustworthy over the USD keys, nothing blocks, and the omission
-    is named by a benign flag (T-164.6.6.2-15) so it is never silent."""
+    """D-13, the UNSUPPORTED-unit variant (164.6.6.2.1 plan 09): ``native_unit`` is the null-anchor
+    reason of a code with no price source (EUR) only. A BTC key is priced and is in the book (see
+    the ``_btc_book`` cases below); this arm keeps its old promise for the codes that are not.
+    The book stays trustworthy over the USD keys, nothing blocks, and the omission is named by a
+    benign flag (T-164.6.6.2-15) so it is never silent."""
     from services.job_worker import run_derive_allocator_equity_job
 
     fake = _FakeSupabase(_seed_native_sibling(with_returns=with_returns))
@@ -2943,6 +3286,185 @@ async def test_compose_omits_a_native_unit_key_without_degrading(
     assert "dropped_key" not in payload["degrade_reasons"]
     assert "no_anchor" not in payload["degrade_reasons"]
     assert "native_unit_key_omitted" in payload["flags"]
+
+
+# --- compose: a BTC key in the USD book (164.6.6.2.1 plan 09) -----------------------------
+#
+# Hand literals: key A (USD) holds 100000.0 on every day (returns 0.0, realized terminal and
+# anchor 100000.0); key B (BTC) holds 1.0 BTC x 60000 = 60000.0 (returns 0.0, realized terminal
+# 60000.0). The book is 160000.0 while both are in it. These rows are what plan 08's key-mode
+# derive writes for a BTC key; seeding them directly keeps this test about the COMPOSE side.
+
+_BTC_ALLOC = "alloc-btc"
+_BTC_DAYS = [f"2026-06-{d:02d}" for d in range(6, 11)]  # 06-06 .. 06-10
+
+
+def _btc_book(b_payload: dict[str, Any], *, b_days: list[str]) -> dict[str, list[dict]]:
+    api_keys = [
+        {"id": key, "user_id": _BTC_ALLOC, "is_active": True,
+         "sync_status": "connected", "disconnected_at": None}
+        for key in ("key-A", "key-B")
+    ]
+    csv = [
+        {"api_key_id": "key-A", "allocator_id": _BTC_ALLOC, "date": day, "daily_return": 0.0}
+        for day in _BTC_DAYS
+    ] + [
+        {"api_key_id": "key-B", "allocator_id": _BTC_ALLOC, "date": day, "daily_return": 0.0}
+        for day in b_days
+    ]
+    derived = [
+        {"allocator_id": _BTC_ALLOC, "kind": "key_inputs:key-A",
+         "payload": {"flows": [], "anchor_usd": 100_000.0, "venue": "binance",
+                     "realized_terminal_usd": 100_000.0, "realized_terminal_day": _BTC_DAYS[-1]}},
+        {"allocator_id": _BTC_ALLOC, "kind": "key_inputs:key-B", "payload": b_payload},
+    ]
+    return {"csv_daily_returns": csv, DERIVED_TABLE: derived, LEGACY_TABLE: [], "api_keys": api_keys}
+
+
+def _btc_payload(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "flows": [], "anchor_usd": 60_000.0, "anchor_null_reason": None, "venue": "mt5",
+        "native_unit": "BTC", "priced_through": "2026-06-09", "unpriced_days": [],
+        "realized_terminal_usd": 60_000.0, "realized_terminal_day": "2026-06-09",
+    }
+    payload.update(overrides)
+    return payload
+
+
+async def _compose_btc_book(seed: dict[str, list[dict]]) -> dict:
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(seed)
+    job = {"id": "j-btc", "kind": "derive_allocator_equity", "allocator_id": _BTC_ALLOC}
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    curve = [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+    assert len(curve) == 1, fake.upserts
+    return _extract_payload(curve[0][1])
+
+
+@pytest.mark.asyncio
+async def test_compose_puts_a_priced_btc_key_in_the_usd_book() -> None:
+    """D-01 / D-09 (plan 09 tracer, priced half). B's live balance is priced at the D-1 close,
+    so its row carries a USD anchor (60000.0) and B is in the book on every day: 100000.0 +
+    60000.0 = 160000.0, trustworthy, nothing omitted."""
+    payload = await _compose_btc_book(_btc_book(_btc_payload(), b_days=_BTC_DAYS[:-1]))
+
+    assert {r["date"]: r["equity_usd"] for r in payload["curve"]} == {
+        day: pytest.approx(160_000.0, abs=1e-9) for day in _BTC_DAYS
+    }
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "native_unpriced_key_omitted" not in payload["flags"]
+    assert "unpriced_native_keys" not in payload
+
+
+@pytest.mark.asyncio
+async def test_compose_rotates_an_unpriced_anchor_btc_key_out_after_its_last_priced_day() -> None:
+    """D-09 / D-20 (plan 09 tracer, trailing half), from the rows plan 08 writes. B is priced
+    through 06-08 (realized terminal 60000.0 there) and the live close of 06-09 is missing: its
+    row has a NULL anchor, ``native_unpriced``, ``priced_through`` 06-08 and ``unpriced_close_day``
+    06-09. The book is 160000.0 through 06-08 and A alone (100000.0) after it. B leaving is an
+    exit: the book return on 06-09 is A's own 0.0 (a booked loss would read -0.375). The omission
+    is named with the day of the missing close."""
+    b = _btc_payload(
+        anchor_usd=None, anchor_null_reason="native_unpriced", priced_through="2026-06-08",
+        unpriced_close_day="2026-06-09",
+        realized_terminal_usd=60_000.0, realized_terminal_day="2026-06-08",
+    )
+    payload = await _compose_btc_book(_btc_book(b, b_days=_BTC_DAYS[:3]))
+
+    curve = {r["date"]: r["equity_usd"] for r in payload["curve"]}
+    assert [curve[d] for d in _BTC_DAYS[:3]] == [pytest.approx(160_000.0, abs=1e-9)] * 3
+    assert [curve[d] for d in _BTC_DAYS[3:]] == [pytest.approx(100_000.0, abs=1e-9)] * 2
+    assert {r["date"]: r["r"] for r in payload["returns"]}["2026-06-09"] == pytest.approx(0.0, abs=1e-12)
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "dropped_key" not in payload["degrade_reasons"]
+    assert "native_unpriced_key_omitted" in payload["flags"]
+    assert payload["unpriced_native_keys"] == [{"api_key_id": "key-B", "day": "2026-06-09"}]
+
+
+@pytest.mark.asyncio
+async def test_compose_leaves_a_btc_key_out_of_an_interior_unpriced_stretch() -> None:
+    """D-09 (plan 09 Task 2, mechanism I2). B has USD returns on 06-06, 06-07 and 06-10 and none
+    on 06-08 and 06-09 (the close of 06-08 is missing, so 06-09 cannot pair either). Its row names
+    both days and the realized USD level on 06-07, the last priced day before the hole (60000.0).
+    The book is 160000.0 on the three priced days and A's 100000.0 on the two unpriced ones; a
+    stale carry would read 160000.0 there. B leaves and re-enters; neither is a book return."""
+    b = _btc_payload(
+        priced_through="2026-06-10", unpriced_days=["2026-06-08", "2026-06-09"],
+        segment_terminals=[{"utc_day_iso": "2026-06-07", "level_usd": 60_000.0}],
+        realized_terminal_day="2026-06-10",
+    )
+    seed = _btc_book(b, b_days=[])
+    seed["csv_daily_returns"] += [
+        {"api_key_id": "key-B", "allocator_id": _BTC_ALLOC, "date": day, "daily_return": 0.0}
+        for day in ("2026-06-06", "2026-06-07", "2026-06-10")
+    ]
+    payload = await _compose_btc_book(seed)
+
+    curve = {r["date"]: r["equity_usd"] for r in payload["curve"]}
+    for day in ("2026-06-06", "2026-06-07", "2026-06-10"):
+        assert curve[day] == pytest.approx(160_000.0, abs=1e-9), day
+    for day in ("2026-06-08", "2026-06-09"):
+        assert curve[day] == pytest.approx(100_000.0, abs=1e-9), day
+    returns = {r["date"]: r["r"] for r in payload["returns"]}
+    for day in ("2026-06-08", "2026-06-09", "2026-06-10"):
+        assert returns[day] == pytest.approx(0.0, abs=1e-12), day
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "missing_return_inside_coverage" not in payload["flags"]
+    assert "native_unpriced_key_omitted" in payload["flags"]
+
+
+@pytest.mark.asyncio
+async def test_compose_omits_a_btc_key_with_nothing_priced_by_name() -> None:
+    """No price source at all: no series, a NULL anchor, no terminal. B is omitted by name (the
+    same token and list), the book over A stays trustworthy."""
+    b = _btc_payload(
+        anchor_usd=None, anchor_null_reason="native_unpriced", priced_through=None,
+        unpriced_close_day="2026-06-09",
+    )
+    del b["realized_terminal_usd"], b["realized_terminal_day"]
+    payload = await _compose_btc_book(_btc_book(b, b_days=[]))
+
+    assert {r["date"]: r["equity_usd"] for r in payload["curve"]} == {
+        day: pytest.approx(100_000.0, abs=1e-9) for day in _BTC_DAYS
+    }
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "native_unpriced_key_omitted" in payload["flags"]
+    assert payload["unpriced_native_keys"] == [{"api_key_id": "key-B", "day": "2026-06-09"}]
+
+
+@pytest.mark.asyncio
+async def test_compose_leaves_a_btc_key_with_a_malformed_native_field_out_by_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T-164.6.6.2.1-23: the JSONB is worker-written but untrusted. A malformed ``priced_through``
+    must never be read as a price: B is left out of the book (A alone, 100000.0), named, and the
+    book is not degraded or failed. SFH-02 / WR-02: the entry carries a reason for its missing
+    day, and the worker warning names the key and what was wrong with the field, so an operator
+    can find the row."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
+        payload = await _compose_btc_book(
+            _btc_book(_btc_payload(priced_through="not-a-day"), b_days=_BTC_DAYS[:-1])
+        )
+    warned = [r.getMessage() for r in caplog.records if "malformed native field" in r.getMessage()]
+    assert len(warned) == 1, warned
+    assert "key-B" in warned[0], warned[0]
+    assert "priced_through" in warned[0], warned[0]
+
+    assert {r["date"]: r["equity_usd"] for r in payload["curve"]} == {
+        day: pytest.approx(100_000.0, abs=1e-9) for day in _BTC_DAYS
+    }
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "native_unpriced_key_omitted" in payload["flags"]
+    assert payload["unpriced_native_keys"] == [
+        {"api_key_id": "key-B", "day": None, "reason": "day_unknown"}
+    ]
 
 
 def test_native_unit_is_not_a_no_capital_anchor_reason() -> None:

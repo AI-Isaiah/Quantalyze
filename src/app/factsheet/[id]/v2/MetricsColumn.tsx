@@ -6,7 +6,7 @@ import type { FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
 import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
 import { pairedFloorReason } from "@/lib/factsheet/joint";
-import { nativeUnitReason, withUnit } from "@/lib/factsheet/returns-unit";
+import { benchmarkWithheldReason, withUnit } from "@/lib/factsheet/returns-unit";
 import { usePayload, useActiveComparator } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, useWindowedView, type Basis, type RangeScope } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel, FULL_HISTORY_NOTE, ScopeNote } from "./AnalyticalPanels";
@@ -330,7 +330,13 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         <EditorialSection label="IV" name="Benchmark — vs BTC">
           <BenchmarkMetricsBody
             joint={null}
-            withheldReason={`Not measurable: ${nativeUnitReason(payload.returnsUnit)}. A BTC benchmark measured in ${payload.returnsUnit} is a flat line.`}
+            withheldReason={
+              // Phase 164.6.6.2.1 (D-15): the USD view's returns were CONVERTED, so the
+              // native view's "flat line" sentence is false there; it says why in its own words.
+              payload.convertedFrom != null
+                ? `Not measurable: ${benchmarkWithheldReason(payload.returnsUnit, payload.convertedFrom)}, so they carry the ${payload.convertedFrom} price by construction.`
+                : `Not measurable: ${benchmarkWithheldReason(payload.returnsUnit)}. A BTC benchmark measured in ${payload.returnsUnit} is a flat line.`
+            }
           />
         </EditorialSection>
       ) : jointCmp.joint ? (

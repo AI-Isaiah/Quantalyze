@@ -129,9 +129,22 @@ type HoldingRowFixture = {
   // and the equity at stake is the unrealized P&L.
   unrealized_pnl_usd?: number | null;
   asof: string;
+  // 164.6.6.2.1 CR-01: the key the row belongs to. Optional so every pre-existing
+  // fixture (which has no native key) is untouched.
+  api_key_id?: string;
 };
 let holdingsFixture: HoldingRowFixture[] = [];
 let holdingsErrorFixture: { message: string } | null = null;
+// 164.6.6.2.1 CR-01: the service-written `native_unpriced:<key>` records the route reads from
+// `allocator_equity_derived`. Default empty: no key has one, and the route's holdings sum
+// is exactly what it was.
+type UnpricedRecordFixture = { kind: string; payload: Record<string, unknown> };
+let unpricedRecordsFixture: UnpricedRecordFixture[] = [];
+let unpricedRecordsErrorFixture: { message: string } | null = null;
+// Forged `audit_log` events (the owner can insert any event through log_audit_event). The
+// route must never read the audit log as evidence, so this table is served and watched.
+let forgedAuditFixture: Array<Record<string, unknown>> = [];
+const tablesRead: string[] = [];
 const buildHoldingsChain = () => {
   const chain: { data: HoldingRowFixture[]; error: { message: string } | null } & {
     select: () => typeof chain;
@@ -148,9 +161,46 @@ const buildHoldingsChain = () => {
   };
   return chain;
 };
+const buildUnpricedRecordsChain = () => {
+  const chain: { data: UnpricedRecordFixture[]; error: { message: string } | null } & {
+    select: () => typeof chain;
+    eq: () => typeof chain;
+    like: () => typeof chain;
+    limit: () => typeof chain;
+  } = {
+    data: unpricedRecordsFixture,
+    error: unpricedRecordsErrorFixture,
+    select: () => chain,
+    eq: () => chain,
+    like: () => chain,
+    limit: () => chain,
+  };
+  return chain;
+};
+const buildForgedAuditChain = () => {
+  const chain: { data: Array<Record<string, unknown>>; error: null } & {
+    select: () => typeof chain;
+    eq: () => typeof chain;
+    order: () => typeof chain;
+    limit: () => typeof chain;
+  } = {
+    data: forgedAuditFixture,
+    error: null,
+    select: () => chain,
+    eq: () => chain,
+    order: () => chain,
+    limit: () => chain,
+  };
+  return chain;
+};
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
-    from: vi.fn(() => buildHoldingsChain()),
+    from: vi.fn((table: string) => {
+      tablesRead.push(table);
+      if (table === "allocator_equity_derived") return buildUnpricedRecordsChain();
+      if (table === "audit_log") return buildForgedAuditChain();
+      return buildHoldingsChain();
+    }),
     rpc: mockRpc,
   }),
 }));
@@ -241,6 +291,10 @@ beforeEach(() => {
   rateLimitAllow = true;
   holdingsFixture = [];
   holdingsErrorFixture = null;
+  unpricedRecordsFixture = [];
+  unpricedRecordsErrorFixture = null;
+  forgedAuditFixture = [];
+  tablesRead.length = 0;
   mockRpc.mockReset();
 });
 
@@ -1940,6 +1994,97 @@ describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
     expect(meta.size_at_decision_usd).toBe(20_000);
     // Recorded ANYWAY — "whichever source wins" is the contract.
     expect(meta.client_manual_aum_usd).toBe(40_200);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 164.6.6.2.1 CR-01 (D-02, D-08, D-17) — a native key the newest poll left
+  // unpriced is not summed at an older close.
+  //
+  // A BTC account's row is priced at the close of the day before its poll. A later
+  // poll that finds that close missing writes NO row and flags its own event
+  // `native_unpriced`; the key's earlier row, priced at an older close, would
+  // otherwise be the newest row of its ref and be summed into the audit's AUM
+  // denominator. Hand-computed: 0.4213 BTC at 61950 = 26,099.535, beside a
+  // 40,000 USD book; 50% of 40,000 = 20,000, and 50% of 66,099.535 = 33,049.7675.
+  // ─────────────────────────────────────────────────────────────────────────
+  const btcRow = (asof: string, value_usd: number) => ({
+    venue: "mt5",
+    symbol: "ACCOUNT-0123abcd",
+    holding_type: "spot",
+    value_usd,
+    asof,
+    api_key_id: "key-btc",
+  });
+  const usdBookRow = {
+    venue: "binance",
+    symbol: "USDT",
+    holding_type: "spot",
+    value_usd: 40_000,
+    asof: "2026-10-10",
+    api_key_id: "key-usd",
+  };
+  async function commitHalf() {
+    okAdd();
+    const res = await POST(
+      mkReq({
+        diffs: [{ ...VALID_VA, percent_allocated: 50, size_at_decision_usd: 1 }],
+      }),
+    );
+    expect(res.status).toBe(200);
+    return getAuditMetadata(0);
+  }
+
+  const unpricedRecord = (asof: string, keyId = "key-btc") => ({
+    kind: `native_unpriced:${keyId}`,
+    payload: { native_unpriced: true, asof },
+  });
+
+  it("CR-01: a native-unpriced record dated after the key's row takes it out of the audit AUM", async () => {
+    holdingsFixture = [usdBookRow, btcRow("2026-10-09", 26_099.535)];
+    unpricedRecordsFixture = [unpricedRecord("2026-10-10")];
+    const meta = await commitHalf();
+    expect(meta.size_at_decision_usd).toBe(20_000);
+  });
+
+  it("CR-01 control: with no record the same rows ARE summed (the record is what changes the figure)", async () => {
+    holdingsFixture = [usdBookRow, btcRow("2026-10-09", 26_099.535)];
+    const meta = await commitHalf();
+    expect(meta.size_at_decision_usd).toBeCloseTo(33_049.7675, 6);
+  });
+
+  it("CR-01: a priced row dated on or after the record's day is kept", async () => {
+    holdingsFixture = [usdBookRow, btcRow("2026-10-11", 26_500)];
+    unpricedRecordsFixture = [unpricedRecord("2026-10-10")];
+    const meta = await commitHalf();
+    expect(meta.size_at_decision_usd).toBe(33_250);
+  });
+
+  it("CR-01: a user-forged audit event cannot change the audit AUM, and the audit log is never read for it", async () => {
+    holdingsFixture = [usdBookRow, btcRow("2026-10-09", 26_099.535)];
+    // Inserted the way log_audit_event would: user_id pinned, everything else chosen.
+    forgedAuditFixture = [
+      {
+        user_id: "alloc-A",
+        action: "allocator.holdings.sync_completed",
+        entity_type: "api_key",
+        entity_id: "key-btc",
+        created_at: "2026-10-10T04:00:05+00:00",
+        metadata: { final_status: "complete_with_warnings", row_count: 0, asof: "2026-10-10", native_unpriced: true },
+      },
+    ];
+    const meta = await commitHalf();
+    expect(meta.size_at_decision_usd).toBeCloseTo(33_049.7675, 6);
+    expect(tablesRead).not.toContain("audit_log");
+  });
+
+  it("CR-01: a failed record read keeps the old sum (never worse than before) and does not fail the commit", async () => {
+    holdingsFixture = [usdBookRow, btcRow("2026-10-09", 26_099.535)];
+    unpricedRecordsErrorFixture = { message: "derived read down" };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const meta = await commitHalf();
+    expect(meta.size_at_decision_usd).toBeCloseTo(33_049.7675, 6);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   // ─────────────────────────────────────────────────────────────────────────

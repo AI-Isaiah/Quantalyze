@@ -861,6 +861,165 @@ async def test_run_poll_allocator_positions_job_emits_sync_completed_audit_on_do
 
 
 # ---------------------------------------------------------------------------
+# 164.6.6.2.1 CR-01 — a poll that left a native account unpriced records it, service-side
+# ---------------------------------------------------------------------------
+
+
+async def _run_poll_with_fetch_result(monkeypatch, api_key_row_factory, fetch_result):
+    """Run the real handler with the venue read replaced by ``fetch_result`` and
+    return ``(result, audit metadata, persisted rows, supabase mock)``."""
+    from services import job_worker as jw
+    from services import audit as audit_module
+    from services import allocator_positions as ap_mod
+
+    key_row = api_key_row_factory(id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5")
+    mock_supabase = MagicMock()
+    mock_exchange = MagicMock()
+    mock_exchange.close = AsyncMock()
+    fake_ctx = jw._ExchangeContext(
+        supabase=mock_supabase, strategy_row=None, key_row=key_row, exchange=mock_exchange
+    )
+
+    async def _fake_preflight(job, name):
+        return fake_ctx
+
+    monkeypatch.setattr(jw, "_allocator_key_preflight", _fake_preflight)
+
+    async def _fake_fetch(venue, exchange, api_key_id=None):
+        return fetch_result
+
+    persisted: list[list[dict]] = []
+
+    async def _fake_persist(supa, rows, allocator_id, api_key_id, asof):
+        persisted.append(rows)
+        return len(rows)
+
+    monkeypatch.setattr(ap_mod, "fetch_allocator_holdings", _fake_fetch)
+    monkeypatch.setattr(ap_mod, "persist_allocator_holdings", _fake_persist)
+
+    # The identity stamp is a separate seam with its own tests.
+    from services import account_identity
+
+    monkeypatch.setattr(
+        account_identity, "stamp_account_identity", AsyncMock(return_value=None)
+    )
+    log_audit_mock = MagicMock()
+    monkeypatch.setattr(audit_module, "log_audit_event", log_audit_mock)
+
+    result = await jw.run_poll_allocator_positions_job(
+        {"id": "job-1", "kind": "poll_allocator_positions", "api_key_id": API_KEY_ID}
+    )
+    log_audit_mock.assert_called_once()
+    return result, log_audit_mock.call_args.kwargs["metadata"], persisted, mock_supabase
+
+
+def _marker_upserts(mock_supabase) -> list[dict]:
+    """Every ``allocator_equity_derived`` upsert payload the handler issued."""
+    return [c.args[0] for c in mock_supabase.table.return_value.upsert.call_args_list]
+
+
+@pytest.mark.asyncio
+async def test_poll_records_a_service_side_marker_when_the_close_was_missing(
+    monkeypatch, api_key_row_factory
+):
+    """CR-01 (D-02, D-08, D-17). The poll wrote no row, so the key's EARLIER row stays its
+    latest. The dashboard, the AUM and the commit audit read each key's latest rows, so
+    they need the poll's own word that the day is unpriced. It is written to
+    ``allocator_equity_derived`` (service-role-only writes), NOT to the audit log: the
+    owner can call ``log_audit_event`` with any action and metadata, so an event there is
+    not evidence."""
+    from datetime import datetime, timezone
+
+    from services import job_worker as jw
+    from services.allocator_positions import (
+        MT5_NATIVE_UNPRICED_NOTE,
+        NATIVE_UNPRICED_KIND_PREFIX,
+        NativeUnpricedNote,
+    )
+
+    note = NativeUnpricedNote(MT5_NATIVE_UNPRICED_NOTE.format(day="Oct 9"))
+    result, metadata, persisted, supabase = await _run_poll_with_fetch_result(
+        monkeypatch, api_key_row_factory, ([], note)
+    )
+
+    assert result.outcome == jw.DispatchOutcome.DONE
+    assert persisted == [[]]
+    assert "native_unpriced" not in metadata, "the audit event is no evidence and carries none"
+    upserts = [u for u in _marker_upserts(supabase) if u.get("kind", "").startswith("native_unpriced:")]
+    assert len(upserts) == 1
+    marker = upserts[0]
+    assert marker["allocator_id"] == ALLOCATOR_ID
+    assert marker["kind"] == NATIVE_UNPRICED_KIND_PREFIX + API_KEY_ID
+    assert marker["payload"]["native_unpriced"] is True
+    assert marker["payload"]["asof"] == datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    supabase.table.assert_any_call("allocator_equity_derived")
+
+
+@pytest.mark.asyncio
+async def test_poll_does_not_record_a_marker_for_other_warnings(
+    monkeypatch, api_key_row_factory
+):
+    """The marker follows the TYPE of the warning, not its words: an ordinary warning,
+    even one carrying the unpriced copy, writes none."""
+    from services.allocator_positions import MT5_NATIVE_UNPRICED_NOTE
+
+    _, metadata, _, supabase = await _run_poll_with_fetch_result(
+        monkeypatch,
+        api_key_row_factory,
+        ([], MT5_NATIVE_UNPRICED_NOTE.format(day="Oct 9")),
+    )
+    assert _marker_upserts(supabase) == []
+    assert metadata["final_status"] == "complete_with_warnings"
+
+
+@pytest.mark.asyncio
+async def test_poll_fails_loudly_when_the_marker_cannot_be_written(
+    monkeypatch, api_key_row_factory
+):
+    """A marker that silently failed would leave the earlier row counted at an older
+    close, the defect itself. The write rides the persist arm: the poll fails."""
+    from services import job_worker as jw
+    from services import allocator_positions as ap_mod
+    from services.allocator_positions import MT5_NATIVE_UNPRICED_NOTE, NativeUnpricedNote
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("marker write down")
+
+    monkeypatch.setattr(ap_mod, "persist_native_unpriced_marker", _boom)
+    # The handler reads the writer from the module at call time.
+    from services import audit as audit_module
+
+    monkeypatch.setattr(audit_module, "log_audit_event", MagicMock())
+    key_row = api_key_row_factory(id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5")
+    mock_exchange = MagicMock()
+    mock_exchange.close = AsyncMock()
+    ctx = jw._ExchangeContext(
+        supabase=MagicMock(), strategy_row=None, key_row=key_row, exchange=mock_exchange
+    )
+
+    async def _pre(job, name):
+        return ctx
+
+    async def _fetch(venue, exchange, api_key_id=None):
+        return ([], NativeUnpricedNote(MT5_NATIVE_UNPRICED_NOTE.format(day="Oct 9")))
+
+    async def _persist(*_a, **_k):
+        return 0
+
+    from services import account_identity
+
+    monkeypatch.setattr(account_identity, "stamp_account_identity", AsyncMock(return_value=None))
+    monkeypatch.setattr(jw, "_allocator_key_preflight", _pre)
+    monkeypatch.setattr(ap_mod, "fetch_allocator_holdings", _fetch)
+    monkeypatch.setattr(ap_mod, "persist_allocator_holdings", _persist)
+
+    result = await jw.run_poll_allocator_positions_job(
+        {"id": "job-1", "kind": "poll_allocator_positions", "api_key_id": API_KEY_ID}
+    )
+    assert result.outcome == jw.DispatchOutcome.FAILED
+
+
+# ---------------------------------------------------------------------------
 # Test 9 — auth error maps to sync_status='revoked' + sync_failed audit
 # ---------------------------------------------------------------------------
 

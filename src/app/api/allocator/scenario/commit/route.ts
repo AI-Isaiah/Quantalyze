@@ -55,6 +55,7 @@ import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/r
 import { emit, type AuditEvent } from "@/lib/audit";
 import { stampOutcomeMarker } from "@/lib/analytics/onboarding-funnel";
 import { holdingScopeKey } from "@/lib/keys";
+import { fetchNativeUnpricedDays } from "@/lib/latest-holdings-per-key";
 // Phase 151 AUM-01 — the shared dollar ceiling for the client-asserted
 // manual_aum_usd bound (distinct from MAX_TICKET_SIZE_USD).
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
@@ -829,13 +830,39 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
       .from("allocator_holdings")
       // G3 — `unrealized_pnl_usd` is selected for the EQUITY-basis comparison
       // figure only; the sizing columns are unchanged.
-      .select("venue, symbol, holding_type, value_usd, unrealized_pnl_usd, asof")
+      .select("api_key_id, venue, symbol, holding_type, value_usd, unrealized_pnl_usd, asof")
       .eq("allocator_id", user.id)
       .in("holding_type", ["spot", "derivative"])
       .order("asof", { ascending: false })
       .order("holding_type", { ascending: true });
     holdingsLookupErr = holdingErr;
     holdingsLookupRan = true;
+    // 164.6.6.2.1 CR-01 (D-02, D-08, D-17): the days on which a poll declared a native-unit
+    // account unpriced, from the poll's SERVICE-written record (never the audit log, which
+    // the owner can write). Such a poll writes no row, so the key's older row (priced at
+    // an older close) would be the newest of its ref below and be summed as current. A
+    // failed read keeps the sum as it was before this check and says so; it never fails
+    // the commit, whose data layer already landed.
+    let unpricedDayByKey = new Map<string, string>();
+    if (!holdingErr) {
+      const unpriced = await fetchNativeUnpricedDays(supabase, user.id);
+      if (unpriced.error) {
+        console.warn(
+          "[scenario-commit] native-unpriced record read for audit recompute failed:",
+          unpriced.error.message,
+        );
+        captureToSentry(
+          new Error("scenario_commit: native-unpriced record read for audit recompute failed"),
+          {
+            tags: { area: "scenario-commit", gate: "audit_size_recompute" },
+            extra: { user_id: user.id, supabase_err: unpriced.error.message },
+            level: "warning",
+          },
+        );
+      } else {
+        unpricedDayByKey = unpriced.data;
+      }
+    }
     if (holdingErr) {
       // Don't fail the commit — the data layer already landed. Log + mark
       // every per-row audit with `_size_source: "lookup_failed"` so the
@@ -851,6 +878,11 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
       });
     } else {
       for (const row of holdingRows ?? []) {
+        // CR-01: a row dated before its key's latest unpriced poll is priced at an older
+        // close than that poll named. Skipped BEFORE the dedup, so an older row of the
+        // same ref cannot take its place as the newest.
+        const unpricedDay = row.api_key_id ? unpricedDayByKey.get(row.api_key_id) : undefined;
+        if (unpricedDay !== undefined && row.asof < unpricedDay) continue;
         const ref = holdingScopeKey(row);
         // Order is asof DESC; the FIRST row seen for a given ref is the
         // newest snapshot. Skip subsequent (older) rows.

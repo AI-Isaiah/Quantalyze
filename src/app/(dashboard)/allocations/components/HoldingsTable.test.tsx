@@ -592,3 +592,108 @@ describe("[169 D-50] HoldingsTable money cells", () => {
     expect(cells[PNL].textContent).toBe("—");
   });
 });
+
+/**
+ * Phase 164.6.6.2.1 plan 17 (D-01, D-17, D-21) — a native-unit account's
+ * Holdings row shows its quantity in its stored unit and its USD value with
+ * the conversion stated. The unit comes from the row's stored `quantity_unit`
+ * only: never inferred from the symbol or from the mark.
+ */
+describe("HoldingsTable — native-unit account row (164.6.6.2.1 / D-01, D-17, D-21)", () => {
+  const QTY = 2;
+  const ENTRY = 3;
+  const VALUE = 4;
+  const TITLE =
+    "0.4213 BTC × $61,950.00, converted from BTC at the stored daily BTC close";
+
+  function cellsOf(container: HTMLElement): HTMLTableCellElement[] {
+    return Array.from(
+      container.querySelector("tbody")!.querySelectorAll("tr")[0].querySelectorAll("td"),
+    );
+  }
+
+  // The worked input of the UI-SPEC (F): 0.4213 BTC x $61,950.00 = $26,099.54.
+  function accountRow(overrides: Partial<HoldingRow> = {}): HoldingRow {
+    return makeHolding({
+      id: "holding-account",
+      venue: "mt5",
+      symbol: "ACCOUNT-1a2b3c4d",
+      quantity: 0.4213,
+      mark_price_usd: 61_950,
+      value_usd: 26_099.54,
+      entry_price: null,
+      unrealized_pnl_usd: null,
+      quantity_unit: "BTC",
+      ...overrides,
+    });
+  }
+
+  function renderRow(row: HoldingRow) {
+    return render(
+      <HoldingsTable holdings={[row]} showRevoked={true} onShowRevokedChange={() => {}} />,
+    );
+  }
+
+  it("shows the quantity in its stored unit, the unchanged em-dash entry price, and the USD value with the conversion as title and sr-only text", () => {
+    const { container } = renderRow(accountRow());
+    const cells = cellsOf(container);
+    expect(cells[QTY].textContent).toBe("0.4213 BTC");
+    expect(cells[ENTRY].textContent).toBe("—");
+    expect(cells[VALUE].getAttribute("title")).toBe(TITLE);
+    const sr = cells[VALUE].querySelector("span.sr-only");
+    expect(sr).not.toBeNull();
+    expect(sr!.textContent).toBe(` (${TITLE})`);
+    // The visible value is the whole-dollar USD figure; the sr-only span adds
+    // the sentence after it, never in place of it.
+    expect(cells[VALUE].textContent).toBe(`$26,100 (${TITLE})`);
+  });
+
+  it("a row with no stored unit renders today's cells exactly: no title, no sr-only span, the symbol never read for a unit", () => {
+    const { container } = renderRow(accountRow({ quantity_unit: null }));
+    const cells = cellsOf(container);
+    expect(cells[QTY].textContent).toBe("0.4213");
+    expect(cells[VALUE].textContent).toBe("$26,100");
+    expect(cells[VALUE].hasAttribute("title")).toBe(false);
+    expect(cells[VALUE].querySelector("span.sr-only")).toBeNull();
+  });
+
+  it("a row whose unit field is absent (a legacy fixture) is the same as null", () => {
+    const row = accountRow();
+    delete row.quantity_unit;
+    const { container } = renderRow(row);
+    const cells = cellsOf(container);
+    expect(cells[QTY].textContent).toBe("0.4213");
+    expect(cells[VALUE].hasAttribute("title")).toBe(false);
+  });
+
+  it.each(["btc", "<b>X</b>", "B", "TOOLONGUNITXX", "BTC "])(
+    "a malformed stored unit %j is treated as absent (parsed, never printed)",
+    (unit) => {
+      const { container } = renderRow(accountRow({ quantity_unit: unit }));
+      const cells = cellsOf(container);
+      expect(cells[QTY].textContent).toBe("0.4213");
+      expect(cells[VALUE].hasAttribute("title")).toBe(false);
+      expect(cells[VALUE].querySelector("span.sr-only")).toBeNull();
+      expect(container.innerHTML).not.toContain("<b>X</b>");
+    },
+  );
+
+  it("a stored unit with no mark prints no invented price: the unit shows, the conversion sentence does not", () => {
+    const { container } = renderRow(accountRow({ mark_price_usd: null }));
+    const cells = cellsOf(container);
+    expect(cells[QTY].textContent).toBe("0.4213 BTC");
+    expect(cells[VALUE].hasAttribute("title")).toBe(false);
+    expect(cells[VALUE].querySelector("span.sr-only")).toBeNull();
+    expect(cells[VALUE].textContent).toBe("$26,100");
+  });
+
+  it("a USD-family row is untouched by the unit path", () => {
+    const { container } = renderRow(
+      makeHolding({ quantity: 1.5, value_usd: 90_000, entry_price: 60_000, quantity_unit: null }),
+    );
+    const cells = cellsOf(container);
+    expect(cells[QTY].textContent).toBe("1.50");
+    expect(cells[VALUE].textContent).toBe("$90,000");
+    expect(cells[VALUE].hasAttribute("title")).toBe(false);
+  });
+});

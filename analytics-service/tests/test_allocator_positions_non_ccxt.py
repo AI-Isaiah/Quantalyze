@@ -956,14 +956,14 @@ async def test_mt5_non_usd_currency_skips_honestly(mt5_enabled):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("code", ["BTC", "USDT", "USDC", "EURR", "DAI"])
+@pytest.mark.parametrize("code", ["USDT", "USDC", "EURR", "DAI"])
 async def test_mt5_poll_values_only_usd_so_every_other_code_stays_skipped(
     mt5_enabled, code
 ):
     """164.6.6.2 / D-04, "behaviour for those is unchanged". The poll prices positions at
-    a $1.00 mark, which holds for "USD" alone: BTC (a native unit) and the USD-family
-    codes that are not "USD" are skipped by name, exactly as before the shared
-    classifier. Pricing an EURR holding at $1.00 would invent data inside an AUM total.
+    a $1.00 mark, which holds for "USD" alone: the USD-family codes that are not "USD"
+    are skipped by name, exactly as before the shared classifier. (164.6.6.2.1 moved BTC,
+    the native unit, out of this list: it is priced at a stored close, see below.) Pricing an EURR holding at $1.00 would invent data inside an AUM total.
     Falsify: replace the ``!= "USD"`` valuation test with a USD-family membership test
     and the four family codes go red."""
     from services.allocator_positions import MT5_NON_USD_NOTE
@@ -989,6 +989,224 @@ async def test_mt5_poll_still_values_a_usd_account(mt5_enabled):
 
     assert rows, "a USD account must still produce its holdings row"
     assert warning is None or "currency" not in warning.lower()
+    assert "quantity_unit" not in rows[0], (
+        "a USD row is byte-identical to before 164.6.6.2.1: no quantity_unit key"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 164.6.6.2.1 / D-17, D-09 -- a BTC account is priced at the stored close of the
+# latest COMPLETED UTC day, or left out by name. The clock is frozen at
+# 2026-10-09 12:00Z, so the latest completed day is 2026-10-08.
+# ---------------------------------------------------------------------------
+def _freeze_clock_and_closes(
+    monkeypatch, closes: dict[str, float] | None | BaseException
+):
+    """Freeze the module clock seam and patch the closes reader where the poll
+    imports it (``ap.read_btc_closes``). ``None`` is a SUCCESSFUL read with no usable
+    close stored; an exception INSTANCE is a read that failed (SFH-01)."""
+    from datetime import datetime, timezone
+
+    import pandas as pd
+
+    monkeypatch.setattr(
+        ap, "_utc_now", lambda: datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
+    )
+    series = (
+        None
+        if closes is None or isinstance(closes, BaseException)
+        else pd.Series(
+            list(closes.values()), index=pd.DatetimeIndex(list(closes.keys()))
+        )
+    )
+
+    async def _fake_closes():
+        if isinstance(closes, BaseException):
+            raise closes
+        return series
+
+    monkeypatch.setattr(ap, "read_btc_closes", _fake_closes)
+
+
+@pytest.mark.asyncio
+async def test_mt5_poll_prices_a_btc_account_at_the_latest_completed_close(
+    mt5_enabled, monkeypatch
+):
+    """0.4213 BTC at the 2026-10-08 close of 61950.00 is 26099.535
+    (0.4213 x 61950.00 = 24780 + 1319.535). The row carries the NATIVE quantity,
+    its unit, the close as the mark and the USD value; a BTC amount must never be
+    counted as dollars in AUM (T-24)."""
+    _freeze_clock_and_closes(monkeypatch, {"2026-10-07": 60000.0, "2026-10-08": 61950.0})
+    transport = _RecordingMt5Transport(
+        account=_account(currency="BTC", equity=0.4213, balance=0.4)
+    )
+
+    rows, warning = await fetch_allocator_holdings(
+        "mt5", _session(transport), API_KEY_ID
+    )
+
+    assert warning is None
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["symbol"] == f"ACCOUNT-{API_KEY_ID[:8]}"
+    assert row["quantity"] == pytest.approx(0.4213, abs=1e-12)
+    assert row["quantity_unit"] == "BTC"
+    assert row["mark_price"] == pytest.approx(61950.0, abs=1e-9)
+    assert row["value_usd"] == pytest.approx(26099.535, abs=1e-9)
+    assert row["entry_price"] is None
+    assert row["raw_payload"] == {"currency": "BTC", "equity": 0.4213, "balance": 0.4}
+
+
+@pytest.mark.asyncio
+async def test_mt5_poll_leaves_out_a_btc_account_whose_day_has_no_close(
+    mt5_enabled, monkeypatch
+):
+    """An older close is present, the completed day's is not: no row, and the
+    named end-user note. Never the older close, never 0 (D-17, D-09)."""
+    _freeze_clock_and_closes(monkeypatch, {"2026-10-07": 60000.0})
+    transport = _RecordingMt5Transport(account=_account(currency="BTC", equity=0.4213))
+
+    rows, warning = await fetch_allocator_holdings(
+        "mt5", _session(transport), API_KEY_ID
+    )
+
+    assert rows == []
+    assert warning == "No BTC close stored for Oct 8 yet; left out of holdings."
+    assert warning == ap.MT5_NATIVE_UNPRICED_NOTE.format(day="Oct 8")
+    assert len(warning) <= 60
+
+
+@pytest.mark.asyncio
+async def test_mt5_poll_marks_the_unpriced_note_so_the_handler_need_not_read_its_text(
+    mt5_enabled, monkeypatch
+):
+    """CR-01. The poll handler flags the poll's audit event ``native_unpriced`` so the
+    dashboard stops counting the key's earlier row. It must decide that from the TYPE of
+    the warning, never by matching the copy: copy is end-user text and gets reworded.
+    The other warnings of a native account (a floored non-positive equity, with its row
+    written) are NOT that case."""
+    _freeze_clock_and_closes(monkeypatch, {"2026-10-07": 60000.0})
+    unpriced = await fetch_allocator_holdings(
+        "mt5",
+        _session(_RecordingMt5Transport(account=_account(currency="BTC", equity=0.4213))),
+        API_KEY_ID,
+    )
+    assert isinstance(unpriced[1], ap.NativeUnpricedNote)
+
+    _freeze_clock_and_closes(monkeypatch, {"2026-10-08": 61950.0})
+    floored_rows, floored_note = await fetch_allocator_holdings(
+        "mt5",
+        _session(_RecordingMt5Transport(account=_account(currency="BTC", equity=-0.05))),
+        API_KEY_ID,
+    )
+    assert floored_rows and floored_note == MT5_NON_POSITIVE_EQUITY_NOTE
+    assert not isinstance(floored_note, ap.NativeUnpricedNote)
+
+    skipped_rows, skipped_note = await fetch_allocator_holdings(
+        "mt5",
+        _session(_RecordingMt5Transport(account=_account(currency="EURR"))),
+        API_KEY_ID,
+    )
+    assert skipped_rows == []
+    assert not isinstance(skipped_note, ap.NativeUnpricedNote)
+
+
+@pytest.mark.asyncio
+async def test_mt5_poll_closes_outage_is_a_retry_naming_the_read_not_a_missing_close(
+    mt5_enabled, monkeypatch, caplog
+):
+    """SFH-01. A closes READ that failed is not "no close stored for Oct 8": the close
+    may well be there. Telling the allocator the account was left out for a missing
+    close names a cause nobody checked (and, through CR-01, would tell the readers to
+    drop the key's row). It is a transient failure naming the read; the poll retries.
+    ``None`` from a SUCCESSFUL read stays the honest "no close stored" (test above)."""
+    from services.allocator_positions import (
+        MT5_BTC_CLOSES_UNREADABLE_NOTE,
+        AllocatorHoldingsSyncTransientError,
+    )
+    from services.benchmark import BtcClosesReadError
+
+    _freeze_clock_and_closes(monkeypatch, BtcClosesReadError("benchmark read failed"))
+    transport = _RecordingMt5Transport(account=_account(currency="BTC", equity=0.4213))
+
+    with pytest.raises(AllocatorHoldingsSyncTransientError) as err:
+        await fetch_allocator_holdings("mt5", _session(transport), API_KEY_ID)
+
+    assert str(err.value) == MT5_BTC_CLOSES_UNREADABLE_NOTE
+    assert not isinstance(str(err.value), ap.NativeUnpricedNote)
+    assert "left out" not in str(err.value) and "stored for" not in str(err.value)
+    assert len(MT5_BTC_CLOSES_UNREADABLE_NOTE) <= 60
+    assert "BTC" in MT5_BTC_CLOSES_UNREADABLE_NOTE
+
+
+@pytest.mark.asyncio
+async def test_mt5_poll_closes_outage_does_not_touch_a_usd_account(mt5_enabled, monkeypatch):
+    """A USD account never reads the closes (D-04): an outage cannot fail its poll."""
+    from services.benchmark import BtcClosesReadError
+
+    _freeze_clock_and_closes(monkeypatch, BtcClosesReadError("benchmark read failed"))
+    rows, warning = await fetch_allocator_holdings(
+        "mt5", _session(_RecordingMt5Transport(account=_account(currency="USD"))), API_KEY_ID
+    )
+    assert rows and "quantity_unit" not in rows[0]
+
+
+@pytest.mark.asyncio
+async def test_mt5_poll_unpriced_note_fits_its_sixty_character_budget_at_the_longest_day():
+    """UI-SPEC F: at most 60 characters. 'Sep 30' is the longest day label."""
+    assert len(ap.MT5_NATIVE_UNPRICED_NOTE.format(day="Sep 30")) <= 60
+
+
+@pytest.mark.asyncio
+async def test_mt5_poll_leaves_out_a_btc_account_with_no_price_source(
+    mt5_enabled, monkeypatch
+):
+    _freeze_clock_and_closes(monkeypatch, None)
+    transport = _RecordingMt5Transport(account=_account(currency="BTC", equity=0.4213))
+
+    rows, warning = await fetch_allocator_holdings(
+        "mt5", _session(transport), API_KEY_ID
+    )
+
+    assert rows == []
+    assert warning == ap.MT5_NATIVE_UNPRICED_NOTE.format(day="Oct 8")
+
+
+@pytest.mark.asyncio
+async def test_mt5_poll_floors_a_negative_btc_equity_at_zero_with_the_existing_note(
+    mt5_enabled, monkeypatch
+):
+    """The WR-01 floor and its note hold for a native unit too; the reported
+    equity stays in raw_payload (a blow-up must stay distinguishable)."""
+    _freeze_clock_and_closes(monkeypatch, {"2026-10-08": 61950.0})
+    transport = _RecordingMt5Transport(account=_account(currency="BTC", equity=-0.05))
+
+    rows, warning = await fetch_allocator_holdings(
+        "mt5", _session(transport), API_KEY_ID
+    )
+
+    assert warning == MT5_NON_POSITIVE_EQUITY_NOTE
+    assert len(rows) == 1
+    assert rows[0]["quantity"] == 0.0
+    assert rows[0]["value_usd"] == 0.0
+    assert rows[0]["quantity_unit"] == "BTC"
+    assert rows[0]["raw_payload"]["equity"] == -0.05
+
+
+@pytest.mark.asyncio
+async def test_mt5_poll_still_skips_an_unsupported_code_with_a_native_price_source(
+    mt5_enabled, monkeypatch
+):
+    """EUR and ETH are not native units this phase admits: skipped by name even
+    when closes exist."""
+    _freeze_clock_and_closes(monkeypatch, {"2026-10-08": 61950.0})
+    for code in ("EUR", "ETH"):
+        transport = _RecordingMt5Transport(account=_account(currency=code))
+        rows, warning = await fetch_allocator_holdings(
+            "mt5", _session(transport), API_KEY_ID
+        )
+        assert rows == []
+        assert warning == MT5_NON_USD_NOTE.format(ccy=code)
 
 
 @pytest.mark.asyncio

@@ -23,7 +23,7 @@
  * alone.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // queries.ts pulls in @/lib/supabase/admin which imports `server-only`, which
 // throws on any non-server-component module load (vitest runs in jsdom). Stub
@@ -53,6 +53,16 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({ from: () => builder() }),
+}));
+
+// Phase 164.6.6.2.1 D-11: the unallocated own-capital MTD of a native-unit row is
+// read in USD, so the BTC closes are read through `readBtcCloses`. Mocked so a
+// case chooses the price window (or a read failure) and counts the reads; every
+// other export of the module stays real. Mirrors queries.my-allocation.test.ts.
+const btcCloses = vi.hoisted(() => ({ read: vi.fn() }));
+vi.mock("@/lib/factsheet/benchmark-source", async (importActual) => ({
+  ...(await importActual<typeof import("@/lib/factsheet/benchmark-source")>()),
+  readBtcCloses: btcCloses.read,
 }));
 
 import { getOwnCapitalStrategies } from "./queries";
@@ -217,5 +227,101 @@ describe("getOwnCapitalStrategies — WR-01 series resolution (API-ingested stra
   it("a transient DB failure still returns null, never [] (the WR-02 error contract this map must not swallow)", async () => {
     state.queryResult = { data: null, error: { message: "boom" } };
     await expect(getOwnCapitalStrategies(USER)).resolves.toBeNull();
+  });
+});
+
+/**
+ * Phase 164.6.6.2.1 D-11 — a BTC-native own-capital row's MTD is a USD MTD.
+ *
+ * WHY: the Holdings table has two halves. The positioned half is already USD (its
+ * series is converted in `getMyAllocationDashboard`); the unallocated half read the
+ * raw BTC returns, so the SAME strategy showed a USD MTD while allocated and a BTC
+ * MTD while not, unlabelled. The oracle is the economics, hand-computed, never the
+ * converter's output:
+ *   NAV 1.0 -> 1.1 in BTC, closes 60000 -> 66000:
+ *     (1.1 x 66000) / (1.0 x 60000) - 1 = 0.21   (the BTC MTD would be 0.10)
+ *   a flat second day (return 0, closes 66000 -> 66000): 1.00 x 66000/66000 - 1 = 0
+ *   MTD = 1.21 x 1.00 - 1 = 0.21
+ * The first day (07-31, the previous month's close) is dropped by the converter: it
+ * has no prior priced day (the 164.6.6.2 day-0 rule).
+ */
+describe("getOwnCapitalStrategies — 164.6.6.2.1 D-11 native-unit MTD in USD", () => {
+  const BTC_ROW_SERIES = [
+    { date: "2026-07-31", value: 0.0 },
+    { date: "2026-08-01", value: 0.1 },
+    { date: "2026-08-02", value: 0.0 },
+  ];
+  const CLOSES = {
+    prices: [
+      { date: "2026-07-31", close: 60000 },
+      { date: "2026-08-01", close: 66000 },
+      { date: "2026-08-02", close: 66000 },
+    ],
+    dropped: [] as string[],
+    through: "2026-08-02",
+  };
+  const nativeRow = (id = "s-btc") => ({
+    ...API_INGESTED_ROW,
+    id,
+    strategy_analytics: {
+      ...API_INGESTED_ROW.strategy_analytics,
+      daily_returns: BTC_ROW_SERIES,
+      returns_series: null,
+      data_quality_flags: { native_unit: "BTC", venue_detail: "x" },
+    },
+  });
+
+  beforeEach(() => {
+    btcCloses.read.mockReset();
+    btcCloses.read.mockResolvedValue(CLOSES);
+  });
+
+  it("a BTC row's mtd is the USD MTD (0.21), not the BTC MTD (0.10)", async () => {
+    state.queryResult = { data: [nativeRow()], error: null };
+
+    const marked = await getOwnCapitalStrategies(USER);
+
+    // 1.21 x 1.00 - 1, hand-computed above.
+    expect(marked![0].mtd).toBeCloseTo(0.21, 12);
+    expect(marked![0].mtd).not.toBeCloseTo(0.1, 6);
+    expect(btcCloses.read).toHaveBeenCalledTimes(1);
+    // The raw flags blob still never leaves the function.
+    const analytics = marked![0].strategy_analytics as unknown as Record<string, unknown>;
+    expect(analytics).not.toHaveProperty("data_quality_flags");
+    expect(JSON.stringify(marked)).not.toContain("venue_detail");
+  });
+
+  it("with no usable closes the mtd is null (renders a dash) - never the BTC figure, never 0", async () => {
+    state.queryResult = { data: [nativeRow()], error: null };
+    btcCloses.read.mockResolvedValue(null);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const marked = await getOwnCapitalStrategies(USER);
+
+    expect(marked![0].mtd).toBeNull();
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("BTC closes unavailable"));
+    errSpy.mockRestore();
+  });
+
+  it("a USD-family row is unchanged and the closes are not read at all", async () => {
+    state.queryResult = { data: [API_INGESTED_ROW], error: null };
+
+    const marked = await getOwnCapitalStrategies(USER);
+
+    expect(marked![0].mtd).toBeCloseTo(0.05, 10);
+    expect(btcCloses.read).not.toHaveBeenCalled();
+  });
+
+  it("a mixed book reads the closes ONCE and converts only the native row", async () => {
+    state.queryResult = {
+      data: [nativeRow("s-btc"), { ...API_INGESTED_ROW, id: "s-usd" }],
+      error: null,
+    };
+
+    const marked = await getOwnCapitalStrategies(USER);
+
+    expect(btcCloses.read).toHaveBeenCalledTimes(1);
+    expect(marked!.find((m) => m.id === "s-btc")!.mtd).toBeCloseTo(0.21, 12);
+    expect(marked!.find((m) => m.id === "s-usd")!.mtd).toBeCloseTo(0.05, 10);
   });
 });

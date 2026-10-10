@@ -27,7 +27,9 @@ from typing import Any
 
 import pandas as pd
 
+from services.benchmark import BtcClosesReadError, read_btc_closes
 from services.dispersion import dispersing_corrwith
+from services.native_to_usd import UsdSeriesConverter, native_units_by_id
 from services.wealth_returns import daily_returns_from_row
 
 logger = logging.getLogger("quantalyze.analytics")
@@ -48,7 +50,26 @@ _MIN_OVERLAP_DAYS = 30
 _PUBLISHED_STRATEGIES_LIMIT = 100
 
 
-def find_matched_strategy(
+async def _best_effort_btc_closes() -> pd.Series | None:
+    """The stored BTC closes for the scan's USD conversion (164.6.6.2.1 SFH-01).
+
+    Matching is best-effort, so a failed read still yields ``None`` (native candidates are
+    then left out of the scan, never correlated raw, and USD candidates are scanned as
+    usual). But the cause is logged here: a read that failed must not hide behind the
+    same "no price source" an empty table gives.
+    """
+    try:
+        return await read_btc_closes()
+    except BtcClosesReadError as exc:
+        logger.warning(
+            "find_matched_strategy: stored BTC closes unreadable (%s); native-unit "
+            "candidates are left out of the scan",
+            exc,
+        )
+        return None
+
+
+async def find_matched_strategy(
     returns: pd.Series,
     supabase: Any,
 ) -> str | None:
@@ -59,6 +80,14 @@ def find_matched_strategy(
 
     Vectorized: builds one DataFrame of all candidate series and runs
     a single ``corrwith`` instead of looping per-strategy.
+
+    Phase 164.6.6.2.1 (D-04, D-02): candidates are compared in USD. ``returns``
+    is the trade-derived USD series, so a BTC-unit candidate's stored returns
+    are converted to USD first (the ``portfolio_bridge`` idiom,
+    ``UsdSeriesConverter``); correlating its raw BTC series against a USD target
+    would compare two currencies. A native candidate that cannot be converted
+    (no BTC price source, or no priced interval) is absent from the scan, never
+    correlated raw.
 
     Logs warnings on Supabase errors but never raises — matching is
     a best-effort enrichment, not a load-bearing primitive.
@@ -94,9 +123,27 @@ def find_matched_strategy(
             # (the row's ``daily_returns`` when present, else derived from the
             # curve by its cumulative method). A pure services module, so it is
             # imported directly rather than copied.
-            s = daily_returns_from_row(row, name=row["strategy_id"])
+            #
+            # ``keep_absent=True`` keeps an undefined day as NaN so the USD
+            # conversion below prices a one-day move over that one day (the
+            # ``portfolio_bridge`` idiom); the ``dropna`` on the aligned frame
+            # discards it from the correlation either way.
+            s = daily_returns_from_row(row, name=row["strategy_id"], keep_absent=True)
             if s is not None:
                 existing[row["strategy_id"]] = s
+
+        # D-04 / D-02: BEFORE the frame is built, every native-unit candidate is
+        # put in USD. An unconvertible one is dropped from ``existing``. Only a
+        # count is logged, never an id or an amount.
+        existing, unconvertible = await UsdSeriesConverter(_best_effort_btc_closes).convert(
+            existing, native_units_by_id(sa_result.data or [])
+        )
+        if unconvertible:
+            logger.info(
+                "find_matched_strategy: %d native-unit candidate(s) could not be "
+                "converted to USD and were left out of the scan",
+                len(unconvertible),
+            )
 
         if not existing:
             return None

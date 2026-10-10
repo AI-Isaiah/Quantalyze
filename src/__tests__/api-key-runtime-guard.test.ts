@@ -38,6 +38,13 @@ const baseRow = {
   account_shared_with_api_key_id: null,
   account_share_kind: null,
   history_inclusion: null,
+  // Phase 164.6.6.2.1 plan 15 (D-07 / D-17) — the account's native unit, its
+  // balance in that unit and the stored close day joined the projection
+  // (migration 20261010120000 GRANTs them), so the fixture carries them for
+  // `.strict()` to accept the row.
+  account_currency: null,
+  account_balance_native: null,
+  account_balance_usdt_close_date: null,
 };
 
 describe("ApiKeyRowSchema — M-0583 trust-boundary guard", () => {
@@ -163,4 +170,57 @@ describe("ApiKeyRowSchema — M-0583 trust-boundary guard", () => {
     expect(out).toHaveLength(1);
     expect(out[0].account_balance_usdt).toBe(0);
   });
+
+  // Phase 164.6.6.2.1 plan 15 (D-07, D-17; T-164.6.6.2.1-37). The three native
+  // fields are rendered as text on the key card, so a malformed unit or date
+  // must be dropped at this boundary rather than printed.
+  it("preserves a priced native row (unit, balance, stored close day)", () => {
+    const out = parseApiKeyRows([
+      {
+        ...baseRow,
+        account_currency: "BTC",
+        account_balance_native: 0.4213,
+        account_balance_usdt_close_date: "2026-10-08",
+      },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].account_currency).toBe("BTC");
+    expect(out[0].account_balance_native).toBe(0.4213);
+    expect(out[0].account_balance_usdt_close_date).toBe("2026-10-08");
+  });
+
+  it("coerces NUMERIC-as-string account_balance_native", () => {
+    const out = parseApiKeyRows([{ ...baseRow, account_currency: "BTC", account_balance_native: "0.4213" }]);
+    expect(out).toHaveLength(1);
+    expect(out[0].account_balance_native).toBe(0.4213);
+  });
+
+  it("rejects empty-string account_balance_native (no silent coerce-to-zero)", () => {
+    expect(parseApiKeyRows([{ ...baseRow, account_balance_native: "" }])).toHaveLength(0);
+  });
+
+  it.each([
+    ["a lower-case unit code", { account_currency: "btc" }],
+    ["a one-letter unit code", { account_currency: "B" }],
+    ["an eleven-letter unit code", { account_currency: "ABCDEFGHIJK" }],
+    ["a unit with markup", { account_currency: "BT<C" }],
+    ["a prose close date", { account_balance_usdt_close_date: "Oct 8" }],
+    ["a timestamp as the close date", { account_balance_usdt_close_date: "2026-10-08T00:00:00Z" }],
+  ])("rejects %s at the boundary", (_name, bad) => {
+    expect(parseApiKeyRows([{ ...baseRow, ...bad }])).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  // `account_balance_native` is deliberately NOT in this list: it shares
+  // `_strictNumberOrStringNumericNullable` with `account_balance_usdt`, which
+  // reads an absent key as null, so a row without it is a row with no native
+  // balance, not drift. The two text fields have no such preprocess.
+  it.each(["account_currency", "account_balance_usdt_close_date"] as const)(
+    "rejects rows missing %s (strict schema)",
+    (field) => {
+      const row: Record<string, unknown> = { ...baseRow };
+      delete row[field];
+      expect(parseApiKeyRows([row])).toHaveLength(0);
+    },
+  );
 });

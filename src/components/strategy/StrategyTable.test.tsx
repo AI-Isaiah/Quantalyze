@@ -1367,3 +1367,66 @@ describe("StrategyTable — container-gated pinning (170.2 D-05)", () => {
     expect(src).not.toMatch(/left-\(--pin-star-left\) [^"`]*\b(min-w-|w-\[)/);
   });
 });
+
+/**
+ * Phase 164.6.6.2.1 plan 16 (D-05, D-12, UI-SPEC D) — the compact `in BTC` chip.
+ * A native-unit strategy is labelled on every StrategyTable mount so a BTC
+ * return is never read as a USD one. The chip is the FIRST child of the badge
+ * row (before the type Badges), never on the name Link row, and a USD row's
+ * name-cell DOM is byte-identical to the build before the chip existed.
+ */
+describe("StrategyTable — native-unit chip (164.6.6.2.1 D-05)", () => {
+  function renderOne(nativeUnit: unknown) {
+    const s = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    s.analytics = makeAnalytics({
+      strategy_id: STRATEGY_ID_A,
+      native_unit: nativeUnit as string | null,
+    });
+    render(<StrategyTable strategies={[s]} categorySlug="crypto-sma" />);
+    const nameCell = screen.getByRole("link", { name: "Alpha Stellar" }).closest("td")!;
+    const badgeRow = nameCell.querySelector("div.flex.flex-wrap.gap-1") as HTMLElement;
+    return { nameCell, badgeRow };
+  }
+
+  it("a BTC row renders exactly one chip, first in the badge row, with the contracted text, name and title", () => {
+    const { nameCell, badgeRow } = renderOne("BTC");
+    const chips = nameCell.querySelectorAll("[data-returns-unit]");
+    expect(chips).toHaveLength(1);
+    const chip = chips[0] as HTMLElement;
+    expect(chip.getAttribute("data-returns-unit")).toBe("BTC");
+    expect(chip.textContent).toBe("Returns in BTC");
+    expect(chip.querySelector(".sr-only")?.textContent).toBe("Returns ");
+    expect(chip.getAttribute("title")).toBe("Returns on this row are in BTC, not USD.");
+    // First child of the badge row, before the first type Badge...
+    expect(badgeRow.firstElementChild).toBe(chip);
+    expect(badgeRow.children[1]?.textContent).toBe("Long-Only");
+    // ...and never on the name Link row.
+    const linkRow = nameCell.firstElementChild as HTMLElement;
+    expect(linkRow.querySelector("[data-returns-unit]")).toBeNull();
+  });
+
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["lower-case", "btc"],
+    ["markup", "<b>X</b>"],
+    ["non-string", 5],
+  ])("a %s native_unit renders no chip", (_label, value) => {
+    const { nameCell } = renderOne(value);
+    expect(nameCell.querySelector("[data-returns-unit]")).toBeNull();
+    expect(nameCell.textContent).not.toMatch(/in BTC|in X/);
+  });
+
+  it("a USD row's name cell (link row and badge row) is byte-identical to the pre-change snapshot", () => {
+    const { nameCell, badgeRow } = renderOne(null);
+    // Pre-change literals, captured from the build BEFORE the chip existed.
+    // (The status line below the badge row carries a clock-dependent
+    // "Synced Nd ago", so only the two structural rows are pinned.)
+    expect((nameCell.firstElementChild as HTMLElement).outerHTML).toBe(
+      '<div class="flex items-center gap-1.5"><a class="font-medium text-text-primary hover:text-accent transition-colors" href="/factsheet/11111111-0000-4000-8000-000000000001"><div class="contents"><span class="whitespace-nowrap">Alpha</span> <span class="whitespace-nowrap">Stellar</span></div></a></div>',
+    );
+    expect(badgeRow.outerHTML).toBe(
+      '<div class="flex flex-wrap gap-1"><span class="inline-flex items-center rounded-md px-2 py-0.5 text-caption font-medium bg-badge-directional/10 text-badge-directional whitespace-nowrap">Long-Only</span></div>',
+    );
+  });
+});

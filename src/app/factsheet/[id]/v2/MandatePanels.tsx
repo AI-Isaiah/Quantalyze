@@ -3,6 +3,7 @@
 import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { usePayload } from "./factsheet-context";
 import { useBasisSeriesView } from "./basis-context";
+import { useUnitView } from "./unit-view";
 
 /**
  * Mandate-section editorial panels.
@@ -63,10 +64,18 @@ export function StrategyThesisPanel() {
 
 export function TermsPanel() {
   const payload = usePayload();
+  // 164.6.6.2.1 review CR-02: the data source and the live/backtest framing are
+  // facts about the STRATEGY, not about the unit on screen (D-19 keeps the masthead
+  // on the native payload for the same reason). In the USD view `payload` is the
+  // converted payload: its trust tier is null as built and its series starts at
+  // least one native date later, so reading either off it printed "—" for an
+  // API-verified strategy and could mark a live record as backtest. Outside a
+  // UnitViewProvider (the composer, /strategy/[id]/v2) `payload` is already native.
+  const native = useUnitView()?.nativePayload ?? payload;
   // 169 review WR-03: the observation window and Sample size describe the
   // selected basis's record, as the thesis above and "Years Observed" do.
   const m = useBasisSeriesView(payload).strategyMetrics;
-  const tier = payload.trustTier;
+  const tier = native.trustTier;
   const tierLabel =
     tier === "api_verified" ? "API-verified" :
     tier === "csv_uploaded" ? "CSV-uploaded (verification pending)" :
@@ -85,8 +94,10 @@ export function TermsPanel() {
   // read from the selected basis, an MTM series that starts later made a live
   // record read "backtest" under the MTM toggle. The length Terms below stay on
   // the selected basis (WR-03).
-  const recordStart = payload.strategyMetrics.start;
-  const declaredStart = payload.startDate ? new Date(payload.startDate) : null;
+  // CR-02: and, for the same reason, the NATIVE unit's cash record, never the
+  // USD series' later start.
+  const recordStart = native.strategyMetrics.start;
+  const declaredStart = native.startDate ? new Date(native.startDate) : null;
   const obsStart = new Date(recordStart);
   const hasBacktestGap =
     declaredStart && !Number.isNaN(declaredStart.getTime())
@@ -102,9 +113,9 @@ export function TermsPanel() {
       </header>
       <dl className="grid grid-cols-[140px_1fr] gap-y-1 text-fixed-11">
         <Term label="Data source">{tierLabel}</Term>
-        {payload.startDate && (
+        {native.startDate && (
           <Term label="Live since">
-            {iso(payload.startDate)}
+            {iso(native.startDate)}
             {hasBacktestGap && (
               <span className="ml-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
                 — observation window starts {iso(recordStart)}; portion before live date is backtest

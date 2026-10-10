@@ -115,6 +115,11 @@ const buildHoldingsChain = () => {
     eq: () => typeof chain;
     in: () => typeof chain;
     order: () => typeof chain;
+    // 164.6.6.2.1 CR-01: the audit recompute also reads the native-unpriced records
+    // (`allocator_equity_derived`, `.like()` then `.limit()`); an empty answer leaves
+    // the sum as it was.
+    like: () => typeof chain;
+    limit: () => typeof chain;
   } = {
     data: [],
     error: null,
@@ -122,6 +127,8 @@ const buildHoldingsChain = () => {
     eq: () => chain,
     in: () => chain,
     order: () => chain,
+    like: () => chain,
+    limit: () => chain,
   };
   return chain;
 };

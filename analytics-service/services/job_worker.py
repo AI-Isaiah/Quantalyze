@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, NamedTuple, TypeVar, cast
 
 import ccxt
 import sentry_sdk
@@ -307,6 +307,11 @@ _DERIBIT_EMPTY_LEDGER_FLOOR_USD: Final[float] = USD_FLOORS.material_equity
 _MT5_CURRENCY_BLANK_MESSAGE: Final[str] = (
     "derive_broker_dailies: the MT5 account currency was not reported yet — retrying"
 )
+# 164.6.6.2.1 SFH-01 -- the stored BTC closes could not be read, so a key's USD inputs cannot
+# be formed. A read fault, never a verdict on the key: transient, nothing written.
+_MT5_BTC_CLOSES_UNREADABLE_MESSAGE: Final[str] = (
+    "derive_broker_dailies: the stored BTC prices were not readable — retrying"
+)
 _MT5_CURRENCY_CHANGED_MESSAGE: Final[str] = (
     "derive_broker_dailies: the MT5 account currency differs from the one stored — "
     "refusing to mix two units in one series"
@@ -316,6 +321,13 @@ _MT5_CURRENCY_REFUSED_MESSAGE: Final[str] = (
 )
 # PostgREST's answer to a write naming a column its schema cache does not hold yet.
 _PGRST_SCHEMA_CACHE_MISS: Final[str] = "PGRST204"
+
+# 164.6.6.2.1 / D-06, D-17 — the only unit a live balance can be priced in: BTC is the one
+# native unit this phase holds a price source (the stored BTC closes) for. A key-mode
+# ``AccountUnit`` can also be ``native`` for a code with no floors (EUR, ETH), whose amount a
+# BTC close would turn into a confident-looking wrong dollar figure, so the USD balance of
+# any other native code stays NULL.
+_BTC_PRICED_UNIT: Final[str] = "BTC"
 
 # Phase 164.6.6.3 / D-13 — the FIXED message of an expired MT5 deal-history wait.
 # `error_kind` stays "transient" (no new DB value: that would be a migration that
@@ -423,6 +435,16 @@ _NATIVE_RETURNS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "sfox", "m
 logger = logging.getLogger("quantalyze.analytics.job_worker")
 
 
+def _utc_now() -> datetime:
+    """The derive's clock seam (164.6.6.2.1 / D-17): an aware UTC ``datetime``.
+
+    A live native balance is priced at the latest COMPLETED UTC day, which is a function
+    of "now", so tests freeze this instead of the wall clock. Never a naive local
+    clock: ``latest_completed_close_day`` refuses a naive datetime.
+    """
+    return datetime.now(timezone.utc)
+
+
 async def _fetch_mt5_account_balance(
     session: Mt5Session, *, api_key_id: str | None = None
 ) -> float | None:
@@ -520,6 +542,11 @@ async def _fetch_mt5_account_balance(
         )
         return None
     if _balance_unit.native:
+        # ⭐ 164.6.6.2.1 / plan 07 — this stays ``None`` ON PURPOSE: the derive
+        # (``_persist_account_unit``) is the ONLY writer of a native key's
+        # ``account_balance_usdt`` (priced at the latest completed close, dated). Returning a
+        # number here would race it, and ``advance_sync_cursor``'s COALESCE on that column
+        # only leaves the derive's value alone while this parameter is NULL.
         logger.info(
             "sync_trades: mt5 account is denominated in %s, not USD — continuing "
             "without a USD balance snapshot (D-14)",
@@ -3327,6 +3354,136 @@ def _calendar_days_absent_from(
     return out
 
 
+class _NativeKeyUsd(NamedTuple):
+    """A native-unit key's inputs in USD, plus what a missing close left out (164.6.6.2.1)."""
+
+    returns: "pd.Series"
+    day_pnl: "pd.Series"
+    realized_terminal: "tuple[pd.Timestamp, float] | None"
+    flows: "list[Any]"
+    unpriced_days: list[str]
+    priced_through: str | None
+    segment_terminals: "list[tuple[str, float]]"
+
+
+def _convert_native_key_to_usd(
+    *,
+    unit: str,
+    closes: "pd.Series | None",
+    native_returns: "pd.Series",
+    native_day_pnl: "pd.Series",
+    native_nav_levels: "pd.Series",
+    native_flow_by_day: dict[str, float],
+) -> _NativeKeyUsd:
+    """Derive a native key's USD inputs from its NATIVE series (164.6.6.2.1 D-03, D-09).
+
+    The native series stays the source of truth; every figure here is the native one priced
+    at the stored close of ITS OWN day (``services.native_to_usd``), and a day with no usable
+    close is OMITTED and NAMED, never priced at a neighbour's close and never written as
+    r = 0.
+
+    * ``returns``: the USD returns on the NATIVE index, NaN where no row is written (a day the
+      TWR left out, or one a missing close left unpriced), so the persisted rows, the span the
+      reconcile deletes over and ``dropped_day_pnl_payload`` all read the one series.
+    * ``day_pnl``: native day P&L x that day's close; an unpriced day drops out.
+    * ``realized_terminal``: the native realized NAV level at the LAST USD return day ``P``
+      (forward-filled natively across quiet days, which is legitimate) x ``P``'s close.
+    * ``flows``: ``amount x close(flow day)``; a flow on an unpriced day is not persisted and
+      its day is named instead.
+    * ``unpriced_days``: native return days after the first that the USD series lacks because
+      a close is missing, plus a flow day without a close. A day after the last stored close
+      is the LIVE tail (priced through the anchor, D-17), not an interior hole, so it is not
+      listed. ``priced_through`` is ``P`` as an ISO day.
+    * ``segment_terminals``: for each interior hole (``hole_segment_ends``), the realized USD
+      level on the last priced day before it, ``(ISO day, native NAV level x that day's close)``.
+      The allocator compose replays the series in segments split at those days and rolls each
+      segment back from its own level; across a hole the stored returns alone cannot say what the
+      level was on the far side (MEASUREMENT M3).
+    """
+    import pandas as pd
+
+    from services.allocator_equity_compose import hole_segment_ends
+    from services.external_flows import ExternalFlow
+    from services.native_to_usd import (
+        _usable_closes,
+        convert_native_levels_to_usd,
+        convert_native_returns_to_usd,
+    )
+
+    formed = convert_native_returns_to_usd(native_returns, unit, closes)
+    returns = formed.reindex(native_returns.index)
+    close_by_day = _usable_closes(closes) if closes is not None else {}
+    last_close_day = max(close_by_day) if close_by_day else None
+    formed_days = {pd.Timestamp(ts).normalize() for ts in formed.index}
+    pnl_days = {pd.Timestamp(ts).normalize() for ts in native_day_pnl.index}
+
+    unpriced: set[pd.Timestamp] = set()
+    for k, ts in enumerate(native_returns.index):
+        day = pd.Timestamp(ts).normalize()
+        if k == 0 or last_close_day is None or day > last_close_day or day in formed_days:
+            continue
+        # A finite native return the USD series lacks is a pairing a close was missing for. A
+        # NaN one is a day the TWR itself left out: it is unpriced only if its P&L (carried to
+        # the book as ``dropped_day_pnl``) cannot be priced because the day has no close.
+        if math.isfinite(float(native_returns.iloc[k])) or (
+            day in pnl_days and day not in close_by_day
+        ):
+            unpriced.add(day)
+
+    day_pnl = convert_native_levels_to_usd(native_day_pnl, unit, closes)
+    day_pnl = day_pnl[~day_pnl.index.isin(list(unpriced))]
+
+    flows: list[Any] = []
+    for iso_day, amount in sorted(native_flow_by_day.items()):
+        flow_day = pd.Timestamp(iso_day).normalize()
+        close = close_by_day.get(flow_day)
+        if close is None:
+            if last_close_day is not None and flow_day <= last_close_day:
+                unpriced.add(flow_day)
+            continue
+        flows.append(ExternalFlow(utc_day_iso=iso_day, usd_signed=amount * close))
+
+    realized_terminal: tuple[pd.Timestamp, float] | None = None
+    priced_through: str | None = None
+    if not formed.empty:
+        last_day = pd.Timestamp(formed.index[-1]).normalize()
+        priced_through = last_day.date().isoformat()
+        levels_to_p = native_nav_levels[native_nav_levels.index <= last_day]
+        if not levels_to_p.empty:
+            realized_terminal = (last_day, float(levels_to_p.iloc[-1]) * close_by_day[last_day])
+
+    unpriced_iso = sorted(day.date().isoformat() for day in unpriced)
+
+    # The days this key's USD series says something about: a return row, a persisted flow, a
+    # dropped-day P&L row (a day the TWR left out that has a priced P&L). The same three sets the
+    # allocator compose reads back, so ``hole_segment_ends`` finds the same holes on both sides.
+    event_days = {pd.Timestamp(ts).date().isoformat() for ts in formed.index}
+    event_days |= {flow.utc_day_iso for flow in flows}
+    event_days |= {
+        pd.Timestamp(ts).date().isoformat()
+        for ts in returns.index[returns.isna().to_numpy()]
+        if ts in day_pnl.index
+    }
+    segment_terminals: list[tuple[str, float]] = []
+    for end_iso in hole_segment_ends(event_days, unpriced_iso):
+        end_day = pd.Timestamp(end_iso)
+        levels_to_end = native_nav_levels[native_nav_levels.index <= end_day]
+        end_close = close_by_day.get(end_day)
+        if levels_to_end.empty or end_close is None:
+            continue  # no level to state; the compose reports the missing one, never a guess
+        segment_terminals.append((end_iso, float(levels_to_end.iloc[-1]) * end_close))
+
+    return _NativeKeyUsd(
+        returns=returns,
+        day_pnl=day_pnl,
+        realized_terminal=realized_terminal,
+        flows=flows,
+        unpriced_days=unpriced_iso,
+        priced_through=priced_through,
+        segment_terminals=segment_terminals,
+    )
+
+
 async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     """Broker key full-history → daily-return series → csv_daily_returns.
 
@@ -4041,11 +4198,28 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # the PRE ``account_info`` the read returns. ``None`` for every other venue (their
         # pre-stamp and thresholds are untouched), and for MT5 until the classification below.
         _mt5_unit: AccountUnit | None = None
+        # 164.6.6.2.1 / D-17 — the stored BTC daily closes, loaded AT MOST ONCE per derive and
+        # only for a native MT5 account (a USD-family key never reads them). ``None`` is "no
+        # price source" and is never replaced by a guess. Plan 08 reads it for the key-mode
+        # inputs; ``_persist_account_unit`` reads it to price the live balance.
+        _btc_closes: "pd.Series | None" = None
         # Phase 164.6.6.2 / D-13, D-14 — set by the MT5 branch ONLY in key-mode, for an account
-        # whose unit is not USD-family (native, or a code with no floors). Such a key runs no
-        # combine and writes no per-key series; ``_run_key_mode_compose_epilogue`` reads this
-        # to persist ``anchor_null_reason: "native_unit"`` and no flows.
+        # whose unit is not USD-family AND not one this derive can price (a code with no floors
+        # and no price source: EUR, ETH). Such a key runs no combine and writes no per-key
+        # series; ``_run_key_mode_compose_epilogue`` reads this to persist
+        # ``anchor_null_reason: "native_unit"`` and no flows. A BTC key is NOT skipped any more
+        # (164.6.6.2.1 / plan 08): it takes the USD conversion below.
         _native_unit_key_skip: bool = False
+        # 164.6.6.2.1 / D-03, D-09, D-17 — set ONLY by the MT5 key-mode branch for a native unit
+        # this derive can price (BTC). The native series stays the source of truth; the per-key
+        # series, flows, realized terminal and anchor are DERIVED from it in USD at the stored
+        # daily closes. ``_native_usd_inputs`` carries what the epilogue must name beside them:
+        # the unit, the last USD return day (``priced_through``) and the days a missing close
+        # left out (``unpriced_days``). ``None`` for every other account.
+        _native_key_usd: bool = False
+        _native_usd_inputs: "dict[str, Any] | None" = None
+        # The native NAV levels (realized basis) the USD realized terminal is read from.
+        _native_nav_levels: "pd.Series | None" = None
         # Phase 167.1.2.2 / D-15 — set ONLY in key-mode by a venue whose reconstruction
         # builds a NAV (deribit's native core, MT5's deal ledger): the account's actual P&L per
         # NAV day, in USD. ``_run_key_mode_compose_epilogue`` persists it for the days the TWR
@@ -5116,7 +5290,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     error_message=f"derive_broker_dailies: {MT5_DISABLED_DETAIL}",
                     error_kind="permanent",
                 )
-            from services.broker_dailies import combine_mt5_deal_ledger, mt5_day_pnl
+            from services.broker_dailies import (
+                combine_mt5_deal_ledger,
+                mt5_day_pnl,
+                reconstruct_mt5_nav_levels,
+            )
             from services.mt5_client import (
                 Mt5AccountMismatchError,
                 Mt5ClientError,
@@ -5149,8 +5327,34 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             async def _persist_account_unit(unit: AccountUnit, equity: float) -> None:
                 _unit_payload: dict[str, Any] = {"account_currency": unit.code}
                 if unit.native:
+                    from services.native_to_usd import price_live_balance
+
+                    # ⭐ 164.6.6.2.1 / D-17, D-02 — the derive is the ONLY writer of a native
+                    # key's USD balance. It is priced at the stored close of the latest
+                    # COMPLETED UTC day, and that day is stored beside it so the key card
+                    # names it; with that one close missing BOTH are NULL, never an older
+                    # close. ``_fetch_mt5_account_balance`` returns None for a native unit,
+                    # so the sync RPC's COALESCE on ``account_balance_usdt`` never
+                    # overwrites this.
+                    _priced = (
+                        price_live_balance(equity, unit.code, _btc_closes, _utc_now())
+                        if unit.code == _BTC_PRICED_UNIT
+                        else None
+                    )
                     _unit_payload["account_balance_native"] = equity
-                    _unit_payload["account_balance_usdt"] = None
+                    _unit_payload["account_balance_usdt"] = (
+                        _priced[0] if _priced is not None else None
+                    )
+                    _unit_payload["account_balance_usdt_close_date"] = (
+                        _priced[1].date().isoformat() if _priced is not None else None
+                    )
+                    # The unit code and a flag only, never an amount (T-164.6.6.2.1-20).
+                    logger.info(
+                        "derive_broker_dailies: mt5 native balance unit=%s priced=%s (label=%s)",
+                        unit.code,
+                        _priced is not None,
+                        funding_label,
+                    )
 
                 def _update_account_unit() -> None:
                     ctx.supabase.table("api_keys").update(_unit_payload).eq(
@@ -5164,7 +5368,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         raise
                     logger.warning(
                         "derive_broker_dailies: api_keys does not know the account-unit "
-                        "columns yet (code %s, label=%s) — the unit was NOT stored; this "
+                        "columns (account_currency, account_balance_native, "
+                        "account_balance_usdt_close_date) yet (code %s, label=%s) — the unit "
+                        "was NOT stored; this "
                         "is the deploy window before the migration reaches this database",
                         _PGRST_SCHEMA_CACHE_MISS,
                         funding_label,
@@ -5655,27 +5861,66 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     error_kind="permanent",
                 )
 
-            # ⭐ 164.6.6.2 / D-03, D-13, D-14 — a KEY whose unit is not USD-family is skipped
-            # honestly. The allocator curve is a USD sum: a BTC series blended in would be added
-            # as dollars, and a USD anchor of ``0.11`` would understate the book by the whole
-            # account. So the derive stores the unit (so D-03 has a code to compare on the next
-            # read, from the equity step (c) just validated), runs NO combine and writes NO
-            # per-key series, and control falls to the existing <2-day key-mode short-circuit,
-            # which calls the epilogue and returns DONE. The epilogue reads this flag first and
-            # persists ``anchor_null_reason: "native_unit"`` with no flows.
+            # ⭐ 164.6.6.2.1 / D-03, D-09, D-17 — a BTC KEY is converted, not skipped. The allocator
+            # curve is a USD sum, so the key's native series is never added as dollars: the
+            # derive keeps the native series as the source of truth (D-03) and writes the USD
+            # series, flows, realized terminal and anchor DERIVED from it at the stored daily
+            # closes. A day with no close is omitted BY NAME (``unpriced_days``) and never priced
+            # at a neighbour's close or written as r = 0 (D-09); a live anchor with no close of
+            # the latest completed day is NULL with reason ``native_unpriced`` (D-17), never
+            # priced at an older one. (This replaces the 164.6.6.2 D-13 "skipped honestly" block.)
             #
-            # Every name the short-circuit and the epilogue read is set HERE, explicitly, so
-            # none is undefined or inherited from another venue's branch: ``returns`` (empty),
-            # ``meta``, ``funding`` / ``realized`` (the short-circuit logs their counts),
-            # ``external_flows`` (empty, so no BTC flow is persisted), ``equity`` (the validated
-            # equity; the epilogue ignores it behind the flag), ``balance_error``,
-            # ``upnl_unreadable`` and ``open_unrealized_usd``.
-            if is_key_mode and _mt5_unit.native:
+            # The ONLY native unit still skipped is one this derive cannot price (a code with no
+            # floors: EUR, ETH). It stores its code, runs NO combine and writes NO per-key
+            # series; control falls to the existing <2-day key-mode short-circuit, which calls
+            # the epilogue and returns DONE with ``anchor_null_reason: "native_unit"`` and no
+            # flows. Every name that short-circuit and the epilogue read is set HERE, explicitly,
+            # so none is undefined or inherited from another venue's branch: ``returns`` (empty),
+            # ``meta``, ``funding`` / ``realized``, ``external_flows`` (empty), ``equity``,
+            # ``balance_error``, ``upnl_unreadable`` and ``open_unrealized_usd``.
+            if _mt5_unit.native and _mt5_unit.code == _BTC_PRICED_UNIT:
+                # 164.6.6.2.1 / D-17 — the ONE closes read of this derive, before either
+                # ``_persist_account_unit`` call. Key mode reads this same series for the USD
+                # conversion below (no second read).
+                #
+                # SFH-01: ``read_btc_closes`` tells a FAILED read (BtcClosesReadError) from
+                # "no usable close stored" (None). A key's inputs ARE the conversion, so a
+                # key-mode derive that cannot read the closes retries (TRANSIENT, nothing
+                # written, the last good inputs stand) instead of persisting
+                # ``native_unpriced`` with a day that was never checked, which the compose
+                # would turn into the key leaving the book by name. The strategy path needs
+                # no close for its native returns (the closes only price the displayed USD
+                # balance), so it stays best-effort: the pair is NULL, and the warning names
+                # the read.
+                from services.benchmark import BtcClosesReadError, read_btc_closes
+
+                try:
+                    _btc_closes = await read_btc_closes()
+                except BtcClosesReadError as _closes_exc:
+                    logger.warning(
+                        "derive_broker_dailies: stored %s closes unreadable (label=%s, "
+                        "key_mode=%s): %s",
+                        _mt5_unit.code,
+                        funding_label,
+                        is_key_mode,
+                        _closes_exc,
+                    )
+                    if is_key_mode:
+                        return DispatchResult(
+                            outcome=DispatchOutcome.FAILED,
+                            error_message=_MT5_BTC_CLOSES_UNREADABLE_MESSAGE,
+                            error_kind="transient",
+                        )
+                    _btc_closes = None
+            _native_key_usd = (
+                is_key_mode and _mt5_unit.native and _mt5_unit.code == _BTC_PRICED_UNIT
+            )
+            if is_key_mode and _mt5_unit.native and not _native_key_usd:
                 await _persist_account_unit(_mt5_unit, _mt5_equity)
                 _native_unit_key_skip = True
                 logger.info(
-                    "derive_broker_dailies: mt5 key unit %s is not USD — no per-key series, "
-                    "null anchor 'native_unit' (label=%s, D-13)",
+                    "derive_broker_dailies: mt5 key unit %s has no price source — no per-key "
+                    "series, null anchor 'native_unit' (label=%s, D-13)",
                     _mt5_unit.code,
                     funding_label,
                 )
@@ -5719,6 +5964,21 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             _realized_terminal = (
                                 _day_pnl_usd.index[-1],
                                 _mt5_equity - (_mt5_equity - _mt5_balance),
+                            )
+                        if _native_key_usd:
+                            # D-03: for a native key ``_day_pnl_usd`` and ``_realized_terminal``
+                            # above are still NATIVE; the USD conversion below replaces them.
+                            # It reads the realized NAV level at the last USD return day from
+                            # the levels sibling (same fold, same arithmetic core), so a native
+                            # level forward-filled to that day is the one priced.
+                            _native_nav_levels, _native_nav_meta = reconstruct_mt5_nav_levels(
+                                _mt5_deals,
+                                account_equity=_mt5_equity,
+                                account_balance=_mt5_balance,
+                                server_utc_offset_s=int(
+                                    os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")
+                                ),
+                                floors=_mt5_unit.floors,
                             )
             except Mt5DealClassificationError as exc:
                 _scrubbed = str(scrub_freeform_string(str(exc)))
@@ -5789,7 +6049,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # ⭐ 164.6.6.2 / D-02, D-14 — persist the unit AFTER the combine and the fail-loud
             # above accepted this account's numbers, and BEFORE any series is written, so a
             # series never exists beside a stale or absent unit.
-            if not is_key_mode:
+            if not is_key_mode or _native_key_usd:
                 await _persist_account_unit(_mt5_unit, _mt5_equity)
 
             # (f) Belt-and-braces uPnL-wedge flag: combine_mt5_deal_ledger already
@@ -5848,6 +6108,35 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 ExternalFlow(utc_day_iso=_day, usd_signed=_amt)
                 for _day, _amt in sorted(_mt5_flow_by_day.items())
             ]
+            if _native_key_usd:
+                # ⭐ 164.6.6.2.1 / D-03, D-09 — everything above is NATIVE (BTC). From here
+                # the key's inputs are the USD ones derived from it, so the per-key series,
+                # the persisted flows, the dropped-day P&L and the realized terminal below
+                # are all dollars at the stored close of their own day. Judged AFTER the
+                # material-equity floor above, which counts the key's NATIVE usable days.
+                assert _day_pnl_usd is not None and _native_nav_levels is not None
+                _usd_key = _convert_native_key_to_usd(
+                    unit=_mt5_unit.code,
+                    closes=_btc_closes,
+                    native_returns=returns,
+                    native_day_pnl=_day_pnl_usd,
+                    native_nav_levels=_native_nav_levels,
+                    native_flow_by_day=_mt5_flow_by_day,
+                )
+                returns = _usd_key.returns
+                _day_pnl_usd = _usd_key.day_pnl
+                _realized_terminal = _usd_key.realized_terminal
+                external_flows = _usd_key.flows
+                _native_usd_inputs = {
+                    "native_unit": _mt5_unit.code,
+                    "priced_through": _usd_key.priced_through,
+                    "unpriced_days": _usd_key.unpriced_days,
+                    # The realized USD level on the last priced day before each interior hole.
+                    "segment_terminals": [
+                        {"utc_day_iso": _day, "level_usd": _level}
+                        for _day, _level in _usd_key.segment_terminals
+                    ],
+                }
         else:
             # Current total equity = the initial-capital anchor (anchor-to-today,
             # reconstruct backward). OKX is read via raw totalEq inside
@@ -6295,27 +6584,51 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # dust so a small NEGATIVE equity (|equity| <= DUST but a real-capital
         # problem) degrades rather than being silently omitted as dust.
         _anchor_null_reason: str | None = None
+        # 164.6.6.2.1 / D-17 — the number the ladder below judges. For a USD key it is the
+        # venue's equity. For a native key it is that equity PRICED at the stored close of the
+        # latest completed UTC day, so dust, non-positive and non-finite are judged in DOLLARS
+        # (a funded 0.4213 BTC account is 26099.535 USD, not a value below the 1000 USD floor),
+        # or ``None`` when that one close is missing (never an older one).
+        _anchor_basis: float | None = (
+            float(equity) if equity is not None and not _native_key_usd else None
+        )
+        _unpriced_close_day: str | None = None
+        if _native_key_usd and equity is not None:
+            from services.native_to_usd import latest_completed_close_day, price_live_balance
+
+            _live_priced = price_live_balance(
+                float(equity), _mt5_unit.code if _mt5_unit else None, _btc_closes, _utc_now()
+            )
+            if _live_priced is not None:
+                _anchor_basis = _live_priced[0]
+            else:
+                _unpriced_close_day = latest_completed_close_day(_utc_now()).date().isoformat()
         if _native_unit_key_skip:
             # 164.6.6.2 D-13: FIRST arm, ahead of ``balance_error``. The balance read worked;
             # it is just not dollars. Never ``dust`` (a funded BTC account is not
             # immaterial), and never in ``_NO_CAPITAL_ANCHOR_REASONS`` (it has capital).
             _anchor_null_reason = "native_unit"
-        elif balance_error or equity is None:
+        elif _native_key_usd and _unpriced_close_day is not None:
+            # 164.6.6.2.1 / D-09, D-17: the live close is missing. The balance is real capital,
+            # so this is never ``dust``; it is not a read failure either, so it is named apart
+            # from ``balance_error``. ``unpriced_close_day`` below says which close.
+            _anchor_null_reason = "native_unpriced"
+        elif balance_error or _anchor_basis is None:
             _anchor_null_reason = "balance_error"
-        elif not math.isfinite(float(equity)):
+        elif not math.isfinite(_anchor_basis):
             _anchor_null_reason = "nonfinite"
-        elif equity <= 0.0:
+        elif _anchor_basis <= 0.0:
             _anchor_null_reason = "nonpositive"
-        elif abs(equity) <= DUST_NAV_FLOOR:
+        elif abs(_anchor_basis) <= DUST_NAV_FLOOR:
             _anchor_null_reason = "dust"
         elif _skipped_nonfinite_flows > 0:
             _anchor_null_reason = "flow_drop"
-        # equity is provably non-None when _anchor_null_reason is None (the
-        # `equity is None` branch above stamps "balance_error"); the explicit
-        # `equity is not None` is a mypy narrowing that changes no runtime path.
+        # ``_anchor_basis`` is provably non-None when _anchor_null_reason is None (the
+        # ``is None`` branch above stamps "balance_error"); the explicit ``is not None`` is a
+        # mypy narrowing that changes no runtime path.
         _anchor_usd: float | None = (
-            float(equity)
-            if _anchor_null_reason is None and equity is not None
+            _anchor_basis
+            if _anchor_null_reason is None and _anchor_basis is not None
             else None
         )
         _key_inputs_payload = {
@@ -6339,6 +6652,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             _key_inputs_payload["dropped_day_pnl"] = dropped_day_pnl_payload(
                 returns, _day_pnl_usd
             )
+        if _native_usd_inputs is not None:
+            # 164.6.6.2.1 / D-09, D-17 — ADDITIVE, in the 167.1.2.2 D-15 voice above: a reader
+            # that does not know these fields, and a row written before them, are both fine.
+            # ``native_unit`` is the unit the native series was in; ``priced_through`` the last
+            # day it has a USD return (the same day as ``realized_terminal_day``);
+            # ``unpriced_days`` the days a missing close left out BY NAME, in ISO order, never
+            # written as r = 0; ``segment_terminals`` the realized USD level on the last priced
+            # day before each interior hole (the allocator compose rolls each segment back from
+            # its own); ``unpriced_close_day`` (only when the live anchor is NULL
+            # ``native_unpriced``) the one close the anchor lacks.
+            _key_inputs_payload.update(_native_usd_inputs)
+            if _unpriced_close_day is not None:
+                _key_inputs_payload["unpriced_close_day"] = _unpriced_close_day
         if _realized_terminal is not None:
             # CR-01: the writer's own terminal, on its own day. The compose rolls the
             # stored returns back from it, so the zero-start verdict and every historical
@@ -9931,8 +10257,10 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
     from services import account_identity
     from services.allocator_positions import (
         AllocatorHoldingsSyncTransientError,
+        NativeUnpricedNote,
         fetch_allocator_holdings,
         persist_allocator_holdings,
+        persist_native_unpriced_marker,
         sync_error_copy,
         _map_exception_to_sync_status,
     )
@@ -10190,6 +10518,19 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             count = await persist_allocator_holdings(
                 ctx.supabase, rows, allocator_id, api_key_id, today_str
             )
+            if isinstance(warning, NativeUnpricedNote):
+                # 164.6.6.2.1 CR-01 (D-02, D-08, D-17): a native account whose latest
+                # completed day has no stored close got NO row from this poll, so its
+                # EARLIER row, priced at an older close, is still the key's latest.
+                # Record the poll's word that the day is unpriced where the readers
+                # (dashboard holdings and AUM, the commit audit) can trust it: a
+                # SERVICE-written row. Not the audit log -- ``log_audit_event`` is
+                # callable by the owner with any action and metadata, so an event
+                # there is not evidence. Inside this try so a failed write fails the
+                # poll loudly (persist_failed) instead of leaving the stale row live.
+                await persist_native_unpriced_marker(
+                    ctx.supabase, allocator_id, api_key_id, today_str
+                )
 
             spot_count = sum(1 for r in rows if r.get("holding_type") == "spot")
             deriv_count = sum(1 for r in rows if r.get("holding_type") == "derivative")
@@ -11571,7 +11912,10 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     """
     import pandas as pd
 
-    from services.allocator_equity_compose import compose_allocator_equity
+    from services.allocator_equity_compose import (
+        compose_allocator_equity,
+        read_native_key_inputs,
+    )
     from services.allocator_equity_derive import (
         FULL_HISTORY_VENUES,
         SHARED_ACCOUNT_KINDS,
@@ -12037,6 +12381,14 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # writer. An older row has none and is replayed from its live anchor as before. A
     # stitch source needs none: the account's terminal is the counted (newest) key's.
     realized_terminal_by_key: dict[str, tuple[str, float]] = {}
+    # 164.6.6.2.1 D-09 / D-20: a BTC key whose live close is missing, mapped to that day. Its
+    # series is priced through ``priced_through`` and it leaves the book after it (T1).
+    unpriced_close_day_by_key: dict[str, str] = {}
+    # 164.6.6.2.1 D-09 (mechanism I2): the interior days a missing close left out of a BTC key's
+    # USD series, and the realized USD level on the last priced day before each such hole. The
+    # compose replays the key in segments split there and rolls each back from its own level.
+    unpriced_days_by_key: dict[str, tuple[str, ...]] = {}
+    segment_terminals_by_key: dict[str, dict[str, float]] = {}
     orphan_kinds: list[str] = []
     # M3: the JSONB→python coercions below (float(usd_signed), float(anchor_usd))
     # sit OUTSIDE the compose NavReconstructionError catch — a corrupt persisted
@@ -12121,6 +12473,66 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 _reason = payload.get("anchor_null_reason")
                 if isinstance(_reason, str) and _reason:
                     null_anchor_reasons[api_key_id] = _reason
+            # ⭐ 164.6.6.2.1 / D-09, D-20 — a BTC key's USD inputs. The row is worker-written
+            # but untrusted (T-164.6.6.2.1-23): a malformed native field leaves the key OUT of
+            # the book by name (NULL anchor, ``native_unpriced``), never priced on a guess.
+            try:
+                _native_inputs = read_native_key_inputs(payload)
+            except (ValueError, TypeError) as _native_exc:
+                # SFH-02 / WR-02: the key is named in the payload (``day_unknown``) and here, with
+                # the field that was wrong (the reader's messages carry no stored value).
+                logger.warning(
+                    "derive_allocator_equity: a native-unit key_inputs row of allocator %s "
+                    "(key %s) has a malformed native field (%s: %s) — the key is left out of "
+                    "the book by name",
+                    allocator_id,
+                    api_key_id,
+                    type(_native_exc).__name__,
+                    _native_exc,
+                )
+                anchors_by_key[api_key_id] = None
+                null_anchor_reasons[api_key_id] = "native_unpriced"
+                realized_terminal_by_key.pop(api_key_id, None)
+                dropped_pnl_by_key[api_key_id] = {}
+                flows_by_key[api_key_id] = []
+            else:
+                if _native_inputs is not None:
+                    if _native_inputs.unpriced_close_day is not None:
+                        unpriced_close_day_by_key[api_key_id] = _native_inputs.unpriced_close_day
+                    if _native_inputs.unpriced_days:
+                        unpriced_days_by_key[api_key_id] = _native_inputs.unpriced_days
+                        segment_terminals_by_key[api_key_id] = dict(
+                            _native_inputs.segment_terminals
+                        )
+                    if (
+                        _anchor is None
+                        and payload.get("anchor_null_reason") == "native_unpriced"
+                    ):
+                        _held = realized_terminal_by_key.get(api_key_id)
+                        if (
+                            _held is not None
+                            and _native_inputs.priced_through is not None
+                            and _held[0] == _native_inputs.priced_through
+                        ):
+                            # T1: priced through P, the live close missing. The key is composed
+                            # at its realized USD level on P and rotated out after it, like a
+                            # departed key: its leaving is an exit, never a return.
+                            anchors_by_key[api_key_id] = _held[1]
+                            null_anchor_reasons.pop(api_key_id, None)
+                            departed_end_by_key[api_key_id] = _native_inputs.priced_through
+                            # A flow or dropped-day P&L dated after P happened while the key
+                            # was already out of the book; left in, the replay would read the
+                            # series as running past its realized terminal.
+                            flows_by_key[api_key_id] = [
+                                _f
+                                for _f in flows_by_key[api_key_id]
+                                if _f.utc_day_iso <= _native_inputs.priced_through
+                            ]
+                            dropped_pnl_by_key[api_key_id] = {
+                                _d: _v
+                                for _d, _v in dropped_pnl_by_key[api_key_id].items()
+                                if _d <= _native_inputs.priced_through
+                            }
     except (ValueError, TypeError, KeyError) as exc:
         return await _permanent_corrupt_input(exc)
 
@@ -12327,6 +12739,11 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             # the stored returns back from it, so the open position at the moment of the
             # derive neither shifts a level nor moves the zero-start verdict.
             realized_terminal_by_key=realized_terminal_by_key,
+            # D-09 / D-20: the BTC keys whose live close is missing, named by key and day.
+            unpriced_close_day_by_key=unpriced_close_day_by_key or None,
+            # D-09 (I2): the interior holes, and the level each segment before one rolls from.
+            unpriced_days_by_key=unpriced_days_by_key or None,
+            segment_terminals_by_key=segment_terminals_by_key or None,
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3

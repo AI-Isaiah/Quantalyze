@@ -759,7 +759,12 @@ def _daily(series: pd.Series) -> list[float]:
 class TestOptimizerAndBridgeScoreBtcInUsd:
     """`find_improvement_candidates` and `find_replacement_candidates` weight the
     series they are given, so the portfolio's BTC strategies AND a BTC candidate
-    must be converted to USD before the call (D-23)."""
+    must be converted to USD before the call (D-23).
+
+    Phase 164.6.6.2.1 (D-10): the two `test_bridge_*` tests below are the
+    regression pin for the ROADMAP's second named consumer,
+    `find_replacement_candidates`, which `portfolio_bridge` already feeds USD
+    series (closed by #969); it is therefore not edited by that phase."""
 
     @pytest.mark.asyncio
     async def test_optimizer_hands_the_scorer_usd_series(self):

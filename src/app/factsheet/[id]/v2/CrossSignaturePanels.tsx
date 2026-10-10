@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import { usePayload } from "./factsheet-context";
 import { BaseLeverageNote } from "./basis-context";
-import { nativeUnitReason } from "@/lib/factsheet/returns-unit";
+import { benchmarkWithheldReason } from "@/lib/factsheet/returns-unit";
 import { SignatureEmptyPanel, SIG_BENCH, BTC_OUTAGE_REASON, btcPricesUnavailable } from "./SignaturePanels";
 import type { EventSignature, EventSignaturesSet } from "@/lib/factsheet/types";
 import { niceStepValues } from "@/lib/chart-ticks";
@@ -52,7 +52,7 @@ export function CrossSignaturesSection() {
   // study, so for a strategy whose returns are in a native unit every panel is the
   // empty form with the stated reason, whatever the comparator.
   if (payload.returnsUnit) {
-    const reason = nativeUnitReason(payload.returnsUnit);
+    const reason = benchmarkWithheldReason(payload.returnsUnit, payload.convertedFrom);
     return (
       <section className="flex flex-col gap-10">
         <CrossHorizon

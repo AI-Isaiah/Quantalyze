@@ -179,6 +179,7 @@ export type Database = {
           id: string
           mark_price: number
           quantity: number
+          quantity_unit: string | null
           raw_payload: Json | null
           side: string
           symbol: string
@@ -198,6 +199,7 @@ export type Database = {
           id?: string
           mark_price: number
           quantity: number
+          quantity_unit?: string | null
           raw_payload?: Json | null
           side: string
           symbol: string
@@ -217,6 +219,7 @@ export type Database = {
           id?: string
           mark_price?: number
           quantity?: number
+          quantity_unit?: string | null
           raw_payload?: Json | null
           side?: string
           symbol?: string
@@ -334,6 +337,7 @@ export type Database = {
         Row: {
           account_balance_native: number | null
           account_balance_usdt: number | null
+          account_balance_usdt_close_date: string | null
           account_currency: string | null
           account_share_kind: string | null
           account_shared_with_api_key_id: string | null
@@ -363,6 +367,7 @@ export type Database = {
         Insert: {
           account_balance_native?: number | null
           account_balance_usdt?: number | null
+          account_balance_usdt_close_date?: string | null
           account_currency?: string | null
           account_share_kind?: string | null
           account_shared_with_api_key_id?: string | null
@@ -392,6 +397,7 @@ export type Database = {
         Update: {
           account_balance_native?: number | null
           account_balance_usdt?: number | null
+          account_balance_usdt_close_date?: string | null
           account_currency?: string | null
           account_share_kind?: string | null
           account_shared_with_api_key_id?: string | null

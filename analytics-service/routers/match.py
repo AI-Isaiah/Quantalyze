@@ -46,6 +46,7 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from services.allocator_positions import read_native_unpriced_days
 from services.benchmark import get_btc_closes
 from services.db import (
     PaginatedSelectTruncated,
@@ -590,12 +591,46 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
     # --- Step 1: fetch all holdings for this allocator, most-recent-first ---
     holdings_result = (
         supabase.table("allocator_holdings")
-        .select("venue, symbol, holding_type, value_usd, asof")
+        .select("api_key_id, venue, symbol, holding_type, value_usd, asof")
         .eq("allocator_id", allocator_id)
         .order("asof", desc=True)
         .execute()
     )
     holdings_rows = rows(holdings_result)
+
+    # --- Step 1b: drop a native-unpriced key's rows dated before its marker ---
+    # 164.6.6.2.1 R2-WR-01 (D-02, D-08, D-17): a BTC-denominated MT5 account whose latest
+    # completed day has no stored close polls to NO row, so its earlier row (priced at an
+    # older close) would win the collapse below and be summed into the AUM and the weights
+    # while the dashboard says the account is left out. The poll's service-written marker
+    # names that day; the same reader the daily refresh uses (strict comparison: rows on
+    # or after the marker's day stand). A failed marker read is logged at ERROR (which
+    # reaches Sentry) and the rows are kept as they were: this is a request-time scorer,
+    # and nothing it computes is persisted.
+    key_ids = sorted({str(h["api_key_id"]) for h in holdings_rows if h.get("api_key_id")})
+    unpriced_days: dict[str, str] = {}
+    if key_ids:
+        try:
+            unpriced_days = read_native_unpriced_days(supabase, allocator_id, key_ids)
+        except Exception:  # noqa: BLE001 - see above: keep the rows, say so loudly
+            logger.exception(
+                "match: native-unpriced marker read failed for allocator %s; the "
+                "holdings rows are kept as they were",
+                allocator_id,
+            )
+    if unpriced_days:
+        kept_rows: list[Row] = []
+        for h in holdings_rows:
+            unpriced_day = unpriced_days.get(str(h.get("api_key_id")))
+            if unpriced_day is not None and str(h["asof"]) < unpriced_day:
+                continue
+            kept_rows.append(h)
+        if len(kept_rows) != len(holdings_rows):
+            logger.info(
+                "match: native-unpriced marker removed %d holdings row(s) for allocator %s",
+                len(holdings_rows) - len(kept_rows), allocator_id,
+            )
+        holdings_rows = kept_rows
 
     # --- Step 2: collapse to latest-asof-per-(venue, symbol, holding_type) ---
     # First row wins because we ordered DESC — mirrors queries.ts:791-795 holdingsMap
