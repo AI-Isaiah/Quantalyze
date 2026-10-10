@@ -360,6 +360,10 @@ export function HoldingsTabPanel(
           value_usd: h.value_usd,
           entry_price: h.entry_price ?? null,
           unrealized_pnl_usd: h.unrealized_pnl_usd ?? null,
+          // Phase 164.6.6.2.1 plan 17: the stored unit and the mark the row
+          // was valued at; the table decides nothing from the symbol.
+          quantity_unit: h.quantity_unit ?? null,
+          mark_price_usd: h.mark_price_usd,
           api_key_id: h.api_key_id,
           source_key_sync_status: status,
           source_key_missing: !keyStatusById.has(h.api_key_id),

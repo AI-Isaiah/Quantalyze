@@ -673,7 +673,15 @@ const CLOSURE_FLOOR = 30;
  * A resolver that handles `./…` and silently drops aliases looks perfectly
  * healthy — it just walks a smaller graph. This module is how we tell.
  */
-const ALIAS_ONLY_WITNESS = "src/lib/portfolio-math-utils.ts";
+//
+// 2026-10-09 (Phase 164.6.6.2.1 plan 11): the builder now imports
+// `./native-to-usd`, whose closure reaches `src/lib/portfolio-stats.ts`, and that
+// file imports `./portfolio-math-utils` RELATIVELY. The module above therefore
+// stopped being alias-only (measured: it left `closure.aliasOnly`, this test went
+// red). The witness is now `src/lib/supabase/admin.ts`, which
+// `fetch-and-build-payload.ts` imports as `@/lib/supabase/admin` and which no
+// other module in the closure reaches relatively (measured in `closure.aliasOnly`).
+const ALIAS_ONLY_WITNESS = "src/lib/supabase/admin.ts";
 
 /**
  * Every module-specifier string literal in a source: `from "x"`, a bare

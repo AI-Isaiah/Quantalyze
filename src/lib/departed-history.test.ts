@@ -212,6 +212,29 @@ describe("departedHistoryCard — the switch and the line never disagree (SFH-C4
     );
   });
 
+  it("164.6.6.2.1 D-09: a native key whose last day has no stored close names that cause, and native_unit keeps its sentence", () => {
+    // The derive stamps anchor_null_reason "native_unpriced" when a native-unit
+    // account's last balance has no stored BTC close. The read worked and the
+    // account is supported; what is missing is a price for one day.
+    const anchor = departedAnchorOf({
+      payload: { anchor_usd: null, anchor_null_reason: "native_unpriced" },
+    });
+    expect(anchor).toEqual({ state: "unusable", reason: "native_unpriced" });
+    const card = departedHistoryCard(knownKey, knownCase.keys, anchor);
+    expect(card.sentence).toBe(
+      "History not available: no BTC close is stored for this account's last day, so its last balance cannot be priced in USD.",
+    );
+    expect(card.checked).toBe(false);
+    expect(card.toggleTo).toBeNull();
+    // The unsupported-currency sentence is a different cause and stays.
+    expect(
+      departedHistoryCard(knownKey, knownCase.keys, { state: "unusable", reason: "native_unit" })
+        .sentence,
+    ).toBe(
+      "History not available: this account is measured in its own currency, not USD, so it cannot be added to a USD history.",
+    );
+  });
+
   it("a bounded key with no anchor keeps its bound's own reason", () => {
     const c = spec.cases.find((row) => row.name.startsWith("13_"))!;
     const card = departedHistoryCard(c.keys.find((k) => k.id === "k-dep")!, c.keys, {

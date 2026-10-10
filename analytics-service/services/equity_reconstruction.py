@@ -41,11 +41,13 @@ import pandas as pd
 import sentry_sdk
 
 from services.account_identity import VENUES_WITH_ACCOUNT_ID
+from services.allocator_positions import read_native_unpriced_days
 from services.allocator_equity_derive import (
     account_groups,
     eligible_key_predicate,
     working_holder_predicate,
 )
+from services.benchmark import BtcClosesReadError, read_btc_closes
 from services.ccxt_flow_fetch import _rate_limit_sleep, fetch_ccxt_transfers
 from services.closed_sets import (
     # A-03 — the MT5 go-dark gate. Added HERE, in the block this module already
@@ -75,6 +77,7 @@ from services.job_worker import (
 )
 from services.exchange import aclose_exchange
 from services.metrics import DEFAULT_PERIODS_PER_YEAR
+from services.native_to_usd import convert_native_levels_to_usd
 from services.redact import scrub_freeform_string
 
 if TYPE_CHECKING:
@@ -1840,6 +1843,8 @@ class _LatestHoldings:
     never_polled_keys: int
     max_carry_age_days: int
     identity_unknown_not_carried: int
+    # R2-WR-01: accounts left out because a poll declared their latest completed day unpriced.
+    native_unpriced_accounts: int
 
 
 async def _fetch_latest_holdings_per_eligible_key(
@@ -1917,6 +1922,21 @@ async def _fetch_latest_holdings_per_eligible_key(
     or not, and so does a failing key whose account id is known or whose venue
     stamps none (MT5, sFOX).
 
+    A NATIVE-UNPRICED account is NOT carried (164.6.6.2.1 R2-WR-01, D-02/D-08/D-17):
+    a BTC-denominated MT5 account whose latest completed day has no stored close
+    polls to NO row, and the poll records that in the service-only
+    ``native_unpriced:<key>`` row of ``allocator_equity_derived``
+    (``read_native_unpriced_days``, the one Python reader). When the latest marker
+    over the group's keys is dated AFTER the group's latest ``asof``, those rows
+    are priced at an older close than the poll just named, so the account
+    contributes nothing and ``native_unpriced_accounts`` counts it. The
+    comparison is strict: a same-day priced poll writes rows dated the marker's
+    own day and they stand. This is the exception to the "MT5 persists an
+    explicit empty-equity row itself" premise above: an unpriced MT5 poll
+    persists no row at all. A failed marker read RAISES like every other read
+    here: the snapshot is first-writer-wins, so a day written without the marker
+    would pin the stale-close value for good.
+
     The latest ``asof`` is reduced with ``max()`` in Python, so correctness
     never rests on the order a read returns.
 
@@ -1942,6 +1962,12 @@ async def _fetch_latest_holdings_per_eligible_key(
     )
     eligible_keys = sum(1 for r in key_rows if eligible_key_predicate(r))
 
+    # R2-WR-01: one read of every key's native-unpriced marker, before the loop.
+    all_key_ids = [str(r.get("id")) for r in key_rows if r.get("id")]
+    unpriced_days = await db_execute(
+        lambda: read_native_unpriced_days(supabase, allocator_id, all_key_ids)
+    )
+
     rows: list[dict[str, Any]] = []
     counted_accounts = 0
     carried = 0
@@ -1950,6 +1976,7 @@ async def _fetch_latest_holdings_per_eligible_key(
     never_polled = 0
     max_carry_age = 0
     identity_unknown_not_carried = 0
+    native_unpriced_accounts = 0
     for group in account_groups(key_rows):
         eligible = [r for r in group if eligible_key_predicate(r)]
         if not eligible:
@@ -1981,6 +2008,14 @@ async def _fetch_latest_holdings_per_eligible_key(
             never_polled += len(eligible)
             continue
         latest = max(asofs)
+
+        group_unpriced_day = max(
+            (unpriced_days[i] for i in group_ids if i in unpriced_days), default=None
+        )
+        if group_unpriced_day is not None and group_unpriced_day > latest:
+            # R2-WR-01: these rows are priced at an older close than the poll named.
+            native_unpriced_accounts += 1
+            continue
 
         if latest < today_iso and _identity_unknown_and_not_working(group, eligible):
             # R2-CR-02: its same-day rows would have counted; it has none today.
@@ -2037,6 +2072,7 @@ async def _fetch_latest_holdings_per_eligible_key(
         never_polled_keys=never_polled,
         max_carry_age_days=max_carry_age,
         identity_unknown_not_carried=identity_unknown_not_carried,
+        native_unpriced_accounts=native_unpriced_accounts,
     )
 
 
@@ -2791,6 +2827,13 @@ _MT5_BACKFILL_MESSAGES: dict[str, str] = {
         "reconstruct_allocator_history: the MT5 account currency was not readable "
         "— retrying"
     ),
+    # 164.6.6.2.1 SFH-01 -- the stored BTC closes could not be READ. A read fault, not "no
+    # price source": the backfill is a ONE-TIME rebuild, so ending it as no-data on a blip
+    # would leave the account's history empty for good. Retries; nothing is persisted.
+    "btc_closes_unreadable": (
+        "reconstruct_allocator_history: the stored BTC prices were not readable "
+        "— retrying"
+    ),
     "account_snapshot": (
         "reconstruct_allocator_history: the MT5 balance snapshot was missing or "
         "non-numeric — refusing to reconstruct from it"
@@ -2857,14 +2900,24 @@ def _mt5_telemetry() -> dict[str, Any]:
 
 
 def _mt5_rows_from_levels(
-    nav: "pd.Series", start_date: date, end_date: date,
+    nav: "pd.Series",
+    start_date: date,
+    end_date: date,
+    *,
+    native_unit: str | None = None,
+    btc_closes: "pd.Series | None" = None,
 ) -> list[dict[str, Any]]:
     """Turn an MT5 NAV-LEVEL series into ``allocator_equity_snapshots`` rows,
     CLIPPED to ``[start_date, end_date]`` and DENSE across interior quiet days.
 
-    A native-unit account (a BTC MT5 account) never reaches this function:
-    ``_mt5_fetch_window`` skips it first (164.6.6.2 D-13); its USD view is Phase
-    164.6.6.2.1 (D-15).
+    A native-unit account (a BTC MT5 account, 164.6.6.2.1 D-02) passes its unit and
+    the stored closes. Its NATIVE levels are densified by forward-fill exactly as a USD
+    account's are (a BTC balance does not change because nobody traded), and ONLY THEN
+    priced, each day at that day's own stored close
+    (``native_to_usd.convert_native_levels_to_usd``). A day with no close gets NO ROW:
+    the USD value is never forward-filled, since that would state a figure no stored
+    close backs. With no price source at all there are no rows. The no-row-before-the-
+    first-ledger-event rule and the window clip below hold for it unchanged.
 
     ⛔ ``value_usd`` is an ABSOLUTE DOLLAR BALANCE. ``nav`` MUST come from
     ``broker_dailies.reconstruct_mt5_nav_levels`` — the LEVELS sibling — never
@@ -2940,6 +2993,10 @@ def _mt5_rows_from_levels(
     dense = levels.reindex(
         pd.date_range(levels.index.min(), dense_end, freq="D")
     ).ffill()
+    if native_unit is not None:
+        # The native balance was carried above; the PRICE is looked up per day and
+        # an unpriced day drops out here, so it cannot reappear as a row below.
+        dense = convert_native_levels_to_usd(dense, native_unit, btc_closes)
 
     for day, value in dense.items():
         as_date = pd.Timestamp(day).date()
@@ -3251,12 +3308,14 @@ async def _mt5_fetch_window(
     # just returned, decided BEFORE any equity is extracted or any row is built.
     # `allocator_equity_snapshots.value_usd` is an absolute DOLLAR balance, so a BTC level of
     # 0.11 must never reach `_mt5_rows_from_levels` (its 2-decimal rounding would store it as
-    # eleven cents and flatten the whole curve). A native, unsupported or malformed currency
-    # takes the EXISTING empty-window disposition (the caller's `count == 0 and not rows` ->
+    # eleven cents and flatten the whole curve). An unsupported or malformed currency takes
+    # the EXISTING empty-window disposition (the caller's `count == 0 and not rows` ->
     # `allocator.equity.reconstruct_no_data`, outcome DONE), so the dashboard shows no
     # fabricated history and the reason it shows is the positions poll's own note. Blank is
     # a read fault: TRANSIENT, nothing guessed (D-01). Logs carry the validated code or
     # "unknown" and never an amount or the raw broker text (T-164.6.6.2-11).
+    # ⭐ 164.6.6.2.1 / D-02 — a NATIVE unit (BTC) is no longer in that skip: its levels are
+    # priced per day at that day's stored close below, and an unpriced day has no row.
     try:
         _unit = classify_account_currency(info.get("currency"))
     except AccountCurrencyBlank:
@@ -3280,14 +3339,6 @@ async def _mt5_fetch_window(
             _unsupported.code, allocator_id, api_key_id,
         )
         return ([], False, _mt5_telemetry())
-    if _unit.native:
-        logger.info(
-            "reconstruct_allocator_history: mt5 account is measured in %s "
-            "(allocator=%s key=%s) — no USD history built (D-13)",
-            _unit.code, allocator_id, api_key_id,
-        )
-        return ([], False, _mt5_telemetry())
-
     # ⭐ [Rule 2 — missing critical functionality] The equity/balance guards below
     # are NOT in the plan's `<behavior>` block. They are added because a NaN/Inf
     # anchor sails past every downstream NAV-denominator guard as a silent-NaN
@@ -3311,6 +3362,7 @@ async def _mt5_fetch_window(
             equity,
             balance,
             server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+            floors=_unit.floors,
         )
     except Mt5DealClassificationError as exc:
         # The deribit-'correction' fail-loud lesson: never retry an unknown
@@ -3364,6 +3416,33 @@ async def _mt5_fetch_window(
             meta.get("computation_status_hint"),
             ",".join(_guards_fired) or "none",
         )
+
+    if _unit.native:
+        # 164.6.6.2.1 / D-02 -- a BTC account's NATIVE levels are priced per day at
+        # that day's stored close; an unpriced day has no row. Logs carry the unit
+        # only, never an amount (T-164.6.6.2-11).
+        try:
+            btc_closes = await read_btc_closes()
+        except BtcClosesReadError as exc:
+            # SFH-01: an outage is not "no price source". `None` below is the honest
+            # "no close stored" (a successful read) and still ends as no-data; a failed
+            # read retries. Nothing was persisted yet. The cause is in the log line.
+            logger.warning(
+                "reconstruct_allocator_history: stored %s closes unreadable "
+                "(allocator=%s key=%s): %s",
+                _unit.code, allocator_id, api_key_id, exc,
+            )
+            return _fail("btc_closes_unreadable", "transient")
+        rows = _mt5_rows_from_levels(
+            nav, start_date, end_date, native_unit=_unit.code, btc_closes=btc_closes,
+        )
+        logger.info(
+            "reconstruct_allocator_history: mt5 account is measured in %s "
+            "(allocator=%s key=%s) — %d priced day(s) built (price source %s)",
+            _unit.code, allocator_id, api_key_id, len(rows),
+            "absent" if btc_closes is None else "present",
+        )
+        return (rows, False, _mt5_telemetry())
 
     return (
         _mt5_rows_from_levels(nav, start_date, end_date),
@@ -3933,6 +4012,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                     "never_polled_keys": latest.never_polled_keys,
                     "max_carry_age_days": latest.max_carry_age_days,
                     "identity_unknown_not_carried": latest.identity_unknown_not_carried,
+                    "native_unpriced_accounts": latest.native_unpriced_accounts,
                 },
             )
             return DispatchResult(outcome=DispatchOutcome.DONE)
@@ -4031,17 +4111,20 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 "never_polled_keys": latest.never_polled_keys,
                 "max_carry_age_days": latest.max_carry_age_days,
                 "identity_unknown_not_carried": latest.identity_unknown_not_carried,
+                "native_unpriced_accounts": latest.native_unpriced_accounts,
             },
         )
         logger.info(
             "refresh_allocator_equity_daily: upserted %d row for allocator=%s "
             "(key=%s, venue=%s, eligible_keys=%d, carried_keys=%d, "
             "excluded_shared_keys=%d, no_working_accounts=%d, emptied_accounts=%d, "
-            "never_polled_keys=%d, identity_unknown_not_carried=%d)",
+            "never_polled_keys=%d, identity_unknown_not_carried=%d, "
+            "native_unpriced_accounts=%d)",
             count, allocator_id, api_key_id, venue,
             latest.eligible_keys, latest.carried_keys, latest.excluded_shared_keys,
             latest.no_working_accounts, latest.emptied_accounts,
             latest.never_polled_keys, latest.identity_unknown_not_carried,
+            latest.native_unpriced_accounts,
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
     except ccxt.RateLimitExceeded as exc:

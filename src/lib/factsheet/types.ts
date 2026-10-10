@@ -773,6 +773,29 @@ export type FactsheetCommon = {
    */
   returnsUnit?: string;
   /**
+   * Phase 164.6.6.2.1 (D-15, D-19) — the native unit this payload's returns were
+   * CONVERTED from. Present ONLY on the USD-view payload (`usdView.payload`) of a
+   * native-unit strategy; panels read it for the per-view withholding reason
+   * ("returns are converted from BTC"). The masthead never reads it. Absent for a
+   * USD strategy and for the native payload, so those payloads are byte-identical.
+   */
+  convertedFrom?: string;
+  /**
+   * Phase 164.6.6.2.1 (D-06) — the USD view of a native-unit strategy, built
+   * server-side next to the native payload. Absent for a USD strategy (a
+   * conditional spread, so the key is not there at all and a USD payload is
+   * byte-identical) and for a native strategy whose USD view could not be built
+   * (see {@link usdViewUnavailable}).
+   */
+  usdView?: FactsheetUsdView;
+  /**
+   * Phase 164.6.6.2.1 (D-22) — why a native strategy has no {@link usdView}:
+   * the price read failed, or no day had a stored close. Present only for a
+   * native strategy whose USD view could not be built; absent otherwise, so a
+   * USD payload stays byte-identical.
+   */
+  usdViewUnavailable?: "price_read_failed" | "no_priced_day";
+  /**
    * Phase 170.2 (SC-4, D-09) — `strategies.source`, present ONLY when it is
    * `"csv"` (a conditional spread: any other source leaves the key out, so a
    * non-CSV payload is byte-identical). The masthead venue label keys on this.
@@ -893,3 +916,31 @@ export type FactsheetCsvPayload = FactsheetCommon & {
  * unrepresentable for CSV strategies by construction. (NEW-C20-01, B6)
  */
 export type FactsheetPayload = FactsheetApiPayload | FactsheetCsvPayload;
+
+/**
+ * Phase 164.6.6.2.1 (D-06, D-22; UI-SPEC B and C) — the USD view of a
+ * native-unit strategy. Hangs off the native payload as `usdView`; absent for a
+ * USD strategy, so a USD payload is byte-identical.
+ */
+export interface FactsheetUsdView {
+  /** The factsheet payload recomputed on the USD-converted series. */
+  payload: FactsheetPayload;
+  /** The native unit the returns were converted from ("BTC"); parsed at the boundary. */
+  convertedFrom: string;
+  /** First date of the USD series (ISO day, UTC). */
+  usdStart: string;
+  /** Last date of the USD series (ISO day, UTC). */
+  usdEnd: string;
+  /**
+   * True when the USD series starts later than the native series' SECOND date,
+   * i.e. leading days had no stored close (UI-SPEC C curve break).
+   */
+  leadingHole: boolean;
+  /** Interior calendar days (ISO, UTC) with no stored close (UI-SPEC B disclosure). */
+  unpricedDays: string[];
+  /**
+   * `{k}` of UI-SPEC B: the count of native return days absent from the USD
+   * series because their pairing interval contains an unpriced day (interior only).
+   */
+  removedReturns: number;
+}

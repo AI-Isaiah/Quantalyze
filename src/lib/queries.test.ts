@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 /**
  * Tests for the manager-identity redaction in `getStrategyDetail()` and
@@ -199,6 +199,7 @@ vi.mock("@/lib/factsheet/v2-joint", async (importActual) => ({
 
 import {
   getStrategiesByCategory,
+  shapeRowAnalytics,
   getStrategyDetail,
   getPublicStrategyDetail,
   fetchStrategyLazyMetrics,
@@ -415,7 +416,14 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
   it("never projects daily_returns, the metrics_json blob, data_quality_flags, or the raw returns_series", async () => {
     const { cols, embed } = await captureSelect();
     expect(cols).not.toContain("daily_returns");
-    expect(cols).not.toContain("data_quality_flags");
+    // AMENDED 2026-10-10, Phase 164.6.6.2.1 D-12 (this was a bare
+    // `not.toContain("data_quality_flags")`): ONE enumerated scalar now crosses
+    // to anonymous readers, `native_unit:data_quality_flags->>native_unit`, so
+    // the list can label a BTC strategy "in BTC". The blob never crosses: the
+    // lookahead below allows exactly that one `->>native_unit` key and nothing
+    // else (not the bare column, not `->` object access, not another key). The
+    // positive pin for the alias is the test after the 3M one below.
+    expect(cols).not.toMatch(/data_quality_flags(?!->>native_unit\b)/);
     // `metrics_json` may appear ONLY as the JSONB-key alias below — never as a
     // projected column (which would ship the entire blob to an anon reader).
     expect(embed).not.toMatch(/metrics_json(?!->)/);
@@ -447,6 +455,15 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
     // returns `{"three_month": 0.0}` (HTTP 200, a real number) — see
     // 159-03-SUMMARY. The A4 assumption held; the filter does not degrade.
     expect(embed).toContain("three_month:metrics_json->three_month");
+  });
+
+  it("carries the native unit as ONE aliased flags scalar, never the flags blob (164.6.6.2.1 D-12)", async () => {
+    const { cols, embed } = await captureSelect();
+    // The StrategyTable "in BTC" chip's only anonymous data. A scalar key out of
+    // a private blob, like `three_month` and `series_end`.
+    expect(embed).toContain("native_unit:data_quality_flags->>native_unit");
+    // Every occurrence of the column is that one alias: strip it and nothing is left.
+    expect(cols.replace("data_quality_flags->>native_unit", "")).not.toContain("data_quality_flags");
   });
 });
 
@@ -2280,5 +2297,282 @@ describe("departedHistoryUnavailable: the derived payload's benign flag reaches 
 
   it("is false with no derived row", () => {
     expect(call(null).departedHistoryUnavailable).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 164.6.6.2.1 plan 17 (D-09, D-20). The derive leaves a native-unit
+// account out of the dollar total on a day whose BTC close is not stored, and
+// says which key and day under `native_unpriced_key_omitted` +
+// `unpriced_native_keys`. The reader names the owner's own key, so a drop in
+// the book total is never silent. The JSONB is worker-written: read defensively.
+// ---------------------------------------------------------------------------
+describe("unpricedNativeAccounts: the derive's omitted-account list reaches the Overview (164.6.6.2.1 D-20)", () => {
+  const key = (id: string, label: string | null) => ({
+    id,
+    is_active: true,
+    exchange: "okx",
+    label,
+    sync_status: "complete",
+    last_sync_at: "2026-10-09T00:00:00Z",
+    disconnected_at: null,
+    venue_account_id: `va-${id}`,
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+  });
+  const KEYS = [key("K1", "BTC desk"), key("K2", "Alpha MT5"), key("K3", "  "), key("K4", "Zed")];
+  const row = (extra: Record<string, unknown>, trustworthy = true) => ({
+    payload: {
+      version: 2,
+      is_trustworthy: trustworthy,
+      curve: [{ date: "2026-10-09", equity_usd: 100 }],
+      returns: [{ date: "2026-10-09", r: 0.01 }],
+      flags: ["native_unpriced_key_omitted"],
+      ...extra,
+    } as Record<string, unknown>,
+    computed_at: "2026-10-10T05:30:00Z",
+  });
+  const call = (r: Parameters<typeof derivePhase07Fields>[5], keys = KEYS) =>
+    derivePhase07Fields(keys, [], 0, [], false, r);
+
+  it("names the owner's own key and the writer's day on a ready book", () => {
+    const result = call(row({ unpriced_native_keys: [{ api_key_id: "K1", day: "2026-10-08" }] }));
+    expect(result.equityHistoryState).toBe("ready");
+    expect(result.unpricedNativeAccounts).toEqual([
+      { apiKeyId: "K1", label: "BTC desk", day: "2026-10-08", kind: "dated" },
+    ]);
+  });
+
+  it("sorts ascending by label, keeps one entry per key (earliest day), and falls back to the exchange for a blank label", () => {
+    const result = call(
+      row({
+        unpriced_native_keys: [
+          { api_key_id: "K1", day: "2026-10-08" },
+          { api_key_id: "K4", day: "2026-10-07" },
+          { api_key_id: "K2", day: "2026-10-09" },
+          { api_key_id: "K2", day: "2026-10-06" },
+          { api_key_id: "K3", day: "2026-10-05" },
+        ],
+      }),
+    );
+    expect(result.unpricedNativeAccounts?.map((a) => [a.label, a.day])).toEqual([
+      ["Alpha MT5", "2026-10-06"],
+      ["BTC desk", "2026-10-08"],
+      ["okx", "2026-10-05"],
+      ["Zed", "2026-10-07"],
+    ]);
+  });
+
+  it.each([
+    ["an unknown key id", { api_key_id: "not-mine", day: "2026-10-08" }],
+    ["a non-string key id", { api_key_id: 7, day: "2026-10-08" }],
+    ["a bare string", "K1"],
+    ["null", null],
+  ])("drops an entry that names no key the owner holds: %s", (_label, entry) => {
+    const result = call(row({ unpriced_native_keys: [entry, { api_key_id: "K4", day: "2026-10-07" }] }));
+    expect(result.unpricedNativeAccounts).toEqual([
+      { apiKeyId: "K4", label: "Zed", day: "2026-10-07", kind: "dated" },
+    ]);
+  });
+
+  // R2-WR-02: the writer lists three different facts under one flag, and the reader keeps the
+  // kind so the note can say which. A "whole" key is out of every day including today; a
+  // "history" key is out of interior days only and IS in today's total; a "dated" key is out of
+  // the curve's last day. SFH-02 / WR-02: every one of them is still NAMED.
+  describe("the kind of omission survives the reader (R2-WR-02)", () => {
+    it("dated: a day the writer recorded is kept, with kind 'dated'", () => {
+      const result = call(row({ unpriced_native_keys: [{ api_key_id: "K1", day: "2026-10-08" }] }));
+      expect(result.unpricedNativeAccounts).toEqual([
+        { apiKeyId: "K1", label: "BTC desk", day: "2026-10-08", kind: "dated" },
+      ]);
+    });
+
+    it("dated: interior hole days riding beside a last day do not turn it into history", () => {
+      const result = call(
+        row({
+          unpriced_native_keys: [
+            { api_key_id: "K1", day: "2026-10-08", hole_days: ["2026-07-14", "2026-07-15"] },
+          ],
+        }),
+      );
+      expect(result.unpricedNativeAccounts).toEqual([
+        { apiKeyId: "K1", label: "BTC desk", day: "2026-10-08", kind: "dated" },
+      ]);
+    });
+
+    it.each([
+      ["reason day_unknown (an unreadable native row)", { api_key_id: "K1", day: null, reason: "day_unknown" }],
+      ["a missing day field", { api_key_id: "K1" }],
+      ["a non-ISO day", { api_key_id: "K1", day: "Oct 8" }],
+      ["a calendar-impossible day", { api_key_id: "K1", day: "2026-02-31" }],
+      ["a non-string day", { api_key_id: "K1", day: 20261008 }],
+      ["a null day and unreadable hole_days", { api_key_id: "K1", day: null, hole_days: ["nope", 7] }],
+      ["day_unknown beside hole_days (out whole wins)", { api_key_id: "K1", day: null, reason: "day_unknown", hole_days: ["2026-07-14"] }],
+    ])("whole: the account is out of the total entirely when the entry has %s", (_label, entry) => {
+      const result = call(row({ unpriced_native_keys: [entry] }));
+      expect(result.unpricedNativeAccounts).toEqual([
+        { apiKeyId: "K1", label: "BTC desk", day: null, kind: "whole" },
+      ]);
+    });
+
+    it("history: interior hole days only, with a null day, count the valid distinct days", () => {
+      const result = call(
+        row({
+          unpriced_native_keys: [
+            { api_key_id: "K1", day: null, hole_days: ["2026-07-14", "2026-07-15", "2026-07-15", "junk", "2026-02-31"] },
+          ],
+        }),
+      );
+      expect(result.unpricedNativeAccounts).toEqual([
+        { apiKeyId: "K1", label: "BTC desk", day: null, kind: "history", holeDays: 2 },
+      ]);
+    });
+
+    it("history: a hole_days-only entry with the day field absent is history too", () => {
+      const result = call(row({ unpriced_native_keys: [{ api_key_id: "K1", hole_days: ["2026-07-14"] }] }));
+      expect(result.unpricedNativeAccounts).toEqual([
+        { apiKeyId: "K1", label: "BTC desk", day: null, kind: "history", holeDays: 1 },
+      ]);
+    });
+
+    it("one key listed twice keeps the strongest claim: dated, then whole, then history", () => {
+      const history = { api_key_id: "K1", day: null, hole_days: ["2026-10-03"] };
+      const whole = { api_key_id: "K1", day: null, reason: "day_unknown" };
+      const dated = { api_key_id: "K1", day: "2026-10-08" };
+      const kinds = (entries: unknown[]) =>
+        call(row({ unpriced_native_keys: entries })).unpricedNativeAccounts?.map((a) => a.kind);
+      expect(kinds([history, dated])).toEqual(["dated"]);
+      expect(kinds([whole, history])).toEqual(["whole"]);
+      expect(kinds([history, whole, dated])).toEqual(["dated"]);
+    });
+  });
+
+  describe("when the flag is present but entries are dropped (SFH-02: never a silent drop)", () => {
+    let errorSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      recorders.sentryCalls.length = 0;
+    });
+    afterEach(() => errorSpy.mockRestore());
+
+    it("logs received vs kept, to the console and Sentry, with no key id or label in it", () => {
+      call(
+        row({
+          unpriced_native_keys: [
+            { api_key_id: "K1", day: "2026-10-08" },
+            { api_key_id: "not-mine", day: "2026-10-08" },
+            null,
+          ],
+        }),
+      );
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const message = String(errorSpy.mock.calls[0].join(" "));
+      expect(message).toContain("received 3");
+      expect(message).toContain("kept 1");
+      expect(message).not.toContain("not-mine");
+      expect(message).not.toContain("BTC desk");
+      expect(recorders.sentryCalls).toHaveLength(1);
+      expect(recorders.sentryCalls[0].opts).toMatchObject({
+        tags: { op: "readUnpricedNativeAccounts" },
+        level: "warning",
+      });
+    });
+
+    it("logs when the flag is raised but the list is missing or not an array", () => {
+      call(row({}));
+      call(row({ unpriced_native_keys: { api_key_id: "K1", day: "2026-10-08" } }));
+      expect(errorSpy).toHaveBeenCalledTimes(2);
+      expect(String(errorSpy.mock.calls[0].join(" "))).toContain("received 0");
+    });
+
+    it("does not log when every entry is kept, or when the flag is absent", () => {
+      call(row({ unpriced_native_keys: [{ api_key_id: "K1", day: null }] }));
+      call(row({ flags: [] }));
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(recorders.sentryCalls).toHaveLength(0);
+    });
+  });
+
+  it.each([
+    ["the flag is absent", { flags: [], unpriced_native_keys: [{ api_key_id: "K1", day: "2026-10-08" }] }],
+    ["the list is absent", {}],
+    ["the list is not an array", { unpriced_native_keys: { api_key_id: "K1", day: "2026-10-08" } }],
+    ["flags is not a list", { flags: "native_unpriced_key_omitted", unpriced_native_keys: [{ api_key_id: "K1", day: "2026-10-08" }] }],
+  ])("is empty when %s", (_label, extra) => {
+    expect(call(row(extra)).unpricedNativeAccounts).toEqual([]);
+  });
+
+  it("is empty while the history is rebuilding (no curve is shown) and with no derived row", () => {
+    const rebuilding = call(
+      row({ unpriced_native_keys: [{ api_key_id: "K1", day: "2026-10-08" }] }, false),
+    );
+    expect(rebuilding.equityHistoryState).toBe("rebuilding");
+    expect(rebuilding.unpricedNativeAccounts).toEqual([]);
+    expect(call(null).unpricedNativeAccounts).toEqual([]);
+  });
+});
+
+/**
+ * Phase 164.6.6.2.1 plan 16 (D-05, D-12) — a rankable row carries the unit the
+ * StrategyTable chip reads. The anonymous ranking read projects the one scalar
+ * (`native_unit:data_quality_flags->>native_unit`); the owner's wildcard embed
+ * carries the whole flags blob instead, so the shaper maps the unit out of it.
+ * Either way the value passes `parseReturnsUnit`, so a malformed string never
+ * reaches the render as label text.
+ */
+describe("shapeRowAnalytics — native_unit for the StrategyTable chip", () => {
+  const ROW = {
+    id: "an-1",
+    strategy_id: "s-1",
+    computed_at: "2026-01-01T00:00:00Z",
+    computation_status: "complete",
+    data_quality_flags: null,
+  } as unknown as Parameters<typeof shapeRowAnalytics>[0];
+
+  const shape = (over: Record<string, unknown>) =>
+    shapeRowAnalytics({ ...(ROW as object), ...over } as never, "s-1");
+
+  it("owner wildcard row: maps native_unit out of data_quality_flags when no scalar alias is present", () => {
+    const out = shape({ data_quality_flags: { native_unit: "BTC" } });
+    expect(out.native_unit).toBe("BTC");
+  });
+
+  it("anonymous ranking row: the projected scalar alias is kept", () => {
+    expect(shape({ native_unit: "BTC" }).native_unit).toBe("BTC");
+  });
+
+  it("the alias wins over the blob when both are present", () => {
+    const out = shape({ native_unit: "ETH", data_quality_flags: { native_unit: "BTC" } });
+    expect(out.native_unit).toBe("ETH");
+  });
+
+  it.each([
+    ["lower-case", "btc"],
+    ["markup", "<b>X</b>"],
+    ["non-string", 5],
+    ["empty", ""],
+  ])("a %s unit is dropped to null, never passed through", (_l, bad) => {
+    expect(shape({ native_unit: bad }).native_unit).toBeNull();
+    expect(shape({ data_quality_flags: { native_unit: bad } }).native_unit).toBeNull();
+  });
+
+  it("a USD row (no unit anywhere) carries null", () => {
+    expect(shape({}).native_unit).toBeNull();
+    expect(shape({ data_quality_flags: { composite: true } }).native_unit).toBeNull();
+  });
+
+  it("the flags blob is not copied into the shape by the mapping (only the one scalar is derived)", () => {
+    // The wildcard owner path already carries the blob; the mapping must not ADD
+    // any flags key to a row that arrived without them.
+    const out = shape({ native_unit: "BTC", data_quality_flags: undefined });
+    expect(out.data_quality_flags).toBeUndefined();
+    expect(out.native_unit).toBe("BTC");
+  });
+
+  it("a non-rankable (failed / computing) row loses the unit: it shows no figures to misread", () => {
+    for (const computation_status of ["failed", "computing", "pending"]) {
+      const out = shape({ computation_status, native_unit: "BTC", data_quality_flags: { native_unit: "BTC" } });
+      expect(out.native_unit ?? null).toBeNull();
+    }
   });
 });

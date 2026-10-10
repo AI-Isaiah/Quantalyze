@@ -137,6 +137,77 @@ export function partialPollDay(metadata: unknown): string | null {
 }
 
 /**
+ * 164.6.6.2.1 CR-01 (D-02, D-08, D-17). The `allocator_equity_derived.kind` prefix of the
+ * positions poll's record that a native-unit account's latest completed day was
+ * UNPRICED (`native_unpriced:<api_key_id>`). Pinned equal to
+ * `NATIVE_UNPRICED_KIND_PREFIX` in `analytics-service/services/allocator_positions.py`
+ * by this module's test.
+ *
+ * WHY THIS TABLE AND NOT THE AUDIT LOG. The evidence must be something the owner cannot
+ * write. `audit_log` is not: `public.log_audit_event` is SECURITY DEFINER, granted to
+ * `authenticated`, and records ANY action, entity and metadata under the caller's own
+ * user id, so an owner could forge a poll event for their own key and shape what the
+ * dashboard, the AUM and the commit audit count. `allocator_equity_derived` has one
+ * write policy, `allocator_equity_derived_service_all` (service role); the owner has
+ * SELECT only (`allocator_equity_derived_owner_select`). The table-level INSERT/UPDATE
+ * grants to `authenticated` do not matter: row-level security refuses every such write.
+ */
+export const NATIVE_UNPRICED_KIND_PREFIX = "native_unpriced:";
+
+/**
+ * The day the positions poll declared a native-unit account UNPRICED, from the payload
+ * of its `native_unpriced:<key>` record, or null when `payload` is not one.
+ *
+ * A BTC account's holdings row is priced at the stored close of the latest completed
+ * day. When that close is missing the poll writes NO row (`allocator_holdings.value_usd`
+ * is NOT NULL, and a zero would state a value no close backs) and records this instead.
+ * The key's earlier row, priced at an older close, would otherwise stay its latest and
+ * keep counting in the Holdings tab and the AUM under a note that says the account is
+ * left out. A record needs a recorded day, like `cleanPollDay`.
+ */
+export function nativeUnpricedDay(payload: unknown): string | null {
+  if (payload === null || typeof payload !== "object") return null;
+  const p = payload as Record<string, unknown>;
+  if (p.native_unpriced !== true) return null;
+  const asof = p.asof;
+  return typeof asof === "string" && ISO_DAY.test(asof) ? asof : null;
+}
+
+/**
+ * CR-01. For each of the owner's keys, the LATEST day a poll declared a native-unit
+ * account unpriced (`nativeUnpricedDay`), for the reader that sums every key's newest
+ * row per holding rather than reading one key at a time (the scenario commit's audit
+ * AUM). That reader drops a key's rows dated BEFORE the returned day: they are priced at
+ * an older close than the poll just named. Rows dated on or after it stand (a later
+ * priced poll writes rows at its own, later, day), so the rule needs no "newest poll"
+ * bookkeeping.
+ *
+ * One owner-scoped read, bounded by `HOLDINGS_ROW_CAP`: the table holds at most one
+ * such row per key. Never throws; an error is returned, and the caller decides (the
+ * commit keeps its old sum and says so, rather than failing a landed commit). Runs on
+ * the caller's user-scoped client under `allocator_equity_derived_owner_select`.
+ */
+export async function fetchNativeUnpricedDays(
+  supabase: SupabaseClient<Database>,
+  userId: string,
+): Promise<{ data: Map<string, string>; error: ReadError | null }> {
+  const res = await supabase
+    .from("allocator_equity_derived")
+    .select("kind, payload")
+    .eq("allocator_id", userId)
+    .like("kind", `${NATIVE_UNPRICED_KIND_PREFIX}%`)
+    .limit(HOLDINGS_ROW_CAP);
+  if (res.error) return { data: new Map(), error: res.error };
+  const dayByKey = new Map<string, string>();
+  for (const row of (res.data ?? []) as Array<{ kind: unknown; payload: unknown }>) {
+    const day = nativeUnpricedDay(row.payload);
+    if (typeof row.kind !== "string" || day === null) continue;
+    dayByKey.set(row.kind.slice(NATIVE_UNPRICED_KIND_PREFIX.length), day);
+  }
+  return { data: dayByKey, error: null };
+}
+
+/**
  * The bounded read behind Open Positions. Three steps, in the shape of
  * `getLatestExposureSnapshot` (read the latest `asof` first, then the rows at
  * it) but at the per-key grain (D-16):
@@ -240,7 +311,7 @@ export async function fetchLatestHoldingsPerKey(
         partialDay: string | null;
         error: ReadError | null;
       }> => {
-        const [latestRes, pollRes, newestPollRes] = await Promise.all([
+        const [latestRes, pollRes, newestPollRes, unpricedRes] = await Promise.all([
           supabase
             .from("allocator_holdings")
             .select("asof")
@@ -269,6 +340,13 @@ export async function fetchLatestHoldingsPerKey(
             .eq("entity_id", key.id)
             .order("created_at", { ascending: false })
             .limit(1),
+          // CR-01: the poll's record that a native account was unpriced.
+          supabase
+            .from("allocator_equity_derived")
+            .select("payload")
+            .eq("allocator_id", userId)
+            .eq("kind", `${NATIVE_UNPRICED_KIND_PREFIX}${key.id}`)
+            .limit(1),
         ]);
         if (latestRes.error) return { reading: null, partialDay: null, error: latestRes.error };
         if (pollRes.error) return { reading: null, partialDay: null, error: pollRes.error };
@@ -277,6 +355,31 @@ export async function fetchLatestHoldingsPerKey(
         }
         const partialDay = partialPollDay(newestPollRes.data?.[0]?.metadata ?? null);
         const latestAsof = latestRes.data?.[0]?.asof ?? null;
+        // CR-01: the poll's service-written record that it found this native
+        // account unpriced on a day after the key's latest rows. Those rows are
+        // priced at an older close than the poll just named, so the key
+        // contributes nothing (the same reading as a clean empty poll, below).
+        // A failed read of the record is NOT an error of this read: it is read from the
+        // same table as the equity curve, whose outage the dashboard isolates (it
+        // renders the history as rebuilding) and must not turn into a blank Holdings
+        // tab. It is logged loudly and the key keeps its latest rows, exactly as
+        // before this check existed.
+        if (unpricedRes.error) {
+          console.error(
+            "[fetchLatestHoldingsPerKey] native-unpriced record read failed; the key's latest rows are kept as they were:",
+            unpricedRes.error.message,
+          );
+        }
+        const unpricedAsof = unpricedRes.error
+          ? null
+          : nativeUnpricedDay(unpricedRes.data?.[0]?.payload ?? null);
+        if (unpricedAsof !== null && (latestAsof === null || unpricedAsof > latestAsof)) {
+          return {
+            reading: { day: unpricedAsof, hasRows: false },
+            partialDay: null,
+            error: null,
+          };
+        }
         const cleanPollAsof = cleanPollDay(pollRes.data?.[0]?.metadata ?? null);
         if (cleanPollAsof !== null && (latestAsof === null || cleanPollAsof > latestAsof)) {
           // SFH-C4-02: the key's newest clean poll read it after these rows.

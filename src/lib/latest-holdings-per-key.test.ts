@@ -4,11 +4,14 @@
  * before its latest poll must see that position leave; a key that did not
  * poll on the allocator's latest day must keep its own rows.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   fetchLatestHoldingsPerKey,
   HOLDINGS_ROW_CAP,
   latestHoldingsPerKey,
+  NATIVE_UNPRICED_KIND_PREFIX,
+  fetchNativeUnpricedDays,
+  nativeUnpricedDay,
 } from "./latest-holdings-per-key";
 
 type Row = { api_key_id: string; asof: string; symbol: string };
@@ -119,10 +122,12 @@ function fakeClient(
   holdings: HoldingDb[],
   fail?: Fail,
   audit: AuditDb[] = [],
+  derived: Array<Record<string, unknown>> = [],
 ) {
   return {
     from(table: string) {
       const eqs: Array<[string, unknown]> = [];
+      let likePrefix: { column: string; prefix: string } | null = null;
       let select = "";
       let order: { column: string; ascending: boolean } | null = null;
       let limit: number | null = null;
@@ -133,6 +138,10 @@ function fakeClient(
         },
         eq(c: string, v: unknown) {
           eqs.push([c, v]);
+          return chain;
+        },
+        like(c: string, pattern: string) {
+          likePrefix = { column: c, prefix: pattern.replace(/%$/, "") };
           return chain;
         },
         order(c: string, o: { ascending: boolean }) {
@@ -149,9 +158,19 @@ function fakeClient(
             return;
           }
           const source = (
-            table === "api_keys" ? keys : table === "audit_log" ? audit : holdings
+            table === "api_keys"
+              ? keys
+              : table === "audit_log"
+                ? audit
+                : table === "allocator_equity_derived"
+                  ? derived
+                  : holdings
           ) as Array<Record<string, unknown>>;
           let rows = source.filter((r) => eqs.every(([c, v]) => r[c] === v));
+          if (likePrefix) {
+            const { column, prefix } = likePrefix;
+            rows = rows.filter((r) => String(r[column]).startsWith(prefix));
+          }
           if (order) {
             const { column, ascending } = order;
             rows = [...rows].sort(
@@ -666,5 +685,116 @@ describe("fetchLatestHoldingsPerKey: the poll that wrote the rows could not read
     }, [partial]);
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
     expect(res).toEqual({ data: null, error: { message: "rls denied" }, partialReads: [] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 164.6.6.2.1 CR-01: a poll that left a native-unit account unpriced.
+// ---------------------------------------------------------------------------
+describe("nativeUnpricedDay (CR-01)", () => {
+  it("reads the day from a payload flagged native_unpriced", () => {
+    expect(nativeUnpricedDay({ native_unpriced: true, asof: "2026-10-10" })).toBe("2026-10-10");
+  });
+
+  it.each([
+    ["no flag", { asof: "2026-10-10" }],
+    ["flag false", { asof: "2026-10-10", native_unpriced: false }],
+    ["flag as a string", { asof: "2026-10-10", native_unpriced: "true" }],
+    ["flag without a day", { native_unpriced: true }],
+    ["flag with a malformed day", { asof: "Oct 10", native_unpriced: true }],
+    ["null payload", null],
+    ["a non-object", "native_unpriced"],
+  ])("is null for %s", (_label, payload) => {
+    expect(nativeUnpricedDay(payload)).toBeNull();
+  });
+
+  it("uses the kind prefix the Python poll writes (pinned across runtimes)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const py = readFileSync(
+      join(process.cwd(), "analytics-service/services/allocator_positions.py"),
+      "utf8",
+    );
+    expect(py).toContain(`NATIVE_UNPRICED_KIND_PREFIX = "${NATIVE_UNPRICED_KIND_PREFIX}"`);
+  });
+});
+
+const record = (keyId: string, asof: string, extra: Record<string, unknown> = {}) => ({
+  allocator_id: "user-1",
+  kind: `${NATIVE_UNPRICED_KIND_PREFIX}${keyId}`,
+  payload: { native_unpriced: true, asof, ...extra },
+});
+
+describe("fetchLatestHoldingsPerKey: a native key the newest poll left unpriced (CR-01)", () => {
+  const btc = [{ id: "key-btc", user_id: "user-1", exchange: "mt5" }];
+  const priced = [h("key-btc", "2026-10-09", "ACCOUNT-0123abcd")];
+
+  it("contributes nothing once the poll's record is dated after its rows", async () => {
+    const client = fakeClient(btc, priced, undefined, [], [record("key-btc", "2026-10-10")]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res).toEqual({ data: [], error: null, partialReads: [] });
+  });
+
+  it("keeps the rows when the record is of the rows' own day", async () => {
+    const client = fakeClient(btc, priced, undefined, [], [record("key-btc", "2026-10-09")]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.data).toEqual(priced);
+  });
+
+  it("ignores another key's record", async () => {
+    const client = fakeClient(btc, priced, undefined, [], [record("key-other", "2026-10-10")]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.data).toEqual(priced);
+  });
+
+  it("a forged audit event is no evidence: the same event shapes the poll once wrote change nothing", async () => {
+    // log_audit_event lets the owner insert any action/entity/metadata for their own key.
+    const client = fakeClient(btc, priced, undefined, [
+      poll("key-btc", "2026-10-10T04:00:05+00:00", {
+        final_status: "complete_with_warnings",
+        row_count: 0,
+        asof: "2026-10-10",
+        native_unpriced: true,
+      }),
+    ]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.data).toEqual(priced);
+  });
+
+  it("a failed record read keeps the key's rows (no worse than before) and is logged, not swallowed", async () => {
+    const client = fakeClient(
+      btc,
+      priced,
+      { table: "allocator_equity_derived", select: "payload", message: "derived read down" },
+      [],
+      [record("key-btc", "2026-10-10")],
+    );
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.error).toBeNull();
+    expect(res.data).toEqual(priced);
+    expect(err).toHaveBeenCalledWith(
+      expect.stringContaining("native-unpriced record read failed"),
+      "derived read down",
+    );
+    err.mockRestore();
+  });
+});
+
+describe("fetchNativeUnpricedDays (CR-01)", () => {
+  it("maps each key to its record's day and ignores malformed payloads", async () => {
+    const client = fakeClient([], [], undefined, [], [
+      record("key-a", "2026-10-10"),
+      record("key-b", "2026-10-08"),
+      { allocator_id: "user-1", kind: "native_unpriced:key-c", payload: { asof: "2026-10-10" } },
+      { allocator_id: "user-1", kind: "key_inputs:key-a", payload: { native_unpriced: true, asof: "2026-10-10" } },
+      { allocator_id: "user-2", kind: "native_unpriced:key-z", payload: { native_unpriced: true, asof: "2026-10-10" } },
+    ]);
+    const res = await fetchNativeUnpricedDays(client, "user-1");
+    expect(res.error).toBeNull();
+    expect([...res.data.entries()].sort()).toEqual([
+      ["key-a", "2026-10-10"],
+      ["key-b", "2026-10-08"],
+    ]);
   });
 });

@@ -37,6 +37,10 @@ const fake = vi.hoisted(() => ({
   signals: [] as AbortSignal[],
   /** N-3: the strategies read never answers until its signal aborts. */
   strategyHangs: false,
+  /** 164.6.6.2.1 plan 11: stored BTC closes the benchmark_prices mock serves. */
+  btcRows: [] as { date: string; close_price: number | string | null }[],
+  /** 164.6.6.2.1 plan 11: a benchmark_prices read that fails. */
+  btcError: null as unknown,
 }));
 
 vi.mock("@/lib/supabase/admin", () => {
@@ -78,10 +82,23 @@ vi.mock("@/lib/supabase/admin", () => {
       // reader and one first-stored-date probe. An empty successful page ends
       // the reader's loop at once and answers the probe with no stored history,
       // so every case here exercises the real read path.
-      b.gte = self;
-      b.lte = self;
-      b.lt = self;
-      b.then = (resolve: (v: unknown) => unknown) => resolve({ data: [], error: null });
+      // 164.6.6.2.1 plan 11: the mock honours the reader's filters, order and
+      // limit, so a seeded close table pages exactly as PostgREST would, and the
+      // default (no rows) is the empty page the cases above rely on.
+      const f = { gte: null as string | null, lte: null as string | null, lt: null as string | null, asc: true, limit: Infinity };
+      b.gte = (_c: string, v: string) => ((f.gte = v), b);
+      b.lte = (_c: string, v: string) => ((f.lte = v), b);
+      b.lt = (_c: string, v: string) => ((f.lt = v), b);
+      b.order = (_c: string, o?: { ascending?: boolean }) => ((f.asc = o?.ascending !== false), b);
+      b.limit = (n: number) => ((f.limit = n), b);
+      b.then = (resolve: (v: unknown) => unknown) => {
+        if (fake.btcError) return resolve({ data: null, error: fake.btcError });
+        const rows = fake.btcRows
+          .filter((r) => (f.gte === null || r.date >= f.gte) && (f.lte === null || r.date <= f.lte) && (f.lt === null || r.date < f.lt))
+          .sort((x, y) => (f.asc ? x.date.localeCompare(y.date) : y.date.localeCompare(x.date)))
+          .slice(0, f.limit);
+        return resolve({ data: rows, error: null });
+      };
     }
     if (table === "csv_daily_returns") {
       // The composite read awaits the builder itself after `.limit(...)`, one
@@ -203,6 +220,8 @@ beforeEach(() => {
   fake.orFilters = [];
   fake.signals = [];
   fake.strategyHangs = false;
+  fake.btcRows = [];
+  fake.btcError = null;
   vi.mocked(captureToSentry).mockClear();
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -831,5 +850,148 @@ describe("164.6.6.2 D-25 — small_base_measured on the analytics row reaches th
     const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
     expect(payload).not.toBeNull();
     expect(payload?.dataQuality && "smallBaseMeasured" in payload.dataQuality).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 164.6.6.2.1 plan 11 (D-01, D-02, D-03, D-15) — a native strategy's
+// payload carries a SECOND payload, `usdView`, built server-side from the native
+// series converted at the stored daily BTC close. A USD strategy's payload has
+// no `usdView` key and no `usdViewUnavailable` key.
+// ---------------------------------------------------------------------------
+const DAY_MS = 86_400_000;
+const isoPlus = (start: string, i: number) =>
+  new Date(Date.parse(`${start}T00:00:00Z`) + i * DAY_MS).toISOString().slice(0, 10);
+
+/** `n` consecutive calendar days from `start`, every native return 0.0. */
+function flatNative(n: number, start: string): { date: string; value: number }[] {
+  return Array.from({ length: n }, (_, i) => ({ date: isoPlus(start, i), value: 0 }));
+}
+
+/**
+ * `n` consecutive daily closes from `start`: exactly `first` on the first day and
+ * exactly `last` on the last, a positive wobble in between. Because every native
+ * return is 0, the USD value compounds to last/first whatever the wobble is.
+ */
+function wobblyCloses(n: number, start: string, first: number, last: number) {
+  return Array.from({ length: n }, (_, i) => {
+    const ramp = first + ((last - first) * i) / (n - 1);
+    const wobble = i === 0 || i === n - 1 ? 0 : 1500 * Math.sin((i * Math.PI) / (n - 1)) * (i % 2 === 0 ? 1 : -0.4);
+    return { date: isoPlus(start, i), close_price: i === n - 1 ? last : ramp + wobble };
+  });
+}
+
+const usdOf = async (): Promise<NonNullable<Awaited<ReturnType<typeof fetchAndBuildPayload>>>> => {
+  const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+  expect(payload).not.toBeNull();
+  return payload as NonNullable<typeof payload>;
+};
+
+describe("164.6.6.2.1 plan 11 — a native strategy ships a server-built USD payload", () => {
+  const NATIVE_FLAGS = { native_unit: "BTC" };
+
+  it("the USD payload is labelled USD, converted from BTC, and keeps the BTC withholdings", async () => {
+    seed(single({ daily_returns: flatNative(30, "2024-01-01"), data_quality_flags: NATIVE_FLAGS }));
+    fake.btcRows = wobblyCloses(30, "2024-01-01", 60000, 87846);
+    const payload = await usdOf();
+    expect(payload.returnsUnit).toBe("BTC");
+    expect(payload.usdView).toBeDefined();
+    const usd = payload.usdView!;
+    expect(usd.convertedFrom).toBe("BTC");
+    expect(usd.payload.returnsUnit).toBe("USD");
+    expect(usd.payload.convertedFrom).toBe("BTC");
+    // D-15: a USD strategy "against BTC" is still not a like-for-like comparison.
+    expect(usd.payload.activeComparator).toBe("none");
+    // The native payload is a plain native payload: no USD labels leak onto it.
+    expect(payload.convertedFrom).toBeUndefined();
+    expect("usdViewUnavailable" in payload).toBe(false);
+  });
+
+  it("BLEED GATE: the USD figures come from the converted series, never the persisted BTC scalars", async () => {
+    // 1463 native days make a USD series of 1461 calendar days between its first and last
+    // date (the first native day has no prior close and is dropped), so
+    // years = 1461 / 365.25 = 4 EXACTLY. Every native return is 0.0, so the USD
+    // equity is the close ratio 87846 / 60000 = 1.4641 = 1.1^4 whatever the
+    // closes in between. Hand arithmetic: cumulative return 0.4641, CAGR
+    // 1.4641^(1/4) - 1 = 0.1. The row's persisted CAGR is the sentinel 9.99.
+    seed(
+      single({
+        daily_returns: flatNative(1463, "2020-01-01"),
+        data_quality_flags: NATIVE_FLAGS,
+        ...FULL_CASH,
+        cagr: 9.99,
+        cumulative_return: 9.99,
+      }),
+    );
+    fake.btcRows = wobblyCloses(1463, "2020-01-01", 60000, 87846);
+    const payload = await usdOf();
+    const usd = payload.usdView!.payload;
+    expect(usd.dates).toHaveLength(1462);
+    expect(Math.abs(usd.strategyMetrics.cagr - 0.1)).toBeLessThan(1e-12);
+    expect(Math.abs(usd.strategyMetrics.cum_ret - 0.4641)).toBeLessThan(1e-12);
+    expect(usd.strategyMetrics.cagr).not.toBe(9.99);
+    // The sentinel is reachable: the native payload (not the USD one) wears it.
+    expect(payload.strategyMetrics.cagr).toBe(9.99);
+    // No persisted by-basis object rides the USD build.
+    expect(usd.metricsByBasis).toBeUndefined();
+  });
+
+  it("a USD strategy has neither usdView nor usdViewUnavailable, and reads no closes", async () => {
+    seed(single({ daily_returns: points(30) }));
+    fake.btcRows = wobblyCloses(30, "2024-01-02", 60000, 87846);
+    const payload = await usdOf();
+    expect("usdView" in payload).toBe(false);
+    expect("usdViewUnavailable" in payload).toBe(false);
+    expect("convertedFrom" in payload).toBe(false);
+  });
+
+  it("a failed closes read says price_read_failed and builds no USD payload", async () => {
+    seed(single({ daily_returns: flatNative(30, "2024-01-01"), data_quality_flags: NATIVE_FLAGS }));
+    fake.btcError = { message: "boom", code: "57014" };
+    const payload = await usdOf();
+    expect(payload.usdViewUnavailable).toBe("price_read_failed");
+    expect("usdView" in payload).toBe(false);
+  });
+
+  it("an empty closes table says no_priced_day and builds no USD payload", async () => {
+    seed(single({ daily_returns: flatNative(30, "2024-01-01"), data_quality_flags: NATIVE_FLAGS }));
+    fake.btcRows = [];
+    const payload = await usdOf();
+    expect(payload.usdViewUnavailable).toBe("no_priced_day");
+    expect("usdView" in payload).toBe(false);
+  });
+
+  it("an interior price hole breaks the curve, names the day and counts both removed returns (D-06)", async () => {
+    // Native 2024-01-01..2024-01-30, one close missing on 2024-01-10. The return of
+    // Jan 10 (itself unpriced) and of Jan 11 (its interval holds Jan 10) are both gone.
+    seed(single({ daily_returns: flatNative(30, "2024-01-01"), data_quality_flags: NATIVE_FLAGS }));
+    fake.btcRows = wobblyCloses(30, "2024-01-01", 60000, 87846).filter((r) => r.date !== "2024-01-10");
+    const usd = (await usdOf()).usdView!;
+    expect(usd.unpricedDays).toEqual(["2024-01-10"]);
+    expect(usd.removedReturns).toBe(2);
+    expect(usd.leadingHole).toBe(false);
+    expect(usd.usdStart).toBe("2024-01-02");
+    expect(usd.usdEnd).toBe("2024-01-30");
+    const seam = [{ start: "2024-01-10", end: "2024-01-11", kind: "gap", days: 2 }];
+    expect(usd.payload.missingSegments).toEqual(seam);
+    expect(usd.payload.dates).toHaveLength(27);
+  });
+
+  it("closes that start late flag a leading hole, not interior removals (D-22)", async () => {
+    seed(single({ daily_returns: flatNative(30, "2024-01-01"), data_quality_flags: NATIVE_FLAGS }));
+    fake.btcRows = wobblyCloses(26, "2024-01-05", 60000, 87846);
+    const usd = (await usdOf()).usdView!;
+    expect(usd.usdStart).toBe("2024-01-06");
+    expect(usd.leadingHole).toBe(true);
+    expect(usd.removedReturns).toBe(0);
+    expect(usd.payload.missingSegments ?? []).toEqual([]);
+  });
+
+  it("closes that cover none of the series' days say no_priced_day", async () => {
+    seed(single({ daily_returns: flatNative(30, "2024-01-01"), data_quality_flags: NATIVE_FLAGS }));
+    fake.btcRows = wobblyCloses(30, "2019-01-01", 60000, 87846);
+    const payload = await usdOf();
+    expect(payload.usdViewUnavailable).toBe("no_priced_day");
+    expect("usdView" in payload).toBe(false);
   });
 });

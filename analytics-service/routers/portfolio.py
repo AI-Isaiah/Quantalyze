@@ -2698,9 +2698,28 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
                         "returns_series": _trim_returns_series(row.get("returns_series")),
                         "daily_returns": _trim_returns_series(row.get("daily_returns")),
                     }
-                    s = daily_returns_from_row(trimmed_row, name=row["strategy_id"])
+                    # ``keep_absent=True``: an undefined day stays a NaN so the USD
+                    # conversion below prices a one-day move over that one day, as
+                    # ``portfolio_bridge`` does; the ``dropna`` on ``aligned``
+                    # discards it from the correlation either way.
+                    s = daily_returns_from_row(
+                        trimmed_row, name=row["strategy_id"], keep_absent=True
+                    )
                     if s is not None:
                         existing[row["strategy_id"]] = s
+
+                # Phase 164.6.6.2.1 (D-04, D-10): the uploaded `returns` are the
+                # trade-derived USD series, so every BTC-unit candidate is put in
+                # USD here, AFTER the trim above (the memory cap bounds what is
+                # deserialised, so converting first would build the full series).
+                # An unconvertible native candidate is a MISSING series (D-02):
+                # dropped from `existing`, never correlated raw. Absence of a BTC
+                # price therefore leaves native candidates out of the scan and does
+                # not by itself make matching "unavailable".
+                _usd = UsdSeriesConverter(get_btc_closes)
+                existing, _unconvertible = await _usd.convert(
+                    existing, native_units_by_id(rows(sa_result))
+                )
 
                 if existing:
                     df = pd.DataFrame(existing)

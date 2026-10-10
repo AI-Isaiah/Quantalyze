@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import math
+from bisect import bisect_right
 from collections.abc import Collection, Mapping, Sequence
 from datetime import date, datetime, timezone
 from typing import Any, NamedTuple
@@ -73,6 +74,13 @@ _DEPARTED_HISTORY_INCLUDED = "departed_history_included"
 # positions poll's ``MT5_NON_USD_NOTE``.
 _NATIVE_UNIT_KEY_OMITTED = "native_unit_key_omitted"
 _NATIVE_UNIT_REASON = "native_unit"
+# Benign (164.6.6.2.1 D-09, D-20). A BTC key is in the book at its USD values, but a day with no
+# stored BTC close cannot be priced. The key is left out of that day BY NAME, never priced at a
+# neighbouring close and never carried: after its last priced day (mechanism T1, the existing
+# departed-key exit), on an interior unpriced day (mechanism I2), or entirely when nothing could
+# be priced at all. ``native_unpriced`` is a null-anchor reason only for that last case.
+_NATIVE_UNPRICED_KEY_OMITTED = "native_unpriced_key_omitted"
+_NATIVE_UNPRICED_REASON = "native_unpriced"
 
 
 class PortfolioReturns(NamedTuple):
@@ -93,6 +101,98 @@ class PortfolioReturns(NamedTuple):
     nonfinite_days: int
     missing_return_days: int
     undefined_return_days: int = 0
+
+
+class NativeKeyInputs(NamedTuple):
+    """The native-unit fields a BTC key's ``key_inputs`` row carries (164.6.6.2.1).
+
+    ``priced_through`` is the last day the key has a USD return (the day of its realized
+    terminal); ``unpriced_close_day`` the one live close its anchor lacks, set only when the
+    anchor is NULL ``native_unpriced``. ``unpriced_days`` are the days a missing close left out
+    of its USD series (an interior hole), and ``segment_terminals`` the realized USD level on the
+    last priced day BEFORE each such hole, ``((ISO day, USD), ...)`` oldest first: the level the
+    series before the hole is rolled back from (see ``hole_segment_ends``)."""
+
+    priced_through: str | None
+    unpriced_close_day: str | None
+    unpriced_days: tuple[str, ...] = ()
+    segment_terminals: tuple[tuple[str, float], ...] = ()
+
+
+def _strict_iso_day(raw: Any, what: str) -> str:
+    """An ISO ``YYYY-MM-DD`` day, exactly as written. ``date.fromisoformat`` also accepts
+    other spellings (``20261008``) on some Python versions, which would not match the
+    writer's day keys, so the round trip must reproduce the input."""
+    if not isinstance(raw, str):
+        raise TypeError(f"key_inputs {what}: not a string")
+    try:
+        iso = date.fromisoformat(raw).isoformat()
+    except ValueError:
+        # Re-raised without the stdlib text, which echoes the stored value: the worker logs
+        # this message to name the field, and a stored value is not ours to print.
+        raise ValueError(f"key_inputs {what}: not an ISO day") from None
+    if iso != raw:
+        raise ValueError(f"key_inputs {what}: not an ISO day")
+    return iso
+
+
+def read_native_key_inputs(payload: Mapping[str, Any]) -> NativeKeyInputs | None:
+    """The native-unit fields of a ``key_inputs`` payload, or ``None`` for a USD key (no
+    ``native_unit``). The JSONB is worker-written but untrusted (T-164.6.6.2.1-23): a present
+    but malformed field raises ``ValueError`` / ``TypeError`` so the caller can leave the key
+    OUT of the book by name, never read a guess as a price."""
+    unit = payload.get("native_unit")
+    if unit is None:
+        return None
+    if not isinstance(unit, str) or not unit:
+        raise TypeError("key_inputs native_unit: not a unit code")
+    through = payload.get("priced_through")
+    close_day = payload.get("unpriced_close_day")
+    raw_days = payload.get("unpriced_days")
+    if raw_days is not None and not isinstance(raw_days, list):
+        raise TypeError("key_inputs unpriced_days: not a list")
+    days = tuple(sorted({_strict_iso_day(d, "unpriced_days") for d in raw_days or ()}))
+    raw_terminals = payload.get("segment_terminals")
+    if raw_terminals is not None and not isinstance(raw_terminals, list):
+        raise TypeError("key_inputs segment_terminals: not a list")
+    terminals: dict[str, float] = {}
+    for row in raw_terminals or ():
+        day = _strict_iso_day(row["utc_day_iso"], "segment_terminals")
+        level = row["level_usd"]
+        # ``float(True) == 1.0``: a JSON boolean must not be read as a dollar.
+        if isinstance(level, bool) or not isinstance(level, (int, float)):
+            raise TypeError("key_inputs segment_terminals: non-numeric level")
+        if not math.isfinite(float(level)) or float(level) <= 0.0:
+            raise ValueError("key_inputs segment_terminals: level is not a positive number")
+        if day in terminals:
+            raise ValueError("key_inputs segment_terminals: duplicate day")
+        terminals[day] = float(level)
+    return NativeKeyInputs(
+        None if through is None else _strict_iso_day(through, "priced_through"),
+        None if close_day is None else _strict_iso_day(close_day, "unpriced_close_day"),
+        days,
+        tuple(sorted(terminals.items())),
+    )
+
+
+def hole_segment_ends(event_days: Collection[str], unpriced_days: Collection[str]) -> list[str]:
+    """The event days that END a segment before an interior unpriced stretch (a hole).
+
+    ``event_days`` are the days a key's USD series says anything about (a return, a flow or a
+    dropped-day P&L); a day in ``unpriced_days`` is never an event, since its close is missing
+    (or its predecessor's is). Two consecutive events with an unpriced day strictly between them
+    are separated by a hole, and the earlier one is returned. An unpriced day before the first
+    event or after the last separates nothing. ONE definition, used by the writer (which stores
+    the realized USD level on each of these days) and by the compose (which needs a level on
+    exactly these days), so the two cannot disagree on where a hole is."""
+    unpriced = sorted(set(unpriced_days))
+    events = sorted(set(event_days) - set(unpriced))
+    ends: list[str] = []
+    for earlier, later in zip(events, events[1:]):
+        nxt = bisect_right(unpriced, earlier)
+        if nxt < len(unpriced) and unpriced[nxt] < later:
+            ends.append(earlier)
+    return ends
 
 
 def _bool_flag_tokens(flags: Mapping[str, Any]) -> set[str]:
@@ -330,6 +430,9 @@ def compose_allocator_equity(
     full_history_keys: Collection[str] | None = None,
     dropped_day_pnl_by_key: Mapping[str, Mapping[str, float]] | None = None,
     realized_terminal_by_key: Mapping[str, tuple[str, float]] | None = None,
+    unpriced_close_day_by_key: Mapping[str, str] | None = None,
+    unpriced_days_by_key: Mapping[str, Collection[str]] | None = None,
+    segment_terminals_by_key: Mapping[str, Mapping[str, float]] | None = None,
 ) -> dict[str, Any]:
     """Compose the allocator display-row payload from real per-key inputs.
 
@@ -385,8 +488,48 @@ def compose_allocator_equity(
     the REALIZED terminal level its writer rolled the stored returns back from (not the live
     equity in ``anchors_by_key``, which adds the open position). ``replay_key_equity`` rolls
     from it, so levels and the zero-start verdict are the writer's own, and the live anchor
-    enters on the last day only. A key with no entry is replayed from its anchor as before."""
+    enters on the last day only. A key with no entry is replayed from its anchor as before.
+
+    ``unpriced_close_day_by_key`` (164.6.6.2.1 D-09 / D-20) maps a BTC key whose live balance
+    could not be priced (the latest completed UTC day has no stored close) to that day's ISO
+    date. The key arrives with its series priced through its last USD return day ``P``, an
+    anchor equal to its realized USD level on ``P`` (the live balance is NOT in the book: no
+    price exists for it) and ``departed_end_by_key[k] == P``. It is then composed through ``P``
+    and rotated out after it as an exit, never a return and never a carried level, so the book
+    stays trustworthy (mechanism T1, measured in plan 03). The omission is named twice: the
+    benign flag ``native_unpriced_key_omitted``, and ``payload["unpriced_native_keys"]``, a list
+    sorted by key id of ``{"api_key_id", "day"}`` for each such key left out of the curve's LAST
+    day, ``day`` being the ISO date of the close that is missing. No amount enters the list. A
+    key with a NULL anchor and the reason ``native_unpriced`` (nothing could be priced at all) is
+    omitted from the unanchored-return and fourth-bucket rules exactly as ``native_unit`` is, and
+    listed the same way; its entry carries ``"reason": "day_unknown"`` when no close day is known.
+    (164.6.6.2.1 SFH-02) A key replayed in segments across an interior hole is listed too, with
+    ``"hole_days"`` (the interior unpriced days, sorted) beside its ``day``, which stays ``None``
+    unless the key is also left out of the curve's last day. ``day`` keeps its one meaning. A key in this map without a ``departed_end_by_key`` entry is rotated out
+    after its last return day, which is what the job sends; carrying it flat would book dollars
+    no close backs.
+
+    ``unpriced_days_by_key`` and ``segment_terminals_by_key`` (164.6.6.2.1 D-09, mechanism I2,
+    selected by MEASUREMENT M3 = STALE-CARRY) handle an INTERIOR hole: days between a key's
+    priced days that have no USD return because a close is missing. A hole in the stored
+    returns is not a local defect. ``replay_key_equity`` rolls backward over the days present,
+    so the return after the hole is applied to the level labelled with the day BEFORE it, and
+    every earlier level is scaled by the same error (M3 measured +2833, +2691 and +2940 on
+    levels of 62730, 59590 and 65100); the interior days were also carried at r = 0. The key is
+    therefore replayed in SEGMENTS, split at each ``hole_segment_ends`` day. Each segment before
+    the last is rolled back from ``segment_terminals_by_key[k][day]``, the realized USD level the
+    writer stored on its last day (the writer priced it at that day's own close), so the levels
+    before a hole are the writer's own; the last segment rolls from the key's realized terminal as
+    before. A segment before the last is rotated out after its last day by the departure
+    machinery (an exit seam on the curve, an outflow of its last level in the ledger), and the
+    next segment enters with an inflow of its first level, so across the hole the key
+    contributes nothing to the dollar total and leaves both sums of ``payload.returns``: never a
+    return, never a carried level. A hole whose terminal is missing is not guessed: the key is
+    composed unsplit and ``key_inputs_mismatch`` (blocking) says so. The flag
+    ``native_unpriced_key_omitted`` records that days were left out. Both inputs are optional;
+    a key with no entry is composed exactly as before."""
     departed_end = dict(departed_end_by_key or {})
+    unpriced_close_day = dict(unpriced_close_day_by_key or {})
     dropped_pnl = dict(dropped_day_pnl_by_key or {})
     realized_terminal = dict(realized_terminal_by_key or {})
     full_history = frozenset(full_history_keys or ())
@@ -417,10 +560,21 @@ def compose_allocator_equity(
     }
     if native_unit_keys:
         flag_tokens.add(_NATIVE_UNIT_KEY_OMITTED)
+    # 164.6.6.2.1 D-09: a BTC key with a NULL anchor and the reason ``native_unpriced`` had no
+    # close to price its live balance and nothing priced before it either (a key that has a
+    # priced stretch arrives ANCHORED at its realized USD level, see ``unpriced_close_day_by_key``).
+    # It is left out by name exactly like a native-unit key: real capital that is not a read
+    # failure, so no ``DROPPED_KEY``.
+    native_unpriced_keys = {
+        k
+        for k, a in anchors_by_key.items()
+        if a is None and _null_reasons.get(k) == _NATIVE_UNPRICED_REASON
+    }
+    omitted_by_name = native_unit_keys | native_unpriced_keys
     unanchored_return_keys = [
         k
         for k in returns_by_key
-        if anchors_by_key.get(k) is None and k not in native_unit_keys
+        if anchors_by_key.get(k) is None and k not in omitted_by_name
     ]
     # An anchored key (real capital) with NO return series — cannot be blended, so
     # its capital is missing from the $-total. Iterate anchors_by_key so it is seen.
@@ -459,7 +613,7 @@ def compose_allocator_equity(
         for k in anchors_by_key
         if anchors_by_key.get(k) is None
         and k not in returns_by_key
-        and k not in native_unit_keys
+        and k not in omitted_by_name
     ]
     for k in null_anchor_without_returns:
         if _null_reasons.get(k) == "dust":
@@ -468,8 +622,112 @@ def compose_allocator_equity(
         reasons.add(DegradeReason.MISSING_SERIES)
         reasons.add(DegradeReason.DROPPED_KEY)
 
+    # D-09: a key the job names as unpriced on its live close leaves the book after its last
+    # return day. The job always sends that end in ``departed_end_by_key``; if a caller does not,
+    # the same day is used, so the key is never carried flat on a price no close backs.
+    for k in sorted(unpriced_close_day):
+        if k in anchored_keys and k not in departed_end and len(returns_by_key[k]) > 0:
+            departed_end[k] = max(str(d) for d in returns_by_key[k].index)
+
     anchored_returns = {k: returns_by_key[k] for k in anchored_keys}
     anchored_flows = {k: list(flows_by_key.get(k, [])) for k in anchored_keys}
+
+    # ── D-09 / mechanism I2: replay a key with an interior unpriced hole in SEGMENTS. ──
+    # ``unit`` is what the rest of the compose calls a key: an original key, or one segment of
+    # a key split at a hole (the LAST segment keeps the key's own id, so every per-key input
+    # that names the key - its realized terminal, its departed end - still lands on it).
+    parent: dict[str, str] = {k: k for k in anchored_keys}
+    # SFH-02: the interior unpriced days of each key replayed in segments, so the dashboard can
+    # name a key that was left out of days other than the curve's last.
+    interior_hole_days: dict[str, list[str]] = {}
+    unit_anchors: dict[str, float | None] = dict(anchors_by_key)
+    hole_exit_units: set[str] = set()
+    reentry_units: list[str] = []
+    history_first = set(full_history)
+    unpriced_days_in = {
+        k: frozenset(str(d) for d in days)
+        for k, days in (unpriced_days_by_key or {}).items()
+    }
+    for k in list(anchored_keys):
+        unpriced_k = unpriced_days_in.get(k)
+        if not unpriced_k:
+            continue
+        pnl_k = dropped_pnl.get(k) or {}
+        events = (
+            {str(d) for d in anchored_returns[k].index}
+            | {str(f[0]) for f in anchored_flows[k]}
+            | {str(d) for d in pnl_k}
+        )
+        ends = hole_segment_ends(events, unpriced_k)
+        if not ends:
+            continue
+        terminals = (segment_terminals_by_key or {}).get(k, {})
+        if any(e not in terminals for e in ends):
+            # The writer should have stored the level on each of these days. Without it the
+            # levels before the hole are unknowable, so it is NOT guessed: the key composes
+            # unsplit (the pre-fix roll) and the book says it cannot be trusted.
+            reasons.add(DegradeReason.KEY_INPUTS_MISMATCH)
+            logger.warning(
+                "compose: a key has %d interior unpriced hole(s) but no stored level on %d of "
+                "the days before them; it is composed unsplit and the book is untrustworthy (%s)",
+                len(ends),
+                sum(1 for e in ends if e not in terminals),
+                DegradeReason.KEY_INPUTS_MISMATCH.value,
+            )
+            continue
+        priced_events = sorted(events - unpriced_k)
+        interior_hole_days[k] = sorted(
+            d for d in unpriced_k if priced_events[0] < d < priced_events[-1]
+        )
+
+        def _in_segment(day: str, lo: str | None, hi: str | None) -> bool:
+            return (
+                day not in unpriced_k
+                and (lo is None or day > lo)
+                and (hi is None or day <= hi)
+            )
+
+        bounds = [None, *ends, None]
+        units: list[tuple[str, pd.Series, list[ExternalFlow], dict[str, float], str | None]] = []
+        for j in range(len(ends) + 1):
+            lo, hi = bounds[j], bounds[j + 1]
+            uid = k if j == len(ends) else f"{k}#hole{j}"
+            seg_returns = anchored_returns[k][
+                [_in_segment(str(d), lo, hi) for d in anchored_returns[k].index]
+            ]
+            seg_flows = [f for f in anchored_flows[k] if _in_segment(str(f[0]), lo, hi)]
+            seg_pnl = {d: v for d, v in pnl_k.items() if _in_segment(str(d), lo, hi)}
+            units.append((uid, seg_returns, seg_flows, seg_pnl, hi))
+        position = anchored_keys.index(k)
+        del anchored_keys[position]
+        del anchored_returns[k]
+        del anchored_flows[k]
+        was_full_history = k in history_first
+        history_first.discard(k)
+        placed = 0
+        for j, (uid, seg_returns, seg_flows, seg_pnl, hi) in enumerate(units):
+            if len(seg_returns) == 0:
+                # A segment with no return row cannot be blended or replayed from a level.
+                # It is left out and the omission is named (the flag below), not hidden.
+                flag_tokens.add(_NATIVE_UNPRICED_KEY_OMITTED)
+                continue
+            anchored_keys.insert(position + placed, uid)
+            placed += 1
+            parent[uid] = k
+            anchored_returns[uid] = seg_returns
+            anchored_flows[uid] = seg_flows
+            dropped_pnl[uid] = seg_pnl
+            if j == 0 and was_full_history:
+                history_first.add(uid)
+            if j > 0:
+                reentry_units.append(uid)
+            if hi is not None:
+                level = terminals[hi]
+                unit_anchors[uid] = level
+                realized_terminal[uid] = (hi, level)
+                departed_end[uid] = hi
+                hole_exit_units.add(uid)
+        flag_tokens.add(_NATIVE_UNPRICED_KEY_OMITTED)
 
     # Per-key $-equity backward replay (asserts the ISO index per key). A
     # departed key is replayed on its FULL series first: its anchor is its level
@@ -479,8 +737,8 @@ def compose_allocator_equity(
         k: replay_key_equity(
             anchored_returns[k],
             anchored_flows[k],
-            anchors_by_key[k],
-            history_reaches_inception=k in full_history,
+            unit_anchors[k],
+            history_reaches_inception=k in history_first,
             dropped_day_pnl=dropped_pnl.get(k),
             realized_terminal=realized_terminal.get(k),
         )
@@ -542,7 +800,7 @@ def compose_allocator_equity(
     # ── Carry-in #1/#4: feed the blend ONE Segment at a time. Within a dense coverage
     # segment every covering key has a row every day, so exclusive_fill_days == 0
     # STRUCTURALLY — a nonzero count means the wiring regressed (the canary). ──
-    weights = _current_equity_weights(anchored_keys, anchors_by_key)
+    weights = _current_equity_weights(anchored_keys, unit_anchors)
     for s in seg.segments:
         seg_series = {k: anchored_returns[k].loc[list(s.days)] for k in s.keys}
         seg_weights = {k: weights[k] for k in s.keys}
@@ -580,6 +838,18 @@ def compose_allocator_equity(
                 utc_day_iso=seam.next_first_day,
                 usd_signed=-float(equity[seam.prev_last_day]),
             )
+        )
+    # I2: a segment that follows a hole ENTERS the book with its first level, the other half of
+    # the exit booked above. Where a coverage seam already hands capital into it, that seam
+    # books the handoff once and no second inflow is added.
+    seam_entered = {n for seam in seg.seams for n in seam.next_keys}
+    for unit in reentry_units:
+        entered = per_key_equity[unit].equity if unit in per_key_equity else None
+        if entered is None or len(entered) == 0 or unit in seam_entered:
+            continue
+        first = min(str(d) for d in entered.index)
+        ledger_flows[unit].append(
+            ExternalFlow(utc_day_iso=first, usd_signed=float(entered[first]))
         )
     ledger = build_allocator_ledger(
         ledger_flows, seg.seams, per_key_equity, anchored_returns
@@ -638,8 +908,41 @@ def compose_allocator_equity(
         departed_keys=departed_present,
         dropped_days_by_key=dropped_days,
     )
-    if departed_present:
+    if any(k not in hole_exit_units for k in departed_present):
+        # A segment rotated out before a hole is not a departed key.
         flag_tokens.add(_DEPARTED_HISTORY_INCLUDED)
+    # D-09 / D-20: the BTC keys left out of the book by name. A key rotated out after its last
+    # priced day is listed only when that day precedes the curve's last date (it is then absent
+    # from the last day); a key omitted whole is always listed. ``day`` is the missing close.
+    last_curve_day = curve_rows[-1]["date"] if curve_rows else None
+    unpriced_native: list[dict[str, Any]] = []
+    for k in sorted(set(unpriced_close_day) | native_unpriced_keys | set(interior_hole_days)):
+        entry: dict[str, Any] | None = None
+        if k in native_unpriced_keys:
+            entry = {"api_key_id": k, "day": unpriced_close_day.get(k)}
+            if entry["day"] is None:
+                # The row's native fields were unreadable (or named no close): the key is out
+                # whole and the day is unknown. Say so, so the reader never has to guess.
+                entry["reason"] = "day_unknown"
+        else:
+            held = per_key_equity.get(k)
+            if (
+                k in departed_present
+                and held is not None
+                and held.equity is not None
+                and last_curve_day is not None
+                and max(str(d) for d in held.equity.index) < last_curve_day
+            ):
+                entry = {"api_key_id": k, "day": unpriced_close_day.get(k)}
+        if k in interior_hole_days:
+            # ``day`` keeps its meaning (left out of the curve's LAST day); the interior days
+            # ride beside it. A key with only interior holes has no ``day``.
+            entry = entry or {"api_key_id": k, "day": None}
+            entry["hole_days"] = interior_hole_days[k]
+        if entry is not None:
+            unpriced_native.append(entry)
+    if unpriced_native:
+        flag_tokens.add(_NATIVE_UNPRICED_KEY_OMITTED)
     returns_rows = book_returns.rows
     skipped_days = book_returns.skipped_nonpositive_days
     if book_returns.nonfinite_days:
@@ -683,7 +986,7 @@ def compose_allocator_equity(
         # counted once on purpose.
         if token:
             flag_tokens.add(token)
-    return {
+    payload: dict[str, Any] = {
         "curve": curve_rows,
         "returns": returns_rows,
         "version": 2,
@@ -696,8 +999,12 @@ def compose_allocator_equity(
             "computable": scalars.computable,
         },
         "inputs": {
-            "n_keys": len(anchored_keys),
+            "n_keys": len({parent[k] for k in anchored_keys}),
             "anchor_asof": anchor_asof,
             "composed_at": datetime.now(timezone.utc).isoformat(),
         },
     }
+    if unpriced_native:
+        # Additive, present only when a key was left out (an older reader never sees it).
+        payload["unpriced_native_keys"] = unpriced_native
+    return payload

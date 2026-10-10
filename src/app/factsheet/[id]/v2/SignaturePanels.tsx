@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import { usePayload } from "./factsheet-context";
 import { BaseLeverageNote } from "./basis-context";
-import { nativeUnitReason } from "@/lib/factsheet/returns-unit";
+import { benchmarkWithheldReason } from "@/lib/factsheet/returns-unit";
 import type { EventSignature, EventSignaturesSet, FactsheetPayload } from "@/lib/factsheet/types";
 import { niceStepValues } from "@/lib/chart-ticks";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
@@ -78,6 +78,7 @@ export function SignaturesSection() {
   // panel is the empty form with the stated reason, whatever the comparator. No chart,
   // no count, and nothing to say about leverage because nothing is shown.
   if (payload.returnsUnit) {
+    const reason = benchmarkWithheldReason(payload.returnsUnit, payload.convertedFrom);
     return (
       <section className="flex flex-col gap-10">
         <SignatureHorizon
@@ -85,14 +86,14 @@ export function SignaturesSection() {
           subtitle={SIG_SUBTITLE_7D}
           set={payload.eventSignatures?.h7 ?? null}
           btcUnavailable={false}
-          withheldReason={nativeUnitReason(payload.returnsUnit)}
+          withheldReason={reason}
         />
         <SignatureHorizon
           title="Returns Signatures for 1 Day Horizon"
           subtitle={SIG_SUBTITLE_1D}
           set={payload.eventSignatures?.h1 ?? null}
           btcUnavailable={false}
-          withheldReason={nativeUnitReason(payload.returnsUnit)}
+          withheldReason={reason}
         />
       </section>
     );

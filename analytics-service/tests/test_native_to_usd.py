@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +25,19 @@ import pytest
 from unittest.mock import patch
 
 from services import benchmark as benchmark_mod
-from services.benchmark import BTC_CLOSES_SOURCE, get_btc_closes
-from services.native_to_usd import convert_native_returns_to_usd, parse_native_unit
+from services.benchmark import (
+    BTC_CLOSES_SOURCE,
+    BtcClosesReadError,
+    get_btc_closes,
+    read_btc_closes,
+)
+from services.native_to_usd import (
+    convert_native_levels_to_usd,
+    convert_native_returns_to_usd,
+    latest_completed_close_day,
+    parse_native_unit,
+    price_live_balance,
+)
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "native_to_usd_oracle.json"
 _ORACLE: dict[str, Any] = json.loads(_FIXTURE.read_text(encoding="utf-8"))
@@ -145,6 +157,161 @@ def test_closes_that_are_not_midnight_normalized_still_pair() -> None:
     )
     out = convert_native_returns_to_usd(s, "BTC", closes)
     assert out.iloc[0] == pytest.approx(0.21, abs=1e-12)
+
+
+# --- Phase 164.6.6.2.1 (D-02): native LEVELS to USD ------------------------
+# Python-only: the shared JSON oracle is read by TypeScript for RETURNS and is
+# deliberately not extended with levels. Every expected value is a literal.
+
+
+def _levels(raw: dict[str, float], name: str = "level") -> pd.Series:
+    dates = sorted(raw)
+    return pd.Series(
+        [raw[d] for d in dates], index=pd.DatetimeIndex(dates), name=name, dtype=float
+    )
+
+
+def _days(s: pd.Series) -> list[str]:
+    return [d.strftime("%Y-%m-%d") for d in s.index]
+
+
+def test_levels_convert_at_the_stored_close_of_the_same_day_and_agree_with_returns() -> None:
+    """1.0 x 60000 = 60000.0 and 1.1 x 66000 = 72600.0. The returns converter on
+    the same pair gives 0.21 = 72600 / 60000 - 1, so levels and returns cannot
+    drift apart."""
+    levels = _levels({"2026-02-02": 1.0, "2026-02-03": 1.1})
+    closes = _closes({"2026-02-02": 60000.0, "2026-02-03": 66000.0})
+    out = convert_native_levels_to_usd(levels, "BTC", closes)
+    assert _days(out) == ["2026-02-02", "2026-02-03"]
+    assert out.tolist() == pytest.approx([60000.0, 72600.0], abs=1e-9)
+    returns = _series([{"date": "2026-02-02", "value": 0.0}, {"date": "2026-02-03", "value": 0.1}])
+    usd_returns = convert_native_returns_to_usd(returns, "BTC", closes)
+    assert usd_returns.iloc[0] == pytest.approx(0.21, abs=1e-12)
+    assert out.iloc[1] / out.iloc[0] - 1 == pytest.approx(usd_returns.iloc[0], abs=1e-12)
+
+
+def test_a_day_without_a_close_is_absent_and_its_neighbours_are_untouched() -> None:
+    """D-02: never 0, never the previous close, never the next close."""
+    levels = _levels({"2026-02-02": 1.0, "2026-02-03": 1.1, "2026-02-04": 1.2})
+    closes = _closes({"2026-02-02": 60000.0, "2026-02-04": 70000.0})
+    out = convert_native_levels_to_usd(levels, "BTC", closes)
+    assert _days(out) == ["2026-02-02", "2026-02-04"]
+    assert out.tolist() == pytest.approx([60000.0, 84000.0], abs=1e-9)
+
+
+def test_levels_unusable_close_leaves_that_day_absent() -> None:
+    levels = _levels({"2026-02-02": 1.0, "2026-02-03": 1.1, "2026-02-04": 1.2})
+    for bad in (0.0, -5.0, math.nan, math.inf):
+        closes = _closes({"2026-02-02": 60000.0, "2026-02-03": bad, "2026-02-04": 70000.0})
+        out = convert_native_levels_to_usd(levels, "BTC", closes)
+        assert _days(out) == ["2026-02-02", "2026-02-04"], bad
+        assert all(math.isfinite(v) for v in out.tolist()), bad
+
+
+def test_a_non_finite_native_level_leaves_that_day_absent() -> None:
+    levels = _levels({"2026-02-02": 1.0, "2026-02-03": math.nan, "2026-02-04": 1.2})
+    closes = _closes({"2026-02-02": 60000.0, "2026-02-03": 66000.0, "2026-02-04": 70000.0})
+    out = convert_native_levels_to_usd(levels, "BTC", closes)
+    assert _days(out) == ["2026-02-02", "2026-02-04"]
+
+
+def test_levels_unit_none_returns_the_same_object() -> None:
+    levels = _levels({"2026-02-02": 1.0})
+    assert convert_native_levels_to_usd(levels, None, _closes({"2026-02-02": 60000.0})) is levels
+
+
+def test_levels_without_closes_are_an_empty_series_never_the_input() -> None:
+    levels = _levels({"2026-02-02": 1.0, "2026-02-03": 1.1}, name="nav")
+    out = convert_native_levels_to_usd(levels, "BTC", None)
+    assert out is not levels
+    assert out.empty
+    assert isinstance(out.index, pd.DatetimeIndex)
+    assert out.name == "nav"
+
+
+def test_levels_result_is_sorted_by_day_and_keeps_the_input_name() -> None:
+    levels = pd.Series(
+        [1.1, 1.0],
+        index=pd.DatetimeIndex(["2026-02-03", "2026-02-02"]),
+        name="nav",
+        dtype=float,
+    )
+    closes = _closes({"2026-02-02": 60000.0, "2026-02-03": 66000.0})
+    out = convert_native_levels_to_usd(levels, "BTC", closes)
+    assert _days(out) == ["2026-02-02", "2026-02-03"]
+    assert out.name == "nav"
+
+
+# --- Phase 164.6.6.2.1 (D-17): the live-balance pricing rule ---------------
+# `benchmark_prices` never holds today's row, so a live balance is priced only at
+# the stored close of the latest COMPLETED UTC day, dated, or not at all.
+
+_NOW = datetime(2026, 10, 9, 14, 0, tzinfo=timezone.utc)
+
+
+def test_latest_completed_close_day_is_the_previous_utc_day() -> None:
+    assert latest_completed_close_day(_NOW) == pd.Timestamp("2026-10-08")
+    just_after_midnight = datetime(2026, 10, 9, 0, 5, tzinfo=timezone.utc)
+    assert latest_completed_close_day(just_after_midnight) == pd.Timestamp("2026-10-08")
+
+
+def test_latest_completed_close_day_reads_the_utc_date_not_the_local_one() -> None:
+    """2026-10-09T01:00+05:00 is 2026-10-08T20:00Z: the UTC date is the 8th, so
+    the latest completed day is the 7th. A local-date read would say the 8th."""
+    local = datetime(2026, 10, 9, 1, 0, tzinfo=timezone(timedelta(hours=5)))
+    assert latest_completed_close_day(local) == pd.Timestamp("2026-10-07")
+
+
+def test_latest_completed_close_day_refuses_a_naive_clock() -> None:
+    with pytest.raises(ValueError):
+        latest_completed_close_day(datetime(2026, 10, 9, 14, 0))
+
+
+def test_live_balance_uses_only_the_latest_completed_close() -> None:
+    """0.4213 BTC x 61950.00 = 24780 + 1319.535 = 26099.535, dated 2026-10-08."""
+    closes = _closes({"2026-10-08": 61950.00})
+    priced = price_live_balance(0.4213, "BTC", closes, _NOW)
+    assert priced is not None
+    usd, day = priced
+    assert usd == pytest.approx(26099.535, abs=1e-9)
+    assert day == pd.Timestamp("2026-10-08")
+
+
+def test_live_balance_never_uses_an_older_close() -> None:
+    """D-17: nothing older is ever used, even though one exists."""
+    assert price_live_balance(0.4213, "BTC", _closes({"2026-10-07": 61000.00}), _NOW) is None
+
+
+def test_live_balance_never_uses_todays_close_even_if_present() -> None:
+    assert price_live_balance(0.4213, "BTC", _closes({"2026-10-09": 62000.00}), _NOW) is None
+
+
+def test_live_balance_prefers_the_completed_day_over_newer_and_older_closes() -> None:
+    closes = _closes({"2026-10-07": 61000.00, "2026-10-08": 61950.00, "2026-10-09": 62000.00})
+    priced = price_live_balance(1.0, "BTC", closes, _NOW)
+    assert priced is not None
+    assert priced[0] == pytest.approx(61950.00, abs=1e-9)
+
+
+def test_live_balance_unusable_close_on_the_completed_day_is_none() -> None:
+    for bad in (0.0, -5.0, math.nan, math.inf):
+        closes = _closes({"2026-10-07": 61000.00, "2026-10-08": bad})
+        assert price_live_balance(0.4213, "BTC", closes, _NOW) is None, bad
+
+
+def test_live_balance_is_none_for_a_usd_unit_no_closes_or_a_non_finite_amount() -> None:
+    closes = _closes({"2026-10-08": 61950.00})
+    assert price_live_balance(0.4213, None, closes, _NOW) is None
+    assert price_live_balance(0.4213, "BTC", None, _NOW) is None
+    assert price_live_balance(math.nan, "BTC", closes, _NOW) is None
+    assert price_live_balance(math.inf, "BTC", closes, _NOW) is None
+
+
+def test_live_balance_closes_index_with_a_time_of_day_still_pairs() -> None:
+    closes = pd.Series([61950.00], index=pd.DatetimeIndex(["2026-10-08 00:00:00"]), dtype=float)
+    priced = price_live_balance(1.0, "BTC", closes, _NOW)
+    assert priced is not None
+    assert priced[0] == pytest.approx(61950.00, abs=1e-9)
 
 
 @pytest.mark.parametrize("raw", ["BTC", "ETH", "USDT", "AB", "ABCDEFGHIJ"])
@@ -285,3 +452,71 @@ async def test_get_btc_closes_read_failure_is_none_and_loud(caplog: pytest.LogCa
         with caplog.at_level("WARNING"):
             assert await get_btc_closes() is None
     assert any("BTC closes read failed" in r.message for r in caplog.records)
+
+
+# --- read_btc_closes: a failed read is not "no close stored" (164.6.6.2.1 SFH-01) -------
+
+
+@pytest.mark.asyncio
+async def test_read_btc_closes_raises_on_a_failed_read_where_get_btc_closes_says_none(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The callers that act on the ABSENCE of a close (reconstruct ends a one-time
+    rebuild as "no data", the derive writes a ``native_unpriced`` anchor with a day that
+    was never checked, the poll tells the user "no close stored") cannot tell an outage
+    from an empty table through ``None``. ``read_btc_closes`` raises on the outage and
+    keeps ``None`` for "nothing usable is stored"; ``get_btc_closes`` keeps its contract."""
+
+    class _Boom(_FakeBenchmarkClient):
+        def execute(self) -> Any:
+            raise OSError("db down")
+
+    with patch.object(benchmark_mod, "_benchmark_client", return_value=_Boom([])):
+        with caplog.at_level("WARNING"):
+            with pytest.raises(BtcClosesReadError) as err:
+                await read_btc_closes()
+            assert await get_btc_closes() is None
+    assert isinstance(err.value.__cause__, OSError)
+    assert any("BTC closes read failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_read_btc_closes_raises_when_the_store_cannot_be_reached_at_all() -> None:
+    """An unconfigured client is a read that could not happen, not an empty table."""
+    with patch.object(benchmark_mod, "_benchmark_client", return_value=None):
+        with pytest.raises(BtcClosesReadError):
+            await read_btc_closes()
+
+
+@pytest.mark.asyncio
+async def test_read_btc_closes_raises_on_a_programming_error_too_but_still_reports_it() -> None:
+    class _Bug(_FakeBenchmarkClient):
+        def execute(self) -> Any:
+            raise ZeroDivisionError("bug")
+
+    with patch.object(benchmark_mod, "_benchmark_client", return_value=_Bug([])):
+        with pytest.raises(BtcClosesReadError):
+            await read_btc_closes()
+
+
+@pytest.mark.asyncio
+async def test_read_btc_closes_is_none_for_a_successful_read_with_nothing_usable() -> None:
+    """Empty table and only-unusable closes are a SUCCESSFUL read: the honest "no close
+    stored", the one answer ``None`` keeps."""
+    with patch.object(benchmark_mod, "_benchmark_client", return_value=_FakeBenchmarkClient([])):
+        assert await read_btc_closes() is None
+    only_bad = [_btc_row("2026-02-02", 0)]
+    with patch.object(
+        benchmark_mod, "_benchmark_client", return_value=_FakeBenchmarkClient(only_bad)
+    ):
+        assert await read_btc_closes() is None
+
+
+@pytest.mark.asyncio
+async def test_read_btc_closes_returns_the_same_series_as_get_btc_closes() -> None:
+    table = [_btc_row("2026-02-03", 66000), _btc_row("2026-02-02", 60000)]
+    with patch.object(benchmark_mod, "_benchmark_client", return_value=_FakeBenchmarkClient(table)):
+        read = await read_btc_closes()
+        got = await get_btc_closes()
+    assert read is not None and got is not None
+    pd.testing.assert_series_equal(read, got)

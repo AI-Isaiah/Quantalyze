@@ -557,12 +557,15 @@ def _c7_verify(
     raw_rows: dict[str, dict[str, object]] | None = None,
     cap: int | None = None,
     frames: list[pd.DataFrame] | None = None,
+    btc_closes: pd.Series | None = None,
 ) -> dict:
     """``verify_strategy``'s response for a venue whose daily returns are ``target``.
 
     ``cap`` replaces the H-0594 trailing trim cap for the call; ``frames`` collects
     the candidate frame each ``dispersing_corrwith`` call receives (a pass-through
-    spy, patched on the module object)."""
+    spy, patched on the module object). ``btc_closes`` is what the route's BTC price
+    loader returns (None: no price source), read only when a candidate carries a
+    native unit."""
     from models.schemas import VerifyStrategyRequest
     from routers import portfolio as portfolio_mod
     from starlette.requests import Request as StarletteRequest
@@ -605,6 +608,7 @@ def _c7_verify(
         mp.setattr(
             portfolio_mod, "get_supabase", lambda: _c7_supabase(existing, raw_rows)
         )
+        _stub_closes(mp, btc_closes, "routers.portfolio")
         if cap is not None:
             mp.setattr(portfolio_mod, "_MATCH_RETURNS_SERIES_MAX_POINTS", cap)
         if frames is not None:
@@ -740,6 +744,49 @@ def test_c7_a_stored_daily_returns_list_is_trimmed_to_the_cap_and_wins_over_the_
     assert (out["matching_status"], out["matched_strategy_id"]) == ("matched", "stored")
 
 
+def _c7_btc_row(native: pd.Series) -> dict[str, dict[str, object]]:
+    return {
+        "btc_cand": {
+            "returns_series": _stored_curve(native),
+            "data_quality_flags": {"native_unit": "BTC"},
+        }
+    }
+
+
+def test_c7_btc_raw_series_equal_to_the_usd_upload_is_not_a_match() -> None:
+    """Phase 164.6.6.2.1 (D-04, D-10 third consumer) RED-first: a BTC-unit candidate
+    whose RAW stored returns equal the uploaded USD series is a different series in
+    USD, so the route reports ``no_match``, not a duplicate."""
+    target, closes, raw_equal, _ = _btc_world(seed=211)
+    in_usd = ((1.0 + raw_equal) * closes / closes.shift(1) - 1.0).dropna()
+    assert float(in_usd.corr(target.reindex(in_usd.index))) < 0.95, "precondition"
+    out = _c7_verify(target, {}, raw_rows=_c7_btc_row(raw_equal), btc_closes=closes)
+    assert (out["matching_status"], out["matched_strategy_id"]) == ("no_match", None)
+
+
+def test_c7_btc_candidate_whose_usd_series_equals_the_upload_is_matched() -> None:
+    """D-04: the false negative. The stored BTC series does not track the upload
+    (stated), its USD conversion equals it."""
+    target, closes, _, usd_equal = _btc_world(seed=212)
+    assert float(usd_equal.iloc[1:].corr(target.iloc[1:])) < 0.95, "precondition"
+    out = _c7_verify(target, {}, raw_rows=_c7_btc_row(usd_equal), btc_closes=closes)
+    assert (out["matching_status"], out["matched_strategy_id"]) == ("matched", "btc_cand")
+
+
+def test_c7_btc_candidate_with_no_price_source_is_absent_and_matching_stays_available() -> None:
+    """D-02: no BTC closes drops the native candidate (its raw series equals the
+    upload and must not match). Absence of a price is a missing series, so the
+    status is ``no_match`` and NOT ``matching_unavailable``; a USD candidate on
+    the same request still matches."""
+    target, _, raw_equal, _ = _btc_world(seed=213)
+    out = _c7_verify(target, {}, raw_rows=_c7_btc_row(raw_equal), btc_closes=None)
+    assert (out["matching_status"], out["matched_strategy_id"]) == ("no_match", None)
+    out = _c7_verify(
+        target, {"usd_twin": target.copy()}, raw_rows=_c7_btc_row(raw_equal), btc_closes=None
+    )
+    assert (out["matching_status"], out["matched_strategy_id"]) == ("matched", "usd_twin")
+
+
 # ---------------------------------------------------------------------------
 # C8 - services/strategy_matching.find_matched_strategy
 # ---------------------------------------------------------------------------
@@ -787,6 +834,7 @@ class _StubClient:
         self,
         candidates: dict[str, pd.Series],
         stored_levels: dict[str, pd.Series] | None = None,
+        flags: dict[str, dict[str, object]] | None = None,
     ) -> None:
         levels = stored_levels or {}
         self._published = [{"id": sid} for sid in [*candidates, *levels]]
@@ -803,6 +851,11 @@ class _StubClient:
             }
             for sid, s in levels.items()
         ]
+        # Phase 164.6.6.2.1 (D-04): a candidate row may carry the flags the worker
+        # writes beside its series (``native_unit``), on the SAME row.
+        for row in self._analytics:
+            if row["strategy_id"] in (flags or {}):
+                row["data_quality_flags"] = (flags or {})[row["strategy_id"]]  # type: ignore[index]
         self.selected: list[str] = []
 
     def table(self, name: str) -> _Query:
@@ -813,17 +866,18 @@ class _StubClient:
         )
 
 
-def _c8(
+async def _c8(
     target: pd.Series,
     candidates: dict[str, pd.Series],
     caplog: pytest.LogCaptureFixture,
     stored_levels: dict[str, pd.Series] | None = None,
+    flags: dict[str, dict[str, object]] | None = None,
 ) -> str | None:
     caplog.clear()
     caplog.set_level(logging.DEBUG, logger="quantalyze.analytics")
     target = target.copy()
     target.index = pd.DatetimeIndex(target.index.strftime("%Y-%m-%d"))
-    return find_matched_strategy(target, _StubClient(candidates, stored_levels))
+    return await find_matched_strategy(target, _StubClient(candidates, stored_levels, flags))
 
 
 def _matching_failed_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -831,29 +885,29 @@ def _matching_failed_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 
 @pytest.mark.parametrize("yield_id", _YIELD_IDS)
-def test_c8_two_strategies_with_the_same_constant_yield_do_not_match(
+async def test_c8_two_strategies_with_the_same_constant_yield_do_not_match(
     yield_id: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     target = _residue_leg(yield_id)
     twin = _residue_leg(yield_id, start=5_000.0)
-    assert _c8(target, {"twin": twin}, caplog) is None
+    assert await _c8(target, {"twin": twin}, caplog) is None
     assert _matching_failed_lines(caplog) == []
 
 
 @pytest.mark.parametrize("yield_id", _YIELD_IDS)
-def test_c8_constant_yield_answer_equals_the_all_zero_answer(
+async def test_c8_constant_yield_answer_equals_the_all_zero_answer(
     yield_id: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     """D-07: an all-zero target and candidate give no match (None) today, and a
     constant-yield pair must give the same answer."""
     target = _residue_leg(yield_id)
     twin = _residue_leg(yield_id, start=5_000.0)
-    with_zero = _c8(_zeros_like(target), {"twin": _zeros_like(twin)}, caplog)
+    with_zero = await _c8(_zeros_like(target), {"twin": _zeros_like(twin)}, caplog)
     assert with_zero is None
-    assert _c8(target, {"twin": twin}, caplog) == with_zero
+    assert await _c8(target, {"twin": twin}, caplog) == with_zero
 
 
-def test_c8_no_dispersing_candidate_is_an_explicit_none_not_a_failure(
+async def test_c8_no_dispersing_candidate_is_an_explicit_none_not_a_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Every candidate flat (an all-zero one and a constant yield): None through
@@ -868,28 +922,28 @@ def test_c8_no_dispersing_candidate_is_an_explicit_none_not_a_failure(
         {"yield": _residue_leg("daily_1e-4")},
         {"zero": zero, "yield": _residue_leg("daily_1e-4")},
     ):
-        assert _c8(target, candidates, caplog) is None
+        assert await _c8(target, candidates, caplog) is None
         assert _matching_failed_lines(caplog) == [], sorted(candidates)
 
 
-def test_c8_a_flat_target_is_an_explicit_none_not_a_failure(caplog: pytest.LogCaptureFixture) -> None:
+async def test_c8_a_flat_target_is_an_explicit_none_not_a_failure(caplog: pytest.LogCaptureFixture) -> None:
     idx = nav_constant_yield(1e-4).index
     candidates = {"noisy": _noise(idx, seed=82)}
-    assert _c8(pd.Series(0.0, index=idx), candidates, caplog) is None
+    assert await _c8(pd.Series(0.0, index=idx), candidates, caplog) is None
     assert _matching_failed_lines(caplog) == []
-    assert _c8(_residue_leg("daily_1e-4"), candidates, caplog) is None
+    assert await _c8(_residue_leg("daily_1e-4"), candidates, caplog) is None
     assert _matching_failed_lines(caplog) == []
 
 
-def test_c8_a_near_identical_noisy_candidate_still_matches(caplog: pytest.LogCaptureFixture) -> None:
+async def test_c8_a_near_identical_noisy_candidate_still_matches(caplog: pytest.LogCaptureFixture) -> None:
     idx = nav_constant_yield(1e-4).index
     target = _noise(idx, seed=83)
     near = target + _noise(idx, seed=84, scale=0.0005)
     candidates = {"near": near, "other": _noise(idx, seed=85), "yield": _residue_leg("daily_1e-4")}
-    assert _c8(target, candidates, caplog) == "near"
+    assert await _c8(target, candidates, caplog) == "near"
 
 
-def test_c8_a_candidate_stored_as_a_curve_of_the_targets_daily_returns_matches(
+async def test_c8_a_candidate_stored_as_a_curve_of_the_targets_daily_returns_matches(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Phase 164.6.6.2.2 (D-06) tracer: the published strategy is stored the way the
@@ -899,11 +953,11 @@ def test_c8_a_candidate_stored_as_a_curve_of_the_targets_daily_returns_matches(
     idx = nav_constant_yield(1e-4).index
     target = _noise(idx, seed=87)
     candidates = {"same": target.copy(), "other": _noise(idx, seed=88)}
-    assert _c8(target, candidates, caplog) == "same"
+    assert await _c8(target, candidates, caplog) == "same"
     assert _matching_failed_lines(caplog) == []
 
 
-def test_c8_a_candidate_whose_curve_levels_track_the_target_but_whose_returns_do_not_is_not_matched(
+async def test_c8_a_candidate_whose_curve_levels_track_the_target_but_whose_returns_do_not_is_not_matched(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """D-06 negative (T-164.6.6.2.2-14): a return-shaped series stored where a curve
@@ -921,24 +975,24 @@ def test_c8_a_candidate_whose_curve_levels_track_the_target_but_whose_returns_do
     derived = (levels / levels.shift(1) - 1.0).dropna()
     derived_corr = float(derived.corr(target.reindex(derived.index)))
     assert derived_corr < 0.95, f"precondition: derived returns must not track (got {derived_corr})"
-    assert _c8(target, {}, caplog, stored_levels={"levels_track": levels}) is None
+    assert await _c8(target, {}, caplog, stored_levels={"levels_track": levels}) is None
     assert _matching_failed_lines(caplog) == []
 
 
-def test_c8_reads_the_daily_returns_and_flags_columns_of_the_candidates() -> None:
+async def test_c8_reads_the_daily_returns_and_flags_columns_of_the_candidates() -> None:
     """The boundary needs ``daily_returns`` (D-02 order) and ``data_quality_flags``
     (the curve's cumulative method) off the same row: the select names both, and the
     column-strict stub proves they are real columns."""
     idx = nav_constant_yield(1e-4).index
     stub = _StubClient({"same": _noise(idx, seed=90)})
-    find_matched_strategy(_noise(idx, seed=90), stub)
+    await find_matched_strategy(_noise(idx, seed=90), stub)
     analytics_selects = [c for c in stub.selected if c.startswith("strategy_analytics: ")]
     assert len(analytics_selects) == 1
     for column in ("strategy_id", "returns_series", "daily_returns", "data_quality_flags"):
         assert column in analytics_selects[0], column
 
 
-def test_c8_a_real_failure_still_logs_matching_failed(caplog: pytest.LogCaptureFixture) -> None:
+async def test_c8_a_real_failure_still_logs_matching_failed(caplog: pytest.LogCaptureFixture) -> None:
     """The broad except stays for real failures: the warning keeps its meaning."""
 
     class _Broken:
@@ -948,8 +1002,122 @@ def test_c8_a_real_failure_still_logs_matching_failed(caplog: pytest.LogCaptureF
     caplog.clear()
     caplog.set_level(logging.WARNING, logger="quantalyze.analytics")
     idx = nav_constant_yield(1e-4).index
-    assert find_matched_strategy(_noise(idx, seed=86), _Broken()) is None
+    assert await find_matched_strategy(_noise(idx, seed=86), _Broken()) is None
     assert len(_matching_failed_lines(caplog)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.6.6.2.1 (D-04, D-10, D-02) - a BTC-unit candidate is compared in USD
+#
+# The matcher correlates a candidate's daily returns with a trade-derived USD
+# target. A BTC-native strategy stores its returns in BTC, so correlating the raw
+# series compares two currencies: it can report a duplicate that is not one (raw
+# equal, USD different) and miss one that is (USD equal, raw different). The
+# candidate is converted to USD first; one with no price source is absent, never
+# read raw.
+# ---------------------------------------------------------------------------
+
+_BTC_FLAGS = {"btc_cand": {"native_unit": "BTC"}}
+
+
+def _btc_world(seed: int) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    """``(target, closes, raw_equal, usd_equal)`` over 60 days.
+
+    ``target`` is the USD series being matched. ``closes`` are BTC daily closes
+    with real day-to-day variation. ``raw_equal`` is a BTC series numerically equal
+    to the target. ``usd_equal`` is the BTC series whose USD conversion
+    ``(1 + r_k) * P_k / P_{k-1} - 1`` equals the target on every day after the
+    first, built by inverting that formula by hand: ``r_k = (1 + T_k) * P_{k-1} /
+    P_k - 1``. Day 0 is never priced, so its value is a placeholder.
+    """
+    idx = pd.date_range("2026-01-01", periods=60, freq="D")
+    target = _noise(idx, seed=seed)
+    rng = np.random.default_rng(seed + 1000)
+    closes = pd.Series(60_000.0 * np.exp(np.cumsum(rng.normal(0.0, 0.03, len(idx)))), index=idx)
+    usd_equal = ((1.0 + target) * closes.shift(1) / closes - 1.0).fillna(0.0)
+    return target, closes, target.copy(), usd_equal
+
+
+def _stub_closes(
+    monkeypatch: pytest.MonkeyPatch,
+    closes: pd.Series | None | BaseException,
+    module: str,
+    attr: str = "get_btc_closes",
+) -> None:
+    """Patch the closes loader ``module`` imported as ``attr``. An exception INSTANCE makes
+    the loader raise it (a read that failed)."""
+
+    async def _loader() -> pd.Series | None:
+        if isinstance(closes, BaseException):
+            raise closes
+        return closes
+
+    monkeypatch.setattr(f"{module}.{attr}", _loader)
+
+
+async def test_c8_btc_raw_series_equal_to_the_usd_target_is_not_a_match(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-04 RED-first: the candidate's RAW BTC returns equal the USD target, so a
+    matcher that correlates the stored series reports a duplicate. In USD the
+    candidate is a different series (its correlation with the target is stated as a
+    precondition), so there is no match."""
+    target, closes, raw_equal, _ = _btc_world(seed=201)
+    in_usd = ((1.0 + raw_equal) * closes / closes.shift(1) - 1.0).dropna()
+    assert float(in_usd.corr(target.reindex(in_usd.index))) < 0.95, "precondition"
+    _stub_closes(monkeypatch, closes, "services.strategy_matching", "read_btc_closes")
+    assert await _c8(target, {"btc_cand": raw_equal}, caplog, flags=_BTC_FLAGS) is None
+    assert _matching_failed_lines(caplog) == []
+
+
+async def test_c8_btc_candidate_whose_usd_series_equals_the_target_is_the_match(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-04: the false negative. The candidate's BTC series looks nothing like the
+    target (stated), but converted to USD it IS the target."""
+    target, closes, _, usd_equal = _btc_world(seed=202)
+    assert float(usd_equal.iloc[1:].corr(target.iloc[1:])) < 0.95, "precondition"
+    _stub_closes(monkeypatch, closes, "services.strategy_matching", "read_btc_closes")
+    candidates = {"btc_conv": usd_equal, "other": _noise(target.index, seed=203)}
+    flags = {"btc_conv": {"native_unit": "BTC"}}
+    assert await _c8(target, candidates, caplog, flags=flags) == "btc_conv"
+
+
+async def test_c8_btc_candidate_with_no_price_source_is_absent_not_read_raw(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-02: with no BTC closes the native candidate cannot be put in USD, so it is
+    dropped from the scan; the raw series (equal to the target) must not match. A
+    USD candidate on the same call still does."""
+    target, _, raw_equal, _ = _btc_world(seed=204)
+    _stub_closes(monkeypatch, None, "services.strategy_matching", "read_btc_closes")
+    assert await _c8(target, {"btc_cand": raw_equal}, caplog, flags=_BTC_FLAGS) is None
+    assert _matching_failed_lines(caplog) == []
+    candidates = {"btc_cand": raw_equal, "usd_twin": target.copy()}
+    assert await _c8(target, candidates, caplog, flags=_BTC_FLAGS) == "usd_twin"
+
+
+async def test_c8_closes_outage_is_logged_with_its_cause_and_usd_candidates_still_match(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """164.6.6.2.1 SFH-01. Matching is best-effort and stays so, but a closes READ that
+    failed must not hide behind "no price source": the cause is logged. The native
+    candidate is left out of the scan (it cannot be put in USD), never read raw, and the
+    USD candidate on the same call still matches."""
+    from services.benchmark import BtcClosesReadError
+
+    target, _, raw_equal, _ = _btc_world(seed=205)
+    _stub_closes(
+        monkeypatch,
+        BtcClosesReadError("benchmark_prices read failed"),
+        "services.strategy_matching",
+        "read_btc_closes",
+    )
+    candidates = {"btc_cand": raw_equal, "usd_twin": target.copy()}
+    assert await _c8(target, candidates, caplog, flags=_BTC_FLAGS) == "usd_twin"
+    assert _matching_failed_lines(caplog) == []
+    causes = [r.getMessage() for r in caplog.records if "closes unreadable" in r.getMessage()]
+    assert len(causes) == 1 and "benchmark_prices read failed" in causes[0], causes
 
 
 # ---------------------------------------------------------------------------

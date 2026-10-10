@@ -5,7 +5,7 @@ import { trackFactsheetEvent } from "./factsheet-analytics";
 import { useBasisSeriesView } from "./basis-context";
 import { isoToMonthDay } from "./MetricsColumn";
 import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
-import { nativeUnitReason } from "@/lib/factsheet/returns-unit";
+import { benchmarkWithheldReason } from "@/lib/factsheet/returns-unit";
 
 // The "none" state is reachable by clicking the active comparator chip a
 // second time — toggle-off semantics. An explicit "None" radio used to live
@@ -109,7 +109,7 @@ export function ComparatorPicker() {
         })}
         {unit !== null && (
           <span className="text-micro font-mono uppercase tracking-wider text-text-muted">
-            {`${LABELS.btc} not available: ${nativeUnitReason(unit)}`}
+            {`${LABELS.btc} not available: ${benchmarkWithheldReason(unit, payload.convertedFrom)}`}
           </span>
         )}
       </div>

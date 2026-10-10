@@ -39,6 +39,9 @@ import { isComputedAnalytics } from "@/lib/closed-sets";
 import { buildFactsheetPayload, deriveIngestSource, hasBuildableSeries, MIN_FACTSHEET_SERIES_POINTS } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { readFactsheetBenchmark } from "./benchmark-read";
+import { readBenchmarkPrices } from "./benchmark-source";
+import { convertNativeReturnsToUsd } from "./native-to-usd";
+import { buildUsdViewFacts } from "./usd-view";
 import { parseReturnsUnit } from "./returns-unit";
 import {
   CompositeSeriesReadError,
@@ -50,7 +53,7 @@ import {
 import { resolveDailyReturnSeries } from "./allocator-portfolio-payload";
 import { curveMethodFromFlags } from "./resolve-series";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
-import type { FactsheetPayload, IngestSource } from "./types";
+import type { FactsheetPayload, FactsheetUsdView, IngestSource } from "./types";
 
 /**
  * The visibility predicate injected into `fetchAndBuildPayload`. Structurally
@@ -653,7 +656,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v13", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v14", id,
  * computedAt], a `null` computedAt included. 167.2.1-REVIEW-R2 IN-01: the key
  * moves more often than "once per successful run". The status bridge
  * `sync_strategy_analytics_status` (latest definition: migration
@@ -834,38 +837,153 @@ async function buildFromResolved(
     strategy.name ??
     strategy.codename ??
     displayStrategyName(strategy);
-  return buildFactsheetPayload(
-    {
-      id: strategy.id,
-      name: factsheetName,
-      types: strategy.strategy_types ?? [],
-      markets: strategy.markets ?? [],
-      computedAt,
-      trustTier: null,
-      // Composites route down the csv arm EXPLICITLY (suppresses the three
-      // synthesized panels via the existing discriminated union — no new
-      // logic). Single-key keeps the raw-column-derived classification.
-      ingestSource: isComposite ? "csv" : ingestSource,
-      description: strategy.description ?? null,
-      subtypes: strategy.subtypes ?? [],
-      supportedExchanges: strategy.supported_exchanges ?? [],
-      // Phase 170.2 (SC-4, D-09): the stored provenance marker. The masthead
-      // venue label keys on THIS (`strategies.source = 'csv'`), never on
-      // `ingestSource`, which is derived from `daily_returns` and so reads "api"
-      // for every PROD strategy.
-      source: strategy.source ?? null,
-      leverageRange: strategy.leverage_range ?? null,
-      aum: strategy.aum ?? null,
-      maxCapacity: strategy.max_capacity ?? null,
-      avgDailyTurnover: strategy.avg_daily_turnover ?? null,
-      startDate: strategy.start_date ?? null,
-      benchmark: strategy.benchmark ?? null,
-      assetClass: strategy.asset_class ?? null,
-    },
-    dailyReturns,
-    buildOpts,
-  );
+  const strategyArg = {
+    id: strategy.id,
+    name: factsheetName,
+    types: strategy.strategy_types ?? [],
+    markets: strategy.markets ?? [],
+    computedAt,
+    trustTier: null,
+    // Composites route down the csv arm EXPLICITLY (suppresses the three
+    // synthesized panels via the existing discriminated union — no new
+    // logic). Single-key keeps the raw-column-derived classification.
+    ingestSource: isComposite ? ("csv" as const) : ingestSource,
+    description: strategy.description ?? null,
+    subtypes: strategy.subtypes ?? [],
+    supportedExchanges: strategy.supported_exchanges ?? [],
+    // Phase 170.2 (SC-4, D-09): the stored provenance marker. The masthead
+    // venue label keys on THIS (`strategies.source = 'csv'`), never on
+    // `ingestSource`, which is derived from `daily_returns` and so reads "api"
+    // for every PROD strategy.
+    source: strategy.source ?? null,
+    leverageRange: strategy.leverage_range ?? null,
+    aum: strategy.aum ?? null,
+    maxCapacity: strategy.max_capacity ?? null,
+    avgDailyTurnover: strategy.avg_daily_turnover ?? null,
+    startDate: strategy.start_date ?? null,
+    benchmark: strategy.benchmark ?? null,
+    assetClass: strategy.asset_class ?? null,
+  };
+  const nativePayload = buildFactsheetPayload(strategyArg, dailyReturns, buildOpts);
+
+  // Phase 164.6.6.2.1 (D-01, D-03, D-15) — a native strategy ships its USD view
+  // beside the native payload. By spread, so a USD payload (and a composite) has
+  // neither key and stays byte-identical.
+  if (unit === null || isComposite) return nativePayload;
+  const usd = await buildUsdView({
+    supabase,
+    id,
+    unit,
+    analytics,
+    dqf,
+    strategyArg,
+  });
+  return { ...nativePayload, ...usd };
 }
+
+type UsdViewOutcome =
+  | { usdView: FactsheetUsdView }
+  | { usdViewUnavailable: "price_read_failed" | "no_priced_day" };
+
+/**
+ * Phase 164.6.6.2.1 (D-01, D-02, D-03, D-15) — the USD view of a native-unit
+ * strategy, built server-side from the NATIVE truth: the stored native series
+ * converted at the stored daily BTC close (`convertNativeReturnsToUsd`, the
+ * production idiom of `/api/strategies/[id]/returns`), then a SECOND
+ * `buildFactsheetPayload` over that USD series.
+ *
+ * ⛔ The USD build is given NEITHER `singleKeyOpts` NOR `metricsByBasis`
+ * (RESEARCH Pitfall 3): the persisted headline scalars are BTC figures, and
+ * overlaying them would print a BTC CAGR under a USD label. Every USD figure is
+ * recomputed from the USD series. `returnsUnit: "USD"` makes the labels read
+ * "... in USD" and pins `activeComparator` to "none"; `convertedFrom` makes every
+ * benchmark-vs-BTC panel withhold with the converted-from reason (D-15).
+ *
+ * D-02: a failed price read, or a read that leaves no priced day, is a NAMED
+ * reason and never a USD payload built from nothing. The read goes through
+ * `readBenchmarkPrices` (not `readBtcCloses`) because that one answers null for
+ * both a failed read and an empty table.
+ */
+async function buildUsdView(args: {
+  supabase: ReturnType<typeof createAdminClient>;
+  id: string;
+  unit: string;
+  analytics: ResolvedFactsheetInputs["analytics"];
+  dqf: ResolvedFactsheetInputs["dqf"];
+  strategyArg: Parameters<typeof buildFactsheetPayload>[0];
+}): Promise<UsdViewOutcome> {
+  const { supabase, id, unit, analytics, dqf, strategyArg } = args;
+  const read = await readBenchmarkPrices(supabase, "BTC");
+  if (!read.ok) {
+    const err = read.error as { code?: unknown; message?: unknown } | null;
+    console.error(USD_VIEW_READ_FAILED_MESSAGE, {
+      id,
+      code: typeof err?.code === "string" ? err.code : "none",
+      message: typeof err?.message === "string" ? err.message : String(read.error),
+    });
+    return { usdViewUnavailable: "price_read_failed" };
+  }
+  if (read.prices.length === 0) {
+    console.warn(USD_VIEW_UNPRICED_MESSAGE, { id, reason: "no_closes_stored", dropped: read.dropped.length });
+    return { usdViewUnavailable: "no_priced_day" };
+  }
+  // WR-02: the conversion reads the series with its absent days kept as NaN
+  // placeholders, so the day after a gap is priced over its own single interval.
+  const nativeSeries = resolveDailyReturnSeries(
+    analytics?.daily_returns,
+    analytics?.returns_series,
+    curveMethodFromFlags(dqf),
+    true,
+  );
+  const usdSeries = convertNativeReturnsToUsd(nativeSeries, unit, {
+    prices: read.prices,
+    dropped: read.dropped,
+  });
+  if (usdSeries.length === 0) {
+    console.warn(USD_VIEW_UNPRICED_MESSAGE, { id, reason: "no_covered_day", closes: read.prices.length });
+    return { usdViewUnavailable: "no_priced_day" };
+  }
+  // A short series is the same data-fact as above: it cannot make a factsheet.
+  if (!hasBuildableSeries(usdSeries)) {
+    console.warn(USD_VIEW_UNPRICED_MESSAGE, { id, reason: "too_few_priced_days", priced: usdSeries.length });
+    return { usdViewUnavailable: "no_priced_day" };
+  }
+
+  // D-06, D-22: the holes the conversion left, counted and located from the SAME
+  // dates and closes it read. The seam list rides into the USD build; the rest
+  // rides on `usdView` for the disclosure and the unpriced note.
+  const facts = buildUsdViewFacts(
+    nativeSeries.map((p) => p.date),
+    usdSeries.map((p) => p.date),
+    new Set(read.prices.map((p) => p.date)),
+  );
+  const usdOpts: BuildFactsheetOpts = {
+    dataQuality: singleKeyDataQuality(dqf),
+    returnsUnit: "USD",
+    ...(facts.missingSegments.length > 0 ? { missingSegments: facts.missingSegments } : {}),
+  };
+  usdOpts.benchmarkPrices = await readFactsheetBenchmark(supabase, usdSeries, usdOpts, id);
+  const built = buildFactsheetPayload(strategyArg, usdSeries, usdOpts);
+  const payload: FactsheetPayload = { ...built, convertedFrom: unit };
+  return {
+    usdView: {
+      payload,
+      convertedFrom: unit,
+      usdStart: facts.usdStart,
+      usdEnd: facts.usdEnd,
+      leadingHole: facts.leadingHole,
+      unpricedDays: facts.unpricedDays,
+      removedReturns: facts.removedReturns,
+    },
+  };
+}
+
+/** The one stable message of a failed closes read behind the USD view. */
+const USD_VIEW_READ_FAILED_MESSAGE =
+  "[factsheet] BTC closes read failed; USD view unavailable";
+/** The one stable message of a USD view that no stored close could price. */
+const USD_VIEW_UNPRICED_MESSAGE =
+  "[factsheet] USD view unavailable: no stored BTC close prices any of the series' days";
 
 /**
  * 167.2.1-REVIEW-SFH-R2 N-3 — how long one buildability probe may take before

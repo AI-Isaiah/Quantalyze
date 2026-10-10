@@ -369,6 +369,18 @@ export interface StrategyAnalytics {
    */
   cumulative_method?: string | null;
   /**
+   * Phase 164.6.6.2.1 (D-05, D-12) — NOT a `strategy_analytics` column. The
+   * scalar `data_quality_flags->>native_unit`, projected as a JSONB alias
+   * (`native_unit:data_quality_flags->>native_unit`) by the anonymous ranking
+   * read, which must not ship the whole flags blob. `shapeRowAnalytics` also
+   * derives it from the owner's wildcard embed, always through
+   * `parseReturnsUnit`, so a value here is either a well-formed unit code
+   * (`"BTC"`) or `null`. The StrategyTable chip reads it. OPTIONAL like
+   * `cumulative_method`: reads that do not project it stay valid, and an
+   * absent value is the USD family (no chip).
+   */
+  native_unit?: string | null;
+  /**
    * Phase 170.2 (SC-3, D-07) — NOT a `strategy_analytics` column. The scalar
    * `data_quality_flags->>twr_chain_broken`, projected as a JSONB alias
    * (`twr_chain_broken:data_quality_flags->>twr_chain_broken`) by the
@@ -1262,6 +1274,15 @@ export interface ApiKey {
   // Same migration (D-05 / D-09). The owner's include/exclude choice for a
   // departed key's history; NULL = the default rule.
   history_inclusion: "include" | "exclude" | null;
+  // Migration 20261010120000 (Phase 164.6.6.2.1, D-07 / D-17), columns born in
+  // 20261007120000. The account's native unit code (`BTC`; NULL = USD family),
+  // its balance in that unit, and the UTC day of the daily close
+  // `account_balance_usdt` was priced at. Read-only to the client: only the
+  // worker writes them. The card renders the close date as stored, never one
+  // computed from the viewer's clock.
+  account_currency: string | null;
+  account_balance_native: number | null;
+  account_balance_usdt_close_date: string | null;
 }
 
 /** Phase 167.1.2 D-11 / D-04 — the closed set of `api_keys.account_share_kind`. */
@@ -1303,6 +1324,16 @@ export const ApiKeyRowSchema = z
     account_shared_with_api_key_id: z.string().nullable(),
     account_share_kind: z.enum(["duplicate", "composite_member"]).nullable(),
     history_inclusion: z.enum(["include", "exclude"]).nullable(),
+    // Phase 164.6.6.2.1 (D-07 / D-17). A unit code is 2-10 capitals (the same
+    // shape `parseReturnsUnit` and the column CHECK enforce); the balance is a
+    // finite number or a numeric string (PostgREST numeric); the close date is
+    // a bare YYYY-MM-DD day. Anything else drops the row at the read boundary.
+    account_currency: z.string().regex(/^[A-Z]{2,10}$/).nullable(),
+    account_balance_native: _strictNumberOrStringNumericNullable,
+    account_balance_usdt_close_date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .nullable(),
   })
   .strict() satisfies z.ZodType<ApiKey>;
 

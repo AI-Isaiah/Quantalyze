@@ -2,7 +2,7 @@
 
 import React, { type ReactNode } from "react";
 import dynamic from "next/dynamic";
-import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
+import type { FactsheetPayload, FactsheetUsdView, RollWindowPick } from "@/lib/factsheet/types";
 import { pairedFloorReason } from "@/lib/factsheet/joint";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 // Phase 163 / HONEST-08 — the SERIES ladder (3d/7d) is shared with the
@@ -19,7 +19,7 @@ import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
 import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
-import { withUnit } from "@/lib/factsheet/returns-unit";
+import { formatCloseDay, formatUnpricedDays, withUnit } from "@/lib/factsheet/returns-unit";
 import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
 // Phase 164 (SHARE-04) — THE ONE SHARE PREDICATE, shared with the other two
 // affordance sites (the strategies page and discovery detail, both of which go
@@ -33,12 +33,13 @@ import {
 } from "@/components/strategy/ShareableLink";
 import type { CapitalOwnership } from "@/lib/capital-ownership";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
+import { UnitViewProvider, useUnitView } from "./unit-view";
 import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSeriesView, useWindowedView, useAppliedLeverage, leverageApplies, leverageEligibleFor, mtmDisabledReasonCopy, mtmReasonTone, smoothedDisabledReasonCopy, type Basis } from "./basis-context";
 // Phase 90.5 (LEV-01, D1/D2) + Phase 107 (LEV-BB): ephemeral single-key leverage.
 // LeverageProvider wraps the body (transparent to GUARD-02); useLeverage drives the
 // ControlBar input AND the KpiStrip's levered-view gate. The KpiStrip now reads the
 // leverage-composed useBasisSeriesView (plan 01), so the derived metrics hooks are gone.
-import { LeverageProvider, useLeverage } from "./leverage-context";
+import { LeverageContext, LeverageProvider, useLeverage } from "./leverage-context";
 /**
  * 151 UAT — the shared CONTRACT ceiling (`MAX_LEVERAGE`, src/lib/leverage.ts)
  * was raised 10 → 200 for the Scenario Composer's strategy rows, which is what
@@ -224,17 +225,59 @@ export function FactsheetView({
   ownerShare,
 }: { payload: FactsheetPayload } & OwnerLaneProps) {
   return (
-    <FactsheetProvider payload={payload}>
-      <FactsheetShell
-        payload={payload}
-        viewerNotice={viewerNotice}
-        recipientShare={recipientShare}
-        ownershipMark={ownershipMark}
-        renameTarget={renameTarget}
-        ownerShare={ownerShare}
-      />
-    </FactsheetProvider>
+    // Phase 164.6.6.2.1 (D-01, D-18): the Units toggle lives HERE and nowhere
+    // else, so `/strategy/[id]/v2` and the composer, which mount FactsheetBody
+    // under their own FactsheetProvider, stay native-only. `payload` is the NATIVE
+    // payload: the masthead reads it directly, and the frozen provider is handed
+    // whichever payload the viewer selected.
+    <UnitViewProvider payload={payload}>
+      <SelectedPayloadProvider>
+        <FactsheetShell
+          payload={payload}
+          viewerNotice={viewerNotice}
+          recipientShare={recipientShare}
+          ownershipMark={ownershipMark}
+          renameTarget={renameTarget}
+          ownerShare={ownerShare}
+        />
+      </SelectedPayloadProvider>
+    </UnitViewProvider>
   );
+}
+
+/**
+ * Feeds the frozen `FactsheetProvider` the payload for the selected unit view.
+ * It is the same provider element in the same tree position in both views, so a
+ * switch is a prop change, never a remount (focus on the toggle survives).
+ */
+function SelectedPayloadProvider({ children }: { children: ReactNode }) {
+  const unitView = useUnitView();
+  // Always inside UnitViewProvider (FactsheetView above is the only caller).
+  return <FactsheetProvider payload={unitView!.selectedPayload}>{children}</FactsheetProvider>;
+}
+
+/**
+ * Phase 164.6.6.2.1 (D-16, UI-SPEC A switch effect 4) — in the USD view the
+ * leverage every consumer reads is 1, and the native multiplier is held untouched.
+ *
+ * The USD payload is converted by the server at 1x. Scaling that series by L would
+ * lever the BTC price leg as well as the strategy, so the USD view must never see
+ * L != 1. Every view hook reads leverage through `LeverageContext`, so shadowing the
+ * context here covers the KPI strip, the charts, the rail and the caption in one
+ * place, with no per-consumer wiring (the Phase 107 backbone). The real state lives
+ * in the `LeverageProvider` above and is never written while the shadow is up, so
+ * the switch back to the native unit restores the prior multiplier by construction.
+ *
+ * The Provider element is rendered in BOTH views, only its value differs, so a
+ * switch never remounts the subtree (focus on the Units toggle survives).
+ * Outside a `UnitViewProvider` (the composer, `/strategy/[id]/v2`) the value is the
+ * real context, passed through.
+ */
+function UsdViewLeverageHold({ children }: { children: ReactNode }) {
+  const real = React.useContext(LeverageContext);
+  const inUsd = useUnitView()?.view === "usd";
+  const held = React.useMemo(() => ({ leverage: 1, setLeverage: () => {} }), []);
+  return <LeverageContext.Provider value={inUsd ? held : real}>{children}</LeverageContext.Provider>;
 }
 
 /**
@@ -375,6 +418,7 @@ export function FactsheetBody({
     // KpiStrip + ControlBar. It renders children only (no DOM) → transparent to
     // the GUARD-02 byte-identity gate; basis is ephemeral (GUARD-04).
     <LeverageProvider>
+    <UsdViewLeverageHold>
     <BasisProvider>
       <article
         id="factsheet-main"
@@ -509,6 +553,7 @@ export function FactsheetBody({
         {!hideFooter && <FactsheetFooter payload={payload} scenarioMode={scenarioMode} />}
       </article>
     </BasisProvider>
+    </UsdViewLeverageHold>
     </LeverageProvider>
   );
 }
@@ -1004,14 +1049,51 @@ export function SharedPrivatelyNotice() {
   );
 }
 
+/**
+ * Phase 164.6.6.2.1 (D-06, UI-SPEC B): the sentence under the USD view's masthead
+ * that says how the figures were made and which days they leave out. Prints, so
+ * it lives in the masthead rather than the (non-printing) ControlBar.
+ */
+function UsdDisclosure({ usdView }: { usdView: FactsheetUsdView }) {
+  const end = formatCloseDay(usdView.usdEnd);
+  const priced = usdView.leadingHole ? `Priced from ${formatCloseDay(usdView.usdStart)} through ${end}.` : `Priced through ${end}.`;
+  const m = usdView.unpricedDays.length;
+  const k = usdView.removedReturns;
+  const note =
+    m > 0
+      ? `No ${usdView.convertedFrom} close for ${m} ${m === 1 ? "day" : "days"}: ${formatUnpricedDays(usdView.unpricedDays)}. ` +
+        `${k} daily USD ${k === 1 ? "return that needs" : "returns that need"} ${m === 1 ? "that close" : "those closes"} ` +
+        `${k === 1 ? "is" : "are"} left out, so every USD figure here is computed over priced days only.`
+      : null;
+  return (
+    <div className="mt-4 flex max-w-3xl flex-col gap-1" data-testid="factsheet-usd-disclosure">
+      <p className="text-caption text-text-muted">
+        Shown in USD, converted from {usdView.convertedFrom} at the stored daily {usdView.convertedFrom} close. {priced}
+      </p>
+      {note && (
+        <p className="text-caption text-text-muted" data-testid="factsheet-usd-unpriced-note">
+          {note}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function FactsheetHeader({
-  payload,
+  payload: payloadProp,
   ownershipMark,
   renameTarget,
 }: {
   payload: FactsheetPayload;
 } & Pick<OwnerLaneProps, "ownershipMark" | "renameTarget">) {
   const [renameOpen, setRenameOpen] = React.useState(false);
+  // Phase 164.6.6.2.1 (D-19, UI-SPEC rule 4): every identity element below (H1,
+  // unit chip, trust tier, FreshnessChip, SeriesRecencyLine, CapacityChip) reads
+  // the NATIVE payload, in both views. The frozen provider is handed the selected
+  // payload, so `usePayload()` must never be used in this component. Outside a
+  // UnitViewProvider (composer, `/strategy/[id]/v2`) the prop is the only payload.
+  const unitView = useUnitView();
+  const payload = unitView?.nativePayload ?? payloadProp;
   // Phase 164.6.6.2 (D-08, D-09): the ONE field every unit surface reads.
   const returnsUnit = payload.returnsUnit ?? null;
   const exchanges = payload.supportedExchanges.length > 0 ? payload.supportedExchanges.join(", ") : null;
@@ -1174,6 +1256,9 @@ function FactsheetHeader({
           )}
         </div>
       </div>
+      {unitView?.view === "usd" && unitView.nativePayload.usdView && (
+        <UsdDisclosure usdView={unitView.nativePayload.usdView} />
+      )}
     </header>
   );
 }
@@ -2249,6 +2334,37 @@ function ControlBar({
   const payload = usePayload();
   const { resetXRange } = useXRange();
   const { setComparator } = useComparator();
+  // Phase 164.6.6.2.1 (D-01, D-18, UI-SPEC A): the Units toggle. `null` outside a
+  // UnitViewProvider (the composer and `/strategy/[id]/v2`, native-only), so those
+  // mounts render no node here. The unit label comes from the NATIVE payload: the
+  // selected payload in the USD view says "USD" and would label its own segment.
+  const unitView = useUnitView();
+  const nativeUnit = unitView?.nativePayload.returnsUnit ?? null;
+  const showUnitToggle = unitView != null && nativeUnit != null;
+  // UI-SPEC A (Disabled USD): the reason is the segment's title AND a visible line.
+  // A failed read is transient (the cached payload expires within the hour), so it
+  // is amber; no priced day at all is a steady fact, so it is muted.
+  const usdUnavailableReason = unitView?.unavailableReason ?? null;
+  const usdReasonCopy =
+    usdUnavailableReason === "price_read_failed"
+      ? "No USD view: the daily BTC closes could not be read. It is retried within the hour."
+      : usdUnavailableReason === "no_priced_day"
+        ? "No USD view: no day in this record has a stored BTC close."
+        : undefined;
+  const unitViewMode = unitView?.view ?? "native";
+  const inUsd = unitViewMode === "usd";
+  // Phase 164.6.6.2.1 (D-16, UI-SPEC A switch effects 4 + 5): in the USD view the
+  // leverage and basis groups are judged on the NATIVE payload. The USD payload is
+  // built at 1x and without `metricsByBasis` or a gate, so judging it would make
+  // both groups vanish on the switch instead of saying why they are off. The BTC
+  // price leg named in the leverage reason is the one the conversion used.
+  const gatePayload = inUsd && unitView ? unitView.nativePayload : payload;
+  const priceLeg = unitView?.selectedPayload.convertedFrom ?? nativeUnit ?? "BTC";
+  const leverageUsdReason = `Leverage is off in the USD view: it would also lever ${priceLeg}.`;
+  const basisUsdReason = `Shown in ${nativeUnit ?? "BTC"} only. Switch Units to ${nativeUnit ?? "BTC"} to see this basis.`;
+  // Empty on mount; set by an ACTUAL switch so a screen reader hears the change
+  // and a fresh mount is silent.
+  const [unitAnnouncement, setUnitAnnouncement] = React.useState("");
   // Phase 164 (D-09) — TWO share mechanisms, one meaning. `useShareMode()` reads
   // `?share=1` and serves the PUBLISHED id route; it is untouched. The token
   // route has no query param to read, so its share mode arrives structurally as
@@ -2274,20 +2390,28 @@ function ControlBar({
     prevBasisRef.current = basis;
     resetXRange();
   }, [basis, resetXRange]);
-  const composite = payload.dataQuality?.composite === true;
-  const mtmAvailable = payload.mtmGate?.available === true;
-  const mtmReason = mtmDisabledReasonCopy(payload.mtmGate?.reason);
+  // UI-SPEC A (switch effects 2): the USD series has its own span and holes, so a
+  // zoom window captured on the other view is meaningless. Same pattern as basis.
+  const prevUnitViewRef = React.useRef(unitViewMode);
+  React.useEffect(() => {
+    if (prevUnitViewRef.current === unitViewMode) return;
+    prevUnitViewRef.current = unitViewMode;
+    resetXRange();
+  }, [unitViewMode, resetXRange]);
+  const composite = gatePayload.dataQuality?.composite === true;
+  const mtmAvailable = gatePayload.mtmGate?.available === true;
+  const mtmReason = mtmDisabledReasonCopy(gatePayload.mtmGate?.reason);
   // Phase 133 (SMTM-01): the smoothed gate — enabled ⇔ the persisted smoothed_mtm
   // basis is available; disabled → the mapped closed-set reason copy. Always a STEADY
   // honest-empty condition (no self-healing transient), so the inline reason renders
   // muted — no amber, no tone split.
-  const smoothedAvailable = payload.smoothedGate?.available === true;
-  const smoothedReason = smoothedDisabledReasonCopy(payload.smoothedGate?.reason);
+  const smoothedAvailable = gatePayload.smoothedGate?.available === true;
+  const smoothedReason = smoothedDisabledReasonCopy(gatePayload.smoothedGate?.reason);
   // Phase 102 (DESIGN.md tone split): amber --color-warning is reserved for
   // transient/recoverable reasons (timeout, anchor-race — the system re-attempts
   // on the next derive); steady-state honest-empty reasons render muted. Amber on
   // a steady reason would falsely signal self-healing (RESEARCH Pitfall 4).
-  const mtmReasonTransient = mtmReasonTone(payload.mtmGate?.reason) === "transient";
+  const mtmReasonTransient = mtmReasonTone(gatePayload.mtmGate?.reason) === "transient";
   // Phase 90.5 (LEV-01, D1/D2/D5) + Phase 107 (LEV-BB, CONTEXT scope): fail-closed
   // eligibility — the leverage cluster renders IFF single-key (composite !== true) AND
   // periodsPerYear present AND the active basis is RESOLVED. Phase 107 levers the
@@ -2300,7 +2424,7 @@ function ControlBar({
   // IN-02 (Phase 107 review): the ONE shared structural-eligibility predicate (single
   // source of truth with the view hook + KpiStrip gate). True even at L=1 — the input
   // must render so the user can engage leverage.
-  const leverageEligible = leverageEligibleFor(payload, basis);
+  const leverageEligible = leverageEligibleFor(gatePayload, basis);
   const { leverage, setLeverage } = useLeverage();
   // Local ephemeral clamp message (NOT setCommitError — that mandate-commit
   // channel does not exist on the factsheet). Interactive fail-loud contract
@@ -2308,6 +2432,9 @@ function ControlBar({
   // message; <0 -> 0 + message; >MAX -> MAX + message; valid -> clear.
   const [leverageMsg, setLeverageMsg] = React.useState<string | null>(null);
   const onLeverageChange = (raw: number) => {
+    // D-16: the USD view holds the native multiplier untouched; a change event on
+    // the read-only input (an assistive-tech or scripted write) must not reach it.
+    if (inUsd) return;
     if (!Number.isFinite(raw)) {
       setLeverageMsg(
         `Invalid leverage — enter a number between 0 and ${FACTSHEET_MAX_LEVERAGE}. The previous value was kept.`,
@@ -2340,8 +2467,47 @@ function ControlBar({
     }
     trackFactsheetEvent("factsheet_v2_reset_view", { strategy_id: payload.strategyId });
   };
+  // `mr-auto` pushes the left cluster against the left edge; the first group that
+  // renders owns it. The toggle takes it only when neither group below does.
+  const leverageGroupRenders = !scenarioMode && leverageEligible;
+  const basisGroupRenders = composite || gatePayload.mtmGate != null;
   return (
     <section className="factsheet-v2-no-print mt-6 flex flex-wrap items-center justify-start lg:justify-end gap-x-3 sm:gap-x-6 gap-y-3 border-b border-border pb-3">
+      {showUnitToggle && (
+        <div
+          className={`${leverageGroupRenders || basisGroupRenders ? "" : "mr-auto "}flex flex-col items-start gap-1`}
+          data-testid="factsheet-unit-toggle"
+        >
+          <span className="text-micro font-mono uppercase tracking-wider text-text-muted">Units</span>
+          <SegmentedControl
+            ariaLabel="Units"
+            activeId={unitViewMode}
+            onChange={(id) => {
+              const next = id === "usd" ? "usd" : "native";
+              // UI-SPEC A (switch effect 5): the USD view is cash only, so leaving a
+              // non-cash basis happens in the SAME event as the switch. Two renders
+              // would show the USD payload under an MTM label for one frame.
+              if (next === "usd" && basis !== "cash_settlement") setBasis("cash_settlement");
+              // D-16: a clamp message belongs to the multiplier it was about.
+              setLeverageMsg(null);
+              unitView.setView(next);
+              setUnitAnnouncement(`Showing figures in ${next === "usd" ? "USD" : nativeUnit}.`);
+            }}
+            options={[
+              { id: "native", label: nativeUnit },
+              { id: "usd", label: "USD", disabled: !unitView.usdAvailable, disabledReason: usdReasonCopy },
+            ]}
+          />
+          {usdReasonCopy && (
+            <p className={`text-caption ${usdUnavailableReason === "price_read_failed" ? "text-warning" : "text-text-muted"}`}>
+              {usdReasonCopy}
+            </p>
+          )}
+          <span role="status" aria-live="polite" className="sr-only">
+            {unitAnnouncement}
+          </span>
+        </div>
+      )}
       {/* Phase 167.1.2 plan 07: never inside the composer (scenarioMode). Its
           payload now carries periodsPerYear, which makes it leverage-eligible,
           but the composer already levers each constituent, and a whole-blend
@@ -2361,7 +2527,9 @@ function ControlBar({
               step="0.1"
               min="0"
               max={FACTSHEET_MAX_LEVERAGE}
-              value={leverage.toString()}
+              value={inUsd ? "1" : leverage.toString()}
+              readOnly={inUsd}
+              aria-disabled={inUsd ? "true" : undefined}
               title="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
               aria-label="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
               onChange={(e) => {
@@ -2372,12 +2540,12 @@ function ControlBar({
                 if (e.target.value.trim() === "") return;
                 onLeverageChange(Number(e.target.value));
               }}
-              className="w-16 rounded-sm border border-border bg-surface px-2 py-1 text-right text-caption font-mono tabular-nums focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+              className={`w-16 rounded-sm border border-border bg-surface px-2 py-1 text-right text-caption font-mono tabular-nums focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]${inUsd ? " opacity-60 cursor-not-allowed" : ""}`}
             />
             <span aria-hidden="true" className="text-caption font-mono text-text-muted">
               ×
             </span>
-            {leverage !== 1 && (
+            {!inUsd && leverage !== 1 && (
               <button
                 type="button"
                 onClick={resetLeverage}
@@ -2388,7 +2556,8 @@ function ControlBar({
               </button>
             )}
           </div>
-          {leverageMsg && (
+          {inUsd && <p className="text-caption text-text-muted">{leverageUsdReason}</p>}
+          {!inUsd && leverageMsg && (
             <p
               role="status"
               aria-live="polite"
@@ -2400,7 +2569,7 @@ function ControlBar({
           )}
         </div>
       )}
-      {(composite || payload.mtmGate != null) && (
+      {basisGroupRenders && (
         <div className="mr-auto flex flex-col items-start gap-1">
           <SegmentedControl
             ariaLabel="Metrics basis"
@@ -2411,8 +2580,8 @@ function ControlBar({
               {
                 id: "mark_to_market",
                 label: "Mark-to-market",
-                disabled: !mtmAvailable,
-                disabledReason: mtmReason,
+                disabled: inUsd || !mtmAvailable,
+                disabledReason: inUsd ? basisUsdReason : mtmReason,
               },
               // Phase 133 (SMTM-01): the third segment — sentence-case "Smoothed
               // mark-to-market" (matches the "Mark-to-market" sibling's full-word
@@ -2430,14 +2599,16 @@ function ControlBar({
                     {
                       id: "smoothed_mtm",
                       label: "Smoothed mark-to-market",
-                      disabled: !smoothedAvailable,
-                      disabledReason: smoothedReason,
+                      disabled: inUsd || !smoothedAvailable,
+                      disabledReason: inUsd ? basisUsdReason : smoothedReason,
                     },
                   ]
                 : []),
             ]}
           />
-          {!mtmAvailable &&
+          {inUsd && <p className="text-caption text-text-muted">{basisUsdReason}</p>}
+          {!inUsd &&
+            !mtmAvailable &&
             (mtmReasonTransient ? (
               // Transient/recoverable → amber (system re-attempts on next derive).
               <p
@@ -2462,9 +2633,10 @@ function ControlBar({
               and reads as pending for a pass that will never run — the segment
               itself stays honest-disabled with the mapped reason as its tooltip
               (aria-disabled + title, SegmentedControl). */}
-          {SMOOTHED_MTM_UI_ENABLED &&
+          {!inUsd &&
+            SMOOTHED_MTM_UI_ENABLED &&
             !smoothedAvailable &&
-            (mtmAvailable || payload.mtmGate?.reason === "unsmoothed_options_book") && (
+            (mtmAvailable || gatePayload.mtmGate?.reason === "unsmoothed_options_book") && (
               <p className="text-caption text-text-muted">{smoothedReason}</p>
             )}
         </div>

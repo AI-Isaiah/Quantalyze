@@ -42,6 +42,7 @@ import {
 } from "@/components/notes/HoldingNoteRow";
 import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
 import { formatNumber, formatPercent } from "@/lib/utils";
+import { nativeAmount, parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 // Phase 150: `formatUsd` was module-private here; it is now the ONE money
 // formatter for this surface (shared with the Phase-150 mark/allocate
 // dialogs). Body unchanged — a second money formatter here is forbidden.
@@ -94,6 +95,21 @@ function formatQuantity(n: number): string {
   });
 }
 
+/**
+ * Phase 164.6.6.2.1 plan 17 (D-17, D-21). How a native-unit account's USD value
+ * was reached, stated only from stored fields: the quantity in its stored unit,
+ * the mark the row was valued at, and the one thing the data guarantees about
+ * that mark (`benchmark_prices` has no source column, so it is "the stored daily
+ * close", never a named pair). Null when there is no well-formed stored unit or
+ * no mark, so a USD-family row, and a row with nothing to state, say nothing.
+ */
+function nativeValueBasis(h: HoldingRow, unit: string | null): string | null {
+  if (unit === null) return null;
+  const mark = h.mark_price_usd;
+  if (mark == null || !Number.isFinite(mark)) return null;
+  return `${nativeAmount(h.quantity, unit)} × ${formatUsdPrice(mark)}, converted from ${unit} at the stored daily ${unit} close`;
+}
+
 function formatDays(n: number | null): string {
   if (n == null || !Number.isFinite(n)) return "—";
   return `${n}d`;
@@ -115,6 +131,15 @@ export interface HoldingRow {
   value_usd: number;
   entry_price: number | null;
   unrealized_pnl_usd: number | null;
+  /**
+   * Phase 164.6.6.2.1 plan 17 (D-01, D-17). The unit `quantity` is counted in,
+   * as stored on the holdings row (`allocator_holdings.quantity_unit`), and the
+   * mark (USD per unit) the row was valued at. Both optional so legacy fixtures
+   * compile; a row with no well-formed stored unit renders today's cells. The
+   * unit is never inferred from `symbol` or from the mark.
+   */
+  quantity_unit?: string | null;
+  mark_price_usd?: number | null;
   api_key_id: string;
   /** Joined from `api_keys.sync_status` by the dashboard layer. */
   source_key_sync_status: string;
@@ -618,6 +643,9 @@ function LegacyHoldingsTable({
               });
               const noteEntry = notesByHoldingScopeRef[scopeRef];
               const isExpanded = expandedNoteRowId === h.id;
+              // Phase 164.6.6.2.1 plan 17: the stored unit only, parsed.
+              const nativeUnit = parseReturnsUnit(h.quantity_unit);
+              const valueBasis = nativeValueBasis(h, nativeUnit);
               return (
                 <Fragment key={h.id}>
                   <tr
@@ -655,9 +683,18 @@ function LegacyHoldingsTable({
                     <td className="px-4 py-2 text-xs text-text-secondary">
                       {h.holding_type === "spot" ? "Spot" : "Derivative"}
                     </td>
-                    <td className={numericCell}>{formatQuantity(h.quantity)}</td>
+                    <td className={numericCell}>
+                      {nativeUnit !== null
+                        ? nativeAmount(h.quantity, nativeUnit)
+                        : formatQuantity(h.quantity)}
+                    </td>
                     <td className={numericCell}>{formatUsdPrice(h.entry_price)}</td>
-                    <td className={numericCell}>{formatUsd(h.value_usd)}</td>
+                    <td className={numericCell} title={valueBasis ?? undefined}>
+                      {formatUsd(h.value_usd)}
+                      {valueBasis !== null ? (
+                        <span className="sr-only"> ({valueBasis})</span>
+                      ) : null}
+                    </td>
                     <td className={numericCell}>
                       {formatUsdSigned(h.unrealized_pnl_usd)}
                     </td>

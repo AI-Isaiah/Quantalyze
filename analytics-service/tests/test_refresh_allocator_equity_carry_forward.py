@@ -77,7 +77,13 @@ def _seed_holding(
     }
 
 
-async def _run_refresh(monkeypatch: pytest.MonkeyPatch, fake: FakeSupabaseClient, job_key: str) -> Any:
+async def _run_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    fake: FakeSupabaseClient,
+    job_key: str,
+    *,
+    expect_failed: bool = False,
+) -> Any:
     """Run the job as ``job_key``'s refresh on TODAY. Returns the audit mock."""
     audit = _install_fake_audit(monkeypatch)
     exchange = AsyncMock()
@@ -101,7 +107,8 @@ async def _run_refresh(monkeypatch: pytest.MonkeyPatch, fake: FakeSupabaseClient
     )
     from services.job_worker import DispatchOutcome
 
-    assert result.outcome == DispatchOutcome.DONE, result
+    expected = DispatchOutcome.FAILED if expect_failed else DispatchOutcome.DONE
+    assert result.outcome == expected, result
     return audit
 
 
@@ -1187,3 +1194,146 @@ async def test_events_without_asof_keep_the_created_at_rule(
 
     assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD + 500.0)
     assert _refresh_complete_metadata(audit)["emptied_accounts"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 164.6.6.2.1 R2-WR-01 (D-02, D-08, D-17): the refresh honours the native-unpriced marker
+# ---------------------------------------------------------------------------
+#
+# A BTC-denominated MT5 account whose latest completed day has no stored close polls to NO
+# row; the positions poll records that in a service-only ``native_unpriced:<key>`` row of
+# ``allocator_equity_derived`` (dated the poll's day). Its EARLIER row is priced at an older
+# close. The refresh carries every counted account at its latest ``asof`` "with no staleness
+# horizon", and the snapshot it writes is first-writer-wins -- so without this honour the
+# stale-close value became the day's permanent legacy total, under a note saying the
+# account was left out.
+
+MT5_BTC_USD = 26_100.0
+
+
+def _seed_unpriced_marker(
+    fake: FakeSupabaseClient, key_id: str, day: date, *, valid: bool = True
+) -> None:
+    fake.store[("allocator_equity_derived", (ALLOCATOR_ID, f"native_unpriced:{key_id}"))] = {
+        "allocator_id": ALLOCATOR_ID,
+        "kind": f"native_unpriced:{key_id}",
+        "payload": (
+            {"native_unpriced": True, "asof": day.isoformat()} if valid else {"asof": day.isoformat()}
+        ),
+    }
+
+
+def _seed_native_btc_book(fake: FakeSupabaseClient) -> None:
+    """An okx key polled today, and an MT5 BTC key whose last PRICED row is yesterday's."""
+    _seed_key(fake, API_KEY_ID_1)
+    _seed_key(fake, API_KEY_ID_2, exchange="mt5")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, 1000.0)
+    _seed_holding(fake, API_KEY_ID_2, "mt5", "BTC", TODAY - timedelta(days=1), MT5_BTC_USD)
+
+
+@pytest.mark.asyncio
+async def test_a_marker_dated_after_the_priced_row_leaves_the_account_out_of_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Priced row for day N, marker for day N+1: the account is out of today's persisted
+    snapshot and the exclusion is COUNTED (counts only, never the USD)."""
+    fake = FakeSupabaseClient()
+    _seed_native_btc_book(fake)
+    _seed_unpriced_marker(fake, API_KEY_ID_2, TODAY)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    row = _today_row(fake)
+    assert row["value_usd"] == pytest.approx(1000.0), (
+        "the account unpriced today was carried at yesterday's close-priced row: "
+        f"{row['value_usd']}"
+    )
+    assert "BTC" not in row["breakdown"]
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["native_unpriced_accounts"] == 1
+    assert metadata["carried_keys"] == 0
+    leaked = {k: v for k, v in metadata.items() if v == MT5_BTC_USD}
+    assert not leaked, f"audit metadata carries a USD figure: {sorted(leaked)}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param("same_day", id="marker-on-the-rows-own-day-keeps-them"),
+        pytest.param("older", id="marker-older-than-the-rows-keeps-them"),
+        pytest.param("not_a_marker", id="payload-without-the-flag-is-not-a-marker"),
+        pytest.param("no_marker", id="no-marker-at-all"),
+    ],
+)
+async def test_a_marker_that_does_not_postdate_the_rows_hides_nothing(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Strict comparison: a same-day priced poll (unpriced at 00:05, priced at 03:00) writes
+    rows dated the marker's own day, and they stand. An old marker never hides a later
+    priced row, so the marker is never cleared."""
+    fake = FakeSupabaseClient()
+    _seed_native_btc_book(fake)
+    if case == "same_day":
+        _seed_unpriced_marker(fake, API_KEY_ID_2, TODAY - timedelta(days=1))
+    elif case == "older":
+        _seed_unpriced_marker(fake, API_KEY_ID_2, TODAY - timedelta(days=4))
+    elif case == "not_a_marker":
+        _seed_unpriced_marker(fake, API_KEY_ID_2, TODAY, valid=False)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    assert _today_row(fake)["value_usd"] == pytest.approx(1000.0 + MT5_BTC_USD)
+    assert _refresh_complete_metadata(audit)["native_unpriced_accounts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_book_whose_only_account_is_unpriced_writes_no_snapshot_and_says_why(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The only counted account is unpriced: there is nothing honest to write, so the
+    existing no-holdings branch runs (no row, no zero) and its audit carries the count."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_2, exchange="mt5")
+    _seed_holding(fake, API_KEY_ID_2, "mt5", "BTC", TODAY - timedelta(days=1), MT5_BTC_USD)
+    _seed_unpriced_marker(fake, API_KEY_ID_2, TODAY)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
+
+    assert fake.rows_for("allocator_equity_snapshots") == []
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["reason"] == "no_holdings_today"
+    assert metadata["native_unpriced_accounts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_marker_read_fails_the_job_instead_of_pinning_a_short_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The snapshot is first-writer-wins, so a refresh that could not read the marker must
+    not write the day: it fails loudly (FAILED job plus a refresh_failed audit) and the
+    next run retries. Counting the stale row would pin a value the marker exists to deny."""
+    fake = FakeSupabaseClient()
+    _seed_native_btc_book(fake)
+    real_table = fake.table
+
+    class _BrokenTable:
+        def __getattr__(self, _name: str) -> Any:
+            def _chain(*_a: Any, **_k: Any) -> Any:
+                return self
+
+            return _chain
+
+        def execute(self) -> Any:
+            raise RuntimeError("marker table unavailable")
+
+    def _table(name: str) -> Any:
+        return _BrokenTable() if name == "allocator_equity_derived" else real_table(name)
+
+    monkeypatch.setattr(fake, "table", _table)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1, expect_failed=True)
+
+    assert fake.rows_for("allocator_equity_snapshots") == []
+    actions = [c.kwargs.get("action") for c in audit.call_args_list]
+    assert "allocator.equity.refresh_failed" in actions

@@ -52,7 +52,8 @@
  *   (owner RLS: `allocator_holdings_owner_select` — `allocator_id =
  *   auth.uid()`) with an explicit `.eq("allocator_id", userId)` gate as
  *   defence-in-depth. The admin client is NEVER imported (it would bypass RLS).
- *   The projection is a six-column allow-list; the exchange raw-payload column
+ *   The projection is a six-column allow-list (the latest-snapshot read adds the
+ *   owner's own `api_key_id`, R2-WR-01); the exchange raw-payload column
  *   and the key-material columns are never selected.
  *
  * Edge case (98-03 plan-checker W4). The fetch caps rows at 730 days via
@@ -65,6 +66,8 @@
  */
 
 import { createClient } from "@/lib/supabase/server";
+import { fetchNativeUnpricedDays } from "@/lib/latest-holdings-per-key";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 const BACKFILL_CAP_DAYS = 730;
 const MS_PER_DAY = 86_400_000;
@@ -109,7 +112,7 @@ export interface AllocationPoint {
   venues: { venue: string; valueUsd: number; weight: number }[];
 }
 
-/** One row of the six-column allow-listed projection. */
+/** One row of the allow-listed projection. */
 interface HoldingRow {
   asof: string;
   venue: string;
@@ -117,6 +120,14 @@ interface HoldingRow {
   holding_type: string;
   side: string;
   value_usd: number;
+}
+
+/**
+ * `HoldingRow` plus the owning key, read only by the latest-snapshot read (R2-WR-01) to
+ * match a row to its native-unpriced marker. The owner's own FK; no key material.
+ */
+interface LatestHoldingRow extends HoldingRow {
+  api_key_id: string | null;
 }
 
 /** D-P2: negate short notional; long/flat pass through unsigned. */
@@ -288,14 +299,40 @@ export async function getLatestExposureSnapshot(
   const latestAsof = (latestData as { asof: string }[] | null)?.[0]?.asof;
   if (!latestAsof) return null; // honest-empty (also >730d-stale, per W4)
 
-  // Step 2: the holdings AT that exact asof — six-column secretless projection.
-  const { data, error } = await supabase
-    .from("allocator_holdings")
-    .select("asof, venue, symbol, holding_type, side, value_usd")
-    .eq("allocator_id", userId)
-    .eq("asof", latestAsof);
+  // Step 2: the holdings AT that exact asof — the six-column secretless projection plus
+  // the owning key's id (R2-WR-01, below). Read beside the native-unpriced markers.
+  const [{ data, error }, unpriced] = await Promise.all([
+    supabase
+      .from("allocator_holdings")
+      .select("asof, venue, symbol, holding_type, side, value_usd, api_key_id")
+      .eq("allocator_id", userId)
+      .eq("asof", latestAsof),
+    fetchNativeUnpricedDays(supabase, userId),
+  ]);
   if (error) throw error;
-  const latestRows = (data ?? []) as HoldingRow[];
+  // 164.6.6.2.1 R2-WR-01 (D-02, D-08, D-17): a native-unit (BTC) account whose latest
+  // completed day had no stored close polls to NO row, so its earlier row, priced at an
+  // older close, can be the allocator's newest `asof` and was rendered here as the current
+  // exposure. The poll's service-written marker names that day; the SAME shared reader the
+  // scenario commit uses drops a key's rows dated before it (strict: rows on or after the
+  // marker's day stand). A failed marker read is logged and sent to Sentry and the rows
+  // are kept as they were: it must not blank the exposure section, whose own read errors
+  // already throw above.
+  if (unpriced.error) {
+    console.error(
+      "[getLatestExposureSnapshot] native-unpriced record read failed; the latest rows are kept as they were:",
+      unpriced.error.message,
+    );
+    captureToSentry(new Error("portfolio-exposure: native-unpriced record read failed"), {
+      tags: { area: "portfolio-exposure", gate: "native_unpriced_marker" },
+      extra: { user_id: userId, supabase_err: unpriced.error.message },
+      level: "warning",
+    });
+  }
+  const latestRows = ((data ?? []) as LatestHoldingRow[]).filter((r) => {
+    const unpricedDay = r.api_key_id ? unpriced.data.get(r.api_key_id) : undefined;
+    return unpricedDay === undefined || r.asof >= unpricedDay;
+  });
   if (latestRows.length === 0) return null;
 
   const byGrain = new Map<string, ExposureSlice>();

@@ -6461,12 +6461,14 @@ async def _mt5_backfill_in_currency(monkeypatch, currency: object, *, scale: flo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("currency", ["BTC", " btc ", "EUR", "ETH", "b!tc"])
+@pytest.mark.parametrize("currency", ["EUR", "ETH", "b!tc"])
 async def test_mt5_backfill_skips_a_non_usd_account_before_any_row_is_built(
     monkeypatch, _mt5_terminal_state, currency,
 ):
-    """D-13: a native, unsupported or malformed currency ends DONE as 'no data', with
-    nothing persisted. Equity 0.1105 would otherwise be stored as eleven cents."""
+    """D-13: an unsupported or malformed currency ends DONE as 'no data', with nothing
+    persisted. (164.6.6.2.1 moved the native unit, BTC, out of this list: it is priced per
+    day, see the BTC cases below. " btc " is BTC too: the one shared classifier strips
+    and upper-cases before it decides, in the poll, the derive and here alike.)"""
     from services.job_worker import DispatchOutcome
 
     result, fake_supabase, audit_mock = await _mt5_backfill_in_currency(
@@ -6482,6 +6484,140 @@ async def test_mt5_backfill_skips_a_non_usd_account_before_any_row_is_built(
     assert kinds == [
         "allocator.equity.reconstruct_started",
         "allocator.equity.reconstruct_no_data",
+    ], kinds
+
+
+# ---------------------------------------------------------------------------
+# 164.6.6.2.1 / D-02 -- a BTC account's history is priced PER DAY at that day's stored
+# close. scale 1e-5 turns the canonical ledger into native levels (hand-derived from
+# `_mt5_canonical_ledger`, times 1e-5):
+#   d10 1.004 BTC | d9 (quiet, native forward-filled) 1.004 | d8 1.107 | d7 1.105
+# A day with no close gets NO row: the NATIVE balance may be carried across a quiet
+# day, the PRICE never is.
+# ---------------------------------------------------------------------------
+def _patch_btc_closes(
+    monkeypatch, closes: dict[date, float] | None | BaseException
+) -> None:
+    """``None`` is a SUCCESSFUL closes read with nothing usable stored; an exception
+    INSTANCE is a read that failed (164.6.6.2.1 SFH-01) and is raised by the reader."""
+    import pandas as pd
+
+    import services.equity_reconstruction as er
+
+    series = (
+        None
+        if closes is None or isinstance(closes, BaseException)
+        else pd.Series(
+            list(closes.values()), index=pd.DatetimeIndex(list(closes.keys()))
+        )
+    )
+
+    async def _fake_closes():
+        if isinstance(closes, BaseException):
+            raise closes
+        return series
+
+    monkeypatch.setattr(er, "read_btc_closes", _fake_closes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("currency", ["BTC", " btc "])
+async def test_mt5_backfill_prices_a_btc_account_per_day_at_that_days_close(
+    monkeypatch, _mt5_terminal_state, currency,
+):
+    from services.job_worker import DispatchOutcome
+
+    today = datetime.now(timezone.utc).date()
+    d10, d9, d8, d7 = (today - timedelta(days=n) for n in (10, 9, 8, 7))
+    _patch_btc_closes(monkeypatch, {d10: 60000.0, d9: 61000.0, d8: 62000.0, d7: 63000.0})
+
+    result, fake_supabase, _audit = await _mt5_backfill_in_currency(
+        monkeypatch, currency, scale=1e-5
+    )
+
+    assert result.outcome == DispatchOutcome.DONE, (result.error_kind, result.error_message)
+    persisted = _persisted_by_asof(fake_supabase)
+    # Hand literals: 1.004 x 60000, 1.004 (carried) x 61000, 1.107 x 62000, 1.105 x 63000.
+    assert persisted == pytest.approx(
+        {
+            d10.isoformat(): 60240.0,
+            d9.isoformat(): 61244.0,
+            d8.isoformat(): 68634.0,
+            d7.isoformat(): 69615.0,
+        },
+        abs=0.01,
+    )
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_writes_no_row_for_a_btc_day_without_a_close(
+    monkeypatch, _mt5_terminal_state,
+):
+    """d9 has no stored close: no d9 row, and its neighbours are untouched. Not 0, and
+    not the d10 USD value carried across (T-25)."""
+    from services.job_worker import DispatchOutcome
+
+    today = datetime.now(timezone.utc).date()
+    d10, d9, d8, d7 = (today - timedelta(days=n) for n in (10, 9, 8, 7))
+    _patch_btc_closes(monkeypatch, {d10: 60000.0, d8: 62000.0, d7: 63000.0})
+
+    result, fake_supabase, _audit = await _mt5_backfill_in_currency(
+        monkeypatch, "BTC", scale=1e-5
+    )
+
+    assert result.outcome == DispatchOutcome.DONE, (result.error_kind, result.error_message)
+    persisted = _persisted_by_asof(fake_supabase)
+    assert d9.isoformat() not in persisted
+    assert persisted == pytest.approx(
+        {d10.isoformat(): 60240.0, d8.isoformat(): 68634.0, d7.isoformat(): 69615.0},
+        abs=0.01,
+    )
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_of_a_btc_account_with_no_price_source_persists_nothing(
+    monkeypatch, _mt5_terminal_state,
+):
+    """No stored closes at all: the existing no-data disposition, nothing persisted."""
+    from services.job_worker import DispatchOutcome
+
+    _patch_btc_closes(monkeypatch, None)
+
+    result, fake_supabase, _audit = await _mt5_backfill_in_currency(
+        monkeypatch, "BTC", scale=1e-5
+    )
+
+    assert result.outcome == DispatchOutcome.DONE
+    assert fake_supabase.rows_for("allocator_equity_snapshots") == []
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_of_a_btc_account_retries_when_the_closes_read_fails(
+    monkeypatch, _mt5_terminal_state,
+):
+    """SFH-01. A closes READ that fails is not "no price source". The backfill is a
+    ONE-TIME rebuild (`_api_key_already_reconstructed` short-circuits every later run),
+    so ending it as `reconstruct_no_data` / DONE on a blip leaves the account's history
+    empty for good. It is a transient failure with its own fixed message, and nothing
+    is persisted, so the retry rebuilds from scratch."""
+    from services.benchmark import BtcClosesReadError
+    from services.equity_reconstruction import _MT5_BACKFILL_MESSAGES
+    from services.job_worker import DispatchOutcome
+
+    _patch_btc_closes(monkeypatch, BtcClosesReadError("benchmark read failed"))
+
+    result, fake_supabase, audit_mock = await _mt5_backfill_in_currency(
+        monkeypatch, "BTC", scale=1e-5
+    )
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert result.error_message == _MT5_BACKFILL_MESSAGES["btc_closes_unreadable"]
+    _assert_nothing_persisted(fake_supabase)
+    kinds = [c.kwargs["action"] for c in audit_mock.call_args_list]
+    assert kinds == [
+        "allocator.equity.reconstruct_started",
+        "allocator.equity.reconstruct_failed",
     ], kinds
 
 

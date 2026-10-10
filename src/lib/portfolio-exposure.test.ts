@@ -20,6 +20,9 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { captureToSentry } from "@/lib/sentry-capture";
+
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
 interface HoldingRow {
   asof: string;
@@ -28,6 +31,8 @@ interface HoldingRow {
   holding_type: string;
   side: string;
   value_usd: number;
+  /** R2-WR-01: the key the row was polled for, read to honour the unpriced marker. */
+  api_key_id?: string;
 }
 
 // PostgREST silently caps every response at `max_rows` (supabase/config.toml:18
@@ -36,6 +41,14 @@ interface HoldingRow {
 // regression genuinely RED against the old single unbounded `.order(asof asc)`
 // query (it drops the newest rows) and GREEN once the reads paginate / narrow.
 const POSTGREST_MAX_ROWS = 1000;
+
+// R2-WR-01: the `allocator_equity_derived` rows (the native-unpriced markers) the same
+// mocked client serves when the module reads that table; kept apart from the holdings
+// resolver so the holdings contract assertions below never see those calls.
+const derivedResolver = vi.hoisted(() => ({
+  rows: [] as { kind: string; payload: unknown }[],
+  error: null as { message: string } | null,
+}));
 
 const holdingsResolver = vi.hoisted(() => ({
   rows: [] as HoldingRow[],
@@ -61,7 +74,20 @@ const FILTERABLE_COLS = new Set([
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
-    from: () => {
+    from: (table?: string) => {
+      if (table === "allocator_equity_derived") {
+        const derived: Record<string, unknown> = {};
+        for (const m of ["select", "eq", "like", "limit"]) derived[m] = () => derived;
+        derived.then = (
+          onFulfilled: (v: { data: unknown; error: unknown }) => unknown,
+        ) =>
+          Promise.resolve(
+            derivedResolver.error
+              ? { data: null, error: derivedResolver.error }
+              : { data: derivedResolver.rows, error: null },
+          ).then(onFulfilled);
+        return derived;
+      }
       // Per-query builder state so a two-step read (max-asof then eq-asof) and
       // a paginated read (repeated `.range`) each resolve against their OWN
       // filters, while global resolver arrays capture the query CONTRACT.
@@ -181,6 +207,8 @@ beforeEach(() => {
   holdingsResolver.orderCalls = [];
   holdingsResolver.limitCalls = [];
   holdingsResolver.rangeCalls = [];
+  derivedResolver.rows = [];
+  derivedResolver.error = null;
 });
 
 describe("computeAsofGaps — pure gap detection (missingSegments shape)", () => {
@@ -228,7 +256,9 @@ describe("getLatestExposureSnapshot", () => {
   it("secretless projection: never selects raw_payload / api_key, includes the six allow-listed columns", async () => {
     holdingsResolver.rows = [row()];
     await getLatestExposureSnapshot(USER_ID);
-    expect(holdingsResolver.selectArg).not.toMatch(/raw_payload|api_key/);
+    // R2-WR-01: `api_key_id` (the owner's own FK, no key material) is the one addition,
+    // read to match a row to its native-unpriced marker. The secret columns stay out.
+    expect(holdingsResolver.selectArg).not.toMatch(/raw_payload|api_key(?!_id)/);
     for (const col of [
       "asof",
       "venue",
@@ -276,6 +306,76 @@ describe("getLatestExposureSnapshot", () => {
     const snap = await getLatestExposureSnapshot(USER_ID);
     expect(snap!.slices).toHaveLength(1);
     expect(snap!.slices[0].valueUsd).toBe(140);
+  });
+});
+
+describe("getLatestExposureSnapshot honours the native-unpriced marker (164.6.6.2.1 R2-WR-01)", () => {
+  // A BTC-denominated MT5 account whose latest completed day has no stored close polls to NO
+  // row; the poll records that in a service-written `native_unpriced:<key>` row. Its
+  // earlier row (priced at an older close) can be the allocator's newest `asof`, and was
+  // then rendered on /allocations as the current exposure.
+  const MT5_KEY = "22222222-2222-2222-2222-222222222222";
+  const OKX_KEY = "33333333-3333-3333-3333-333333333333";
+  const marker = (key: string, day: string) => ({
+    kind: `native_unpriced:${key}`,
+    payload: { native_unpriced: true, asof: day },
+  });
+
+  it("drops a key's rows dated before its marker (the shared reader's strict comparison)", async () => {
+    holdingsResolver.rows = [
+      row({ asof: "2026-07-02", api_key_id: MT5_KEY, venue: "mt5", symbol: "BTC", value_usd: 26_100 }),
+      row({ asof: "2026-07-02", api_key_id: OKX_KEY, venue: "okx", symbol: "USDT", value_usd: 1_000 }),
+    ];
+    derivedResolver.rows = [marker(MT5_KEY, "2026-07-03")];
+
+    const snap = await getLatestExposureSnapshot(USER_ID);
+
+    expect(snap!.slices.map((s) => s.symbol)).toEqual(["USDT"]);
+    expect(snap!.totalGrossUsd).toBe(1_000);
+  });
+
+  it("honest-empty when the marker removes every row of the latest day", async () => {
+    holdingsResolver.rows = [
+      row({ asof: "2026-07-02", api_key_id: MT5_KEY, venue: "mt5", symbol: "BTC", value_usd: 26_100 }),
+    ];
+    derivedResolver.rows = [marker(MT5_KEY, "2026-07-03")];
+
+    expect(await getLatestExposureSnapshot(USER_ID)).toBeNull();
+  });
+
+  it.each([
+    ["on the rows' own day", "2026-07-02"],
+    ["older than the rows", "2026-06-20"],
+  ])("a marker %s hides nothing", async (_label, day) => {
+    holdingsResolver.rows = [
+      row({ asof: "2026-07-02", api_key_id: MT5_KEY, venue: "mt5", symbol: "BTC", value_usd: 26_100 }),
+    ];
+    derivedResolver.rows = [marker(MT5_KEY, day)];
+
+    const snap = await getLatestExposureSnapshot(USER_ID);
+
+    expect(snap!.totalGrossUsd).toBe(26_100);
+  });
+
+  it("a failed marker read keeps the rows (never blanks the tab) and says so", async () => {
+    holdingsResolver.rows = [
+      row({ asof: "2026-07-02", api_key_id: MT5_KEY, venue: "mt5", symbol: "BTC", value_usd: 26_100 }),
+    ];
+    derivedResolver.error = { message: "marker table unavailable" };
+    vi.mocked(captureToSentry).mockClear();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const snap = await getLatestExposureSnapshot(USER_ID);
+
+      expect(snap!.totalGrossUsd).toBe(26_100);
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("native-unpriced"),
+        "marker table unavailable",
+      );
+      expect(captureToSentry).toHaveBeenCalledTimes(1);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });
 

@@ -8772,6 +8772,80 @@ stays out of tracked text: record it only in the Bybit key's settings and the Ra
 reads `ready` in census e on the next scheduled run.
 ⛔ **Not a close:** a green Railway setting without a Bybit derive that reads `done`.
 
+## Phase 164.6.6.2.1 (BTCUSDVIEW) — routed items (logged 2026-10-09)
+
+### 164.6.6.2.1-V2-UNIT-TOGGLE — `/strategy/[id]/v2` shows a native-unit strategy in its native unit only, with no USD view (booked 2026-10-09, Phase 164.6.6.2.1 D-18)
+
+**Why it is open.** Phase 164.6.6.2.1 gives the factsheet family (`/factsheet/[id]/v2`, the
+recipient share and the Discovery strategy page) a BTC/USD unit toggle (D-01). The founder kept
+`/strategy/[id]/v2` native-only in that phase, with its unit chip and no toggle (D-18, 2026-10-09),
+because Phase 170.5 is reworking v2. So on v2 a BTC account's figures are in BTC with no way to see
+the USD view the factsheet offers.
+
+**Owner:** Phase 170.5 (the v2 rework), routed by the founder on 2026-10-09 (164.6.6.2.1 D-18).
+**Trigger:** the start of 170.5 planning.
+**Gate (what closes it):** `/strategy/[id]/v2` offers the same native-default BTC/USD view as the
+factsheet, built from the same server payload (`usdView`), with the masthead native in both views,
+and a test that fails first when the toggle is removed.
+⛔ **Not a close:** a client-side USD recompute on v2, or a v2 that defaults to USD.
+
+### 164.6.6.2.1-DISCOVERY-RANKING-HONESTY — Discovery ranks a BTC strategy's returns beside USD strategies' returns (booked 2026-10-09, Phase 164.6.6.2.1 D-14)
+
+**Why it is open.** Phase 164.6.6.2.1 labels a native-unit strategy on `StrategyTable` with an
+"in BTC" chip (D-05, D-12), but the Discovery ranking, its sort order and its percentile badges
+still compare a BTC return with USD returns as if they were one unit. The chip says what the
+number is; the rank still treats it as comparable. Out of scope for 164.6.6.2.1 by decision D-14.
+
+**Owner:** unrouted; the founder routes it at the next Discovery or ranking phase.
+**Trigger:** the first published native-unit strategy (PROD had 0 published on 2026-10-09), or
+the next phase touching the Discovery ranking, whichever comes first.
+**Gate (what closes it):** a native-unit strategy is ranked on a like-for-like basis (its USD
+series, or a separate unit bucket), by a decision recorded in that phase's CONTEXT, with a test
+that fails first on today's mixed ranking.
+⛔ **Not a close:** the chip alone.
+
+### 164.6.6.2.1-STITCH-DEPARTED-HOLE-SPLIT — a departed or stitch-source BTC key with an interior price hole is replayed unsplit (booked 2026-10-10, Phase 164.6.6.2.1 review WR-01)
+
+**Why it is open.** The allocator compose job reads a BTC key's interior unpriced days and segment
+terminals (`read_native_key_inputs`, mechanism I2) only for counted keys. The departed-key and
+stitch-source branches `continue` before that read, so such a key is replayed as one segment
+across a stored-close hole, which is the mis-scaling I2 exists to remove, with no
+`key_inputs_mismatch`. Review confidence 6, below the fix bar; exposure is low today (PROD's one BTC
+key was live on 2026-10-09). No test covers it.
+
+**Owner:** unrouted; the founder routes it at the next allocator-book phase.
+**Trigger:** a BTC key departs or is stitched as a source while its stored history holds an
+interior hole, or the next phase that touches the compose job's key_inputs read.
+**Gate (what closes it):** departed and stitch-source BTC keys are split at their holes exactly
+like counted keys (or refuse with `key_inputs_mismatch` when they carry holes), with a test that
+fails first on today's code.
+⛔ **Not a close:** a comment saying departed keys are rare.
+
+### 164.6.6.2.1-USDVIEW-READFAIL-CACHED — a failed BTC price read disables the factsheet USD toggle for the cache TTL (booked 2026-10-10, Phase 164.6.6.2.1 review SFH-03)
+
+**Why it is open.** `buildUsdView` returns `usdViewUnavailable: "price_read_failed"` as a normal
+payload, so the factsheet cache stores it under the payload key for up to an hour although the
+next read would succeed. The reason is shown to the user. Confidence 5, below the fix bar.
+
+**Owner:** unrouted; the next phase touching the factsheet payload cache.
+**Trigger:** a reported "USD view unavailable" that clears on its own, or that phase starting.
+**Gate (what closes it):** a failed price read renders but is not cached (as the builder's
+degraded-build path already does), with a test that fails first.
+⛔ **Not a close:** a shorter TTL.
+
+### 164.6.6.2.1-HOLDINGS-UNITLESS-QTY — a native holdings row with a missing or malformed unit prints a bare BTC quantity (booked 2026-10-10, Phase 164.6.6.2.1 review SFH-04)
+
+**Why it is open.** `HoldingsTable` and `derivePhase07Fields` parse `quantity_unit`; a null or
+malformed value falls back to the plain quantity format, so a BTC count shows with no unit. The
+writer always sets the unit today, so this is a defensive-reader gap. `value_usd` is correct.
+Confidence 5, below the fix bar.
+
+**Owner:** unrouted; the next phase touching the Holdings table.
+**Trigger:** a holdings row reaches the reader with a native mark and no parseable unit.
+**Gate (what closes it):** such a row shows a dash or a named reason for the quantity, never a bare
+number, with a test that fails first.
+⛔ **Not a close:** inferring the unit from the symbol.
+
 ### [167.1.2.2.2-CRON-TICK-RESIDUALS] — four MEDIUM residuals of `public.cron_sync_tick()` that the plan 01 review round recorded and did not fix (booked 2026-10-09, Phase 167.1.2.2.2 plan 01 Task 3)
 
 **Why it is open.** The three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter)

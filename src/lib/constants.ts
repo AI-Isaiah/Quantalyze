@@ -185,11 +185,23 @@ export const API_KEY_USER_COLUMNS_ARR = [
   "account_shared_with_api_key_id",
   "account_share_kind",
   "history_inclusion",
+  // Migration 20261010120000 (Phase 164.6.6.2.1, D-07 / D-17) — GRANT SELECT
+  // (account_currency, account_balance_native, account_balance_usdt_close_date)
+  // ON api_keys TO authenticated, owner-only through the existing RLS. The
+  // first two columns are 20261007120000's (Phase 164.6.6.2), born un-granted;
+  // the close date is new there. The native unit and balance are the truth of a
+  // BTC account; the close date names the daily close the USD value was priced
+  // at (D-17). Rendered by AllocatorExchangeManager's balance segment.
+  // ⛔ Code PR only: PROD applied the GRANT before this list gained the
+  // columns, so no key list selects a column PROD lacks (42501 on every read).
+  "account_currency",
+  "account_balance_native",
+  "account_balance_usdt_close_date",
 ] as const;
 
 /** PostgREST projection string derived from the allowlist tuple. */
 export const API_KEY_USER_COLUMNS = API_KEY_USER_COLUMNS_ARR.join(", ") as
-  "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error, last_429_at, disconnected_at, venue_account_id, account_shared_with_api_key_id, account_share_kind, history_inclusion";
+  "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error, last_429_at, disconnected_at, venue_account_id, account_shared_with_api_key_id, account_share_kind, history_inclusion, account_currency, account_balance_native, account_balance_usdt_close_date";
 
 /** Single api_keys column name as a narrow string literal union type. */
 export type ApiKeyUserColumn = (typeof API_KEY_USER_COLUMNS_ARR)[number];

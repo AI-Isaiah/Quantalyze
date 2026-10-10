@@ -1,7 +1,7 @@
 "use client";
 
 import { ResponsiveTable } from "@/components/ResponsiveTable";
-import { nativeUnitReason, withUnit } from "@/lib/factsheet/returns-unit";
+import { benchmarkWithheldReason, withUnit } from "@/lib/factsheet/returns-unit";
 
 import { usePayload } from "./factsheet-context";
 import { useBasisSeriesView } from "./basis-context";
@@ -55,7 +55,7 @@ export function StressWindowsPanel() {
         <p className="text-fixed-11 text-text-muted">
           {unit === null
             ? `strategy vs ${benchName} compounded return + max drawdown during named market events`
-            : `${withUnit("strategy compounded return", unit)} + max drawdown during named market events · ${benchName} column not shown: ${nativeUnitReason(unit)}`}
+            : `${withUnit("strategy compounded return", unit)} + max drawdown during named market events · ${benchName} column not shown: ${benchmarkWithheldReason(unit, payload.convertedFrom)}`}
           {(droppedOutOfRange > 0 || droppedPartial > 0) && (
             <>
               {" "}· evaluating {windows.length} of {totalCatalogued} catalogued events

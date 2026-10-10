@@ -2182,7 +2182,7 @@ async def process_key(
                 # the four keys stay pre-nulled if this update never ran.
                 enriched_metrics_snapshot.update(four_keys)
                 period_returns = compute_period_returns(returns)
-                matched_strategy_id = find_matched_strategy(returns, supabase)
+                matched_strategy_id = await find_matched_strategy(returns, supabase)
                 enriched_metrics_snapshot.update(
                     {
                         "return_24h": period_returns.get("return_24h"),
