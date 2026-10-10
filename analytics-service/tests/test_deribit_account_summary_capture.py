@@ -173,22 +173,68 @@ def test_identity_holds_on_the_exact_decimal_sum() -> None:
     assert ident["identity_resid_ratio"] == 0.0
 
 
-def test_identity_breaks_by_the_residual_over_the_precision_tolerance() -> None:
-    """8 decimal places, four addends: tolerance 4e-8 (restated, not imported). A residual of
-    1e-6 is 25 tolerances."""
+def test_identity_breaks_by_the_residual_over_the_published_precision_tolerance() -> None:
+    """MD-02: Deribit reports each coin field to 8 decimal places and the identity has five
+    rounded terms, so rounding alone can show 5 * 0.5e-8 = 2.5e-8 (restated, not imported).
+    A residual of 1e-6 is 40 tolerances."""
     off = {**_BTC_SUMMARY, "equity": 3.12345778}
     ident = _payload_for(off)["identity"]["BTC"]
     assert ident["identity_ok"] is False
-    assert ident["identity_resid_ratio"] == pytest.approx(1e-6 / 4e-8, rel=1e-9)
+    assert ident["identity_resid_ratio"] == pytest.approx(1e-6 / 2.5e-8, rel=1e-6)
 
 
-def test_identity_tolerates_a_half_unit_of_the_last_place() -> None:
-    """Each of the four addends is rounded to 8 places by Deribit, so a residual of 3e-8 is
-    rounding, not a defect: it is inside 4e-8."""
-    near = {**_BTC_SUMMARY, "equity": 3.12345681}
-    ident = _payload_for(near)["identity"]["BTC"]
+def test_identity_tolerates_rounding_of_the_published_precision_and_no_more() -> None:
+    """A residual of 2e-8 is inside five half-units of the 8th place (2.5e-8); 3e-8 is not."""
+    inside = _payload_for({**_BTC_SUMMARY, "equity": 3.1234568})["identity"]["BTC"]
+    assert inside["identity_ok"] is True
+    assert inside["identity_resid_ratio"] == pytest.approx(2e-8 / 2.5e-8, rel=1e-6)
+    outside = _payload_for({**_BTC_SUMMARY, "equity": 3.12345681})["identity"]["BTC"]
+    assert outside["identity_ok"] is False
+    assert outside["identity_resid_ratio"] == pytest.approx(3e-8 / 2.5e-8, rel=1e-6)
+
+
+def test_identity_mixed_precision_reads_true() -> None:
+    """MD-02 false break. options_value is a computed mark shown to 10 places, equity is
+    Deribit's rounding to 8: 1.0 + 0.1234567891 = 1.1234567891, equity 1.12345679, so the
+    residual is 9e-10, far inside 2.5e-8. The precision of the finest field must not tighten
+    the tolerance for the others."""
+    summ = {"currency": "BTC", "equity": 1.12345679, "balance": 1.0,
+            "options_value": 0.1234567891}
+    ident = _payload_for(summ)["identity"]["BTC"]
     assert ident["identity_ok"] is True
-    assert ident["identity_resid_ratio"] == pytest.approx(3e-8 / 4e-8, rel=1e-6)
+    assert ident["identity_resid_ratio"] == pytest.approx(9e-10 / 2.5e-8, rel=1e-6)
+
+
+def test_identity_round_values_do_not_hide_a_real_gap() -> None:
+    """MD-02 false pass. Every value happens to be round, so no precision can be inferred
+    from them. equity 100.0 against balance 99.7 is a 0.3 coin gap, which is 3e6 times the
+    tolerance max(2.5e-8, 1e-9 * 100) = 1e-7."""
+    ident = _payload_for({"currency": "BTC", "equity": 100.0, "balance": 99.7})["identity"]["BTC"]
+    assert ident["identity_ok"] is False
+    assert ident["identity_resid_ratio"] == pytest.approx(0.3 / 1e-7, rel=1e-6)
+
+
+def test_identity_relative_tolerance_takes_over_for_a_large_equity() -> None:
+    """Above |equity| = 25 coins the relative term 1e-9 * |equity| exceeds the 2.5e-8 floor.
+    equity 1000.0000005 against balance 1000.0: residual 5e-7 against 1e-6."""
+    ident = _payload_for(
+        {"currency": "BTC", "equity": 1000.0000005, "balance": 1000.0}
+    )["identity"]["BTC"]
+    assert ident["identity_ok"] is True
+    assert ident["identity_resid_ratio"] == pytest.approx(0.5, rel=1e-6)
+
+
+def test_identity_stores_the_signed_residual_and_the_places_for_offline_rejudging() -> None:
+    """Plan 05 can re-judge from the stored snapshot without trusting this tolerance."""
+    below = _payload_for({"currency": "BTC", "equity": 1.0, "balance": 1.3})["identity"]["BTC"]
+    assert below["identity_resid_native"] == pytest.approx(-0.3, abs=1e-12)
+    assert below["identity_places"] == 8
+    above = _payload_for({"currency": "BTC", "equity": 1.3, "balance": 1.0})["identity"]["BTC"]
+    assert above["identity_resid_native"] == pytest.approx(0.3, abs=1e-12)
+    # Not computable (no balance): there is no residual to store, but the places still are.
+    none = _payload_for({"currency": "BTC", "equity": 1.0})["identity"]["BTC"]
+    assert none["identity_resid_native"] is None
+    assert none["identity_places"] == 8
 
 
 def test_identity_is_not_computable_without_a_balance_and_never_true() -> None:
@@ -207,6 +253,11 @@ def test_identity_falls_back_to_session_upl_and_counts_missing_parts_as_zero() -
     assert ident["identity_ok"] is True
     assert ident["has_open_options"] is False
     assert ident["options_session_upl_nonzero"] is False
+    # MD-02: the fallback can now FAIL. A wrong fallback (e.g. ignoring session_upl) would give
+    # a residual of 0.5 here, and equity 1.8 leaves 0.3 unexplained under the right one.
+    off = _payload_for({**summ, "equity": 1.8})["identity"]["BTC"]
+    assert off["identity_ok"] is False
+    assert off["identity_resid_native"] == pytest.approx(0.3, abs=1e-12)
 
 
 def test_identity_flags_the_open_option_book() -> None:
@@ -249,6 +300,36 @@ def test_the_writer_refuses_a_non_finite_value() -> None:
 
 
 # ── the strict reader ────────────────────────────────────────────────────────────
+
+
+def test_the_reader_accepts_a_row_written_before_the_residual_fields_and_round_trips_new_ones() -> None:
+    stored = json.loads(json.dumps(_payload_for(_BTC_SUMMARY, index={"BTC": 60000.0})))
+    got = read_account_summary({"account_summary": stored})
+    assert got is not None
+    assert got["identity"]["BTC"]["identity_places"] == 8
+    assert isinstance(got["identity"]["BTC"]["identity_resid_native"], float)
+    for key in ("identity_resid_native", "identity_places"):
+        del stored["identity"]["BTC"][key]
+    old_row = read_account_summary({"account_summary": stored})
+    assert old_row is not None and "identity_places" not in old_row["identity"]["BTC"]
+
+
+@pytest.mark.parametrize(
+    "key, bad, exc",
+    [
+        ("identity_resid_native", True, TypeError),
+        ("identity_resid_native", "0.1", TypeError),
+        ("identity_resid_native", float("nan"), ValueError),
+        ("identity_places", True, TypeError),
+        ("identity_places", 8.0, TypeError),
+        ("identity_places", "8", TypeError),
+    ],
+)
+def test_the_reader_refuses_a_malformed_residual_field(key: str, bad: Any, exc: type) -> None:
+    stored = json.loads(json.dumps(_payload_for(_BTC_SUMMARY, index={"BTC": 60000.0})))
+    stored["identity"]["BTC"][key] = bad
+    with pytest.raises(exc):
+        read_account_summary({"account_summary": stored})
 
 
 def test_an_old_row_reads_as_none() -> None:
@@ -295,8 +376,10 @@ def _key_inputs_payload(capture: dict, key_id: str) -> dict:
 
 
 async def _run_deribit_key_mode_derive(
-    state: Any, *, report: Any = None
+    state: Any, *, report: Any = None, ledger: Any = None, trace: dict | None = None
 ) -> tuple[dict, AsyncMock]:
+    """``ledger`` replaces the marks-free stub ledger the build returns; ``trace`` (when given)
+    is filled with the ``combine`` mock so a test can see what the worker handed it."""
     import pandas as pd
 
     from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
@@ -313,7 +396,13 @@ async def _run_deribit_key_mode_derive(
     returns = pd.Series([0.01, -0.02, 0.03], index=idx)
     ctx, capture = _ctx(strategy_row=None, key_mode=True)
     ledger_mock, _calls = _recording_ledger([report or _report(has_option_activity=False)])
+    if ledger is not None:
+        ledger_mock = AsyncMock(
+            return_value=(ledger, report or _report(has_option_activity=False))
+        )
     combine = MagicMock(return_value=(returns, _ledger_meta()))
+    if trace is not None:
+        trace["combine"] = combine
     state_spy = AsyncMock(return_value=state)
     with _apply(
         _base_patches(
@@ -656,3 +745,259 @@ def test_report_defaults_leave_every_existing_constructor_valid() -> None:
     r = CompletenessReport(total_return_rows=2)
     assert r.ledger_digest is None and r.ledger_digest_error is None
     assert math.isfinite(r.total_return_rows)
+
+
+# ── MD-01: a REFUSED derive still stores what it read (D-03) ─────────────────────
+#
+# The PR-1 review's finding: all three captures were assigned after ``combine_native_ledger``
+# returned, so a derive the section 5 gate (or any other structural refusal) turned away stored
+# nothing, although its one summaries read and its full crawl had already happened. Those are
+# exactly the derives a diagnosis needs. A refusal now writes a ``key_capture:<api_key_id>``
+# row, and never touches ``key_inputs:<api_key_id>``, which the compose reads for flows and the
+# anchor and which must stay the last good derive's.
+
+
+def _breaching_ledger() -> Any:
+    """The 6.48-BTC-throughput shape with a MATERIAL 0.5 BTC residual (above the dust
+    allowance), so section 5 refuses: Σpnl 6.479214, withdrawn 6.479202, terminal 0.5."""
+    from services.external_flows import ExternalFlow
+    from services.native_nav import NativeLedger
+    from tests.test_native_nav import _dense
+
+    return NativeLedger(
+        native_pnl={"BTC": _dense([3.0, 3.479214])},
+        terminal_native_equity={"BTC": 0.5},
+        marks={"BTC": _dense([88000.0, 88000.0])},
+        native_flows=[ExternalFlow("2026-01-02", -570000.0, "BTC", -6.479202)],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+
+
+def _refusal_state() -> DeribitNativeAccountState:
+    return DeribitNativeAccountState(
+        native_equity={"BTC": 0.5}, native_upnl={}, collapsed_equity_usd=100_000.0,
+        collapsed_upnl_usd=0.0, balance_error=False, upnl_unreadable=False,
+        native_options_value={},
+        native_balance={"BTC": 0.4},
+        summary_snapshot={"BTC": {"equity": 0.5, "balance": 0.4}},
+        index_usd_snapshot={"BTC": 88000.0},
+        read_at_iso="2026-10-09T05:30:00+00:00",
+    )
+
+
+def _upserts(capture: dict, kind_prefix: str) -> list[dict]:
+    return [
+        payload
+        for name, payload, _oc in capture["upserts"]
+        if name == "allocator_equity_derived"
+        and isinstance(payload, dict)
+        and str(payload.get("kind", "")).startswith(kind_prefix)
+    ]
+
+
+async def _run_refused_derive(
+    *,
+    combine: Any = None,
+    build_effect: BaseException | None = None,
+    report: Any = None,
+    fail_capture_upsert: bool = False,
+) -> tuple[Any, dict]:
+    """A key-mode Deribit derive that is turned away. ``combine=None`` runs the REAL
+    ``combine_native_ledger`` over the breaching ledger, so the gate and the diagnostic are the
+    production ones."""
+    from unittest.mock import patch
+
+    from services.broker_dailies import combine_native_ledger as real_combine
+    from services.deribit_ingest import deribit_ledger_digest
+    from services.job_worker import run_derive_broker_dailies_job
+    from tests.test_mtm_single_key import _apply, _base_patches, _ctx, _recording_ledger, _report
+
+    ctx, capture = _ctx(strategy_row=None, key_mode=True)
+    if fail_capture_upsert:
+        original = ctx.supabase.table.side_effect
+
+        def _table(name: str) -> Any:
+            tbl = original(name)
+            real_upsert = tbl.upsert.side_effect
+
+            def _upsert(payload: object, **kw: object) -> Any:
+                if isinstance(payload, dict) and str(payload.get("kind", "")).startswith(
+                    "key_capture:"
+                ):
+                    raise RuntimeError("db down: secret-0.123456-BTC")
+                return real_upsert(payload, **kw)
+
+            tbl.upsert.side_effect = _upsert
+            return tbl
+
+        ctx.supabase.table.side_effect = _table
+
+    rep = report or _report(has_option_activity=False)
+    if rep.ledger_digest is None:
+        rep.ledger_digest = deribit_ledger_digest(_ROWS)
+    if build_effect is not None:
+        ledger_mock, _calls = _recording_ledger([rep], side_effects=[build_effect])
+    else:
+        ledger = _breaching_ledger()
+        ledger_mock = AsyncMock(return_value=(ledger, rep))
+    patches = _base_patches(
+        ctx, key_mode=True, ledger_mock=ledger_mock,
+        combine_mock=combine or real_combine,
+        state_spy=AsyncMock(return_value=_refusal_state()),
+    )
+    with _apply(patches):
+        result = await run_derive_broker_dailies_job(
+            {"id": "j", "kind": "derive_broker_dailies", "api_key_id": "key-drb"}
+        )
+    return result, capture
+
+
+@pytest.mark.asyncio
+async def test_a_refused_derive_still_stores_what_it_read() -> None:
+    """MD-01, the section 5 gate. The derive still returns FAILED as before, and now ALSO
+    stores the summaries read, the ledger digest and the inception diagnostic (computed
+    although the gate refused) on its own ``key_capture`` row."""
+    from services.job_worker import DispatchOutcome
+
+    result, capture = await _run_refused_derive()
+    assert result.outcome == DispatchOutcome.FAILED and result.error_kind == "permanent"
+
+    [row] = _upserts(capture, "key_capture:")
+    assert row["kind"] == "key_capture:key-drb"
+    assert row["allocator_id"] == "alloc-1"
+    payload = row["payload"]
+    assert payload["outcome"] == "refused"
+    assert payload["refusal_class"] == "InceptionReconciliationError"
+    assert payload["venue"] == "deribit"
+    assert isinstance(payload["captured_at"], str) and payload["captured_at"]
+    # The three captures, each read back through its strict reader.
+    summary = read_account_summary(payload)
+    assert summary is not None and summary["summaries"][0]["currency"] == "BTC"
+    assert read_ledger_digest(payload) is not None
+    from services.allocator_equity_derive import read_native_inception_diagnostics
+
+    diag = read_native_inception_diagnostics(payload)
+    assert diag is not None
+    # 0.5 BTC at 88000 is a material residual: the diagnostic reports the breach the gate saw.
+    assert diag["breach_ratio_current"] > 1
+    assert json.dumps(payload, allow_nan=False)  # JSONB-safe
+
+
+@pytest.mark.asyncio
+async def test_a_refused_derive_never_writes_key_inputs() -> None:
+    """MD-01 / T-33: the compose reads ``key_inputs`` for flows and the anchor. A refused
+    derive's partial capture must not replace the last good derive's."""
+    _result, capture = await _run_refused_derive()
+    assert _upserts(capture, "key_inputs:") == []
+    # And nothing else the refusal would have written alongside a success.
+    assert [n for n, _p, _o in capture["upserts"] if n == "csv_daily_returns"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_successful_derive_writes_key_inputs_and_no_key_capture() -> None:
+    """The capture row is for refusals only; a good derive keeps writing the three fields
+    onto ``key_inputs`` exactly as before."""
+    capture = await _run_success_capture()
+    assert _upserts(capture, "key_capture:") == []
+    [row] = _upserts(capture, "key_inputs:")
+    assert read_account_summary(row["payload"]) is not None
+
+
+async def _run_success_capture() -> dict:
+    import pandas as pd
+
+    from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
+    from tests.test_mtm_single_key import (
+        _apply,
+        _base_patches,
+        _ctx,
+        _ledger_meta,
+        _recording_ledger,
+        _report,
+    )
+
+    returns = pd.Series(
+        [0.01, -0.02, 0.03], index=pd.DatetimeIndex(["2024-05-01", "2024-05-02", "2024-05-03"])
+    )
+    ctx, capture = _ctx(strategy_row=None, key_mode=True)
+    ledger_mock, _calls = _recording_ledger([_report(has_option_activity=False)])
+    combine = MagicMock(return_value=(returns, _ledger_meta()))
+    with _apply(
+        _base_patches(
+            ctx, key_mode=True, ledger_mock=ledger_mock, combine_mock=combine,
+            state_spy=AsyncMock(return_value=_refusal_state()),
+        )
+    ):
+        result = await run_derive_broker_dailies_job(
+            {"id": "j", "kind": "derive_broker_dailies", "api_key_id": "key-drb"}
+        )
+    assert result.outcome == DispatchOutcome.DONE
+    return capture
+
+
+@pytest.mark.asyncio
+async def test_a_failing_capture_upsert_keeps_the_original_refusal_and_is_not_silent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The capture is additive: if ITS upsert fails the derive still returns the original
+    FAILED disposition and message, and one WARNING names the exception class only."""
+    from services.job_worker import DispatchOutcome
+
+    baseline, _ = await _run_refused_derive()
+    with caplog.at_level("WARNING"):
+        result, capture = await _run_refused_derive(fail_capture_upsert=True)
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == baseline.error_kind == "permanent"
+    assert result.error_message == baseline.error_message
+    assert _upserts(capture, "key_capture:") == []
+    warnings = [r for r in caplog.records if "key_capture" in r.getMessage()]
+    assert len(warnings) == 1
+    text = warnings[0].getMessage()
+    assert "RuntimeError" in text and "deribit" in text
+    assert "secret" not in text and "0.123456" not in text  # class name only, never the message
+
+
+@pytest.mark.asyncio
+async def test_each_structural_refusal_after_the_read_is_captured_with_its_class() -> None:
+    """The other refusals that return FAILED after the summaries read: an unmarkable
+    currency, a row that cannot be valued (the ledger never finished, so only the summaries
+    read exists), and the empty-ledger refusal."""
+    import dataclasses
+
+    from services.deribit_txn import LedgerValuationError
+    from services.native_nav import UnmarkableCurrencyError
+    from tests.test_mtm_single_key import _report
+
+    # An unmarkable currency raised by the combine.
+    result, capture = await _run_refused_derive(
+        combine=MagicMock(
+            side_effect=UnmarkableCurrencyError(
+                currency="BTC", venue="deribit", reason="no_mark", missing_day_count=1
+            )
+        )
+    )
+    assert result.error_kind == "permanent"
+    [row] = _upserts(capture, "key_capture:")
+    assert row["payload"]["refusal_class"] == "UnmarkableCurrencyError"
+    assert read_account_summary(row["payload"]) is not None
+    assert read_ledger_digest(row["payload"]) is not None
+
+    # A valuation refusal out of the crawl: the ledger never existed, the read did.
+    result, capture = await _run_refused_derive(build_effect=LedgerValuationError("bad row"))
+    assert result.error_kind == "permanent"
+    [row] = _upserts(capture, "key_capture:")
+    assert row["payload"]["refusal_class"] == "LedgerValuationError"
+    assert read_account_summary(row["payload"]) is not None
+    assert "ledger_digest" not in row["payload"]
+    assert "native_inception_diagnostics" not in row["payload"]
+
+    # The empty-ledger refusal: material equity, zero return-bearing rows.
+    empty = dataclasses.replace(_report(has_option_activity=False), total_return_rows=0)
+    result, capture = await _run_refused_derive(report=empty)
+    assert result.error_kind == "permanent"
+    [row] = _upserts(capture, "key_capture:")
+    assert row["payload"]["refusal_class"] == "EmptyLedgerRefusal"
+    assert read_account_summary(row["payload"]) is not None
+    assert read_ledger_digest(row["payload"]) is not None
+    assert _upserts(capture, "key_inputs:") == []

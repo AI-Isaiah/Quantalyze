@@ -43,6 +43,7 @@ from services.broker_dailies import (
     combine_mt5_deal_ledger,
     combine_native_ledger,
     mt5_day_pnl,
+    native_ledger_composed_flows,
     native_ledger_day_pnl,
     native_ledger_realized_terminal,
 )
@@ -499,6 +500,10 @@ async def test_deribit_key_mode_stores_the_realized_terminal_from_the_real_ledge
         patch(
             "services.broker_dailies.native_ledger_realized_terminal",
             new=native_ledger_realized_terminal,
+        ),
+        patch(
+            "services.broker_dailies.native_ledger_composed_flows",
+            new=native_ledger_composed_flows,
         ),
     ]
     with _apply(patches):

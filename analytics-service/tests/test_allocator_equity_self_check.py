@@ -71,7 +71,7 @@ def _drained_account(kept_after_drain: int) -> tuple[list[str], list[float], dic
     return days, returns, flows, levels
 
 
-@pytest.mark.parametrize("kept_after_drain", [300, 100, 10])
+@pytest.mark.parametrize("kept_after_drain", [300, 150, 10])
 def test_near_total_withdrawal_after_strong_growth_is_replayed_not_refused(
     kept_after_drain: int,
 ) -> None:
@@ -95,13 +95,28 @@ def test_near_total_withdrawal_after_strong_growth_is_replayed_not_refused(
 
     assert ke.equity is not None
     assert list(ke.equity.index) == days
+    # 167.1.2.2.1 SC-3 / D-01, D-09: a day whose level is below the smaller of 1% of the prior
+    # peak and 100 USD is zero capital. Both are restated here (a Fraction, never imported) and
+    # applied to the exact rational truth. The kept levels 300 and 150 are far below 1% of the
+    # ~1e6 held level but over the 100 USD floor, so they are live capital; the kept 10 is under
+    # it, so the drained tail is exactly 0.0. (The boundary value 100 is left out: the cent-rounded
+    # flow lands the level either side of it.) The D-12 point of this test (the self-check on the
+    # RAW levels does not refuse a correct roll) is unchanged.
+    peak = truth[0]
+    emptied_days = 0
     for t, day in enumerate(days):
-        expected = float(truth[t])
+        if t > 0 and truth[t] < min(Fraction(1, 100) * peak, Fraction(100)):
+            expected = 0.0
+            emptied_days += 1
+        else:
+            expected = float(truth[t])
+            peak = max(peak, truth[t])
         tol = _SELF_CHECK_ABS + _SELF_CHECK_REL * abs(expected)
         assert abs(float(ke.equity[day]) - expected) <= tol, (
             f"day-index {t}: replayed level is outside the self-check band "
             "around the exact rational truth"
         )
+    assert emptied_days == (_N_DAYS - _DRAIN_DAY if kept_after_drain < 100 else 0)
 
 
 # ── Teeth: the self-check must still refuse a roll that disagrees with the identity ──

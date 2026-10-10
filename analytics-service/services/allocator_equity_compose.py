@@ -430,6 +430,8 @@ def compose_allocator_equity(
     full_history_keys: Collection[str] | None = None,
     dropped_day_pnl_by_key: Mapping[str, Mapping[str, float]] | None = None,
     realized_terminal_by_key: Mapping[str, tuple[str, float]] | None = None,
+    writer_basis_by_key: Mapping[str, tuple[Sequence[ExternalFlow], Mapping[str, float]]]
+    | None = None,
     unpriced_close_day_by_key: Mapping[str, str] | None = None,
     unpriced_days_by_key: Mapping[str, Collection[str]] | None = None,
     segment_terminals_by_key: Mapping[str, Mapping[str, float]] | None = None,
@@ -490,6 +492,15 @@ def compose_allocator_equity(
     from it, so levels and the zero-start verdict are the writer's own, and the live anchor
     enters on the last day only. A key with no entry is replayed from its anchor as before.
 
+    ``writer_basis_by_key`` (167.1.2.2.1 D-06) maps a key to ``(composed flows, day P&L)``, the
+    two series its writer's NAV obeys (flows as ``ExternalFlow`` rows, day P&L as {ISO day: USD}).
+    ``replay_key_equity`` then rolls the key on them (``equity_{t-1} = equity_t - F_t - P_t``),
+    so its levels and its implied start are the writer's own. When that roll actually ran
+    (``KeyEquity.flags['writer_basis']``) the key's flows in the curve, the ledger and the MWR
+    are the writer's composed flows, the ones its levels were rolled through; a key that fell
+    back (``writer_basis_mismatch``) keeps its event-time flows everywhere. A key with no entry
+    is composed exactly as before.
+
     ``unpriced_close_day_by_key`` (164.6.6.2.1 D-09 / D-20) maps a BTC key whose live balance
     could not be priced (the latest completed UTC day has no stored close) to that day's ISO
     date. The key arrives with its series priced through its last USD return day ``P``, an
@@ -529,6 +540,7 @@ def compose_allocator_equity(
     ``native_unpriced_key_omitted`` records that days were left out. Both inputs are optional;
     a key with no entry is composed exactly as before."""
     departed_end = dict(departed_end_by_key or {})
+    writer_basis = dict(writer_basis_by_key or {})
     unpriced_close_day = dict(unpriced_close_day_by_key or {})
     dropped_pnl = dict(dropped_day_pnl_by_key or {})
     realized_terminal = dict(realized_terminal_by_key or {})
@@ -741,9 +753,16 @@ def compose_allocator_equity(
             history_reaches_inception=k in history_first,
             dropped_day_pnl=dropped_pnl.get(k),
             realized_terminal=realized_terminal.get(k),
+            writer_flows=writer_basis[k][0] if k in writer_basis else None,
+            writer_day_pnl=writer_basis[k][1] if k in writer_basis else None,
         )
         for k in anchored_keys
     }
+    for k in anchored_keys:
+        if per_key_equity[k].flags.get("writer_basis") is True:
+            # D-06: the flows the levels were rolled through are the flows the curve, the
+            # ledger and the MWR read.
+            anchored_flows[k] = list(writer_basis[k][0])
     for ke in per_key_equity.values():
         reasons |= ke.degrade_reasons
         flag_tokens |= _bool_flag_tokens(ke.flags)

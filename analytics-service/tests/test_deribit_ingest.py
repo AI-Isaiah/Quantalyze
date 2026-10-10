@@ -3584,6 +3584,129 @@ async def test_h1_mark_to_market_wedge_excludes_options_value(
     combine_native_ledger(ledger, report.indexable_currencies)  # §5 closes, no raise
 
 
+# ===========================================================================
+# DERIBITWEDGE (167.1.2.2.1, SC-1 / D-18) — under cash_settlement the terminal wedge is
+# anchored on the venue's documented cash ``balance``: equity = balance + futures
+# (session UPL + RPL) + options mark value, so wedge = equity - balance. The old form
+# (futures+options session uPnL + options_value) subtracted ``options_session_upl`` twice
+# (it is already inside ``options_value``) and never read ``session_rpl``. The oracle for
+# every case below is the stated identity with hand-worked numbers, never the module's code.
+# ===========================================================================
+
+
+async def _build_open_book_cash_ledger(
+    monkeypatch: Any, summary: dict[str, Any]
+) -> tuple[Any, Any]:
+    """The open-book fixture (cash: 1.0 deposit + 1.0 cash pnl = 2.0 BTC) under the
+    default cash_settlement basis, with ``summary`` as the single account summary."""
+    _patch_pipeline(
+        monkeypatch, scopes=[di.Scope("main", None, True)],
+        currencies={"main": ["BTC"]}, paginate=_open_book_paginate(),
+    )
+    _patch_jul_index(monkeypatch)
+    ex = _NativeAnchorStub(summaries=[summary], index_price={"BTC": 60000.0})
+    return await di.build_deribit_native_ledger(ex)
+
+
+async def test_wedge_counts_session_move_once(monkeypatch: Any) -> None:
+    """SC-1: equity 3.0 = balance 2.0 + futures 0.5 + options_value 0.5 (the options
+    session move 0.2 is INSIDE options_value). The wedge is therefore 1.0; the old form
+    gave 0.5 + 0.2 + 0.5 = 1.2 and left a 0.2 residual at section 5."""
+    from services.broker_dailies import combine_native_ledger
+
+    ledger, report = await _build_open_book_cash_ledger(
+        monkeypatch,
+        {"currency": "BTC", "equity": 3.0, "balance": 2.0, "session_upl": 0.5,
+         "futures_session_upl": 0.5, "futures_session_rpl": 0.0,
+         "options_session_upl": 0.2, "options_value": 0.5},
+    )
+    assert ledger.terminal_upnl_native["BTC"] == pytest.approx(1.0)  # today: 1.2
+    # Independent invariant: the rolled terminal is the cash the txn log sums to.
+    assert ledger.terminal_native_equity["BTC"] - ledger.terminal_upnl_native["BTC"] == pytest.approx(2.0)
+    _returns, meta = combine_native_ledger(ledger, report.indexable_currencies)
+    assert meta["computation_status_hint"] in ("complete", "complete_with_warnings")
+
+
+async def test_wedge_session_rpl_accrual_does_not_move_terminal(monkeypatch: Any) -> None:
+    """Pitfall 1: a futures session RPL of 0.05 accrues (equity 3.05, balance unchanged
+    until the 08:00 settlement). The wedge moves with it (1.05) so the rolled terminal
+    stays exactly the cash 2.0; the old form never read ``session_rpl`` and rolled 1.85."""
+    from services.broker_dailies import combine_native_ledger
+
+    base, _ = await _build_open_book_cash_ledger(
+        monkeypatch,
+        {"currency": "BTC", "equity": 3.0, "balance": 2.0, "session_upl": 0.5,
+         "futures_session_upl": 0.5, "futures_session_rpl": 0.0,
+         "options_session_upl": 0.2, "options_value": 0.5},
+    )
+    ledger, report = await _build_open_book_cash_ledger(
+        monkeypatch,
+        {"currency": "BTC", "equity": 3.05, "balance": 2.0, "session_upl": 0.5,
+         "session_rpl": 0.05, "futures_session_upl": 0.5, "futures_session_rpl": 0.05,
+         "options_session_upl": 0.2, "options_value": 0.5},
+    )
+    assert ledger.terminal_upnl_native["BTC"] == pytest.approx(1.05)
+    rolled = ledger.terminal_native_equity["BTC"] - ledger.terminal_upnl_native["BTC"]
+    rolled_base = base.terminal_native_equity["BTC"] - base.terminal_upnl_native["BTC"]
+    assert rolled == rolled_base  # exact: equity - (equity - balance) == balance
+    _returns, meta = combine_native_ledger(ledger, report.indexable_currencies)
+    assert meta["computation_status_hint"] in ("complete", "complete_with_warnings")
+
+
+async def test_wedge_balance_absent_uses_component_fallback(monkeypatch: Any) -> None:
+    """Advisory 2: no ``balance`` key (older stubs, a renamed field) takes the component
+    fallback ``native_upnl - options_session_upl + options_value`` = 0.7 - 0.2 + 0.5 = 1.0,
+    NEVER a fabricated ``equity - 0.0`` (which would be 3.0 and strand section 5)."""
+    from services.broker_dailies import combine_native_ledger
+
+    ledger, report = await _build_open_book_cash_ledger(
+        monkeypatch,
+        {"currency": "BTC", "equity": 3.0, "session_upl": 0.5,
+         "futures_session_upl": 0.5, "options_session_upl": 0.2, "options_value": 0.5},
+    )
+    assert ledger.terminal_upnl_native["BTC"] == pytest.approx(1.0)  # today: 1.2
+    _returns, meta = combine_native_ledger(ledger, report.indexable_currencies)
+    assert meta["computation_status_hint"] in ("complete", "complete_with_warnings")
+
+
+async def test_wedge_perp_only_session_rpl_is_an_intended_change(
+    monkeypatch: Any,
+) -> None:
+    """INTENDED CHANGE (named in the CHANGELOG): a perp-only account with an accrued
+    ``session_rpl`` used to roll a terminal that included it (wedge = session_upl only).
+    The wedge is now ``equity - balance`` = session_upl 0.30 + session_rpl 0.05 = 0.35,
+    so the rolled terminal is the cash balance 0.99 whatever the session has realized."""
+    from services.broker_dailies import combine_native_ledger
+
+    async def _paginate(
+        _ex: Any, scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[Any]:
+        if currency != "BTC":
+            return []
+        return [
+            _btc_deposit(10, change=1.0),
+            {"type": "settlement", "instrument_name": "BTC-PERPETUAL",
+             "currency": "BTC", "change": -0.01, "index_price": 60000.0,
+             "timestamp": _jul_ms(11, 8)},
+        ]
+
+    _patch_pipeline(
+        monkeypatch, scopes=[di.Scope("main", None, True)],
+        currencies={"main": ["BTC"]}, paginate=_paginate,
+    )
+    _patch_jul_index(monkeypatch)
+    # cash 0.99 = 1.0 deposit - 0.01 settlement; equity 1.34 = 0.99 + 0.30 + 0.05.
+    ex = _NativeAnchorStub(
+        summaries=[{"currency": "BTC", "equity": 1.34, "balance": 0.99,
+                    "session_upl": 0.30, "session_rpl": 0.05}],
+        index_price={"BTC": 60000.0},
+    )
+    ledger, report = await di.build_deribit_native_ledger(ex)
+    assert ledger.terminal_upnl_native["BTC"] == pytest.approx(0.35)  # today: 0.30
+    _returns, meta = combine_native_ledger(ledger, report.indexable_currencies)
+    assert meta["computation_status_hint"] in ("complete", "complete_with_warnings")
+
+
 async def test_open_book_missing_summary_hole_fails_at_inception_gate(
     monkeypatch: Any,
 ) -> None:

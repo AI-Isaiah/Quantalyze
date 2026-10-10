@@ -296,6 +296,15 @@ WORKER_FENCE_V2: Final[bool] = (
 # silently-empty (green) track record, never genuine "insufficient history".
 _DERIBIT_EMPTY_LEDGER_FLOOR_USD: Final[float] = USD_FLOORS.material_equity
 
+# 167.1.2.2.1 R2-WR-03: the venues whose key_inputs row can carry the writer's own basis
+# (``composed_flows`` + ``composed_day_pnl``). The Deribit NAV path is the only writer; the MT5
+# and ccxt payloads never set ``_composed_flows_usd``. BOTH sides read this set: the key_inputs
+# writer (derive_broker_dailies) stores the basis only for these venues, and the compose-side
+# visibility counts (derive_allocator_equity, SFH-02) flag a stitched account on the legacy roll
+# only for these venues. A stitched account on any other venue has no basis to lack, so it is
+# not a degradation and must not carry the tokens.
+WRITER_BASIS_VENUES: Final[frozenset[str]] = frozenset({"deribit"})
+
 # Phase 164.6.6.2 / D-01, D-03, D-06 — the FIXED texts of the MT5 account-currency refusals.
 # Every one lands in `compute_jobs.error_message` or `strategy_analytics.computation_error`,
 # both re-classifiable (D-42): none may carry a `mt5_validation._WRONG_SERVER_PHRASES` /
@@ -3354,6 +3363,63 @@ def _calendar_days_absent_from(
     return out
 
 
+async def _persist_refused_key_capture(
+    supabase: Any,
+    *,
+    allocator_id: str,
+    api_key_id: str,
+    venue: str,
+    refusal_class: str,
+    captures: Sequence[Mapping[str, Any] | None],
+) -> None:
+    """Store what a REFUSED Deribit key-mode derive read, on its own row (167.1.2.2.1 MD-01).
+
+    D-03: "Any live read ... is captured as an input and stored. It is never read silently
+    during a derive." A derive that the section 5 gate (or any other structural refusal) turns
+    away has still made its one ``get_account_summaries`` read and its full crawl, and those are
+    exactly the derives a diagnosis needs. The three captures (``account_summary``,
+    ``ledger_digest``, ``native_inception_diagnostics``, whichever exist) go to
+    ``allocator_equity_derived`` ``kind = "key_capture:<api_key_id>"`` with ``outcome:
+    "refused"`` and the refusal's class name.
+
+    It is a SEPARATE row from ``key_inputs:<api_key_id>`` on purpose: the compose reads
+    ``key_inputs`` for the flows and the anchor, and a refused derive's partial capture must not
+    replace the last good derive's (PR-1 review MD-01's alternative). The ``kind`` column has no
+    CHECK, so a new family needs no migration.
+
+    NEVER raises: a failure of this additive upsert logs one WARNING carrying the exception
+    class name only, and the caller returns its original refusal unchanged. The payload is
+    numeric and class names only, with no message text and no id."""
+    payload: dict[str, Any] = {
+        "outcome": "refused",
+        "refusal_class": refusal_class,
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "venue": venue,
+    }
+    for capture in captures:
+        if capture is not None:
+            payload.update(capture)
+
+    def _persist() -> None:
+        supabase.table("allocator_equity_derived").upsert(
+            {
+                "allocator_id": allocator_id,
+                "kind": "key_capture:" + api_key_id,
+                "payload": payload,
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="allocator_id,kind",
+        ).execute()
+
+    try:
+        await db_execute(_persist)
+    except Exception as exc:  # noqa: BLE001 - additive; the original refusal must stand
+        logger.warning(
+            "derive_broker_dailies: refused-derive key_capture not persisted "
+            "(venue=%s, error=%s)",
+            venue,
+            type(exc).__name__,
+        )
 class _NativeKeyUsd(NamedTuple):
     """A native-unit key's inputs in USD, plus what a missing close left out (164.6.6.2.1)."""
 
@@ -4237,6 +4303,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # left out of the stored returns. ``None`` for every other venue and for the
         # allocated-capital path, whose key_inputs row then carries no such field.
         _day_pnl_usd: "pd.Series | None" = None
+        # 167.1.2.2.1 D-06: the flows the writer's NAV obeys (native quantity x the day mark),
+        # set ONLY on the Deribit key-mode NAV path beside ``_day_pnl_usd``. Stored with it so the
+        # allocator compose rolls on the writer's own basis. ``None`` for every other venue.
+        _composed_flows_usd: "pd.Series | None" = None
         # CR-01 (167.1.2.2 round 1): the REALIZED terminal the NAV above was rolled back from,
         # ``(last NAV day, USD)``. It is NOT the live equity the epilogue stores as
         # ``anchor_usd``: MT5 rolls from ``equity - upnl``, Deribit from the native balance less
@@ -4275,6 +4345,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # → EMPTY funding_rows, no funding_fees write (count-once, DRB-07).
             from services.broker_dailies import (
                 combine_native_ledger,
+                native_ledger_composed_flows,
                 native_ledger_day_pnl,
                 native_ledger_inception_diagnostics,
                 native_ledger_realized_terminal,
@@ -4352,6 +4423,46 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     "native anchor) — retrying rather than building a zero-anchor "
                     "ledger."
                 )
+            # 167.1.2.2.1 D-03 / MD-01: store the ONE summaries read this derive made, NOW,
+            # before any gate can refuse. (PR-1 computed it after ``combine_native_ledger``,
+            # so a refused derive, the very one a diagnosis needs, stored nothing.) A capture
+            # failure is recorded by class name and never fails the derive. Four broad excepts
+            # guard four additive captures (this one, the digest, the digest writer and the
+            # diagnostic); each writes ``<field>_error`` plus one class-name WARNING.
+            if is_key_mode and denominator_config is None:
+                try:
+                    from services.allocator_equity_derive import account_summary_payload
+
+                    _account_summary_snapshot = account_summary_payload(account_state)
+                except Exception as _capture_exc:  # noqa: BLE001 - additive capture
+                    logger.warning(
+                        "derive_broker_dailies: account_summary capture failed "
+                        "(venue=%s, error=%s)",
+                        venue,
+                        type(_capture_exc).__name__,
+                    )
+                    _account_summary_snapshot = {
+                        "account_summary_error": type(_capture_exc).__name__
+                    }
+
+            async def _record_refusal(refusal_class: str) -> None:
+                # MD-01: a refusal after the read stores what the derive read, on its own
+                # ``key_capture`` row (never ``key_inputs``, which the compose reads). Key-mode
+                # NAV derives only; never raises. Reads the three captures as they stand NOW.
+                if is_key_mode and denominator_config is None:
+                    await _persist_refused_key_capture(
+                        ctx.supabase,
+                        allocator_id=allocator_id,
+                        api_key_id=api_key_id,
+                        venue=venue,
+                        refusal_class=refusal_class,
+                        captures=(
+                            _account_summary_snapshot,
+                            _ledger_digest,
+                            _native_inception_diagnostics,
+                        ),
+                    )
+
             equity = account_state.collapsed_equity_usd
             balance_error = account_state.balance_error
             open_unrealized_usd = account_state.collapsed_upnl_usd
@@ -4426,6 +4537,73 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # BEFORE any upsert — no partial track record is ever written. The
                 # native path does NOT bypass this honesty gate.
                 assert_ledger_complete(_completeness)
+                # 167.1.2.2.1 D-03 / MD-01: the ledger-dependent captures run HERE, after the
+                # completeness gate and BEFORE anything that can refuse (the C2 floor below, and
+                # ``combine_native_ledger`` with its section 5 gate). A refused derive therefore
+                # stores them too (``_record_refusal``). Key-mode NAV derives only.
+                if is_key_mode and denominator_config is None:
+                    # The numbers behind the section 5 verdict (the rolled pre-history residual
+                    # per currency under today's wedge and a balance-anchored one, the inception
+                    # mark, the throughput, the day-0 capitals, four breach ratios), read off the
+                    # SAME rolled buckets the gate judges. Computed whether or not the gate then
+                    # passes (the diagnostic never raises the inception refusal), gated on
+                    # ``full_history`` only. An additive measurement: it must never fail a working
+                    # derive, and is not silent (the class name lands in the payload and in one
+                    # WARNING, class and venue, never a magnitude).
+                    if native_ledger.full_history:
+                        try:
+                            from services.allocator_equity_derive import (
+                                native_inception_diagnostics_payload,
+                            )
+
+                            # The balance-anchored wedge: equity - balance, per currency that
+                            # has both (balance is present-only, never a coerced zero).
+                            _alt_wedge = {
+                                _c: account_state.native_equity[_c]
+                                - account_state.native_balance[_c]
+                                for _c in account_state.native_balance
+                                if _c in account_state.native_equity
+                            }
+                            _diag = native_ledger_inception_diagnostics(
+                                native_ledger,
+                                _completeness.indexable_currencies,
+                                alt_terminal_upnl_native=_alt_wedge or None,
+                            )
+                            if _diag is not None:
+                                _native_inception_diagnostics = (
+                                    native_inception_diagnostics_payload(_diag)
+                                )
+                        except Exception as _diag_exc:  # noqa: BLE001 - additive measurement
+                            logger.warning(
+                                "derive_broker_dailies: native_inception_diagnostics failed "
+                                "(venue=%s, error=%s)",
+                                venue,
+                                type(_diag_exc).__name__,
+                            )
+                            _native_inception_diagnostics = {
+                                "native_inception_diagnostics_error": type(_diag_exc).__name__
+                            }
+                    # The digest was computed by the ledger build (it holds the crawled rows):
+                    # either it is there, or the build recorded the CLASS NAME it failed with.
+                    _digest_err: str | None = _completeness.ledger_digest_error
+                    if _digest_err is None and _completeness.ledger_digest is not None:
+                        try:
+                            from services.allocator_equity_derive import (
+                                ledger_digest_payload,
+                            )
+
+                            _ledger_digest = ledger_digest_payload(_completeness.ledger_digest)
+                        except Exception as _digest_exc:  # noqa: BLE001 - additive capture
+                            _digest_err = type(_digest_exc).__name__
+                    if _digest_err is not None:
+                        # Class name only, never the message (T-115-05).
+                        logger.warning(
+                            "derive_broker_dailies: ledger_digest capture failed "
+                            "(venue=%s, error=%s)",
+                            venue,
+                            _digest_err,
+                        )
+                        _ledger_digest = {"ledger_digest_error": _digest_err}
                 # C2 — equity-vs-activity floor: a materially-funded account that
                 # produced ZERO return-bearing rows across the whole window is a
                 # silently-empty (green) ledger (broken key / wrong account / mass
@@ -4438,6 +4616,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     and abs(equity) > _DERIBIT_EMPTY_LEDGER_FLOOR_USD
                     and _completeness.total_return_rows == 0
                 ):
+                    await _record_refusal("EmptyLedgerRefusal")
                     await _stamp_strategy_analytics_failed(
                         "Deribit account holds equity but the ledger produced no "
                         "return-bearing activity in the window."
@@ -4476,81 +4655,14 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     _realized_terminal = native_ledger_realized_terminal(
                         native_ledger, _completeness.indexable_currencies
                     )
+                    # D-06: the flows off the SAME levels, stored with the day P&L.
+                    _composed_flows_usd = native_ledger_composed_flows(
+                        native_ledger, _completeness.indexable_currencies
+                    )
                     if native_ledger.full_history:
+                        # D-15: the gate ran and passed (a breach raised above). The numbers
+                        # behind it were captured before the gate, so a refusal stores them too.
                         _native_inception_verdict = "reconciled"
-                        # D-03: store the numbers that verdict rested on. The ONLY broad except
-                        # this phase adds: the diagnostic is an additive measurement and must
-                        # never fail a working derive. It is not silent: the class name lands in
-                        # the payload and in one WARNING (class and venue, never a magnitude).
-                        try:
-                            from services.allocator_equity_derive import (
-                                native_inception_diagnostics_payload,
-                            )
-
-                            # The balance-anchored wedge: equity - balance, per currency that
-                            # has both (balance is present-only, never a coerced zero).
-                            _alt_wedge = {
-                                _c: account_state.native_equity[_c]
-                                - account_state.native_balance[_c]
-                                for _c in account_state.native_balance
-                                if _c in account_state.native_equity
-                            }
-                            _diag = native_ledger_inception_diagnostics(
-                                native_ledger,
-                                _completeness.indexable_currencies,
-                                alt_terminal_upnl_native=_alt_wedge or None,
-                            )
-                            if _diag is not None:
-                                _native_inception_diagnostics = (
-                                    native_inception_diagnostics_payload(_diag)
-                                )
-                        except Exception as _diag_exc:  # noqa: BLE001 - additive measurement
-                            logger.warning(
-                                "derive_broker_dailies: native_inception_diagnostics failed "
-                                "(venue=%s, error=%s)",
-                                venue,
-                                type(_diag_exc).__name__,
-                            )
-                            _native_inception_diagnostics = {
-                                "native_inception_diagnostics_error": type(_diag_exc).__name__
-                            }
-                    # D-03: store the ONE summaries read this derive already made. A
-                    # capture failure is recorded by class name and never fails the derive.
-                    try:
-                        from services.allocator_equity_derive import account_summary_payload
-
-                        _account_summary_snapshot = account_summary_payload(account_state)
-                    except Exception as _capture_exc:  # noqa: BLE001 - additive capture
-                        logger.warning(
-                            "derive_broker_dailies: account_summary capture failed "
-                            "(venue=%s, error=%s)",
-                            venue,
-                            type(_capture_exc).__name__,
-                        )
-                        _account_summary_snapshot = {
-                            "account_summary_error": type(_capture_exc).__name__
-                        }
-                    # The digest was computed by the ledger build (it holds the crawled rows):
-                    # either it is there, or the build recorded the CLASS NAME it failed with.
-                    _digest_err: str | None = _completeness.ledger_digest_error
-                    if _digest_err is None and _completeness.ledger_digest is not None:
-                        try:
-                            from services.allocator_equity_derive import (
-                                ledger_digest_payload,
-                            )
-
-                            _ledger_digest = ledger_digest_payload(_completeness.ledger_digest)
-                        except Exception as _digest_exc:  # noqa: BLE001 - additive capture
-                            _digest_err = type(_digest_exc).__name__
-                    if _digest_err is not None:
-                        # Class name only, never the message (T-115-05).
-                        logger.warning(
-                            "derive_broker_dailies: ledger_digest capture failed "
-                            "(venue=%s, error=%s)",
-                            venue,
-                            _digest_err,
-                        )
-                        _ledger_digest = {"ledger_digest_error": _digest_err}
                 # FLOW-04 materiality: the pure native core does not emit
                 # unrealized_pnl_in_anchor (it subtracts the wedge per-currency, App
                 # A #6). Preserve the v1.8 warning using the collapsed USD anchor +
@@ -4976,6 +5088,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # premise (>1 funded subaccount → ScopeAuthError), or a truncated
                 # crawl all mean we cannot PROVE coverage → clean permanent FAILED,
                 # never a silently-partial track record.
+                await _record_refusal(type(exc).__name__)
                 await _stamp_strategy_analytics_failed(
                     "Deribit transaction history could not be verified as "
                     "complete.",
@@ -5002,6 +5115,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # network ValueError/json.JSONDecodeError escaping the crawl falls
                 # through to the outer generic handler and stays transient-retryable.
                 scrubbed = str(scrub_freeform_string(str(exc)))
+                await _record_refusal(type(exc).__name__)
                 await _stamp_strategy_analytics_failed(
                     "Deribit ledger contained a transaction that could not be "
                     "processed (unvaluable coin cash, undatable, or schema drift).",
@@ -5029,6 +5143,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # Caught in this SAME try as the crawl so a native refusal is never
                 # misclassified transient 'unknown' and retried forever (T-80-10).
                 scrubbed = str(scrub_freeform_string(str(exc)))
+                await _record_refusal(type(exc).__name__)
                 await _stamp_strategy_analytics_failed(
                     "Deribit native NAV reconstruction refused a structural input "
                     "(a value-bearing currency with no USD mark, or the "
@@ -6683,6 +6798,26 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             from services.allocator_equity_derive import realized_terminal_payload
 
             _key_inputs_payload.update(realized_terminal_payload(*_realized_terminal))
+        if (
+            venue in WRITER_BASIS_VENUES
+            and _composed_flows_usd is not None
+            and _day_pnl_usd is not None
+            and not _day_pnl_usd.empty
+            and _realized_terminal is not None
+        ):
+            # 167.1.2.2.1 D-06 (founder 2026-10-10): the writer's own composed flows and day
+            # P&L, read off the levels its returns are chained from. The compose rolls backward
+            # from ``realized_terminal_*`` through exactly these, so it reproduces the writer's
+            # levels instead of drifting through the event-time ``flows`` field (D-03: a stored
+            # input). Additive: the event-time ``flows`` and every other field are unchanged,
+            # and a payload with neither field is the old row. Deribit NAV path only; the MT5
+            # and ccxt payloads never set ``_composed_flows_usd`` (``WRITER_BASIS_VENUES``).
+            # No amount is logged.
+            from services.allocator_equity_derive import writer_basis_payload
+
+            _key_inputs_payload.update(
+                writer_basis_payload(_day_pnl_usd, _composed_flows_usd)
+            )
         if _native_inception_verdict is not None:
             _key_inputs_payload["native_inception"] = _native_inception_verdict
         # 167.1.2.2.1 D-03: Deribit-only and present-only (the ccxt payload keeps its 5 keys).
@@ -11994,6 +12129,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         eligible_key_predicate,
         read_dropped_day_pnl,
         read_realized_terminal,
+        read_writer_basis,
         stitch_dropped_day_pnl,
         stitch_shared_account,
         working_holder_predicate,
@@ -12451,6 +12587,11 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # writer. An older row has none and is replayed from its live anchor as before. A
     # stitch source needs none: the account's terminal is the counted (newest) key's.
     realized_terminal_by_key: dict[str, tuple[str, float]] = {}
+    # 167.1.2.2.1 D-06: ``(flows by day, day P&L by day)`` — the two series a Deribit writer's NAV
+    # obeys, stored on its row. A row written before D-06 has none and composes as before. A
+    # stitch source's is kept apart: the account's basis is decided after the stitch below.
+    writer_basis_raw: dict[str, tuple[dict[str, float], dict[str, float]]] = {}
+    source_writer_basis: dict[str, tuple[dict[str, float], dict[str, float]]] = {}
     # 164.6.6.2.1 D-09 / D-20: a BTC key whose live close is missing, mapped to that day. Its
     # series is priced through ``priced_through`` and it leaves the book after it (T1).
     unpriced_close_day_by_key: dict[str, str] = {}
@@ -12496,6 +12637,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                     _departed_terminal = read_realized_terminal(departed_payload)
                     if _departed_terminal is not None:
                         realized_terminal_by_key[api_key_id] = _departed_terminal
+                    _departed_basis = read_writer_basis(departed_payload)
+                    if _departed_basis is not None:
+                        writer_basis_raw[api_key_id] = _departed_basis
                 continue
             if api_key_id not in counted_ids:
                 # A shared-account key left out by the group resolution: still
@@ -12519,6 +12663,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                         for _f in (source_payload.get("flows") or [])
                     ]
                     source_dropped_pnl[api_key_id] = read_dropped_day_pnl(source_payload)
+                    _source_basis = read_writer_basis(source_payload)
+                    if _source_basis is not None:
+                        source_writer_basis[api_key_id] = _source_basis
                 continue
             key_inputs_ids.add(api_key_id)
             payload = row.get("payload") or {}
@@ -12535,6 +12682,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             _terminal = read_realized_terminal(payload)
             if _terminal is not None:
                 realized_terminal_by_key[api_key_id] = _terminal
+            _basis = read_writer_basis(payload)
+            if _basis is not None:
+                writer_basis_raw[api_key_id] = _basis
             _anchor = payload.get("anchor_usd")
             anchors_by_key[api_key_id] = None if _anchor is None else float(_anchor)
             if _anchor is None:
@@ -12662,6 +12812,26 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # SFH-R2-03: join each stitched account's older members onto its kept key.
     stitched_accounts = 0
     truncated_accounts = 0
+    # D-06: the stitched kept keys, and the writer basis of those accounts whose EVERY member
+    # carries one (a stitched series is one account, so its basis is the members' bases joined
+    # by the same day ownership the stitch applies to flows and dropped-day P&L).
+    stitched_kept: set[str] = set()
+    stitched_writer_basis: dict[str, tuple[list[ExternalFlow], dict[str, float]]] = {}
+    # SFH-02: a stitched account that does not get a joined basis keeps today's roll, by design,
+    # and says so. ``absent_members`` counts the members (sources plus the kept key) with no
+    # basis, ``absent_stitched_members`` all members of those accounts, and ``partial`` is set
+    # when some account had a basis on at least one member but not on all. R2-WR-03: only an
+    # account on a venue that writes a basis (``WRITER_BASIS_VENUES``) is counted; on any other
+    # venue the legacy roll is the only roll, not a degradation.
+    writer_basis_venue_ids = {
+        str(row["id"])
+        for row in key_rows
+        if str(row.get("exchange") or "").strip().lower() in WRITER_BASIS_VENUES
+    }
+    absent_stitched_accounts = 0
+    absent_members = 0
+    absent_stitched_members = 0
+    partial_writer_basis = False
     for kept_id, source_ids in stitch_sources.items():
         kept_series = returns_by_key.get(kept_id)
         if kept_series is None:
@@ -12681,6 +12851,27 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             [source_dropped_pnl.get(k, {}) for k in source_ids]
             + [dropped_pnl_by_key.get(kept_id, {})],
         )
+        _members_with_basis = sum(1 for k in source_ids if k in source_writer_basis) + (
+            1 if kept_id in writer_basis_raw else 0
+        )
+        if kept_id in writer_basis_venue_ids and _members_with_basis < len(source_ids) + 1:
+            absent_stitched_accounts += 1
+            absent_stitched_members += len(source_ids) + 1
+            absent_members += len(source_ids) + 1 - _members_with_basis
+            partial_writer_basis = partial_writer_basis or _members_with_basis > 0
+        if all(k in source_writer_basis for k in source_ids) and kept_id in writer_basis_raw:
+            _links = [source_returns[k] for k in source_ids] + [kept_series]
+            _bases = [source_writer_basis[k] for k in source_ids] + [writer_basis_raw[kept_id]]
+            _owned_flows = stitch_dropped_day_pnl(_links, [b[0] for b in _bases])
+            _owned_pnl = stitch_dropped_day_pnl(_links, [b[1] for b in _bases])
+            stitched_writer_basis[kept_id] = (
+                [
+                    validate_flow_shape(ExternalFlow(utc_day_iso=_d, usd_signed=_a))
+                    for _d, _a in sorted(_owned_flows.items())
+                ],
+                _owned_pnl,
+            )
+        stitched_kept.add(kept_id)
         returns_by_key[kept_id], flows_by_key[kept_id] = stitched
         stitched_accounts += 1
     if truncated_accounts:
@@ -12694,6 +12885,24 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             allocator_id,
             DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED.value,
         )
+
+    # D-06: which keys compose on the writer's basis. A stitched account takes the joined basis
+    # or none (a member without the fields leaves the account on today's path, byte for byte);
+    # every other key takes its own row's, when it has a day P&L.
+    writer_basis_by_key: dict[str, tuple[Sequence[ExternalFlow], Mapping[str, float]]] = {}
+    for _k, (_flows_by_day_map, _pnl_by_day_map) in writer_basis_raw.items():
+        if _k in stitched_kept or not _pnl_by_day_map:
+            continue
+        writer_basis_by_key[_k] = (
+            [
+                validate_flow_shape(ExternalFlow(utc_day_iso=_d, usd_signed=_a))
+                for _d, _a in sorted(_flows_by_day_map.items())
+            ],
+            _pnl_by_day_map,
+        )
+    for _k, _joined in stitched_writer_basis.items():
+        if _joined[1]:
+            writer_basis_by_key[_k] = _joined
 
     # A departed key the rule includes but whose inputs are gone was left out of
     # departed_end_by_key before the rule's end days were used (WR-R2-02), so it
@@ -12780,6 +12989,12 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                     ("duplicate_shared_account_counted_once", duplicate_counted_once),
                     ("shared_account_history_stitched", stitched_accounts > 0),
                     ("departed_history_unavailable", bool(departed_unavailable)),
+                    # SFH-02: non-blocking. A stitched account composing on today's roll
+                    # because a member has no writer basis; "partial" is the half-deployed
+                    # shape (some members carry one), its absence with the base token is a
+                    # fully pre-deploy account.
+                    ("writer_basis_absent_stitched", absent_stitched_accounts > 0),
+                    ("writer_basis_partial_stitched", partial_writer_basis),
                 )
                 if raised
             ]
@@ -12809,6 +13024,10 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             # the stored returns back from it, so the open position at the moment of the
             # derive neither shifts a level nor moves the zero-start verdict.
             realized_terminal_by_key=realized_terminal_by_key,
+            # D-06: the writer's own composed flows and day P&L, where the row carries them.
+            # The compose rolls such a key on them, so its levels and its implied start are
+            # the writer's; a key without them is composed exactly as before.
+            writer_basis_by_key=writer_basis_by_key,
             # D-09 / D-20: the BTC keys whose live close is missing, named by key and day.
             unpriced_close_day_by_key=unpriced_close_day_by_key or None,
             # D-09 (I2): the interior holes, and the level each segment before one rolls from.
@@ -12835,6 +13054,12 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             ),
             error_kind="permanent",
         )
+
+    if absent_stitched_accounts:
+        # SFH-02: counts only (no key id, no USD). Both are absent when every stitched
+        # account took the joined basis, so a healthy payload is unchanged.
+        payload["inputs"]["writer_basis_missing_members"] = absent_members
+        payload["inputs"]["writer_basis_stitched_members"] = absent_stitched_members
 
     # ── 5. B2 root cause: an EMPTY curve is NOT a renderable series. A
     #      zero-anchored-keys / zero-weight-mass compose (every prod allocator

@@ -1687,6 +1687,23 @@ class DeribitNativeAccountState:
     index_usd_snapshot: Mapping[str, float] = field(default_factory=dict)
     read_at_iso: str | None = None
 
+    @classmethod
+    def from_stored(cls, stored: Mapping[str, Any]) -> DeribitNativeAccountState:
+        """Rebuild the state a derive read, from the ``account_summary`` it stored.
+
+        ``stored`` is the dict ``allocator_equity_derive.read_account_summary`` returns
+        (``read_at``, ``summaries``, ``index_usd``). It runs the SAME pure code the live fetch
+        runs (:func:`_state_from_summaries`) over the stored summaries and the stored index
+        prices, so a derive replayed with ``build_deribit_native_ledger(..., account_state=...)``
+        reproduces the original byte for byte and makes no exchange summaries read (D-03: "a
+        re-run reproduces it"). A missing key raises ``KeyError``, so a corrupt row fails loud.
+
+        No production caller exists in this phase. It is the replay entry D-03 requires; the
+        re-baseline check (plan 06) and the Wave 5 hand-off cite it."""
+        return _state_from_summaries(
+            stored["summaries"], stored["index_usd"], read_at_iso=stored["read_at"]
+        )
+
 
 # The numeric ``get_account_summaries`` fields a stored snapshot may carry. This is the
 # WHITELIST (T-167.1.2.2.1-01): every field the derive reads off a summary is here, plus the
@@ -1736,43 +1753,48 @@ def _account_summary_snapshot_row(summ: Mapping[str, Any]) -> dict[str, Any]:
     return row
 
 
-async def fetch_deribit_native_account_state(
-    exchange: Any,
+def _cash_basis_wedge(state: DeribitNativeAccountState, ccy: str) -> float:
+    """The cash_settlement terminal wedge of ONE currency, in native units (DERIBITWEDGE
+    SC-1 / D-18).
+
+    Deribit's documented identity under standard margin is
+    ``equity = balance + futures (session UPL + session RPL) + options mark value``, and
+    ``balance`` excludes open futures PnL and the options mark value. The rolled terminal
+    (``equity - wedge``) must be the CASH the transaction log sums to, so the wedge is
+    ``equity - balance``: it counts the open option book's session move once (it is already
+    inside ``options_value``) and carries the accrued ``session_rpl`` the old form never read.
+
+    ``balance`` is read present-only (a currency whose ``balance`` is absent, null, boolean or
+    non-finite is not in ``native_balance``). Then, and only then, the component form applies:
+    ``native_upnl - options_session_upl + options_value``. ``native_upnl`` is the COMBINED
+    session uPnL (``futures_session_upl``, else the legacy ``session_upl``, plus
+    ``options_session_upl``), so subtracting ``options_session_upl`` leaves the futures leg
+    once and the options mark once. ``options_session_upl`` is never added on top of a legacy
+    ``session_upl`` fallback (RESEARCH 1.2)."""
+    if ccy in state.native_balance:
+        return float(state.native_equity.get(ccy, 0.0)) - float(state.native_balance[ccy])
+    return (
+        float(state.native_upnl.get(ccy, 0.0))
+        - float(state.native_options_session_upl.get(ccy, 0.0))
+        + float(state.native_options_value.get(ccy, 0.0))
+    )
+
+
+def _state_from_summaries(
+    summaries: Sequence[Any],
+    index_prices: Mapping[str, float],
     *,
-    sleep: SleepFn = asyncio.sleep,
-    max_retries: int = PUBLIC_READ_MAX_RETRIES,
+    read_at_iso: str | None,
 ) -> DeribitNativeAccountState:
-    """Read the Deribit account anchor in native + collapsed channels from ONE
-    ``get_account_summaries`` response (D5) — the SINGLE summaries fetch and the
-    SINGLE code path both ``fetch_deribit_account_equity_and_upnl_usd`` (legacy
-    4-tuple) and ``build_deribit_native_ledger`` (native maps) delegate to.
+    """The PURE half of :func:`fetch_deribit_native_account_state`: one
+    ``get_account_summaries`` ``summaries`` list plus the ``{ccy}_usd`` index prices already
+    resolved for it, turned into a :class:`DeribitNativeAccountState`. No I/O, no clock.
 
-    The native maps are read STRAIGHT off each summary (``equity`` /
-    ``session_upl``) in NATIVE units — no ``{ccy}_usd`` multiply. The collapsed
-    anchor/wedge reuse the SAME resolved ``index_prices`` (one probe per held
-    non-linear currency) so there is NO second fetch of anything. Read-error
-    discipline (red-team LOW-1): a TRANSIENT collapsed-anchor probe blip
-    (network/timeout/5xx → ``ccxt.NetworkError``) is RETRIED with backoff and, on
-    ``max_retries`` exhaustion, raises ``DeribitTransientReadError`` (retryable) —
-    it is NEVER swallowed into ``balance_error=True`` (which would let the caller
-    proceed to a silent clean ``complete`` that skips the collapsed-anchor DQ
-    checks). A GENUINE unvaluable collapse (a held coin whose ``{ccy}_usd`` index
-    genuinely does not resolve) still flags ``balance_error`` honestly. Leak: no raw
-    equity/upnl values are logged.
-    """
-    from services.deribit_txn import _LINEAR_CURRENCIES, deribit_equity_to_usd
-
-    empty: dict[str, float] = {}
-    try:
-        resp = await exchange.private_get_get_account_summaries({})
-    except Exception:  # noqa: BLE001 - a failed read is a DQ flag, not a crash
-        return DeribitNativeAccountState(empty, {}, None, 0.0, True, False, {})
-    # Taken immediately after the response returns: the instant the stored snapshot describes.
-    read_at_iso = datetime.now(timezone.utc).isoformat()
-    result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
-    summaries = result.get("summaries", []) if isinstance(result, Mapping) else []
-    if not isinstance(summaries, Sequence) or not summaries:
-        return DeribitNativeAccountState({}, {}, None, 0.0, True, False, {})
+    The live fetch calls it with the exchange's response and
+    :meth:`DeribitNativeAccountState.from_stored` with the stored snapshot, so a replayed
+    derive computes its state with the very same code as the original (DERIBITWEDGE D-03).
+    ``read_at_iso`` is carried through verbatim."""
+    from services.deribit_txn import deribit_equity_to_usd
 
     # Native per-currency maps read from the SAME summaries (D5) — NEVER index-
     # multiplied. session_upl absent/null/non-numeric → 0.0 (never fabricated).
@@ -1811,6 +1833,79 @@ async def fetch_deribit_native_account_state(
         native_options_session_upl[ccy] = float(
             summ.get("options_session_upl", 0.0) or 0.0
         )
+
+    try:
+        equity = deribit_equity_to_usd(summaries, index_prices)
+    except ValueError:
+        # A coin-margined currency with no resolvable USD index → refuse a
+        # coin/non-USD collapsed anchor; flag heuristic capital rather than
+        # mis-scale. The NATIVE maps stay (they need no index); the wedge inherits
+        # the same fail-loud collapsed disposition (never fabricated).
+        return DeribitNativeAccountState(
+            native_equity, native_upnl, None, 0.0, True, False,
+            native_options_value,
+            native_options_session_upl,
+            native_balance,
+            summary_snapshot,
+            dict(index_prices),
+            read_at_iso,
+        )
+    open_unrealized_usd, upnl_unreadable = _deribit_session_upl_to_usd(
+        summaries, index_prices
+    )
+    return DeribitNativeAccountState(
+        native_equity,
+        native_upnl,
+        equity,
+        open_unrealized_usd,
+        False,
+        upnl_unreadable,
+        native_options_value,
+        native_options_session_upl,
+        native_balance,
+        summary_snapshot,
+        dict(index_prices),
+        read_at_iso,
+    )
+
+
+async def fetch_deribit_native_account_state(
+    exchange: Any,
+    *,
+    sleep: SleepFn = asyncio.sleep,
+    max_retries: int = PUBLIC_READ_MAX_RETRIES,
+) -> DeribitNativeAccountState:
+    """Read the Deribit account anchor in native + collapsed channels from ONE
+    ``get_account_summaries`` response (D5) — the SINGLE summaries fetch and the
+    SINGLE code path both ``fetch_deribit_account_equity_and_upnl_usd`` (legacy
+    4-tuple) and ``build_deribit_native_ledger`` (native maps) delegate to.
+
+    The native maps are read STRAIGHT off each summary (``equity`` /
+    ``session_upl``) in NATIVE units — no ``{ccy}_usd`` multiply. The collapsed
+    anchor/wedge reuse the SAME resolved ``index_prices`` (one probe per held
+    non-linear currency) so there is NO second fetch of anything. Read-error
+    discipline (red-team LOW-1): a TRANSIENT collapsed-anchor probe blip
+    (network/timeout/5xx → ``ccxt.NetworkError``) is RETRIED with backoff and, on
+    ``max_retries`` exhaustion, raises ``DeribitTransientReadError`` (retryable) —
+    it is NEVER swallowed into ``balance_error=True`` (which would let the caller
+    proceed to a silent clean ``complete`` that skips the collapsed-anchor DQ
+    checks). A GENUINE unvaluable collapse (a held coin whose ``{ccy}_usd`` index
+    genuinely does not resolve) still flags ``balance_error`` honestly. Leak: no raw
+    equity/upnl values are logged.
+    """
+    from services.deribit_txn import _LINEAR_CURRENCIES
+
+    empty: dict[str, float] = {}
+    try:
+        resp = await exchange.private_get_get_account_summaries({})
+    except Exception:  # noqa: BLE001 - a failed read is a DQ flag, not a crash
+        return DeribitNativeAccountState(empty, {}, None, 0.0, True, False, {})
+    # Taken immediately after the response returns: the instant the stored snapshot describes.
+    read_at_iso = datetime.now(timezone.utc).isoformat()
+    result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
+    summaries = result.get("summaries", []) if isinstance(result, Mapping) else []
+    if not isinstance(summaries, Sequence) or not summaries:
+        return DeribitNativeAccountState({}, {}, None, 0.0, True, False, {})
 
     # Resolve one {ccy}_usd index per held non-linear currency for the COLLAPSED
     # anchor/wedge only (the native maps above never touch these).
@@ -1868,39 +1963,7 @@ async def fetch_deribit_native_account_state(
             except (TypeError, ValueError):
                 continue
 
-    try:
-        equity = deribit_equity_to_usd(summaries, index_prices)
-    except ValueError:
-        # A coin-margined currency with no resolvable USD index → refuse a
-        # coin/non-USD collapsed anchor; flag heuristic capital rather than
-        # mis-scale. The NATIVE maps stay (they need no index); the wedge inherits
-        # the same fail-loud collapsed disposition (never fabricated).
-        return DeribitNativeAccountState(
-            native_equity, native_upnl, None, 0.0, True, False,
-            native_options_value,
-            native_options_session_upl,
-            native_balance,
-            summary_snapshot,
-            index_prices,
-            read_at_iso,
-        )
-    open_unrealized_usd, upnl_unreadable = _deribit_session_upl_to_usd(
-        summaries, index_prices
-    )
-    return DeribitNativeAccountState(
-        native_equity,
-        native_upnl,
-        equity,
-        open_unrealized_usd,
-        False,
-        upnl_unreadable,
-        native_options_value,
-        native_options_session_upl,
-        native_balance,
-        summary_snapshot,
-        index_prices,
-        read_at_iso,
-    )
+    return _state_from_summaries(summaries, index_prices, read_at_iso=read_at_iso)
 
 
 async def fetch_deribit_account_equity_and_upnl_usd(
@@ -2565,18 +2628,27 @@ async def build_deribit_native_ledger(
         if pnl_basis == PNL_BASIS_MARK_TO_MARKET
         else []
     )
-    # H1 (BLOCKER): under CASH_SETTLEMENT the OPEN option book's settled mark
-    # (``native_options_value``) is INCLUDED in the venue-reported ``equity``
-    # (terminal_native_equity) but is NOT in the cash-only ``native_pnl`` and NOT in
-    # the session-uPnL wedge — so §5 (`_assert_inception_reconciled`) would strand it
-    # as an unexplained residual and fail a perfectly healthy open-options NAV
-    # account PERMANENT (the shipped NAV+options+cash_settlement §5 combination had
-    # ZERO coverage). Value the open book INTO the terminal wedge so the reconciliation
-    # closes: terminal_equity == Σnative_pnl + Σflow + wedge, with wedge = session
-    # uPnL + open-book MTM. Like the session-uPnL wedge, this open-MTM is stripped
-    # from the realized-basis NAV backward roll (consistent with the existing
-    # unrealized-stripping design). Perp-only / no-open-book accounts have
-    # ``options_value`` == 0 ⇒ wedge unchanged ⇒ byte-identical (SC-4).
+    # Under CASH_SETTLEMENT the terminal wedge is ``equity - balance`` (DERIBITWEDGE SC-1 /
+    # D-18; ``_cash_basis_wedge``). Deribit's documented identity under standard margin is
+    #   equity = balance + futures (session UPL + session RPL) + options mark value
+    # and ``balance`` "does not include open futures PnL or options mark value". The txn log
+    # sums to that cash balance, so the rolled terminal (``equity - wedge``) must be it, and
+    # §5 (`_assert_inception_reconciled`) then reconciles the log to the venue's own cash.
+    #
+    # H1 (BLOCKER) is why the wedge also carries the OPEN option book: its settled mark
+    # (``options_value``) is INCLUDED in the venue-reported ``equity`` but is NOT in the
+    # cash-only ``native_pnl``, so without it §5 strands the mark and fails a healthy
+    # open-options account PERMANENT. ``equity - balance`` carries it by construction, and
+    # the old component form (``native_upnl + options_value``) did too, but with one wrong and
+    # one missing term: ``options_session_upl`` (already INSIDE ``options_value``) was counted
+    # a second time through ``native_upnl``, and ``futures_session_rpl`` was never read. Both
+    # move with live account state, which is why two derives of one ledger disagreed (the
+    # phase's determinism item, D-03). Phase 131 REVIEW "Residual #2" is lifted by this.
+    # When ``balance`` is absent the helper falls back to the component form with
+    # ``options_session_upl`` removed. Like the session-uPnL wedge, this is stripped from the
+    # realized-basis NAV backward roll. Perp-only accounts with no ``session_rpl`` get the same
+    # value as before (``equity - balance == session_upl``); with one, the wedge now includes
+    # it, an intended change.
     #
     # Under MARK_TO_MARKET the open book's value is ALREADY carried INTO native_pnl by
     # the summary channel, so adding it to the wedge would DOUBLE-COUNT — keep the
@@ -2600,11 +2672,10 @@ async def build_deribit_native_ledger(
         _wedge_ccys = (
             {str(c).upper() for c in state.native_upnl}
             | {str(c).upper() for c in state.native_options_value}
+            | {str(c).upper() for c in state.native_balance}
         )
         terminal_upnl_native = {
-            c: float(state.native_upnl.get(c, 0.0))
-            + float(state.native_options_value.get(c, 0.0))
-            for c in _wedge_ccys
+            c: _cash_basis_wedge(state, c) for c in _wedge_ccys
         }
     ledger = NativeLedger(
         native_pnl=native_pnl,

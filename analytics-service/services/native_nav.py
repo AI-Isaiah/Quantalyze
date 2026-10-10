@@ -206,10 +206,12 @@ INCEPTION_NATIVE_DUST_REL: float = 1e-4
 # a phantom offset about 60 times the $1 floor, hidden by a throughput of thousands of coin).
 # Two pinned data points bound the value: the production dust shape of about $1.06
 # (test_inception_dust_relative_to_throughput_passes) must stay green, and that measured offset
-# must breach. Any value in about [2, 300) satisfies both; 5 is the founder's pick. THE GATE DOES
-# NOT READ THIS CONSTANT YET: it is only reported (``native_inception_diagnostics`` computes the
-# ``*_with_cap`` ratios from it). Plan 06 wires it into ``_assert_inception_reconciled``, and only
-# after the stored PROD reading shows the options-holding account still passes under it (OQ-3).
+# must breach. Any value in about [2, 300) satisfies both; 5 is the founder's pick. THE GATE READS
+# THIS CONSTANT (``_assert_inception_reconciled`` passes it to ``_inception_reading``; SC-2).
+# It was merged only after the stored PROD reading showed it strands no connected key (OQ-3, plan
+# 05's ``cap-verdict: passes``: ``breach_ratio_balance_anchor_with_cap`` was 0 on every key).
+# ``native_inception_diagnostics`` still reports ``breach_ratio_current`` WITHOUT the cap, so
+# readings taken before and after the gate change compare like for like.
 INCEPTION_DUST_CAP_USD: float = 5.0
 # Both constants are tuned against the three real Deribit keys at the P78-style
 # live acceptance gate (the FLOW_DOM_RATIO precedent, nav_twr.py:64-65); real-key
@@ -748,6 +750,30 @@ def native_day_pnl(
     return level_day_pnl(nav_usd, composed_flows_usd, prev0=prev0_usd)
 
 
+def native_composed_flows(
+    ledger: NativeLedger,
+    *,
+    indexable_currencies: frozenset[str],
+    venue: str = "",
+) -> pd.Series:
+    """The USD flows the writer's NAV obeys, ``F_t = Σ_c flowqty_c(t) × mark_c(t)``, on every
+    NAV day (zero where no flow landed), off the SAME levels
+    ``reconstruct_native_nav_and_twr`` chains its returns from (167.1.2.2.1 D-06).
+
+    These are NOT the event-time ``usd_signed`` flows the derive also stores: the core
+    values each flow's native quantity at the DAY mark. The allocator compose rolls
+    backward through the pair (these flows, ``native_day_pnl``) so that its levels are the
+    writer's own. Never a second roll: it is the ``composed_flows_usd`` series
+    ``_native_nav_levels`` already built. Empty when no bucket rolled. Raises what
+    ``reconstruct_native_nav_and_twr`` raises, including the §5 inception refusal."""
+    levels = _native_nav_levels(
+        ledger, indexable_currencies=indexable_currencies, venue=venue
+    )
+    if levels is None:
+        return pd.Series(dtype=float, name="composed_flows")
+    return levels[2].rename("composed_flows")
+
+
 def native_realized_terminal(
     ledger: NativeLedger,
     *,
@@ -912,14 +938,15 @@ def _assert_inception_reconciled(
     (INCEPT-01) — NOT claimed here.
 
     167.1.2.2.1: the arithmetic lives in ``_inception_reading`` so the diagnostic stored with
-    each derive is computed by the same code. This gate passes ``dust_cap_usd=None``: it does
-    not read ``INCEPTION_DUST_CAP_USD`` yet.
+    each derive is computed by the same code. This gate passes
+    ``dust_cap_usd=INCEPTION_DUST_CAP_USD`` (SC-2): a residual is dust only if it is within the
+    throughput-relative allowance AND worth at most the cap at the inception-day mark.
     """
     if not ledger.full_history:
         return  # §5.3 — a truncated ledger legitimately cannot reconcile to zero.
 
     reading = _inception_reading(
-        rolled, orphans=orphans, dust_cap_usd=None, venue=venue
+        rolled, orphans=orphans, dust_cap_usd=INCEPTION_DUST_CAP_USD, venue=venue
     )
     per_bucket_resid_usd = [(row.code, row.resid_usd) for row in reading.rows]
     resid_usd_total = reading.resid_usd_total
