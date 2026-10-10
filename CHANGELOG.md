@@ -8,8 +8,8 @@
 - Migrations the dump newly carries, from the marker diff: `20261010130000_strategy_analytics_trade_fetch_provenance.sql`, `20261010140000_cron_sync_tick.sql`.
 - `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-10` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.129.10.0 → 0.129.10.1.
 - The gates on the composed tree, verbatim: `baseline-currency: carried=293 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 126 — MATCH 123, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
-
 - `scripts/dump-sql-functions.ts`: the dated `snapshot-only` `NAME_SET_RATCHET` row for `cron_sync_tick` (captured 2026-10-09, Phase 167.1.2.2.2) is deleted. Its clearing condition was exactly this re-dump; with the function now on both sides the snapshot gate reported it `ratchet-stale` and required the deletion. Gate (a) now reads 124 vs 124 names with 0 ratcheted disagreements.
+
 ### Notes
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38027977271` succeeded, and this entry was composed by the `redump-pr` job. Run `38027977271` is the provenance anchor.
 - The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
