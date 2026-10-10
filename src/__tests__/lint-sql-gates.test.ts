@@ -1149,7 +1149,8 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 86 -> 87, `node scripts/lint-sql-gates.mjs` printed `scanned 87 file(s); 0 finding(s)` with the side-kind scope gate in the corpus.
     // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 87 -> 88, `node scripts/lint-sql-gates.mjs` printed `scanned 88 file(s); 0 finding(s)` with the truncate-revoke gate in the corpus beside the side-kind scope gate.
     // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): 88 -> 89, `node scripts/lint-sql-gates.mjs` printed `scanned 89 file(s); 0 finding(s)` with the native-balance GRANT gate (test_btcusdview_native_balance.sql, one new gate file) in the corpus.
-    expect(res.out).toMatch(/scanned 89 file/);
+    // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): 89 -> 91 on the tree merged with origin/main, `node scripts/lint-sql-gates.mjs` printed `scanned 91 file(s); 0 finding(s)` with the cron_sync_tick gate and the trade-fetch column gate in the corpus beside the BTCUSDVIEW gate.
+    expect(res.out).toMatch(/scanned 91 file/);
     expect(res.status, res.out).toBe(0);
   });
 

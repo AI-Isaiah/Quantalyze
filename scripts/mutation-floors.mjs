@@ -1123,7 +1123,17 @@
 // biting 5`. Both directions are recorded under ARMS_FLOOR below. WAIVED_CEILING stays 0.
 // A branch that merges another gate-adding branch (TRADESYNC) re-measures both constants on
 // the merged tree; they are never added by hand.
-export const FILES_FLOOR = 62;
+// Phase 167.1.2.2.2 TRADESYNC, 2026-10-09: 62 -> 64 (+2 annotated gate files:
+// test_cron_sync_tick.sql and test_strategy_analytics_trade_fetch_provenance.sql), RE-MEASURED
+// on the tree merged with origin/main (the BTCUSDVIEW gate above already counted, per its
+// own note). MEASURED by ONE full run of `node scripts/mutation-runner/run.mjs`:
+// `scope: FULL 64/64 annotated files`, `coverage: files 64/91`, `arms: 630/630/0`,
+// `biting: 630`, `lane-invocations: 630 ... plus 64 baseline / 64 restore leg(s)` (the two
+// tallies AGREE), `lane-blocked: 0`, `unreachable: 27`, `per-arm lane time: mean 2.4s over
+// 630 arm run(s)`. (The pre-merge reading of this branch alone was files 63/90, arms 625;
+// main alone read 62/89 and 615; 63 + 1 = 64 and 625 + 5 = 630 agree with the merged run.)
+// WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 64;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2937,7 +2947,13 @@ export const FILES_FLOOR = 62;
 // `biting: 5` first. The census vitest files read the corpus, so the stale-low direction is
 // observed by `The corpus declares 615 twin(s) of which 0 are waivers, so a green run bites 615.
 // ARMS_FLOOR is 610.` until this constant moves.
-export const ARMS_FLOOR = 615;
+// Phase 167.1.2.2.2 TRADESYNC, 2026-10-09: 615 -> 630 (+15 biting arms), RE-MEASURED on the tree
+// merged with origin/main. Per-file lines of the same full run that set FILES_FLOOR:
+// `test_cron_sync_tick.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8` and
+// `test_strategy_analytics_trade_fetch_provenance.sql: sections 7 / judged 7 / annotated 7 /
+// waived 0 / biting 7`, beside `test_btcusdview_native_balance.sql: sections 5 / judged 5 /
+// annotated 5 / waived 0 / biting 5`; `arms: 630/630/0`, `biting: 630`.
+export const ARMS_FLOOR = 630;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

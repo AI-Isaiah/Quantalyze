@@ -295,7 +295,10 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
     const [, verified, declared, arms] = summary!;
     expect(Number(declared)).toBe(sentinelFloor);
     expect(Number(arms)).toBe(armsFloor);
-    expect(Number(verified)).toBe(sentinelFloor - 1);
+    // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): TWO files are now declared
+    // but not checked against a run (test_prod_prober_cadence.sql and test_cron_sync_tick.sql,
+    // both LANE-ONLY), so the verified count sits two under the floor, not one.
+    expect(Number(verified)).toBe(sentinelFloor - 2);
     // Guard the guard: proves the excluded file's OWN sentinel was skipped
     // this run — not merely that the totals still add up. A different file,
     // test_sync_status_curated_sentence_survives.sql, shares the SAME "ALL 7
@@ -687,6 +690,17 @@ const LANE_ONLY_ANCHOR = "-- LANE-ONLY:";
 
 /** The set of files, declared object and declared fixture the corpus carries today. */
 const LANE_ONLY_SITES: readonly { file: string; object: string; fixture: string; why: string }[] = [
+  {
+    file: "test_cron_sync_tick.sql",
+    object: "net._lane_posts",
+    fixture: "scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql",
+    why:
+      "Every arm asserts against the pg-net stand-in that fixture 34's own header marks as never " +
+      "applied to TEST or PROD; shared TEST carries the real pg_net, so a version of this gate " +
+      "made to run there would issue genuine outbound HTTP from shared CI infrastructure on every " +
+      "run. Its arms execute and are mutation-checked twin-by-twin on the pg-lane under " +
+      "sql-mutation (Phase 167.1.2.2.2).",
+  },
   {
     file: "test_mark_rpc_bridge_advisory_lock.sql",
     object: "dblink",

@@ -126,6 +126,10 @@ _SCOPED_RE = re.compile(
 #     with FIVE scoped driver UPDATEs and again shipped it without this key; the
 #     164.5.2.1 review-fix round found the pin red at its own base commit and
 #     recorded it                                  -> (absent) -> 5
+#   * Phase 167.1.2.2.2 (TRADESYNC) added
+#     supabase/tests/test_strategy_analytics_trade_fetch_provenance.sql with SIX
+#     seed-scoped UPDATEs and its census plan missed this key; PR-A's CI python
+#     job found the pin red                        -> (absent) -> 6
 #
 # ⚠️ A count of ZERO is expressed by ABSENCE, not by an explicit `: 0` entry.
 # `actual` below is built with a truthiness filter, so a file with no matches
@@ -138,6 +142,7 @@ _EXPECTED_MATCH_COUNTS: dict[str, int] = {
     "test_ledger_refresh_staleness.sql": 2,
     "test_metrics_by_basis_write.sql": 4,
     "test_strategy_analytics_stuck_computing_reaper.sql": 3,
+    "test_strategy_analytics_trade_fetch_provenance.sql": 6,
     "test_sync_status_bridge_residues.sql": 5,
     "test_sync_status_curated_sentence_survives.sql": 3,
     "test_sync_status_marked_refresh_protected.sql": 8,
