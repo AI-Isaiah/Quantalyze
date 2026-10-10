@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.129.10.1] - 2026-10-10 — BASELINE: automated re-dump after the PROD apply of 09d5049b
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38027977271`, after the PROD apply of merge `09d5049b`: sha256 `48fa55a2…` → `2eefab3e…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 126, distinct function names 123 → 124, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261010130000_strategy_analytics_trade_fetch_provenance.sql`, `20261010140000_cron_sync_tick.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-10` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.129.10.0 → 0.129.10.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=293 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 126 — MATCH 123, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+- `scripts/dump-sql-functions.ts`: the dated `snapshot-only` `NAME_SET_RATCHET` row for `cron_sync_tick` (captured 2026-10-09, Phase 167.1.2.2.2) is deleted. Its clearing condition was exactly this re-dump; with the function now on both sides the snapshot gate reported it `ratchet-stale` and required the deletion. Gate (a) now reads 124 vs 124 names with 0 ratcheted disagreements.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38027977271` succeeded, and this entry was composed by the `redump-pr` job. Run `38027977271` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.129.10.0] - 2026-10-09 — TRADESYNC (1/2): the daily trade-sync tick exists, strategy_analytics gets its trade-fetch and provenance columns, and neither is wired to anything yet
 
 Phase 167.1.2.2.2, first of two PRs. The analytics service has carried a `POST /api/cron-sync` route and the per-key sync code behind it for a long time, and nothing has ever called it, so live strategy keys have not had their trades ingested on a schedule. This PR ships the callable and the two columns the later readers need, **and nothing that reads them or schedules anything**. The code PR (plans 05 onward) adds the readers and merges only after PROD has applied these two migrations, so a select that names a column never meets a PROD that lacks it.
