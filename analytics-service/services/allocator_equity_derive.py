@@ -723,6 +723,38 @@ _SELF_CHECK_REL = 1e-9
 # key pass, the verdict on a key that lands outside is the point of the check.
 _INCEPTION_ZERO_START_BAND = 1e-4
 
+# 167.1.2.2.1 SC-3 / D-01 (founder 2026-10-09): a day whose reconstructed level is
+# below this fraction of the PRIOR peak is "emptied" — zero capital, no return weight,
+# neither refused nor degraded. The fraction is relative so it behaves the same for any
+# account size. It is the founder's number: do not loosen it to make a key pass without
+# a founder decision (changing it changes which days carry returns, so every affected
+# book would have to be recomputed).
+EMPTIED_FRACTION = 0.01
+
+# 167.1.2.2.1 CR-02 / SFH-01 (review round 1): the emptied band is two-sided. A level is
+# "emptied" only when it is within this fraction of the PRIOR peak BELOW zero, up to
+# ``EMPTIED_FRACTION`` above it. A level further below zero is not a drained account, it
+# is the backward roll saying that a flow it was given never happened (a duplicated or
+# mis-dated deposit pushes every earlier level down by its amount), so it keeps the
+# refusal it always had (``non-positive reconstructed equity``) instead of being zeroed
+# and read as a trustworthy book. 1e-4 is the zero-start band's number
+# (``_INCEPTION_ZERO_START_BAND``): it is kept as its own constant so that tightening the
+# inception check never silently moves the emptied rule. Measured on PROD's stored inputs
+# (2026-10-10): the 755 emptied levels sit 3.8e-6..8.1e-6 of the peak, ALL positive, so
+# this band is about 12x wider than the largest magnitude seen and changes nothing there.
+EMPTIED_NEGATIVE_FRACTION = 1e-4
+
+# 167.1.2.2.1 D-08 / D-09 (founder 2026-10-10, amends D-07, after PR-2 review WR-03 and round 2
+# R2-WR-02): an absolute floor on the emptied rule. The prior peak never decays, so with the
+# percent band alone a real small balance after a large old peak (3k after a 1M peak) would
+# compose as zero capital indefinitely. D-09: a level is emptied only when it is below the
+# SMALLER of ``EMPTIED_FRACTION`` of the prior peak and this amount, on replayed levels and on
+# the last-day live anchor alike, so a balance of this amount or more is live capital whether
+# or not a deposit follows (D-08 tested the post-deposit level, so a cents credit flipped the
+# class of the same balance). The floor is far above PROD's measured emptied levels (all under
+# 100 USD; D-07 reading: 755 emptied days in 2 stretches), so that reading holds.
+EMPTIED_RESTART_FLOOR_USD = 100.0
+
 # Venues whose history reaches the account's start, by the code's own statements:
 #   * deribit: ``NativeLedger(full_history=True)`` (deribit_ingest) — the txn-log
 #     reaches inception, and native_nav's §5 inception gate enforces it.
@@ -846,6 +878,33 @@ def _flows_by_day(flows: Sequence[Any] | None) -> dict[str, float]:
     return dict(sums)
 
 
+def _emptied_ceiling(peak: float) -> float:
+    """The level below which a day is emptied (D-01, D-09): the smaller of
+    ``EMPTIED_FRACTION`` of the prior peak and the absolute ``EMPTIED_RESTART_FLOOR_USD``."""
+    return min(EMPTIED_FRACTION * peak, EMPTIED_RESTART_FLOOR_USD)
+
+
+# 167.1.2.2.1 D-09 c: how closely the previous level times (1 + r) must reach this level for a
+# stored loss to count as the explanation of an emptied stretch's first day, as a fraction of
+# the previous level. A stored return is the writer's TWR for the day, so it reproduces the fall
+# to float precision when it is the fall; 1e-6 absorbs the writer's amount rounding and nothing
+# like a flow (the case it must refuse is a residual of the order of the fall itself).
+_EMPTIED_LOSS_REL_TOL = 1e-6
+
+
+def _loss_accounts_for_drop(prev_level: float, level: float, stored_return: float) -> bool:
+    """True when a stored return ``r < 0`` is the loss that takes ``prev_level`` to a positive
+    ``level``: ``prev_level * (1 + r)`` within ``_EMPTIED_LOSS_REL_TOL`` of ``level``. Any
+    flow, P&L or mis-dated row that moved the level beyond that makes the stored return an
+    unrelated number, so it does not explain the fall."""
+    return (
+        stored_return < 0.0
+        and level > 0.0
+        and abs(prev_level * (1.0 + stored_return) - level)
+        <= _SELF_CHECK_ABS + _EMPTIED_LOSS_REL_TOL * abs(prev_level)
+    )
+
+
 def replay_key_equity(
     returns: pd.Series,
     flows: Sequence[Any] | None,
@@ -854,6 +913,8 @@ def replay_key_equity(
     history_reaches_inception: bool = False,
     dropped_day_pnl: Mapping[str, float] | None = None,
     realized_terminal: tuple[str, float] | None = None,
+    writer_day_pnl: Mapping[str, float] | None = None,
+    writer_flows: Sequence[Any] | None = None,
 ) -> KeyEquity:
     """Reconstruct one key's $-equity series BACKWARD from ``anchor`` (STITCH-04).
 
@@ -922,6 +983,33 @@ def replay_key_equity(
     from different derive runs: the roll falls back to the anchor and the key degrades
     as ``KEY_INPUTS_MISMATCH``.
 
+    167.1.2.2.1 D-06 (founder 2026-10-10) — THE WRITER'S OWN FLOWS AND DAY P&L. The roll above
+    rebuilds the writer's NAV from other numbers (event-time USD flows, stored returns, the
+    dropped days), and on PROD that rebuild missed the writer's own prev0 by 1.3% of the first
+    return day's level: the gap accumulates over the history. ``writer_day_pnl`` ({ISO day:
+    ``NAV_t - NAV_{t-1} - F_t`` in USD}, the day set called W below) and ``writer_flows`` (the
+    writer's composed flows, ``ExternalFlow`` rows) are the two series the writer's NAV obeys,
+    stored by the derive. They are given together or not at all (``ValueError``). ``flows`` stays
+    the event-time flows.
+
+    When W is non-empty the days replayed are the union of the return days, the flow days, the
+    dropped days AND W (no writer P&L day is stepped over), and the roll is the writer's own
+    identity, ``equity_{t-1} = equity_t - F_t - P_t`` with no return factor, so every level is
+    the writer's NAV and the opening-run ``implied_start`` (which subtracts the first opening
+    day's writer P&L) is the writer's prev0. It applies ONLY when the row and the returns come
+    from one derive: every return day is in W or carries a stored return of exactly ``0.0`` (a
+    gap-fill row that carries the level), every writer flow day is in W, and ``realized_terminal``
+    is given on ``max(W)``, the series' last day. Otherwise the roll above runs unchanged on the
+    event-time ``flows`` (exactly the call without the two arguments), the flag
+    ``writer_basis_mismatch`` is set and the key degrades as ``KEY_INPUTS_MISMATCH`` (blocking),
+    the CR-01 precedent. In writer-basis mode the flag ``writer_basis`` is ``True``.
+
+    SC-3 is not weakened: the Pitfall 5 hardening and the ``dropped_day_pnl_*`` flags read ONLY
+    the dropped-day map and the stored returns, never W (W covers every NAV day, so reading it
+    would explain every collapse). A stretch must still begin on a withdrawal, a stored
+    dropped-day P&L or a stored non-zero return that left a positive level (an ordinary
+    trading loss, CR-01 of the PR-2 review).
+
     Structural refusals raise ``NavReconstructionError`` (permanent, mirroring
     ``nav_twr``): a return factor ``1 + r_t <= 0`` (an un-replayable ≤ −100% day)
     or a non-positive reconstructed intermediate equity (a withdrawal dwarfing
@@ -931,6 +1019,11 @@ def replay_key_equity(
     A forward/backward construction-sanity self-check (the ``nav_twr``
     reconcile pattern) replays FORWARD and asserts byte-agreement, reddening only
     on a roll-loop-vs-identity code divergence."""
+    if (writer_day_pnl is None) != (writer_flows is None):
+        raise ValueError(
+            "replay_key_equity: writer_day_pnl and writer_flows are given together or not at all"
+        )
+
     if anchor is None:
         return KeyEquity(
             None, REASON_NO_ANCHOR, degrade_reasons=frozenset({DegradeReason.NO_ANCHOR})
@@ -974,6 +1067,39 @@ def replay_key_equity(
     # HIGH-1: union flow days into the return index BEFORE the roll. D-15: so are the
     # dropped days, which carry P&L and no return.
     days = sorted(set(r) | set(fbd) | set(pnl_by_day))
+    # D-06: the writer's own flows and day P&L, when the row and the returns agree. ``roll_pnl``
+    # is what the roll, the forward self-check and the implied start subtract; ``pnl_by_day``
+    # stays the DROPPED-day map (the hardening and the flags read it and nothing else).
+    roll_pnl: Mapping[str, float] = pnl_by_day
+    r_roll: Mapping[str, float] = r
+    writer_mode = False
+    writer_mismatch = False
+    if writer_day_pnl:
+        w_flows = _flows_by_day(writer_flows)
+        w_pnl: dict[str, float] = {}
+        for w_day, w_amount in writer_day_pnl.items():
+            w_value = float(w_amount)
+            if not math.isfinite(w_value):
+                raise NavReconstructionError(
+                    "allocator equity replay: non-finite writer day P&L — refusing a "
+                    "data-quality NaN/inf amount"
+                )
+            w_pnl[str(w_day)] = w_value
+        w_days = sorted(set(r) | set(w_flows) | set(pnl_by_day) | set(w_pnl))
+        last_w = max(w_pnl)
+        writer_mode = (
+            all(d in w_pnl or r[d] == 0.0 for d in r)
+            and all(d in w_pnl for d in w_flows)
+            and realized_terminal is not None
+            and realized_terminal[0] == last_w
+            and w_days[-1] == last_w
+        )
+        writer_mismatch = not writer_mode
+        if writer_mode:
+            days = w_days
+            fbd = w_flows
+            roll_pnl = w_pnl
+            r_roll = {}
     n = len(days)
     if n == 0:
         return KeyEquity(
@@ -1005,6 +1131,10 @@ def replay_key_equity(
     equity[n - 1] = terminal_level
     for t in range(n - 1, 0, -1):
         day_t = days[t]
+        if writer_mode:
+            # D-06: the writer's own identity, no return factor.
+            equity[t - 1] = equity[t] - fbd.get(day_t, 0.0) - roll_pnl.get(day_t, 0.0)
+            continue
         factor = 1.0 + r.get(day_t, 0.0)
         if factor <= 0.0:
             # An un-replayable ≤ −100% day: the backward identity has no positive
@@ -1017,7 +1147,50 @@ def replay_key_equity(
             equity[t] - fbd.get(day_t, 0.0) - pnl_by_day.get(day_t, 0.0)
         ) / factor
 
-    bad = sum(1 for e in equity if not (e > 0.0))
+    # 167.1.2.2.1 SC-3 / D-01: classify emptied days on the RAW writer-basis levels,
+    # chronologically. The prior peak (D-02) is the maximum over EARLIER non-emptied
+    # levels only; an emptied day never lifts it, and a later level never reclassifies a
+    # past day. D-04: a deposit landing on the day right after an emptied day ends the
+    # stretch — that day is not emptied and the peak restarts at its level. D-07
+    # (founder, 2026-10-10) amends D-04: the deposit ends the stretch only when it lifts
+    # the level to at least EMPTIED_FRACTION of the prior peak (still the pre-stretch
+    # peak here, since an emptied day never lifts it). A smaller (dust) deposit leaves
+    # the stretch running and the peak untouched; PROD held one deposit of about 1e-8 of
+    # the peak that, under D-04 alone, restarted the peak at dust and left the near-zero
+    # days after it classified live. D-09 (founder, 2026-10-10) amends D-08: the emptied band
+    # itself is bounded above by the SMALLER of EMPTIED_FRACTION of the prior peak and
+    # EMPTIED_RESTART_FLOOR_USD (``_emptied_ceiling``), so a balance of that amount or more is
+    # live capital whether or not a deposit follows, and the deposit that ends a stretch is
+    # simply the one that lifts the level out of the band (the peak restarts at its level).
+    # A non-positive level with no prior peak is not emptied and still refuses below, and
+    # neither is a level more than EMPTIED_NEGATIVE_FRACTION of the prior peak below zero
+    # (CR-02).
+    emptied = [False] * n
+    peak: float | None = None
+    peak_at_last_day: float | None = None
+    for t in range(n):
+        e = equity[t]
+        if t == n - 1:
+            peak_at_last_day = peak
+        ends_stretch = (
+            t > 0
+            and emptied[t - 1]
+            and fbd.get(days[t], 0.0) > 0.0
+            and peak is not None
+            and e >= _emptied_ceiling(peak)
+        )
+        if ends_stretch:
+            if e > 0.0:
+                peak = e
+        elif (
+            peak is not None
+            and -EMPTIED_NEGATIVE_FRACTION * peak <= e < _emptied_ceiling(peak)
+        ):
+            emptied[t] = True
+        elif e > 0.0:
+            peak = e if peak is None else max(peak, e)
+
+    bad = sum(1 for e, m in zip(equity, emptied) if not m and not (e > 0.0))
     if bad:
         raise NavReconstructionError(
             f"allocator equity replay: non-positive reconstructed equity on "
@@ -1025,14 +1198,73 @@ def replay_key_equity(
             "fabricate a floor)"
         )
 
+    # Pitfall 5: a stretch must begin on a day the ledger explains: a withdrawal flow, a
+    # stored dropped-day P&L, or a stored LOSS that accounts for the drop (the writer's own
+    # account of that day, i.e. an ordinary trading loss; CR-01, review round 1, tightened by
+    # D-09 c / SFH-R2-F1). "Accounts for the drop" means the previous level times (1 + r)
+    # reaches this level (``_loss_accounts_for_drop``): a stored return that merely differs
+    # from zero (a small loss, a gain, a loss far short of the fall) explains nothing, because
+    # a mis-dated flow that lands a level in the band would otherwise pass as zero capital on
+    # any trading day. A level that falls below the band with none of the three is a data
+    # fault (a double-counted flow, a mis-dated row) and must not be silently read as zero
+    # capital. A stored return of exactly 0.0 is a gap-fill row that carries the level; it
+    # explains nothing. Only the stored returns are read here, never the writer's day P&L W
+    # (W covers every NAV day, so reading it would explain every collapse). Day indices and
+    # counts only (T-115-05).
+    for t in range(n):
+        if emptied[t] and (t == 0 or not emptied[t - 1]):
+            day = days[t]
+            explained = (
+                fbd.get(day, 0.0) < 0.0
+                or day in pnl_by_day
+                or (t > 0 and _loss_accounts_for_drop(equity[t - 1], equity[t], r.get(day, 0.0)))
+            )
+            if not explained:
+                raise NavReconstructionError(
+                    f"allocator equity replay: an emptied stretch begins on day {t} of "
+                    f"{n} with no withdrawal, no stored day P&L and no stored return that "
+                    "accounts for the fall — refusing to read a data fault as zero capital"
+                )
+
+    # Pitfall 6: the forward self-check runs on the RAW levels. Zeroing first would make
+    # the per-step identity fail at the stretch edges.
     series = pd.Series(equity, index=days, name=getattr(returns, "name", None))
-    _assert_forward_agreement(series, r, fbd, days, pnl_by_day)
+    _assert_forward_agreement(series, r_roll, fbd, days, roll_pnl)
+    emptied_days = sum(emptied)
+    if emptied_days:
+        series = series.copy()
+        series[pd.Series(emptied, index=series.index)] = 0.0
     flags: dict[str, Any] = {}
     reasons: set[DegradeReason] = set()
+    if writer_mode:
+        flags["writer_basis"] = True
+    if writer_mismatch:
+        flags["writer_basis_mismatch"] = True
+        reasons.add(DegradeReason.KEY_INPUTS_MISMATCH)
     if realized_terminal is not None and not from_realized:
         flags["realized_terminal_day_mismatch"] = True
         reasons.add(DegradeReason.KEY_INPUTS_MISMATCH)
-    if from_realized and equity[n - 1] != float(anchor):
+    # A stretch that runs to the last day: the live anchor decides, on the same two-sided
+    # band as a replayed level (D-09). Inside it the anchor IS zero capital (the level stays
+    # exactly 0.0, and a non-positive anchor is not a refusal). At or above the band the
+    # account holds real equity now, so today's step below runs and the anchor wins; the flag
+    # says the last day was classified emptied. Further below zero than the band
+    # (EMPTIED_NEGATIVE_FRACTION of the prior peak) is a data fault, not a drained account: it
+    # falls through to the non-positive refusal below, as on origin/main (R2-WR-01).
+    anchor_in_band = False
+    if emptied[n - 1]:
+        # An emptied day always has a prior peak; the None test only narrows the type.
+        if (
+            peak_at_last_day is not None
+            and -EMPTIED_NEGATIVE_FRACTION * peak_at_last_day
+            <= float(anchor)
+            < _emptied_ceiling(peak_at_last_day)
+        ):
+            anchor_in_band = True
+            flags["emptied_last_day_anchor_in_band"] = 1
+        else:
+            flags["emptied_last_day_live_anchor"] = 1
+    if from_realized and equity[n - 1] != float(anchor) and not anchor_in_band:
         # The live equity enters on the anchor day only. The check above ran on the
         # writer's own levels (the step into the last day is the writer's identity); this
         # is the one point the open position and any later mark move are added to.
@@ -1044,6 +1276,14 @@ def replay_key_equity(
             )
         series = series.copy()
         series.iloc[n - 1] = float(anchor)
+    if emptied_days:
+        # Counts and a bool only (T-115-05); present only when a stretch exists, so a
+        # key with none keeps exactly the flag dict it had. No DegradeReason: D-01.
+        flags["emptied_stretch_days"] = emptied_days
+        flags["emptied_stretches"] = sum(
+            1 for t in range(n) if emptied[t] and (t == 0 or not emptied[t - 1])
+        )
+        flags["emptied_stretch"] = True
     if pnl_by_day:
         flags["dropped_day_pnl_days"] = len(pnl_by_day)
     if ignored_pnl_days:
@@ -1061,11 +1301,13 @@ def replay_key_equity(
         # (the funding day's trading result is real and is inside the level), so the
         # residue is the capital the ledger never funded, not a day's P&L. Without a
         # stored P&L (a row from before D-15) it is 0 and this is ``equity - F``.
+        # D-06: on the writer's basis ``roll_pnl`` is the writer's own day P&L, so on the
+        # funding day this IS the writer's prev0 (RESEARCH 6.1: ``L - F - P = prev0``).
         first_open = opening_run[0]
         implied_start = (
             equity[days.index(first_open)]
             - fbd[first_open]
-            - pnl_by_day.get(first_open, 0.0)
+            - roll_pnl.get(first_open, 0.0)
         )
         level_first_return = equity[days.index(ret_days[0])]
         if abs(implied_start) > _INCEPTION_ZERO_START_BAND * level_first_return:
@@ -1171,6 +1413,87 @@ def read_realized_terminal(payload: Mapping[str, Any]) -> tuple[str, float] | No
     return date.fromisoformat(str(raw_day)).isoformat(), amount
 
 
+def writer_basis_payload(day_pnl: pd.Series, composed_flows: pd.Series) -> dict[str, Any]:
+    """The ``key_inputs`` fields for 167.1.2.2.1 D-06: the two series the writer's NAV obeys.
+
+    ``composed_flows`` is the writer's own USD flows (native quantity x the day mark), one
+    ``{utc_day_iso, flow_usd}`` per day with a non-zero flow. ``composed_day_pnl`` is its own
+    day P&L ``NAV_t - NAV_{t-1} - F_t`` (day 0 against the prior capital), one
+    ``{utc_day_iso, pnl_usd}`` per NAV day. Both come off the SAME levels the stored returns
+    are chained from (``native_nav._native_nav_levels``), so the allocator compose can roll
+    on the writer's basis instead of the event-time ``flows`` field (D-03: a value the compose
+    needs is a stored input). The two fields always travel together.
+
+    A non-finite value is refused (count only, no amount): JSONB cannot hold it, and a poison
+    value would fail the upsert and loop the derive."""
+    flow_rows: list[dict[str, Any]] = []
+    for ts, raw in composed_flows.items():
+        amount = float(raw)
+        if not math.isfinite(amount):
+            raise NavReconstructionError(
+                "key_inputs composed flows: non-finite amount — refusing to persist it"
+            )
+        if amount != 0.0:
+            flow_rows.append(
+                {"utc_day_iso": pd.Timestamp(ts).date().isoformat(), "flow_usd": amount}
+            )
+    pnl_rows: list[dict[str, Any]] = []
+    for ts, raw in day_pnl.items():
+        amount = float(raw)
+        if not math.isfinite(amount):
+            raise NavReconstructionError(
+                "key_inputs composed day P&L: non-finite amount — refusing to persist it"
+            )
+        pnl_rows.append({"utc_day_iso": pd.Timestamp(ts).date().isoformat(), "pnl_usd": amount})
+    return {"composed_flows": flow_rows, "composed_day_pnl": pnl_rows}
+
+
+def _read_basis_rows(raw: Any, amount_key: str, label: str) -> dict[str, float]:
+    """{ISO day: amount} from one stored basis field; every malformation is a ``ValueError``."""
+    if not isinstance(raw, list):
+        raise ValueError(f"key_inputs {label}: not a list")
+    out: dict[str, float] = {}
+    for row in raw:
+        if not isinstance(row, Mapping) or "utc_day_iso" not in row or amount_key not in row:
+            raise ValueError(f"key_inputs {label}: malformed row")
+        day = date.fromisoformat(str(row["utc_day_iso"])).isoformat()
+        raw_amount = row[amount_key]
+        # ``float(True) == 1.0``: a JSON boolean would be read as a dollar (as in the neighbours).
+        if isinstance(raw_amount, bool) or not isinstance(raw_amount, (int, float)):
+            raise ValueError(f"key_inputs {label}: non-numeric amount")
+        amount = float(raw_amount)
+        if not math.isfinite(amount):
+            raise ValueError(f"key_inputs {label}: non-finite amount")
+        # The writer emits one row per day. A repeated day is corruption, and summing or
+        # overwriting it would move every earlier level: refuse it, never read a guess.
+        if day in out:
+            raise ValueError(f"key_inputs {label}: duplicate day")
+        out[day] = amount
+    return out
+
+
+def read_writer_basis(
+    payload: Mapping[str, Any],
+) -> tuple[dict[str, float], dict[str, float]] | None:
+    """``(flows_by_day, pnl_by_day)`` from a ``key_inputs`` payload, each ``{ISO day: USD}``;
+    ``None`` when the row predates D-06 (both fields absent or null), which the compose then
+    treats exactly as before. The reader of ``writer_basis_payload`` (167.1.2.2.1 D-06).
+
+    The two fields travel together: one without the other, a repeated day, a bad day, a
+    boolean or non-numeric amount or a non-finite amount raises ``ValueError``, so the job
+    disposes it as a corrupt input instead of reading a guess."""
+    raw_flows = payload.get("composed_flows")
+    raw_pnl = payload.get("composed_day_pnl")
+    if raw_flows is None and raw_pnl is None:
+        return None
+    if raw_flows is None or raw_pnl is None:
+        raise ValueError("key_inputs writer basis: composed flows and day P&L must come together")
+    return (
+        _read_basis_rows(raw_flows, "flow_usd", "composed flows"),
+        _read_basis_rows(raw_pnl, "pnl_usd", "composed day P&L"),
+    )
+
+
 # ── Phase 167.1.2.2.1 (DERIBITWEDGE, PR-1): the stored account-summary read ──────────────────
 #
 # The Deribit key-mode derive reads ``get_account_summaries`` once. These helpers STORE that
@@ -1179,35 +1502,60 @@ def read_realized_terminal(payload: Mapping[str, Any]) -> tuple[str, float] | No
 # identity ``equity = balance + futures_session_upl + futures_session_rpl + options_value``
 # (Deribit's own field semantics, standard margin). No value a derive computes reads them.
 
-_IDENTITY_PLACES_CAP: int = 12
-# Four addends each rounded to ``d`` places contribute at most 2.5 units of the last place to
-# a residual; ``4 * 10**-d`` is the tolerance that reading allows. It is set by the fields'
-# OWN decimal precision rather than a flat constant, so a coin reported to 8 places and a USD
-# stable reported to 2 are each judged against their own rounding.
-_IDENTITY_TOL_UNITS: int = 4
+# Deribit reports every coin-denominated ``get_account_summaries`` field rounded to 8 decimal
+# places (the published examples at docs.deribit.com show 8-place values for ``equity``,
+# ``balance``, ``futures_session_upl``, ``futures_session_rpl`` and ``options_value``). The
+# identity has FIVE rounded terms (equity, balance, futures session UPL, futures session RPL,
+# options value), each off by at most half a unit of the 8th place, so an EXACT identity can
+# show at most 5 * 0.5 * 10**-8 = 2.5e-8 of residual from rounding alone.
+#
+# The verdict is judged against that published precision and NEVER against the precision a
+# value happens to show. The shipped PR-1 rule read the shortest ``repr`` of the finest field,
+# which failed both ways (PR-1 review MD-02, measured): balance 1.0 with options_value
+# 0.1234567891 and equity 1.12345679 read as BROKEN (the finest field tightened the tolerance
+# for all), and equity 100.0 against balance 99.7 read as HOLDING (every value round, so a
+# 0.4 tolerance). A relative term, 1e-9 * |equity|, covers binary-float error in the engine and
+# in the float-to-JSON chain for large balances; it overtakes the floor only above
+# |equity| = 25 coins, where 1e-9 of equity is still far below any economically meaningful gap.
+_DERIBIT_FIELD_PLACES: int = 8
+_IDENTITY_TERMS: int = 5
+_IDENTITY_REL_TOL: Decimal = Decimal("1e-9")
 _SUMMARY_STR_FIELDS: frozenset[str] = frozenset({"margin_model"})
 _SUMMARY_BOOL_FIELDS: frozenset[str] = frozenset({"cross_collateral_enabled"})
 
 
-def _decimal_places(value: float) -> int:
-    """Decimal places of ``value``'s shortest round-trip form (``repr``), which reproduces
-    the decimal the exchange sent."""
-    exponent = Decimal(repr(value)).as_tuple().exponent
-    return -exponent if isinstance(exponent, int) and exponent < 0 else 0
+def _identity_tolerance(equity: Decimal) -> Decimal:
+    """``max(2.5e-8, 1e-9 * |equity|)`` in native units (see ``_DERIBIT_FIELD_PLACES``)."""
+    rounding = (
+        Decimal(_IDENTITY_TERMS) * Decimal("0.5") * Decimal(10) ** -_DERIBIT_FIELD_PLACES
+    )
+    return max(rounding, _IDENTITY_REL_TOL * abs(equity))
 
 
 def _account_identity(snap: Mapping[str, Any]) -> dict[str, Any]:
     """The identity verdict of ONE currency's snapshot.
 
-    ``identity_ok`` / ``identity_resid_ratio`` are ``None`` when the identity cannot be
-    computed (no readable ``balance`` or ``equity``): not computable is never ``True``. A
-    missing ``futures_session_rpl`` or ``options_value`` counts as 0.0 and a missing
-    ``futures_session_upl`` falls back to ``session_upl`` (the order
-    ``_combined_session_upl`` uses). The residual is exact decimal arithmetic."""
+    ``identity_ok`` / ``identity_resid_ratio`` / ``identity_resid_native`` are ``None`` when
+    the identity cannot be computed (no readable ``balance`` or ``equity``): not computable is
+    never ``True``. A missing ``futures_session_rpl`` or ``options_value`` counts as 0.0 and a
+    missing ``futures_session_upl`` falls back to ``session_upl`` (the order
+    ``_combined_session_upl`` uses). The residual is exact decimal arithmetic.
+
+    ``identity_resid_native`` (the SIGNED residual) and ``identity_places`` (the published
+    precision the tolerance rests on) are stored so the verdict can be re-judged offline from
+    the snapshot without trusting this tolerance (PR-1 review MD-02).
+
+    Caution for a reader: on Deribit ``session_upl`` is futures PLUS options. When
+    ``futures_session_upl`` is absent and an option book is open, the fallback adds the options
+    session P&L on top of ``options_value``, which already holds it, so the verdict can read
+    as broken for that currency. That is a limit of the fallback, not evidence about the
+    account (PR-1 review IN-03)."""
     options_value = snap.get("options_value")
     ident: dict[str, Any] = {
         "identity_ok": None,
         "identity_resid_ratio": None,
+        "identity_resid_native": None,
+        "identity_places": _DERIBIT_FIELD_PLACES,
         "options_session_upl_nonzero": snap.get("options_session_upl", 0.0) != 0.0,
         "has_open_options": options_value is not None and options_value != 0.0,
     }
@@ -1218,18 +1566,16 @@ def _account_identity(snap: Mapping[str, Any]) -> dict[str, Any]:
     upl = snap.get("futures_session_upl")
     if upl is None:
         upl = snap.get("session_upl")
-    parts = [equity, balance]
+    parts = [balance]
     parts.extend(v for v in (upl, snap.get("futures_session_rpl"), options_value) if v is not None)
-    places = min(max(_decimal_places(float(v)) for v in parts), _IDENTITY_PLACES_CAP)
-    tolerance = Decimal(_IDENTITY_TOL_UNITS) * Decimal(10) ** -places
-    total = sum(
-        (Decimal(repr(float(v))) for v in parts[1:]),
-        Decimal(0),
-    )
-    residual = Decimal(repr(float(equity))) - total
+    total = sum((Decimal(repr(float(v))) for v in parts), Decimal(0))
+    equity_exact = Decimal(repr(float(equity)))
+    residual = equity_exact - total
+    tolerance = _identity_tolerance(equity_exact)
     ratio = float(abs(residual) / tolerance)
     ident["identity_resid_ratio"] = ratio
-    ident["identity_ok"] = ratio <= 1.0
+    ident["identity_resid_native"] = float(residual)
+    ident["identity_ok"] = abs(residual) <= tolerance
     return ident
 
 
@@ -1351,6 +1697,19 @@ def read_account_summary(payload: Mapping[str, Any]) -> dict[str, Any] | None:
             "options_session_upl_nonzero": verdict["options_session_upl_nonzero"],
             "has_open_options": verdict["has_open_options"],
         }
+        # MD-02 fields: absent on a row written before them, strictly typed when present.
+        resid = verdict.get("identity_resid_native")
+        if resid is not None:
+            identity[str(ccy)]["identity_resid_native"] = _strict_finite_number(
+                resid, "residual"
+            )
+        elif "identity_resid_native" in verdict:
+            identity[str(ccy)]["identity_resid_native"] = None
+        if "identity_places" in verdict:
+            places = verdict["identity_places"]
+            if isinstance(places, bool) or not isinstance(places, int):
+                raise TypeError("key_inputs account_summary: identity_places is not an integer")
+            identity[str(ccy)]["identity_places"] = places
     return {
         "read_at": read_at,
         "summaries": summaries,

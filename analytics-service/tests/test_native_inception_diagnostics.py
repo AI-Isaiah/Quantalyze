@@ -164,15 +164,23 @@ def test_a_currency_the_balance_does_not_cover_keeps_its_current_wedge() -> None
     assert abs(by_code["BTC"]["resid_native_balance_anchor"] - 0.006) < 1e-12
 
 
-# ── the gate does not move ───────────────────────────────────────────────────────
+# ── the gate reads the cap; the diagnostic's "current" ratio does not ────────────
 
 
-def test_the_gate_still_passes_the_dust_fixture_and_does_not_read_the_cap() -> None:
-    """$300 of residual would breach under the cap. It must NOT here: this plan only measures."""
-    returns, _meta = reconstruct_native_nav_and_twr(
-        _section_b_ledger(), indexable_currencies=_BTC, venue="deribit"
-    )
-    assert returns.name == "returns"
+def test_the_gate_reads_the_cap_and_breach_ratio_current_stays_without_it() -> None:
+    """167.1.2.2.1 plan 06 (SC-2): the $300 residual now breaches the gate, because the gate
+    ANDs the absolute cap into ``is_dust``. ``breach_ratio_current`` keeps its meaning of
+    "today's rule WITHOUT the cap" (still absorbed as dust, so 0), while
+    ``breach_ratio_current_with_cap`` carries the breach. That split is what lets readings taken
+    before and after the gate change compare like for like."""
+    ledger = _section_b_ledger()
+    with pytest.raises(InceptionReconciliationError) as exc:
+        reconstruct_native_nav_and_twr(ledger, indexable_currencies=_BTC, venue="deribit")
+    assert exc.value.currencies == ["BTC"]
+    d = _diag(ledger)
+    assert d["breach_ratio_current"] == 0.0
+    assert d["breach_ratio_current_with_cap"] > 1.0
+    assert abs(exc.value.breach_ratio - d["breach_ratio_current_with_cap"]) < 1e-9
 
 
 def test_a_ledger_the_gate_refuses_still_yields_a_diagnostic() -> None:
@@ -330,27 +338,65 @@ def _state(*, equity: float = 1.0, balance: float | None = 0.9) -> DeribitNative
     )
 
 
-async def _derive(state: Any, wrapper: Any) -> dict[str, Any]:
+async def _derive(
+    state: Any, wrapper: Any, *, ledger: Any = None, trace: dict[str, Any] | None = None
+) -> dict[str, Any]:
     from tests.test_deribit_account_summary_capture import _run_deribit_key_mode_derive
 
     with patch("services.broker_dailies.native_ledger_inception_diagnostics", new=wrapper):
-        payload, _spy = await _run_deribit_key_mode_derive(state)
+        payload, _spy = await _run_deribit_key_mode_derive(state, ledger=ledger, trace=trace)
     return payload
 
 
 @pytest.mark.asyncio
 async def test_a_key_mode_derive_stores_the_inception_diagnostics() -> None:
+    from tests.test_mtm_single_key import _stub_native_ledger
+
     real = _diag(_section_b_ledger(), alt_terminal_upnl_native={"BTC": 0.004})
     wrapper = MagicMock(return_value=real)
-    payload = await _derive(_state(), wrapper)
+    given = _stub_native_ledger()
+    trace: dict[str, Any] = {}
+    payload = await _derive(_state(), wrapper, ledger=given, trace=trace)
 
     stored = read_native_inception_diagnostics(payload)
     assert stored == real
     assert "native_inception_diagnostics_error" not in payload
     # equity 1.0 - balance 0.9 is the balance-anchored wedge, handed to the wrapper per currency.
-    [(_args, kwargs)] = [(c.args, c.kwargs) for c in wrapper.call_args_list]
+    [(args, kwargs)] = [(c.args, c.kwargs) for c in wrapper.call_args_list]
     alt = kwargs["alt_terminal_upnl_native"]
     assert set(alt) == {"BTC"} and abs(alt["BTC"] - 0.1) < 1e-12
+    # LO-06: the diagnostic is run on the SAME ledger and indexable set the worker gave the
+    # combine, not on some other ledger (a wiring defect the mocked wrapper used to hide).
+    [combine_call] = trace["combine"].call_args_list
+    assert len(args) == 2
+    assert args[0] is given and args[0] is combine_call.args[0]
+    assert args[1] == combine_call.args[1] == frozenset({"BTC"})
+
+
+@pytest.mark.asyncio
+async def test_the_real_diagnostic_runs_through_the_worker_and_round_trips() -> None:
+    """LO-06: no MagicMock. The ledger the build returns carries marks, so the REAL
+    ``native_ledger_inception_diagnostics`` runs inside ``job_worker`` and what it stores
+    survives the strict reader. Hand-worked: the ledger rolls 2000 BTC of pnl against a
+    2000 BTC withdrawal to a terminal of 0.01, so the residual under the ledger's own (empty)
+    wedge is 0.01; equity 0.01 less balance 0.006 is a balance-anchored wedge of 0.004, which
+    rolls from 0.006."""
+    from tests.test_deribit_account_summary_capture import _run_deribit_key_mode_derive
+
+    ledger = _section_b_ledger()
+    state = _state(equity=0.01, balance=0.006)
+    payload, _spy = await _run_deribit_key_mode_derive(state, ledger=ledger)
+
+    assert "native_inception_diagnostics_error" not in payload
+    stored = read_native_inception_diagnostics(payload)
+    assert stored is not None
+    [row] = stored["currencies"]
+    assert row["currency"] == "BTC"
+    assert abs(row["resid_native_current"] - 0.01) < 1e-12
+    assert abs(row["resid_native_balance_anchor"] - 0.006) < 1e-12
+    assert row["mark0_usd"] == 30000.0
+    assert row["throughput_native"] == 4000.0
+    assert stored["orphan_unvaluable"] is False
 
 
 @pytest.mark.asyncio

@@ -563,6 +563,24 @@ async def test_deribit_routes_through_native_combine():
     assert passed_indexable == frozenset({"BTC"})
 
 
+def _non_capture_upserts(capture: dict) -> list:
+    """Every upsert of a refused key-mode derive EXCEPT its ``key_capture:<api_key_id>`` row.
+
+    167.1.2.2.1 MD-01 (D-03): a Deribit key-mode derive that refuses after its summaries read
+    now records what it read on a ``key_capture`` row of ``allocator_equity_derived``. The pins
+    below are about the track record (no ``csv_daily_returns``, no ``key_inputs``), and they
+    still say so: only that one capture row is allowed through."""
+    return [
+        (name, payload, oc)
+        for name, payload, oc in capture["upserts"]
+        if not (
+            name == "allocator_equity_derived"
+            and isinstance(payload, dict)
+            and str(payload.get("kind", "")).startswith("key_capture:")
+        )
+    ]
+
+
 @pytest.mark.asyncio
 async def test_deribit_completeness_gate_fails_loud():
     """assert_ledger_complete raising (a scope×currency never reached
@@ -576,7 +594,7 @@ async def test_deribit_completeness_gate_fails_loud():
     ):
         result = await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
     assert result.outcome == DispatchOutcome.FAILED
-    assert capture["upserts"] == [], "a partial ledger must NOT upsert dailies"
+    assert _non_capture_upserts(capture) == [], "a partial ledger must NOT upsert dailies"
 
 
 @pytest.mark.asyncio
@@ -591,7 +609,7 @@ async def test_deribit_ledger_truncation_fails_loud():
     with _apply(patches):
         result = await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
     assert result.outcome == DispatchOutcome.FAILED
-    assert capture["upserts"] == [], "a truncated ledger must NOT upsert dailies"
+    assert _non_capture_upserts(capture) == [], "a truncated ledger must NOT upsert dailies"
 
 
 @pytest.mark.asyncio
@@ -609,7 +627,7 @@ async def test_deribit_currency_enumeration_fails_loud():
     with _apply(patches):
         result = await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
     assert result.outcome == DispatchOutcome.FAILED
-    assert capture["upserts"] == []
+    assert _non_capture_upserts(capture) == []
 
 
 @pytest.mark.asyncio
@@ -629,7 +647,7 @@ async def test_deribit_scope_auth_error_is_clean_permanent_failed():
         result = await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
     assert result.outcome == DispatchOutcome.FAILED
     assert result.error_kind == "permanent"
-    assert capture["upserts"] == []
+    assert _non_capture_upserts(capture) == []
 
 
 @pytest.mark.asyncio
@@ -645,7 +663,7 @@ async def test_deribit_material_equity_zero_rows_fails_loud():
     with _apply(patches):
         result = await run_derive_broker_dailies_job({"api_key_id": "key-drb"})
     assert result.outcome == DispatchOutcome.FAILED
-    assert capture["upserts"] == []
+    assert _non_capture_upserts(capture) == []
 
 
 @pytest.mark.asyncio

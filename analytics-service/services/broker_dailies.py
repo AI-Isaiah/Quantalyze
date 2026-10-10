@@ -69,6 +69,7 @@ from services.mt5_deals import (
 )
 from services.native_nav import (
     NativeLedger,
+    native_composed_flows,
     native_day_pnl,
     native_inception_diagnostics,
     native_realized_terminal,
@@ -900,6 +901,15 @@ def native_ledger_day_pnl(
     (``native_nav.native_day_pnl``, ``venue="deribit"``). Not defined for the
     allocated-capital (``denominator_config``) path, which builds no NAV."""
     return native_day_pnl(ledger, indexable_currencies=indexable, venue="deribit")
+
+
+def native_ledger_composed_flows(
+    ledger: NativeLedger, indexable: frozenset[str]
+) -> pd.Series:
+    """The Deribit account's USD flows as its NAV obeys them, native quantity x the day mark
+    (167.1.2.2.1 D-06): ``native_nav.native_composed_flows``, ``venue="deribit"``, off the
+    same levels as ``native_ledger_day_pnl``. Key-mode NAV path only."""
+    return native_composed_flows(ledger, indexable_currencies=indexable, venue="deribit")
 
 
 def native_ledger_realized_terminal(

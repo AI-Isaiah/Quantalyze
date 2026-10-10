@@ -8823,6 +8823,155 @@ stays out of tracked text: record it only in the Bybit key's settings and the Ra
 reads `ready` in census e on the next scheduled run.
 ⛔ **Not a close:** a green Railway setting without a Bybit derive that reads `done`.
 
+## Phase 167.1.2.2.1 (DERIBITWEDGE) — routed items (logged 2026-10-10)
+
+### 167.1.2.2.1-WAVE5-REBASELINE — the two private composites are recomputed once, in the Wave 5 consolidated run, after NAVBREACH (booked 2026-10-10, Phase 167.1.2.2.1 plan 07, D-18)
+
+**Why it is open.** The daily 05:30 UTC derive re-derives every connected Deribit key with the
+deployed code, so PR-2's merge and deploy IS the keys' re-baseline (plan 08 brackets it). What is
+left for Wave 5 is the two private composites, through `stitch_composite`, which wait on Phase
+166.3.1 NAVBREACH. `docs/runbooks/deribitwedge-rebaseline-readings.md`, section `## Wave 5
+hand-off`, carries the list, the order (`r1-fingerprint` and `r4-day-returns` immediately before,
+`composite-cap` before the composite recompute, `r1-fingerprint`, `r2-verdict` and
+`r3-sibling-diff` after), the acceptance and the residue. The `composite-cap-verdict` read
+`passes` on 2026-10-10 (stored cash arm, MTM arm estimated), with the options-holding account
+using about two thirds of the cap.
+
+**Owner:** the Wave 5 consolidated recompute (the founder routes it with 166.3 R2..R6 and
+NAVBREACH).
+**Trigger:** NAVBREACH's fix is merged and the first 05:30 UTC derive after PR-2 has run.
+**Gate (what closes it):** after the composite recompute, `r3-sibling-diff` reads 0 differing days
+on every account (or each difference is attributed by unequal `ledger_digest` values), the
+options-holding allocator's `r2-verdict` is recorded as it reads, and no row was recomputed twice.
+⛔ **Not a close:** re-deriving the keys a second time, a BEFORE snapshot taken after the keys
+moved, or loosening the inception cap to make a composite pass.
+
+### 167.1.2.2.1-COMPOSITE-CAP-ORDERING — the 5 USD inception cap also gates the composite path, measured once on stored data, not live (booked 2026-10-10, PR-2 review WR-02, security F2, RESEARCH OQ-8)
+
+**Why it is open.** `_assert_inception_reconciled` passes `INCEPTION_DUST_CAP_USD` for every
+caller, including `_reconstruct_deribit` under the cash and the MTM basis. A composite member
+breach is a permanent failure. The plan 05 clearance covered the key-mode cash arm only. Plan 07
+took the `composite-cap` reading (`passes`: 6 of 6 member keys, 0 of 18 currency rows non-dust,
+largest residual 0.67 of the cap). The MTM arm is an estimate (stored cash diagnostics plus
+`futures_session_rpl`), and the composite recompute reads live state.
+
+**Owner:** the Wave 5 composite recompute (see `167.1.2.2.1-WAVE5-REBASELINE`).
+**Trigger:** immediately before the first `stitch_composite` after NAVBREACH.
+**Gate (what closes it):** `composite-cap` re-read the same day reads `passes`, or a `strands` is
+put to the founder with the numbers; after the recompute the composites' status is recorded as the
+cap's effect when it flips.
+⛔ **Not a close:** the 2026-10-10 reading alone (it is a stored reading and the wedge offset is
+time-varying), or raising `INCEPTION_DUST_CAP_USD`.
+
+### 167.1.2.2.1-MATERIALITY-OPTIONS-UPL — the FLOW-04 materiality ratio still uses the combined session UPL, so it overstates by the options session UPL (booked 2026-10-10, RESEARCH 1.5)
+
+**Why it is open.** `unrealized_pnl_in_anchor` in `analytics-service/services/job_worker.py` still
+uses the collapsed USD `native_upnl` (the combined session UPL, `open_unrealized_usd`), which now
+differs from the cash wedge the writer rolls (`equity - balance`). It overstates by
+`options_session_upl`. It feeds a warning heuristic, not returns.
+
+**Owner:** this phase's ROADMAP section as a recorded residual, until the orchestrator names a
+phase.
+**Trigger:** the first review of a `unrealized_pnl_in_anchor` warning on a Deribit account, or any
+phase touching the materiality ratio.
+**Gate (what closes it):** the ratio reads the same wedge the writer rolls, with a test that fails
+first on an account with a nonzero `options_session_upl`.
+⛔ **Not a close:** a note that the warning is "only a heuristic".
+
+### 167.1.2.2.1-CAGR-EMPTY-SPAN — the factsheet CAGR annualizes over calendar days, including emptied stretches (booked 2026-10-10, RESEARCH 3.4)
+
+**Why it is open.** An emptied stretch composes as zero capital with no return (SC-3), but the
+factsheet CAGR annualizes over the calendar span, so a book that was empty for long stretches reads
+a diluted CAGR. Recorded, not fixed.
+
+**Owner:** this phase's ROADMAP section as a recorded residual, until the orchestrator names a
+phase.
+**Trigger:** the first allocator-facing factsheet or book whose span contains an emptied stretch
+(the options-holding account's two stretches, 695 and 60 days on the scratch replay).
+**Gate (what closes it):** the CAGR denominator excludes emptied days, or the factsheet states the
+span it annualized over, with a test on a book with an emptied stretch.
+⛔ **Not a close:** removing the stretch from the chart.
+
+### 167.1.2.2.1-DISCONNECTED-KEYS-OLD-WEDGE — disconnected Deribit keys cannot be re-derived and keep the old wedge (booked 2026-10-10)
+
+**Why it is open.** A re-derive needs live credentials. A key that is disconnected keeps the returns
+the old wedge produced, and no form in the re-baseline runbook reads it by design.
+
+**Owner:** unrouted; the founder routes it if a disconnected key's returns are ever shown.
+**Trigger:** a disconnected Deribit key's history reaches a published book or factsheet.
+**Gate (what closes it):** the key's returns are either re-derived from stored inputs or hidden
+behind a stated basis flag, with a test.
+⛔ **Not a close:** reconnecting the key to re-derive it without the owner's consent.
+
+### 167.1.2.2.1-WRITER-BASIS-VALUES — writer-basis mode checks the calendar, never the values (booked 2026-10-10, PR-2 review WR-01, confidence 5)
+
+**Why it is open.** A `key_inputs` row and a returns set from two derives that share the last NAV
+day pass the gate: the lagging-row check compares last days only. That happens with a same-day
+re-derive after a ledger correction, a retried key or a manual enqueue. Such a pair composes on the
+old day P&L and the new returns with no `key_inputs_mismatch`. The review recommended a cross-check
+`abs(r[d] * L - w_pnl[d]) <= tol` per day and it was not taken.
+
+**Owner:** unrouted; the founder routes it at the next compose phase planning.
+**Trigger:** the first observed same-day re-derive that is followed by a compose, or any phase that
+touches `read_writer_basis` or the writer-basis gate in `replay_key_equity`.
+**Gate (what closes it):** the gate rejects a pair whose day P&L and returns disagree beyond a stated
+tolerance, with a test that fails first when the check is removed.
+⛔ **Not a close:** the determinism test (SC-6), which proves two derives of the same inputs agree,
+not that a stored row and stored returns come from one derive.
+
+### 167.1.2.2.1-WRITER-BASIS-EMPTY-READS-LEGACY — an empty or half-present writer basis reads as a legacy row, including an all-empty stitched account (booked 2026-10-10, SFH-03, SFH-R2-F3)
+
+**Why it is open.** `read_writer_basis` returns `None` for a row that carries no fields, so an
+empty-but-present basis behaves like a row written before D-06. In a stitched account whose members
+ALL store an empty basis, no `writer_basis_absent_stitched` flag is raised either. The effect is a
+quiet fall back to the legacy roll, which is the path D-06 was written to retire.
+
+**Owner:** unrouted; the founder routes it with the next compose phase.
+**Trigger:** the first Deribit key whose derive stores an empty basis (a NAV with no rolled bucket),
+or any change to `read_writer_basis`.
+**Gate (what closes it):** an empty basis is told apart from an absent one and a stitched account
+with all-empty members raises its flag, with a test that fails first.
+⛔ **Not a close:** noting that the legacy roll is "still correct" for that account.
+
+### 167.1.2.2.1-EMPTIED-CONSTANTS — two constants the fixer chose are not founder-blessed (booked 2026-10-10, PR-2 review round 2 fix scope)
+
+**Why it is open.** The emptied-stretch fixes use `EMPTIED_NEGATIVE_FRACTION = 1e-4` (a level more
+than that fraction of the prior peak below zero is a data fault) and `_EMPTIED_LOSS_REL_TOL = 1e-6`
+(how closely a stored loss must account for the fall into an emptied stretch). Both were picked by
+the fixer to make the founder's D-09 rule testable, and the founder has not seen them as numbers.
+
+**Owner:** THE FOUNDER (bless or change), recorded in this phase's CONTEXT.md as a dated decision.
+**Trigger:** the first emptied stretch that refuses on either bound, or plan 08's `d07-verdict-prod`
+differing from 755 days in 2 stretches.
+**Gate (what closes it):** a CONTEXT decision names each value, and the tests restate it.
+⛔ **Not a close:** widening either band to make a PROD replay pass.
+
+### 167.1.2.2.1-KEY-CAPTURE-ORPHAN — `key_capture` rows are not removed when a single key is deleted (booked 2026-10-10, security F1, 03-SUMMARY recorded-not-fixed)
+
+**Why it is open.** The compose's orphan cleanup walks `key_inputs:%` only, and the table cascades
+by `allocator_id`, so a `key_capture:<api_key_id>` row lingers until the allocator is deleted. The
+row is owner-readable under the same RLS as `key_inputs`, numbers and class names only, so this is
+tidiness and not disclosure.
+
+**Owner:** unrouted; the founder routes it with the next `allocator_equity_derived` change.
+**Trigger:** a GDPR deletion review of single-key deletes, or any phase touching the orphan cleanup.
+**Gate (what closes it):** deleting a key removes its `key_capture` row, with a test.
+⛔ **Not a close:** the allocator-level cascade.
+
+### 167.1.2.2.1-RUNBOOK-WRITE-SCAN-DDL — the re-baseline runbook's write scan does not name DDL or `set_config` (booked 2026-10-10, security F3)
+
+**Why it is open.** The renderer refuses `INSERT`, `UPDATE`, `DELETE`, the cron schedule calls and
+`enqueue_...(` calls, which is what the threat register declared. It does not name DDL or
+`set_config`. Every form was audited as SELECT-only and parameters are quoted and
+character-restricted, so there is no live gap. Widening the regex would make the guard match its
+own claim only if the list is kept in step with the threat register.
+
+**Owner:** unrouted; the founder routes it if a form is added by someone else.
+**Trigger:** any new form added to the runbook.
+**Gate (what closes it):** the scan names DDL and `set_config`, with a render test that fails on a
+form containing one.
+⛔ **Not a close:** a reviewer's reading that the forms are SELECT-only.
+
 ## Phase 164.6.6.2.1 (BTCUSDVIEW) — routed items (logged 2026-10-09)
 
 ### 164.6.6.2.1-V2-UNIT-TOGGLE — `/strategy/[id]/v2` shows a native-unit strategy in its native unit only, with no USD view (booked 2026-10-09, Phase 164.6.6.2.1 D-18)

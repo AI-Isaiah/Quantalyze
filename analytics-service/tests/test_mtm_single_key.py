@@ -283,6 +283,13 @@ def _base_patches(
             "services.broker_dailies.native_ledger_day_pnl",
             new=MagicMock(return_value=pd.Series(dtype="float64")),
         ),
+        # 167.1.2.2.1 D-06: and the composed flows off the same levels, stubbed for the same
+        # reason (the stub ledger cannot be valued); real coverage is in
+        # test_allocator_equity_writer_basis.py.
+        patch(
+            "services.broker_dailies.native_ledger_composed_flows",
+            new=MagicMock(return_value=pd.Series(dtype="float64")),
+        ),
         # CR-01 (round 1): and the realized terminal the NAV was rolled from, for the same
         # reason; its real-ledger coverage is in test_allocator_equity_dropped_day_pnl.py.
         patch(

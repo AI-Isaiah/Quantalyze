@@ -861,6 +861,31 @@ def test_inception_material_residual_above_dust_still_breaches() -> None:
     assert exc.value.currencies == ["BTC"]
 
 
+def test_inception_dust_cap_bounds_the_turnover_allowance() -> None:
+    """167.1.2.2.1 SC-2: the throughput-relative dust allowance alone lets an account that
+    rolled a lot of coin excuse an offset worth hundreds of dollars. Here 4000 BTC of gross
+    throughput (allowance 0.4 BTC) absorbs a 0.01 BTC residual worth $300 at the $30000
+    inception mark. An offsetting 2000 BTC withdrawal keeps the terminal NAV near $300, so the
+    NAV-relative tolerance stays at its $1 floor and cannot be what decides. The gate must
+    refuse: a residual is dust only if it is ALSO worth at most the absolute USD cap.
+
+    NEUTER: passing ``dust_cap_usd=None`` from the gate makes the relative allowance the only
+    test again; the $300 residual is dust and this call does NOT raise (RED)."""
+    ledger = NativeLedger(
+        native_pnl={"BTC": _dense([1000.0, 1000.0, 0.0])},
+        terminal_native_equity={"BTC": 0.01},  # resid 0.01 BTC = $300 at the 30000 mark
+        marks={"BTC": _dense([30000.0, 30000.0, 30000.0])},
+        native_flows=[ExternalFlow("2026-01-03", -60_000_000.0, "BTC", -2000.0)],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+    with pytest.raises(InceptionReconciliationError) as exc:
+        reconstruct_native_nav_and_twr(
+            ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+        )
+    assert exc.value.currencies == ["BTC"]
+
+
 def test_inception_dust_floor_zero_throughput_orphan_still_breaches() -> None:
     """A zero-throughput bucket (no pnl, no flow) gets NO dust allowance
     (1e-4 × 0 = 0), so a nonzero residual still fails loud — the dust exemption can
