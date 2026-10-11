@@ -448,6 +448,9 @@ describe("NAV-01 — the two PUBLIC category pages pass nothing new (absence-as-
       expect(src).not.toContain("visibility=");
       expect(src).not.toContain("placeholderKeys");
       expect(src).not.toContain("onFinishSetup");
+      // 2026-10-09 Phase 170.7: managerRows / initialSort are the /strategies manager mode; a public page passing either would expose the owner columns
+      expect(src).not.toContain("managerRows");
+      expect(src).not.toContain("initialSort");
       // Non-vacuity for THIS file: it really is the page that mounts the table.
       expect(src).toContain("<StrategyTable");
     });
@@ -594,15 +597,31 @@ describe("NAV-01 — repo-wide: one widening consumer, one ranking implementatio
     return found;
   }
 
-  it("pin 10 — exactly ONE production file widens the shared table to owner-all-statuses, and it is the my-strategies surface", () => {
+  it("pin 10 — exactly TWO production files widen the shared table to owner-all-statuses: the my-strategies section and the manager /strategies page", () => {
     // A repo-wide walk, not an allowlist: a brand-new file the gate author
     // never hand-picked is caught. The failure this forbids: a second surface
     // opting into the owner recipe without the owner-scoped SERVER query that
     // makes it safe — the prop does not narrow anything, it stops the component
     // re-narrowing an already-narrowed set.
-    const consumers = wideningConsumers();
-    expect(consumers).toHaveLength(1);
-    expect(consumers[0]).toContain("my-strategies");
+    //
+    // 2026-10-10 Phase 170.7 (MYSTRATTABLE, T-170.7-05): the manager's own
+    // `/strategies` page is now the SECOND owner surface (it moved from a card
+    // list onto this table). The pin is rewritten to name exactly the two
+    // consumers, not loosened to "at least one" or "any path": a third file
+    // still fails it, and so does either of the two disappearing. Both reads
+    // are owner-scoped on the server; `/strategies` is pinned to
+    // `.eq("user_id", user.id)` below and again in its own page.table.test.tsx.
+    const consumers = wideningConsumers().sort();
+    expect(consumers).toEqual([
+      "src/app/(dashboard)/my-strategies/MyStrategiesSection.tsx",
+      "src/app/(dashboard)/strategies/page.tsx",
+    ]);
+    // WR-03: the substring appears twice in that page (the list read and the
+    // wizard-draft lookup), so a bare `toContain` survives losing the LIST
+    // read's filter. Anchor it to the list select's own chain.
+    expect(stripComments(readSource(consumers[1]))).toMatch(
+      /\.select\(`\*, strategy_analytics \(\$\{CATEGORY_RANKING_ANALYTICS_COLUMNS\}\)`\)\s*\.eq\("user_id", user\.id\)/,
+    );
   });
 
   it("pin 11 — exactly ONE production file exports StrategyTable and exactly ONE exports the scoring core", () => {

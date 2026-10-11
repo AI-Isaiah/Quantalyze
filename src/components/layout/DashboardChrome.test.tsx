@@ -499,15 +499,39 @@ describe("DashboardChrome — wide fluid-fill variant (Phase 52)", () => {
   });
 
   it("keeps the new-strategy WIZARD (/strategies/new/wizard) narrow — it is a form", () => {
-    // Nothing under `/strategies` is on the allow-list. A bounded measure is a
-    // real readability control for a form, not decoration.
+    // Only the `/strategies` INDEX is on the allow-list (exact match, Phase
+    // 170.7); the wizard under it is not. A bounded measure is a real
+    // readability control for a form, not decoration.
     const container = contentContainerFor("/strategies/new/wizard");
     expect(container).toHaveClass("max-w-7xl");
     expect(container).not.toHaveClass("max-w-full");
   });
 
-  it("keeps the legacy card list (/strategies) narrow — it is not a dense table", () => {
+  // 2026-10-09 Phase 170.7: /strategies is a dense table now (StrategyTable); exact-match arm, forms stay narrow
+  it("widens the My Strategies INDEX (/strategies) to max-w-full — it is the shared dense table now", () => {
     const container = contentContainerFor("/strategies");
+    expect(container).toHaveClass("max-w-full");
+    expect(container).not.toHaveClass("max-w-7xl");
+  });
+
+  it("keeps the new-strategy form (/strategies/new) narrow — the arm is exact-match, not a prefix", () => {
+    const container = contentContainerFor("/strategies/new");
+    expect(container).toHaveClass("max-w-7xl");
+    expect(container).not.toHaveClass("max-w-full");
+  });
+
+  it("keeps the strategy edit form (/strategies/<uuid>/edit) narrow", () => {
+    const container = contentContainerFor(
+      "/strategies/3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b/edit",
+    );
+    expect(container).toHaveClass("max-w-7xl");
+    expect(container).not.toHaveClass("max-w-full");
+  });
+
+  it("does NOT widen a route that merely starts with the prefix string (/strategiesx)", () => {
+    // Regex boundary for the anchored arm: `$` after `strategies`, so a
+    // lookalike sibling stays on the bounded measure.
+    const container = contentContainerFor("/strategiesx");
     expect(container).toHaveClass("max-w-7xl");
     expect(container).not.toHaveClass("max-w-full");
   });
@@ -579,6 +603,19 @@ describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid she
     "src/components",
   ];
 
+  // 2026-10-09 Phase 170.7: the `/strategies` INDEX joined the fluid measure by
+  // an exact-match arm, so its index-level files are swept by name. The
+  // `strategies` SUBTREE is deliberately NOT in SCANNED_TREES: the arm is
+  // exact-match, and the wizard legitimately carries `mx-auto max-w-3xl` as a
+  // form (a bounded measure is a readability control there). Sweeping the tree
+  // would flag it, and exempting it would blur the rule.
+  const SCANNED_FILES = [
+    "src/app/(dashboard)/strategies/page.tsx",
+    "src/app/(dashboard)/strategies/loading.tsx",
+    "src/app/(dashboard)/strategies/error.tsx",
+    "src/app/(dashboard)/strategies/layout.tsx",
+  ];
+
   /** A container-sized cap: the px form OR a large Tailwind rung. */
   // ⚠️ NO trailing `\b` after the `]` alternative — `]` is a non-word character,
   // so a word boundary there can never match and the px form would silently
@@ -648,7 +685,7 @@ describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid she
       .map((rel) => `${dir}/${rel}`);
   }
 
-  const files = SCANNED_TREES.flatMap(tsxFilesUnder);
+  const files = [...SCANNED_TREES.flatMap(tsxFilesUnder), ...SCANNED_FILES];
 
   it("the sweep actually walked every scanned tree (anti-vacuity floor)", () => {
     // Without this, a renamed directory or a broken glob would make every
@@ -660,6 +697,19 @@ describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid she
         files.some((f) => f.startsWith(tree)),
         `no .tsx found under ${tree} — the sweep is not reaching it`,
       ).toBe(true);
+    }
+  });
+
+  it("every named /strategies index file exists and was swept (anti-vacuity)", () => {
+    // A renamed or deleted index file would drop out of the sweep silently:
+    // `readFileSync` would throw below, but only on the day someone runs it. This
+    // names the file instead, and proves each one landed in the swept list.
+    for (const file of SCANNED_FILES) {
+      expect(
+        existsSync(join(process.cwd(), file)),
+        `SCANNED_FILES names a missing file: ${file}`,
+      ).toBe(true);
+      expect(files, `${file} was not read by the sweep`).toContain(file);
     }
   });
 

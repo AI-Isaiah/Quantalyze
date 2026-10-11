@@ -96,6 +96,17 @@ interface StrategyFiltersProps {
    * an existence oracle. Founder ruling 2026-08-05 keeps grid discovery-only.
    */
   showViewToggle?: boolean;
+  /**
+   * 170.7 / WR-02 — renders the "Sort by" and "Sort direction" selects. DEFAULT
+   * `true`, so /discovery/[slug] and /browse/[slug] are byte-identical. `false`
+   * on a mount whose table is seeded with an `initialSort` (the manager's
+   * newest-first /strategies): the selects can only name a `SortKey`, which has
+   * no Created option, so they would read "Sharpe" over a Created-sorted table,
+   * picking Sharpe would fire no change event, and the direction select would
+   * flip the Created sort under a Sharpe label. The column headers sort
+   * (Created included) and are the one sort control there.
+   */
+  showSort?: boolean;
 }
 
 // --- Sort options ---
@@ -281,6 +292,7 @@ export function StrategyFilters({
   leadingSlot,
   onOpenCustomize,
   showViewToggle = true,
+  showSort = true,
 }: StrategyFiltersProps) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [draft, setDraft] = useState<AdvancedFilters>(advancedFilters);
@@ -345,33 +357,35 @@ export function StrategyFilters({
         </label>
 
         {/* Sort by */}
-        <div className="flex items-center gap-1.5 ml-auto">
-          <span className="text-xs text-text-muted">Sort:</span>
-          <select
-            value={sortKey}
-            onChange={(e) => onSortKeyChange(e.target.value as SortKey)}
-            aria-label="Sort by"
-            className="rounded-lg border border-border bg-surface px-2 py-1.5 text-sm text-text-primary"
-          >
-            {SORT_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-          <select
-            value={sortDir}
-            onChange={(e) => onSortDirChange(e.target.value as SortDir)}
-            aria-label="Sort direction"
-            className="rounded-lg border border-border bg-surface px-2 py-1.5 text-sm text-text-primary"
-          >
-            {SORT_DIR_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        {showSort && (
+          <div className="flex items-center gap-1.5 ml-auto">
+            <span className="text-xs text-text-muted">Sort:</span>
+            <select
+              value={sortKey}
+              onChange={(e) => onSortKeyChange(e.target.value as SortKey)}
+              aria-label="Sort by"
+              className="rounded-lg border border-border bg-surface px-2 py-1.5 text-sm text-text-primary"
+            >
+              {SORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+            <select
+              value={sortDir}
+              onChange={(e) => onSortDirChange(e.target.value as SortDir)}
+              aria-label="Sort direction"
+              className="rounded-lg border border-border bg-surface px-2 py-1.5 text-sm text-text-primary"
+            >
+              {SORT_DIR_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {onOpenCustomize && (
           <button

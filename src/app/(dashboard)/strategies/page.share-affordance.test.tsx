@@ -19,11 +19,12 @@
  *   3. both sibling surfaces route through the same component, so a fourth
  *      opinion cannot appear without this file noticing.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import React from "react";
+import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
 
 vi.mock("server-only", () => ({}));
 // Phase 164.6.6.3.1 D-06: the page captures a failed share read; this file
@@ -154,6 +155,22 @@ interface MockStrategyRow {
   review_note: string | null;
   created_at: string;
   api_key_id: string | null;
+  // 2026-10-09 Phase 170.7: the rest of the `Strategy` field set the shared
+  // table reads (subtypes, markets, supported_exchanges, aum, start_date,
+  // is_example, ...), so the page swap changes the page and not these inputs.
+  user_id: string;
+  category_id: string | null;
+  description: string | null;
+  subtypes: string[];
+  markets: string[];
+  supported_exchanges: string[];
+  leverage_range: string | null;
+  avg_daily_turnover: number | null;
+  aum: number | null;
+  max_capacity: number | null;
+  start_date: string | null;
+  is_example: boolean;
+  benchmark: string;
   // Phase 167.2 (KCS-12): the list reads the analytics status to decide the
   // share note. Computed by default, so these cases see no note.
   strategy_analytics: { computation_status: string | null } | null;
@@ -229,6 +246,19 @@ function row(id: string, status: string): MockStrategyRow {
     review_note: null,
     created_at: "2026-01-01T00:00:00.000Z",
     api_key_id: null,
+    user_id: "u-1",
+    category_id: "cat-1",
+    description: null,
+    subtypes: ["Trend Following"],
+    markets: ["Spot"],
+    supported_exchanges: ["Binance"],
+    leverage_range: null,
+    avg_daily_turnover: null,
+    aum: 1_000_000,
+    max_capacity: 10_000_000,
+    start_date: "2024-01-01",
+    is_example: false,
+    benchmark: "BTC",
     strategy_analytics: { computation_status: "complete" },
   };
 }
@@ -241,6 +271,14 @@ async function renderPage(): Promise<HTMLElement> {
 }
 
 beforeEach(() => {
+  // 2026-10-09 Phase 170.7: the shared table mounts client hooks that touch
+  // `fetch` and `localStorage`; install the same doubles my-strategies/page.test.tsx does.
+  installFetchMock();
+  try {
+    window.localStorage.clear();
+  } catch {
+    // jsdom may not implement clear in some configurations; non-fatal.
+  }
   redirectMock.mockReset();
   shareProps.length = 0;
   // Phase 167.2.1 (D-08): UUID-shaped, because the page's probe runs under
@@ -251,6 +289,10 @@ beforeEach(() => {
   // Phase 164.6.6.3.1 D-05/D-06 Wave 0.
   state.shares = [];
   state.sharesError = null;
+});
+
+afterEach(() => {
+  restoreFetchMock();
 });
 
 describe("StrategiesPage — the share control is always present (SHARE-04)", () => {
@@ -355,88 +397,7 @@ describe("StrategiesPage — a failed share read fails closed (164.6.6.3.1 D-06)
   });
 });
 
-describe("StrategiesPage — N-STRAT row layout (170-05)", () => {
-  it("stacks below md, wraps tags whole, and keeps the name link textContent equal to the name", async () => {
-    // WHY: at V390 the private-link control overlapped the name, and a
-    // hyphenated word broke at its hyphen. Each word and each tag stays
-    // whole. textContent must equal the name exactly — noteOf() matches
-    // a.textContent === strategyName (PC-5).
-    // GC-02 (2026-09-30): the stack breakpoint moved from sm to md ON
-    // PURPOSE. At V640 the sm row put the full-width control group beside
-    // the name and left the name block 142 px (CI run 36764778803); stacking
-    // until md keeps it full width (>= 160 px). So the row and the control
-    // group carry md: utilities, and none of the five may come back on sm:.
-    state.strategies = [
-      {
-        ...row("s-layout", "draft"),
-        name: "Alpha Long-Short Beta",
-        strategy_types: ["Long-Short", "Market Neutral"],
-      },
-    ];
-
-    const container = await renderPage();
-    const rowEl = container.querySelector('[data-testid="strategy-row"]')!
-      .firstElementChild as HTMLElement;
-    const rowTokens = rowEl.className.split(/\s+/);
-    expect(rowTokens).toContain("flex-col");
-    for (const token of ["md:flex-row", "md:items-center", "md:justify-between"]) {
-      expect(rowTokens).toContain(token);
-    }
-
-    const link = container.querySelector("a")!;
-    expect(link.textContent).toBe("Alpha Long-Short Beta");
-    // WR-02 (170 review): /strategies does not scroll, so its name words must
-    // be breakable when one is wider than the name block. A nowrap word there
-    // let a 40-character hyphenated name overflow the card at 390 px.
-    for (const word of link.querySelectorAll("span")) {
-      expect(word.className.split(/\s+/)).toContain("inline-block");
-      expect(word.className.split(/\s+/)).not.toContain("whitespace-nowrap");
-    }
-
-    const tagRow = link.nextElementSibling as HTMLElement;
-    expect(tagRow.className).toContain("flex-wrap");
-    expect(tagRow.className).toContain("gap-1");
-    const chips = [...tagRow.querySelectorAll("span")];
-    expect(chips.length).toBeGreaterThanOrEqual(2);
-    for (const chip of chips) {
-      expect(chip.className).toContain("whitespace-nowrap");
-    }
-
-    // CR-01 (170 review, measured 2026-10-01 in Chromium with DM Sans): from
-    // md up the name block keeps a hard 160 px floor and the control group
-    // may shrink and wrap. With `md:shrink-0` the group held its one-line
-    // width (~401 px for a draft row), so at 768 and 800 px (desktop 200%
-    // zoom on 1536/1600 px screens) the name block got 0 px and the name
-    // painted over the controls. The floor and the shrinkable group are the
-    // fix; `md:shrink-0` coming back re-opens the overlap.
-    const nameBlock = link.parentElement as HTMLElement;
-    const nameTokens = nameBlock.className.split(/\s+/);
-    for (const token of ["flex-1", "min-w-0", "md:min-w-[160px]"]) {
-      expect(nameTokens).toContain(token);
-    }
-
-    const group = rowEl.lastElementChild as HTMLElement;
-    const groupTokens = group.className.split(/\s+/);
-    expect(groupTokens).toContain("flex-wrap");
-    for (const token of ["md:ml-4", "md:min-w-0"]) {
-      expect(groupTokens).toContain(token);
-    }
-    expect(groupTokens).not.toContain("md:shrink-0");
-    expect(groupTokens).not.toContain("shrink-0");
-
-    // GC-02: none of the five layout utilities may sit on the sm: prefix.
-    const smLayout = [
-      "sm:flex-row",
-      "sm:items-center",
-      "sm:justify-between",
-      "sm:ml-4",
-      "sm:shrink-0",
-    ];
-    for (const token of [...rowTokens, ...groupTokens]) {
-      expect(smLayout).not.toContain(token);
-    }
-  });
-});
+// 2026-10-09 Phase 170.7: the card list is gone; this case's CR-01 and WR-02 reasons (a name painting over the controls, an overlong hyphenated name) are now asserted as table geometry in the e2e/layout-narrow.spec.ts describes "/strategies — MYSTRATTABLE phones" and "/strategies — MYSTRATTABLE wide"
 
 describe("StrategiesPage — private-link control is a small secondary peer (170-05)", () => {
   it("passes size=sm through to ShareableLink", async () => {

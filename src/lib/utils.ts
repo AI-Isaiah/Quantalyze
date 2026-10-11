@@ -108,6 +108,28 @@ export function formatAbsoluteDate(iso: string): string {
   });
 }
 
+/**
+ * The UTC calendar day of a timestamp as `YYYY-MM-DD`, or `—` when the
+ * value is null, undefined, empty or does not parse. Phase 170.7 / D-09: the
+ * manager table's Created cell.
+ *
+ * UTC fields only, never the runtime locale or time zone, so the server render
+ * and the browser print the same string. That is why it is not
+ * `toLocaleDateString` (locale- and zone-dependent: a hydration-mismatch risk)
+ * and not `iso.slice(0, 10)` (it reads the day in the OFFSET the string
+ * happens to carry, so `2026-10-09T23:30:00-05:00` would print the 9th while
+ * the instant is the 10th in UTC).
+ */
+export function formatIsoDay(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const y = String(d.getUTCFullYear()).padStart(4, "0");
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 /** Minute-bucket key used to gate relative-time re-renders. Callers
  *  that tick every minute can compare buckets and skip the state
  *  update when it hasn't changed. */

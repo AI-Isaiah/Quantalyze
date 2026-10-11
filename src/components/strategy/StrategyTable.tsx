@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Fragment,
   useState,
   useMemo,
   useCallback,
@@ -9,6 +10,7 @@ import {
   useLayoutEffect,
   useRef,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
@@ -36,7 +38,7 @@ import { SimulateImpactButton } from "@/components/discovery/SimulateImpactButto
 import { OwnershipTag } from "./OwnershipTag";
 import { ReturnsUnitChip } from "./ReturnsUnitChip";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
-import { formatPercent, formatNumber, formatCurrency } from "@/lib/utils";
+import { formatPercent, formatNumber, formatCurrency, formatIsoDay } from "@/lib/utils";
 import {
   isComputedAnalytics,
   deriveEmptySeriesState,
@@ -81,7 +83,9 @@ type StrategyWithAnalytics = Strategy & {
   analyticsPresent?: boolean;
 };
 
-type TableSortKey = SortKey | "name" | "six_month_return";
+// "created_at" (170.7 / D-09) is a TABLE sort key only: it is not a `SortKey`,
+// so the filter bar's Sort menu (Discovery's) never lists it.
+type TableSortKey = SortKey | "name" | "six_month_return" | "created_at";
 
 type PercentileMetric = keyof PercentileMap[string];
 
@@ -340,6 +344,48 @@ interface StrategyTableProps {
    */
   visibility?: "published-only" | "owner-all-statuses";
   /**
+   * Phase 170.7 / D-01 — the manager mode of this SHARED table, keyed by
+   * strategy id. Present (the manager's /strategies page, together with
+   * `visibility="owner-all-statuses"`), it adds a Status column right after
+   * Strategy and swaps the Actions cell for an Edit link plus this row's
+   * `actions` slot; it drops the in-name status badge and the ownership tag
+   * (Status has its own column now) and renders no Simulate Impact, Mark
+   * ownership or Rename control (a manager's page has no allocator portfolio).
+   *
+   * ABSENT means byte-identical output. /discovery, /browse and /my-strategies
+   * never pass it, and `StrategyTable.default-mounts.test.tsx` pins all three
+   * mounts to HTML captured before this prop existed. Every manager branch in
+   * this file is gated on it.
+   *
+   * A DATA prop of server-built elements, deliberately not a function prop: a
+   * function is non-serializable across the RSC to client boundary, a
+   * `ReactNode` is not (Next: server components can be passed to a client
+   * component as props). `editHref` is the Edit link's target; `actions` is
+   * the private-link control and the row actions, rendered once, in the one
+   * Actions cell; `note` is the full-width row under a strategy's row.
+   */
+  managerRows?: Record<
+    string,
+    { editHref: string; actions: ReactNode; note?: ReactNode }
+  >;
+  /**
+   * Phase 170.7 / D-09 — seeds the TABLE sort only (the column-header sort).
+   * ABSENT means Sharpe descending, so Discovery, Browse and /my-strategies
+   * are byte-identical. The manager page passes
+   * `{ key: "created_at", dir: "desc" }`, so a strategy created a minute ago
+   * is the top row.
+   *
+   * The filter bar's Sort menu keeps its own `sortKey`/`sortDir` seeds:
+   * `created_at` is not a `SortKey`, and that menu is Discovery's. After any
+   * header click the menu and the table can already disagree today; this mount
+   * starts that way.
+   *
+   * A seed that must survive mount: see the prefs-mirror effect, which skips
+   * its sort setters when this is set. Callers pass no `userId`, so there are
+   * no persisted prefs to honour.
+   */
+  initialSort?: { key: TableSortKey; dir: SortDir };
+  /**
    * Phase 149 Delta 5 / NAV-01 — the per-KEY coverage half of the owner
    * surface. The founder's PROD census is 8 active keys → 4 strategies → 2 keys
    * with nothing derived from them: without these rows /my-strategies would
@@ -428,6 +474,10 @@ function getSortValue(s: StrategyWithAnalytics, key: TableSortKey): number | str
       return s.analytics.computed_at ?? "";
     case "six_month_return":
       return s.analytics.six_month_return ?? 0;
+    case "created_at":
+      // ISO timestamps compare chronologically as strings. A missing date
+      // sorts as "" (oldest), never as an invented date.
+      return s.created_at ?? "";
     default:
       return (s.analytics[key as keyof StrategyAnalytics] as number) ?? 0;
   }
@@ -442,6 +492,8 @@ export function StrategyTable({
   initialWatchedSet,
   percentiles,
   visibility = "published-only",
+  managerRows,
+  initialSort,
   placeholderKeys,
   onFinishSetup,
   onMarkOwnership,
@@ -491,8 +543,12 @@ export function StrategyTable({
     usePinnedStackOffsets(userId !== undefined);
 
   // Column header sort (uses a superset of SortKey)
-  const [tableSortKey, setTableSortKey] = useState<TableSortKey>("sharpe");
-  const [tableSortDir, setTableSortDir] = useState<SortDir>("desc");
+  const [tableSortKey, setTableSortKey] = useState<TableSortKey>(
+    initialSort?.key ?? "sharpe",
+  );
+  const [tableSortDir, setTableSortDir] = useState<SortDir>(
+    initialSort?.dir ?? "desc",
+  );
 
   // Capture wall-clock time at mount for the track-record filter (stable across renders)
   const [mountedAtMs] = useState(() => Date.now());
@@ -541,11 +597,30 @@ export function StrategyTable({
   useEffect(() => {
     if (!prefsHydrated) return;
     setViewMode(prefs.view);
-    setSortKey(prefs.sort.key);
-    setSortDir(prefs.sort.dir);
-    setTableSortKey(prefs.sort.key);
-    setTableSortDir(prefs.sort.dir);
-    setShowExamples(!prefs.hide_examples);
+    // 2026-10-10 (170.7 / D-09) — an `initialSort` mount keeps its seeded sort.
+    // A userId-less table hydrates IMMEDIATELY (`useDiscoveryPrefs` runs
+    // `useCrossTabStorage` with `enabled: false`, whose `isHydrated` starts
+    // true), so this effect fires on the first mount and would write the
+    // DEFAULTS (Sharpe descending) over the seed one render later: the
+    // manager's newest-first order would flash and then vanish, and a strategy
+    // with no analytics would sink to the bottom. `initialSort` callers pass
+    // no `userId`, so there are no persisted prefs to honour. View mode and
+    // hide-examples mirroring are unchanged.
+    if (!initialSort) {
+      setSortKey(prefs.sort.key);
+      setSortDir(prefs.sort.dir);
+      setTableSortKey(prefs.sort.key);
+      setTableSortDir(prefs.sort.dir);
+    }
+    // 2026-10-11 (170.7 / SFH-1) — a `managerRows` mount keeps `showExamples`
+    // true. `hide_examples` defaults to true for an allocator who should not
+    // land on example strategies, but on the manager's own list every row is
+    // the owner's, so the default would silently drop their own `is_example`
+    // strategies from /strategies with no count shown. The checkbox still
+    // works; only the Discovery preference is not applied here.
+    if (!managerRows) {
+      setShowExamples(!prefs.hide_examples);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefsHydrated]);
 
@@ -729,20 +804,29 @@ export function StrategyTable({
       // direction would march it to the opposite end, making the fabrication
       // look like data.
       //
-      // Sinking these rows below every ranked one is ALSO what keeps `#n`
-      // contiguous: `rank` is derived from the paged index (`page * PAGE_SIZE
-      // + i + 1`), so ranked rows may only be numbered while they occupy an
-      // unbroken prefix of the list. Interleave one unranked row and either it
-      // steals an ordinal or, if skipped, leaves a hole in the sequence.
+      // Sinking these rows below every ranked one is ALSO what makes the `#n`
+      // ordinal a RANK under a metric sort: the ranked rows occupy an unbroken
+      // prefix, so "the 3rd ranked row" is also "the 3rd row". (Since 170.7 /
+      // D-11 `rankOrdinals` counts ranked rows only, so the Created sort,
+      // which interleaves, still numbers them #1, #2, #3 without a hole.)
       //
       // NOT direction-aware and NOT exempted for the `name` column: a row is
       // subordinate because of what is KNOWN about it, not because of which
       // header the visitor last clicked. This is the same subordination rule
       // the Phase 149 Delta 5 placeholder rows follow — render below the
       // ranking, never shift it.
-      const aRanked = isRankedRow(a);
-      const bRanked = isRankedRow(b);
-      if (aRanked !== bRanked) return aRanked ? -1 : 1;
+      //
+      // 2026-10-10 (170.7 / D-09) — EXCEPT under the Created sort. There a row
+      // is ordered by a fact it DOES have, its creation date, so subordinating
+      // it would fabricate a position the other way: a strategy created a
+      // minute ago, with no analytics yet, would sit below every older ranked
+      // one, and "a new strategy is always at the top" would be false for the
+      // one strategy that needs it. Every metric key keeps the partition.
+      if (effectiveSortKey !== "created_at") {
+        const aRanked = isRankedRow(a);
+        const bRanked = isRankedRow(b);
+        if (aRanked !== bRanked) return aRanked ? -1 : 1;
+      }
 
       const aVal = getSortValue(a, effectiveSortKey);
       const bVal = getSortValue(b, effectiveSortKey);
@@ -757,6 +841,26 @@ export function StrategyTable({
 
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const paged = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  // 170.7 / D-11 — the `#n` ordinal of each RANKED row: its 1-based position
+  // among the ranked rows only, in table order, counted over the FULL filtered
+  // and sorted list so the numbering continues across pages (page 2's first
+  // ranked row follows page 1's last). An unranked row has no entry and prints
+  // an em dash.
+  //
+  // Under every metric key the STALE-01 partition above makes the ranked rows
+  // an unbroken prefix, so this equals the old paged index (`page * PAGE_SIZE
+  // + i + 1`) and Discovery / Browse are unchanged. Only the Created sort
+  // interleaves unranked rows; deriving the ordinal from the paged index there
+  // would leave a hole (`—, #2, #3`) or hand an unranked row an ordinal.
+  const rankOrdinals = useMemo(() => {
+    const ordinals = new Map<string, number>();
+    let next = 0;
+    for (const s of filtered) {
+      if (isRankedRow(s)) ordinals.set(s.id, ++next);
+    }
+    return ordinals;
+  }, [filtered]);
 
   // Phase 149 Delta 5 — deliberately derived OUTSIDE `filtered`/`paged`/`rank`
   // (the UI-SPEC subordination rule): `#n`, `totalPages` and the pagination
@@ -801,9 +905,10 @@ export function StrategyTable({
   // Strategy + Return% + CAGR + Sharpe + Max DD (5). Priority-collapsed but
   // still in the DOM (CSS @max-3xl:hidden): Volatility + 6 Month + AUM + Return
   // spark + Underwater spark (5). Plus the per-row Details disclosure column (1)
-  // and Actions (1) = 13; +1 leading star column when userId is present.
+  // and Actions (1) = 13; +1 leading star column when userId is present, and
+  // +2 (Status and Created) when managerRows is set (170.7 / D-01, D-09).
   const showStarColumn = userId !== undefined;
-  const emptyRowColSpan = showStarColumn ? 14 : 13;
+  const emptyRowColSpan = (showStarColumn ? 14 : 13) + (managerRows ? 2 : 0);
 
   const showEmptyWatchlist = scope === "watchlist" && watchedSet.size === 0;
 
@@ -853,6 +958,10 @@ export function StrategyTable({
         viewMode={viewMode}
         onViewModeChange={setViewMode}
         showViewToggle={visibility !== "owner-all-statuses"}
+        // WR-02: the filter bar's Sort selects cannot name Created, so on a
+        // seeded-sort mount they would disagree with the table. The column
+        // headers are the one sort control there.
+        showSort={!initialSort}
         advancedFilters={advancedFilters}
         onAdvancedFiltersChange={(f) => { setAdvancedFilters(f); setPage(0); }}
         leadingSlot={
@@ -993,37 +1102,85 @@ export function StrategyTable({
                         : "sticky top-0 z-20 bg-surface";
                       const sortedHere = tableSortKey === col.key;
                       return (
-                        <th
-                          key={col.key}
-                          scope="col"
-                          // aria-sort exposes the current sort state to assistive
-                          // tech (WCAG 4.1.2) \u2014 the visual \u2191/\u2193 glyph alone is not an
-                          // accessible cue.
-                          aria-sort={
-                            sortedHere
-                              ? tableSortDir === "asc"
-                                ? "ascending"
-                                : "descending"
-                              : "none"
-                          }
-                          className={`${stickyLeft} px-4 py-3 ${col.align === "right" ? "text-right" : "text-left"} ${col.collapse ? "@max-3xl:hidden" : ""}`}
-                        >
-                          {/* The sort control is a real <button> so it is
-                              keyboard-operable (WCAG 2.1.1) \u2014 the prior click-only
-                              <th> could not be sorted from the keyboard. The
-                              actively-sorted header darkens to text-text-primary
-                              so the sort target is scannable. */}
-                          <button
-                            type="button"
-                            onClick={() => handleColumnSort(col.key)}
-                            className={`-mx-1 inline-flex items-center gap-1 rounded px-1 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${HEADER_LABEL} ${sortedHere ? "text-text-primary" : "text-text-muted hover:text-text-primary"}`}
+                        <Fragment key={col.key}>
+                          <th
+                            scope="col"
+                            // aria-sort exposes the current sort state to assistive
+                            // tech (WCAG 4.1.2) \u2014 the visual \u2191/\u2193 glyph alone is not an
+                            // accessible cue.
+                            aria-sort={
+                              sortedHere
+                                ? tableSortDir === "asc"
+                                  ? "ascending"
+                                  : "descending"
+                                : "none"
+                            }
+                            className={`${stickyLeft} px-4 py-3 ${col.align === "right" ? "text-right" : "text-left"} ${col.collapse ? "@max-3xl:hidden" : ""}`}
                           >
-                            {col.label}
-                            {sortedHere && (
-                              <span aria-hidden="true">{tableSortDir === "asc" ? "\u2191" : "\u2193"}</span>
-                            )}
-                          </button>
-                        </th>
+                            {/* The sort control is a real <button> so it is
+                                keyboard-operable (WCAG 2.1.1) \u2014 the prior click-only
+                                <th> could not be sorted from the keyboard. The
+                                actively-sorted header darkens to text-text-primary
+                                so the sort target is scannable. */}
+                            <button
+                              type="button"
+                              onClick={() => handleColumnSort(col.key)}
+                              className={`-mx-1 inline-flex items-center gap-1 rounded px-1 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${HEADER_LABEL} ${sortedHere ? "text-text-primary" : "text-text-muted hover:text-text-primary"}`}
+                            >
+                              {col.label}
+                              {sortedHere && (
+                                <span aria-hidden="true">{tableSortDir === "asc" ? "\u2191" : "\u2193"}</span>
+                              )}
+                            </button>
+                          </th>
+                          {/* Phase 170.7 / D-01 — the manager Status column, emitted
+                              INSIDE the map right after the Strategy header
+                              (index 0), never after the map: a header placed
+                              after COLUMNS.map lands after AUM and every data
+                              cell is read under the wrong heading. A plain
+                              header: not sortable (no button, no aria-sort),
+                              vertically sticky at z-20 like every scrolling
+                              header, and never horizontally pinned, so it
+                              scrolls under the Strategy header's z-30. */}
+                          {i === 0 && managerRows && (
+                            <th
+                              scope="col"
+                              className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted`}
+                            >
+                              Status
+                            </th>
+                          )}
+                          {/* 170.7 / D-09 — the manager Created column, right
+                              after Status. Built like a COLUMNS header (same
+                              aria-sort derivation, same sort button and
+                              glyph) so it sorts from the keyboard, but vertical
+                              sticky only: z-20, never horizontally pinned, so
+                              it scrolls under the Strategy header's z-30. */}
+                          {i === 0 && managerRows && (
+                            <th
+                              scope="col"
+                              aria-sort={
+                                tableSortKey === "created_at"
+                                  ? tableSortDir === "asc"
+                                    ? "ascending"
+                                    : "descending"
+                                  : "none"
+                              }
+                              className="sticky top-0 z-20 bg-surface px-4 py-3 text-left"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => handleColumnSort("created_at")}
+                                className={`-mx-1 inline-flex items-center gap-1 rounded px-1 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${HEADER_LABEL} ${tableSortKey === "created_at" ? "text-text-primary" : "text-text-muted hover:text-text-primary"}`}
+                              >
+                                Created
+                                {tableSortKey === "created_at" && (
+                                  <span aria-hidden="true">{tableSortDir === "asc" ? "\u2191" : "\u2193"}</span>
+                                )}
+                              </button>
+                            </th>
+                          )}
+                        </Fragment>
                       );
                     })}
                     <th className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted @max-3xl:hidden`}>Return</th>
@@ -1037,11 +1194,11 @@ export function StrategyTable({
                   </tr>
                 </thead>
                 <tbody>
-                  {paged.map((s, i) => {
-                    // Rank is 1-based within the ACTIVE sort order, continuous
-                    // across pages (page 2 row 1 = #21). Re-derived every render
-                    // from the paged index, so it re-numbers when the sort flips.
-                    const rank = page * PAGE_SIZE + i + 1;
+                  {paged.map((s) => {
+                    // Rank is 1-based among the RANKED rows in the ACTIVE sort
+                    // order, continuous across pages (D-11). Re-derived with the
+                    // sort, so it re-numbers when the sort flips.
+                    const rank = rankOrdinals.get(s.id);
                     // Compute each collapsible cell's value ONCE so the visible
                     // cell and the relocated <details> render the IDENTICAL real
                     // value via the honest-null formatters \u2014 never a fabricated
@@ -1125,10 +1282,26 @@ export function StrategyTable({
                           )}
                         </span>
                       ) : null;
+                    // 170.7 / D-06 — a note follows the data row only when this
+                    // strategy has one. The data row then hands its bottom
+                    // hairline to the note row, so the pair reads as one record
+                    // with one rule under it. Every other row keeps today's
+                    // class string exactly (managerRows absent => no note).
+                    const rowNote = managerRows?.[s.id]?.note;
+                    const hasNote = Boolean(rowNote);
                     return (
+                      // Keyed by s.id (never the loop index): the pair, and the
+                      // row's actions slot inside it, must keep their identity
+                      // across a sort, a density change and a search, so the
+                      // private-link modal's native dialog keeps its opener node
+                      // (D-01, founder UAT #4).
+                      <Fragment key={s.id}>
                       <tr
-                        key={s.id}
-                        className="group border-b border-border last:border-0 transition-colors"
+                        className={
+                          hasNote
+                            ? "group transition-colors"
+                            : "group border-b border-border last:border-0 transition-colors"
+                        }
                         style={{ height: "var(--row-h)" }}
                       >
                         {/* Sticky rank cell — solid bg-surface (NOT the
@@ -1201,7 +1374,7 @@ export function StrategyTable({
                                 comes from Badge's status maps (Badge.tsx). A
                                 "Published" chip is deliberately absent —
                                 absence of a marker IS "published". */}
-                            {s.status !== "published" && (
+                            {!managerRows && s.status !== "published" && (
                               <Badge type="status" label={s.status} />
                             )}
                             {/* Phase 150 / OWN-03 — the ownership mark, in the
@@ -1219,7 +1392,8 @@ export function StrategyTable({
                                 default keeps them tag-free. An UNMARKED row
                                 renders nothing — OwnershipTag returns null, and
                                 absence is honest. */}
-                            {visibility === "owner-all-statuses" && (
+                            {visibility === "owner-all-statuses" &&
+                              !managerRows && (
                               <OwnershipTag mark={s.capital_ownership} />
                             )}
                           </div>
@@ -1314,6 +1488,27 @@ export function StrategyTable({
                               ))}
                           </div>
                         </td>
+                        {/* Phase 170.7 / D-01 — the manager Status cell, directly
+                            after the Strategy cell so it lines up with the
+                            header emitted after index 0 of COLUMNS.map. The
+                            SAME Badge the in-name marker uses (suppressed in
+                            manager mode above), so the label stays in one
+                            map. Not collapsed below @3xl: status is
+                            first-order information. */}
+                        {managerRows && (
+                          <td className="px-4 py-3 whitespace-nowrap group-hover:bg-page/50 transition-colors">
+                            <Badge type="status" label={s.status} />
+                          </td>
+                        )}
+                        {/* 170.7 / D-09 — the manager Created cell, right after
+                            Status. The UTC day through the one helper, never
+                            a locale string (server and browser would disagree
+                            and the table is a client component). */}
+                        {managerRows && (
+                          <td className="px-4 py-3 whitespace-nowrap font-metric tabular-nums text-text-secondary group-hover:bg-page/50 transition-colors">
+                            {formatIsoDay(s.created_at)}
+                          </td>
+                        )}
                         {/* Return / 6 Month carry a sign → sign-tinted (green/red)
                             only for a finite value. CAGR / Sharpe are magnitudes →
                             neutral ink. Max DD is red only when finitely negative.
@@ -1405,8 +1600,32 @@ export function StrategyTable({
                             the visibility default already guarantees every row
                             is published. */}
                         <td className="px-4 py-3 text-right group-hover:bg-page/50 transition-colors">
-                          {ownerRowActions}
-                          {s.status === "published" && (
+                          {/* Phase 170.7 / D-01 — manager mode: Edit, then this
+                              row's server-built slot, on ONE line (a wrapped
+                              Actions cell doubles the row height and breaks
+                              the --row-h rhythm). No Mark ownership, Rename or
+                              Simulate Impact: a manager's page has no allocator
+                              portfolio, and a control that cannot work is worse
+                              than none. The Edit link renders only for an id
+                              with an entry, so a missing id shows an empty cell,
+                              never another row's slot. */}
+                          {managerRows ? (
+                            <div className="flex flex-nowrap items-center justify-end gap-3 whitespace-nowrap">
+                              {managerRows[s.id] && (
+                                <Link
+                                  href={managerRows[s.id].editHref}
+                                  aria-label={`Edit ${s.name}`}
+                                  className={`${GHOST_ROW_ACTION} inline-flex items-center pointer-coarse:min-h-[44px]`}
+                                >
+                                  Edit
+                                </Link>
+                              )}
+                              {managerRows[s.id]?.actions}
+                            </div>
+                          ) : (
+                            ownerRowActions
+                          )}
+                          {s.status === "published" && !managerRows && (
                             <SimulateImpactButton
                               candidateStrategyId={s.id}
                               candidateName={s.name}
@@ -1415,6 +1634,32 @@ export function StrategyTable({
                           )}
                         </td>
                       </tr>
+                      {hasNote && (
+                        // 170.7 / D-06 — the full-width note row. One cell spans
+                        // every header; the inner block is as wide as the
+                        // visible scroller (`cqw` resolves against the
+                        // ResponsiveTable @container region) and sticks to its
+                        // left edge, so a sentence-length note stays in view at
+                        // any scrollLeft. From @3xl its text lines up with the
+                        // strategy name above: the merged Strategy offset (the
+                        // same variable the Strategy cells pin to) plus the
+                        // cell's 1rem padding. No bg-track (chip-contrast pin),
+                        // no hover tint, no top padding: the note hugs its row.
+                        <tr
+                          data-testid="strategy-row-note"
+                          className="bg-surface border-b border-border last:border-0"
+                        >
+                          <td colSpan={emptyRowColSpan} className="p-0">
+                            <div
+                              data-testid="strategy-row-footer"
+                              className="sticky left-0 w-[100cqw] space-y-2 pb-3 pl-4 pr-4 @3xl:pl-[calc(var(--pin-strategy-left)+1rem)] overflow-visible text-caption"
+                            >
+                              {rowNote}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     );
                   })}
                   {/* Phase 149 Delta 5 — three arms, in the order they matter:
@@ -1477,6 +1722,21 @@ export function StrategyTable({
                             </span>
                           </div>
                         </td>
+                        {/* 170.7 / D-01 — keeps the placeholder td count equal to
+                            the th count when the manager Status column shows.
+                            No strategy exists, so no status: an honest em dash. */}
+                        {managerRows && (
+                          <td className="px-4 py-3">
+                            <span className="text-text-muted">—</span>
+                          </td>
+                        )}
+                        {/* 170.7 / D-09 — and the Created cell: no strategy,
+                            no creation date. */}
+                        {managerRows && (
+                          <td className="px-4 py-3">
+                            <span className="text-text-muted">—</span>
+                          </td>
+                        )}
                         {/* Every metric cell is an honest em-dash: there is no
                             run, no series, nothing to average. A 0 / 0.00 /
                             +0.0% here would be invented data (SC-4). */}

@@ -131,13 +131,17 @@ export function DashboardChrome({
   // surfaces are removed in this same commit; leaving them would re-clamp the
   // now-fluid shell and silently restore the bug.
   //
-  // ⛔ `/strategies` is NOT here. It is a legacy CARD list, and the tree also
-  // holds `/strategies/new/wizard` (a FORM) and `/strategies/[id]` (a DOCUMENT,
-  // 1440px) — none of them earn the dense-table measure.
+  // ⭐ 2026-10-09 Phase 170.7 — the `/strategies` INDEX is on the list, by an
+  // EXACT-MATCH arm kept apart from the prefix regex. The index is a dense table
+  // now (the shared `StrategyTable`), so it earns the fluid measure. The tree
+  // under it does not: `/strategies/new/wizard` is a FORM and `/strategies/[id]`
+  // is a DOCUMENT / edit form, so both stay bounded at `max-w-7xl`. That is why
+  // `strategies` is NOT inside the `(\/|$)` alternation above: a prefix match
+  // would widen them too.
   const isWide =
     /^\/(allocations|compare|discovery|admin|portfolios|my-strategies)(\/|$)/.test(
       pathname,
-    );
+    ) || /^\/strategies$/.test(pathname);
 
   if (isFullBleed) {
     return (

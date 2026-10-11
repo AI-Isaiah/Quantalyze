@@ -1,11 +1,10 @@
 import { createClient } from "@/lib/supabase/server";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/Button";
-import { Badge } from "@/components/ui/Badge";
-import { NowrapWords } from "@/components/ui/NowrapWords";
 import { Card } from "@/components/ui/Card";
 import { StrategyActions } from "@/components/strategy/StrategyActions";
 import { ShareableLink } from "@/components/strategy/ShareableLink";
+import { StrategyTable } from "@/components/strategy/StrategyTable";
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 // Server component: import the predicate from the NON-client module. Importing
 // it from ShareableLink.tsx compiles but throws at request time.
@@ -25,6 +24,12 @@ import {
   type CompositeMemberCount,
 } from "@/lib/strategy-shape";
 import { captureToSentry } from "@/lib/sentry-capture";
+// Phase 170.7 (D-01, D-03): the owner list is read through the SAME explicit
+// ranking allowlist Discovery uses and shaped by the SAME shaper, so a strategy
+// with no analytics (or a failed run) reads a dash and never a number.
+import { CATEGORY_RANKING_ANALYTICS_COLUMNS, shapeRowAnalytics } from "@/lib/queries";
+import { extractAnalytics } from "@/lib/utils";
+import type { Strategy } from "@/lib/types";
 import {
   KEY_STATUS_UNREADABLE_NOTE,
   probeUnreadableShareNote,
@@ -46,6 +51,7 @@ import Link from "next/link";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
 import { redirect } from "next/navigation";
+import type { ReactNode } from "react";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
@@ -68,6 +74,18 @@ interface StrategyKeyMemberRow {
   api_key_id: string;
   seq: number;
 }
+
+/**
+ * Phase 170.7 — one row of the owner list read: the whole `strategies` row
+ * (`select("*")`, owner-scoped) plus the columns the page itself reads, and the
+ * ranking embed as `unknown` (postgrest-js cannot type the `->-1->>` alias, so
+ * the result is cast the way `getMyStrategies` casts it).
+ */
+type OwnerListRow = Strategy & {
+  review_note: string | null;
+  source: string;
+  strategy_analytics: unknown;
+};
 
 /** One S4 line: one untrusted status, the keys in it, the first key seen. */
 interface UntrustedKeyLine {
@@ -363,12 +381,22 @@ export default async function StrategiesPage() {
   // See migration 031: `source` discriminates wizard drafts from
   // legacy / admin_import drafts. The PostgREST `.or()` filter below
   // keeps legacy drafts visible while hiding wizard-in-progress rows.
-  const { data: strategies, error: strategiesError } = await supabase
+  // Phase 170.7 (D-01, D-03): `*` plus the explicit ranking allowlist. Never
+  // `strategy_analytics (*)` (the owner-only exemption inside `getMyStrategies`,
+  // RANK-02), and never `getMyStrategies` itself: it drops archived rows and
+  // does not hide wizard drafts. The owner scope below is the page's own, with
+  // RLS (`strategies_read`, `analytics_read`) as the backstop. `computation_status`
+  // is in the allowlist, so the KCS-12 reads below keep their input.
+  const { data: listData, error: strategiesError } = await supabase
     .from("strategies")
-    .select("id, name, status, source, strategy_types, review_note, created_at, api_key_id, strategy_analytics ( computation_status )")
+    .select(`*, strategy_analytics (${CATEGORY_RANKING_ANALYTICS_COLUMNS})`)
     .eq("user_id", user.id)
     .or("source.neq.wizard,status.neq.draft")
     .order("created_at", { ascending: false });
+  // The cast is type-only: the `->-1->>` alias in the allowlist defeats
+  // postgrest-js's select parser (RESEARCH Pitfall 4). `null` stays `null`, so
+  // the unreadable arm below still sees a missing rows array.
+  const strategies = listData as unknown as OwnerListRow[] | null;
   // 167.2-REVIEW-SFH H-1: a failed list read is NOT "no strategies". The
   // KCS-12 analytics embed added new ways for this one query to fail whole (a
   // column grant revoked on `computation_status`, an ambiguous embed), and the
@@ -716,6 +744,119 @@ export default async function StrategiesPage() {
   captureProbeOutcomes(probeOutcomes);
   captureProbeThrows(probeThrows);
 
+  // Phase 170.7 (D-03): every row is shaped by the one analytics shaper. A
+  // missing `strategy_analytics` row, and a run that did not finish (`failed`,
+  // `pending`, `computing`), come out as the empty shape with their real status,
+  // so the table prints a dash, never a 0 and never a failed run's stored
+  // figures. No `?? 0` anywhere on this path.
+  const rows = (strategies ?? []).map((s) => {
+    const a = extractAnalytics(s.strategy_analytics);
+    return { ...s, analytics: shapeRowAnalytics(a, s.id), analyticsPresent: a !== null };
+  });
+
+  // Phase 167.2 / KCS-06 (S4) + KCS-12 (S5), and the 170.7 review feedback —
+  // one strategy's note: what the table renders in the full-width row under it.
+  // Built here and not in the table because the key pills and the contact
+  // pointer are server-composed. The table owns the wrapping block
+  // (`strategy-row-footer`), so this returns that block's CHILDREN as a
+  // Fragment, in the order D-06 fixes: review feedback, then one line per
+  // DISTINCT untrusted key status (the key card's own pill and helper, mounted
+  // as the key card mounts it; the caption names a key and the pill names its
+  // state, no claim about the strategy's numbers), then the share note.
+  // `undefined` when the strategy has none of them, so no empty row renders.
+  // Each mount keeps its own helper live region; on this static server render
+  // they never change, so they announce nothing.
+  const noteFor = (s: OwnerListRow): ReactNode => {
+    const keyLines = untrustedKeyLines(
+      feedingKeyIdsByStrategy.get(s.id) ?? [],
+      keysById,
+    );
+    const shareNote = shareNotes.get(s.id);
+    const showFeedback = Boolean(s.review_note) && s.status === "draft";
+    if (!showFeedback && keyLines.length === 0 && !shareNote) return undefined;
+    return (
+      <>
+        {showFeedback && (
+          // D-08 (2026-10-09): feedback is recoverable (revise and resubmit), so
+          // DESIGN.md's colour gate makes it amber, not red.
+          <p className="rounded px-2 py-1 text-caption font-normal text-warning bg-warning/5">
+            Review feedback: {s.review_note}
+          </p>
+        )}
+        {keyLines.map((line) => (
+          <div
+            key={line.status}
+            data-testid="strategy-row-key-mark"
+            className="flex items-start justify-between gap-3"
+          >
+            <p className="text-caption font-normal text-text-muted">{line.caption}</p>
+            <AllocatorSyncStatus
+              syncStatus={line.status}
+              syncError={line.first.sync_error}
+              lastSyncAt={line.first.last_sync_at}
+              exchange={line.first.exchange}
+            />
+          </div>
+        ))}
+        {/* KCS-12 (S5) — after any S4 lines; plain text, no role. */}
+        {shareNote && (
+          <p
+            data-testid="strategy-row-share-note"
+            className="text-caption font-normal text-text-muted"
+          >
+            {/* AD-05: the note's "contact form" phrase links the support topic
+                with this row's strategy id. */}
+            <ContactPointerText
+              text={shareNote}
+              href={contactHref({ topic: "support", strategy: s.id })}
+            />
+          </p>
+        )}
+      </>
+    );
+  };
+
+  // Phase 170.7 (D-01): each row's Edit target, its actions and its note, keyed
+  // by strategy id and built ONCE per request. Props are strings and booleans
+  // only (never a token, nonce or generation), so they serialize across the
+  // RSC boundary. The elements are rendered once, in the table's one Actions
+  // cell: a second mount would be a second dialog and a second `shareLive`.
+  const managerRows = Object.fromEntries(
+    rows.map((s) => [
+      s.id,
+      {
+        editHref: `/strategies/${s.id}/edit`,
+        actions: (
+          <>
+            {/* Phase 164 (SHARE-04) — the status gate is GONE, and its
+                removal is the point, not a side effect. Hiding the control
+                for unpublished rows was the other half of the same
+                dishonesty class as the factsheet's 404-producing Copy
+                Link: an owner with a private strategy had no affordance at
+                all, so the product's answer to "show this to my LP" was
+                "you can't". Every row on this page belongs to the session
+                user, so an unpublished row now yields a working, revocable
+                private link instead of nothing.
+                ⛔ `StrategyActions` in the same row is untouched (D-03). */}
+            <ShareableLink
+              strategyId={s.id}
+              published={isPublishedStatus(s.status)}
+              hasActiveShare={liveShareIds.has(s.id)}
+              size="sm"
+            />
+            <StrategyActions
+              strategyId={s.id}
+              status={s.status}
+              hasApiKey={!!s.api_key_id}
+              hasData={!!s.api_key_id}
+            />
+          </>
+        ),
+        note: noteFor(s),
+      },
+    ]),
+  );
+
   return (
     <>
       <PageHeader
@@ -735,9 +876,10 @@ export default async function StrategiesPage() {
         <Card
           data-testid="wizard-draft-resume-banner"
           data-rejected={wizardDraftRejected ? "true" : "false"}
+          // 2026-10-09 Phase 170.7 D-08: review feedback is recoverable -> amber (DESIGN.md colour gate)
           className={
             wizardDraftRejected
-              ? "mb-3 border-negative/40 bg-negative/5"
+              ? "mb-3 border-warning/40 bg-warning/5"
               : "mb-3 border-accent/40 bg-accent/5"
           }
         >
@@ -753,7 +895,9 @@ export default async function StrategiesPage() {
                       ? `"${wizardDraft.name}" needs revisions before it can be published.`
                       : "Your draft needs revisions before it can be published."}
                   </p>
-                  <p className="mt-2 text-xs text-negative bg-negative/5 rounded px-2 py-1">
+                  {/* No fill, no padding of its own: it sits on the shell's single
+                      bg-warning/5 layer (4.68:1); a second layer is 4.39:1 (AD-06). */}
+                  <p className="mt-2 text-xs text-warning">
                     Review feedback: {wizardDraft.review_note}
                   </p>
                 </>
@@ -817,106 +961,16 @@ export default async function StrategiesPage() {
               {KEY_STATUS_UNREADABLE_NOTE}
             </p>
           )}
-          {strategies.map((s) => {
-            const keyLines = untrustedKeyLines(
-              feedingKeyIdsByStrategy.get(s.id) ?? [],
-              keysById,
-            );
-            const shareNote = shareNotes.get(s.id);
-            return (
-              <Card key={s.id} data-testid="strategy-row">
-                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                  {/* CR-01 (170 review, measured 2026-10-01): from md up the name
-                      block keeps a hard 160 px floor and the control group may
-                      shrink and wrap its own items. With `md:shrink-0` the group
-                      stayed at its one-line width (~400 px for a draft row), so
-                      at 768-840 px (desktop 200% zoom) the name block got 0 px
-                      and the name painted over the controls. */}
-                  <div className="flex-1 min-w-0 md:min-w-[160px]">
-                    <Link href={`/strategies/${s.id}/edit`} className="font-medium text-text-primary hover:text-accent transition-colors">
-                      <NowrapWords text={s.name} breakOverlong />
-                    </Link>
-                    <div className="flex flex-wrap gap-1 mt-1">
-                      {s.strategy_types.map((t: string) => (
-                        <Badge key={t} label={t} className="whitespace-nowrap" />
-                      ))}
-                    </div>
-                    {s.review_note && s.status === "draft" && (
-                      <p className="mt-2 text-xs text-negative bg-negative/5 rounded px-2 py-1">
-                        Review feedback: {s.review_note}
-                      </p>
-                    )}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-3 md:ml-4 md:min-w-0 md:justify-end">
-                    {/* Phase 164 (SHARE-04) — the status gate is GONE, and its
-                        removal is the point, not a side effect. Hiding the control
-                        for unpublished rows was the other half of the same
-                        dishonesty class as the factsheet's 404-producing Copy
-                        Link: an owner with a private strategy had no affordance at
-                        all, so the product's answer to "show this to my LP" was
-                        "you can't". Every row on this page belongs to the session
-                        user, so an unpublished row now yields a working, revocable
-                        private link instead of nothing.
-                        ⛔ `StrategyActions` in the same row is untouched (D-03). */}
-                    <ShareableLink
-                      strategyId={s.id}
-                      published={isPublishedStatus(s.status)}
-                      hasActiveShare={liveShareIds.has(s.id)}
-                      size="sm"
-                    />
-                    <Badge label={s.status} type="status" />
-                    <StrategyActions strategyId={s.id} status={s.status} hasApiKey={!!s.api_key_id} hasData={!!s.api_key_id} />
-                    <span className="text-xs text-text-muted">
-                      {new Date(s.created_at).toLocaleDateString()}
-                    </span>
-                  </div>
-                </div>
-                {/* Phase 167.2 / KCS-06 (S4) + KCS-12 (S5) — the footer band, only
-                    when the row has something to show. One line per DISTINCT untrusted status,
-                    carrying the key card's own pill and helper, mounted exactly
-                    as the key card mounts it. The caption names a key and the
-                    pill names its state: no claim about the strategy's numbers.
-                    Each mount keeps its own helper live region; on this static
-                    server render they never change, so they announce nothing. */}
-                {(keyLines.length > 0 || shareNote) && (
-                  <div
-                    data-testid="strategy-row-footer"
-                    className="mt-3 border-t border-border pt-3 space-y-2"
-                  >
-                    {keyLines.map((line) => (
-                      <div
-                        key={line.status}
-                        data-testid="strategy-row-key-mark"
-                        className="flex items-start justify-between gap-3"
-                      >
-                        <p className="text-xs text-text-muted">{line.caption}</p>
-                        <AllocatorSyncStatus
-                          syncStatus={line.status}
-                          syncError={line.first.sync_error}
-                          lastSyncAt={line.first.last_sync_at}
-                          exchange={line.first.exchange}
-                        />
-                      </div>
-                    ))}
-                    {/* KCS-12 (S5) — after any S4 lines; plain text, no role. */}
-                    {shareNote && (
-                      <p
-                        data-testid="strategy-row-share-note"
-                        className="text-xs text-text-muted"
-                      >
-                        {/* AD-05: the note's "contact form" phrase links the
-                            support topic with this row's strategy id. */}
-                        <ContactPointerText
-                          text={shareNote}
-                          href={contactHref({ topic: "support", strategy: s.id })}
-                        />
-                      </p>
-                    )}
-                  </div>
-                )}
-              </Card>
-            );
-          })}
+          <StrategyTable
+            strategies={rows}
+            // A prefs-SCOPE key, not a discovery category. No `userId` is
+            // passed, so the table persists no sort or density here and
+            // `initialSort` is not overwritten by a hydrated preference.
+            categorySlug="strategies"
+            visibility="owner-all-statuses"
+            managerRows={managerRows}
+            initialSort={{ key: "created_at", dir: "desc" }}
+          />
         </div>
       )}
     </>

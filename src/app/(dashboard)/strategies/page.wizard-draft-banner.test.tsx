@@ -17,9 +17,10 @@
  * The filter that hides wizard drafts inline stays — preserving the
  * StrategyForm-routing safety invariant the original comment guards.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import React from "react";
+import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
 
 vi.mock("server-only", () => ({}));
 
@@ -120,12 +121,30 @@ interface MockStrategyRow {
   review_note: string | null;
   created_at: string;
   api_key_id: string | null;
+  // 2026-10-09 Phase 170.7: the rest of the `Strategy` field set the shared
+  // table reads (subtypes, markets, supported_exchanges, aum, start_date,
+  // is_example, ...), so the page swap changes the page and not these inputs.
+  user_id: string;
+  category_id: string | null;
+  description: string | null;
+  subtypes: string[];
+  markets: string[];
+  supported_exchanges: string[];
+  leverage_range: string | null;
+  avg_daily_turnover: number | null;
+  aum: number | null;
+  max_capacity: number | null;
+  start_date: string | null;
+  is_example: boolean;
+  benchmark: string;
 }
 
 interface MockDraftRow {
   id: string;
   name: string | null;
   created_at: string;
+  // Set by the admin reject path; a rejected wizard draft is the SAME hidden row.
+  review_note?: string | null;
 }
 
 const state = vi.hoisted(() => ({
@@ -212,6 +231,14 @@ async function renderPage(): Promise<HTMLElement> {
 
 describe("StrategiesPage — wizard-draft Resume banner (2026-05-21 regression)", () => {
   beforeEach(() => {
+    // 2026-10-09 Phase 170.7: the shared table mounts client hooks that touch
+    // `fetch` and `localStorage`; install the same doubles my-strategies/page.test.tsx does.
+    installFetchMock();
+    try {
+      window.localStorage.clear();
+    } catch {
+      // jsdom may not implement clear in some configurations; non-fatal.
+    }
     redirectMock.mockReset();
     // Phase 167.2.1 (D-08): UUID-shaped, because the page's probe runs under
     // `withPublishedOrOwner(q, user.id)`, which fails closed (and logs) on a
@@ -219,6 +246,10 @@ describe("StrategiesPage — wizard-draft Resume banner (2026-05-21 regression)"
     state.user = { id: "00000000-0000-4000-8000-0000000000a1" };
     state.publishedStrategies = [];
     state.wizardDraft = null;
+  });
+
+  afterEach(() => {
+    restoreFetchMock();
   });
 
   it("with NO published strategies AND NO wizard draft, shows 'Create your first strategy'", async () => {
@@ -257,6 +288,19 @@ describe("StrategiesPage — wizard-draft Resume banner (2026-05-21 regression)"
         review_note: null,
         created_at: "2026-05-20T12:00:00Z",
         api_key_id: "k-1",
+        user_id: "u-1",
+        category_id: "cat-1",
+        description: null,
+        subtypes: ["Trend Following"],
+        markets: ["Spot"],
+        supported_exchanges: ["Binance"],
+        leverage_range: null,
+        avg_daily_turnover: null,
+        aum: 1_000_000,
+        max_capacity: 10_000_000,
+        start_date: "2024-01-01",
+        is_example: false,
+        benchmark: "BTC",
       },
     ];
     state.wizardDraft = {
@@ -287,6 +331,19 @@ describe("StrategiesPage — wizard-draft Resume banner (2026-05-21 regression)"
         review_note: null,
         created_at: "2026-05-20T12:00:00Z",
         api_key_id: "k-1",
+        user_id: "u-1",
+        category_id: "cat-1",
+        description: null,
+        subtypes: ["Trend Following"],
+        markets: ["Spot"],
+        supported_exchanges: ["Binance"],
+        leverage_range: null,
+        avg_daily_turnover: null,
+        aum: 1_000_000,
+        max_capacity: 10_000_000,
+        start_date: "2024-01-01",
+        is_example: false,
+        benchmark: "BTC",
       },
     ];
     state.wizardDraft = null;
@@ -296,5 +353,81 @@ describe("StrategiesPage — wizard-draft Resume banner (2026-05-21 regression)"
     );
     expect(banner).toBeNull();
     expect(container.textContent).toContain("Live Strategy");
+  });
+});
+
+// 2026-10-09 Phase 170.7 D-08: review feedback is recoverable -> amber (DESIGN.md
+// colour gate). The banner's shell takes ONE `bg-warning/5` layer and the
+// feedback line sits on it with no fill of its own: two layers measure 4.39:1,
+// one measures 4.68:1 (UI-SPEC AD-06).
+describe("StrategiesPage — a rejected wizard draft's banner is amber (170.7 D-08)", () => {
+  beforeEach(() => {
+    installFetchMock();
+    try {
+      window.localStorage.clear();
+    } catch {
+      // non-fatal
+    }
+    redirectMock.mockReset();
+    state.user = { id: "00000000-0000-4000-8000-0000000000a1" };
+    state.publishedStrategies = [];
+    state.wizardDraft = null;
+  });
+
+  afterEach(() => {
+    restoreFetchMock();
+  });
+
+  it("paints the rejected shell and its feedback line amber, the line with no fill of its own", async () => {
+    state.wizardDraft = {
+      id: "draft-1",
+      name: "WIP Alpha",
+      created_at: "2026-05-21T12:00:00Z",
+      review_note: "Add a longer track record",
+    };
+    const container = await renderPage();
+
+    const banner = container.querySelector(
+      "[data-testid='wizard-draft-resume-banner']",
+    ) as HTMLElement;
+    expect(banner.getAttribute("data-rejected")).toBe("true");
+    const shell = banner.className.split(/\s+/);
+    expect(shell).toContain("border-warning/40");
+    expect(shell).toContain("bg-warning/5");
+    expect(shell).not.toContain("border-negative/40");
+    expect(shell).not.toContain("bg-negative/5");
+
+    const line = Array.from(banner.querySelectorAll("p")).find((p) =>
+      (p.textContent ?? "").startsWith("Review feedback:"),
+    );
+    expect(line, "the feedback line").toBeDefined();
+    expect(line!.textContent).toContain("Add a longer track record");
+    const tokens = line!.className.split(/\s+/);
+    expect(tokens).toContain("text-warning");
+    expect(tokens).toContain("text-xs");
+    expect(tokens).not.toContain("text-negative");
+    // No fill of its own: a second bg-warning/5 layer on the shell is 4.39:1.
+    expect(tokens.filter((t) => t.startsWith("bg-"))).toEqual([]);
+
+    // Copy and the button are unchanged.
+    expect(banner.textContent).toContain("Your strategy submission was sent back for changes.");
+    expect(banner.textContent).toContain("Revise & resubmit");
+  });
+
+  it("keeps the unfinished-draft banner accent, not amber", async () => {
+    state.wizardDraft = {
+      id: "draft-2",
+      name: "WIP Beta",
+      created_at: "2026-05-21T12:00:00Z",
+    };
+    const container = await renderPage();
+    const banner = container.querySelector(
+      "[data-testid='wizard-draft-resume-banner']",
+    ) as HTMLElement;
+    expect(banner.getAttribute("data-rejected")).toBe("false");
+    const shell = banner.className.split(/\s+/);
+    expect(shell).toContain("border-accent/40");
+    expect(shell).toContain("bg-accent/5");
+    expect(shell).not.toContain("bg-warning/5");
   });
 });
