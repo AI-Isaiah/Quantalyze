@@ -1,12 +1,25 @@
 /**
- * Portfolio exposure read layer — PI-01 / PI-02 / PI-03 (Phase 98, v1.10).
+ * Portfolio exposure read layer — PI-02 / PI-03 (Phase 98, v1.10), and the
+ * data-contract types of PI-01.
  *
  * A server-only, owner-scoped, secretless read over `allocator_holdings` that
- * gives Phase 99's three widgets their data WITHOUT any UI or ingestion (both
- * explicitly deferred): Exposure by Asset Class (PI-01), Net Exposure Over Time
- * (PI-02), Allocation Over Time (PI-03). This module is the contract Phase 99
- * renders against — the decisions below are LOCKED by the 98-03 planner; read
- * them before consuming.
+ * gives Phase 99's two over-time widgets their data WITHOUT any UI or ingestion
+ * (both explicitly deferred): Net Exposure Over Time (PI-02) and Allocation Over
+ * Time (PI-03). This module is the contract Phase 99 renders against — the
+ * decisions below are LOCKED by the 98-03 planner; read them before consuming.
+ *
+ * Phase 170.4 (D-01, D-03) — the CURRENT snapshot (PI-01, Exposure by Asset
+ *   Class) is no longer read here. The retired allocator-wide snapshot read took
+ *   the allocator's single latest `asof` and applied only the native-unpriced
+ *   rule, so it could show positions the Holdings and Open Positions tables had
+ *   dropped (PROD, 2026-10-03). The card is now `exposureSnapshotFromHoldings`
+ *   (allocations/lib/exposure-snapshot.ts) over the dashboard payload's per-key
+ *   holdings, the same array both tables split, so the three agree by
+ *   construction and a failed per-key read throws to allocations/error.tsx
+ *   instead of rendering an empty card. This module keeps the `ExposureSnapshot`
+ *   / `ExposureSlice` types that builder returns. The 730-day window below
+ *   applies to the two series only; the over-time charts are history and are
+ *   unchanged (D-03).
  *
  * D-P1 — Exposure taxonomy. `holding_type` (`spot` | `derivative`) is the
  *   PRIMARY class dimension and the only complete, honest, non-degenerate
@@ -14,9 +27,9 @@
  *   always a crypto exchange (custody location, not an asset class), so the
  *   #597 crypto/traditional classifier is degenerate here; `symbol` is too
  *   granular to be a class and any symbol->bucket map would be invented
- *   taxonomy. The snapshot therefore returns slices at the raw groupable
- *   (holding_type, venue, symbol, side) grain with `holding_type` designated
- *   primary; the DISPLAY LABEL (e.g. "Spot vs Derivatives") is Phase 99's call.
+ *   taxonomy. The snapshot therefore carries slices at the raw groupable
+ *   (api_key_id, holding_type, venue, symbol, side) grain (the key since 170.4,
+ *   D-08: one key is one strategy) with `holding_type` designated primary; the DISPLAY LABEL (e.g. "Spot vs Derivatives") is Phase 99's call.
  *   venue/symbol travel along for secondary grouping / drill-down.
  *
  * D-P2 — Net exposure is SIGNED. `value_usd` is stored UNSIGNED (magnitude);
@@ -36,9 +49,9 @@
  *   coverage-based (F-2), so a skipped asof at the series BOUNDARY (first/last)
  *   is marked too — not only interior skips.
  *
- * D-P7 / honest-empty. `getLatestExposureSnapshot` returns `null` when the
- *   allocator has zero holdings (so "no data" is distinguishable from "zero
- *   exposure"); the two series return `{ points: [], gaps: [] }`. Never a
+ * D-P7 / honest-empty. The current snapshot builder returns `null` for a book
+ *   with zero holdings (so "no data" is distinguishable from "zero exposure");
+ *   the two series return `{ points: [], gaps: [] }`. Never a
  *   zero-filled point, never a synthetic `asof`.
  *
  * No-zero-fill / marked gaps. `asof` is a plain DATE (one row per
@@ -52,22 +65,17 @@
  *   (owner RLS: `allocator_holdings_owner_select` — `allocator_id =
  *   auth.uid()`) with an explicit `.eq("allocator_id", userId)` gate as
  *   defence-in-depth. The admin client is NEVER imported (it would bypass RLS).
- *   The projection is a six-column allow-list (the latest-snapshot read adds the
- *   owner's own `api_key_id`, R2-WR-01); the exchange raw-payload column
+ *   The projection is a six-column allow-list; the exchange raw-payload column
  *   and the key-material columns are never selected.
  *
- * Edge case (98-03 plan-checker W4). The fetch caps rows at 730 days via
+ * Edge case (98-03 plan-checker W4). The series fetch caps rows at 730 days via
  *   `.gte("asof", today - 730d)`, mirroring the reconstruction BACKFILL_CAP_DAYS
- *   (queries.ts:2540-2542). An allocator whose most recent holdings snapshot is
- *   >730 days stale therefore reads as honest-empty ("no data") rather than
- *   surfacing a two-year-old exposure. This is acceptable (a >2y-stale
- *   allocator has no current exposure to report) but is documented here so a
- *   future consumer knows stale-beyond-cap is indistinguishable from empty.
+ *   (queries.ts:2540-2542). An allocator whose holdings are all >730 days old
+ *   therefore reads as honest-empty series. It applies to the two series only
+ *   (Phase 170.4, D-03); the current snapshot has no date window.
  */
 
 import { createClient } from "@/lib/supabase/server";
-import { fetchNativeUnpricedDays } from "@/lib/latest-holdings-per-key";
-import { captureToSentry } from "@/lib/sentry-capture";
 
 const BACKFILL_CAP_DAYS = 730;
 const MS_PER_DAY = 86_400_000;
@@ -75,6 +83,12 @@ const MS_PER_DAY = 86_400_000;
 export type HoldingClass = "spot" | "derivative";
 
 export interface ExposureSlice {
+  /**
+   * The key that holds the position (Phase 170.4, D-08: one key is one strategy).
+   * A slice never merges two keys' rows, so two live keys on one venue holding
+   * one symbol are two slices. Null only for a row that carries no key.
+   */
+  apiKeyId: string | null;
   holdingType: HoldingClass;
   venue: string;
   symbol: string;
@@ -85,9 +99,20 @@ export interface ExposureSlice {
   signedValueUsd: number;
 }
 
+/**
+ * The current "what I hold now" card. Phase 170.4 (D-01): it is built from the
+ * dashboard payload's per-key holdings by `exposureSnapshotFromHoldings`
+ * (allocations/lib/exposure-snapshot.ts), the same array the Holdings and Open
+ * Positions tables split, so the three surfaces agree by construction.
+ */
 export interface ExposureSnapshot {
-  /** The latest asof the slices belong to. */
-  asof: string;
+  /** The newest day any slice was read on; null when no row carries a read day. */
+  asof: string | null;
+  /**
+   * The oldest day any slice was read on. Differs from `asof` when the keys were
+   * read on different days; null when no row carries a read day.
+   */
+  oldestAsof: string | null;
   slices: ExposureSlice[];
   totalGrossUsd: number;
   totalNetUsd: number;
@@ -120,14 +145,6 @@ interface HoldingRow {
   holding_type: string;
   side: string;
   value_usd: number;
-}
-
-/**
- * `HoldingRow` plus the owning key, read only by the latest-snapshot read (R2-WR-01) to
- * match a row to its native-unpriced marker. The owner's own FK; no key material.
- */
-interface LatestHoldingRow extends HoldingRow {
-  api_key_id: string | null;
 }
 
 /** D-P2: negate short notional; long/flat pass through unsigned. */
@@ -265,99 +282,6 @@ async function fetchHoldings(userId: string): Promise<HoldingRow[]> {
 /** Distinct asof days in ascending order. */
 function distinctSortedAsofs(rows: HoldingRow[]): string[] {
   return Array.from(new Set(rows.map((r) => r.asof))).sort();
-}
-
-/**
- * PI-01 — the allocator's LATEST exposure, aggregated at the
- * (holding_type, venue, symbol, side) grain with gross + signed net totals.
- * Returns `null` for an allocator with zero holdings (honest-empty).
- *
- * F-1 (v1.10): a TWO-STEP read rather than scanning the whole 730-day window.
- * Step 1 reads the single most-recent `asof` (`order(asof desc).limit(1)`);
- * step 2 reads only the holdings AT that exact asof. This is truncation-proof
- * (a single day's holdings is far under PostgREST's 1000-row `max_rows` cap),
- * correct, AND cheaper than the prior full-window scan — which, being ASCENDING
- * and unbounded, was silently capped at 1000 and dropped the NEWEST rows,
- * returning a stale snapshot labelled as current. The 730-day `.gte` cap stays
- * on step 1 so a >730d-stale allocator reads honest-empty (header edge case W4).
- */
-export async function getLatestExposureSnapshot(
-  userId: string,
-): Promise<ExposureSnapshot | null> {
-  const supabase = await createClient();
-  const capIso = toIsoDate(Date.now() - BACKFILL_CAP_DAYS * MS_PER_DAY);
-
-  // Step 1: the most-recent asof within the 730-day window (single row).
-  const { data: latestData, error: latestError } = await supabase
-    .from("allocator_holdings")
-    .select("asof")
-    .eq("allocator_id", userId)
-    .gte("asof", capIso)
-    .order("asof", { ascending: false })
-    .limit(1);
-  if (latestError) throw latestError;
-  const latestAsof = (latestData as { asof: string }[] | null)?.[0]?.asof;
-  if (!latestAsof) return null; // honest-empty (also >730d-stale, per W4)
-
-  // Step 2: the holdings AT that exact asof — the six-column secretless projection plus
-  // the owning key's id (R2-WR-01, below). Read beside the native-unpriced markers.
-  const [{ data, error }, unpriced] = await Promise.all([
-    supabase
-      .from("allocator_holdings")
-      .select("asof, venue, symbol, holding_type, side, value_usd, api_key_id")
-      .eq("allocator_id", userId)
-      .eq("asof", latestAsof),
-    fetchNativeUnpricedDays(supabase, userId),
-  ]);
-  if (error) throw error;
-  // 164.6.6.2.1 R2-WR-01 (D-02, D-08, D-17): a native-unit (BTC) account whose latest
-  // completed day had no stored close polls to NO row, so its earlier row, priced at an
-  // older close, can be the allocator's newest `asof` and was rendered here as the current
-  // exposure. The poll's service-written marker names that day; the SAME shared reader the
-  // scenario commit uses drops a key's rows dated before it (strict: rows on or after the
-  // marker's day stand). A failed marker read is logged and sent to Sentry and the rows
-  // are kept as they were: it must not blank the exposure section, whose own read errors
-  // already throw above.
-  if (unpriced.error) {
-    console.error(
-      "[getLatestExposureSnapshot] native-unpriced record read failed; the latest rows are kept as they were:",
-      unpriced.error.message,
-    );
-    captureToSentry(new Error("portfolio-exposure: native-unpriced record read failed"), {
-      tags: { area: "portfolio-exposure", gate: "native_unpriced_marker" },
-      extra: { user_id: userId, supabase_err: unpriced.error.message },
-      level: "warning",
-    });
-  }
-  const latestRows = ((data ?? []) as LatestHoldingRow[]).filter((r) => {
-    const unpricedDay = r.api_key_id ? unpriced.data.get(r.api_key_id) : undefined;
-    return unpricedDay === undefined || r.asof >= unpricedDay;
-  });
-  if (latestRows.length === 0) return null;
-
-  const byGrain = new Map<string, ExposureSlice>();
-  for (const r of latestRows) {
-    const key = `${r.holding_type}|${r.venue}|${r.symbol}|${r.side}`;
-    const existing = byGrain.get(key);
-    if (existing) {
-      existing.valueUsd += r.value_usd;
-      existing.signedValueUsd += signed(r.side, r.value_usd);
-    } else {
-      byGrain.set(key, {
-        holdingType: r.holding_type as HoldingClass,
-        venue: r.venue,
-        symbol: r.symbol,
-        side: r.side as ExposureSlice["side"],
-        valueUsd: r.value_usd,
-        signedValueUsd: signed(r.side, r.value_usd),
-      });
-    }
-  }
-
-  const slices = Array.from(byGrain.values());
-  const totalGrossUsd = slices.reduce((a, s) => a + s.valueUsd, 0);
-  const totalNetUsd = slices.reduce((a, s) => a + s.signedValueUsd, 0);
-  return { asof: latestAsof, slices, totalGrossUsd, totalNetUsd };
 }
 
 /**

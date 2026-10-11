@@ -100,6 +100,10 @@ def _build_mock_supabase(
             return _chain(prefs)
         if table_name == "allocator_holdings":
             return _chain(holdings)
+        if table_name == "api_keys":
+            # 170.4 WR-03: the scorer reads the owner's keys, then each key's
+            # newest day. This chain ignores filters, so the fixture has ONE key.
+            return _chain([{"id": "key-a"}])
         if table_name == "allocator_equity_snapshots":
             return _chain(snapshots)
         return _chain([])
@@ -127,10 +131,12 @@ def _fixture_snapshots() -> list[dict]:
 
 def _fixture_holdings() -> list[dict]:
     return [
-        {"venue": "binance", "symbol": "BTC", "holding_type": "spot",
-         "value_usd": _BTC_START, "asof": "2026-02-10"},
-        {"venue": "binance", "symbol": "ETH", "holding_type": "spot",
-         "value_usd": _ETH_START, "asof": "2026-02-10"},
+        {"api_key_id": "key-a", "venue": "binance", "symbol": "BTC", "holding_type": "spot",
+         "value_usd": _BTC_START, "asof": "2026-02-10",
+         "updated_at": "2026-02-10T04:00:00+00:00"},
+        {"api_key_id": "key-a", "venue": "binance", "symbol": "ETH", "holding_type": "spot",
+         "value_usd": _ETH_START, "asof": "2026-02-10",
+         "updated_at": "2026-02-10T04:00:00+00:00"},
     ]
 
 

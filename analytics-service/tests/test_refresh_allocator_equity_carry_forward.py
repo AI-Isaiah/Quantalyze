@@ -74,6 +74,7 @@ def _seed_holding(
         "value_usd": value_usd,
         "unrealized_pnl_usd": unrealized_pnl_usd,
         "holding_type": holding_type,
+        "updated_at": "2026-09-20T04:00:00+00:00",
     }
 
 
@@ -243,8 +244,11 @@ async def test_shared_account_is_read_by_group_not_by_the_holders_own_rows(
 async def test_shared_account_rows_split_across_both_keys_are_summed_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both keys polled today and each won the race for one symbol. The account's
-    day is the union of the group's rows, one row per symbol, never a key's half."""
+    """Both keys polled today and each won the race for one symbol. Before Phase
+    170.4 plan 11 the account's day was the union of the group's rows (1000).
+    D-10 supersedes that: the account is counted once, through ONE key (here a
+    tie on ``updated_at``, so the smaller id, key 1), and key 2's BTC row stops
+    counting (the disclosed loss of decision (b) / case (a))."""
     fake = FakeSupabaseClient()
     _seed_pair(fake, "duplicate")
     _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, 600.0)
@@ -253,8 +257,8 @@ async def test_shared_account_rows_split_across_both_keys_are_summed_once(
     await _run_refresh(monkeypatch, fake, API_KEY_ID_2)
 
     row = _today_row(fake)
-    assert row["value_usd"] == pytest.approx(1000.0)
-    assert row["breakdown"] == {"USDT": 600.0, "BTC": 400.0}
+    assert row["value_usd"] == pytest.approx(600.0)
+    assert row["breakdown"] == {"USDT": 600.0}
 
 
 @pytest.mark.asyncio

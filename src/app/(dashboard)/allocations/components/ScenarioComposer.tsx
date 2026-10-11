@@ -158,11 +158,11 @@ import {
   buildPerKeyStrategyForBuilderSet,
   mergeAddedIntoPerKeySet,
 } from "../lib/scenario-adapter";
-import { buildHoldingRef } from "../lib/holding-outcome-adapter";
 import {
   buildKeyTrustClause,
   capitalizeFirst,
   holdingEquityContributionLocal,
+  holdingsByRef,
   managerSideKeyIds,
   summarizeLiveHoldings,
   type LiveHoldingsSummary,
@@ -947,6 +947,10 @@ export function ScenarioComposer({
 }: ScenarioComposerProps) {
   const {
     holdingsSummary: rawHoldingsSummary,
+    // Phase 170.4 plan 07 (D-10): the commit RPC's contributing row set, the
+    // source of every holdings fingerprint below. Optional on the payload
+    // (legacy fixtures); absent falls back to the dollar rows.
+    holdingsFingerprintRows,
     flaggedHoldings,
     matchDecisionsByHoldingRef,
     existingOutcomesByHoldingRef,
@@ -965,6 +969,12 @@ export function ScenarioComposer({
     // the ONE source of the own-book delta below. A payload without the field
     // reads as no returns.
     equityDailyReturns = NO_OWN_BOOK_RETURNS,
+    // 170.4 D-05 / D-07: the server-side "has an eligible key" predicate
+    // (`apiKeys.some(isPerKeyDailiesEligibleKey)` in src/lib/queries.ts), the
+    // one signal every tab reads. Never derived from the holdings: an empty book
+    // is exactly the case where the two disagree. A payload without the field
+    // reads as no eligible key (the conservative default: connect prompt).
+    hasConnectedKeys = false,
   } = payload as MyAllocationDashboardPayload & {
     existingOutcomesByHoldingRef?: Record<string, unknown>;
   };
@@ -1082,13 +1092,30 @@ export function ScenarioComposer({
     [isBlankMode, isOwnBookRebuilding, equityDailyReturns],
   );
 
+  // Phase 170.4 D-10 (plan-checker N2): the fingerprint rows are the commit
+  // RPC's contributing set, NOT the dollar rows. `rawHoldingsSummary` carries one
+  // key per exchange account (the winner), so a fingerprint over it would drop a
+  // losing key's token and `commit_scenario_batch` would refuse the commit as
+  // `portfolio_fingerprint_stale`. Un-gated by entry mode, like
+  // `rawHoldingsSummary`; blank mode seeds `[]` below.
+  const rawFingerprintRows: { symbol: string; venue: string; holding_type: string }[] =
+    holdingsFingerprintRows ?? rawHoldingsSummary;
+
+  const seedFingerprintRows = useMemo(
+    () => (entryMode === "blank" ? [] : rawFingerprintRows),
+    [entryMode, rawFingerprintRows],
+  );
+
   const scenario = useScenarioState({
     holdingsSummary: holdingsSummary as { symbol: string; venue: string; holding_type: string; value_usd: number }[],
+    // The seeding/commit fingerprint: `[]` in blank mode (the draft seeds empty),
+    // else the contributing row set. Weights stay seeded from `holdingsSummary`.
+    fingerprintHoldings: seedFingerprintRows,
     // CR-01 (Phase 63 review) — the drift reference is the mode-UNgated LIVE
     // book, so the hook's storedMismatch agrees with openSavedScenario's drift
     // check even when a gate=false holder is forced into blank mode (which gates
     // holdingsSummary to []). SEEDING still uses the gated holdingsSummary above.
-    driftReferenceHoldings: rawHoldingsSummary as { symbol: string; venue: string; holding_type: string; value_usd: number }[],
+    driftReferenceHoldings: rawFingerprintRows,
     allocatorId,
   });
 
@@ -1909,8 +1936,12 @@ export function ScenarioComposer({
       // look drifted — falsely suppressing the MEMBER-04 ineligible disclosure
       // for a book draft the live book still matches. In book mode the two are
       // identical, so this is a no-op there.
+      // Phase 170.4 D-10: its fingerprint is the contributing row set's, the
+      // same one the hook seeds from, so a book draft the live book still
+      // matches is not drifted.
       const defaultDraft = defaultDraftFromHoldings(
         rawHoldingsSummary as Parameters<typeof defaultDraftFromHoldings>[0],
+        computeHoldingsFingerprint(rawFingerprintRows),
       );
       // WR-04 (Phase 29 review): `row.draft` is `unknown`. The stringify→parse
       // roundtrip re-serializes data that was already a parsed object; a value
@@ -2222,6 +2253,7 @@ export function ScenarioComposer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       rawHoldingsSummary,
+      rawFingerprintRows,
       holdingsSummary,
       scenario.hydrateFromSaved,
       payload.bookEntryGateSatisfied,
@@ -4303,20 +4335,13 @@ export function ScenarioComposer({
   // new reference on every server-action settle) defeated the memo on
   // the hot path. Two memos > one big memo when the deps have different
   // cardinalities.
-  const holdingByRef = useMemo(() => {
-    const byRef = new Map<string, (typeof holdingsSummary)[number]>();
-    for (const x of holdingsSummary) {
-      byRef.set(
-        buildHoldingRef({
-          venue: x.venue,
-          symbol: x.symbol,
-          holding_type: x.holding_type,
-        }),
-        x,
-      );
-    }
-    return byRef;
-  }, [holdingsSummary]);
+  // 170.4 D-08: ONE ROW PER KEY under a scope ref (`holdingsByRef` keeps every
+  // row), so a second live key holding the same venue:symbol:type is summed in
+  // the live total, never overwritten.
+  const holdingsByScopeRef = useMemo(
+    () => holdingsByRef(holdingsSummary),
+    [holdingsSummary],
+  );
   // Phase 151 AUM-01 — the DERIVED live-holdings total: what custody says the
   // modelled book is worth. It is one INPUT to the scenario's AUM, not the AUM
   // itself.
@@ -4386,7 +4411,7 @@ export function ScenarioComposer({
   // degrade-branch and E1 comments travelled with the loop. `liveHoldingsSum`
   // keeps its name and its value, so every reader below is untouched.
   //
-  // Two memos, not one (the `holdingByRef` precedent above): the key-status
+  // Two memos, not one (the `holdingsByScopeRef` precedent above): the key-status
   // map changes only with the payload, the summary with every toggle.
   const statusByKeyId = useMemo(
     () =>
@@ -4411,7 +4436,7 @@ export function ScenarioComposer({
     () =>
       summarizeLiveHoldings({
         toggleByScopeRef: scenario.draft.toggleByScopeRef,
-        holdingByRef,
+        holdingsByRef: holdingsByScopeRef,
         contributingApiKeyIds: payload.contributingApiKeyIds ?? [],
         managerSideApiKeyIds,
         statusByKeyId,
@@ -4421,7 +4446,7 @@ export function ScenarioComposer({
       }),
     [
       scenario.draft.toggleByScopeRef,
-      holdingByRef,
+      holdingsByScopeRef,
       payload.contributingApiKeyIds,
       managerSideApiKeyIds,
       statusByKeyId,
@@ -4844,16 +4869,16 @@ export function ScenarioComposer({
             Start a portfolio
           </h2>
           <p className="mx-auto max-w-md text-sm text-text-secondary">
-            Connect a read-only exchange API key to project portfolio scenarios
-            from your live book — or start from a blank slate and browse
-            strategies to compose one.
+            {hasConnectedKeys
+              ? "Your connected exchange accounts hold no open positions yet. Start from a blank slate and browse strategies to compose one."
+              : "Connect a read-only exchange API key to project portfolio scenarios from your live book — or start from a blank slate and browse strategies to compose one."}
           </p>
           <div className="mt-6 flex items-center justify-center gap-3">
             <Link
               href="/profile?tab=exchanges"
               className="inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
             >
-              Connect Exchange →
+              {hasConnectedKeys ? "Manage exchanges →" : "Connect Exchange →"}
             </Link>
             <button
               type="button"

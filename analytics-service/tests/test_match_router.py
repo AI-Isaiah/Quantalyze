@@ -3229,8 +3229,9 @@ class TestHoldingsWarmUpDroppedLogging:
 
         # One holding with insufficient history (warm-up gate drops it)
         collapsed = [
-            {"venue": "binance", "symbol": "BTC/USDT", "holding_type": "spot",
-             "value_usd": 10_000, "asof": "2026-01-15"},
+            {"api_key_id": "key-a", "venue": "binance", "symbol": "BTC/USDT",
+             "holding_type": "spot", "value_usd": 10_000, "asof": "2026-01-15",
+             "updated_at": "2026-01-15T04:00:00+00:00"},
         ]
 
         def _make_query_result(data):
@@ -3238,12 +3239,17 @@ class TestHoldingsWarmUpDroppedLogging:
             q.select.return_value = q
             q.eq.return_value = q
             q.order.return_value = q
+            q.limit.return_value = q
             q.execute.return_value = MagicMock(data=data)
             return q
 
         def _table(name):
             if name == "allocator_holdings":
                 return _make_query_result(collapsed)
+            if name == "api_keys":
+                # 170.4 WR-03: the scorer reads the owner's keys, then each key's
+                # newest day.
+                return _make_query_result([{"id": "key-a"}])
             # allocator_equity_snapshots: empty snapshots
             return _make_query_result([])
 

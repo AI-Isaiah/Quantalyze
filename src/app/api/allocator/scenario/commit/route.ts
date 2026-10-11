@@ -55,7 +55,8 @@ import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/r
 import { emit, type AuditEvent } from "@/lib/audit";
 import { stampOutcomeMarker } from "@/lib/analytics/onboarding-funnel";
 import { holdingScopeKey } from "@/lib/keys";
-import { fetchNativeUnpricedDays } from "@/lib/latest-holdings-per-key";
+import { fetchLatestHoldingsPerKey } from "@/lib/latest-holdings-per-key";
+import { oneKeyPerAccountDay } from "@/lib/holdings-account-day";
 // Phase 151 AUM-01 — the shared dollar ceiling for the client-asserted
 // manual_aum_usd bound (distinct from MAX_TICKET_SIZE_USD).
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
@@ -764,8 +765,8 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   // this field entirely; `percent_allocated` is the authoritative
   // dimensioning column — but the AUDIT TRAIL still trusted client truth.
   //
-  // Fix: one SELECT against allocator_holdings to assemble the authoritative
-  // total_aum and per-holding value_usd map. The audit emit loop then
+  // Fix: assemble the authoritative total_aum and per-holding value_usd map
+  // from the allocator's holdings on the server. The audit emit loop then
   // derives size from server data:
   //   - voluntary_remove: server_size = the removed holding's value_usd
   //   - voluntary_modify / voluntary_add / bridge_recommended:
@@ -773,15 +774,28 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   //   - lookup failure: fall back to client number with a `_size_source`
   //     sentinel of "client_unverified" so forensic readers can filter.
   //
-  // CRITICAL — asof handling (code-reviewer C1 catch, PR-2 2026-05-28):
-  // allocator_holdings has UNIQUE (allocator_id, venue, symbol, asof) — one
-  // row PER DAY per holding (migration 20260420073003 line 147). A long-
-  // lived allocator can have 730+ snapshots per holding. A naive `SUM(value_usd)`
-  // would inflate AUM by the snapshot count (100×–730×) and the per-holding
-  // map would pick a non-deterministic asof. We mirror the RPC's MAX(asof)
-  // pattern (migration 20260515210400 lines 286/359/411) by ordering DESC and
-  // KEEPING ONLY THE FIRST-SEEN entry per (venue, symbol, holding_type) — the
-  // newest snapshot. Then sum across the deduped map for AUM.
+  // WHICH ROWS COUNT (170.4 D-08, D-10). One API key is one strategy, so the
+  // figure is the sum over every live key of that key's rows at the key's own
+  // latest day (`fetchLatestHoldingsPerKey`, the dashboard's reader), and keys
+  // that read ONE exchange account count it once per day
+  // and holding type (`oneKeyPerAccountDay`, the shared tie-break). The table is one row per
+  // venue:symbol:type PER DAY (a long-lived allocator holds 730+ snapshots per
+  // holding), which is why a plain SUM(value_usd) is wrong (code-reviewer C1,
+  // PR-2 2026-05-28) and why the read takes only each key's newest day. Before
+  // 170.4 this kept ONE row per venue:symbol:type across ALL keys and dates, so a
+  // book with two keys holding one symbol under-counted (Phase 167.1.1 R-15-1).
+  //
+  // WHAT THE FIGURE MAY REST ON (T-170.4-31). It is PERSISTED
+  // (`size_at_decision_usd`), so it uses SERVICE-WRITTEN evidence only:
+  // `allocator_holdings` rows and their `updated_at`, the
+  // `allocator_equity_derived` native-unpriced markers (owner SELECT only) and
+  // the `api_keys` identity columns (INSERT and UPDATE revoked from
+  // authenticated). The audit log is NEVER read: `log_audit_event` lets the owner
+  // write any event for their own keys, so the reader runs with audit
+  // evidence switched off (its `auditEvidence` option). KNOWN LIMIT, pinned by a test: the dashboard lets a
+  // newer clean empty poll supersede a key's older rows; this figure cannot, so
+  // on such a book the commit's AUM can exceed the Holdings total until the key's
+  // next written rows. The display may supersede; the persisted figure may not.
   //
   // Skipped on cached replays (the original commit already emitted the
   // server-side number; replays produce no new audit rows).
@@ -817,82 +831,92 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   let holdingsLookupErr: { message?: string } | null = null;
   let holdingsLookupRan = false;
   if (!isCachedReplay) {
-    // I3 (PR-2 specialist code-reviewer): pre-filter to the two
-    // holding_type values the audit recompute knows about. A legacy /
-    // drifted row with holding_type="margin" (or any other value) would
-    // otherwise bloat serverAumUsd without ever matching a client diff's
-    // holding_ref, producing inflated AUM denominators silently.
-    // Reviewer #1 (2026-05-28): add holding_type tiebreaker so the
-    // first-seen-wins dedup is deterministic when two rows for the same
-    // (venue, symbol, asof) but different holding_type exist. Postgres
-    // would otherwise return them in an unspecified order.
-    const { data: holdingRows, error: holdingErr } = await supabase
-      .from("allocator_holdings")
-      // G3 — `unrealized_pnl_usd` is selected for the EQUITY-basis comparison
-      // figure only; the sizing columns are unchanged.
-      .select("api_key_id, venue, symbol, holding_type, value_usd, unrealized_pnl_usd, asof")
-      .eq("allocator_id", user.id)
-      .in("holding_type", ["spot", "derivative"])
-      .order("asof", { ascending: false })
-      .order("holding_type", { ascending: true });
-    holdingsLookupErr = holdingErr;
+    // I3 (PR-2 specialist code-reviewer): only the two holding_type values the
+    // audit recompute knows about are summed. A legacy / drifted row with
+    // holding_type="margin" (or any other value) would otherwise bloat
+    // serverAumUsd without ever matching a client diff's holding_ref,
+    // producing inflated AUM denominators silently.
+    //
+    // G3 — `unrealized_pnl_usd` is selected for the EQUITY-basis comparison
+    // figure only; the sizing columns are unchanged. `updated_at` feeds
+    // `oneKeyPerAccountDay`.
+    const read = await fetchLatestHoldingsPerKey(
+      supabase,
+      user.id,
+      "api_key_id, venue, symbol, holding_type, value_usd, unrealized_pnl_usd, asof, updated_at",
+      { auditEvidence: false },
+    );
+    holdingsLookupErr = read.error;
     holdingsLookupRan = true;
-    // 164.6.6.2.1 CR-01 (D-02, D-08, D-17): the days on which a poll declared a native-unit
-    // account unpriced, from the poll's SERVICE-written record (never the audit log, which
-    // the owner can write). Such a poll writes no row, so the key's older row (priced at
-    // an older close) would be the newest of its ref below and be summed as current. A
-    // failed read keeps the sum as it was before this check and says so; it never fails
-    // the commit, whose data layer already landed.
-    let unpricedDayByKey = new Map<string, string>();
-    if (!holdingErr) {
-      const unpriced = await fetchNativeUnpricedDays(supabase, user.id);
-      if (unpriced.error) {
-        console.warn(
-          "[scenario-commit] native-unpriced record read for audit recompute failed:",
-          unpriced.error.message,
-        );
-        captureToSentry(
-          new Error("scenario_commit: native-unpriced record read for audit recompute failed"),
-          {
-            tags: { area: "scenario-commit", gate: "audit_size_recompute" },
-            extra: { user_id: user.id, supabase_err: unpriced.error.message },
-            level: "warning",
-          },
-        );
-      } else {
-        unpricedDayByKey = unpriced.data;
+    type CommitHoldingRow = {
+      api_key_id: string;
+      venue: string;
+      symbol: string;
+      holding_type: string;
+      value_usd: number | null;
+      unrealized_pnl_usd: number | null;
+      asof: string;
+      updated_at: string;
+    };
+    let countedRows: CommitHoldingRow[] = [];
+    if (!holdingsLookupErr) {
+      try {
+        // An account read through several keys counts once per day. A row
+        // without a parseable `updated_at` throws `HoldingsUpdatedAtError`
+        // (the column is NOT NULL, so that is a contract violation): it is a
+        // failed lookup, never a failed commit, like any other read error.
+        countedRows = oneKeyPerAccountDay(
+          (read.data ?? []) as CommitHoldingRow[],
+          (keyId) => read.accountByKey[keyId] ?? keyId,
+        ).filter((r) => r.holding_type === "spot" || r.holding_type === "derivative");
+      } catch (e) {
+        holdingsLookupErr = { message: e instanceof Error ? e.message : String(e) };
       }
     }
-    if (holdingErr) {
+    // 164.6.6.2.1 CR-01 (D-02, D-08, D-17): the reader drops a native-unit account the
+    // poll declared unpriced, from the poll's SERVICE-written record (never the audit
+    // log, which the owner can write). A failed read of that record keeps the sum as it
+    // was before the check and says so; it never fails the commit, whose data layer
+    // already landed.
+    if (read.markerReadError) {
+      console.warn(
+        "[scenario-commit] native-unpriced record read for audit recompute failed:",
+        read.markerReadError,
+      );
+      captureToSentry(
+        new Error("scenario_commit: native-unpriced record read for audit recompute failed"),
+        {
+          tags: { area: "scenario-commit", gate: "audit_size_recompute" },
+          extra: { user_id: user.id, supabase_err: read.markerReadError },
+          level: "warning",
+        },
+      );
+    }
+    if (holdingsLookupErr) {
       // Don't fail the commit — the data layer already landed. Log + mark
       // every per-row audit with `_size_source: "lookup_failed"` so the
       // sparse path is observable in forensic queries.
       console.warn(
         "[scenario-commit] allocator_holdings lookup for audit recompute failed:",
-        holdingErr.message,
+        holdingsLookupErr.message,
       );
       captureToSentry(new Error("scenario_commit: holdings lookup for audit recompute failed"), {
         tags: { area: "scenario-commit", gate: "audit_size_recompute" },
-        extra: { user_id: user.id, supabase_err: holdingErr.message },
+        extra: { user_id: user.id, supabase_err: holdingsLookupErr.message },
         level: "warning",
       });
     } else {
-      for (const row of holdingRows ?? []) {
-        // CR-01: a row dated before its key's latest unpriced poll is priced at an older
-        // close than that poll named. Skipped BEFORE the dedup, so an older row of the
-        // same ref cannot take its place as the newest.
-        const unpricedDay = row.api_key_id ? unpricedDayByKey.get(row.api_key_id) : undefined;
-        if (unpricedDay !== undefined && row.asof < unpricedDay) continue;
+      for (const row of countedRows) {
         const ref = holdingScopeKey(row);
-        // Order is asof DESC; the FIRST row seen for a given ref is the
-        // newest snapshot. Skip subsequent (older) rows.
-        if (holdingValueByRef.has(ref)) continue;
         const v = typeof row.value_usd === "number" && Number.isFinite(row.value_usd)
           ? row.value_usd
           : 0;
-        holdingValueByRef.set(ref, v);
+        // Every counted row adds: two keys holding one ref both count (D-08),
+        // so the per-ref line is the sum over keys, the same line the
+        // Scenario draft carries (plan 07).
+        holdingValueByRef.set(ref, (holdingValueByRef.get(ref) ?? 0) + v);
         serverAumUsd += v;
-        // G3 — the SAME deduped rows on the equity basis. Mirrors
+        // G3 — the SAME rows on the equity basis. Mirrors
         // `holdingEquityContribution` (queries.ts) exactly: a derivative's
         // equity at stake is its unrealized P&L, never its leveraged notional;
         // a null/non-finite P&L contributes 0 rather than falling back to

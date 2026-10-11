@@ -233,17 +233,25 @@ function clampAllWeights(
 }
 
 /**
- * Deterministic, order-invariant fingerprint of a holdings set. Sort by
- * "{symbol}:{venue}:{holding_type}" then join with "|". Collision resistance
- * is NOT required — the fingerprint exists to detect when live holdings
- * have structurally changed since the draft was written. (Pitfall 4)
+ * Deterministic, order-invariant fingerprint of a holdings set: the sorted,
+ * DEDUPLICATED set of "{symbol}:{venue}:{holding_type}" tokens joined with "|".
+ * Collision resistance is NOT required — the fingerprint exists to detect when
+ * live holdings have structurally changed since the draft was written.
+ * (Pitfall 4)
+ *
+ * Phase 170.4 (D-08, D-10): a token SET, mirroring the commit RPC's recompute.
+ * `commit_scenario_batch` builds its token array with a `DISTINCT ON (venue,
+ * symbol, holding_type)` over the contributing rows (migration 20260929120000),
+ * so two keys holding one symbol are ONE token. The caller passes the RPC's
+ * contributing row set (`holdingsFingerprintRows` on the payload), not the
+ * dollar rows, which the one-key-per-account-day rule narrows.
  */
 export function computeHoldingsFingerprint(
   holdings: HoldingForFingerprint[],
 ): string {
-  return holdings
-    .map((h) => `${h.symbol}:${h.venue}:${h.holding_type}`)
-    .slice()
+  return Array.from(
+    new Set(holdings.map((h) => `${h.symbol}:${h.venue}:${h.holding_type}`)),
+  )
     .sort((a, b) => a.localeCompare(b))
     .join("|");
 }
@@ -302,6 +310,10 @@ export function renormalizeWeights(
  * double work); when omitted, this function calls computeHoldingsFingerprint
  * internally. Either way the returned `init_holdings_fingerprint` is
  * deterministic for the same holding set.
+ *
+ * Phase 170.4 (D-08): rows that share a scope ref (different keys holding one
+ * venue:symbol:type) accumulate into ONE weight, the sum of their values over
+ * the total, so the default draft never drops a key's dollars.
  */
 export function defaultDraftFromHoldings(
   holdings: HoldingForDefault[],
@@ -313,10 +325,18 @@ export function defaultDraftFromHoldings(
   );
   const toggleByScopeRef: Record<string, boolean> = {};
   const weightOverrides: Record<string, number> = {};
+  // D-08: rows of different keys can share one venue:symbol:type scope ref. They
+  // get ONE toggle whose weight is the SUM of their values over the book total,
+  // so no key's dollars are dropped.
+  const valueByRef: Record<string, number> = {};
   for (const h of holdings) {
     const ref = holdingRefOf(h);
     toggleByScopeRef[ref] = true;
-    weightOverrides[ref] = total > 0 ? h.value_usd / total : 0;
+    valueByRef[ref] =
+      (valueByRef[ref] ?? 0) + (Number.isFinite(h.value_usd) ? h.value_usd : 0);
+  }
+  for (const ref of Object.keys(valueByRef)) {
+    weightOverrides[ref] = total > 0 ? valueByRef[ref] / total : 0;
   }
   return {
     schema_version: SCENARIO_SCHEMA_VERSION,

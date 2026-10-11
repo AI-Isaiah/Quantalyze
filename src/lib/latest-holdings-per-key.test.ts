@@ -10,7 +10,6 @@ import {
   HOLDINGS_ROW_CAP,
   latestHoldingsPerKey,
   NATIVE_UNPRICED_KIND_PREFIX,
-  fetchNativeUnpricedDays,
   nativeUnpricedDay,
 } from "./latest-holdings-per-key";
 
@@ -255,7 +254,7 @@ describe("fetchLatestHoldingsPerKey (D-16, bounded read)", () => {
 
   it("no keys at all is an empty book, not an error", async () => {
     const res = await fetchLatestHoldingsPerKey(fakeClient([], []), "user-1", COLS);
-    expect(res).toEqual({ data: [], error: null, partialReads: [] });
+    expect(res).toEqual({ data: [], error: null, partialReads: [], accountByKey: {}, markerReadError: null });
   });
 
   it("another user's keys and rows are never read", async () => {
@@ -285,7 +284,7 @@ describe("fetchLatestHoldingsPerKey (D-16, bounded read)", () => {
       { table, select, message: "rls denied" },
     );
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
-    expect(res).toEqual({ data: null, error: { message: "rls denied" }, partialReads: [] });
+    expect(res).toEqual({ data: null, error: { message: "rls denied" }, partialReads: [], accountByKey: {}, markerReadError: null });
   });
 
   it("a per-key rows read that reaches the row cap returns a named error, never a partial list", async () => {
@@ -320,6 +319,8 @@ describe("fetchLatestHoldingsPerKey (D-16, bounded read)", () => {
       data: null,
       error: { message: "api_keys id read reached the row cap" },
       partialReads: [],
+      accountByKey: {},
+      markerReadError: null,
     });
   });
 });
@@ -347,7 +348,7 @@ describe("fetchLatestHoldingsPerKey: a later clean poll supersedes older rows (S
       }),
     ]);
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
-    expect(res).toEqual({ data: [], error: null, partialReads: [] });
+    expect(res).toEqual({ data: [], error: null, partialReads: [], accountByKey: {}, markerReadError: null });
   });
 
   it("the newest clean poll decides: an empty poll before a later poll with rows does not hide them", async () => {
@@ -418,7 +419,7 @@ describe("fetchLatestHoldingsPerKey: a later clean poll supersedes older rows (S
       ],
     );
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
-    expect(res).toEqual({ data: [], error: null, partialReads: [] });
+    expect(res).toEqual({ data: [], error: null, partialReads: [], accountByKey: {}, markerReadError: null });
   });
 
   it("another user's poll events are never read", async () => {
@@ -481,7 +482,7 @@ describe("fetchLatestHoldingsPerKey: one exchange account, one reading (SFH-C4-0
       ],
     );
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
-    expect(res).toEqual({ data: [], error: null, partialReads: [] });
+    expect(res).toEqual({ data: [], error: null, partialReads: [], accountByKey: {}, markerReadError: null });
   });
 
   it("a live key that never wrote a row but polled clean and empty supersedes them too", async () => {
@@ -498,7 +499,7 @@ describe("fetchLatestHoldingsPerKey: one exchange account, one reading (SFH-C4-0
       ],
     );
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
-    expect(res).toEqual({ data: [], error: null, partialReads: [] });
+    expect(res).toEqual({ data: [], error: null, partialReads: [], accountByKey: {}, markerReadError: null });
   });
 
   it("a marker link joins the account when the marked key has no venue id of its own", async () => {
@@ -559,6 +560,58 @@ describe("fetchLatestHoldingsPerKey: one exchange account, one reading (SFH-C4-0
       "key-a:2026-08-31:BTC-PERP",
       "key-b:2026-09-29:ETH-PERP",
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 170.4 plan 11 (D-10). The read keeps EVERY tied key (the Scenario
+// fingerprint's row set, which the commit RPC recomputes) and names the account
+// token each contributing key was grouped by, so a dollar total can apply
+// `oneKeyPerAccountDay` with the same identity.
+// ---------------------------------------------------------------------------
+describe("fetchLatestHoldingsPerKey: accountByKey (170.4 plan 11, D-10)", () => {
+  const sameAccount = (id: string) => ({
+    id,
+    user_id: "user-1",
+    exchange: "binance",
+    venue_account_id: "acct-1",
+  });
+
+  it("two tied keys of one account are BOTH returned and share one account token", async () => {
+    const client = fakeClient(
+      [
+        sameAccount("key-a"),
+        sameAccount("key-b"),
+        { id: "key-c", user_id: "user-1", exchange: "binance", venue_account_id: null },
+      ],
+      [
+        h("key-a", "2026-10-11", "BTC"),
+        h("key-b", "2026-10-11", "BTC"),
+        h("key-c", "2026-10-11", "ETH"),
+      ],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.error).toBeNull();
+    expect(ids(res.data as Row[]).sort()).toEqual([
+      "key-a:2026-10-11:BTC",
+      "key-b:2026-10-11:BTC",
+      "key-c:2026-10-11:ETH",
+    ]);
+    expect(res.accountByKey).toEqual({
+      "key-a": "account:key-a",
+      "key-b": "account:key-a",
+      "key-c": "key:key-c",
+    });
+  });
+
+  it("only contributing keys are named: a superseded key is absent", async () => {
+    const client = fakeClient(
+      [sameAccount("key-old"), sameAccount("key-new")],
+      [h("key-old", "2026-08-31", "BTC-PERP"), h("key-new", "2026-09-29", "ETH-PERP")],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[])).toEqual(["key-new:2026-09-29:ETH-PERP"]);
+    expect(res.accountByKey).toEqual({ "key-new": "account:key-new" });
   });
 });
 
@@ -684,7 +737,7 @@ describe("fetchLatestHoldingsPerKey: the poll that wrote the rows could not read
       message: "rls denied",
     }, [partial]);
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
-    expect(res).toEqual({ data: null, error: { message: "rls denied" }, partialReads: [] });
+    expect(res).toEqual({ data: null, error: { message: "rls denied" }, partialReads: [], accountByKey: {}, markerReadError: null });
   });
 });
 
@@ -732,7 +785,7 @@ describe("fetchLatestHoldingsPerKey: a native key the newest poll left unpriced 
   it("contributes nothing once the poll's record is dated after its rows", async () => {
     const client = fakeClient(btc, priced, undefined, [], [record("key-btc", "2026-10-10")]);
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
-    expect(res).toEqual({ data: [], error: null, partialReads: [] });
+    expect(res).toEqual({ data: [], error: null, partialReads: [], accountByKey: {}, markerReadError: null });
   });
 
   it("keeps the rows when the record is of the rows' own day", async () => {
@@ -781,20 +834,118 @@ describe("fetchLatestHoldingsPerKey: a native key the newest poll left unpriced 
   });
 });
 
-describe("fetchNativeUnpricedDays (CR-01)", () => {
-  it("maps each key to its record's day and ignores malformed payloads", async () => {
-    const client = fakeClient([], [], undefined, [], [
-      record("key-a", "2026-10-10"),
-      record("key-b", "2026-10-08"),
-      { allocator_id: "user-1", kind: "native_unpriced:key-c", payload: { asof: "2026-10-10" } },
-      { allocator_id: "user-1", kind: "key_inputs:key-a", payload: { native_unpriced: true, asof: "2026-10-10" } },
-      { allocator_id: "user-2", kind: "native_unpriced:key-z", payload: { native_unpriced: true, asof: "2026-10-10" } },
-    ]);
-    const res = await fetchNativeUnpricedDays(client, "user-1");
+// ---------------------------------------------------------------------------
+// Phase 170.4 plan 12 (D-08, D-10, T-170.4-31). The scenario commit's server AUM
+// is PERSISTED, so it may rest on service-written evidence only. `audit_log` is
+// owner-writable (log_audit_event), so `{ auditEvidence: false }` reads no audit
+// row at all: no clean-poll supersession, no partial-read day.
+// ---------------------------------------------------------------------------
+describe("fetchLatestHoldingsPerKey: { auditEvidence: false } (170.4 plan 12)", () => {
+  const deribit = [{ id: "key-d", user_id: "user-1", exchange: "deribit" }];
+  const rows = [h("key-d", "2026-10-10", "BTC-PERP")];
+  const cleanEmptyPoll = poll("key-d", "2026-10-11T04:00:05+00:00", {
+    final_status: "complete",
+    row_count: 0,
+    asof: "2026-10-11",
+  });
+  const withTableLog = (client: ReturnType<typeof fakeClient>) => {
+    const tables: string[] = [];
+    const wrapped = {
+      from: (t: string) => {
+        tables.push(t);
+        return (client as unknown as { from: (t: string) => unknown }).from(t);
+      },
+    } as unknown as ReturnType<typeof fakeClient>;
+    return { wrapped, tables };
+  };
+
+  it("issues no audit_log read at all", async () => {
+    const { wrapped, tables } = withTableLog(fakeClient(deribit, rows, undefined, [cleanEmptyPoll]));
+    await fetchLatestHoldingsPerKey(wrapped, "user-1", COLS, { auditEvidence: false });
+    expect(tables).not.toContain("audit_log");
+    expect(tables).toEqual(expect.arrayContaining(["api_keys", "allocator_holdings", "allocator_equity_derived"]));
+  });
+
+  it("KNOWN LIMIT: a newer clean empty poll supersedes the key's rows on the dashboard (default) and cannot in the commit's mode", async () => {
+    const dashboard = await fetchLatestHoldingsPerKey(
+      fakeClient(deribit, rows, undefined, [cleanEmptyPoll]),
+      "user-1",
+      COLS,
+    );
+    expect(dashboard.data).toEqual([]);
+    const commit = await fetchLatestHoldingsPerKey(
+      fakeClient(deribit, rows, undefined, [cleanEmptyPoll]),
+      "user-1",
+      COLS,
+      { auditEvidence: false },
+    );
+    expect(ids(commit.data as Row[])).toEqual(["key-d:2026-10-10:BTC-PERP"]);
+  });
+
+  it("names no partial read even when a partial poll event wrote the rows' day", async () => {
+    const partialPoll = poll("key-d", "2026-10-10T04:00:05+00:00", {
+      final_status: "complete_with_warnings",
+      row_count: 1,
+      asof: "2026-10-10",
+    });
+    const dashboard = await fetchLatestHoldingsPerKey(
+      fakeClient(deribit, rows, undefined, [partialPoll]),
+      "user-1",
+      COLS,
+    );
+    expect(dashboard.partialReads).toEqual([{ api_key_id: "key-d", asof: "2026-10-10" }]);
+    const commit = await fetchLatestHoldingsPerKey(
+      fakeClient(deribit, rows, undefined, [partialPoll]),
+      "user-1",
+      COLS,
+      { auditEvidence: false },
+    );
+    expect(commit.partialReads).toEqual([]);
+    expect(commit.data).toEqual(rows);
+  });
+
+  it("still drops a native-unpriced key (service-written evidence) and keeps accountByKey", async () => {
+    const res = await fetchLatestHoldingsPerKey(
+      fakeClient(
+        [
+          { id: "key-btc", user_id: "user-1", exchange: "mt5" },
+          { id: "key-d", user_id: "user-1", exchange: "deribit" },
+        ],
+        [h("key-btc", "2026-10-09", "ACCOUNT-0123abcd"), h("key-d", "2026-10-10", "BTC-PERP")],
+        undefined,
+        [],
+        [record("key-btc", "2026-10-10")],
+      ),
+      "user-1",
+      COLS,
+      { auditEvidence: false },
+    );
+    expect(ids(res.data as Row[])).toEqual(["key-d:2026-10-10:BTC-PERP"]);
+    expect(res.accountByKey).toEqual({ "key-d": "key:key-d" });
+  });
+
+  it("a failed marker read is surfaced as markerReadError and the rows are kept", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await fetchLatestHoldingsPerKey(
+      fakeClient(
+        deribit,
+        rows,
+        { table: "allocator_equity_derived", select: "payload", message: "derived read down" },
+        [],
+        [record("key-d", "2026-10-11")],
+      ),
+      "user-1",
+      COLS,
+      { auditEvidence: false },
+    );
     expect(res.error).toBeNull();
-    expect([...res.data.entries()].sort()).toEqual([
-      ["key-a", "2026-10-10"],
-      ["key-b", "2026-10-08"],
-    ]);
+    expect(res.markerReadError).toBe("derived read down");
+    expect(res.data).toEqual(rows);
+    err.mockRestore();
+  });
+
+  it("markerReadError is null when every marker read succeeded", async () => {
+    const res = await fetchLatestHoldingsPerKey(fakeClient(deribit, rows), "user-1", COLS);
+    expect(res.markerReadError).toBeNull();
   });
 });

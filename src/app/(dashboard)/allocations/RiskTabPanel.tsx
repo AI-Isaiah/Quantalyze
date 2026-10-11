@@ -4,6 +4,8 @@ import { Suspense } from "react";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { WIDGET_COMPONENTS, type WidgetId } from "./widgets";
 import { EquityHistoryRebuilding } from "./components/EquityHistoryRebuilding";
+import { EmptyState } from "./EmptyState";
+import { historyGate, resolveNotSyncingKeys } from "./lib/history-gate";
 import { bookRiskInput } from "./widgets/lib/book-risk-input";
 
 /**
@@ -29,28 +31,24 @@ const RISK_WIDGETS: readonly WidgetId[] = [
   "correlation-matrix",
 ] as const;
 
-/**
- * The keys a `key_not_syncing` reason is about, resolved to the owner's own key
- * rows exactly as the Overview resolves them (AllocationDashboardV2, review C2
- * round 2 IN-04): an id missing from `apiKeys` makes the set unknown (null), so
- * the line falls back to its unnamed form rather than naming a different key.
- */
-function resolveNotSyncingKeys(
-  props: MyAllocationDashboardPayload,
-): MyAllocationDashboardPayload["apiKeys"] | null {
-  const ids = props.equityHistoryNotSyncingKeyIds ?? [];
-  if (ids.length === 0) return null;
-  const byId = new Map((props.apiKeys ?? []).map((k) => [k.id, k]));
-  const keys = ids.map((id) => byId.get(id));
-  return keys.every((k) => k !== undefined) ? keys : null;
-}
-
 export function RiskTabPanel(props: MyAllocationDashboardPayload) {
   // Phase 169.4-01 (SC2, T-169-25): the Risk tab shares the Overview's
   // rebuilding state. Fail-closed like the Overview: only an explicit "ready"
   // shows a figure; a missing or unknown state reads as rebuilding, and NO risk
   // widget renders over a history 167.1.2 withholds.
-  if (props.equityHistoryState !== "ready") {
+  // Phase 170.4 plan 04 (D-04, D-07, D-09): Risk and Overview now share ONE
+  // gate (`historyGate`), so they cannot disagree. An allocator with NO
+  // eligible key and an empty book sees the connect-a-key card on both tabs;
+  // one with an eligible key sees the rebuilding panel on both.
+  const gate = historyGate(props);
+  if (gate === "no_eligible_key") {
+    return (
+      <div data-tab-panel="risk">
+        <EmptyState hasSyncing={false} hasConnectedKeys={false} />
+      </div>
+    );
+  }
+  if (gate === "rebuilding") {
     return (
       <div data-tab-panel="risk">
         <EquityHistoryRebuilding

@@ -61,7 +61,6 @@ vi.mock("@/lib/queries", () => ({
   hasAnyOwnStrategies: (...args: unknown[]) => anyStrategiesMock(...args),
 }));
 vi.mock("@/lib/portfolio-exposure", () => ({
-  getLatestExposureSnapshot: async () => null,
   getNetExposureSeries: async () => [],
   getAllocationSeries: async () => [],
 }));

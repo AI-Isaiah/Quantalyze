@@ -80,7 +80,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import pandas as pd
 
@@ -319,6 +319,179 @@ def account_groups(
     for key_id in sorted(ids):
         grouped[_find(key_id)].append(by_id[key_id])
     return [grouped[root] for root in sorted(grouped, key=lambda r: str(grouped[r][0].get("id")))]
+
+
+def account_identity_tokens(
+    keys: Sequence[Mapping[str, Any]],
+) -> dict[str, str | None]:
+    """Which keys read the same exchange account, as one token per account.
+
+    Two keys read one account when they carry the same non-blank
+    ``(exchange, venue_account_id)`` (case-blind exchange, as
+    ``account_identity_collisions``), or when one is MARKED against the other
+    (``account_share_kind`` duplicate / composite_member naming it in
+    ``account_shared_with_api_key_id``). The marker is the stamper's own
+    evidence (D-01, D-04): the marked key hit the holder's unique account index,
+    which is exactly why its own ``venue_account_id`` stays NULL. Reading the
+    NULL alone would call it an unknown account and let an owner's 'include'
+    count one account twice. A key with neither a venue id nor a marker link is
+    unknown (``None``). The marker kinds are ``SHARED_ACCOUNT_KINDS``, the set
+    ``account_groups`` reads (IN-03), never a copy. Pure.
+
+    Moved here from ``services/job_worker.py`` (170.4 review CR-01) so the match
+    scorer groups keys by the SAME identity as the departed-history rule, the
+    dashboard (``accountIdentityTokens``, src/lib/departed-history.ts) and the
+    commit RPC's ``contributing`` CTE. ``job_worker.account_identity_tokens``
+    delegates here; there is one implementation."""
+    ids = [str(row["id"]) for row in keys]
+    parent = {key_id: key_id for key_id in ids}
+
+    def _find(key_id: str) -> str:
+        while parent[key_id] != key_id:
+            parent[key_id] = parent[parent[key_id]]
+            key_id = parent[key_id]
+        return key_id
+
+    def _union(left: str, right: str) -> None:
+        root_left, root_right = _find(left), _find(right)
+        if root_left != root_right:
+            parent[max(root_left, root_right)] = min(root_left, root_right)
+
+    known: set[str] = set()
+    by_venue: dict[tuple[str, str], str] = {}
+    for row in keys:
+        key_id = str(row["id"])
+        venue_id = row.get("venue_account_id")
+        if isinstance(venue_id, str) and venue_id.strip():
+            exchange = row.get("exchange")
+            exchange_key = exchange.strip().lower() if isinstance(exchange, str) else ""
+            pair = (exchange_key, venue_id.strip())
+            known.add(key_id)
+            if pair in by_venue:
+                _union(by_venue[pair], key_id)
+            else:
+                by_venue[pair] = key_id
+    for row in keys:
+        key_id = str(row["id"])
+        holder = row.get("account_shared_with_api_key_id")
+        if (
+            row.get("account_share_kind") in SHARED_ACCOUNT_KINDS
+            and holder is not None
+            and str(holder) != key_id
+            and str(holder) in parent
+        ):
+            known.update((key_id, str(holder)))
+            _union(key_id, str(holder))
+    return {
+        key_id: (f"account:{_find(key_id)}" if key_id in known else None)
+        for key_id in ids
+    }
+
+
+class HoldingsUpdatedAtError(ValueError):
+    """A holdings row's ``updated_at`` is missing, null or not an ISO instant.
+
+    ``allocator_holdings.updated_at`` is NOT NULL DEFAULT now() with a BEFORE
+    UPDATE trigger (supabase/schema/baseline.sql), so its absence is a contract
+    violation, never a tie. Twin of ``HoldingsUpdatedAtError`` in
+    src/lib/holdings-account-day.ts (same name, same cases)."""
+
+
+# date, ``T``, time, optional fraction (any number of digits), ``Z`` or +-HH:MM.
+# ASCII digits only and ``fullmatch``: ``\d`` alone would accept other scripts'
+# digits and ``$`` would accept a trailing newline, neither of which the TS twin does.
+_ISO_INSTANT = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})"
+    r"(?:\.([0-9]+))?(Z|[+-][0-9]{2}:[0-9]{2})"
+)
+_EPOCH_ORDINAL = date(1970, 1, 1).toordinal()
+
+
+def written_at_micros(ts: Any) -> int:
+    """An ISO-8601 instant as integer microseconds since the epoch.
+
+    Fraction digits are padded or cut to six; ``Z`` and any ``+-HH:MM`` offset
+    are applied. Anything else (a non-string, a missing offset, a space instead
+    of ``T``, an impossible calendar date or clock time) raises
+    ``HoldingsUpdatedAtError``. Integer arithmetic only: no float, no
+    ``datetime.fromisoformat`` (which is more lenient than the TS twin).
+
+    Twin of ``writtenAtMicros`` in src/lib/holdings-account-day.ts; both are
+    replayed against tests/fixtures/one_key_per_account_day_cases.json."""
+    if not isinstance(ts, str):
+        raise HoldingsUpdatedAtError(
+            "holdings updated_at must be an ISO timestamp string, got "
+            f"{'null' if ts is None else type(ts).__name__}"
+        )
+    match = _ISO_INSTANT.fullmatch(ts)
+    if match is None:
+        raise HoldingsUpdatedAtError(f"holdings updated_at is not an ISO instant: {ts!r}")
+    year, month, day, hour, minute, second = (int(g) for g in match.groups()[:6])
+    fraction = int((match.group(7) or "").ljust(6, "0")[:6])
+    if match.group(8) == "Z":
+        offset_minutes = 0
+    else:
+        off_hour, off_minute = int(match.group(8)[1:3]), int(match.group(8)[4:6])
+        if off_hour > 23 or off_minute > 59:
+            raise HoldingsUpdatedAtError(f"holdings updated_at has an impossible offset: {ts!r}")
+        offset_minutes = (-1 if match.group(8)[0] == "-" else 1) * (off_hour * 60 + off_minute)
+    if hour > 23 or minute > 59 or second > 59:
+        raise HoldingsUpdatedAtError(f"holdings updated_at is not a real clock time: {ts!r}")
+    try:
+        ordinal = date(year, month, day).toordinal()
+    except ValueError as exc:
+        raise HoldingsUpdatedAtError(
+            f"holdings updated_at is not a real calendar instant: {ts!r}"
+        ) from exc
+    seconds = (ordinal - _EPOCH_ORDINAL) * 86400 + hour * 3600 + minute * 60 + second
+    return (seconds - offset_minutes * 60) * 1_000_000 + fraction
+
+
+_Row = TypeVar("_Row", bound=Mapping[str, Any])
+
+
+def one_key_per_account_day(rows: Sequence[_Row]) -> list[_Row]:
+    """Phase 170.4 plan 11 (D-10, D-08): one account, counted once per type, on its day.
+
+    ``rows`` are ONE account's holdings rows on its newest ``asof`` (an
+    ``account_groups`` group's rows at its latest day). Once ``allocator_holdings``
+    keeps a row per key (plan 09), several keys of that account can each hold
+    rows on the day, and summing them all counts the account several times. The
+    winner is picked per ``holding_type`` (review WR-01): among the keys holding
+    rows of a type, it is the key whose rows OF THAT TYPE carry the latest
+    ``updated_at`` INSTANT (the maximum over those rows; ``written_at_micros``),
+    ties broken by the smallest LOWERCASE ``api_key_id``. The winner's rows of
+    the type are returned in input order; every other key's rows of that type do
+    not count. Picking per type, not per account, keeps a later spot-only poll
+    from erasing the derivative rows another key of the account wrote that day,
+    and each type still comes from exactly one key, so nothing is counted twice.
+
+    Under today's index this changes what counts in one case: an earlier
+    same-day poll's leftover row for a symbol the later poll no longer read, of
+    the SAME type, stops counting. A later PARTIAL poll (spot only) by one key
+    does not hide another key's derivative rows. The rule stays timestamp-only
+    on purpose (no owner-writable audit evidence in the choice).
+
+    A row without a parseable ``updated_at`` raises ``HoldingsUpdatedAtError``.
+    DOLLAR TOTALS ONLY: the Scenario fingerprint keeps every contributing key's
+    rows. Twin of ``oneKeyPerAccountDay`` in src/lib/holdings-account-day.ts."""
+    instants: dict[tuple[str, str], int] = {}
+    for row in rows:
+        slot = (str(row.get("holding_type")), str(row["api_key_id"]))
+        at = written_at_micros(row.get("updated_at"))
+        if slot not in instants or at > instants[slot]:
+            instants[slot] = at
+    winner: dict[str, str] = {}
+    for holding_type in {slot[0] for slot in instants}:
+        winner[holding_type] = min(
+            (key_id for type_, key_id in instants if type_ == holding_type),
+            key=lambda k: (-instants[(holding_type, k)], k.lower()),
+        )
+    return [
+        row
+        for row in rows
+        if winner[str(row.get("holding_type"))] == str(row["api_key_id"])
+    ]
 
 
 def stitch_shared_account(

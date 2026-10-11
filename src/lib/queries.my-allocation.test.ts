@@ -117,6 +117,9 @@ const state = vi.hoisted(() => ({
     // Phase 164.6.6.2.1 plan 17 — the stored unit of a native-unit account's
     // row (migration 20261010120000). Optional so existing seeds compile.
     quantity_unit?: string | null;
+    // Phase 170.4 plan 07 — allocator_holdings.updated_at is NOT NULL; the
+    // dashboard now reads it for the one-key-per-account-day rule.
+    updated_at: string;
   }>,
   // Phase 36 / 36-03 — per-key csv_daily_returns rows read by
   // getMyAllocationDashboard for the Overview-stats repoint (D1/D2/D3).
@@ -1486,6 +1489,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
         value_usd: 4000,
         venue: "binance",
         holding_type: "spot",
+        updated_at: "2026-04-10T04:00:00+00:00",
         asof: "2026-04-10", // older
       },
       {
@@ -1497,6 +1501,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
         value_usd: 10000,
         venue: "binance",
         holding_type: "spot",
+        updated_at: "2026-04-12T04:00:00+00:00",
         asof: "2026-04-12", // newest — MUST win
       },
       {
@@ -1508,6 +1513,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
         value_usd: 6750,
         venue: "binance",
         holding_type: "spot",
+        updated_at: "2026-04-11T04:00:00+00:00",
         asof: "2026-04-11", // middle
       },
       {
@@ -1519,6 +1525,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
         value_usd: 3000,
         venue: "binance",
         holding_type: "spot",
+        updated_at: "2026-04-11T04:00:00+00:00",
         asof: "2026-04-11",
       },
       {
@@ -1530,6 +1537,7 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
         value_usd: 6200,
         venue: "binance",
         holding_type: "spot",
+        updated_at: "2026-04-12T04:00:00+00:00",
         asof: "2026-04-12", // newest ETH — MUST win
       },
     ];
@@ -1798,6 +1806,7 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
         value_usd,
         venue: "binance",
         holding_type: "spot",
+        updated_at: "2026-05-13T04:00:00+00:00",
         asof: ASOF[ASOF.length - 1],
         api_key_id: "key-A",
       },
@@ -1928,11 +1937,13 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
       {
         allocator_id: "user-1", symbol: "BTC", quantity: 1, mark_price: 53_500,
         value_usd: 30_000, venue: "binance", holding_type: "spot",
+        updated_at: "2026-05-13T04:00:00+00:00",
         asof: ASOF[ASOF.length - 1], api_key_id: "key-A",
       },
       {
         allocator_id: "user-1", symbol: "ETH", quantity: 10, mark_price: 2_000,
         value_usd: 20_000, venue: "okx", holding_type: "spot",
+        updated_at: "2026-05-13T04:00:00+00:00",
         asof: ASOF[ASOF.length - 1], api_key_id: "key-B",
       },
     ];
@@ -2054,11 +2065,13 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
       {
         allocator_id: "user-1", symbol: "BTC", quantity: 1, mark_price: 53_500,
         value_usd: 30_000, venue: "binance", holding_type: "spot",
+        updated_at: "2026-05-13T04:00:00+00:00",
         asof: ASOF[ASOF.length - 1], api_key_id: "key-A",
       },
       {
         allocator_id: "user-1", symbol: "ETH", quantity: 10, mark_price: 2_000,
         value_usd: 20_000, venue: "okx", holding_type: "spot",
+        updated_at: "2026-05-13T04:00:00+00:00",
         asof: ASOF[ASOF.length - 1], api_key_id: "key-B",
       },
     ];
@@ -2128,6 +2141,7 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
         value_usd: 30_000,
         venue: "binance",
         holding_type: "spot",
+        updated_at: "2026-05-13T04:00:00+00:00",
         asof: ASOF[ASOF.length - 1],
         api_key_id: "key-A",
       },
@@ -2139,6 +2153,7 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
         value_usd: 20_000,
         venue: "okx",
         holding_type: "spot",
+        updated_at: "2026-05-13T04:00:00+00:00",
         asof: ASOF[ASOF.length - 1],
         api_key_id: "key-B",
       },
@@ -2304,6 +2319,7 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
         value_usd: 30_000,
         venue: "binance",
         holding_type: "spot",
+        updated_at: "2026-05-13T04:00:00+00:00",
         asof: ASOF[ASOF.length - 1],
         api_key_id: "key-A",
       },
@@ -2315,6 +2331,7 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
         value_usd: 20_000,
         venue: "okx",
         holding_type: "spot",
+        updated_at: "2026-05-13T04:00:00+00:00",
         asof: ASOF[ASOF.length - 1],
         api_key_id: "key-B",
       },
@@ -4053,6 +4070,7 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
       value_usd: valueUsd,
       venue: "bybit",
       holding_type: "spot" as const,
+      updated_at: "2026-05-12T04:00:00+00:00",
       asof: AUM04_DATES[AUM04_DATES.length - 1],
       api_key_id: apiKeyId,
     };
@@ -4671,6 +4689,7 @@ describe("getMyAllocationDashboard — Open Positions reads each key's own lates
     value_usd,
     venue,
     holding_type: "spot" as const,
+    updated_at: `${asof}T04:00:00+00:00`,
     asof,
   });
 
@@ -5193,6 +5212,7 @@ describe("getMyAllocationDashboard — a native account's Holdings row carries i
     value_usd: 26099.54,
     venue: "mt5",
     holding_type: "spot" as const,
+    updated_at: "2026-10-09T04:00:00+00:00",
     asof: "2026-10-09",
     ...(quantity_unit === undefined ? {} : { quantity_unit }),
   });

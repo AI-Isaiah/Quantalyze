@@ -1,5 +1,5 @@
 import { render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ExposureByClass } from "./ExposureByClass";
 import type { ExposureSnapshot, ExposureSlice } from "@/lib/portfolio-exposure";
 
@@ -11,10 +11,20 @@ import type { ExposureSnapshot, ExposureSlice } from "@/lib/portfolio-exposure";
  * direction lock. Pure CSS — no recharts, no data fetching.
  */
 
-function snap(slices: ExposureSlice[], overrides: Partial<ExposureSnapshot> = {}): ExposureSnapshot {
-  const totalGrossUsd = slices.reduce((a, s) => a + s.valueUsd, 0);
-  const totalNetUsd = slices.reduce((a, s) => a + s.signedValueUsd, 0);
-  return { asof: "2026-07-11", slices, totalGrossUsd, totalNetUsd, ...overrides };
+type SliceInput = Omit<ExposureSlice, "apiKeyId"> & { apiKeyId?: string | null };
+
+function snap(slices: SliceInput[], overrides: Partial<ExposureSnapshot> = {}): ExposureSnapshot {
+  const full: ExposureSlice[] = slices.map((s) => ({ ...s, apiKeyId: s.apiKeyId ?? null }));
+  const totalGrossUsd = full.reduce((a, s) => a + s.valueUsd, 0);
+  const totalNetUsd = full.reduce((a, s) => a + s.signedValueUsd, 0);
+  return {
+    asof: "2026-07-11",
+    oldestAsof: "2026-07-11",
+    slices: full,
+    totalGrossUsd,
+    totalNetUsd,
+    ...overrides,
+  };
 }
 
 // Hedged book (D-P2): long $300K spot + short $100K derivative.
@@ -93,26 +103,84 @@ describe("<ExposureByClass> — composition bar + legend", () => {
 });
 
 describe("<ExposureByClass> — honest-empty", () => {
-  it("renders exactly the two-line honest-empty copy and no KPI strip for a null snapshot", () => {
+  it("renders the two-line empty copy, no KPI strip and no 24-month claim for a null snapshot", () => {
     render(<ExposureByClass snapshot={null} />);
-    expect(screen.getByText("No position snapshot yet.")).toBeTruthy();
+    expect(screen.getByText("No current positions.")).toBeTruthy();
     expect(
-      screen.getByText(
-        "Exposure appears after your first exchange sync. Snapshots older than 24 months are not shown.",
-      ),
+      screen.getByText("Exposure appears once a key's latest sync reads a position."),
     ).toBeTruthy();
+    // The per-key reader has no date window, so a 24-month claim would be false.
+    expect(document.body.textContent).not.toContain("24 months");
     // no fabricated numbers, no KPI strip, no title
     expect(screen.queryByTestId("kpi-gross")).toBeNull();
     expect(screen.queryByText("Exposure by asset class")).toBeNull();
   });
 });
 
+describe("<ExposureByClass> — read-day stamp (D-01)", () => {
+  it("names the one day every key was read on", () => {
+    render(<ExposureByClass snapshot={snap(HEDGED.slices, { asof: "2026-10-03", oldestAsof: "2026-10-03" })} />);
+    expect(screen.getByText("as of 2026-10-03")).toBeTruthy();
+  });
+
+  it("names the range when the keys were read on different days", () => {
+    render(<ExposureByClass snapshot={snap(HEDGED.slices, { asof: "2026-10-03", oldestAsof: "2026-10-01" })} />);
+    expect(screen.getByText("as of 2026-10-01 to 2026-10-03")).toBeTruthy();
+  });
+
+  it("renders no stamp at all, and never an invented day, when no row has a read day", () => {
+    const { container } = render(
+      <ExposureByClass snapshot={snap(HEDGED.slices, { asof: null, oldestAsof: null })} />,
+    );
+    expect(container.textContent).not.toContain("as of");
+    expect(container.textContent).not.toContain("null");
+  });
+});
+
+describe("<ExposureByClass> — Key column (D-08)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const TWO_KEYS = snap([
+    { apiKeyId: "key-a", holdingType: "spot", venue: "binance", symbol: "BTC", side: "flat", valueUsd: 40000, signedValueUsd: 40000 },
+    { apiKeyId: "key-b", holdingType: "spot", venue: "binance", symbol: "BTC", side: "flat", valueUsd: 25000, signedValueUsd: 25000 },
+  ]);
+
+  it("names each row's key by the one key-label rule", () => {
+    const labels = new Map([
+      ["key-a", "Binance — Main"],
+      ["key-b", "Binance — ••••ey-b"],
+    ]);
+    render(<ExposureByClass snapshot={TWO_KEYS} keyLabels={labels} />);
+    const rows = screen.getByRole("table").querySelectorAll("tbody tr");
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("Binance — Main");
+    expect(rows[1].textContent).toContain("Binance — ••••ey-b");
+  });
+
+  it("reads an em-dash, never the raw key id, for a key the panel does not know", () => {
+    render(<ExposureByClass snapshot={TWO_KEYS} keyLabels={new Map([["key-a", "Binance — Main"]])} />);
+    const rows = screen.getByRole("table").querySelectorAll("tbody tr");
+    expect(rows[1].textContent).not.toContain("key-b");
+    const cells = rows[1].querySelectorAll("td");
+    expect(cells[1].textContent).toBe("—");
+    expect(document.body.textContent).not.toContain("key-a|");
+  });
+
+  it("renders two keys' one-symbol rows without a duplicate React key warning", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<ExposureByClass snapshot={TWO_KEYS} />);
+    const dup = err.mock.calls.filter((c) => String(c[0]).includes("same key"));
+    expect(dup).toHaveLength(0);
+    expect(screen.getByRole("table").querySelectorAll("tbody tr")).toHaveLength(2);
+  });
+});
+
 describe("<ExposureByClass> — drilldown table", () => {
-  it("renders a real table with the six UI-SPEC columns in order, sorted by valueUsd desc", () => {
+  it("renders a real table with the UI-SPEC columns (plus Key, D-08) in order, sorted by valueUsd desc", () => {
     render(<ExposureByClass snapshot={HEDGED} />);
     const table = screen.getByRole("table");
     const headers = within(table).getAllByRole("columnheader").map((h) => h.textContent);
-    expect(headers).toEqual(["Venue", "Symbol", "Type", "Side", "Gross", "Net"]);
+    expect(headers).toEqual(["Venue", "Key", "Symbol", "Type", "Side", "Gross", "Net"]);
 
     const rows = table.querySelectorAll("tbody tr");
     expect(rows).toHaveLength(2);

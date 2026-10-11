@@ -123,6 +123,58 @@ describe("OptimizerPanel", () => {
     expect(screen.queryByText(/Run Optimizer/i)).not.toBeInTheDocument();
   });
 
+  it("0-portfolio gate with hasConnectedKeys=false is the same connect card (explicit prop)", () => {
+    render(
+      <OptimizerPanel
+        hasConnectedKeys={false}
+        prefetch={prefetch({
+          portfolios: [],
+          defaultPortfolioId: null,
+          initialSuggestions: null,
+          computedAt: null,
+          computationStatus: null,
+        })}
+      />,
+    );
+    expect(
+      screen.getByText("Simulate Impact needs a live portfolio"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Connect Exchange/i }),
+    ).toHaveAttribute("href", "/profile?tab=exchanges");
+  });
+
+  // 170.4 D-06 / D-07: a key-holder with no portfolio is never told to connect
+  // a key. The signal is the server-side `hasConnectedKeys` flag, not
+  // `portfolios` (empty here by construction, which is the bug's trigger).
+  it("0-portfolio gate with an eligible key names the real reason, no connect link, no optimizer (D-06)", () => {
+    render(
+      <OptimizerPanel
+        hasConnectedKeys
+        prefetch={prefetch({
+          portfolios: [],
+          defaultPortfolioId: null,
+          initialSuggestions: null,
+          computedAt: null,
+          computationStatus: null,
+        })}
+      />,
+    );
+    expect(
+      screen.getByText("Simulate Impact needs a portfolio"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Your exchange keys are connected, but you have no portfolio yet. A portfolio starts when you allocate to a strategy.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /Connect/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Connect a read-only/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Run Optimizer/i)).not.toBeInTheDocument();
+  });
+
   it("renders the mandatory footer disclaimer verbatim", () => {
     render(<OptimizerPanel prefetch={prefetch()} />);
     expect(screen.getByText(FOOTER)).toBeInTheDocument();
@@ -193,4 +245,28 @@ describe("OptimizerPanel", () => {
     render(<OptimizerPanel prefetch={prefetch()} />);
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
   });
+
+  // Kept LAST: it resolves the next/dynamic PortfolioOptimizer chunk, whose own
+  // <dt>-less markup repeats the glossary titles, so any glossary getByTitle
+  // test placed after it in this file would see duplicates.
+  it.each([true, false])(
+    "a portfolio with no analytics mounts the optimizer's never-run state and shows no connect copy (hasConnectedKeys=%s) (D-06)",
+    async (hasConnectedKeys) => {
+      render(
+        <OptimizerPanel
+          hasConnectedKeys={hasConnectedKeys}
+          prefetch={prefetch({
+            initialSuggestions: null,
+            computedAt: null,
+            computationStatus: null,
+          })}
+        />,
+      );
+      expect(await screen.findByText(/Run Optimizer/i)).toBeInTheDocument();
+      expect(
+        screen.queryByRole("link", { name: /Connect/i }),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText(/Connect a read-only/)).not.toBeInTheDocument();
+    },
+  );
 });

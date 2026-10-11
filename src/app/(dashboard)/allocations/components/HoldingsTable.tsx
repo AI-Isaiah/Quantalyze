@@ -141,6 +141,13 @@ export interface HoldingRow {
   quantity_unit?: string | null;
   mark_price_usd?: number | null;
   api_key_id: string;
+  /**
+   * Phase 170.4 D-08. The label of the key this row's position belongs to
+   * (`apiKeyLabelById`: "Binance — Main"), shown under the symbol. `null` or
+   * absent when the key is not in the key list: the cell then shows nothing,
+   * never the raw key id.
+   */
+  key_label?: string | null;
   /** Joined from `api_keys.sync_status` by the dashboard layer. */
   source_key_sync_status: string;
   /** Phase 167.1 review round 2 WR-05. True when `api_key_id` is MISSING from
@@ -196,6 +203,15 @@ export interface HoldingsTableProps {
   onEditAllocation?: (row: StrategyRow) => void;
   // ── Legacy props (Phase 08) — required when `rows` is absent.
   holdings?: HoldingRow[];
+  /**
+   * Phase 170.4 D-02 (legacy mode only). How many rows the Open Positions
+   * table beneath this one shows. When the table holds no spot rows at all and
+   * this is above zero, the empty line says there are no SPOT holdings and
+   * points at those positions, instead of reading as an empty book. The caller
+   * passes the Open Positions table's own row count, so the sentence and the
+   * table cannot disagree. Absent or 0 keeps "No holdings to display.".
+   */
+  openPositionCount?: number;
   showRevoked?: boolean;
   onShowRevokedChange?: (next: boolean) => void;
   notesByHoldingScopeRef?: Record<
@@ -242,6 +258,7 @@ export function HoldingsTable(props: HoldingsTableProps) {
   return (
     <LegacyHoldingsTable
       holdings={props.holdings ?? []}
+      openPositionCount={props.openPositionCount ?? 0}
       showRevoked={props.showRevoked ?? true}
       onShowRevokedChange={props.onShowRevokedChange ?? (() => {})}
       notesByHoldingScopeRef={props.notesByHoldingScopeRef ?? {}}
@@ -556,6 +573,7 @@ function StrategySortableHeader({
 
 interface LegacyProps {
   holdings: HoldingRow[];
+  openPositionCount: number;
   showRevoked: boolean;
   onShowRevokedChange: (next: boolean) => void;
   notesByHoldingScopeRef: Record<
@@ -566,6 +584,7 @@ interface LegacyProps {
 
 function LegacyHoldingsTable({
   holdings,
+  openPositionCount,
   showRevoked,
   onShowRevokedChange,
   notesByHoldingScopeRef,
@@ -603,9 +622,24 @@ function LegacyHoldingsTable({
       </div>
 
       {visibleHoldings.length === 0 ? (
-        <p className="px-4 py-6 text-sm text-text-muted">
-          No holdings to display.
-        </p>
+        // Phase 170.4 D-02: tested on `holdings`, not `visibleHoldings`. A spot
+        // row hidden by the untrusted-key filter is still a spot holding, so
+        // the no-spot-holdings line would be false of it; that case keeps the
+        // original line and the hidden-count footer below.
+        holdings.length === 0 && openPositionCount > 0 ? (
+          <p className="px-4 py-6 text-sm text-text-muted">
+            <span className="block">No spot holdings.</span>
+            <span className="block">
+              {openPositionCount === 1
+                ? "Your 1 open position is listed under Open Positions below."
+                : `Your ${openPositionCount} open positions are listed under Open Positions below.`}
+            </span>
+          </p>
+        ) : (
+          <p className="px-4 py-6 text-sm text-text-muted">
+            No holdings to display.
+          </p>
+        )
       ) : (
         <ResponsiveTable label="Holdings">
         <table className="w-full text-sm">
@@ -679,6 +713,14 @@ function LegacyHoldingsTable({
                           </span>
                         ) : null}
                       </div>
+                      {h.key_label ? (
+                        <div
+                          data-testid="holding-key-label"
+                          className="text-caption text-text-muted"
+                        >
+                          {h.key_label}
+                        </div>
+                      ) : null}
                     </td>
                     <td className="px-4 py-2 text-xs text-text-secondary">
                       {h.holding_type === "spot" ? "Spot" : "Derivative"}

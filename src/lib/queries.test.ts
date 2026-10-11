@@ -2186,6 +2186,8 @@ describe("derivePhase07Fields: holdingsSummary is each key's own latest asof (D-
     holding_type: "spot",
     asof,
     api_key_id,
+    // Phase 170.4 plan 07: required by the one-key-per-account-day rule.
+    updated_at: `${asof}T04:00:00+00:00`,
     side: null,
     entry_price: null,
     unrealized_pnl_usd: null,
@@ -2234,18 +2236,21 @@ describe("derivePhase07Fields: holdingsSummary is each key's own latest asof (D-
     expect(desc).toEqual(asc);
   });
 
-  it("the unchanged collapse still keeps the newer of two keys' rows on one venue:symbol:type", () => {
-    // Two keys on the same venue:symbol:type at their own latest asofs. The
-    // per-key filter keeps both; the D-08 collapse (holdingScopeKey, max asof)
-    // then keeps key A's newer row. The collapse is not touched by D-16.
+  it("D-08: two keys on one venue:symbol:type keep one row EACH (no cross-key merge)", () => {
+    // Two keys on the same venue:symbol:type at their own latest asofs. D-08
+    // ("One Key is One Strategy"): holdings from different keys are never
+    // merged, so both rows survive and the total is the sum over keys. The
+    // collapse used to keep only key A's newer row (200) and drop key B's 50.
     const rows = [
       row("key-a", "2026-09-27", "BTC", { value_usd: 200 }),
       row("key-b", "2026-09-25", "BTC", { value_usd: 50 }),
     ];
     const summary = summarize(rows);
-    expect(summary).toHaveLength(1);
-    expect(summary[0].api_key_id).toBe("key-a");
-    expect(summary[0].value_usd).toBe(200);
+    expect(summary.map((h) => `${h.api_key_id}:${h.value_usd}`).sort()).toEqual([
+      "key-a:200",
+      "key-b:50",
+    ]);
+    expect(summary.reduce((s, h) => s + h.value_usd, 0)).toBe(250);
   });
 });
 

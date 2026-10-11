@@ -20,7 +20,7 @@
  * breaks it by design (D-07).
  *
  * Every holding carries its own (venue, symbol, holding_type) triple.
- * `holdingByRef` keys on that triple, not on the key, so two holdings sharing
+ * `holdingsByRef` groups on that triple (one row per key under it, 170.4 D-08), not on the key, so two holdings sharing
  * one would collapse into a single map entry and make a hand-typed oracle wrong
  * for a reason that has nothing to do with the helper.
  */
@@ -32,6 +32,7 @@ import {
   buildKeyTrustClause,
   holdingEquityContributionLocal,
   holdingEquityIsReported,
+  holdingsByRef,
   managerSideKeyIds,
   summarizeLiveHoldings,
 } from "./live-holdings-summary";
@@ -190,12 +191,6 @@ const ALL_HOLDINGS = [
 
 const ref = (h: DashboardHolding) => buildHoldingRef(h);
 
-function buildHoldingByRef(
-  holdings: readonly DashboardHolding[],
-): ReadonlyMap<string, DashboardHolding> {
-  return new Map(holdings.map((h) => [ref(h), h]));
-}
-
 /** Every listed holding toggled ON, the composer's default draft. */
 function allOn(holdings: readonly DashboardHolding[]): Record<string, boolean> {
   return Object.fromEntries(holdings.map((h) => [ref(h), true]));
@@ -211,7 +206,7 @@ function summarize(opts: {
 }) {
   return summarizeLiveHoldings({
     toggleByScopeRef: opts.toggles ?? allOn(opts.holdings),
-    holdingByRef: buildHoldingByRef(opts.holdings),
+    holdingsByRef: holdingsByRef(opts.holdings),
     contributingApiKeyIds: opts.contributing,
     managerSideApiKeyIds: opts.managerSide ?? [],
     statusByKeyId: STATUS_BY_KEY_ID,
@@ -227,9 +222,9 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("summarizeLiveHoldings — fixture self-proof", () => {
-  it("every fixture holding has a distinct (venue, symbol, holding_type) triple, so none collapses out of holdingByRef", () => {
+  it("every fixture holding has a distinct (venue, symbol, holding_type) triple, so none collapses out of holdingsByRef", () => {
     expect(new Set(ALL_HOLDINGS.map(ref)).size).toBe(ALL_HOLDINGS.length);
-    expect(buildHoldingByRef(ALL_HOLDINGS).size).toBe(ALL_HOLDINGS.length);
+    expect(holdingsByRef(ALL_HOLDINGS).size).toBe(ALL_HOLDINGS.length);
   });
 
   it("`error` is a status the REAL predicate calls trusted — the precondition that makes pin 5 non-vacuous", () => {
@@ -277,7 +272,7 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     expect(s.untrusted).toEqual({ amount: -2_500, count: 1, unavailable: 0 });
   });
 
-  it("pin 4: an untrusted holding that is toggled OFF, or whose key is outside a non-empty contributing set, adds nothing to the total or the untrusted amount; non-holding refs and refs missing from holdingByRef are ignored", () => {
+  it("pin 4: an untrusted holding that is toggled OFF, or whose key is outside a non-empty contributing set, adds nothing to the total or the untrusted amount; non-holding refs and refs missing from holdingsByRef are ignored", () => {
     const holdings = [H_TRUSTED, H_SIGN_IN_FAILED, H_SIGN_IN_FAILED_OUTSIDE];
     const s = summarize({
       holdings,
@@ -379,7 +374,7 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     const holdings = [H_TRUSTED, H_REVOKED, H_SIGN_IN_FAILED_OUTSIDE];
     const s = summarizeLiveHoldings({
       toggleByScopeRef: allOn(holdings),
-      holdingByRef: buildHoldingByRef(holdings),
+      holdingsByRef: holdingsByRef(holdings),
       contributingApiKeyIds: [KEY_TRUSTED],
       managerSideApiKeyIds: [],
       statusByKeyId: new Map(),
@@ -763,7 +758,7 @@ describe("summarizeLiveHoldings — [review C2 WR-03] excludedNotConnected", () 
   const run = (eligible: readonly string[] | undefined) =>
     summarizeLiveHoldings({
       toggleByScopeRef: allOn([H_TRUSTED, H_GONE, H_REVOKED]),
-      holdingByRef: buildHoldingByRef([H_TRUSTED, H_GONE, H_REVOKED]),
+      holdingsByRef: holdingsByRef([H_TRUSTED, H_GONE, H_REVOKED]),
       contributingApiKeyIds: [KEY_TRUSTED],
       managerSideApiKeyIds: [],
       statusByKeyId: statusWithGone,
@@ -797,7 +792,7 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
   // every status the fixture knows (trusted, untrusted, absent from the status
   // map), contributing / manager-side / neither, spot and derivative holdings,
   // unreported values, negative P&L, toggles on and off, stray refs that are
-  // not in holdingByRef and non-holding refs, and the empty-contributing
+  // not in holdingsByRef and non-holding refs, and the empty-contributing
   // degrade branch.
   function lcg(seed: number) {
     let x = seed >>> 0;
@@ -851,7 +846,7 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
       }
       const toggles: Record<string, boolean> = {};
       for (const h of holdings) toggles[ref(h)] = rand() < 0.8;
-      // Stray refs the loop must ignore: one not in holdingByRef, one not a
+      // Stray refs the loop must ignore: one not in holdingsByRef, one not a
       // holding ref at all.
       toggles[`holding:stray-${c}:X:spot`] = true;
       toggles[`strategy-${c}`] = true;
@@ -869,7 +864,7 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
       );
       const s = summarizeLiveHoldings({
         toggleByScopeRef: toggles,
-        holdingByRef: buildHoldingByRef(holdings),
+        holdingsByRef: holdingsByRef(holdings),
         contributingApiKeyIds: contributing,
         managerSideApiKeyIds: managerSide,
         statusByKeyId: GEN_STATUS,
@@ -991,5 +986,69 @@ describe("buildKeyTrustClause — [167.1.2 SC-4] the excludedTrusted part", () =
     expect(
       buildKeyTrustClause(part(12_345, 1), NONE, RENDER, part(8_000, 2), NONE, NONE),
     ).toBe("includes $12345 and excludes $8000 from keys needing attention");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 170.4 D-08 ("One Key is One Strategy") — every key's row under one scope ref
+// ---------------------------------------------------------------------------
+
+describe("holdingsByRef + summarizeLiveHoldings — D-08 two keys, one venue:symbol:type", () => {
+  // Two live keys hold the SAME binance BTC spot. key-a trusted and eligible,
+  // key-b revoked. Hand-typed: 40,000 + 25,000 = 65,000; the revoked key's
+  // 25,000 is the untrusted part (count 1).
+  const KEY_A = "dallochold-key-a";
+  const KEY_B = "dallochold-key-b";
+  const ROW_A = buildHolding({
+    venue: "binance",
+    symbol: "BTC",
+    value_usd: 40_000,
+    api_key_id: KEY_A,
+  });
+  const ROW_B = buildHolding({
+    venue: "binance",
+    symbol: "BTC",
+    value_usd: 25_000,
+    api_key_id: KEY_B,
+  });
+  const SHARED_REF = "holding:binance:BTC:spot";
+  const STATUS = new Map<string, string | null>([
+    [KEY_A, null],
+    [KEY_B, "revoked"],
+  ]);
+
+  function twoKeySummary(on: boolean) {
+    return summarizeLiveHoldings({
+      toggleByScopeRef: { [SHARED_REF]: on },
+      holdingsByRef: holdingsByRef([ROW_A, ROW_B]),
+      contributingApiKeyIds: [],
+      managerSideApiKeyIds: [],
+      statusByKeyId: STATUS,
+    });
+  }
+
+  it("the fixture's two rows really share one scope ref (precondition that makes the oracle non-vacuous)", () => {
+    expect(ref(ROW_A)).toBe(SHARED_REF);
+    expect(ref(ROW_B)).toBe(SHARED_REF);
+  });
+
+  it("holdingsByRef keeps every row under a ref, in input order", () => {
+    const m = holdingsByRef([ROW_A, ROW_B]);
+    expect(m.size).toBe(1);
+    expect(m.get(SHARED_REF)).toEqual([ROW_A, ROW_B]);
+  });
+
+  it("toggle ON: the total sums BOTH keys (65,000) and each row is classified by its OWN key — the revoked key's 25,000 is the untrusted part, count 1", () => {
+    const s = twoKeySummary(true);
+    expect(s.total).toBe(65_000);
+    expect(s.untrusted.amount).toBe(25_000);
+    expect(s.untrusted.count).toBe(1);
+    expect(s.unknownStatus.count).toBe(0);
+  });
+
+  it("toggle OFF: neither row counts", () => {
+    const s = twoKeySummary(false);
+    expect(s.total).toBe(0);
+    expect(s.untrusted.count).toBe(0);
   });
 });

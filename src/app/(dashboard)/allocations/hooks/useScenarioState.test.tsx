@@ -932,3 +932,96 @@ describe("useScenarioState", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 170.4 plan 07 (D-10, plan-checker N2): the fingerprint is built from the
+// commit RPC's contributing row set, not from the dollar rows.
+// ---------------------------------------------------------------------------
+describe("useScenarioState: fingerprintHoldings (170.4 D-10 / N2)", () => {
+  beforeEach(() => {
+    store.clear();
+    vi.clearAllMocks();
+  });
+
+  // One exchange account read by two keys on the same day. The dollar rows carry
+  // the winning key only (BTC, ETH); the RPC's `contributing` CTE keeps BOTH keys,
+  // so its token set also holds the losing key's SOL-PERP.
+  const WINNER_ROWS: HoldingForDefault[] = [
+    { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 30000 },
+    { symbol: "ETH", venue: "binance", holding_type: "spot", value_usd: 5000 },
+  ];
+  const CONTRIBUTING = [
+    { symbol: "BTC", venue: "binance", holding_type: "spot" },
+    { symbol: "BTC", venue: "binance", holding_type: "spot" },
+    { symbol: "ETH", venue: "binance", holding_type: "spot" },
+    { symbol: "SOL-PERP", venue: "binance", holding_type: "derivative" },
+  ];
+  // The hand-typed recompute input: the RPC's sorted DISTINCT ON tokens.
+  const RECOMPUTE = "BTC:binance:spot|ETH:binance:spot|SOL-PERP:binance:derivative";
+
+  it("the hook's fingerprint and the default draft's init fingerprint equal the RPC's recompute input", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({
+        holdingsSummary: WINNER_ROWS,
+        fingerprintHoldings: CONTRIBUTING,
+        allocatorId: ALLOCATOR_A,
+      }),
+    );
+    expect(result.current.draft.init_holdings_fingerprint).toBe(RECOMPUTE);
+    expect(result.current.fingerprintMismatch).toBe(false);
+  });
+
+  it("the default weights sum over the winner's rows only (35000 total), never the contributing set", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({
+        holdingsSummary: WINNER_ROWS,
+        fingerprintHoldings: CONTRIBUTING,
+        allocatorId: ALLOCATOR_A,
+      }),
+    );
+    expect(Object.keys(result.current.draft.toggleByScopeRef).sort()).toEqual([
+      REF_BTC,
+      REF_ETH,
+    ]);
+    expect(result.current.draft.weightOverrides[REF_BTC]).toBeCloseTo(30000 / 35000, 9);
+    expect(result.current.draft.weightOverrides[REF_ETH]).toBeCloseTo(5000 / 35000, 9);
+  });
+
+  it("a stored draft carrying the RPC's recompute fingerprint is resumed, not flagged as drifted", () => {
+    const stored = defaultDraftFromHoldings(WINNER_ROWS, RECOMPUTE);
+    store.set(scenarioStorageKey(ALLOCATOR_A), JSON.stringify(stored));
+    const { result } = renderHook(() =>
+      useScenarioState({
+        holdingsSummary: WINNER_ROWS,
+        fingerprintHoldings: CONTRIBUTING,
+        allocatorId: ALLOCATOR_A,
+      }),
+    );
+    expect(result.current.fingerprintMismatch).toBe(false);
+  });
+
+  it("without fingerprintHoldings the fingerprint comes from holdingsSummary, as before", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: WINNER_ROWS, allocatorId: ALLOCATOR_A }),
+    );
+    expect(result.current.draft.init_holdings_fingerprint).toBe(
+      "BTC:binance:spot|ETH:binance:spot",
+    );
+  });
+
+  it("in blank mode a draft stamped with the recompute set matches the drift reference and does not read as drifted", () => {
+    // Blank mode: the composer seeds [] and passes the un-gated fingerprint rows
+    // as the drift reference. A book draft that matches the live book is not drifted.
+    const stored = defaultDraftFromHoldings(WINNER_ROWS, RECOMPUTE);
+    store.set(scenarioStorageKey(ALLOCATOR_A), JSON.stringify(stored));
+    const { result } = renderHook(() =>
+      useScenarioState({
+        holdingsSummary: [],
+        fingerprintHoldings: [],
+        driftReferenceHoldings: CONTRIBUTING,
+        allocatorId: ALLOCATOR_A,
+      }),
+    );
+    expect(result.current.fingerprintMismatch).toBe(false);
+  });
+});

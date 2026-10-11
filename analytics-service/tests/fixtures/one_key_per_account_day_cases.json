@@ -1,0 +1,206 @@
+{
+  "_comment": "Phase 170.4 plan 11 (D-10, D-08). The cross-runtime oracle for the one-key-per-account-day rule. Read by src/lib/holdings-account-day.test.ts (oneKeyPerAccountDay, writtenAtMicros) and analytics-service/tests/test_one_key_per_account_day.py (one_key_per_account_day, written_at_micros). HAND-TYPED: every micros figure and every survivor below was worked out by hand (epoch seconds of 2026-10-11T04:00:00Z = 1791691200), never produced by either implementation. The rule: among the keys of ONE account holding rows OF ONE holding_type on that account's newest asof, the winner FOR THAT TYPE is the key whose rows OF THAT TYPE carry the latest updated_at INSTANT (a key's instant is the max over its rows of the type; parsed to integer microseconds, fraction padded or cut to six digits, Z and +00:00 and any offset applied), ties broken by the smallest LOWERCASE api_key_id; the winner is picked per (account, holding_type), never per account (review WR-01), so a later spot-only poll cannot erase an earlier key's derivative rows. A missing, null or malformed updated_at raises HoldingsUpdatedAtError. Do not add a case here without adding its expectation in both runtimes' runs; the two suites consume this file whole.",
+  "micros": [
+    { "ts": "1970-01-01T00:00:00Z", "micros": 0 },
+    { "ts": "2026-10-11T04:00:00Z", "micros": 1791691200000000 },
+    { "ts": "2026-10-11T04:00:05Z", "micros": 1791691205000000 },
+    { "ts": "2026-10-11T04:00:05.000000+00:00", "micros": 1791691205000000 },
+    { "ts": "2026-10-11T04:00:05.123456+00:00", "micros": 1791691205123456 },
+    { "ts": "2026-10-11T04:00:05.123457+00:00", "micros": 1791691205123457 },
+    { "ts": "2026-10-11T04:02:10.5Z", "micros": 1791691330500000 },
+    { "ts": "2026-10-11T04:00:05.1234569Z", "micros": 1791691205123456 },
+    { "ts": "2026-10-11T06:00:05+02:00", "micros": 1791691205000000 },
+    { "ts": "2026-10-11T04:00:05.12-05:30", "micros": 1791711005120000 }
+  ],
+  "micros_errors": [
+    "2026-10-11 04:00",
+    "2026-10-11T04:00:05",
+    "2026-10-11 04:00:05Z",
+    "2026-10-11T04:00:05.Z",
+    "2026-13-01T00:00:00Z",
+    "2026-02-30T00:00:00Z",
+    "2026-10-11T24:00:00Z",
+    "2026-10-11T04:00:05+24:00",
+    ""
+  ],
+  "cases": [
+    {
+      "name": "later_poll_wins_mixed_fraction_digits_and_suffixes",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05.123456+00:00", "holding_type": "spot", "symbol": "BTC", "value_usd": 29000 },
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05.123456+00:00", "holding_type": "spot", "symbol": "ETH", "value_usd": 4800 },
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05.123456+00:00", "holding_type": "spot", "symbol": "SOL", "value_usd": 700 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:02:10.5Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 30000 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:02:10.5Z", "holding_type": "spot", "symbol": "ETH", "value_usd": 5000 }
+      ],
+      "expected": { "acct-D": ["b0000000-0000-4000-8000-00000000000b"] },
+      "expected_sum_usd": 35000
+    },
+    {
+      "name": "a_fraction_beats_the_same_second_written_without_one",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05.000001+00:00", "holding_type": "spot", "symbol": "BTC", "value_usd": 100 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 200 }
+      ],
+      "expected": { "acct-D": ["a0000000-0000-4000-8000-00000000000a"] },
+      "expected_sum_usd": 100
+    },
+    {
+      "name": "an_offset_is_applied_before_comparing",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T06:00:05+02:00", "holding_type": "spot", "symbol": "BTC", "value_usd": 100 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:30:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 200 }
+      ],
+      "expected": { "acct-D": ["b0000000-0000-4000-8000-00000000000b"] },
+      "expected_sum_usd": 200
+    },
+    {
+      "name": "equal_instants_written_differently_smaller_id_wins",
+      "rows": [
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05.000000+00:00", "holding_type": "spot", "symbol": "BTC", "value_usd": 200 },
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 100 }
+      ],
+      "expected": { "acct-D": ["a0000000-0000-4000-8000-00000000000a"] },
+      "expected_sum_usd": 100
+    },
+    {
+      "name": "equal_instants_an_uppercase_id_compares_lowercase",
+      "rows": [
+        { "api_key_id": "B0000000-0000-4000-8000-00000000000B", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 200 },
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 100 }
+      ],
+      "expected": { "acct-D": ["a0000000-0000-4000-8000-00000000000a"] },
+      "expected_sum_usd": 100
+    },
+    {
+      "name": "a_sub_millisecond_difference_decides",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05.123456+00:00", "holding_type": "spot", "symbol": "BTC", "value_usd": 100 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05.123457+00:00", "holding_type": "spot", "symbol": "BTC", "value_usd": 200 }
+      ],
+      "expected": { "acct-D": ["b0000000-0000-4000-8000-00000000000b"] },
+      "expected_sum_usd": 200
+    },
+    {
+      "name": "two_accounts_on_one_day_both_survive",
+      "rows": [
+        { "api_key_id": "c0000000-0000-4000-8000-00000000000c", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 50 },
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:10:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 100 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-E", "asof": "2026-10-11", "updated_at": "2026-10-11T03:00:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 200 }
+      ],
+      "expected": {
+        "acct-D": ["a0000000-0000-4000-8000-00000000000a"],
+        "acct-E": ["b0000000-0000-4000-8000-00000000000b"]
+      },
+      "expected_sum_usd": 300
+    },
+    {
+      "name": "a_later_spot_only_poll_keeps_the_earlier_keys_derivatives",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 28000 },
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05Z", "holding_type": "derivative", "symbol": "BTC-PERP", "value_usd": 6000 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:30:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 30000 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:30:00Z", "holding_type": "spot", "symbol": "ETH", "value_usd": 5000 }
+      ],
+      "expected": { "acct-D": ["a0000000-0000-4000-8000-00000000000a", "b0000000-0000-4000-8000-00000000000b"] },
+      "expected_sum_usd": 41000
+    },
+    {
+      "name": "a_full_later_poll_wins_both_types",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 28000 },
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05Z", "holding_type": "derivative", "symbol": "BTC-PERP", "value_usd": 6000 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:30:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 30000 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:30:00Z", "holding_type": "spot", "symbol": "ETH", "value_usd": 5000 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:30:00Z", "holding_type": "derivative", "symbol": "BTC-PERP", "value_usd": 6500 }
+      ],
+      "expected": { "acct-D": ["b0000000-0000-4000-8000-00000000000b"] },
+      "expected_sum_usd": 41500
+    },
+    {
+      "name": "a_later_derivative_only_poll_keeps_the_earlier_keys_spot_rows",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 28000 },
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05Z", "holding_type": "spot", "symbol": "SOL", "value_usd": 700 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:30:00Z", "holding_type": "derivative", "symbol": "BTC-PERP", "value_usd": 6500 }
+      ],
+      "expected": { "acct-D": ["a0000000-0000-4000-8000-00000000000a", "b0000000-0000-4000-8000-00000000000b"] },
+      "expected_sum_usd": 35200
+    },
+    {
+      "name": "each_type_is_decided_by_that_types_own_latest_instant",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:30:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 28000 },
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:00Z", "holding_type": "derivative", "symbol": "BTC-PERP", "value_usd": 6000 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 30000 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:10:00Z", "holding_type": "derivative", "symbol": "BTC-PERP", "value_usd": 6500 }
+      ],
+      "expected": { "acct-D": ["a0000000-0000-4000-8000-00000000000a", "b0000000-0000-4000-8000-00000000000b"] },
+      "expected_sum_usd": 34500
+    },
+    {
+      "name": "a_tie_in_one_type_is_broken_by_the_smaller_id_apart_from_the_other_type",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 100 },
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T03:00:00Z", "holding_type": "derivative", "symbol": "BTC-PERP", "value_usd": 10 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 200 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:00.000001Z", "holding_type": "derivative", "symbol": "BTC-PERP", "value_usd": 20 }
+      ],
+      "expected": { "acct-D": ["a0000000-0000-4000-8000-00000000000a", "b0000000-0000-4000-8000-00000000000b"] },
+      "expected_sum_usd": 120
+    },
+    {
+      "name": "a_keys_instant_is_the_latest_of_its_rows",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 100 },
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:05:00Z", "holding_type": "spot", "symbol": "ETH", "value_usd": 50 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:03:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 200 }
+      ],
+      "expected": { "acct-D": ["a0000000-0000-4000-8000-00000000000a"] },
+      "expected_sum_usd": 150
+    },
+    {
+      "name": "an_older_day_never_survives_whatever_its_updated_at",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-10", "updated_at": "2026-10-12T00:00:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 999 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T01:00:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 200 }
+      ],
+      "expected": { "acct-D": ["b0000000-0000-4000-8000-00000000000b"] },
+      "expected_sum_usd": 200
+    },
+    {
+      "name": "a_single_key_keeps_every_row",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:00Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 1 },
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:01Z", "holding_type": "spot", "symbol": "ETH", "value_usd": 2 },
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:02Z", "holding_type": "spot", "symbol": "SOL", "value_usd": 3 }
+      ],
+      "expected": { "acct-D": ["a0000000-0000-4000-8000-00000000000a"] },
+      "expected_sum_usd": 6
+    },
+    {
+      "name": "error_updated_at_null",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": null, "holding_type": "spot", "symbol": "BTC", "value_usd": 100 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 200 }
+      ],
+      "expect_error": "HoldingsUpdatedAtError"
+    },
+    {
+      "name": "error_updated_at_absent",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "holding_type": "spot", "symbol": "BTC", "value_usd": 100 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 200 }
+      ],
+      "expect_error": "HoldingsUpdatedAtError"
+    },
+    {
+      "name": "error_updated_at_without_seconds_or_offset",
+      "rows": [
+        { "api_key_id": "a0000000-0000-4000-8000-00000000000a", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11 04:00", "holding_type": "spot", "symbol": "BTC", "value_usd": 100 },
+        { "api_key_id": "b0000000-0000-4000-8000-00000000000b", "account": "acct-D", "asof": "2026-10-11", "updated_at": "2026-10-11T04:00:05Z", "holding_type": "spot", "symbol": "BTC", "value_usd": 200 }
+      ],
+      "expect_error": "HoldingsUpdatedAtError"
+    }
+  ]
+}

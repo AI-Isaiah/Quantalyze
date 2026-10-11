@@ -53,6 +53,9 @@ function payload(
     analytics: null,
     apiKeys: [],
     holdingsSummary: [],
+    // The fixture is a keyed book (Phase 170.4 D-09): an empty book with no
+    // eligible key is the connect-a-key card, not the rebuilding panel.
+    hasConnectedKeys: true,
     perKeyReturnsByApiKeyId: {},
     contributingApiKeyIds: [],
     equityHistoryState: "ready",

@@ -808,8 +808,11 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // T_C1 — Empty state (zero holdings)
   // -------------------------------------------------------------------------
   it("T_C1 holdingsSummary=[] → renders EmptyState with dual CTA; clicking Browse opens StrategyBrowseDrawer", () => {
+    // 170.4 D-05: the connect prompt is the NO-KEY front door, so the intent of
+    // this case is stated explicitly (the fixture default has an eligible key).
     const payload = makePayload({
       holdingsSummary: [],
+      hasConnectedKeys: false,
     });
     render(
       <ScenarioComposer
@@ -836,6 +839,58 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(screen.queryByText(/Strategy Sandbox/i)).toBeNull();
     fireEvent.click(browseBtn);
     expect(screen.getByTestId("browse-drawer-mock")).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // T_C1_KEYS — 170.4 D-05 / D-07: an allocator WITH an eligible key and an
+  //   empty book is never told to connect one. The signal is the payload's
+  //   server-side `hasConnectedKeys`, not the (empty) holdings.
+  // -------------------------------------------------------------------------
+  it("T_C1_KEYS eligible key + empty book → says the accounts hold no open positions, links Manage exchanges, no connect prompt", () => {
+    const payload = makePayload({
+      holdingsSummary: [],
+      hasConnectedKeys: true,
+    });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(screen.getByText("Start a portfolio")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Your connected exchange accounts hold no open positions yet. Start from a blank slate and browse strategies to compose one.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Manage exchanges/i }),
+    ).toHaveAttribute("href", "/profile?tab=exchanges");
+    expect(
+      screen.queryByRole("link", { name: /Connect Exchange/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Connect a read-only/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Browse strategies/i }));
+    expect(screen.getByTestId("browse-drawer-mock")).toBeInTheDocument();
+  });
+
+  it("T_C1_KEYS_ABSENT a payload without hasConnectedKeys reads as no eligible key (conservative default)", () => {
+    const payload = makePayload({ holdingsSummary: [] });
+    delete (payload as { hasConnectedKeys?: boolean }).hasConnectedKeys;
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(
+      screen.getByRole("link", { name: /Connect Exchange/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /Manage exchanges/i }),
+    ).not.toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------
@@ -2665,6 +2720,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("T_C_MODE2 no live book → defaults to Blank slate, never a dead 'From my book' segment", () => {
     const payload = makePayload({
       holdingsSummary: [],
+      hasConnectedKeys: false,
     });
     render(
       <ScenarioComposer
@@ -3662,6 +3718,59 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(new Set((afterChange as string).split("|"))).not.toEqual(
       new Set(["BTC:binance:spot", "ETH:binance:spot"]),
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 170.4 plan 07 (plan-checker N2) — the composer wires
+  // `payload.holdingsFingerprintRows ?? rawHoldingsSummary` into the hook as the
+  // fingerprint source. `holdingsSummary` carries only the WINNING key per
+  // exchange account, so a same-account same-day key pair whose losing key holds
+  // a SOL-PERP derivative would drop that token from the client fingerprint,
+  // while `commit_scenario_batch` computes its recompute over the full
+  // contributing set and would refuse the commit as `portfolio_fingerprint_stale`.
+  // The expected string is hand-typed from the fingerprint rows (the RPC's token
+  // shape), never derived from `holdingsSummary`. Falling back to
+  // `rawHoldingsSummary` here drops the SOL-PERP token and turns this RED.
+  // -------------------------------------------------------------------------
+  it("plan 07 N2: the commit fingerprint is the fingerprint rows' tokens, not the winner-only holdingsSummary's", () => {
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          // The winner-only dollar rows: BTC + ETH.
+          holdingsSummary: [HOLDING_BTC, HOLDING_ETH],
+          // The RPC's contributing set: the same two plus the losing same-account
+          // key's SOL-PERP derivative (and a duplicate BTC from that losing key).
+          holdingsFingerprintRows: [
+            { symbol: "BTC", venue: "binance", holding_type: "spot" },
+            { symbol: "BTC", venue: "binance", holding_type: "spot" },
+            { symbol: "ETH", venue: "binance", holding_type: "spot" },
+            { symbol: "SOL-PERP", venue: "binance", holding_type: "derivative" },
+          ],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: "strat-n2",
+      name: "N2 Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    const sent = vi
+      .mocked(ScenarioCommitDrawer)
+      .mock.calls.at(-1)?.[0]?.initHoldingsFingerprint;
+    // Hand-typed token set (the RPC's DISTINCT tokens for those rows).
+    expect(new Set((sent as string).split("|"))).toEqual(
+      new Set([
+        "BTC:binance:spot",
+        "ETH:binance:spot",
+        "SOL-PERP:binance:derivative",
+      ]),
+    );
+    // Dedup: the duplicated BTC row contributes exactly one token.
+    expect((sent as string).split("|")).toHaveLength(3);
   });
 
   // -------------------------------------------------------------------------
@@ -16557,6 +16666,35 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
       "Overrides live-holdings total $50,000.",
     );
     expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+  });
+
+  it("170.4 D-08: two live keys holding ONE venue:symbol:type are both summed — PORTFOLIO AUM 65,000 (40,000 + 25,000), the second key's row is never overwritten, and the sign_in_failed key's 25,000 is the disclosed part", () => {
+    // Both rows share ONE scope ref (binance:AUMTRUST-A:spot). Before D-08 the
+    // composer kept the last row per ref, so the field read 25,000.
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: 40_000,
+      },
+      {
+        id: AT_KEY_SIGN_IN_FAILED,
+        status: "sign_in_failed",
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: 25_000,
+      },
+    ]);
+    // Fixture self-proof: the two rows really share one triple.
+    expect(new Set(payload.holdingsSummary.map(buildHoldingRef)).size).toBe(1);
+    expect(payload.holdingsSummary).toHaveLength(2);
+    renderAt(payload);
+    expect(aumField().value).toBe("65000");
+    expect(
+      screen.getByTestId("scenario-aum-untrusted-note").textContent,
+    ).toBe("Includes $25,000 from keys needing attention.");
   });
 
   it("AUMTRUST placement follows the COMMITTED value (RESEARCH Pitfall 3): typing without a blur neither moves nor removes the marker", () => {

@@ -2144,7 +2144,8 @@ async def test_two_accounts_under_one_allocator_do_not_collapse_on_upsert(
 
     # The conflict target is what actually decides collapse — so assert the two
     # rows differ in the KEY TUPLE, not merely in some field.
-    assert captured["on_conflict"] == "allocator_id,venue,symbol,asof"
+    # (D-10: the mock never raises 42P10, so the first call carries the per-key target.)
+    assert captured["on_conflict"] == ap.HOLDINGS_CONFLICT_TARGET
     keys = {
         (r["allocator_id"], r["venue"], r["symbol"], r["asof"]) for r in upserted
     }

@@ -30,6 +30,7 @@ import ccxt.async_support as ccxt
 import pytest
 
 from services.allocator_positions import (  # noqa: E402
+    HOLDINGS_CONFLICT_TARGET,
     _map_exception_to_sync_status,
     fetch_allocator_holdings,
     persist_allocator_holdings,
@@ -169,11 +170,12 @@ async def test_idempotent_upsert(api_key_row_factory):
 
     # The client must use the allocator-holdings table
     mock_supabase.table.assert_called_with("allocator_holdings")
-    # The conflict target must be exactly the 4-tuple INGEST-04 spec
+    # The conflict target must be exactly the per-key tuple (INGEST-04 widened by D-10).
+    # These mocks never raise 42P10, so the first (and only) call per persist carries it.
     assert mock_table.upsert.call_count == 2
     for call in mock_table.upsert.call_args_list:
         kwargs = call.kwargs
-        assert kwargs.get("on_conflict") == "allocator_id,venue,symbol,asof"
+        assert kwargs.get("on_conflict") == HOLDINGS_CONFLICT_TARGET
 
     # allocator_id / api_key_id / asof are stamped on every row
     first_payload = mock_table.upsert.call_args_list[0].args[0]

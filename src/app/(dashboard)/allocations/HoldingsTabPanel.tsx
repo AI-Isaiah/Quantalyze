@@ -45,6 +45,7 @@ import { ScenarioFlaggedHoldingsList } from "./ScenarioFlaggedHoldingsList";
 // through the B7b-locked widgets/index.ts WIDGET_COMPONENTS barrel (these are
 // section-mounted, not part of the configurable dashboard grid).
 import { ExposureByClass } from "./widgets/positions/ExposureByClass";
+import { exposureSnapshotFromHoldings } from "./lib/exposure-snapshot";
 import { NetExposureChart } from "./widgets/positions/NetExposureChart";
 import { AllocationOverTime } from "./widgets/allocation/AllocationOverTime";
 import type { ExposureSectionData } from "./lib/exposure-props";
@@ -58,6 +59,7 @@ import type { FavoriteRow, OptimizerPrefetch } from "./lib/watchlist-read";
 // Review C4 WR-01: the eligible-key rule (active, not revoked, not
 // disconnected), from the pure module the Exchanges page already uses.
 import { isLiveKey } from "@/lib/departed-history";
+import { apiKeyLabelById } from "@/lib/api-key-label";
 
 /** Honest-empty optimizer state when the prop is absent (test harnesses). */
 /** A venue's display name. The exchange ids that need more than a capital. */
@@ -322,6 +324,13 @@ export function HoldingsTabPanel(
     () => holdingsSummary.filter((h) => h.holding_type === "derivative"),
     [holdingsSummary],
   );
+  // Phase 170.4 (D-01): the Exposure card reads this SAME array, so it, Holdings
+  // and Open Positions agree by construction.
+  const keyLabels = useMemo(() => apiKeyLabelById(apiKeys), [apiKeys]);
+  const exposureSnapshot = useMemo(
+    () => exposureSnapshotFromHoldings(holdingsSummary),
+    [holdingsSummary],
+  );
 
   // ── Map api_key.id → sync_status. A key PRESENT with a null status maps to
   //    'unknown', which the tables read as trusted (the legitimate no-status
@@ -352,7 +361,13 @@ export function HoldingsTabPanel(
           ? keyStatusById.get(h.api_key_id) ?? "unknown"
           : "unknown";
         return {
-          id: ref,
+          // Phase 170.4 D-08: rows are per key. The ref alone (venue:symbol:type)
+          // is shared by two keys' rows of one symbol, which would share a React
+          // key and one note-expansion state. The note scope ref the table
+          // builds from venue/symbol/type is unchanged: two keys' rows of one
+          // symbol still share one note.
+          id: `${ref}#${h.api_key_id}`,
+          key_label: keyLabels.get(h.api_key_id) ?? null,
           venue: h.venue,
           symbol: h.symbol,
           holding_type: "spot",
@@ -369,7 +384,7 @@ export function HoldingsTabPanel(
           source_key_missing: !keyStatusById.has(h.api_key_id),
         };
       }),
-    [spotHoldings, keyStatusById],
+    [spotHoldings, keyStatusById, keyLabels],
   );
 
   const openPositionRows = useMemo<OpenPositionRow[]>(
@@ -384,7 +399,9 @@ export function HoldingsTabPanel(
           ? keyStatusById.get(h.api_key_id) ?? "unknown"
           : "unknown";
         return {
-          id: ref,
+          // Phase 170.4 D-08: one row per key, as for the spot rows above.
+          id: `${ref}#${h.api_key_id}`,
+          key_label: keyLabels.get(h.api_key_id) ?? null,
           venue: h.venue,
           symbol: h.symbol,
           side: h.side ?? "flat",
@@ -398,7 +415,7 @@ export function HoldingsTabPanel(
           source_key_missing: !keyStatusById.has(h.api_key_id),
         };
       }),
-    [derivativeHoldings, keyStatusById],
+    [derivativeHoldings, keyStatusById, keyLabels],
   );
 
   // SFH-R2-03: the UTC day the tab was opened, the absolute reference the
@@ -458,14 +475,15 @@ export function HoldingsTabPanel(
 
       {/* Section 2 — Exposure (PI-01/02/03). Sits directly after Strategies per
           the 99-UI-SPEC placement (the 100-04 Watchlist/Notes sections now follow
-          it, before Exchange Positions). Additive: fed by the distinct `exposure`
-          prop; renders honest-empty when the trio is empty. */}
+          it, before Exchange Positions). The current card reads the panel's own
+          holdings (Phase 170.4, D-01); the two over-time charts are fed by the
+          distinct `exposure` prop (D-03) and render honest-empty when empty. */}
       <section aria-label="Exposure" className="grid grid-cols-1 gap-4">
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Exposure
         </h3>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <ExposureByClass snapshot={props.exposure.snapshot} />
+          <ExposureByClass snapshot={exposureSnapshot} keyLabels={keyLabels} />
           <NetExposureChart {...props.exposure.netSeries} />
           <div className="lg:col-span-2">
             <AllocationOverTime {...props.exposure.allocationSeries} />
@@ -488,7 +506,14 @@ export function HoldingsTabPanel(
         <div className="@container">
           <div className="grid grid-cols-1 gap-6 @5xl:grid-cols-2">
             <WatchlistPanel favorites={favorites} suggestedIds={suggestedIds} />
-            <OptimizerPanel prefetch={optimizer} />
+            {/* Phase 170.4 D-06, D-07: the server-side eligible-key flag, the
+                one answer to "does this allocator have a key to connect?". A
+                key with no portfolio is not told to connect a key here. A
+                missing flag reads as no eligible key. */}
+            <OptimizerPanel
+              prefetch={optimizer}
+              hasConnectedKeys={props.hasConnectedKeys ?? false}
+            />
           </div>
         </div>
       </section>
@@ -521,6 +546,9 @@ export function HoldingsTabPanel(
         ) : null}
         <HoldingsTable
           holdings={spotHoldingRows}
+          // Phase 170.4 D-02: the Open Positions table's own row count, so a
+          // derivatives-only book reads "No spot holdings" and not "empty".
+          openPositionCount={openPositionRows.length}
           showRevoked={showRevoked}
           onShowRevokedChange={setShowRevoked}
         />

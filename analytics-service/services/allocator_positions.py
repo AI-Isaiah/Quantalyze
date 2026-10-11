@@ -57,6 +57,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, ClassVar, Literal, cast
 
 import ccxt.async_support as ccxt
+from postgrest.exceptions import APIError
 from supabase import Client
 
 from services.account_unit import (
@@ -1645,6 +1646,21 @@ async def fetch_allocator_holdings(
     return (spot_rows + deriv_rows, warning)
 
 
+# 170.4 D-10 (founder 2026-10-11): D-08 ("One Key is One Strategy") holds end to end, so
+# two live keys on one venue holding one symbol on the same day keep ONE ROW EACH. The
+# `allocator_holdings` unique index and this upsert's conflict target therefore gain
+# `api_key_id`. Keys that share one exchange account stay de-duplicated downstream by the
+# same-account grouping (167.1.2); that is a read-side rule, not an ingestion one.
+HOLDINGS_CONFLICT_TARGET = "allocator_id,venue,symbol,asof,api_key_id"
+# The key the table was unique on before migration 170.4-09. It exists ONLY for the deploy
+# window: the migration auto-applies to PROD on merge while Railway deploys separately, and
+# until the per-key index exists Postgres refuses HOLDINGS_CONFLICT_TARGET with SQLSTATE
+# 42P10. Its removal is booked by the PR 2 release plan.
+HOLDINGS_CONFLICT_TARGET_PRE_D10 = "allocator_id,venue,symbol,asof"
+# SQLSTATE: no unique or exclusion constraint matches the ON CONFLICT column list.
+_NO_MATCHING_CONFLICT_INDEX = "42P10"
+
+
 async def persist_allocator_holdings(
     supabase_client: Client,
     holdings: list[dict[str, Any]],
@@ -1652,13 +1668,21 @@ async def persist_allocator_holdings(
     api_key_id: str,
     asof_date: str,
 ) -> int:
-    """INGEST-04: idempotent upsert on (allocator_id, venue, symbol, asof).
+    """INGEST-04 / D-10: idempotent upsert on (allocator_id, venue, symbol, asof, api_key_id).
 
     Stamps allocator_id / api_key_id / asof onto every row before the
     upsert so a caller can pass either the raw fetch_allocator_holdings
     output or a pre-stamped list. Re-running with identical input
     produces identical rows because the DB unique index + ON CONFLICT
     DO UPDATE converges.
+
+    The conflict target carries ``api_key_id`` (D-10, founder 2026-10-11) so every live key
+    keeps its own row. Until migration 170.4-09 has created the per-key unique index,
+    Postgres refuses that target with SQLSTATE 42P10; ONLY that refusal makes this retry
+    once on the pre-D10 target (``HOLDINGS_CONFLICT_TARGET_PRE_D10``), so the deployed
+    worker keeps writing on either side of the migration. Every other error, including a
+    42P10 on the retry itself, propagates unchanged so ``sync_status`` records it. The
+    fallback exists only for that deploy window; the PR 2 release plan books its removal.
     """
     if not holdings:
         return 0
@@ -1673,13 +1697,24 @@ async def persist_allocator_holdings(
         for h in holdings
     ]
 
-    def _upsert() -> None:
+    def _upsert(on_conflict: str) -> None:
         supabase_client.table("allocator_holdings").upsert(
             rows,
-            on_conflict="allocator_id,venue,symbol,asof",
+            on_conflict=on_conflict,
         ).execute()
 
-    await db_execute(_upsert)
+    try:
+        await db_execute(lambda: _upsert(HOLDINGS_CONFLICT_TARGET))
+    except APIError as exc:
+        if exc.code != _NO_MATCHING_CONFLICT_INDEX:
+            raise
+        logger.info(
+            "persist_allocator_holdings: per-key conflict target refused with %s (the "
+            "170.4-09 unique index is not applied yet); retrying once on %s",
+            _NO_MATCHING_CONFLICT_INDEX,
+            HOLDINGS_CONFLICT_TARGET_PRE_D10,
+        )
+        await db_execute(lambda: _upsert(HOLDINGS_CONFLICT_TARGET_PRE_D10))
     return len(rows)
 
 

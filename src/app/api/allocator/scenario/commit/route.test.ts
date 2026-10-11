@@ -129,10 +129,16 @@ type HoldingRowFixture = {
   // and the equity at stake is the unrealized P&L.
   unrealized_pnl_usd?: number | null;
   asof: string;
+  // 170.4 plan 11/12: REQUIRED, hand-typed on every fixture. `allocator_holdings.updated_at`
+  // is NOT NULL DEFAULT now() (supabase/schema/baseline.sql) and `oneKeyPerAccountDay`
+  // rejects a missing value, so a harness default would hide that contract.
+  updated_at: string;
   // 164.6.6.2.1 CR-01: the key the row belongs to. Optional so every pre-existing
-  // fixture (which has no native key) is untouched.
+  // fixture (which has no native key) stays ONE key: the harness assigns it
+  // `FIXTURE_KEY_ID`.
   api_key_id?: string;
 };
+const FIXTURE_KEY_ID = "key-fixture";
 let holdingsFixture: HoldingRowFixture[] = [];
 let holdingsErrorFixture: { message: string } | null = null;
 // 164.6.6.2.1 CR-01: the service-written `native_unpriced:<key>` records the route reads from
@@ -145,38 +151,95 @@ let unpricedRecordsErrorFixture: { message: string } | null = null;
 // route must never read the audit log as evidence, so this table is served and watched.
 let forgedAuditFixture: Array<Record<string, unknown>> = [];
 const tablesRead: string[] = [];
-const buildHoldingsChain = () => {
-  const chain: { data: HoldingRowFixture[]; error: { message: string } | null } & {
-    select: () => typeof chain;
-    eq: () => typeof chain;
-    in: () => typeof chain;
-    order: () => typeof chain;
-  } = {
-    data: holdingsFixture,
-    error: holdingsErrorFixture,
+// 170.4 plan 12: the route reads holdings through the dashboard's three-step reader
+// (`api_keys`, then per key its latest asof, then that key's rows at it), so the
+// chains below HONOUR `eq`, `order` and `limit` over the fixtures. The filters are
+// applied when `data` is read (the awaited chain is a plain object, not a thenable).
+type FilterRow = Record<string, unknown>;
+const buildFilterChain = (
+  source: () => FilterRow[],
+  error: () => { message: string } | null,
+) => {
+  const eqs: Array<[string, unknown]> = [];
+  const ins: Array<[string, unknown[]]> = [];
+  let likePrefix: { column: string; prefix: string } | null = null;
+  let order: { column: string; ascending: boolean } | null = null;
+  let limitN: number | null = null;
+  const chain = {
+    get error() {
+      return error();
+    },
+    get data() {
+      if (error()) return null;
+      let rows = source().filter(
+        (r) => eqs.every(([c, v]) => r[c] === v) && ins.every(([c, vs]) => vs.includes(r[c])),
+      );
+      if (likePrefix) {
+        const { column, prefix } = likePrefix;
+        rows = rows.filter((r) => String(r[column]).startsWith(prefix));
+      }
+      if (order) {
+        const { column, ascending } = order;
+        rows = [...rows].sort(
+          (a, b) => (String(a[column]) < String(b[column]) ? -1 : 1) * (ascending ? 1 : -1),
+        );
+      }
+      return limitN === null ? rows : rows.slice(0, limitN);
+    },
     select: () => chain,
-    eq: () => chain,
-    in: () => chain,
-    order: () => chain,
+    eq: (c: string, v: unknown) => {
+      eqs.push([c, v]);
+      return chain;
+    },
+    in: (c: string, vs: unknown[]) => {
+      ins.push([c, vs]);
+      return chain;
+    },
+    like: (c: string, pattern: string) => {
+      likePrefix = { column: c, prefix: pattern.replace(/%$/, "") };
+      return chain;
+    },
+    order: (c: string, o?: { ascending?: boolean }) => {
+      order = { column: c, ascending: o?.ascending ?? true };
+      return chain;
+    },
+    limit: (n: number) => {
+      limitN = n;
+      return chain;
+    },
   };
   return chain;
 };
-const buildUnpricedRecordsChain = () => {
-  const chain: { data: UnpricedRecordFixture[]; error: { message: string } | null } & {
-    select: () => typeof chain;
-    eq: () => typeof chain;
-    like: () => typeof chain;
-    limit: () => typeof chain;
-  } = {
-    data: unpricedRecordsFixture,
-    error: unpricedRecordsErrorFixture,
-    select: () => chain,
-    eq: () => chain,
-    like: () => chain,
-    limit: () => chain,
-  };
-  return chain;
-};
+// A fixture row without a key belongs to the one fixture key.
+const holdingKeyId = (h: HoldingRowFixture) => h.api_key_id ?? FIXTURE_KEY_ID;
+const buildHoldingsChain = () =>
+  buildFilterChain(
+    () =>
+      holdingsFixture.map((h) => ({ allocator_id: "alloc-A", ...h, api_key_id: holdingKeyId(h) })),
+    () => holdingsErrorFixture,
+  );
+// `api_keys` is served from the distinct keys of `holdingsFixture`, each its own
+// account (no identity columns). A holdings outage fails this first read too, as
+// a real outage would, so `holdingsErrorFixture` still means "the book could not
+// be read".
+const buildApiKeysChain = () =>
+  buildFilterChain(
+    () =>
+      [...new Set(holdingsFixture.map(holdingKeyId))].map((id) => ({
+        id,
+        user_id: "alloc-A",
+        exchange: "binance",
+        venue_account_id: null,
+        account_share_kind: null,
+        account_shared_with_api_key_id: null,
+      })),
+    () => holdingsErrorFixture,
+  );
+const buildUnpricedRecordsChain = () =>
+  buildFilterChain(
+    () => unpricedRecordsFixture.map((r) => ({ allocator_id: "alloc-A", ...r })),
+    () => unpricedRecordsErrorFixture,
+  );
 const buildForgedAuditChain = () => {
   const chain: { data: Array<Record<string, unknown>>; error: null } & {
     select: () => typeof chain;
@@ -199,6 +262,7 @@ vi.mock("@/lib/supabase/server", () => ({
       tablesRead.push(table);
       if (table === "allocator_equity_derived") return buildUnpricedRecordsChain();
       if (table === "audit_log") return buildForgedAuditChain();
+      if (table === "api_keys") return buildApiKeysChain();
       return buildHoldingsChain();
     }),
     rpc: mockRpc,
@@ -1469,8 +1533,8 @@ describe("NEW-C18-04 — server-side audit recompute of size_at_decision_usd", (
   it("voluntary_add: server_size = percent_allocated × total_aum / 100, source = server_aum", async () => {
     // Two holdings, latest asof: 80k + 120k = 200k AUM
     holdingsFixture = [
-      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd: 80_000, asof: "2026-05-28" },
-      { venue: "binance", symbol: "ETH", holding_type: "spot", value_usd: 120_000, asof: "2026-05-28" },
+      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd: 80_000, asof: "2026-05-28", updated_at: "2026-05-28T04:00:00+00:00" },
+      { venue: "binance", symbol: "ETH", holding_type: "spot", value_usd: 120_000, asof: "2026-05-28", updated_at: "2026-05-28T04:00:00+00:00" },
     ];
     mockRpc.mockResolvedValueOnce({
       data: {
@@ -1495,7 +1559,7 @@ describe("NEW-C18-04 — server-side audit recompute of size_at_decision_usd", (
 
   it("voluntary_remove: server_size = holding.value_usd, source = server_holding", async () => {
     holdingsFixture = [
-      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd: 42_000, asof: "2026-05-28" },
+      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd: 42_000, asof: "2026-05-28", updated_at: "2026-05-28T04:00:00+00:00" },
     ];
     mockRpc.mockResolvedValueOnce({
       data: {
@@ -1548,9 +1612,9 @@ describe("NEW-C18-04 — server-side audit recompute of size_at_decision_usd", (
     // With latest-asof-only, AUM is just the newest snapshot (100k → 5_000).
     holdingsFixture = [
       // Order DESC — newest first (mirrors .order("asof", { ascending: false }))
-      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd: 100_000, asof: "2026-05-28" },
-      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd:  50_000, asof: "2026-05-27" },
-      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd:  10_000, asof: "2026-05-26" },
+      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd: 100_000, asof: "2026-05-28", updated_at: "2026-05-28T04:00:00+00:00" },
+      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd:  50_000, asof: "2026-05-27", updated_at: "2026-05-27T04:00:00+00:00" },
+      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd:  10_000, asof: "2026-05-26", updated_at: "2026-05-26T04:00:00+00:00" },
     ];
     mockRpc.mockResolvedValueOnce({
       data: {
@@ -1574,8 +1638,8 @@ describe("NEW-C18-04 — server-side audit recompute of size_at_decision_usd", (
 
   it("C1 REGRESSION: voluntary_remove picks the LATEST asof value, not a stale snapshot", async () => {
     holdingsFixture = [
-      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd: 75_000, asof: "2026-05-28" }, // latest
-      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd:  1_000, asof: "2024-01-01" }, // ancient
+      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd: 75_000, asof: "2026-05-28", updated_at: "2026-05-28T04:00:00+00:00" }, // latest
+      { venue: "binance", symbol: "BTC", holding_type: "spot", value_usd:  1_000, asof: "2024-01-01", updated_at: "2024-01-01T04:00:00+00:00" }, // ancient
     ];
     mockRpc.mockResolvedValueOnce({
       data: {
@@ -1662,6 +1726,7 @@ describe("T_R24 — B11 / NEW-C18-10 portfolio-fingerprint precondition", () => 
         holding_type: "spot",
         value_usd: 460_000,
         asof: "2026-08-07",
+        updated_at: "2026-08-07T04:00:00+00:00",
       },
     ];
     mockRpc.mockResolvedValueOnce({
@@ -1871,6 +1936,7 @@ describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
         holding_type: "spot",
         value_usd: 80_000,
         asof: "2026-08-07",
+        updated_at: "2026-08-07T04:00:00+00:00",
       },
       {
         venue: "binance",
@@ -1878,6 +1944,7 @@ describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
         holding_type: "spot",
         value_usd: 120_000,
         asof: "2026-08-07",
+        updated_at: "2026-08-07T04:00:00+00:00",
       },
     ];
     okAdd();
@@ -1935,6 +2002,7 @@ describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
         holding_type: "spot",
         value_usd: 40_000,
         asof: "2026-08-07",
+        updated_at: "2026-08-07T04:00:00+00:00",
       },
     ];
     holdingsErrorFixture = null;
@@ -2013,6 +2081,7 @@ describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
     holding_type: "spot",
     value_usd,
     asof,
+    updated_at: `${asof}T04:00:00+00:00`,
     api_key_id: "key-btc",
   });
   const usdBookRow = {
@@ -2021,6 +2090,7 @@ describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
     holding_type: "spot",
     value_usd: 40_000,
     asof: "2026-10-10",
+    updated_at: "2026-10-10T04:00:00+00:00",
     api_key_id: "key-usd",
   };
   async function commitHalf() {
@@ -2121,6 +2191,7 @@ describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
         value_usd: 400_000,
         unrealized_pnl_usd: 40_000,
         asof: "2026-08-07",
+        updated_at: "2026-08-07T04:00:00+00:00",
       },
     ];
     holdingsErrorFixture = null;

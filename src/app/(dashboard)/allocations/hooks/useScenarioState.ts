@@ -53,6 +53,7 @@ import {
   type ScenarioDraft,
   type AddedStrategy,
   type HoldingForDefault,
+  type HoldingForFingerprint,
 } from "../lib/scenario-state";
 import type { CoverageWindow } from "@/lib/scenario-window";
 import { useCrossTabStorage } from "@/lib/storage/cross-tab";
@@ -70,7 +71,18 @@ export interface UseScenarioStateOptions {
    * (book mode / no live book), which makes the predicate reduce to the
    * pre-Phase-63 single-fingerprint check.
    */
-  driftReferenceHoldings?: HoldingForDefault[];
+  driftReferenceHoldings?: HoldingForFingerprint[];
+  /**
+   * Phase 170.4 plan 07 (D-10, plan-checker N2) — the rows the holdings
+   * FINGERPRINT is computed from: the commit RPC's contributing row set
+   * (`payload.holdingsFingerprintRows`), which keeps every key whose day equals
+   * its account's newest day. `holdingsSummary` carries the dollar rows, which
+   * the one-key-per-account-day rule narrows to one key per account; a
+   * fingerprint over those alone drops a losing key's token and
+   * `commit_scenario_batch` refuses the commit as `portfolio_fingerprint_stale`.
+   * Seeding WEIGHTS stay on `holdingsSummary`. Defaults to `holdingsSummary`.
+   */
+  fingerprintHoldings?: HoldingForFingerprint[];
   /**
    * T-10-02 + N1 — scopes the localStorage key per allocator. Pass the
    * authenticated user's id (allocator id). Two allocators in the same
@@ -164,18 +176,23 @@ export interface UseScenarioStateReturn {
 export function useScenarioState(
   opts: UseScenarioStateOptions,
 ): UseScenarioStateReturn {
-  const { holdingsSummary, driftReferenceHoldings, allocatorId } = opts;
+  const { holdingsSummary, driftReferenceHoldings, fingerprintHoldings, allocatorId } =
+    opts;
 
+  // Phase 170.4 D-10: the seeding fingerprint reads the commit RPC's
+  // contributing row set when the caller supplies it (see
+  // `fingerprintHoldings`), else the dollar rows.
+  const fingerprintRows = fingerprintHoldings ?? holdingsSummary;
   const fingerprint = useMemo(
-    () => computeHoldingsFingerprint(holdingsSummary),
-    [holdingsSummary],
+    () => computeHoldingsFingerprint(fingerprintRows),
+    [fingerprintRows],
   );
 
   // CR-01 — the LIVE-book drift fingerprint. Defaults to the gated
   // `holdingsSummary` (book mode / no live book) so the drift predicate reduces
   // to the single-fingerprint check; in blank mode the composer passes the raw
   // live book, so a book draft that still matches it is not seen as drifted.
-  const driftReference = driftReferenceHoldings ?? holdingsSummary;
+  const driftReference = driftReferenceHoldings ?? fingerprintRows;
   const driftFingerprint = useMemo(
     () => computeHoldingsFingerprint(driftReference),
     [driftReference],
