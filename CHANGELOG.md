@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.130.6.1] - 2026-10-11 — BASELINE: automated re-dump after the PROD apply of 31b7d6f8
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38174945189`, after the PROD apply of merge `31b7d6f8`: sha256 `2eefab3e…` → `afce6f5e…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 126 → 126, distinct function names 124 → 124, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261011120000_allocator_holdings_per_key_unique.sql`, `20261011120100_commit_scenario_batch_fingerprint_unpriced.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-11` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.130.6.0 → 0.130.6.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=295 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 126 — MATCH 123, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38174945189` succeeded, and this entry was composed by the `redump-pr` job. Run `38174945189` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.130.6.0] - 2026-10-11 — ALLOCHOLDINGS (2/2): every API key keeps its own holdings row, a book with a native-unpriced key is no longer refused as stale, and the over-time charts count one exchange account once per day
 
 Phase 170.4, release 2 of 2. Release 1 (0.130.5.0) made the Allocations tabs read one per-key holdings source and left one limit standing: the unique index on `allocator_holdings` still carried `(allocator_id, venue, symbol, asof)`, so two keys holding one symbol on one day overwrote each other at ingestion, and the writer's 42P10 fallback was the only thing keeping the deployed worker writing. This release applies the index change (D-10), closes the review's WR-02 (the commit RPC's fingerprint refused a book the dashboard accepted), and makes the two over-time charts follow the same one-key-per-account-day rule as every dollar total (D-11). Two migrations ship and both auto-apply to TEST and then PROD on merge with no human stop; both were reviewed before the merge (see Notes).
