@@ -22,6 +22,7 @@
  */
 
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import { buildHoldingRef } from "./holding-outcome-adapter";
 import {
   isUntrustedKeySyncStatus,
   UNKNOWN_KEY_STATUS_SET_NOUN,
@@ -29,6 +30,35 @@ import {
 } from "@/lib/closed-sets";
 
 type DashboardHolding = MyAllocationDashboardPayload["holdingsSummary"][number];
+
+/**
+ * 170.4 D-08 ("One Key is One Strategy") — group the payload's holdings by the
+ * composer's scope ref (`buildHoldingRef`: venue:symbol:type), KEEPING EVERY ROW
+ * and the input order.
+ *
+ * WHY MANY ROWS PER REF. A scope ref is the Scenario's line, a persisted
+ * identifier (toggles and match decisions are keyed on it). Its rows are every
+ * live key's position in that venue:symbol:type. The pre-170.4 map held one
+ * holding per ref (`Map.set` overwrote), so once the payload carries one row per
+ * key, a second key's row replaced the first and dropped out of the live total.
+ * Each row is classified by its OWN key's status in `summarizeLiveHoldings`.
+ */
+export function holdingsByRef(
+  holdings: readonly DashboardHolding[],
+): Map<string, DashboardHolding[]> {
+  const byRef = new Map<string, DashboardHolding[]>();
+  for (const h of holdings) {
+    const ref = buildHoldingRef({
+      venue: h.venue,
+      symbol: h.symbol,
+      holding_type: h.holding_type,
+    });
+    const rows = byRef.get(ref);
+    if (rows) rows.push(h);
+    else byRef.set(ref, [h]);
+  }
+  return byRef;
+}
 
 /**
  * DSRC-02 (D2) — per-holding equity contribution, the per-key WEIGHT source.
@@ -211,7 +241,8 @@ export function managerSideKeyIds(
 
 export function summarizeLiveHoldings(args: {
   toggleByScopeRef: Readonly<Record<string, boolean>>;
-  holdingByRef: ReadonlyMap<string, DashboardHolding>;
+  /** 170.4 D-08: every row under a scope ref, from `holdingsByRef`. */
+  holdingsByRef: ReadonlyMap<string, readonly DashboardHolding[]>;
   contributingApiKeyIds: readonly string[];
   /** `eligibleApiKeyIds` minus `allocatorEligibleApiKeyIds`, both read from the
    *  payload (never re-derived): the keys that feed a strategy the owner runs
@@ -270,48 +301,51 @@ export function summarizeLiveHoldings(args: {
   for (const [scopeRef, on] of Object.entries(args.toggleByScopeRef)) {
     if (!on) continue;
     if (!scopeRef.startsWith("holding:")) continue;
-    const h = args.holdingByRef.get(scopeRef);
-    if (!h) continue;
-    // E1 — the SAME per-holding equity definition `equityByApiKeyId` (and
-    // therefore `totalBookEquity`, and therefore every NOTIONAL cell) uses.
-    // Never `h.value_usd`: on a derivative that is notional, not equity.
-    const equity = holdingEquityContributionLocal(h);
-    // ⛔ The shared predicate is the ONLY membership test (167 D-16). A local
-    // equality on the status column is the defect that rule exists to prevent.
-    const untrusted = isUntrustedKeySyncStatus(args.statusByKeyId.get(h.api_key_id));
-    if (narrowToModelledBook && !contributing.has(h.api_key_id)) {
-      // D-20: a manager-side key the payload identifies is not the allocator's
-      // book, so its holdings are not part of what the narrowing excluded from
-      // THEIR AUM. Only the indistinguishable remainder may over-disclose.
-      // Phase 167.1.2 SC-4: every branch below lands the holding in a part, so
-      // no toggled-on dollar leaves this loop unaccounted for.
-      if (managerSide.has(h.api_key_id)) {
-        addTo(out.excludedManagerSide, h, equity);
-      } else if (untrusted) {
-        addTo(out.excludedUntrusted, h, equity);
-      } else if (!args.statusByKeyId.has(h.api_key_id)) {
-        // Review round 3 WR-01: an ABSENT status is unknown, not trusted,
-        // on the excludes side too (the WR-05 `.has` rule).
-        addTo(out.excludedUnknownStatus, h, equity);
-      } else if (eligible !== null && !eligible.has(h.api_key_id)) {
-        // Review C2 WR-03: in the key list, status not untrusted, but not
-        // eligible: the key is disconnected or inactive, not "connected with
-        // no return history yet".
-        addTo(out.excludedNotConnected, h, equity);
-      } else {
-        // Trusted, not contributing, not manager-side: a key with no return
-        // series yet. Before 167.1.2 this fell through to `continue` unnamed.
-        addTo(out.excludedTrusted, h, equity);
+    const rows = args.holdingsByRef.get(scopeRef);
+    if (!rows) continue;
+    // D-08: every key's row under this ref counts, each by its OWN key.
+    for (const h of rows) {
+      // E1 — the SAME per-holding equity definition `equityByApiKeyId` (and
+      // therefore `totalBookEquity`, and therefore every NOTIONAL cell) uses.
+      // Never `h.value_usd`: on a derivative that is notional, not equity.
+      const equity = holdingEquityContributionLocal(h);
+      // ⛔ The shared predicate is the ONLY membership test (167 D-16). A local
+      // equality on the status column is the defect that rule exists to prevent.
+      const untrusted = isUntrustedKeySyncStatus(args.statusByKeyId.get(h.api_key_id));
+      if (narrowToModelledBook && !contributing.has(h.api_key_id)) {
+        // D-20: a manager-side key the payload identifies is not the allocator's
+        // book, so its holdings are not part of what the narrowing excluded from
+        // THEIR AUM. Only the indistinguishable remainder may over-disclose.
+        // Phase 167.1.2 SC-4: every branch below lands the holding in a part, so
+        // no toggled-on dollar leaves this loop unaccounted for.
+        if (managerSide.has(h.api_key_id)) {
+          addTo(out.excludedManagerSide, h, equity);
+        } else if (untrusted) {
+          addTo(out.excludedUntrusted, h, equity);
+        } else if (!args.statusByKeyId.has(h.api_key_id)) {
+          // Review round 3 WR-01: an ABSENT status is unknown, not trusted,
+          // on the excludes side too (the WR-05 `.has` rule).
+          addTo(out.excludedUnknownStatus, h, equity);
+        } else if (eligible !== null && !eligible.has(h.api_key_id)) {
+          // Review C2 WR-03: in the key list, status not untrusted, but not
+          // eligible: the key is disconnected or inactive, not "connected with
+          // no return history yet".
+          addTo(out.excludedNotConnected, h, equity);
+        } else {
+          // Trusted, not contributing, not manager-side: a key with no return
+          // series yet. Before 167.1.2 this fell through to `continue` unnamed.
+          addTo(out.excludedTrusted, h, equity);
+        }
+        continue;
       }
-      continue;
-    }
-    out.total += equity;
-    if (untrusted) {
-      addTo(out.untrusted, h, equity);
-    } else if (!args.statusByKeyId.has(h.api_key_id)) {
-      // WR-05: an ABSENT status is unknown, not trusted. `.has`, not a check
-      // on the looked-up value: a key present with a null status is trusted.
-      addTo(out.unknownStatus, h, equity);
+      out.total += equity;
+      if (untrusted) {
+        addTo(out.untrusted, h, equity);
+      } else if (!args.statusByKeyId.has(h.api_key_id)) {
+        // WR-05: an ABSENT status is unknown, not trusted. `.has`, not a check
+        // on the looked-up value: a key present with a null status is trusted.
+        addTo(out.unknownStatus, h, equity);
+      }
     }
   }
   return out;

@@ -11859,63 +11859,15 @@ def account_identity_tokens(
 ) -> dict[str, str | None]:
     """Which keys read the same exchange account, as one token per account.
 
-    Two keys read one account when they carry the same non-blank
-    ``(exchange, venue_account_id)`` (case-blind exchange, as
-    ``account_identity_collisions``), or when one is MARKED against the other
-    (``account_share_kind`` duplicate / composite_member naming it in
-    ``account_shared_with_api_key_id``). The marker is the stamper's own
-    evidence (D-01, D-04): the marked key hit the holder's unique account index,
-    which is exactly why its own ``venue_account_id`` stays NULL. Reading the
-    NULL alone would call it an unknown account and let an owner's 'include'
-    count one account twice. A key with neither a venue id nor a marker link is
-    unknown (``None``). The marker kinds are ``SHARED_ACCOUNT_KINDS``, the set
-    ``account_groups`` reads (IN-03), never a copy. Pure."""
-    import services.allocator_equity_derive as allocator_equity_derive
+    The implementation lives in ``services.allocator_equity_derive`` (170.4
+    review CR-01: the match scorer groups keys by the same identity, so there is
+    one implementation). It is imported here at call time, as the derive is in
+    ``_is_live_key``, to keep pandas off this module's import path. Pure."""
+    from services.allocator_equity_derive import (
+        account_identity_tokens as derive_account_identity_tokens,
+    )
 
-    marker_kinds = allocator_equity_derive.SHARED_ACCOUNT_KINDS
-    ids = [str(row["id"]) for row in keys]
-    parent = {key_id: key_id for key_id in ids}
-
-    def _find(key_id: str) -> str:
-        while parent[key_id] != key_id:
-            parent[key_id] = parent[parent[key_id]]
-            key_id = parent[key_id]
-        return key_id
-
-    def _union(left: str, right: str) -> None:
-        root_left, root_right = _find(left), _find(right)
-        if root_left != root_right:
-            parent[max(root_left, root_right)] = min(root_left, root_right)
-
-    known: set[str] = set()
-    by_venue: dict[tuple[str, str], str] = {}
-    for row in keys:
-        key_id = str(row["id"])
-        venue_id = row.get("venue_account_id")
-        if isinstance(venue_id, str) and venue_id.strip():
-            exchange = row.get("exchange")
-            exchange_key = exchange.strip().lower() if isinstance(exchange, str) else ""
-            pair = (exchange_key, venue_id.strip())
-            known.add(key_id)
-            if pair in by_venue:
-                _union(by_venue[pair], key_id)
-            else:
-                by_venue[pair] = key_id
-    for row in keys:
-        key_id = str(row["id"])
-        holder = row.get("account_shared_with_api_key_id")
-        if (
-            row.get("account_share_kind") in marker_kinds
-            and holder is not None
-            and str(holder) != key_id
-            and str(holder) in parent
-        ):
-            known.update((key_id, str(holder)))
-            _union(key_id, str(holder))
-    return {
-        key_id: (f"account:{_find(key_id)}" if key_id in known else None)
-        for key_id in ids
-    }
+    return derive_account_identity_tokens(keys)
 
 
 # Sorts before every real ISO day: a live key with no returns yet bounds a

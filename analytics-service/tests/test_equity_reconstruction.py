@@ -917,6 +917,7 @@ async def test_refresh_daily_appends_one_row(monkeypatch):
         }
     # Today's holdings (populated by Phase 06 poll_allocator_positions earlier today)
     fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "binance", "BTC", today.isoformat()))] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID,
         "api_key_id": API_KEY_ID_1,
         "venue": "binance",
@@ -1085,6 +1086,7 @@ async def test_refresh_daily_aggregates_across_keys(monkeypatch):
 
     # Today's holdings from BOTH keys (same allocator)
     fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "binance", "BTC", today.isoformat()))] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID,
         "api_key_id": API_KEY_ID_1,
         "venue": "binance",
@@ -1096,6 +1098,7 @@ async def test_refresh_daily_aggregates_across_keys(monkeypatch):
         "holding_type": "spot",
     }
     fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "ETH", today.isoformat()))] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID,
         "api_key_id": API_KEY_ID_2,
         "venue": "okx",
@@ -2821,6 +2824,7 @@ async def test_refresh_daily_uses_unrealized_pnl_for_perp_not_notional(monkeypat
     # $123.45 unrealised PnL. Pre-fix total = 195,493 + 50,172 = 245,665.
     # Post-fix total = 195,493 + 123.45 = 195,616.81.
     fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "USDT", today.isoformat()))] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID,
         "api_key_id": API_KEY_ID_1,
         "venue": "okx",
@@ -2833,6 +2837,7 @@ async def test_refresh_daily_uses_unrealized_pnl_for_perp_not_notional(monkeypat
         "holding_type": "spot",
     }
     fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "ETHUSDT", today.isoformat()))] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID,
         "api_key_id": API_KEY_ID_1,
         "venue": "okx",
@@ -2931,18 +2936,21 @@ async def test_refresh_daily_excludes_deribit_derivatives(monkeypatch):
     # Today: OKX USDT spot + OKX ETH perp (uPnL 100) + a Deribit BTC perp
     # (uPnL 2500 — must be EXCLUDED as deferred).
     fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "USDT", today.isoformat()))] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
         "venue": "okx", "symbol": "USDT", "asof": today.isoformat(),
         "quantity": 100_000.0, "mark_price": 1.0, "value_usd": 100_000.0,
         "unrealized_pnl_usd": None, "holding_type": "spot",
     }
     fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "ETHUSDT", today.isoformat()))] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
         "venue": "okx", "symbol": "ETHUSDT", "asof": today.isoformat(),
         "quantity": 1.0, "mark_price": 3000.0, "value_usd": 3000.0,
         "unrealized_pnl_usd": 100.0, "holding_type": "derivative",
     }
     fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "deribit", "BTC-PERPETUAL", today.isoformat()))] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
         "venue": "deribit", "symbol": "BTC-PERPETUAL", "asof": today.isoformat(),
         "quantity": 0.2, "mark_price": 49900.0, "value_usd": 10000.0,
@@ -3842,12 +3850,14 @@ async def test_h1161_refresh_logs_audit_when_perp_upnl_is_none(monkeypatch):
     today = date(2026, 4, 23)
 
     fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "USDT", today.isoformat()))] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
         "venue": "okx", "symbol": "USDT", "asof": today.isoformat(),
         "value_usd": 100_000.0, "holding_type": "spot",
         "unrealized_pnl_usd": None,
     }
     fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "ETHUSDT", today.isoformat()))] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
         "venue": "okx", "symbol": "ETHUSDT", "asof": today.isoformat(),
         "value_usd": 50_000.0, "holding_type": "derivative",
@@ -3892,12 +3902,14 @@ async def test_h1161_refresh_keeps_perp_breakdown_entry_when_upnl_is_zero(monkey
 
     today = date(2026, 4, 23)
     fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "USDT", today.isoformat()))] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
         "venue": "okx", "symbol": "USDT", "asof": today.isoformat(),
         "value_usd": 100_000.0, "holding_type": "spot",
         "unrealized_pnl_usd": None,
     }
     fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "ETHUSDT", today.isoformat()))] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
         "venue": "okx", "symbol": "ETHUSDT", "asof": today.isoformat(),
         "value_usd": 50_000.0, "holding_type": "derivative",
@@ -5078,6 +5090,7 @@ async def test_pta7_refresh_skips_non_numeric_upnl(monkeypatch):
     fake_supabase.store[
         ("allocator_holdings", (ALLOCATOR_ID, today_iso, "USDT"))
     ] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
         "asof": today_iso, "symbol": "USDT",
         "holding_type": "spot", "value_usd": 100.0,
@@ -5085,6 +5098,7 @@ async def test_pta7_refresh_skips_non_numeric_upnl(monkeypatch):
     fake_supabase.store[
         ("allocator_holdings", (ALLOCATOR_ID, today_iso, "BTCUSDT"))
     ] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
         "asof": today_iso, "symbol": "BTCUSDT",
         "holding_type": "derivative", "value_usd": 1000.0,
@@ -5225,6 +5239,7 @@ async def test_spec_sfh4_refresh_perp_upnl_missing_is_aggregated(monkeypatch):
         fake_supabase.store[
             ("allocator_holdings", (ALLOCATOR_ID, today_iso, sym))
         ] = {
+            "updated_at": "2026-09-20T04:00:00+00:00",
             "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
             "asof": today_iso, "symbol": sym,
             "holding_type": "derivative", "value_usd": 1000.0,
@@ -5233,6 +5248,7 @@ async def test_spec_sfh4_refresh_perp_upnl_missing_is_aggregated(monkeypatch):
     fake_supabase.store[
         ("allocator_holdings", (ALLOCATOR_ID, today_iso, "USDT"))
     ] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
         "asof": today_iso, "symbol": "USDT",
         "holding_type": "spot", "value_usd": 50.0,

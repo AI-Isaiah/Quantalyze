@@ -355,6 +355,35 @@ def test_s15_scoring_failure_leaks_no_exception_text(
     assert correlation_id in logged
 
 
+def test_s15_truncated_holdings_read_is_a_logged_500_with_a_correlation_id(
+    match_client, monkeypatch, caplog
+) -> None:
+    """170.4 WR-03 / SFH-1: a holdings read that reaches the PostgREST row cap
+    raises ``HoldingsReadTruncated`` out of ``_load_holding_portfolio_context``.
+    It takes the scorer's existing failure path: a 500 ``SCORING_FAILED`` whose
+    body carries a correlation id and none of the exception text, the text going
+    to the operator's log."""
+    from routers import match as match_mod
+
+    async def _truncated(allocator_id, universe):
+        raise match_mod.HoldingsReadTruncated("CANARY_CAP holdings read reached the cap")
+
+    _arrange_recompute(monkeypatch, _truncated)
+
+    with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+        resp = match_client.post(
+            "/api/match/recompute",
+            json={"allocator_id": str(uuid4()), "force": False},
+        )
+
+    assert resp.status_code == 500
+    envelope = resp.json()["detail"]
+    assert envelope["code"] == "SCORING_FAILED"
+    assert envelope["correlation_id"]
+    assert resp.text.count("CANARY_CAP") == 0
+    assert "CANARY_CAP" in " ".join(rec.getMessage() for rec in caplog.records)
+
+
 def test_s16_eval_window_too_large_is_caller_400(match_client, monkeypatch) -> None:
     """S-16 — ``PaginatedSelectTruncated`` means the CALLER asked for too much.
 

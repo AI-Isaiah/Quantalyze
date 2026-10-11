@@ -82,6 +82,7 @@ def _seed_key(fake: FakeSupabaseClient, key_id: str) -> None:
 
 def _seed_holding(fake: FakeSupabaseClient, key_id: str, value_usd: float) -> None:
     fake.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "USDT", TODAY.isoformat(), key_id))] = {
+        "updated_at": "2026-09-20T04:00:00+00:00",
         "allocator_id": ALLOCATOR_ID,
         "api_key_id": key_id,
         "venue": "okx",

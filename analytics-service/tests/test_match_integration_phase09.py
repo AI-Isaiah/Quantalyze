@@ -109,6 +109,10 @@ def _build_mock_supabase(
             return _chain(strategy_analytics)
         if table_name == "allocator_holdings":
             return _chain(holdings)
+        if table_name == "api_keys":
+            # 170.4 WR-03: the scorer reads the owner's keys, then each key's
+            # newest day. This chain ignores filters, so the fixtures have ONE key.
+            return _chain([{"id": "key-phase09"}])
         if table_name == "allocator_equity_snapshots":
             return _chain(snapshots)
         if table_name == "match_decisions":
@@ -134,11 +138,11 @@ def test_load_allocator_context_holdings_only(monkeypatch):
     holdings = [
         {
             "venue": "binance", "symbol": "BTC", "holding_type": "spot",
-            "value_usd": 50000.0, "asof": "2026-02-10",
+            "value_usd": 50000.0, "asof": "2026-02-10", "api_key_id": "key-phase09", "updated_at": "2026-02-10T04:00:00+00:00",
         },
         {
             "venue": "binance", "symbol": "ETH", "holding_type": "spot",
-            "value_usd": 30000.0, "asof": "2026-02-10",
+            "value_usd": 30000.0, "asof": "2026-02-10", "api_key_id": "key-phase09", "updated_at": "2026-02-10T04:00:00+00:00",
         },
     ]
     # 41 days of snapshots so warm-up gate (>=30 returns) passes
@@ -196,8 +200,8 @@ def test_mixed_portfolio_weights_sum_to_one(monkeypatch):
     ]
     # Two holdings each with 41-day history
     holdings = [
-        {"venue": "binance", "symbol": "SOL", "holding_type": "spot", "value_usd": 25000.0, "asof": "2026-02-10"},
-        {"venue": "binance", "symbol": "AVAX", "holding_type": "spot", "value_usd": 25000.0, "asof": "2026-02-10"},
+        {"venue": "binance", "symbol": "SOL", "holding_type": "spot", "value_usd": 25000.0, "asof": "2026-02-10", "api_key_id": "key-phase09", "updated_at": "2026-02-10T04:00:00+00:00"},
+        {"venue": "binance", "symbol": "AVAX", "holding_type": "spot", "value_usd": 25000.0, "asof": "2026-02-10", "api_key_id": "key-phase09", "updated_at": "2026-02-10T04:00:00+00:00"},
     ]
     snapshots = _make_multi_symbol_snapshots(41, {"SOL": 25000.0, "AVAX": 25000.0})
 
@@ -274,8 +278,8 @@ def test_warmup_gate_under_30d(monkeypatch):
     NOTE per finding f1: plain `def`, no await.
     """
     holdings = [
-        {"venue": "binance", "symbol": "BTC", "holding_type": "spot", "value_usd": 50000.0, "asof": "2026-01-20"},
-        {"venue": "binance", "symbol": "ETH", "holding_type": "spot", "value_usd": 30000.0, "asof": "2026-01-20"},
+        {"venue": "binance", "symbol": "BTC", "holding_type": "spot", "value_usd": 50000.0, "asof": "2026-01-20", "api_key_id": "key-phase09", "updated_at": "2026-01-20T04:00:00+00:00"},
+        {"venue": "binance", "symbol": "ETH", "holding_type": "spot", "value_usd": 30000.0, "asof": "2026-01-20", "api_key_id": "key-phase09", "updated_at": "2026-01-20T04:00:00+00:00"},
     ]
     # BTC gets only 20 days (→ 19 returns, < 30 warm-up gate); ETH gets 41 days (→ 40 returns, passes)
     btc_snaps = _make_snapshot_series(20, "BTC", start_value=50000.0)

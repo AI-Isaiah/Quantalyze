@@ -24,6 +24,13 @@ import type { OptimizerPrefetch } from "../lib/watchlist-read";
  * shared component's /portfolios/[id] ordering stays byte-identical — SC-4).
  * The refresh path is PortfolioOptimizer's existing POST /api/portfolio-optimizer
  * ONLY — never the weights endpoint; never a pie/donut/weight-bar/"allocation %".
+ *
+ * 0-PORTFOLIO STATE (170.4 D-06, D-07): the "connect a key" prompt shows only
+ * when the server-side `hasConnectedKeys` flag is not true. An allocator with an
+ * eligible key and no portfolio is told that reason instead, with no connect
+ * link. No portfolio is created automatically (deferred idea, not built). With a
+ * portfolio but no analytics, PortfolioOptimizer's own never-run state names the
+ * reason and no connect copy appears whatever the flag says.
  */
 
 const PortfolioOptimizer = dynamic(
@@ -75,7 +82,20 @@ function sortByScoreDesc(
   );
 }
 
-export function OptimizerPanel({ prefetch }: { prefetch: OptimizerPrefetch }) {
+export function OptimizerPanel({
+  prefetch,
+  hasConnectedKeys = false,
+}: {
+  prefetch: OptimizerPrefetch;
+  /**
+   * 170.4 D-06 / D-07: the server-side "has an eligible key" predicate
+   * (`apiKeys.some(isPerKeyDailiesEligibleKey)` in src/lib/queries.ts), carried
+   * in the dashboard payload. Never derived from `portfolios` or holdings.
+   * Defaults to false (a harness supplying nothing asserts no key), which is
+   * the pre-170.4 behaviour.
+   */
+  hasConnectedKeys?: boolean;
+}) {
   const [portfolioId, setPortfolioId] = useState<string | null>(
     prefetch.defaultPortfolioId,
   );
@@ -93,6 +113,24 @@ export function OptimizerPanel({ prefetch }: { prefetch: OptimizerPrefetch }) {
 
   // 0-portfolio honest gate — PortfolioOptimizer is NOT mounted, no fake rows.
   if (prefetch.portfolios.length === 0 || portfolioId == null) {
+    // 170.4 D-06: with an eligible key the remedy is NOT "connect a key" — the
+    // allocator has one. No portfolio is created automatically (deferred idea);
+    // the owner-scoped allocation route provisions the real portfolio on the
+    // first allocation (src/app/api/portfolio-strategies/allocation/route.ts).
+    if (hasConnectedKeys) {
+      return (
+        <Card>
+          {heading}
+          <p className="mt-3 text-small font-medium text-text-primary">
+            Simulate Impact needs a portfolio
+          </p>
+          <p className="mt-1 text-small text-text-secondary">
+            Your exchange keys are connected, but you have no portfolio yet. A
+            portfolio starts when you allocate to a strategy.
+          </p>
+        </Card>
+      );
+    }
     return (
       <Card>
         {heading}

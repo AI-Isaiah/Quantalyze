@@ -7,6 +7,7 @@ import { AlertBanner } from "./components/AlertBanner";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
 import EquityChartWidget from "./widgets/performance/EquityChart";
 import { EquityHistoryRebuilding } from "./components/EquityHistoryRebuilding";
+import { historyGate, resolveNotSyncingKeys } from "./lib/history-gate";
 import { buildAllocatorPortfolioFactsheetPayload } from "@/lib/factsheet/allocator-portfolio-payload";
 import { formatCloseDay } from "@/lib/factsheet/returns-unit";
 import {
@@ -38,7 +39,6 @@ import { FactsheetBody } from "@/app/factsheet/[id]/v2/FactsheetView";
 export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   const {
     portfolio,
-    holdingsSummary = [],
     hasSyncing = false,
     analytics,
     flaggedHoldings = [],
@@ -62,13 +62,6 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // drives the explanatory banner so the missing absolute history doesn't
     // read as a broken connection.
     equityBaselineUnknown = false,
-    // DOGFOOD-1 (Phase 110.1): the honest connected-keys signal derived
-    // server-side via isPerKeyDailiesEligibleKey (is_active && !revoked &&
-    // !disconnected). NOT `activeVenues.length > 0`, which counts
-    // soft-disconnected / revoked keys as connected and wrongly showed the
-    // "connected — no positions synced yet" copy to an allocator who
-    // disconnected their only key.
-    hasConnectedKeys = false,
     // Phase 167.1.2 / D-02 ("Hide it until correct"): while the history is
     // rebuilt the producer withholds the curve, and neither the curve nor any
     // factsheet KPI computed from it renders.
@@ -79,15 +72,12 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // BTC comparator is built from. Absent reads as null (the fixture path).
     btcBenchmarkPrices = null,
     equityHistoryRebuildReason = null,
-    // Review C2 round 2 IN-04: the keys a key_not_syncing reason is about.
-    equityHistoryNotSyncingKeyIds = [],
     // Review C4 SFH-C4-04: the ready curve left out at least one departed
     // account's history (its anchor balance is gone). False when absent.
     departedHistoryUnavailable = false,
     // Phase 164.6.6.2.1 plan 17 (D-20): the native-unit accounts the total
     // leaves out on an unpriced day. Empty when absent.
     unpricedNativeAccounts = [],
-    apiKeys = [],
   } = props;
   // Fail-closed: ONLY an explicit "ready" may show the curve. A missing field,
   // null, "" or any state added later (a destructuring default fires on
@@ -99,18 +89,17 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   // "rebuilding" no number of days flips the state, so the warm-up timer would
   // be false. The Scenario composer gates its disclosure on the same state.
 
-  const holdingsEmpty = holdingsSummary.length === 0;
+  // Phase 170.4 plan 04 (D-04, D-07, D-09): the Overview and the Risk tab
+  // choose their state through one function over the payload, so they cannot
+  // disagree on the rebuilding panel, the connect-a-key card or the key a
+  // key_not_syncing line names.
+  const gate = historyGate(props);
 
   // Review C2 round 2 IN-04: resolve the producer's ids to the owner's own key
   // rows so the key_not_syncing line can name the key. An id missing from the
   // list makes the set unknown (null), and the line falls back to its unnamed
   // form rather than naming a different key.
-  const notSyncingKeys = (() => {
-    if (equityHistoryNotSyncingKeyIds.length === 0) return null;
-    const byId = new Map(apiKeys.map((k) => [k.id, k]));
-    const keys = equityHistoryNotSyncingKeyIds.map((id) => byId.get(id));
-    return keys.every((k) => k !== undefined) ? keys : null;
-  })();
+  const notSyncingKeys = resolveNotSyncingKeys(props);
 
   const factsheetPayload = useMemo(
     () =>
@@ -139,7 +128,11 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     ],
   );
 
-  if (holdingsEmpty && !hasSyncing) {
+  // Phase 170.4 plan 04 (D-04, D-09): this early return no longer shadows the
+  // rebuilding state. With an eligible key the rebuilding panel wins over the
+  // connected-but-empty card ("rebuilding" falls through to the render below);
+  // with none, the connect-a-key card shows whatever the history state.
+  if (gate === "no_eligible_key" || gate === "connected_empty") {
     return (
       <div data-ui-v2-shell="true">
         {/* CL9 / NEW-C01-11: holdingsSummary (allocator_holdings) and
@@ -161,10 +154,13 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             as "connected — no positions synced yet". Using the honest signal,
             an allocator who disconnected their only key sees the "Connect a
             key" CTA; one with a live key but no synced positions sees the
-            connected-but-empty copy. */}
+            connected-but-empty copy. Phase 170.4 (D-04, D-09): `historyGate`
+            reads that same flag, and the rebuilding state now takes
+            precedence over the connected-but-empty card, so this branch is
+            reached with a connected key only once the history is ready. */}
         <EmptyState
           hasSyncing={false}
-          hasConnectedKeys={hasConnectedKeys}
+          hasConnectedKeys={gate === "connected_empty"}
         />
       </div>
     );

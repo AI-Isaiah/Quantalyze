@@ -31,6 +31,7 @@ class _Query:
         self._eq: list[tuple[str, Any]] = []
         self._in: list[tuple[str, list[Any]]] = []
         self._desc: tuple[str, bool] | None = None
+        self._limit: int | None = None
 
     def select(self, *_a: Any, **_k: Any) -> "_Query":
         return self
@@ -47,6 +48,10 @@ class _Query:
         self._desc = (col, desc)
         return self
 
+    def limit(self, count: int) -> "_Query":
+        self._limit = count
+        return self
+
     def execute(self) -> Any:
         if self._name == "allocator_equity_derived" and self._db.derived_error is not None:
             raise self._db.derived_error
@@ -59,6 +64,11 @@ class _Query:
         if self._desc is not None:
             col, desc = self._desc
             data.sort(key=lambda r: r[col], reverse=desc)
+        # PostgREST: a response never exceeds the explicit limit nor the server's
+        # max_rows (1000 on this project), and a capped read carries no error.
+        ceilings = [n for n in (self._limit, self._db.max_rows) if n is not None]
+        if ceilings:
+            data = data[: min(ceilings)]
         return type("R", (), {"data": data})()
 
 
@@ -66,6 +76,7 @@ class _Db:
     def __init__(self, tables: dict[str, list[dict[str, Any]]]) -> None:
         self.tables = tables
         self.derived_error: Exception | None = None
+        self.max_rows: int | None = None  # PostgREST's server-side cap
 
     def table(self, name: str) -> _Query:
         return _Query(self, name)
@@ -80,6 +91,7 @@ def _holding(key: str, venue: str, symbol: str, asof: str, value: float) -> dict
         "holding_type": "spot",
         "value_usd": value,
         "asof": asof,
+        "updated_at": f"{asof}T04:00:00+00:00",
     }
 
 
@@ -94,6 +106,10 @@ def _marker(key: str, day: str) -> dict[str, Any]:
 def _book(marker_day: str | None) -> _Db:
     return _Db(
         {
+            "api_keys": [
+                {"id": MT5_KEY, "user_id": ALLOCATOR, "exchange": "mt5"},
+                {"id": OKX_KEY, "user_id": ALLOCATOR, "exchange": "okx"},
+            ],
             "allocator_holdings": [
                 _holding(MT5_KEY, "mt5", "BTC", "2026-10-09", BTC_USD),
                 _holding(OKX_KEY, "okx", "USDT", "2026-10-10", OKX_USD),

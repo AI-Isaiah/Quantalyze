@@ -98,7 +98,7 @@ const PAYLOAD = {
   portfolio: null,
   analytics: null,
   apiKeys: [
-    { id: "key-1", sync_status: "complete", venue: "binance", key_label: "BNB" },
+    { id: "key-1", sync_status: "complete", exchange: "binance", label: "BNB" },
   ],
   alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
   outcomes: [],
@@ -186,7 +186,7 @@ describe("HoldingsTabPanel — a key missing from apiKeys is flagged, a present 
     const payload = {
       ...PAYLOAD,
       apiKeys: [
-        { id: "key-1", sync_status: null, venue: "binance", key_label: "BNB" },
+        { id: "key-1", sync_status: null, exchange: "binance", label: "BNB" },
       ],
       holdingsSummary: [
         SPOT_USDT,

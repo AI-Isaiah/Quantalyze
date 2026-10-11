@@ -68,6 +68,7 @@ import type {
 } from "./types";
 import { SUPPORTED_EXCHANGES, type SupportedExchange } from "./utils";
 import { holdingScopeKey } from "./keys";
+import { oneKeyPerAccountDay } from "./holdings-account-day";
 import {
   fetchLatestHoldingsPerKey,
   latestHoldingsPerKey,
@@ -3138,6 +3139,22 @@ export interface MyAllocationDashboardPayload {
    */
   partialPositionReads?: Array<{ api_key_id: string; asof: string }>;
   /**
+   * Phase 170.4 plan 07 (D-10). The row set the Scenario fingerprint is built
+   * from: EVERY live key's rows at its account's newest day, as `symbol`,
+   * `venue` and `holding_type` only. It is deliberately NOT narrowed by the
+   * one-key-per-account-day rule that `holdingsSummary` carries: the commit
+   * RPC (`commit_scenario_batch`, migration 20260929120000) recomputes the
+   * fingerprint over its `contributing` CTE, which keeps every key whose day
+   * equals its account's newest day, so a fingerprint over the winner's rows
+   * alone would be refused as `portfolio_fingerprint_stale`. Optional so
+   * legacy fixtures compile; the dashboard read always sets it.
+   */
+  holdingsFingerprintRows?: Array<{
+    symbol: string;
+    venue: string;
+    holding_type: "spot" | "derivative";
+  }>;
+  /**
    * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
    * allocator's snapshots, or null when every snapshot's column is
    * NULL (e.g., pure CoinGecko-fallback data). Drives the venue-
@@ -4379,6 +4396,10 @@ export function derivePhase07Fields(
     // Phase 164.6.6.2.1 plan 17: optional here so a fixture that predates the
     // column compiles; the dashboard read projects it on every row.
     quantity_unit?: string | null;
+    // Phase 170.4 plan 07 (D-10): required. allocator_holdings.updated_at is
+    // NOT NULL DEFAULT now(); the one-key-per-account-day rule compares it, and
+    // a row without one is a contract violation (HoldingsUpdatedAtError).
+    updated_at: string;
   }>,
   // CL9 / NEW-C01-11: computed at the read boundary (any flagged row present),
   // threaded through so both payload branches surface it via the `...phase07`
@@ -4395,6 +4416,10 @@ export function derivePhase07Fields(
   // Review C4 round 2 WR-R2-03: the read's `partialReads`. Defaulted so
   // callers that pass no holdings read (fixtures) name no key.
   partialReads: ReadonlyArray<{ api_key_id: string; asof: string }> = [],
+  // Phase 170.4 plan 07 (D-10): each contributing key's exchange-account token
+  // (`fetchLatestHoldingsPerKey`'s `accountByKey`). A key it does not name is its
+  // own account, so a caller that passes none counts every key.
+  accountByKey: Readonly<Record<string, string>> = {},
 ): Pick<
   MyAllocationDashboardPayload,
   | "equitySnapshots"
@@ -4413,6 +4438,7 @@ export function derivePhase07Fields(
   | "departedHistoryUnavailable"
   | "unpricedNativeAccounts"
   | "partialPositionReads"
+  | "holdingsFingerprintRows"
   | "minHistoryDepthMonths"
   | "activeVenues"
   | "hasConnectedKeys"
@@ -4522,38 +4548,69 @@ export function derivePhase07Fields(
     ),
   ).sort();
 
-  // Collapse holdings to latest-asof-per-{venue}:{symbol}:{holding_type}
-  // via linear scan of the max-asof comparator. Input order is IRRELEVANT
-  // for correctness: the read (fetchLatestHoldingsPerKey) concatenates the
-  // keys' rows in no guaranteed order. Do NOT flip the comparator to
-  // "first-seen wins" thinking ordering is guaranteed.
+  // One row per KEY and {venue}:{symbol}:{holding_type}, latest asof within a
+  // key. Input order is IRRELEVANT for correctness: the read
+  // (fetchLatestHoldingsPerKey) concatenates the keys' rows in no guaranteed
+  // order. Do NOT flip the comparator to "first-seen wins" thinking ordering
+  // is guaranteed.
   //
-  // NEW-C03-02: Key by `${venue}:${symbol}:${holding_type}`, not just
+  // NEW-C03-02: the scope is `${venue}:${symbol}:${holding_type}`, not just
   // `symbol`. Keying on symbol alone silently collapsed multi-venue
   // (Binance BTC + OKX BTC) and spot+derivative (BTC-spot + BTC-perp)
-  // holdings to a single row — only the latest-asof survived, so a whole
-  // exchange's position could disappear from the dashboard and the
-  // surviving venue could flip between page loads. The scope_ref keyspace
-  // used everywhere else in the pipeline already uses this triple-key
-  // format (see buildHoldingRef).
+  // holdings to a single row. The scope_ref keyspace used everywhere else in
+  // the pipeline uses this triple-key format (see buildHoldingRef).
+  //
+  // Phase 170.4 D-08 ("One Key is One Strategy", founder 2026-10-11): holdings
+  // from different API keys are never merged. This map used to key by the scope
+  // alone, so two live keys holding one symbol on one venue lost one key's
+  // position (Holdings understated, and under D-01 Exposure would too). The key
+  // is now `${api_key_id}|${scope}`: each key's position is its own row and
+  // every total over `holdingsSummary` is the sum over keys. Departed and
+  // superseded keys are already removed by the read, so no cross-key dedup is
+  // needed here.
   //
   // Phase 167.1.2 D-16: the collapse runs only over each key's rows at that
   // key's own latest asof (latestHoldingsPerKey), so a position a key closed
   // before its latest poll no longer survives from an older row. Review C4
   // SFH-C4-01 / SFH-C4-02: the read already dropped a key whose account a
   // newer reading superseded (another key on the same exchange account, or
-  // the key's own later clean poll), so this collapse never picks a departed
-  // key's row for a symbol the account has closed since.
-  const holdingsMap = new Map<string, (typeof holdingsRows)[number]>();
+  // the key's own later clean poll).
+  const perKeyMap = new Map<string, (typeof holdingsRows)[number]>();
   for (const r of latestHoldingsPerKey(holdingsRows)) {
-    // B8: same canonical triple key as the scope_ref sites above
-    // (holdingScopeKey) so the dedup keyspace cannot drift from the rest of
-    // the pipeline. The "holding:" prefix is immaterial to a local dedup map.
-    const key = holdingScopeKey(r);
-    const existing = holdingsMap.get(key);
-    if (!existing || r.asof > existing.asof) holdingsMap.set(key, r);
+    // B8: the scope part is the canonical triple key (holdingScopeKey) so the
+    // dedup keyspace cannot drift from the rest of the pipeline.
+    const key = `${r.api_key_id}|${holdingScopeKey(r)}`;
+    const existing = perKeyMap.get(key);
+    if (!existing || r.asof > existing.asof) perKeyMap.set(key, r);
   }
-  const holdingsSummary = Array.from(holdingsMap.values()).map((r) => ({
+  const perKeyRows = Array.from(perKeyMap.values());
+
+  // Phase 170.4 D-10: the Scenario fingerprint's row set. Built from the
+  // per-key rows BEFORE the account rule below, because `commit_scenario_batch`
+  // recomputes the fingerprint over its `contributing` CTE (migration
+  // 20260929120000), which keeps EVERY key whose day equals its account's
+  // newest day. Narrowing this to the winner's rows would drop a losing key's
+  // token and the RPC would refuse a book-mode commit as
+  // `portfolio_fingerprint_stale`. The client deduplicates tokens to a set, as
+  // the RPC's DISTINCT ON does. Symbol, venue and type only: the fingerprint
+  // needs no value.
+  const holdingsFingerprintRows = perKeyRows.map((r) => ({
+    symbol: r.symbol,
+    venue: r.venue,
+    holding_type: r.holding_type,
+  }));
+
+  // Phase 170.4 D-10: keys that share ONE exchange account count once per day
+  // in DOLLARS (plan 11's rule, picked per holding type: latest `updated_at`
+  // instant over the key's rows of the type, ties by smallest lowercase
+  // api_key_id; review WR-01). Holdings, Open Positions, Exposure, the live AUM and
+  // the Scenario default weights read `holdingsSummary`, so they carry the
+  // winner's rows only; keys on different accounts all stay (D-08).
+  const dollarRows = oneKeyPerAccountDay(
+    perKeyRows,
+    (keyId) => accountByKey[keyId] ?? keyId,
+  );
+  const holdingsSummary = dollarRows.map((r) => ({
     symbol: r.symbol,
     quantity: r.quantity,
     mark_price_usd: r.mark_price,
@@ -4567,6 +4624,9 @@ export function derivePhase07Fields(
     quantity_unit: parseReturnsUnit(r.quantity_unit),
     asof: r.asof,
   }));
+  // The partial-read note names the poll whose rows are shown: only keys that
+  // still hold a row in `holdingsSummary`.
+  const shownKeyIds = new Set(holdingsSummary.map((h) => h.api_key_id));
 
   return {
     // Phase 167.1.2 / D-02 (review round 1 SFH-03): the raw snapshot levels are
@@ -4590,7 +4650,10 @@ export function derivePhase07Fields(
     equityHistoryNotSyncingKeyIds,
     departedHistoryUnavailable,
     unpricedNativeAccounts,
-    partialPositionReads: partialReads.map((p) => ({ ...p })),
+    partialPositionReads: partialReads
+      .filter((p) => shownKeyIds.has(p.api_key_id))
+      .map((p) => ({ ...p })),
+    holdingsFingerprintRows,
     minHistoryDepthMonths,
     activeVenues,
     hasConnectedKeys,
@@ -4767,7 +4830,7 @@ export const getMyAllocationDashboard = cache(
         // Positions section without conflating notional `value_usd`
         // with equity contribution (only `unrealized_pnl_usd` counts
         // toward the equity curve for derivatives).
-        "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id, side, entry_price, unrealized_pnl_usd, quantity_unit",
+        "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id, side, entry_price, unrealized_pnl_usd, quantity_unit, updated_at",
       ),
       getUserApiKeys(userId),
       admin
@@ -5139,6 +5202,7 @@ export const getMyAllocationDashboard = cache(
       entry_price: number | null;
       unrealized_pnl_usd: number | null;
       quantity_unit: string | null;
+      updated_at: string;
     }>;
 
     const phase07 = derivePhase07Fields(
@@ -5152,6 +5216,9 @@ export const getMyAllocationDashboard = cache(
       phase115DerivedRow,
       // Review C4 round 2 WR-R2-03: keys whose rows' poll left positions unread.
       phase07HoldingsRes.partialReads,
+      // Phase 170.4 D-10: each contributing key's exchange account, so keys that
+      // share one account count once per day in the dollar totals.
+      phase07HoldingsRes.accountByKey,
     );
 
     // Phase 169.4 plan 02 (SC3, D-09, D-69): the Overview's BTC comparator

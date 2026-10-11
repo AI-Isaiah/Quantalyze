@@ -7,7 +7,6 @@ import {
   getOwnCapitalStrategies,
 } from "@/lib/queries";
 import {
-  getLatestExposureSnapshot,
   getNetExposureSeries,
   getAllocationSeries,
 } from "@/lib/portfolio-exposure";
@@ -57,15 +56,18 @@ export default async function MyAllocationPage() {
   // requireRolePage's wrong-role redirect() throws NEXT_REDIRECT (redirect.md).
   await requireRolePage(supabase, user, "allocator");
 
-  // Phase 99 / 99-04 — fetch the polled dashboard payload AND the three
-  // exposure reads in ONE Promise.all with the AUTHENTICATED user.id
+  // Phase 99 / 99-04 — fetch the polled dashboard payload AND the two
+  // over-time exposure series in ONE Promise.all with the AUTHENTICATED user.id
   // (`supabase.auth.getUser()` above — never a client-supplied id; the
-  // rls-auditor carry-forward). The exposure reads are NOT folded into
+  // rls-auditor carry-forward). The series are NOT folded into
   // getMyAllocationDashboard (that payload has a client refresh/poll path; the
-  // exposure reads are a daily-grain 730-day paged scan that runs once per page
-  // load). No error-swallowing wrapper here: the read layer THROWS on PostgREST
-  // errors and that throw must reach `allocations/error.tsx` — an error and an
-  // empty book are distinct states; never collapse an error into empty-state copy.
+  // series are a daily-grain 730-day paged scan that runs once per page load).
+  // Phase 170.4 (D-01): the CURRENT exposure snapshot is not read here any more;
+  // it is built in HoldingsTabPanel from the payload's per-key holdings, the
+  // same rows Holdings and Open Positions show. No error-swallowing wrapper
+  // here: the read layer THROWS on PostgREST errors and that throw must reach
+  // `allocations/error.tsx` — an error and an empty book are distinct states;
+  // never collapse an error into empty-state copy.
   //
   // Phase 100 / 100-04 (PI-04 + PI-05) — SAME additive precedent: three more
   // owner-scoped reads join the batch (the watchlist favorites, the optimizer
@@ -97,7 +99,6 @@ export default async function MyAllocationPage() {
   // read — so a fetch error cannot masquerade as a definitive empty state.
   const [
     payload,
-    snapshot,
     netSeries,
     allocationSeries,
     favorites,
@@ -107,7 +108,6 @@ export default async function MyAllocationPage() {
     anyOwnStrategies,
   ] = await Promise.all([
     getMyAllocationDashboard(user.id),
-    getLatestExposureSnapshot(user.id),
     getNetExposureSeries(user.id),
     getAllocationSeries(user.id),
     getFavoritesWithStrategies(supabase, user.id),
@@ -116,7 +116,7 @@ export default async function MyAllocationPage() {
     getOwnCapitalStrategies(user.id),
     hasAnyOwnStrategies(user.id),
   ]);
-  const exposure: ExposureSectionData = { snapshot, netSeries, allocationSeries };
+  const exposure: ExposureSectionData = { netSeries, allocationSeries };
 
   // Review WR-02 — the null-vs-empty contract both reads document is CONSUMED
   // here, not collapsed. `null` means the fetch failed; `[]` means the fetch
@@ -131,7 +131,7 @@ export default async function MyAllocationPage() {
   // idiom (149 review WR-01), which these two queries' own docblocks name:
   // "a degraded render beats an error boundary here". The competing precedent
   // in the comment above (throw-to-error.tsx) belongs to the reads that THROW
-  // themselves — the dashboard payload and the three exposure reads, whose
+  // themselves — the dashboard payload and the two exposure series, whose
   // absence leaves nothing to render. Here the rest of the money surface
   // (equity, exposure, holdings) is intact, and taking it down over a blip in
   // one auxiliary strategies read is a bigger lie than the strip.

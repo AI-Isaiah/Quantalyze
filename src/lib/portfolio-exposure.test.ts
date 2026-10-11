@@ -1,6 +1,11 @@
 /**
- * Phase 98 / 98-03 (PI-01/PI-02/PI-03) — RED-first contract spec for the
+ * Phase 98 / 98-03 (PI-02/PI-03) — RED-first contract spec for the
  * server-only `allocator_holdings` read layer (`portfolio-exposure.ts`).
+ *
+ * Phase 170.4 plan 01 (D-01): the allocator-wide "latest snapshot" read (PI-01)
+ * is retired from this module. The current Exposure card is built from the
+ * dashboard payload's per-key holdings (allocations/lib/exposure-snapshot.ts,
+ * tested there), so what these specs cover is the two over-time series (D-03).
  *
  * Mocking convention mirrors `src/lib/queries.percentiles.test.ts`: a
  * `vi.hoisted` resolver feeds a thenable capturing query-builder chain, so a
@@ -10,19 +15,15 @@
  * `queries.mandateIsSet.test.ts`), so a capturing chain — not a no-op stub — is
  * required. No live DB (project memory: live-DB `skipIf` tests never run in CI).
  *
- * Covers the seven behaviour clusters the plan pins:
- *   1. honest-empty (D-P7)          5. latest-asof-only snapshot
- *   2. owner gate + no-admin-import 6. no-zero-fill gap marking (+ computeAsofGaps units)
- *   3. secretless projection (T-98-08) 7. per-venue weight math (+ zero-gross skip, D-P3)
- *   4. signed net (D-P2)
+ * Covers the behaviour clusters the series reads pin:
+ *   1. honest-empty (D-P7)             4. signed net (D-P2)
+ *   2. owner gate + no-admin-import    5. no-zero-fill gap marking (+ computeAsofGaps units)
+ *   3. secretless projection (T-98-08) 6. per-venue weight math (+ zero-gross skip, D-P3)
  */
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { captureToSentry } from "@/lib/sentry-capture";
-
-vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
 interface HoldingRow {
   asof: string;
@@ -31,8 +32,6 @@ interface HoldingRow {
   holding_type: string;
   side: string;
   value_usd: number;
-  /** R2-WR-01: the key the row was polled for, read to honour the unpriced marker. */
-  api_key_id?: string;
 }
 
 // PostgREST silently caps every response at `max_rows` (supabase/config.toml:18
@@ -41,14 +40,6 @@ interface HoldingRow {
 // regression genuinely RED against the old single unbounded `.order(asof asc)`
 // query (it drops the newest rows) and GREEN once the reads paginate / narrow.
 const POSTGREST_MAX_ROWS = 1000;
-
-// R2-WR-01: the `allocator_equity_derived` rows (the native-unpriced markers) the same
-// mocked client serves when the module reads that table; kept apart from the holdings
-// resolver so the holdings contract assertions below never see those calls.
-const derivedResolver = vi.hoisted(() => ({
-  rows: [] as { kind: string; payload: unknown }[],
-  error: null as { message: string } | null,
-}));
 
 const holdingsResolver = vi.hoisted(() => ({
   rows: [] as HoldingRow[],
@@ -74,20 +65,7 @@ const FILTERABLE_COLS = new Set([
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
-    from: (table?: string) => {
-      if (table === "allocator_equity_derived") {
-        const derived: Record<string, unknown> = {};
-        for (const m of ["select", "eq", "like", "limit"]) derived[m] = () => derived;
-        derived.then = (
-          onFulfilled: (v: { data: unknown; error: unknown }) => unknown,
-        ) =>
-          Promise.resolve(
-            derivedResolver.error
-              ? { data: null, error: derivedResolver.error }
-              : { data: derivedResolver.rows, error: null },
-          ).then(onFulfilled);
-        return derived;
-      }
+    from: () => {
       // Per-query builder state so a two-step read (max-asof then eq-asof) and
       // a paginated read (repeated `.range`) each resolve against their OWN
       // filters, while global resolver arrays capture the query CONTRACT.
@@ -178,7 +156,6 @@ vi.mock("@/lib/supabase/admin", () => {
 });
 
 import {
-  getLatestExposureSnapshot,
   getNetExposureSeries,
   getAllocationSeries,
   computeAsofGaps,
@@ -207,8 +184,6 @@ beforeEach(() => {
   holdingsResolver.orderCalls = [];
   holdingsResolver.limitCalls = [];
   holdingsResolver.rangeCalls = [];
-  derivedResolver.rows = [];
-  derivedResolver.error = null;
 });
 
 describe("computeAsofGaps — pure gap detection (missingSegments shape)", () => {
@@ -239,15 +214,13 @@ describe("computeAsofGaps — pure gap detection (missingSegments shape)", () =>
   });
 });
 
-describe("getLatestExposureSnapshot", () => {
-  it("honest-empty: zero rows → null (not a zero-filled snapshot)", async () => {
-    holdingsResolver.rows = [];
-    expect(await getLatestExposureSnapshot(USER_ID)).toBeNull();
-  });
-
+describe("the series reads' shared fetch (owner gate and projection, T-98-07 / T-98-08)", () => {
+  // These two cases used to run against the retired latest-snapshot read. Both
+  // series go through the same `fetchHoldings`, so the trust boundary is pinned
+  // here on the reads that remain.
   it("owner gate: issues .eq('allocator_id', userId) and a 730-day .gte('asof') cap", async () => {
     holdingsResolver.rows = [row()];
-    await getLatestExposureSnapshot(USER_ID);
+    await getNetExposureSeries(USER_ID);
     expect(holdingsResolver.eqCalls).toContainEqual(["allocator_id", USER_ID]);
     const gteCols = holdingsResolver.gteCalls.map((c) => c[0]);
     expect(gteCols).toContain("asof");
@@ -255,126 +228,10 @@ describe("getLatestExposureSnapshot", () => {
 
   it("secretless projection: never selects raw_payload / api_key, includes the six allow-listed columns", async () => {
     holdingsResolver.rows = [row()];
-    await getLatestExposureSnapshot(USER_ID);
-    // R2-WR-01: `api_key_id` (the owner's own FK, no key material) is the one addition,
-    // read to match a row to its native-unpriced marker. The secret columns stay out.
-    expect(holdingsResolver.selectArg).not.toMatch(/raw_payload|api_key(?!_id)/);
-    for (const col of [
-      "asof",
-      "venue",
-      "symbol",
-      "holding_type",
-      "side",
-      "value_usd",
-    ]) {
+    await getAllocationSeries(USER_ID);
+    expect(holdingsResolver.selectArg).not.toMatch(/raw_payload|api_key/);
+    for (const col of ["asof", "venue", "symbol", "holding_type", "side", "value_usd"]) {
       expect(holdingsResolver.selectArg).toContain(col);
-    }
-  });
-
-  it("signed net (D-P2): short is negated; net = 250, gross = 450", async () => {
-    holdingsResolver.rows = [
-      row({ symbol: "BTC", holding_type: "derivative", side: "short", value_usd: 100 }),
-      row({ symbol: "ETH", holding_type: "derivative", side: "long", value_usd: 300 }),
-      row({ symbol: "SOL", holding_type: "spot", side: "flat", value_usd: 50 }),
-    ];
-    const snap = await getLatestExposureSnapshot(USER_ID);
-    expect(snap).not.toBeNull();
-    expect(snap!.totalNetUsd).toBe(250);
-    expect(snap!.totalGrossUsd).toBe(450);
-    const shortSlice = snap!.slices.find((s) => s.side === "short");
-    expect(shortSlice!.signedValueUsd).toBe(-100);
-    expect(shortSlice!.valueUsd).toBe(100);
-  });
-
-  it("latest-asof only: slices come solely from the max asof", async () => {
-    holdingsResolver.rows = [
-      row({ asof: "2026-07-01", symbol: "OLD", value_usd: 999 }),
-      row({ asof: "2026-07-02", symbol: "BTC", value_usd: 100 }),
-      row({ asof: "2026-07-02", symbol: "ETH", value_usd: 200 }),
-    ];
-    const snap = await getLatestExposureSnapshot(USER_ID);
-    expect(snap!.asof).toBe("2026-07-02");
-    expect(snap!.slices.map((s) => s.symbol).sort()).toEqual(["BTC", "ETH"]);
-    expect(snap!.slices.some((s) => s.symbol === "OLD")).toBe(false);
-  });
-
-  it("aggregates the (holding_type, venue, symbol, side) grain into one slice", async () => {
-    holdingsResolver.rows = [
-      row({ symbol: "BTC", value_usd: 100 }),
-      row({ symbol: "BTC", value_usd: 40 }),
-    ];
-    const snap = await getLatestExposureSnapshot(USER_ID);
-    expect(snap!.slices).toHaveLength(1);
-    expect(snap!.slices[0].valueUsd).toBe(140);
-  });
-});
-
-describe("getLatestExposureSnapshot honours the native-unpriced marker (164.6.6.2.1 R2-WR-01)", () => {
-  // A BTC-denominated MT5 account whose latest completed day has no stored close polls to NO
-  // row; the poll records that in a service-written `native_unpriced:<key>` row. Its
-  // earlier row (priced at an older close) can be the allocator's newest `asof`, and was
-  // then rendered on /allocations as the current exposure.
-  const MT5_KEY = "22222222-2222-2222-2222-222222222222";
-  const OKX_KEY = "33333333-3333-3333-3333-333333333333";
-  const marker = (key: string, day: string) => ({
-    kind: `native_unpriced:${key}`,
-    payload: { native_unpriced: true, asof: day },
-  });
-
-  it("drops a key's rows dated before its marker (the shared reader's strict comparison)", async () => {
-    holdingsResolver.rows = [
-      row({ asof: "2026-07-02", api_key_id: MT5_KEY, venue: "mt5", symbol: "BTC", value_usd: 26_100 }),
-      row({ asof: "2026-07-02", api_key_id: OKX_KEY, venue: "okx", symbol: "USDT", value_usd: 1_000 }),
-    ];
-    derivedResolver.rows = [marker(MT5_KEY, "2026-07-03")];
-
-    const snap = await getLatestExposureSnapshot(USER_ID);
-
-    expect(snap!.slices.map((s) => s.symbol)).toEqual(["USDT"]);
-    expect(snap!.totalGrossUsd).toBe(1_000);
-  });
-
-  it("honest-empty when the marker removes every row of the latest day", async () => {
-    holdingsResolver.rows = [
-      row({ asof: "2026-07-02", api_key_id: MT5_KEY, venue: "mt5", symbol: "BTC", value_usd: 26_100 }),
-    ];
-    derivedResolver.rows = [marker(MT5_KEY, "2026-07-03")];
-
-    expect(await getLatestExposureSnapshot(USER_ID)).toBeNull();
-  });
-
-  it.each([
-    ["on the rows' own day", "2026-07-02"],
-    ["older than the rows", "2026-06-20"],
-  ])("a marker %s hides nothing", async (_label, day) => {
-    holdingsResolver.rows = [
-      row({ asof: "2026-07-02", api_key_id: MT5_KEY, venue: "mt5", symbol: "BTC", value_usd: 26_100 }),
-    ];
-    derivedResolver.rows = [marker(MT5_KEY, day)];
-
-    const snap = await getLatestExposureSnapshot(USER_ID);
-
-    expect(snap!.totalGrossUsd).toBe(26_100);
-  });
-
-  it("a failed marker read keeps the rows (never blanks the tab) and says so", async () => {
-    holdingsResolver.rows = [
-      row({ asof: "2026-07-02", api_key_id: MT5_KEY, venue: "mt5", symbol: "BTC", value_usd: 26_100 }),
-    ];
-    derivedResolver.error = { message: "marker table unavailable" };
-    vi.mocked(captureToSentry).mockClear();
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    try {
-      const snap = await getLatestExposureSnapshot(USER_ID);
-
-      expect(snap!.totalGrossUsd).toBe(26_100);
-      expect(errorSpy).toHaveBeenCalledWith(
-        expect.stringContaining("native-unpriced"),
-        "marker table unavailable",
-      );
-      expect(captureToSentry).toHaveBeenCalledTimes(1);
-    } finally {
-      errorSpy.mockRestore();
     }
   });
 });
@@ -449,24 +306,6 @@ function seqRow(i: number): HoldingRow {
 }
 
 describe("F-1 (v1.10): PostgREST 1000-row truncation must not drop newest holdings", () => {
-  it("getLatestExposureSnapshot uses the two-step max-asof-then-eq path (not a full-window scan)", async () => {
-    holdingsResolver.rows = [
-      row({ asof: "2026-07-01", symbol: "OLD", value_usd: 999 }),
-      row({ asof: "2026-07-05", symbol: "BTC", value_usd: 100 }),
-    ];
-    const snap = await getLatestExposureSnapshot(USER_ID);
-
-    // Step 1: a descending single-row read to find the latest asof.
-    expect(holdingsResolver.orderCalls).toContainEqual(["asof", false]);
-    expect(holdingsResolver.limitCalls).toContain(1);
-    // Step 2: fetch holdings AT that exact asof (eq, not a window scan).
-    expect(holdingsResolver.eqCalls).toContainEqual(["asof", "2026-07-05"]);
-    // The prior full-window scan ordered ascending only, with no limit.
-    expect(holdingsResolver.orderCalls).not.toContainEqual(["asof", true]);
-    expect(snap!.asof).toBe("2026-07-05");
-    expect(snap!.slices.map((s) => s.symbol)).toEqual(["BTC"]);
-  });
-
   it("getNetExposureSeries paginates a >1000-row window and returns the COMPLETE series incl. the newest asof", async () => {
     const big = Array.from({ length: 1500 }, (_, i) => seqRow(i));
     const newestAsof = big[big.length - 1].asof;

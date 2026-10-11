@@ -6,10 +6,10 @@
  * (`_fetch_latest_holdings_per_eligible_key`): that key's rows at its own
  * latest asof; ordering is not trusted for correctness.
  *
- * Why per key and not allocator-wide: `getLatestExposureSnapshot` takes the
- * allocator's single latest `asof`, which drops every position of a key that
- * did not poll on that day, so a quiet key would read as flat. Each key keeps
- * its own latest poll instead.
+ * Why per key and not allocator-wide: a read that takes the allocator's single
+ * latest `asof` drops every position of a key that did not poll on that day,
+ * so a quiet key would read as flat. Each key keeps its own latest poll
+ * instead.
  *
  * Why the key set is not narrowed: every key the allocator owns counts,
  * departed ones included. Phase 167.1 routes a holding whose key is not
@@ -55,10 +55,10 @@ export function latestHoldingsPerKey<
 /**
  * The most rows one read may return before it counts as possibly truncated.
  * PostgREST's `max_rows` is 1000 on this project, and a read at that ceiling
- * returns a silent partial list with no error (the failure
- * `getLatestExposureSnapshot`'s docblock records for the old full-window
- * scan). Every read below also asks for at most this many rows with an
- * explicit `.limit`, so the check does not depend on the server setting.
+ * returns a silent partial list with no error, which an unbounded scan of this
+ * table would take for the whole book. Every read below also asks for at most
+ * this many rows with an explicit `.limit`, so the check does not depend on
+ * the server setting.
  */
 export const HOLDINGS_ROW_CAP = 1000;
 
@@ -174,43 +174,8 @@ export function nativeUnpricedDay(payload: unknown): string | null {
 }
 
 /**
- * CR-01. For each of the owner's keys, the LATEST day a poll declared a native-unit
- * account unpriced (`nativeUnpricedDay`), for the reader that sums every key's newest
- * row per holding rather than reading one key at a time (the scenario commit's audit
- * AUM). That reader drops a key's rows dated BEFORE the returned day: they are priced at
- * an older close than the poll just named. Rows dated on or after it stand (a later
- * priced poll writes rows at its own, later, day), so the rule needs no "newest poll"
- * bookkeeping.
- *
- * One owner-scoped read, bounded by `HOLDINGS_ROW_CAP`: the table holds at most one
- * such row per key. Never throws; an error is returned, and the caller decides (the
- * commit keeps its old sum and says so, rather than failing a landed commit). Runs on
- * the caller's user-scoped client under `allocator_equity_derived_owner_select`.
- */
-export async function fetchNativeUnpricedDays(
-  supabase: SupabaseClient<Database>,
-  userId: string,
-): Promise<{ data: Map<string, string>; error: ReadError | null }> {
-  const res = await supabase
-    .from("allocator_equity_derived")
-    .select("kind, payload")
-    .eq("allocator_id", userId)
-    .like("kind", `${NATIVE_UNPRICED_KIND_PREFIX}%`)
-    .limit(HOLDINGS_ROW_CAP);
-  if (res.error) return { data: new Map(), error: res.error };
-  const dayByKey = new Map<string, string>();
-  for (const row of (res.data ?? []) as Array<{ kind: unknown; payload: unknown }>) {
-    const day = nativeUnpricedDay(row.payload);
-    if (typeof row.kind !== "string" || day === null) continue;
-    dayByKey.set(row.kind.slice(NATIVE_UNPRICED_KIND_PREFIX.length), day);
-  }
-  return { data: dayByKey, error: null };
-}
-
-/**
- * The bounded read behind Open Positions. Three steps, in the shape of
- * `getLatestExposureSnapshot` (read the latest `asof` first, then the rows at
- * it) but at the per-key grain (D-16):
+ * The bounded read behind Open Positions. Three steps at the per-key grain
+ * (D-16): read each key's latest `asof` first, then the rows at it:
  *
  * 1. the owner's keys with their account identity columns (allowed by
  *    SEC-005). This is the whole key set the old read covered: every
@@ -266,7 +231,32 @@ export async function fetchNativeUnpricedDays(
  * record both stay, and so does the flag. It clears only when a later poll
  * writes the key's rows again. A key that contributes no rows is never named.
  *
- * Never throws. Returns `{ data, error, partialReads }` so the caller's
+ * Phase 170.4 plan 11 (D-10): this read keeps EVERY tied key on purpose, because
+ * the Scenario fingerprint must hold the row set `commit_scenario_batch`'s
+ * `contributing` CTE recomputes (every contributing key at the account's newest
+ * day). It returns `accountByKey`, each contributing key's account token (the
+ * identity it grouped by), so a caller that sums DOLLARS applies
+ * `oneKeyPerAccountDay` (holdings-account-day.ts) with that same identity and
+ * counts the account once per holding type (the winner is picked per
+ * (account, holding_type), so a key listed here may end up holding no counted row).
+ *
+ * Phase 170.4 plan 12 (D-08, D-10, T-170.4-31): `opts.auditEvidence` (default true,
+ * the dashboard's reading). The scenario commit PERSISTS the figure it sums
+ * (`size_at_decision_usd`), and `audit_log` is owner-writable through
+ * `log_audit_event`, so that caller passes `{ auditEvidence: false }`: neither
+ * audit read is issued, so a clean empty poll cannot supersede a key's rows and no
+ * partial-read day is named (`partialReads` is `[]`). What remains rests on
+ * evidence the service writes: `allocator_holdings` rows and their `updated_at`,
+ * the `allocator_equity_derived` native-unpriced markers (owner SELECT only) and the
+ * `api_keys` identity columns (INSERT and UPDATE revoked from authenticated).
+ * ACCEPTED DIFFERENCE, pinned by a test: on the dashboard a newer clean empty poll
+ * ends a key's older rows; in the commit's mode it cannot, so the commit's figure
+ * can exceed the Holdings total until the key's next written rows. The display may
+ * supersede; the persisted figure may not.
+ * `markerReadError` carries the message of the first failed native-unpriced
+ * record read (the key keeps its rows; the caller decides whether to say so).
+ *
+ * Never throws. Returns `{ data, error, partialReads, accountByKey, markerReadError }` so the caller's
  * `assertOk` treats it like any other Supabase result. Any step's error is returned as `error`. A
  * read that reaches `HOLDINGS_ROW_CAP` returns a named error instead of a
  * partial list. A key with no holdings contributes nothing.
@@ -281,23 +271,35 @@ export async function fetchLatestHoldingsPerKey(
   supabase: SupabaseClient<Database>,
   userId: string,
   columns: string,
+  opts: { auditEvidence?: boolean } = {},
 ): Promise<{
   data: unknown[] | null;
   error: ReadError | null;
   partialReads: PartialRead[];
+  /** Each contributing key's account token; `{}` on an error or an empty book. */
+  accountByKey: Record<string, string>;
+  /**
+   * The message of the first failed `native_unpriced:<key>` record read, or null.
+   * The read is not an error of this call (the key keeps its rows), so a caller
+   * that persists a figure can say the figure was computed without that check.
+   */
+  markerReadError: string | null;
 }> {
+  const auditEvidence = opts.auditEvidence !== false;
   const keysRes = await supabase
     .from("api_keys")
     .select(KEY_IDENTITY_COLUMNS)
     .eq("user_id", userId)
     .limit(HOLDINGS_ROW_CAP);
-  if (keysRes.error) return { data: null, error: keysRes.error, partialReads: [] };
+  if (keysRes.error) return { data: null, error: keysRes.error, partialReads: [], accountByKey: {}, markerReadError: null };
   const keys = (keysRes.data ?? []) as KeyIdentityRow[];
   if (keys.length >= HOLDINGS_ROW_CAP) {
     return {
       data: null,
       error: { message: "api_keys id read reached the row cap" },
       partialReads: [],
+      accountByKey: {},
+      markerReadError: null,
     };
   }
 
@@ -310,7 +312,9 @@ export async function fetchLatestHoldingsPerKey(
         reading: KeyReading | null;
         partialDay: string | null;
         error: ReadError | null;
+        markerError: string | null;
       }> => {
+        const noAudit = Promise.resolve({ data: null, error: null });
         const [latestRes, pollRes, newestPollRes, unpricedRes] = await Promise.all([
           supabase
             .from("allocator_holdings")
@@ -319,27 +323,31 @@ export async function fetchLatestHoldingsPerKey(
             .eq("api_key_id", key.id)
             .order("asof", { ascending: false })
             .limit(1),
-          supabase
-            .from("audit_log")
-            .select("metadata")
-            .eq("user_id", userId)
-            .eq("action", POLL_COMPLETED_ACTION)
-            .eq("entity_type", "api_key")
-            .eq("entity_id", key.id)
-            .eq("metadata->>final_status", "complete")
-            .order("created_at", { ascending: false })
-            .limit(1),
+          auditEvidence
+            ? supabase
+                .from("audit_log")
+                .select("metadata")
+                .eq("user_id", userId)
+                .eq("action", POLL_COMPLETED_ACTION)
+                .eq("entity_type", "api_key")
+                .eq("entity_id", key.id)
+                .eq("metadata->>final_status", "complete")
+                .order("created_at", { ascending: false })
+                .limit(1)
+            : noAudit,
           // WR-R2-03: the newest poll of any outcome, to tell whether it
           // wrote the rows below with the positions unread.
-          supabase
-            .from("audit_log")
-            .select("metadata")
-            .eq("user_id", userId)
-            .eq("action", POLL_COMPLETED_ACTION)
-            .eq("entity_type", "api_key")
-            .eq("entity_id", key.id)
-            .order("created_at", { ascending: false })
-            .limit(1),
+          auditEvidence
+            ? supabase
+                .from("audit_log")
+                .select("metadata")
+                .eq("user_id", userId)
+                .eq("action", POLL_COMPLETED_ACTION)
+                .eq("entity_type", "api_key")
+                .eq("entity_id", key.id)
+                .order("created_at", { ascending: false })
+                .limit(1)
+            : noAudit,
           // CR-01: the poll's record that a native account was unpriced.
           supabase
             .from("allocator_equity_derived")
@@ -348,10 +356,15 @@ export async function fetchLatestHoldingsPerKey(
             .eq("kind", `${NATIVE_UNPRICED_KIND_PREFIX}${key.id}`)
             .limit(1),
         ]);
-        if (latestRes.error) return { reading: null, partialDay: null, error: latestRes.error };
-        if (pollRes.error) return { reading: null, partialDay: null, error: pollRes.error };
+        if (latestRes.error) return { reading: null, partialDay: null, error: latestRes.error, markerError: null };
+        if (pollRes.error) return { reading: null, partialDay: null, error: pollRes.error, markerError: null };
         if (newestPollRes.error) {
-          return { reading: null, partialDay: null, error: newestPollRes.error };
+          return {
+            reading: null,
+            partialDay: null,
+            error: newestPollRes.error,
+            markerError: null,
+          };
         }
         const partialDay = partialPollDay(newestPollRes.data?.[0]?.metadata ?? null);
         const latestAsof = latestRes.data?.[0]?.asof ?? null;
@@ -364,6 +377,7 @@ export async function fetchLatestHoldingsPerKey(
         // renders the history as rebuilding) and must not turn into a blank Holdings
         // tab. It is logged loudly and the key keeps its latest rows, exactly as
         // before this check existed.
+        const markerError = unpricedRes.error ? unpricedRes.error.message : null;
         if (unpricedRes.error) {
           console.error(
             "[fetchLatestHoldingsPerKey] native-unpriced record read failed; the key's latest rows are kept as they were:",
@@ -378,6 +392,7 @@ export async function fetchLatestHoldingsPerKey(
             reading: { day: unpricedAsof, hasRows: false },
             partialDay: null,
             error: null,
+            markerError,
           };
         }
         const cleanPollAsof = cleanPollDay(pollRes.data?.[0]?.metadata ?? null);
@@ -387,19 +402,21 @@ export async function fetchLatestHoldingsPerKey(
             reading: { day: cleanPollAsof, hasRows: false },
             partialDay: null,
             error: null,
+            markerError,
           };
         }
         return {
           reading: latestAsof ? { day: latestAsof, hasRows: true } : null,
           partialDay,
           error: null,
+          markerError,
         };
       },
     ),
   );
   const failedReading = readings.find((r) => r.error !== null);
   if (failedReading) {
-    return { data: null, error: failedReading.error, partialReads: [] };
+    return { data: null, error: failedReading.error, partialReads: [], accountByKey: {}, markerReadError: null };
   }
 
   // SFH-C4-01: one exchange account, one reading. Keys that read the same
@@ -476,6 +493,11 @@ export async function fetchLatestHoldingsPerKey(
   );
 
   const failed = perKey.find((k) => k.error !== null);
-  if (failed) return { data: null, error: failed.error, partialReads: [] };
-  return { data: perKey.flatMap((k) => k.rows), error: null, partialReads };
+  if (failed) {
+    return { data: null, error: failed.error, partialReads: [], accountByKey: {}, markerReadError: null };
+  }
+  const accountByKey: Record<string, string> = {};
+  for (const { keyId } of toRead) accountByKey[keyId] = accountOf(keyId);
+  const markerReadError = readings.find((r) => r.markerError !== null)?.markerError ?? null;
+  return { data: perKey.flatMap((k) => k.rows), error: null, partialReads, accountByKey, markerReadError };
 }

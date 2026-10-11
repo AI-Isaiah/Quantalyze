@@ -45,6 +45,7 @@ from services.allocator_positions import read_native_unpriced_days
 from services.allocator_equity_derive import (
     account_groups,
     eligible_key_predicate,
+    one_key_per_account_day,
     working_holder_predicate,
 )
 from services.benchmark import BtcClosesReadError, read_btc_closes
@@ -1810,7 +1811,7 @@ async def _inflight_reconstructs_for_zero_snapshot_book(
 # latest-asof read and the rows read cannot drift apart.
 _REFRESH_HOLDINGS_COLUMNS = (
     "symbol, quantity, mark_price, value_usd, "
-    "unrealized_pnl_usd, venue, holding_type, api_key_id"
+    "unrealized_pnl_usd, venue, holding_type, api_key_id, updated_at"
 )
 
 # C2 silent-failure SFH-09: a carried account contributes its value_usd from its
@@ -1863,17 +1864,22 @@ async def _fetch_latest_holdings_per_eligible_key(
 
     Grain: per ACCOUNT, not per key (C2 review CR-03). Keys that read one
     exchange account form a group (``account_groups``: a holder plus every key
-    marked 'duplicate' or 'composite_member' against it). ``allocator_holdings``
-    is last-writer on (allocator_id, venue, symbol, asof) with no api_key_id in
-    the key, so an account's rows on a day carry whichever of its keys polled it
-    LAST. Reading one key's own-named rows would carry the account at the last
-    day that key happened to win the race, which can be months old. So a group
+    marked 'duplicate' or 'composite_member' against it). A group's latest day
+    is read over EVERY member's rows (a departed member's rows are still that
+    account's), because one member may have polled the account more recently
+    than another; reading one key's own-named rows would carry the account at
+    the last day that key happened to poll, which can be months old. So a group
     with at least one eligible member is read once: its latest ``asof`` over
-    EVERY member's rows (a departed member's rows are still that account's),
-    then that day's rows, summed once. Which member is working (D-18) does not
-    change the sum; a working member is simply the one that keeps the latest
-    day fresh. A group none of whose eligible members is working is still
-    carried once, and counted in ``no_working_accounts`` so it is not silent.
+    EVERY member's rows, then that day's rows, counted once. Several keys of the
+    account may hold rows on that day (Phase 170.4 plan 09 keeps a row per key,
+    where the unique index used to keep only the last poller's), so
+    ``one_key_per_account_day`` keeps, for each holding type, the rows of the one
+    key whose poll of that type wrote last (D-10 and review WR-01, the rule shared
+    with src/lib/holdings-account-day.ts). Which
+    member is working (D-18) does not change the sum; a working member is
+    simply the one that keeps the latest day fresh. A group none of whose
+    eligible members is working is still carried once, and counted in
+    ``no_working_accounts`` so it is not silent.
 
     An EMPTIED account contributes $0, not its last balance (C2 review CR-04).
     The ccxt spot builder keeps only qty > 0 and ``persist_allocator_holdings``
@@ -2051,7 +2057,12 @@ async def _fetch_latest_holdings_per_eligible_key(
                 .execute()
             )
 
-        rows.extend(getattr(await db_execute(_sel_rows), "data", None) or [])
+        # D-10: several keys of one account may hold rows on this day (plan 09's
+        # per-key index); the account is counted once per holding type, through
+        # the key whose poll of that type wrote last (WR-01).
+        rows.extend(
+            one_key_per_account_day(getattr(await db_execute(_sel_rows), "data", None) or [])
+        )
         if latest < today_iso:
             carried += 1
             max_carry_age = max(

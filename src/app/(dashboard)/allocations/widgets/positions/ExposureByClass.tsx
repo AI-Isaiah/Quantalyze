@@ -10,7 +10,7 @@ import { ResponsiveTable } from "@/components/ResponsiveTable";
  * PI-01 — Exposure by asset class (99-UI-SPEC § Widget 1).
  *
  * A segmented horizontal composition bar + KPI strip (GROSS/NET/LONG/SHORT) +
- * per-slice drilldown table — NOT a donut (the class dimension has exactly two
+ * per-slice drilldown table (one row per key's position, D-08) — NOT a donut (the class dimension has exactly two
  * values, D-P1, and a single-class book would render a misleading full circle).
  * Pure CSS: no chart library, no data fetching. Consumes a plain `ExposureSnapshot`
  * prop; the data-contract types are imported TYPE-ONLY so the server Supabase
@@ -42,21 +42,48 @@ const CLASS_COLOR: Record<HoldingClass, string> = {
   derivative: DERIVATIVE_COLOR,
 };
 
-export function ExposureByClass({ snapshot }: { snapshot: ExposureSnapshot | null }) {
-  // Honest-empty (snapshot === null → zero holdings OR >730d stale, W4). The
-  // AttributionBar empty-card idiom, verbatim. A read ERROR is NOT an empty
-  // state — it propagates to allocations/error.tsx; the widget only renders the
-  // data it is given.
+/**
+ * The card's read-day stamp (Phase 170.4, D-01). The keys behind the card may
+ * have been read on different days, so it names the newest day, or the range
+ * from the oldest to the newest. With no read day it names nothing: a stamp is
+ * a claim about a date, and an absent date is never replaced by an invented one.
+ */
+function readDayStamp(snapshot: ExposureSnapshot): string | null {
+  if (snapshot.asof === null) return null;
+  if (snapshot.oldestAsof === null || snapshot.oldestAsof === snapshot.asof) {
+    return `as of ${snapshot.asof}`;
+  }
+  return `as of ${snapshot.oldestAsof} to ${snapshot.asof}`;
+}
+
+export function ExposureByClass({
+  snapshot,
+  keyLabels,
+}: {
+  snapshot: ExposureSnapshot | null;
+  /**
+   * api_key_id → display name from the one key-label rule (`apiKeyLabelById`).
+   * A slice whose key is not in the map reads an em-dash, never the raw id
+   * (T-169-26).
+   */
+  keyLabels?: ReadonlyMap<string, string>;
+}) {
+  // Honest-empty (snapshot === null → the latest per-key read holds no position).
+  // The AttributionBar empty-card idiom. No date window is claimed: the per-key
+  // reader keeps a quiet key's last read, so "older snapshots are hidden" would
+  // be false. A read ERROR is NOT an empty state — it propagates to
+  // allocations/error.tsx; the widget only renders the data it is given.
   if (snapshot === null) {
     return (
       <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center">
-        <p className="text-small text-text-muted">No position snapshot yet.</p>
+        <p className="text-small text-text-muted">No current positions.</p>
         <p className="text-caption text-text-muted">
-          Exposure appears after your first exchange sync. Snapshots older than 24 months are not shown.
+          Exposure appears once a key&apos;s latest sync reads a position.
         </p>
       </div>
     );
   }
+  const stamp = readDayStamp(snapshot);
 
   const gross = snapshot.totalGrossUsd;
   const net = snapshot.totalNetUsd;
@@ -75,7 +102,9 @@ export function ExposureByClass({ snapshot }: { snapshot: ExposureSnapshot | nul
     <Card padding="sm">
       <div className="flex items-center justify-between">
         <h4 className="text-small font-semibold text-text-primary">Exposure by asset class</h4>
-        <span className="text-caption font-metric text-text-muted">as of {snapshot.asof}</span>
+        {stamp !== null && (
+          <span className="text-caption font-metric text-text-muted">{stamp}</span>
+        )}
       </div>
 
       {/* KPI strip — GROSS / NET / LONG / SHORT. No color on direction. */}
@@ -134,7 +163,7 @@ export function ExposureByClass({ snapshot }: { snapshot: ExposureSnapshot | nul
         })}
       </div>
 
-      {/* Drilldown table — per (venue, symbol, type, side) slice, valueUsd desc.
+      {/* Drilldown table — per (key, venue, symbol, type, side) slice, valueUsd desc.
           Table idiom copied from CompositionDonut. Class identity is carried by
           label + swatch, never color alone (WCAG 1.4.1). Side/Net never colored
           by direction. Scrolls only past 12 rows.
@@ -153,6 +182,7 @@ export function ExposureByClass({ snapshot }: { snapshot: ExposureSnapshot | nul
             <thead>
               <tr className="border-b border-border text-left text-caption text-text-muted uppercase tracking-wider">
                 <th className="py-2 pr-4">Venue</th>
+                <th className="py-2 pr-4">Key</th>
                 <th className="py-2 pr-4">Symbol</th>
                 <th className="py-2 pr-4">Type</th>
                 <th className="py-2 pr-4">Side</th>
@@ -165,10 +195,13 @@ export function ExposureByClass({ snapshot }: { snapshot: ExposureSnapshot | nul
                 .sort((a, b) => b.valueUsd - a.valueUsd)
                 .map((s) => (
                   <tr
-                    key={`${s.holdingType}|${s.venue}|${s.symbol}|${s.side}`}
+                    key={`${s.apiKeyId}|${s.holdingType}|${s.venue}|${s.symbol}|${s.side}`}
                     className="border-b border-border/50 transition-colors hover:bg-page/50"
                   >
                     <td className="py-2 pr-4">{s.venue}</td>
+                    <td className="py-2 pr-4">
+                      {(s.apiKeyId !== null && keyLabels?.get(s.apiKeyId)) || "—"}
+                    </td>
                     <td className="py-2 pr-4">{s.symbol}</td>
                     <td className="py-2 pr-4">
                       <span className="flex items-center gap-1.5">

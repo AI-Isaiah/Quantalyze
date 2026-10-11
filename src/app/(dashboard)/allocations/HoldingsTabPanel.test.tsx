@@ -91,14 +91,14 @@ const STUB_PAYLOAD = {
     {
       id: "key-revoked",
       sync_status: "revoked",
-      venue: "binance",
-      key_label: "BNB key",
+      exchange: "binance",
+      label: "BNB key",
     },
     {
       id: "key-complete",
       sync_status: "complete",
-      venue: "coinbase",
-      key_label: "CB key",
+      exchange: "coinbase",
+      label: "CB key",
     },
   ],
   alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
@@ -137,19 +137,19 @@ function renderPanel() {
 describe("HoldingsTabPanel — source_key_sync_status join (T12b regression)", () => {
   it("revoked apiKey → 'revoked' on the spot holding row", () => {
     const map = renderPanel();
-    const ref = buildHoldingRef(REVOKED_HOLDING);
+    const ref = `${buildHoldingRef(REVOKED_HOLDING)}#${REVOKED_HOLDING.api_key_id}`;
     expect(map[ref]).toBe("revoked");
   });
 
   it("complete apiKey → 'complete' on the spot holding row", () => {
     const map = renderPanel();
-    const ref = buildHoldingRef(ACTIVE_HOLDING);
+    const ref = `${buildHoldingRef(ACTIVE_HOLDING)}#${ACTIVE_HOLDING.api_key_id}`;
     expect(map[ref]).toBe("complete");
   });
 
   it("holding with null api_key_id → 'unknown' (defensive default)", () => {
     const map = renderPanel();
-    const ref = buildHoldingRef(ORPHAN_HOLDING);
+    const ref = `${buildHoldingRef(ORPHAN_HOLDING)}#${ORPHAN_HOLDING.api_key_id}`;
     expect(map[ref]).toBe("unknown");
   });
 });

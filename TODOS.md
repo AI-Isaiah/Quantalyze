@@ -9194,6 +9194,56 @@ today, because the default `overflowOf` matches and the region is asserted visib
 **Fix.** Throw in both cases.
 **Owner / Trigger:** as 170.7-E2E-HEADER-PROBE-COVERAGE.
 
+## Phase 170.4 (ALLOCHOLDINGS) — routed review items (logged 2026-10-11)
+
+### 170.4-FINGERPRINT-UNPRICED-TWIN — the commit RPC's `contributing` CTE has no native-unpriced rule (review WR-02, MEDIUM, conf 8)
+
+**Why it is open.** `fetchLatestHoldingsPerKey` drops a key whose newer `native_unpriced:` marker
+leaves it without rows. The `contributing` CTE in migration `20260929120000` has no such rule, so the
+client fingerprint can differ from the RPC's, and a book-mode commit is refused as
+`portfolio_fingerprint_stale` until the key's next priced poll. The gap predates 170.4 and is recorded
+in `170.4-07-SUMMARY.md`.
+**Fix.** Add the rule to the CTE in PR 2's migration (170.4 plan 09), with a SQL gate arm.
+**Owner:** 170.4 plan 09. **Trigger:** PR 2.
+
+### 170.4-WRITER-FALLBACK-SILENT — the 42P10 fallback is visible only as an INFO log line (SFH-2, MEDIUM, conf 6)
+
+**Why it is open.** Until PR 2's per-key index exists, every holdings poll retries on the pre-D10
+target, and two keys holding one symbol on one day overwrite each other (D-08 is false in that
+window). Nothing reaches Sentry.
+**Fix.** Log a warning plus a one-shot Sentry capture per process, with a stable tag, and make the tag
+reading zero part of the gate for removing the fallback (`[170.4-HOLDINGS-UPSERT-FALLBACK]`).
+**Owner:** 170.4 PR 2 (plan 10).
+
+### 170.4-DASHBOARD-MARKER-READ-SILENT — the dashboard drops `markerReadError` (SFH-3, MEDIUM, conf 6)
+
+**Why it is open.** A failed `native_unpriced:` read keeps an unpriced key's older rows in Holdings,
+Exposure and the live total, with no note and no Sentry capture. The commit route does report the same
+condition.
+**Fix.** Report it to Sentry in `getMyAllocationDashboard`, and carry a degraded flag that renders a
+one-line disclosure.
+**Owner / Trigger:** the next /allocations data phase.
+
+### 170.4-STRATEGIES-TABLE-CONNECT-COPY — the Holdings tab's Strategies table still says "Connect an exchange API key or upload a CSV" (verification warning 4, booked 2026-10-11)
+
+**Why it is open.** The Strategies table's empty state in `HoldingsTable.tsx` reads "No strategies yet.
+Connect an exchange API key or upload a CSV to see your strategies here." It is keyed on
+`hasAnyStrategies`, not on the shared `hasConnectedKeys` predicate (D-07), so an allocator with an
+eligible key but no strategies is still told to connect one. 170.4's goal and SC 6 were narrowed to
+allocator-book prompts, so this copy is outside them.
+**Fix.** Branch the copy on `hasConnectedKeys`: with a key, say no strategy is linked to the connected
+accounts yet; without one, keep the connect prompt.
+**Owner / Trigger:** the next /allocations copy pass (e.g. 170.6 DISPLAYPOLISH).
+
+### 170.4-MATCH-UNPRICED-PER-KEY — the scorer applies the native-unpriced marker per key, not per account (SFH-4, MEDIUM, conf 5)
+
+**Why it is open.** When key A of an account carries a marker for day D and key B's newest rows are on
+D-1, the TS reader and the equity refresh drop B's rows, but `match.py` keeps them, so the match AUM
+disagrees with Holdings for that account.
+**Fix.** Use the group-level marker day (the maximum over the account's keys), as
+`equity_reconstruction.py` does. Add a shared case.
+**Owner / Trigger:** the next phase touching `routers/match.py`.
+
 ## Phase 170.3 (OGPUBLIC) — routed review items (logged 2026-10-11)
 
 ### 170.3-OG-MALFORMED-ID — a malformed id on the now-public OG route can mask real read failures in Sentry (booked 2026-10-11, review WR-01 / SFH-1, MEDIUM)

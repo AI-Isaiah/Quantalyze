@@ -68,6 +68,10 @@ export interface OpenPositionRow {
   /** The actual equity contribution for this row. */
   unrealized_pnl_usd: number | null;
   api_key_id: string;
+  /** Phase 170.4 D-08. The label of the key this position belongs to
+   *  (`apiKeyLabelById`), shown under the symbol; `null` or absent when the key
+   *  is not in the key list (nothing shown, never the raw key id). */
+  key_label?: string | null;
   /** Joined from `api_keys.sync_status` by the dashboard layer. */
   source_key_sync_status: string;
   /** Phase 167.1 review round 2 WR-05. True when `api_key_id` is MISSING from
@@ -241,6 +245,14 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                         </span>
                       ) : null}
                     </div>
+                    {r.key_label ? (
+                      <div
+                        data-testid="holding-key-label"
+                        className="text-caption text-text-muted"
+                      >
+                        {r.key_label}
+                      </div>
+                    ) : null}
                   </td>
                   <td
                     className="px-4 py-2 text-xs font-semibold uppercase tracking-wider"

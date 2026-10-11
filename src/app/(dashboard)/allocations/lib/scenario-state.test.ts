@@ -1340,3 +1340,36 @@ describe("computeHoldingsFingerprint", () => {
     expect(TOL).toBe(1e-9);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 170.4 plan 07 (D-08, D-10): the fingerprint is a TOKEN SET, and rows of
+// different keys that share a scope ref keep every key's dollars.
+// ---------------------------------------------------------------------------
+describe("computeHoldingsFingerprint: a deduplicated token set (170.4 D-10)", () => {
+  it("BTC binance spot twice and ETH okx spot give exactly the two tokens, joined and sorted", () => {
+    // `commit_scenario_batch` recomputes the fingerprint with a DISTINCT ON over
+    // (venue, symbol, holding_type): two keys holding one symbol are one token.
+    const rows = [
+      { symbol: "BTC", venue: "binance", holding_type: "spot" },
+      { symbol: "ETH", venue: "okx", holding_type: "spot" },
+      { symbol: "BTC", venue: "binance", holding_type: "spot" },
+    ];
+    expect(computeHoldingsFingerprint(rows)).toBe("BTC:binance:spot|ETH:okx:spot");
+  });
+});
+
+describe("defaultDraftFromHoldings: rows sharing a scope ref SUM (170.4 D-08)", () => {
+  it("40000 and 25000 of one ref and 35000 of another: weights 0.65 and 0.35, both toggled on", () => {
+    const draft = defaultDraftFromHoldings([
+      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 40000 },
+      { symbol: "BTC", venue: "binance", holding_type: "spot", value_usd: 25000 },
+      { symbol: "ETH", venue: "binance", holding_type: "spot", value_usd: 35000 },
+    ]);
+    expect(draft.toggleByScopeRef).toEqual({
+      "holding:binance:BTC:spot": true,
+      "holding:binance:ETH:spot": true,
+    });
+    expect(draft.weightOverrides["holding:binance:BTC:spot"]).toBeCloseTo(0.65, 9);
+    expect(draft.weightOverrides["holding:binance:ETH:spot"]).toBeCloseTo(0.35, 9);
+  });
+});

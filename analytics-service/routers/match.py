@@ -46,6 +46,7 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from services.allocator_equity_derive import account_identity_tokens, one_key_per_account_day
 from services.allocator_positions import read_native_unpriced_days
 from services.benchmark import get_btc_closes
 from services.db import (
@@ -565,14 +566,41 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
     }
 
 
+# The most rows one holdings or key read may return before it counts as possibly
+# truncated. PostgREST's ``max_rows`` is 1000 on this project and a read at that
+# ceiling returns a silent partial list. Same figure as ``HOLDINGS_ROW_CAP`` in
+# src/lib/latest-holdings-per-key.ts, which fails loud the same way.
+_HOLDINGS_ROW_CAP = 1000
+
+
+class HoldingsReadTruncated(RuntimeError):
+    """A holdings or key read reached ``_HOLDINGS_ROW_CAP`` rows, so it may be a
+    partial list. Scoring on a partial book would report a confident, wrong
+    ``portfolio_aum``; ``_score_one_allocator``'s caller turns this, like any
+    failed read, into a 500 with a correlation id."""
+
+
 def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
     """Phase 09 / D-01 + D-16. Load allocator_holdings and reconstruct per-symbol
     returns from allocator_equity_snapshots.breakdown.
 
-    Mirrors the TypeScript queries.ts holdingsMap collapse (latest-asof-per-
-    (venue, symbol, holding_type) wins). Applies the Phase 07 D-03 warm-up gate:
-    holdings whose per-symbol series has fewer than 30 daily returns are excluded
-    from portfolio math entirely (not flagged, not compared).
+    Phase 170.4 D-08 / D-10 (Phase 167.1.1 R-15-1, R-15-2): one API key is one
+    strategy, so the AUM is the sum over EVERY live key's position, and keys that
+    read ONE exchange account count it once. Each account (``account_identity_tokens``,
+    the dashboard's and the commit RPC's identity: keys that share a non-blank
+    (exchange, venue_account_id) or a marker link; any other key is its own account)
+    takes its rows at its newest ``asof``, and ``one_key_per_account_day`` (plan 11)
+    keeps, per account AND per holding type, the one key that wins that day (latest
+    ``updated_at`` instant, ties by smallest lowercase ``api_key_id``). Rows of a key before its account's newest day
+    no longer count. Rows of different keys that share a (venue, symbol,
+    holding_type) are SUMMED into one pseudo-strategy, which carries their total
+    once. The same rule runs in TypeScript for the dashboard and the scenario
+    commit (``oneKeyPerAccountDay``); both are replayed against one case table.
+    Only service-written evidence enters: ``allocator_holdings`` rows and
+    ``updated_at``, the native-unpriced markers and the owner's ``api_keys``
+    identity columns. No audit-log read is added. Applies the Phase 07 D-03 warm-up
+    gate: holdings whose per-symbol series has fewer than 30 daily returns are
+    excluded from portfolio math entirely (not flagged, not compared).
 
     This helper is SYNC (plain def) — called from _load_allocator_context which is
     itself sync and invoked via asyncio.to_thread. Per finding f1: MUST NOT be
@@ -583,20 +611,66 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
       portfolio_weights:    dict[str, float]  (value_usd / total_eligible_value, sums to 1.0)
       portfolio_returns:    dict[str, pd.Series]  (one Series per eligible holding)
       portfolio_aum:        float  (sum of eligible holding value_usd)
-      holdings_rows_eligible: list[dict]  (raw holding rows that passed warm-up gate, for
-                                           compute_holding_flags consumption in Task 3)
+      holdings_rows_eligible: list[dict]  (one row per pseudo-strategy that passed the warm-up
+                                           gate, ``value_usd`` summed over the counted keys,
+                                           for compute_holding_flags consumption in Task 3)
     """
     supabase = get_supabase()
 
-    # --- Step 1: fetch all holdings for this allocator, most-recent-first ---
-    holdings_result = (
-        supabase.table("allocator_holdings")
-        .select("api_key_id, venue, symbol, holding_type, value_usd, asof")
-        .eq("allocator_id", allocator_id)
-        .order("asof", desc=True)
+    # --- Step 1: the owner's keys, then each key's newest day of holdings ---
+    # 170.4 review WR-03 / SFH-1: this used to read the allocator's WHOLE holdings
+    # history in one unbounded SELECT. PostgREST's max_rows (1000 on this project)
+    # truncates such a read with no error, and the account-newest-day rule below
+    # would then take an account's "newest" day from a partial list. The read is
+    # now the one ``fetchLatestHoldingsPerKey`` makes (src/lib/latest-holdings-per-key.ts):
+    # per key, its latest ``asof`` and then the rows on that day. Every read is
+    # owner-filtered and asks for at most ``_HOLDINGS_ROW_CAP`` rows; one that
+    # returns that many raises, because the book would be a partial one. A key's
+    # rows before its newest day never counted (its account's newest day is the
+    # latest of its keys' newest days), so nothing the old read used is dropped.
+    key_rows = rows(
+        supabase.table("api_keys")
+        .select(
+            "id, exchange, venue_account_id, account_share_kind, "
+            "account_shared_with_api_key_id"
+        )
+        .eq("user_id", allocator_id)
+        .limit(_HOLDINGS_ROW_CAP)
         .execute()
     )
-    holdings_rows = rows(holdings_result)
+    if len(key_rows) >= _HOLDINGS_ROW_CAP:
+        raise HoldingsReadTruncated(
+            f"api_keys read reached the {_HOLDINGS_ROW_CAP}-row cap for allocator {allocator_id}"
+        )
+    holdings_rows: list[Row] = []
+    for key_row in key_rows:
+        key_id = str(key_row["id"])
+        latest = rows(
+            supabase.table("allocator_holdings")
+            .select("asof")
+            .eq("allocator_id", allocator_id)
+            .eq("api_key_id", key_id)
+            .order("asof", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not latest:
+            continue
+        day_rows = rows(
+            supabase.table("allocator_holdings")
+            .select("api_key_id, venue, symbol, holding_type, value_usd, asof, updated_at")
+            .eq("allocator_id", allocator_id)
+            .eq("api_key_id", key_id)
+            .eq("asof", latest[0]["asof"])
+            .limit(_HOLDINGS_ROW_CAP)
+            .execute()
+        )
+        if len(day_rows) >= _HOLDINGS_ROW_CAP:
+            raise HoldingsReadTruncated(
+                f"allocator_holdings per-key read reached the {_HOLDINGS_ROW_CAP}-row cap "
+                f"for allocator {allocator_id}"
+            )
+        holdings_rows.extend(day_rows)
 
     # --- Step 1b: drop a native-unpriced key's rows dated before its marker ---
     # 164.6.6.2.1 R2-WR-01 (D-02, D-08, D-17): a BTC-denominated MT5 account whose latest
@@ -632,13 +706,48 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
             )
         holdings_rows = kept_rows
 
-    # --- Step 2: collapse to latest-asof-per-(venue, symbol, holding_type) ---
-    # First row wins because we ordered DESC — mirrors queries.ts:791-795 holdingsMap
-    holdings_map: dict[tuple[str, str, str], Row] = {}
+    # --- Step 2: every key's position, each exchange account once per day ---
+    # (170.4 D-08, D-10). The owner's keys (read in Step 1; owner-filtered, identity
+    # columns only, no key material) name which keys read one account.
+    group_of: dict[str, str] = {}
+    if holdings_rows:
+        # CR-01 (D-10): the SAME identity the dashboard, the commit AUM and the
+        # commit RPC's ``contributing`` CTE use: a shared non-blank
+        # (exchange, venue_account_id) OR a marker link. A key with neither is
+        # unknown and stays its own account (``key:<id>`` below).
+        for key_id, token in account_identity_tokens(key_rows).items():
+            if token is not None:
+                group_of[key_id] = token
+
+    def _account(holding: Row) -> str:
+        key_id = str(holding["api_key_id"])
+        return group_of.get(key_id, f"key:{key_id}")
+
+    newest_day: dict[str, str] = {}
     for holding in holdings_rows:
-        key = (holding["venue"], holding["symbol"], holding["holding_type"])
-        if key not in holdings_map:
-            holdings_map[key] = holding
+        account = _account(holding)
+        if account not in newest_day or str(holding["asof"]) > newest_day[account]:
+            newest_day[account] = str(holding["asof"])
+    day_rows_by_account: dict[str, list[Row]] = {}
+    for holding in holdings_rows:
+        account = _account(holding)
+        if str(holding["asof"]) == newest_day[account]:
+            day_rows_by_account.setdefault(account, []).append(holding)
+
+    # One pseudo-strategy per (venue, symbol, holding_type): the counted keys'
+    # values are summed into it (D-08), the eligible row carries the total once.
+    holdings_map: dict[tuple[str, str, str], Row] = {}
+    for account_rows in day_rows_by_account.values():
+        for counted in one_key_per_account_day(account_rows):
+            key = (counted["venue"], counted["symbol"], counted["holding_type"])
+            if key in holdings_map:
+                holdings_map[key] = {
+                    **holdings_map[key],
+                    "value_usd": float(holdings_map[key].get("value_usd") or 0.0)
+                    + float(counted.get("value_usd") or 0.0),
+                }
+            else:
+                holdings_map[key] = dict(counted)
     collapsed = list(holdings_map.values())
 
     if not collapsed:
