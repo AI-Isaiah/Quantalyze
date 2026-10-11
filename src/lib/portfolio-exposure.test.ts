@@ -19,11 +19,18 @@
  *   1. honest-empty (D-P7)             4. signed net (D-P2)
  *   2. owner gate + no-admin-import    5. no-zero-fill gap marking (+ computeAsofGaps units)
  *   3. secretless projection (T-98-08) 6. per-venue weight math (+ zero-gross skip, D-P3)
+ *
+ * Phase 170.4 plan 14 (D-11, D-10, D-08, D-03): the series count one exchange
+ * account once per (day, holding_type) by plan 11's `oneKeyPerAccountDay`
+ * applied per `asof`, so the mock is table-aware (`allocator_holdings` and the
+ * owner's `api_keys` identity read; any other table throws) and every row
+ * carries `api_key_id` and `updated_at`.
  */
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { KEY_IDENTITY_COLUMNS } from "./latest-holdings-per-key";
 
 interface HoldingRow {
   asof: string;
@@ -32,6 +39,17 @@ interface HoldingRow {
   holding_type: string;
   side: string;
   value_usd: number;
+  api_key_id: string;
+  updated_at: string;
+}
+
+/** One `api_keys` identity row, the columns `KEY_IDENTITY_COLUMNS` selects. */
+interface KeyRow {
+  id: string;
+  exchange: string | null;
+  venue_account_id: string | null;
+  account_share_kind: string | null;
+  account_shared_with_api_key_id: string | null;
 }
 
 // PostgREST silently caps every response at `max_rows` (supabase/config.toml:18
@@ -52,6 +70,16 @@ const holdingsResolver = vi.hoisted(() => ({
   rangeCalls: [] as [number, number][],
 }));
 
+// The owner's key-identity read (`api_keys`). Honours `.limit()` like the
+// holdings chain, so the cap case can seed exactly the row cap.
+const keysResolver = vi.hoisted(() => ({
+  rows: [] as unknown[],
+  error: null as unknown,
+  selectArg: "" as string,
+  eqCalls: [] as [string, unknown][],
+  limitCalls: [] as number[],
+}));
+
 // Row columns the mock can actually filter on (allocator_id is NOT projected
 // onto the seeded HoldingRow, so an `.eq("allocator_id", …)` is a no-op filter
 // here — it is still captured in `eqCalls` for the owner-gate assertion).
@@ -65,7 +93,45 @@ const FILTERABLE_COLS = new Set([
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
-    from: () => {
+    from: (table: string) => {
+      if (table === "api_keys") {
+        let limitN: number | null = null;
+        const keysChain: Record<string, unknown> = {};
+        keysChain.select = (arg: string) => {
+          keysResolver.selectArg = arg;
+          return keysChain;
+        };
+        keysChain.eq = (col: string, val: unknown) => {
+          keysResolver.eqCalls.push([col, val]);
+          return keysChain;
+        };
+        keysChain.limit = (n: number) => {
+          keysResolver.limitCalls.push(n);
+          limitN = n;
+          return keysChain;
+        };
+        keysChain.then = (
+          onFulfilled: (v: { data: unknown; error: unknown }) => unknown,
+        ) => {
+          if (keysResolver.error) {
+            return Promise.resolve({
+              data: null,
+              error: keysResolver.error,
+            }).then(onFulfilled);
+          }
+          const data =
+            limitN === null
+              ? keysResolver.rows.slice(0, POSTGREST_MAX_ROWS)
+              : keysResolver.rows.slice(0, limitN);
+          return Promise.resolve({ data, error: null }).then(onFulfilled);
+        };
+        return keysChain;
+      }
+      // Any other table is an unplanned read: fail loud, never fall through to
+      // the holdings chain.
+      if (table !== "allocator_holdings") {
+        throw new Error(`unexpected table read: ${table}`);
+      }
       // Per-query builder state so a two-step read (max-asof then eq-asof) and
       // a paginated read (repeated `.range`) each resolve against their OWN
       // filters, while global resolver arrays capture the query CONTRACT.
@@ -163,6 +229,13 @@ import {
 
 const USER_ID = "11111111-1111-1111-1111-111111111111";
 
+// Fixed key ids. K1 is the default key of `row()`; K1 and K2 share one account
+// in the D-11 cases, K3 and K4 are on distinct accounts.
+const K1 = "aaaaaaaa-0000-4000-8000-000000000001";
+const K2 = "aaaaaaaa-0000-4000-8000-000000000002";
+const K3 = "aaaaaaaa-0000-4000-8000-000000000003";
+const K4 = "aaaaaaaa-0000-4000-8000-000000000004";
+
 function row(overrides: Partial<HoldingRow> = {}): HoldingRow {
   return {
     asof: "2026-07-01",
@@ -171,6 +244,19 @@ function row(overrides: Partial<HoldingRow> = {}): HoldingRow {
     holding_type: "spot",
     side: "long",
     value_usd: 100,
+    api_key_id: K1,
+    updated_at: "2026-07-01T10:00:00Z",
+    ...overrides,
+  };
+}
+
+function keyRow(id: string, overrides: Partial<KeyRow> = {}): KeyRow {
+  return {
+    id,
+    exchange: "binance",
+    venue_account_id: null,
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
     ...overrides,
   };
 }
@@ -184,6 +270,11 @@ beforeEach(() => {
   holdingsResolver.orderCalls = [];
   holdingsResolver.limitCalls = [];
   holdingsResolver.rangeCalls = [];
+  keysResolver.rows = [keyRow(K1)];
+  keysResolver.error = null;
+  keysResolver.selectArg = "";
+  keysResolver.eqCalls = [];
+  keysResolver.limitCalls = [];
 });
 
 describe("computeAsofGaps — pure gap detection (missingSegments shape)", () => {
@@ -226,13 +317,150 @@ describe("the series reads' shared fetch (owner gate and projection, T-98-07 / T
     expect(gteCols).toContain("asof");
   });
 
-  it("secretless projection: never selects raw_payload / api_key, includes the six allow-listed columns", async () => {
+  it("secretless projection (T-98-08): the holdings select is EXACTLY the eight allow-listed columns", async () => {
     holdingsResolver.rows = [row()];
     await getAllocationSeries(USER_ID);
-    expect(holdingsResolver.selectArg).not.toMatch(/raw_payload|api_key/);
-    for (const col of ["asof", "venue", "symbol", "holding_type", "side", "value_usd"]) {
-      expect(holdingsResolver.selectArg).toContain(col);
-    }
+    // Tightened by plan 14 (D-11), deliberately. Plan 09's per-key index and
+    // D-11 need `api_key_id` and `updated_at` on the projection, so the old
+    // substring check (`not.toMatch(/api_key/)`) can no longer hold. A column
+    // SET equality is stricter than it was: any extra column (the raw payload,
+    // key material) fails, which a substring check on two names could not say.
+    const columns = holdingsResolver.selectArg.split(",").map((c) => c.trim());
+    expect(new Set(columns)).toEqual(
+      new Set([
+        "asof",
+        "venue",
+        "symbol",
+        "holding_type",
+        "side",
+        "value_usd",
+        "api_key_id",
+        "updated_at",
+      ]),
+    );
+    expect(columns).toHaveLength(8);
+  });
+
+  it("the key-identity read (T-170.4-40): the per-key reader's identity columns, owner-scoped, on the user client", async () => {
+    holdingsResolver.rows = [row()];
+    await getNetExposureSeries(USER_ID);
+    const identityColumns = (selectArg: string) =>
+      new Set(selectArg.split(",").map((c) => c.trim()));
+    expect(identityColumns(keysResolver.selectArg)).toEqual(
+      identityColumns(KEY_IDENTITY_COLUMNS),
+    );
+    // No key material rides along: none of the identity columns is a secret.
+    expect(keysResolver.selectArg).not.toMatch(/secret|passphrase|encrypted|raw_payload/);
+    expect(keysResolver.eqCalls).toContainEqual(["user_id", USER_ID]);
+    // The holdings owner gate is unchanged by the second read.
+    expect(holdingsResolver.eqCalls).toContainEqual(["allocator_id", USER_ID]);
+  });
+});
+
+describe("D-11: one exchange account counts once per (day, holding_type) in both series", () => {
+  // K1 and K2 read ONE okx account (the D-09 identity the per-key reader groups
+  // by), so the two keys' same-day rows are one account's rows, not two.
+  const sharedAccount = () => [
+    keyRow(K1, { exchange: "okx", venue_account_id: "ACCT-1" }),
+    keyRow(K2, { exchange: "okx", venue_account_id: "ACCT-1" }),
+  ];
+
+  it("a same-account pair holding the same position on one day counts ONCE in net, gross and the venue gross", async () => {
+    keysResolver.rows = sharedAccount();
+    holdingsResolver.rows = [
+      row({ venue: "okx", api_key_id: K1, value_usd: 1000, updated_at: "2026-07-01T10:00:00Z" }),
+      row({ venue: "okx", api_key_id: K2, value_usd: 1000, updated_at: "2026-07-01T11:00:00Z" }),
+    ];
+
+    const net = await getNetExposureSeries(USER_ID);
+    expect(net.points).toEqual([{ asof: "2026-07-01", netUsd: 1000, grossUsd: 1000 }]);
+
+    const alloc = await getAllocationSeries(USER_ID);
+    expect(alloc.points).toEqual([
+      { asof: "2026-07-01", venues: [{ venue: "okx", valueUsd: 1000, weight: 1 }] },
+    ]);
+  });
+
+  it("the rule runs per asof day, never once over the window: the earlier day keeps its point (D-03)", async () => {
+    keysResolver.rows = sharedAccount();
+    holdingsResolver.rows = [
+      row({ venue: "okx", api_key_id: K1, value_usd: 1000, updated_at: "2026-07-01T10:00:00Z" }),
+      row({ venue: "okx", api_key_id: K2, value_usd: 1000, updated_at: "2026-07-01T11:00:00Z" }),
+      row({ asof: "2026-07-02", venue: "okx", api_key_id: K1, value_usd: 1200, updated_at: "2026-07-02T10:00:00Z" }),
+    ];
+
+    const net = await getNetExposureSeries(USER_ID);
+    expect(net.points).toEqual([
+      { asof: "2026-07-01", netUsd: 1000, grossUsd: 1000 },
+      { asof: "2026-07-02", netUsd: 1200, grossUsd: 1200 },
+    ]);
+    expect(net.gaps).toEqual([]);
+
+    const alloc = await getAllocationSeries(USER_ID);
+    expect(alloc.points.map((p) => p.asof)).toEqual(["2026-07-01", "2026-07-02"]);
+    expect(alloc.gaps).toEqual([]);
+  });
+
+  it("keys on DISTINCT accounts both count (D-08): 300 + 200 = 500", async () => {
+    keysResolver.rows = [
+      keyRow(K3, { exchange: "binance", venue_account_id: "ACCT-2" }),
+      keyRow(K4, { exchange: "binance", venue_account_id: "ACCT-3" }),
+    ];
+    holdingsResolver.rows = [
+      row({ symbol: "ETH", api_key_id: K3, value_usd: 300 }),
+      row({ symbol: "ETH", api_key_id: K4, value_usd: 200 }),
+    ];
+
+    const net = await getNetExposureSeries(USER_ID);
+    expect(net.points).toEqual([{ asof: "2026-07-01", netUsd: 500, grossUsd: 500 }]);
+
+    const alloc = await getAllocationSeries(USER_ID);
+    expect(alloc.points).toEqual([
+      { asof: "2026-07-01", venues: [{ venue: "binance", valueUsd: 500, weight: 1 }] },
+    ]);
+  });
+
+  it("the winner is picked per holding_type: K2's later spot poll does not erase K1's only derivative", async () => {
+    keysResolver.rows = sharedAccount();
+    holdingsResolver.rows = [
+      row({
+        venue: "okx", api_key_id: K1, symbol: "BTC-PERP", holding_type: "derivative",
+        side: "short", value_usd: 400, updated_at: "2026-07-01T09:00:00Z",
+      }),
+      row({ venue: "okx", api_key_id: K1, value_usd: 1000, updated_at: "2026-07-01T10:00:00Z" }),
+      row({ venue: "okx", api_key_id: K2, value_usd: 1000, updated_at: "2026-07-01T11:00:00Z" }),
+    ];
+
+    const net = await getNetExposureSeries(USER_ID);
+    // spot long 1000 (K2 wins spot) minus derivative short 400 (K1 is the only
+    // derivative): net 600, gross 1400.
+    expect(net.points).toEqual([{ asof: "2026-07-01", netUsd: 600, grossUsd: 1400 }]);
+  });
+
+  it("an identity read ERROR rejects both series (never an empty or partial series)", async () => {
+    holdingsResolver.rows = [row()];
+    keysResolver.error = { message: "api_keys read failed" };
+    await expect(getNetExposureSeries(USER_ID)).rejects.toEqual({ message: "api_keys read failed" });
+    await expect(getAllocationSeries(USER_ID)).rejects.toEqual({ message: "api_keys read failed" });
+  });
+
+  it("an identity read that REACHES the row cap rejects both series, naming the cap", async () => {
+    holdingsResolver.rows = [row()];
+    keysResolver.rows = Array.from({ length: 1000 }, (_, i) =>
+      keyRow(`bbbbbbbb-0000-4000-8000-${String(i).padStart(12, "0")}`),
+    );
+    await expect(getNetExposureSeries(USER_ID)).rejects.toThrow(/row cap \(1000\)/);
+    await expect(getAllocationSeries(USER_ID)).rejects.toThrow(/row cap \(1000\)/);
+  });
+
+  it("an unparseable updated_at on a counted row rejects with HoldingsUpdatedAtError", async () => {
+    holdingsResolver.rows = [row({ updated_at: "not-a-timestamp" })];
+    await expect(getNetExposureSeries(USER_ID)).rejects.toMatchObject({
+      name: "HoldingsUpdatedAtError",
+    });
+    await expect(getAllocationSeries(USER_ID)).rejects.toMatchObject({
+      name: "HoldingsUpdatedAtError",
+    });
   });
 });
 

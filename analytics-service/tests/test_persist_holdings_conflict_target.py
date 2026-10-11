@@ -12,6 +12,8 @@ a real failure that ``sync_status`` has to record, so each of those propagates u
 from __future__ import annotations
 
 import logging
+import re
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -71,6 +73,42 @@ def _client(*outcomes: Exception | None) -> tuple[MagicMock, list[dict[str, Any]
 def test_constants_are_the_per_key_and_the_pre_d10_targets():
     assert HOLDINGS_CONFLICT_TARGET == "allocator_id,venue,symbol,asof,api_key_id"
     assert HOLDINGS_CONFLICT_TARGET_PRE_D10 == "allocator_id,venue,symbol,asof"
+
+
+_PER_KEY_MIGRATION = (
+    Path(__file__).resolve().parents[2]
+    / "supabase"
+    / "migrations"
+    / "20261011120000_allocator_holdings_per_key_unique.sql"
+)
+
+
+def _migration_unique_index_columns() -> list[str]:
+    """The column list of the migration's ``CREATE UNIQUE INDEX`` (comments stripped)."""
+    live = "\n".join(
+        line for line in _PER_KEY_MIGRATION.read_text().splitlines() if not line.lstrip().startswith("--")
+    )
+    found = re.findall(
+        r"CREATE\s+UNIQUE\s+INDEX\s+\w+\s+ON\s+public\.allocator_holdings\s*\(([^)]*)\)",
+        live,
+        flags=re.IGNORECASE,
+    )
+    assert len(found) == 1, f"expected exactly one CREATE UNIQUE INDEX in the migration, found {len(found)}"
+    return [col.strip() for col in found[0].split(",")]
+
+
+def test_the_writers_conflict_target_is_the_migrations_unique_index():
+    """ON CONFLICT needs a unique index over EXACTLY the target's columns, or Postgres answers 42P10.
+
+    The writer's constant and the migration's index are two copies of one fact; this binds them
+    so a column added to one cannot ship without the other (D-10).
+    """
+    index_columns = _migration_unique_index_columns()
+    target_columns = HOLDINGS_CONFLICT_TARGET.split(",")
+    assert len(index_columns) == len(set(index_columns)), "the index repeats a column"
+    assert set(index_columns) == set(target_columns), (
+        f"the writer upserts on {target_columns} but migration 20261011120000 indexes {index_columns}"
+    )
 
 
 @pytest.mark.asyncio

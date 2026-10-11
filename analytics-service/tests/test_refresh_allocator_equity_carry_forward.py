@@ -174,10 +174,12 @@ async def test_quiet_key_counts_at_its_latest_holdings_not_zero(monkeypatch: pyt
 # Task 2: one account counted once, write order irrelevant, departed keys out
 # ---------------------------------------------------------------------------
 
-# One exchange account behind two keys. The holdings table is last-writer on
-# (allocator_id, venue, symbol, asof) with no api_key_id in the key, so the
-# account's rows on a day carry whichever key polled it LAST; a pair's two keys
-# never write different symbols for one account. The fixtures below are that
+# One exchange account behind two keys. Before 170.4 D-10 (migration
+# 20261011120000) the holdings table was last-writer on (allocator_id, venue,
+# symbol, asof) with no api_key_id in the key, so the account's rows on a day
+# carried whichever key polled it LAST; a pair's two keys never wrote different
+# symbols for one account. Since the per-key index both keys can hold rows, and
+# the refresh counts the account once through `one_key_per_account_day`. The fixtures below are that
 # production shape: one venue, one symbol set, and the api_key_id stamp is the
 # only thing that varies. TODAY_USD and STALE_USD differ so the total names the
 # day the account was read on.

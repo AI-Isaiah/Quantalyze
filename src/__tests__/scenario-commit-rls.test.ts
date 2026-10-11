@@ -354,7 +354,9 @@ describe("POST /api/allocator/scenario/commit — live-DB RLS regression (Phase 
           mark_price: 50,
         },
       ],
-      { onConflict: "allocator_id,venue,symbol,asof" },
+      // 170.4 D-10: the unique key is per key (migration 20261011120000), so the
+      // upsert target carries api_key_id; the old four-column target raises 42P10.
+      { onConflict: "allocator_id,venue,symbol,asof,api_key_id" },
     );
     if (hold.error) {
       throw new Error(`Seed holdings failed: ${hold.error.message}`);

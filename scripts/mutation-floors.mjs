@@ -1133,7 +1133,15 @@
 // 630 arm run(s)`. (The pre-merge reading of this branch alone was files 63/90, arms 625;
 // main alone read 62/89 and 615; 63 + 1 = 64 and 625 + 5 = 630 agree with the merged run.)
 // WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 64;
+// Phase 170.4 ALLOCHOLDINGS plan 09, 2026-10-11: 64 -> 66 (+2 annotated gate files:
+// test_allocator_holdings_per_key_unique.sql and
+// test_commit_scenario_batch_fingerprint_unpriced.sql). MEASURED by ONE full run of
+// `node scripts/mutation-runner/run.mjs` on the tree merged with origin/main (e6313c4ab):
+// `scope: FULL 66/66 annotated files`, `coverage: files 66/93`, `arms: 638/638/0`,
+// `biting: 638`, `lane-invocations: 638 ... plus 66 baseline / 66 restore leg(s)` (the two
+// tallies AGREE), `lane-blocked: 0`, `unreachable: 27`, `per-arm lane time: mean 1.4s over
+// 638 arm run(s)`. WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 66;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2953,7 +2961,12 @@ export const FILES_FLOOR = 64;
 // `test_strategy_analytics_trade_fetch_provenance.sql: sections 7 / judged 7 / annotated 7 /
 // waived 0 / biting 7`, beside `test_btcusdview_native_balance.sql: sections 5 / judged 5 /
 // annotated 5 / waived 0 / biting 5`; `arms: 630/630/0`, `biting: 630`.
-export const ARMS_FLOOR = 630;
+// Phase 170.4 ALLOCHOLDINGS plan 09, 2026-10-11: 630 -> 638 (+8 biting arms), from the same
+// full run that set FILES_FLOOR: `test_allocator_holdings_per_key_unique.sql: sections 6 /
+// judged 6 / annotated 6 / waived 0 / biting 6` and
+// `test_commit_scenario_batch_fingerprint_unpriced.sql: sections 2 / judged 2 / annotated 2 /
+// waived 0 / biting 2`; `arms: 638/638/0`, `biting: 638`.
+export const ARMS_FLOOR = 638;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

@@ -2,9 +2,9 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260929120000_commit_scenario_batch_fingerprint_reader_set.sql
+-- source migration: 20261011120100_commit_scenario_batch_fingerprint_unpriced.sql
 -- --------------------------------------------------------------------------
--- STEP 1: re-install the 5-arg body with the reader-set recompute in (3b)
+-- STEP 1: re-install the 5-arg body with the native-unpriced arm in the recompute
 -- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.commit_scenario_batch(
   p_allocator_id uuid,
@@ -159,13 +159,20 @@ BEGIN
   -- portfolio_fingerprint_stale, which no refresh cleared. The CTE below is
   -- that reader's rule, step for step:
   --   1. the owner's keys, departed ones included;
-  --   2. per key, its latest asof, and its newest audit event
-  --      'allocator.holdings.sync_completed' with final_status 'complete'
-  --      (newest by created_at DESC, NULLs first, as PostgREST orders). That
-  --      event is evidence only when row_count is a non-negative whole number
-  --      and asof is a YYYY-MM-DD string (cleanPollDay). When its day is
-  --      STRICTLY after the key's latest rows, the key's reading is that day
-  --      with no rows (SFH-C4-02); otherwise it is the latest asof with rows;
+  --   2. per key, its latest asof, its service-written native-unpriced marker
+  --      (allocator_equity_derived, kind 'native_unpriced:' || the key id), and
+  --      its newest audit event 'allocator.holdings.sync_completed' with
+  --      final_status 'complete' (newest by created_at DESC, NULLs first, as
+  --      PostgREST orders). The marker is evidence only when its payload is an
+  --      object whose native_unpriced is JSON true and whose asof is a
+  --      YYYY-MM-DD string (nativeUnpricedDay). When its day is STRICTLY after
+  --      the key's latest rows, or the key has none, the key's reading is that
+  --      day with no rows (170.4 review WR-02), and this is decided BEFORE the
+  --      clean poll. The clean-poll event is evidence only when row_count is a
+  --      non-negative whole number and asof is a YYYY-MM-DD string
+  --      (cleanPollDay). When its day is STRICTLY after the key's latest rows,
+  --      the key's reading is that day with no rows (SFH-C4-02); otherwise it
+  --      is the latest asof with rows;
   --   3. keys grouped by exchange account (accountIdentityTokens, the D-09
   --      identity: a shared non-blank venue_account_id on one exchange, or an
   --      account_shared_with_api_key_id marker of a shared kind, joined
@@ -182,9 +189,11 @@ BEGIN
   -- ⚠️ TWIN. This is the third copy of the rule (TypeScript reader, this, and
   -- the grain rule in plan 10's Python helper). A change to
   -- latest-holdings-per-key.ts or to accountIdentityTokens that is not made
-  -- here re-opens SFH-R2-01. The gate is
+  -- here re-opens SFH-R2-01. The gates are
   -- supabase/tests/test_commit_scenario_batch_fingerprint_precondition.sql
-  -- tests 10-14.
+  -- tests 10-14 and supabase/tests/test_commit_scenario_batch_fingerprint_unpriced.sql
+  -- (the native-unpriced arm, bound to the TypeScript side by
+  -- src/lib/fingerprint-unpriced-parity.test.ts).
   --
   -- The token format MIRRORS computeHoldingsFingerprint (scenario-state.ts):
   -- symbol-first "symbol:venue:holding_type", and NO value_usd filter (the
@@ -265,7 +274,15 @@ BEGIN
                  AND al.entity_id   = k.id
                  AND al.metadata->>'final_status' = 'complete'
                ORDER BY al.created_at DESC
-               LIMIT 1) AS poll_meta
+               LIMIT 1) AS poll_meta,
+             -- 170.4 WR-02: the positions poll's service-written record that it
+             -- found a native-unit account UNPRICED (allocator_equity_derived has
+             -- one row per (allocator_id, kind); the owner has SELECT only).
+             (SELECT d.payload
+                FROM allocator_equity_derived d
+               WHERE d.allocator_id = p_allocator_id
+                 AND d.kind         = 'native_unpriced:' || k.id::text
+               LIMIT 1) AS unpriced_meta
         FROM owner_keys k
     ),
     key_poll AS (
@@ -284,7 +301,17 @@ BEGIN
                WHEN jsonb_typeof(e.poll_meta->'asof') IS DISTINCT FROM 'string' THEN NULL
                WHEN (e.poll_meta->>'asof') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN NULL
                ELSE e.poll_meta->>'asof'
-             END AS poll_day
+             END AS poll_day,
+             -- nativeUnpricedDay. Same guards, same order: an object payload,
+             -- native_unpriced JSON true, asof a YYYY-MM-DD string.
+             CASE
+               WHEN e.unpriced_meta IS NULL THEN NULL
+               WHEN jsonb_typeof(e.unpriced_meta) <> 'object' THEN NULL
+               WHEN e.unpriced_meta->'native_unpriced' IS DISTINCT FROM 'true'::jsonb THEN NULL
+               WHEN jsonb_typeof(e.unpriced_meta->'asof') IS DISTINCT FROM 'string' THEN NULL
+               WHEN (e.unpriced_meta->>'asof') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN NULL
+               ELSE e.unpriced_meta->>'asof'
+             END AS unpriced_day
         FROM key_evidence e
     ),
     key_reading AS (
@@ -292,14 +319,19 @@ BEGIN
              p.latest_asof,
              (p.poll_day IS NOT NULL
               AND (p.latest_day IS NULL
-                   OR p.poll_day COLLATE "C" > p.latest_day COLLATE "C")) AS polled_after_rows
+                   OR p.poll_day COLLATE "C" > p.latest_day COLLATE "C")) AS polled_after_rows,
+             (p.unpriced_day IS NOT NULL
+              AND (p.latest_day IS NULL
+                   OR p.unpriced_day COLLATE "C" > p.latest_day COLLATE "C")) AS unpriced_after_rows
         FROM key_poll p
     ),
     key_day AS (
       SELECT r.id,
              r.latest_asof,
-             NOT r.polled_after_rows AS has_rows,
-             CASE WHEN r.polled_after_rows THEN p.poll_day ELSE p.latest_day END AS day
+             NOT (r.unpriced_after_rows OR r.polled_after_rows) AS has_rows,
+             CASE WHEN r.unpriced_after_rows THEN p.unpriced_day
+                  WHEN r.polled_after_rows THEN p.poll_day
+                  ELSE p.latest_day END AS day
         FROM key_reading r
         JOIN key_poll p ON p.id = r.id
     ),

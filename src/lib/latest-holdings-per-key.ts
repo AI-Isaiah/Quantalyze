@@ -79,16 +79,48 @@ export const POLL_COMPLETED_ACTION = "allocator.holdings.sync_completed";
  * The key columns the account identity reads (`accountIdentityTokens`). Every
  * one is in `API_KEY_USER_COLUMNS`, so the user-scoped client may select it.
  */
-const KEY_IDENTITY_COLUMNS =
+export const KEY_IDENTITY_COLUMNS =
   "id, exchange, venue_account_id, account_share_kind, account_shared_with_api_key_id";
 
-type KeyIdentityRow = {
+export type KeyIdentityRow = {
   id: string;
   exchange: string | null;
   venue_account_id: string | null;
   account_share_kind: string | null;
   account_shared_with_api_key_id: string | null;
 };
+
+/**
+ * Phase 170.4 plan 14 (D-11): the ONE mapping from a key to the exchange
+ * account it reads (the D-09 identity, `accountIdentityTokens`). The per-key
+ * reader groups by it, the dollar callers hand it to `oneKeyPerAccountDay`,
+ * and the over-time series reader (`fetchHoldings`, portfolio-exposure.ts)
+ * does the same, so "which keys share an account" has one mechanism.
+ *
+ * `keys` are the owner's `api_keys` rows read with `KEY_IDENTITY_COLUMNS`; the
+ * five fields `accountIdentityTokens` also takes are not identity and are null.
+ * A key the identity does not group, or that is absent from `keys`, is its own
+ * account (`key:<id>`).
+ */
+export function keyAccountOf(
+  keys: readonly KeyIdentityRow[],
+): (keyId: string) => string {
+  const identity = accountIdentityTokens(
+    keys.map((k) => ({
+      id: k.id,
+      exchange: typeof k.exchange === "string" ? k.exchange : "",
+      venue_account_id: k.venue_account_id ?? null,
+      account_share_kind: k.account_share_kind ?? null,
+      account_shared_with_api_key_id: k.account_shared_with_api_key_id ?? null,
+      disconnected_at: null,
+      sync_status: null,
+      history_inclusion: null,
+      first_returns_day: null,
+      last_returns_day: null,
+    })),
+  );
+  return (keyId: string): string => identity.get(keyId) ?? `key:${keyId}`;
+}
 
 /**
  * Review C4 round 2 WR-R2-03: a key whose returned rows were written, on
@@ -422,22 +454,7 @@ export async function fetchLatestHoldingsPerKey(
   // SFH-C4-01: one exchange account, one reading. Keys that read the same
   // account (the D-09 identity) are grouped; only the keys holding the
   // group's newest reading day, with rows on it, contribute.
-  const identity = accountIdentityTokens(
-    keys.map((k) => ({
-      id: k.id,
-      exchange: typeof k.exchange === "string" ? k.exchange : "",
-      venue_account_id: k.venue_account_id ?? null,
-      account_share_kind: k.account_share_kind ?? null,
-      account_shared_with_api_key_id: k.account_shared_with_api_key_id ?? null,
-      disconnected_at: null,
-      sync_status: null,
-      history_inclusion: null,
-      first_returns_day: null,
-      last_returns_day: null,
-    })),
-  );
-  const accountOf = (keyId: string): string =>
-    identity.get(keyId) ?? `key:${keyId}`;
+  const accountOf = keyAccountOf(keys);
   const newestByAccount = new Map<string, string>();
   keys.forEach((key, i) => {
     const reading = readings[i].reading;

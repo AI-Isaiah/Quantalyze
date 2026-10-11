@@ -192,7 +192,9 @@ describe("migration 083 — commit_scenario_batch race-safe M7 (live-DB)", () =>
           mark_price: 100,
         },
       ],
-      { onConflict: "allocator_id,venue,symbol,asof" },
+      // 170.4 D-10: the unique key is per key (migration 20261011120000), so the
+      // upsert target carries api_key_id; the old four-column target raises 42P10.
+      { onConflict: "allocator_id,venue,symbol,asof,api_key_id" },
     );
     if (seedHoldings.error) {
       throw new Error(

@@ -295,3 +295,15 @@ waived. A DATED reading of one full `node scripts/mutation-runner/run.mjs` on th
 alone, no file edited during it: `coverage: files 62/89`, `arms: 615/615/0`, `biting: 615`,
 `lane-invocations: 615` plus 62 baseline / 62 restore legs, `unreachable: 27`, `lane-blocked: 0`,
 `No defects.`, exit 0. Not a live constant: read `FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plans 09 and 13): two gate files arrived,
+`supabase/tests/test_allocator_holdings_per_key_unique.sql` (migration 20261011120000: the
+five-column per-key unique index on `allocator_holdings`, six arms) and
+`supabase/tests/test_commit_scenario_batch_fingerprint_unpriced.sql` (migration 20261011120100:
+the native-unpriced marker rule in `commit_scenario_batch`'s fingerprint recompute, two arms), each
+arm on a `sql` or `edit` step, none waived. A DATED reading of one full
+`node scripts/mutation-runner/run.mjs` on that branch, no file edited during it:
+`scope: FULL 66/66 annotated files`, `coverage: files 66/93`, `arms: 638/638/0`, `biting: 638`,
+`lane-invocations: 638` plus 66 baseline / 66 restore legs, `unreachable: 27`, `lane-blocked: 0`,
+`No defects.`, exit 0. Plan 13 re-measured it independently of plan 09 and read the same figures.
+Not a live constant: read `FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
