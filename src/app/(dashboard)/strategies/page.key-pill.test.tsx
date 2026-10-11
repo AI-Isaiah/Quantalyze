@@ -57,6 +57,7 @@ vi.mock("@/components/strategy/ShareableLink", async () => {
 });
 
 interface PillProps {
+  subject: string;
   syncStatus: string | null;
   syncError: string | null;
   lastSyncAt: string | null;
@@ -71,6 +72,7 @@ const pillProps = vi.hoisted(() => [] as PillProps[]);
 vi.mock("@/components/exchanges/AllocatorSyncStatus", () => ({
   AllocatorSyncStatus: (props: PillProps) => {
     pillProps.push({
+      subject: props.subject,
       syncStatus: props.syncStatus,
       syncError: props.syncError,
       lastSyncAt: props.lastSyncAt,
@@ -507,8 +509,12 @@ describe("StrategiesPage — KCS-06 the key mark (S4)", () => {
     ]);
     // Mounted exactly as the key card mounts it: the stored status, error,
     // time and exchange code, not a paraphrase.
+    // D-15: a strategy key's last_sync_at is the daily key check, so the row
+    // must mount the pill as a strategy-key subject ("Key checked ..."), never
+    // the allocator-holdings "Synced ..." label.
     expect(pillProps).toEqual([
       {
+        subject: "strategy-key",
         syncStatus: "sign_in_failed",
         syncError: "synthetic auth error",
         lastSyncAt: "2026-02-01T00:00:00.000Z",

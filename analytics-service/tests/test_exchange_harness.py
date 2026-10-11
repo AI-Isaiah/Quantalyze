@@ -566,6 +566,135 @@ class TestBybitFetchDailyPnl:
 
 
 # ===================================================================
+# Page caps: a capped fetch must SAY it is truncated (PR-B round 1, ME-02)
+# ===================================================================
+
+class TestPageCapsStampTheTruncationFlag:
+    """167.1.2.2.2 PR-B round 1, SFH-H2 / ME-02.
+
+    The cron tick reads `daily_pnl_truncated_*` to decide that a window was not
+    read in full. Before TRADESYNC the window was roughly one day, so no cap was
+    reachable; TRADESYNC makes windows unclamped (157 days for the first tick),
+    so a cap is reachable, and OKX pages NEWEST-first, so a cap drops the OLDEST
+    days: the gap days the phase exists to recover. Each venue loop that can hit
+    a cap has to stamp its flag, with a control that stays clean.
+    """
+
+    @staticmethod
+    def _full_pages(prefix: str, inst_type: str, ts_ms: int):
+        """An OKX bills endpoint that NEVER runs out: every page holds 100 rows
+        with fresh billIds, so only a page cap can end the walk."""
+        counter = {"n": 0}
+
+        async def _pages(params):
+            if params.get("instType") != inst_type:
+                return {"data": []}
+            counter["n"] += 1
+            base = counter["n"] * 1000
+            return {
+                "data": [
+                    _okx_bill(f"{prefix}{base + i}", "1.0", "0.0", ts_ms)
+                    for i in range(100)
+                ]
+            }
+
+        return _pages, counter
+
+    @pytest.mark.asyncio
+    async def test_okx_recent_bills_page_cap_stamps_the_flag(self):
+        from services.exchange import get_and_clear_last_dq_flags
+
+        get_and_clear_last_dq_flags()
+        exchange = _make_okx_exchange()
+        pages, counter = self._full_pages("r", "SWAP", _ts(2024, 3, 15, 10))
+        exchange.private_get_account_bills = AsyncMock(side_effect=pages)
+        # since_ms inside 90 days: the archive is skipped, so ONLY this loop can
+        # stamp the flag.
+        since_ms = int((datetime.now(timezone.utc) - timedelta(days=10)).timestamp() * 1000)
+
+        await fetch_daily_pnl(exchange, since_ms)
+
+        assert counter["n"] == 100, "the stub must really run the loop to its cap"
+        assert get_and_clear_last_dq_flags().get("daily_pnl_truncated_okx") is True
+
+    @pytest.mark.asyncio
+    async def test_okx_archive_page_cap_stamps_the_flag(self):
+        """The archive loop had `range(100)` and NO cap flag at all, so a
+        157-day first window that exhausted it was returned as complete."""
+        from services.exchange import get_and_clear_last_dq_flags
+
+        get_and_clear_last_dq_flags()
+        exchange = _make_okx_exchange()
+        pages, counter = self._full_pages("a", "SWAP", _ts(2024, 3, 15, 10))
+        exchange.private_get_account_bills_archive = AsyncMock(side_effect=pages)
+
+        # since_ms=None: the whole reach, so the archive is fetched.
+        await fetch_daily_pnl(exchange, None)
+
+        assert counter["n"] == 100, "the stub must really run the archive loop to its cap"
+        assert get_and_clear_last_dq_flags().get("daily_pnl_truncated_okx") is True, (
+            "an exhausted archive page cap is a TRUNCATED window and must say so"
+        )
+
+    @pytest.mark.asyncio
+    async def test_okx_archive_that_ends_on_a_short_page_is_not_truncated(self):
+        """The control: a final page below 100 rows ends the walk before the cap,
+        and a clean fetch carries no truncation flag."""
+        from services.exchange import get_and_clear_last_dq_flags
+
+        get_and_clear_last_dq_flags()
+        exchange = _make_okx_exchange()
+        calls = {"n": 0}
+
+        async def _archive(params):
+            if params.get("instType") != "SWAP":
+                return {"data": []}
+            calls["n"] += 1
+            if calls["n"] < 100:
+                return {
+                    "data": [
+                        _okx_bill(f"c{calls['n']}-{i}", "1.0", "0.0", _ts(2024, 3, 15, 10))
+                        for i in range(100)
+                    ]
+                }
+            return {"data": [_okx_bill("last", "1.0", "0.0", _ts(2024, 3, 15, 10))]}
+
+        exchange.private_get_account_bills_archive = AsyncMock(side_effect=_archive)
+
+        await fetch_daily_pnl(exchange, None)
+
+        assert calls["n"] == 100, "99 full pages then a short one: the cap is not exceeded"
+        flags = get_and_clear_last_dq_flags()
+        assert "daily_pnl_truncated_okx" not in flags, flags
+
+    @pytest.mark.asyncio
+    async def test_bybit_window_page_cap_stamps_the_flag(self):
+        from services.exchange import get_and_clear_last_dq_flags
+
+        get_and_clear_last_dq_flags()
+        exchange = _make_bybit_exchange()
+        counter = {"n": 0}
+
+        async def _pages(params):
+            counter["n"] += 1
+            return {
+                "result": {
+                    "list": [_bybit_closed_pnl("BTCUSDT", "1.0", _ts(2024, 3, 15, 10) + counter["n"])],
+                    "nextPageCursor": f"cursor-{counter['n']}",
+                }
+            }
+
+        exchange.private_get_v5_position_closed_pnl = AsyncMock(side_effect=_pages)
+        # One 7-day window, so exactly one cap (50 pages) is exhausted.
+        since_ms = int((datetime.now(timezone.utc) - timedelta(days=3)).timestamp() * 1000)
+
+        await fetch_daily_pnl(exchange, since_ms)
+
+        assert counter["n"] == 50
+        assert get_and_clear_last_dq_flags().get("daily_pnl_truncated_bybit") is True
+
+
+# ===================================================================
 # General / Cross-Exchange Tests
 # ===================================================================
 

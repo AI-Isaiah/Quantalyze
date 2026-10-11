@@ -37,6 +37,13 @@ interface CompositionDonutProps {
      * the point.
      */
     seriesEnd: string | null;
+    /**
+     * Phase 167.1.2.2.2 / SC-4, D-07 — the constituent's
+     * `strategy_analytics.trades_fetched_at`, the cron's own record of its last
+     * successful trade fetch. REQUIRED for the same reason `seriesEnd` is: a
+     * caller that cannot resolve one says `null` out loud.
+     */
+    tradesFetchedAt: string | null;
   }[];
 }
 
@@ -111,6 +118,12 @@ export function CompositionDonut({ strategies }: CompositionDonutProps) {
                     <SyncBadge
                       computedAt={s.computedAt ?? null}
                       seriesEnd={s.seriesEnd ?? null}
+                      /* SC-4, D-07 — the cron's record. F3 — the venue is NULL:
+                         a slice is another manager's strategy and carries no
+                         api-key exchange, and `supported_exchanges` is never
+                         the source. */
+                      tradesFetchedAt={s.tradesFetchedAt}
+                      tradeFetchVenue={null}
                     />
                   </div>
                 </td>

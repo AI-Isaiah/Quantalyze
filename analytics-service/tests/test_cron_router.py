@@ -86,6 +86,26 @@ def _clear_validation_cache():
     cron_mod._key_validation_cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _heartbeat_never_reaches_a_real_project(monkeypatch):
+    """167.1.2.2.2 plan 06 (SC-6): every `cron_sync()` run now writes a
+    `cron_runs` row through `routers.cron.get_supabase`, including the runs that
+    abort before the route builds its own client (a missing KEK). Unpatched, such
+    a test would reach the real `get_supabase()`, which is a WRITE to a real
+    project whenever `SUPABASE_URL` is set (`main.py` loads the TEST project's
+    env file at import, so any test that imports `main` sets it for the rest of a
+    local run). The default is a sink that refuses; the recorder's never-raises
+    contract turns the refusal into one warning. A test that wants rows patches
+    `cron_mod.get_supabase` itself (this fixture runs first, so its patch wins).
+    """
+
+    def _refuse() -> Any:
+        raise RuntimeError("unit tests never write a cron_runs row to a real project")
+
+    monkeypatch.setattr(cron_mod, "get_supabase", _refuse)
+    yield
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -98,6 +118,7 @@ def _make_key_row(
     strategy_ids: list[str] | None = None,
     last_sync_at: str | None = None,
     strategy_cursors: dict[str, str | None] | None = None,
+    strategy_high_waters: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """Build a synthetic `api_keys` row as `cron_sync` hands it to
     `_sync_single_key`.
@@ -114,6 +135,12 @@ def _make_key_row(
     correct for the reader, but the production path for a key whose markers
     were never fetched is an absent key, and the helper must be able to
     express it.
+
+    167.1.2.2.2: `strategy_high_waters` is the same idea for the stored
+    high-water the route attaches beside `strategy_cursors` (strategy id -> the
+    ISO of 00:00 UTC of its newest daily-P&L day, or None). Omitted -> the key
+    is absent, which `_sync_single_key` reads as "nothing loaded": every
+    marker-less strategy gets a full-reach fetch.
     """
     row: dict[str, Any] = {
         "id": key_id,
@@ -130,6 +157,8 @@ def _make_key_row(
     }
     if strategy_cursors is not None:
         row["strategy_cursors"] = strategy_cursors
+    if strategy_high_waters is not None:
+        row["strategy_high_waters"] = strategy_high_waters
     return row
 
 
@@ -212,6 +241,12 @@ def _make_mock_supabase_for_cron_sync(
     update_data: list[dict] | None = None,
     sc_data: list[dict] | None = None,
     sc_select_side_effect: list[Any] | None = None,
+    trades_rows: list[dict] | None = None,
+    trades_select_error: BaseException | None = None,
+    sa_update_returned_ids: list[str] | None = None,
+    sa_update_error: BaseException | None = None,
+    cron_runs_insert_error: BaseException | None = None,
+    cron_runs_insert_returns_no_rows: bool = False,
 ) -> MagicMock:
     """Build a MagicMock supabase client wired for end-to-end cron_sync
     integration tests. Each table name dispatches to its own chain so
@@ -254,6 +289,38 @@ def _make_mock_supabase_for_cron_sync(
       and failing every call could not distinguish "degraded to an empty
       mapping" from "kept the rows it had already collected", which is the
       difference between a clean fallback and partial garbage.
+    - trades_rows: the `trades` table the high-water read runs against
+      (167.1.2.2.2), rows shaped `{"strategy_id", "timestamp", "is_fill"}`.
+      ⚠️ SERVED BY A FAKE THAT APPLIES THE FILTERS IT IS GIVEN, not by a canned
+      `.data`. A canned answer would return the same row whether or not the
+      read carried `.eq("is_fill", False)`, so a mutant that dropped the filter
+      would stay green. Every query is captured on
+      `mock_supabase.trades_queries` as `{"eq": [...], "order": ..., "limit":
+      ...}`. Default `None` is an EMPTY table (every strategy has no stored
+      day). `trades_select_error` makes every `.execute()` raise.
+    - sa_update_returned_ids / sa_update_error: the `strategy_analytics`
+      stamp (167.1.2.2.2). The UPDATE answers with one `{"strategy_id": id}`
+      row per id in `sa_update_returned_ids`; the default (None) echoes every id
+      it was sent, i.e. "every row existed". Pass a shorter list to model an
+      advancing strategy that has no analytics row (PostgREST answers an UPDATE
+      matching nothing with 200 and an EMPTY list). Every UPDATE is captured on
+      `mock_supabase.strategy_analytics_updates` as `(payload, column, ids)` and
+      every UPSERT on `mock_supabase.strategy_analytics_upserts`, which a
+      correct implementation leaves EMPTY (an upsert would create a stub
+      `pending` analytics row).
+    - keys_data (167.1.2.2.2 plan 06): served by a fake that APPLIES the two
+      filters `cron_sync` sends, `.eq("is_active", True)` and
+      `.is_("disconnected_at", "null")`, against each row (a row without an
+      `is_active` key counts as active; one without `disconnected_at` as
+      connected). A canned answer would return a disconnected row whether or not
+      the query carried the filter, so a regression that dropped it would stay
+      green. The fake is STRICT (select/eq/is_/execute only), and every query is
+      captured on `mock_supabase.api_keys_selects` as `{"select", "eq", "is_"}`.
+    - cron_runs_insert_error / cron_runs_insert_returns_no_rows: the SC-6
+      heartbeat. Every INSERT into `cron_runs` is captured on
+      `mock_supabase.cron_runs_inserts` (the payload dicts, in call order);
+      `cron_runs_insert_error` makes `.execute()` raise, and
+      `..._returns_no_rows` answers with an empty list.
     """
     if ps_data is None:
         ps_data = []
@@ -276,10 +343,39 @@ def _make_mock_supabase_for_cron_sync(
 
     mock_supabase = MagicMock()
 
-    keys_chain = MagicMock()
-    keys_chain.select.return_value.eq.return_value.execute.return_value = MagicMock(
-        data=keys_data
-    )
+    api_keys_selects: list[dict[str, Any]] = []
+
+    class _FakeApiKeysQuery:
+        def __init__(self, cols: Any) -> None:
+            self._cols = cols
+            self._eq: list[tuple[str, Any]] = []
+            self._is: list[tuple[str, Any]] = []
+
+        def eq(self, col: str, val: Any) -> "_FakeApiKeysQuery":
+            self._eq.append((col, val))
+            return self
+
+        def is_(self, col: str, val: Any) -> "_FakeApiKeysQuery":
+            self._is.append((col, val))
+            return self
+
+        def execute(self) -> Any:
+            api_keys_selects.append(
+                {"select": self._cols, "eq": list(self._eq), "is_": list(self._is)}
+            )
+            matched = []
+            for r in keys_data:
+                if not all(
+                    r.get(c, True if c == "is_active" else None) == v
+                    for c, v in self._eq
+                ):
+                    continue
+                if not all(
+                    (r.get(c) is None) == (v == "null") for c, v in self._is
+                ):
+                    continue
+                matched.append(r)
+            return MagicMock(data=matched)
 
     ps_chain = MagicMock()
     ps_chain.select.return_value.in_.return_value.execute.return_value = MagicMock(
@@ -327,16 +423,128 @@ def _make_mock_supabase_for_cron_sync(
 
     sc_chain.upsert.side_effect = _sc_upsert
 
+    # 167.1.2.2.2 — `trades` (the high-water read) and `strategy_analytics`
+    # (the trades_fetched_at stamp). Both explicit and CAPTURING for the reason
+    # the docstring gives: the old `return MagicMock()` fallthrough accepted any
+    # read or write on a table the fixture did not name and recorded nothing.
+    trades_queries: list[dict[str, Any]] = []
+    sa_updates: list[tuple[dict, str, list[str]]] = []
+    sa_upserts: list[Any] = []
+    _trades_table_rows = list(trades_rows or [])
+
+    class _FakeTradesQuery:
+        def __init__(self) -> None:
+            self._eq: list[tuple[str, Any]] = []
+            self._order: tuple[str, bool] | None = None
+            self._limit: int | None = None
+
+        def select(self, *_a: Any, **_k: Any) -> "_FakeTradesQuery":
+            return self
+
+        def eq(self, col: str, val: Any) -> "_FakeTradesQuery":
+            self._eq.append((col, val))
+            return self
+
+        def order(self, col: str, desc: bool = False) -> "_FakeTradesQuery":
+            self._order = (col, desc)
+            return self
+
+        def limit(self, n: int) -> "_FakeTradesQuery":
+            self._limit = n
+            return self
+
+        def execute(self) -> Any:
+            trades_queries.append(
+                {"eq": list(self._eq), "order": self._order, "limit": self._limit}
+            )
+            if trades_select_error is not None:
+                raise trades_select_error
+            matched = [
+                r
+                for r in _trades_table_rows
+                if all(r.get(c) == v for c, v in self._eq)
+            ]
+            if self._order is not None:
+                col, desc = self._order
+                matched.sort(key=lambda r: r[col], reverse=desc)
+            if self._limit is not None:
+                matched = matched[: self._limit]
+            return MagicMock(data=[{"timestamp": r["timestamp"]} for r in matched])
+
+    # ⚠️ STRICT objects, not MagicMocks: `update(...)` supports exactly
+    # `.in_(col, ids)` and the filter exactly `.execute()`. A MagicMock would
+    # accept ANY chained filter (`.neq("computation_status", ...)`, `.eq(...)`)
+    # and answer as if it had run, so a stamp narrowed to some row states would
+    # be indistinguishable from the unfiltered one this phase decided on. Here
+    # an unexpected call is an AttributeError, which the best-effort stamp
+    # records in the envelope, which the gate then reads.
+    class _FakeSaFilter:
+        def __init__(self, sent: list[str]) -> None:
+            self._sent = sent
+
+        def execute(self) -> Any:
+            if sa_update_error is not None:
+                raise sa_update_error
+            returned = self._sent if sa_update_returned_ids is None else [
+                i for i in self._sent if i in sa_update_returned_ids
+            ]
+            return MagicMock(data=[{"strategy_id": i} for i in returned])
+
+    class _FakeSaUpdate:
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+
+        def in_(self, col: str, ids: Any) -> _FakeSaFilter:
+            sent = list(ids)
+            sa_updates.append((dict(self._payload), col, sent))
+            return _FakeSaFilter(sent)
+
+    class _FakeSaTable:
+        def update(self, payload: dict) -> _FakeSaUpdate:
+            return _FakeSaUpdate(payload)
+
+        def upsert(self, payload: Any, *a: Any, **k: Any) -> Any:
+            sa_upserts.append(payload)
+            return MagicMock()
+
+    sa_chain = _FakeSaTable()
+
+    # 167.1.2.2.2 plan 06 (SC-6) — `cron_runs`, the heartbeat. Explicit and
+    # CAPTURING for the reason the docstring gives for the other tables.
+    cron_runs_inserts: list[dict[str, Any]] = []
+
+    class _FakeCronRunsInsert:
+        def __init__(self, payload: dict[str, Any]) -> None:
+            self._payload = payload
+
+        def execute(self) -> Any:
+            cron_runs_inserts.append(self._payload)
+            if cron_runs_insert_error is not None:
+                raise cron_runs_insert_error
+            if cron_runs_insert_returns_no_rows:
+                return MagicMock(data=[])
+            return MagicMock(data=[self._payload])
+
+    class _FakeCronRunsTable:
+        def insert(self, payload: dict[str, Any]) -> _FakeCronRunsInsert:
+            return _FakeCronRunsInsert(payload)
+
+    cron_runs_table = _FakeCronRunsTable()
+
     def _table(name: str):
+        if name == "trades":
+            return _FakeTradesQuery()
+        if name == "strategy_analytics":
+            return sa_chain
         if name == "strategy_sync_cursors":
             return sc_chain
         if name == "api_keys":
             t = MagicMock()
-            t.select.return_value.eq.return_value.execute.return_value = (
-                keys_chain.select.return_value.eq.return_value.execute.return_value
-            )
+            t.select.side_effect = lambda *a, **k: _FakeApiKeysQuery(a)
             t.update.return_value = update_chain
             return t
+        if name == "cron_runs":
+            return cron_runs_table
         if name == "portfolio_strategies":
             return ps_chain
         if name == "portfolios":
@@ -356,6 +564,11 @@ def _make_mock_supabase_for_cron_sync(
 
     # Captured `strategy_sync_cursors` upsert payloads, in call order.
     mock_supabase.strategy_cursor_upserts = strategy_cursor_upserts
+    mock_supabase.trades_queries = trades_queries
+    mock_supabase.strategy_analytics_updates = sa_updates
+    mock_supabase.strategy_analytics_upserts = sa_upserts
+    mock_supabase.api_keys_selects = api_keys_selects
+    mock_supabase.cron_runs_inserts = cron_runs_inserts
 
     return mock_supabase
 
@@ -844,8 +1057,9 @@ class TestPortfolioRecomputeErrorIsolation:
         mock_supabase = MagicMock()
 
         # api_keys SELECT returns a single ok key with one strategy
+        # 167.1.2.2.2 plan 06 (D-13): the select now ends `.eq(...).is_(...)`.
         keys_chain = MagicMock()
-        keys_chain.select.return_value.eq.return_value.execute.return_value = (
+        keys_chain.select.return_value.eq.return_value.is_.return_value.execute.return_value = (
             MagicMock(
                 data=[
                     {
@@ -893,8 +1107,8 @@ class TestPortfolioRecomputeErrorIsolation:
             if name == "api_keys":
                 t = MagicMock()
                 # SELECT path
-                t.select.return_value.eq.return_value.execute.return_value = (
-                    keys_chain.select.return_value.eq.return_value.execute.return_value
+                t.select.return_value.eq.return_value.is_.return_value.execute.return_value = (
+                    keys_chain.select.return_value.eq.return_value.is_.return_value.execute.return_value
                 )
                 # UPDATE path
                 t.update.return_value = update_chain
@@ -1228,7 +1442,21 @@ class TestSyncTradesShapeDriftHoldsTheCursor:
                 upd.eq.return_value.execute.return_value = MagicMock(
                     data=[{"id": "key-1"}]
                 )
-                upd.in_.return_value.execute.return_value = MagicMock(data=[])
+                if name == "strategy_analytics":
+                    # 167.1.2.2.2: the trades_fetched_at stamp. Echo the ids it
+                    # was sent as returned rows ("every analytics row existed")
+                    # so a tick through this runner is not reported as having
+                    # left strategies unstamped. The stamp's own gates live in
+                    # `TestTradesFetchedAtStampedOnlyOnAdvance`.
+                    upd.in_.side_effect = lambda col, ids: MagicMock(
+                        execute=MagicMock(
+                            return_value=MagicMock(
+                                data=[{"strategy_id": i} for i in ids]
+                            )
+                        )
+                    )
+                else:
+                    upd.in_.return_value.execute.return_value = MagicMock(data=[])
                 return upd
 
             chain.update.side_effect = _update
@@ -1550,7 +1778,8 @@ class TestApiKeysSelectFailureRaises500:
         mock_supabase = MagicMock()
         # Make the keys SELECT chain raise on .execute().
         chain = MagicMock()
-        chain.select.return_value.eq.return_value.execute.side_effect = (
+        # 167.1.2.2.2 plan 06 (D-13): the select now ends `.eq(...).is_(...)`.
+        chain.select.return_value.eq.return_value.is_.return_value.execute.side_effect = (
             RuntimeError("supabase down")
         )
         mock_supabase.table.return_value = chain
@@ -2639,9 +2868,16 @@ class TestC0197CronTriggersAnalyticsRecompute:
 
         # The illegal `computation_status='stale'` write must be GONE — it
         # violated the CHECK constraint (23514) and nothing ever read it.
+        # 167.1.2.2.2 RE-BASE: this arm used to assert NO strategy_analytics
+        # UPDATE at all. The cron now stamps `trades_fetched_at` there (SC-4 /
+        # D-07), so the property narrows to what it always meant: no write may
+        # carry `computation_status` (the CHECK-violating 'stale' marker), and
+        # the only write is the single-column stamp, whose own gates are in
+        # `TestTradesFetchedAtStampedOnlyOnAdvance`.
         sa_updates = updates_by_table.get("strategy_analytics", [])
-        assert sa_updates == [], (
-            f"strategy_analytics must NOT be UPDATEd with a 'stale' marker "
+        assert all(list(u) == ["trades_fetched_at"] for u in sa_updates), (
+            f"strategy_analytics must NOT be UPDATEd with a 'stale' marker or "
+            f"any column but the trades_fetched_at stamp "
             f"(removed — CHECK-violating + dead); got {sa_updates!r}"
         )
 
@@ -3078,19 +3314,27 @@ class TestHeldStatusBucketForStalledKeys:
         import routers.portfolio as portfolio_mod
         _sys.modules["routers.portfolio"] = portfolio_mod
 
-        # One key whose only linked strategy is archived => `strategy_ids`
-        # is empty after the lifecycle filter, so the per-strategy RPC loop
-        # never runs and nothing can be stored.
+        # One key backing an eligible strategy whose `sync_trades` stores ZERO
+        # rows without raising or drifting: real trades fetched, none stored,
+        # no per-strategy error, so the cursor is pinned.
+        # 167.1.2.2.2 plan 06 (D-13): this used to be a key whose only strategy
+        # was archived, so `strategy_ids` was empty and the per-strategy loop
+        # never ran. The selector now drops such a key before any venue call
+        # (`TestCronSyncSkipsDisconnectedAndStrategylessKeys`), so that fixture
+        # can no longer reach `_sync_single_key` through the route. The property
+        # this class pins, "fetched-and-stored-nothing is `held`, never `ok`",
+        # is unchanged and is fed here by the zero-stored RPC instead.
         mock_supabase = _make_mock_supabase_for_cron_sync(
             keys_data=[
                 {
                     "id": "key-held",
                     "exchange": "binance",
                     "last_sync_at": None,
-                    "strategies": [{"id": "strat-archived", "status": "archived"}],
+                    "strategies": [{"id": "strat-held", "status": "published"}],
                 }
             ],
             ps_data=[],
+            rpc_data=0,
         )
 
         mock_exchange = AsyncMock()
@@ -3137,7 +3381,9 @@ class TestHeldStatusBucketForStalledKeys:
         # Real trades were fetched and none stored — that pairing is what
         # makes the key stalled rather than idle.
         assert held_results[0]["trades_fetched"] == 2
-        assert held_results[0]["per_strategy_stored"] == {}
+        # Plan 06 re-feed: the strategy is attempted and stores zero, where the
+        # old fixture never reached the per-strategy loop and left `{}`.
+        assert held_results[0]["per_strategy_stored"] == {"strat-held": 0}
         # `held` must survive the RESULTS_CAP triage as a diagnostic status —
         # a stalled key evicted from a capped body is unobservable.
         assert "held" in cron_mod._NON_OK_STATUSES
@@ -3150,16 +3396,18 @@ class TestHeldStatusBucketForStalledKeys:
         import routers.portfolio as portfolio_mod
         _sys.modules["routers.portfolio"] = portfolio_mod
 
+        # 167.1.2.2.2 plan 06 (D-13): re-fed as in `test_stalled_key_reports_held_not_ok`.
         mock_supabase = _make_mock_supabase_for_cron_sync(
             keys_data=[
                 {
                     "id": "key-held",
                     "exchange": "binance",
                     "last_sync_at": None,
-                    "strategies": [{"id": "strat-archived", "status": "archived"}],
+                    "strategies": [{"id": "strat-held", "status": "published"}],
                 }
             ],
             ps_data=[],
+            rpc_data=0,
         )
 
         mock_exchange = AsyncMock()
@@ -3674,6 +3922,19 @@ _SYNC_CURSOR_TABLE = "strategy_sync_cursors"
 _ONE_TICK_AGO = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
 
 
+def _utc_midnight_days_ago(days: int) -> tuple[str, int]:
+    """`(iso, epoch_ms)` of 00:00 UTC, `days` whole UTC days before today.
+
+    167.1.2.2.2: the stand-in for a strategy's stored high-water, which the
+    route loads day-aligned. Both values come from the one datetime, so the
+    expected millisecond is derived independently of `routers.cron`.
+    """
+    midnight = (datetime.now(timezone.utc) - timedelta(days=days)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return midnight.isoformat(), int(midnight.timestamp() * 1000)
+
+
 class TestResumeFloorEmptyFanOutFallsBackToKeyCursor:
     """164.5.1.4 IN-01: `_resume_floor_ms`'s no-eligible-strategies branch.
 
@@ -3892,6 +4153,16 @@ class TestKeyCursorFallbackIsNeverClamped:
     """164.5.1.4 ROUND-2 BLOCKER: `MAX_MARKER_LOOKBACK_MS` may bound a HELD
     MARKER and nothing else.
 
+    ⭐ 167.1.2.2.2 TRADESYNC RE-BASE (the class keeps its name; the PROPERTY is
+    unchanged). The non-marker floor used to be the KEY cursor. It is now the
+    strategy's own stored HIGH-WATER (`strategy_high_waters`, D-11), and the
+    key cursor is not an input to a strategy's window at all (D-12). The
+    property each arm pins still holds and matters MORE now: a non-marker floor
+    is never clamped, because the high-water is exactly the gap the phase
+    exists to recover (PROD: 138 and 156 days behind, against a 30-day cap).
+    The prose below is the original derivation, kept as lineage; read "key
+    cursor" in it as "the non-marker fallback source".
+
     ⛔ THE DEFECT THIS PINS, AND IT SHIPPED. The clamp was written after the
     loop in `_resume_floor_ms`, so it clamped whatever the loop produced —
     including the value `_strategy_resume_point` falls back to for a strategy
@@ -3953,11 +4224,12 @@ class TestKeyCursorFallbackIsNeverClamped:
         return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
 
     def test_a_key_cursor_older_than_the_cap_is_returned_unclamped(self, caplog):
-        """The INERT ON ARRIVAL property, at an age where the clamp can bite."""
-        key_cursor = self._iso(self.DORMANT_KEY_CURSOR_MS)
-        expected = cron_mod.parse_since_ms(key_cursor)
+        """The INERT ON ARRIVAL property, at an age where the clamp can bite.
+        (167.1.2.2.2: the non-marker source is the stored high-water.)"""
+        high_water = self._iso(self.DORMANT_KEY_CURSOR_MS)
+        expected = cron_mod.parse_since_ms(high_water)
         assert expected is not None, (
-            "the key cursor must parse — otherwise the expectation below is "
+            "the high-water must parse — otherwise the expectation below is "
             "None and the defect this arm exists to kill would pass"
         )
         assert self.NOW_MS - expected > cron_mod.MAX_MARKER_LOOKBACK_MS, (
@@ -3968,18 +4240,19 @@ class TestKeyCursorFallbackIsNeverClamped:
         with caplog.at_level("WARNING", logger="quantalyze.analytics"):
             floor = cron_mod._resume_floor_ms(
                 ["strat-A", "strat-B"],
-                {},  # the state the migration lands in: no marker rows at all
-                key_cursor,
+                {},  # the state PROD is in: no marker rows at all
+                # A RECENT key cursor, to prove it is not what the floor reads.
+                self._iso(self.NOW_MS - 60_000),
+                strategy_high_waters={"strat-A": high_water, "strat-B": high_water},
                 now_ms=self.NOW_MS,
             )
 
         assert floor == expected, (
             "INERT ON ARRIVAL: with NO marker rows every strategy is ABSENT "
-            "from the mapping and falls back to the KEY cursor, which the cap "
-            "must not touch — pre-phase this path had no cap at all, and a key "
-            "dormant past the cap (disconnect/reconnect and the "
-            "credential-failure deactivation both PRESERVE last_sync_at) used "
-            f"to catch up in full. Got {floor!r}, expected {expected!r}"
+            "from the mapping and resumes from its stored HIGH-WATER, which "
+            "the cap must not touch: it is the gap the phase recovers, and "
+            "clamping it would cut a 156-day gap to 30. Got "
+            f"{floor!r}, expected {expected!r}"
         )
         clamp_lines = [r.message for r in caplog.records if "CLAMPED" in r.message]
         assert not clamp_lines, (
@@ -3989,44 +4262,50 @@ class TestKeyCursorFallbackIsNeverClamped:
         )
 
     def test_both_no_marker_branches_return_the_same_window(self):
-        """⛔ The two branches are the SAME pre-phase behaviour and must agree.
+        """⛔ The two branches are the SAME no-cap behaviour and must agree.
 
-        `_resume_floor_ms` parses the key cursor twice over: once in the
-        no-eligible-strategies short-circuit, once through
-        `_strategy_resume_point`'s absent-strategy fallback. The shipped clamp
-        applied to the second and not the first, so the same key cursor
-        produced two different windows depending on whether the key happened to
-        have an eligible strategy. This arm makes that divergence impossible to
-        reintroduce without a named failure.
+        `_resume_floor_ms` parses a non-marker instant twice over: once in the
+        no-eligible-strategies short-circuit (the KEY cursor, the one place it
+        is still read), once through `_strategy_resume_point`'s absent-strategy
+        path (the stored high-water). The shipped clamp applied to the second
+        and not the first, so the same instant produced two different windows
+        depending on whether the key happened to have an eligible strategy.
+        This arm makes that divergence impossible to reintroduce without a
+        named failure.
         """
-        key_cursor = self._iso(self.DORMANT_KEY_CURSOR_MS)
+        instant = self._iso(self.DORMANT_KEY_CURSOR_MS)
 
         no_eligible = cron_mod._resume_floor_ms(
-            [], {}, key_cursor, now_ms=self.NOW_MS
+            [], {}, instant, now_ms=self.NOW_MS
         )
         eligible_but_unmarked = cron_mod._resume_floor_ms(
-            ["strat-A"], {}, key_cursor, now_ms=self.NOW_MS
+            ["strat-A"],
+            {},
+            None,
+            strategy_high_waters={"strat-A": instant},
+            now_ms=self.NOW_MS,
         )
 
         assert no_eligible == eligible_but_unmarked, (
             "with no marker rows, having an eligible strategy may not change "
-            "the window by so much as a millisecond — both readings are the "
-            f"key cursor. Got {eligible_but_unmarked!r} with an eligible "
+            "the window by so much as a millisecond: neither branch is "
+            f"clamped. Got {eligible_but_unmarked!r} with an eligible "
             f"strategy vs {no_eligible!r} without"
         )
+        assert eligible_but_unmarked is not None
 
     def test_a_held_marker_past_the_cap_is_still_clamped(self):
         """The non-vacuity counterpart: the fix above narrows the clamp, it
-        does not delete it. One strategy ABSENT (key-cursor fallback, dormant)
-        and one PRESENT with an ancient marker — the marker is what produced
-        the floor, so the clamp must still bite."""
-        key_cursor = self._iso(self.NOW_MS - 60_000)
+        does not delete it. One strategy ABSENT (stored high-water, recent) and
+        one PRESENT with an ancient marker — the marker is what produced the
+        floor, so the clamp must still bite."""
         held_ms = self.NOW_MS - 3 * cron_mod.MAX_MARKER_LOOKBACK_MS
 
         floor = cron_mod._resume_floor_ms(
             ["strat-A", "strat-B"],
             {"strat-B": self._iso(held_ms)},
-            key_cursor,
+            self._iso(self.NOW_MS - 60_000),
+            strategy_high_waters={"strat-A": self._iso(self.NOW_MS - 60_000)},
             now_ms=self.NOW_MS,
         )
 
@@ -4035,6 +4314,29 @@ class TestKeyCursorFallbackIsNeverClamped:
             "narrowing the clamp to marker provenance must not turn it off. "
             f"Got {floor!r}"
         )
+
+    def test_a_high_water_past_the_cap_beside_a_recent_marker_is_not_clamped(self):
+        """167.1.2.2.2 — the mixed key. strat-A holds a RECENT marker, strat-B
+        has none and a high-water 156 days back. The window must reach B's
+        high-water (it produced the floor and is not marker-derived), and the
+        report must stay empty: nothing was clamped, nothing was lost."""
+        report: dict[str, Any] = {}
+        high_water_ms = self.NOW_MS - 156 * 86_400_000
+
+        floor = cron_mod._resume_floor_ms(
+            ["strat-A", "strat-B"],
+            {"strat-A": self._iso(self.NOW_MS - 60_000)},
+            None,
+            strategy_high_waters={"strat-B": self._iso(high_water_ms)},
+            now_ms=self.NOW_MS,
+            clamp_report=report,
+        )
+
+        assert floor == high_water_ms, (
+            "the 156-day gap behind a marker-less strategy must be reachable "
+            f"on a key whose sibling holds a fresh marker. Got {floor!r}"
+        )
+        assert report == {}, report
 
     def test_the_cap_is_thirty_days_and_that_magnitude_is_pinned(self):
         """⛔ THE DIAL ITSELF, IN ABSOLUTE DAYS.
@@ -4168,6 +4470,26 @@ class TestEveryCronSyncedVenueStampsTheFetchErrorFlag:
             "precisely because the defect was a single branch diverging from "
             f"its siblings. Readings: {readings!r}"
         )
+
+    @pytest.mark.asyncio
+    async def test_a_venue_error_names_its_exception_class_on_every_venue(self):
+        """SFH-H1: the flag says THAT the fetch crashed; the class says WHAT
+        crashed, so a `failed` count is diagnosable from the envelope. Only the
+        class NAME is recorded, never the message: a ccxt message can carry a
+        signed request URL."""
+        classes: dict[str, Any] = {}
+        for exchange_id in ("okx", "binance", "bybit"):
+            await cron_mod.fetch_all_trades(
+                self._ExplodingExchange(exchange_id), since_ms=1_700_000_000_000
+            )
+            classes[exchange_id] = cron_mod.get_and_clear_last_dq_flags().get(
+                "daily_pnl_fetch_error_class"
+            )
+        assert classes == {
+            "okx": "NetworkError",
+            "binance": "NetworkError",
+            "bybit": "NetworkError",
+        }, classes
 
     @pytest.mark.asyncio
     async def test_a_crashed_bybit_fetch_does_not_read_as_an_idle_tick(self):
@@ -4331,13 +4653,14 @@ class TestClampReachesTheResponseEnvelope:
         trades = [{"id": "t1"}]
         fetch_mock = AsyncMock(return_value=trades)
 
-        # strat-A is ABSENT from the mapping (key-cursor fallback, recent);
+        # strat-A is ABSENT from the mapping (stored high-water, recent);
         # strat-B holds a marker 200 days old. The floor is therefore
         # MARKER-derived and past the cap, so the clamp must fire.
         key_row = _make_key_row(
             strategy_ids=["strat-A", "strat-B"],
             last_sync_at=self._ago(0.01),
             strategy_cursors={"strat-B": self._ago(200)},
+            strategy_high_waters={"strat-A": self._ago(0.01)},
         )
         result, _, _ = await TestSyncCursorPerStrategyResume._run_tick(
             key_row=key_row,
@@ -4359,7 +4682,7 @@ class TestClampReachesTheResponseEnvelope:
         )
         assert report["truncated_strategy_ids"] == ["strat-B"], (
             "and every strategy that LOST span, which here is strat-B alone — "
-            "strat-A holds no marker and falls back to a recent key cursor. "
+            "strat-A holds no marker and resumes from a recent high-water. "
             f"Got {report!r}"
         )
         assert report["cap_days"] == 30, (
@@ -4372,10 +4695,13 @@ class TestClampReachesTheResponseEnvelope:
 
         # The envelope must describe the window the venue was ACTUALLY asked
         # for — a report that did not match the fetch would be worse than none.
+        # 167.1.2.2.2: every window is floored to 00:00 UTC before the venue
+        # sees it, so the fetch is the REPORTED floor's day start. The report
+        # still carries the unfloored clamp instant, which is the cap's own.
         since_ms = fetch_mock.call_args.kwargs["since_ms"]
-        assert abs(since_ms - report["oldest_allowed_ms"]) < 5_000, (
-            "the reported floor must BE the window the fetch used, not a "
-            f"separately-computed number. fetch={since_ms!r} report={report!r}"
+        assert since_ms == _utc_midnight_ms(report["oldest_allowed_ms"]), (
+            "the reported floor must BE the window the fetch used (day-aligned), "
+            f"not a separately-computed number. fetch={since_ms!r} report={report!r}"
         )
 
     @pytest.mark.asyncio
@@ -4391,6 +4717,7 @@ class TestClampReachesTheResponseEnvelope:
             strategy_ids=["strat-A", "strat-B"],
             last_sync_at=self._ago(0.01),
             strategy_cursors={"strat-B": self._ago(1)},
+            strategy_high_waters={"strat-A": self._ago(1)},
         )
         result, _, _ = await TestSyncCursorPerStrategyResume._run_tick(
             key_row=key_row,
@@ -4453,7 +4780,8 @@ class TestClampReachesTheResponseEnvelope:
 
     def test_a_key_cursor_floor_writes_no_report(self):
         """⛔ THE TIE TO THE PROVENANCE FIX. The report exists to describe a
-        real, permanent loss. A floor that came from the KEY cursor is never
+        real, permanent loss. A floor that came from a NON-MARKER source (the
+        stored high-water since 167.1.2.2.2, the key cursor before) is never
         clamped and loses nothing, so an entry here would be a false alarm
         naming a strategy that holds no row — and an operator would follow it
         into `strategy_sync_cursors` looking for a row that does not exist."""
@@ -4464,7 +4792,12 @@ class TestClampReachesTheResponseEnvelope:
 
         report: dict[str, Any] = {}
         floor = cron_mod._resume_floor_ms(
-            ["strat-A"], {}, ancient, now_ms=now_ms, clamp_report=report
+            ["strat-A"],
+            {},
+            None,
+            strategy_high_waters={"strat-A": ancient},
+            now_ms=now_ms,
+            clamp_report=report,
         )
 
         assert floor == cron_mod.parse_since_ms(ancient), f"got {floor!r}"
@@ -4777,6 +5110,18 @@ class TestSyncCursorPerStrategyResume:
     # it, and tick 2 must come back to it.
     T0 = _ONE_TICK_AGO
 
+    # 167.1.2.2.2 TRADESYNC — a marker-less strategy resumes from its OWN stored
+    # high-water (`strategy_high_waters`), which the route loads as 00:00 UTC of
+    # its newest daily-P&L day. Two explicitly-old days (whole UTC days ago, so
+    # they are day-aligned exactly as the loader makes them) stand in for it:
+    # old enough that they are never equal to "today's midnight", which is what
+    # an ADVANCED marker floors to. That separation is what lets a gate here tell
+    # "resumed from the high-water" from "resumed from a marker written this
+    # tick". Expected instants come from the same datetime the ISO string was
+    # made from, never from the code under test.
+    HW_OLD_ISO, HW_OLD_MS = _utc_midnight_days_ago(10)
+    HW_MID_ISO, HW_MID_MS = _utc_midnight_days_ago(3)
+
     @staticmethod
     def _cursor_map(upsert_payloads: list[Any]) -> dict[str, Any]:
         """Flatten captured `strategy_sync_cursors` upsert payloads into the
@@ -4947,6 +5292,10 @@ class TestSyncCursorPerStrategyResume:
         ask the venue for strat-B's window, even though the KEY cursor
         advanced past it (which it must — holding it would starve strat-A into
         permanent re-fetch, the symmetric defect C-0198 chose to avoid).
+
+        167.1.2.2.2: strat-B has NO marker on tick 1, so it is held ABSENT (no
+        row is written, see `TestHeldFirstTickPreservesAbsentMarker`) and its
+        outstanding window is its stored high-water, re-read on tick 2.
         """
         t0_ms = cron_mod.parse_since_ms(self.T0)
         assert t0_ms is not None, "T0 must parse — the whole gate is measured against it"
@@ -4954,10 +5303,14 @@ class TestSyncCursorPerStrategyResume:
         trades = [{"id": "t1"}]
         fetch_mock = AsyncMock(return_value=trades)
 
-        # ---- Tick 1: the state the migration lands in — no marker rows at all.
+        # ---- Tick 1: the state PROD is in — no marker rows at all.
         key_row_1 = _make_key_row(
             strategy_ids=["strat-A", "strat-B"],
             last_sync_at=self.T0,
+            strategy_high_waters={
+                "strat-A": self.HW_OLD_ISO,
+                "strat-B": self.HW_OLD_ISO,
+            },
         )
         result_1, key_updates_1, cursor_upserts_1 = await self._run_tick(
             key_row=key_row_1,
@@ -4973,44 +5326,36 @@ class TestSyncCursorPerStrategyResume:
 
         # ⛔ TICK 1'S WINDOW, AND IT IS NOT A FORMALITY — it is the only
         #    assertion in this class that can tell MEMBERSHIP from `.get()`.
-        #    Tick 1 runs with NO marker rows at all, which is the state the
-        #    migration lands in and the state its "INERT on arrival, today's
-        #    behaviour byte for byte" claim is about. With membership every
-        #    strategy is ABSENT and falls back to the key cursor (T0). With
-        #    `.get()`, absent and present-with-NULL both yield None,
-        #    `_resume_floor_ms` short-circuits, and `since_ms` becomes None —
-        #    a FULL-HISTORY refetch for every active key on the first tick
-        #    after deploy, silent and green.
+        #    Tick 1 runs with NO marker rows at all, the state PROD is in. With
+        #    membership every strategy is ABSENT and resumes from its stored
+        #    high-water. With `.get()`, absent and present-with-NULL both yield
+        #    None, `_resume_floor_ms` short-circuits, and `since_ms` becomes
+        #    None — a FULL-HISTORY refetch for every active key on the first
+        #    tick, silent and green.
         #    ⚠️ `call_args` is the LAST call, so every tick-2 assertion below
-        #    is blind to this: by tick 2 both strategies are PRESENT in the
-        #    mapping and the two readings agree. MEASURED before this arm
-        #    existed: the `.get()` mutant survived the whole file at 56 passed.
+        #    is blind to this: by tick 2 the markers that exist are PRESENT in
+        #    the mapping and the two readings agree.
         first_since_ms = fetch_mock.call_args_list[0].kwargs["since_ms"]
-        assert first_since_ms == t0_ms, (
+        assert first_since_ms == self.HW_OLD_MS, (
             "INERT ON ARRIVAL: with no marker rows yet every strategy is "
-            "ABSENT from the mapping and must fall back to the key cursor "
-            f"(since_ms={t0_ms}). Got since_ms={first_since_ms!r}. A None here "
-            "means absent was collapsed into present-with-NULL — a full "
-            "re-fetch of all history for every key on the first tick after "
-            "this ships."
+            "ABSENT from the mapping and must resume from its stored "
+            f"high-water (since_ms={self.HW_OLD_MS}, 00:00 UTC). Got "
+            f"since_ms={first_since_ms!r}. A None here means absent was "
+            "collapsed into present-with-NULL — a full re-fetch of all history "
+            "for every key on the first tick."
         )
 
         cursors = self._cursor_map(cursor_upserts_1)
-        assert set(cursors) == {"strat-A", "strat-B"}, (
-            "EVERY strategy in the fan-out must get a marker row this tick, "
-            "held or advancing. Advance-only writing leaves the failed "
-            "strategy with no row, so the next tick falls back to the key "
-            "cursor that just advanced past its window — the fix would be "
-            f"INERT on the first failure. Captured: {cursors!r}"
+        assert set(cursors) == {"strat-A"}, (
+            "strat-A advanced and gets a row. strat-B was HELD on a tick where "
+            "it had NO marker, so it must get NO row: a row pinned at its old "
+            "high-water would be a MARKER, the 30-day cap would clamp it on "
+            "the next read, and the gap behind it would be cut. Captured: "
+            f"{cursors!r}"
         )
         assert cursors["strat-A"] != self.T0, (
             "strat-A stored trades and its recompute enqueue succeeded, so its "
             f"marker must have advanced past T0; got {cursors['strat-A']!r}"
-        )
-        assert cursors["strat-B"] == self.T0, (
-            "strat-B's RPC raised, so its marker must be PINNED at the resume "
-            "point the tick STARTED from, not at the post-tick instant; "
-            f"got {cursors['strat-B']!r}"
         )
 
         advanced = [p["last_sync_at"] for p in key_updates_1 if "last_sync_at" in p]
@@ -5024,11 +5369,13 @@ class TestSyncCursorPerStrategyResume:
             "assertion below could pass for the trivial reason that nothing moved"
         )
 
-        # ---- Tick 2: built from tick 1's OWN captured outputs.
+        # ---- Tick 2: built from tick 1's OWN captured outputs. strat-B is
+        #      still marker-less, so the route re-reads its (unchanged) high-water.
         key_row_2 = _make_key_row(
             strategy_ids=["strat-A", "strat-B"],
             last_sync_at=key_cursor_after_tick_1,
             strategy_cursors=cursors,
+            strategy_high_waters={"strat-B": self.HW_OLD_ISO},
         )
         await self._run_tick(
             key_row=key_row_2,
@@ -5038,11 +5385,10 @@ class TestSyncCursorPerStrategyResume:
         )
 
         since_ms = fetch_mock.call_args.kwargs["since_ms"]
-        assert since_ms == t0_ms, (
+        assert since_ms == self.HW_OLD_MS, (
             "THE CONSEQUENCE: tick 2 must ask the venue for strat-B's "
-            f"outstanding window (since_ms={t0_ms}), not the advanced key "
-            f"cursor. Got since_ms={since_ms!r}. A marker that is written but "
-            "never read produces exactly this failure."
+            f"outstanding window (since_ms={self.HW_OLD_MS}), not the advanced "
+            f"key cursor or strat-A's marker. Got since_ms={since_ms!r}."
         )
 
     @pytest.mark.asyncio
@@ -5056,33 +5402,37 @@ class TestSyncCursorPerStrategyResume:
         either "the venue had nothing" or "the venue call crashed", and the
         router has to read the flag to tell them apart.
 
-        THE LOSS IF IT DOES NOT: tick 1 holds strat-B at T0. Tick 2 pins the
-        window at T0 (correct), the venue call crashes, `trades == []`, a bare
-        `not trades` reads that as an idle tick, and strat-B's marker advances
-        to now — discarding a hold of ARBITRARY AGE. Its outstanding window is
+        THE LOSS IF IT DOES NOT: tick 1 holds strat-B. Tick 2 pins the window
+        at B's resume point (correct), the venue call crashes, `trades == []`,
+        a bare `not trades` reads that as an idle tick, and strat-B ADVANCES to
+        now — discarding a hold of ARBITRARY AGE. Its outstanding window is
         then fetched by no later tick, ever. That is the same permanent
         per-strategy loss this phase exists to close, re-entered through the
         advance rule the phase itself added.
-        """
-        t0_ms = cron_mod.parse_since_ms(self.T0)
-        assert t0_ms is not None
 
+        167.1.2.2.2: strat-B's hold is its ABSENCE of a marker (held on a tick
+        where it had none), so "the hold survived" reads: still no row after
+        the crashed tick, and tick 3 still asks for its high-water.
+        """
         trades = [{"id": "t1"}]
         fetch_mock = AsyncMock(return_value=trades)
+        high_waters = {"strat-A": self.HW_OLD_ISO, "strat-B": self.HW_OLD_ISO}
 
-        # ---- Tick 1: strat-B's storage RPC raises, so it is HELD at T0.
+        # ---- Tick 1: strat-B's storage RPC raises, so it is HELD (absent).
         _r1, key_updates_1, cursor_upserts_1 = await self._run_tick(
             key_row=_make_key_row(
-                strategy_ids=["strat-A", "strat-B"], last_sync_at=self.T0
+                strategy_ids=["strat-A", "strat-B"],
+                last_sync_at=self.T0,
+                strategy_high_waters=high_waters,
             ),
             failing_strategy_ids={"strat-B"},
             fetch_mock=fetch_mock,
             trades=trades,
         )
         cursors_1 = self._cursor_map(cursor_upserts_1)
-        assert cursors_1["strat-B"] == self.T0, (
-            "precondition for this test: tick 1 must actually HOLD strat-B. "
-            f"got {cursors_1['strat-B']!r}"
+        assert "strat-B" not in cursors_1 and "strat-A" in cursors_1, (
+            "precondition for this test: tick 1 must actually HOLD strat-B "
+            f"(no row) while advancing strat-A. got {cursors_1!r}"
         )
         key_cursor_after_1 = [
             p["last_sync_at"] for p in key_updates_1 if "last_sync_at" in p
@@ -5097,6 +5447,7 @@ class TestSyncCursorPerStrategyResume:
                 strategy_ids=["strat-A", "strat-B"],
                 last_sync_at=key_cursor_after_1,
                 strategy_cursors=cursors_1,
+                strategy_high_waters={"strat-B": self.HW_OLD_ISO},
             ),
             failing_strategy_ids=set(),
             fetch_mock=empty_fetch,
@@ -5104,12 +5455,18 @@ class TestSyncCursorPerStrategyResume:
             dq_flags={"daily_pnl_fetch_error": True},
         )
         cursors_2 = self._cursor_map(cursor_upserts_2)
-        assert cursors_2["strat-B"] == self.T0, (
-            "THE HOLD MUST SURVIVE A CRASHED FETCH. strat-B was held at T0 and "
+        assert "strat-B" not in cursors_2, (
+            "THE HOLD MUST SURVIVE A CRASHED FETCH. strat-B was held and "
             "tick 2's fetch raised inside fetch_daily_pnl, which swallows the "
             "exception and returns an EMPTY list with daily_pnl_fetch_error "
-            "set. Advancing here discards a hold of arbitrary age and strands "
-            f"strat-B's outstanding window permanently. got {cursors_2['strat-B']!r}"
+            "set. A row for strat-B here means it ADVANCED, discarding a hold "
+            "of arbitrary age and stranding its outstanding window "
+            f"permanently. got {cursors_2!r}"
+        )
+        assert cursors_2["strat-A"] == cursors_1["strat-A"], (
+            "and the crashed tick must not advance the OTHER strategy either: "
+            "its marker is held at the value it already had. "
+            f"got {cursors_2['strat-A']!r}, had {cursors_1['strat-A']!r}"
         )
 
         # ---- Tick 3: and the window it asks for is still strat-B's.
@@ -5118,16 +5475,17 @@ class TestSyncCursorPerStrategyResume:
                 strategy_ids=["strat-A", "strat-B"],
                 last_sync_at=key_cursor_after_1,
                 strategy_cursors=cursors_2,
+                strategy_high_waters={"strat-B": self.HW_OLD_ISO},
             ),
             failing_strategy_ids=set(),
             fetch_mock=fetch_mock,
             trades=trades,
         )
         since_ms = fetch_mock.call_args.kwargs["since_ms"]
-        assert since_ms == t0_ms, (
+        assert since_ms == self.HW_OLD_MS, (
             "THE CONSEQUENCE: after a crashed idle tick the next real tick "
-            f"must still ask for strat-B's outstanding window (since_ms={t0_ms}); "
-            f"got {since_ms!r}"
+            "must still ask for strat-B's outstanding window "
+            f"(since_ms={self.HW_OLD_MS}); got {since_ms!r}"
         )
 
     @pytest.mark.asyncio
@@ -5141,14 +5499,21 @@ class TestSyncCursorPerStrategyResume:
         fetch_mock = AsyncMock(return_value=trades)
         _r1, key_updates_1, cursor_upserts_1 = await self._run_tick(
             key_row=_make_key_row(
-                strategy_ids=["strat-A", "strat-B"], last_sync_at=self.T0
+                strategy_ids=["strat-A", "strat-B"],
+                last_sync_at=self.T0,
+                strategy_high_waters={
+                    "strat-A": self.HW_OLD_ISO,
+                    "strat-B": self.HW_OLD_ISO,
+                },
             ),
             failing_strategy_ids={"strat-B"},
             fetch_mock=fetch_mock,
             trades=trades,
         )
         cursors_1 = self._cursor_map(cursor_upserts_1)
-        assert cursors_1["strat-B"] == self.T0
+        assert "strat-B" not in cursors_1, (
+            "precondition: tick 1 HELD strat-B (no row)"
+        )
         key_cursor_after_1 = [
             p["last_sync_at"] for p in key_updates_1 if "last_sync_at" in p
         ][-1]
@@ -5158,6 +5523,7 @@ class TestSyncCursorPerStrategyResume:
                 strategy_ids=["strat-A", "strat-B"],
                 last_sync_at=key_cursor_after_1,
                 strategy_cursors=cursors_1,
+                strategy_high_waters={"strat-B": self.HW_OLD_ISO},
             ),
             failing_strategy_ids=set(),
             fetch_mock=AsyncMock(return_value=[]),
@@ -5165,12 +5531,14 @@ class TestSyncCursorPerStrategyResume:
             dq_flags=None,
         )
         cursors_2 = self._cursor_map(cursor_upserts_2)
-        assert cursors_2["strat-B"] != self.T0, (
+        assert "strat-B" in cursors_2, (
             "a CLEAN empty fetch is genuine evidence that nothing is "
-            "outstanding, so the hold must clear. If this ever fails, the fix "
-            "for the crashed-fetch case has over-reached into holding forever "
-            f"on every idle tick. got {cursors_2['strat-B']!r}"
+            "outstanding, so strat-B must ADVANCE and get its first marker row. "
+            "If this ever fails, the fix for the crashed-fetch case has "
+            "over-reached into holding forever on every idle tick. got "
+            f"{cursors_2!r}"
         )
+        assert cursors_2["strat-B"] != self.T0 and cursors_2["strat-B"] is not None
 
     @pytest.mark.asyncio
     async def test_null_marker_means_refetch_all_history_not_fall_back(self):
@@ -5183,25 +5551,27 @@ class TestSyncCursorPerStrategyResume:
         arm nothing anywhere constructs it, so the canonical wrong resolver —
 
             resolved = strategy_cursors.get(sid)
-            return resolved if resolved is not None else key_cursor
+            return resolved if resolved is not None else <the fallback>
 
         — passes the entire module green, because states (1) and (3) are the
         only ones exercised and both implementations agree on those.
 
-        Production reachability: a key whose `last_sync_at` is NULL (the
-        first-ever sync — the largest payload and so the likeliest tick to hit
-        a deadlock) with a multi-strategy fan-out and one failing RPC. The
-        hold-write resolves to None and stores NULL. Under the wrong resolver
-        the next tick falls back to the key cursor that just advanced, and the
-        strategy's ENTIRE history is stranded.
+        167.1.2.2.2: a held strategy with NO marker is no longer given a NULL
+        row (it stays absent), so this state is now built by seeding a PRESENT
+        NULL marker. The contract is the same: the stored NULL must dominate
+        BOTH the key cursor and the strategy's stored high-water, and a held
+        present marker is written back unchanged.
         """
         trades = [{"id": "t1"}]
         fetch_mock = AsyncMock(return_value=trades)
 
-        # ---- Tick 1 from a key that has NEVER synced.
+        # ---- Tick 1: strat-B carries a PRESENT NULL marker and fails.
         _r1, key_updates_1, cursor_upserts_1 = await self._run_tick(
             key_row=_make_key_row(
-                strategy_ids=["strat-A", "strat-B"], last_sync_at=None
+                strategy_ids=["strat-A", "strat-B"],
+                last_sync_at=None,
+                strategy_cursors={"strat-B": None},
+                strategy_high_waters={"strat-A": self.HW_OLD_ISO},
             ),
             failing_strategy_ids={"strat-B"},
             fetch_mock=fetch_mock,
@@ -5209,14 +5579,14 @@ class TestSyncCursorPerStrategyResume:
         )
         cursors_1 = self._cursor_map(cursor_upserts_1)
         assert "strat-B" in cursors_1, (
-            "persist-on-hold: strat-B must still get a ROW. Absence would make "
-            f"this test measure state (1) instead of state (2). got {cursors_1!r}"
+            "persist-on-hold for a PRESENT marker: strat-B must still get a "
+            "ROW. Absence would make this test measure state (1) instead of "
+            f"state (2). got {cursors_1!r}"
         )
         assert cursors_1["strat-B"] is None, (
-            "STATE (2) MUST BE WRITTEN, NOT SKIPPED: the key had never synced, "
-            "so strat-B's pre-tick resume point IS None and the marker must "
-            "record it as a present NULL — 'refetch from the start of "
-            f"history'. got {cursors_1['strat-B']!r}"
+            "STATE (2) MUST BE WRITTEN BACK, NOT DROPPED: strat-B's pre-tick "
+            "resume point IS a present NULL and the marker must keep recording "
+            f"'refetch from the start of history'. got {cursors_1['strat-B']!r}"
         )
 
         key_cursor_after_1 = [
@@ -5227,13 +5597,15 @@ class TestSyncCursorPerStrategyResume:
             "below could pass for the trivial reason that nothing moved"
         )
 
-        # ---- Tick 2: the key cursor is now a real timestamp, but strat-B's
-        #      marker is a present NULL and must dominate the floor.
+        # ---- Tick 2: the key cursor is now a real timestamp AND strat-B has a
+        #      stored high-water, but its marker is a present NULL and must
+        #      dominate the floor.
         await self._run_tick(
             key_row=_make_key_row(
                 strategy_ids=["strat-A", "strat-B"],
                 last_sync_at=key_cursor_after_1,
                 strategy_cursors=cursors_1,
+                strategy_high_waters={"strat-B": self.HW_OLD_ISO},
             ),
             failing_strategy_ids=set(),
             fetch_mock=fetch_mock,
@@ -5243,9 +5615,9 @@ class TestSyncCursorPerStrategyResume:
         assert since_ms is None, (
             "ABSENT and PRESENT-WITH-NULL ARE DIFFERENT STATES. A present NULL "
             "means refetch ALL history, so the window must be unbounded "
-            "(since_ms=None) even though the key cursor advanced. Got "
-            f"since_ms={since_ms!r} — that is the key cursor, which means the "
-            "resolver fell back instead of honouring the stored NULL, and "
+            "(since_ms=None) even though the key cursor advanced and the "
+            f"strategy has a stored high-water. Got since_ms={since_ms!r} — "
+            "the resolver fell back instead of honouring the stored NULL, and "
             "strat-B's entire history is stranded."
         )
 
@@ -5255,16 +5627,21 @@ class TestSyncCursorPerStrategyResume:
         strategies — tick 2's window must then move FORWARD. Without this, a
         window pinned unconditionally would satisfy the test above while
         measuring nothing.
-        """
-        t0_ms = cron_mod.parse_since_ms(self.T0)
-        assert t0_ms is not None
 
+        167.1.2.2.2: the starting point is the strategies' stored high-water
+        (10 days back) and "forward" is measured at DAY granularity, because
+        every window is now floored to 00:00 UTC.
+        """
         trades = [{"id": "t1"}]
         fetch_mock = AsyncMock(return_value=trades)
 
         key_row_1 = _make_key_row(
             strategy_ids=["strat-A", "strat-B"],
             last_sync_at=self.T0,
+            strategy_high_waters={
+                "strat-A": self.HW_OLD_ISO,
+                "strat-B": self.HW_OLD_ISO,
+            },
         )
         result_1, key_updates_1, cursor_upserts_1 = await self._run_tick(
             key_row=key_row_1,
@@ -5274,6 +5651,7 @@ class TestSyncCursorPerStrategyResume:
         )
 
         assert result_1["status"] == "ok"
+        assert fetch_mock.call_args.kwargs["since_ms"] == self.HW_OLD_MS
 
         cursors = self._cursor_map(cursor_upserts_1)
         assert set(cursors) == {"strat-A", "strat-B"}, (
@@ -5302,11 +5680,16 @@ class TestSyncCursorPerStrategyResume:
         )
 
         since_ms = fetch_mock.call_args.kwargs["since_ms"]
-        assert since_ms > t0_ms, (
+        assert since_ms is not None and since_ms > self.HW_OLD_MS, (
             "THE CONTROL: with no failure to hold anything back, tick 2's "
-            f"fetch window must move forward past T0 ({t0_ms}); got "
-            f"{since_ms!r}. A 'pinned' window that is pinned no matter what "
-            "measures nothing."
+            f"fetch window must move forward past the old high-water "
+            f"({self.HW_OLD_MS}); got {since_ms!r}. A 'pinned' window that is "
+            "pinned no matter what measures nothing."
+        )
+        marker_ms = int(datetime.fromisoformat(cursors["strat-A"]).timestamp() * 1000)
+        assert since_ms == _utc_midnight_ms(marker_ms), (
+            "and it is the advanced marker FLOORED to its UTC day, not the "
+            f"marker itself. Got {since_ms!r}"
         )
 
     @pytest.mark.asyncio
@@ -5323,10 +5706,16 @@ class TestSyncCursorPerStrategyResume:
 
         The consequence being pinned: strat-B's window was STORED but never
         RECOMPUTED, so its dashboard analytics are frozen against trades that
-        exist. Holding its marker is what makes the next tick re-fetch that
-        window and re-attempt the enqueue. Without the hold nothing ever
-        re-drives it — the Phase-18 shape the enqueue loop's own comment in
-        `cron.py` describes.
+        exist. Holding strat-B (not advancing it) is what makes the next tick
+        re-fetch that window and re-attempt the enqueue. Without the hold
+        nothing ever re-drives it — the Phase-18 shape the enqueue loop's own
+        comment in `cron.py` describes.
+
+        167.1.2.2.2: strat-B has no marker, so "held" means it gets NO row and
+        stays on its stored high-water. After tick 1 stored its trades that
+        high-water is the newest stored DAY, which the route re-reads on tick 2
+        (`HW_MID`, 3 days back, stands in for it) — and the floor is that whole
+        day, so its newest stored day is re-fetched, re-stored and re-enqueued.
 
         Re-driving is safe in both directions and is deliberately not re-proven
         here: `sync_trades` deletes scoped to the incoming payload's own
@@ -5344,6 +5733,10 @@ class TestSyncCursorPerStrategyResume:
         key_row_1 = _make_key_row(
             strategy_ids=["strat-A", "strat-B"],
             last_sync_at=self.T0,
+            strategy_high_waters={
+                "strat-A": self.HW_OLD_ISO,
+                "strat-B": self.HW_OLD_ISO,
+            },
         )
         result_1, key_updates_1, cursor_upserts_1 = await self._run_tick(
             key_row=key_row_1,
@@ -5381,19 +5774,15 @@ class TestSyncCursorPerStrategyResume:
         )
 
         cursors = self._cursor_map(cursor_upserts_1)
-        assert set(cursors) == {"strat-A", "strat-B"}, (
-            "every strategy in the fan-out gets a marker row, held or "
-            f"advancing; captured: {cursors!r}"
+        assert set(cursors) == {"strat-A"}, (
+            "strat-A advanced and gets a row; strat-B STORED but its recompute "
+            "enqueue raised, so it is HELD, and held with no prior marker "
+            "means NO row — advancing it strands the window whose recompute "
+            f"never fired; captured: {cursors!r}"
         )
         assert cursors["strat-A"] != self.T0, (
             "strat-A stored AND enqueued, so its marker must advance past T0; "
             f"got {cursors['strat-A']!r}"
-        )
-        assert cursors["strat-B"] == self.T0, (
-            "strat-B STORED but its recompute enqueue raised, so its marker "
-            "must stay PINNED at the resume point the tick started from — "
-            "advancing it strands the window whose recompute never fired; "
-            f"got {cursors['strat-B']!r}"
         )
 
         advanced = [p["last_sync_at"] for p in key_updates_1 if "last_sync_at" in p]
@@ -5407,11 +5796,13 @@ class TestSyncCursorPerStrategyResume:
             "assertion below could pass for the trivial reason that nothing moved"
         )
 
-        # ---- Tick 2: inputs DERIVED from tick 1's own captured outputs.
+        # ---- Tick 2: inputs DERIVED from tick 1's own captured outputs, plus
+        #      the high-water the route would now read for strat-B.
         key_row_2 = _make_key_row(
             strategy_ids=["strat-A", "strat-B"],
             last_sync_at=key_cursor_after_tick_1,
             strategy_cursors=cursors,
+            strategy_high_waters={"strat-B": self.HW_MID_ISO},
         )
         rpc_calls_2: list[tuple[str, dict]] = []
         await self._run_tick(
@@ -5423,12 +5814,14 @@ class TestSyncCursorPerStrategyResume:
         )
 
         since_ms = fetch_mock.call_args.kwargs["since_ms"]
-        assert since_ms == t0_ms, (
+        assert since_ms == self.HW_MID_MS, (
             "THE CONSEQUENCE: tick 2 must ask the venue for strat-B's "
-            f"un-recomputed window (since_ms={t0_ms}), not the advanced key "
-            f"cursor. Got since_ms={since_ms!r}. Delete the `sid not in "
-            "recompute_enqueue_errors` conjunct from the advance condition and "
-            "this is the assertion that fails."
+            f"un-recomputed window (since_ms={self.HW_MID_MS}, its high-water "
+            f"day), not a marker written this tick. Got since_ms={since_ms!r}. "
+            "Delete the `sid not in recompute_enqueue_errors` conjunct from "
+            "the advance condition and this is the assertion that fails: "
+            "strat-B would carry a marker of now and the window would floor to "
+            "today."
         )
         assert (
             "enqueue_compute_job",
@@ -6139,3 +6532,2044 @@ class TestHeldStrategyMarkersAreNamedInTheEnvelope:
         assert not [
             r for r in caplog.records if "held the per-strategy" in r.getMessage()
         ], "nothing was held, so nothing may be logged as held"
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2.2.2 TRADESYNC — the data-derived resume high-water, the UTC floor and
+# the trades_fetched_at stamp
+# ---------------------------------------------------------------------------
+
+
+def _utc_midnight_ms(ms: int) -> int:
+    """00:00 UTC of the day containing `ms`.
+
+    Written out in the TEST (not imported from `routers.cron`) so the
+    expectation is never computed by the code under test (CLAUDE.md Rule 9).
+    Tests that can type their instant as a literal do so instead.
+    """
+    return ms - ms % 86_400_000
+
+
+async def _drive_cron_sync(
+    mock_supabase: MagicMock,
+    *,
+    fetch_mock: AsyncMock,
+    dq_flags: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the REAL `cron_sync()` entry point against `mock_supabase`.
+
+    `parse_since_ms` is deliberately NOT patched: these gates measure the
+    number the venue is asked for, and stubbing the parser would erase it.
+    """
+    import sys as _sys
+    import routers.portfolio as portfolio_mod
+
+    _sys.modules["routers.portfolio"] = portfolio_mod
+    mock_exchange = AsyncMock()
+    mock_exchange.close = AsyncMock()
+    with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+         patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+         patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+         patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+         patch.object(
+             cron_mod,
+             "validate_key_permissions",
+             AsyncMock(return_value=_stub_validation(valid=True)),
+         ), \
+         patch.object(cron_mod, "fetch_all_trades", fetch_mock), \
+         patch.object(
+             cron_mod, "get_and_clear_last_dq_flags", lambda: dict(dq_flags or {})
+         ), \
+         patch.object(cron_mod, "fetch_usdt_balance", AsyncMock(return_value=None)):
+        return await cron_mod.cron_sync()
+
+
+class TestFallbackIgnoresPollOverwrittenKeyCursor:
+    """167.1.2.2.2 SC-2 / SC-3 (D-11, D-12): a strategy with NO marker row
+    resumes from its OWN newest stored daily-P&L day, never from
+    `api_keys.last_sync_at`.
+
+    ⛔ THE DEFECT, MEASURED ON PROD BEFORE THIS PHASE. `strategy_sync_cursors`
+    held 0 rows, so the first `/cron-sync` tick would have resumed every
+    strategy from `api_keys.last_sync_at`, which the 04:00 allocator poll
+    overwrites DAILY (`poll_allocator_positions`). The key reads "checked nine
+    hours ago" while the strategy's newest stored day is 156 days old, so the
+    whole gap is skipped, silently, with a green tick. A seeded marker would not
+    have helped: `MAX_MARKER_LOOKBACK_MS` clamps a marker to 30 days. The
+    strategy's own stored data is the only unclamped, truthful resume source.
+
+    The instants below are TYPED LITERALS: 2026-05-07 05:17 UTC is the newest
+    stored daily-P&L row, and 1778112000000 is 00:00 UTC of that day.
+    """
+
+    HW_ROW_TS = "2026-05-07T05:17:00+00:00"
+    HW_DAY_START_MS = 1778112000000  # 2026-05-07T00:00:00+00:00
+
+    @staticmethod
+    def _keys(last_sync_at: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "key-1",
+                "exchange": "okx",
+                "last_sync_at": last_sync_at,
+                "strategies": [{"id": "strat-A", "status": "published"}],
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_marker_less_strategy_resumes_from_its_stored_high_water_day(self):
+        poll_stamp = (datetime.now(timezone.utc) - timedelta(hours=9)).isoformat()
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=self._keys(poll_stamp),
+            sc_data=[],
+            trades_rows=[
+                {"strategy_id": "strat-A", "timestamp": self.HW_ROW_TS, "is_fill": False}
+            ],
+        )
+        fetch_mock = AsyncMock(return_value=[{"id": "t1"}])
+
+        response = await _drive_cron_sync(mock_supabase, fetch_mock=fetch_mock)
+
+        # Non-vacuity: the tick really ran, on the path under test.
+        assert fetch_mock.await_count == 1, "the key must have been fetched"
+        assert "strategy_cursor_lookup_error" not in response, response
+        assert "strategy_high_water_lookup_error" not in response, response
+        assert mock_supabase.strategy_cursor_upserts, "no marker table traffic: not a real tick"
+
+        since_ms = fetch_mock.call_args.kwargs["since_ms"]
+        poll_ms = cron_mod.parse_since_ms(poll_stamp)
+        assert since_ms != poll_ms, (
+            "the venue was asked for the 04:00 poll's last_sync_at instant "
+            f"({poll_ms}): the whole gap behind the strategy's newest stored "
+            "day is skipped, silently, on a green tick"
+        )
+        assert since_ms == self.HW_DAY_START_MS, (
+            "a marker-less strategy resumes from 00:00 UTC of its newest "
+            f"stored daily-P&L day ({self.HW_DAY_START_MS}). Got {since_ms!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_moving_last_sync_at_moves_no_strategy_fetch_window(self):
+        """SC-3 / D-12 in its own words: the poll keeps writing the key's
+        `last_sync_at`, and writing it changes NO strategy's window."""
+        windows = []
+        for age in (timedelta(minutes=1), timedelta(days=40)):
+            stamp = (datetime.now(timezone.utc) - age).isoformat()
+            mock_supabase = _make_mock_supabase_for_cron_sync(
+                keys_data=self._keys(stamp),
+                sc_data=[],
+                trades_rows=[
+                    {"strategy_id": "strat-A", "timestamp": self.HW_ROW_TS, "is_fill": False}
+                ],
+            )
+            fetch_mock = AsyncMock(return_value=[{"id": "t1"}])
+            await _drive_cron_sync(mock_supabase, fetch_mock=fetch_mock)
+            windows.append(fetch_mock.call_args.kwargs["since_ms"])
+
+        assert windows == [self.HW_DAY_START_MS, self.HW_DAY_START_MS], (
+            "two ticks that differ ONLY in api_keys.last_sync_at must hand the "
+            f"venue the same window. Got {windows!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_strategy_with_no_stored_day_gets_full_reach(self):
+        """No stored daily-P&L row -> `None`, the over-fetch direction (the
+        same semantics a present-with-NULL marker has). NOT the key cursor."""
+        poll_stamp = (datetime.now(timezone.utc) - timedelta(hours=9)).isoformat()
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=self._keys(poll_stamp), sc_data=[], trades_rows=[]
+        )
+        fetch_mock = AsyncMock(return_value=[{"id": "t1"}])
+
+        response = await _drive_cron_sync(mock_supabase, fetch_mock=fetch_mock)
+
+        assert "strategy_high_water_lookup_error" not in response, response
+        assert fetch_mock.call_args.kwargs["since_ms"] is None
+
+    def test_the_resolver_reads_the_high_water_and_has_no_key_cursor_input(self):
+        """The unit seam: absent marker -> high-water, present marker wins,
+        present-NULL stays NULL. The resolver takes no key cursor at all, which
+        is what makes a third caller unable to reintroduce the old fallback."""
+        resolve = cron_mod._strategy_resume_point
+        hw = {"strat-A": "2026-05-07T00:00:00+00:00", "strat-C": None}
+        assert resolve("strat-A", {}, hw) == "2026-05-07T00:00:00+00:00"
+        assert resolve("strat-C", {}, hw) is None
+        assert resolve("strat-Z", {}, hw) is None  # no high-water entry: full reach
+        assert resolve("strat-A", {"strat-A": "2026-06-01T00:00:00+00:00"}, hw) == (
+            "2026-06-01T00:00:00+00:00"
+        )
+        assert resolve("strat-A", {"strat-A": None}, hw) is None
+
+
+class TestFetchWindowFloorsToUtcMidnight:
+    """167.1.2.2.2 T-167.1.2.2.2-16: EVERY window handed to the venue is
+    day-aligned, marker-derived or not, and `None` stays `None`.
+
+    ⛔ THE DEFECT. `sync_trades` replaces stored daily rows with a DELETE scoped
+    to the incoming payload's own `[min, max]` timestamps. A window that starts
+    at 04:30 makes the venue sum only that day's bills AFTER 04:30 into the
+    day's row, and the scoped delete then overwrites the stored, complete day
+    with the partial one. 00:00 UTC makes the first fetched day whole.
+    """
+
+    def test_the_floor_function_on_typed_literals(self):
+        floor = cron_mod._floor_to_utc_day_ms
+        # 2026-08-12T04:30:00Z -> 2026-08-12T00:00:00Z
+        assert floor(1786509000000) == 1786492800000
+        # an exact midnight is its own floor
+        assert floor(1786492800000) == 1786492800000
+        # one millisecond before midnight belongs to the PREVIOUS day:
+        # 2026-08-11T23:59:59.999Z -> 2026-08-11T00:00:00Z
+        assert floor(1786492799999) == 1786406400000
+        assert floor(None) is None
+
+    @pytest.mark.asyncio
+    async def test_a_present_marker_mid_day_reaches_the_venue_as_utc_midnight(self):
+        # A marker 5 days back at 04:30 UTC: young enough that the 30-day cap
+        # is not the thing under test, mid-day so the floor is.
+        day = (datetime.now(timezone.utc) - timedelta(days=5)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        marker = day.replace(hour=4, minute=30)
+        expected_ms = int(day.timestamp() * 1000)
+        marker_ms = int(marker.timestamp() * 1000)
+        assert marker_ms - expected_ms == 16_200_000, "fixture must be mid-day"
+
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+        await TestSyncCursorPerStrategyResume._run_tick(
+            key_row=_make_key_row(
+                strategy_ids=["strat-A"],
+                last_sync_at=marker.isoformat(),
+                strategy_cursors={"strat-A": marker.isoformat()},
+            ),
+            failing_strategy_ids=set(),
+            fetch_mock=fetch_mock,
+            trades=trades,
+        )
+
+        since_ms = fetch_mock.call_args.kwargs["since_ms"]
+        assert since_ms == expected_ms, (
+            "a marker at 04:30 UTC must reach the venue as 00:00 UTC of that "
+            f"day ({expected_ms}); got {since_ms!r}. A mid-day window lets the "
+            "scoped delete in sync_trades replace a whole stored day with a "
+            "partial one."
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_mid_day_stored_high_water_reaches_the_venue_as_utc_midnight(self):
+        """The non-marker source, through the real route, on a typed literal."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "okx",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "strat-A", "status": "published"}],
+                }
+            ],
+            trades_rows=[
+                {
+                    "strategy_id": "strat-A",
+                    "timestamp": "2026-08-12T04:30:00+00:00",
+                    "is_fill": False,
+                }
+            ],
+        )
+        fetch_mock = AsyncMock(return_value=[{"id": "t1"}])
+
+        await _drive_cron_sync(mock_supabase, fetch_mock=fetch_mock)
+
+        assert fetch_mock.call_args.kwargs["since_ms"] == 1786492800000, (
+            "2026-08-12T04:30Z must reach the venue as 2026-08-12T00:00Z "
+            "(1786492800000)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_null_marker_still_reaches_the_venue_as_none(self):
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+        await TestSyncCursorPerStrategyResume._run_tick(
+            key_row=_make_key_row(
+                strategy_ids=["strat-A"],
+                last_sync_at=_ONE_TICK_AGO,
+                strategy_cursors={"strat-A": None},
+            ),
+            failing_strategy_ids=set(),
+            fetch_mock=fetch_mock,
+            trades=trades,
+        )
+        assert fetch_mock.call_args.kwargs["since_ms"] is None, (
+            "full history must stay full history: flooring None must not "
+            "invent a date"
+        )
+
+
+class TestHighWaterIgnoresFillRows:
+    """167.1.2.2.2 SC-2: only `is_fill = false` (daily-P&L) rows set the
+    high-water. Raw fills come from the queued `sync_trades` job and are NEWER
+    than the daily rows, so counting one would move the floor forward past a
+    gap that is still open.
+
+    The fake `trades` table in `_make_mock_supabase_for_cron_sync` APPLIES the
+    filters it is given, so this gate asserts the RESULT (the window) and the
+    QUERY (the filter that produced it), and neither can be satisfied by a
+    canned answer.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_newer_raw_fill_does_not_move_the_floor(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "okx",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "strat-A", "status": "published"}],
+                }
+            ],
+            trades_rows=[
+                {
+                    "strategy_id": "strat-A",
+                    "timestamp": "2026-05-07T05:17:00+00:00",
+                    "is_fill": False,
+                },
+                # The fill is five months NEWER than the daily row.
+                {
+                    "strategy_id": "strat-A",
+                    "timestamp": "2026-10-01T09:00:00+00:00",
+                    "is_fill": True,
+                },
+            ],
+        )
+        fetch_mock = AsyncMock(return_value=[{"id": "t1"}])
+
+        await _drive_cron_sync(mock_supabase, fetch_mock=fetch_mock)
+
+        assert fetch_mock.call_args.kwargs["since_ms"] == 1778112000000, (
+            "the window must start at 00:00 UTC of the newest DAILY-P&L day "
+            "(2026-05-07), not at the newer raw fill. Got "
+            f"{fetch_mock.call_args.kwargs['since_ms']!r}"
+        )
+        queries = mock_supabase.trades_queries
+        assert len(queries) == 1, queries
+        assert ("is_fill", False) in queries[0]["eq"], (
+            "the read itself must carry the daily-P&L filter; got "
+            f"{queries[0]!r}"
+        )
+        assert ("strategy_id", "strat-A") in queries[0]["eq"], queries[0]
+        assert queries[0]["order"] == ("timestamp", True), queries[0]
+        assert queries[0]["limit"] == 1, queries[0]
+
+    @pytest.mark.asyncio
+    async def test_a_strategy_with_only_fills_gets_full_reach(self):
+        """No daily-P&L row at all (fills only) is NOT a resume point."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "okx",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "strat-A", "status": "published"}],
+                }
+            ],
+            trades_rows=[
+                {
+                    "strategy_id": "strat-A",
+                    "timestamp": "2026-10-01T09:00:00+00:00",
+                    "is_fill": True,
+                }
+            ],
+        )
+        fetch_mock = AsyncMock(return_value=[{"id": "t1"}])
+        await _drive_cron_sync(mock_supabase, fetch_mock=fetch_mock)
+        assert fetch_mock.call_args.kwargs["since_ms"] is None
+
+
+class TestHighWaterLookupFailsOpen:
+    """167.1.2.2.2 T-167.1.2.2.2-18: a failed high-water read fails OPEN to a
+    full-reach fetch (the idempotent over-fetch direction), is RECORDED in the
+    response envelope, and never aborts the tick or discards its results."""
+
+    @staticmethod
+    def _keys() -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "key-1",
+                "exchange": "okx",
+                "last_sync_at": _ONE_TICK_AGO,
+                "strategies": [{"id": "strat-A", "status": "published"}],
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_read_error_means_full_reach_and_an_envelope_field(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=self._keys(),
+            trades_select_error=RuntimeError("PostgREST 503: upstream connect error"),
+        )
+        fetch_mock = AsyncMock(return_value=[{"id": "t1"}])
+
+        response = await _drive_cron_sync(mock_supabase, fetch_mock=fetch_mock)
+
+        assert fetch_mock.call_args.kwargs["since_ms"] is None, (
+            "a failed high-water read must fall to FULL REACH, never to the "
+            "key cursor or to a guess"
+        )
+        assert "RuntimeError" in response["strategy_high_water_lookup_error"], response
+        assert "strat-A" in response["strategy_high_water_lookup_error"], response
+        # The tick completed and its results survived.
+        assert response["total_keys"] == 1
+        assert response["results"][0]["status"] == "ok", response["results"]
+        assert response["results"][0]["trades_stored"] == 1, response["results"]
+
+    @pytest.mark.asyncio
+    async def test_an_unparseable_timestamp_is_a_failed_read_not_a_silent_none(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=self._keys(),
+            trades_rows=[
+                {"strategy_id": "strat-A", "timestamp": "not-a-date", "is_fill": False}
+            ],
+        )
+        fetch_mock = AsyncMock(return_value=[{"id": "t1"}])
+
+        response = await _drive_cron_sync(mock_supabase, fetch_mock=fetch_mock)
+
+        assert fetch_mock.call_args.kwargs["since_ms"] is None
+        assert "strategy_high_water_lookup_error" in response, (
+            "an unreadable timestamp is a fault the operator must be able to "
+            f"see, not an empty high-water. Got {sorted(response)!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_read_adds_no_error_field(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=self._keys(),
+            trades_rows=[
+                {
+                    "strategy_id": "strat-A",
+                    "timestamp": "2026-05-07T05:17:00+00:00",
+                    "is_fill": False,
+                }
+            ],
+        )
+        response = await _drive_cron_sync(
+            mock_supabase, fetch_mock=AsyncMock(return_value=[{"id": "t1"}])
+        )
+        assert "strategy_high_water_lookup_error" not in response, (
+            "a conditional field that is always present is not conditional"
+        )
+
+
+class TestHeldFirstTickPreservesAbsentMarker:
+    """167.1.2.2.2: a strategy HELD on the tick where it had no marker writes
+    NO marker row, so the next tick resumes from the unclamped high-water again.
+
+    ⛔ THE TRAP. A marker-less strategy's resume point is its stored high-water,
+    which on PROD is 138 and 156 days old. If the hold-write persisted that as
+    a marker row, the NEXT read would treat it as a MARKER, and a marker is
+    clamped to `MAX_MARKER_LOOKBACK_MS` (30 days). One transient `sync_trades`
+    failure on the first tick would then abandon the 126 oldest days of a
+    156-day gap, silently, and permanently.
+    """
+
+    HW156_ISO, HW156_MS = _utc_midnight_days_ago(156)
+
+    @pytest.mark.asyncio
+    async def test_the_two_tick_loop_never_clamps_the_gap(self, caplog):
+        import logging
+
+        trades = [{"id": "t1"}]
+        fetch_mock = AsyncMock(return_value=trades)
+        run_tick = TestSyncCursorPerStrategyResume._run_tick
+        cursor_map = TestSyncCursorPerStrategyResume._cursor_map
+
+        # ---- Tick 1: no markers; strat-B's store fails and it is HELD.
+        result_1, key_updates_1, upserts_1 = await run_tick(
+            key_row=_make_key_row(
+                strategy_ids=["strat-A", "strat-B"],
+                last_sync_at=_ONE_TICK_AGO,
+                strategy_high_waters={
+                    "strat-A": self.HW156_ISO,
+                    "strat-B": self.HW156_ISO,
+                },
+            ),
+            failing_strategy_ids={"strat-B"},
+            fetch_mock=fetch_mock,
+            trades=trades,
+        )
+        cursors_1 = cursor_map(upserts_1)
+        assert fetch_mock.call_args.kwargs["since_ms"] == self.HW156_MS, (
+            "precondition: tick 1 reached back to the 156-day high-water"
+        )
+        assert result_1["strategy_cursors_held"] == ["strat-B"], (
+            "the hold must still be NAMED in the envelope even though no row "
+            f"is written for it; got {result_1.get('strategy_cursors_held')!r}"
+        )
+        assert "strat-B" not in cursors_1, (
+            "strat-B was held on a tick where it had NO marker: writing a row "
+            "at its 156-day-old high-water would make it a clamp-able marker. "
+            f"got {cursors_1!r}"
+        )
+        assert "strat-A" in cursors_1, "strat-A advanced and must get its row"
+
+        # ---- Tick 2: built from tick 1's own outputs.
+        key_cursor_after_1 = [
+            p["last_sync_at"] for p in key_updates_1 if "last_sync_at" in p
+        ][-1]
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result_2, _k2, _u2 = await run_tick(
+                key_row=_make_key_row(
+                    strategy_ids=["strat-A", "strat-B"],
+                    last_sync_at=key_cursor_after_1,
+                    strategy_cursors=cursors_1,
+                    strategy_high_waters={"strat-B": self.HW156_ISO},
+                ),
+                failing_strategy_ids=set(),
+                fetch_mock=fetch_mock,
+                trades=trades,
+            )
+
+        since_ms = fetch_mock.call_args.kwargs["since_ms"]
+        assert since_ms == self.HW156_MS, (
+            "tick 2 must resume from the SAME unclamped 156-day high-water "
+            f"({self.HW156_MS}); got {since_ms!r}. A value near now - 30 days "
+            "means the first-tick hold was persisted as a marker and clamped."
+        )
+        assert not [r for r in caplog.records if "CLAMPED" in r.getMessage()], (
+            "and no clamp may be announced: nothing was held long enough to "
+            f"clamp. Got {[r.getMessage() for r in caplog.records]!r}"
+        )
+        assert "strategy_cursor_window_clamped" not in result_2, result_2
+
+    @pytest.mark.asyncio
+    async def test_a_present_marker_that_is_held_still_hold_writes(self):
+        """The other half of the rule: only an ABSENT marker is exempt. A
+        marker that already exists is held in place, exactly as before."""
+        trades = [{"id": "t1"}]
+        held_marker = _ONE_TICK_AGO
+        _r, _k, upserts = await TestSyncCursorPerStrategyResume._run_tick(
+            key_row=_make_key_row(
+                strategy_ids=["strat-A", "strat-B"],
+                last_sync_at=_ONE_TICK_AGO,
+                strategy_cursors={"strat-B": held_marker},
+                strategy_high_waters={"strat-A": self.HW156_ISO},
+            ),
+            failing_strategy_ids={"strat-B"},
+            fetch_mock=AsyncMock(return_value=trades),
+            trades=trades,
+        )
+        cursors = TestSyncCursorPerStrategyResume._cursor_map(upserts)
+        assert cursors["strat-B"] == held_marker, (
+            "a PRESENT marker whose strategy fails must be written back at "
+            f"its pre-tick value; got {cursors.get('strat-B')!r}"
+        )
+
+    def test_a_present_156_day_marker_is_still_clamped_to_thirty_days(self):
+        """The cap is untouched: it bounds a HELD MARKER, which is exactly
+        what the first-tick rule above keeps a high-water from becoming."""
+        now_ms = 1_800_000_000_000
+        marker = datetime.fromtimestamp(
+            (now_ms - 156 * 86_400_000) / 1000, tz=timezone.utc
+        ).isoformat()
+        floor = cron_mod._resume_floor_ms(
+            ["strat-B"], {"strat-B": marker}, None, now_ms=now_ms
+        )
+        assert floor == now_ms - 30 * 86_400_000
+
+
+class TestTradesFetchedAtStampedOnlyOnAdvance:
+    """167.1.2.2.2 SC-4 / D-07 writer: `strategy_analytics.trades_fetched_at`
+    is set to the tick's `marker_now` for exactly the strategies whose
+    `strategy_advances` is true.
+
+    ⛔ WHY IT FOLLOWS `strategy_advances` AND NOT THE KEY CURSOR. The badge says
+    "Trades fetched N days ago". The key cursor advances on a PARTIAL tick
+    (C-0198), so stamping on it would paint a strategy whose store failed as
+    freshly fetched; a held strategy must read honestly old (D-05 staleness).
+    ⛔ A single-column UPDATE, never an upsert: an upsert would create a stub
+    `pending` analytics row for a strategy that has none.
+    """
+
+    @staticmethod
+    def _keys(*sids: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "key-1",
+                "exchange": "okx",
+                "last_sync_at": _ONE_TICK_AGO,
+                "strategies": [{"id": sid, "status": "published"} for sid in sids],
+            }
+        ]
+
+    @staticmethod
+    def _failing_rpc(mock_supabase: MagicMock, failing: set[str]) -> None:
+        def _rpc(name: str, args: dict):
+            chain = MagicMock()
+            if name == "sync_trades" and args.get("p_strategy_id") in failing:
+                chain.execute.side_effect = RuntimeError("deadlock")
+            else:
+                chain.execute.return_value = MagicMock(data=1)
+            return chain
+
+        mock_supabase.rpc.side_effect = _rpc
+
+    @pytest.mark.asyncio
+    async def test_the_advancing_strategy_is_stamped_and_the_held_one_is_not(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=self._keys("strat-A", "strat-B"),
+            trades_rows=[],
+        )
+        self._failing_rpc(mock_supabase, {"strat-B"})
+
+        response = await _drive_cron_sync(
+            mock_supabase, fetch_mock=AsyncMock(return_value=[{"id": "t1"}])
+        )
+
+        # Non-vacuity: strat-B really was held and strat-A really advanced.
+        upserts = mock_supabase.strategy_cursor_upserts
+        written = {row["strategy_id"]: row["last_sync_at"] for row in upserts[0]}
+        assert set(written) == {"strat-A"}, written
+        marker_now = written["strat-A"]
+
+        updates = mock_supabase.strategy_analytics_updates
+        assert updates == [
+            ({"trades_fetched_at": marker_now}, "strategy_id", ["strat-A"])
+        ], (
+            "exactly ONE single-column UPDATE, naming ONLY the advancing "
+            "strategy, carrying the tick's marker_now. The held strategy must "
+            f"read honestly old. Captured: {updates!r}"
+        )
+        assert mock_supabase.strategy_analytics_upserts == [], (
+            "never an upsert: it would create a stub `pending` analytics row"
+        )
+        key_result = response["results"][0]
+        assert key_result["trades_fetched_at_stamped"] == 1, key_result
+        assert "trades_fetched_at_stamp_error" not in key_result, key_result
+        assert "trades_fetched_at_unstamped" not in key_result, key_result
+
+    @pytest.mark.asyncio
+    async def test_an_idle_successful_fetch_stamps_a_degraded_one_does_not(self):
+        # Idle: nothing found, nothing wrong. A fetch that found nothing new is
+        # still a fetch.
+        idle = _make_mock_supabase_for_cron_sync(keys_data=self._keys("strat-A"))
+        await _drive_cron_sync(idle, fetch_mock=AsyncMock(return_value=[]))
+        assert [u[2] for u in idle.strategy_analytics_updates] == [["strat-A"]], (
+            "a clean empty fetch is a successful fetch and must stamp"
+        )
+
+        # Degraded: `fetch_daily_pnl` swallowed an exception and returned [].
+        degraded = _make_mock_supabase_for_cron_sync(keys_data=self._keys("strat-A"))
+        response = await _drive_cron_sync(
+            degraded,
+            fetch_mock=AsyncMock(return_value=[]),
+            dq_flags={"daily_pnl_fetch_error": True},
+        )
+        assert degraded.strategy_analytics_updates == [], (
+            "a crashed fetch that looks empty did NOT fetch trades; stamping "
+            "it would be a false 'fetched' claim on a public badge. Captured: "
+            f"{degraded.strategy_analytics_updates!r}"
+        )
+        assert "trades_fetched_at_stamped" not in response["results"][0]
+        # SFH-H1: and the key must not CLAIM health while declining to stamp.
+        # No stamp beside an `ok` key and an `ok` envelope is the three-signals-
+        # disagree defect: the operator sees green while the badge ages.
+        key_result = response["results"][0]
+        assert key_result["status"] != "ok", key_result
+        assert key_result["fetch_degraded"] is True, key_result
+        assert response["fetch_degraded"] == 1, response
+        assert response["synced"] == 0 and response["failed"] == 1, response
+
+        # The idle control, on the same assertions: ok, not degraded.
+        idle_response = await _drive_cron_sync(
+            _make_mock_supabase_for_cron_sync(keys_data=self._keys("strat-A")),
+            fetch_mock=AsyncMock(return_value=[]),
+        )
+        assert idle_response["results"][0]["status"] == "ok", idle_response
+        assert idle_response["fetch_degraded"] == 0, idle_response
+
+    @pytest.mark.asyncio
+    async def test_a_failing_update_never_aborts_the_tick(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=self._keys("strat-A"),
+            sa_update_error=RuntimeError("PostgREST 503: upstream connect error"),
+        )
+
+        response = await _drive_cron_sync(
+            mock_supabase, fetch_mock=AsyncMock(return_value=[{"id": "t1"}])
+        )
+
+        key_result = response["results"][0]
+        assert key_result["status"] == "ok", key_result
+        assert key_result["trades_stored"] == 1, (
+            "the sync counts must be exactly what they are without the stamp: "
+            f"{key_result!r}"
+        )
+        assert "RuntimeError" in key_result["trades_fetched_at_stamp_error"], key_result
+        assert "trades_fetched_at_stamped" not in key_result, key_result
+        # The marker write (the tick's real work) still happened.
+        assert mock_supabase.strategy_cursor_upserts, "markers must still be written"
+        # And the failure is visible at the top of the response too, because
+        # `results` is capped and prefers non-ok keys.
+        assert "RuntimeError" in response["trades_fetched_at_stamp_error"], response
+
+    @pytest.mark.asyncio
+    async def test_stamped_counts_returned_rows_not_ids_sent(self):
+        # Two advancing ids; the UPDATE matches ONE row (strat-B has no
+        # analytics row, and PostgREST answers that with 200 and an empty list).
+        short = _make_mock_supabase_for_cron_sync(
+            keys_data=self._keys("strat-A", "strat-B"),
+            sa_update_returned_ids=["strat-A"],
+        )
+        response = await _drive_cron_sync(
+            short, fetch_mock=AsyncMock(return_value=[{"id": "t1"}])
+        )
+        key_result = response["results"][0]
+        assert [u[2] for u in short.strategy_analytics_updates] == [
+            ["strat-A", "strat-B"]
+        ] or [u[2] for u in short.strategy_analytics_updates] == [
+            ["strat-B", "strat-A"]
+        ], short.strategy_analytics_updates
+        assert key_result["trades_fetched_at_stamped"] == 1, (
+            "two ids were SENT but one row came BACK: counting ids would "
+            f"report a stamp that never happened. Got {key_result!r}"
+        )
+        assert key_result["trades_fetched_at_unstamped"] == 1, key_result
+
+        full = _make_mock_supabase_for_cron_sync(
+            keys_data=self._keys("strat-A", "strat-B")
+        )
+        response = await _drive_cron_sync(
+            full, fetch_mock=AsyncMock(return_value=[{"id": "t1"}])
+        )
+        key_result = response["results"][0]
+        assert key_result["trades_fetched_at_stamped"] == 2, key_result
+        assert "trades_fetched_at_unstamped" not in key_result, key_result
+
+    @pytest.mark.asyncio
+    async def test_the_stamp_is_accepted_on_every_row_state_and_not_filtered(self):
+        """Orchestrator decision 2026-10-09 (plan 02 review,
+        `[167.1.2.2.2-PROVENANCE-GATE-RESIDUALS]` item 5): the stamp is ACCEPTED
+        on a `computing` row and on a stale-stamped one, and is NOT filtered.
+
+        A `trades_fetched_at`-only UPDATE still fires
+        `strategy_analytics_stamp_computing_started_trigger` (database side):
+        on a `computing` row with NULL `computing_started_at` it gives the
+        stuck-computing reaper the start time it lacked; on a non-computing row
+        it clears a stale stamp. Both preserve the trigger's own invariant.
+        The trigger itself is proven by a lane arm (owned by the TODOS entry),
+        not by a mock. What THIS gate pins is the decision's Python half: the
+        UPDATE is single-column and has no status filter. The fake
+        `strategy_analytics` table supports `.in_` and nothing else, so a
+        `.neq("computation_status", "computing")` narrowing is an
+        AttributeError here, recorded as `trades_fetched_at_stamp_error`.
+        """
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=self._keys("strat-A"),
+        )
+        response = await _drive_cron_sync(
+            mock_supabase, fetch_mock=AsyncMock(return_value=[{"id": "t1"}])
+        )
+        key_result = response["results"][0]
+        assert "trades_fetched_at_stamp_error" not in key_result, key_result
+        (payload, column, ids) = mock_supabase.strategy_analytics_updates[0]
+        assert list(payload) == ["trades_fetched_at"], (
+            "single-column: any other column in the payload would be a second "
+            f"write the trigger and the CHECKs were not reviewed for. {payload!r}"
+        )
+        assert column == "strategy_id" and ids == ["strat-A"]
+
+
+class TestADegradedFetchIsNeverOk:
+    """167.1.2.2.2 PR-B round 1, SFH-H1.
+
+    ⛔ THE DEFECT. `fetch_degraded` was read only to HOLD the per-strategy
+    marker and the `trades_fetched_at` stamp. It was never copied into the
+    key's result, and the key-level `should_advance_cursor = (not trades) or
+    synced_count > 0` let a degraded `[]` advance `api_keys.last_sync_at` and
+    fall through to `status = "ok"`. So a venue crash produced a green key,
+    a green envelope and a green `cron_runs` heartbeat, while the badge
+    quietly aged. Three signals disagreed, and the two operator-facing ones
+    were the wrong ones.
+
+    The venue crash is injected through `dq_flags`, which stands in for the
+    buffer `fetch_daily_pnl` stamps, because a crashed fetch and an idle one
+    both surface as an EMPTY `trades`. Every arm has its clean-fetch control.
+    """
+
+    CRASH_FLAGS = {
+        "daily_pnl_fetch_error": True,
+        "daily_pnl_fetch_error_class": "NetworkError",
+    }
+
+    @staticmethod
+    async def _tick(
+        *,
+        trades: list[dict[str, Any]],
+        dq_flags: dict[str, Any] | None,
+        rpc_calls: list[tuple[str, dict]] | None = None,
+    ) -> tuple[dict[str, Any], list[dict], list[Any]]:
+        return await TestSyncCursorPerStrategyResume._run_tick(
+            key_row=_make_key_row(
+                strategy_ids=["strat-A", "strat-B"],
+                last_sync_at=_ONE_TICK_AGO,
+                strategy_cursors={"strat-A": _ONE_TICK_AGO, "strat-B": _ONE_TICK_AGO},
+            ),
+            failing_strategy_ids=set(),
+            fetch_mock=AsyncMock(return_value=trades),
+            trades=trades,
+            rpc_calls=rpc_calls,
+            dq_flags=dq_flags,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_crashed_fetch_is_an_error_not_ok(self):
+        result, _keys, _cursors = await self._tick(trades=[], dq_flags=self.CRASH_FLAGS)
+
+        assert result["status"] == "error", (
+            "an empty list that is EMPTY BECAUSE THE VENUE CALL CRASHED must "
+            f"not read as a healthy key. Got {result!r}"
+        )
+        assert result["fetch_degraded"] is True, result
+        assert result["fetch_degraded_reasons"] == ["daily_pnl_fetch_error"], result
+        assert result["fetch_error_class"] == "NetworkError", result
+        assert "NetworkError" in result["error"], (
+            "the error text names the class so a `failed` count is diagnosable "
+            f"without the logs. Got {result.get('error')!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_crashed_fetch_does_not_advance_the_key_cursor(self):
+        _result, key_updates, _cursors = await self._tick(
+            trades=[], dq_flags=self.CRASH_FLAGS
+        )
+        assert not [p for p in key_updates if "last_sync_at" in p], (
+            "the key cursor must stay where it was: the window was not read. "
+            f"Captured api_keys updates: {key_updates!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_clean_empty_fetch_is_still_ok_and_advances(self):
+        """The control. Without it every arm above passes against a route that
+        simply never reports ok."""
+        result, key_updates, cursors = await self._tick(trades=[], dq_flags=None)
+
+        assert result["status"] == "ok", result
+        assert "fetch_degraded" not in result, (
+            "a conditional field must be ABSENT on a healthy tick: " f"{result!r}"
+        )
+        assert [p for p in key_updates if "last_sync_at" in p], key_updates
+        assert cursors, "an idle tick advances both strategy markers"
+
+    @pytest.mark.asyncio
+    async def test_a_degraded_fetch_that_returned_rows_stores_nothing(self):
+        """The rows of an incomplete window must not be stored.
+
+        For an absent-marker strategy the resume point is its stored
+        high-water. Storing the NEWER days of a window whose OLDER days were
+        never read moves that high-water past the unread span, and the next
+        tick would resume from there: a permanent hole from a tick that looked
+        like progress. Re-fetching an unstored window is idempotent.
+        """
+        rpc_calls: list[tuple[str, dict]] = []
+        result, key_updates, cursors = await self._tick(
+            trades=[{"id": "t1"}], dq_flags=self.CRASH_FLAGS, rpc_calls=rpc_calls
+        )
+
+        assert not [c for c in rpc_calls if c[0] == "sync_trades"], (
+            f"a degraded window must not be stored. RPCs: {rpc_calls!r}"
+        )
+        assert not [c for c in rpc_calls if c[0] == "enqueue_compute_job"], rpc_calls
+        assert result["status"] == "error", result
+        assert result["trades_fetched"] == 1, (
+            "the fetched count stays honest even though nothing was stored"
+        )
+        assert result["trades_stored"] == 0, result
+        assert not [p for p in key_updates if "last_sync_at" in p], key_updates
+        written = TestSyncCursorPerStrategyResume._cursor_map(cursors)
+        assert written == {"strat-A": _ONE_TICK_AGO, "strat-B": _ONE_TICK_AGO}, (
+            "present markers are HELD at their pre-tick value, never advanced. "
+            f"Got {written!r}"
+        )
+
+    # R2-ME-01 (PR-B round 3). When `fapiPrivate_get_income` fails, the Binance
+    # branch stamps ONLY this flag and returns BTC/USDT SPOT FILLS shaped as
+    # daily-P&L rows; it never stamps `daily_pnl_fetch_error`.
+    INCOME_FALLBACK_FLAGS = {"daily_pnl_binance_income_fallback": True}
+    #: A spot fill as the fallback shapes it: a BTC price in `price`, not a
+    #: day's P&L.
+    _SPOT_FILL = {
+        "exchange": "binance",
+        "symbol": "BTC/USDT",
+        "side": "buy",
+        "price": 64000.0,
+        "quantity": 0.01,
+        "order_type": "limit",
+        "timestamp": "2026-10-10T12:00:00+00:00",
+    }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "trades",
+        [
+            pytest.param([_SPOT_FILL], id="btc-spot-fills-returned"),
+            pytest.param([], id="no-btc-trades-reads-as-idle"),
+        ],
+    )
+    async def test_the_binance_income_fallback_is_a_degraded_fetch(
+        self, trades: list[dict[str, Any]]
+    ):
+        """Spot fills must NEVER replace a strategy's daily P&L.
+
+        `sync_trades` deletes the incoming payload's own `[min, max]` span
+        before inserting, so storing the fallback's BTC fills overwrites the
+        strategy's real `daily_pnl` rows in that span with BTC prices, and
+        advancing/stamping on them tells the badge the window was read. With no
+        BTC trades the fallback is `[]`, which reads as an idle success and
+        advances every marker over a window nothing was read from. Either way
+        the tick must behave exactly as for `daily_pnl_fetch_error`: store
+        nothing, move nothing, stamp nothing, report `error`, and name the
+        reason.
+        """
+        rpc_calls: list[tuple[str, dict]] = []
+        result, key_updates, cursors = await self._tick(
+            trades=trades, dq_flags=self.INCOME_FALLBACK_FLAGS, rpc_calls=rpc_calls
+        )
+
+        assert result["status"] == "error", result
+        assert result["fetch_degraded"] is True, result
+        assert result["fetch_degraded_reasons"] == [
+            "daily_pnl_binance_income_fallback"
+        ], result
+        assert "daily_pnl_binance_income_fallback" in result["error"], result
+        assert result["trades_stored"] == 0, result
+        assert not [c for c in rpc_calls if c[0] == "sync_trades"], (
+            "spot fills must never reach sync_trades: its window-scoped DELETE "
+            f"would replace real daily rows. RPCs: {rpc_calls!r}"
+        )
+        assert not [c for c in rpc_calls if c[0] == "enqueue_compute_job"], rpc_calls
+        assert not [p for p in key_updates if "last_sync_at" in p], (
+            f"the key cursor must not advance. Captured: {key_updates!r}"
+        )
+        written = TestSyncCursorPerStrategyResume._cursor_map(cursors)
+        assert written == {"strat-A": _ONE_TICK_AGO, "strat-B": _ONE_TICK_AGO}, (
+            f"strategy markers are HELD, never advanced. Got {written!r}"
+        )
+
+        # The stamp is a separate write path: pin it on the same flag.
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "binance")],
+        )
+        response = await _drive_cron_sync(
+            mock_supabase,
+            fetch_mock=AsyncMock(return_value=trades),
+            dq_flags=self.INCOME_FALLBACK_FLAGS,
+        )
+        assert mock_supabase.strategy_analytics_updates == [], (
+            "a window replaced by spot fills (or by nothing) was not fetched; "
+            "stamping `trades_fetched_at` would be a false claim on a public "
+            f"badge. Captured: {mock_supabase.strategy_analytics_updates!r}"
+        )
+        assert response["results"][0]["status"] == "error", response
+        assert response["fetch_degraded"] == 1, response
+
+    @pytest.mark.asyncio
+    async def test_the_envelope_counts_the_degraded_key(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "okx")],
+        )
+        response = await _drive_cron_sync(
+            mock_supabase,
+            fetch_mock=AsyncMock(return_value=[]),
+            dq_flags=self.CRASH_FLAGS,
+        )
+
+        assert response["fetch_degraded"] == 1, response
+        assert response["failed"] == 1, response
+        assert response["synced"] == 0, response
+        assert response["results"][0]["status"] == "error", response["results"][0]
+
+    @pytest.mark.asyncio
+    async def test_the_envelope_reports_zero_degraded_on_a_clean_tick(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "okx")],
+        )
+        response = await _drive_cron_sync(
+            mock_supabase, fetch_mock=AsyncMock(return_value=[{"id": "t1"}])
+        )
+        assert response["fetch_degraded"] == 0, response
+        assert response["synced"] == 1, response
+
+    @pytest.mark.asyncio
+    async def test_the_heartbeat_row_is_an_error_when_a_key_fetch_crashed(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "okx")],
+        )
+        await _drive_cron_sync(
+            mock_supabase,
+            fetch_mock=AsyncMock(return_value=[]),
+            dq_flags=self.CRASH_FLAGS,
+        )
+
+        (row,) = mock_supabase.cron_runs_inserts
+        assert row["status"] == "error", (
+            "a tick whose only key could not be read must not leave an `ok` "
+            f"heartbeat row. Got {row!r}"
+        )
+        assert "fetch_degraded=1" in row["error"], row["error"]
+        assert row["metadata"]["fetch_degraded"] == 1, row["metadata"]
+        assert "live" not in row["error"], "a key id never rides into the row"
+
+    def test_the_heartbeat_builder_counts_fetch_degraded_as_a_problem(self):
+        """Unit form: a response whose ONLY signal is `fetch_degraded` (every
+        status counter zero) must still be an error row."""
+        row = cron_mod._cron_sync_heartbeat_row(
+            {
+                "synced": 1,
+                "failed": 0,
+                "timed_out": 0,
+                "revoked": 0,
+                "total_keys": 1,
+                "fetch_degraded": 1,
+            },
+            datetime.now(timezone.utc),
+            None,
+        )
+        assert row["status"] == "error", row
+        assert "fetch_degraded=1" in row["error"], row["error"]
+
+
+class TestATruncatedWindowIsNeverTreatedAsComplete:
+    """167.1.2.2.2 PR-B round 1, SFH-H2 / ME-02.
+
+    ⛔ THE DEFECT. The cron path read only `daily_pnl_fetch_error`.
+    `daily_pnl_truncated_okx` and `daily_pnl_truncated_bybit` were drained by
+    `get_and_clear_last_dq_flags()` and thrown away, so a window that hit a page
+    cap still had rows, `per_strategy_stored > 0`, an advanced marker and a
+    "fetched" stamp. OKX pages newest-first, so the cap drops the OLDEST days,
+    which are the gap days TRADESYNC exists to recover, and the next tick resumes
+    from the advanced marker and never asks for them again.
+
+    A truncation flag now degrades the fetch exactly as a crash does: nothing
+    stored, no marker, no stamp, no cursor advance, and it is named in the key
+    result, the envelope and the heartbeat.
+    """
+
+    FLAGS = ["daily_pnl_truncated_okx", "daily_pnl_truncated_bybit"]
+
+    def test_each_truncation_flag_is_a_degradation_reason(self):
+        for flag in self.FLAGS:
+            reasons, error_class = cron_mod._fetch_degradation({flag: True})
+            assert reasons == [flag], (flag, reasons)
+            assert error_class is None
+
+    def test_a_false_or_absent_flag_is_not_a_degradation(self):
+        assert cron_mod._fetch_degradation({}) == ([], None)
+        assert cron_mod._fetch_degradation({"daily_pnl_truncated_okx": False}) == (
+            [],
+            None,
+        )
+        # A flag from ANOTHER fetcher's namespace must not degrade a daily-pnl
+        # window: `sync_truncated_*` belongs to `fetch_raw_trades`, which the
+        # cron path never calls.
+        assert cron_mod._fetch_degradation({"sync_truncated_okx": True}) == ([], None)
+
+    def test_the_error_class_is_a_plain_identifier_or_nothing(self):
+        flags = {
+            "daily_pnl_fetch_error": True,
+            "daily_pnl_fetch_error_class": "GET https://x.invalid/?sig=abc failed",
+        }
+        assert cron_mod._fetch_degradation(flags) == (["daily_pnl_fetch_error"], None), (
+            "a value that is not a class name (a message with a URL) is refused"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("flag", FLAGS)
+    async def test_a_truncated_window_is_not_stamped_stored_or_marked(self, flag):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "okx")],
+        )
+        response = await _drive_cron_sync(
+            mock_supabase,
+            fetch_mock=AsyncMock(return_value=[{"id": "t1"}]),
+            dq_flags={flag: True},
+        )
+
+        key_result = response["results"][0]
+        assert key_result["status"] == "error", (
+            "rows WERE returned (so `per_strategy_stored > 0` would have held) "
+            f"and the key still must not read healthy. Got {key_result!r}"
+        )
+        assert key_result["fetch_degraded"] is True, key_result
+        assert key_result["fetch_degraded_reasons"] == [flag], key_result
+        assert mock_supabase.strategy_analytics_updates == [], (
+            "no `trades_fetched_at` stamp for a window that was not read in full: "
+            f"{mock_supabase.strategy_analytics_updates!r}"
+        )
+        assert mock_supabase.strategy_cursor_upserts == [], (
+            "no marker row: a marker written now would be CLAMPED to 30 days on "
+            f"the next read, abandoning the span. {mock_supabase.strategy_cursor_upserts!r}"
+        )
+        assert not [
+            c for c in mock_supabase.rpc.call_args_list if c.args[0] == "sync_trades"
+        ], "the rows of a truncated window are not stored"
+        assert response["fetch_degraded"] == 1, response
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("flag", FLAGS)
+    async def test_a_truncated_window_leaves_an_error_heartbeat(self, flag):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "okx")],
+        )
+        await _drive_cron_sync(
+            mock_supabase,
+            fetch_mock=AsyncMock(return_value=[{"id": "t1"}]),
+            dq_flags={flag: True},
+        )
+        (row,) = mock_supabase.cron_runs_inserts
+        assert row["status"] == "error", row
+        assert "fetch_degraded=1" in row["error"], row["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("flag", FLAGS)
+    async def test_a_present_marker_is_held_not_advanced_by_a_truncated_window(
+        self, flag
+    ):
+        result, key_updates, cursors = await TestSyncCursorPerStrategyResume._run_tick(
+            key_row=_make_key_row(
+                strategy_ids=["strat-A"],
+                last_sync_at=_ONE_TICK_AGO,
+                strategy_cursors={"strat-A": _ONE_TICK_AGO},
+            ),
+            failing_strategy_ids=set(),
+            fetch_mock=AsyncMock(return_value=[{"id": "t1"}]),
+            trades=[{"id": "t1"}],
+            dq_flags={flag: True},
+        )
+        assert TestSyncCursorPerStrategyResume._cursor_map(cursors) == {
+            "strat-A": _ONE_TICK_AGO
+        }, "the marker stays at its pre-tick value so the next tick re-reads the window"
+        assert not [p for p in key_updates if "last_sync_at" in p], key_updates
+        assert result["status"] == "error", result
+
+    @pytest.mark.asyncio
+    async def test_a_window_whose_truncation_flag_is_false_is_a_normal_tick(self):
+        """The control: the flag name present with a False value changes nothing."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "okx")],
+        )
+        response = await _drive_cron_sync(
+            mock_supabase,
+            fetch_mock=AsyncMock(return_value=[{"id": "t1"}]),
+            dq_flags={"daily_pnl_truncated_okx": False},
+        )
+        assert response["results"][0]["status"] == "ok", response["results"][0]
+        assert response["fetch_degraded"] == 0, response
+        assert mock_supabase.strategy_analytics_updates, "a clean tick stamps"
+
+
+class TestAVenueWithNoDailyPnlFetcherIsNeverStamped:
+    """167.1.2.2.2 PR-B round 1, ME-01.
+
+    ⛔ THE DEFECT. `deribit` is in `EXCHANGE_CLASSES`, so a strategy key on it
+    passed the `deferred` guard and reached `fetch_all_trades`, whose
+    `fetch_daily_pnl` has no branch for it and returns `[]` with NO error flag.
+    `strategy_advances` was then True (`not trades` and not degraded), so the
+    strategy's marker moved to now and `trades_fetched_at` was stamped with the
+    tick instant: every viewer, anonymous ones included, saw a green "Trades
+    fetched 5h ago" for a venue nothing was ever read from. Dormant on PROD
+    (the census has no Deribit strategy key), live with the first one published.
+
+    An unsupported venue is now an explicit, NAMED outcome (`deferred` with
+    reason `no_daily_pnl_fetcher`), decided BEFORE any venue call and never a
+    stamp. The venue set is `services.exchange.DAILY_PNL_VENUES`, which a test
+    ties to the branches `fetch_daily_pnl` really has.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_deribit_strategy_key_is_deferred_not_fetched_or_stamped(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "deribit")],
+        )
+        fetch_mock = AsyncMock(return_value=[])
+
+        response = await _drive_cron_sync(mock_supabase, fetch_mock=fetch_mock)
+
+        key_result = response["results"][0]
+        assert key_result["status"] == "deferred", key_result
+        assert key_result["reason"] == "no_daily_pnl_fetcher", key_result
+        assert fetch_mock.await_count == 0, "no venue call for an unsupported venue"
+        assert mock_supabase.strategy_analytics_updates == [], (
+            "NO `trades_fetched_at` stamp for a venue nothing was fetched from: "
+            f"{mock_supabase.strategy_analytics_updates!r}"
+        )
+        assert mock_supabase.strategy_cursor_upserts == [], (
+            "and no marker: it would claim a window was read"
+        )
+        assert response["deferred"] == 1 and response["synced"] == 0, response
+
+    @pytest.mark.asyncio
+    async def test_a_supported_venue_beside_it_is_still_fetched_and_stamped(self):
+        """The control, and the isolation proof: the deferral touches only the
+        unsupported key."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                _strategy_key("live-okx", "okx"),
+                _strategy_key("live-der", "deribit"),
+            ],
+        )
+        fetch_mock = AsyncMock(return_value=[{"id": "t1"}])
+
+        response = await _drive_cron_sync(mock_supabase, fetch_mock=fetch_mock)
+
+        by_exchange = {r["exchange"]: r for r in response["results"]}
+        assert by_exchange["okx"]["status"] == "ok", by_exchange
+        assert by_exchange["deribit"]["status"] == "deferred", by_exchange
+        assert fetch_mock.await_count == 1
+        assert [u[2] for u in mock_supabase.strategy_analytics_updates] == [
+            ["strat-live-okx"]
+        ], mock_supabase.strategy_analytics_updates
+
+    def test_every_ccxt_venue_is_either_supported_or_named_unsupported(self):
+        """A venue added to `EXCHANGE_CLASSES` must force a decision here: either
+        a `fetch_daily_pnl` branch (and a `DAILY_PNL_VENUES` entry) or a named
+        place on the unsupported side. Silence is what stamped Deribit."""
+        unsupported = set(cron_mod.EXCHANGE_CLASSES) - set(cron_mod.DAILY_PNL_VENUES)
+        assert unsupported == {"deribit"}, unsupported
+
+    def test_the_venue_set_is_exactly_the_branches_fetch_daily_pnl_has(self):
+        """The Python half of the tie the TypeScript pin
+        (`freshness.trade-fetch-venues.test.ts`) makes on the other side: the
+        set the router consults cannot drift from the chain it describes."""
+        import inspect
+        import re as _re
+
+        from services import exchange as exchange_mod
+
+        source = inspect.getsource(exchange_mod.fetch_daily_pnl)
+        branches = set(_re.findall(r'exchange\.id\s*==\s*"([a-z0-9_]+)"', source))
+        assert branches, "the source slice must find the venue chain"
+        assert set(exchange_mod.DAILY_PNL_VENUES) == branches, (
+            exchange_mod.DAILY_PNL_VENUES,
+            branches,
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_daily_pnl_itself_fails_closed_on_an_unsupported_venue(self):
+        """Defence in depth, for the callers that do not go through the router's
+        guard: an empty list from a venue with no branch is NOT 'nothing to
+        report'. It carries the error flag, so no caller can read it as idle."""
+        from services.exchange import fetch_daily_pnl, get_and_clear_last_dq_flags
+
+        exchange = MagicMock()
+        exchange.id = "deribit"
+        get_and_clear_last_dq_flags()
+        rows_returned = await fetch_daily_pnl(exchange, None)
+        flags = get_and_clear_last_dq_flags()
+
+        assert rows_returned == []
+        assert flags.get("daily_pnl_fetch_error") is True, flags
+        assert flags.get("daily_pnl_unsupported_venue") is True, flags
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2.2.2 plan 06 — the selector filter (SC-5 / D-13)
+# ---------------------------------------------------------------------------
+
+
+class _VenueSpy:
+    """Records which api_keys rows the tick reached the venue for.
+
+    `decrypt_credentials` hands each key its own id as the api key, so
+    `create_exchange(exchange_name, api_key, ...)` can name the key it was built
+    for; the exchange double carries that id, so `validate_key_permissions` and
+    `fetch_usdt_balance` can be attributed too. A key whose id starts with
+    `revoked-` fails validation with a credential-rejection code, which is
+    exactly what a real revoked-but-active key does on PROD. A key whose id
+    starts with `transient-` fails with a NON-credential code (a rate limit), so
+    the key is left active and the result is `transient_failure`.
+    """
+
+    #: id prefix -> (error code, message). One keyword-argument site below
+    #: serves both prefixes: `src/lib/seam-venue-vocabulary.invariant.test.ts`
+    #: pins the count of error-code assignment sites under `tests/`, and a
+    #: second spy would add one for no new behaviour.
+    REJECTIONS: dict[str, tuple[str, str]] = {
+        "revoked-": ("AUTH_FAILED", "rejected"),
+        "transient-": ("RATE_LIMITED", "slow down"),
+    }
+
+    def __init__(self) -> None:
+        self.created: list[str] = []
+        self.validated: list[str] = []
+        self.balance_reads: list[str] = []
+
+    def decrypt(self, key_row: dict[str, Any], _kek: bytes) -> tuple[str, str, None]:
+        return (key_row["id"], "s", None)
+
+    def create(self, _exchange_name: str, api_key: str, *_a: Any) -> Any:
+        self.created.append(api_key)
+        ex = AsyncMock()
+        ex.close = AsyncMock()
+        ex.spy_key_id = api_key
+        return ex
+
+    async def validate(self, exchange: Any) -> dict[str, Any]:
+        self.validated.append(exchange.spy_key_id)
+        for prefix, (code, message) in self.REJECTIONS.items():
+            if exchange.spy_key_id.startswith(prefix):
+                return _stub_validation(valid=False, error_code=code, error=message)
+        return _stub_validation(valid=True)
+
+    async def balance(self, exchange: Any) -> None:
+        self.balance_reads.append(exchange.spy_key_id)
+        return None
+
+
+async def _drive_cron_sync_with_spy(
+    mock_supabase: MagicMock, spy: _VenueSpy
+) -> dict[str, Any]:
+    import sys as _sys
+    import routers.portfolio as portfolio_mod
+
+    _sys.modules["routers.portfolio"] = portfolio_mod
+    with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+         patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+         patch.object(cron_mod, "decrypt_credentials", spy.decrypt), \
+         patch.object(cron_mod, "create_exchange", spy.create), \
+         patch.object(cron_mod, "validate_key_permissions", spy.validate), \
+         patch.object(
+             cron_mod, "fetch_all_trades", AsyncMock(return_value=[{"id": "t1"}])
+         ), \
+         patch.object(cron_mod, "fetch_usdt_balance", spy.balance):
+        return await cron_mod.cron_sync()
+
+
+def _strategy_key(key_id: str, exchange: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "id": key_id,
+        "exchange": exchange,
+        "last_sync_at": None,
+        "strategies": [{"id": f"strat-{key_id}", "status": "published"}],
+        **extra,
+    }
+
+
+def _allocator_only_key(key_id: str, exchange: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "id": key_id,
+        "exchange": exchange,
+        "last_sync_at": None,
+        "strategies": [],
+        **extra,
+    }
+
+
+_DISCONNECTED_AT = "2026-10-03T08:00:00+00:00"
+
+
+class TestCronSyncSkipsDisconnectedAndStrategylessKeys:
+    """167.1.2.2.2 SC-5 / D-13. Unfiltered, the first tick reads 14 disconnected
+    users' exchange accounts, overwrites allocator balances with the tick's own
+    reading, pins `revoked` at 5 forever and can run about 9 minutes against
+    Railway's 5-minute idle cut-off (RESEARCH Section 5, PROD census 2026-10-09).
+
+    The selector keeps a key only if it is connected AND backs an eligible
+    strategy. Strategy keys that are revoked keep today's path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_api_keys_query_carries_the_disconnected_filter(self):
+        """The filter is applied IN THE QUERY. The fake `api_keys` table applies
+        the filters it is given, so a disconnected row stays out only if the
+        query asked for `disconnected_at IS NULL`; the captured call proves it
+        was asked, in the shape the repo's other consumers use."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                _strategy_key("live", "okx"),
+                _strategy_key("gone", "okx", disconnected_at=_DISCONNECTED_AT),
+            ],
+        )
+        spy = _VenueSpy()
+        response = await _drive_cron_sync_with_spy(mock_supabase, spy)
+
+        assert len(mock_supabase.api_keys_selects) == 1
+        query = mock_supabase.api_keys_selects[0]
+        assert ("disconnected_at", "null") in query["is_"], query
+        assert ("is_active", True) in query["eq"], query
+        assert spy.created == ["live"], (
+            "a disconnected user's credentials were decrypted and an exchange "
+            f"client built for them: {spy.created!r}"
+        )
+        assert response["total_keys"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_key_with_no_eligible_strategy_never_reaches_the_venue(self):
+        """No strategy row, and a key whose only strategy is archived (dropped
+        by `ALLOWED_STRATEGY_STATUSES`), both stop before any venue call."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                _strategy_key("live", "okx"),
+                _allocator_only_key("alloc", "okx"),
+                {
+                    "id": "archived-only",
+                    "exchange": "okx",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "s-arch", "status": "archived"}],
+                },
+            ],
+        )
+        spy = _VenueSpy()
+        response = await _drive_cron_sync_with_spy(mock_supabase, spy)
+
+        assert spy.created == ["live"]
+        assert spy.validated == ["live"]
+        assert spy.balance_reads in ([], ["live"]), (
+            "an OKX balance read for a strategy-less key would overwrite the "
+            f"allocator's account_balance_usdt: {spy.balance_reads!r}"
+        )
+        assert response["total_keys"] == 1
+        assert response["skipped_no_strategy"] == 2
+
+    @pytest.mark.asyncio
+    async def test_prod_shaped_census_syncs_exactly_the_four_strategy_keys(self):
+        """The PROD census of 2026-10-09 as a fixture: 5 revoked allocator-only
+        bybit keys, 3 allocator-only okx and 8 allocator-only deribit keys, 3
+        okx + 1 bybit strategy keys, plus the disconnected population (okx 5,
+        deribit 8; one of the okx ones backs a strategy). Intended population: 4.
+        `revoked` must be 0: the 5 revoked bybit keys have no strategy, so
+        validating them would report `key_revoked` on every run, forever."""
+        keys: list[dict[str, Any]] = []
+        keys += [_allocator_only_key(f"revoked-bybit-{i}", "bybit") for i in range(5)]
+        keys += [_allocator_only_key(f"alloc-okx-{i}", "okx") for i in range(3)]
+        keys += [_allocator_only_key(f"alloc-der-{i}", "deribit") for i in range(8)]
+        keys += [_strategy_key(f"strat-okx-{i}", "okx") for i in range(3)]
+        keys += [_strategy_key("strat-bybit-0", "bybit")]
+        keys += [_strategy_key("disc-okx-strat", "okx", disconnected_at=_DISCONNECTED_AT)]
+        keys += [
+            _allocator_only_key(f"disc-okx-{i}", "okx", disconnected_at=_DISCONNECTED_AT)
+            for i in range(4)
+        ]
+        keys += [
+            _allocator_only_key(f"disc-der-{i}", "deribit", disconnected_at=_DISCONNECTED_AT)
+            for i in range(8)
+        ]
+        mock_supabase = _make_mock_supabase_for_cron_sync(keys_data=keys)
+        spy = _VenueSpy()
+        response = await _drive_cron_sync_with_spy(mock_supabase, spy)
+
+        assert sorted(spy.created) == [
+            "strat-bybit-0", "strat-okx-0", "strat-okx-1", "strat-okx-2",
+        ]
+        assert sorted(spy.validated) == sorted(spy.created)
+        assert set(spy.balance_reads) <= set(spy.created), spy.balance_reads
+        assert response["total_keys"] == 4
+        assert response["skipped_no_strategy"] == 16
+        assert response["revoked"] == 0
+        assert response["synced"] == 4
+
+    @pytest.mark.asyncio
+    async def test_a_revoked_strategy_key_keeps_its_path(self):
+        """The exclusion is about allocator-only keys. A revoked key that backs
+        an eligible strategy stays in the loop and reports `revoked`."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("revoked-strat", "okx")],
+        )
+        _wire_allocator_holdings_empty(mock_supabase)
+        spy = _VenueSpy()
+        response = await _drive_cron_sync_with_spy(mock_supabase, spy)
+
+        assert spy.created == ["revoked-strat"]
+        assert response["total_keys"] == 1
+        assert response["revoked"] == 1
+
+    @pytest.mark.asyncio
+    async def test_the_no_keys_early_return_reports_the_skip_field_too(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(keys_data=[])
+        spy = _VenueSpy()
+        response = await _drive_cron_sync_with_spy(mock_supabase, spy)
+
+        assert response["total_keys"] == 0
+        assert response["skipped_no_strategy"] == 0
+
+    @pytest.mark.asyncio
+    async def test_a_book_of_only_strategy_less_keys_returns_the_early_shape(self):
+        """Every key dropped is the same observable state as no keys: nothing to
+        do, and the response still says how many were skipped."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_allocator_only_key("a", "okx"), _allocator_only_key("b", "deribit")],
+        )
+        spy = _VenueSpy()
+        response = await _drive_cron_sync_with_spy(mock_supabase, spy)
+
+        assert spy.created == []
+        assert response["total_keys"] == 0
+        assert response["skipped_no_strategy"] == 2
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2.2.2 plan 06 — the cron_runs heartbeat (SC-6 alarm input)
+# ---------------------------------------------------------------------------
+
+#: The closed metadata key set, written out here so the test never reads the
+#: expectation from the module it is checking (CLAUDE.md Rule 9).
+_HEARTBEAT_KEYS = frozenset(
+    {
+        "total_keys",
+        "skipped_no_strategy",
+        "synced",
+        "partial",
+        "held",
+        "failed",
+        "timed_out",
+        "revoked",
+        "transient",
+        "deferred",
+        "fetch_degraded",
+        "duration_s",
+        "stamped",
+    }
+)
+
+
+def _without_durations(value: Any) -> Any:
+    """Zero every `duration_s` so two runs of the same fixture compare equal."""
+    if isinstance(value, dict):
+        return {
+            k: (0 if k == "duration_s" else _without_durations(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_without_durations(v) for v in value]
+    return value
+
+
+async def _drive_heartbeat_run(
+    mock_supabase: MagicMock,
+    *,
+    fetch_mock: AsyncMock | None = None,
+    spy: _VenueSpy | None = None,
+) -> dict[str, Any]:
+    import sys as _sys
+    import routers.portfolio as portfolio_mod
+
+    _sys.modules["routers.portfolio"] = portfolio_mod
+    spy = spy or _VenueSpy()
+    with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+         patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+         patch.object(cron_mod, "decrypt_credentials", spy.decrypt), \
+         patch.object(cron_mod, "create_exchange", spy.create), \
+         patch.object(cron_mod, "validate_key_permissions", spy.validate), \
+         patch.object(
+             cron_mod,
+             "fetch_all_trades",
+             fetch_mock or AsyncMock(return_value=[{"id": "t1"}]),
+         ), \
+         patch.object(cron_mod, "fetch_usdt_balance", spy.balance):
+        return await cron_mod.cron_sync()
+
+
+class TestCronSyncHeartbeat:
+    """167.1.2.2.2 SC-6: every `/api/cron-sync` run leaves ONE `cron_runs` row,
+    the input the booked `[167.1.2.2.2-TRADESYNC-STALENESS-ALARM]` reads (D-05's
+    2-day ceiling). Nothing in this phase pages a human; the row is the signal.
+
+    Counter-only metadata (a closed key set, no ids and no URLs) and a recorder
+    that can never change the route's return value or raise.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_normal_run_writes_exactly_one_ok_row(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "okx")],
+        )
+        response = await _drive_heartbeat_run(mock_supabase)
+
+        assert len(mock_supabase.cron_runs_inserts) == 1
+        row = mock_supabase.cron_runs_inserts[0]
+        assert row["cron_name"] == "cron_sync"
+        assert row["status"] == "ok", row
+        assert row["error"] is None
+        started = datetime.fromisoformat(row["started_at"])
+        completed = datetime.fromisoformat(row["completed_at"])
+        assert started.tzinfo is not None and completed >= started
+        metadata = row["metadata"]
+        assert set(metadata) <= _HEARTBEAT_KEYS, set(metadata) - _HEARTBEAT_KEYS
+        assert all(
+            isinstance(v, (int, float)) and not isinstance(v, bool)
+            for v in metadata.values()
+        ), metadata
+        assert metadata["total_keys"] == 1
+        assert metadata["synced"] == 1
+        assert metadata["skipped_no_strategy"] == 0
+        assert metadata["failed"] == metadata["timed_out"] == metadata["revoked"] == 0
+        assert metadata["stamped"] == 1, (
+            "the stamp counter is the heartbeat's evidence that the trades-fetched "
+            f"stamp landed this tick: {metadata!r}"
+        )
+        assert response["trades_fetched_at_stamped"] == 1
+
+    @pytest.mark.asyncio
+    async def test_the_module_key_set_is_the_closed_set(self):
+        assert cron_mod._CRON_SYNC_HEARTBEAT_METADATA_KEYS == _HEARTBEAT_KEYS
+        assert isinstance(cron_mod._CRON_SYNC_HEARTBEAT_METADATA_KEYS, frozenset)
+        assert cron_mod.CRON_SYNC_CRON_NAME == "cron_sync"
+
+    @pytest.mark.asyncio
+    async def test_the_no_keys_early_return_writes_one_error_row(self):
+        """PR-B round 1 ME-03 (this arm used to expect `ok`, which was the
+        defect). The cron is registered only where strategy-backed keys exist, so
+        a tick that found NONE fetched nothing and must not look like a healthy
+        day. `cron_runs.status` admits only running/ok/error, so the distinct
+        reading lives in the error text and the counters."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(keys_data=[])
+        await _drive_heartbeat_run(mock_supabase)
+
+        assert len(mock_supabase.cron_runs_inserts) == 1
+        row = mock_supabase.cron_runs_inserts[0]
+        assert row["status"] == "error", row
+        assert "no_strategy_backed_keys" in row["error"], row["error"]
+        assert row["metadata"]["total_keys"] == 0
+
+    @pytest.mark.asyncio
+    async def test_the_all_skipped_early_return_writes_one_error_row_naming_the_skips(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_allocator_only_key("a", "okx"), _allocator_only_key("b", "okx")],
+        )
+        await _drive_heartbeat_run(mock_supabase)
+
+        assert len(mock_supabase.cron_runs_inserts) == 1
+        row = mock_supabase.cron_runs_inserts[0]
+        assert row["status"] == "error", row
+        assert "no_strategy_backed_keys" in row["error"], row["error"]
+        assert "skipped_no_strategy=2" in row["error"], row["error"]
+        assert row["metadata"]["skipped_no_strategy"] == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("scenario", ["failed", "revoked", "timed_out", "error_field"])
+    async def test_a_run_reporting_a_problem_writes_an_error_row_naming_counters(
+        self, scenario
+    ):
+        """`failed`, `timed_out` or `revoked` above 0, or any top-level `*_error`
+        field, is an `error` row. The summary names counters and field NAMES, never
+        an id, a URL or the exception text a venue put in the key result (a venue
+        error string can carry a request URL)."""
+        secret_text = "https://api.example.invalid/v5/private?apiKey=abc123"
+        key_id = "key-with-a-recognisable-id"
+        fetch_mock = AsyncMock(return_value=[{"id": "t1"}])
+        kwargs: dict[str, Any] = {}
+        spy = _VenueSpy()
+        if scenario == "failed":
+            fetch_mock = AsyncMock(side_effect=RuntimeError(f"GET {secret_text} failed"))
+        elif scenario == "revoked":
+            key_id = "revoked-key-with-a-recognisable-id"
+        elif scenario == "timed_out":
+            async def _slow(*_a: Any, **_k: Any) -> list[dict[str, Any]]:
+                import asyncio as _asyncio
+                await _asyncio.sleep(5)
+                return []
+            fetch_mock = AsyncMock(side_effect=_slow)
+        elif scenario == "error_field":
+            kwargs["trades_select_error"] = RuntimeError(f"read failed at {secret_text}")
+
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key(key_id, "okx")], **kwargs
+        )
+        _wire_allocator_holdings_empty(mock_supabase)
+        if scenario == "timed_out":
+            with patch.object(cron_mod, "KEY_SYNC_TIMEOUT", 0.05):
+                response = await _drive_heartbeat_run(
+                    mock_supabase, fetch_mock=fetch_mock, spy=spy
+                )
+        else:
+            response = await _drive_heartbeat_run(
+                mock_supabase, fetch_mock=fetch_mock, spy=spy
+            )
+
+        counter = {
+            "failed": "failed",
+            "revoked": "revoked",
+            "timed_out": "timed_out",
+            "error_field": None,
+        }[scenario]
+        if counter:
+            assert response[counter] == 1, response
+        assert len(mock_supabase.cron_runs_inserts) == 1
+        row = mock_supabase.cron_runs_inserts[0]
+        assert row["status"] == "error", row
+        summary = row["error"]
+        assert isinstance(summary, str) and summary
+        if counter:
+            assert f"{counter}=1" in summary, summary
+        else:
+            assert "strategy_high_water_lookup_error" in summary, summary
+        for forbidden in (key_id, "https", "apiKey", "abc123", "example.invalid"):
+            assert forbidden not in summary, (forbidden, summary)
+        assert all(
+            isinstance(v, (int, float)) for v in row["metadata"].values()
+        ), row["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_extra_response_content_never_reaches_the_row(self):
+        """The recorder reads the closed key set off the response and nothing
+        else: a response carrying ids, a URL-bearing error and a nested results
+        list leaks none of it into the row."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(keys_data=[])
+        response = {
+            "synced": 2,
+            "failed": 0,
+            "total_keys": 2,
+            "skipped_no_strategy": 1,
+            "duration_s": 1.5,
+            "results": [{"key_id": "k-secret-id", "error": "https://x.invalid/p?k=1"}],
+            "strategy_cursor_lookup_error": "APIError: https://x.invalid/rest/v1/y",
+            "some_label": "k-secret-id",
+        }
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase):
+            await cron_mod._record_cron_sync_run(
+                response, datetime.now(timezone.utc)
+            )
+
+        (row,) = mock_supabase.cron_runs_inserts
+        assert set(row["metadata"]) <= _HEARTBEAT_KEYS
+        assert row["metadata"] == {
+            "synced": 2,
+            "failed": 0,
+            "total_keys": 2,
+            "skipped_no_strategy": 1,
+            "duration_s": 1.5,
+        }
+        assert row["status"] == "error"
+        flat = repr(row)
+        for forbidden in ("k-secret-id", "x.invalid", "https"):
+            assert forbidden not in flat, (forbidden, flat)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["raises", "no_rows", "times_out"])
+    async def test_a_failing_insert_never_changes_the_return_value(self, mode, caplog):
+        """The recorder is invisible to the route: the same run with a working
+        insert and with a broken one returns byte-equal bodies (durations
+        zeroed, since two runs cannot share a stopwatch)."""
+
+        def _fixture() -> MagicMock:
+            kwargs: dict[str, Any] = {}
+            if mode == "raises":
+                kwargs["cron_runs_insert_error"] = RuntimeError("insert refused")
+            elif mode == "no_rows":
+                kwargs["cron_runs_insert_returns_no_rows"] = True
+            sb = _make_mock_supabase_for_cron_sync(
+                keys_data=[_strategy_key("live", "okx")], **kwargs
+            )
+            if mode == "times_out":
+                real_table = sb.table.side_effect
+
+                def _blocking_table(name: str) -> Any:
+                    if name != "cron_runs":
+                        return real_table(name)
+                    t = MagicMock()
+
+                    def _insert(_payload: Any) -> Any:
+                        import time as _time
+                        ins = MagicMock()
+                        ins.execute.side_effect = lambda: _time.sleep(0.5)
+                        return ins
+
+                    t.insert.side_effect = _insert
+                    return t
+
+                sb.table.side_effect = _blocking_table
+            return sb
+
+        good = await _drive_heartbeat_run(
+            _make_mock_supabase_for_cron_sync(keys_data=[_strategy_key("live", "okx")])
+        )
+        cron_mod._key_validation_cache.clear()
+        with patch.object(cron_mod, "_CRON_SYNC_HEARTBEAT_TIMEOUT_S", 0.05):
+            with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+                broken = await _drive_heartbeat_run(_fixture())
+
+        assert _without_durations(broken) == _without_durations(good)
+        if mode == "no_rows":
+            assert any(
+                "INSERT returned no rows" in r.getMessage() for r in caplog.records
+            ), [r.getMessage() for r in caplog.records]
+
+    @pytest.mark.asyncio
+    async def test_an_unavailable_client_never_changes_the_return_value(self):
+        """The recorder builds its client AFTER the body ran, so it makes the LAST
+        `get_supabase()` call of a run. A measuring run counts the calls; the real
+        run refuses exactly that last one. The return value is the same as the
+        measuring run's, and no row was written."""
+        import sys as _sys
+        import routers.portfolio as portfolio_mod
+        _sys.modules["routers.portfolio"] = portfolio_mod
+
+        async def _run(refuse_call: int | None) -> tuple[dict[str, Any], int, MagicMock]:
+            mock_supabase = _make_mock_supabase_for_cron_sync(
+                keys_data=[_strategy_key("live", "okx")],
+            )
+            calls = {"n": 0}
+
+            def _get() -> Any:
+                calls["n"] += 1
+                if refuse_call is not None and calls["n"] == refuse_call:
+                    raise RuntimeError("no client for the heartbeat")
+                return mock_supabase
+
+            spy = _VenueSpy()
+            cron_mod._key_validation_cache.clear()
+            with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+                 patch.object(cron_mod, "get_supabase", _get), \
+                 patch.object(cron_mod, "decrypt_credentials", spy.decrypt), \
+                 patch.object(cron_mod, "create_exchange", spy.create), \
+                 patch.object(cron_mod, "validate_key_permissions", spy.validate), \
+                 patch.object(
+                     cron_mod,
+                     "fetch_all_trades",
+                     AsyncMock(return_value=[{"id": "t1"}]),
+                 ), \
+                 patch.object(cron_mod, "fetch_usdt_balance", spy.balance):
+                response = await cron_mod.cron_sync()
+            return response, calls["n"], mock_supabase
+
+        measured, total_calls, measured_sb = await _run(None)
+        assert len(measured_sb.cron_runs_inserts) == 1
+        refused, _n, refused_sb = await _run(total_calls)
+
+        assert _without_durations(refused) == _without_durations(measured)
+        assert refused_sb.cron_runs_inserts == []
+
+    @pytest.mark.asyncio
+    async def test_a_missing_kek_writes_an_error_row_and_still_raises_500(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(keys_data=[])
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "get_kek", side_effect=RuntimeError("KEK missing")):
+            with pytest.raises(cron_mod.HTTPException) as excinfo:
+                await cron_mod.cron_sync()
+
+        assert excinfo.value.status_code == 500
+        (row,) = mock_supabase.cron_runs_inserts
+        assert row["status"] == "error"
+        assert row["cron_name"] == "cron_sync"
+        assert "HTTPException" in row["error"] and "500" in row["error"]
+        assert "KEK" not in row["error"], "the exception text must not ride into the row"
+        assert all(isinstance(v, (int, float)) for v in row["metadata"].values())
+
+    @pytest.mark.asyncio
+    async def test_an_api_keys_select_failure_writes_an_error_row_and_still_raises_500(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(keys_data=[])
+        real_table = mock_supabase.table.side_effect
+
+        def _table(name: str) -> Any:
+            if name == "api_keys":
+                t = MagicMock()
+                t.select.return_value.eq.return_value.is_.return_value.execute.side_effect = (
+                    RuntimeError("supabase down at https://x.invalid")
+                )
+                return t
+            return real_table(name)
+
+        mock_supabase.table.side_effect = _table
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "get_kek", return_value=b"x" * 32):
+            with pytest.raises(cron_mod.HTTPException) as excinfo:
+                await cron_mod.cron_sync()
+
+        assert excinfo.value.status_code == 500
+        (row,) = mock_supabase.cron_runs_inserts
+        assert row["status"] == "error"
+        assert "x.invalid" not in repr(row)
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_run_still_leaves_one_error_row(self):
+        """The one exit that is neither a return nor an exception: the handler
+        task is cancelled mid-run. The row is written, then the cancellation
+        propagates untouched."""
+        import asyncio as _asyncio
+
+        entered = _asyncio.Event()
+
+        async def _hang(*_a: Any, **_k: Any) -> list[dict[str, Any]]:
+            entered.set()
+            await _asyncio.sleep(30)
+            return []
+
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "okx")],
+        )
+        task = _asyncio.ensure_future(
+            _drive_heartbeat_run(mock_supabase, fetch_mock=AsyncMock(side_effect=_hang))
+        )
+        await _asyncio.wait_for(entered.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(_asyncio.CancelledError):
+            await task
+
+        (row,) = mock_supabase.cron_runs_inserts
+        assert row["status"] == "error"
+        assert "CancelledError" in row["error"]
+
+
+class TestCronSyncHeartbeatCountsEveryUnhealthyOutcome:
+    """167.1.2.2.2 PR-B round 1, SFH-M1 + ME-03.
+
+    ⛔ THE DEFECT. The heartbeat's error set was a hand-written
+    `("failed", "timed_out", "revoked")` while the route's own
+    `_NON_OK_STATUSES` also holds `transient_failure`, `partial` and `held`, and
+    its summary comment warns that "every key hit a transient validation
+    failure" must not read as idle. The heartbeat repeated that exact
+    misreading: for a week of all-transient, all-held or partial ticks,
+    `cron_runs` got `status = ok` with `error = NULL`, and its metadata did not
+    even carry `transient` or `partial`, so the booked staleness alarm could not
+    recover the count. A tick that found no strategy-backed key at all was `ok`
+    too.
+
+    The error counters are now DERIVED from `_NON_OK_STATUSES` through the status
+    registry, so the two cannot drift again; a test patches the set and watches
+    the heartbeat follow.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_all_transient_tick_is_an_error_row(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                _strategy_key("transient-1", "okx"),
+                _strategy_key("transient-2", "okx"),
+                _strategy_key("transient-3", "okx"),
+            ],
+        )
+        response = await _drive_heartbeat_run(mock_supabase)
+
+        assert response["transient"] == 3 and response["synced"] == 0, response
+        (row,) = mock_supabase.cron_runs_inserts
+        assert row["status"] == "error", row
+        assert "transient=3" in row["error"], row["error"]
+        assert row["metadata"]["transient"] == 3, (
+            "the count must be recoverable from the row by the alarm: "
+            f"{row['metadata']!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_all_held_tick_is_an_error_row(self):
+        """Real trades fetched and none stored with no per-strategy error: the
+        key is `held`, its cursor is pinned and its window grows every tick."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live-1", "okx"), _strategy_key("live-2", "okx")],
+            rpc_data=0,
+        )
+        response = await _drive_heartbeat_run(mock_supabase)
+
+        assert response["held"] == 2 and response["synced"] == 0, response
+        (row,) = mock_supabase.cron_runs_inserts
+        assert row["status"] == "error", row
+        assert "held=2" in row["error"], row["error"]
+        assert row["metadata"]["held"] == 2, row["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_a_partial_tick_is_an_error_row(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "live",
+                    "exchange": "okx",
+                    "last_sync_at": None,
+                    "strategies": [
+                        {"id": "strat-A", "status": "published"},
+                        {"id": "strat-B", "status": "published"},
+                    ],
+                }
+            ],
+        )
+
+        def _rpc(name: str, args: dict) -> Any:
+            chain = MagicMock()
+            if name == "sync_trades" and args.get("p_strategy_id") == "strat-B":
+                chain.execute.side_effect = RuntimeError("deadlock")
+            else:
+                chain.execute.return_value = MagicMock(data=1)
+            return chain
+
+        mock_supabase.rpc.side_effect = _rpc
+        response = await _drive_heartbeat_run(mock_supabase)
+
+        assert response["partial"] == 1, response
+        (row,) = mock_supabase.cron_runs_inserts
+        assert row["status"] == "error", row
+        assert "partial=1" in row["error"], row["error"]
+        assert row["metadata"]["partial"] == 1, row["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_a_tick_where_every_key_was_deferred_is_an_error_row(self):
+        """Nothing was fetched at all. `deferred` stays benign per key, but a
+        tick whose ONLY outcome is deferral ingested nothing."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live-sfox", "sfox")],
+        )
+        response = await _drive_heartbeat_run(mock_supabase)
+
+        assert response["deferred"] == 1 and response["synced"] == 0, response
+        (row,) = mock_supabase.cron_runs_inserts
+        assert row["status"] == "error", row
+        assert "no_key_synced" in row["error"], row["error"]
+        assert row["metadata"]["deferred"] == 1, row["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_a_deferred_key_beside_a_synced_one_stays_ok(self):
+        """The control: one benign deferral next to a real sync is a healthy
+        day, so the rule above is not 'any deferral is an error'."""
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "okx"), _strategy_key("live-sfox", "sfox")],
+        )
+        response = await _drive_heartbeat_run(mock_supabase)
+
+        assert response["synced"] == 1 and response["deferred"] == 1, response
+        (row,) = mock_supabase.cron_runs_inserts
+        assert row["status"] == "ok", row
+        assert row["error"] is None
+        assert row["metadata"]["deferred"] == 1, row["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_tick_is_still_ok_with_zero_counters(self):
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[_strategy_key("live", "okx")],
+        )
+        await _drive_heartbeat_run(mock_supabase)
+        (row,) = mock_supabase.cron_runs_inserts
+        assert row["status"] == "ok" and row["error"] is None, row
+        for counter in ("partial", "held", "transient", "deferred", "fetch_degraded"):
+            assert row["metadata"][counter] == 0, (counter, row["metadata"])
+
+    @pytest.mark.parametrize("status", sorted(cron_mod._NON_OK_STATUSES))
+    def test_every_non_ok_route_status_is_an_error_trigger(self, status):
+        """The heartbeat and the route agree, status by status."""
+        counter = cron_mod.SYNC_STATUS_SUMMARY_KEYS[status]
+        row = cron_mod._cron_sync_heartbeat_row(
+            {"synced": 1, "total_keys": 2, counter: 1},
+            datetime.now(timezone.utc),
+            None,
+        )
+        assert row["status"] == "error", (status, counter, row)
+        assert f"{counter}=1" in row["error"], row["error"]
+
+    @pytest.mark.asyncio
+    async def test_the_error_set_follows_the_routes_non_ok_set(self):
+        """ONE DEFINITION. Adding `deferred` to the route's `_NON_OK_STATUSES`
+        must turn the same tick that was `ok` above into an error row, with no
+        edit to the heartbeat. A hand-copied tuple would stay green here."""
+        keys = [_strategy_key("live", "okx"), _strategy_key("live-sfox", "sfox")]
+        with patch.object(
+            cron_mod, "_NON_OK_STATUSES", cron_mod._NON_OK_STATUSES | {"deferred"}
+        ):
+            mock_supabase = _make_mock_supabase_for_cron_sync(keys_data=keys)
+            await _drive_heartbeat_run(mock_supabase)
+        (row,) = mock_supabase.cron_runs_inserts
+        assert row["status"] == "error", row
+        assert "deferred=1" in row["error"], row["error"]
+
+    @pytest.mark.asyncio
+    async def test_the_metadata_key_set_covers_every_status_counter(self):
+        """A status registered in `SYNC_STATUS_SUMMARY_KEYS` always reaches the
+        row's metadata, so a new status cannot ship invisible to the alarm."""
+        assert set(cron_mod.SYNC_STATUS_SUMMARY_KEYS.values()) <= set(
+            cron_mod._CRON_SYNC_HEARTBEAT_METADATA_KEYS
+        )

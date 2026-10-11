@@ -378,6 +378,151 @@ function toFiniteMs(
   return Number.isFinite(ms) ? ms : null;
 }
 
+/**
+ * ── Phase 167.1.2.2.2 / TRADESYNC: the TRADE-FETCH arm ──────────────────────
+ *
+ * THE SUBJECT (D-07). The last SUCCESSFUL TRADE FETCH
+ * (`strategy_analytics.trades_fetched_at`), never `computed_at`. The analytics
+ * recompute can run on trades that were fetched weeks ago, so `computed_at`
+ * answers "when did we last do arithmetic" and says nothing about whether the
+ * venue's records are in. Only the daily `/cron-sync` tick writes this
+ * timestamp.
+ *
+ * THE THRESHOLD (D-05). "Stale when the last successful trade fetch is MORE
+ * THAN 2 days old." The tick runs daily, so two days is one missed tick plus
+ * slack. "More than" is a strict greater-than on elapsed milliseconds: a fetch
+ * exactly 48 h old is `current`, 48 h plus 1 ms is `stale`. The 2 is used only
+ * through this constant.
+ */
+export const TRADE_FETCH_STALE_DAYS = 2;
+
+/**
+ * The venues `/cron-sync` actually fetches trades for, i.e. the venues
+ * `fetch_daily_pnl` (analytics-service/services/exchange.py) has a branch for.
+ *
+ * Only a venue in this list can honestly be called "never fetched": for every
+ * other venue (deribit has a class in `EXCHANGE_CLASSES` but no
+ * `fetch_daily_pnl` branch; MT5, sFOX, CSV and composite are not ccxt trade
+ * fetches at all) a null timestamp is the NORMAL state, not a gap.
+ * `freshness.trade-fetch-venues.test.ts` reads the Python file and fails when
+ * the two lists drift, so adding or removing a venue branch there forces a
+ * decision here (T-167.1.2.2.2-28).
+ */
+export const TRADE_FETCH_VENUES = ["okx", "bybit", "binance"] as const;
+
+/**
+ * What a trade-fetch timestamp says, as the ONE verdict every surface renders.
+ *
+ *   `current`        — fetched, and not more than TRADE_FETCH_STALE_DAYS ago.
+ *   `stale`          — fetched, and more than TRADE_FETCH_STALE_DAYS ago. This
+ *                      is the existing red stale token on the same ladder
+ *                      (`FRESHNESS_COLORS.stale`), and it means two or more
+ *                      daily ticks have failed to record a fetch (F4).
+ *   `never`          — no fetch recorded for a venue the cron does fetch.
+ *   `future`         — the timestamp is ahead of now beyond clock skew: a
+ *                      corrupt write, neither a freshness nor a staleness claim.
+ *   `not_applicable` — no claim can be made (unparseable input, or a null
+ *                      timestamp for a venue the cron never fetches).
+ */
+export type TradeFetchState =
+  | "current"
+  | "stale"
+  | "never"
+  | "future"
+  | "not_applicable";
+
+export interface TradeFetchVerdict {
+  state: TradeFetchState;
+  /** The parsed instant; `null` when the input was null or unparseable. */
+  fetchedAt: Date | null;
+}
+
+/**
+ * Unparseable values already reported, so one corrupt row warns once rather
+ * than once per render (the `deriveSegmentMarkers` malformed-shape idiom, with
+ * the once-only added because this runs per row of a list).
+ */
+const warnedUnparseableTradeFetch = new Set<string>();
+
+/**
+ * Classify a trade-fetch timestamp. THE one classifier: the SyncBadge, the
+ * factsheet trade-fetch line and the tearsheet all import this, and nothing
+ * else compares the timestamp itself.
+ *
+ * ⛔ WHY ONE EXPORTED FUNCTION AND NOT A LINT. The
+ * `quantalyze/no-raw-staleness-derivation` rule only matches `last_sync_at`
+ * text, so it cannot see a comparison against `trades_fetched_at`. The
+ * compensating control is this single resolver plus a pin (plan 11) that no
+ * other file does that comparison.
+ *
+ * ⛔ NOT `computeFreshness`. That ladder is 12 h / 48 h for a job that should
+ * run many times a day. This tick is daily, so a healthy fetch is routinely
+ * 20+ hours old and would read amber for half of every day.
+ *
+ * ⛔ THE SKEW TOLERANCE IS MINUTES, NOT THE SERIES ARM'S DAY. `trades_fetched_at`
+ * is an INSTANT written by our own pipeline (like `computed_at`), not a UTC
+ * DATE like `series_end`, so the allowance for two server clocks drifting is
+ * `CLOCK_SKEW_TOLERANCE_MINUTES`. A day of grace here would launder a corrupt
+ * write into a "current" claim (T-167.1.2.2.2-27).
+ *
+ * Rules, in order:
+ *   1. non-null and unparseable            -> `not_applicable` (warn once).
+ *   2. ahead of now by more than the skew  -> `future`.
+ *   3. older than TRADE_FETCH_STALE_DAYS   -> `stale`.
+ *   4. non-null otherwise                  -> `current`.
+ *   5. null, venue in TRADE_FETCH_VENUES   -> `never`.
+ *   6. null otherwise                      -> `not_applicable`.
+ *
+ * A non-null `tradesFetchedAt` is authoritative whatever the venue says (only
+ * the cron writes it); the venue only separates the two null cases.
+ *
+ * ⚠️ F2 — the state is NAMED `never` but the COPY for it must be "No trade
+ * fetch recorded yet", never "Trades not yet fetched". A strategy can hold
+ * years of historical trades (CSV upload, earlier sync) and still carry a null
+ * timestamp until the first tick, so "not yet fetched" would be a false claim
+ * on a public factsheet.
+ *
+ * ⚠️ F3 — `venue` comes ONLY from the strategy's api-key exchange, never from
+ * `supported_exchanges`. A CSV strategy that declares okx there has no api key
+ * and no cron fetch, so it must resolve `not_applicable`; passing the declared
+ * list would stamp it "no trade fetch recorded".
+ */
+export function resolveTradeFetch(
+  tradesFetchedAt: Date | string | number | null | undefined,
+  venue: string | null | undefined,
+  now: Date = new Date(),
+): TradeFetchVerdict {
+  if (tradesFetchedAt == null) {
+    const isFetchedVenue =
+      typeof venue === "string" &&
+      (TRADE_FETCH_VENUES as readonly string[]).includes(venue.toLowerCase());
+    return { state: isFetchedVenue ? "never" : "not_applicable", fetchedAt: null };
+  }
+
+  const ms = toFiniteMs(tradesFetchedAt);
+  if (ms === null) {
+    const key = String(tradesFetchedAt);
+    if (!warnedUnparseableTradeFetch.has(key)) {
+      warnedUnparseableTradeFetch.add(key);
+      console.warn(
+        "[freshness] resolveTradeFetch — trades_fetched_at is not a parseable instant; making no claim",
+        { value: key },
+      );
+    }
+    return { state: "not_applicable", fetchedAt: null };
+  }
+
+  const fetchedAt = new Date(ms);
+  const elapsedMs = now.getTime() - ms;
+  if (-elapsedMs > CLOCK_SKEW_TOLERANCE_MINUTES * 60 * 1000) {
+    return { state: "future", fetchedAt };
+  }
+  if (elapsedMs > TRADE_FETCH_STALE_DAYS * 24 * 60 * 60 * 1000) {
+    return { state: "stale", fetchedAt };
+  }
+  return { state: "current", fetchedAt };
+}
+
 /** Short human-readable label for badges ("Fresh", "Warm", "Stale"). */
 export function freshnessLabel(freshness: Freshness): string {
   switch (freshness) {

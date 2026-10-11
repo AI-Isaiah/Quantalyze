@@ -791,6 +791,7 @@ export default async function StrategiesPage() {
           >
             <p className="text-caption font-normal text-text-muted">{line.caption}</p>
             <AllocatorSyncStatus
+              subject="strategy-key"
               syncStatus={line.status}
               syncError={line.first.sync_error}
               lastSyncAt={line.first.last_sync_at}

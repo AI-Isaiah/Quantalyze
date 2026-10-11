@@ -6,7 +6,7 @@ import random
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal, TypedDict
+from typing import Any, Final, Literal, TypedDict
 
 from supabase import Client
 
@@ -832,6 +832,18 @@ EXCHANGE_CLASSES: dict[str, type] = {
     "deribit": ccxt.deribit,   # Phase 06 — D-17 exchange coverage; derivative-side only per f3 Path B
 }
 
+# 167.1.2.2.2 PR-B round 1 (ME-01) — THE VENUES `fetch_daily_pnl` HAS A BRANCH FOR.
+# `EXCHANGE_CLASSES` is "venues ccxt can talk to"; this is the narrower "venues
+# the cron's daily-P&L fetch can READ". Deribit is in the first and not the
+# second (its realized returns come from the txn-log ledger in
+# `services/job_worker.py`, never from `fetch_all_trades`). The cron tick
+# consults THIS set before any venue call, because a venue with no branch used to
+# return `[]` with no error flag, which the tick read as a successful idle fetch
+# and STAMPED. `tests/test_cron_router.py` pins the set to the `exchange.id ==`
+# chain below, and `src/lib/freshness.trade-fetch-venues.test.ts` pins the
+# TypeScript list to the same chain.
+DAILY_PNL_VENUES: Final[frozenset[str]] = frozenset({"okx", "binance", "bybit"})
+
 
 def create_exchange(exchange_name: str, api_key: str, api_secret: str, passphrase: str | None = None) -> ccxt.Exchange:
     """Create a CCXT exchange instance with read-only credentials."""
@@ -1498,10 +1510,12 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                 logger.info("OKX: skipping archive API (since_ms is within 3 months)")
             else:
                 logger.info("OKX: fetching archive API for older history...")
+                OKX_ARCHIVE_PAGE_CAP = 100
                 for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
                     after_id = ""
                     type_count = 0
-                    for page in range(100):
+                    _okx_archive_cap_hit = False
+                    for page in range(OKX_ARCHIVE_PAGE_CAP):
                         params = {"instType": inst_type, "limit": "100"}
                         if since_ms:
                             params["begin"] = str(since_ms)
@@ -1523,6 +1537,11 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                             after_id = data[-1].get("billId", "")
                             if len(data) < 100:
                                 break
+                            # 167.1.2.2.2 PR-B round 1 (ME-02): the archive walk
+                            # had a silent cap. OKX pages newest-first, so a
+                            # capped walk drops the OLDEST days of the window.
+                            if page == OKX_ARCHIVE_PAGE_CAP - 1:
+                                _okx_archive_cap_hit = True
                         except Exception as e:
                             # NEW-C13-04: same rationale as the bills path.
                             # NEW-C13-10: scrub before logging.
@@ -1534,6 +1553,13 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                             raise
                     if type_count > 0:
                         logger.info("OKX archive %s: fetched %d bills", inst_type, type_count)
+                    if _okx_archive_cap_hit:
+                        logger.warning(
+                            "OKX archive %s: page cap (%d) hit — daily_pnl "
+                            "may be truncated for this inst_type",
+                            inst_type, OKX_ARCHIVE_PAGE_CAP,
+                        )
+                        _record_dq_flag("daily_pnl_truncated_okx", True)
 
             # Merge recent + archive and deduplicate by billId
             merged_bills = all_bills + archive_bills
@@ -2014,6 +2040,22 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                 # `RateLimitExceeded` keeps re-raising above, unchanged, so the
                 # `_stamp_429` path is untouched.
                 _record_dq_flag("daily_pnl_fetch_error", True)
+                _record_dq_flag("daily_pnl_fetch_error_class", type(exc).__name__)
+
+        else:
+            # 167.1.2.2.2 PR-B round 1 (ME-01): a venue with no branch used to fall
+            # straight through to `return daily_pnl` with an EMPTY list and no
+            # flag, indistinguishable from an account that simply had nothing to
+            # report. Fail CLOSED: the error flag is what every caller already
+            # reads as "do not treat this as a complete, idle window", and the
+            # specific flag names the cause.
+            logger.warning(
+                "fetch_daily_pnl: no daily-PnL branch for exchange %r — returning "
+                "an empty series flagged as a fetch error, not as an idle window",
+                getattr(exchange, "id", None),
+            )
+            _record_dq_flag("daily_pnl_fetch_error", True)
+            _record_dq_flag("daily_pnl_unsupported_venue", True)
 
     except Exception as e:
         # NEW-C13-07: stamp a DQ flag before returning the partial series.
@@ -2025,6 +2067,10 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
             type(e).__name__, scrub_freeform_string(str(e)),
         )
         _record_dq_flag("daily_pnl_fetch_error", True)
+        # 167.1.2.2.2 PR-B round 1 SFH-H1: the exception CLASS NAME only, so the
+        # cron envelope can say WHAT crashed. Never the message: a ccxt message
+        # can carry a signed request URL.
+        _record_dq_flag("daily_pnl_fetch_error_class", type(e).__name__)
 
     return daily_pnl
 

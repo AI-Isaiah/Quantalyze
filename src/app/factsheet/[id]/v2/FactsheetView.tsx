@@ -14,6 +14,7 @@ import {
   SERIES_STALE_DAYS,
   SERIES_END_FUTURE_ALLOWANCE_DAYS,
 } from "@/lib/freshness";
+import { TradeFetchLineView, UnrecoveredGapLines, formatIsoDate } from "../trade-fetch-lines";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
@@ -1262,6 +1263,21 @@ function FactsheetHeader({
           <div>
             <FreshnessChip computedAt={payload.computedAt} seriesDates={payload.dates} />
             <SeriesRecencyLine seriesDates={payload.dates} />
+            {/* Phase 167.1.2.2.2 (TRADESYNC, D-06/D-10): the last successful
+                trade fetch, a sentence of its own directly after the series
+                line, shown to EVERY viewer (anon on a published strategy,
+                allocator, owner) and not hidden in print. NOT inside
+                FreshnessChip: its "Computed" eyebrow names `computed_at`
+                correctly and was never a "Synced" claim. */}
+            <TradeFetchLine
+              tradesFetchedAt={payload.tradesFetchedAt}
+              tradeFetchVenue={payload.tradeFetchVenue}
+            />
+            {/* D-02 / F1: each named unrecovered gap, newest first, directly
+                after the trade-fetch line. A statement about the whole record,
+                so it sits in the header (what survives printing), not in the
+                chart seam. Server truth only (`payload.unrecoveredGaps`). */}
+            <UnrecoveredGapLines gaps={payload.unrecoveredGaps} />
           </div>
           {payload.aum != null && (
             <CapacityChip
@@ -1561,6 +1577,32 @@ function SeriesRecencyLine({ seriesDates }: { seriesDates: string[] }) {
   if (!end) return null;
   return (
     <p className="mt-1 text-caption text-text-muted">Track record through {end.formatted}</p>
+  );
+}
+
+/**
+ * Trade-fetch line - Phase 167.1.2.2.2 (TRADESYNC), D-06 / D-07 / D-10.
+ *
+ * The sentence, its copy and its verdict live in `../trade-fetch-lines.tsx`
+ * (`TradeFetchLineView`), shared with the printed tear sheet. This wrapper owns
+ * the one thing that needs a hook: `now` comes from a `useState` initialiser
+ * (the `FreshnessChip` precedent), so render stays pure and the line cannot
+ * flicker between server and client by a clock read during render.
+ */
+function TradeFetchLine({
+  tradesFetchedAt,
+  tradeFetchVenue,
+}: {
+  tradesFetchedAt: string | null;
+  tradeFetchVenue: string | null;
+}) {
+  const [nowMs] = React.useState(() => Date.now());
+  return (
+    <TradeFetchLineView
+      tradesFetchedAt={tradesFetchedAt}
+      tradeFetchVenue={tradeFetchVenue}
+      nowMs={nowMs}
+    />
   );
 }
 
@@ -2860,14 +2902,6 @@ function FactsheetFooter({
 // pct / num are imported from "./format" at the top of this file (the strip's five toned cells use display-sign).
 // (IMPORTANT-1/FINDING-8 — b06-codereview/silentfailure): removed private
 // copies to ensure a single implementation is tested by audit-c20.test.ts.
-
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
-
-function formatIsoDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
-}
 
 function isoToYmd(iso: string): string {
   const d = new Date(iso);

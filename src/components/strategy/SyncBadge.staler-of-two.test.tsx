@@ -19,6 +19,17 @@
  * from production on 2026-08-26, so that gate now guards ZERO rows on this
  * surface. Every fixture below is `status: "published", is_example: false` —
  * a test written against the example gate would be vacuous by construction.
+ *
+ * ── REBASED BY PHASE 167.1.2.2.2 / TRADESYNC (SC-4, D-07, D-14) ─────────────
+ * The badge no longer says "Synced" and no longer reads `computed_at`: its
+ * subject is the last TRADE FETCH (`tradesFetchedAt`), staler-of-two against
+ * the series end. Every case below keeps the PROPERTY it always pinned — the
+ * staler of the two facts binds, and the sentence names its subject — with
+ * the retired "sync" fact replaced by the trade-fetch fact the same inputs now
+ * produce. The WR-06 / WR-06-UTC series-arm cases pass a recent fetch so the
+ * series half is what is under test. `SyncBadge.trade-fetch.test.tsx` owns
+ * the trade-fetch states themselves. The RED transcripts in the comments
+ * below are frozen records of the pre-rebase badge and are left unedited.
  */
 
 import { describe, it, expect } from "vitest";
@@ -42,82 +53,141 @@ function dotClass(container: HTMLElement): string {
   return dot!.className;
 }
 
-describe("SyncBadge — buckets on the staler of sync- and series-recency", () => {
-  it("Test 1: a fresh job over a 112-day-dead series reads the SERIES, not the sync", () => {
-    // The exact production shape: computed 7h ago, series ended 112d ago.
+describe("SyncBadge — buckets on the staler of trade-fetch and series-recency", () => {
+  it("Test 1: a current fetch over a 112-day-dead series reads the SERIES, not the fetch", () => {
+    // The exact production shape: a recent job over a dead track record. The
+    // recent fact here is the trade fetch, 7h ago.
     const { container } = render(
-      <SyncBadge computedAt={agoIso(7 * HOUR)} seriesEnd={agoIso(112 * DAY)} />,
+      <SyncBadge
+        computedAt={agoIso(7 * HOUR)}
+        seriesEnd={agoIso(112 * DAY)}
+        tradesFetchedAt={agoIso(7 * HOUR)}
+        tradeFetchVenue="okx"
+      />,
     );
 
     // The dot buckets on the 112-day fact, not the 7-hour one.
     expect(dotClass(container)).toContain("bg-negative");
     // And the copy NAMES the subject that carried it there, mirroring
-    // FreshnessChip's "Track record · old" — a stale dot beside "Synced 7h ago"
-    // would merely relocate the contradiction into the same badge.
+    // FreshnessChip's "Track record · old" — a stale dot beside a fresh-fetch
+    // sentence would merely relocate the contradiction into the same badge.
     expect(container.textContent).toMatch(/Track record/i);
-    // The false claim is GONE, not merely recoloured.
+    // The recency claim is GONE, not merely recoloured.
     expect(container.textContent).not.toMatch(/Synced/);
+    expect(container.textContent).not.toMatch(/Trades fetched/);
   });
 
-  it("Test 2: when the SYNC is the staler fact, the sync-keyed form is unchanged", () => {
-    // computedAt 3d ago (stale on the 12h/48h ladder), series 1d ago.
+  it("Test 2: when the TRADE FETCH is the staler fact, the trade-keyed form binds", () => {
+    // Fetch 3d ago (stale past the 2-day rule), series 1d ago.
     const { container } = render(
-      <SyncBadge computedAt={agoIso(3 * DAY)} seriesEnd={agoIso(1 * DAY)} />,
+      <SyncBadge
+        computedAt={agoIso(3 * DAY)}
+        seriesEnd={agoIso(1 * DAY)}
+        tradesFetchedAt={agoIso(3 * DAY)}
+        tradeFetchVenue="okx"
+      />,
     );
 
-    expect(container.textContent).toMatch(/Synced 3d ago/);
+    expect(container.textContent).toMatch(/Trades fetched 3d ago/);
+    expect(container.textContent).toMatch(/stale/);
     expect(container.textContent).not.toMatch(/Track record/i);
     expect(dotClass(container)).toContain("bg-negative");
   });
 
-  it("Test 2b: a healthy row keeps its fresh dot and its sync-keyed copy", () => {
+  it("Test 2b: a healthy row keeps its fresh dot and its trade-keyed copy", () => {
     // No regression on the rows that are actually fine — without this, a fix
     // that simply capped everything below fresh would pass Tests 1 and 3.
     const { container } = render(
-      <SyncBadge computedAt={agoIso(2 * HOUR)} seriesEnd={agoIso(1 * DAY)} />,
+      <SyncBadge
+        computedAt={agoIso(2 * HOUR)}
+        seriesEnd={agoIso(1 * DAY)}
+        tradesFetchedAt={agoIso(2 * HOUR)}
+        tradeFetchVenue="okx"
+      />,
     );
 
-    expect(container.textContent).toMatch(/Synced 2h ago/);
+    expect(container.textContent).toMatch(/Trades fetched 2h ago/);
     expect(dotClass(container)).toContain("bg-positive");
   });
 
-  it("Test 3: an UNKNOWN series end caps 'fresh' — it cannot support a freshness claim", () => {
+  it("Test 3: an UNKNOWN series end does not suppress a recorded fetch, and invents no series claim", () => {
+    // ⚠️ THE OLD PROPERTY WAS RETIRED, NOT PRESERVED: "an unknown series end
+    // caps `fresh` at `warm`" was a rule about the JOB (a fresh job over an
+    // unknown track is no evidence of a live strategy). The UI-SPEC badge
+    // states replace it: a fetch the cron recorded is a claim about the FETCH
+    // and says so by name, and a series end that cannot be resolved binds
+    // nothing. The badge no longer says anything a reader could take for a
+    // claim about the strategy's track record.
     const { container } = render(
-      <SyncBadge computedAt={agoIso(2 * HOUR)} seriesEnd={null} />,
+      <SyncBadge
+        computedAt={agoIso(2 * HOUR)}
+        seriesEnd={null}
+        tradesFetchedAt={agoIso(2 * HOUR)}
+        tradeFetchVenue="okx"
+      />,
     );
 
-    // Mirrors FreshnessChip's TONE_RANK, where `unknown` sits ABOVE `fresh`.
-    expect(dotClass(container)).not.toContain("bg-positive");
-    // …but it is not a stale CLAIM either — the job really did run 2h ago.
-    expect(dotClass(container)).toContain("bg-amber-400");
-    expect(container.textContent).toMatch(/Synced 2h ago/);
+    expect(container.textContent).toMatch(/Trades fetched 2h ago/);
+    expect(container.textContent).not.toMatch(/Track record/i);
   });
 
-  it("Test 3b: an UNKNOWN series end never ERASES a known-bad sync age", () => {
-    // TONE_RANK's other half: `unknown` sits BELOW `stale`/`old`. Letting a
-    // mere absence of series data soften a definite 5-day-old job would trade
-    // a fact for a shrug.
+  it("Test 3b: an UNKNOWN series end never ERASES a known-bad fetch age", () => {
+    // The other half: a definite bad age is evidence we HAVE, and a mere
+    // absence of series data must not soften it.
     const { container } = render(
-      <SyncBadge computedAt={agoIso(5 * DAY)} seriesEnd={null} />,
+      <SyncBadge
+        computedAt={agoIso(5 * DAY)}
+        seriesEnd={null}
+        tradesFetchedAt={agoIso(5 * DAY)}
+        tradeFetchVenue="okx"
+      />,
     );
 
     expect(dotClass(container)).toContain("bg-negative");
-    expect(container.textContent).toMatch(/Synced 5d ago/);
+    expect(container.textContent).toMatch(/Trades fetched 5d ago/);
   });
 
   it("Test 3c: an unparseable series end is treated as unknown, never as fine", () => {
-    const { container } = render(
-      <SyncBadge computedAt={agoIso(2 * HOUR)} seriesEnd="not-a-date" />,
+    // With a recorded fetch, the fetch sentence stands and the unreadable
+    // series end adds no claim. With NO trade claim either, nothing renders —
+    // it must not become a green "Track record" line.
+    const withFetch = render(
+      <SyncBadge
+        computedAt={agoIso(2 * HOUR)}
+        seriesEnd="not-a-date"
+        tradesFetchedAt={agoIso(2 * HOUR)}
+        tradeFetchVenue="okx"
+      />,
     );
+    expect(withFetch.container.textContent).not.toMatch(/Track record/i);
+    withFetch.unmount();
 
-    expect(dotClass(container)).not.toContain("bg-positive");
+    const noClaim = render(
+      <SyncBadge
+        computedAt={agoIso(2 * HOUR)}
+        seriesEnd="not-a-date"
+        tradesFetchedAt={null}
+        tradeFetchVenue={null}
+      />,
+    );
+    expect(noClaim.container.textContent).toBe("");
   });
 
-  it("Test 4: a null computedAt still renders nothing — the early return survives", () => {
+  it("Test 4: a null computedAt no longer erases the badge — it drives nothing (D-07)", () => {
+    // The old early return on a missing `computedAt` is GONE on purpose: the
+    // trade fetch is the subject now, so a strategy whose analytics never ran
+    // (or failed) but whose trades are fetched still has a real fetch date.
     const { container } = render(
-      <SyncBadge computedAt={null} seriesEnd={agoIso(112 * DAY)} />,
+      <SyncBadge
+        computedAt={null}
+        seriesEnd={agoIso(112 * DAY)}
+        tradesFetchedAt={agoIso(2 * HOUR)}
+        tradeFetchVenue="okx"
+      />,
     );
-    expect(container.textContent).toBe("");
+    // The dead series still binds over the current fetch.
+    expect(container.textContent).toMatch(/Track record ends 112d ago/);
+    expect(dotClass(container)).toContain("bg-negative");
   });
 });
 
@@ -194,7 +264,12 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
 
   it("WR-06: a future series end is never painted as the worst case", () => {
     const { container } = render(
-      <SyncBadge computedAt={agoIso(2 * HOUR)} seriesEnd={futureIso(2)} />,
+      <SyncBadge
+        computedAt={agoIso(2 * HOUR)}
+        seriesEnd={futureIso(2)}
+        tradesFetchedAt={agoIso(2 * HOUR)}
+        tradeFetchVenue="okx"
+      />,
     );
 
     // A date we cannot have observed yet is not evidence of a DEAD strategy.
@@ -205,7 +280,12 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
 
   it("WR-06: the dot and the sentence never describe one date two ways", () => {
     const { container } = render(
-      <SyncBadge computedAt={agoIso(2 * HOUR)} seriesEnd={futureIso(2)} />,
+      <SyncBadge
+        computedAt={agoIso(2 * HOUR)}
+        seriesEnd={futureIso(2)}
+        tradesFetchedAt={agoIso(2 * HOUR)}
+        tradeFetchVenue="okx"
+      />,
     );
 
     // THE SELF-CONTRADICTION, pinned: "just now" is a claim of recency and it
@@ -219,7 +299,12 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
 
   it("WR-06: the badge agrees with the factsheet chip — no freshness claim, no staleness claim", () => {
     const { container } = render(
-      <SyncBadge computedAt={agoIso(2 * HOUR)} seriesEnd={futureIso(2)} />,
+      <SyncBadge
+        computedAt={agoIso(2 * HOUR)}
+        seriesEnd={futureIso(2)}
+        tradesFetchedAt={agoIso(2 * HOUR)}
+        tradeFetchVenue="okx"
+      />,
     );
 
     // ⛔ MUTED, NOT AMBER (163-REVIEW, finding 2). WR-06's first repair mapped
@@ -250,14 +335,16 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
       <SyncBadge
         computedAt={agoIso(2 * HOUR)}
         seriesEnd={new Date(Date.now() + 30_000).toISOString()}
+        tradesFetchedAt={agoIso(2 * HOUR)}
+        tradeFetchVenue="okx"
       />,
     );
 
     // Within tolerance the series is a CURRENT bar, so it neither binds nor
-    // recolours: the honest render is the sync-keyed one, in green.
+    // recolours: the honest render is the fetch-keyed one, in green.
     expect(dotClass(container)).toContain("bg-positive");
     expect(dotClass(container)).not.toContain("bg-text-muted");
-    expect(container.textContent).toMatch(/Synced 2h ago/);
+    expect(container.textContent).toMatch(/Trades fetched 2h ago/);
     expect(container.textContent).not.toMatch(/Track record/i);
   });
 
@@ -282,14 +369,16 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
       <SyncBadge
         computedAt={agoIso(2 * HOUR)}
         seriesEnd={new Date(Date.now() + HOUR).toISOString()}
+        tradesFetchedAt={agoIso(2 * HOUR)}
+        tradeFetchVenue="okx"
       />,
     );
 
     // Within the day allowance the series is a CURRENT bar: it neither binds
-    // nor recolours, and the honest render is the sync-keyed one, in green.
+    // nor recolours, and the honest render is the fetch-keyed one, in green.
     expect(dotClass(container)).toContain("bg-positive");
     expect(dotClass(container)).not.toContain("bg-text-muted");
-    expect(container.textContent).toMatch(/Synced 2h ago/);
+    expect(container.textContent).toMatch(/Trades fetched 2h ago/);
     expect(container.textContent).not.toMatch(/Track record ends in the future/i);
   });
 
@@ -315,6 +404,8 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
         computedAt={agoIso(2 * HOUR)}
         // Two days ahead is past the allowance no matter what hour it is.
         seriesEnd={new Date(Date.now() + 2 * DAY).toISOString()}
+        tradesFetchedAt={agoIso(2 * HOUR)}
+        tradeFetchVenue="okx"
       />,
     );
 
@@ -339,6 +430,8 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
       <SyncBadge
         computedAt={agoIso(2 * HOUR)}
         seriesEnd={new Date(Date.now() + 23 * HOUR).toISOString()}
+        tradesFetchedAt={agoIso(2 * HOUR)}
+        tradeFetchVenue="okx"
       />,
     );
 
@@ -351,6 +444,8 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
       <SyncBadge
         computedAt={agoIso(2 * HOUR)}
         seriesEnd={new Date(Date.now() + 25 * HOUR).toISOString()}
+        tradesFetchedAt={agoIso(2 * HOUR)}
+        tradeFetchVenue="okx"
       />,
     );
 
@@ -365,7 +460,12 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
    */
   it("WR-06 STALE CONTROL: a genuinely old series end still buckets stale", () => {
     const { container } = render(
-      <SyncBadge computedAt={agoIso(2 * HOUR)} seriesEnd={agoIso(112 * DAY)} />,
+      <SyncBadge
+        computedAt={agoIso(2 * HOUR)}
+        seriesEnd={agoIso(112 * DAY)}
+        tradesFetchedAt={agoIso(2 * HOUR)}
+        tradeFetchVenue="okx"
+      />,
     );
 
     expect(dotClass(container)).toContain("bg-negative");
@@ -374,29 +474,51 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
   });
 
   /**
-   * The one place a series verdict is allowed to override a DEFINITE bad sync
-   * age, and the reason it is allowed: `TONE_RANK` puts the chip's `future`
-   * above its `old`, because a date that has not happened impeaches the INPUT
-   * rather than merely aging it. Ranking it as a mere middle bucket would have
-   * left the badge saying "Synced 5d ago" in red where the factsheet said
-   * "Track record · future — check data" in grey — the two surfaces naming
-   * different subjects for one row.
+   * ⚠️ THE ONE PLACE A SERIES VERDICT OVERRODE A DEFINITE BAD AGE, REBASED.
+   * `TONE_RANK` puts the chip's `future` above its `old`, so a future series
+   * end used to bind even over a known-bad SYNC age. Under the trade-fetch
+   * subject the UI-SPEC precedence is explicit: a STALE FETCH ALWAYS BINDS
+   * (rule 1) — it is the D-06 claim every viewer must see, and it is the
+   * cause. So the same input pair now renders the fetch sentence, and the
+   * original property (a future series end binds over a definite bad age) is
+   * kept for the bad age that remains outrankable: a bad COMPUTE age, which no
+   * longer drives anything, moves into the tooltip.
    */
-  it("WR-06: a future series end binds even over a known-bad sync age", () => {
+  it("WR-06: a future series end binds over a bad compute age, which moves into the tooltip", () => {
     const { container } = render(
-      <SyncBadge computedAt={agoIso(5 * DAY)} seriesEnd={futureIso(2)} />,
+      <SyncBadge
+        computedAt={agoIso(5 * DAY)}
+        seriesEnd={futureIso(2)}
+        tradesFetchedAt={agoIso(2 * HOUR)}
+        tradeFetchVenue="okx"
+      />,
     );
 
     expect(dotClass(container)).toContain("bg-text-muted");
     expect(container.textContent).toMatch(/Track record ends in the future/i);
-    // The sync fact is NOT discarded — it moves into the tooltip, exactly as
+    // The compute fact is NOT discarded — it moves into the tooltip, exactly as
     // on the ordinary series arm.
     expect(container.querySelector("span")?.getAttribute("title")).toMatch(
       /Analytics last computed 5d ago/,
     );
   });
 
-  it("WR-06 CONTROL: a sync timestamp seconds in the future is CLOCK SKEW, not corruption", () => {
+  it("WR-06 (inverted by UI-SPEC rule 1): a STALE fetch outranks a future series end", () => {
+    const { container } = render(
+      <SyncBadge
+        computedAt={agoIso(2 * HOUR)}
+        seriesEnd={futureIso(2)}
+        tradesFetchedAt={agoIso(5 * DAY)}
+        tradeFetchVenue="okx"
+      />,
+    );
+
+    expect(dotClass(container)).toContain("bg-negative");
+    expect(container.textContent).toMatch(/Trades fetched 5d ago/);
+    expect(container.textContent).not.toMatch(/Track record/i);
+  });
+
+  it("WR-06 CONTROL: a fetch timestamp seconds in the future is CLOCK SKEW, not corruption", () => {
     // `computeFreshness` has tolerated <5min of writer/reader drift as `fresh`
     // since it was written, because a browser clock trailing the server's by a
     // second or two is ordinary. The copy must not contradict that verdict by
@@ -404,13 +526,15 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
     // self-contradiction for another, and would fire on real users.
     const { container } = render(
       <SyncBadge
-        computedAt={new Date(Date.now() + 3_000).toISOString()}
+        computedAt={agoIso(1 * HOUR)}
         seriesEnd={agoIso(1 * DAY)}
+        tradesFetchedAt={new Date(Date.now() + 3_000).toISOString()}
+        tradeFetchVenue="okx"
       />,
     );
 
     expect(dotClass(container)).toContain("bg-positive");
-    expect(container.textContent).toMatch(/Synced just now/);
+    expect(container.textContent).toMatch(/Trades fetched just now/);
     expect(container.textContent).not.toMatch(/in the future/i);
   });
 
@@ -440,11 +564,12 @@ describe("WR-06 — a FUTURE series end is suspicious, never 'stale just now'", 
       <StrategyTable strategies={[row]} categorySlug="crypto-sma" />,
     );
 
-    // The sync fact is the only one in question now, and it is 7h old: green,
-    // sync-keyed, and making no claim about a date it cannot have observed.
+    // The mount passes no fetch record (the fixture carries none), so only the
+    // series half speaks: tomorrow's bar is a CURRENT bar, green, and the
+    // sentence must not call it "in the future" beside that green dot.
     expect(container.querySelector(".bg-positive")).toBeTruthy();
     expect(container.querySelector(".bg-text-muted")).toBeNull();
-    expect(container.textContent).toMatch(/Synced 7h ago/);
+    expect(container.textContent).toMatch(/Track record ends just now/);
     expect(container.textContent).not.toMatch(/in the future/i);
     // The allowance is not a licence to look healthy: a dead track would still
     // bind here, which the 112-day row below proves.
@@ -525,6 +650,7 @@ function makeAnalytics(over: Partial<StrategyAnalytics>): StrategyAnalytics {
     volume_metrics: null,
     exposure_metrics: null,
     data_quality_flags: null,
+    trades_fetched_at: null,
     ...over,
   };
 }
@@ -645,9 +771,11 @@ describe("HONEST-08 — the production row, through StrategyTable and StrategyGr
 
     // THE CONTROL, and it is what stops this passing on a globally dead badge:
     // a row with the same terminal-success analytics and a LIVE series keeps
-    // its sync-keyed copy and its green dot, in the same render.
+    // its green dot, in the same render. (The fixture records no trade fetch,
+    // so the series half is what speaks; it names its subject.)
     const healthy = tableRowFor(container, HEALTHY);
-    expect(healthy.textContent).toMatch(/Synced 2h ago/);
+    expect(healthy.textContent).toMatch(/Track record ends 1d ago/);
+    expect(healthy.textContent).not.toMatch(/Synced/);
     expect(healthy.querySelector(".bg-positive")).toBeTruthy();
   });
 
@@ -661,11 +789,13 @@ describe("HONEST-08 — the production row, through StrategyTable and StrategyGr
       />,
     );
 
-    // Exactly ONE "Synced" claim across the grid, and it belongs to the row
-    // whose track record is alive.
-    expect(container.textContent?.match(/Synced/g) ?? []).toHaveLength(1);
-    expect(container.textContent).toMatch(/Synced 2h ago/);
-    expect(container.textContent).toMatch(/Track record ends/i);
+    // No "Synced" claim anywhere on the grid (D-14), and each row's sentence
+    // names the series fact it is making: the dead row's 112 days, the live
+    // row's 1 day.
+    expect(container.textContent?.match(/Synced/g) ?? []).toHaveLength(0);
+    expect(container.textContent?.match(/Track record ends/g) ?? []).toHaveLength(2);
+    expect(container.textContent).toMatch(/Track record ends 112d ago/);
+    expect(container.textContent).toMatch(/Track record ends 1d ago/);
     expect(container.querySelectorAll(".bg-positive")).toHaveLength(1);
     expect(container.querySelectorAll(".bg-negative")).toHaveLength(1);
   });

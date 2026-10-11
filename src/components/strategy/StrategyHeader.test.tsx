@@ -51,16 +51,22 @@ describe("StrategyHeader", () => {
     expect(screen.queryByText(/last synced/i)).toBeNull();
   });
 
-  it("shows sync badge for 24-48h old data", () => {
-    const oldDate = new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(); // 30h = 1d
+  // Phase 167.1.2.2.2 / D-07 — a bare `computedAt` is the ANALYTICS JOB's
+  // clock and the badge no longer claims anything from it. This header takes no
+  // analytics row, so it has neither a trade fetch nor a series end to state
+  // (it passes an explicit null for both) and therefore renders NO badge,
+  // however old `computedAt` is. REPLACES the two cases that pinned
+  // "Synced 1d ago" / "Synced 3d ago". The "Live since" line is the control
+  // that something did render beside the (absent) badge.
+  it.each([
+    ["30h (1d)", 30 * 60 * 60 * 1000],
+    ["72h (3d)", 72 * 60 * 60 * 1000],
+  ])("makes no freshness claim from a %s old computedAt", (_label, ageMs) => {
+    const oldDate = new Date(Date.now() - ageMs).toISOString();
     const { container } = render(<StrategyHeader strategy={makeStrategy()} computedAt={oldDate} />);
-    expect(container.textContent).toContain("Synced 1d ago");
-  });
-
-  it("shows sync badge for >48h old data", () => {
-    const veryOldDate = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(); // 72h = 3 days
-    const { container } = render(<StrategyHeader strategy={makeStrategy()} computedAt={veryOldDate} />);
-    expect(container.textContent).toContain("Synced 3d ago");
+    expect(container.textContent).toContain("Live since 2023-01-15");
+    expect(container.textContent).not.toMatch(/Synced|Trades fetched|No trade fetch|Track record/);
+    expect(container.querySelector("span.rounded-full")).toBeNull();
   });
 
   it("shows no indicator when computedAt is undefined", () => {

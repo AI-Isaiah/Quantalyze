@@ -138,7 +138,10 @@ function mockAdmin(strategy: unknown, error: unknown = null): SupabaseClient {
 }
 
 /** The outer signature probe (the published lane hits), carrying computed_at. */
-function mockRequestClient(computedAt: string) {
+function mockRequestClient(
+  computedAt: string,
+  tradeFacts: { trades_fetched_at?: string | null; series_provenance?: unknown } = {},
+) {
   const chain = {
     select: () => chain,
     eq: () => chain,
@@ -149,7 +152,7 @@ function mockRequestClient(computedAt: string) {
           name: "Synthetic Published",
           codename: null,
           disclosure_tier: "exploratory",
-          strategy_analytics: { computed_at: computedAt },
+          strategy_analytics: { computed_at: computedAt, ...tradeFacts },
         },
         error: null,
       }),
@@ -175,8 +178,9 @@ function findPayload(node: unknown): FactsheetPayload | null {
 async function request(
   analytics: { computed_at: string; computation_status: string; daily_returns: unknown },
   adminError: unknown = null,
+  tradeFacts: { trades_fetched_at?: string | null; series_provenance?: unknown } = {},
 ) {
-  vi.mocked(createClient).mockResolvedValue(mockRequestClient(analytics.computed_at) as never);
+  vi.mocked(createClient).mockResolvedValue(mockRequestClient(analytics.computed_at, tradeFacts) as never);
   vi.mocked(createAdminClient).mockReturnValue(mockAdmin(adminRow(analytics), adminError));
   return FactsheetV2Page({ params: Promise.resolve({ id: STRATEGY_ID }) });
 }
@@ -266,9 +270,51 @@ describe("WR-02 — the public factsheet cache is keyed by the analytics run it 
     }
   });
 
-  it("KEY SHAPE: the key is the shape version, the id and computed_at, and nothing viewer-dependent", async () => {
+  it("KEY SHAPE: the key is the shape version, the id, computed_at and the two trade-fact members, and nothing viewer-dependent", async () => {
     await request({ computed_at: T0, computation_status: "complete", daily_returns: CASH_DAILY });
-    expect(cacheKeys).toEqual([["factsheet-v2-payload-v15", STRATEGY_ID, T0]]);
+    // No stamp and no provenance on the row: both members read the literal "none".
+    expect(cacheKeys).toEqual([["factsheet-v2-payload-v16", STRATEGY_ID, T0, "none", "none"]]);
+  });
+});
+
+describe("167.1.2.2.2 plan 10 - a tick or a provenance write that leaves computed_at alone still refreshes the page", () => {
+  const RUN = { computed_at: T0, computation_status: "complete", daily_returns: CASH_DAILY };
+  const FETCH_1 = "2026-10-09T03:15:00+00:00";
+  const FETCH_2 = "2026-10-10T03:15:00+00:00";
+  const GAPS_A = { unrecovered_gaps: [{ from: "2026-05-07", to: "2026-07-08" }] };
+  const GAPS_B = { unrecovered_gaps: [{ from: "2026-05-07", to: "2026-07-09" }] };
+
+  it("TICK-MOVES-KEY: a new trades_fetched_at under the same computed_at rebuilds", async () => {
+    // The daily tick stamps trades_fetched_at and may not move computed_at; a
+    // cached page would keep saying "Last trades fetched 3 days ago" for the TTL.
+    await request(RUN, null, { trades_fetched_at: FETCH_1 });
+    await request(RUN, null, { trades_fetched_at: FETCH_2 });
+    expect(adminReads, "the second request was served from the cache").toBe(2);
+  });
+
+  it("PROVENANCE-MOVES-KEY: a runbook gap write under the same computed_at rebuilds", async () => {
+    await request(RUN, null, { trades_fetched_at: FETCH_1, series_provenance: GAPS_A });
+    await request(RUN, null, { trades_fetched_at: FETCH_1, series_provenance: GAPS_B });
+    expect(adminReads, "the second request was served from the cache").toBe(2);
+  });
+
+  it("SAME-FACTS-STILL-CACHED (control): unchanged stamp and provenance build once", async () => {
+    await request(RUN, null, { trades_fetched_at: FETCH_1, series_provenance: GAPS_A });
+    await request(RUN, null, { trades_fetched_at: FETCH_1, series_provenance: GAPS_A });
+    expect(adminReads).toBe(1);
+  });
+
+  it("the key carries the raw stamp and a short fingerprint, never the provenance JSON itself", async () => {
+    await request(RUN, null, { trades_fetched_at: FETCH_1, series_provenance: GAPS_A });
+    expect(cacheKeys).toHaveLength(1);
+    const [version, id, computed, stamp, fingerprint] = cacheKeys[0] as string[];
+    expect([version, id, computed, stamp]).toEqual([
+      "factsheet-v2-payload-v16",
+      STRATEGY_ID,
+      T0,
+      FETCH_1,
+    ]);
+    expect(fingerprint).toMatch(/^[0-9a-f]{16}$/);
   });
 });
 

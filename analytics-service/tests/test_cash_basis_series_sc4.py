@@ -772,6 +772,7 @@ def test_single_cash_settlement_persist_seam() -> None:
 from services.allocated_capital import metrics_day_basis, parse_returns_denominator_config
 from services.broker_dailies import gap_fill_daily_returns
 from services.metrics import compute_all_metrics, periods_per_year_for_asset_class
+from services.transforms import downsample_series
 from tests.test_csv_analytics_runner import (
     _ALLOC_CFG_SIMPLE_ACTIVE,
     _make_broker_supabase_mock,
@@ -919,7 +920,16 @@ async def test_broker_guard_day() -> None:
 
     Neuter: pass densify_policy="sparse" (or drop the broker reindex upstream) → the
     guard NaN is never reinstated → the headline bridges the break → the DICT-EQUAL vs
-    the dense-reindex oracle reddens."""
+    the dense-reindex oracle reddens. Neutering the runner's gap-day trim
+    (``_without_gap_day_points``) instead reddens the guard-day ABSENT assertion and
+    the trimmed chart-list comparison below, and leaves the scalar equality green.
+
+    D-16 (2026-10-10, founder, 167.1.2.2.2): the scalar byte-identity is unchanged, but
+    the oracle's dated chart lists (``returns_series``, ``drawdown_series``) are compared
+    AFTER removing the guard day's point, and its two sparklines are re-derived from
+    those trimmed lists. ``compute_all_metrics`` bridges a NaN day with a flat chart
+    point (the F3 continuity rule); a refused day stays MISSING in everything persisted
+    (D-02), so the runner drops that point at its persist boundary."""
     sb = _make_broker_supabase_mock(
         _BROKER_GUARD_DAY_ROWS, api_key_id="key-guard", asset_class="crypto",
     )
@@ -938,10 +948,34 @@ async def test_broker_guard_day() -> None:
     ).metrics_json
 
     scalar = _runner_scalar_payload(sb)
-    assert _metrics_json_equal(scalar, oracle), (
+
+    # D-16: the chart lists leave the byte-identity; they are compared trimmed below.
+    guard_day = "2024-01-03"
+    chart_keys = ("returns_series", "drawdown_series", "sparkline_returns", "sparkline_drawdown")
+    oracle_scalar = {k: v for k, v in oracle.items() if k not in chart_keys}
+    assert _metrics_json_equal(scalar, oracle_scalar), (
         "the broker guard-day scalar must be byte-identical to the dense-reindex-with-"
         "NaN legacy compute — SC-4 breach"
     )
+    # The oracle DOES carry the bridged flat point (else the trim below proves nothing).
+    assert guard_day in [p["date"] for p in oracle["returns_series"]]
+    assert guard_day in [p["date"] for p in oracle["drawdown_series"]]
+    oracle_trimmed = {
+        k: [p for p in oracle[k] if p["date"] != guard_day]
+        for k in ("returns_series", "drawdown_series")
+    }
+    oracle_trimmed["sparkline_returns"] = downsample_series(oracle_trimmed["returns_series"], 90)
+    oracle_trimmed["sparkline_drawdown"] = downsample_series(oracle_trimmed["drawdown_series"], 90)
+    assert _metrics_json_equal(scalar, oracle_trimmed), (
+        "the persisted chart lists must equal the oracle's with the guard day's point "
+        "removed and the sparklines re-derived from the trimmed lists — D-16 breach"
+    )
+    for key in ("returns_series", "drawdown_series"):
+        persisted_dates = [p["date"] for p in scalar[key]]
+        assert guard_day not in persisted_dates, (
+            f"the guarded day must be ABSENT from the persisted {key} (D-02/D-16): "
+            f"{persisted_dates!r}"
+        )
     # The persisted sparse rows EXCLUDE the guarded day; densify tag echoes broker_nan.
     cash = _runner_cash_payload(sb)
     assert cash is not None

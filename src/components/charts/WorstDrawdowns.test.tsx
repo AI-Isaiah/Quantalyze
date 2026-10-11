@@ -55,6 +55,7 @@ function makeAnalytics(
     volume_metrics: null,
     exposure_metrics: null,
     data_quality_flags: null,
+    trades_fetched_at: null,
     ...overrides,
   };
 }

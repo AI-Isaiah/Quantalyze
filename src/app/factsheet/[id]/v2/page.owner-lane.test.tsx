@@ -112,7 +112,7 @@ const OTHER_UID = "22222222-2222-4222-8222-222222222222";
  *  from the ROW's status, never from which probe matched (review WR-01), so
  *  equality between the two lists is deliberately NOT pinned anymore. */
 const SIGNATURE_SELECT =
-  "id, name, codename, disclosure_tier, strategy_analytics ( computed_at )";
+  "id, name, codename, disclosure_tier, strategy_analytics ( computed_at, trades_fetched_at, series_provenance )";
 
 /** The owner-inclusive predicate string, typed as a LITERAL. A param-keyed
  *  predicate (`user_id.eq.<route id>`) cannot produce this string. */

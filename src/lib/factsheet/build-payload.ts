@@ -242,8 +242,14 @@ export function deriveSegmentMarkers(dqf: {
   return { segmentBoundaries, missingSegments };
 }
 
-/** UTC calendar days between two YYYY-MM-DD dates, INCLUSIVE both ends. */
-function inclusiveDayCount(start: string, end: string): number {
+/**
+ * UTC calendar days between two YYYY-MM-DD dates, INCLUSIVE both ends.
+ *
+ * Exported (Phase 167.1.2.2.2 TRADESYNC plan 11) so the header's named-gap line
+ * (`UnrecoveredGapLines`) and the chart seam's `{days}d - no data` label are one
+ * arithmetic: the two can never disagree for one span.
+ */
+export function inclusiveDayCount(start: string, end: string): number {
   const s = Date.parse(`${start}T00:00:00Z`);
   const e = Date.parse(`${end}T00:00:00Z`);
   if (!Number.isFinite(s) || !Number.isFinite(e)) return 0;
@@ -527,6 +533,15 @@ type FactsheetStrategyInput = {
     types: string[];
     markets: string[];
     computedAt: string;
+    /** Phase 167.1.2.2.2 (D-06/D-07): last successful trade fetch. Optional like
+     *  `ingestSource?` / `assetClass?` (about 60 test literals and the non-strategy
+     *  callers do not carry it); the pass-through defaults an absent value to
+     *  `null`, which renders no claim. */
+    tradesFetchedAt?: string | null;
+    /** The strategy's api-key exchange (F3), never `supported_exchanges`. */
+    tradeFetchVenue?: string | null;
+    /** D-02: named unrecovered gaps, already validated by `parseUnrecoveredGaps`. */
+    unrecoveredGaps?: { from: string; to: string }[];
     trustTier: TrustTierKind | null;
     /** Origin of the daily-return series — "api" (live-ingested) or "csv"
      *  (user-uploaded). Defaults to "csv" when absent so existing callers
@@ -842,6 +857,9 @@ function buildFromBuildableSeries(
     strategyTypes: strategy.types,
     markets: strategy.markets,
     computedAt: strategy.computedAt,
+    tradesFetchedAt: strategy.tradesFetchedAt ?? null,
+    tradeFetchVenue: strategy.tradeFetchVenue ?? null,
+    unrecoveredGaps: strategy.unrecoveredGaps ?? [],
     trustTier: strategy.trustTier,
     description: strategy.description ?? null,
     subtypes: strategy.subtypes ?? [],

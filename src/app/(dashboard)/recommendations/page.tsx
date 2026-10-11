@@ -247,11 +247,18 @@ export default async function RecommendationsPage() {
   // recommended record whose series ended months ago read as current.
   const computedById = new Map<string, boolean>();
   const seriesEndById = new Map<string, string | null>();
+  // Phase 167.1.2.2.2 / SC-4, D-07 — the same read also answers "when did the
+  // cron last fetch this strategy's trades", off the column the daily
+  // `/cron-sync` tick writes. It is the cron's own record, so it is NOT gated
+  // on `computed` below: a failed analytics run says nothing about whether the
+  // venue's records came in (plan 09 preserves it on failed rows for the same
+  // reason, D-06/D-10).
+  const tradesFetchedAtById = new Map<string, string | null>();
   if (recRows.length > 0) {
     const { data: statusRows, error: statusError } = await supabase
       .from("strategy_analytics")
       .select(
-        "strategy_id, computation_status, series_end:returns_series->-1->>date",
+        "strategy_id, computation_status, trades_fetched_at, series_end:returns_series->-1->>date",
       )
       .in(
         "strategy_id",
@@ -272,9 +279,11 @@ export default async function RecommendationsPage() {
       strategy_id: string;
       computation_status: string | null;
       series_end: string | null;
+      trades_fetched_at: string | null;
     }>) {
       computedById.set(r.strategy_id, isRankableAnalyticsRow(r));
       seriesEndById.set(r.strategy_id, r.series_end ?? null);
+      tradesFetchedAtById.set(r.strategy_id, r.trades_fetched_at ?? null);
     }
   }
 
@@ -294,6 +303,7 @@ export default async function RecommendationsPage() {
       max_drawdown: number | null;
       computed_at: string | null;
       series_end: string | null;
+      trades_fetched_at: string | null;
     };
   }> = recRows.map((row) => {
     const computed = computedById.get(row.strategy_id) === true;
@@ -318,6 +328,8 @@ export default async function RecommendationsPage() {
         computed_at: computed ? (row.analytics_computed_at ?? null) : null,
         // Gated like the figures: an unverified run makes no age claim either.
         series_end: computed ? (seriesEndById.get(row.strategy_id) ?? null) : null,
+        // NOT gated on `computed` — see `tradesFetchedAtById` above.
+        trades_fetched_at: tradesFetchedAtById.get(row.strategy_id) ?? null,
       },
     };
   });
@@ -484,6 +496,7 @@ function RecommendationCard({
       max_drawdown: number | null;
       computed_at: string | null;
       series_end: string | null;
+      trades_fetched_at: string | null;
     };
   };
 }) {
@@ -515,6 +528,13 @@ function RecommendationCard({
             <SyncBadge
               computedAt={strategy.computed_at}
               seriesEnd={strategy.series_end}
+              // SC-4, D-07 — the cron's record. F3 — the venue is NULL: this
+              // read joins no `api_keys` (another manager's keys are hidden by
+              // RLS) and `supported_exchanges` is never the source. A recorded
+              // fetch time still reads current or stale; only never-fetched
+              // becomes "no claim", the cautious direction.
+              tradesFetchedAt={strategy.trades_fetched_at}
+              tradeFetchVenue={null}
             />
           </div>
           <p className="mt-2 text-sm text-text-secondary leading-relaxed">

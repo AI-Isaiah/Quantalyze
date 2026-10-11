@@ -127,9 +127,18 @@ function readChipLabel(container: HTMLElement): string {
  * The two claims both surfaces make, read out of each one's own rendered text.
  *
  * `namesTrackRecord` — is this row's freshness being reported ABOUT the track
- * record (rather than about the compute job)? The badge swaps "Synced …" for
- * "Track record ends …"; the chip swaps the `Computed ·` eyebrow for
- * `Track record ·`.
+ * record (rather than about the other fact the row carries)? The badge swaps
+ * its trade-fetch sentence ("Trades fetched …") for "Track record ends …"; the
+ * chip swaps the `Computed ·` eyebrow for `Track record ·`.
+ *
+ * ⚠️ PHASE 167.1.2.2.2 REBASE (D-14). The badge's other fact is the TRADE FETCH
+ * now, not the compute job. Both badge renders below pass a CURRENT fetch (the
+ * same instant as `computedAt`, venue okx) so that, exactly as before, the
+ * series sentence binds if and only if the series verdict is worse than the
+ * other fact — the property this file pins. Passing no fetch at all would put
+ * the badge in its "not applicable" state, where a live series end names the
+ * track record by itself and the row would disagree with the chip's job-keyed
+ * eyebrow for a reason that has nothing to do with the series ladder.
  *
  * `saysFuture` — is the date being called one we cannot have observed?
  */
@@ -140,7 +149,7 @@ interface Claims {
 
 function badgeClaims(seriesEndYmd: string, computedAt: string): Claims {
   const { container } = render(
-    <SyncBadge computedAt={computedAt} seriesEnd={seriesEndYmd} />,
+    <SyncBadge computedAt={computedAt} seriesEnd={seriesEndYmd} tradesFetchedAt={computedAt} tradeFetchVenue="okx" />,
   );
   const text = container.textContent ?? "";
   return {
@@ -324,7 +333,7 @@ describe("WR-04 — on a fractional day the badge and the chip still answer one 
       const seriesEndYmd = ymdInDays(-seriesDaysAgo);
       const computedAt = isoHoursAgo(1);
 
-      const badgeRender = render(<SyncBadge computedAt={computedAt} seriesEnd={seriesEndYmd} />);
+      const badgeRender = render(<SyncBadge computedAt={computedAt} seriesEnd={seriesEndYmd} tradesFetchedAt={computedAt} tradeFetchVenue="okx" />);
       const badgeText = badgeRender.container.textContent ?? "";
       const badge = {
         namesTrackRecord: /Track record/i.test(badgeText),
@@ -349,4 +358,144 @@ describe("WR-04 — on a fractional day the badge and the chip still answer one 
       vi.useRealTimers();
     }
   });
+});
+
+/**
+ * Phase 167.1.2.2.2 (TRADESYNC, plan 11 Task 3) — THE SAME QUESTION ABOUT THE
+ * TRADE FETCH: ONE INSTANT, BOTH SURFACES, ONE VERDICT.
+ *
+ * `trades_fetched_at` is judged by exactly one function, `resolveTradeFetch` in
+ * `src/lib/freshness.ts` (2 days, strictly "more than", D-05). The list badge
+ * (`SyncBadge`) and the factsheet header line (`TradeFetchLineView`, mounted by
+ * `FactsheetView`) both route through it. The lint rule that guards the sibling
+ * `last_sync_at` hazard cannot see this field (PATTERNS correction 1), so
+ * `freshness.single-classifier.test.ts` guards the source and THIS block guards
+ * the verdict: a fetch instant is handed, as the same string, to both surfaces
+ * at the 48 h boundary, and each is read against a HAND-TYPED expectation, never
+ * only against the other (two surfaces that broke the same way would still
+ * agree).
+ *
+ * The copy differs on purpose ("Trades fetched 2d ago · stale" vs "Stale: last
+ * trades fetched 2 days ago"), so the agreement is on two derived booleans: does
+ * the surface call the key stale, and does it paint that claim in the negative
+ * (red) token. 48 h exactly is CURRENT and 48 h + 1 ms is STALE on both; the
+ * 1 ms row is the one a surface that re-derived staleness from a whole-day count
+ * (`days > 2`) or a rounded hour count would get wrong.
+ *
+ * The clock is frozen (Date only) so "now" is the same instant for both renders
+ * and for the elapsed-time arithmetic inside the resolver.
+ */
+describe("TRADESYNC — the badge and the factsheet line answer one fetch instant the same way", () => {
+  const NOW = "2026-10-09T12:00:00.000Z";
+  // The series end and the compute stamp are held fresh and identical across
+  // rows so the trade fetch is the only thing that varies.
+  const SERIES_END = "2026-10-08";
+  const COMPUTED_AT = "2026-10-09T03:00:00.000Z";
+
+  interface FetchClaims {
+    saysStale: boolean;
+    paintedNegative: boolean;
+  }
+
+  function badgeFetchClaims(tradesFetchedAt: string): FetchClaims {
+    const { container } = render(
+      <SyncBadge
+        computedAt={COMPUTED_AT}
+        seriesEnd={SERIES_END}
+        tradesFetchedAt={tradesFetchedAt}
+        tradeFetchVenue="okx"
+      />,
+    );
+    const text = container.textContent ?? "";
+    const claims = {
+      saysStale: /\bstale\b/i.test(text),
+      paintedNegative: container.querySelector(".text-negative") !== null,
+    };
+    return claims;
+  }
+
+  function lineFetchClaims(tradesFetchedAt: string): FetchClaims {
+    const payload: FactsheetPayload = {
+      ...payloadFor(SERIES_END, COMPUTED_AT),
+      tradesFetchedAt,
+      tradeFetchVenue: "okx",
+      unrecoveredGaps: [],
+    };
+    const { container } = render(
+      <FactsheetProvider payload={payload} persist={false}>
+        <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+      </FactsheetProvider>,
+    );
+    const line = Array.from(container.querySelectorAll("header p")).find((p) =>
+      /last trades fetched/i.test(p.textContent ?? ""),
+    );
+    expect(line, "factsheet trade-fetch line did not render").toBeDefined();
+    return {
+      saysStale: /\bstale\b/i.test(line!.textContent ?? ""),
+      paintedNegative: line!.className.includes("text-negative"),
+    };
+  }
+
+  // HAND-TYPED, both columns. Every instant is relative to NOW above.
+  const FETCH_ROWS: {
+    what: string;
+    tradesFetchedAt: string;
+    saysStale: boolean;
+    paintedNegative: boolean;
+  }[] = [
+    {
+      what: "fetched 1 hour ago",
+      tradesFetchedAt: "2026-10-09T11:00:00.000Z",
+      saysStale: false,
+      paintedNegative: false,
+    },
+    {
+      what: "fetched exactly 48 h ago (D-05: not MORE than 2 days)",
+      tradesFetchedAt: "2026-10-07T12:00:00.000Z",
+      saysStale: false,
+      paintedNegative: false,
+    },
+    {
+      what: "fetched 48 h + 1 ms ago (the first stale instant)",
+      tradesFetchedAt: "2026-10-07T11:59:59.999Z",
+      saysStale: true,
+      paintedNegative: true,
+    },
+    {
+      what: "fetched 9 days ago",
+      tradesFetchedAt: "2026-09-30T12:00:00.000Z",
+      saysStale: true,
+      paintedNegative: true,
+    },
+  ];
+
+  it("CONTROL: the matrix is hand-typed, has both boundary instants, and is non-degenerate", () => {
+    expect(FETCH_ROWS).toHaveLength(4);
+    expect(FETCH_ROWS.some((r) => r.saysStale)).toBe(true);
+    expect(FETCH_ROWS.some((r) => !r.saysStale)).toBe(true);
+    // The two boundary rows differ by exactly one millisecond, so the test
+    // cannot pass on a surface that rounds.
+    const exactly = Date.parse(FETCH_ROWS[1].tradesFetchedAt);
+    const oneMsOver = Date.parse(FETCH_ROWS[2].tradesFetchedAt);
+    expect(exactly - oneMsOver).toBe(1);
+    expect(Date.parse(NOW) - exactly).toBe(48 * HOUR_MS);
+  });
+
+  it.each(FETCH_ROWS)(
+    "one fetch instant, two surfaces, one verdict — $what",
+    ({ what, tradesFetchedAt, saysStale, paintedNegative }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(NOW));
+      try {
+        const badge = badgeFetchClaims(tradesFetchedAt);
+        const line = lineFetchClaims(tradesFetchedAt);
+
+        expect(badge, `badge, ${what}`).toEqual({ saysStale, paintedNegative });
+        expect(line, `factsheet line, ${what}`).toEqual({ saysStale, paintedNegative });
+        expect(badge, `badge and factsheet line disagree about: ${what}`).toEqual(line);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 });

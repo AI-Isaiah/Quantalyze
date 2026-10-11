@@ -57,6 +57,12 @@ export function StrategyHeader({
                carry the series is the fix if this surface ever needs the
                track-record arm. */
             seriesEnd={null}
+            /* Phase 167.1.2.2.2 / SC-4 — same EXPLICIT null for the same
+               reason: no analytics row reaches this header, so it has no
+               `trades_fetched_at`, and no api-key exchange (F3: never
+               `supported_exchanges`) to name a venue. No trade claim. */
+            tradesFetchedAt={null}
+            tradeFetchVenue={null}
             exchange={strategy.supported_exchanges?.[0]}
           />
         )}

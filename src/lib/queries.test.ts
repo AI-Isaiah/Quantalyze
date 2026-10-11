@@ -46,6 +46,10 @@ const recorders = vi.hoisted(() => {
     // Records the `.select(cols)` argument used against the strategies
     // table so the path-extraction contract can assert no `select *` regressions.
     strategySelectCols: [] as string[],
+    // Phase 167.1.2.2.2 plan 09 — `getPortfolioStrategies` reads
+    // `portfolio_strategies` with a nested strategy_analytics embed that feeds
+    // the portfolio tables' SyncBadge. Records its `.select(cols)` argument.
+    portfolioSelectCols: [] as string[],
     // NEW-C03-03 regression: records `.eq(col, val)` calls on the strategies
     // table so we can assert the `status=published` predicate is always sent.
     strategyEqCalls: [] as Array<[string, unknown]>,
@@ -115,6 +119,22 @@ const buildChain = (data: unknown, recordStrategySelect = false) => {
 };
 
 /**
+ * Phase 167.1.2.2.2 plan 09 — the `portfolio_strategies` chain for
+ * `getPortfolioStrategies`: `.select(cols).eq(..).order(..)`, awaited.
+ */
+const buildPortfolioStrategiesChain = () => {
+  const chain: Record<string, unknown> = {};
+  chain.select = (cols: string) => {
+    recorders.portfolioSelectCols.push(cols);
+    return chain;
+  };
+  chain.eq = () => chain;
+  chain.order = () =>
+    Promise.resolve({ data: [], error: null });
+  return chain;
+};
+
+/**
  * Phase 13 / Plan 13-01 / DISCO-01 — Specialised chain builder for the
  * `user_favorites` table. `getMyWatchlist` calls
  * `.from("user_favorites").select("strategy_id").eq("user_id", uid)` and
@@ -161,6 +181,9 @@ vi.mock("@/lib/supabase/server", () => ({
       if (table === "user_favorites") {
         return buildFavoritesChain();
       }
+      if (table === "portfolio_strategies") {
+        return buildPortfolioStrategiesChain();
+      }
       return buildChain(
         table === "strategies" ? recorders.strategyData : recorders.managerRowData,
         table === "strategies",
@@ -204,6 +227,7 @@ import {
   getPublicStrategyDetail,
   fetchStrategyLazyMetrics,
   getMyWatchlist,
+  getPortfolioStrategies,
   getStrategyDetailV2,
   derivePhase07Fields,
   deriveStrategyLinkedKeyIds,
@@ -214,6 +238,8 @@ import {
   DERIVED_ROW_READ_FAILED,
 } from "./queries";
 import type { SupportedExchange } from "./utils";
+import { EMPTY_ANALYTICS } from "./utils";
+import type { StrategyAnalytics } from "./types";
 
 const baseStrategy = {
   id: "strat_123",
@@ -249,6 +275,7 @@ beforeEach(() => {
   recorders.favoritesSelectCalls = [];
   recorders.favoritesEqCalls = [];
   recorders.strategySelectCols = [];
+  recorders.portfolioSelectCols = [];
   recorders.strategyEqCalls = [];
   recorders.listRows = null;
   recorders.listError = null;
@@ -449,6 +476,16 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
     expect(embed).toContain("series_end:returns_series->-1->>date");
   });
 
+  it("carries trades_fetched_at as a plain column: the badge's subject, never computed_at (D-07)", async () => {
+    const { cols, embed } = await captureSelect();
+    // A plain column, no alias: it is an instant, not a JSONB path. Without it
+    // every row reaches the badge with no fetch time and the badge falls back
+    // to its series half for ALL rows, which reads as a quiet regression.
+    expect(embed.split(",").map((c) => c.trim())).toContain("trades_fetched_at");
+    // The factsheet-only provenance column must never ride the list embed.
+    expect(cols).not.toContain("series_provenance");
+  });
+
   it("carries the 3M advanced filter as an aliased JSONB key, not the blob", async () => {
     const { embed } = await captureSelect();
     // MEASURED against the TEST project 2026-08-21: this embed alias form
@@ -530,6 +567,87 @@ describe("getStrategyDetail — RANK-02 caller-scoped analytics projection", () 
       embed.split(",").map((c) => c.trim()).sort();
     expect(members(detail.embed).length).toBeGreaterThan(0);
     expect(members(detail.embed)).toEqual(members(factsheet.embed));
+  });
+});
+
+describe("PUBLIC_ANALYTICS_COLUMNS — the trade fetch time reaches every anon strategy read (D-06)", () => {
+  const captureEmbed = async (run: () => Promise<unknown>) => {
+    recorders.strategyData = { ...baseStrategy, disclosure_tier: "exploratory" };
+    await run();
+    const cols = recorders.strategySelectCols.at(-1) ?? "";
+    return { cols, embed: /strategy_analytics \(([^)]*)\)/.exec(cols)?.[1] ?? "" };
+  };
+  const members = (embed: string) => embed.split(",").map((c) => c.trim());
+
+  it("getPublicStrategyDetail projects trades_fetched_at", async () => {
+    const { cols, embed } = await captureEmbed(() => getPublicStrategyDetail("strat_123"));
+    expect(members(embed)).toContain("trades_fetched_at");
+    expect(cols).not.toContain("series_provenance");
+  });
+
+  it("getStrategyDetail (bound to the same constant) projects trades_fetched_at", async () => {
+    const { cols, embed } = await captureEmbed(() => getStrategyDetail("strat_123"));
+    expect(members(embed)).toContain("trades_fetched_at");
+    expect(cols).not.toContain("series_provenance");
+  });
+});
+
+describe("getPortfolioStrategies — the portfolio tables' badge gets the fetch time too", () => {
+  it("projects trades_fetched_at in the nested strategy_analytics embed", async () => {
+    await getPortfolioStrategies("port_1");
+    const cols = recorders.portfolioSelectCols.at(-1) ?? "";
+    const embed = /strategy_analytics \(([^)]*)\)/.exec(cols)?.[1] ?? "";
+    expect(embed.split(",").map((c) => c.trim())).toContain("trades_fetched_at");
+    expect(cols).not.toContain("series_provenance");
+  });
+});
+
+describe("shapeRowAnalytics — trades_fetched_at survives a run that produced no numbers (D-06, D-10)", () => {
+  const FETCHED = "2026-10-01T04:00:00+00:00";
+  const row = (over: Partial<StrategyAnalytics>): StrategyAnalytics => ({
+    ...EMPTY_ANALYTICS,
+    id: "an-1",
+    strategy_id: "s-1",
+    computed_at: "2026-10-09T10:00:00+00:00",
+    sharpe: 1.5,
+    trades_fetched_at: FETCHED,
+    ...over,
+  });
+
+  it.each(["failed", "pending", "computing"] as const)(
+    "a %s row keeps its real fetch date while its numbers are blanked",
+    (status) => {
+      const shaped = shapeRowAnalytics(row({ computation_status: status }), "s-1");
+      // The numbers and the compute time are blanked (a run that did not produce
+      // them); the FETCH date is a different fact and is a real one.
+      expect(shaped.sharpe).toBeNull();
+      expect(shaped.computed_at).toBe("");
+      expect(shaped.trades_fetched_at).toBe(FETCHED);
+    },
+  );
+
+  it("a failed row with no fetch recorded stays null, not undefined", () => {
+    const shaped = shapeRowAnalytics(
+      row({ computation_status: "failed", trades_fetched_at: null }),
+      "s-1",
+    );
+    expect(shaped.trades_fetched_at).toBeNull();
+  });
+
+  it("a failed row from a projection that omits the column reads null (no claim)", () => {
+    const partial = { ...row({ computation_status: "failed" }) } as Partial<StrategyAnalytics>;
+    delete partial.trades_fetched_at;
+    const shaped = shapeRowAnalytics(partial as StrategyAnalytics, "s-1");
+    expect(shaped.trades_fetched_at).toBeNull();
+  });
+
+  it("a successful row passes its fetch date through", () => {
+    const shaped = shapeRowAnalytics(row({ computation_status: "complete" }), "s-1");
+    expect(shaped.trades_fetched_at).toBe(FETCHED);
+  });
+
+  it("no analytics row at all reads null", () => {
+    expect(shapeRowAnalytics(null, "s-1").trades_fetched_at).toBeNull();
   });
 });
 

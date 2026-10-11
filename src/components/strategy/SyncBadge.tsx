@@ -1,12 +1,22 @@
+import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import {
   resolveEffectiveRecency,
+  resolveTradeFetch,
   FRESHNESS_COLORS,
   FUTURE_SERIES_DOT,
   CLOCK_SKEW_TOLERANCE_MINUTES,
+  TRADE_FETCH_STALE_DAYS,
 } from "@/lib/freshness";
 
 interface SyncBadgeProps {
+  /**
+   * Phase 167.1.2.2.2 / D-07 — when the analytics job last RAN. It no longer
+   * drives the dot, the sentence or the render gate: it survives only inside
+   * the tooltip, labelled "Analytics last computed …". The status bridge
+   * re-stamps `computed_at` on every job transition, so it says nothing about
+   * whether the venue's records are in.
+   */
   computedAt: string | null;
   /**
    * Phase 163 / HONEST-08 — the date of the LAST point of the strategy's
@@ -19,6 +29,27 @@ interface SyncBadgeProps {
    * silently reopen the class by omission.
    */
   seriesEnd: string | null;
+  /**
+   * Phase 167.1.2.2.2 / SC-4 — `strategy_analytics.trades_fetched_at`: the last
+   * SUCCESSFUL trade fetch, written only by the daily `/cron-sync` tick.
+   * REQUIRED for the same reason `seriesEnd` is: a mount that cannot name its
+   * source must say `null` out loud rather than inherit a compute-time claim by
+   * omission.
+   */
+  tradesFetchedAt: string | null;
+  /**
+   * Phase 167.1.2.2.2 / F3 — the venue as the strategy's API KEY knows it, or
+   * `null` when the mount cannot resolve one. NEVER `supported_exchanges`: a CSV
+   * strategy that declares okx has no key and no cron fetch, so it must resolve
+   * to "no claim". It only separates the two null cases of `tradesFetchedAt`
+   * (never fetched vs. not a fetched venue); a recorded fetch time is
+   * authoritative whatever this says.
+   *
+   * Separate from `exchange` on purpose: `exchange` also renders the visible
+   * venue LABEL, and making it required would add an "OKX" label to mounts that
+   * show none today.
+   */
+  tradeFetchVenue: string | null;
   exchange?: string | null;
   className?: string;
 }
@@ -58,59 +89,167 @@ const EXCHANGE_LABELS: Record<string, string> = {
 };
 
 /**
+ * How bad each verdict is, so the two facts are directly comparable (UI-SPEC
+ * "Badge states"): trade `current` 0, trade `never` 1 (the existing
+ * `TONE_RANK` "unknown" slot); series fresh 0, warm 2, stale 3, future 4. Ties
+ * go to the trade sentence. `stale` and `future` trade verdicts never reach the
+ * comparison: they always bind.
+ */
+const TRADE_RANK = { current: 0, never: 1 } as const;
+const SERIES_RANK = { fresh: 0, warm: 2, stale: 3, future: 4 } as const;
+type SeriesVerdict = keyof typeof SERIES_RANK;
+
+/**
  * Per-row data-recency badge for the ranked lists and the portfolio tables.
  *
- * Phase 163 / HONEST-08 (measured on production 2026-08-26) — THE BADGE
- * BUCKETS ON THE STALER OF TWO FACTS: when the analytics job last RAN
- * (`computedAt`) and where the TRACK RECORD ends (`seriesEnd`). Before this it
- * read `computedAt` alone, so `/browse/crypto-sma` row #2 rendered "Synced 7h
- * ago" over a return series whose last point was 112 days old — while that
- * same strategy's factsheet chip correctly read `Track record · old`. Both
- * statements were true and the pair was a lie: "Synced" is a claim about the
- * JOB and every reader takes it as a claim about the STRATEGY.
+ * Phase 167.1.2.2.2 / TRADESYNC (SC-4, D-05..D-07, D-14, F2, F3) — THE BADGE
+ * NAMES WHAT IT MEASURES: the last successful TRADE FETCH
+ * (`strategy_analytics.trades_fetched_at`, written only by the daily
+ * `/cron-sync` tick), never `computed_at`. Measured on PROD, five strategies
+ * whose newest trade was 15-156 days old read as freshly synced within the day, because
+ * the status bridge re-stamps `computed_at` on every job transition. That word
+ * was a claim about the JOB that every reader took as a claim about the
+ * STRATEGY, so it is retired here (D-14).
  *
- * THE BADGE IS NOT DELETED, and that was the tempting wrong fix. Sync recency
- * is real information — it is what tells an operator the pipeline is alive.
- * The defect was presenting it as the ONLY clock. So the staler fact wins, and
- * the copy NAMES whichever subject carried the verdict (mirroring
- * `FreshnessChip`'s `Computed · …` / `Track record · …` eyebrow): a stale dot
- * beside "Synced 7h ago" would merely relocate the contradiction inside the
- * badge. When SYNC binds — every healthy row, and every row that was already
- * honest — the render is unchanged.
+ * TWO FACTS ARE JUDGED, EACH ON ITS OWN LADDER: the trade fetch through
+ * `resolveTradeFetch` (the one classifier; 2 days, D-05) and the series end
+ * through the shared 3d/7d series ladder (HONEST-08). One sentence renders and
+ * it NAMES ITS SUBJECT. Precedence (UI-SPEC):
+ *   1. trade `stale`  — always binds: it is the D-06 claim every viewer must
+ *      see, and it is the cause when the series is old too.
+ *   2. trade `future` — binds, muted: a data defect, neither claim.
+ *   3. otherwise the series sentence binds only when its verdict is STRICTLY
+ *      worse than the trade verdict (ties go to the trade sentence).
+ *   4. trade `not_applicable` — only the series half exists; no series end
+ *      renders nothing (no claim, no placeholder).
  *
- * The staler-of-two decision itself lives in `resolveEffectiveRecency`
- * (lib/freshness.ts), shared with nothing re-derived here. A second local copy
- * of that comparison is exactly how the list and the factsheet came to
- * disagree in the first place.
+ * ⛔ F2: the `never` state reads "No trade fetch recorded yet", never the
+ * phrase that claims the platform has not yet fetched. A strategy can hold
+ * years of historical trades (CSV, an earlier sync) and still carry a null
+ * timestamp until the first tick.
+ *
+ * ⛔ D-07: NOTHING VISIBLE IS DERIVED FROM `computedAt`. See the series half
+ * below: it is judged against `now` as its stand-in job instant, so the dot,
+ * the sentence and the render gate are identical whatever `computedAt` is,
+ * including null.
  */
 export function SyncBadge({
   computedAt,
   seriesEnd,
+  tradesFetchedAt,
+  tradeFetchVenue,
   exchange,
   className,
 }: SyncBadgeProps) {
-  if (!computedAt) return null;
+  const now = new Date();
+  const trade = resolveTradeFetch(tradesFetchedAt, tradeFetchVenue, now);
 
-  const date = new Date(computedAt);
-  // The whole staler-of-two decision — which fact binds, and how bad it is —
-  // is made in lib/freshness.ts and merely RENDERED here. This component owns
-  // no second opinion about which of the two dates is worse; that duplication
-  // is what let this surface and the factsheet chip contradict each other.
-  const recency = resolveEffectiveRecency(computedAt, seriesEnd);
-  // ⛔ THE FUTURE ARM IS NOT AMBER (163-REVIEW, finding 2). `Freshness` has no
-  // neutral bucket, so a series end ahead of now lands on `warm` for LADDER
-  // purposes — but amber is the colour this product uses for "getting old",
-  // and a date that has not happened is not an age claim at all. The factsheet
-  // chip renders the identical input in `--color-text-muted` under
-  // "future — check data"; `FUTURE_SERIES_DOT` is that same token, so the two
-  // public surfaces answer one input with one colour.
-  const dotColor = recency.seriesEndIsFuture
+  // The series half. `resolveEffectiveRecency` is the shared staler-of-two
+  // resolver (HONEST-08) and takes a job instant as its first fact. Handing it
+  // `now` makes that fact exactly fresh, so the resolver reports the SERIES
+  // verdict alone: `warm` / `stale` / future (flagged) bind, a live series does
+  // not. Deliberate, not a stub: the trade fetch has replaced the job as the
+  // other fact (D-07), and no second copy of the series ladder is re-derived.
+  const recency = resolveEffectiveRecency(now, seriesEnd, now);
+  const seriesEndDate = recency.seriesEndDate;
+  let seriesVerdict: SeriesVerdict | null = null;
+  if (seriesEndDate) {
+    seriesVerdict = recency.seriesEndIsFuture
+      ? "future"
+      : recency.subject === "series"
+        ? recency.freshness
+        : "fresh";
+  }
+
+  // ⛔ THE FUTURE ARM IS NOT AMBER (163-REVIEW, finding 2). A series end ahead
+  // of now lands on `warm` for LADDER purposes, but amber means "getting old"
+  // and a date that has not happened is not an age claim. `FUTURE_SERIES_DOT`
+  // is the muted token the factsheet chip uses for that same input.
+  const seriesDot = recency.seriesEndIsFuture
     ? FUTURE_SERIES_DOT
     : FRESHNESS_COLORS[recency.freshness].dot;
+
+  let bound: "trade" | "series" | "none";
+  if (trade.state === "stale" || trade.state === "future") {
+    bound = "trade";
+  } else if (trade.state === "not_applicable") {
+    bound = seriesVerdict ? "series" : "none";
+  } else {
+    bound =
+      seriesVerdict && SERIES_RANK[seriesVerdict] > TRADE_RANK[trade.state]
+        ? "series"
+        : "trade";
+  }
+  if (bound === "none") return null;
+
+  const computedDate = computedAt ? new Date(computedAt) : null;
+  const computedSuffix =
+    computedDate && Number.isFinite(computedDate.getTime())
+      ? ` Analytics last computed ${timeAgo(computedDate)}.`
+      : "";
+
   const exchangeLabel = exchange
     ? EXCHANGE_LABELS[exchange.toLowerCase()] ?? exchange
     : null;
-  const seriesBinds = recency.subject === "series" && recency.seriesEndDate;
+
+  // A series bar dated ahead but inside the day allowance is a CURRENT bar
+  // (WR-06-UTC): `timeAgo` would call it "in the future" beside a positive
+  // dot, so clamp it to now. A genuinely future bar keeps its date and the
+  // muted "in the future" sentence.
+  const seriesAge = (): string =>
+    timeAgo(
+      seriesEndDate!.getTime() > now.getTime() && !recency.seriesEndIsFuture
+        ? now
+        : seriesEndDate!,
+    );
+
+  let dot: string;
+  let sentence: ReactNode;
+  let title: string;
+
+  if (bound === "series") {
+    dot = seriesDot;
+    sentence = <span>Track record ends {seriesAge()}</span>;
+    if (trade.state === "not_applicable") {
+      title = `Track record ends ${seriesAge()}.${computedSuffix}`;
+    } else {
+      const tradeSentence =
+        trade.state === "never"
+          ? "No trade fetch recorded yet."
+          : `Trades last fetched ${timeAgo(trade.fetchedAt!)}.`;
+      title = `Track record ends ${seriesAge()}. ${tradeSentence}${computedSuffix}`;
+    }
+  } else if (trade.state === "stale") {
+    const age = timeAgo(trade.fetchedAt!);
+    dot = FRESHNESS_COLORS.stale.dot;
+    sentence = (
+      <span>
+        Trades fetched {age}
+        <Separator />
+        <span className="text-negative">stale</span>
+      </span>
+    );
+    title = `No trades fetched from the exchange in more than ${TRADE_FETCH_STALE_DAYS} days. Last fetch ${age}.${computedSuffix}`;
+  } else if (trade.state === "future") {
+    dot = FUTURE_SERIES_DOT;
+    sentence = (
+      <span>
+        Trades fetched
+        <Separator />
+        future — check data
+      </span>
+    );
+    title = `The recorded trade fetch time is in the future, so no fetch age is shown.${computedSuffix}`;
+  } else if (trade.state === "never") {
+    dot = FUTURE_SERIES_DOT;
+    sentence = <span>No trade fetch recorded yet</span>;
+    title = `No trade fetch is recorded for this strategy yet. Trades are fetched daily.${computedSuffix}`;
+  } else {
+    const age = timeAgo(trade.fetchedAt!);
+    dot = FRESHNESS_COLORS.fresh.dot;
+    sentence = <span>Trades fetched {age}</span>;
+    title = `Trades last fetched from the exchange ${age}. Fetched daily; marked stale after ${TRADE_FETCH_STALE_DAYS} days without a fetch.${computedSuffix}`;
+  }
 
   return (
     <span
@@ -118,24 +257,32 @@ export function SyncBadge({
         "inline-flex items-center gap-1.5 text-fixed-10 text-text-muted",
         className,
       )}
-      // Only on the series arm, so the sync-keyed render stays byte-identical.
-      // The sync date is not DISCARDED when the series binds — it moves here,
-      // because "when did we last poll" remains a real fact about the row.
-      title={
-        seriesBinds
-          ? `Track record ends ${timeAgo(recency.seriesEndDate!)}. Analytics last computed ${timeAgo(date)}.`
-          : undefined
-      }
+      // Supplemental only: every claim is already in the visible text, so
+      // nothing depends on hover. The compute time lives here and nowhere else.
+      title={title}
     >
-      <span className={cn("h-1.5 w-1.5 rounded-full shrink-0", dotColor)} />
+      <span
+        aria-hidden="true"
+        className={cn("h-1.5 w-1.5 rounded-full shrink-0", dot)}
+      />
       {exchangeLabel ? (
         <span className="font-medium text-text-secondary">{exchangeLabel}</span>
       ) : null}
-      {seriesBinds ? (
-        <span>Track record ends {timeAgo(recency.seriesEndDate!)}</span>
-      ) : (
-        <span>Synced {timeAgo(date)}</span>
-      )}
+      {sentence}
     </span>
+  );
+}
+
+/**
+ * The visible ` · ` is decoration (`aria-hidden`); the `sr-only` comma is what
+ * a screen reader hears, so "Trades fetched 9d ago · stale" is announced as
+ * "Trades fetched 9d ago, stale".
+ */
+function Separator() {
+  return (
+    <>
+      <span aria-hidden="true"> · </span>
+      <span className="sr-only">, </span>
+    </>
   );
 }

@@ -29,6 +29,7 @@ For deploy semantics and the CI/prod invariants, see the repo
 | [vercel-cron-upgrade.md](./vercel-cron-upgrade.md) | Vercel cron scheduler |
 | [mt5-go-live.md](./mt5-go-live.md) | MT5 prod gateway stand-up + real-broker soak + flag flip (private-net-only RPyC, GATE-CHECK, rollback) |
 | [prod-prober-cadence-go-live.md](./prod-prober-cadence-go-live.md) | Registering the PROD-side prod-prober cadence observer (`pg_cron`, Phase 164.1.1 PROBERCADENCE) |
+| [cron-sync-go-live.md](./cron-sync-go-live.md) | Registering the daily trade-sync tick (`cron-sync-trades`, `pg_cron` + `pg_net`, Phase 167.1.2.2.2 TRADESYNC): pre-tick proof, D-08 carry-forward with its oracle, D-10 seed, rehearsal verdict, registration, manifest, rollback |
 
 ## Security & compliance
 

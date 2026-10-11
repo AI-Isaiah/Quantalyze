@@ -1712,7 +1712,7 @@ export function ApiKeyManager({
                       allocator card's source; an id outside the map renders
                       verbatim. The title-case it replaces read "Mt5" / "Okx". */}
                   {dataSourceLabel(key).exchange}
-                  {key.last_sync_at && ` · Last synced ${new Date(key.last_sync_at).toLocaleDateString()}`}
+                  {key.last_sync_at && ` · Key checked ${new Date(key.last_sync_at).toLocaleDateString()}`}
                 </p>
                 {key.exchange === "mt5" && (
                   <p className="text-xs text-text-muted font-metric mt-0.5">
@@ -1858,6 +1858,7 @@ export function ApiKeyManager({
           {isUntrustedKeySyncStatus(key.sync_status) && (
             <div className="mt-2">
               <AllocatorSyncStatus
+                subject="strategy-key"
                 syncStatus={syncingKeyId === key.id ? "syncing" : key.sync_status}
                 syncError={key.sync_error}
                 lastSyncAt={key.last_sync_at}

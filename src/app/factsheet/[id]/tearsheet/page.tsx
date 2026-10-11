@@ -11,9 +11,17 @@ import { PercentileRankBadge } from "@/components/strategy/PercentileRankBadge";
 import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel";
 import { PrintButton } from "@/components/ui/PrintButton";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { withPublishedOnly } from "@/lib/visibility";
 import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
 import { parseReturnsUnit, withUnit } from "@/lib/factsheet/returns-unit";
+import { parseUnrecoveredGaps, type UnrecoveredGap } from "@/lib/factsheet/trade-fetch-provenance";
+import { captureToSentry } from "@/lib/sentry-capture";
+import {
+  TradeFetchLineView,
+  TradeFetchUnavailableLine,
+  UnrecoveredGapLines,
+} from "../trade-fetch-lines";
 
 const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -82,6 +90,129 @@ async function readReturnsUnit(
       message: err instanceof Error ? err.message : String(err),
     });
     return { determined: false };
+  }
+}
+
+/**
+ * Phase 167.1.2.2.2 (TRADESYNC, plan 11, D-06 / D-10 / D-02) - the two facts the
+ * tear sheet prints under the Data pill: when the exchange was last read, and
+ * which days nobody has supplied.
+ *
+ * Why a read of its own and not `getFactsheetDetail`: that projection is the anon
+ * ranked projection and deliberately carries neither `series_provenance` (the
+ * gap record) nor the strategy's api-key exchange. The exchange is the F3 venue
+ * (never `supported_exchanges`, which a CSV strategy may declare without ever
+ * being trade-fetched), it sits behind `api_keys`, and that table has no anon
+ * read, so this is the SAME service-role read the factsheet payload builder makes
+ * (`fetch-and-build-payload.ts`), behind the same published-only gate and with
+ * the same minimal embed: `exchange` alone (T-167.1.2.2.2-32), no key material.
+ * Only plain values leave this function.
+ *
+ * Fails to a NEUTRAL "unavailable" line, never to silence and never to a false
+ * sentence (SFH-M2). "Nothing to claim" (a CSV strategy: no key, no stamp, zero
+ * gaps) and "we could not read it" are different facts and are returned as
+ * different shapes:
+ *
+ *   - `readable: false` - the read errored, threw, or returned no row for a
+ *     strategy the page has just rendered. Neither the fetch line nor the gap
+ *     lines can be claimed; the page says the status is unavailable.
+ *   - `readable: true, fetchKnown: false` - the row came back but the stamp (or
+ *     the key's exchange) is not the shape the column promises. A non-string
+ *     stamp must NOT be coerced to "no stamp": for an OKX key that would print
+ *     "No trade fetch recorded yet", a false statement on a printable page. The
+ *     fetch line is replaced by the unavailable line; the gap record is a
+ *     separate column and its lines are unaffected.
+ *
+ * Every one of these is reported to Sentry through `captureToSentry`, the helper
+ * the factsheet resolver uses: `console.*` does not reach Sentry in this repo,
+ * so a log line alone left a degraded public page invisible to everyone. It
+ * never takes the printable page down (the PDF wrapper screenshots this route).
+ */
+type TradeFactsRead =
+  | { readable: false }
+  | {
+      readable: true;
+      /** False when the stamp / exchange is malformed: say "unavailable", not "never". */
+      fetchKnown: boolean;
+      tradesFetchedAt: string | null;
+      tradeFetchVenue: string | null;
+      unrecoveredGaps: UnrecoveredGap[];
+    };
+
+function reportTradeFactsFailure(
+  strategyId: string,
+  reason: "read_error" | "read_threw" | "no_row" | "malformed_field",
+  detail: string,
+): void {
+  captureToSentry(new Error(`tearsheet: trade facts ${reason}`), {
+    tags: { stage: "tearsheet-trade-facts", reason, strategy_id: strategyId },
+    extra: { detail },
+  });
+}
+
+async function readTradeFacts(strategyId: string): Promise<TradeFactsRead> {
+  try {
+    const { data, error } = await withPublishedOnly(
+      createAdminClient()
+        .from("strategies")
+        .select(
+          "api_keys!strategies_api_key_id_fkey ( exchange ), strategy_analytics ( trades_fetched_at, series_provenance )",
+        )
+        .eq("id", strategyId),
+    ).maybeSingle();
+    if (error) {
+      console.error("[tearsheet] trade facts read failed", { message: error.message });
+      reportTradeFactsFailure(strategyId, "read_error", error.message);
+      return { readable: false };
+    }
+    if (!data) {
+      // The page has just rendered this published strategy, so no row is an
+      // anomaly (an unpublish race at worst), not "nothing to claim".
+      reportTradeFactsFailure(strategyId, "no_row", "no strategies row returned");
+      return { readable: false };
+    }
+    const row = data as unknown as {
+      api_keys?: { exchange?: unknown } | Array<{ exchange?: unknown }> | null;
+      strategy_analytics?:
+        | { trades_fetched_at?: unknown; series_provenance?: unknown }
+        | Array<{ trades_fetched_at?: unknown; series_provenance?: unknown }>
+        | null;
+    };
+    const apiKey = Array.isArray(row.api_keys) ? row.api_keys[0] : row.api_keys;
+    const analytics = Array.isArray(row.strategy_analytics)
+      ? row.strategy_analytics[0]
+      : row.strategy_analytics;
+
+    const rawStamp = analytics?.trades_fetched_at;
+    const rawExchange = apiKey?.exchange;
+    // null / undefined is "no value recorded"; anything else must be a string
+    // (and the stamp a parseable instant) or the column is not what it promises.
+    const stampMalformed =
+      rawStamp != null && (typeof rawStamp !== "string" || Number.isNaN(Date.parse(rawStamp)));
+    const exchangeMalformed = rawExchange != null && typeof rawExchange !== "string";
+    const fetchKnown = !stampMalformed && !exchangeMalformed;
+    if (!fetchKnown) {
+      reportTradeFactsFailure(
+        strategyId,
+        "malformed_field",
+        `${stampMalformed ? `trades_fetched_at is ${typeof rawStamp}` : ""}${
+          stampMalformed && exchangeMalformed ? "; " : ""
+        }${exchangeMalformed ? `api_keys.exchange is ${typeof rawExchange}` : ""}`,
+      );
+    }
+    return {
+      readable: true,
+      fetchKnown,
+      tradesFetchedAt: typeof rawStamp === "string" && !stampMalformed ? rawStamp : null,
+      tradeFetchVenue:
+        typeof rawExchange === "string" && rawExchange.length > 0 ? rawExchange.toLowerCase() : null,
+      unrecoveredGaps: parseUnrecoveredGaps(analytics?.series_provenance),
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[tearsheet] trade facts read failed", { message });
+    reportTradeFactsFailure(strategyId, "read_threw", message);
+    return { readable: false };
   }
 }
 
@@ -217,6 +348,10 @@ export default async function TearSheetPage({
     (strategy as { discovery_categories?: { slug?: string } | null }).discovery_categories?.slug ??
     undefined;
 
+  // D-06 / D-10 / D-02: read only when the pill below will render (same gate),
+  // so a withheld pill never has a trade-fetch statement standing alone.
+  const tradeRead = isRankableAnalyticsRow(analytics) ? await readTradeFacts(strategy.id) : null;
+
   const percentileMap = await getPercentiles(categorySlug);
   const percentiles = percentileMap?.[strategy.id] ?? null;
 
@@ -290,6 +425,32 @@ export default async function TearSheetPage({
               label="Data"
               variant="pill"
             />
+          )}
+          {/* Phase 167.1.2.2.2 (TRADESYNC, plan 11, D-06/D-10/D-02/F1): the same
+              two statements the factsheet header makes, from the same module, at
+              the print size. Behind the pill's own gate (`tradeFacts` is only
+              read for a terminal-success row) and shown to EVERY viewer. The
+              wrapper bounds the width: this column is `shrink-0`, so an unbounded
+              sentence would size the column to its full single-line length and
+              push the title; bounded, a long gap line wraps inside it. */}
+          {tradeRead && (
+            <div className="ml-auto max-w-[14rem]">
+              {tradeRead.readable && tradeRead.fetchKnown ? (
+                <TradeFetchLineView
+                  tradesFetchedAt={tradeRead.tradesFetchedAt}
+                  tradeFetchVenue={tradeRead.tradeFetchVenue}
+                  nowMs={Date.now()}
+                  size="fixed-10"
+                />
+              ) : (
+                // SFH-M2: an unreadable / malformed state is neither "never
+                // fetched" nor "nothing to claim"; say it is unavailable.
+                <TradeFetchUnavailableLine size="fixed-10" />
+              )}
+              {tradeRead.readable && (
+                <UnrecoveredGapLines gaps={tradeRead.unrecoveredGaps} size="fixed-10" />
+              )}
+            </div>
           )}
           <p className="mt-1 text-fixed-10 text-text-muted">
             Generated{" "}

@@ -46,23 +46,26 @@ function isoDaysAgo(days: number): string {
 }
 
 describe("<CompositionDonut> — B14 per-slice freshness", () => {
-  it("renders a freshness badge per slice with a computed_at and distinguishes fresh from stale", () => {
+  // Phase 167.1.2.2.2 / D-07 — the per-slice badge states the last TRADE FETCH
+  // (`tradesFetchedAt`), not the analytics compute time. The stale slice below
+  // carries a FRESH `computedAt` (the status bridge re-stamps it on every job
+  // transition), so a badge still keyed on it would paint both slices green.
+  it("renders a freshness badge per slice with a trade fetch and distinguishes fresh from stale", () => {
     const { container } = render(
       <CompositionDonut
         strategies={[
-          // Phase 163 / HONEST-08 — each slice carries a LIVE track record as
-          // well as a computed_at, so this spec keeps testing the fresh/stale
-          // split it was written for. Without a series end the badge is capped
-          // below fresh (pinned separately below): a job that ran 2h ago over
-          // a track record we cannot see is not evidence of a live slice.
-          { id: "a", name: "Fresh", weight: 0.6, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: hoursAgoIso(2), seriesEnd: isoDaysAgo(1) },
-          { id: "b", name: "Stale", weight: 0.4, amount: 500, twr: 0.1, sharpe: 1.0, computedAt: hoursAgoIso(100), seriesEnd: isoDaysAgo(1) },
+          // Phase 163 / HONEST-08 — each slice carries a LIVE track record, so
+          // nothing outranks the trade sentence and this spec keeps testing
+          // the fresh/stale split it was written for.
+          { id: "a", name: "Fresh", weight: 0.6, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: hoursAgoIso(1), seriesEnd: isoDaysAgo(1), tradesFetchedAt: hoursAgoIso(2) },
+          { id: "b", name: "Stale", weight: 0.4, amount: 500, twr: 0.1, sharpe: 1.0, computedAt: hoursAgoIso(1), seriesEnd: isoDaysAgo(1), tradesFetchedAt: hoursAgoIso(100) },
         ]}
       />,
     );
 
-    expect(screen.getAllByText(/Synced/i)).toHaveLength(2);
-    // 2h ago → fresh (positive); 100h ago → stale (negative).
+    expect(screen.getAllByText(/Trades fetched/i)).toHaveLength(2);
+    expect(screen.queryByText(/Synced/i)).toBeNull();
+    // Fetched 2h ago → current (positive); 100h (4d) ago → stale (negative).
     expect(container.querySelectorAll(".bg-positive")).toHaveLength(1);
     expect(container.querySelectorAll(".bg-negative")).toHaveLength(1);
   });
@@ -71,18 +74,24 @@ describe("<CompositionDonut> — B14 per-slice freshness", () => {
     const { container } = render(
       <CompositionDonut
         strategies={[
-          { id: "a", name: "DeadTrack", weight: 1, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: hoursAgoIso(7), seriesEnd: isoDaysAgo(112) },
+          { id: "a", name: "DeadTrack", weight: 1, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: hoursAgoIso(7), seriesEnd: isoDaysAgo(112), tradesFetchedAt: hoursAgoIso(7) },
         ]}
       />,
     );
 
     expect(container.querySelectorAll(".bg-positive")).toHaveLength(0);
     expect(container.querySelectorAll(".bg-negative")).toHaveLength(1);
-    expect(screen.queryByText(/Synced/i)).toBeNull();
+    // A current fetch is on the slice, yet the dead track record outranks it.
+    expect(screen.queryByText(/Trades fetched/i)).toBeNull();
     expect(screen.getByText(/Track record ends/i)).toBeTruthy();
   });
 
-  it("HONEST-08: an UNKNOWN series end caps the slice dot below fresh", () => {
+  // Phase 167.1.2.2.2 / D-07 — REPLACES "an UNKNOWN series end caps the slice
+  // dot below fresh": that cap belonged to the retired job-recency claim. The
+  // badge now names the TRADE FETCH, which the cron recorded whether or not
+  // this slice carries a series, and an absent series contributes nothing to
+  // the verdict (UI-SPEC "Badge states", rule 3).
+  it("HONEST-08/D-07: an UNKNOWN series end neither caps nor extends the trade claim — the sentence names the fetch", () => {
     const { container } = render(
       <CompositionDonut
         strategies={[
@@ -90,27 +99,30 @@ describe("<CompositionDonut> — B14 per-slice freshness", () => {
           // "this caller cannot resolve a track-record end" has to be stated
           // rather than achieved by leaving the field off — which is how a
           // future donut caller would have silently reopened HONEST-08.
-          { id: "a", name: "NoSeries", weight: 1, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: hoursAgoIso(2), seriesEnd: null },
+          { id: "a", name: "NoSeries", weight: 1, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: hoursAgoIso(2), seriesEnd: null, tradesFetchedAt: hoursAgoIso(2) },
         ]}
       />,
     );
 
-    expect(container.querySelectorAll(".bg-positive")).toHaveLength(0);
-    // …but not a staleness claim either — the job really did run 2h ago.
+    expect(screen.getByText(/Trades fetched 2h ago/i)).toBeTruthy();
+    expect(container.querySelectorAll(".bg-positive")).toHaveLength(1);
     expect(container.querySelectorAll(".bg-negative")).toHaveLength(0);
-    expect(screen.getByText(/Synced 2h ago/i)).toBeTruthy();
+    // It makes no claim about a track record it cannot see.
+    expect(screen.queryByText(/Track record/i)).toBeNull();
   });
 
-  it("renders no freshness badge for a slice missing computed_at", () => {
+  it("renders no freshness badge for a slice with no trade fetch (a fresh computedAt alone fabricates no liveness)", () => {
     render(
       <CompositionDonut
         strategies={[
-          { id: "a", name: "NoData", weight: 1, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: null, seriesEnd: null },
+          // A FRESH computedAt beside no trade fetch and no series: the old
+          // badge said "Synced 2h ago" here.
+          { id: "a", name: "NoData", weight: 1, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: hoursAgoIso(2), seriesEnd: null, tradesFetchedAt: null },
         ]}
       />,
     );
 
-    expect(screen.queryByText(/Synced/i)).toBeNull();
+    expect(screen.queryByText(/Trades fetched|No trade fetch|Track record|Synced/i)).toBeNull();
   });
 });
 
@@ -124,8 +136,8 @@ describe("<CompositionDonut> — desktop byte-identity (CHART-01b, PieChart/Cell
     render(
       <CompositionDonut
         strategies={[
-          { id: "a", name: "Fresh", weight: 0.6, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: null, seriesEnd: null },
-          { id: "b", name: "Other", weight: 0.4, amount: 500, twr: 0.1, sharpe: 1.0, computedAt: null, seriesEnd: null },
+          { id: "a", name: "Fresh", weight: 0.6, amount: 1000, twr: 0.2, sharpe: 1.5, computedAt: null, seriesEnd: null, tradesFetchedAt: null },
+          { id: "b", name: "Other", weight: 0.4, amount: 500, twr: 0.1, sharpe: 1.0, computedAt: null, seriesEnd: null, tradesFetchedAt: null },
         ]}
       />,
     );

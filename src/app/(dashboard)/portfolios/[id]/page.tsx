@@ -226,6 +226,10 @@ export function buildCompositionRows(
         // a job that ran an hour ago over a series that ended in May is not a
         // fresh constituent. `seriesEndOf` is the one shared derivation.
         seriesEnd: seriesEndOf(a),
+        // Phase 167.1.2.2.2 / SC-4 — the slice's trade-fetch record, the same
+        // column the breakdown table reads from the same embed (one source,
+        // so the two surfaces cannot disagree about one strategy).
+        tradesFetchedAt: a?.trades_fetched_at ?? null,
       };
     })
     .filter((row): row is NonNullable<typeof row> => row !== null);

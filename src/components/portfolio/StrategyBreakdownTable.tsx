@@ -32,6 +32,12 @@ interface StrategyRow {
    * makes exactly that claim about strategies its viewer does not own.
    */
   seriesEnd: string | null;
+  /**
+   * Phase 167.1.2.2.2 / SC-4, D-07 — the constituent's
+   * `strategy_analytics.trades_fetched_at`: the cron's own record of its last
+   * successful trade fetch, or `null` when the read carried none.
+   */
+  tradesFetchedAt: string | null;
 }
 
 const COLUMNS: { key: SortKey; label: string; align?: "right" }[] = [
@@ -154,6 +160,10 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
         // rather than trusting. That silence is exactly why the projection and
         // the strip are one statement rather than two steps.
         seriesEnd: seriesEndOf(analytics),
+        // Phase 167.1.2.2.2 / SC-4 — `getPortfolioStrategies` projects the
+        // column in its embed and `stripConstituentSeries` spreads the rest,
+        // so it arrives here. `?? null` covers a read that predates it.
+        tradesFetchedAt: analytics?.trades_fetched_at ?? null,
       };
     });
   }, [strategies, attribution]);
@@ -220,6 +230,13 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
                   <SyncBadge
                     computedAt={row.computedAt}
                     seriesEnd={row.seriesEnd}
+                    /* SC-4, D-07 — the cron's record, never `computed_at`.
+                       F3 — a constituent is another manager's strategy and the
+                       embed carries no api-key exchange (RLS hides
+                       `api_keys`), so the venue is NULL, never
+                       `supported_exchanges`. */
+                    tradesFetchedAt={row.tradesFetchedAt}
+                    tradeFetchVenue={null}
                   />
                 </div>
               </td>
