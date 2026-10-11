@@ -8799,6 +8799,8 @@ EXECUTED, §str/None follow-through, §Discovery observation).
 
 ## Phase 167.1.2.2 (DERIVECRON) — routed items (logged 2026-10-07)
 
+- **[167.1.2.2-SCENARIO-BLANK-SLATE-COPY]** (logged 2026-10-11, DERIVECRON plan 09 browser re-run; owner: 170.6 DISPLAYPOLISH or the next Scenario copy pass). On a blank-slate Scenario with 0 overlapping days, every blend tile reads "Warming up — need 30 more days of synced data" although no strategy is in the scenario (the BTC and Stress panels correctly say to add strategies), and the embedded factsheet renders "0 observations" with the generic thesis "Scenario is a systematic strategy". Done when a blank slate says to add strategies in the tiles and the embedded factsheet shows an honest empty state instead of a thesis.
+
 ### 167.1.2.2-BACKFILL-STALENESS-ALARM — a frozen backfill worker stalls every derive job until a human notices (booked 2026-10-07, Phase 167.1.2.2 D-10)
 
 **Why it is open.** Railway healthchecks run only at deploy time. The backfill service's restart
