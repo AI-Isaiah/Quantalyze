@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { captureToSentry, shouldCaptureNow } from "@/lib/sentry-capture";
 import { withPublishedOnly } from "@/lib/visibility";
 import { computeOgHeadline } from "@/lib/factsheet/og-metrics";
+import { shortenOgDescription } from "@/lib/factsheet/og-description";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 // Phase 147 / SCEN-01 — the LEAF import. `resolveDailyReturnSeries` lives in
 // its own module precisely so this route (and the public share page) can share
@@ -151,7 +152,8 @@ export async function GET(
   }
 
   const name = data?.name ?? data?.codename ?? "Strategy";
-  const description = (data?.description ?? "").slice(0, 140);
+  // Phase 170.3 D-04..D-06: word-boundary shortening, not a raw 140-unit cut.
+  const description = shortenOgDescription(data?.description);
 
   // Quick headline metrics from the daily-returns array, computed via the
   // extracted pure helper (og-metrics.ts) so we don't pull the full
