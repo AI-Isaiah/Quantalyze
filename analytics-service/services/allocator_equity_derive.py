@@ -80,7 +80,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import pandas as pd
 
@@ -447,7 +447,10 @@ def written_at_micros(ts: Any) -> int:
     return (seconds - offset_minutes * 60) * 1_000_000 + fraction
 
 
-def one_key_per_account_day(rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+_Row = TypeVar("_Row", bound=Mapping[str, Any])
+
+
+def one_key_per_account_day(rows: Sequence[_Row]) -> list[_Row]:
     """Phase 170.4 plan 11 (D-10, D-08): one account, counted once per type, on its day.
 
     ``rows`` are ONE account's holdings rows on its newest ``asof`` (an
