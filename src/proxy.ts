@@ -15,13 +15,20 @@ import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
 // would be bounced to the dashboard mid-reset. /forgot-password is NOT
 // bounce-exempt: an already-authed user landing there bounces to the dashboard,
 // matching /login + /signup.
-const PUBLIC_ROUTES = ["/login", "/signup", "/forgot-password", "/reset-password", "/api/health", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/scenario-share", "/factsheet-share", "/api/benchmark/btc", "/legal", "/demo", "/api/demo", "/for-quants", "/api/for-quants-lead", "/security", "/contact"];
+const PUBLIC_ROUTES = ["/login", "/signup", "/forgot-password", "/reset-password", "/api/health", "/strategy", "/factsheet", "/api/factsheet", "/api/og/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/scenario-share", "/factsheet-share", "/api/benchmark/btc", "/legal", "/demo", "/api/demo", "/for-quants", "/api/for-quants-lead", "/security", "/contact"];
 // 51-REVIEW (red-team): /api/health is a documented public liveness probe, but
 // it was NOT in PUBLIC_ROUTES — the proxy session gate runs BEFORE the route
 // handler, so an unauthenticated uptime/ops probe got 307→login instead of
 // {ok:true}. The prior manifest note ("returns before the session gate matters")
 // was inaccurate. getSession() is cookie-only (no network), so listing it here
 // keeps the probe independent of any auth backend.
+// Phase 170.3 (D-01, D-02): /api/og/factsheet is the share-preview card. The
+// proxy session gate runs BEFORE the route handler, so cookie-less unfurlers
+// (Slack, LinkedIn, X) got 307→login and no share ever showed a preview. Only
+// this one route is public (not the whole /api/og tree): a future OG route has to opt in.
+// The route's read is published-only (`withPublishedOnly`), so no unpublished
+// data reaches an anonymous caller; an unpublished or unknown id renders the
+// generic card.
 const ADMIN_ROUTES = ["/admin", "/api/admin"];
 
 export async function proxy(request: NextRequest) {

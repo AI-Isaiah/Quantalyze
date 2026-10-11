@@ -9194,6 +9194,37 @@ today, because the default `overflowOf` matches and the region is asserted visib
 **Fix.** Throw in both cases.
 **Owner / Trigger:** as 170.7-E2E-HEADER-PROBE-COVERAGE.
 
+## Phase 170.3 (OGPUBLIC) — routed review items (logged 2026-10-11)
+
+### 170.3-OG-MALFORMED-ID — a malformed id on the now-public OG route can mask real read failures in Sentry (booked 2026-10-11, review WR-01 / SFH-1, MEDIUM)
+
+**Why it is open.** `/api/og/factsheet/[id]` is reachable signed-out since 170.3. A non-uuid id goes
+straight to `.eq("id", id)`, so PostgREST answers 22P02 and the route takes its failure path. That path
+logs on every hit, sends `no-store`, renders a full card and spends the `og-factsheet:read` Sentry
+throttle slot. That slot allows one capture per 60 s per instance, so a malformed hit once a minute hides a real
+timeout or column drift. Both reviewers flagged it; MEDIUM, so it is booked rather than fixed.
+**Fix.** Check `isUuid(id)` before the read, as `src/app/api/factsheet/[id]/tearsheet.pdf/route.ts`
+already does. Treat a malformed id as not-found: generic card, normal cache, no capture. Change test P3
+in `route.public-access.test.tsx`, and add a separate valid-uuid read-error case that keeps the `no-store`
+plus one-capture behaviour pinned.
+**Owner / Trigger:** the next phase touching `src/app/api/og/`; or any Sentry gap on OG reads.
+
+### 170.3-OG-NOTFOUND-CACHE — a not-yet-published strategy's blank card is cached for a day or more (booked 2026-10-11, SFH-2, MEDIUM)
+
+**Why it is open.** A genuine not-found (an unpublished or unknown id) renders the generic card under
+`LONG_CACHE_CONTROL` (1 day `s-maxage` plus 7 days `stale-while-revalidate`). If a link is shared before
+publishing, unfurlers and the CDN keep the blank card after the strategy is published.
+**Fix.** Give a not-found a short cache, and keep the long cache for rendered data.
+**Owner / Trigger:** as 170.3-OG-MALFORMED-ID.
+
+### 170.3-OG-P3-STATUS-VACUOUS — P3's "never a 404" line cannot fail (booked 2026-10-11, SFH-3, MEDIUM)
+
+**Why it is open.** `expect(res.status ?? 200).toBe(200)` in `route.public-access.test.tsx` always
+passes, because the ImageResponse mock has no `status`. A 404 is still caught indirectly by the cache
+assertion.
+**Fix.** Give the mock a status, or assert the response type, then neuter to RED.
+**Owner / Trigger:** fixed together with 170.3-OG-MALFORMED-ID.
+
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
 - **"Do NOT implement" landmines (keep documented, do not touch):** bridge-scoring precompute;

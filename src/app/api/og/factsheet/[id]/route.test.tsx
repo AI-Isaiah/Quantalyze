@@ -253,6 +253,17 @@ afterEach(() => {
 });
 
 describe("GET /api/og/factsheet/[id]", () => {
+  it("OD1 — 170.3 D-04: a long description reaches the card cut at a word boundary with an ellipsis, never mid-word", async () => {
+    // 143 code points; the old raw 140-unit cut ended "alpha om".
+    STATE.strategyRow!.description = "alpha ".repeat(23) + "omega";
+    const { GET } = await import("./route");
+    await GET(makeRequest(), ctx(PUBLISHED_ID));
+
+    const strings = latestCardStrings();
+    expect(strings).toContain("alpha ".repeat(22) + "alpha…");
+    expect(strings.some((s) => s.endsWith("alpha om"))).toBe(false);
+  });
+
   it("O1 — SC1-OG: a returns_series-ONLY embed reaches computeOgHeadline as the DIFFERENCED series", async () => {
     STATE.strategyRow!.strategy_analytics = [
       { daily_returns: null, returns_series: WEALTH_INDEX , computation_status: "complete" },

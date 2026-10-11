@@ -239,6 +239,9 @@ describe("proxy public-route gating (anonymous session)", () => {
       "/browse/crypto-sma",
       "/factsheet/abc-123",
       "/api/factsheet/abc-123/pdf",
+      // Phase 170.3 (D-01): the share-preview card is fetched cookie-lessly by
+      // Slack / LinkedIn / X; it must not 307→login.
+      "/api/og/factsheet/22222222-2222-4222-8222-222222222222",
       // 51-REVIEW (red-team): /api/health is a public liveness probe — an anon
       // uptime/ops probe must get {ok:true}, not 307→login (the proxy gate runs
       // before the route handler).
@@ -290,6 +293,12 @@ describe("proxy public-route gating (anonymous session)", () => {
       "/signupwizard", // sibling of /signup
       "/api/demo-evil", // looks like /api/demo but is a sibling
       "/api/factsheetx", // sibling of /api/factsheet
+      // Phase 170.3 (D-01): only /api/og/factsheet is public. The parent, a
+      // future OG route and the siblings of the entry must all still 307.
+      "/api/og",
+      "/api/og/other-card/abc-123",
+      "/api/og/factsheetx",
+      "/api/og/factsheetx/abc-123",
       "/browseFAKE", // C-0187: sibling of /browse — must NOT match
       "/legalese", // sibling of /legal
       "/securityaudit", // sibling of /security
