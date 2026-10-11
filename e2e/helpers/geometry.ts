@@ -386,9 +386,13 @@ export async function assertPinnedStackDoesNotCover(
         heads.findIndex((h) => (h.textContent ?? "").trim().startsWith(text));
       const pinnedIdx = idx(args.pinnedLabel);
       const metricCols = args.metrics.map((m) => ({ label: m, i: idx(m) }));
+      // A table note row (170.7: one colSpan cell under a manager's strategy)
+      // has no metric cell to probe; reading it by column index would throw.
       const rows = Array.from(
         region.querySelectorAll<HTMLElement>("tbody tr"),
-      ).filter((r) => r.querySelector("td"));
+      ).filter(
+        (r) => r.dataset.testid !== "strategy-row-note" && r.querySelector("td"),
+      );
       const problems: string[] = [];
       if (pinnedIdx < 0 || metricCols.some((m) => m.i < 0)) {
         return {
@@ -479,4 +483,298 @@ export async function assertPinnedStackDoesNotCover(
     throw new Error(`${label}: ${result.problems.join("; ")}`);
   }
   return { probes: result.probes, stops: result.stops };
+}
+
+/**
+ * Phase 170.7 (MYSTRATTABLE) D-07 — the four relations 170.2 asserted only
+ * inline in `/discovery — SC6-DISCOVERY` are exported here so the manager's
+ * `/strategies` describes CALL them instead of copying them. The Discovery
+ * describes call these same functions; their assertions, tolerances (1 px) and
+ * failure strings are the ones 170.2 shipped, moved and not edited.
+ *
+ * Every helper skips the table's note rows (`tr[data-testid="strategy-row-note"]`):
+ * a note row holds one `colSpan` cell, so reading it by column index would be
+ * wrong. Discovery renders none, so skipping them changes nothing there.
+ */
+
+/**
+ * Wait until the strategy table's column widths hold still. They keep moving
+ * after first paint (measured by 170.2: the rank cell read 38.5 px and the
+ * region scrolled 1338 px wide early, then 31.0 px and 1184 px, on the same
+ * page; web fonts and the sparklines settle late). Waits until every header
+ * width and the region's scrollWidth have held for 500 ms (cap 10 s), then two
+ * more frames so the table's ResizeObserver has applied its pin offsets.
+ */
+export async function settleStrategyTableLayout(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    const snap = () => {
+      const reg = document.querySelector<HTMLElement>('[role="region"][aria-label^="Strategies:"]');
+      if (!reg) return "<no region>";
+      const heads = Array.from(reg.querySelectorAll<HTMLElement>("thead th"));
+      return `${reg.scrollWidth}|${heads.map((h) => h.getBoundingClientRect().width.toFixed(2)).join(",")}`;
+    };
+    const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+    let last = snap();
+    let stableSince = performance.now();
+    const deadline = performance.now() + 10_000;
+    while (performance.now() < deadline) {
+      await frame();
+      const now = snap();
+      if (now !== last) {
+        last = now;
+        stableSince = performance.now();
+      } else if (performance.now() - stableSince >= 500) {
+        break;
+      }
+    }
+    await frame();
+    await frame();
+  });
+}
+
+/**
+ * Below the table's `@3xl` container step nothing is pinned: after scrolling the
+ * region to its maximum the pinned-column header and every body cell of that
+ * column have moved left with the row, by the scrolled amount, within 1 px.
+ *
+ * `requireBelow3xl` false (Discovery, the default): a container at or above the
+ * step is skipped, as 170.2 had it. True (the manager describes): that is a
+ * failure, so a viewport that is not below the step cannot pass vacuously.
+ * `minScrolled` (default 0): the region must really have scrolled this far,
+ * else the check is vacuous.
+ */
+export async function assertColumnUnpinnedBelow3xl(
+  region: Locator,
+  label: string,
+  opts: {
+    pinnedLabel?: string;
+    at3xl?: number;
+    requireBelow3xl?: boolean;
+    minScrolled?: number;
+  } = {},
+): Promise<{ container: number; scrolled: number; cells: number }> {
+  if ((await region.count()) === 0) {
+    throw new Error(`${label}: locator resolved to 0 elements — an empty page must not pass (W-02)`);
+  }
+  const res = await region.first().evaluate(
+    (el, args) => {
+      const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
+      const idx = (t: string) => heads.findIndex((h) => (h.textContent ?? "").trim().startsWith(t));
+      const colIdx = idx(args.pinnedLabel);
+      const rows = Array.from(el.querySelectorAll<HTMLElement>("tbody tr")).filter(
+        (r) => r.dataset.testid !== "strategy-row-note" && r.querySelector("td"),
+      );
+      const problems: string[] = [];
+      const container = el.clientWidth;
+      if (colIdx < 0) {
+        return { problems: [`${args.pinnedLabel} header not found`], container, scrolled: 0, cells: 0 };
+      }
+      if (rows.length === 0) {
+        return { problems: ["no body row to measure (W-02)"], container, scrolled: 0, cells: 0 };
+      }
+      const cells = [
+        heads[colIdx],
+        ...rows.map((r) => r.querySelectorAll<HTMLElement>(":scope > td")[colIdx]),
+      ];
+      const below = container < args.at3xl;
+      el.scrollLeft = 0;
+      const before = cells.map((c) => c.getBoundingClientRect().left);
+      el.scrollLeft = el.scrollWidth;
+      const scrolled = el.scrollLeft;
+      const after = cells.map((c) => c.getBoundingClientRect().left);
+      if (args.requireBelow3xl && !below) {
+        problems.push(`container ${container} px is not below the ${args.at3xl} px step`);
+      }
+      if (scrolled < args.minScrolled) {
+        problems.push(`region only scrolled ${scrolled} px; the check would be vacuous`);
+      }
+      if (below) {
+        cells.forEach((_, k) => {
+          const moved = before[k] - after[k];
+          if (Math.abs(moved - scrolled) > 1)
+            problems.push(
+              `${args.pinnedLabel} ${k === 0 ? "header" : `cell ${k}`} is pinned: moved ${moved.toFixed(1)} px of ${scrolled} px scrolled`,
+            );
+        });
+      }
+      el.scrollLeft = 0;
+      return { problems, container, scrolled, cells: cells.length };
+    },
+    {
+      pinnedLabel: opts.pinnedLabel ?? "Strategy",
+      at3xl: opts.at3xl ?? 768,
+      requireBelow3xl: opts.requireBelow3xl ?? false,
+      minScrolled: opts.minScrolled ?? 0,
+    },
+  );
+  if (res.problems.length) throw new Error(res.problems.join("; "));
+  return { container: res.container, scrolled: res.scrolled, cells: res.cells };
+}
+
+/**
+ * UI-SPEC X-1: at the maximum scroll the point 2 px inside the pinned header's
+ * right edge hits that header or a descendant, never a later header cell
+ * painting over it. Logs `<label> X-1 scrolled=… ok=… hit=…` (also on failure).
+ *
+ * The maximum scroll is where 170.2 probes, and it only ever has the LAST columns
+ * under that point. `underEveryLaterHeader` (the manager page, whose Status and
+ * Created headers sit right after Strategy) also probes, for every header after
+ * the pinned one, the scroll position at which that header's centre is under the
+ * point, so a header that ties the pinned one's z-index is caught while it is
+ * actually passing beneath it. Off by default: Discovery's call is unchanged.
+ */
+export async function assertPinnedHeaderNotPaintedOver(
+  region: Locator,
+  label: string,
+  opts: { pinnedLabel?: string; underEveryLaterHeader?: boolean } = {},
+): Promise<{ scrolled: number; hit: string; probes: number }> {
+  if ((await region.count()) === 0) {
+    throw new Error(`${label}: locator resolved to 0 elements — an empty page must not pass (W-02)`);
+  }
+  const pinnedLabel = opts.pinnedLabel ?? "Strategy";
+  const res = await region.first().evaluate(
+    (el, args) => {
+      const main = document.getElementById("main-content");
+      const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
+      const pinnedIdx = heads.findIndex((h) => (h.textContent ?? "").trim().startsWith(args.pinnedLabel));
+      if (pinnedIdx < 0) return { error: `${args.pinnedLabel} header not found` };
+      const th = heads[pinnedIdx];
+      const max = el.scrollWidth;
+      // [scroll position, which later header is meant to be under the point]
+      const stops: [number, string][] = [[max, ""]];
+      if (args.underEveryLaterHeader) {
+        el.scrollLeft = 0;
+        const pointX = th.getBoundingClientRect().right - 2;
+        const maxLeft = el.scrollWidth - el.clientWidth;
+        heads.slice(pinnedIdx + 1).forEach((h) => {
+          const r = h.getBoundingClientRect();
+          if (r.width === 0) return;
+          const s = (r.left + r.right) / 2 - pointX;
+          if (s >= 0 && s <= maxLeft) stops.push([s, (h.textContent ?? "").trim().slice(0, 12) || "?"]);
+        });
+      }
+      const probes = stops.map(([left, under]) => {
+        el.scrollLeft = left;
+        const r0 = th.getBoundingClientRect();
+        if (main) main.scrollTop += r0.top + r0.height / 2 - window.innerHeight / 2;
+        const r = th.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.right - 2, r.top + r.height / 2);
+        const cls =
+          hit && typeof (hit as HTMLElement).className === "string"
+            ? String((hit as HTMLElement).className).split(" ").filter(Boolean).slice(0, 2).join(".")
+            : "";
+        return {
+          scrolled: el.scrollLeft,
+          under,
+          ok: !!hit && (hit === th || th.contains(hit)),
+          hit: hit ? `${hit.tagName}.${cls} "${(hit.textContent ?? "").trim().slice(0, 20)}"` : "<null>",
+          thRight: r.right,
+        };
+      });
+      el.scrollLeft = 0;
+      return { probes };
+    },
+    { pinnedLabel, underEveryLaterHeader: opts.underEveryLaterHeader ?? false },
+  );
+  if ("error" in res) throw new Error(String(res.error));
+  for (const p of res.probes) {
+    console.log(`${label} X-1 scrolled=${p.scrolled} ok=${p.ok} hit=${p.hit}${p.under ? ` (while "${p.under}" is under the edge)` : ""}`);
+  }
+  const bad = res.probes.find((p) => !p.ok);
+  if (bad) {
+    throw new Error(
+      `at scrollLeft ${bad.scrolled} the point 2 px inside the ${pinnedLabel} header's right edge (${bad.thRight.toFixed(1)}) is covered by ${bad.hit}${bad.under ? ` while the "${bad.under}" header is under it` : ""}`,
+    );
+  }
+  const last = res.probes[0];
+  return { scrolled: last.scrolled, hit: last.hit, probes: res.probes.length };
+}
+
+/**
+ * UI-SPEC P-2 and P-3, at scrollLeft 0 and at the maximum, on every body row:
+ * each pinned body cell is as wide as its header cell and ends where it ends
+ * (width and right edge within 1 px), and no descendant of the `overflowOf`
+ * column's cell paints past that cell's right edge.
+ *
+ * `pinned` names the pinned columns: a header index, or a header-text prefix.
+ * Discovery passes rank, star and Strategy; the manager page has no star.
+ */
+export async function assertPinnedCellsMatchHeaders(
+  region: Locator,
+  label: string,
+  opts: {
+    pinned: { header: number | string; name: string }[];
+    overflowOf?: string;
+  },
+): Promise<{ rows: number; stops: string[] }> {
+  if ((await region.count()) === 0) {
+    throw new Error(`${label}: locator resolved to 0 elements — an empty page must not pass (W-02)`);
+  }
+  const res = await region.first().evaluate(
+    (el, args) => {
+      const problems: string[] = [];
+      const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
+      const idx = (t: string) => heads.findIndex((h) => (h.textContent ?? "").trim().startsWith(t));
+      const cols = args.pinned.map((p) => ({
+        i: typeof p.header === "number" ? p.header : idx(p.header),
+        name: p.name,
+      }));
+      if (cols.some((c) => c.i < 0 || !heads[c.i])) {
+        return { problems: [`header lookup failed ${JSON.stringify(cols)}`], rows: 0 };
+      }
+      const rows = Array.from(el.querySelectorAll<HTMLElement>("tbody tr")).filter(
+        (r) => r.dataset.testid !== "strategy-row-note" && r.querySelector("td"),
+      );
+      if (rows.length === 0) return { problems: ["no body row to measure (W-02)"], rows: 0 };
+      const tds = (r: HTMLElement) => Array.from(r.querySelectorAll<HTMLElement>(":scope > td"));
+      const R = (n: Element) => n.getBoundingClientRect();
+      const stops: [string, number][] = [["0", 0], ["max", el.scrollWidth]];
+      for (const [tag, left] of stops) {
+        el.scrollLeft = left;
+        // P-2 and P-3 on every row
+        rows.forEach((row, ri) => {
+          const cells = tds(row);
+          cols.forEach(({ i, name: n }) => {
+            const th = R(heads[i]);
+            const td = R(cells[i]);
+            if (Math.abs(td.width - th.width) > 1)
+              problems.push(`P-2 @${tag}: ${n} row ${ri + 1} td width ${td.width.toFixed(1)} != th width ${th.width.toFixed(1)}`);
+            if (Math.abs(td.right - th.right) > 1)
+              problems.push(`P-2 @${tag}: ${n} row ${ri + 1} td right ${td.right.toFixed(1)} != th right ${th.right.toFixed(1)}`);
+          });
+          const over = cols.find((c) => c.name === args.overflowOf);
+          if (!over) return;
+          const nameTd = cells[over.i];
+          const nameRect = R(nameTd);
+          const walker = document.createTreeWalker(nameTd, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+          let node: Node | null = walker.nextNode();
+          while (node) {
+            let right = -Infinity;
+            let what = "";
+            if (node.nodeType === Node.ELEMENT_NODE) {
+              const b = (node as Element).getBoundingClientRect();
+              if (b.width > 0 || b.height > 0) {
+                right = b.right;
+                what = (node as Element).tagName;
+              }
+            } else if ((node.textContent ?? "").trim()) {
+              const range = document.createRange();
+              range.selectNodeContents(node);
+              right = range.getBoundingClientRect().right;
+              what = "TEXT";
+            }
+            if (right > nameRect.right + 1)
+              problems.push(`P-3 @${tag}: row ${ri + 1} ${what} paints to ${right.toFixed(1)}, past the pinned edge ${nameRect.right.toFixed(1)}`);
+            node = walker.nextNode();
+          }
+        });
+      }
+      el.scrollLeft = 0;
+      return { problems, rows: rows.length };
+    },
+    { pinned: opts.pinned, overflowOf: opts.overflowOf ?? "Strategy" },
+  );
+  if (res.problems.length) throw new Error(res.problems.join("; "));
+  return { rows: res.rows, stops: ["0", "max"] };
 }

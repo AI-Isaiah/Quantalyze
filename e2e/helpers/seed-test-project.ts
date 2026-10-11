@@ -353,8 +353,19 @@ export async function setSeededStrategyNameAndTags(opts: {
   strategyId: string;
   name: string;
   strategyTypes: string[];
-  /** Default "published". "draft" keeps the draft controls on the card. */
-  status?: "published" | "draft";
+  /**
+   * Default "published". "draft" keeps the draft controls on the row. Phase
+   * 170.7 widens the union with the two statuses the manager table shows
+   * besides those: "private" (the unpublished share lane) and "pending_review".
+   */
+  status?: "published" | "draft" | "private" | "pending_review";
+  /**
+   * Phase 170.7 — written to `strategies.review_note`. OPT-IN: absent, the
+   * update payload is byte-identical to before, so every existing caller is
+   * unchanged. The manager table shows it as `Review feedback: ...` under a
+   * draft row.
+   */
+  reviewNote?: string;
 }): Promise<void> {
   const admin = getAdmin();
   const { error } = await admin
@@ -367,6 +378,7 @@ export async function setSeededStrategyNameAndTags(opts: {
       // or draft.
       status: opts.status ?? "published",
       source: "admin_import",
+      ...(opts.reviewNote !== undefined ? { review_note: opts.reviewNote } : {}),
     })
     .eq("id", opts.strategyId);
   if (error) {
@@ -532,6 +544,15 @@ export async function seedStrategyWithHistory(opts: {
   strategyTypes?: string[];
   /** Phase 170.2 — override the hard-coded `supported_exchanges: ["binance"]`. OPT-IN. */
   supportedExchanges?: string[];
+  /**
+   * Phase 170.7 — insert the strategy (and its analytics) for an EXISTING user
+   * instead of minting a throwaway owner. The manager's /strategies page lists
+   * only the signed-in user's own rows, so a row WITH computed analytics for
+   * that manager needs this. OPT-IN: absent, the helper mints its own owner as
+   * before. The helper never deletes any user, so a passed-in owner is never
+   * removed by it either; rows are removed by `cleanupStrategiesByNamePrefix`.
+   */
+  ownerUserId?: string;
 }): Promise<string> {
   const admin = getAdmin();
 
@@ -557,24 +578,32 @@ export async function seedStrategyWithHistory(opts: {
   const anchorMs = opts.anchorMs ?? Date.now();
 
   // Owner profile — separate from any test allocator, mirrors seedBridgeCandidate.
-  const ownerEmail = `e2e-strategy-v2-owner-${uniqueSuffix(6)}@example.test`;
-  const { data: ownerData, error: ownerError } =
-    await admin.auth.admin.createUser({
-      email: ownerEmail,
-      password: `seed-${uniqueSuffix(8)}`,
-      email_confirm: true,
-    });
-  if (ownerError || !ownerData.user) {
-    throw new Error(
-      `seedStrategyWithHistory (owner) failed: ${ownerError?.message ?? "no user"}`,
-    );
+  // 170.7: a caller-supplied `ownerUserId` skips the mint (and the profile
+  // upsert, which would overwrite the caller's role and display name).
+  let ownerId: string;
+  if (opts.ownerUserId) {
+    ownerId = opts.ownerUserId;
+  } else {
+    const ownerEmail = `e2e-strategy-v2-owner-${uniqueSuffix(6)}@example.test`;
+    const { data: ownerData, error: ownerError } =
+      await admin.auth.admin.createUser({
+        email: ownerEmail,
+        password: `seed-${uniqueSuffix(8)}`,
+        email_confirm: true,
+      });
+    if (ownerError || !ownerData.user) {
+      throw new Error(
+        `seedStrategyWithHistory (owner) failed: ${ownerError?.message ?? "no user"}`,
+      );
+    }
+    ownerId = ownerData.user.id;
+    await admin
+      .from("profiles")
+      .upsert(
+        { id: ownerId, display_name: ownerEmail },
+        { onConflict: "id" },
+      );
   }
-  await admin
-    .from("profiles")
-    .upsert(
-      { id: ownerData.user.id, display_name: ownerEmail },
-      { onConflict: "id" },
-    );
 
   const name = opts.name ?? `Phase 14b ${opts.days}d fixture`;
   const startDate = new Date(anchorMs - opts.days * 86_400_000)
@@ -588,7 +617,7 @@ export async function seedStrategyWithHistory(opts: {
   const { data: strategy, error: sErr } = await admin
     .from("strategies")
     .insert({
-      user_id: ownerData.user.id,
+      user_id: ownerId,
       name,
       status: "published",
       benchmark: "BTC",

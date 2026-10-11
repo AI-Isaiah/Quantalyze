@@ -1306,6 +1306,14 @@ describe("StrategyTable — container-gated pinning (170.2 D-05)", () => {
       const t = line.trim();
       // Comments may name the offsets; only class strings are contracted.
       if (t.startsWith("//") || t.startsWith("*") || t.startsWith("{/*")) continue;
+      // 2026-10-10 Phase 170.7-02 (D-06): the manager note row's block is
+      // `sticky left-0 w-[100cqw]` on purpose, at EVERY width: a sentence-length
+      // note must stay in view at any scrollLeft. It is not one of the three
+      // pinned columns this census contracts, so it is excluded here by its
+      // unmistakable `w-[100cqw]` and pinned separately by the next test, which
+      // requires exactly one such line, inside the note row. The census was not
+      // loosened for any other `left-0`.
+      if (t.includes("sticky left-0 w-[100cqw]")) continue;
       // Drop the string / JSX delimiters the \S* run drags along (`"`, backtick, `}`).
       for (const m of line.matchAll(offsetToken)) tokens.push(m[0].replace(/["'`}{,;]+$/g, ""));
     }
@@ -1321,6 +1329,21 @@ describe("StrategyTable — container-gated pinning (170.2 D-05)", () => {
     expect(tokens.length).toBeGreaterThanOrEqual(9);
     const bare = tokens.filter((tok) => !tok.includes("@3xl:left-"));
     expect(bare, `un-gated pinned offsets: ${bare.join(", ")}`).toEqual([]);
+  });
+
+  it("the one un-gated left-0 in the source is the note row's region-wide block (170.7-02)", () => {
+    const src = readFileSync(
+      join(process.cwd(), "src/components/strategy/StrategyTable.tsx"),
+      "utf8",
+    );
+    const lines = src
+      .split("\n")
+      .filter((l) => l.includes("sticky left-0 w-[100cqw]"));
+    expect(lines).toHaveLength(1);
+    // And it sits after the note row's own opening tag, never in a column cell.
+    const noteRowAt = src.indexOf('data-testid="strategy-row-note"');
+    expect(noteRowAt).toBeGreaterThan(-1);
+    expect(src.indexOf("sticky left-0 w-[100cqw]")).toBeGreaterThan(noteRowAt);
   });
 
   it("rank cells pin at 0; star and Strategy cells read the measured offsets, in the header, the data row AND the placeholder row", () => {

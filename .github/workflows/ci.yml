@@ -6921,6 +6921,13 @@ jobs:
           # No production exposure: prod sets NEXT_PUBLIC_SITE_URL to the
           # canonical Vercel host.
           NEXT_PUBLIC_ALLOWED_ORIGINS: http://localhost:3000
+          # Phase 170.7 — `npm run start` is a separate process from the build
+          # above, so the build step's SHARE_TOKEN_SECRET never reaches it.
+          # src/lib/strategy-share-token.ts reads the secret at MODULE SCOPE and
+          # throws without it, so every share mint 500'd here. The MYSTRATTABLE
+          # focus-return describe is the first seeded spec to mint a link.
+          # Same placeholder as the build step; the specs mint under it.
+          SHARE_TOKEN_SECRET: placeholder_share_token_secret_not_a_real_secret
       # Golden bake (workflow_dispatch input bake_svg_goldens): upload ONLY the
       # svg-chart-parity snapshot PNGs — chart images, no .next bundle /
       # trace.zip / page HTML — so the C-0293(c) secret-in-artifact concern

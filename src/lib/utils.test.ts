@@ -7,6 +7,7 @@ import {
   cn,
   formatRelativeTime,
   formatAbsoluteDate,
+  formatIsoDay,
   isUuid,
   minuteBucket,
   UUID_RE,
@@ -216,6 +217,27 @@ describe("formatAbsoluteDate", () => {
   });
   it("handles year boundary correctly", () => {
     expect(formatAbsoluteDate("2026-01-01T00:00:00Z")).toBe("Jan 1");
+  });
+});
+
+describe("formatIsoDay", () => {
+  // 170.7 / D-09 - the manager table's Created cell. UTC calendar day, never
+  // the runtime locale or zone, so the server render and the browser agree.
+  it("prints the UTC day of a full timestamp", () => {
+    expect(formatIsoDay("2026-10-09T12:34:56.789+00:00")).toBe("2026-10-09");
+  });
+  it("converts to UTC rather than slicing the string", () => {
+    // 23:30 at -05:00 is 04:30 UTC the NEXT day; a slice(0, 10) would say 10-09.
+    expect(formatIsoDay("2026-10-09T23:30:00-05:00")).toBe("2026-10-10");
+  });
+  it("keeps a bare date as that date", () => {
+    expect(formatIsoDay("2026-01-05")).toBe("2026-01-05");
+  });
+  it("prints an em dash for null, undefined, empty and unparseable input", () => {
+    expect(formatIsoDay(null)).toBe("\u2014");
+    expect(formatIsoDay(undefined)).toBe("\u2014");
+    expect(formatIsoDay("")).toBe("\u2014");
+    expect(formatIsoDay("not a date")).toBe("\u2014");
   });
 });
 

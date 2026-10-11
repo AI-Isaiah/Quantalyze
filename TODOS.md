@@ -1381,6 +1381,35 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### ALLOCSYNC-CAPTION-01 — the AllocatorSyncStatus pill and helper line are text-xs inside the /strategies note row, whose other lines are text-caption (booked 2026-10-09, Phase 170.7)
+
+**Why it is open.** The Phase 170.7 UI-SPEC accepted this typography residue. `AllocatorSyncStatus` is a
+shared component used on other surfaces, so 170.7 did not resize it. In the `/strategies` note row the
+other lines are DM Sans `text-caption` (12 to 13 px), while the pill (`text-xs`) and its helper line
+(`text-xs`) stay at 12 px.
+
+**Owner: unrouted.** Founder to assign.
+
+**Trigger.** The next phase that edits `AllocatorSyncStatus` or the `/strategies` note row.
+
+**What closing it means.** Both `text-xs` sites in `src/components/exchanges/AllocatorSyncStatus.tsx`
+move to `text-caption`, after checking every surface that mounts the component, and DESIGN.md's
+typography stays one tier per role.
+
+### STRATEGIES-LOADING-SKELETON-01 — /strategies still shows card skeletons while loading, but the page is now the shared table (booked 2026-10-09, Phase 170.7)
+
+**Why it is open.** `src/app/(dashboard)/strategies/loading.tsx` still renders card skeletons while the
+page is now the shared `StrategyTable`. Phase 170.7 RESEARCH Open Question 9 marked the skeleton optional
+and not required by D-01 to D-09, so deferring it is cheaper than a task in that phase.
+
+**Owner: unrouted.** Founder to assign.
+
+**Trigger.** The next phase that edits `/strategies`, or a founder report of the loading flash.
+
+**What closing it means.** `loading.tsx` renders a skeleton with the table's frame and row rhythm
+(`src/app/(dashboard)/discovery/[slug]/loading.tsx` is the precedent to read first), with a test that it
+no longer renders card skeletons.
+
 ### 164.6.6.3.3-WAVE5-RECOMPUTE — the guarded rows' headlines are withheld until the Wave 5 recompute writes headline_since (booked 2026-10-09, Phase 164.6.6.3.3)
 
 **Why it is open.** Phase 164.6.6.3.3 plan 01 changes the stored metrics of a guarded row (every
@@ -9130,6 +9159,40 @@ weakened CHECK. (3) the rollback copies the column to a named table or the runbo
 export step. (4) arms that fail first when `authenticated` can UPDATE either column and when a non-owner
 reads an unpublished row's value. (5) plan 05's red-first test on a `computing` row.
 ⛔ **Not a close:** the review round's CLEAN verdicts, or arm 5 reading green on a `complete` row.
+
+## Phase 170.7 (MYSTRATTABLE) — routed items (logged 2026-10-11)
+
+### 170.7-E2E-HEADER-PROBE-COVERAGE — the pinned-header overlap check can pass without probing Status or Created (booked 2026-10-11, Phase 170.7 D-10)
+
+**Why it is open.** `assertPinnedHeaderNotPaintedOver` in `e2e/helpers/geometry.ts` drops any
+`underEveryLaterHeader` stop that falls outside the scroll range or has zero width, and the
+MYSTRATTABLE wide describe in `e2e/layout-narrow.spec.ts` only logs the probe count. If the stops
+for Status and Created fall out of range, the check falls back to Discovery's old single stop and
+still passes. Founder D-10 booked this rather than fixing it in round 1.
+**Fix.** Return the labels actually probed and assert they include Status and Created.
+**Owner:** the next phase that touches `e2e/helpers/geometry.ts`.
+**Trigger:** any edit to the pinned-header helpers.
+
+### 170.7-RANK-PAGE-CONTINUITY-TEST — nothing pins that `#n` continues across pages (booked 2026-10-11, Phase 170.7 review round 2 WR-04)
+
+**Why it is open.** Since D-11, `rankOrdinals` in `StrategyTable.tsx` numbers ranked rows over the
+full `filtered` list. That is the only thing that makes page 2 start at #21. Every test uses
+fewer than `PAGE_SIZE` rows, so changing the loop to `paged` would restart page 2 at #1 and no
+test would fail. Round-2 MEDIUM, test-only, so it is booked rather than fixed under the standing rule.
+**Fix.** Add two tests: a Discovery mount with 21 or more ranked rows, where clicking Next shows
+#21, and a manager Created-sort mount with one unranked row on page 1, where page 2's first ranked
+row shows #20. Prove both go RED under the `paged` change.
+**Owner:** the next phase that touches `StrategyTable` pagination or ranking.
+**Trigger:** any edit to `rankOrdinals`.
+
+### 170.7-E2E-HELPER-SILENT-SKIPS — two geometry helpers return quietly instead of failing (booked 2026-10-11, Phase 170.7 D-10)
+
+**Why it is open.** `assertPinnedCellsMatchHeaders` returns silently when `overflowOf` names no
+pinned column, which turns its no-paint-past-the-edge half into a no-op. `settleStrategyTableLayout`
+stops at its deadline without failing, and it treats a missing region as stable. Neither is vacuous
+today, because the default `overflowOf` matches and the region is asserted visible first.
+**Fix.** Throw in both cases.
+**Owner / Trigger:** as 170.7-E2E-HEADER-PROBE-COVERAGE.
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 

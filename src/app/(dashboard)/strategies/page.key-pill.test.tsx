@@ -19,6 +19,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render } from "@testing-library/react";
 import React from "react";
+import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
 
 vi.mock("server-only", () => ({}));
 // 167.2 review-fix: the page captures its read failures to Sentry.
@@ -100,6 +101,22 @@ interface MockStrategyRow {
   review_note: string | null;
   created_at: string;
   api_key_id: string | null;
+  // 2026-10-09 Phase 170.7: the rest of the `Strategy` field set the shared
+  // table reads (subtypes, markets, supported_exchanges, aum, start_date,
+  // is_example, ...), so the page swap changes the page and not these inputs.
+  user_id: string;
+  category_id: string | null;
+  description: string | null;
+  subtypes: string[];
+  markets: string[];
+  supported_exchanges: string[];
+  leverage_range: string | null;
+  avg_daily_turnover: number | null;
+  aum: number | null;
+  max_capacity: number | null;
+  start_date: string | null;
+  is_example: boolean;
+  benchmark: string;
   /** PostgREST hands a 1:1 embed back as an object or a one-element array. */
   strategy_analytics:
     | { computation_status: string | null }
@@ -366,6 +383,19 @@ function row(
     review_note: null,
     created_at: "2026-01-01T00:00:00.000Z",
     api_key_id: null,
+    user_id: "u-1",
+    category_id: "cat-1",
+    description: null,
+    subtypes: ["Trend Following"],
+    markets: ["Spot"],
+    supported_exchanges: ["Binance"],
+    leverage_range: null,
+    avg_daily_turnover: null,
+    aum: 1_000_000,
+    max_capacity: 10_000_000,
+    start_date: "2024-01-01",
+    is_example: false,
+    benchmark: "BTC",
     // Default computed, so the key-mark cases see no share note.
     strategy_analytics: { computation_status: "complete" },
     ...overrides,
@@ -410,6 +440,14 @@ function markLines(container: HTMLElement) {
 let consoleError: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
+  // 2026-10-09 Phase 170.7: the shared table mounts client hooks that touch
+  // `fetch` and `localStorage`; install the same doubles my-strategies/page.test.tsx does.
+  installFetchMock();
+  try {
+    window.localStorage.clear();
+  } catch {
+    // jsdom may not implement clear in some configurations; non-fatal.
+  }
   redirectMock.mockReset();
   pillProps.length = 0;
   // Phase 167.2.1 (D-08): UUID-shaped, because the list now probes computed
@@ -447,6 +485,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  restoreFetchMock();
   consoleError.mockRestore();
 });
 
@@ -663,6 +702,16 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   const UNBUILDABLE_SHORT =
     "Right now, a private link to this strategy shows that its factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
 
+  // 2026-10-09 Phase 170.7: the note moves from the card footer to a full-width row under the table row (D-06); this lookup serves both until plan 06 swaps the page
+  function shareNoteOf(container: HTMLElement, strategyName: string): Element | null {
+    const link = [...container.querySelectorAll("a")].find((a) => a.textContent === strategyName);
+    const card = link?.closest('[data-testid="strategy-row"]');
+    if (card) return card.querySelector('[data-testid="strategy-row-share-note"]');
+    const sibling = link?.closest("tr")?.nextElementSibling;
+    if (!sibling?.matches('[data-testid="strategy-row-note"]')) return null;
+    return sibling.querySelector('[data-testid="strategy-row-share-note"]');
+  }
+
   // 164.6.6.3.3 D-08 (UI-SPEC section 4.2), typed out, never imported: the
   // analytics row FAILED. The second sentence is D-08's public sentence.
   const ANALYTICS_FAILED =
@@ -671,10 +720,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     "Right now, this strategy's factsheet link opens a page without the numbers. Analytics are not available for this strategy yet.";
 
   function noteOf(container: HTMLElement, strategyName: string): string | null {
-    const card = [...container.querySelectorAll("a")]
-      .find((a) => a.textContent === strategyName)
-      ?.closest('[data-testid="strategy-row"]');
-    return card?.querySelector('[data-testid="strategy-row-share-note"]')?.textContent ?? null;
+    return shareNoteOf(container, strategyName)?.textContent ?? null;
   }
 
   // In-flight rows are RECENT on the real clock the page reads. A fixed past
@@ -766,10 +812,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect(noteOf(container, "Strategy c-pre86")).toBe(UNBUILDABLE_COMPOSITE);
     // AD-05: the pointer is one same-tab link carrying this row's strategy id,
     // and the note names no address.
-    const note = [...container.querySelectorAll("a")]
-      .find((a) => a.textContent === "Strategy c-pre86")
-      ?.closest('[data-testid="strategy-row"]')
-      ?.querySelector('[data-testid="strategy-row-share-note"]');
+    const note = shareNoteOf(container, "Strategy c-pre86");
     const pointers = note!.querySelectorAll("a");
     expect(pointers).toHaveLength(1);
     expect(pointers[0].textContent).toBe("contact form");
@@ -1440,7 +1483,12 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     expect([...bands[1].children].map((c) => c.getAttribute("data-testid"))).toEqual([
       "strategy-row-share-note",
     ]);
-    expect(bands[1].querySelector("p")?.className).toBe("text-xs text-text-muted");
+    // 2026-10-10 Phase 170.7 (UI-SPEC Typography): every note-row line is
+    // `text-caption` weight 400 (it was `text-xs` on the card), so the share
+    // note's class string moved with the note's new home.
+    expect(bands[1].querySelector("p")?.className).toBe(
+      "text-caption font-normal text-text-muted",
+    );
   });
 
   const cron = (n: number) =>

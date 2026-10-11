@@ -12,17 +12,21 @@
  * Shared TEST: every seed uses this spec's own per-worker prefix and
  * cleanup deletes only that prefix. Never assert a global count.
  */
-import { test, expect, type Page } from "./helpers/hydration-guard";
+import { test, expect, type Locator, type Page } from "./helpers/hydration-guard";
 import { assertNoReflow } from "./helpers/reflow";
 import {
   assertChildrenInside,
   assertInsideViewport,
   assertFitsOrScrollsInside,
   assertNotClippedByAncestors,
+  assertColumnUnpinnedBelow3xl,
   assertNotCovered,
+  assertPinnedCellsMatchHeaders,
+  assertPinnedHeaderNotPaintedOver,
   assertPinnedStackDoesNotCover,
   assertScrollsInside,
   rectsIntersect,
+  settleStrategyTableLayout,
   type Rect,
 } from "./helpers/geometry";
 import {
@@ -400,171 +404,632 @@ const WRITE_CONTROLS = [
   "SKIP",
 ] as const;
 
-test.describe("/strategies — N-STRAT", () => {
+// 2026-10-09 Phase 170.7: /strategies is the shared StrategyTable now; the card geometry these measured (CR-01 name over controls, GC-02 stacking, WR-02 overlong names) is replaced by "/strategies — MYSTRATTABLE phones" and "/strategies — MYSTRATTABLE wide"
+//
+// Phase 170.7 (MYSTRATTABLE) plan 07 — the manager's My Strategies page on a
+// phone. The page mounts the shared StrategyTable in manager mode, so the
+// guarantees are Discovery's (no page scroll, the `Strategies` region scrolls
+// inside itself, nothing pinned below the container step) plus the three that
+// are this page's own: every name opens its factsheet (D-02), a strategy with
+// no analytics says `—` (D-03), and a strategy's note row stays in view under
+// it at any scroll position (D-06).
+//
+// WHY LOCAL viewports: V360 and V375 are not in the shared `VIEWPORTS`, which is
+// pinned by many describes and is never widened here.
+const MYSTR_PHONE_VIEWPORTS: { id: string; width: number; height: number }[] = [
+  { id: "V360", width: 360, height: 780 },
+  { id: "V375", width: 375, height: 667 },
+  { id: "V390", width: 390, height: 844 },
+];
+// UI-SPEC note-indent relation, below `@3xl`: the note's first line starts at the
+// region's left edge + 16 px (`pl-4`). Tailwind v4 `@3xl` = 768 px of CONTAINER.
+const MYSTR_NOTE_INDENT_PX = 16;
+const MYSTR_AT_3XL_PX = 768;
+
+/**
+ * Mint one manager-owned fixture row of a given status and rename it. The row
+ * is a wizard-draft shell (its API key is a placeholder ciphertext) moved off
+ * the wizard source so the page lists it. Scoped by id, through getAdmin().
+ */
+async function seedManagerStrategy(opts: {
+  ownerUserId: string;
+  prefix: string;
+  name: string;
+  status: "draft" | "private" | "pending_review";
+  reviewNote?: string;
+}): Promise<string> {
+  const draft = await seedWizardDraft({
+    ownerUserId: opts.ownerUserId,
+    namePrefix: opts.prefix,
+  });
+  await setSeededStrategyNameAndTags({
+    strategyId: draft.strategyId,
+    name: opts.name,
+    strategyTypes: ["spot", "trend following"],
+    status: opts.status,
+    ...(opts.reviewNote !== undefined ? { reviewNote: opts.reviewNote } : {}),
+  });
+  return draft.strategyId;
+}
+
+/**
+ * The manager and the four rows both MYSTRATTABLE describes seed: a published
+ * row WITH computed analytics (so a `—` check is not passing on an all-empty
+ * table), a private row and a pending_review row with none, and a draft carrying
+ * review feedback under a long hyphenated multi-word name. One definition, so
+ * the phones and wide describes cannot drift apart. Teardown is the caller's
+ * `finally` (`cleanupStrategiesByNamePrefix(prefix)`).
+ */
+async function seedMystrManagerRows(prefix: string) {
+  const manager = await seedTestAllocator({ role: "manager" });
+  const publishedName = `${prefix}Published Momentum Basket`;
+  const publishedId = await seedStrategyWithHistory({
+    days: 200,
+    name: publishedName,
+    ownerUserId: manager.userId,
+  });
+  const privateName = `${prefix}Private Carry Sleeve`;
+  const privateId = await seedManagerStrategy({
+    ownerUserId: manager.userId,
+    prefix,
+    name: privateName,
+    status: "private",
+  });
+  const pendingName = `${prefix}Pending Review Basis Trade`;
+  const pendingId = await seedManagerStrategy({
+    ownerUserId: manager.userId,
+    prefix,
+    name: pendingName,
+    status: "pending_review",
+  });
+  const draftName = `${prefix}Long-Short-Momentum-Mean-Reversion-Statistical-Arbitrage Sleeve`;
+  const draftId = await seedManagerStrategy({
+    ownerUserId: manager.userId,
+    prefix,
+    name: draftName,
+    status: "draft",
+    reviewNote:
+      "The track record covers fewer than ninety days; add a longer history and resubmit for review.",
+  });
+  const seeded = [
+    { id: publishedId, name: publishedName, label: "published" },
+    { id: privateId, name: privateName, label: "private" },
+    { id: pendingId, name: pendingName, label: "pending_review" },
+    { id: draftId, name: draftName, label: "draft" },
+  ];
+  return { manager, seeded, publishedId, privateId, pendingId, draftId };
+}
+
+/**
+ * Where the draft's note block and first line sit at one scroll stop, with the
+ * Strategy name text in the row above for the `@3xl` relation. `firstLeft` is the
+ * left edge of the block's first element (the review-feedback block's own box);
+ * `textLeft` the left edge of its first text node (a Range), which the amber
+ * block pads inward by its own `px-2` (`firstPadLeft`).
+ */
+async function readMystrNote(region: Locator, id: string, stop: "0" | "max") {
+  return region.evaluate(
+    (el, args) => {
+      el.scrollLeft = args.stop === "max" ? el.scrollWidth : 0;
+      const rr = el.getBoundingClientRect();
+      const link = el.querySelector<HTMLElement>(`a[href="/factsheet/${args.id}"]`);
+      const row = link?.closest("tr");
+      const footer = row?.nextElementSibling?.querySelector<HTMLElement>(
+        '[data-testid="strategy-row-footer"]',
+      );
+      if (!link || !footer) return null;
+      const firstTextLeft = (root: Element): number | null => {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+          if ((n.textContent ?? "").trim()) {
+            const range = document.createRange();
+            range.selectNodeContents(n);
+            return range.getBoundingClientRect().left;
+          }
+        }
+        return null;
+      };
+      const fr = footer.getBoundingClientRect();
+      const first = footer.firstElementChild;
+      return {
+        regionLeft: rr.left,
+        regionRight: rr.right,
+        blockLeft: fr.left,
+        blockRight: fr.right,
+        firstLeft: first ? first.getBoundingClientRect().left : null,
+        firstPadLeft: first ? parseFloat(getComputedStyle(first).paddingLeft) : null,
+        textLeft: firstTextLeft(footer),
+        nameTextLeft: firstTextLeft(link),
+        scrolled: el.scrollLeft,
+      };
+    },
+    { id, stop },
+  );
+}
+
+/** The data row (never the note row) whose Strategy cell links to `/factsheet/<id>`. */
+function mystrRow(page: Page, id: string) {
+  return page
+    .getByRole("region", { name: /^Strategies:/ })
+    .locator("tbody tr")
+    .filter({ has: page.locator(`a[href="/factsheet/${id}"]`) });
+}
+
+test.describe("/strategies — MYSTRATTABLE phones", () => {
   test.skip(
     !HAS_SEED_ENV,
     "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
   );
 
-  for (const vp of VIEWPORTS) {
-    test(`${vp.id}: name and control group do not intersect, name is whole, tags are one line`, async ({
+  for (const vp of MYSTR_PHONE_VIEWPORTS) {
+    test(`${vp.id}: no page scroll, the table scrolls inside, nothing is pinned, names open factsheets, empty metrics read —, the note stays in view`, async ({
       page,
     }) => {
-      test.setTimeout(90_000);
+      test.setTimeout(180_000);
       await page.setViewportSize({ width: vp.width, height: vp.height });
-      const manager = await seedTestAllocator({ role: "manager" });
-      // Several words plus one hyphenated word. Synthetic; own prefix.
-      // seedWizardDraft mints the row; the name is rewritten on THIS id only.
-      const seededName = `${NAME_PREFIX} Long-Short Momentum Sleeve`;
-      const draft = await seedWizardDraft({
-        ownerUserId: manager.userId,
-        namePrefix: NAME_PREFIX + " ",
-      });
-      // The helper publishes THIS id only and sets the multi-word tag the
-      // one-line chip assertion measures. It goes through getAdmin().
-      await setSeededStrategyNameAndTags({
-        strategyId: draft.strategyId,
-        name: seededName,
-        strategyTypes: ["spot", "trend following"],
-      });
+      const prefix = `${NAME_PREFIX} myst-${vp.id} `;
+      const failures: string[] = [];
+      const collect = async (label: string, fn: () => Promise<void>) => {
+        try {
+          await fn();
+        } catch (e) {
+          failures.push(`${label}: ${(e as Error).message.split("\n")[0]}`);
+        }
+      };
 
-      await loginViaForm(page, manager.email, manager.password);
-      // Anchor by testid, not the h1: /my-strategies shares "My Strategies".
-      await page.goto("/strategies");
-      const row = page.locator('[data-testid="strategy-row"]').filter({ hasText: seededName });
-      await expect(row, `${vp.id}: seeded strategy row missing`).toBeVisible({
-        timeout: 15_000,
-      });
-      await assertNoReflow(page, '[data-testid="strategy-row"]');
+      try {
+        const { manager, seeded, publishedId, privateId, pendingId, draftId } =
+          await seedMystrManagerRows(prefix);
 
-      const nameLink = row.getByRole("link", { name: seededName, exact: true });
-      await expect(nameLink).toHaveText(seededName);
-      const controls = nameLink.locator("xpath=../following-sibling::div[1]");
-      const nameBox = await boxOf(nameLink, `${vp.id} strategy name`);
-      const controlBox = await boxOf(controls, `${vp.id} control group`);
-      expect(
-        rectsIntersect(nameBox, controlBox),
-        `${vp.id}: name rect intersects the control group`,
-      ).toBe(false);
+        await loginViaForm(page, manager.email, manager.password);
+        await page.goto("/strategies");
+        const frame = page.locator("[data-strategy-table]");
+        await expect(frame, `${vp.id}: strategy table missing`).toBeVisible({
+          timeout: 15_000,
+        });
+        const region = page.getByRole("region", { name: /^Strategies:/ });
+        await expect(region, `${vp.id}: Strategies region missing`).toBeVisible();
+        // Precondition: all four seeded rows are in the table, else every check
+        // below could pass on a table that never showed them.
+        for (const s of seeded) {
+          await expect(
+            mystrRow(page, s.id),
+            `${vp.id}: precondition: the ${s.label} row is missing`,
+          ).toHaveCount(1);
+        }
 
-      // GC-02 (2026-09-30): the row stacks below md, so at V390 and V640 the
-      // control group starts below the name block; from md up (V960) it is
-      // one row, so the two boxes overlap vertically.
-      const nameBlock = nameLink.locator("xpath=..");
-      const block = await boxOf(nameBlock, `${vp.id} name block`);
-      if (vp.width < MD_PX) {
-        expect(
-          controlBox.y,
-          `${vp.id}: control group top ${controlBox.y} is not below the name block bottom ${block.y + block.height} (GC-02 stacked row)`,
-        ).toBeGreaterThanOrEqual(block.y + block.height - 1);
-      } else {
-        expect(
-          controlBox.y < block.y + block.height && controlBox.y + controlBox.height > block.y,
-          `${vp.id}: control group ${controlBox.y}+${controlBox.height} does not share a row with the name block ${block.y}+${block.height} (GC-02 one row)`,
-        ).toBe(true);
+        // 1. No horizontal page scroll (names the offender when there is one).
+        await collect("page overflow", () =>
+          assertNoReflow(page, "[data-strategy-table]"),
+        );
+
+        // 2. The region scrolls inside itself, right edge inside the viewport.
+        await collect("region scrolls inside", () =>
+          assertScrollsInside(region, `${vp.id} Strategies region`),
+        );
+        const right = await region.evaluate((el) => el.getBoundingClientRect().right);
+        if (right > vp.width + 1) {
+          failures.push(
+            `region right edge ${right.toFixed(1)} is outside the ${vp.width} px viewport`,
+          );
+        }
+
+        // 3. Unpinned below @3xl (D-04): at the maximum scroll the Strategy
+        //    header and every Strategy body cell have moved left with the row.
+        //    The relation is 170.2's, exported from geometry.ts (D-07); the
+        //    guards make it fail, not pass, on a container at or above the step
+        //    or a region that barely scrolled.
+        await collect("unpinned", async () => {
+          const res = await assertColumnUnpinnedBelow3xl(
+            region,
+            `${vp.id} Strategy column`,
+            { at3xl: MYSTR_AT_3XL_PX, requireBelow3xl: true, minScrolled: 40 },
+          );
+          console.log(
+            `MYSTRATTABLE ${vp.id} unpinned container=${res.container} scrolled=${res.scrolled} cells=${res.cells}`,
+          );
+        });
+
+        // 4. Every name opens its factsheet, whatever the status (D-02).
+        for (const s of seeded) {
+          await collect(`name link (${s.label})`, async () => {
+            const link = region.locator(`a[href="/factsheet/${s.id}"]`);
+            await expect(link).toHaveCount(1);
+            await expect(link).toHaveAttribute("href", `/factsheet/${s.id}`);
+            expect(
+              ((await link.textContent()) ?? "").replace(/\s+/g, " ").trim(),
+              `the ${s.label} name link text`,
+            ).toBe(s.name);
+          });
+        }
+
+        // 5. A strategy with no analytics says `—` in Return %, CAGR, Sharpe and
+        //    Max DD (D-03); the published row WITH analytics shows figures there,
+        //    so the dash check is not passing on an all-empty table.
+        await collect("metric cells", async () => {
+          const read = await region.evaluate(
+            (el, ids) => {
+              const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
+              const idx = (label: string) =>
+                heads.findIndex((h) => (h.textContent ?? "").trim().startsWith(label));
+              const cols = ["Return %", "CAGR", "Sharpe", "Max DD"].map((label) => ({
+                label,
+                i: idx(label),
+              }));
+              const out: Record<string, Record<string, string>> = {};
+              for (const [key, id] of Object.entries(ids)) {
+                const row = el
+                  .querySelector(`a[href="/factsheet/${id}"]`)
+                  ?.closest("tr");
+                const tds = row ? row.querySelectorAll<HTMLElement>(":scope > td") : [];
+                out[key] = {};
+                for (const c of cols) {
+                  out[key][c.label] =
+                    c.i < 0 || !tds[c.i] ? "<missing>" : (tds[c.i].textContent ?? "").trim();
+                }
+              }
+              return out;
+            },
+            { published: publishedId, private: privateId, pending: pendingId },
+          );
+          const problems: string[] = [];
+          for (const key of ["private", "pending"] as const) {
+            for (const [label, text] of Object.entries(read[key])) {
+              if (text !== "—") problems.push(`${key} row ${label} reads "${text}", not —`);
+            }
+          }
+          for (const [label, text] of Object.entries(read.published)) {
+            if (!/\d/.test(text))
+              problems.push(`published row ${label} reads "${text}", expected a figure`);
+          }
+          if (problems.length) throw new Error(problems.join("; "));
+        });
+
+        // 6. The draft's note row (D-06): `Review feedback:`, in view at any
+        //    scroll position, its first line at the region's left edge + 16 px.
+        const noteRow = mystrRow(page, draftId).locator("xpath=following-sibling::tr[1]");
+        await collect("note row exists", async () => {
+          await expect(noteRow).toHaveAttribute("data-testid", "strategy-row-note");
+          await expect(noteRow).toContainText("Review feedback:");
+        });
+        for (const stop of ["0", "max"] as const) {
+          await collect(`note in view at scrollLeft ${stop}`, async () => {
+            const g = await readMystrNote(region, draftId, stop);
+            if (!g) throw new Error("the note block [data-testid=strategy-row-footer] was not found");
+            console.log(
+              `MYSTRATTABLE ${vp.id} note scrollLeft=${g.scrolled} region=${g.regionLeft.toFixed(1)}..${g.regionRight.toFixed(1)} block=${g.blockLeft.toFixed(1)}..${g.blockRight.toFixed(1)} first=${g.firstLeft?.toFixed(1)} text=${g.textLeft?.toFixed(1)}`,
+            );
+            const problems: string[] = [];
+            if (stop === "max" && g.scrolled < 40)
+              problems.push(`region only scrolled ${g.scrolled} px; the check would be vacuous`);
+            if (Math.abs(g.blockLeft - g.regionLeft) > 1)
+              problems.push(
+                `block left ${g.blockLeft.toFixed(1)} is not the region's left ${g.regionLeft.toFixed(1)}`,
+              );
+            if (g.blockRight > g.regionRight + 1)
+              problems.push(
+                `block right ${g.blockRight.toFixed(1)} is past the region's right ${g.regionRight.toFixed(1)}`,
+              );
+            if (g.firstLeft === null) problems.push("the note block has no first element");
+            else if (Math.abs(g.firstLeft - (g.regionLeft + MYSTR_NOTE_INDENT_PX)) > 1)
+              problems.push(
+                `first line left ${g.firstLeft.toFixed(1)} is not region left + ${MYSTR_NOTE_INDENT_PX} (${(g.regionLeft + MYSTR_NOTE_INDENT_PX).toFixed(1)})`,
+              );
+            if (problems.length) throw new Error(problems.join("; "));
+          });
+        }
+      } finally {
+        await cleanupStrategiesByNamePrefix(prefix);
       }
 
-      if (vp.id === "V390") {
-        const chips = row.locator("span", { hasText: /^(spot|trend following)$/ });
-        expect(await chips.count(), "expected a tag chip on the seeded row").toBeGreaterThan(0);
-        const heights = await chips.evaluateAll((els) =>
-          els.map((el) => (el as HTMLElement).getBoundingClientRect().height),
-        );
-        const line = Math.min(...heights);
-        for (const h of heights) {
-          expect(
-            h,
-            `${vp.id}: a tag chip is taller than one line (${h} > ${line})`,
-          ).toBeLessThanOrEqual(line + 1);
-        }
-      } else {
-        // GC-02: the 160 px name-block floor holds at V640 (stacked, full
-        // width) and at V960 (one row).
-        expect(block.width, `${vp.id}: name block narrower than 160px`).toBeGreaterThanOrEqual(160);
+      for (const f of failures) {
+        console.log(`MYSTRATTABLE ${vp.id} FAILED ${f}`);
+      }
+      expect(failures, `${vp.id}: MYSTRATTABLE phone contracts that failed`).toEqual([]);
+    });
+  }
+});
+
+// Phase 170.7 (D-01) — the private-link modal moved from a card into a `td`
+// inside the table's scroll region. The behaviour is unchanged and the focus
+// return is founder UAT #4: after Close, Escape and a revoke the keyboard focus
+// is back on THAT row's private-link button. `Modal` keeps its native <dialog>
+// mounted and calls `dialog.close()`; the browser restores focus. Unmounting an
+// open dialog would drop focus to the body.
+const MYSTR_FOCUS_VIEWPORTS: { id: string; width: number; height: number }[] = [
+  { id: "V1280", width: 1280, height: 800 },
+  { id: "V390", width: 390, height: 844 },
+];
+
+test.describe("/strategies — MYSTRATTABLE focus return", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
+  );
+  // The mint copies the link; a denied clipboard would still mint, but grant it
+  // so the row reads the success path.
+  test.use({ permissions: ["clipboard-read", "clipboard-write"] });
+
+  for (const vp of MYSTR_FOCUS_VIEWPORTS) {
+    test(`${vp.id}: Close, Escape and revoke each return focus to the row's private-link button`, async ({
+      page,
+    }) => {
+      test.setTimeout(180_000);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      const prefix = `${NAME_PREFIX} myst-focus-${vp.id} `;
+      try {
+        const manager = await seedTestAllocator({ role: "manager" });
+        const name = `${prefix}Private Link Sleeve`;
+        const id = await seedManagerStrategy({
+          ownerUserId: manager.userId,
+          prefix,
+          name,
+          status: "private",
+        });
+
+        await loginViaForm(page, manager.email, manager.password);
+        await page.goto("/strategies");
+        await expect(
+          page.locator("[data-strategy-table]"),
+          `${vp.id}: strategy table missing`,
+        ).toBeVisible({ timeout: 15_000 });
+
+        const row = mystrRow(page, id);
+        await expect(row, `${vp.id}: the seeded private row is missing`).toHaveCount(1);
+        // The Actions cell is the row's last cell; the button is located inside it.
+        const button = row.locator("td").last().getByRole("button", { name: /private link/ });
+        const dialog = page.locator("dialog[open]");
+
+        // The mint: "Get private link" -> (copy feedback) -> "Manage private link".
+        await expect(button).toHaveAccessibleName("Get private link");
+        await button.scrollIntoViewIfNeeded();
+        await button.click();
+        await expect(
+          row.locator("td").last().getByRole("button", { name: "Manage private link" }),
+          `${vp.id}: the mint did not flip the row to Manage private link`,
+        ).toBeVisible({ timeout: 20_000 });
+
+        // (a) the dialog's Close button.
+        await button.click();
+        await expect(dialog, `${vp.id}: (a) the dialog did not open`).toHaveCount(1);
+        await dialog.getByRole("button", { name: "Close", exact: true }).click();
+        await expect(dialog, `${vp.id}: (a) the dialog did not close`).toHaveCount(0);
+        expect(await button.evaluate((el) => el === document.activeElement), `${vp.id}: (a) focus is not on the row's private-link button after Close`).toBe(true);
+
+        // (b) Escape.
+        await button.click();
+        await expect(dialog, `${vp.id}: (b) the dialog did not reopen`).toHaveCount(1);
+        await page.keyboard.press("Escape");
+        await expect(dialog, `${vp.id}: (b) Escape did not close the dialog`).toHaveCount(0);
+        expect(await button.evaluate((el) => el === document.activeElement), `${vp.id}: (b) focus is not on the row's private-link button after Escape`).toBe(true);
+
+        // (c) revoke: the panel loads lazily, then Revoke link -> Revoke.
+        await button.click();
+        await expect(dialog, `${vp.id}: (c) the dialog did not reopen`).toHaveCount(1);
+        await dialog.getByRole("button", { name: "Revoke link" }).click({ timeout: 20_000 });
+        await dialog.getByRole("button", { name: "Revoke", exact: true }).click();
+        await expect(dialog, `${vp.id}: (c) the revoke did not close the dialog`).toHaveCount(0);
+        await expect(
+          row.locator("td").last().getByRole("button", { name: "Get private link" }),
+          `${vp.id}: (c) the row did not flip back to Get private link`,
+        ).toBeVisible();
+        expect(await button.evaluate((el) => el === document.activeElement), `${vp.id}: (c) focus is not on the row's private-link button after the revoke`).toBe(true);
+      } finally {
+        // strategy_shares cascades from strategies.
+        await cleanupStrategiesByNamePrefix(prefix);
       }
     });
   }
 });
 
-// CR-01 (170 review): a DRAFT row's control group is the widest one (about
-// 400 px on one line). With the 260 px sidebar the row at 768-840 px is
-// narrower than that, and before the fix the name block got 0 px and the
-// name painted over the controls. V960 above is the only md+ width the
-// published case covers, so the draft row gets its own widths here.
-const DRAFT_ROW_VIEWPORTS: { id: string; width: number; height: number }[] = [
-  { id: "V768", width: 768, height: 1024 },
-  { id: "V800", width: 800, height: 600 },
+// Phase 170.7 (MYSTRATTABLE) plan 08 — the manager's My Strategies table on a
+// desktop, either side of 170.2's `@3xl` container step, with the three columns
+// the manager adds (Status, Created, Actions) present.
+//
+// WHY: the extra columns widen the table, so the room and occlusion relations
+// 170.2 proves on Discovery can behave differently here, and the note indent
+// reads the runtime-measured pin offset. D-07: every pin relation below is a
+// CALL to a helper exported from e2e/helpers/geometry.ts, the same functions the
+// `/discovery — SC6-DISCOVERY` describes call; nothing of 170.2's is re-typed.
+//
+// V1080 is the table just under the step (a 754 px region, nothing pinned),
+// V1100 the narrowest pinned table (774 px), V1280 the ordinary desktop. They
+// are local, like Discovery's: the shared `VIEWPORTS` is never widened.
+//
+// The pinned stack on this page is the rank column and the Strategy column: the
+// manager page passes no `userId`, so there is no star column.
+const MYSTR_WIDE_VIEWPORTS: { id: string; width: number; height: number; pinned: boolean }[] = [
+  { id: "V1080", width: 1080, height: 800, pinned: false },
+  { id: "V1100", width: 1100, height: 800, pinned: true },
+  { id: "V1280", width: 1280, height: 800, pinned: true },
 ];
 
-test.describe("/strategies — N-STRAT draft row (CR-01)", () => {
+test.describe("/strategies — MYSTRATTABLE wide", () => {
   test.skip(
     !HAS_SEED_ENV,
     "layout-narrow: seed-helper env vars not wired — skipping prevents false-green (W-02).",
   );
 
-  test.afterAll(async () => {
-    if (HAS_SEED_ENV) {
-      await cleanupStrategiesByNamePrefix(NAME_PREFIX);
-    }
-  });
-
-  for (const vp of DRAFT_ROW_VIEWPORTS) {
-    test(`${vp.id}: draft row keeps a 160px name block clear of the control group, controls inside the group`, async ({
+  for (const vp of MYSTR_WIDE_VIEWPORTS) {
+    test(`${vp.id}: ${vp.pinned ? "the pinned Strategy column covers no metric nor its own header, widths agree" : "nothing is pinned"}, each note lines up with its strategy`, async ({
       page,
     }) => {
-      test.setTimeout(90_000);
+      test.setTimeout(180_000);
       await page.setViewportSize({ width: vp.width, height: vp.height });
-      const manager = await seedTestAllocator({ role: "manager" });
-      const seededName = `${NAME_PREFIX} Draft Long-Short Sleeve`;
-      const draft = await seedWizardDraft({
-        ownerUserId: manager.userId,
-        namePrefix: NAME_PREFIX + " ",
-      });
-      // Off the wizard source so the list shows it, but still a draft.
-      await setSeededStrategyNameAndTags({
-        strategyId: draft.strategyId,
-        name: seededName,
-        strategyTypes: ["spot", "trend following"],
-        status: "draft",
-      });
+      const prefix = `${NAME_PREFIX} myst-wide-${vp.id} `;
+      const failures: string[] = [];
+      const collect = async (label: string, fn: () => Promise<void>) => {
+        try {
+          await fn();
+        } catch (e) {
+          failures.push(`${label}: ${(e as Error).message.split("\n")[0]}`);
+        }
+      };
 
-      await loginViaForm(page, manager.email, manager.password);
-      await page.goto("/strategies");
-      const row = page.locator('[data-testid="strategy-row"]').filter({ hasText: seededName });
-      await expect(row, `${vp.id}: seeded draft row missing`).toBeVisible({
-        timeout: 15_000,
-      });
-      // The row must carry the draft controls, or a silently published row
-      // would pass here on the narrower published control group.
-      await expect(
-        row.getByRole("button", { name: "Submit for Review" }),
-        `${vp.id}: seeded row does not show the draft controls`,
-      ).toBeVisible();
-      await assertNoReflow(page, '[data-testid="strategy-row"]');
+      try {
+        const { manager, seeded, draftId } = await seedMystrManagerRows(prefix);
+        await loginViaForm(page, manager.email, manager.password);
+        await page.goto("/strategies");
+        await expect(
+          page.locator("[data-strategy-table]"),
+          `${vp.id}: strategy table missing`,
+        ).toBeVisible({ timeout: 15_000 });
+        const region = page.getByRole("region", { name: /^Strategies:/ });
+        await expect(region, `${vp.id}: Strategies region missing`).toBeVisible();
+        // Precondition: all four seeded rows are in the table, else every check
+        // below could pass on a table that never showed them.
+        for (const s of seeded) {
+          await expect(
+            mystrRow(page, s.id),
+            `${vp.id}: precondition: the ${s.label} row is missing`,
+          ).toHaveCount(1);
+        }
 
-      const nameLink = row.getByRole("link", { name: seededName, exact: true });
-      await expect(nameLink).toHaveText(seededName);
-      const nameBlock = nameLink.locator("xpath=..");
-      const controls = nameLink.locator("xpath=../following-sibling::div[1]");
-      const block = await boxOf(nameBlock, `${vp.id} name block`);
-      const nameBox = await boxOf(nameLink, `${vp.id} strategy name`);
-      const controlBox = await boxOf(controls, `${vp.id} control group`);
+        // Column widths keep moving after first paint; wait for them to hold still.
+        await settleStrategyTableLayout(page);
 
-      expect(block.width, `${vp.id}: name block narrower than 160px`).toBeGreaterThanOrEqual(160);
-      expect(
-        rectsIntersect(block, controlBox),
-        `${vp.id}: name block intersects the control group`,
-      ).toBe(false);
-      // A 0 px block intersects nothing, so the block check alone is blind to
-      // CR-01. The defect was the name painting PAST that block onto the
-      // controls: check the name's own box, and that it stays in its block.
-      expect(
-        rectsIntersect(nameBox, controlBox),
-        `${vp.id}: name rect intersects the control group`,
-      ).toBe(false);
-      await assertChildrenInside(page, nameBlock, `${vp.id} name block`);
-      // A shrinkable group must wrap its items, never let one spill out.
-      await assertChildrenInside(page, controls, `${vp.id} control group`);
+        // Precondition: the three manager columns are there, the stack is rank +
+        // Strategy (no star column), and the container is on the side of the
+        // `@3xl` step this case expects. Without these every relation below is
+        // vacuous or measures the wrong thing.
+        const pre = await region.evaluate((el) => {
+          const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th")).map((h) =>
+            (h.textContent ?? "").trim(),
+          );
+          return { clientWidth: el.clientWidth, scrollWidth: el.scrollWidth, heads };
+        });
+        console.log(
+          `MYSTRATTABLE wide ${vp.id} region clientWidth=${pre.clientWidth} scrollWidth=${pre.scrollWidth} scrollable=${pre.scrollWidth - pre.clientWidth} headers=${pre.heads.map((h) => h.slice(0, 10) || "?").join("|")}`,
+        );
+        for (const label of ["Status", "Created", "Actions", "Return %", "CAGR", "Sharpe"]) {
+          expect(
+            pre.heads.some((h) => h.startsWith(label)),
+            `${vp.id}: precondition: the ${label} column is missing (headers: ${pre.heads.join(" | ")})`,
+          ).toBe(true);
+        }
+        expect(
+          pre.heads[1].startsWith("Strategy"),
+          `${vp.id}: precondition: the pinned stack is rank + Strategy; header 2 is "${pre.heads[1]}"`,
+        ).toBe(true);
+        expect(
+          pre.clientWidth >= MYSTR_AT_3XL_PX,
+          `${vp.id}: precondition: the container is ${pre.clientWidth} px, expected ${vp.pinned ? "at or above" : "below"} the ${MYSTR_AT_3XL_PX} px step`,
+        ).toBe(vp.pinned);
+
+        // The Strategy column, either side of the step.
+        if (!vp.pinned) {
+          // D-04, D-07: unpinned, so the Strategy header and every Strategy cell
+          // move left with the row. Fails on a container at or above the step or
+          // a region that barely scrolled.
+          await collect("unpinned", async () => {
+            const r = await assertColumnUnpinnedBelow3xl(region, `${vp.id} Strategy column`, {
+              at3xl: MYSTR_AT_3XL_PX,
+              requireBelow3xl: true,
+              minScrolled: 40,
+            });
+            console.log(
+              `MYSTRATTABLE wide ${vp.id} unpinned container=${r.container} scrolled=${r.scrolled} cells=${r.cells}`,
+            );
+          });
+        } else {
+          // X-1: the Status and Created headers (and every other later header)
+          // never paint over the pinned Strategy header, at the maximum scroll and
+          // at the scroll where each of them is passing under its right edge.
+          await collect("X-1 header not painted over", async () => {
+            const r = await assertPinnedHeaderNotPaintedOver(region, `MYSTRATTABLE wide ${vp.id}`, {
+              underEveryLaterHeader: true,
+            });
+            console.log(`MYSTRATTABLE wide ${vp.id} X-1 probes=${r.probes}`);
+          });
+          // P-2 and P-3: every pinned body cell is as wide as its header and ends
+          // where it ends, and nothing in the Strategy cell paints past it, at
+          // scrollLeft 0 and at the maximum.
+          await collect("P-2/P-3 pinned cells match their headers", async () => {
+            const r = await assertPinnedCellsMatchHeaders(region, `MYSTRATTABLE wide ${vp.id}`, {
+              pinned: [
+                { header: 0, name: "rank" },
+                { header: "Strategy", name: "Strategy" },
+              ],
+            });
+            console.log(`MYSTRATTABLE wide ${vp.id} P-2/P-3 rows=${r.rows} stops=${r.stops.join("/")}`);
+          });
+          // SC-6 second half: the pinned stack covers no Return %, CAGR or Sharpe
+          // cell at any scroll position.
+          await collect("pinned stack covers no metric", async () => {
+            const r = await assertPinnedStackDoesNotCover(
+              page,
+              region,
+              `${vp.id} pinned stack`,
+              { metrics: ["Return %", "CAGR", "Sharpe"] },
+            );
+            console.log(
+              `MYSTRATTABLE wide ${vp.id} occlusion probes=${r.probes} stops=${r.stops.join("/")}`,
+            );
+          });
+        }
+
+        // D-06: each note lines up with its strategy. At V1080 (unpinned) the
+        // note's first line starts at the region's left edge + 16 px. Where the
+        // table pins, it starts at the Strategy name text's left edge, whatever
+        // the scroll position. Always: the note block lies inside the region.
+        //
+        // "First line" is the note block's first element, the review-feedback
+        // block's own box; its text is inset by that block's own `px-2` (UI-SPEC
+        // D-08 markup), which is asserted equal to the measured Range offset, so
+        // the glyph is never off by anything but the block's declared padding.
+        const noteRow = mystrRow(page, draftId).locator("xpath=following-sibling::tr[1]");
+        await collect("note row exists", async () => {
+          await expect(noteRow).toHaveAttribute("data-testid", "strategy-row-note");
+          await expect(noteRow).toContainText("Review feedback:");
+        });
+        for (const stop of ["0", "max"] as const) {
+          await collect(`note alignment at scrollLeft ${stop}`, async () => {
+            const g = await readMystrNote(region, draftId, stop);
+            if (!g) throw new Error("the note block [data-testid=strategy-row-footer] was not found");
+            console.log(
+              `MYSTRATTABLE wide ${vp.id} note scrollLeft=${g.scrolled} region=${g.regionLeft.toFixed(1)}..${g.regionRight.toFixed(1)} block=${g.blockLeft.toFixed(1)}..${g.blockRight.toFixed(1)} first=${g.firstLeft?.toFixed(1)} text=${g.textLeft?.toFixed(1)} name=${g.nameTextLeft?.toFixed(1)} pad=${g.firstPadLeft}`,
+            );
+            const problems: string[] = [];
+            if (stop === "max" && g.scrolled < 40)
+              problems.push(`region only scrolled ${g.scrolled} px; the check would be vacuous`);
+            if (Math.abs(g.blockLeft - g.regionLeft) > 1)
+              problems.push(
+                `block left ${g.blockLeft.toFixed(1)} is not the region's left ${g.regionLeft.toFixed(1)}`,
+              );
+            if (g.blockRight > g.regionRight + 1)
+              problems.push(
+                `block right ${g.blockRight.toFixed(1)} is past the region's right ${g.regionRight.toFixed(1)}`,
+              );
+            if (g.firstLeft === null || g.textLeft === null || g.firstPadLeft === null) {
+              problems.push("the note block has no first element or no text");
+            } else {
+              if (Math.abs(g.textLeft - (g.firstLeft + g.firstPadLeft)) > 1)
+                problems.push(
+                  `the first text starts at ${g.textLeft.toFixed(1)}, not the first block's left ${g.firstLeft.toFixed(1)} + its own padding ${g.firstPadLeft}`,
+                );
+              if (vp.pinned) {
+                if (g.nameTextLeft === null) problems.push("the Strategy name text was not found");
+                else if (Math.abs(g.firstLeft - g.nameTextLeft) > 1)
+                  problems.push(
+                    `first line left ${g.firstLeft.toFixed(1)} is not the Strategy name text's left ${g.nameTextLeft.toFixed(1)} (delta ${(g.firstLeft - g.nameTextLeft).toFixed(1)})`,
+                  );
+              } else if (Math.abs(g.firstLeft - (g.regionLeft + MYSTR_NOTE_INDENT_PX)) > 1) {
+                problems.push(
+                  `first line left ${g.firstLeft.toFixed(1)} is not region left + ${MYSTR_NOTE_INDENT_PX} (${(g.regionLeft + MYSTR_NOTE_INDENT_PX).toFixed(1)})`,
+                );
+              }
+            }
+            if (problems.length) throw new Error(problems.join("; "));
+          });
+        }
+      } finally {
+        await cleanupStrategiesByNamePrefix(prefix);
+      }
+
+      for (const f of failures) {
+        console.log(`MYSTRATTABLE wide ${vp.id} FAILED ${f}`);
+      }
+      expect(failures, `${vp.id}: MYSTRATTABLE wide contracts that failed`).toEqual([]);
     });
   }
 });
@@ -1179,9 +1644,20 @@ test.describe("/discovery — SC6-DISCOVERY unpinned", () => {
           });
         }
 
-        // 5. Unpinned below @3xl, and every metric cell reachable (D-01, D-05).
-        await collect("unpinned + metrics reachable", async () => {
-          const res = await page.evaluate((at3xl) => {
+        // 5a. Unpinned below @3xl (D-01): the Strategy header and every Strategy
+        //     body cell move left with the row. The relation is
+        //     assertColumnUnpinnedBelow3xl in geometry.ts: Phase 170.7 moved it
+        //     there, unedited, so the manager's /strategies describes call it
+        //     instead of copying it.
+        await collect("unpinned", async () => {
+          await assertColumnUnpinnedBelow3xl(region, `${vp.id} Strategy column`, {
+            at3xl: AT_3XL_PX,
+          });
+        });
+
+        // 5b. Every metric cell reachable (D-01, D-05).
+        await collect("metrics reachable", async () => {
+          const res = await page.evaluate(() => {
             const region = document.querySelector<HTMLElement>(
               '[role="region"][aria-label^="Strategies:"]',
             )!;
@@ -1209,31 +1685,8 @@ test.describe("/discovery — SC6-DISCOVERY unpinned", () => {
               };
 
             const containerPx = region.clientWidth;
-            // Pinning is only contracted below the container step.
-            const below = containerPx < at3xl;
 
-            // (a) After scrolling to the maximum, the Strategy header and every
-            //     Strategy body cell have moved left with the row.
-            region.scrollLeft = 0;
-            const strategyCells = [
-              heads[strategyIdx],
-              ...rows.map((r) => cell(r, strategyIdx)),
-            ];
-            const before = strategyCells.map((c) => c.getBoundingClientRect().left);
-            region.scrollLeft = region.scrollWidth;
-            const scrolled = region.scrollLeft;
-            const after = strategyCells.map((c) => c.getBoundingClientRect().left);
-            if (below) {
-              strategyCells.forEach((_, k) => {
-                const moved = before[k] - after[k];
-                if (Math.abs(moved - scrolled) > 1)
-                  problems.push(
-                    `Strategy ${k === 0 ? "header" : `cell ${k}`} is pinned: moved ${moved.toFixed(1)} px of ${scrolled} px scrolled`,
-                  );
-              });
-            }
-
-            // (b) Every Return %, CAGR and Sharpe cell is fully inside the region
+            // Every Return %, CAGR and Sharpe cell is fully inside the region
             //     and not covered at some scroll position.
             const maxLeft = region.scrollWidth - region.clientWidth;
             const stops = [0, 60, 150, 300, maxLeft];
@@ -1271,7 +1724,7 @@ test.describe("/discovery — SC6-DISCOVERY unpinned", () => {
               });
             }
             return { problems, containerPx };
-          }, AT_3XL_PX);
+          });
           console.log(
             `SC6-DISCOVERY ${vp.id} unpinned check container=${res.containerPx} problems=${res.problems.length}`,
           );
@@ -1383,37 +1836,11 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
           `${vp.id}: precondition: expected the 3 seeded crypto-sma rows, got ${rowCount}`,
         ).toBeGreaterThanOrEqual(3);
 
-        // The table's column widths keep moving after first paint (measured: the
-        // rank cell read 38.5 px and the region scrolled 1338 px wide early on,
-        // then 31.0 px and 1184 px, on the same page; web fonts and the
-        // sparklines settle late). Wait until every header edge and the region's
-        // scrollWidth have held still for 500 ms, then two more frames so the
-        // table's ResizeObserver has applied its offsets, before reading anything.
-        await page.evaluate(async () => {
-          await document.fonts.ready;
-          const snap = () => {
-            const reg = document.querySelector<HTMLElement>('[role="region"][aria-label^="Strategies:"]');
-            if (!reg) return "<no region>";
-            const heads = Array.from(reg.querySelectorAll<HTMLElement>("thead th"));
-            return `${reg.scrollWidth}|${heads.map((h) => h.getBoundingClientRect().width.toFixed(2)).join(",")}`;
-          };
-          const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
-          let last = snap();
-          let stableSince = performance.now();
-          const deadline = performance.now() + 10_000;
-          while (performance.now() < deadline) {
-            await frame();
-            const now = snap();
-            if (now !== last) {
-              last = now;
-              stableSince = performance.now();
-            } else if (performance.now() - stableSince >= 500) {
-              break;
-            }
-          }
-          await frame();
-          await frame();
-        });
+        // The table's column widths keep moving after first paint (170.2 measured the
+        // rank cell at 38.5 px and then 31.0 px on one page); wait until they hold
+        // still. The wait moved to geometry.ts (170.7) so the manager describes
+        // share it.
+        await settleStrategyTableLayout(page);
 
         // Precondition: pinning is active (the container is at or above @3xl) and
         // the star column shows. Without both, every contract below is vacuous.
@@ -1447,34 +1874,7 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
         // 1. X-1: at maximum scroll the point just inside the Strategy th's right
         //    edge hits the th itself or a descendant, never a later header cell.
         await collect("X-1 header not painted over", async () => {
-          const res = await region.evaluate((el) => {
-            const main = document.getElementById("main-content");
-            const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
-            const th = heads.find((h) => (h.textContent ?? "").trim().startsWith("Strategy"));
-            if (!th) return { error: "Strategy header not found" };
-            el.scrollLeft = el.scrollWidth;
-            const r0 = th.getBoundingClientRect();
-            if (main) main.scrollTop += r0.top + r0.height / 2 - window.innerHeight / 2;
-            const r = th.getBoundingClientRect();
-            const hit = document.elementFromPoint(r.right - 2, r.top + r.height / 2);
-            const cls =
-              hit && typeof (hit as HTMLElement).className === "string"
-                ? String((hit as HTMLElement).className).split(" ").filter(Boolean).slice(0, 2).join(".")
-                : "";
-            return {
-              scrolled: el.scrollLeft,
-              ok: !!hit && (hit === th || th.contains(hit)),
-              hit: hit ? `${hit.tagName}.${cls} "${(hit.textContent ?? "").trim().slice(0, 20)}"` : "<null>",
-              thRight: r.right,
-            };
-          });
-          if ("error" in res) throw new Error(String(res.error));
-          console.log(`SC6-DISCOVERY pinned ${vp.id} X-1 scrolled=${res.scrolled} ok=${res.ok} hit=${res.hit}`);
-          if (!res.ok) {
-            throw new Error(
-              `at scrollLeft ${res.scrolled} the point 2 px inside the Strategy header's right edge (${res.thRight.toFixed(1)}) is covered by ${res.hit}`,
-            );
-          }
+          await assertPinnedHeaderNotPaintedOver(region, `SC6-DISCOVERY pinned ${vp.id}`);
         });
 
         // 2. SC-6 second half: the pinned stack covers no Return %, CAGR or Sharpe
@@ -1491,10 +1891,20 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
           );
         });
 
-        // 3. P-1 (edge equalities), P-2 (per-row width and right edge), P-3 (no
-        //    descendant past the pinned edge), P-4 (room for a metric), at
-        //    scrollLeft 0 and at the maximum.
-        await collect("P-1..P-4 pinned geometry", async () => {
+        // 3. P-1 (edge equalities), P-4 (room for a metric), at scrollLeft 0 and at
+        //    the maximum. P-2 (per-row width and right edge) and P-3 (no descendant
+        //    past the pinned edge) are assertPinnedCellsMatchHeaders in geometry.ts,
+        //    moved there unedited by 170.7 so the manager describes call them.
+        await collect("P-2/P-3 pinned cells match their headers", async () => {
+          await assertPinnedCellsMatchHeaders(region, `SC6-DISCOVERY pinned ${vp.id}`, {
+            pinned: [
+              { header: 0, name: "rank" },
+              { header: 1, name: "star" },
+              { header: "Strategy", name: "Strategy" },
+            ],
+          });
+        });
+        await collect("P-1/P-4 pinned geometry", async () => {
           const res = await region.evaluate((el) => {
             const problems: string[] = [];
             const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
@@ -1530,41 +1940,6 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
                 if (name.right > first.left + 1)
                   problems.push(`P-1b @0: the Strategy header's right edge ${name.right.toFixed(1)} covers the first ${(name.right - first.left).toFixed(1)} px of Return % (left ${first.left.toFixed(1)})`);
               }
-              // P-2 and P-3 on every row
-              rows.forEach((row, ri) => {
-                const cells = tds(row);
-                ([[rankI, "rank"], [starI, "star"], [nameI, "Strategy"]] as [number, string][]).forEach(([i, n]) => {
-                  const th = R(heads[i]);
-                  const td = R(cells[i]);
-                  if (Math.abs(td.width - th.width) > 1)
-                    problems.push(`P-2 @${tag}: ${n} row ${ri + 1} td width ${td.width.toFixed(1)} != th width ${th.width.toFixed(1)}`);
-                  if (Math.abs(td.right - th.right) > 1)
-                    problems.push(`P-2 @${tag}: ${n} row ${ri + 1} td right ${td.right.toFixed(1)} != th right ${th.right.toFixed(1)}`);
-                });
-                const nameTd = cells[nameI];
-                const nameRect = R(nameTd);
-                const walker = document.createTreeWalker(nameTd, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
-                let node: Node | null = walker.nextNode();
-                while (node) {
-                  let right = -Infinity;
-                  let what = "";
-                  if (node.nodeType === Node.ELEMENT_NODE) {
-                    const b = (node as Element).getBoundingClientRect();
-                    if (b.width > 0 || b.height > 0) {
-                      right = b.right;
-                      what = (node as Element).tagName;
-                    }
-                  } else if ((node.textContent ?? "").trim()) {
-                    const range = document.createRange();
-                    range.selectNodeContents(node);
-                    right = range.getBoundingClientRect().right;
-                    what = "TEXT";
-                  }
-                  if (right > nameRect.right + 1)
-                    problems.push(`P-3 @${tag}: row ${ri + 1} ${what} paints to ${right.toFixed(1)}, past the pinned edge ${nameRect.right.toFixed(1)}`);
-                  node = walker.nextNode();
-                }
-              });
               // P-4 (measured once, at scroll 0, where the stack and the metrics are laid out naturally)
               if (tag === "0") {
                 const edge = name.right - (rr.left + el.clientLeft);

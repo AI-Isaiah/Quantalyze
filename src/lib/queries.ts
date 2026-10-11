@@ -377,8 +377,14 @@ export const COMPARE_ANALYTICS_COLUMNS =
  * regex that allows only this one `->>native_unit` form. A non-rankable row
  * (`failed` / `computing`) is blanked by `shapeRowAnalytics` and so loses the
  * alias: such a row shows no figures to misread.
+ *
+ * Phase 170.7 (D-09) — exported for a SECOND consumer, the manager's
+ * `/strategies` owner list (plan 06), which embeds the same columns so its
+ * rows are shaped by `shapeRowAnalytics` exactly like Discovery's. It stays an
+ * explicit allowlist and is never replaced by `strategy_analytics (*)`
+ * (RANK-02): a wildcard would put the private blobs above on the wire.
  */
-const CATEGORY_RANKING_ANALYTICS_COLUMNS =
+export const CATEGORY_RANKING_ANALYTICS_COLUMNS =
   "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date, native_unit:data_quality_flags->>native_unit";
 
 export async function getStrategiesByCategory(categorySlug: string): Promise<RankedStrategyRow[]> {
