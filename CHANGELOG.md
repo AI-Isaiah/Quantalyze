@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.130.5.1] - 2026-10-11 — Close-out records: DERIVECRON and ACCOUNTTRUTH closed, their founder decisions booked
+
+Docs and ledger only. No code changes.
+
+### Notes
+- **Phase 167.1.2.2 DERIVECRON is closed.** The daily 05:30 UTC allocator derive is verified on production over two scheduled days: 23 of 23 key derives and 8 of 8 rebuilds done each day, 0 reclaimed, 0 failed. SC-3 is met for 4 of the 6 non-held owners. The other 2 are Deribit books owned by Phase 167.1.2.2.1 DERIBITWEDGE and are re-read after its next derive (founder decision 2026-10-11). The browser re-run is recorded as a dated addendum to the 167.1.2 UAT. The security re-audit of plans 04-09 is SECURED (43 of 44 threats closed).
+- **Phase 167.1.2 ACCOUNTTRUTH is closed.** All 8 success criteria are verified in code and tests, against a fresh read-only production census. The founder decided its seven open product calls (D-23..D-29). The missing plan 08 SUMMARY is written from the records.
+- **Routed, not fixed here:**
+  - The rebuilding-panel copy goes to Phase 170.6 DISPLAYPOLISH.
+  - The USD dust floor moves from $1000 to $100, routed to Phase 164.6.6.2.3 FLOWTIMING.
+  - New TODOS ids: `167.1.2-DRAFT-CLASH-SAYS-SO`, `167.1.2-ORPHAN-COPY-FIX`, `167.1.2-MT5-FAILING-HOLDER`, `167.1.2-DUST-FLOOR-100` and `167.1.2.2-C07-OVERFLOW`.
+- **Known limits.** Browser items the orchestrator cannot observe (phone width and zoom, a book holding a duplicate or departed key, the wizard refusal with real keys) stay standing founder checks.
+
 ## [0.130.5.0] - 2026-10-11 — ALLOCHOLDINGS (1/2): the Allocations tabs agree about what the allocator holds now and about whether history is rebuilding, every API key's position is its own row, and one exchange account counts once per day in every dollar total
 
 Phase 170.4, release 1 of 2. On 2026-10-03 the founder read the production Allocations page and found the tabs disagreeing: the Exposure panel showed three Deribit positions (185.1K gross) while Holdings said "No holdings to display" and Open Positions said "No open derivative positions"; Overview and Risk showed different states while history was rebuilding; Scenario and the Diversification Optimizer asked for an exchange key while keys were connected. The cause was three readers answering "what do I hold" and "is there a key" from different places. After this release there is one holdings source, one history gate and one server-side "has an eligible key" flag, and the founder's D-08 rule ("One Key is One Strategy") holds from the payload to the dollar totals. Release 2 (plan 09's migration) follows once this one is merged and deployed; no file under `supabase/migrations/` is in this release.
