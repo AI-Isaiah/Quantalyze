@@ -161,9 +161,9 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [x] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
-- [ ] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — not yet verified
+- [x] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — verified 2026-10-11 (completed 2026-10-11)
 - [ ] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — not yet planned (data integrity; after 167.1.2 PR C)
-- [ ] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — not yet planned (booked 2026-10-07, founder)
+- [x] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — planned 2026-10-07, 9 plans (completed 2026-10-11)
 - [ ] **Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital** (INSERTED 2026-10-08) — not yet planned (founder D-18, 167.1.2.2)
 - [ ] **Phase 167.1.2.2.2: TRADESYNC — live strategy keys ingest trades daily again** (INSERTED 2026-10-09) — not yet planned (founder, data integrity)
 - [x] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed (completed 2026-10-04)
@@ -3195,6 +3195,8 @@ Plans:
 - Re-derive and re-measure every affected PROD strategy, not just MM-2x. Before and after readings, marker first.
 **Requirements**: TBD
 **Depends on:** Phase 164.6.6.2.2
+⭐ **Routed in 2026-10-11 (167.1.2 ACCOUNTTRUTH D-27, founder "$100"):** `USD_FLOORS.dust_nav` moves from $1000 to $100 (equal to `material_equity`); TODOS `[167.1.2-DUST-FLOOR-100]`. Sized in this phase's dry run, effective on PROD with the Wave 5 recompute.
+
 **Plans:** 0 plans
 
 Plans:
@@ -4723,6 +4725,8 @@ Plans:
 **Goal:** An allocator's book counts each exchange ACCOUNT exactly once, and "My Allocation" never shows an equity curve, return or ratio that the data does not support. A second key on an account that is already connected is refused. The equity history is rebuilt as one series per account from per-key returns and flows, and hidden until that series exists.
 **Requirements**: TBD. Source: founder browser UAT 2026-09-24 on the founder's own allocator book ("completely wrong, obviously"), with a read-only root-cause trace at `96b5db4c`.
 **Depends on:** Phase 167.1
+⭐ **Close-out decisions 2026-10-11 (founder, D-23..D-29 in CONTEXT):** draft clash says so, orphan copy and MT5 failing-holder fixes booked in TODOS; the rebuilding-panel copy routed to 170.6 DISPLAYPOLISH; the USD dust floor becomes $100, routed to 164.6.6.2.3 FLOWTIMING; the dust edge cases and K1 reader limits stay booked limits.
+
 **Plans:** 0 plans
 
 ⭐ **Founder decisions, 2026-09-24 (AskUserQuestion):**
@@ -4811,18 +4815,18 @@ version-2 `equity_curve` row and My Allocation leaves "being rebuilt".
 **Founder decisions 2026-10-07 (after research):** FLIP Step 4 (E2GT-01) waived as a pre-gate; one manual fan-out rehearsal before registering; okx bound hits do not hold the cron (booked follow-up); backfill staleness alarm routed to OUTAGEALERT. Detail: `167.1.2.2-CONTEXT.md` D-07..D-10.
 **Requirements**: TBD
 **Depends on:** Phase 167.1.2
-**Plans:** 9 plans (04 and 05 conditional on the rehearsal showing reclaims)
+**Plans:** 9/9 plans complete (04 and 05 conditional on the rehearsal showing reclaims)
 
 Plans:
 - [x] 167.1.2.2-01-PLAN.md — the derivecron runbook with its PROD statement forms proven read-only (tracer); dated FLIP runbook notes (D-04, D-07)
 - [x] 167.1.2.2-02-PLAN.md — the D-08 rehearsal: one manual fan-out on PROD, watched to drain, per-venue readings and a verdict
 - [x] 167.1.2.2-03-PLAN.md — D-05 lineage notes in ROADMAP and TODOS; D-10 staleness alarm booked to OUTAGEALERT; MT5 cross-service contention booked
 - [x] 167.1.2.2-04-PLAN.md — NOT TAKEN (0 reclaims measured) — CONDITIONAL (verdict RECLAIMS): backfill-role claim batch of 1, shipped and deployed
-- [ ] 167.1.2.2-05-PLAN.md — CONDITIONAL (plan 04 taken): re-rehearsal on the batch-of-1 worker
-- [ ] 167.1.2.2-06-PLAN.md — register the cron through the runbook (never a migration) and re-capture the cron manifest in the same session
-- [ ] 167.1.2.2-07-PLAN.md — resolve the 164.4.2 test-vs-ROADMAP entry, book the okx follow-up if earned (D-09), planning-reading tests, ship the phase PR
-- [ ] 167.1.2.2-08-PLAN.md — the first 05:30 UTC run: D-06 reads judged on computed_at, SC-3 verdict
-- [ ] 167.1.2.2-09-PLAN.md — 167.1.2's remaining browser UAT against rebuilt books (SC-4), recorded as a dated addendum
+- [x] 167.1.2.2-05-PLAN.md — CONDITIONAL (plan 04 taken): re-rehearsal on the batch-of-1 worker
+- [x] 167.1.2.2-06-PLAN.md — register the cron through the runbook (never a migration) and re-capture the cron manifest in the same session
+- [x] 167.1.2.2-07-PLAN.md — resolve the 164.4.2 test-vs-ROADMAP entry, book the okx follow-up if earned (D-09), planning-reading tests, ship the phase PR
+- [x] 167.1.2.2-08-PLAN.md — the first 05:30 UTC run: D-06 reads judged on computed_at, SC-3 verdict
+- [x] 167.1.2.2-09-PLAN.md — 167.1.2's remaining browser UAT against rebuilt books (SC-4), recorded as a dated addendum
 
 
 ⭐ **Rehearsal 2026-10-07 UNCLEAN (2 failed_final): founder D-11/D-12 (CONTEXT).** The bybit key's IP allow-list gains the backfill egress (founder action), and the compose divergence is root-caused before the cron is registered. Plans 04-06 wait on both.
@@ -5424,6 +5428,8 @@ This phase keeps signed zeros and non-negative *values* drawn red, plus its othe
 **Goal:** [Urgent work - to be planned]
 **Requirements**: TBD
 **Depends on:** Phase 170
+⭐ **Routed in 2026-10-11 (167.1.2 ACCOUNTTRUTH D-26, founder):** the equity-history rebuilding panel drops "yet", says "One of your keys", names a key by exchange plus nickname (or exchange plus last 4 when unnamed), and gives "could not load" and "needs action" their own headings.
+
 **Plans:** 0 plans
 
 Plans:
@@ -5706,9 +5712,9 @@ kept verbatim.
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Complete    | 2026-10-04 |
 | 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
-| 167.1.2 ACCOUNTTRUTH | PR A + PR B shipped | In progress — PR A v0.92.0.0 (#859), PR B v0.103.0.0 (#870); PR C executing | - |
+| 167.1.2 ACCOUNTTRUTH | PR A, B, C1–C5 shipped | Complete | 2026-10-11 |
 | 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
-| 167.1.2.2 DERIVECRON | 0/? | Queued — booked 2026-10-07 (founder) | - |
+| 167.1.2.2 DERIVECRON | 9/9 | Complete | 2026-10-11 |
 | 167.1.2.2.1 DERIBITWEDGE | 0/? | Queued — booked 2026-10-08 (founder D-18) | - |
 | 167.1.2.2.2 TRADESYNC | 0/? | Queued — booked 2026-10-09 (founder) | - |
 | 167.2 KEYCARDSYNC | 10/10 | Complete    | 2026-10-04 |
