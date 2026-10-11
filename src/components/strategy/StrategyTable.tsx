@@ -1459,6 +1459,18 @@ export function StrategyTable({
                                    means unknown, which the resolver caps below
                                    fresh rather than treating as fine. */
                                 seriesEnd={s.analytics.series_end ?? null}
+                                /* Phase 167.1.2.2.2 / SC-4, D-07 — the
+                                   trade-fetch claim is the cron's own record,
+                                   seen by every viewer (D-06). F3 — the venue
+                                   is the api-key exchange or NULL, never
+                                   `supported_exchanges`: these rows carry the
+                                   key's id and not its exchange (and the
+                                   anonymous reads cannot see `api_keys`), so
+                                   NULL. A recorded fetch time still reads
+                                   current or stale; only never-fetched turns
+                                   into "no claim", the cautious direction. */
+                                tradesFetchedAt={s.analytics.trades_fetched_at ?? null}
+                                tradeFetchVenue={null}
                                 exchange={s.supported_exchanges?.[0]}
                               />
                             )}

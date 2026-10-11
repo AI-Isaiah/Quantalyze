@@ -38,6 +38,7 @@ const SAMPLE_ANALYTICS: StrategyAnalytics = {
   volume_metrics: null,
   exposure_metrics: null,
   data_quality_flags: null,
+  trades_fetched_at: null,
 };
 
 describe("extractAnalytics", () => {
@@ -120,6 +121,9 @@ describe("extractAnalytics", () => {
       "rolling_metrics",
       "return_quantiles",
       "trade_metrics",
+      // Phase 167.1.2.2.2 (D-07) — the badge's subject; absent here would make
+      // a failed-analytics row render a trade claim from `undefined`.
+      "trades_fetched_at",
     ];
 
     for (const key of keys) {

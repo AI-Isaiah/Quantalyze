@@ -54,6 +54,7 @@ from services.allocated_capital import (
     parse_returns_denominator_config,
 )
 from services.dispersion import dispersion_is_residue
+from services.transforms import downsample_series
 from services.equity.fallback import merge_dq_flags
 from services.position_reconstruction import _normalize_side
 from services.nav_twr import NAV_TWR_GUARD_KEYS
@@ -1288,6 +1289,49 @@ def _load_strategy_daily_returns(
         cursor = str(chunk[-1]["date"])
 
 
+# Phase 167.1.2.2.2 (plan 07, D-02): the dated chart lists ``compute_all_metrics``
+# persists on the strategy_analytics row. Its chart paths carry a NaN day FORWARD
+# (``returns.fillna(0)``, the F3 red-team continuity rule) so the cumulative curve
+# is not truncated at the first hole; that puts a flat point on every day the
+# series has no return for. D-02 says such a day stays MISSING in everything that
+# is persisted, so the runner removes those points at the persist boundary. The
+# headline and every scalar are untouched (they never read these lists). The two
+# sparklines are UNDATED downsamples of those lists, so they are re-derived from
+# the filtered lists with the same ``downsample_series`` call and target.
+# (D-16, founder 2026-10-10. The target 90 is metrics.py's own sparkline constant; the
+# source here is the already-capped list, which differs from metrics.py's uncapped
+# source only beyond cap_data_points' 5000 points, and only on a series with gap days.)
+_GAP_DATED_CHART_LISTS = ("returns_series", "drawdown_series")
+_GAP_SPARKLINES = (
+    ("sparkline_returns", "returns_series"),
+    ("sparkline_drawdown", "drawdown_series"),
+)
+_SPARKLINE_POINTS = 90
+
+
+def _without_gap_day_points(
+    metrics_json: Mapping[str, Any], gap_days: frozenset[str]
+) -> dict[str, Any]:
+    """Return a copy of ``metrics_json`` whose dated chart lists carry no point
+    dated on a ``gap_days`` ISO date, with the sparklines re-derived from them.
+    A plain copy when ``gap_days`` is empty."""
+    out = dict(metrics_json)
+    if not gap_days:
+        return out
+    for key in _GAP_DATED_CHART_LISTS:
+        points = out.get(key)
+        if isinstance(points, list):
+            out[key] = [
+                p for p in points
+                if not (isinstance(p, dict) and p.get("date") in gap_days)
+            ]
+    for spark_key, source_key in _GAP_SPARKLINES:
+        source = out.get(source_key)
+        if spark_key in out and isinstance(source, list):
+            out[spark_key] = downsample_series(source, _SPARKLINE_POINTS)
+    return out
+
+
 async def run_csv_strategy_analytics(
     strategy_id: str,
     *,
@@ -1946,6 +1990,18 @@ async def run_csv_strategy_analytics(
                 densify_policy="broker_nan" if _is_broker_sourced else "sparse",
             )
 
+            # D-02 (167.1.2.2.2-07): the load boundary above reinstated NaN on every
+            # in-span day the stored rows lack (a guarded day, or the recorded gap
+            # between carried-forward legacy rows and a re-derived window). Those days
+            # stay MISSING in the persisted chart lists too: ``compute_all_metrics``
+            # bridged them with a flat chart point, which is removed here.
+            _gap_day_iso = frozenset(
+                ts.date().isoformat() for ts in returns.index[returns.isna()]
+            )
+            _chart_metrics_json = _without_gap_day_points(
+                metrics_result.metrics_json, _gap_day_iso
+            )
+
             data_quality_flags: DataQualityFlags = {"csv_source": True}  # M-0657
             # Phase 164.6.6.2.2 (D-05): name the cumulative method this row's curve was
             # BUILT with, beside the curve, so a reader never has to guess it. This is
@@ -2151,7 +2207,7 @@ async def run_csv_strategy_analytics(
                     # computation_status to complete_with_warnings, a status the
                     # publish gate PASSES (the D-16 fail-open).
                     payload["series_completeness"] = "user_supplied"
-                payload.update(metrics_result.metrics_json)
+                payload.update(_chart_metrics_json)
 
                 def _write_complete() -> None:
                     supabase.table("strategy_analytics").upsert(

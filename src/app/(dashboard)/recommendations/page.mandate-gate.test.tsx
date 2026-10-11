@@ -95,13 +95,22 @@ vi.mock("@/lib/supabase/server", () => ({
         );
       // Like PostgREST, a column comes back only if the select projected it:
       // a row's `series_end` is dropped unless the alias was selected, so a
-      // regression that stops projecting it fails AGE1, not only AGE4.
+      // regression that stops projecting it fails AGE1, not only AGE4. The
+      // same rule applies to `trades_fetched_at` (167.1.2.2.2 / SC-4), so a
+      // regression that stops selecting it fails AGE2, not only AGE4.
       chain.then = (onFulfilled: (v: { data: unknown; error: unknown }) => unknown) => {
-        const projected = (seeded.analyticsSelect.at(-1) ?? "").includes("series_end:");
+        const lastSelect = seeded.analyticsSelect.at(-1) ?? "";
+        const seriesProjected = lastSelect.includes("series_end:");
+        const tradesProjected = lastSelect.includes("trades_fetched_at");
         const rows = (seeded.statusRows as Array<Record<string, unknown>>).map((r) => {
-          if (projected) return r;
-          const { series_end: _dropped, ...rest } = r;
-          return rest;
+          const { series_end: _s, trades_fetched_at: _t, ...rest } = r;
+          return {
+            ...rest,
+            ...(seriesProjected && "series_end" in r ? { series_end: r.series_end } : {}),
+            ...(tradesProjected && "trades_fetched_at" in r
+              ? { trades_fetched_at: r.trades_fetched_at }
+              : {}),
+          };
         });
         return Promise.resolve(
           table === "strategy_analytics"
@@ -210,6 +219,7 @@ beforeEach(() => {
     computation_status: "complete",
     computed_at: hoursAgo(1),
     series_end: dateDaysAgo(1),
+    trades_fetched_at: hoursAgo(1),
   }));
   seeded.statusError = null;
   seeded.analyticsSelect = [];
@@ -522,6 +532,7 @@ describe("SC8 · /recommendations — every recommended record states where its 
         computation_status: "complete",
         computed_at: hoursAgo(1),
         series_end: dateDaysAgo(200),
+        trades_fetched_at: hoursAgo(1),
       },
     ];
     await renderPage();
@@ -531,15 +542,52 @@ describe("SC8 · /recommendations — every recommended record states where its 
       card.queryByText(/^Track record ends 200d ago$/),
       "a record that ended 200 days ago read as current",
     ).not.toBeNull();
-    expect(card.queryByText(/^Synced /)).toBeNull();
+    // A current fetch is on the row, yet the dead track record outranks it.
+    expect(card.queryByText(/^Trades fetched /)).toBeNull();
   });
 
-  it("AGE2: a series that ended yesterday renders the fresh sync state", async () => {
+  it("AGE2: a series that ended yesterday renders the fresh trade-fetch state (the cron's record, not the compute time)", async () => {
     await renderPage();
     const card = within(cardFor(NAMES[1]));
 
-    expect(card.queryByText(/^Synced 1h ago$/)).not.toBeNull();
+    expect(card.queryByText(/^Trades fetched 1h ago$/)).not.toBeNull();
     expect(card.queryByText(/Track record ends/)).toBeNull();
+    expect(card.queryByText(/Synced/)).toBeNull();
+  });
+
+  it("AGE2b: a fetch older than two days reads stale beside a FRESH computed_at (D-06/D-07)", async () => {
+    seeded.statusRows = IDS.map((id) => ({
+      strategy_id: id,
+      computation_status: "complete",
+      computed_at: hoursAgo(1),
+      series_end: dateDaysAgo(1),
+      trades_fetched_at: hoursAgo(5 * 24),
+    }));
+    await renderPage();
+    const card = within(cardFor(NAMES[1]));
+
+    // `rec()` carries `analytics_computed_at: 1h ago` too: the compute time is
+    // fresh, the fetch is five days old, and the badge must say the latter.
+    expect(card.queryByText(/^Trades fetched 5d ago/)).not.toBeNull();
+    expect(card.queryByText("stale")).not.toBeNull();
+  });
+
+  it("AGE2c: a row whose analytics run did not complete still states its trade fetch — the cron's record is independent of the run", async () => {
+    seeded.statusRows = [
+      {
+        strategy_id: IDS[1],
+        computation_status: "failed",
+        computed_at: hoursAgo(1),
+        series_end: dateDaysAgo(1),
+        trades_fetched_at: hoursAgo(3),
+      },
+    ];
+    await renderPage();
+    const card = within(cardFor(NAMES[1]));
+
+    // The figures stay withheld (em-dashes), but the fetch claim is the one
+    // fact that does not come from the failed run.
+    expect(card.queryByText(/^Trades fetched 3h ago$/)).not.toBeNull();
   });
 
   it("AGE3: a failed status read renders no age claim at all (fail-closed)", async () => {
@@ -549,7 +597,7 @@ describe("SC8 · /recommendations — every recommended record states where its 
 
     for (const name of NAMES) {
       const card = within(cardFor(name));
-      expect(card.queryByText(/^Synced /)).toBeNull();
+      expect(card.queryByText(/^Trades fetched /)).toBeNull();
       expect(card.queryByText(/Track record ends/)).toBeNull();
     }
   });
@@ -561,6 +609,8 @@ describe("SC8 · /recommendations — every recommended record states where its 
     expect(seeded.analyticsSelect).toHaveLength(1);
     const cols = seeded.analyticsSelect[0];
     expect(cols).toContain("series_end:returns_series->-1->>date");
+    // 167.1.2.2.2 / SC-4 — the cron's trade-fetch record rides the same read.
+    expect(cols).toContain("trades_fetched_at");
     // The whole returns_series blob is never projected; only the arrow alias.
     expect(cols.replace("returns_series->-1->>date", "")).not.toContain("returns_series");
   });

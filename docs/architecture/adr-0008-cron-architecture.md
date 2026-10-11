@@ -3,6 +3,15 @@
 ## Status
 Proposed (decision needed to assign each mechanism a clear role)
 
+> **CORRECTED 2026-10-10 (Phase 167.1.2.2.2):** current status is **Accepted in
+> practice, never formally ratified.** The mechanisms below are the ones that run,
+> with one exception: the Edge Function mechanism, which the doc-vs-live note under
+> Evidence records as not deployed. The line above is kept as lineage. Statements
+> in this document that proved false are corrected beside the sentence they
+> correct, each with a dated `CORRECTED` note; no decision text has been removed.
+> `src/__tests__/adr-0008.test.ts` fails while a known-false sentence stands
+> without such a note.
+
 ## Context
 Five places exist to schedule background work, using three different auth
 patterns. No central registry documents "what runs on what schedule and
@@ -18,6 +27,27 @@ codification.
 | 3 | Supabase pg_cron -> FastAPI | `X-Service-Key` via Postgres GUC | match recompute |
 | 4 | Supabase Edge Functions (Deno) | Supabase service-role JWT | `compute-trigger`, `notify-admin` |
 | 5 | Python-side cron_sync | Triggered by Mechanism 3 | `analytics-service/routers/cron.py` |
+
+> **CORRECTED 2026-10-10 (Phase 167.1.2.2.2) — mechanism 3's auth.** The row above
+> says `X-Service-Key` comes from a Postgres GUC. It does not. The service key is
+> read from Supabase Vault and the destination URL from `public.system_settings`
+> (`analytics_service_url`), which the function re-tests against an allow-list
+> before it posts anything. The pattern is set by
+> `supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql`
+> and hardened by `supabase/migrations/20260911120000_vault_tick_hardening.sql`.
+> The app-GUC read pattern was retired, and `scripts/lint-app-guc.mjs` fences new
+> migrations against it. The original row is kept as lineage.
+>
+> **CORRECTED 2026-10-10 (Phase 167.1.2.2.2) — mechanism 5's trigger.** The row
+> above says `cron_sync` is triggered by mechanism 3. Nothing triggered it: no
+> `cron.job` row, Vercel cron, workflow schedule or Railway cron ever called
+> `/api/cron-sync`, so the live strategy keys it exists for went unsynced for up to
+> 156 days while this document said the question was answered. Root cause:
+> `.planning/debug/cron-sync-unscheduled.md`. It is now triggered by
+> `public.cron_sync_tick()` on the pg_cron job `cron-sync-trades`, a mechanism 3
+> job whose registration is made by the phase's go-live runbook
+> (`docs/runbooks/cron-sync-go-live.md`) and never by a migration. Read `scripts/prod-prober/cron-manifest.json` to see whether the job
+> is registered, not this sentence. The original row is kept as lineage.
 
 ### Problems
 - `alert-digest` uses `!==` for CRON_SECRET comparison (timing-unsafe).
@@ -38,6 +68,12 @@ Assign each mechanism a workload class:
 2. **Cross-service orchestration** (match engine recompute, data sync) ->
    Supabase pg_cron calling FastAPI directly. Keeps secrets in DB GUCs,
    avoids routing through Vercel.
+
+   > **CORRECTED 2026-10-10 (Phase 167.1.2.2.2):** the secrets are not in DB GUCs.
+   > The service key lives in Supabase Vault and the destination in
+   > `public.system_settings`; see the correction under the mechanisms table. The
+   > decision itself (pg_cron calling FastAPI directly) stands, and the sentence
+   > above is kept as lineage.
 
 3. **Event-triggered compute** (post-insert triggers) -> Supabase Edge
    Functions. Already in place for `compute-trigger` and `notify-admin`.
@@ -62,9 +98,24 @@ Assign each mechanism a workload class:
 | Analytics warmup | 0 0 * * * | Vercel Cron (1) | `/api/cron/warm-analytics` |
 | Alert digest | 0 9 * * * | Vercel Cron (4) | `/api/alert-digest` |
 | Match recompute | Hourly | pg_cron (3) | FastAPI `/api/match/cron-recompute` |
+| Trade sync (`cron-sync-trades`) | 30 4 * * * | pg_cron (3) | FastAPI `/api/cron-sync`, called by `public.cron_sync_tick()` |
 | Stuck-`computing` reaper | `*/15 * * * *` | pg_cron, **in-DB SQL** (no FastAPI hop) | `reap_strategy_analytics_stuck_computing` |
 | Compute trigger | On insert | Edge Function (3) | `compute-trigger` |
 | Admin notification | On event | Edge Function (3) | `notify-admin` |
+
+> **CORRECTED 2026-10-10 (Phase 167.1.2.2.2) — the trade-sync row.** The inventory
+> had no row for `/api/cron-sync`; the `cron-sync-trades` row is added above. The
+> tick does not read every active key. It reads only connected keys that back an
+> eligible strategy (4 on PROD when measured on 2026-10-09: 3 OKX, 1 Bybit). Three
+> classes are excluded, each for a recorded reason. Disconnected keys: the user
+> disconnected them but their credentials remain, so reading them would resume
+> reading an account after its owner left. Connected allocator-only keys: there is
+> no strategy to store trades for, so the tick would only overwrite the account
+> balance and a second `last_sync_at` that the daily holdings poll owns. Revoked
+> allocator-only keys: validation fails on every run and the key is never
+> deactivated, so the `revoked` counter would read non-zero forever and poison any
+> alarm built on it. The "Compute trigger" row above is historical: see the
+> correction under Evidence.
 
 > The reaper (added v0.52.0.0) is a **sixth shape** the five mechanisms above do
 > not describe: pg_cron running SQL directly in the database, with no service
@@ -76,6 +127,12 @@ Assign each mechanism a workload class:
 > `cron.job_run_details`. See [`docs/runbooks/compute-queue.md`](../runbooks/compute-queue.md)
 > § "The stuck-`computing` reaper". This inventory is a partial snapshot — the
 > prod project carries 8 registered pg_cron jobs.
+>
+> **CORRECTED 2026-10-10 (Phase 167.1.2.2.2):** that count is stale and no number is
+> restated here. The registered pg_cron jobs are the `jobs` array of the committed
+> manifest `scripts/prod-prober/cron-manifest.json`, which is re-captured whenever
+> a job is registered or removed. Count it there. The sentence above is kept as
+> lineage.
 
 ## Consequences
 
@@ -113,6 +170,17 @@ Assign each mechanism a workload class:
   > this path: either (re)deploy + wire the invocation, or retire this section
   > and the source if the compute/notify paths now run elsewhere (the Railway
   > self-polling worker + `analytics-service/routers/cron.py` cover compute).
+  >
+  > **CORRECTED 2026-10-10 (Phase 167.1.2.2.2):** the `compute-trigger` source was
+  > removed in v0.42.1.0 (Phase 106, Stage B legacy/dark-path cutover), so the
+  > `supabase/functions/compute-trigger/index.ts` citation above points at a file
+  > that no longer exists. Only `notify-admin` source remains in the tree. The
+  > citation is kept as lineage, and the "Compute trigger" inventory row is
+  > historical.
 - Python cron: `analytics-service/routers/cron.py` (`cron_sync` at lines 297-688).
+- Python cron (corrected 2026-10-10, Phase 167.1.2.2.2): `analytics-service/routers/cron.py`,
+  the `cron_sync` route, cited by symbol because the line range above rotted as the
+  route grew. Called by `public.cron_sync_tick()`, defined by the migration whose
+  filename ends `_cron_sync_tick.sql` under `supabase/migrations/`.
 - `cron_runs` table: `supabase/migrations/20260408113029_cron_heartbeat.sql`.
 - `vercel.json` crons block: `vercel.json` (lines 6-9).

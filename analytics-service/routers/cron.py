@@ -1,10 +1,11 @@
 import asyncio
+import functools
 import logging
 import re
 import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Final, Literal
 
 import pandas as pd
 import sentry_sdk
@@ -16,7 +17,7 @@ from services.benchmark import get_benchmark_returns
 from services.error_contract import service_error
 from services.db import db_execute, get_supabase, rows
 from services.encryption import decrypt_credentials, get_kek
-from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions, get_and_clear_last_dq_flags, EXCHANGE_CLASSES
+from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions, get_and_clear_last_dq_flags, EXCHANGE_CLASSES, DAILY_PNL_VENUES
 
 router = APIRouter(prefix="/api", tags=["cron"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -461,10 +462,156 @@ def _log_strategy_cursor_exc(exc: BaseException, msg: str, *args: Any) -> None:
     logger.exception(msg, *args)
 
 
+_MS_PER_UTC_DAY = 86_400_000
+
+# 167.1.2.2.2 PR-B round 1 (SFH-H1) — HOW A FETCH SAYS "I DID NOT READ THE WHOLE
+# WINDOW". `fetch_daily_pnl` never raises to its caller: its handlers log, stamp a
+# data-quality flag and RETURN whatever list they had, frequently EMPTY. The flag
+# buffer is therefore the only channel that tells a crashed fetch from an idle
+# one, and `_fetch_degradation` is the one place this module reads it.
+_FETCH_ERROR_FLAG = "daily_pnl_fetch_error"
+#: PR-B round 3 (R2-ME-01): the Binance branch of `fetch_daily_pnl`, when
+#: `fapiPrivate_get_income` fails, stamps this flag and returns BTC/USDT SPOT
+#: FILLS shaped as daily-P&L rows. It does NOT stamp `_FETCH_ERROR_FLAG`, so it
+#: needs its own name here. ⛔ Spot fills must never replace futures daily P&L:
+#: `sync_trades` deletes the payload's `[min, max]` span before inserting, so
+#: storing them overwrites the strategy's real daily rows with BTC prices. The
+#: flag stays distinct from the fetch-error flag on purpose: the admin health
+#: card reads it by name, and the reason in the envelope names the real cause.
+_FETCH_INCOME_FALLBACK_FLAG = "daily_pnl_binance_income_fallback"
+#: PR-B round 1 (SFH-H2 / ME-02): `fetch_daily_pnl` stamps
+#: `daily_pnl_truncated_<venue>` when a page cap ended a walk before the venue
+#: ran out of rows. Matched by PREFIX so a venue added to the fetcher is covered
+#: without an edit here, and never by a looser `*truncated*` pattern: the
+#: `sync_truncated_*` flags belong to `fetch_raw_trades`, which this path does
+#: not call.
+_FETCH_TRUNCATED_PREFIX = "daily_pnl_truncated_"
+#: The exception CLASS NAME the fetcher stamped beside the flag. A name only,
+#: never a message (a ccxt message can carry a signed request URL), and the
+#: pattern below refuses anything that is not a plain identifier.
+_FETCH_ERROR_CLASS_FLAG = "daily_pnl_fetch_error_class"
+_ERROR_CLASS_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def _fetch_degradation(flags: dict[str, Any]) -> tuple[list[str], str | None]:
+    """Read a drained flag buffer: `(reasons, error_class)`.
+
+    `reasons` is the sorted NAMES of the flags that mean the window was not read
+    in full; empty means the fetch is trustworthy, including as evidence that
+    nothing is outstanding. `error_class` is the exception class name the
+    fetcher recorded, or None.
+    """
+    reasons: list[str] = []
+    if flags.get(_FETCH_ERROR_FLAG):
+        reasons.append(_FETCH_ERROR_FLAG)
+    if flags.get(_FETCH_INCOME_FALLBACK_FLAG):
+        reasons.append(_FETCH_INCOME_FALLBACK_FLAG)
+    # ⛔ A TRUNCATED WINDOW IS NOT A COMPLETE ONE. Venues page newest-first, so a
+    # cap drops the OLDEST days of the window, which are the gap days a resumed
+    # tick exists to recover; treating the surviving rows as the whole window
+    # advanced the marker past them and stamped the strategy "fetched".
+    reasons.extend(
+        key
+        for key, value in flags.items()
+        if key.startswith(_FETCH_TRUNCATED_PREFIX) and value
+    )
+    error_class = flags.get(_FETCH_ERROR_CLASS_FLAG)
+    if not (
+        isinstance(error_class, str) and _ERROR_CLASS_NAME_RE.match(error_class)
+    ):
+        error_class = None
+    return sorted(reasons), error_class
+
+
+def _floor_to_utc_day_ms(ms: int | None) -> int | None:
+    """00:00 UTC of the day containing `ms`; `None` (full history) stays `None`.
+
+    167.1.2.2.2 TRADESYNC (T-167.1.2.2.2-16). Applied to EVERY window handed to
+    `fetch_all_trades`, marker-derived or not.
+
+    ⛔ WHY A RESUME POINT MUST BE DAY-ALIGNED. The venue returns one
+    `daily_pnl` row per UTC DAY, and `sync_trades` replaces stored rows with a
+    DELETE scoped to the incoming payload's own `[min(timestamp),
+    max(timestamp)]`. A window that starts mid-day makes the venue sum only the
+    bills AFTER that instant into that day's row, and the scoped delete then
+    replaces the stored, complete day with the partial one. Flooring to 00:00
+    UTC makes the first fetched day whole. Over-fetching a few hours is
+    idempotent; a partial day written over a whole one is not.
+    """
+    if ms is None:
+        return None
+    return ms - ms % _MS_PER_UTC_DAY
+
+
+def _high_water_floor_iso(timestamp: str) -> str:
+    """ISO string for 00:00 UTC of the day containing `timestamp`.
+
+    Raises on an unparseable value; the caller treats that as a failed read
+    (fail OPEN, recorded in the envelope), never as a silent `None`.
+    """
+    parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    parsed = parsed.astimezone(timezone.utc)
+    return parsed.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+
+def _load_strategy_high_waters(
+    supabase: Any, strategy_ids: list[str]
+) -> tuple[dict[str, str | None], str | None]:
+    """Each strategy's own resume high-water: the UTC day of its newest stored
+    DAILY-P&L row, or `None` when it has none. Returns `(mapping, error)`.
+
+    167.1.2.2.2 TRADESYNC SC-2 / D-11. This replaces `api_keys.last_sync_at`
+    as the ABSENT-marker fallback.
+
+    ⛔ `is_fill = false` IS THE WHOLE FILTER. The cron writes one `daily_pnl`
+    row per day with `is_fill = false`; raw fills (`is_fill = true`) come from
+    the queued `sync_trades` job and are NEWER than the daily rows, so reading
+    them would move the floor forward past a gap that is still open.
+
+    ⚠️ FAIL OPEN, PER STRATEGY. A read or parse error maps THAT strategy to
+    `None` (full reach, the over-fetch direction, which is idempotent) and is
+    recorded in the returned error string for the response envelope. It never
+    raises: a Supabase blip must not abort the tick, and a full-reach fetch is
+    still bounded by `KEY_SYNC_TIMEOUT`.
+
+    The mapping carries an entry for EVERY requested strategy (a value of
+    `None` means "no stored day, or the read failed"), so the resolver never
+    has to tell "not loaded" from "empty".
+    """
+    mapping: dict[str, str | None] = {}
+    errors: list[str] = []
+    for sid in strategy_ids:
+        try:
+            result = (
+                supabase.table("trades")
+                .select("timestamp")
+                .eq("strategy_id", sid)
+                .eq("is_fill", False)
+                .order("timestamp", desc=True)
+                .limit(1)
+                .execute()
+            )
+            newest = rows(result)
+            mapping[sid] = (
+                _high_water_floor_iso(newest[0]["timestamp"]) if newest else None
+            )
+        except Exception as exc:
+            logger.exception(
+                "cron_sync: stored-high-water read failed for strategy %s — "
+                "failing OPEN to a full-reach fetch for it this tick",
+                sid,
+            )
+            mapping[sid] = None
+            errors.append(f"{sid}: {type(exc).__name__}: {exc}")
+    return mapping, ("; ".join(errors) if errors else None)
+
+
 def _strategy_resume_point(
     strategy_id: str,
     strategy_cursors: dict[str, str | None],
-    key_cursor: str | None,
+    strategy_high_waters: dict[str, str | None],
 ) -> str | None:
     """Resolve where ONE strategy should resume its trade fetch from.
 
@@ -473,28 +620,35 @@ def _strategy_resume_point(
     column comment, in the database itself):
 
       * `strategy_id` ABSENT from the mapping -> there is no per-strategy
-        information for it yet, so fall back to the KEY's own cursor. This is
-        what makes the migration inert the moment it lands: no rows exist, every
-        strategy falls back, and behaviour is today's byte for byte.
+        marker for it yet, so resume from the strategy's OWN stored high-water:
+        the UTC day of its newest daily-P&L row (`strategy_high_waters`), or
+        `None` (full reach) when it has none or the read failed.
       * `strategy_id` PRESENT with a null value -> this strategy has no resume
         point at all and must re-fetch from the START OF HISTORY.
       * `strategy_id` PRESENT with a timestamp -> resume from there.
 
+    167.1.2.2.2 TRADESYNC (D-11, D-12): THE ABSENT STATE USED TO MEAN "THE
+    KEY'S `last_sync_at`" AND IT NO LONGER DOES. The 04:00 allocator poll
+    overwrites that column daily, so it says when the key was last CHECKED, not
+    when this strategy's trades were last FETCHED. Resuming from it skipped the
+    whole gap behind a strategy's newest stored day (measured: gaps of 138 to
+    156 days behind keys that read "checked nine hours ago"). The key cursor is
+    therefore not an input here at all: a third caller cannot reintroduce it by
+    passing the wrong argument.
+
     A `strategy_cursors.get(strategy_id)` returns the same `None` for the first
-    two, and collapsing them is not a cosmetic slip — it makes the whole fix
-    INERT ON THE FIRST FAILURE, which is the common case. Trace it: strat-B's
+    two states, and collapsing them is not a cosmetic slip. Trace it: strat-B's
     RPC raises, so under a `.get()`-shaped design it is given no row; the KEY
-    cursor advances anyway (correctly — a sibling succeeded); the next tick
-    finds no row for strat-B and falls back to that ALREADY-ADVANCED key cursor;
-    strat-B is stranded exactly as before, while every "a row was written"
-    assertion stays green.
+    cursor advances anyway (correctly: a sibling succeeded); the next tick finds
+    no row for strat-B and ... is stranded exactly as before, while every "a
+    row was written" assertion stays green.
 
     This resolver is shared by BOTH the read floor and the hold-write below, so
     the two sites cannot drift apart. Neither re-implements it.
     """
     if strategy_id in strategy_cursors:
         return strategy_cursors[strategy_id]
-    return key_cursor
+    return strategy_high_waters.get(strategy_id)
 
 
 def _resume_floor_ms(
@@ -502,6 +656,7 @@ def _resume_floor_ms(
     strategy_cursors: dict[str, str | None],
     key_cursor: str | None,
     *,
+    strategy_high_waters: dict[str, str | None] | None = None,
     now_ms: int | None = None,
     clamp_report: dict[str, Any] | None = None,
 ) -> int | None:
@@ -516,7 +671,12 @@ def _resume_floor_ms(
     here is deliberately biased toward the first.
 
     With no eligible strategies the key's own cursor is parsed, preserving
-    today's behaviour on a key whose fan-out is empty. A null resume point
+    today's behaviour on a key whose fan-out is empty (167.1.2.2.2: this is the
+    ONLY place the key cursor is still read as a window; once the selector
+    drops keys with no eligible strategy it is unreachable from the route). A
+    strategy ABSENT from `strategy_cursors` resumes from its own entry in
+    `strategy_high_waters` (see `_strategy_resume_point`), and a strategy with
+    no entry there is a full-reach fetch. A null resume point
     ANYWHERE in the set collapses the whole window to a full-history fetch, and
     an unparseable value is treated the same way as a null.
 
@@ -566,6 +726,7 @@ def _resume_floor_ms(
     if not strategy_ids:
         return parse_since_ms(key_cursor)
 
+    strategy_high_waters = strategy_high_waters or {}
     floor: int | None = None
     # Which strategy PRODUCED the floor, so a clamp warning can name it. The
     # operator's next question after "the window was clamped" is always "by
@@ -591,7 +752,9 @@ def _resume_floor_ms(
     # walks.
     marker_floors: dict[str, int] = {}
     for sid in strategy_ids:
-        resume_point = _strategy_resume_point(sid, strategy_cursors, key_cursor)
+        resume_point = _strategy_resume_point(
+            sid, strategy_cursors, strategy_high_waters
+        )
         if resume_point is None:
             return None
         parsed = parse_since_ms(resume_point)
@@ -614,17 +777,16 @@ def _resume_floor_ms(
     # test failure at all, which is how it was found. The `is not None` below
     # carries the type narrowing instead, on a branch that is genuinely live.
     if not floor_from_marker:
-        # ⛔ THE FLOOR CAME FROM THE KEY CURSOR, SO IT IS RETURNED UNTOUCHED.
-        # Every strategy here is ABSENT from the mapping, which is the state
-        # the migration lands in and the state its "inert on arrival" claim is
-        # about: pre-phase this path parsed the key cursor and had NO cap at
-        # all. Clamping it would silently drop history no marker ever held —
-        # reachable with nothing failing anywhere, because
-        # `reconnect_allocator_api_key` and the credential-failure
-        # deactivation both PRESERVE `last_sync_at`, so a key disconnected or
-        # deactivated for longer than the cap and then reconnected used to
-        # catch up in full. It would also name an innocent strategy in the
-        # warning as "holding" a resume point it never held.
+        # ⛔ THE FLOOR CAME FROM A STRATEGY'S STORED HIGH-WATER, SO IT IS
+        # RETURNED UNTOUCHED. Every strategy here is ABSENT from the marker
+        # mapping, which is the state PROD is in (0 marker rows). The cap
+        # exists to bound a HELD marker; a high-water is not a hold, it is the
+        # newest day the strategy actually has. 167.1.2.2.2: clamping it would
+        # cut exactly the gap this phase exists to recover (138 and 156 days
+        # behind) down to 30, and name an innocent strategy in the warning as
+        # "holding" a resume point it never held. (Before this phase the same
+        # property protected the key-cursor fallback: a key dormant past the
+        # cap, then reconnected, used to catch up in full.)
         return floor
     if now_ms is None:
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -692,9 +854,18 @@ async def _sync_single_key(
     # of this function needs the value the tick STARTED from, not the one it
     # produced. An ABSENT `strategy_cursors` key becomes an empty mapping, which
     # under `_strategy_resume_point`'s membership rule means "every strategy
-    # falls back to the key cursor" — today's behaviour exactly.
+    # resumes from its own stored high-water" (167.1.2.2.2; it used to mean
+    # "falls back to the key cursor").
     key_cursor_at_tick_start: str | None = key_row.get("last_sync_at")
     strategy_cursors: dict[str, str | None] = dict(key_row.get("strategy_cursors") or {})
+    # 167.1.2.2.2 TRADESYNC — each marker-less strategy's own stored high-water
+    # (UTC day of its newest daily-P&L row, None = nothing stored / read
+    # failed). It, not `key_cursor_at_tick_start`, is the ABSENT-marker resume
+    # source. An absent mapping is "nothing loaded", which `_strategy_resume_point`
+    # reads as full reach for every marker-less strategy.
+    strategy_high_waters: dict[str, str | None] = dict(
+        key_row.get("strategy_high_waters") or {}
+    )
     start = time.monotonic()
 
     try:
@@ -724,6 +895,38 @@ async def _sync_single_key(
                 "trades_fetched": 0,
                 "duration_s": round(time.monotonic() - start, 2),
                 "status": "deferred",
+            }
+
+        # 167.1.2.2.2 PR-B round 1 (ME-01) — A CCXT VENUE THE DAILY-P&L FETCH
+        # CANNOT READ IS AN EXPLICIT, NAMED OUTCOME, AND IT IS NEVER A STAMP.
+        # `deribit` is in `EXCHANGE_CLASSES` (so the guard above lets it through)
+        # but `fetch_daily_pnl` has no branch for it: it used to return `[]` with
+        # no error flag, `strategy_advances` read that as a successful idle
+        # fetch, and the strategy's marker moved and `trades_fetched_at` was
+        # stamped every day with nothing read. D-13 excludes only ALLOCATOR-only
+        # Deribit keys; a Deribit key backing an eligible strategy stays in the
+        # tick, so the refusal has to live here. Decided BEFORE decrypt and
+        # before any venue call, like the guard above, and reported under the
+        # existing benign `deferred` bucket with its own `reason` so the two
+        # deferrals can be told apart. The badge for such a strategy then reads
+        # honestly old (no stamp), which is the truth: nothing is fetched.
+        if exchange_name not in DAILY_PNL_VENUES:
+            logger.info(
+                "cron_sync: key %s exchange=%s has no daily-P&L fetcher "
+                "(not in DAILY_PNL_VENUES) — deferring without a venue call, "
+                "no marker and no trades_fetched_at stamp",
+                key_id,
+                exchange_name,
+            )
+            return {
+                "key_id": key_id,
+                "strategy_id": strategy_id,
+                "strategy_ids": strategy_ids,
+                "exchange": exchange_name,
+                "trades_fetched": 0,
+                "duration_s": round(time.monotonic() - start, 2),
+                "status": "deferred",
+                "reason": "no_daily_pnl_fetcher",
             }
 
         # A key row with NULL encryption columns (malformed/seed data that
@@ -878,14 +1081,20 @@ async def _sync_single_key(
             _record_validation_success(key_id)
 
             # 164.5.1.4 SYNCCURSOR — the window is the EARLIEST per-strategy
-            # resume point, not the key cursor alone. With no marker rows (the
-            # state the migration lands in) every strategy falls back to the key
-            # cursor and the floor is exactly `parse_since_ms(last_sync_at)`.
-            since_ms = _resume_floor_ms(
-                strategy_ids,
-                strategy_cursors,
-                key_cursor_at_tick_start,
-                clamp_report=strategy_cursor_window_clamped,
+            # resume point. 167.1.2.2.2 TRADESYNC: with no marker row (PROD's
+            # state) a strategy resumes from its own stored high-water, NEVER
+            # from `api_keys.last_sync_at` (D-11, D-12), and EVERY window is
+            # floored to 00:00 UTC (T-167.1.2.2.2-16) so the window-scoped
+            # delete in `sync_trades` never replaces a whole stored day with a
+            # partial one. `None` (full history) stays `None`.
+            since_ms = _floor_to_utc_day_ms(
+                _resume_floor_ms(
+                    strategy_ids,
+                    strategy_cursors,
+                    key_cursor_at_tick_start,
+                    strategy_high_waters=strategy_high_waters,
+                    clamp_report=strategy_cursor_window_clamped,
+                )
             )
             trades = await fetch_all_trades(exchange, since_ms=since_ms)
             # ⛔ DRAIN THE DQ FLAGS IMMEDIATELY AFTER THE AWAIT — the buffer is
@@ -902,7 +1111,10 @@ async def _sync_single_key(
             #    comment says the flag exists precisely so a caller can tell
             #    those apart; until now this caller never looked.
             fetch_dq_flags = get_and_clear_last_dq_flags()
-            fetch_degraded = bool(fetch_dq_flags.get("daily_pnl_fetch_error"))
+            fetch_degraded_reasons, fetch_error_class = _fetch_degradation(
+                fetch_dq_flags
+            )
+            fetch_degraded = bool(fetch_degraded_reasons)
             account_balance = await fetch_usdt_balance(exchange)
         finally:
             await aclose_exchange(exchange)
@@ -916,7 +1128,16 @@ async def _sync_single_key(
         per_strategy_stored: dict[str, int] = {}
         strategy_errors: dict[str, str] = {}
 
-        if trades and strategy_ids:
+        # ⛔ 167.1.2.2.2 PR-B round 1 (SFH-H1) — A DEGRADED WINDOW IS NOT STORED.
+        #    The rows of a fetch that did not read its whole window are the
+        #    NEWER part of it (or an arbitrary part, for a crash). A marker-less
+        #    strategy resumes from its stored high-water, so storing them moves
+        #    that high-water past the span that was never read, and the next
+        #    tick would resume from there: a permanent hole from a tick that
+        #    looked like progress. Re-fetching an unstored window is idempotent
+        #    (`sync_trades` deletes payload-window-scoped before inserting), so
+        #    declining to store costs one tick of freshness and nothing else.
+        if trades and strategy_ids and not fetch_degraded:
             for sid in strategy_ids:
                 try:
                     # Pass `trades` (list[dict]) directly. Pre-serializing via
@@ -1038,7 +1259,17 @@ async def _sync_single_key(
         # USDT balance succeeded if we got here, and stashing it doesn't
         # affect trade replay semantics.
         synced_count = sum(per_strategy_stored.values())
-        should_advance_cursor = (not trades) or synced_count > 0
+        #
+        # 167.1.2.2.2 PR-B round 1 (SFH-H1) — a DEGRADED fetch never advances the
+        # key cursor. Before this conjunct a crashed `[]` satisfied `not trades`,
+        # advanced `last_sync_at` and fell through to `status = "ok"`: the
+        # operator-facing signals read healthy while the window was unread. The
+        # key cursor is no longer a strategy resume source (D-12), but it is what
+        # "Key checked" shows and the 04:00 poll's sibling reader, so it must not
+        # claim a fetch that did not happen.
+        should_advance_cursor = (
+            ((not trades) or synced_count > 0) and not fetch_degraded
+        )
 
         # 164.5.1.4 SYNCCURSOR / WR-01 — ONE instant for BOTH cursor writes.
         #
@@ -1068,7 +1299,19 @@ async def _sync_single_key(
         if update_data:
             supabase.table("api_keys").update(update_data).eq("id", key_id).execute()
         if not should_advance_cursor:
-            if not strategy_ids:
+            if fetch_degraded:
+                logger.warning(
+                    "cron_sync: key %s held last_sync_at unchanged — the venue "
+                    "fetch was DEGRADED (%s, error_class=%s), %d trade(s) "
+                    "returned were NOT stored, and every strategy on this key "
+                    "keeps its resume point so the next tick re-reads the "
+                    "same window",
+                    key_id,
+                    ", ".join(fetch_degraded_reasons),
+                    fetch_error_class,
+                    len(trades),
+                )
+            elif not strategy_ids:
                 logger.warning(
                     "cron_sync: key %s held last_sync_at unchanged — %d "
                     "trade(s) fetched but no strategy on this key was "
@@ -1201,6 +1444,10 @@ async def _sync_single_key(
         marker_now = tick_now
         strategy_cursor_rows: list[dict[str, Any]] = []
         held_strategy_ids: list[str] = []
+        # 167.1.2.2.2 SC-4 / D-07 — the strategies whose trades this tick truly
+        # fetched (and, where there were any, stored and enqueued). They are
+        # exactly the ones whose `trades_fetched_at` is stamped below.
+        advancing_strategy_ids: list[str] = []
         for sid in strategy_ids:
             # ⛔ THE IDLE DISJUNCT IS EVIDENCE-BASED, AND IT MUST STAY THAT WAY.
             #    `not trades` is only proof that nothing is outstanding when the
@@ -1224,12 +1471,36 @@ async def _sync_single_key(
             #    accepted behaviour, and the whole point of the marker is to
             #    SURVIVE that advance. A marker that clears itself on the same
             #    evidence would be no marker at all.
-            strategy_advances = ((not trades) and not fetch_degraded) or (
-                per_strategy_stored.get(sid, 0) > 0
-                and sid not in recompute_enqueue_errors
+            strategy_advances = (not fetch_degraded) and (
+                (not trades)
+                or (
+                    per_strategy_stored.get(sid, 0) > 0
+                    and sid not in recompute_enqueue_errors
+                )
             )
+            if strategy_advances:
+                advancing_strategy_ids.append(sid)
             if not strategy_advances:
                 held_strategy_ids.append(sid)
+                if sid not in strategy_cursors:
+                    # ⛔ 167.1.2.2.2 — A STRATEGY HELD ON THE TICK WHERE IT HAD
+                    # NO MARKER WRITES NO MARKER ROW, and writing one would cut
+                    # the gap. Its resume point is its stored high-water, which
+                    # can be months old (PROD: 138 and 156 days). A held row
+                    # written at that value becomes a MARKER, and a marker is
+                    # clamped to `MAX_MARKER_LOOKBACK_MS` (30 days) on the next
+                    # read, so the 108-day remainder is abandoned by a
+                    # one-tick failure. With no row the strategy stays ABSENT:
+                    # the next tick re-reads the SAME unclamped high-water and
+                    # re-drives the whole window, and nothing is lost.
+                    # It stays re-drivable on the recompute-enqueue path too:
+                    # the resume floor is the high-water DAY, so the newest
+                    # stored day is fetched and re-stored again next tick,
+                    # which re-attempts the enqueue.
+                    # A PRESENT marker still hold-writes below, exactly as
+                    # before: it is already a marker, so the clamp already
+                    # applies to it and pinning it is what keeps it re-drivable.
+                    continue
             strategy_cursor_rows.append(
                 {
                     "strategy_id": sid,
@@ -1237,7 +1508,7 @@ async def _sync_single_key(
                         marker_now
                         if strategy_advances
                         else _strategy_resume_point(
-                            sid, strategy_cursors, key_cursor_at_tick_start
+                            sid, strategy_cursors, strategy_high_waters
                         )
                     ),
                     # No trigger on this table by design (single writer), so the
@@ -1429,6 +1700,88 @@ async def _sync_single_key(
                             f"{len(strategy_cursor_rows)} row(s)"
                         )
 
+        # 167.1.2.2.2 SC-4 / D-07 — STAMP `strategy_analytics.trades_fetched_at`
+        # for exactly the strategies that advanced this tick. This is the
+        # source of truth for the public "Trades fetched N days ago" badge, and
+        # it is written by the one process that fetches trades.
+        #
+        # ⛔ IT FOLLOWS `strategy_advances`, NOT THE KEY CURSOR. The key cursor
+        # advances on a PARTIAL tick (C-0198), so stamping on it would paint a
+        # strategy whose store failed as freshly fetched, on a public page. A
+        # held strategy must read honestly old (D-05 staleness). An idle tick
+        # that fetched successfully and found nothing DOES advance, and stamps:
+        # a fetch that found nothing new is still a fetch. A degraded fetch
+        # (`daily_pnl_fetch_error`, empty list) does not advance, so it does not
+        # stamp.
+        #
+        # ⛔ ONE single-column UPDATE, NEVER an upsert. An upsert would create a
+        # stub `pending` analytics row for a strategy that has none, and would
+        # need every NOT NULL column of that table.
+        #
+        # ⚠️ THE STAMP IS ACCEPTED ON EVERY ROW STATE, `computing` INCLUDED, AND
+        # IS DELIBERATELY NOT FILTERED (orchestrator decision 2026-10-09, plan 02
+        # review, `[167.1.2.2.2-PROVENANCE-GATE-RESIDUALS]` item 5). A
+        # `trades_fetched_at`-only UPDATE still fires the database trigger
+        # `strategy_analytics_stamp_computing_started_trigger`: on a `computing`
+        # row with NULL `computing_started_at` it sets that column to now(),
+        # and on a non-computing row it clears a stale stamp. Both preserve the
+        # trigger's own invariant (the first gives the stuck-computing reaper a
+        # start time it lacked, the second removes a stale marker), so there is
+        # nothing to exclude. The behavioural proof is a lane arm over those
+        # states, owned by the TODOS entry above; it is database-side, so it
+        # cannot be a mocked Python test.
+        #
+        # ⚠️ BEST-EFFORT, NEVER RAISED. A blip here must not abort the tick or
+        # discard the sync results already collected: the trades are stored and
+        # the markers written, and the worst outcome is a badge that reads
+        # older than the truth (the safe direction). The failure is RECORDED in
+        # the envelope, because a stamp that silently stops is a badge that
+        # silently goes stale.
+        trades_fetched_at_stamped: int | None = None
+        trades_fetched_at_unstamped: int | None = None
+        trades_fetched_at_stamp_error: str | None = None
+        if advancing_strategy_ids:
+            try:
+                stamp_result = (
+                    supabase.table("strategy_analytics")
+                    .update({"trades_fetched_at": marker_now})
+                    .in_("strategy_id", advancing_strategy_ids)
+                    .execute()
+                )
+                # Count the rows the UPDATE RETURNED, never the ids it was
+                # sent: an advancing strategy with no `strategy_analytics` row
+                # is updated by nothing, and PostgREST answers that with 200
+                # and an empty list. A no-op UPDATE looks identical to success
+                # unless `.data` is inspected (the `api_keys` deactivation
+                # check above makes the same point).
+                trades_fetched_at_stamped = len(
+                    getattr(stamp_result, "data", None) or []
+                )
+                missing = len(advancing_strategy_ids) - trades_fetched_at_stamped
+                if missing > 0:
+                    trades_fetched_at_unstamped = missing
+                    logger.warning(
+                        "cron_sync: key %s stamped trades_fetched_at on %d of "
+                        "%d advancing strategy(ies); %d had no strategy_analytics "
+                        "row to stamp, so their badge makes no fetch claim",
+                        key_id,
+                        trades_fetched_at_stamped,
+                        len(advancing_strategy_ids),
+                        missing,
+                    )
+            except Exception as stamp_exc:
+                trades_fetched_at_stamped = None
+                trades_fetched_at_stamp_error = (
+                    f"{type(stamp_exc).__name__}: {stamp_exc}"
+                )
+                logger.exception(
+                    "cron_sync: trades_fetched_at stamp failed for key %s "
+                    "(%d strategy(ies)) — the tick's results are preserved; "
+                    "the badge for these strategies reads older than the truth",
+                    key_id,
+                    len(advancing_strategy_ids),
+                )
+
         duration = time.monotonic() - start
         # `partial` means *some* strategies landed AND *some* failed.
         # If every per-strategy RPC raised, that's `error`, not
@@ -1450,8 +1803,16 @@ async def _sync_single_key(
         # `ok` is now only reached when the cursor actually advanced, i.e. a
         # genuinely idle tick (no trades fetched) or trades that landed.
         any_stored = any(n > 0 for n in per_strategy_stored.values())
-        if strategy_errors and any_stored:
-            status: SyncStatus = "partial"
+        # 167.1.2.2.2 PR-B round 1 (SFH-H1): a degraded fetch is checked FIRST.
+        # It stored nothing, so `strategy_errors` is empty and `should_advance_
+        # cursor` is False; without this arm it would be read as `held`, whose
+        # documented remedy ("a strategy re-enters ALLOWED_STRATEGY_STATUSES")
+        # can never clear a venue crash. `error` is the existing bucket that
+        # reaches `failed`, `_NON_OK_STATUSES` and the heartbeat.
+        if fetch_degraded:
+            status: SyncStatus = "error"
+        elif strategy_errors and any_stored:
+            status = "partial"
         elif strategy_errors:
             status = "error"
         elif not should_advance_cursor:
@@ -1470,6 +1831,15 @@ async def _sync_single_key(
             "duration_s": round(duration, 2),
             "status": status,
         }
+        if fetch_degraded:
+            result["fetch_degraded"] = True
+            result["fetch_degraded_reasons"] = fetch_degraded_reasons
+            if fetch_error_class:
+                result["fetch_error_class"] = fetch_error_class
+            # Names only: the flag names and an exception CLASS, never a message.
+            result["error"] = "fetch_degraded: " + ",".join(fetch_degraded_reasons) + (
+                f" ({fetch_error_class})" if fetch_error_class else ""
+            )
         if strategy_errors:
             result["strategy_errors"] = strategy_errors
             # When every strategy failed, surface a top-level error too
@@ -1511,6 +1881,16 @@ async def _sync_single_key(
             result["strategy_cursor_window_clamped"] = (
                 strategy_cursor_window_clamped
             )
+        # 167.1.2.2.2 SC-4: the stamp's outcome, in the same conditional style.
+        # `stamped` is present whenever an UPDATE was issued and answered;
+        # `unstamped` only when it matched fewer rows than it was sent ids;
+        # `stamp_error` only when it raised.
+        if trades_fetched_at_stamped is not None:
+            result["trades_fetched_at_stamped"] = trades_fetched_at_stamped
+        if trades_fetched_at_unstamped is not None:
+            result["trades_fetched_at_unstamped"] = trades_fetched_at_unstamped
+        if trades_fetched_at_stamp_error:
+            result["trades_fetched_at_stamp_error"] = trades_fetched_at_stamp_error
         return result
 
     except Exception as e:
@@ -1564,7 +1944,222 @@ async def _sync_key_with_timeout(key_row: dict[str, Any], kek: bytes) -> dict[st
         }
 
 
+# ---------------------------------------------------------------------------
+# 167.1.2.2.2 SC-6 — the cron_sync heartbeat
+# ---------------------------------------------------------------------------
+#
+# Every `/api/cron-sync` run leaves exactly ONE closed `public.cron_runs` row.
+# This row is the INPUT the booked `[167.1.2.2.2-TRADESYNC-STALENESS-ALARM]`
+# (OUTAGEALERT) reads against D-05's 2-day ceiling. ⚠️ NO HUMAN IS PAGED BY THIS
+# PHASE: it writes the signal, it does not deliver an alarm, and nothing here may
+# be read as one.
+#
+# The shape is `services/mt5_terminal_scrub.py`'s (`_insert_scrub_row` +
+# `record_mt5_terminal_scrub`): a closed metadata key set, a point-event row
+# closed at insert (never a `running` row), and a recorder that can never raise
+# or change the route's return value.
+
+CRON_SYNC_CRON_NAME: Final[str] = "cron_sync"
+
+#: The row's metadata keys, and nothing else (pinned by
+#: `tests/test_cron_router.py::TestCronSyncHeartbeat`). Counters only: no key id,
+#: no strategy id, no URL and no exception text ever enters the row.
+_CRON_SYNC_HEARTBEAT_METADATA_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "total_keys",
+        "skipped_no_strategy",
+        "fetch_degraded",
+        "duration_s",
+        "stamped",
+    }
+    # 167.1.2.2.2 PR-B round 1 (SFH-M1): EVERY status counter the route reports,
+    # taken from the registry rather than copied. The set used to leave out
+    # `transient`, `partial` and `deferred`, so a later alarm could not recover
+    # those counts from the row; a status registered in
+    # `SYNC_STATUS_SUMMARY_KEYS` now reaches the metadata with no edit here.
+    | set(SYNC_STATUS_SUMMARY_KEYS.values())
+)
+
+#: Bound on the insert. The recorder runs AFTER the sync, inside the pg_net
+#: window, so it must not be able to hold the response open.
+_CRON_SYNC_HEARTBEAT_TIMEOUT_S: Final[float] = 5.0
+
+
+def _cron_sync_error_counters() -> tuple[str, ...]:
+    """The response counters whose being above 0 makes the row an `error` row.
+
+    ⭐ ONE DEFINITION (167.1.2.2.2 PR-B round 1, SFH-M1 + ME-03). This is DERIVED
+    from `_NON_OK_STATUSES`, the route's own "this key is not healthy" set, by
+    way of the status registry, so the two cannot disagree. It used to be a
+    hand-written `("failed", "timed_out", "revoked")` and so called a tick `ok`
+    while every key was `transient_failure`, `partial` or `held`, the very
+    misreading the summary's comment forbids. Read at CALL time on purpose: a
+    test that widens the set sees the heartbeat follow, which is how the
+    single-definition property is proven rather than asserted.
+
+    `fetch_degraded` is appended because it is a status-INDEPENDENT signal (a
+    degraded key is also `error` today, but a future status reshuffle must not
+    be able to hide a crashed fetch again). `deferred` is benign per key and is
+    absent from `_NON_OK_STATUSES`; the tick-level rule in
+    `_cron_sync_heartbeat_row` handles a tick made only of deferrals.
+    """
+    return tuple(
+        counter
+        for status, counter in SYNC_STATUS_SUMMARY_KEYS.items()
+        if status in _NON_OK_STATUSES
+    ) + ("fetch_degraded",)
+
+
+def _is_counter(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _cron_sync_heartbeat_row(
+    response: dict[str, Any] | None,
+    started_at: datetime,
+    aborted: BaseException | None,
+) -> dict[str, Any]:
+    """Build the `cron_runs` payload. Reads counters off `response`; never an id."""
+    body: dict[str, Any] = response or {}
+    metadata: dict[str, Any] = {}
+    for key in _CRON_SYNC_HEARTBEAT_METADATA_KEYS:
+        # `stamped` is the response's `trades_fetched_at_stamped`.
+        value = body.get("trades_fetched_at_stamped" if key == "stamped" else key)
+        if _is_counter(value):
+            metadata[key] = value
+
+    error: str | None = None
+    if aborted is not None:
+        # The class name (and the status code of an HTTPException) only: the
+        # exception text can carry a request URL or a credential fragment.
+        status_code = getattr(aborted, "status_code", None)
+        error = (
+            f"cron_sync aborted before a summary: {type(aborted).__name__}"
+            + (f" {status_code}" if isinstance(status_code, int) else "")
+        )
+    else:
+        problems = [
+            f"{counter}={body[counter]}"
+            for counter in _cron_sync_error_counters()
+            if _is_counter(body.get(counter)) and body[counter] > 0
+        ]
+        total_raw = body.get("total_keys")
+        synced_raw = body.get("synced")
+        total_keys: float | None = total_raw if _is_counter(total_raw) else None
+        synced: float | None = synced_raw if _is_counter(synced_raw) else None
+        # ME-03: a tick that found NO strategy-backed key fetched nothing. The
+        # cron is registered (by runbook) only where such keys exist, so zero is
+        # a fault and not an idle day. `cron_runs.status` admits only
+        # running/ok/error, so the DISTINCT reading is this token in the text
+        # (and `total_keys=0` in the metadata), never a fourth status value.
+        if total_keys == 0:
+            skipped = body.get("skipped_no_strategy")
+            problems.append("no_strategy_backed_keys")
+            if _is_counter(skipped):
+                problems.append(f"skipped_no_strategy={skipped}")
+        elif (
+            not problems
+            and total_keys is not None
+            and total_keys > 0
+            and synced == 0
+        ):
+            # Keys existed and nothing was unhealthy, yet nothing synced: every
+            # key was a benign `deferred`. Deferral is fine beside a real sync;
+            # a whole tick of it ingested nothing.
+            problems.append("no_key_synced")
+        # Top-level `*_error` fields are code constants of this module's own
+        # response; only their NAMES are written, never their values.
+        error_fields = sorted(
+            k for k in body if k.endswith("_error") and body[k]
+        )
+        if problems or error_fields:
+            parts = problems + (
+                [f"error_fields={','.join(error_fields)}"] if error_fields else []
+            )
+            error = "cron_sync reported problems: " + " ".join(parts)
+
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "cron_name": CRON_SYNC_CRON_NAME,
+        "started_at": started_at.isoformat(),
+        "completed_at": now,
+        "status": "error" if error else "ok",
+        "error": error,
+        "metadata": metadata,
+    }
+
+
+async def _insert_cron_sync_row(
+    response: dict[str, Any] | None,
+    started_at: datetime,
+    aborted: BaseException | None,
+) -> None:
+    payload = _cron_sync_heartbeat_row(response, started_at, aborted)
+    supabase = get_supabase()
+
+    def _insert() -> Any:
+        return supabase.table("cron_runs").insert(payload).execute()
+
+    result = await db_execute(_insert)
+    if not rows(result):
+        logger.error(
+            "cron_sync: the cron_runs heartbeat INSERT returned no rows — the "
+            "record may not have landed"
+        )
+
+
+async def _record_cron_sync_run(
+    response: dict[str, Any] | None,
+    started_at: datetime,
+    *,
+    aborted: BaseException | None = None,
+) -> None:
+    """Write ONE heartbeat row. NEVER RAISES ``Exception``.
+
+    The row build, the client, the insert and its bound all sit inside the one
+    ``try``; a failure becomes one warning carrying the exception CLASS only.
+    ``asyncio.CancelledError`` passes through.
+    """
+    try:
+        await asyncio.wait_for(
+            _insert_cron_sync_row(response, started_at, aborted),
+            timeout=_CRON_SYNC_HEARTBEAT_TIMEOUT_S,
+        )
+    except Exception as exc:  # noqa: BLE001 — this is the never-raise control
+        try:
+            logger.warning(
+                "cron_sync: the heartbeat row could not be recorded (exc_class=%s)",
+                type(exc).__name__,
+            )
+        except BaseException:  # noqa: BLE001 — this is the never-raise control
+            pass
+
+
+def _heartbeat_cron_sync(
+    fn: Callable[[], Awaitable[dict[str, Any]]],
+) -> Callable[[], Awaitable[dict[str, Any]]]:
+    """Route wrapper: every exit of ``cron_sync`` passes through ONE recording
+    point. A return records the response; an exception (the two 500s, an
+    unexpected fault) or a cancellation records an `error` row and then
+    re-raises UNCHANGED. The wrapper adds no behaviour of its own.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper() -> dict[str, Any]:
+        started_at = datetime.now(timezone.utc)
+        try:
+            response = await fn()
+        except (Exception, asyncio.CancelledError) as exc:
+            await _record_cron_sync_run(None, started_at, aborted=exc)
+            raise
+        await _record_cron_sync_run(response, started_at)
+        return response
+
+    return wrapper
+
+
 @router.post("/cron-sync")
+@_heartbeat_cron_sync
 async def cron_sync() -> dict[str, Any]:
     """Daily cron endpoint: sync trades for ALL active API keys.
 
@@ -1590,11 +2185,19 @@ async def cron_sync() -> dict[str, Any]:
     # in-process. PostgREST's embedded-resource filter has behaved
     # inconsistently across the supabase-py versions we ship; local
     # filtering is robust to that churn.
+    #
+    # 167.1.2.2.2 SC-5 / D-13 — the tick reads only CONNECTED keys that back an
+    # eligible strategy. `disconnected_at IS NULL` is applied in the QUERY, the
+    # repo idiom (`services/account_identity.py`, `services/equity_reconstruction.py`):
+    # a disconnect only stamps `disconnected_at`, the credentials remain, so an
+    # unfiltered tick would resume reading a user's exchange account after they
+    # disconnected it. The strategy-less half is applied after the flatten below.
     try:
         keys_result = (
             supabase.table("api_keys")
             .select("*, strategies!strategies_api_key_id_fkey(id, status)")
             .eq("is_active", True)
+            .is_("disconnected_at", "null")
             .execute()
         )
     except Exception as exc:
@@ -1634,11 +2237,44 @@ async def cron_sync() -> dict[str, Any]:
         row["strategy_id"] = strategy_ids[0] if strategy_ids else None
         keys.append(row)
 
-    if not keys:
-        logger.info("cron_sync: no active API keys found")
-        return {"synced": 0, "failed": 0, "total_keys": 0, "duration_s": 0}
+    # 167.1.2.2.2 SC-5 / D-13 — drop the keys that back no eligible strategy
+    # BEFORE any venue call. Measured on PROD 2026-10-09 (RESEARCH Section 5,
+    # counts only): of 42 active keys, 14 were disconnected (excluded by the
+    # query above) and 28 had no eligible strategy (excluded here), leaving the
+    # intended 4 (okx 3, bybit 1). Why each class stays out:
+    #   * allocator-only keys, connected: any bills fetched are discarded, the
+    #     OKX balance read would overwrite `api_keys.account_balance_usdt`, a
+    #     field other writers own, and Deribit has no `fetch_daily_pnl` branch,
+    #     so it would return nothing and stamp `last_sync_at`, a second writer on
+    #     the poll's column;
+    #   * revoked-but-active allocator-only keys (5, all Bybit): validation
+    #     fails, there is no strategy to deactivate them for, so each would
+    #     report `key_revoked` on every run, forever, and any alarm on
+    #     `revoked > 0` would be poisoned from day one.
+    # A REVOKED key that backs a strategy is not excluded: it keeps today's path
+    # (deactivated unless `allocator_protected`).
+    skipped_no_strategy = sum(1 for row in keys if not row["strategy_ids"])
+    keys = [row for row in keys if row["strategy_ids"]]
+    if skipped_no_strategy:
+        logger.info(
+            "cron_sync: skipped %d active key(s) with no eligible strategy",
+            skipped_no_strategy,
+        )
 
-    logger.info("cron_sync: found %d active API keys", len(keys))
+    if not keys:
+        logger.info("cron_sync: no connected API keys with an eligible strategy found")
+        return {
+            "synced": 0,
+            "failed": 0,
+            "total_keys": 0,
+            "skipped_no_strategy": skipped_no_strategy,
+            "duration_s": 0,
+        }
+
+    logger.info(
+        "cron_sync: found %d connected API keys backing an eligible strategy",
+        len(keys),
+    )
 
     # 164.5.1.4 SYNCCURSOR — attach each key's PER-STRATEGY resume markers.
     #
@@ -1654,8 +2290,8 @@ async def cron_sync() -> dict[str, Any]:
     # entry for every row RETURNED and for no other strategy, and each key's
     # sub-mapping is restricted to its own eligible strategies the same way. A
     # strategy with no row must be ABSENT, never present-with-a-null: the two
-    # mean different things (fall back to the key cursor vs re-fetch all
-    # history) and only absence keeps this change inert on arrival.
+    # mean different things (resume from the strategy's stored high-water vs
+    # re-fetch all history) and only absence keeps this change inert on arrival.
     strategy_cursor_lookup_error: str | None = None
     _cursor_by_strategy: dict[str, str | None] = {}
     _marker_strategy_ids = list(
@@ -1729,6 +2365,32 @@ async def cron_sync() -> dict[str, Any]:
             sid: _cursor_by_strategy[sid]
             for sid in row["strategy_ids"]
             if sid in _cursor_by_strategy
+        }
+
+    # 167.1.2.2.2 TRADESYNC SC-2 / D-11 — each MARKER-LESS strategy's own stored
+    # high-water, the ABSENT-marker resume source. Beside the marker lookup
+    # because it answers the same question for the strategies the marker table
+    # does not cover. Only marker-less strategies are read: a present marker
+    # wins in `_strategy_resume_point`, so reading theirs would be dead traffic.
+    # ⚠️ When the marker lookup FAILED open, `_cursor_by_strategy` is empty and
+    # every strategy is marker-less, so every strategy is read: the over-fetch
+    # direction, as intended.
+    # FAIL OPEN per strategy (`_load_strategy_high_waters`); the error reaches
+    # the response envelope as `strategy_high_water_lookup_error`, never a raise.
+    _hw_strategy_ids = [
+        sid for sid in _marker_strategy_ids if sid not in _cursor_by_strategy
+    ]
+    _high_water_by_strategy: dict[str, str | None] = {}
+    strategy_high_water_lookup_error: str | None = None
+    if _hw_strategy_ids:
+        _high_water_by_strategy, strategy_high_water_lookup_error = (
+            _load_strategy_high_waters(supabase, _hw_strategy_ids)
+        )
+    for row in keys:
+        row["strategy_high_waters"] = {
+            sid: _high_water_by_strategy[sid]
+            for sid in row["strategy_ids"]
+            if sid in _high_water_by_strategy
         }
 
     # Group by exchange for rate-limit awareness
@@ -2157,12 +2819,20 @@ async def cron_sync() -> dict[str, Any]:
     response: dict[str, Any] = {
         **status_counts,
         "total_keys": len(keys),
+        "skipped_no_strategy": skipped_no_strategy,
         "total_trades": total_trades,
         "total_results": len(all_results),
         "results_truncated": results_truncated,
         "duration_s": overall_duration,
         "results": capped_results,
         "portfolio_recomputes": portfolio_recomputes,
+        # 167.1.2.2.2 PR-B round 1 (SFH-H1): how many keys' venue fetch did not
+        # read its whole window. Counted off EVERY result, not the capped list.
+        # Always present (0 on a healthy tick) so a reader never has to tell
+        # "none degraded" from "field absent"; it is also a status-independent
+        # signal the heartbeat reads, so a future status reshuffle cannot hide
+        # a crashed fetch again.
+        "fetch_degraded": sum(1 for r in all_results if r.get("fetch_degraded")),
     }
     # 164.5.1.4: the marker lookup failed open, so the tick ran on key-level
     # cursors alone. Record it beside the recompute lookup error rather than
@@ -2170,6 +2840,30 @@ async def cron_sync() -> dict[str, Any]:
     # identical to a healthy one.
     if strategy_cursor_lookup_error:
         response["strategy_cursor_lookup_error"] = strategy_cursor_lookup_error
+    # 167.1.2.2.2: a failed stored-high-water read failed OPEN to a full-reach
+    # fetch for that strategy. Record it, or a tick that re-fetched everything
+    # looks identical to a healthy one.
+    if strategy_high_water_lookup_error:
+        response["strategy_high_water_lookup_error"] = strategy_high_water_lookup_error
+    # 167.1.2.2.2 SC-4: a stamp error also rides at the TOP of the response.
+    # `results` is capped at RESULTS_CAP and fills with non-ok keys first, so an
+    # error on an otherwise-`ok` key could be truncated out of the body, and a
+    # stamp that silently stops is a public badge that silently goes stale.
+    stamp_errors = [
+        f"{r.get('key_id')}: {r['trades_fetched_at_stamp_error']}"
+        for r in all_results
+        if r.get("trades_fetched_at_stamp_error")
+    ]
+    if stamp_errors:
+        response["trades_fetched_at_stamp_error"] = "; ".join(stamp_errors)
+    # 167.1.2.2.2 SC-6: the tick-wide count of `trades_fetched_at` rows the stamp
+    # RETURNED, summed off every key's result (not the capped `results` list), so
+    # the heartbeat row can carry it as the evidence that the stamp landed.
+    response["trades_fetched_at_stamped"] = sum(
+        r["trades_fetched_at_stamped"]
+        for r in all_results
+        if isinstance(r.get("trades_fetched_at_stamped"), int)
+    )
     return response
 
 

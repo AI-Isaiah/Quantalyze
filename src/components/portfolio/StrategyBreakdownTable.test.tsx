@@ -84,6 +84,10 @@ function strat(
     sharpe?: number | null;
     max_drawdown?: number | null;
     computed_at?: string | null;
+    // Phase 167.1.2.2.2 / SC-4, D-07 — the badge's FIRST clock is now the
+    // cron's own record of its last successful trade fetch; `computed_at`
+    // survives only in the tooltip.
+    trades_fetched_at?: string | null;
     computation_status?: string | null;
     // Phase 163 / HONEST-08 — the badge's second clock.
     //
@@ -256,37 +260,55 @@ function isoDaysAgo(days: number): string {
 }
 
 describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
-  it("renders a per-row freshness badge keyed on each constituent's computed_at", () => {
+  // Phase 167.1.2.2.2 / D-07 — B14's per-row badge now states each
+  // constituent's last TRADE FETCH (`trades_fetched_at`), not its analytics
+  // compute time. Every fixture below gives the constituents an IDENTICAL, fresh
+  // `computed_at`, so a badge still keyed on the compute time could not tell
+  // them apart and the fresh/stale split would collapse.
+  it("renders a per-row freshness badge keyed on each constituent's trades_fetched_at", () => {
     const strategies: StrategyInput[] = [
-      strat("a", "Alpha", 0.6, { sharpe: 1.5, computed_at: hoursAgoIso(2) }),
-      strat("b", "Beta", 0.4, { sharpe: 1.0, computed_at: hoursAgoIso(100) }),
+      strat("a", "Alpha", 0.6, {
+        sharpe: 1.5,
+        computed_at: hoursAgoIso(1),
+        trades_fetched_at: hoursAgoIso(2),
+      }),
+      strat("b", "Beta", 0.4, {
+        sharpe: 1.0,
+        computed_at: hoursAgoIso(1),
+        trades_fetched_at: hoursAgoIso(100),
+      }),
     ];
 
     render(
       <StrategyBreakdownTable strategies={strategies} attribution={null} portfolioId="p-1" />,
     );
 
-    // One "Synced … ago" badge per constituent that has a computed_at.
-    expect(screen.getAllByText(/Synced/i)).toHaveLength(2);
+    // One "Trades fetched … ago" badge per constituent that has a fetch, each
+    // carrying ITS OWN age: 2h is current, 100h (4d) is stale.
+    expect(screen.getAllByText(/Trades fetched/i)).toHaveLength(2);
+    expect(screen.getByText(/Trades fetched 2h ago/i)).toBeTruthy();
+    expect(screen.getByText(/Trades fetched 4d ago/i)).toBeTruthy();
+    expect(screen.queryByText(/Synced/i)).toBeNull();
   });
 
   it("distinguishes a fresh constituent (positive dot) from a stale one (negative dot)", () => {
     const strategies: StrategyInput[] = [
-      // 2h ago → fresh (< 12h) → positive token. Phase 163 / HONEST-08: the
-      // row must ALSO carry a live track record to earn the green dot — a job
-      // that ran 2h ago over a dead series is not a fresh constituent, and an
-      // ABSENT series is capped below fresh (see the cap spec below). The
-      // series end is supplied here so this spec keeps testing the fresh/stale
-      // split it was written for rather than the unknown-series cap.
+      // Fetched 2h ago → current (within the 2-day allowance) → positive
+      // token. The row also carries a live track record, so nothing outranks
+      // the trade sentence.
       strat("a", "Fresh", 0.6, {
         sharpe: 1.5,
-        computed_at: hoursAgoIso(2),
+        computed_at: hoursAgoIso(1),
+        trades_fetched_at: hoursAgoIso(2),
         returns_series: [{ date: isoDaysAgo(1), value: 1.2 }],
       }),
-      // 100h ago → stale (≥ 48h) → negative token.
+      // Fetched 100h ago → stale (> 2 days) → negative token, over a FRESH
+      // computed_at: the production defect (the status bridge re-stamps
+      // `computed_at` on every job transition) must not launder it.
       strat("b", "Stale", 0.4, {
         sharpe: 1.0,
-        computed_at: hoursAgoIso(100),
+        computed_at: hoursAgoIso(1),
+        trades_fetched_at: hoursAgoIso(100),
         returns_series: [{ date: isoDaysAgo(1), value: 1.1 }],
       }),
     ];
@@ -301,19 +323,26 @@ describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
     expect(container.querySelectorAll(".bg-negative")).toHaveLength(1);
   });
 
-  it("renders NO freshness badge for a constituent missing computed_at (never fabricates liveness)", () => {
+  it("renders NO freshness badge for a constituent with no trades_fetched_at (a fresh computed_at alone fabricates no liveness)", () => {
     const strategies: StrategyInput[] = [
-      strat("a", "Alpha", 0.6, { sharpe: 1.5, computed_at: null }),
-      strat("b", "Beta", 0.4, { sharpe: 1.0 }), // computed_at absent entirely
+      // A FRESH computed_at beside no trade fetch: the old badge would have
+      // said "Synced 2h ago" here. The venue is unknown at this mount, so a
+      // missing fetch time is "not applicable", not "never fetched".
+      strat("a", "Alpha", 0.6, {
+        sharpe: 1.5,
+        computed_at: hoursAgoIso(2),
+        trades_fetched_at: null,
+      }),
+      strat("b", "Beta", 0.4, { sharpe: 1.0, computed_at: hoursAgoIso(2) }), // trades_fetched_at absent entirely
     ];
 
     render(
       <StrategyBreakdownTable strategies={strategies} attribution={null} portfolioId="p-1" />,
     );
 
-    // Rows still render, but with no "Synced … ago" liveness claim.
+    // Rows still render, but with no liveness claim of any kind.
     expect(screen.getAllByRole("row").slice(1)).toHaveLength(2);
-    expect(screen.queryByText(/Synced/i)).toBeNull();
+    expect(screen.queryByText(/Trades fetched|No trade fetch|Track record|Synced/i)).toBeNull();
   });
 
   /**
@@ -328,6 +357,7 @@ describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
       strat("a", "DeadTrack", 1, {
         sharpe: 1.5,
         computed_at: hoursAgoIso(7),
+        trades_fetched_at: hoursAgoIso(7),
         returns_series: [{ date: isoDaysAgo(112), value: 1.4 }],
       }),
     ];
@@ -338,7 +368,8 @@ describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
 
     expect(container.querySelectorAll(".bg-positive")).toHaveLength(0);
     expect(container.querySelectorAll(".bg-negative")).toHaveLength(1);
-    expect(screen.queryByText(/Synced/i)).toBeNull();
+    // A current fetch is on the row, yet the dead track record outranks it.
+    expect(screen.queryByText(/Trades fetched/i)).toBeNull();
     expect(screen.getByText(/Track record ends/i)).toBeTruthy();
   });
 
@@ -382,6 +413,7 @@ describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
       strat("a", "Descending", 1, {
         sharpe: 1.5,
         computed_at: hoursAgoIso(2),
+        trades_fetched_at: hoursAgoIso(2),
         // Newest FIRST — the ordering the read path never asserted. The true
         // end of this track record is yesterday; the last slot holds the
         // oldest point.
@@ -401,9 +433,9 @@ describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
     // say it is.
     expect(container.querySelectorAll(".bg-negative")).toHaveLength(0);
     expect(screen.queryByText(/Track record ends/i)).toBeNull();
-    // The job ran 2h ago over a live track record: the honest render is the
-    // sync-keyed one, in green.
-    expect(screen.getByText(/Synced 2h ago/i)).toBeTruthy();
+    // The trades were fetched 2h ago over a live track record: the honest
+    // render is the fetch-keyed one, in green.
+    expect(screen.getByText(/Trades fetched 2h ago/i)).toBeTruthy();
     expect(container.querySelectorAll(".bg-positive")).toHaveLength(1);
   });
 
@@ -412,6 +444,7 @@ describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
       strat("a", "Ascending", 1, {
         sharpe: 1.5,
         computed_at: hoursAgoIso(7),
+        trades_fetched_at: hoursAgoIso(7),
         // Oldest FIRST — the shape the analytics runner actually writes. Here
         // the last slot IS the latest point, and the verdict must not move.
         returns_series: [
@@ -430,17 +463,22 @@ describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
     // simply stopped reading the series at all would pass the case above.
     expect(container.querySelectorAll(".bg-negative")).toHaveLength(1);
     expect(screen.getByText(/Track record ends/i)).toBeTruthy();
-    expect(screen.queryByText(/Synced/i)).toBeNull();
+    expect(screen.queryByText(/Trades fetched/i)).toBeNull();
   });
 
-  it("HONEST-08: an UNKNOWN track record caps the dot below fresh", () => {
+  // Phase 167.1.2.2.2 / D-07 — REPLACES "an UNKNOWN track record caps the dot
+  // below fresh". That cap belonged to the retired job-recency claim: a job
+  // that ran 2h ago says nothing about a track record we cannot see. The badge
+  // now names the TRADE FETCH, a fact the cron recorded whether or not this
+  // read carried a series; an absent series contributes nothing to the verdict
+  // (UI-SPEC "Badge states", rule 3) and the sentence names its own subject
+  // instead of implying a live strategy.
+  it("HONEST-08/D-07: an UNKNOWN track record neither caps nor extends the trade claim — the sentence names the fetch", () => {
     const strategies: StrategyInput[] = [
-      // Terminal success, computed 2h ago, but the read carried no series at
-      // all — so this surface cannot evidence a live strategy and must not
-      // paint one green.
       strat("a", "NoSeries", 1, {
         sharpe: 1.5,
         computed_at: hoursAgoIso(2),
+        trades_fetched_at: hoursAgoIso(2),
         returns_series: null,
       }),
     ];
@@ -449,10 +487,11 @@ describe("<StrategyBreakdownTable> — B14 per-constituent freshness", () => {
       <StrategyBreakdownTable strategies={strategies} attribution={null} portfolioId="p-1" />,
     );
 
-    expect(container.querySelectorAll(".bg-positive")).toHaveLength(0);
-    // Not a staleness claim either — the job really did run 2h ago.
+    expect(screen.getByText(/Trades fetched 2h ago/i)).toBeTruthy();
+    expect(container.querySelectorAll(".bg-positive")).toHaveLength(1);
     expect(container.querySelectorAll(".bg-negative")).toHaveLength(0);
-    expect(screen.getByText(/Synced 2h ago/i)).toBeTruthy();
+    // It makes no claim about a track record it cannot see.
+    expect(screen.queryByText(/Track record/i)).toBeNull();
   });
 });
 
@@ -568,6 +607,7 @@ describe("163-REVIEW finding 1 — the portfolio page's own payload", () => {
       sharpe: 1.5,
       cagr: 0.2,
       computed_at: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+      trades_fetched_at: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
       returns_series: [
         { date: isoDaysAgo(3), value: 1.0 },
         { date: isoDaysAgo(1), value: 1.2 },
@@ -580,6 +620,7 @@ describe("163-REVIEW finding 1 — the portfolio page's own payload", () => {
       sharpe: 1.1,
       cagr: 0.1,
       computed_at: hoursAgoIso(7),
+      trades_fetched_at: hoursAgoIso(7),
       returns_series: [{ date: isoDaysAgo(112), value: 1.4 }],
     });
 
@@ -593,7 +634,7 @@ describe("163-REVIEW finding 1 — the portfolio page's own payload", () => {
     // through yesterday and whose job succeeded twenty minutes ago.
     expect(container.querySelectorAll(".bg-positive")).toHaveLength(1);
     expect(container.querySelectorAll(".bg-amber-400")).toHaveLength(0);
-    expect(screen.getByText(/Synced 20m ago/i)).toBeTruthy();
+    expect(screen.getByText(/Trades fetched 20m ago/i)).toBeTruthy();
   });
 
   // RED under the neuter, verbatim: `AssertionError: expected [ Array(1) ] to
@@ -618,6 +659,36 @@ describe("163-REVIEW finding 1 — the portfolio page's own payload", () => {
     expect(dotClasses(table.container)[0]).toContain("bg-positive");
   });
 
+  // Phase 167.1.2.2.2 / SC-4, D-07 — the same oracle for the NEW clock. A
+  // constituent whose last trade fetch is five days old (stale) beside a fresh
+  // job and a live series must read "Trades fetched 5d ago · stale" on BOTH
+  // surfaces, through the page's own derivations (`stripConstituentSeries` for
+  // the table, `buildCompositionRows` for the donut). Neutering either
+  // derivation's `trades_fetched_at` hand-off makes that surface fall silent
+  // and the two disagree.
+  it("the breakdown table and the donut agree on one strategy's STALE trade fetch", () => {
+    const rows = [
+      sourceRow("stale-fetch", "StaleFetch", {
+        sharpe: 1.2,
+        computed_at: hoursAgoIso(1),
+        trades_fetched_at: hoursAgoIso(5 * 24),
+        returns_series: [{ date: isoDaysAgo(1), value: 1.2 }],
+      }),
+    ];
+
+    const table = renderTableFromPage(rows);
+    const donut = render(
+      <CompositionDonut strategies={buildCompositionRows(rows, null)} />,
+    );
+
+    for (const { container } of [table, donut]) {
+      expect(container.textContent).toContain("Trades fetched 5d ago");
+      expect(container.textContent).toContain("stale");
+    }
+    expect(dotClasses(table.container)).toEqual(dotClasses(donut.container));
+    expect(dotClasses(table.container)[0]).toContain("bg-negative");
+  });
+
   // RED under the neuter, verbatim: `AssertionError: expected  to have a
   // length of 1 but got +0` on `.bg-negative` — the dead row was amber too,
   // because the strip had erased the distinction between the two rows
@@ -630,7 +701,7 @@ describe("163-REVIEW finding 1 — the portfolio page's own payload", () => {
     // the series would make the spec above pass and this one fail.
     expect(container.querySelectorAll(".bg-negative")).toHaveLength(1);
     expect(screen.getByText(/Track record ends 112d ago/i)).toBeTruthy();
-    expect(screen.queryByText(/Synced/i)).toBeNull();
+    expect(screen.queryByText(/Trades fetched/i)).toBeNull();
   });
 
   // RED under the neuter, verbatim: `AssertionError: expected
@@ -701,6 +772,13 @@ describe("163-REVIEW finding 3 — a row composed over EMPTY_ANALYTICS", () => {
   // RED under the neuter, verbatim: `AssertionError: expected  to have a
   // length of 1 but got +0` on `.bg-positive` — the constant's explicit null
   // had suppressed the series the row was carrying.
+  // Phase 167.1.2.2.2 / D-07 — the series the row carries is now DEAD (112
+  // days) and the trade fetch is current. A current fetch alone reads green, so
+  // the ONLY way this row reads "Track record ends 112d ago" in red is the
+  // composed row's `returns_series` being consulted past the constant's
+  // explicit `series_end: null`. (The old fixture, a live series beside a
+  // current claim, could no longer tell "series read" from "series ignored":
+  // both render the fetch sentence.)
   it("an explicit series_end: null never suppresses the series the row carries", () => {
     const { container } = render(
       <StrategyBreakdownTable
@@ -708,7 +786,8 @@ describe("163-REVIEW finding 3 — a row composed over EMPTY_ANALYTICS", () => {
           composedRow({
             sharpe: 1.5,
             computed_at: hoursAgoIso(2),
-            returns_series: [{ date: isoDaysAgo(1), value: 1.2 }],
+            trades_fetched_at: hoursAgoIso(2),
+            returns_series: [{ date: isoDaysAgo(112), value: 1.2 }],
           }),
         ]}
         attribution={null}
@@ -716,26 +795,32 @@ describe("163-REVIEW finding 3 — a row composed over EMPTY_ANALYTICS", () => {
       />,
     );
 
-    expect(container.querySelectorAll(".bg-positive")).toHaveLength(1);
-    expect(container.querySelectorAll(".bg-amber-400")).toHaveLength(0);
-    expect(screen.getByText(/Synced 2h ago/i)).toBeTruthy();
+    expect(screen.getByText(/Track record ends 112d ago/i)).toBeTruthy();
+    expect(container.querySelectorAll(".bg-negative")).toHaveLength(1);
+    expect(container.querySelectorAll(".bg-positive")).toHaveLength(0);
   });
 
-  it("CONTROL: with no series at all the cap below 'fresh' still holds", () => {
+  it("CONTROL: with no series at all the trade claim stands alone — no track-record claim, no cap", () => {
     const { container } = render(
       <StrategyBreakdownTable
         strategies={[
-          composedRow({ sharpe: 1.5, computed_at: hoursAgoIso(2) }),
+          composedRow({
+            sharpe: 1.5,
+            computed_at: hoursAgoIso(2),
+            trades_fetched_at: hoursAgoIso(2),
+          }),
         ]}
         attribution={null}
         portfolioId="p-1"
       />,
     );
 
-    // Falling through to the array arm and finding nothing answers `null` —
-    // unknown — which is exactly where it started. A fresh job over an
-    // unreadable track record is still not evidence of a live strategy.
-    expect(container.querySelectorAll(".bg-positive")).toHaveLength(0);
-    expect(container.querySelectorAll(".bg-amber-400")).toHaveLength(1);
+    // Falling through to the array arm and finding nothing answers `null`. An
+    // absent series contributes nothing, so the badge reads the fetch alone
+    // (and the control above is what proves a PRESENT series still binds).
+    expect(screen.getByText(/Trades fetched 2h ago/i)).toBeTruthy();
+    expect(screen.queryByText(/Track record/i)).toBeNull();
+    expect(container.querySelectorAll(".bg-positive")).toHaveLength(1);
+    expect(container.querySelectorAll(".bg-amber-400")).toHaveLength(0);
   });
 });

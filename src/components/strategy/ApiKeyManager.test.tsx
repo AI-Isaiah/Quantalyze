@@ -661,13 +661,14 @@ describe("ApiKeyManager — D-10 the key card's layout class contract", () => {
  * label ("My Binance" in the H-0395 retry test above).
  *
  * This pins the RENDER CONTRACT — given a row, ApiKeyManager reads `key.exchange`
- * (capitalized exchange name) and `key.last_sync_at` (the "· Last synced …"
- * line) and surfaces BOTH. (The supabase mock here ignores the projection
- * argument, so this guards the render path, not the literal projection string;
- * the static sec-005 test owns the projection-string axis.) Together they cover
+ * (capitalized exchange name) and `key.last_sync_at` (the "· Key checked …"
+ * line; D-15: the 04:00 poll writes this field, so it is a key check) and
+ * surfaces BOTH. (The supabase mock here ignores the projection argument, so
+ * this guards the render path, not the literal projection string; the static
+ * sec-005 test owns the projection-string axis.) Together they cover
  * the degraded-card risk: if the manager stops reading a column — or that column
  * arrives null/absent from a runtime allowlist drop — the card degrades ("?"
- * icon, missing name, no "Last synced" line) and this test fails.
+ * icon, missing name, no "Key checked" line) and this test fails.
  *
  * NB the finding's `sync_status` / `is_active` worry is a MISREAD for THIS
  * component: ApiKeyManager derives SyncProgress.syncStatus from component state,
@@ -725,14 +726,16 @@ describe("ApiKeyManager — M-0456 projection allowlist columns reach the UI", (
     await waitFor(() => {
       expect(screen.getByText("My Binance")).toBeInTheDocument();
     });
-    // exchange (→ "Binance") AND last_sync_at (→ "· Last synced …") render in a
+    // exchange (→ "Binance") AND last_sync_at (→ "· Key checked …") render in a
     // single <p>; anchoring on `^Binance` disambiguates from the "My Binance"
     // label node. If the manager stops reading `exchange`/`last_sync_at`, or
     // either arrives null/absent on the row, this assertion fails — the
     // render-contract guard for the degraded-card regression.
     expect(
-      screen.getByText(/^Binance\s*·\s*Last synced/),
+      screen.getByText(/^Binance\s*·\s*Key checked/),
     ).toBeInTheDocument();
+    // D-15: the owner must never read the key check as a trade sync.
+    expect(screen.queryByText(/Last synced/)).toBeNull();
   });
 
   // UX-01 (#30) — Deribit went live in v1.7 but the local exchangeIcon map was

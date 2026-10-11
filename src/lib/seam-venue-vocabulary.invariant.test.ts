@@ -180,7 +180,22 @@ const SCAN_EXCLUSIONS: readonly ScanExclusion[] = [
     // reason ("THE CODE IS A RULE NAME"), it predates this change, and it is
     // booked in .planning/phases/161-wizerr-honest-error-surfaces/
     // deferred-items.md rather than absorbed here.
-    removesSites: 59,
+    //
+    // 59 → 60 (2026-10-11, Phase 167.1.2.2.2 / TRADESYNC plan 06). ⛔ NOTHING
+    // WAS EXCLUDED — the SUBTREE grew by exactly one site, and the argument is
+    // the 161-03 one, so it is restated rather than inherited.
+    // `test_cron_router.py` gained a spy whose `validate` returns a stub
+    // `ValidationResult` with `error_code="AUTH_FAILED"` for a key whose id
+    // starts `revoked-`, so the daily trade-sync tick can be shown to skip a
+    // credential-rejected key. The code list does NOT move: AUTH_FAILED is
+    // already in the population from real emitters (the rejection a revoked
+    // key actually gets on PROD), and the lifted-exclusion delta above is
+    // computed against codes the NON-test tree already emits. The literal is
+    // a fixture mirroring production, in a file that emits to no user, so the
+    // exclusion hides nothing reachable. The pin is a count, not an allowlist
+    // of sites: the next fixture literal in this subtree moves it again and
+    // has to be argued again.
+    removesSites: 60,
     removesCodes: [
       "COLUMN_IN_DATAFRAME",
       "CSV_PARSE_FAILED",

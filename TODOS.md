@@ -9171,6 +9171,128 @@ export step. (4) arms that fail first when `authenticated` can UPDATE either col
 reads an unpublished row's value. (5) plan 05's red-first test on a `computing` row.
 ⛔ **Not a close:** the review round's CLEAN verdicts, or arm 5 reading green on a `complete` row.
 
+## Phase 167.1.2.2.2 (TRADESYNC) — routed items (logged 2026-10-10)
+
+- **[167.1.2.2.2-OKX-PERSISTENT-TRUNCATION]** (logged 2026-10-11, PR-B fix round SFH-H2; owner: Phase 167.1.2.2.2.1 OKXHISTORY). A truncated window is now degraded: nothing stored, no stamp, key `error`. An OKX first window above the page cap (10k bills per inst type over ~157 days) therefore truncates on every tick and reports `error` daily instead of leaving a silent hole. Done when the OKX fetch is chunked or windowed so a large first window completes.
+- **[167.1.2.2.2-BINANCE-INCOME-PAGINATION]** (logged 2026-10-11, PR-B fix round; owner: the next phase that ships a Binance strategy key). The Binance income call uses `limit=1000` with no pagination and no truncation flag, so a capped Binance window is still invisible. No Binance key on PROD today. Done when it paginates or stamps `daily_pnl_truncated_binance`.
+- **[167.1.2.2.2-INCOME-FALLBACK-PRODUCER-PIN]** (logged 2026-10-11, PR-B review round 3 R3-ME-01, MEDIUM, confidence 5; owner: the next phase that ships a Binance strategy key). The cron reads `daily_pnl_binance_income_fallback` through its own string constant in `routers/cron.py`, and the fetcher writes it as a separate literal in `services/exchange.py`. The round-3 tests hand the flag to the cron through a patched buffer, so a rename on the fetcher side would silently reopen R2-ME-01 (Binance spot fills stored over daily P&L). Done when one test runs the real `fetch_daily_pnl` with the income call failing and the spot call succeeding and asserts `_fetch_degradation` names the flag, or when both sides import one constant. Dormant until a Binance strategy key exists on PROD. Also correct the comment beside the cron constant: nothing in the tree reads the flag by name for an admin health card.
+- **[167.1.2.2.2-GAP-RECORD-SILENT-PARSE]** (logged 2026-10-11, PR-B SFH round 2 NEW-3 / review R2-LO-04, MEDIUM, confidence 6; owner: Phase 164.6.6.3.3 FACTSHEETTRUTH). `parseUnrecoveredGaps` in `src/lib/factsheet/trade-fetch-provenance.ts` returns `[]` on a malformed `series_provenance` with only a `console.warn`, so the public, printable tear sheet reads as having no unrecovered gaps and nothing reaches Sentry. PR-B fixed the same pattern for the fetch stamp (`TradeFetchUnavailableLine`) but not for the gap record. Done when a malformed record reports to Sentry and the tear sheet shows an unavailable state for gaps, with a test that goes RED on today's code.
+
+Counts and ages only; no ids. Each entry below was recorded by plan 13 rather than fixed, because
+fixing it would widen the phase past its six success criteria. The two earlier TRADESYNC bookings
+(`[167.1.2.2.2-CRON-TICK-RESIDUALS]` and `[167.1.2.2.2-PROVENANCE-GATE-RESIDUALS]`) sit above, under the
+DERIVECRON heading, where plans 01 and 02 appended them.
+
+### 167.1.2.2.2-TRADESYNC-STALENESS-ALARM — a daily trade sync that stops running reaches no human (booked 2026-10-10, Phase 167.1.2.2.2 SC-6)
+
+**Why it is open.** Four live strategy keys went unsynced for 14 to 156 days and nothing paged anyone;
+the cause was that no caller existed at all, and this phase gives the route one. Once it runs, the
+failure mode that remains is quiet in the same way: pg_cron marks a run `succeeded` when the SQL
+returned, and the SQL only queues a `pg_net` request, so a 401, a timeout or a handler error leaves a
+green `cron.job_run_details` row. Plan 06 makes `cron_sync` write one `cron_runs` row per run
+(`cron_name = 'cron_sync'`, `status` `ok` or `error`, `metadata` = the response counters), so a cadence
+reader finally has an input. Nothing reads it. Phase 167.1.2.2.2 does not build the alarm: it is a
+second SECURITY DEFINER function, a second cron registration and a second SQL gate file, which doubles
+the migration census for little added safety next to D-06's public stale styling (research section 7).
+Interim controls, and only these: the public "Trades fetched {age} · stale" styling past D-05's 2 days,
+and the go-live runbook's manual reads. **No human is paged.** Sibling:
+`167.1.2.2-BACKFILL-STALENESS-ALARM`, booked the same way. The cadence-alert route that exists
+(`/api/prober-cadence-alert`) takes any `cron_name` in its body, so a reader can reuse it.
+
+**Owner:** Phase 164.6.8 (OUTAGEALERT). Routed there by default, on the research recommendation and the
+167.1.2.2 D-10 precedent; the founder confirms or re-routes at 164.6.8 planning.
+**Trigger:** the start of 164.6.8 planning, or the first morning a read of the `cron_sync` heartbeat (or a
+public stale badge) shows the daily sync older than 2 days, whichever comes first.
+**Gate (what closes it):** a `cron_sync` heartbeat older than 2 days (D-05's ceiling), or two consecutive
+`error` rows, reaches a human without one running a query, with a test that fails first when the reader
+is removed. This also closes item 4 of `[167.1.2.2.2-CRON-TICK-RESIDUALS]` (nothing reads the run).
+⛔ **Not a close:** the public stale styling of D-06, the runbook's manual reads, a `succeeded` row in
+`cron.job_run_details`, or a heartbeat table that is written and read by no one.
+
+### 167.1.2.2.2-SYNCTRADES-LASTSYNC-SEED — the user-triggered trade fetch and the queued sync job still seed from `last_sync_at` (booked 2026-10-10, Phase 167.1.2.2.2 SC-3 sibling)
+
+**Why it is open.** Phase 167.1.2.2.2 fixes the cron's resume fallback to start from the strategy's
+stored high-water and stops it reading `api_keys.last_sync_at` (D-12), because the daily holdings poll
+overwrites that column for every active key (23 of 23 live keys matched the poll's run time within 10
+minutes when measured on 2026-10-09). The poll keeps writing it: four other readers depend on that. Two
+other readers of the same column as a resume point are left as they were. (a) The user-triggered
+`fetch_trades` route in `analytics-service/routers/exchange.py` (the research called it `/sync-trades`;
+the route is `POST /fetch-trades`) seeds `since_ms` from `last_sync_at`, guarded only by a "below the
+gate threshold, force a full lookback" check. (b) The queued `sync_trades` job
+(`run_sync_trades_job` in `analytics-service/services/job_worker.py`) prefers
+`api_keys.last_fetched_trade_timestamp` and falls back to `last_sync_at`; it is shielded only while that
+preferred column is right, and see `167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD` for why it may not be.
+Neither is on the daily path, so neither blocks this phase's goal.
+
+**Owner:** unrouted; review at the next milestone audit, or the first phase that edits either function.
+**Trigger:** any edit to `fetch_trades` or `run_sync_trades_job` that touches its resume point, or a
+user-triggered sync that returns fewer trades than the age of the newest stored trade implies.
+**Gate (what closes it):** both seed from the strategy's stored high-water, the way the cron fallback
+does, with a test that fails first on today's code: a fresh `last_sync_at` beside an old stored trade must
+still reach back to that trade.
+⛔ **Not a close:** the cron's fix, which lives in `analytics-service/routers/cron.py` only.
+
+### 167.1.2.2.2-CRONOBS-SCOPE — the prober's `cron-obs` arm watches two named jobs and joins pg_net rows by time alone (booked 2026-10-10, Phase 167.1.2.2.2 SC-6)
+
+**Why it is open.** `scripts/prod-prober/arms/cron-obs.mjs` observes the hourly `match_engine_cron` job
+and the `ledger_refresh_fanout` job, each selected by `jobname`. It does not observe `cron-sync-trades`,
+so no prober arm reads that job's runs or its responses. Its join between a run and its HTTP response is
+time-only (`net._http_response` carries no cron job id; a response created within 90 seconds of a run's
+start attaches to that run), and the arm already refuses an ambiguous window rather than judge it. The
+new tick is at minute 30, so it does not share a 90-second window with the hourly job today. That is a
+placement fact, not a guarantee: moving any pg_net caller into the first 90 seconds after an observed
+job's start makes the attribution ambiguous. Whether the pg_net request id the tick returns can be
+recovered from a `cron.job_run_details` row is unmeasured.
+
+**Owner:** unrouted; it rides Phase 164.6.8 (OUTAGEALERT) if the founder routes it there, otherwise the
+next phase that edits `cron-obs`.
+**Trigger:** any change to `cron-obs`'s job scope, any schedule change that puts a second pg_net caller
+inside 90 seconds after an observed job's start, or the first scheduled `cron-sync-trades` run whose
+outcome is read by a human.
+**Gate (what closes it):** an arm reads the `cron-sync-trades` runs and attributes their responses
+without a time-only join, with a self-test that fails first when that attribution is neutered.
+⛔ **Not a close:** the tick sitting at minute 30; or the existing arms reading green for the two jobs
+they were written for.
+
+### 167.1.2.2.2-PGNET-HANDLER-CANCEL — whether a pg_net timeout cancels the `/api/cron-sync` handler is unmeasured (booked 2026-10-10, Phase 167.1.2.2.2 research A3)
+
+**Why it is open.** The tick posts with a 180000 ms timeout. Research estimated a filtered tick (4 keys)
+at roughly 30 to 90 seconds and an unfiltered one at about 9 minutes, and neither number was measured
+(the rehearsal measures the first). Nothing established whether, when `pg_net` gives up on a request, the
+FastAPI handler is cancelled mid-write or runs to completion. If it is cancelled, a slow tick dies
+between a store and its derive enqueue. Cursors advance only after stores, so a re-run recovers the
+trades, but a derive enqueue can be lost until the next tick. Open Question 11 in the research: a test
+question, not a founder question.
+
+**Owner:** Phase 167.1.2.2.2 plans 14 and 17 (the rehearsal), which measure the tick's duration; the
+cancel behaviour itself is unrouted unless a rehearsal times out.
+**Trigger:** the first rehearsal or scheduled tick whose `net._http_response` row reads `timed_out`, or
+any change to the tick's timeout or to the route's batch structure.
+**Gate (what closes it):** a measured read, recorded here, of whether the handler finished its stores
+and its derive enqueues after the client gave up (a deliberately slow request against a handler whose
+trailing writes are visible by rows). If it cancels, the timeout budget gets a margin or the tick is made
+asynchronous.
+⛔ **Not a close:** the arithmetic that a filtered tick fits in 180 seconds, or a rehearsal that finished
+inside the timeout (it never exercised cancellation).
+
+### 167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD — `api_keys.last_fetched_trade_timestamp` reads ahead of the data it claims to cover (booked 2026-10-10, Phase 167.1.2.2.2 research section 3)
+
+**Why it is open.** On 2026-10-09 the column read 44.7 days old for one strategy's key while that
+strategy's newest stored trade was 50.7 days old, i.e. the cursor sat 6 days ahead of the stored data. A
+mark that is ahead of storage tells the next reader to skip days it never stored. Phase 167.1.2.2.2 does
+not use it as a resume point for exactly that reason (the cron resumes from the stored high-water), but
+the queued `sync_trades` job passes it as its preferred seed, so that job would skip those 6 days. Which
+writer put it ahead was not traced; it was measured on one strategy only.
+
+**Owner:** unrouted; review with `167.1.2.2.2-SYNCTRADES-LASTSYNC-SEED` at the next milestone audit.
+**Trigger:** the same edit as that entry, or a second strategy read more than 1 day ahead of its stored
+data.
+**Gate (what closes it):** the writer is identified and either keeps the column a stored-through mark or
+the queued job stops trusting it, with a test that fails first on a key whose cursor is ahead of its
+newest stored trade; and the same read, repeated, finds 0 strategies ahead.
+⛔ **Not a close:** the cron ignoring the column, which hides the defect from the daily path and does not
+repair it.
+
 ## Phase 170.7 (MYSTRATTABLE) — routed items (logged 2026-10-11)
 
 ### 170.7-E2E-HEADER-PROBE-COVERAGE — the pinned-header overlap check can pass without probing Status or Created (booked 2026-10-11, Phase 170.7 D-10)

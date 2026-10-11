@@ -122,6 +122,26 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(),
 }));
 
+// Phase 167.1.2.2.2 (plan 11): the page also makes a service-role read of the
+// trade-fetch facts (the api-key exchange and the gap record). None of the
+// cases in this file are about it, so it answers "no row" and, being the quiet
+// path, adds no console.error (T6/T7 count the page's log lines exactly).
+// `page.trade-fetch.test.tsx` owns that read. It answers a row with nothing to
+// claim (no key, no stamp, no gaps): since SFH-M2 a NULL row is an unreadable
+// state that prints the "unavailable" line and reports to Sentry, which is not
+// what these cases are about.
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+vi.mock("@/lib/supabase/admin", () => {
+  const builder: Record<string, unknown> = {};
+  builder.select = () => builder;
+  builder.eq = () => builder;
+  builder.maybeSingle = async () => ({
+    data: { api_keys: null, strategy_analytics: { trades_fetched_at: null, series_provenance: null } },
+    error: null,
+  });
+  return { createAdminClient: () => ({ from: () => builder }) };
+});
+
 import TearSheetPage from "./page";
 import { createClient } from "@/lib/supabase/server";
 

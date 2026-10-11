@@ -97,6 +97,7 @@ function makeAnalytics(
     volume_metrics: null,
     exposure_metrics: null,
     data_quality_flags: null,
+    trades_fetched_at: null,
     ...overrides,
   };
 }
@@ -176,6 +177,13 @@ function jobRunningRow(overrides?: Partial<Row>): Row {
     analytics: makeAnalytics({
       computation_status: "computing",
       computed_at: new Date().toISOString(),
+      // Phase 167.1.2.2.2 / D-07 — the badge states the last TRADE FETCH, and
+      // that fact is independent of the analytics job: the cron fetched this
+      // strategy's trades an hour ago. It is on the fixture so the "no sync
+      // claim beside a Syncing chip" assertions below are NON-VACUOUS — the
+      // row has a trade claim to make, and only the `mayClaimSyncRecency`
+      // gate stops it.
+      trades_fetched_at: new Date(Date.now() - HOUR_MS).toISOString(),
       ...NO_METRICS,
     }),
     ...overrides,
@@ -341,11 +349,13 @@ describe("StrategyTable Delta 4 — SC-4a honest pending chip", () => {
     expect(row.textContent).not.toContain("0.00");
     expect(row.textContent).not.toContain("+0.0%");
 
-    // W-B: a live job carries a computed_at DEFAULT, so the unconditional
-    // SyncBadge would render "Synced just now" right beside a Syncing chip —
-    // two contradictory claims in one cell. On the owner surface the badge
-    // renders only for a row with computed metrics.
-    expect(document.body.textContent).not.toMatch(/Synced/);
+    // W-B: a live job carries a computed_at DEFAULT, so an unconditional
+    // SyncBadge would render a recency claim right beside a Syncing chip — two
+    // contradictory claims in one cell. On the owner surface the badge renders
+    // only for a row with computed metrics. (167.1.2.2.2: the word was
+    // "Synced"; the badge now says "Trades fetched", and this row carries a
+    // current fetch, so the assertion can still fail.)
+    expect(document.body.textContent).not.toMatch(/Trades fetched/);
   });
 
   it("shows Syncing for a NEVER-ENQUEUED row inside the 16h window", () => {
@@ -437,7 +447,7 @@ describe("StrategyTable Delta 4 — SC-4a honest pending chip", () => {
     expect(chipIn(row, "No data")).toBeNull();
   });
 
-  it("W-C: an OMITTED analyticsPresent means 'trust the status' — computed row keeps its SyncBadge", () => {
+  it("W-C: an OMITTED analyticsPresent means 'trust the status' — computed row keeps its SyncBadge (the trade-fetch claim)", () => {
     // Only the EXPLICIT `false` (the absent-row signal) coerces. An omitted
     // optional field carries NO signal, so a `complete` row must behave exactly
     // as it does on the public surfaces. The owner path cannot omit it — plan
@@ -446,6 +456,11 @@ describe("StrategyTable Delta 4 — SC-4a honest pending chip", () => {
       ...privateRow(),
       id: ID_SUBJECT,
       name: NAME_SUBJECT,
+      // 167.1.2.2.2 / D-07 — the badge needs a trade fetch to state.
+      analytics: makeAnalytics({
+        strategy_id: ID_SUBJECT,
+        trades_fetched_at: new Date(Date.now() - HOUR_MS).toISOString(),
+      }),
     };
     delete row.analyticsPresent;
 
@@ -460,7 +475,7 @@ describe("StrategyTable Delta 4 — SC-4a honest pending chip", () => {
     const rendered = rowFor(NAME_SUBJECT);
     expect(chipIn(rendered, "Syncing")).toBeNull();
     expect(chipIn(rendered, "No data")).toBeNull();
-    expect(rendered.textContent).toMatch(/Synced/);
+    expect(rendered.textContent).toMatch(/Trades fetched 1h ago/);
   });
 
   it("public invariance: the SAME live-job row renders NO chip under the default recipe", () => {
@@ -497,7 +512,9 @@ describe("StrategyTable Delta 4 — SC-4a honest pending chip", () => {
     // ...and the row makes NO sync claim it cannot support. Anonymous visitors
     // are the audience least able to check this, so the honesty rule must
     // apply to them at least as hard as it does to the owner (:348).
-    expect(row.textContent).not.toMatch(/Synced/);
+    // (167.1.2.2.2: the row carries a current trade fetch, so a regression
+    // that let the badge through WOULD print "Trades fetched 1h ago".)
+    expect(row.textContent).not.toMatch(/Trades fetched/);
   });
 });
 

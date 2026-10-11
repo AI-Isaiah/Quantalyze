@@ -1,6 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
+  CLOCK_SKEW_TOLERANCE_MINUTES,
+  TRADE_FETCH_STALE_DAYS,
+  TRADE_FETCH_VENUES,
   computeFreshness,
+  resolveTradeFetch,
   freshnessLabel,
   freshnessTooltip,
   FRESHNESS_COLORS,
@@ -127,5 +131,124 @@ describe("FRESHNESS_COLORS", () => {
       expect(FRESHNESS_COLORS[key].dot).toBeTruthy();
       expect(FRESHNESS_COLORS[key].badge).toBeTruthy();
     }
+  });
+});
+
+// ── Phase 167.1.2.2.2 / TRADESYNC (D-05, D-07): the trade-fetch classifier ──
+describe("resolveTradeFetch", () => {
+  const NOW = new Date("2026-10-10T12:00:00.000Z");
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const at = (offsetMs: number): Date => new Date(NOW.getTime() + offsetMs);
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("exports the D-05 threshold as 2 days and the three fetched venues", () => {
+    expect(TRADE_FETCH_STALE_DAYS).toBe(2);
+    expect([...TRADE_FETCH_VENUES]).toEqual(["okx", "bybit", "binance"]);
+  });
+
+  describe("D-05 boundary: more than 2 days is strict greater-than on elapsed ms", () => {
+    it("exactly 48 h old is current", () => {
+      const fetched = at(-TRADE_FETCH_STALE_DAYS * DAY_MS);
+      expect(resolveTradeFetch(fetched, "okx", NOW)).toEqual({
+        state: "current",
+        fetchedAt: fetched,
+      });
+    });
+    it("48 h plus 1 ms is stale", () => {
+      const fetched = at(-TRADE_FETCH_STALE_DAYS * DAY_MS - 1);
+      expect(resolveTradeFetch(fetched, "okx", NOW).state).toBe("stale");
+    });
+    it("a 9 day old fetch is stale and carries that exact instant", () => {
+      const fetched = at(-9 * DAY_MS);
+      const r = resolveTradeFetch(fetched, "bybit", NOW);
+      expect(r.state).toBe("stale");
+      expect(r.fetchedAt?.getTime()).toBe(fetched.getTime());
+    });
+    it("a 1 h old fetch is current (the daily tick is not the 12 h ladder)", () => {
+      // A 20 h old fetch would be `warm` on computeFreshness; it must stay
+      // current here or a daily tick reads amber for half of every day.
+      expect(computeFreshness(at(-20 * 60 * 60 * 1000), NOW)).toBe("warm");
+      expect(resolveTradeFetch(at(-20 * 60 * 60 * 1000), "okx", NOW).state).toBe(
+        "current",
+      );
+    });
+  });
+
+  describe("T-167.1.2.2.2-27: a corrupt future timestamp is never current", () => {
+    const tolMs = CLOCK_SKEW_TOLERANCE_MINUTES * 60 * 1000;
+    it("exactly the skew tolerance ahead is current", () => {
+      expect(resolveTradeFetch(at(tolMs), "okx", NOW).state).toBe("current");
+    });
+    it("one ms beyond the skew tolerance is future", () => {
+      const fetched = at(tolMs + 1);
+      expect(resolveTradeFetch(fetched, "okx", NOW)).toEqual({
+        state: "future",
+        fetchedAt: fetched,
+      });
+    });
+    it("a year-2050 write is future", () => {
+      expect(resolveTradeFetch("2050-01-01T00:00:00Z", "okx", NOW).state).toBe(
+        "future",
+      );
+    });
+  });
+
+  describe("unparseable input", () => {
+    it("is not_applicable and warns once across two calls with the same bad value", () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const bad = "not-a-date-once";
+      const a = resolveTradeFetch(bad, "okx", NOW);
+      const b = resolveTradeFetch(bad, "okx", NOW);
+      expect(a).toEqual({ state: "not_applicable", fetchedAt: null });
+      expect(b).toEqual({ state: "not_applicable", fetchedAt: null });
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("null timestamp: the venue separates never from not_applicable", () => {
+    it.each(["okx", "OKX", "bybit", "binance"])("%s -> never", (venue) => {
+      expect(resolveTradeFetch(null, venue, NOW)).toEqual({
+        state: "never",
+        fetchedAt: null,
+      });
+    });
+    it.each(["deribit", "mt5", "sfox", "csv", null, undefined, ""])(
+      "%s -> not_applicable",
+      (venue) => {
+        expect(resolveTradeFetch(null, venue, NOW)).toEqual({
+          state: "not_applicable",
+          fetchedAt: null,
+        });
+      },
+    );
+  });
+
+  describe("a non-null fetch is authoritative whatever the venue says", () => {
+    it.each([null, "csv", "mt5", "deribit"])(
+      "NOW - 1h with venue %s -> current",
+      (venue) => {
+        expect(resolveTradeFetch(at(-60 * 60 * 1000), venue, NOW).state).toBe(
+          "current",
+        );
+      },
+    );
+    it("a stale non-null fetch is stale even with a null venue", () => {
+      expect(resolveTradeFetch(at(-5 * DAY_MS), null, NOW).state).toBe("stale");
+    });
+  });
+
+  describe("input shapes", () => {
+    it("accepts ISO strings and unix-ms numbers", () => {
+      const fetched = at(-60 * 60 * 1000);
+      expect(resolveTradeFetch(fetched.toISOString(), "okx", NOW).state).toBe(
+        "current",
+      );
+      expect(resolveTradeFetch(fetched.getTime(), "okx", NOW).state).toBe(
+        "current",
+      );
+    });
   });
 });

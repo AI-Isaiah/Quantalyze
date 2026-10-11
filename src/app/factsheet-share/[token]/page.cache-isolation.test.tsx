@@ -152,7 +152,7 @@ const GENERATION = 1;
 
 /** The shape-versioned key prefix, typed HERE by hand. Never imported from the
  *  page: an oracle read out of the module under test cannot fail. */
-const EXPECTED_KEY_PREFIX = "factsheet-v2-payload-v15";
+const EXPECTED_KEY_PREFIX = "factsheet-v2-payload-v16";
 
 const CASH_DAILY = [
   { date: "2025-08-01", value: 0.01 },
@@ -409,7 +409,10 @@ describe("SHARE-02 — the ORDERED adversarial cache isolation", () => {
     // 167.2.1-REVIEW WR-02 (2026-09-26): the sibling's own `computed_at` is a
     // keyParts member, so the entry answers for the run it was built from. It
     // is a property of the sibling's row, never of the viewer or the token.
-    expect(keyParts).toEqual([EXPECTED_KEY_PREFIX, PUBLISHED_ID, "2026-07-01T00:00:00.000Z"]);
+    // 167.1.2.2.2 plan 10: the key also carries `trades_fetched_at` and a
+    // fingerprint of `series_provenance`; the sibling row here has neither, so
+    // both members read the literal "none". Still nothing about the viewer.
+    expect(keyParts).toEqual([EXPECTED_KEY_PREFIX, PUBLISHED_ID, "2026-07-01T00:00:00.000Z", "none", "none"]);
     // ⛔ The private id must appear NOWHERE in the key — not as a part, not as
     // a suffix, not concatenated into one.
     expect(keyParts.join("|")).not.toContain(PRIVATE_ID);

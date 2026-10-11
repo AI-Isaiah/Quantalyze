@@ -1472,6 +1472,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     </p>
                   </div>
                   <AllocatorSyncStatus
+                    subject="holdings"
                     syncStatus={key.sync_status}
                     syncError={key.sync_error}
                     lastSyncAt={key.last_sync_at}

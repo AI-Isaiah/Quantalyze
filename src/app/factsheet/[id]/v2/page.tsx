@@ -25,6 +25,7 @@ import {
 } from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import { provenanceFingerprint } from "@/lib/factsheet/provenance-fingerprint";
 import { withTrustTier } from "@/lib/factsheet/with-trust-tier";
 import {
   deriveComputeState,
@@ -116,6 +117,8 @@ class FactsheetDegradedBuildError extends Error {
 function buildFactsheetPayloadCached(
   id: string,
   computedAt: string,
+  tradesFetchedAt: string | null,
+  provenanceKey: string,
 ): Promise<FactsheetPayload | null> {
   // 167.2.1-REVIEW WR-02 (closes DEF-148-A): the key is the shape version, the
   // id AND `computed_at`, as real `keyParts` members. Before, the page passed
@@ -232,7 +235,8 @@ function buildFactsheetPayloadCached(
     // Bumped v12→v13 (Phase 170.2 PROBEFIXES SC-4, D-09): payload gains the optional source field
     // Bumped v13→v14 (Phase 164.6.6.2.1 BTCUSDVIEW, 2026-10-10, on merging main): 170.2 shipped v13 with `source` but without `usdView` / `usdViewUnavailable`, so this branch's payload is a different shape under the same key. A v13 entry written by main would hide the USD toggle for the 1 h TTL drain.
     // Bumped v14→v15 (re-keyed on merging main, 2026-10-10; originally drafted as v12→v13) (Phase 164.6.6.3.3 FACTSHEETTRUTH, 2026-10-09): the payload's `dataQuality` gains `headlineWithheld` and `headlineGuardReasons`, a composite now carries `twrChainBroken` and `headlineCoversFrom`, and a legacy chain-broken row's seven stored scalars are withheld; a stale entry would show mixed-basis figures under the new one-span note during the 1 h drain.
-    ["factsheet-v2-payload-v15", id, computedAt],
+    // Bumped v15→v16 (Phase 167.1.2.2.2 TRADESYNC plan 10, 2026-10-10, re-keyed on merging main: it was drafted as v12→v13 and main shipped v15 meanwhile): the payload gained `tradesFetchedAt`, `tradeFetchVenue` and `unrecoveredGaps` (the header's trade-fetch line and the named-gap record), and the key gained `trades_fetched_at` plus a fingerprint of `series_provenance`. The daily tick stamps `trades_fetched_at`, and a runbook provenance write sets `series_provenance`, with neither moving `computed_at`, so under the v15 key the line would have stayed frozen for the 1 h TTL. A v15 entry lacks the three fields, which read as undefined (no line), not as an error.
+    ["factsheet-v2-payload-v16", id, computedAt, tradesFetchedAt ?? "none", provenanceKey],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
@@ -335,7 +339,7 @@ export default async function FactsheetV2Page({
     withPublishedOnly(
       supabase
         .from("strategies")
-        .select("id, name, codename, disclosure_tier, strategy_analytics ( computed_at )")
+        .select("id, name, codename, disclosure_tier, strategy_analytics ( computed_at, trades_fetched_at, series_provenance )")
         .eq("id", id),
     )
       .maybeSingle(),
@@ -425,7 +429,7 @@ export default async function FactsheetV2Page({
     const { data: ownRow, error: probeError } = await withPublishedOrOwner(
       supabase
         .from("strategies")
-        .select("id, name, codename, disclosure_tier, status, capital_ownership, source, api_key_id, strategy_analytics ( computed_at )")
+        .select("id, name, codename, disclosure_tier, status, capital_ownership, source, api_key_id, strategy_analytics ( computed_at, trades_fetched_at, series_provenance )")
         .eq("id", id),
       user.id,
     ).maybeSingle();
@@ -536,6 +540,11 @@ export default async function FactsheetV2Page({
     ? signature.strategy_analytics[0]
     : signature.strategy_analytics;
   const computedAt = signAnalytics?.computed_at ?? "0";
+  // Phase 167.1.2.2.2 (plan 10): the two trade-fact key members, from the same
+  // signature probe as `computed_at`, so a tick or a provenance write that does
+  // not move `computed_at` still moves the cache key (PATTERNS correction 3).
+  const tradesFetchedAtKey: string | null = signAnalytics?.trades_fetched_at ?? null;
+  const provenanceKey = provenanceFingerprint(signAnalytics?.series_provenance);
 
   // ⛔ The owner arm calls the builder DIRECTLY: no cache read, no cache write.
   // It cannot route through `buildFactsheetPayloadCached` — the effective
@@ -568,7 +577,7 @@ export default async function FactsheetV2Page({
     payload = ownerBuild.payload;
   } else {
     try {
-      payload = await buildFactsheetPayloadCached(id, computedAt);
+      payload = await buildFactsheetPayloadCached(id, computedAt, tradesFetchedAtKey, provenanceKey);
     } catch (err) {
       // SFH HIGH-1: a degraded build renders its payload, uncached (D-30).
       if (err instanceof FactsheetDegradedBuildError) {

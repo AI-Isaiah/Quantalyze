@@ -38,6 +38,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { buildFactsheetPayload, deriveIngestSource, hasBuildableSeries, MIN_FACTSHEET_SERIES_POINTS } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
+import { parseUnrecoveredGaps } from "./trade-fetch-provenance";
 import { readFactsheetBenchmark } from "./benchmark-read";
 import { readBenchmarkPrices } from "./benchmark-source";
 import { convertNativeReturnsToUsd } from "./native-to-usd";
@@ -332,8 +333,9 @@ async function resolveFactsheetInputs(
        description, subtypes, supported_exchanges, leverage_range, aum,
        max_capacity, avg_daily_turnover, start_date, benchmark, asset_class,
        returns_denominator_config, source,
+       api_keys!strategies_api_key_id_fkey ( exchange ),
        strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis, computation_status,
-         cumulative_return, volatility, max_drawdown, cagr, sharpe, sortino, calmar )`,
+         cumulative_return, volatility, max_drawdown, cagr, sharpe, sortino, calmar, trades_fetched_at, series_provenance )`,
     )
     .eq("id", id);
   const { data: strategy, error } = await visibility(
@@ -668,8 +670,9 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v15", id,
- * computedAt], a `null` computedAt included. 167.2.1-REVIEW-R2 IN-01: the key
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v16", id,
+ * computedAt, tradesFetchedAt ?? "none", provenanceKey] (the last two are
+ * 167.1.2.2.2 plan 10's trade-fact members), a `null` computedAt included. 167.2.1-REVIEW-R2 IN-01: the key
  * moves more often than "once per successful run". The status bridge
  * `sync_strategy_analytics_status` (latest definition: migration
  * 20260906120000) stamps `computed_at = now()` on every job transition it
@@ -846,6 +849,20 @@ async function buildFromResolved(
     );
   }
   const computedAt = analytics?.computed_at ?? "1970-01-01T00:00:00Z";
+  // Phase 167.1.2.2.2 (TRADESYNC, D-06/D-07/D-02). Unlike `computedAt` there is
+  // NO sentinel to invent: a missing stamp is `null`, which the TradeFetchLine
+  // reads as "never fetched" (api-key venue) or "no claim" (everything else).
+  // F3: the venue is the strategy's API-KEY exchange (T-167.1.2.2.2-32: the
+  // embed selects `exchange` only), never `supported_exchanges`, which a CSV
+  // strategy may declare without ever being trade-fetched. The embed is a
+  // many-to-one object; a client that returns an array is read the same way.
+  const apiKey = Array.isArray(strategy.api_keys) ? strategy.api_keys[0] : strategy.api_keys;
+  const tradeFetchVenue =
+    typeof apiKey?.exchange === "string" && apiKey.exchange.length > 0
+      ? apiKey.exchange.toLowerCase()
+      : null;
+  const tradesFetchedAt = analytics?.trades_fetched_at ?? null;
+  const unrecoveredGaps = parseUnrecoveredGaps(analytics?.series_provenance);
   // Factsheet is a "full identity" context per the strategy-display.ts
   // contract: prefer the real name, fall back to codename, then to the
   // synthetic Strategy#id. Without this, exploratory strategies with a
@@ -861,6 +878,9 @@ async function buildFromResolved(
     types: strategy.strategy_types ?? [],
     markets: strategy.markets ?? [],
     computedAt,
+    tradesFetchedAt,
+    tradeFetchVenue,
+    unrecoveredGaps,
     trustTier: null,
     // Composites route down the csv arm EXPLICITLY (suppresses the three
     // synthesized panels via the existing discriminated union — no new

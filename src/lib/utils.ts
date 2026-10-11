@@ -312,4 +312,7 @@ export const EMPTY_ANALYTICS: StrategyAnalytics = {
   volume_metrics: null,
   exposure_metrics: null,
   data_quality_flags: null,
+  // Phase 167.1.2.2.2 (D-07) — no fetch recorded. `shapeRowAnalytics` overrides
+  // this with the row's real value on a failed / pending / computing row.
+  trades_fetched_at: null,
 };

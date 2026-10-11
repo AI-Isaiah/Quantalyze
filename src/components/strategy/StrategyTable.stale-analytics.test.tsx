@@ -155,6 +155,12 @@ function analyticsEmbed(
     // A real bridge-stamped timestamp — NOT null. The whole point is that a
     // failed row carries one, so a `!computed_at` gate would never fire here.
     computed_at: new Date().toISOString(),
+    // Phase 167.1.2.2.2 / D-07 — the badge states the last TRADE FETCH, a fact
+    // the daily cron records independently of the analytics job. EVERY row
+    // carries a current one, the failed rows included, so each "no sync claim"
+    // assertion below is non-vacuous: the row has a claim to make, and only the
+    // table's gates stop it.
+    trades_fetched_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
     computation_status: status,
     sparkline_returns: [1, 2, 3, 4, 5],
     sparkline_drawdown: [0, -0.1, -0.2, -0.05, 0],
@@ -343,7 +349,7 @@ describe("STALE-01 seam — anonymous browse render of a failed-computation row"
     expect((dead.querySelectorAll("td")[8]?.textContent ?? "").trim()).toBe("$1.0M");
   });
 
-  it("makes no 'Synced' claim for a failed row, while the computed row keeps its badge", async () => {
+  it("makes no sync claim for a failed row, while the computed row keeps its badge", async () => {
     seeded.rows = [
       dbRow(ID_LIVE, NAME_LIVE, "complete", LIVE),
       dbRow(ID_DEAD, NAME_DEAD, "failed", STALE),
@@ -351,12 +357,13 @@ describe("STALE-01 seam — anonymous browse render of a failed-computation row"
 
     await renderPublicCategory();
 
-    // The bridge stamped `computed_at = now()` on the failure, so a naive
-    // render says "Synced just now" about a run that produced nothing.
-    expect(rowFor(NAME_DEAD).textContent).not.toMatch(/Synced/);
+    // The bridge stamped `computed_at = now()` on the failure and the cron
+    // fetched the trades an hour ago, so a naive render says "Trades fetched
+    // 1h ago" beside figures from a run that produced nothing.
+    expect(rowFor(NAME_DEAD).textContent).not.toMatch(/Trades fetched/);
     // The control proves the badge still works and that the assertion above is
     // not passing because SyncBadge is globally broken.
-    expect(rowFor(NAME_LIVE).textContent).toMatch(/Synced/);
+    expect(rowFor(NAME_LIVE).textContent).toMatch(/Trades fetched 1h ago/);
   });
 
   it("gives the failed rows NO rank ordinal and never lets one outrank a computed row", async () => {
@@ -633,7 +640,7 @@ describe("HONEST-03 / C-6 — is_example rows never claim a sync recency", () =>
     );
     revealExamples(container);
     const row = rowFor(NAME_LIVE);
-    expect(row.textContent).not.toMatch(/Synced/);
+    expect(row.textContent).not.toMatch(/Trades fetched/);
     // Pin the premise: this row DID compute — it takes a rank. Without this the
     // test would pass on a row that simply had no date to print, which is not
     // the thing being guarded.
@@ -653,7 +660,7 @@ describe("HONEST-03 / C-6 — is_example rows never claim a sync recency", () =>
       />,
     );
     revealExamples(container);
-    expect(rowFor(NAME_DEAD).textContent).not.toMatch(/Synced/);
+    expect(rowFor(NAME_DEAD).textContent).not.toMatch(/Trades fetched/);
   });
 
   it("Test 9: a NON-example row with the same analytics still renders its SyncBadge", () => {
@@ -667,7 +674,7 @@ describe("HONEST-03 / C-6 — is_example rows never claim a sync recency", () =>
         categorySlug="stale-spec"
       />,
     );
-    expect(rowFor(NAME_LIVE).textContent).toMatch(/Synced/);
+    expect(rowFor(NAME_LIVE).textContent).toMatch(/Trades fetched 1h ago/);
   });
 
   it("Test 10: StrategyGrid's badge is guarded identically", async () => {
@@ -681,16 +688,17 @@ describe("HONEST-03 / C-6 — is_example rows never claim a sync recency", () =>
         categorySlug="stale-spec"
       />,
     );
-    // Both cards carry an identical fresh computed_at, so exactly ONE "Synced"
-    // claim may render across the grid — and it must not be the example's.
+    // Both cards carry an identical current trade fetch, so exactly ONE
+    // "Trades fetched" claim may render across the grid — and it must not be
+    // the example's.
     expect(container.textContent).toContain("Example");
-    expect(container.textContent?.match(/Synced/g) ?? []).toHaveLength(1);
+    expect(container.textContent?.match(/Trades fetched/g) ?? []).toHaveLength(1);
     const exampleCard = Array.from(container.querySelectorAll("div")).find(
       (d) =>
         (d.textContent ?? "").includes("Example") &&
         !(d.textContent ?? "").includes(NAME_DEAD),
     );
     expect(exampleCard).toBeTruthy();
-    expect(exampleCard!.textContent).not.toMatch(/Synced/);
+    expect(exampleCard!.textContent).not.toMatch(/Trades fetched/);
   });
 });

@@ -370,7 +370,7 @@ export const COMPARE_ANALYTICS_COLUMNS =
  * consequence of the assumption breaking is a wrong date, not an error, and an
  * unstated assumption is how it would go unnoticed.
  *
- * Phase 164.6.6.2.1 (D-05, D-12) — the trailing `native_unit` alias (the
+ * Phase 164.6.6.2.1 (D-05, D-12) — the `native_unit` alias (the
  * `->>native_unit` key of the flags blob) is ONE enumerated scalar out of a private blob, exactly like `three_month`
  * and `series_end` above: it lets the list label a BTC-denominated strategy
  * "in BTC" so a BTC return is never read as a USD one. The `data_quality_flags`
@@ -386,7 +386,7 @@ export const COMPARE_ANALYTICS_COLUMNS =
  * (RANK-02): a wildcard would put the private blobs above on the wire.
  */
 export const CATEGORY_RANKING_ANALYTICS_COLUMNS =
-  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date, native_unit:data_quality_flags->>native_unit";
+  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date, native_unit:data_quality_flags->>native_unit, trades_fetched_at";
 
 export async function getStrategiesByCategory(categorySlug: string): Promise<RankedStrategyRow[]> {
   const supabase = await createClient();
@@ -643,10 +643,20 @@ export function shapeRowAnalytics(
   //   3. Measured rarity: the 20260802120000 reaper's census recorded 0 rows
   //      at `computing` in BOTH the test and production projects, so the
   //      window this costs anything in is close to empty in practice.
+  //
+  // ⚠️ `trades_fetched_at` IS THE ONE FIELD CARRIED OVER (167.1.2.2.2 plan 09,
+  // D-06 / D-10). The three reasons above blank NUMBERS because a run that did
+  // not produce them cannot vouch for them. The trade-fetch time is a
+  // different fact: it is written by the daily `/cron-sync` tick, never by the
+  // analytics run, so a strategy whose analytics failed still has a real fetch
+  // date, and the stale line must reach every viewer (a disconnected published
+  // key is exactly this shape). `?? null`, because a projection that omits the
+  // column hands back `undefined`, and `undefined` must read "no claim".
   return {
     ...EMPTY_ANALYTICS,
     strategy_id: strategyId,
     computation_status: a.computation_status,
+    trades_fetched_at: a.trades_fetched_at ?? null,
   };
 }
 
@@ -1123,7 +1133,7 @@ export async function getPopulatedCategorySlugs(): Promise<string[]> {
   return Array.from(slugs);
 }
 
-const PUBLIC_ANALYTICS_COLUMNS = "cumulative_return, cagr, volatility, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, six_month_return, sparkline_returns, computation_status, computed_at";
+const PUBLIC_ANALYTICS_COLUMNS = "cumulative_return, cagr, volatility, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, six_month_return, sparkline_returns, computation_status, computed_at, trades_fetched_at";
 
 /** The ONLY strategy_verifications fields that may reach a public client. */
 export type PublicVerificationSignal = {
@@ -2256,7 +2266,7 @@ export async function getPortfolioStrategies(portfolioId: string) {
     .from("portfolio_strategies")
     .select(`
       *, strategies (id, name, status, strategy_types, supported_exchanges, start_date, aum,
-        strategy_analytics (cagr, sharpe, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at, computation_status, returns_series, daily_returns, data_quality_flags)
+        strategy_analytics (cagr, sharpe, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at, computation_status, trades_fetched_at, returns_series, daily_returns, data_quality_flags)
       )
     `)
     .eq("portfolio_id", portfolioId)

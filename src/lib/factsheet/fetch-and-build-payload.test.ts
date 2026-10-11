@@ -32,6 +32,8 @@ const fake = vi.hoisted(() => ({
   tablesSeen: [] as string[],
   /** Phase 169.1 (D-30): every select string a strategy_analytics_series read asked for. */
   analyticsSelects: [] as string[],
+  /** Phase 167.1.2.2.2 (plan 10): every select string a `strategies` read asked for. */
+  strategySelects: [] as string[],
   orFilters: [] as string[],
   /** 167.2.1-REVIEW-SFH-R2 N-3: every AbortSignal a query was given. */
   signals: [] as AbortSignal[],
@@ -49,6 +51,7 @@ vi.mock("@/lib/supabase/admin", () => {
     const self = () => b;
     b.select = (s?: string) => {
       if (table === "strategy_analytics_series") fake.analyticsSelects.push(String(s));
+      if (table === "strategies") fake.strategySelects.push(String(s));
       return b;
     };
     b.eq = self;
@@ -217,6 +220,7 @@ beforeEach(() => {
   fake.csvRows = [];
   fake.csvError = null;
   fake.tablesSeen = [];
+  fake.strategySelects = [];
   fake.orFilters = [];
   fake.signals = [];
   fake.strategyHangs = false;
@@ -883,6 +887,96 @@ describe("164.6.6.2 D-25 — small_base_measured on the analytics row reaches th
     const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
     expect(payload).not.toBeNull();
     expect(payload?.dataQuality && "smallBaseMeasured" in payload.dataQuality).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2.2.2 (TRADESYNC, plan 10) - the trade-fetch fact and the named-gap
+// record reach the payload. F3: the venue is the api key's exchange, never
+// `supported_exchanges`. Absence is null / [], never an epoch or now sentinel.
+// ---------------------------------------------------------------------------
+describe("167.1.2.2.2 plan 10 - tradesFetchedAt, tradeFetchVenue and unrecoveredGaps on the payload", () => {
+  const FETCHED_AT = "2026-10-09T03:15:00+00:00";
+  const withKey = (over: Row, extra: Row) => ({ ...single({ daily_returns: points(30), ...over }), ...extra });
+
+  it("the strategies select asks for trades_fetched_at, series_provenance and ONLY the key's exchange", async () => {
+    seed(single({ daily_returns: points(30) }));
+    await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    const select = fake.strategySelects.join(" ");
+    expect(select).toMatch(/trades_fetched_at/);
+    expect(select).toMatch(/series_provenance/);
+    expect(select).toMatch(/api_keys!strategies_api_key_id_fkey\s*\(\s*exchange\s*\)/);
+  });
+
+  it("a strategy with an api key carries the stamp, the lower-cased exchange and no gaps", async () => {
+    seed(withKey({ trades_fetched_at: FETCHED_AT }, { api_keys: { exchange: "OKX" } }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.tradesFetchedAt).toBe("2026-10-09T03:15:00+00:00");
+    expect(payload?.tradeFetchVenue).toBe("okx");
+    expect(payload?.unrecoveredGaps).toEqual([]);
+  });
+
+  it("an array-shaped embed (a mocked or legacy client) reads the same venue", async () => {
+    seed(withKey({ trades_fetched_at: FETCHED_AT }, { api_keys: [{ exchange: "bybit" }] }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.tradeFetchVenue).toBe("bybit");
+  });
+
+  it("F3: a CSV strategy that DECLARES okx in supported_exchanges has venue null", async () => {
+    seed(withKey({}, { supported_exchanges: ["okx"], api_keys: null }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.tradeFetchVenue).toBeNull();
+  });
+
+  it("absence is null, never a sentinel: no stamp reads null, not an epoch and not now", async () => {
+    seed(withKey({}, { api_keys: { exchange: "okx" } }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.tradesFetchedAt).toBeNull();
+    expect(payload?.tradeFetchVenue).toBe("okx");
+  });
+
+  it("series_provenance.unrecovered_gaps reaches the payload through the validating parser", async () => {
+    seed(
+      withKey(
+        {
+          series_provenance: {
+            legacy_ranges: [{ from: "2026-01-01", to: "2026-02-01" }],
+            unrecovered_gaps: [
+              { from: "2026-05-07", to: "2026-07-08", recorded_at: "2026-10-10T00:00:00Z" },
+              { from: "2026-08-20", to: "2026-08-20" },
+            ],
+          },
+        },
+        { api_keys: { exchange: "okx" } },
+      ),
+    );
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.unrecoveredGaps).toEqual([
+      { from: "2026-08-20", to: "2026-08-20" },
+      { from: "2026-05-07", to: "2026-07-08" },
+    ]);
+  });
+
+  it("a malformed provenance names no gap", async () => {
+    seed(withKey({ series_provenance: { unrecovered_gaps: [{ from: "2026-07-08", to: "2026-05-07" }] } }, {}));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload).not.toBeNull();
+    expect(payload?.unrecoveredGaps).toEqual([]);
+  });
+
+  it("an analytics row with none of the three columns still builds, with null, null and []", async () => {
+    seed(single({ daily_returns: points(30) }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.tradesFetchedAt).toBeNull();
+    expect(payload?.tradeFetchVenue).toBeNull();
+    expect(payload?.unrecoveredGaps).toEqual([]);
+  });
+
+  it("tradeFetchVenue never reads supported_exchanges", () => {
+    const src = readFileSync(join(__dirname, "fetch-and-build-payload.ts"), "utf8");
+    const venueLines = src.split("\n").filter((l) => /tradeFetchVenue/.test(l) && !l.trim().startsWith("//") && !l.trim().startsWith("*"));
+    expect(venueLines.length).toBeGreaterThan(0);
+    for (const l of venueLines) expect(l).not.toMatch(/supported_exchanges|supportedExchanges/);
   });
 });
 

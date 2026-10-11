@@ -485,6 +485,10 @@ export function buildScenarioFactsheetPayload(
     strategyTypes: [],
     markets: [],
     computedAt: "",
+    // Phase 167.1.2.2.2: a scenario blend has no trade fetch of its own.
+    tradesFetchedAt: null,
+    tradeFetchVenue: null,
+    unrecoveredGaps: [],
     trustTier: null,
     description: null,
     subtypes: [],

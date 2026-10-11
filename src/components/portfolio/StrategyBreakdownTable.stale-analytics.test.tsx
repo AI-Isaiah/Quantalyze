@@ -72,6 +72,12 @@ function constituent(
         // Re-stamped to the moment of FAILURE by the SQL status bridge, which
         // is what made the badge read "Synced just now".
         computed_at: new Date().toISOString(),
+        // Phase 167.1.2.2.2 / D-07 — the badge now states the last TRADE
+        // FETCH. EVERY row carries a current one, the failed rows included, so
+        // the "no claim" assertions below hold only because the table's
+        // non-terminal-success gate withholds the row's analytics: they would
+        // go red the moment that gate stopped withholding the badge's input.
+        trades_fetched_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
         computation_status: status,
       },
     },
@@ -128,12 +134,12 @@ describe("STALE-01 · StrategyBreakdownTable — cross-tenant constituents", () 
     expect(dead.getAllByText("—").length).toBe(3);
   });
 
-  it("P2: the SyncBadge makes no claim — `computed_at` on a failed row dates the FAILURE", () => {
+  it("P2: the SyncBadge makes no claim — a failed row's analytics are withheld, trade fetch included", () => {
     renderTable([DEAD(), LIVE()]);
 
-    expect(within(rowFor("Orpheus")).queryByText(/Synced/)).toBeNull();
+    expect(within(rowFor("Orpheus")).queryByText(/Trades fetched/)).toBeNull();
     // …and it is not simply absent everywhere: the control still carries one.
-    expect(within(rowFor("Meridian")).getByText(/Synced/)).toBeTruthy();
+    expect(within(rowFor("Meridian")).getByText(/Trades fetched/)).toBeTruthy();
   });
 
   it("P3: weight and contribution survive — neither is a product of the strategy's analytics job", () => {
@@ -149,7 +155,7 @@ describe("STALE-01 · StrategyBreakdownTable — cross-tenant constituents", () 
     const dead = within(rowFor("Orpheus"));
 
     expect(dead.queryByText(STALE_TEXT.sharpe)).toBeNull();
-    expect(dead.queryByText(/Synced/)).toBeNull();
+    expect(dead.queryByText(/Trades fetched/)).toBeNull();
   });
 
   it("P5: CONTROL — the `complete` constituent keeps every figure and its badge", () => {
@@ -162,7 +168,7 @@ describe("STALE-01 · StrategyBreakdownTable — cross-tenant constituents", () 
         `${metric} (${text}) vanished from a COMPLETE row — the gate is over-broad`,
       ).not.toBeNull();
     }
-    expect(live.getByText(/Synced/)).toBeTruthy();
+    expect(live.getByText(/Trades fetched/)).toBeTruthy();
   });
 
   it("P6: CONTROL — `complete_with_warnings` is a terminal SUCCESS and keeps everything", () => {
@@ -170,6 +176,6 @@ describe("STALE-01 · StrategyBreakdownTable — cross-tenant constituents", () 
     const live = within(rowFor("Meridian"));
 
     expect(live.getByText(LIVE_TEXT.sharpe)).toBeTruthy();
-    expect(live.getByText(/Synced/)).toBeTruthy();
+    expect(live.getByText(/Trades fetched/)).toBeTruthy();
   });
 });

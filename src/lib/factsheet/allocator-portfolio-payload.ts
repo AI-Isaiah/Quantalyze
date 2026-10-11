@@ -79,6 +79,11 @@ export function buildAllocatorPortfolioFactsheetPayload(
       types: ["allocator_portfolio"],
       markets: meta.markets ?? [],
       computedAt: meta.computedAt ?? new Date().toISOString(),
+      // Phase 167.1.2.2.2: a blend of several books has no single trade fetch
+      // and no single-venue gap record. Stated, not defaulted: absence is null.
+      tradesFetchedAt: null,
+      tradeFetchVenue: null,
+      unrecoveredGaps: [],
       trustTier: null,
       // FINDING-6 (b06-silentfailure): Allocator portfolio blends are always
       // derived from live API equity curves — not CSV uploads. Explicitly pass

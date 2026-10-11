@@ -582,6 +582,27 @@ export type FactsheetCommon = {
   strategyTypes: string[];
   markets: string[];
   computedAt: string;
+  /**
+   * Phase 167.1.2.2.2 (TRADESYNC, D-06/D-07): when the trade ingest last
+   * succeeded for this strategy (`strategy_analytics.trades_fetched_at`).
+   * Distinct from `computedAt`, which is when analytics were last recomputed.
+   * `null` is absence: there is NO epoch/now sentinel (the TradeFetchLine
+   * resolves it with `tradeFetchVenue` into "never fetched" or no claim).
+   */
+  tradesFetchedAt: string | null;
+  /**
+   * The strategy's API-key exchange, lower-cased (F3). NEVER derived from
+   * `supported_exchanges`: a CSV strategy may declare okx there and must stay
+   * not-applicable. `null` for CSV, composite and non-strategy payloads.
+   */
+  tradeFetchVenue: string | null;
+  /**
+   * D-02: spans (inclusive UTC `YYYY-MM-DD`) the tick and the venue cannot
+   * supply, parsed by `parseUnrecoveredGaps` from
+   * `strategy_analytics.series_provenance`. Server truth only: the client never
+   * infers a gap from holes in `dates`. `[]` means none recorded.
+   */
+  unrecoveredGaps: { from: string; to: string }[];
   trustTier: TrustTierKind | null;
   /** Author-provided strategy description (registry row `strategies.description`). */
   description: string | null;

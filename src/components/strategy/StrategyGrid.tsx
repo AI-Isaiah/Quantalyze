@@ -123,6 +123,17 @@ export function StrategyGrid({
                      cannot re-open through whichever one a future page
                      mounts. */
                   seriesEnd={s.analytics.series_end ?? null}
+                  /* Phase 167.1.2.2.2 / SC-4, D-07 — the trade-fetch claim is
+                     the cron's own record (`trades_fetched_at`), seen by every
+                     viewer (D-06).
+                     F3 — the venue is the api-key exchange or NULL, never
+                     `supported_exchanges`. This card is fed by the anonymous
+                     list read, which cannot read `api_keys`, so it has no key
+                     exchange to name: NULL. A recorded fetch time still reads
+                     current or stale; only the never-fetched case becomes
+                     "no claim", the cautious direction. */
+                  tradesFetchedAt={s.analytics.trades_fetched_at ?? null}
+                  tradeFetchVenue={null}
                   exchange={s.supported_exchanges?.[0]}
                   className="mb-2"
                 />

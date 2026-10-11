@@ -29,6 +29,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
   it("renders 'Idle' pill for idle status and no helper line", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="idle"
         syncError={null}
         lastSyncAt={null}
@@ -44,6 +45,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
   it("uses U+2026 ellipsis not three dots in Syncing label", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="syncing"
         syncError={null}
         lastSyncAt={null}
@@ -58,6 +60,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
   it("'Syncing…' text length accounts for U+2026 as a single codepoint", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="syncing"
         syncError={null}
         lastSyncAt={null}
@@ -74,6 +77,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
     const twoMinAgo = new Date(Date.now() - 2 * 60_000).toISOString();
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="complete"
         syncError={null}
         lastSyncAt={twoMinAgo}
@@ -97,6 +101,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
     const oneMinAgo = new Date(Date.now() - 60_000).toISOString();
     const { rerender } = render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="complete"
         syncError={null}
         lastSyncAt={oneMinAgo}
@@ -111,6 +116,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
 
     rerender(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="rate_limited"
         syncError={null}
         lastSyncAt={null}
@@ -126,6 +132,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
   it("renders 'Synced (warnings)' for complete_with_warnings + helper with sync_error", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="complete_with_warnings"
         syncError="Binance futures endpoint transient timeout"
         lastSyncAt={null}
@@ -143,6 +150,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
   it("uses U+2014 em-dash not hyphen-minus in Rate limited label", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="rate_limited"
         syncError={null}
         lastSyncAt={null}
@@ -159,6 +167,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
   it("renders 'Key revoked' + helper 'Re-add a read-only key from your exchange.'", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="revoked"
         syncError={null}
         lastSyncAt={null}
@@ -179,6 +188,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
   it("renders 'Sync failed' + helper contains sanitized sync_error for error", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="error"
         syncError="HTTP 502 from binance"
         lastSyncAt={null}
@@ -194,6 +204,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
   it("renders 'Sign-in failed' pill + authored helper (D-05/D-11 arm B)", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="sign_in_failed"
         syncError={null}
         lastSyncAt={null}
@@ -229,6 +240,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
   it("sign_in_failed helper IGNORES syncError — non-vacuity control", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="sign_in_failed"
         syncError="MT5 terminal unreachable \u2014 sync will retry automatically."
         lastSyncAt={null}
@@ -246,6 +258,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
   it("renders '{exchange title-case} cooldown remaining' helper for rate_limited", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="rate_limited"
         syncError={null}
         lastSyncAt={null}
@@ -277,6 +290,7 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
     (exchange, expected) => {
       render(
         <AllocatorSyncStatus
+          subject="holdings"
           syncStatus="rate_limited"
           syncError={null}
           lastSyncAt={null}
@@ -302,6 +316,7 @@ describe("AllocatorSyncStatus — pill color class map", () => {
   it("idle pill uses bg-[#F1F5F9] and text-text-secondary", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="idle"
         syncError={null}
         lastSyncAt={null}
@@ -316,6 +331,7 @@ describe("AllocatorSyncStatus — pill color class map", () => {
   it("rate_limited pill uses bg-warning/10 and text-warning", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="rate_limited"
         syncError={null}
         lastSyncAt={null}
@@ -331,6 +347,7 @@ describe("AllocatorSyncStatus — pill color class map", () => {
   it("complete_with_warnings pill uses bg-warning/10 and text-warning", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="complete_with_warnings"
         syncError="partial"
         lastSyncAt={null}
@@ -345,6 +362,7 @@ describe("AllocatorSyncStatus — pill color class map", () => {
   it("revoked pill uses bg-negative/10 and text-negative", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="revoked"
         syncError={null}
         lastSyncAt={null}
@@ -359,6 +377,7 @@ describe("AllocatorSyncStatus — pill color class map", () => {
   it("error pill uses bg-negative/10 and text-negative", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="error"
         syncError="boom"
         lastSyncAt={null}
@@ -373,6 +392,7 @@ describe("AllocatorSyncStatus — pill color class map", () => {
   it("sign_in_failed pill uses the opaque amber trio and NEVER the idle fallback classes (T-167-08)", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="sign_in_failed"
         syncError={null}
         lastSyncAt={null}
@@ -394,6 +414,7 @@ describe("AllocatorSyncStatus — pill color class map", () => {
   it("falls back to idle neutral pill for unknown sync_status (including 'computing' and null)", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="computing"
         syncError={null}
         lastSyncAt={null}
@@ -408,6 +429,7 @@ describe("AllocatorSyncStatus — pill color class map", () => {
   it("renders neutral 'Idle' fallback when sync_status is null", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus={null}
         syncError={null}
         lastSyncAt={null}
@@ -423,6 +445,7 @@ describe("AllocatorSyncStatus — helper line aria-live silence for neutral stat
   it("helper is empty for idle", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="idle"
         syncError={null}
         lastSyncAt={null}
@@ -437,6 +460,7 @@ describe("AllocatorSyncStatus — helper line aria-live silence for neutral stat
   it("helper is empty for syncing with null queuedNextAttemptAt", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="syncing"
         syncError={null}
         lastSyncAt={null}
@@ -452,6 +476,7 @@ describe("AllocatorSyncStatus — helper line aria-live silence for neutral stat
   it("helper is empty for complete", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="complete"
         syncError={null}
         lastSyncAt={new Date().toISOString()}
@@ -478,6 +503,7 @@ describe("AllocatorSyncStatus — f8 Queued helper rendering (rate-limit contagi
     const future = new Date(Date.now() + 60_000).toISOString();
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="syncing"
         syncError={null}
         lastSyncAt={null}
@@ -499,6 +525,7 @@ describe("AllocatorSyncStatus — f8 Queued helper rendering (rate-limit contagi
     const near = new Date(Date.now() + 5_000).toISOString();
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="syncing"
         syncError={null}
         lastSyncAt={null}
@@ -515,6 +542,7 @@ describe("AllocatorSyncStatus — f8 Queued helper rendering (rate-limit contagi
     const near = new Date(Date.now() + 29_000).toISOString();
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="syncing"
         syncError={null}
         lastSyncAt={null}
@@ -531,6 +559,7 @@ describe("AllocatorSyncStatus — f8 Queued helper rendering (rate-limit contagi
     const at = new Date(Date.now() + 30_000).toISOString();
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="syncing"
         syncError={null}
         lastSyncAt={null}
@@ -548,6 +577,7 @@ describe("AllocatorSyncStatus — f8 Queued helper rendering (rate-limit contagi
     const future = new Date(Date.now() + 60_000).toISOString();
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="idle"
         syncError={null}
         lastSyncAt={null}
@@ -565,6 +595,7 @@ describe("AllocatorSyncStatus — f4 helperOverride precedence (first-run failur
   it("helperOverride takes precedence over computed helper text", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="idle"
         syncError={null}
         lastSyncAt={null}
@@ -579,6 +610,7 @@ describe("AllocatorSyncStatus — f4 helperOverride precedence (first-run failur
   it("helperOverride wins over revoked helper copy", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="revoked"
         syncError={null}
         lastSyncAt={null}
@@ -594,6 +626,7 @@ describe("AllocatorSyncStatus — f4 helperOverride precedence (first-run failur
   it("empty-string helperOverride does not suppress computed helper text", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="revoked"
         syncError={null}
         lastSyncAt={null}
@@ -612,6 +645,7 @@ describe("AllocatorSyncStatus — motion + spinner respects prefers-reduced-moti
   it("syncing pill includes a motion-safe:animate-spin spinner glyph", () => {
     render(
       <AllocatorSyncStatus
+        subject="holdings"
         syncStatus="syncing"
         syncError={null}
         lastSyncAt={null}
@@ -667,6 +701,7 @@ describe("AllocatorSyncStatus — PILL_STYLES roster is fully labelled", () => {
     (status) => {
       render(
         <AllocatorSyncStatus
+          subject="holdings"
           syncStatus={status}
           syncError={null}
           lastSyncAt={null}
@@ -681,4 +716,130 @@ describe("AllocatorSyncStatus — PILL_STYLES roster is fully labelled", () => {
       expect((pill.textContent ?? "").trim()).not.toBe("");
     },
   );
+});
+
+/**
+ * Phase 167.1.2.2.2 plan 12 (D-12, D-15, T-167.1.2.2.2-37).
+ *
+ * The 04:00 poll writes `api_keys.last_sync_at` (D-12), so on a STRATEGY key
+ * that field means "the key was last checked", not "trades were fetched".
+ * `subject` makes every mount choose which of the two it is showing: the
+ * `complete` and `complete_with_warnings` labels branch on it and nothing
+ * else does. These cases exist so a strategy owner can never read a key check
+ * as a trade fetch, and so an allocator's holdings pill, where "Synced" is
+ * accurate, is not collaterally relabelled.
+ */
+describe("AllocatorSyncStatus — subject prop (D-15)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-19T12:00:00Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const oneMinAgo = () => new Date(Date.now() - 60_000).toISOString();
+
+  it("strategy-key + complete reads 'Key checked 1m ago' and never 'Synced'", () => {
+    render(
+      <AllocatorSyncStatus
+        subject="strategy-key"
+        syncStatus="complete"
+        syncError={null}
+        lastSyncAt={oneMinAgo()}
+        exchange="okx"
+      />,
+    );
+    const pill = screen.getByTestId("allocator-sync-pill");
+    expect(pill.textContent).toBe("Key checked 1m ago");
+    expect(pill.textContent).not.toContain("Synced");
+    // The single-flex-item wrap (ISSUE-004) must survive the relabel.
+    expect(pill.children.length).toBe(1);
+  });
+
+  it("strategy-key + complete_with_warnings reads 'Key checked (warnings)' and keeps the helper", () => {
+    render(
+      <AllocatorSyncStatus
+        subject="strategy-key"
+        syncStatus="complete_with_warnings"
+        syncError="partial"
+        lastSyncAt={null}
+        exchange="okx"
+      />,
+    );
+    const pill = screen.getByTestId("allocator-sync-pill");
+    expect(pill.textContent).toBe("Key checked (warnings)");
+    expect(pill.textContent).not.toContain("Synced");
+    expect(screen.getByTestId("allocator-sync-helper").textContent).toBe("partial");
+  });
+
+  it("holdings + complete still reads 'Synced 1m ago' (allocator cards byte-unchanged)", () => {
+    render(
+      <AllocatorSyncStatus
+        subject="holdings"
+        syncStatus="complete"
+        syncError={null}
+        lastSyncAt={oneMinAgo()}
+        exchange="okx"
+      />,
+    );
+    const pill = screen.getByTestId("allocator-sync-pill");
+    expect(pill.textContent).toBe("Synced 1m ago");
+    expect(pill.textContent).not.toContain("Key checked");
+    expect(pill.children.length).toBe(1);
+  });
+
+  it("holdings + complete_with_warnings still reads 'Synced (warnings)'", () => {
+    render(
+      <AllocatorSyncStatus
+        subject="holdings"
+        syncStatus="complete_with_warnings"
+        syncError="partial"
+        lastSyncAt={null}
+        exchange="okx"
+      />,
+    );
+    expect(screen.getByTestId("allocator-sync-pill").textContent).toBe(
+      "Synced (warnings)",
+    );
+  });
+
+  // Every state that is not one of the two relabelled cases must render the
+  // same pill text AND helper text for both subjects, so the prop cannot grow
+  // into a second copy table by accident.
+  it.each([
+    { status: "idle", error: null },
+    { status: "syncing", error: null },
+    { status: "rate_limited", error: null },
+    { status: "revoked", error: null },
+    { status: "error", error: "boom" },
+    { status: "sign_in_failed", error: "raw upstream text" },
+  ])("$status renders identical text for both subjects", ({ status, error }) => {
+    const mount = (subject: "holdings" | "strategy-key") =>
+      render(
+        <AllocatorSyncStatus
+          subject={subject}
+          syncStatus={status}
+          syncError={error}
+          lastSyncAt={oneMinAgo()}
+          exchange="okx"
+          retryAtSeconds={42}
+        />,
+      );
+    const holdings = mount("holdings");
+    const holdingsText = [
+      screen.getByTestId("allocator-sync-pill").textContent,
+      screen.getByTestId("allocator-sync-helper").textContent,
+    ];
+    holdings.unmount();
+    mount("strategy-key");
+    const keyText = [
+      screen.getByTestId("allocator-sync-pill").textContent,
+      screen.getByTestId("allocator-sync-helper").textContent,
+    ];
+    expect(keyText).toEqual(holdingsText);
+    // Non-vacuity: the pill text is a real label, not an empty string.
+    expect(keyText[0]).toBeTruthy();
+  });
 });

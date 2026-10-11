@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Literal
 
 import pandas as pd
@@ -234,6 +234,7 @@ def combine_realized_and_funding(
     *,
     external_flows: Sequence[Any] | None = None,
     open_unrealized_usd: float = 0.0,
+    realized_reach_start: str | None = None,
 ) -> tuple[pd.Series, dict[str, Any]]:
     """Combine realized daily PnL + funding into one anchored, gap-filled
     daily-return series. Returns ``(returns, meta)`` where ``meta`` is the
@@ -247,6 +248,12 @@ def combine_realized_and_funding(
     Phase 75's job. An in-window flow adjusts the chain-linked TWR numerator; a
     flow dated outside the return window fails loud (``NavReconstructionError``)
     rather than silently dropping realized cash.
+
+    ``realized_reach_start`` (an ISO ``YYYY-MM-DD`` UTC day, or ``None``): the
+    first day the REALIZED fetch could reach. Funding dated before it is dropped
+    (see the D-02 note in the body). ``None`` -- the default -- drops nothing; it
+    is the right value whenever both streams were fetched over one window, which
+    is every caller today. Never derive it from the first realized record.
 
     MT5-12 verdict: ``fill_derived_unproven``, ALWAYS — a CONSTANT, not a
     data-driven refinement. This path takes TWO independent input streams
@@ -262,7 +269,35 @@ def combine_realized_and_funding(
     "ledger_complete when the book looks healthy" would newly ADMIT precisely the
     accounts that a silent-truncation bug makes look healthy, which is the
     population the verdict exists to refuse. So it stays constant."""
-    combined = list(realized_pnl_records) + funding_rows_to_daily_pnl_records(funding_rows)
+    funding_records = funding_rows_to_daily_pnl_records(funding_rows)
+    # D-02 (167.1.2.2.2-07, corrected by HI-01 of the PR-B round 1 review): a day the
+    # realized fetch could not REACH is MISSING, not 0.0 and not funding-only. If the
+    # funding stream reaches further back than the realized fetch, the union below
+    # would open the series at the older funding day and ``gap_fill_daily_returns``
+    # would fill every day between that funding row and the realized fetch's reach
+    # with 0.0 -- a flat stretch invented across days the realized side never saw.
+    #
+    # The bound is the realized fetch's REAL reach, supplied by the caller as
+    # ``realized_reach_start``. It is deliberately NOT inferred from the first
+    # realized RECORD: a position held for 39 days before its first close has 39
+    # days of real funding cost and no realized record, and those days are inside
+    # the reach (the account existed and was charged), so erasing them overstates
+    # the track record. Data alone cannot tell "held, nothing closed" from
+    # "the realized fetch could not see this far"; only the fetch window can.
+    # ``None`` (the default, and every caller whose two fetches share one window)
+    # drops nothing. The retained days' returns are unchanged (the NAV roll runs
+    # backward from the anchor, so a pnl row earlier than the first retained day
+    # only moves a start level that is not emitted).
+    if realized_reach_start is not None:
+        # Normalise through ``date`` so a malformed value fails loud here rather
+        # than comparing lexicographically against real days.
+        reach_day = date.fromisoformat(realized_reach_start).isoformat()
+        funding_records = [
+            rec
+            for rec in funding_records
+            if (_funding_iso_day(rec["timestamp"]) or "") >= reach_day
+        ]
+    combined = list(realized_pnl_records) + funding_records
     returns, meta = trades_to_daily_returns_with_status(
         combined,
         account_balance=account_balance,

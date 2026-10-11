@@ -219,6 +219,19 @@ ALLOWED_RETURNS_SERIES_REFS: dict[str, _Allowance] = {
         sites={},
         reason="the candidate select column list, read through daily_returns_from_row.",
     ),
+    "services/analytics_runner.py": _Allowance(
+        selects=0,
+        logs=0,
+        sites={"<module>": 2},
+        reason=(
+            "D-16 (167.1.2.2.2): the WRITER-side gap-day trim. Two module-level "
+            "constants name the stored chart lists (the dated-list tuple and the "
+            "sparkline-to-source pair) so _without_gap_day_points can drop the points "
+            "dated on a day the series has no return for before the runner persists "
+            "them. It filters what compute_all_metrics produced; it reads no stored "
+            "curve."
+        ),
+    ),
     "services/metrics.py": _Allowance(
         selects=0,
         logs=0,

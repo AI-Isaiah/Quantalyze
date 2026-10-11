@@ -34,11 +34,31 @@ import { PILL_STYLES } from "./allocator-sync-pill-styles";
  * (helper line is empty for neutral states).
  */
 export interface AllocatorSyncStatusProps {
+  /**
+   * What `lastSyncAt` is the time OF, so every mount is compile-forced to
+   * choose (167.1.2.2.2 D-12, D-15, T-167.1.2.2.2-37).
+   *
+   * The daily 04:00 poll writes `api_keys.last_sync_at` on EVERY key, and on a
+   * strategy key it reads the venue's balance, not its trades. So there the
+   * time means "the key was last checked", and labelling it "Synced" would let
+   * an owner read a key check as a trade fetch, the same false claim D-14
+   * removes from the strategy freshness badge.
+   *
+   * - `holdings`: an allocator's holdings card, where the sync really fetched
+   *   the holdings. Copy is unchanged ("Synced {age}", "Synced (warnings)").
+   * - `strategy-key`: a strategy owner's key. `complete` reads
+   *   "Key checked {age}" and `complete_with_warnings` reads
+   *   "Key checked (warnings)".
+   *
+   * Only those two labels branch on it; every other state's copy is identical
+   * for both subjects.
+   */
+  subject: "holdings" | "strategy-key";
   /** One of: idle | syncing | complete | complete_with_warnings | rate_limited | revoked | error | sign_in_failed. Unknown / null / 'computing' fall back to 'idle'. */
   syncStatus: string | null;
   /** DB value of api_keys.sync_error (sanitized ≤500 chars server-side). */
   syncError: string | null;
-  /** DB value of api_keys.last_sync_at; interpolated into "Synced {relative time ago}" for the `complete` state. */
+  /** DB value of api_keys.last_sync_at; interpolated into "Synced {relative time ago}" (holdings) or "Key checked {relative time ago}" (strategy-key) for the `complete` state. */
   lastSyncAt: string | null;
   /** Exchange name (lower-case, e.g. "binance") for the rate_limited helper "{title-case} cooldown remaining". */
   exchange: string;
@@ -180,6 +200,7 @@ function SpinnerSvg() {
 }
 
 export function AllocatorSyncStatus({
+  subject,
   syncStatus,
   syncError,
   lastSyncAt,
@@ -214,10 +235,11 @@ export function AllocatorSyncStatus({
       // Wrap both parts in a single span so the inline-flex pill treats them
       // as one flex item — otherwise the whitespace between "Synced" and
       // the relative-time span collapses and the pill renders "Synced1m ago"
-      // even though .textContent is still "Synced 1m ago".
+      // even though .textContent is still "Synced 1m ago". The same holds for
+      // "Key checked" (D-15), so both subjects share this one wrapper.
       pillLabel = (
         <span>
-          Synced{" "}
+          {subject === "strategy-key" ? "Key checked" : "Synced"}{" "}
           <span className="font-metric tabular-nums">
             {formatRelative(lastSyncAt)}
           </span>
@@ -225,7 +247,8 @@ export function AllocatorSyncStatus({
       );
       break;
     case "complete_with_warnings":
-      pillLabel = "Synced (warnings)";
+      pillLabel =
+        subject === "strategy-key" ? "Key checked (warnings)" : "Synced (warnings)";
       break;
     case "rate_limited": {
       const n = Math.max(0, retryAtSeconds ?? 0);

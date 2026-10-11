@@ -399,6 +399,17 @@ export interface StrategyAnalytics {
   volume_metrics: VolumeMetrics | null;
   exposure_metrics: ExposureMetrics | null;
   data_quality_flags: AnalyticsDataQualityFlags | null;
+  /**
+   * Phase 167.1.2.2.2 / TRADESYNC (SC-4, D-05..D-07) — the last SUCCESSFUL
+   * trade fetch (an instant). Written ONLY by the daily `/cron-sync` tick, never
+   * by the analytics run, which is why it is the badge's subject and
+   * `computed_at` is not (the status bridge re-stamps `computed_at` on every job
+   * transition). `null` = no fetch recorded: whether that means "not fetched
+   * yet" or "not a fetched venue" is `resolveTradeFetch`'s call
+   * (`src/lib/freshness.ts`), never the reader's. Preserved by
+   * `shapeRowAnalytics` on a failed / pending / computing row.
+   */
+  trades_fetched_at: string | null;
 }
 
 /**
