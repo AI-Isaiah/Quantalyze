@@ -192,6 +192,9 @@ const CONNECT_SENTENCE = /^Connect a read-only exchange API key/;
 
 // A tab is rendered when its own anchor is on screen; absence assertions are
 // only meaningful after that (the panels are next/dynamic chunks).
+// The chunks load lazily, so a loaded CI shard can take longer than waitFor's
+// 1 s default to mount one (seen on the holdings panel, PR #1005 shard 1).
+const LAZY_PANEL_TIMEOUT_MS = 5000;
 const TABS = [
   {
     tab: "overview",
@@ -270,14 +273,14 @@ describe("the connect-a-key prompt follows the eligible-key flag on every tab (D
   describe.each(TABS.map((t) => t.tab))("tab=%s", (tab) => {
     it("Arm A, an eligible key: no connect link and no connect sentence", async () => {
       const anchor = await renderTab(tab, ARM_A);
-      await waitFor(anchor.rendered);
+      await waitFor(anchor.rendered, { timeout: LAZY_PANEL_TIMEOUT_MS });
       expect(screen.queryByRole("link", { name: CONNECT_LINK })).toBeNull();
       expect(screen.queryByText(CONNECT_SENTENCE)).toBeNull();
     });
 
     it("Arm B, the only key disconnected: the tab prompts to connect one", async () => {
       const anchor = await renderTab(tab, ARM_B);
-      await waitFor(anchor.rendered);
+      await waitFor(anchor.rendered, { timeout: LAZY_PANEL_TIMEOUT_MS });
       expect(
         screen.getAllByRole("link", { name: CONNECT_LINK }).length,
       ).toBeGreaterThan(0);

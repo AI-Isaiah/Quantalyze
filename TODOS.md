@@ -9207,16 +9207,6 @@ today, because the default `overflowOf` matches and the region is asserted visib
 
 ## Phase 170.4 (ALLOCHOLDINGS) — routed review items (logged 2026-10-11)
 
-### 170.4-FINGERPRINT-UNPRICED-TWIN — the commit RPC's `contributing` CTE has no native-unpriced rule (review WR-02, MEDIUM, conf 8)
-
-**Why it is open.** `fetchLatestHoldingsPerKey` drops a key whose newer `native_unpriced:` marker
-leaves it without rows. The `contributing` CTE in migration `20260929120000` has no such rule, so the
-client fingerprint can differ from the RPC's, and a book-mode commit is refused as
-`portfolio_fingerprint_stale` until the key's next priced poll. The gap predates 170.4 and is recorded
-in `170.4-07-SUMMARY.md`.
-**Fix.** Add the rule to the CTE in PR 2's migration (170.4 plan 09), with a SQL gate arm.
-**Owner:** 170.4 plan 09. **Trigger:** PR 2.
-
 ### 170.4-WRITER-FALLBACK-SILENT — the 42P10 fallback is visible only as an INFO log line (SFH-2, MEDIUM, conf 6)
 
 **Why it is open.** Until PR 2's per-key index exists, every holdings poll retries on the pre-D10
@@ -9225,6 +9215,33 @@ window). Nothing reaches Sentry.
 **Fix.** Log a warning plus a one-shot Sentry capture per process, with a stable tag, and make the tag
 reading zero part of the gate for removing the fallback (`[170.4-HOLDINGS-UPSERT-FALLBACK]`).
 **Owner:** 170.4 PR 2 (plan 10).
+
+### 170.4-HOLDINGS-UPSERT-FALLBACK — remove the writer's 42P10 fallback once PR 2 is applied on PROD (booked 2026-10-11, Phase 170.4 plan 10)
+
+**Why it is open.** `persist_allocator_holdings` still retries once on the pre-D10 four-column target
+(`HOLDINGS_CONFLICT_TARGET_PRE_D10`) when Postgres answers 42P10. After PR 2's migration
+(`20261011120000`) applies on PROD that branch is dead. It was not removed in PR 2 because Railway can
+redeploy the worker before the PROD apply finishes, and a worker without the fallback would then fail
+every holdings poll with 42P10 in that window.
+**Fix.** Remove `HOLDINGS_CONFLICT_TARGET_PRE_D10` and its 42P10 branch from `persist_allocator_holdings`
+with its tests (`test_persist_holdings_conflict_target.py`). In the SAME change, update the header of
+`supabase/migrations/down/20261011120000-rollback.sql`: that manual rollback relies on the fallback to
+keep ingestion alive after it runs, so once the constant is gone the writer must be rolled back FIRST
+(review INFO-2). Do `170.4-WRITER-FALLBACK-SILENT` first or with it, so the fallback's use is observable
+before it is removed.
+**Owner:** Phase 170.4 follow-up.
+**Trigger:** PR 2's PROD apply verified: the marker query names PROD, and `pg_indexes` on
+`allocator_holdings` shows the five-column unique index and not the four-column one.
+
+### 170.4-IDENTITY-READ-COMPLETENESS — a holdings row whose key is missing from the identity read counts as its own account (SFH, MEDIUM, booked 2026-10-11)
+
+**Why it is open.** `keyAccountOf`'s `key:<id>` fallback gives a holdings row whose `api_key_id` is
+absent from the `api_keys` identity read its own account, so a same-account pair could double count.
+Reachable only if the foreign key is bypassed. Plan 14 noted that no test seeds the case.
+**Fix / done when.** `fetchHoldings` (`src/lib/portfolio-exposure.ts`) and the per-key reader
+(`fetchLatestHoldingsPerKey`) throw on a counted row whose key is absent from the identity read, with
+a test per reader.
+**Owner / Trigger:** the next /allocations data phase.
 
 ### 170.4-DASHBOARD-MARKER-READ-SILENT — the dashboard drops `markerReadError` (SFH-3, MEDIUM, conf 6)
 

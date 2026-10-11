@@ -55,7 +55,7 @@
  *   zero-filled point, never a synthetic `asof`.
  *
  * No-zero-fill / marked gaps. `asof` is a plain DATE (one row per
- *   allocator/venue/symbol/day). A calendar day missing strictly between the
+ *   allocator/key/venue/symbol/day since Phase 170.4 plan 09). A calendar day missing strictly between the
  *   first and last observed `asof` is a `{ start, end, kind: "gap", days }`
  *   span (days inclusive both ends), mirroring the factsheet `missingSegments`
  *   convention (src/lib/factsheet/types.ts:472-478). Points are emitted ONLY
@@ -65,8 +65,23 @@
  *   (owner RLS: `allocator_holdings_owner_select` — `allocator_id =
  *   auth.uid()`) with an explicit `.eq("allocator_id", userId)` gate as
  *   defence-in-depth. The admin client is NEVER imported (it would bypass RLS).
- *   The projection is a six-column allow-list; the exchange raw-payload column
- *   and the key-material columns are never selected.
+ *   The holdings projection is an eight-column allow-list (the original six
+ *   plus `api_key_id` and `updated_at`, Phase 170.4 D-11), and the owner's key
+ *   identity is read from `api_keys` under `.eq("user_id", userId)` with the
+ *   per-key reader's identity columns (`KEY_IDENTITY_COLUMNS`). The exchange
+ *   raw-payload column and the key-material columns are never selected.
+ *
+ * D-11 (Phase 170.4, with D-10 and D-03). Since plan 09's index keeps ONE ROW
+ *   PER KEY per allocator/venue/symbol/day, two keys that read ONE exchange
+ *   account (the D-09 identity) both hold a same-day row, and summing every row
+ *   would count that account twice. The series therefore count an account once
+ *   per (day, holding_type) by plan 11's `oneKeyPerAccountDay` (the key with
+ *   the latest `updated_at` instant wins, ties to the smallest lowercase key
+ *   id), applied PER `asof` day: each day's rows are that account's newest day.
+ *   Applied once over the window it would keep only each account's newest day.
+ *   Keys on DIFFERENT accounts still all count (D-08). History is otherwise
+ *   unchanged (D-03): every day that had a point still has one. A failed or
+ *   capped identity read, or an unparseable `updated_at`, rejects the series.
  *
  * Edge case (98-03 plan-checker W4). The series fetch caps rows at 730 days via
  *   `.gte("asof", today - 730d)`, mirroring the reconstruction BACKFILL_CAP_DAYS
@@ -76,6 +91,13 @@
  */
 
 import { createClient } from "@/lib/supabase/server";
+import { oneKeyPerAccountDay } from "@/lib/holdings-account-day";
+import {
+  HOLDINGS_ROW_CAP,
+  KEY_IDENTITY_COLUMNS,
+  keyAccountOf,
+  type KeyIdentityRow,
+} from "@/lib/latest-holdings-per-key";
 
 const BACKFILL_CAP_DAYS = 730;
 const MS_PER_DAY = 86_400_000;
@@ -145,6 +167,10 @@ interface HoldingRow {
   holding_type: string;
   side: string;
   value_usd: number;
+  /** The key that wrote the row; the D-11 account rule groups by its account. */
+  api_key_id: string;
+  /** Postgres `timestamptz` text; the D-10 rule compares it as an instant. */
+  updated_at: string;
 }
 
 /** D-P2: negate short notional; long/flat pass through unsigned. */
@@ -245,10 +271,19 @@ const HOLDINGS_PAGE_SIZE = 1000;
 /**
  * The owner-scoped WINDOWED fetch used by the two TIME-SERIES reads
  * (`getNetExposureSeries` / `getAllocationSeries`, which need EVERY row in the
- * 730-day window): USER client + owner RLS, explicit allocator gate, six-column
+ * 730-day window): USER client + owner RLS, explicit allocator gate, eight-column
  * secretless projection, 730-day cap. Throws on a PostgREST error (fail loud —
  * an empty result and a query error are distinct states; never collapse an
  * error into `[]`).
+ *
+ * D-11: returns only the COUNTED rows. Each `asof` day's rows pass through
+ * `oneKeyPerAccountDay` once, so an exchange account read by two keys counts
+ * once per (day, holding_type); keys on different accounts all count (D-08).
+ * The grouping happens AFTER every page is collected (a day can span two
+ * pages) and per day, never over the window, so no day of history is dropped
+ * (D-03). The owner's key identity is read first on the same user client; an
+ * identity read that failed or reached `HOLDINGS_ROW_CAP` could not be trusted
+ * to group keys, so it throws rather than yield a series.
  *
  * F-1 (v1.10): the prior single unbounded `.order("asof", ascending)` query was
  * silently capped by PostgREST at `max_rows` (1000) — HTTP 200, `error: null`,
@@ -260,12 +295,29 @@ const HOLDINGS_PAGE_SIZE = 1000;
  */
 async function fetchHoldings(userId: string): Promise<HoldingRow[]> {
   const supabase = await createClient();
+
+  const keysRes = await supabase
+    .from("api_keys")
+    .select(KEY_IDENTITY_COLUMNS)
+    .eq("user_id", userId)
+    .limit(HOLDINGS_ROW_CAP);
+  if (keysRes.error) throw keysRes.error;
+  const keys = (keysRes.data ?? []) as unknown as KeyIdentityRow[];
+  if (keys.length >= HOLDINGS_ROW_CAP) {
+    throw new Error(
+      `portfolio-exposure: api_keys identity read reached the row cap (${HOLDINGS_ROW_CAP}); refusing a series built on a possibly truncated key set`,
+    );
+  }
+  const accountOf = keyAccountOf(keys);
+
   const capIso = toIsoDate(Date.now() - BACKFILL_CAP_DAYS * MS_PER_DAY);
   const all: HoldingRow[] = [];
   for (let from = 0; ; from += HOLDINGS_PAGE_SIZE) {
     const { data, error } = await supabase
       .from("allocator_holdings")
-      .select("asof, venue, symbol, holding_type, side, value_usd")
+      .select(
+        "asof, venue, symbol, holding_type, side, value_usd, api_key_id, updated_at",
+      )
       .eq("allocator_id", userId)
       .gte("asof", capIso)
       .order("asof", { ascending: true })
@@ -276,7 +328,18 @@ async function fetchHoldings(userId: string): Promise<HoldingRow[]> {
     all.push(...page);
     if (page.length < HOLDINGS_PAGE_SIZE) break;
   }
-  return all;
+
+  const byDay = new Map<string, HoldingRow[]>();
+  for (const r of all) {
+    const day = byDay.get(r.asof);
+    if (day === undefined) byDay.set(r.asof, [r]);
+    else day.push(r);
+  }
+  const counted: HoldingRow[] = [];
+  for (const asof of Array.from(byDay.keys()).sort()) {
+    counted.push(...oneKeyPerAccountDay(byDay.get(asof)!, accountOf));
+  }
+  return counted;
 }
 
 /** Distinct asof days in ascending order. */

@@ -119,7 +119,8 @@ async def test_fetch_allocator_holdings_returns_both_types(monkeypatch):
 @pytest.mark.asyncio
 async def test_idempotent_upsert(api_key_row_factory):
     """INGEST-04 / SC5: re-running persist with identical rows must use
-    `on_conflict="allocator_id,venue,symbol,asof"` and produce the same
+    `on_conflict="allocator_id,venue,symbol,asof,api_key_id"` (170.4 D-10: the
+    unique key is per key) and produce the same
     row count. Idempotency is enforced by the DB constraint; the test
     asserts the client call shape."""
     rows = [

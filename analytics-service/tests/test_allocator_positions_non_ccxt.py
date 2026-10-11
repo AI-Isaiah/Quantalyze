@@ -716,10 +716,11 @@ async def test_mt5_usd_account_emits_one_equity_row(mt5_enabled):
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_mt5_symbol_is_account_scoped(mt5_enabled):
-    """allocator_holdings is UNIQUE (allocator_id, venue, symbol, asof) with NO
-    api_key_id in the key. If every MT5 account wrote the same symbol, the
-    founder's three accounts would upsert over each other and AUM would show
-    ONE of them. The token must also match [A-Za-z0-9_-]+ (the commit route's
+    """allocator_holdings was UNIQUE (allocator_id, venue, symbol, asof) with NO
+    api_key_id in the key until 170.4 D-10 (migration 20261011120000 added it).
+    If every MT5 account wrote the same symbol, the founder's three accounts
+    would upsert over each other on the old key and AUM would show ONE of them;
+    the account-scoped token keeps them apart on either side of that migration. The token must also match [A-Za-z0-9_-]+ (the commit route's
     HOLDING_REF_RE) and must NOT be the broker login (T-151-06, ASVS V8)."""
     rows_a, _ = await fetch_allocator_holdings(
         "mt5", _session(_RecordingMt5Transport(account=_account())), API_KEY_ID
@@ -2086,10 +2087,11 @@ async def test_two_accounts_under_one_allocator_do_not_collapse_on_upsert(
 ):
     """T-151-07 / Pitfall 1, proven at the WIRING (Rule 9), not on a helper.
 
-    `allocator_holdings` is UNIQUE on (allocator_id, venue, symbol, asof) with
-    NO api_key_id in the key. The founder runs THREE MT5 accounts under one
-    allocator: if their rows shared a symbol, the upsert's ON CONFLICT would
-    converge them to ONE row and AUM would report a single account's equity
+    `allocator_holdings` was UNIQUE on (allocator_id, venue, symbol, asof) with
+    NO api_key_id in the key until 170.4 D-10 (migration 20261011120000), and
+    the writer still retries on that old target on 42P10. The founder runs THREE
+    MT5 accounts under one allocator: if their rows shared a symbol, an upsert
+    on the old key would converge them to ONE row and AUM would report a single account's equity
     while the survivor's attribution flipped between syncs. So this drives the
     real `persist_allocator_holdings` against a mock supabase and asserts on
     the captured payload."""
