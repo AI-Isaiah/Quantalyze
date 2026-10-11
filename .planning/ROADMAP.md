@@ -180,11 +180,11 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
 - [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
 - [ ] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned
-- [ ] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — not yet planned
+- [x] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 3 plans (completed 2026-10-11)
 - [ ] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — not yet planned
 - [ ] **Phase 170.5: FACTSHEETV2PANELS — /strategy/[id]/v2 panels render or say why** (INSERTED 2026-10-03) — not yet planned
 - [ ] **Phase 170.6: DISPLAYPOLISH — no signed zeros or red positives; short overlaps read em-dash; booked copy fixes** (INSERTED 2026-10-03) — not yet planned
-- [ ] **Phase 170.7: MYSTRATTABLE — My Strategies uses the ranking table, and the name opens the factsheet** (INSERTED 2026-10-03) — not yet planned
+- [x] **Phase 170.7: MYSTRATTABLE — My Strategies uses the ranking table, and the name opens the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 9 plans (completed 2026-10-11)
 
 ### Phase 158: OPS-CI — A merge means a deploy
 
@@ -5395,13 +5395,23 @@ Success: at 390 px and at desktop 200% zoom the commit bar never covers a headin
 
 ### Phase 170.7: MYSTRATTABLE — the manager My Strategies page (/strategies) uses the same ranking table as the Crypto SMA discovery page, and a strategy's name opens its factsheet (today it links to /strategies/<id>/edit); founder design request 2026-10-02: both are strategy overview or ranking pages. (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
+**Goal:** A manager's My Strategies page (`/strategies`) is the shared Discovery ranking table: each name opens its factsheet for every status, Status and Created columns follow Strategy, a final Actions column holds Edit and the private-link control, a strategy with no analytics still appears with "—" cells, notes sit in a full-width row under their strategy, review feedback is amber, and the newest strategy is first, with Discovery's layout guarantees after Phase 170.2 (170.7-CONTEXT D-01..D-09).
 **Requirements**: TBD
 **Depends on:** Phase 170
-**Plans:** 0 plans
+**Plans:** 9/9 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 170.7 to break down)
+- [x] 170.7-01-PLAN.md — ordering gate (170.2 merged, pin contract by relation); StrategyTable `managerRows`: Status column, Edit + actions slot; default mounts pinned byte-identical
+- [x] 170.7-02-PLAN.md — full-width note row under each strategy (D-06), tests first; actions slot mounts once
+- [x] 170.7-03-PLAN.md — Created column, `formatIsoDay`, `initialSort` newest first (survives prefs hydration), ranking-columns export
+- [x] 170.7-04-PLAN.md — `/strategies` index joins the fluid `isWide` measure (exact match); DESIGN.md record; TODOS ALLOCSYNC-CAPTION-01 and STRATEGIES-LOADING-SKELETON-01
+- [x] 170.7-05-PLAN.md — page-test harness migration (full rows, fetch/localStorage, layout-agnostic note lookup) and pin 2, green on the card page
+- [x] 170.7-06-PLAN.md — page swap onto StrategyTable with D-05 page gates RED first; pin 10; amber review feedback and banner (D-08)
+- [x] 170.7-07-PLAN.md — seeded e2e on phones (no page scroll, unpinned, names, dashes, notes) and private-link focus return
+- [x] 170.7-08-PLAN.md — seeded e2e either side of the pin step via 170.2's helpers; note indent aligns with the name
+- [x] 170.7-09-PLAN.md — release: head green on latest main, version re-picked, one CHANGELOG entry, skip-token scan
+
+⚠️ **Review round 1 (2026-10-11), founder override D-10:** MEDIUM-only findings get a fixer round anyway (WR-01, WR-02, WR-03, SFH-1); rank numbering per D-11. SFH-2/SFH-3 booked in TODOS.
 
 ### Phase 170.6: DISPLAYPOLISH — no signed zero (-0.00, -0.0%) and no non-negative value drawn red on factsheets and OG cards; a comparator overlap too short to annualize reads em-dash (SPX annualized 5 days to Sharpe 10.24); the paired-floor sentence names the date the comparator's prices end (169.4, founder: fix); /recommendations unset-mandate copy reworded (169.3, founder: reword); anonymous /browse never flashes example rows that then vanish; admin Compute Jobs kind filter lists every present kind; the recommendations disclaimer renders once. (INSERTED)
 
@@ -5421,13 +5431,19 @@ Plans:
 
 ### Phase 170.5: FACTSHEETV2PANELS — /strategy/[id]/v2 panels render or say why: the Rolling Alpha and Beta panel is an empty heading in 3M and 6M, benchmark greeks read all em-dash ('Benchmark correlation unavailable') while the factsheet shows alpha, beta, IR and Treynor, the Net and Gross Exposure axis reads 5000000%, Turnover is empty, and the footer calls an API-verified strategy self-reported. (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** On `/strategy/[id]/v2` every panel either renders or says why it can't: rolling alpha and beta, the benchmark greeks (the factsheet's own five figures, D-07), net and gross exposure in USD, turnover, and a footer that follows the real trust tier.
+**Requirements**: TBD (phase-local P1-P5, one per defect, defined in 170.5-RESEARCH.md)
 **Depends on:** Phase 170
-**Plans:** 0 plans
+**Plans:** 7 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 170.5 to break down)
+- [ ] 170.5-01-PLAN.md — tracer: trust tier projected into getStrategyDetailV2; footer and Verified chip follow it (P5, D-05)
+- [ ] 170.5-02-PLAN.md — rolling alpha and beta: 90-day caption, 2-point draw rule, say-why ladder in a 250px block (P1, D-01)
+- [ ] 170.5-03-PLAN.md — net and gross exposure axis and tooltip in USD (P3, D-03)
+- [ ] 170.5-04-PLAN.md — v2-joint helper: the factsheet's live joint, parity-proven, light path and builder mapping (P2, D-07)
+- [ ] 170.5-05-PLAN.md — Panel 7 turnover and exposure guards with cause ladders, through-date caption, rolling-correlation reasons (P2-P4, D-03, D-04)
+- [ ] 170.5-06-PLAN.md — D-07 wiring: light path in getStrategyDetailV2, composite builder path in the v2 page (P2)
+- [ ] 170.5-07-PLAN.md — five-cell greeks strip, reason line, error banner; phase gate (P2, D-07)
 
 ### Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other: Holdings and Open Positions list the positions the Exposure panel shows (2026-10-03: 3 Deribit positions, 185.1K gross, versus 'No holdings to display' / 'No open derivative positions'), Risk and Overview show the same rebuilding state, and Scenario / Diversification Optimizer stop asking to connect a key while keys are connected. (INSERTED)
 
@@ -5447,13 +5463,24 @@ shows 0.12 and -3.7%) **moved to 164.6.6.3.3 FACTSHEETTRUTH item 4**, which runs
 phase keeps the signed-out route (`/api/og` missing from `PUBLIC_ROUTES` in `src/proxy.ts`) and the
 description cut mid-word.
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** A factsheet's share-preview image loads for signed-out visitors and crawlers, only that OG route becomes public, an unpublished or unknown strategy yields the generic card with nothing of the row, and the card's description ends at a whole word.
+**Requirements**: D-01, D-02, D-03, D-04, D-05, D-06 (phase-local, `170.3-CONTEXT.md`)
 **Depends on:** Phase 170
-**Plans:** 0 plans
+
+## Success Criteria
+
+1. A signed-out `GET /api/og/factsheet/<id>` passes the proxy with no redirect and answers 200 `image/png` through the real proxy and route (`e2e/og-public.spec.ts`, run locally on a self-started server and listed in the `e2e` job's unseeded list, which is advisory; `src/proxy.test.ts` is the blocking gate). Exactly `/api/og/factsheet` is in `PUBLIC_ROUTES`: a signed-out `/api/og`, `/api/og/<other>/*` and the sibling `/api/og/factsheetx` still answer 307 to `/login` (D-01, D-03).
+2. For an unpublished, unknown or malformed id the route returns the generic card (no 404), carrying none of the row's name, codename, description or figures; a malformed id's read error is sent with the route's failure-path cache header; a published control renders its name, so the proof is not vacuous (D-02, D-03).
+3. The card's description has its whitespace collapsed and trimmed, is shown whole at 140 characters or fewer, is cut at the last word boundary at or under 140 and given "…" when longer, and is hard-cut at 140 with "…" only for a single word longer than 140 (D-04, D-05, D-06).
+4. Every new test was seen RED on a byte-backed neuter, restored and `cmp`-clean.
+5. After deploy, a cookie-less request for a published strategy's card on the production origin answers 200 `image/png` with no `location` (read by the orchestrator, recorded in VERIFICATION).
+
+**Plans:** 3/3 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 170.3 to break down)
+- [x] 170.3-01-PLAN.md — `/api/og/factsheet` joins PUBLIC_ROUTES; proxy cases, the signed-out e2e canary and the no-leak route test (wave 1)
+- [x] 170.3-02-PLAN.md — `shortenOgDescription`: word-boundary cut with "…", whitespace collapsed, wired into the OG route (wave 1)
+- [x] 170.3-03-PLAN.md — release: green head on latest main, VERSION/package.json/CHANGELOG (wave 2)
 
 ### Phase 170.1: COPY — page copy reads clean on every page (INSERTED)
 
@@ -5698,11 +5725,11 @@ kept verbatim.
 | 170. LAYOUT | 20/20 | Complete | verification passed (ROADMAP phase list: completed 2026-10-01; this row read `In Progress` until 2026-10-04) |
 | 170.1 COPY | 0/? | Queued — feature, after 170 | - |
 | 170.2 PROBEFIXES | 0/? | Queued | - |
-| 170.3 OGPUBLIC | 0/? | Queued — user-facing, booked 2026-10-03 | - |
+| 170.3 OGPUBLIC | 3/3 | Complete | 2026-10-11 |
 | 170.4 ALLOCHOLDINGS | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 170.5 FACTSHEETV2PANELS | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 170.6 DISPLAYPOLISH | 0/? | Queued — user-facing, booked 2026-10-03 | - |
-| 170.7 MYSTRATTABLE | 0/? | Queued — user-facing, booked 2026-10-03 | - |
+| 170.7 MYSTRATTABLE | 9/9 | Complete | 2026-10-11 |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
