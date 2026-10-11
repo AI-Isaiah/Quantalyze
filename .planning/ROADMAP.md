@@ -153,7 +153,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
 - [x] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — verification: passed (PR #988, v0.129.6.0, post-merge items measured 2026-10-09)
 - [x] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
-- [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — complete with routed residuals 2026-10-01 (halted 2026-09-27, resumed after 166.4); verification pending
+- [x] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — complete with routed residuals 2026-10-01 (halted 2026-09-27, resumed after 166.4); verification passed 2026-10-12, residuals owned by 166.3.1 NAVBREACH and 170.2 item 5 (completed 2026-10-12)
 - [ ] **Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds** (INSERTED) — not planned; inserted 2026-10-01 (founder); 166.3's R5 recompute waits on it
 - [x] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [ ] **Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly** (INSERTED) — not yet planned (data integrity)
@@ -5730,7 +5730,7 @@ kept verbatim.
 | 166.1 ENGINEFLOOR | 4/4 | Complete    | 2026-10-04 |
 | 166.1.1 DDSIGN | 3/3 | Complete | v0.129.6.0 · #988 · verification passed 2026-10-09 |
 | 166.2 COMPUTEONCE | 7/7 | Complete    | 2026-10-04 |
-| 166.3 RECOMPUTE | 0/1 | HALTED 2026-09-27 at Task 3 — resumes after 166.4 ships | - |
+| 166.3 RECOMPUTE | 1/1 | Complete (residuals routed) | 2026-10-12 |
 | 166.3.1 NAVBREACH | 0/? | Queued | - |
 | 166.4 BENCHALIGN | 4/4 | Complete | v0.108.0.0 · #892 · (verification passed 7/7) |
 | 166.4.1 PORTFOLIOANALYTICS | 0/? | Queued — data integrity | - |
