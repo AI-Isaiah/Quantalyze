@@ -8752,6 +8752,13 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       **Closed when:** each item's verdict is written into `167-UAT.md` (verdict and counts only —
       no key id, account number or server name).
 
+## Phase 167.1.2 (ACCOUNTTRUTH) — founder close-out decisions (logged 2026-10-11)
+
+- **[167.1.2-DRAFT-CLASH-SAYS-SO]** (owner: the next key-connect phase; D-23). A key whose exchange account matches the user's OWN unfinished draft answers 200 `deduped` and drops the new credential without a word. Done when the connect routes refuse with a message naming the existing draft (finish or delete it first), with a test that fails on today's silent dedupe.
+- **[167.1.2-ORPHAN-COPY-FIX]** (owner: the next key-connect phase; D-24). KEY_ORPHANED sends an allocator-role owner to email security instead of naming the key to Disconnect, and an owner whose only holder is an archived composite gets KEY_VENUE_ALREADY_CONNECTED while My Strategies offers "Finish setup". Done when every role is told which key to Disconnect and the archived case names the archived strategy.
+- **[167.1.2-MT5-FAILING-HOLDER]** (owner: the next MT5 phase; D-25; was IN-R2-01). An MT5 key whose sign-in keeps failing can claim its account's holder slot. Done when a failing key never holds the slot and a working key on the same account takes it, with a test.
+- **[167.1.2-DUST-FLOOR-100]** (owner: Phase 164.6.6.2.3 FLOWTIMING; D-27). `USD_FLOORS.dust_nav` moves from 1000.0 to 100.0 (equal to `material_equity`). Done when the floor is 100, its pins and dependants are re-measured, and the PROD effect is sized in FLOWTIMING's dry run before the Wave 5 recompute.
+
 ## Phase 167.1.2 (ACCOUNTTRUTH) — PR C2 informational items (logged 2026-09-29)
 
 - [ ] **`[167.1.2-C2-R3-IN-05]` A corrupt `key_inputs` row on an older key fails the stitched book permanently (Info, C2 round-3 review IN-05, founder: "It is an informational. Just put it into todos").**
@@ -8798,6 +8805,10 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       **Trigger:** Phase 164.9.3 planning.
 
 ## Phase 167.1.2.2 (DERIVECRON) — routed items (logged 2026-10-07)
+
+- **[167.1.2.2-C07-OVERFLOW]** (logged 2026-10-11, DERIVECRON security re-audit, LOW; owner: next analytics-service phase touching job_worker). `read_dropped_day_pnl` and `read_realized_terminal` raise an uncaught `OverflowError` on a ~400-digit JSON integer; the two `except (ValueError, TypeError, KeyError)` sites in `job_worker.py` omit it. Reaching it needs service-role write access. Done when both tuples include `OverflowError`, with a test.
+
+- **[167.1.2.2-SCENARIO-BLANK-SLATE-COPY]** (logged 2026-10-11, DERIVECRON plan 09 browser re-run; owner: 170.6 DISPLAYPOLISH or the next Scenario copy pass). On a blank-slate Scenario with 0 overlapping days, every blend tile reads "Warming up — need 30 more days of synced data" although no strategy is in the scenario (the BTC and Stress panels correctly say to add strategies), and the embedded factsheet renders "0 observations" with the generic thesis "Scenario is a systematic strategy". Done when a blank slate says to add strategies in the tiles and the embedded factsheet shows an honest empty state instead of a thesis.
 
 ### 167.1.2.2-BACKFILL-STALENESS-ALARM — a frozen backfill worker stalls every derive job until a human notices (booked 2026-10-07, Phase 167.1.2.2 D-10)
 
