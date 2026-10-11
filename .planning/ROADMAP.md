@@ -153,7 +153,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
 - [x] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — verification: passed (PR #988, v0.129.6.0, post-merge items measured 2026-10-09)
 - [x] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
-- [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — complete with routed residuals 2026-10-01 (halted 2026-09-27, resumed after 166.4); verification pending
+- [x] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — complete with routed residuals 2026-10-01 (halted 2026-09-27, resumed after 166.4); verification passed 2026-10-12, residuals owned by 166.3.1 NAVBREACH and 170.2 item 5 (completed 2026-10-12)
 - [ ] **Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds** (INSERTED) — not planned; inserted 2026-10-01 (founder); 166.3's R5 recompute waits on it
 - [x] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [ ] **Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly** (INSERTED) — not yet planned (data integrity)
@@ -181,7 +181,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
 - [ ] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned
 - [x] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 3 plans (completed 2026-10-11)
-- [ ] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — not yet planned
+- [x] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — 14 plans, two PRs (#1003, #1006) (completed 2026-10-11)
 - [ ] **Phase 170.5: FACTSHEETV2PANELS — /strategy/[id]/v2 panels render or say why** (INSERTED 2026-10-03) — not yet planned
 - [ ] **Phase 170.6: DISPLAYPOLISH — no signed zeros or red positives; short overlaps read em-dash; booked copy fixes** (INSERTED 2026-10-03) — not yet planned
 - [x] **Phase 170.7: MYSTRATTABLE — My Strategies uses the ranking table, and the name opens the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 9 plans (completed 2026-10-11)
@@ -5453,13 +5453,39 @@ Plans:
 
 ### Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other: Holdings and Open Positions list the positions the Exposure panel shows (2026-10-03: 3 Deribit positions, 185.1K gross, versus 'No holdings to display' / 'No open derivative positions'), Risk and Overview show the same rebuilding state, and Scenario / Diversification Optimizer stop asking to connect a key while keys are connected. (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** The `/allocations` tabs agree about what the allocator holds now and about whether history is rebuilding: the Exposure card, Holdings and Open Positions are three views of one per-key holdings read in which each live key's position is its own row (One Key is One Strategy), Overview and Risk show the same state through one gate, and no allocator-book surface (the Overview and Risk empty states, Scenario's front door, the Diversification Optimizer) asks for a key while an eligible key is connected.
+**Requirements**: D-01..D-11 (phase-local decisions, `170.4-CONTEXT.md`)
 **Depends on:** Phase 170
-**Plans:** 0 plans
+⚠️ **D-11 (founder 2026-10-11, "Fix in PR 2"):** plan 09's reader census found that the over-time charts' reader (`fetchHoldings`) sums every row per day, so after the per-key index two keys of one exchange account would count twice there. PR 2 applies the one-key-per-account-day rule in that reader too; D-03's history semantics are unchanged. Plan 14 carries it, after plan 09 and before plan 13.
+
+**Plans:** 14/14 plans complete, shipped as two PRs (PR 1: plans 01-08, 11, 12, released by 06; PR 2: plans 09, 13 and 14, released by 10)
+
+## Success Criteria
+
+1. The Exposure card's current snapshot is built from the same per-key `holdingsSummary` that Holdings and Open Positions split, so a row dropped by a newer `native_unpriced` marker, a newer clean poll or a newer key on the same exchange account is absent from all three. The allocator-wide snapshot read is removed, and a failed holdings read still throws to the page's error state rather than showing an empty card or a zero (D-01). An agreement test on one fixture, with hand-typed figures, proves it.
+2. A book with no spot rows and N open positions reads "No spot holdings." and points to the N positions below; a truly empty book keeps its honest empty line (D-02).
+3. The over-time charts (NetExposureChart, AllocationOverTime) keep their history semantics (D-03): every day in the window keeps its point and its gap marking; the one change to their read is D-11's one-key-per-account-day rule, applied per `asof` day.
+4. While history is not ready, Overview shows the same `EquityHistoryRebuilding` panel and reason as Risk, ahead of its empty-holdings card; with no eligible key both show the connect-a-key card; both tabs route through one gate (D-04, D-09).
+5. Scenario and the Diversification Optimizer ask to connect a key only when no key is eligible; otherwise they name the real reason (no open positions yet; no portfolio yet). No portfolio is created automatically (D-05, D-06).
+6. Every allocator-book prompt on every tab reads "has an eligible key" from the payload's `hasConnectedKeys`, never from holdings or portfolios, proven by one payload rendered on all four tabs with only that flag flipped (D-07).
+7. Holdings from different API keys are never merged: two live keys on one venue holding one symbol are two rows on Holdings and Open Positions and two slices on Exposure, each named by its key, and every total (AUM, Exposure gross, the Scenario live total, the scenario commit's server AUM, the match scorer's `portfolio_aum`, and each day's net and gross in NetExposureChart and AllocationOverTime) equals the sum over keys, while keys that read one exchange account count once per day in the TS reader, the over-time charts' reader (D-11), the daily refresh and the scorer; tests with hand-typed figures, including same-day and same-account cases, go RED when the cross-key collapse or the per-account de-dup is undone (D-08, D-10, D-11).
+8. `allocator_holdings`' unique index and `persist_allocator_holdings`' conflict target include `api_key_id`, so two keys keep their own same-day row (D-10). The writer ships first (PR 1) with a fallback taken only on SQLSTATE 42P10; the migration (PR 2) creates the new index before dropping the old one in one transaction, cannot hit existing duplicates (a superset key), leaves RLS and grants unchanged, carries a SQL gate whose RED-UNDER arms bite plus a Python pin, and merges only after migration-reviewer and rls-policy-auditor are clean, because the merge applies to PROD with no human gate.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 170.4 to break down)
+- [ ] 170.4-01-PLAN.md — wave 1: the Exposure card reads the payload's per-key holdings, one slice per key; the second "now" read is retired (D-01, D-03, D-08)
+- [ ] 170.4-04-PLAN.md — wave 1: one history gate for Overview and Risk, keyed on `hasConnectedKeys` (D-04, D-07, D-09)
+- [ ] 170.4-05-PLAN.md — wave 1: Scenario's front door and the Optimizer's no-portfolio state ask for a key only when none is eligible; Scenario's live total keeps every key's row (D-05, D-06, D-07, D-08)
+- [ ] 170.4-08-PLAN.md — wave 1: the holdings writer upserts on the per-key target, falling back only on 42P10 until the migration applies (D-10)
+- [ ] 170.4-11-PLAN.md — wave 1: one tie-break (latest `updated_at` instant, then smallest `api_key_id`) shared by TS and Python so an exchange account counts once per day in dollar totals; the daily refresh applies it (D-10, D-08)
+- [ ] 170.4-07-PLAN.md — wave 2: the payload keeps one row per key, each account once per day in dollars; the Scenario fingerprint keeps the commit RPC's contributing row set; the draft's weights keep every key (D-08, D-10)
+- [ ] 170.4-03-PLAN.md — wave 3: Holdings' derivatives-only line, per-key rows named by their key, the Optimizer wired to the flag, the four-tab eligible-key matrix (D-02, D-06, D-07, D-08)
+- [ ] 170.4-12-PLAN.md — wave 3: the scenario commit's server AUM (service-written evidence only, never the audit log) and the match scorer's `portfolio_aum` count every key, each account once (D-08, D-10; closes 167.1.1 R-15-1, R-15-2)
+- [ ] 170.4-02-PLAN.md — wave 4: the cross-surface agreement test: clean-poll, native_unpriced, same-account and two-live-keys (different-day and same-day) cases, owner fence (D-01, D-08)
+- [ ] 170.4-06-PLAN.md — wave 5: release PR 1 (merge latest main, version re-picked from origin/main, one CHANGELOG entry)
+- [ ] 170.4-09-PLAN.md — wave 6, after PR 1 is merged and deployed: the per-key unique-index migration, its rollback, the six-arm SQL gate, the moved fixtures and the Python pin (D-10); plus the commit RPC's native-unpriced fingerprint rule with its two-arm gate and TS-vs-SQL parity test (review WR-02, TODOS 170.4-FINGERPRINT-UNPRICED-TWIN)
+- [ ] 170.4-14-PLAN.md — wave 7: the over-time charts' reader (`fetchHoldings`) applies the one-key-per-account-day rule per `asof` day, history otherwise unchanged; fails loud on a failed identity read (D-11, D-10, D-03)
+- [ ] 170.4-13-PLAN.md — wave 8: floors and gate censuses; migration-reviewer and rls-policy-auditor clean (D-10)
+- [ ] 170.4-10-PLAN.md — wave 9: release PR 2 (ancestry guard on PR 1's merge commit) and book the fallback's removal
 
 ### Phase 170.3: OGPUBLIC — a factsheet's share-preview image loads for signed-out visitors and crawlers (today /api/og/factsheet/* answers 307 to /login because /api/og is missing from PUBLIC_ROUTES in src/proxy.ts), and the OG card equals the factsheet (a 24-observation strategy's card shows Sharpe and Max DD as an em-dash while the factsheet shows 0.12 and -3.7%; the description is cut mid-word). Found by the 2026-10-03 PROD browser pass. (INSERTED)
 
@@ -5704,7 +5730,7 @@ kept verbatim.
 | 166.1 ENGINEFLOOR | 4/4 | Complete    | 2026-10-04 |
 | 166.1.1 DDSIGN | 3/3 | Complete | v0.129.6.0 · #988 · verification passed 2026-10-09 |
 | 166.2 COMPUTEONCE | 7/7 | Complete    | 2026-10-04 |
-| 166.3 RECOMPUTE | 0/1 | HALTED 2026-09-27 at Task 3 — resumes after 166.4 ships | - |
+| 166.3 RECOMPUTE | 1/1 | Complete (residuals routed) | 2026-10-12 |
 | 166.3.1 NAVBREACH | 0/? | Queued | - |
 | 166.4 BENCHALIGN | 4/4 | Complete | v0.108.0.0 · #892 · (verification passed 7/7) |
 | 166.4.1 PORTFOLIOANALYTICS | 0/? | Queued — data integrity | - |
@@ -5732,7 +5758,7 @@ kept verbatim.
 | 170.1 COPY | 0/? | Queued — feature, after 170 | - |
 | 170.2 PROBEFIXES | 0/? | Queued | - |
 | 170.3 OGPUBLIC | 3/3 | Complete | 2026-10-11 |
-| 170.4 ALLOCHOLDINGS | 0/? | Queued — user-facing, booked 2026-10-03 | - |
+| 170.4 ALLOCHOLDINGS | 14/14 | Complete | 2026-10-11 |
 | 170.5 FACTSHEETV2PANELS | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 170.6 DISPLAYPOLISH | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 170.7 MYSTRATTABLE | 9/9 | Complete | 2026-10-11 |
@@ -6835,8 +6861,8 @@ factsheet on a spinner that never resolves.
 - [x] **Phase 141.2: SEAMFIX — close the 141.1 code-review findings: duplicate onboard verification write, flag-monitor denominator integrity, breaker re-arm** (INSERTED) - 25 findings from the xhigh review (30 agents) deduped to 13; outcome is **twelve remediated, one dispositioned** — finding 8's retry↔limiter amplification is ACCEPTED, not fixed, and is stated as STILL LIVE everywhere it is summarised. Closes the duplicate `strategy_verifications` write on the money path (onboard's retry is now refused unless the call carries a truthy `wizard_session_id`, decided at the single chokepoint) and the three monitoring-integrity regressions D-16 shipped (unbounded `.select()` → `head: true` count, attacker-movable dedup deleted outright, read error now a distinct `denominator_read_failed` outcome rather than zero traffic). 6/6 plans (completed 2026-08-01). VERIFICATION was `human_needed` 17/17 and is now **passed** — three of its four production probes were discharged read-only on 2026-08-01 (42 rows / 42 distinct `correlation_id` / 0 `wizard:` prefix, flow_type resync 20 · csv 20 · onboard 2; unbounded `.select()` returned exactly 1000 rows at HTTP 200 with `error: null` against 7351 total, reproducing the silent truncation; all five breaker keys ABSENT, keeping finding 10 framed as hardening). The fourth — a real Railway-edge 503 carrying a malformed `Retry-After` — stays **Manual-Only and is not a gap**: it cannot be induced, and the only contract-bound 503 emitter we own structurally cannot emit one. ⏳ On PR #656, **not yet merged**
 - [x] **Phase 142: JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL** - Writer-stamped transition timestamp + pg_cron reaper to terminal `failed` + threshold-math CI invariant + WEDGE-01 regression test (completed 2026-08-02)
 - [x] **Phase 142.1: Close 142 review findings: chain-start stamp preservation, deploy sequencing, terminal-writer parity** (INSERTED) — completed 2026-08-03 (#659, v0.52.0.0)
-- [ ] **Phase 142.2: Get MetaTrader 5 running end to end on the unified backbone** (INSERTED) — shipped 2026-08-04 (#660, v0.53.0.0); its phase detail records it as STILL NOT CLOSED
-- [ ] **Phase 142.3: Prove the MT5 numbers correct against the live terminal on a trading day** (INSERTED) — never planned (0 plans); its requirements MT5-06..10 are owned by v1.18 Phase 155
+- [x] **Phase 142.2: Get MetaTrader 5 running end to end on the unified backbone** (INSERTED) — shipped 2026-08-04 (#660, v0.53.0.0); closed 2026-10-12 by founder decision, MT5-05 met by production evidence (completed 2026-10-12)
+- [x] **~~Phase 142.3~~: Prove the MT5 numbers correct against the live terminal on a trading day** (INSERTED) — ⛔ RETIRED 2026-10-12 by founder decision ("then close: 142.3"): closed WITHOUT delivery as a phase; never planned, its scope was re-homed to v1.17 Phase 153 and its requirements MT5-06..10 are owned by v1.18 Phase 155
 - [→] **Phase 143: JOB — Dropped-enqueue reconciliation sweep** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
 - [→] **Phase 144: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
 - [→] **Phase 145: JOB — csv-finalize atomicity (reproduce-first)** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
@@ -7282,6 +7308,8 @@ Plans:
 
 ### Phase 142.2: Get MetaTrader 5 running end to end on the unified backbone (INSERTED)
 
+⭐ **CLOSED 2026-10-12 (founder, "phase complete: 142.2").** MT5-05 is met by production evidence: 9 MT5 keys connected through the wizard since 2026-08-04, all active, all 9 strategies computed (read-only, marker first). `142.2-VERIFICATION.md` and `142.2-HUMAN-UAT.md` carry the close-out. The "STILL NOT CLOSED" text below is kept as lineage; the reachable-not-correct warning still stands.
+
 **Goal:** A founder can connect a real MetaTrader 5 account through the wizard and reach a rendered strategy — key → dailies → backbone → UI — with no step requiring a human to know an internal error code, a server name, or a flag, and with admissibility decided by the canonical daily series rather than a hand-maintained venue list.
 **Requirements**: MT5-01..05, MT5-11, MT5-12 (set at /gsd-discuss-phase 2026-08-03; see `142.2-CONTEXT.md` for the sixteen decisions behind them). ⚠️ MT5-11/MT5-12 were added AFTER the discussion, from live dogfood: the gate is not on the unified backbone. MT5-01/02 are already complete.
 **Depends on:** Phase 142
@@ -7323,6 +7351,8 @@ Plans:
 
 ### Phase 142.3: Prove the MT5 numbers correct against the live terminal on a trading day (INSERTED)
 
+⛔ **RETIRED 2026-10-12 (founder, "then close: 142.3").** Never planned; closed without delivery as a phase. Its scope lives in v1.17 Phase 153 and its requirements MT5-06..10 in v1.18 Phase 155. The text below is kept as lineage.
+
 **Goal:** The performance Quantalyze renders for a live funded MT5 account matches the MT5 terminal's own equity and balance figures on a trading day, on every surface that renders it, with the broker-server-to-UTC offset measured rather than assumed — and any discrepancy found is fixed, wherever its root cause lives.
 **Requirements**: MT5-06..10 (split out of Phase 142.2 on 2026-08-03 at the D-14 valve; the decisions behind them are D-07..D-11 in `142.2-CONTEXT.md`).
 **Depends on:** Phase 142.2 (MT5 must be reachable through the gate before its numbers can be checked)
@@ -7359,8 +7389,7 @@ Plans:
 | 141.2. SEAMFIX (INSERTED) | 6/6 | Complete | 2026-08-01 |
 | 142. JOB reaper + DDL | 6/6 | Complete   | 2026-08-02 |
 | 142.1. Close 142 review findings (INSERTED) | 8/8 | Complete (shipped v0.52.0.0, #659) | 2026-08-03 |
-| 142.2. MT5 end to end on the unified backbone (INSERTED) | 8/8 | Shipped v0.53.0.0 (#660); its phase detail records it as not closed | 2026-08-04 |
-| 142.3. MT5 live-terminal proof (INSERTED) | 0/? | Never planned; MT5-06..10 are owned by v1.18 Phase 155 | - |
+| 142.2. MT5 end to end on the unified backbone (INSERTED) | 8/8 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
 | 143. JOB dropped-enqueue sweep | 0/? | ➡️ **CARRIED to v1.19** | - |
 | 144. JOB WR-02 terminal UPDATE | 0/? | ➡️ **CARRIED to v1.19** | - |
 | 145. JOB csv-finalize atomicity | 0/? | ➡️ **CARRIED to v1.19** | - |
