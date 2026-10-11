@@ -2245,13 +2245,20 @@ BEGIN
   -- portfolio_fingerprint_stale, which no refresh cleared. The CTE below is
   -- that reader's rule, step for step:
   --   1. the owner's keys, departed ones included;
-  --   2. per key, its latest asof, and its newest audit event
-  --      'allocator.holdings.sync_completed' with final_status 'complete'
-  --      (newest by created_at DESC, NULLs first, as PostgREST orders). That
-  --      event is evidence only when row_count is a non-negative whole number
-  --      and asof is a YYYY-MM-DD string (cleanPollDay). When its day is
-  --      STRICTLY after the key's latest rows, the key's reading is that day
-  --      with no rows (SFH-C4-02); otherwise it is the latest asof with rows;
+  --   2. per key, its latest asof, its service-written native-unpriced marker
+  --      (allocator_equity_derived, kind 'native_unpriced:' || the key id), and
+  --      its newest audit event 'allocator.holdings.sync_completed' with
+  --      final_status 'complete' (newest by created_at DESC, NULLs first, as
+  --      PostgREST orders). The marker is evidence only when its payload is an
+  --      object whose native_unpriced is JSON true and whose asof is a
+  --      YYYY-MM-DD string (nativeUnpricedDay). When its day is STRICTLY after
+  --      the key's latest rows, or the key has none, the key's reading is that
+  --      day with no rows (170.4 review WR-02), and this is decided BEFORE the
+  --      clean poll. The clean-poll event is evidence only when row_count is a
+  --      non-negative whole number and asof is a YYYY-MM-DD string
+  --      (cleanPollDay). When its day is STRICTLY after the key's latest rows,
+  --      the key's reading is that day with no rows (SFH-C4-02); otherwise it
+  --      is the latest asof with rows;
   --   3. keys grouped by exchange account (accountIdentityTokens, the D-09
   --      identity: a shared non-blank venue_account_id on one exchange, or an
   --      account_shared_with_api_key_id marker of a shared kind, joined
@@ -2268,9 +2275,11 @@ BEGIN
   -- ⚠️ TWIN. This is the third copy of the rule (TypeScript reader, this, and
   -- the grain rule in plan 10's Python helper). A change to
   -- latest-holdings-per-key.ts or to accountIdentityTokens that is not made
-  -- here re-opens SFH-R2-01. The gate is
+  -- here re-opens SFH-R2-01. The gates are
   -- supabase/tests/test_commit_scenario_batch_fingerprint_precondition.sql
-  -- tests 10-14.
+  -- tests 10-14 and supabase/tests/test_commit_scenario_batch_fingerprint_unpriced.sql
+  -- (the native-unpriced arm, bound to the TypeScript side by
+  -- src/lib/fingerprint-unpriced-parity.test.ts).
   --
   -- The token format MIRRORS computeHoldingsFingerprint (scenario-state.ts):
   -- symbol-first "symbol:venue:holding_type", and NO value_usd filter (the
@@ -2351,7 +2360,15 @@ BEGIN
                  AND al.entity_id   = k.id
                  AND al.metadata->>'final_status' = 'complete'
                ORDER BY al.created_at DESC
-               LIMIT 1) AS poll_meta
+               LIMIT 1) AS poll_meta,
+             -- 170.4 WR-02: the positions poll's service-written record that it
+             -- found a native-unit account UNPRICED (allocator_equity_derived has
+             -- one row per (allocator_id, kind); the owner has SELECT only).
+             (SELECT d.payload
+                FROM allocator_equity_derived d
+               WHERE d.allocator_id = p_allocator_id
+                 AND d.kind         = 'native_unpriced:' || k.id::text
+               LIMIT 1) AS unpriced_meta
         FROM owner_keys k
     ),
     key_poll AS (
@@ -2370,7 +2387,17 @@ BEGIN
                WHEN jsonb_typeof(e.poll_meta->'asof') IS DISTINCT FROM 'string' THEN NULL
                WHEN (e.poll_meta->>'asof') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN NULL
                ELSE e.poll_meta->>'asof'
-             END AS poll_day
+             END AS poll_day,
+             -- nativeUnpricedDay. Same guards, same order: an object payload,
+             -- native_unpriced JSON true, asof a YYYY-MM-DD string.
+             CASE
+               WHEN e.unpriced_meta IS NULL THEN NULL
+               WHEN jsonb_typeof(e.unpriced_meta) <> 'object' THEN NULL
+               WHEN e.unpriced_meta->'native_unpriced' IS DISTINCT FROM 'true'::jsonb THEN NULL
+               WHEN jsonb_typeof(e.unpriced_meta->'asof') IS DISTINCT FROM 'string' THEN NULL
+               WHEN (e.unpriced_meta->>'asof') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN NULL
+               ELSE e.unpriced_meta->>'asof'
+             END AS unpriced_day
         FROM key_evidence e
     ),
     key_reading AS (
@@ -2378,14 +2405,19 @@ BEGIN
              p.latest_asof,
              (p.poll_day IS NOT NULL
               AND (p.latest_day IS NULL
-                   OR p.poll_day COLLATE "C" > p.latest_day COLLATE "C")) AS polled_after_rows
+                   OR p.poll_day COLLATE "C" > p.latest_day COLLATE "C")) AS polled_after_rows,
+             (p.unpriced_day IS NOT NULL
+              AND (p.latest_day IS NULL
+                   OR p.unpriced_day COLLATE "C" > p.latest_day COLLATE "C")) AS unpriced_after_rows
         FROM key_poll p
     ),
     key_day AS (
       SELECT r.id,
              r.latest_asof,
-             NOT r.polled_after_rows AS has_rows,
-             CASE WHEN r.polled_after_rows THEN p.poll_day ELSE p.latest_day END AS day
+             NOT (r.unpriced_after_rows OR r.polled_after_rows) AS has_rows,
+             CASE WHEN r.unpriced_after_rows THEN p.unpriced_day
+                  WHEN r.polled_after_rows THEN p.poll_day
+                  ELSE p.latest_day END AS day
         FROM key_reading r
         JOIN key_poll p ON p.id = r.id
     ),
@@ -2707,7 +2739,7 @@ $_$;
 ALTER FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") IS 'audit-2026-05-07 H-0974 / H-0976 / H-0977 + mig 131 idempotency dedup + B11 NEW-C18-10 portfolio-fingerprint precondition. SECURITY DEFINER RPC that commits a batch of <=50 scenario diffs in a single Postgres transaction. auth.uid() = p_allocator_id guard. Per-row ownership probe with asof + value_usd > 0 filter (mig 128 P1957). voluntary_modify uses single canonical percent_allocated encoding (mig 128 P1956). Idempotency-Key reservation lives in the same tx as the data inserts (mig 131). When p_portfolio_fingerprint is supplied, the CURRENT holdings token set is recompared against it (order-invariant, COLLATE "C", no value_usd filter) and a divergence returns ok:false code=portfolio_fingerprint_stale (route -> 409). Since 20260929120000 (Phase 167.1.2 SFH-R2-01) the current set is the one the My Allocation reader shows (fetchLatestHoldingsPerKey): each key''s rows at its own latest reading, one reading per exchange account, and no rows from a key whose newer clean poll read nothing. On success, emits one scenario.commit audit_log row attributed to the allocator (fail-soft).';
+COMMENT ON FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") IS 'audit-2026-05-07 H-0974 / H-0976 / H-0977 + mig 131 idempotency dedup + B11 NEW-C18-10 portfolio-fingerprint precondition. SECURITY DEFINER RPC that commits a batch of <=50 scenario diffs in a single Postgres transaction. auth.uid() = p_allocator_id guard. Per-row ownership probe with asof + value_usd > 0 filter (mig 128 P1957). voluntary_modify uses single canonical percent_allocated encoding (mig 128 P1956). Idempotency-Key reservation lives in the same tx as the data inserts (mig 131). When p_portfolio_fingerprint is supplied, the CURRENT holdings token set is recompared against it (order-invariant, COLLATE "C", no value_usd filter) and a divergence returns ok:false code=portfolio_fingerprint_stale (route -> 409). Since 20260929120000 (Phase 167.1.2 SFH-R2-01) the current set is the one the My Allocation reader shows (fetchLatestHoldingsPerKey): each key''s rows at its own latest reading, one reading per exchange account, and no rows from a key whose newer clean poll read nothing. Since 20261011120100 (Phase 170.4 WR-02) a key whose service-written native_unpriced marker (allocator_equity_derived) is dated after its newest rows reads as a day with no rows, exactly as the reader does. On success, emits one scenario.commit audit_log row attributed to the allocator (fail-soft).';
 
 
 
@@ -11356,7 +11388,7 @@ CREATE TABLE IF NOT EXISTS "public"."allocator_holdings" (
 ALTER TABLE "public"."allocator_holdings" OWNER TO "postgres";
 
 
-COMMENT ON TABLE "public"."allocator_holdings" IS 'Allocator-owned holdings stream — one row per (allocator_id, venue, symbol, asof). Produced by the FastAPI job worker via the poll_allocator_positions kind. Three-tier RLS (owner/admin/service) per D-03. Phase 06 / Plan 01. Schema mirrors position_snapshots on purpose so Phase 09 Bridge swap-the-source is cheap.';
+COMMENT ON TABLE "public"."allocator_holdings" IS 'Allocator-owned holdings stream — one row per (allocator_id, venue, symbol, asof, api_key_id). Produced by the FastAPI job worker via the poll_allocator_positions kind. Three-tier RLS (owner/admin/service) per D-03. Phase 06 / Plan 01. Schema mirrors position_snapshots on purpose so Phase 09 Bridge swap-the-source is cheap. Phase 170.4 D-10: the key gained api_key_id, so each key keeps its own row.';
 
 
 
@@ -13721,7 +13753,11 @@ CREATE INDEX "allocator_holdings_api_key_id_idx" ON "public"."allocator_holdings
 
 
 
-CREATE UNIQUE INDEX "allocator_holdings_owner_venue_symbol_asof_key" ON "public"."allocator_holdings" USING "btree" ("allocator_id", "venue", "symbol", "asof");
+CREATE UNIQUE INDEX "allocator_holdings_owner_venue_symbol_asof_api_key_key" ON "public"."allocator_holdings" USING "btree" ("allocator_id", "venue", "symbol", "asof", "api_key_id");
+
+
+
+COMMENT ON INDEX "public"."allocator_holdings_owner_venue_symbol_asof_api_key_key" IS 'Phase 170.4 D-10 (replaces allocator_holdings_owner_venue_symbol_asof_key). The idempotent-upsert anchor: one row per (allocator_id, venue, symbol, asof, api_key_id), so two live keys of one allocator on one venue each keep their own row for one symbol and day (D-08). The analytics worker upserts on exactly these five columns (services/allocator_positions.py HOLDINGS_CONFLICT_TARGET, pinned by tests/test_persist_holdings_conflict_target.py). Keys that share one exchange account are de-duplicated at READ time by the one-key-per-account-day rule, never here.';
 
 
 
