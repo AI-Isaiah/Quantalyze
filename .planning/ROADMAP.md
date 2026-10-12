@@ -164,7 +164,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — verified 2026-10-11 (completed 2026-10-11)
 - [ ] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — not yet planned (data integrity; after 167.1.2 PR C)
 - [x] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — planned 2026-10-07, 9 plans (completed 2026-10-11)
-- [ ] **Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital** (INSERTED 2026-10-08) — not yet planned (founder D-18, 167.1.2.2)
+- [x] **Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital** (INSERTED 2026-10-08) — 8 plans, two PRs (#991, PR-2); closed 2026-10-12, SC-4 trustworthy clause routed to NAVBREACH (completed 2026-10-12)
 - [ ] **Phase 167.1.2.2.2: TRADESYNC — live strategy keys ingest trades daily again** (INSERTED 2026-10-09) — not yet planned (founder, data integrity)
 - [x] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
@@ -4546,6 +4546,7 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy
 2. The fix never weakens the reconciliation gate: no widened tolerance and no forged inception row.
 3. The composite's `stitch_composite` recompute on PROD succeeds through the normal job path, with its before/after recorded counts-only.
 4. A failed stitch no longer re-stamps `computed_at` as if the row were current, or that is recorded as a separate defect with an owner.
+5. The two Deribit allocator books that compose but read `is_trustworthy` false on `dropped_key` read trustworthy, or the reason they cannot is recorded. Three return-bearing keys carry a NULL capital anchor (an emptied Deribit account anchored `dust` with 649 return days, and two MT5 keys anchored `nonpositive` and `dust`); NAVBREACH decides how such a key composes, for example as zero capital like an emptied stretch per DERIBITWEDGE D-01. *(Routed 2026-10-12 from 167.1.2.2.1 DERIBITWEDGE SC-4; founder: "Close, route to NAVBREACH"; TODOS `167.1.2.2.1-DROPPED-KEY-NULL-ANCHOR`.)*
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 166.3.1 to break down)
@@ -4853,12 +4854,13 @@ Plans:
 
 1. Under cash_settlement the wedge counts the session move once, and a fixture with `options_session_upl` set fails on today's code. The identity is confirmed first with one Deribit account-summary read at the account's next derive.
 2. The inception `is_dust` allowance is also bounded by an absolute or NAV-relative cap, so the measured offset no longer reads `native_inception: reconciled`. A test fails on today's code.
-3. An emptied stretch, a level within a small band of zero, composes as zero capital with no return, and the book continues on re-deposit. It is neither refused nor degraded (founder D-18(b)). A synthetic withdraw-100%, sit-at-zero, re-deposit key fails on today's compose.
+3. An emptied stretch, a level within a small band of zero, composes as zero capital with no return, and the book continues on re-deposit. It is neither refused nor degraded (founder D-18(b)). A synthetic withdraw-100%, sit-at-zero, re-deposit key fails on today's compose. (Amended 2026-10-10, founder D-07: a re-deposit ends an emptied stretch and restarts the prior peak only when it lifts the level to at least 1% of that peak; a smaller (dust) deposit leaves the stretch running. Plan 09; PROD expects 755 emptied days in 2 stretches.) (Amended 2026-10-10, founder D-08: a re-deposit that lifts the level to at least 100 USD also ends the stretch, so a real small restart is live capital.) (Amended 2026-10-10, founder D-09: emptied means below the smaller of 1% of the prior peak and 100 USD, so 100 USD or more is always live; review round-2 MEDIUMs fixed before ship, overriding the worst-MEDIUM rule.)
 4. Every Deribit account whose cash-basis returns move is named and re-baselined, with before and after readings on PROD (marker first, counts and verdicts only). The recompute runs in the Wave 5 consolidated recompute, and the refused allocator then reads a trustworthy v2 book.
-5. The remaining `inception_unreconciled` on that key (+1.3% implied pre-deposit capital, not explained by the offset) is measured and either fixed here or routed by name.
+   *(Note, 2026-10-09, orchestrator: the 05:30 UTC cron re-derives each connected key with the deployed code, so merge-and-deploy of PR-2 is the keys' re-baseline (plan 08 brackets it); the Wave 5 consolidated recompute covers the two private composites only, so no row is recomputed twice.)*
+5. The remaining `inception_unreconciled` on that key (+1.3% implied pre-deposit capital, not explained by the offset) is measured and either fixed here or routed by name. (Measured 2026-10-10 by plan 06: H-D, the gap is between the allocator compose and the writer, not in the ledger. Fixed here by plans 10 and 11 (founder D-06).)
 6. Two derives over the same stored inputs produce identical returns (today 372 of 1187 days differ, because the derive reads live account state). A test runs the derive twice on frozen inputs and fails on today's code. Any live read the derive needs is captured as a stored input. (Added 2026-10-09, founder: fix here, not a new phase; 167.1.2.2.1 CONTEXT D-03.)
 
-**Plans:** 8 plans (6 waves: W1 01 · W2 02 · W3 03, 04, 05 · W4 06 · W5 07 · W6 08). Two ships: PR-1 after plan 02 (additive capture, no value change), PR-2 after plan 07. Plans 05, 06 and 08 wait on PROD readings (not autonomous).
+**Plans:** 11 plans (9 waves: W1 01 · W2 02 · W3 03, 05 · W4 04 · W5 06, 09 · W6 10 · W7 11 · W8 07 · W9 08; gap plans 09-11 added 2026-10-10 for D-06/D-07; plan 04 moved behind 03 because plan 03 Task 3 folds in PR-1 review MD-01/MD-02 and both edit `allocator_equity_derive.py`). Two ships: PR-1 after plan 02 (additive capture, no value change), PR-2 after plan 07. Plans 05, 06 and 08 wait on PROD readings (not autonomous).
 
 Plans:
 **Wave 1**
@@ -4869,23 +4871,37 @@ Plans:
 
 - [ ] 167.1.2.2.1-02-PLAN.md — (A) the stored inception numbers that decide the cap and SC-5 (`native_inception_diagnostics`, gate verdicts unchanged), then the PR-1 release commit
 
-**Wave 3** *(blocked on Wave 2 completion; plan 05 also waits on PR-1 deployed and a 05:30 UTC derive)*
+**Wave 3** *(blocked on Wave 2 completion and PR-1 merged; plan 05 also waits on PR-1 deployed and a 05:30 UTC derive)*
 
-- [ ] 167.1.2.2.1-03-PLAN.md — (B) cash wedge anchored on `balance` (SC-1, D-18) and derive determinism: perturbation matrix plus stored-snapshot replay (SC-6, D-03), RED first
-- [ ] 167.1.2.2.1-04-PLAN.md — (B) emptied stretch composes as zero capital at below 1% of prior peak, peak restarts on re-deposit, data faults still refuse (SC-3, D-01, D-02, D-04), RED first
+- [ ] 167.1.2.2.1-03-PLAN.md — (B) cash wedge anchored on `balance` (SC-1, D-18) and derive determinism: perturbation matrix plus stored-snapshot replay (SC-6, D-03), RED first; Task 3: a refused derive stores its capture on `key_capture:<key>` (PR-1 review MD-01), sound identity tolerance (MD-02), real diagnostic through job_worker (LO-06)
 - [ ] 167.1.2.2.1-05-PLAN.md — read-only re-baseline runbook; PROD reading of the stored capture: `identity-verdict`, `cap-verdict`, SC-5 prediction (non-autonomous)
 
-**Wave 4** *(blocked on Wave 3 completion)*
+**Wave 4** *(blocked on plan 03)*
+
+- [ ] 167.1.2.2.1-04-PLAN.md — (B) emptied stretch composes as zero capital at below 1% of prior peak, peak restarts on re-deposit, data faults still refuse (SC-3, D-01, D-02, D-04), RED first
+
+**Wave 5** *(blocked on Waves 3-4 completion)*
 
 - [ ] 167.1.2.2.1-06-PLAN.md — (D) SC-5 decided by replaying stored PROD inputs (H-I fixed here, H-L routed to 166.3.1 NAVBREACH, H-D stops for a gap replan); (C) the $5 inception dust cap, merged only on `cap-verdict: passes` (SC-2, OQ-3) (non-autonomous)
+- [ ] 167.1.2.2.1-09-PLAN.md — (gap) a dust re-deposit below 1% of the prior peak does not end an emptied stretch (D-07, SC-3); PROD replay expects 755 emptied days in 2 stretches (non-autonomous)
 
-**Wave 5** *(blocked on Wave 4 completion)*
+**Wave 6 (gap)** *(blocked on plans 06 and 09)*
+
+- [ ] 167.1.2.2.1-10-PLAN.md — (gap) the Deribit writer stores its own composed flows and day P&L in `key_inputs` (D-06, SC-5, SC-6)
+
+**Wave 7 (gap)** *(blocked on plan 10)*
+
+- [ ] 167.1.2.2.1-11-PLAN.md — (gap) the allocator compose rolls on the writer's stored flows and day P&L, so its implied start matches the writer's (D-06, SC-5, SC-3)
+
+**Wave 8** *(blocked on plans 09, 10, 11)*
 
 - [ ] 167.1.2.2.1-07-PLAN.md — (E) Wave 5 hand-off (keys re-baseline at the first post-deploy derive; composites after NAVBREACH), owned residue in TODOS, PR-2 release commit
 
-**Wave 6** *(blocked on PR-2 deployed)*
+**Wave 9** *(blocked on PR-2 deployed)*
 
 - [ ] 167.1.2.2.1-08-PLAN.md — post-ship PROD BEFORE/AFTER around the first post-deploy 05:30 UTC derive; verdicts for SC-1..SC-6 (non-autonomous)
+
+⭐ **CLOSED 2026-10-12.** VERIFICATION passed (6/6) after plan 08's PROD readings around the 2026-10-12 05:30 UTC derive. SC-4's clause "the refused allocator then reads a trustworthy v2 book" is routed by name to Phase 166.3.1 NAVBREACH (founder: "Close, route to NAVBREACH"; its success criterion 5; TODOS `167.1.2.2.1-DROPPED-KEY-NULL-ANCHOR`).
 
 ### Phase 167.1.2.2.2: TRADESYNC — live strategy keys ingest trades daily again: /cron-sync gets a runbook-registered pg_cron tick, each stale key's cursor is seeded at its last stored trade so the gap backfills, and "Synced" reads the last trade fetch (INSERTED)
 
@@ -5777,7 +5793,7 @@ kept verbatim.
 | 167.1.2 ACCOUNTTRUTH | PR A, B, C1–C5 shipped | Complete | 2026-10-11 |
 | 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
 | 167.1.2.2 DERIVECRON | 9/9 | Complete | 2026-10-11 |
-| 167.1.2.2.1 DERIBITWEDGE | 0/? | Queued — booked 2026-10-08 (founder D-18) | - |
+| 167.1.2.2.1 DERIBITWEDGE | 8/8 | Complete | 2026-10-12 |
 | 167.1.2.2.2 TRADESYNC | 0/? | Queued — booked 2026-10-09 (founder) | - |
 | 167.2 KEYCARDSYNC | 10/10 | Complete    | 2026-10-04 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
