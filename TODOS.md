@@ -8865,6 +8865,12 @@ reads `ready` in census e on the next scheduled run.
 
 ## Phase 167.1.2.2.1 (DERIBITWEDGE) — routed items (logged 2026-10-10)
 
+### 167.1.2.2.1-DROPPED-KEY-NULL-ANCHOR — two Deribit allocator books compose but read untrustworthy on `dropped_key` (booked 2026-10-12, DERIBITWEDGE plan 08 SC-4)
+
+Three return-bearing keys carry a NULL capital anchor: an emptied Deribit account anchored `dust` (649 return days) and two MT5 keys anchored `nonpositive` and `dust`. The compose drops them and marks both books `is_trustworthy` false. A scratch compose of the stored inputs shows the Deribit accounts without the dust-anchored key come out trustworthy.
+
+**Owner:** Phase 166.3.1 NAVBREACH, success criterion 5 (founder decision 2026-10-12, "Close, route to NAVBREACH"). **Done when** NAVBREACH decides and implements how a dust- or nonpositive-anchored key with real return history composes (for example as zero capital, like an emptied stretch per DERIBITWEDGE D-01) and both books read trustworthy, or the reason they cannot is recorded.
+
 ### 167.1.2.2.1-WAVE5-REBASELINE — the two private composites are recomputed once, in the Wave 5 consolidated run, after NAVBREACH (booked 2026-10-10, Phase 167.1.2.2.1 plan 07, D-18)
 
 **Why it is open.** The daily 05:30 UTC derive re-derives every connected Deribit key with the

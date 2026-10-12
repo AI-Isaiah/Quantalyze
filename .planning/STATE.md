@@ -6,10 +6,10 @@ current_phase: 164.6.6.1
 current_phase_name: MT5SCRUB
 status: executing
 stopped_at: 164.6.6.1 re-planned 2026-10-04 after the scrub spike (8 plans, 6 waves, plan-check passed); next execute, plan 02 S-11 checkpoint first
-last_updated: "2026-10-12T20:45:02.737Z"
+last_updated: "2026-10-12T20:53:03.485Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 164.6.6.1 execution started
-state_head: ac07234e01b3117d3b6ae69d821008e4591586c5
+state_head: 88b8e34938c6d0fec2d7343558a1b9f8126fbcb3
 progress:
   total_phases: 108
   completed_phases: 91
@@ -1452,6 +1452,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 170.3 edited: re-scoped: OG-card parity moved to 164.6.6.3.3 item 4; 170.6: disclaimer moved to 164.6.6.3.1 item 6a, red em-dash on OG cards moved to 164.6.6.3.3 item 4 (founder 2026-10-06)
 - Phase 164.6.6.2.2 inserted after Phase 164.6.6.2: WEALTHRETURNS: Python blends read the stored wealth curve as daily returns (164.6.6.2 CR-01); founder 2026-10-07 own phase, ship BTCNATIVE first (URGENT)
 - Phase 170.6 edited: edited fields: success_criteria (routed from the 170.2 phone re-check, founder 2026-10-12)
+- Phase 164.6.8 edited: edited fields: success_criteria (WR-02 routed from MT5SCRUB, founder 2026-10-12)
+- Phase 166.3.1 edited: edited fields: success_criteria (--force; dropped_key routed from DERIBITWEDGE SC-4, founder 2026-10-12)
 
 ### Decisions
 

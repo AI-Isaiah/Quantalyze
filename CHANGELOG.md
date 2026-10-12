@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.131.0.1] - 2026-10-12 — Close-out records: DERIBITWEDGE closed, three routed items placed in their owning phases
+
+Docs and ledger only. No code changes.
+
+### Notes
+- **Phase 167.1.2.2.1 DERIBITWEDGE is closed.** VERIFICATION passed (6 of 6) after the PROD readings around the 2026-10-12 05:30 UTC derive. SC-1, SC-2, SC-3 and SC-6 are met. SC-5's inception residual is fixed on PROD: compose start and writer prev0 agree on all 3 keys of the options-holding account. SC-4's re-baseline was measured: no stored return moved across 3 accounts. Its clause "the refused allocator then reads a trustworthy v2 book" is not met yet. The book composes but reads untrustworthy on `dropped_key`, so that clause is routed by name to Phase 166.3.1 NAVBREACH (founder decision 2026-10-12).
+- **Routed with `/gsd-phase --edit`, founder decisions 2026-10-12:**
+  - NAVBREACH (166.3.1) gains success criterion 5: the two Deribit books with a NULL-anchored key read trustworthy, or the reason is recorded. TODOS `167.1.2.2.1-DROPPED-KEY-NULL-ANCHOR` names it as owner.
+  - OUTAGEALERT (164.6.8) gains success criterion 2: an MT5 relaunch debt the self-heal cannot clear is logged at ERROR and reaches a human. This is MT5SCRUB review finding WR-02, which the founder chose to fix rather than accept.
+- **STATE roadmap evolution** records both edits.
+
 ## [0.131.0.0] - 2026-10-12 — TRADESYNC (2/2): the daily tick resumes each strategy from its own stored data, stamps a trade fetch only when one happened, and every surface says "Trades fetched"
 
 Phase 167.1.2.2.2, second of two PRs, and it carries no migration (`git diff origin/main...HEAD --name-only -- supabase/migrations` is empty). Release 1 (0.129.10.0) put the callable `cron_sync_tick()` and the `trades_fetched_at` and `series_provenance` columns on PROD; this one is every reader and writer of them: the `/api/cron-sync` route, the badge, the factsheet, the tear sheet, the relabels, the ADR correction, the go-live runbook and the TODOS bookings. **Nothing is scheduled yet.** The tick has still never run on a clock; the go-live runbook (plans 16-21) registers it after a rehearsal against this deployed code.
