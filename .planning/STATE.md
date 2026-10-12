@@ -6,16 +6,16 @@ current_phase: 164.6.6.1
 current_phase_name: MT5SCRUB
 status: executing
 stopped_at: 164.6.6.1 re-planned 2026-10-04 after the scrub spike (8 plans, 6 waves, plan-check passed); next execute, plan 02 S-11 checkpoint first
-last_updated: "2026-10-06T09:40:09.233Z"
+last_updated: "2026-10-12T20:45:02.737Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 164.6.6.1 execution started
-state_head: 9a613e5332a8513753c27943adde59b67db5f9f2
+state_head: ac07234e01b3117d3b6ae69d821008e4591586c5
 progress:
-  total_phases: 94
-  completed_phases: 70
-  total_plans: 494
-  completed_plans: 482
-  percent: 74
+  total_phases: 108
+  completed_phases: 91
+  total_plans: 632
+  completed_plans: 621
+  percent: 84
 ---
 
 ## ⭐ STATE lineage
@@ -978,7 +978,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [███████░░░] 74%
+Progress: [████████░░] 84%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1451,6 +1451,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.6.6.3 edited: edited fields: scope (narrowed to items 0 and 9), goal, success_criteria; order D-02: 164.6.6.3, .1, .2, .3
 - Phase 170.3 edited: re-scoped: OG-card parity moved to 164.6.6.3.3 item 4; 170.6: disclaimer moved to 164.6.6.3.1 item 6a, red em-dash on OG cards moved to 164.6.6.3.3 item 4 (founder 2026-10-06)
 - Phase 164.6.6.2.2 inserted after Phase 164.6.6.2: WEALTHRETURNS: Python blends read the stored wealth curve as daily returns (164.6.6.2 CR-01); founder 2026-10-07 own phase, ship BTCNATIVE first (URGENT)
+- Phase 170.6 edited: edited fields: success_criteria (routed from the 170.2 phone re-check, founder 2026-10-12)
 
 ### Decisions
 

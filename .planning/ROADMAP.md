@@ -111,12 +111,12 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verified 2026-10-06 (completed 2026-10-06; was `human_needed` 2026-09-26 → 2026-10-06)
 - [x] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — verified 2026-10-04 (completed 2026-10-04)
 - [ ] **Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out** (INSERTED) — not yet planned (waits for the founder's live scrub spike)
-- [ ] **Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series** (INSERTED) — shipped v0.126.0.0 (#969, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
+- [x] **Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series** (INSERTED) — shipped v0.126.0.0 (#969, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
 - [ ] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — not yet planned (booked 2026-10-07 by 164.6.6.2 D-15)
 - [x] **Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend** (INSERTED) — shipped v0.128.0.0 (#973, merged 2026-10-08); verification: passed (D-03 post-deploy reading 2026-10-08) (completed 2026-10-08)
 - [ ] **Phase 164.6.6.2.3: FLOWTIMING — a deposit never breaks a return, and an account's first day is its inception, not a warning** (INSERTED 2026-10-08) — not yet planned (founder D-01/D-02, 2026-10-08)
-- [ ] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
-- [ ] **Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8)** (INSERTED) — shipped v0.125.2.1 (#968, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
+- [x] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
+- [x] **Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8)** (INSERTED) — shipped v0.125.2.1 (#968, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
 - [x] **Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy)** (INSERTED) — verification: passed (v0.129.0.0) (completed 2026-10-08)
 - [ ] **Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b)** (INSERTED) — not yet planned (164.6.6.3 split C, founder 2026-10-06)
 - [x] **Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status** (INSERTED) — shipped v0.129.1.0 (merged 2026-10-08); verification: passed (plan 04 PROD re-sync 2026-10-08) (completed 2026-10-08)
@@ -179,7 +179,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 169.5: BENCHCOMPARE — a factsheet's BTC comparator is read from the database through 169.2's reader, paired over the same interval as the strategy** (INSERTED) — verification: passed (completed 2026-10-04, PR #908)
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
 - [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
-- [ ] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned
+- [x] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned — shipped v0.129.11.0 (#997); closed 2026-10-12 after the founder phone re-check (completed 2026-10-12)
 - [x] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 3 plans (completed 2026-10-11)
 - [x] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — 14 plans, two PRs (#1003, #1006) (completed 2026-10-11)
 - [ ] **Phase 170.5: FACTSHEETV2PANELS — /strategy/[id]/v2 panels render or say why** (INSERTED 2026-10-03) — not yet planned
@@ -5419,6 +5419,7 @@ Plans:
 
 ### Phase 170.6: DISPLAYPOLISH — no signed zero (-0.00, -0.0%) and no non-negative value drawn red on factsheets and OG cards; a comparator overlap too short to annualize reads em-dash (SPX annualized 5 days to Sharpe 10.24); the paired-floor sentence names the date the comparator's prices end (169.4, founder: fix); /recommendations unset-mandate copy reworded (169.3, founder: reword); anonymous /browse never flashes example rows that then vanish; admin Compute Jobs kind filter lists every present kind; the recommendations disclaimer renders once. (INSERTED)
 
+
 ⚠️ **Re-scoped 2026-10-06 (founder, "Ok" to de-duplicating against the 164.6.6.3 split):**
 - "the recommendations disclaimer renders once" **moved to 164.6.6.3.1 UIPOLISH item 6a**;
 - an OG card drawing a non-finite "—" in red **moved to 164.6.6.3.3 FACTSHEETTRUTH item 4**.
@@ -5429,6 +5430,9 @@ This phase keeps signed zeros and non-negative *values* drawn red, plus its othe
 **Requirements**: TBD
 **Depends on:** Phase 170
 ⭐ **Routed in 2026-10-11 (167.1.2 ACCOUNTTRUTH D-26, founder):** the equity-history rebuilding panel drops "yet", says "One of your keys", names a key by exchange plus nickname (or exchange plus last 4 when unnamed), and gives "could not load" and "needs action" their own headings.
+
+**Success Criteria**:
+1. At 360, 375 and 390 CSS px, every column of a row on the Crypto SMA Discovery ranking table is reachable by scrolling the table, with no "More" disclosure, and the last column ("Simulate Impact") is fully visible at the scroll end, not under the right-edge fade; a test fails on today's markup. (Routed 2026-10-12 from the founder's 170.2 phone re-check; founder: "Close 170.2, route to DISPLAYPOLISH".)
 
 **Plans:** 0 plans
 
@@ -5577,10 +5581,37 @@ Plans:
 
 **⭐ ROUTED IN 2026-10-08 (founder phone UAT; edited by `/gsd-phase --edit`):** on PROD at 22:32 local, the founder's phone screenshots of the Crypto SMA Discovery page show the page scrolling sideways: the search and All Filters row, the Sort row and the intro callout run past the right edge, and the table's "Columns" hint is clipped. Worse, the founder pointed out that scrolling the table sideways hides the data behind the strategy name: the header's pinned STRATEGY cell is clipped to about a third of the width, but each row's pinned name cell (name, badges, venue and sync line) is opaque across most of the viewport, so Return %, CAGR and Sharpe slide under it and read blank or as a faint "0". This regresses Phase 170 LAYOUT criterion 3 (no horizontal page scroll), and Phase 170 is closed, so it became criterion 6 here, beside criterion 1's same class on Holdings. Supported phone widths are 360, 375 and 390 px (164.6.6.2 D-26).
 
-**Plans:** 0 plans
+**Plans:** 11 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 170.2 to break down)
+**Wave 1**
+
+- [ ] 170.2-01-PLAN.md — SC-2 first: CoinGecko fallback clamped to 365 days and shifted one day, cache-wins merge, missed day backfilled next run, cron at 00:30 UTC (D-08); self-contained so it can ship as its own PR, with its own release commit when split
+- [ ] 170.2-04-PLAN.md — SC-3: /compare overlay plots stored levels over the D-07 span, twr_chain_broken alias and covered-from read, notes under the legend
+- [ ] 170.2-05-PLAN.md — SC-4: `source` payload field (D-09), masthead `{venue} · self-reported`, payload cache key v13 (v14 if BTCUSDVIEW lands first)
+- [ ] 170.2-06-PLAN.md — SC-1: seeded wide-book Holdings e2e (V390/V640/V735), four `grid-cols-1` grids, Exposure drill-down in ResponsiveTable
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 170.2-02-PLAN.md — SC-5 core: `since` keyword, keyset-paged cache read past max_rows, CSV runner passes its first date
+- [ ] 170.2-07-PLAN.md — SC-6 unpinned half: seeded RED run at 360/375/390 names the page offender (Q-5), `@3xl:` gate on the nine pinned strings (D-01, D-05)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 170.2-03-PLAN.md — SC-5 callers: job-worker and portfolio pass `since`, 12 fakes widened, AST census
+- [ ] 170.2-08-PLAN.md — SC-6 pinned half: occlusion probe at V1100/V1280, Strategy header z-30, rank and star widths left natural with offsets derived at runtime, desktop unchanged asserted in the e2e at V1100 and V1280 (D-06)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 170.2-11-PLAN.md — SC-5 one-time backfill script through the product path (written and tested; run post-merge by plan 10)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 170.2-09-PLAN.md — full gate end to end, cache-key re-check (branch = main + 1), release commit (VERSION/package.json, CHANGELOG)
+
+**Wave 6** *(post-merge, autonomous: false)*
+
+- [ ] 170.2-10-PLAN.md — SHA-bound deploy, one-time BTC backfill on PROD (marker first, counts only), D-03 recompute handed to Wave 5 (named, not run), D-04 phone re-check
 
 ### Phase 165: ACTIONSDEPS — the four GitHub Actions dependabot PRs land first, in the verified order
 
@@ -5691,12 +5722,12 @@ kept verbatim.
 | 164.6.5 MT5VALIDATEWEDGE | 8/8 | Complete    | 2026-10-06 · v0.96.0.0 · #863 |
 | 164.6.6 MT5TERMINALISOLATION | 9/9 | Complete    | 2026-10-04 |
 | 164.6.6.1 MT5SCRUB | 7/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Waiting`, 0/4, until 2026-10-08) | v0.125.0.0 · #950 |
-| 164.6.6.2 BTCNATIVE | 12/13 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.126.0.0 · #969 |
+| 164.6.6.2 BTCNATIVE | 12/13 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
 | 164.6.6.2.1 BTCUSDVIEW | 0/? | Queued — booked 2026-10-07 by 164.6.6.2 D-15 | - |
 | 164.6.6.2.2 WEALTHRETURNS | 7/7 | Complete — verification passed after the D-03 post-deploy reading | 2026-10-08 · v0.128.0.0 · #973 |
 | 164.6.6.2.3 FLOWTIMING | 0/? | Queued — founder 2026-10-08 (D-01/D-02) | - |
-| 164.6.6.3 UATFIXES | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.125.2.0 · #967 |
-| 164.6.6.3.1 UIPOLISH | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.125.2.1 · #968 |
+| 164.6.6.3 UATFIXES | 7/7 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
+| 164.6.6.3.1 UIPOLISH | 6/6 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
 | 164.6.6.3.2 WIZARDCODES | 4/4 | Complete — verification passed (WR-01 MEDIUM recorded as a known gap) | 2026-10-08 · v0.129.0.0 |
 | 164.6.6.3.3 FACTSHEETTRUTH | 0/? | Queued — 164.6.6.3 split C (founder 2026-10-06) | - |
 | 164.6.6.3.4 STATUSBRIDGE | 4/4 | Complete — verification passed after the plan 04 PROD re-sync | 2026-10-08 · v0.129.1.0 · #977 |
@@ -5756,7 +5787,7 @@ kept verbatim.
 | 169.5 BENCHCOMPARE (split from 169 2026-09-27) | 5/5 | Complete    | 2026-10-04 |
 | 170. LAYOUT | 20/20 | Complete | verification passed (ROADMAP phase list: completed 2026-10-01; this row read `In Progress` until 2026-10-04) |
 | 170.1 COPY | 0/? | Queued — feature, after 170 | - |
-| 170.2 PROBEFIXES | 0/? | Queued | - |
+| 170.2 PROBEFIXES | 11/11 | Complete | 2026-10-12 |
 | 170.3 OGPUBLIC | 3/3 | Complete | 2026-10-11 |
 | 170.4 ALLOCHOLDINGS | 14/14 | Complete | 2026-10-11 |
 | 170.5 FACTSHEETV2PANELS | 0/? | Queued — user-facing, booked 2026-10-03 | - |
