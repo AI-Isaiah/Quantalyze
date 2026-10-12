@@ -111,12 +111,12 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verified 2026-10-06 (completed 2026-10-06; was `human_needed` 2026-09-26 → 2026-10-06)
 - [x] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — verified 2026-10-04 (completed 2026-10-04)
 - [ ] **Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out** (INSERTED) — not yet planned (waits for the founder's live scrub spike)
-- [ ] **Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series** (INSERTED) — shipped v0.126.0.0 (#969, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
+- [x] **Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series** (INSERTED) — shipped v0.126.0.0 (#969, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
 - [ ] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — not yet planned (booked 2026-10-07 by 164.6.6.2 D-15)
 - [x] **Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend** (INSERTED) — shipped v0.128.0.0 (#973, merged 2026-10-08); verification: passed (D-03 post-deploy reading 2026-10-08) (completed 2026-10-08)
 - [ ] **Phase 164.6.6.2.3: FLOWTIMING — a deposit never breaks a return, and an account's first day is its inception, not a warning** (INSERTED 2026-10-08) — not yet planned (founder D-01/D-02, 2026-10-08)
-- [ ] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
-- [ ] **Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8)** (INSERTED) — shipped v0.125.2.1 (#968, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending)
+- [x] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
+- [x] **Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8)** (INSERTED) — shipped v0.125.2.1 (#968, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
 - [x] **Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy)** (INSERTED) — verification: passed (v0.129.0.0) (completed 2026-10-08)
 - [ ] **Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b)** (INSERTED) — not yet planned (164.6.6.3 split C, founder 2026-10-06)
 - [x] **Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status** (INSERTED) — shipped v0.129.1.0 (merged 2026-10-08); verification: passed (plan 04 PROD re-sync 2026-10-08) (completed 2026-10-08)
@@ -5691,12 +5691,12 @@ kept verbatim.
 | 164.6.5 MT5VALIDATEWEDGE | 8/8 | Complete    | 2026-10-06 · v0.96.0.0 · #863 |
 | 164.6.6 MT5TERMINALISOLATION | 9/9 | Complete    | 2026-10-04 |
 | 164.6.6.1 MT5SCRUB | 7/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Waiting`, 0/4, until 2026-10-08) | v0.125.0.0 · #950 |
-| 164.6.6.2 BTCNATIVE | 12/13 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.126.0.0 · #969 |
+| 164.6.6.2 BTCNATIVE | 12/13 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
 | 164.6.6.2.1 BTCUSDVIEW | 0/? | Queued — booked 2026-10-07 by 164.6.6.2 D-15 | - |
 | 164.6.6.2.2 WEALTHRETURNS | 7/7 | Complete — verification passed after the D-03 post-deploy reading | 2026-10-08 · v0.128.0.0 · #973 |
 | 164.6.6.2.3 FLOWTIMING | 0/? | Queued — founder 2026-10-08 (D-01/D-02) | - |
-| 164.6.6.3 UATFIXES | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Queued` until 2026-10-08) | v0.125.2.0 · #967 |
-| 164.6.6.3.1 UIPOLISH | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.125.2.1 · #968 |
+| 164.6.6.3 UATFIXES | 7/7 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
+| 164.6.6.3.1 UIPOLISH | 6/6 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
 | 164.6.6.3.2 WIZARDCODES | 4/4 | Complete — verification passed (WR-01 MEDIUM recorded as a known gap) | 2026-10-08 · v0.129.0.0 |
 | 164.6.6.3.3 FACTSHEETTRUTH | 0/? | Queued — 164.6.6.3 split C (founder 2026-10-06) | - |
 | 164.6.6.3.4 STATUSBRIDGE | 4/4 | Complete — verification passed after the plan 04 PROD re-sync | 2026-10-08 · v0.129.1.0 · #977 |
