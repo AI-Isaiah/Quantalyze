@@ -3375,6 +3375,11 @@ lands, a wedged or logged-out validation terminal is noticed only when a validat
    view reads green. ⛔ Do NOT reopen `MT5-WEDGE-OBS-01`; cross-link instead.
    ⭐ **The way this incident was actually found was a founder clicking a button.** That is the
    finding this criterion exists to answer.
+2. **A stuck MT5 relaunch debt is never invisible.** An MT5 jobs-terminal relaunch debt that the
+   self-heal cannot clear because the terminal lease is busy is never silent: while
+   `mt5_relaunch_debt` is set, the lease-busy branch logs at ERROR, so Sentry and the outage path
+   see it, and a stuck debt reaches a human the same way criterion 1's outage does. A test fails on
+   today's busy branch. *(Routed 2026-10-12 from 164.6.6.1 MT5SCRUB review WR-02; founder: "Book a fix".)*
 
 Plans:
 
