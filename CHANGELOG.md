@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.131.2.1] - 2026-10-13 — BASELINE: automated re-dump after the PROD apply of def5e599
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38465831758`, after the PROD apply of merge `def5e599`: sha256 `afce6f5e…` → `17a51332…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 126 → 127, distinct function names 124 → 125, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261013120000_strategy_analytics_hold_computed_at_until_success.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-13` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.131.2.0 → 0.131.2.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=296 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 127 — MATCH 124, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38465831758` succeeded, and this entry was composed by the `redump-pr` job. Run `38465831758` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.131.2.0] - 2026-10-13 — NAVBREACH: `computed_at` moves only on a success, and a connected key that found no capital leaves the book instead of marking it untrustworthy
 
 Phase 166.3.1, one PR, plans 01, 02, 06, 07, 08 and 09 plus the review fix rounds. Plan 03 (the inception-gate fix) is not in this release: it was absorbed into DERIBITWEDGE on 2026-10-10 (D-07), and no test in this phase reproduces the breach (see Notes). Plans 04, 05 and 10, the PROD recompute and the two book readings, are post-ship by design.

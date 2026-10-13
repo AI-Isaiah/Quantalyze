@@ -9714,6 +9714,26 @@ COMMENT ON FUNCTION "public"."strategy_analytics_drop_stale_error_provenance"() 
 
 
 
+CREATE OR REPLACE FUNCTION "public"."strategy_analytics_hold_computed_at_until_success"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+BEGIN
+  IF NEW.computation_status IN ('failed', 'computing') THEN
+    NEW.computed_at := OLD.computed_at;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."strategy_analytics_hold_computed_at_until_success"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."strategy_analytics_hold_computed_at_until_success"() IS 'Phase 166.3.1 D-04 / D-05: computed_at moves only on a successful write. On an update whose new computation_status is failed or computing the old computed_at is restored, silently. That binds sync_strategy_analytics_status branch (b) (a failure no longer stamps) and branch (a) (a job start no longer stamps), the reaper, the Python entry upsert and any future writer, without editing the bridge. A write to complete or complete_with_warnings is untouched. Residue owned by Phase 166.5 COMPUTEDATSTAMP: branch (c) still stamps on an unrelated all-done mark, branch (a) stamps when it moves a failed+warned row to complete_with_warnings, and 166.5''s runner stamp must land on the success write because a stamp written while the row is computing is held here. Self-contained: reads only NEW/OLD, calls nothing, never raises.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."strategy_analytics_stamp_computing_started"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     SET "search_path" TO 'public', 'pg_catalog'
@@ -14465,6 +14485,14 @@ COMMENT ON TRIGGER "strategy_analytics_drop_stale_error_provenance_trigger" ON "
 
 
 
+CREATE OR REPLACE TRIGGER "strategy_analytics_hold_computed_at_until_success_trigger" BEFORE UPDATE ON "public"."strategy_analytics" FOR EACH ROW EXECUTE FUNCTION "public"."strategy_analytics_hold_computed_at_until_success"();
+
+
+
+COMMENT ON TRIGGER "strategy_analytics_hold_computed_at_until_success_trigger" ON "public"."strategy_analytics" IS 'Phase 166.3.1 D-04 / D-05: UPDATE only. Holds computed_at through a write to failed (bridge branch (b), D-04) and through entry into computing (bridge branch (a), D-05); a successful write still stamps it. An INSERT keeps the column default for a first-ever row. Needs the factsheet cache key to carry computation_status (plan 06) and the Sync panel to read a status change as evidence (plan 07). Owner of the success-side residue: Phase 166.5.';
+
+
+
 CREATE OR REPLACE TRIGGER "strategy_analytics_stamp_computing_started_trigger" BEFORE UPDATE ON "public"."strategy_analytics" FOR EACH ROW EXECUTE FUNCTION "public"."strategy_analytics_stamp_computing_started"();
 
 
@@ -16759,6 +16787,11 @@ GRANT ALL ON FUNCTION "public"."stamp_first_sync_success"("p_user_id" "uuid") TO
 
 REVOKE ALL ON FUNCTION "public"."strategy_analytics_drop_stale_error_provenance"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."strategy_analytics_drop_stale_error_provenance"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."strategy_analytics_hold_computed_at_until_success"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."strategy_analytics_hold_computed_at_until_success"() TO "service_role";
 
 
 
