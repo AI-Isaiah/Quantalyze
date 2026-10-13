@@ -167,7 +167,8 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.1.2.1.2: HISTORYREADER — Open Positions, Exchanges and the Overview show a departed or stale key's history truthfully** (INSERTED) — not yet planned (data integrity and user-facing; split from 167.1.2.1 by D-01, 2026-10-13)
 - [x] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — planned 2026-10-07, 9 plans (completed 2026-10-11)
 - [x] **Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital** (INSERTED 2026-10-08) — 8 plans, two PRs (#991, PR-2); closed 2026-10-12, SC-4 trustworthy clause routed to NAVBREACH (completed 2026-10-12)
-- [ ] **Phase 167.1.2.2.2: TRADESYNC — live strategy keys ingest trades daily again** (INSERTED 2026-10-09) — not yet planned (founder, data integrity)
+- [x] **Phase 167.1.2.2.2: TRADESYNC — live strategy keys ingest trades daily again** (INSERTED 2026-10-09) — 22 plans (18 deferred), shipped #1009 and #1012 (completed 2026-10-13)
+- [ ] **Phase 167.1.2.2.2.1: OKXHISTORY — an OKX strategy's days older than the 3-month bills window are rebuilt from OKX's quarterly bills archive** (INSERTED 2026-10-09) — not yet planned (founder, split from TRADESYNC D-01)
 - [x] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
@@ -3377,6 +3378,8 @@ stands up is dark to all four; (b) the READER of skipped-cleanup rows: every non
 relaunch failed) is recorded and read by nothing. This phase is frozen; the item waits here. Until it
 lands, a wedged or logged-out validation terminal is noticed only when a validation fails.
 
+**Owns (routed 2026-10-10 from Phase 167.1.2.2.2 SC-6, default per research, the founder confirms at this phase's planning):** `TODOS.md` `167.1.2.2.2-TRADESYNC-STALENESS-ALARM` — a daily `cron_sync` trade-sync heartbeat (`cron_runs`, `cron_name = 'cron_sync'`) older than 2 days, or two consecutive `error` rows, reaches a human without one running a query. Input: the heartbeat Phase 167.1.2.2.2 plan 06 writes; ceiling: its D-05 (2 days). Interim, and not a close: the public stale styling (D-06) and the go-live runbook's manual reads. Sibling: `167.1.2.2-BACKFILL-STALENESS-ALARM`.
+
 **Plans:** 0 plans
 
 **Success criteria (to be derived properly at planning):**
@@ -4927,6 +4930,11 @@ Plans:
 **Requirements**: TBD (phase-local)
 **Depends on:** Phase 167.1.2.2 (the same runbook-registration route for PROD crons)
 
+
+**⭐ AMENDED 2026-10-09 (research, founder-confirmed in discussion; CONTEXT D-11):** SC-2's cursor-row seeding cannot recover the gap: a seeded marker is clamped to 30 days by `MAX_MARKER_LOOKBACK_MS` (`analytics-service/routers/cron.py`), which would silently cut three of the five gaps. The resume fallback instead starts from a data-derived high-water (the strategy's newest stored daily-P&L row, floored to UTC midnight, unclamped), and the runbook step becomes a read-only pre-tick proof. Days the venue no longer serves are named, not filled; their recovery moved to Phase 167.1.2.2.2.1 OKXHISTORY (founder: split D-01). SC-2's text below is kept as lineage.
+
+**⭐ AMENDED 2026-10-10 (founder, 2026-10-09; CONTEXT D-14 and D-15):** SC-4's wording "Synced Nd ago" is retired on the strategy freshness badge, because the badge now says what it measures: "Trades fetched {age}", and "Trades fetched {age} · stale" past D-05's 2 days (D-14). Strategy-owner key cards (the `ApiKeyManager` "Last synced" and `AllocatorSyncStatus` on `/strategies`) read "Key checked {age}", because the 04:00 poll writes the field they show (D-15); allocator holdings cards are unchanged. SC-4's text below is kept as lineage.
+
 ## Success Criteria
 
 1. A `cron_sync_tick()` SQL function (shaped like `match_engine_cron_tick`, URL from `system_settings`, key from the vault, via `pg_net`) is shipped by migration. Its `cron.schedule` registration goes through a go-live runbook, never a migration (the 164.7 rule and the derivecron/ledger-refresh runbooks). The registration and a re-captured cron manifest are recorded.
@@ -4936,10 +4944,52 @@ Plans:
 5. The tick's effect on allocator keys and on revoked-but-active keys is measured, and each is either intended or excluded. The pg_net timeout fits a full tick, or the tick is made asynchronous.
 6. ADR-0008 is corrected, and a staleness alarm is booked with OUTAGEALERT if one is not built here.
 
+**Plans:** 21/21 plans complete, plan 18 deferred as not needed (PR-A SQL first, PR-B code, then the go-live runbook; plan 18 is conditional; plan 22 was split out of plan 09 at the 2026-10-09 plan check)
+
+Plans:
+- [x] 167.1.2.2.2-01-PLAN.md — `cron_sync_tick()` migration + LANE-ONLY gate with twins (tracer); migration reviews [wave 1]
+- [x] 167.1.2.2.2-02-PLAN.md — `strategy_analytics.trades_fetched_at` + `series_provenance` migration, rollback, gate, types; migration reviews [wave 1]
+- [x] 167.1.2.2.2-03-PLAN.md — no-schedule raw-text census; mutation, lint, LANE-ONLY and baseline censuses moved [wave 2]
+- [x] 167.1.2.2.2-04-PLAN.md — ship PR-A (SQL only, ahead of every reader); PROD catalogue read; baseline re-dump [wave 3]
+- [x] 167.1.2.2.2-05-PLAN.md — resume from the strategy's stored high-water at 00:00 UTC (D-11, D-12), held-absent rule, `trades_fetched_at` stamp (tracer) [wave 4]
+- [x] 167.1.2.2.2-06-PLAN.md — key selector filter (D-13), `cron_runs` heartbeat, timeout budget pinned to the migration [wave 5]
+- [x] 167.1.2.2.2-07-PLAN.md — D-08 no-shorten and D-02 no-zero-fill pins; merged-series headline measured [wave 4]
+- [x] 167.1.2.2.2-08-PLAN.md — `resolveTradeFetch` + `TRADE_FETCH_STALE_DAYS` (D-05) with boundaries; venue list pinned to the fetcher (tracer) [wave 4]
+- [x] 167.1.2.2.2-09-PLAN.md — SyncBadge "Trades fetched" (D-14, D-07), projections, F2 (tracer); mounts moved to plan 22 [wave 5]
+- [x] 167.1.2.2.2-10-PLAN.md — factsheet payload, gap parser, cache key bump, TradeFetchLine for everyone (D-06, D-10) [wave 5]
+- [x] 167.1.2.2.2-11-PLAN.md — named unrecovered-gap lines (D-02, F1), tearsheet, single-classifier pins [wave 7]
+- [x] 167.1.2.2.2-12-PLAN.md — owner key cards read "Key checked" (D-15) [wave 4]
+- [x] 167.1.2.2.2-13-PLAN.md — ADR-0008 corrected with a test (SC-6); staleness alarm booked to 164.6.8; residuals; D-14 recorded [wave 4]
+- [x] 167.1.2.2.2-14-PLAN.md — `cron-sync-go-live.md` runbook; every PROD form proven read-only [wave 6]
+- [x] 167.1.2.2.2-15-PLAN.md — ship PR-B; Railway and Vercel deployed at the merge SHA [wave 8]
+- [x] 167.1.2.2.2-16-PLAN.md — founder confirms D-08; pre-tick proof; D-08 carry-forward with oracle; D-10 seed [wave 9]
+- [x] 167.1.2.2.2-17-PLAN.md — rehearsal tick, four-way verdict, downstream reads behind an SC-2 age gate, named gaps written, OKXHISTORY work list [wave 10]
+- [ ] 167.1.2.2.2-18-PLAN.md — DEFERRED (verdict FITS, not needed) — CONDITIONAL (verdict PGNET-TOO-SLOW only, never KEY-TIMEOUT): async tick, ship, re-rehearsal [wave 11]
+- [x] 167.1.2.2.2-19-PLAN.md — register `cron-sync-trades` by runbook; manifest re-captured in the same session [wave 12]
+- [x] 167.1.2.2.2-20-PLAN.md — ship the manifest PR; debug ledger resolved [wave 13]
+- [x] 167.1.2.2.2-21-PLAN.md — first scheduled tick read by rows behind an SC-2 age gate; public pages read as anon [wave 14]
+- [x] 167.1.2.2.2-22-PLAN.md — every SyncBadge mount passes both required props, venue from the api-key exchange only (F3) (tracer) [wave 6]
+
+### Phase 167.1.2.2.2.1: OKXHISTORY — an OKX strategy's days older than the 3-month bills window are rebuilt from OKX's quarterly bills archive (INSERTED)
+
+**Goal:** The days an OKX strategy missed beyond the 3-month `bills-archive` window are rebuilt from OKX's async quarterly `bills-history-archive`, marked as reconstructed, and reconciled against the days both sources cover.
+**Booked:** founder 2026-10-09 (AskUserQuestion: "Split to OKXHISTORY"), split from 167.1.2.2.2 TRADESYNC CONTEXT D-01 ("Rebuild from account bills") after its research showed the work needs a durable two-step job, a new flow source and a calibrated reconciliation. Data integrity.
+**Evidence (TRADESYNC research, 2026-10-09):** OKX's stored "trades" are already bills (`/account/bills`, 7 days; `/account/bills-archive`, 3 months). Older history is reachable only through `bills-history-archive`: quarterly, since 2021-02-01, excluding the current quarter, delivered as a link after about 2 to 3 hours that expires after 5.5 hours, at about 12 requests a day. ccxt's `fetchLedger` does not call it. Deposit history on OKX is retained 90 days, so flows older than that come from bills transfer types, which no code reads today. Three OKX strategies are affected.
+**Requirements**: TBD (phase-local)
+**Depends on:** Phase 167.1.2.2.2
+
+## Success Criteria
+
+1. A durable two-step job requests an OKX quarterly bills archive, waits for the link and ingests it, surviving restarts and the link's expiry; a test fails on a lost link.
+2. Each rebuilt day is marked reconstructed (TRADESYNC CONTEXT D-03) and is distinguishable from a live-fetched day by any reader.
+3. Where live bills and the archive both cover a day, they reconcile within a calibrated tolerance, and a material disagreement fails loud (TRADESYNC D-04).
+4. A day neither source covers stays missing and is named on the factsheet (TRADESYNC D-02).
+5. Each affected strategy's history is rebuilt on PROD with before/after readings (marker first, counts only); its recompute joins the Wave 5 consolidated recompute.
+
 **Plans:** 0 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 167.1.2.2.2 to break down)
+- [ ] TBD (run /gsd-plan-phase 167.1.2.2.2.1 to break down)
 
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
@@ -5914,7 +5964,8 @@ kept verbatim.
 | 167.1.2.1.2 HISTORYREADER | 0/? | Queued — data integrity and user-facing; split from 167.1.2.1 (D-01), after it | - |
 | 167.1.2.2 DERIVECRON | 9/9 | Complete | 2026-10-11 |
 | 167.1.2.2.1 DERIBITWEDGE | 8/8 | Complete | 2026-10-12 |
-| 167.1.2.2.2 TRADESYNC | 0/? | Queued — booked 2026-10-09 (founder) | - |
+| 167.1.2.2.2 TRADESYNC | 21/21 (plan 18 deferred) | Complete | 2026-10-13 |
+| 167.1.2.2.2.1 OKXHISTORY | 0/? | Queued — booked 2026-10-09 (founder, split from TRADESYNC D-01) | - |
 | 167.2 KEYCARDSYNC | 10/10 | Complete    | 2026-10-04 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |

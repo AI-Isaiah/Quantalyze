@@ -1381,6 +1381,8 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- **[167.1.2.2.2-PUBLIC-REF-CLEANUP]** (logged 2026-10-13, TRADESYNC security re-audit residual R-8, low; owner: the next docs-hygiene pass or any phase touching these runbooks). The repo is public, and three older runbooks (`ci-hardening-permissions-c0293.md`, `flipretry-derived-equity-go-live.md`, `migration-failure.md`) plus two old CHANGELOG entries carry the literal PROD project ref. `flipretry-derived-equity-go-live.md` also carries the TEST ref, and `match-engine.md` carries a role mailbox address. Done when each is replaced with a placeholder or a symbol (as `src/lib/test-safety.ts` pins it), and a hygiene rule rejects the literal refs in tracked text. Never quote the refs in the fix's own commit message or CHANGELOG.
+
 ### ALLOCSYNC-CAPTION-01 — the AllocatorSyncStatus pill and helper line are text-xs inside the /strategies note row, whose other lines are text-caption (booked 2026-10-09, Phase 170.7)
 
 **Why it is open.** The Phase 170.7 UI-SPEC accepted this typography residue. `AllocatorSyncStatus` is a
