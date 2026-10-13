@@ -114,7 +114,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series** (INSERTED) — shipped v0.126.0.0 (#969, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
 - [ ] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — not yet planned (booked 2026-10-07 by 164.6.6.2 D-15)
 - [x] **Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend** (INSERTED) — shipped v0.128.0.0 (#973, merged 2026-10-08); verification: passed (D-03 post-deploy reading 2026-10-08) (completed 2026-10-08)
-- [ ] **Phase 164.6.6.2.3: FLOWTIMING — a deposit never breaks a return, and an account's first day is its inception, not a warning** (INSERTED 2026-10-08) — not yet planned (founder D-01/D-02, 2026-10-08)
+- [x] **Phase 164.6.6.2.3: FLOWTIMING — a deposit never breaks a return, and an account's first day is its inception, not a warning** (INSERTED 2026-10-08) — 12 plans, shipped v0.131.1.0 (#1018) (completed 2026-10-13)
 - [x] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
 - [x] **Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8)** (INSERTED) — shipped v0.125.2.1 (#968, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
 - [x] **Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy)** (INSERTED) — verification: passed (v0.129.0.0) (completed 2026-10-08)
@@ -163,6 +163,8 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
 - [x] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — verified 2026-10-11 (completed 2026-10-11)
 - [ ] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — not yet planned (data integrity; after 167.1.2 PR C)
+- [ ] **Phase 167.1.2.1.1: WRITERRESIDUALS — the allocator equity writer persists why a curve was refused and never dilutes or drops a key silently** (INSERTED) — not yet planned (data integrity; split from 167.1.2.1 by D-01, 2026-10-13)
+- [ ] **Phase 167.1.2.1.2: HISTORYREADER — Open Positions, Exchanges and the Overview show a departed or stale key's history truthfully** (INSERTED) — not yet planned (data integrity and user-facing; split from 167.1.2.1 by D-01, 2026-10-13)
 - [x] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — planned 2026-10-07, 9 plans (completed 2026-10-11)
 - [x] **Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital** (INSERTED 2026-10-08) — 8 plans, two PRs (#991, PR-2); closed 2026-10-12, SC-4 trustworthy clause routed to NAVBREACH (completed 2026-10-12)
 - [ ] **Phase 167.1.2.2.2: TRADESYNC — live strategy keys ingest trades daily again** (INSERTED 2026-10-09) — not yet planned (founder, data integrity)
@@ -183,7 +185,9 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 3 plans (completed 2026-10-11)
 - [x] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — 14 plans, two PRs (#1003, #1006) (completed 2026-10-11)
 - [ ] **Phase 170.5: FACTSHEETV2PANELS — /strategy/[id]/v2 panels render or say why** (INSERTED 2026-10-03) — not yet planned
-- [ ] **Phase 170.6: DISPLAYPOLISH — no signed zeros or red positives; short overlaps read em-dash; booked copy fixes** (INSERTED 2026-10-03) — not yet planned
+- [ ] **Phase 170.6: DISPLAYPOLISH — no signed zeros or red positives; short overlaps read em-dash** (INSERTED 2026-10-03; NUMBERS only since 2026-10-13) — not yet planned
+- [ ] **Phase 170.6.1: DISCOVERYPHONE — the Discovery table works on a phone and names the right venue** (INSERTED 2026-10-13) — not yet planned
+- [ ] **Phase 170.6.2: COPYPASS — copy fixes, the /browse example flash, the admin kind filter** (INSERTED 2026-10-13) — not yet planned
 - [x] **Phase 170.7: MYSTRATTABLE — My Strategies uses the ranking table, and the name opens the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 9 plans (completed 2026-10-11)
 
 ### Phase 158: OPS-CI — A merge means a deploy
@@ -3193,14 +3197,26 @@ Plans:
 - What to do where one is missing. Never invent a time: fall back to the current day-level rule, named.
 - How this interacts with `pnl_dominated_guard`, the negative-NAV guard, the allocator compose replay (Phase 167.1.2.2's realized basis and dropped-day P&L), and the TS factsheet readers.
 - Re-derive and re-measure every affected PROD strategy, not just MM-2x. Before and after readings, marker first.
-**Requirements**: TBD
+⭐ **Founder answers 2026-10-11 (recorded in CONTEXT):** FLOWTIMING-Q1 ACCEPT (the MT5 derive stores its writer basis like Deribit; compose code unchanged, inside D-14). FLOWTIMING-Q2 ACCEPT (Deribit stays day level this phase; intraday Deribit booked as `[164.6.6.2.3-DERIBIT-INTRADAY-TIMING]` in TODOS).
+**Requirements**: TBD (contract: CONTEXT D-01..D-14)
 **Depends on:** Phase 164.6.6.2.2
 ⭐ **Routed in 2026-10-11 (167.1.2 ACCOUNTTRUTH D-27, founder "$100"):** `USD_FLOORS.dust_nav` moves from $1000 to $100 (equal to `material_equity`); TODOS `[167.1.2-DUST-FLOOR-100]`. Sized in this phase's dry run, effective on PROD with the Wave 5 recompute.
-
-**Plans:** 0 plans
+⚠️ **Founder 2026-10-12 (D-15, CONTEXT) — DEVIATION from the worst-MEDIUM-no-fixer rule:** review F1 (a day-level flow day publishes an inflated return as a clean `complete`) is fixed in this phase with a counted flag that drives the "returns can be extreme" caveat. ⭐ **D-16 (founder 2026-10-12):** the cohort base follows D-02 literally (P&L realized earlier the same day counts). ⭐ **D-17 (founder 2026-10-13, amends D-16):** the base telescopes (`B_k = B_{k-1} + P_{k-1} + F_k`), so a vanishing flow is continuous when positions overlap; fixed in a review round-2 fixer round with an overlap property test. ⭐ **D-18 (founder 2026-10-13):** the D-06 guards stay on the telescoped base, so a tiny flow on a day whose carried position lost about 90% or more of the account turns that day into a flagged NaN; recorded as an accepted limit (review round 3 R3-01). ⭐ **Plan 08 dry run approved by the founder 2026-10-12.**
+**Plans:** 12/12 plans complete (planned 2026-10-11; plans 11 and 12 added 2026-10-11 for 167.1.2 D-27, split by suite after the plan-check; plans 06 and 07 gate on the founder answers FLOWTIMING-Q1 (D-14, MT5 writer basis) and FLOWTIMING-Q2 (D-10, Deribit at day level + follow-up), recorded in CONTEXT.md)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.2.3 to break down)
+- [x] 164.6.6.2.3-01-PLAN.md — wave 1: position-relative day return in `nav_twr.py` (cohort split, flow before open on a tie, overnight in the start base), flow guard deleted, day-0 inception rule, day-level info annotation
+- [x] 164.6.6.2.3-02-PLAN.md — wave 1: factsheet stops rendering the retired flow warning; neutral "flow timing at day level" note
+- [x] 164.6.6.2.3-03-PLAN.md — wave 1: MT5 deal instant (UTC) and DEAL_ENTRY codes, position-open resolvers; a timing anomaly degrades to day level
+- [x] 164.6.6.2.3-09-PLAN.md — wave 2: move the core-consumer test pins that asserted the retired flag
+- [x] 164.6.6.2.3-10-PLAN.md — wave 2: move the allocator, job-worker and stitch test pins
+- [x] 164.6.6.2.3-04-PLAN.md — wave 3: retired key becomes carry-only so stored flags survive until the Wave 5 recompute; annotation carried end to end
+- [x] 164.6.6.2.3-05-PLAN.md — wave 3: MT5 fold builds per-day timing; MT5 combines run full-history
+- [x] 164.6.6.2.3-06-PLAN.md — wave 4: store the MT5 writer basis so the allocator compose stays exact (gated on FLOWTIMING-Q1)
+- [x] 164.6.6.2.3-07-PLAN.md — wave 5: day-0 inception for Deribit and full-history ccxt accounts, both ccxt sites (gated on FLOWTIMING-Q2)
+- [x] 164.6.6.2.3-11-PLAN.md — wave 6: USD dust floor $1000 -> $100 (167.1.2 D-27), nav/MT5/sfox engine pins re-measured; leaves a named red window for plan 12
+- [x] 164.6.6.2.3-12-PLAN.md — wave 7: D-27 allocator, job-worker and dropped-day pins re-measured, transforms anchor threshold aligned (live `verify_strategy` effect recorded), `[167.1.2-DUST-FLOOR-100]` closed for its code half
+- [x] 164.6.6.2.3-08-PLAN.md — wave 8: D-13 read-only PROD dry run, counts-only before/after (D-27 floor change sized separately), founder checkpoint (not autonomous)
 
 ### Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view (INSERTED)
 
@@ -4931,7 +4947,9 @@ Plans:
 **Priority:** data integrity (founder priority rule, 2026-09-27: data integrity ahead of features). Registered through `/gsd-phase --insert 167.1.2`; gsd-tools numbered it 167.1.2.1 and the number is kept.
 **Requirements**: TBD (criteria below)
 **Depends on:** Phase 167.1.2 (PR C: its history rebuild changes `replace_equity_snapshots` and the per-key reconstruct path this phase builds on).
-**Plans:** 0 plans
+**Plans:** 10 plans (PR 1: 01-03; PR 2: 04-09; post-ship read: 10)
+
+⭐ **Re-scoped 2026-10-13 (founder, smart discuss "Accept all"; `167.1.2.1-CONTEXT.md` D-01/D-02):** this phase delivers success criteria **1-7 only** (the per-key marker, retry, replace scope, `failed_retry`, migration review, the fast-fail race), in two PRs (D-08). The writer residuals of the first ROUTED IN block moved to **Phase 167.1.2.1.1 WRITERRESIDUALS**, and items (1), (2), (3) and (7) of the second moved to **Phase 167.1.2.1.2 HISTORYREADER**. Re-measured at `c85c938e1`: **SFH-R3-07 is CLOSED** (keyset paging in `_load_allocator_daily_returns`, v0.111.1.0, #903) and **item (4) WR-02 is CLOSED** (`20261011120000_allocator_holdings_per_key_unique.sql` and `HOLDINGS_CONFLICT_TARGET`, v0.130.6.0, #1006). Item (5) WR-03 is now a coupling rule both new phases carry. The blocks below are kept as lineage.
 
 **Evidence (routed 2026-09-27 from the 167.1.2 PR C executor; one class of defect; symbols verified at `origin/main` `c052ab4d` unless noted):**
 
@@ -4964,7 +4982,16 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 167.1.2.1 to break down)
+- [ ] 167.1.2.1-01-PLAN.md — PR 1 migration M1: the two `api_keys` marker columns, the D-05/D-12/D-15 backfill, `request_allocator_holdings_sync` counting `failed_retry` and reading the marker (SC-1, SC-5), new SQL gate, census
+- [ ] 167.1.2.1-02-PLAN.md — PR 1 worker: D-07, every non-deleted sibling blocks the sole-key replace (SC-3), three old-rule tests inverted
+- [ ] 167.1.2.1-03-PLAN.md — PR 1 ship: migration-reviewer, rls-policy-auditor and silent-failure-hunter on M1 (SC-6), release commit, midday merge
+- [ ] 167.1.2.1-04-PLAN.md — PR 2 migration M2: the fan-out retries every owed key, counts attempts at the enqueue, caps at 5 with a cron_runs trace (SC-2, SC-4, SC-7 SQL half), new owed-key gate
+- [ ] 167.1.2.1-05-PLAN.md — PR 2 worker: marker writer and decider (D-15 noop stays owed), the refresh hold on "owed and being worked" (SC-7), the D-09 Sentry event
+- [ ] 167.1.2.1-06-PLAN.md — PR 2 reader: the non-gating "history could not be rebuilt" Overview note (D-09, D-14)
+- [ ] 167.1.2.1-07-PLAN.md — PR 2: repoint the 167.1.2 fan-out gate to M2 (every original arm machine-checked, none silently dropped), census by one measured run, the SQL/Python/TS attempt-cap twins pinned by test
+- [ ] 167.1.2.1-08-PLAN.md — D-12 read-only PROD census of the owed set, brought to the founder before PR 2 merges
+- [ ] 167.1.2.1-09-PLAN.md — PR 2 ship: the three migration reviewers on M2 (SC-6), release commit, merge and deploy clear of 04:00-05:45 UTC
+- [ ] 167.1.2.1-10-PLAN.md — D-11 read of the first post-PR-2 fan-out and the next day's outcome, counts only
 
 ⭐ **ROUTED IN 2026-09-29 (from 167.1.2 PR C4 review rounds 1-3 and its verification; data integrity and user-facing).** Sources: `167.1.2-C4-REVIEW-FIX-K1.md`, `-K2a.md`, `-R2C.md`, `167.1.2-C4-VERIFY.md`, `167.1.2-C4-REVIEW-R3.md`. Items (1)-(3) are the D-16 gaps the founder chose to book here (AskUserQuestion 2026-09-29, "Book them to a phase") rather than accept or fix in C4; (4)-(7) were routed out of C4's fix rounds because each needs a file set or a migration outside a fixer's topic.
 (1) **D-16, unlinked departed key:** a departed key never stamped with `venue_account_id` and never marked is not grouped with its account by `accountIdentityTokens`, so its older rows still show on Open Positions (dated, never as current dollars).
@@ -4974,6 +5001,56 @@ Plans:
 (5) **WR-03 (data integrity):** `account_groups` in `analytics-service/services/allocator_equity_derive.py` (also used by `equity_reconstruction.py`) and the dashboard reader in `src/lib/queries.ts` must change together; gating on the marker alone would reopen the double count the identity token closed.
 (6) **SFH-C4-04 remainder (user-facing):** the derive's `departed_history_unavailable` warning reaches Sentry only as a breadcrumb, not an event, and the Overview line cannot say how many accounts' history is missing (needs a count field written in `job_worker.py`).
 (7) **User-facing:** the Overview's "No positions to analyze yet" card is checked before the equity-history state, so a book whose positions are all closed (e.g. expired Deribit options) hides a ready curve (predates C4); and a stale key's spot rows in Exchange Positions carry no date (C4 dated Open Positions only).
+
+### Phase 167.1.2.1.1: WRITERRESIDUALS — the allocator equity writer persists why a curve was refused and never dilutes or drops a key silently (INSERTED)
+
+**Goal:** The allocator equity writer (derive, stitch and daily refresh) persists the reason it refused a curve, flags a failing or never-polled key instead of carrying it flat, and counts each account once, so a book reading "ready" is never silently diluted or missing a key.
+**Priority:** data integrity (founder priority rule, 2026-09-27).
+**Requirements**: success criteria below
+**Depends on:** Phase 167.1.2.1
+**Plans:** 0 plans
+
+Split out of Phase 167.1.2.1 RECONMARKER by founder decision D-01 (2026-10-13, smart discuss "Accept all"; `167.1.2.1-CONTEXT.md`). Every item was re-measured LIVE at `origin/main` `c85c938e1` on 2026-10-13, by reading code, symbols cited by name. The founder calls marked below are asked in this phase's own discuss (D-03).
+
+## Success Criteria
+
+1. **SFH-05 (writer half):** `run_derive_allocator_equity_job`'s refusal paths call `_delete_equity_curve_row()` and persist no reason, so the reader can name only the generic one. The reason is persisted where the reader can name it.
+2. **One failing key with a known account id:** `no_working_groups` (`SHARED_ACCOUNT_NO_WORKING_KEY`) fires only for groups of 2 or more keys, so a single failing key is carried flat inside a "ready" book with no flag. It is flagged.
+3. **SFH-R3-02:** `stitch_shared_account` keeps a flow only from the key that owns that day, so a deposit only the newer key lists, on a day the older key owns, is dropped and the curve stays trusted. The deposit is kept, or the day is flagged.
+4. **SFH-08:** a key that has never polled adds $0 to the day's persisted total, and only the `never_polled` counter records it (`_fetch_latest_holdings_per_eligible_key`). *Founder call: hold the write or not.*
+5. **SFH-09:** a carried balance has no age limit; `CARRY_AGE_WARN_DAYS = 3` is a log-only WARNING. *Founder call: the cap.*
+6. **R2-CR-02 residual:** two WORKING keys on one account that are both still unstamped are two groups in `account_groups`, so they are counted twice until the stamper runs. They are counted once.
+7. **Item (6), SFH-C4-04 remainder:** the derive's `departed_history_unavailable` reaches Sentry only as a breadcrumb, and no count field says how many accounts' history is missing. It becomes a Sentry event, with a count written in `job_worker.py`.
+8. **R3-WR-02 (landing constraint, not a defect):** a deploy between the 04:00 poll and the 05:00 refresh writes one stale row per emptied account (`_polled_empty_since` rests on the poll's audit event). Any writer change in this phase lands outside that window, or removes the constraint.
+
+9. **MT5 BTC-unit inception residual (routed 2026-10-13 from 166.3.1 NAVBREACH D-08; founder "Route to a phase").** NAVBREACH plan 08 measured on PROD that one allocator book stays `is_trustworthy` false under every exit rule: its MT5 BTC-unit `dust` key (357 return days) replays to `inception_unreconciled`, because the implied start is 0.15% of the first return day's level against the 0.01% band. The gate is not loosened (NAVBREACH D-02). The cause is found in the stored series and fixed at the writer, so the book reads trustworthy, or the reason is recorded by a founder decision. Evidence: `166.3.1-SC5-DECISION.md`.
+Each item is fixed with a test that fails on the old behaviour, or closed by a recorded founder decision. Any grouping change moves Python `account_groups`, TS `accountIdentityTokens`/`keyAccountOf`, `one_key_per_account_day`/`oneKeyPerAccountDay` and the `queries.ts` reader together (167.1.2.1 re-measure, item (5) WR-03).
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 167.1.2.1.1 to break down)
+
+### Phase 167.1.2.1.2: HISTORYREADER — Open Positions, Exchanges and the Overview show a departed or stale key's history truthfully (INSERTED)
+
+**Goal:** The allocator's readers group a departed or stale key with its account, hide superseded rows, date every carried row, and never hide a ready equity curve behind an empty-book card.
+**Priority:** data integrity and user-facing (founder priority rule, 2026-09-27).
+**Requirements**: success criteria below
+**Depends on:** Phase 167.1.2.1 (and 167.1.2.1.1 where a reader consumes a writer field it adds)
+**Plans:** 0 plans
+
+Split out of Phase 167.1.2.1 RECONMARKER by founder decision D-01 (2026-10-13, smart discuss "Accept all"; `167.1.2.1-CONTEXT.md`). Items (1)-(3) are the 167.1.2 C4 D-16 gaps the founder chose to book (2026-09-29). Every item was re-measured at `origin/main` `c85c938e1` on 2026-10-13. The founder call marked below is asked in this phase's own discuss (D-03).
+
+## Success Criteria
+
+1. **Item (1), unlinked departed key:** a departed key never stamped with `venue_account_id` and never marked is not grouped with its account by `accountIdentityTokens` (`src/lib/departed-history.ts`), so its older rows still show on Open Positions. It is grouped, or its rows are hidden as superseded.
+2. **Item (2), same-day empty poll:** in `fetchLatestHoldingsPerKey` (`src/lib/latest-holdings-per-key.ts`) the supersede test `cleanPollAsof > latestAsof` is strict, so a position closed and polled empty on the same UTC day still shows. It is hidden.
+3. **Item (3), Bybit UTA parse-miss:** when the Bybit unified-account id is not parsed, the key stays ungrouped, with item (1)'s effect. It is grouped, or the miss is flagged. (Re-measure: the consequence follows from code; the Bybit stamper was not traced.)
+4. **Item (7a), Overview card order:** `historyGate` (`src/app/(dashboard)/allocations/lib/history-gate.ts`) returns `connected_empty` for a book whose history is `ready` but whose positions are all closed, so the card hides a ready curve. *Founder call: show the curve or keep the card.*
+5. **Item (7b), undated spot rows:** a stale key's spot rows in the Exchanges holdings panel (`HoldingsTabPanel.tsx`) carry no `asof` date, unlike Open Positions' read-day note. They are dated.
+
+Each item is fixed with a test that fails on the old behaviour, or closed by a recorded founder decision. Any grouping change moves Python `account_groups`, TS `accountIdentityTokens`/`keyAccountOf`, `one_key_per_account_day`/`oneKeyPerAccountDay` and the `queries.ts` reader together (167.1.2.1 re-measure, item (5) WR-03).
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 167.1.2.1.2 to break down)
 
 ### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
 
@@ -5450,15 +5527,56 @@ This phase keeps signed zeros and non-negative *values* drawn red, plus its othe
 **Goal:** [Urgent work - to be planned]
 **Requirements**: TBD
 **Depends on:** Phase 170
-⭐ **Routed in 2026-10-11 (167.1.2 ACCOUNTTRUTH D-26, founder):** the equity-history rebuilding panel drops "yet", says "One of your keys", names a key by exchange plus nickname (or exchange plus last 4 when unnamed), and gives "could not load" and "needs action" their own headings.
+
+⚠️ **Re-scoped 2026-10-13 (founder, "Split in three"):** this phase is NUMBERS only (signed zeros, tone, the comparator annualization floor and its dated floor sentence). SC-1 (phone table) and SC-2 (exchange label) **moved to 170.6.1 DISCOVERYPHONE**; the /recommendations copy, the D-26 rebuilding-panel copy, the anonymous /browse example flash and the admin Compute Jobs kind filter **moved to 170.6.2 COPYPASS**. The title above is kept as lineage.
+
+**Requirements**: D-02..D-08 (170.6-CONTEXT.md)
 
 **Success Criteria**:
-1. At 360, 375 and 390 CSS px, every column of a row on the Crypto SMA Discovery ranking table is reachable by scrolling the table, with no "More" disclosure, and the last column ("Simulate Impact") is fully visible at the scroll end, not under the right-edge fade; a test fails on today's markup. (Routed 2026-10-12 from the founder's 170.2 phone re-check; founder: "Close 170.2, route to DISPLAYPOLISH".)
+1. No surface prints a signed zero: a value that rounds to zero prints unsigned and neutral (D-02).
+2. Red/green follows the rounded sign everywhere (tiles, labels, chart ticks and tooltips, OG card); max drawdown is never green; heatmap fills unchanged (D-03, D-04, D-06).
+3. `format.ts` (both) and `utils.ts` delegate to `display-sign.ts`; no second implementation remains (D-05).
+4. A comparator overlap under 90 days shows "—" for Sharpe, Sortino, Calmar, CAGR and annualized vol, keeping cumulative return and max drawdown; a test fails on today's 5-day SPX Sharpe 10.24 (D-07).
+5. When the comparator ends early, the paired-floor sentence says "{CN} prices end Mon D." (D-08).
 
 **Plans:** 0 plans
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 170.6 to break down)
+
+### Phase 170.6.1: DISCOVERYPHONE — the Crypto SMA Discovery table works on a phone and names the right venue (INSERTED)
+
+**Goal:** On a phone every column of a Discovery ranking row is reachable, and a row names the venue its trades actually come from.
+**Requirements**: SC-1, SC-2
+**Depends on:** Phase 170.6
+Split out of 170.6 DISPLAYPOLISH on 2026-10-13 (founder, "Split in three"); SC-1 and SC-2 moved verbatim.
+
+**Success Criteria**:
+1. At 360, 375 and 390 CSS px, every column of a row on the Crypto SMA Discovery ranking table is reachable by scrolling the table, with no "More" disclosure, and the last column ("Simulate Impact") is fully visible at the scroll end, not under the right-edge fade; a test fails on today's markup. (Routed 2026-10-12 from the founder's 170.2 phone re-check; founder: "Close 170.2, route to DISPLAYPOLISH".)
+2. A Discovery row's exchange label, and the "Trades fetched" tooltip that says "from the exchange", name the venue the strategy's trades actually come from. Measured 2026-10-13 by TRADESYNC plan 21 (anon curl on PROD): one published strategy's row reads "Bybit", taken from its descriptive `strategies.supported_exchanges`, while its connected key is on OKX. Either the label reads the connected key's venue, or the mismatch is surfaced; a test fails on today's behaviour. (Routed 2026-10-13 from 167.1.2.2.2 TRADESYNC plan 21; founder: "Route to DISPLAYPOLISH".)
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 170.6.1 to break down)
+
+### Phase 170.6.2: COPYPASS — copy fixes, the anonymous /browse example flash and the admin Compute Jobs kind filter (INSERTED)
+
+**Goal:** The booked copy fixes land, anonymous /browse never flashes example rows that then vanish, and the admin Compute Jobs kind filter lists every present kind.
+**Requirements**: SC-1..SC-4
+**Depends on:** Phase 170.6
+Split out of 170.6 DISPLAYPOLISH on 2026-10-13 (founder, "Split in three").
+
+**Success Criteria**:
+1. /recommendations unset-mandate copy reworded (169.3, founder: reword).
+2. The equity-history rebuilding panel drops "yet", says "One of your keys", names a key by exchange plus nickname (or exchange plus last 4 when unnamed), and gives "could not load" and "needs action" their own headings (routed 2026-10-11 from 167.1.2 ACCOUNTTRUTH D-26, founder).
+3. Anonymous /browse never flashes example rows that then vanish.
+4. The admin Compute Jobs kind filter lists every present kind.
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 170.6.2 to break down)
 
 ### Phase 170.5: FACTSHEETV2PANELS — /strategy/[id]/v2 panels render or say why: the Rolling Alpha and Beta panel is an empty heading in 3M and 6M, benchmark greeks read all em-dash ('Benchmark correlation unavailable') while the factsheet shows alpha, beta, IR and Treynor, the Net and Gross Exposure axis reads 5000000%, Turnover is empty, and the footer calls an API-verified strategy self-reported. (INSERTED)
 
@@ -5746,7 +5864,7 @@ kept verbatim.
 | 164.6.6.2 BTCNATIVE | 12/13 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
 | 164.6.6.2.1 BTCUSDVIEW | 0/? | Queued — booked 2026-10-07 by 164.6.6.2 D-15 | - |
 | 164.6.6.2.2 WEALTHRETURNS | 7/7 | Complete — verification passed after the D-03 post-deploy reading | 2026-10-08 · v0.128.0.0 · #973 |
-| 164.6.6.2.3 FLOWTIMING | 0/? | Queued — founder 2026-10-08 (D-01/D-02) | - |
+| 164.6.6.2.3 FLOWTIMING | 12/12 | Complete | 2026-10-13 |
 | 164.6.6.3 UATFIXES | 7/7 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
 | 164.6.6.3.1 UIPOLISH | 6/6 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
 | 164.6.6.3.2 WIZARDCODES | 4/4 | Complete — verification passed (WR-01 MEDIUM recorded as a known gap) | 2026-10-08 · v0.129.0.0 |
@@ -5792,6 +5910,8 @@ kept verbatim.
 | 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
 | 167.1.2 ACCOUNTTRUTH | PR A, B, C1–C5 shipped | Complete | 2026-10-11 |
 | 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
+| 167.1.2.1.1 WRITERRESIDUALS | 0/? | Queued — data integrity; split from 167.1.2.1 (D-01), after it | - |
+| 167.1.2.1.2 HISTORYREADER | 0/? | Queued — data integrity and user-facing; split from 167.1.2.1 (D-01), after it | - |
 | 167.1.2.2 DERIVECRON | 9/9 | Complete | 2026-10-11 |
 | 167.1.2.2.1 DERIBITWEDGE | 8/8 | Complete | 2026-10-12 |
 | 167.1.2.2.2 TRADESYNC | 0/? | Queued — booked 2026-10-09 (founder) | - |
@@ -5813,6 +5933,8 @@ kept verbatim.
 | 170.4 ALLOCHOLDINGS | 14/14 | Complete | 2026-10-11 |
 | 170.5 FACTSHEETV2PANELS | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 170.6 DISPLAYPOLISH | 0/? | Queued — user-facing, booked 2026-10-03 | - |
+| 170.6.1 DISCOVERYPHONE | 0/? | Queued — user-facing, split from 170.6 2026-10-13 | - |
+| 170.6.2 COPYPASS | 0/? | Queued — user-facing, split from 170.6 2026-10-13 | - |
 | 170.7 MYSTRATTABLE | 9/9 | Complete | 2026-10-11 |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
