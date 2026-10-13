@@ -81,6 +81,8 @@ _NATIVE_UNIT_REASON = "native_unit"
 # be priced at all. ``native_unpriced`` is a null-anchor reason only for that last case.
 _NATIVE_UNPRICED_KEY_OMITTED = "native_unpriced_key_omitted"
 _NATIVE_UNPRICED_REASON = "native_unpriced"
+# 166.3.1 D-08: a key whose live read found no capital left the book after its last measured day.
+_NO_CAPITAL_KEY_EXITED = "no_capital_key_exited"
 
 
 class PortfolioReturns(NamedTuple):
@@ -435,6 +437,7 @@ def compose_allocator_equity(
     unpriced_close_day_by_key: Mapping[str, str] | None = None,
     unpriced_days_by_key: Mapping[str, Collection[str]] | None = None,
     segment_terminals_by_key: Mapping[str, Mapping[str, float]] | None = None,
+    no_capital_exit_by_key: Mapping[str, tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Compose the allocator display-row payload from real per-key inputs.
 
@@ -538,7 +541,33 @@ def compose_allocator_equity(
     return, never a carried level. A hole whose terminal is missing is not guessed: the key is
     composed unsplit and ``key_inputs_mismatch`` (blocking) says so. The flag
     ``native_unpriced_key_omitted`` records that days were left out. Both inputs are optional;
-    a key with no entry is composed exactly as before."""
+    a key with no entry is composed exactly as before.
+
+    ``no_capital_exit_by_key`` (166.3.1 D-08, founder 2026-10-13) maps a key to ``(reason, ISO
+    day)``: a connected key whose live read found no capital (anchor NULL, reason ``dust`` or
+    ``nonpositive``) but which has real stored history. WHY it exists: a key whose account was
+    emptied still has a real return history; dropping it (``DROPPED_KEY``) marks a correct book
+    untrustworthy for as long as the key stays connected, while reading its NULL live anchor as
+    capital would invent money. The only numbers that are not invented are the writer's own: the
+    job sends the key anchored at its stored realized terminal level on ``day`` with
+    ``departed_end_by_key[k] == day``, so it is composed at the writer's levels through ``day``
+    (emptied stretches inside its history stay zero capital, DERIBITWEDGE D-01) and rotated out
+    after it as an exit: never a return, its last level never carried. What the live account holds
+    after ``day`` (at most the dust floor, or nothing) is not in the book as a number. The exit is
+    named twice, never silent: the benign flag ``no_capital_key_exited`` and
+    ``payload["no_capital_exited_keys"]``, a list sorted by key id of ``{"api_key_id", "reason",
+    "day"}`` for each such key that was composed; no amount enters it. The field is additive and
+    present only when non-empty. A key not in this map is composed exactly as before.
+
+    (166.3.1 plan 09) A candidate is never allowed to make a book worse than today. When its
+    replay raises ``NavReconstructionError`` or returns a blocking degrade reason (by the
+    module's own ``_is_trustworthy``), the key is taken back out: it is composed exactly as an
+    unanchored key with returns is today (``NO_ANCHOR`` plus the blocking ``DROPPED_KEY``), is not
+    named as exited, and a counts-only warning names the reason class. The handler covers
+    candidates only; every other key's refusal still raises. A candidate is a KEY: one replayed in
+    segments across an interior hole (``k#hole0 ... k``) falls back as a whole when ANY of its
+    segments is refused or flagged blocking (WR-02), so none of its segments stays in the curve,
+    the ledger, the exit seams or the hole listing."""
     departed_end = dict(departed_end_by_key or {})
     writer_basis = dict(writer_basis_by_key or {})
     unpriced_close_day = dict(unpriced_close_day_by_key or {})
@@ -652,6 +681,9 @@ def compose_allocator_equity(
     # SFH-02: the interior unpriced days of each key replayed in segments, so the dashboard can
     # name a key that was left out of days other than the curve's last.
     interior_hole_days: dict[str, list[str]] = {}
+    # The keys replayed in segments, so a no-capital fallback that takes a key back out of the
+    # book (WR-02) also takes back the omission flag that only its segmentation raised.
+    segmented_keys: set[str] = set()
     unit_anchors: dict[str, float | None] = dict(anchors_by_key)
     hole_exit_units: set[str] = set()
     reentry_units: list[str] = []
@@ -721,7 +753,6 @@ def compose_allocator_equity(
             if len(seg_returns) == 0:
                 # A segment with no return row cannot be blended or replayed from a level.
                 # It is left out and the omission is named (the flag below), not hidden.
-                flag_tokens.add(_NATIVE_UNPRICED_KEY_OMITTED)
                 continue
             anchored_keys.insert(position + placed, uid)
             placed += 1
@@ -739,25 +770,90 @@ def compose_allocator_equity(
                 realized_terminal[uid] = (hi, level)
                 departed_end[uid] = hi
                 hole_exit_units.add(uid)
-        flag_tokens.add(_NATIVE_UNPRICED_KEY_OMITTED)
+        segmented_keys.add(k)
 
     # Per-key $-equity backward replay (asserts the ISO index per key). A
     # departed key is replayed on its FULL series first: its anchor is its level
     # on its own last return day, so clipping before the replay would hang that
     # anchor on the wrong day.
-    per_key_equity = {
-        k: replay_key_equity(
-            anchored_returns[k],
-            anchored_flows[k],
-            unit_anchors[k],
-            history_reaches_inception=k in history_first,
-            dropped_day_pnl=dropped_pnl.get(k),
-            realized_terminal=realized_terminal.get(k),
-            writer_flows=writer_basis[k][0] if k in writer_basis else None,
-            writer_day_pnl=writer_basis[k][1] if k in writer_basis else None,
+    # 166.3.1 plan 09 (D-08): a no-capital candidate is the one kind of key whose replay may
+    # fail without failing the allocator. It is composed only because the job offered it, so a
+    # candidate the replay refuses (``NavReconstructionError``) or flags with a blocking reason is
+    # taken back out and composed exactly as today: ``NO_ANCHOR`` plus ``DROPPED_KEY``. Every other
+    # key keeps raising. The set of candidates actually composed is ``no_capital_exit``.
+    no_capital_exit = dict(no_capital_exit_by_key or {})
+    per_key_equity: dict[str, KeyEquity] = {}
+    fell_back_refused = 0
+    fell_back_blocking: set[DegradeReason] = set()
+    # WR-02 / F4: a candidate is a KEY. A key replayed in segments (``k#hole0 ... k``) is offered
+    # and taken back as one: ``owner`` is the key a unit belongs to, so any of its units that is
+    # refused or flagged blocking takes the whole key back out, not just the last unit that
+    # carries the key's own id.
+    fell_back: list[str] = []
+    for k in anchored_keys:
+        owner = parent.get(k, k)
+        if owner in fell_back:
+            continue  # a sibling unit already took the key back; this unit leaves with it
+        try:
+            key_equity = replay_key_equity(
+                anchored_returns[k],
+                anchored_flows[k],
+                unit_anchors[k],
+                history_reaches_inception=k in history_first,
+                dropped_day_pnl=dropped_pnl.get(k),
+                realized_terminal=realized_terminal.get(k),
+                writer_flows=writer_basis[k][0] if k in writer_basis else None,
+                writer_day_pnl=writer_basis[k][1] if k in writer_basis else None,
+            )
+        except NavReconstructionError:
+            if owner not in no_capital_exit:
+                raise
+            fell_back_refused += 1
+            fell_back.append(owner)
+            continue
+        if owner in no_capital_exit and (
+            key_equity.equity is None or not _is_trustworthy(key_equity.degrade_reasons)
+        ):
+            fell_back_blocking |= key_equity.degrade_reasons
+            fell_back.append(owner)
+            continue
+        per_key_equity[k] = key_equity
+    for owner in fell_back:
+        # Every unit of the key leaves, leaving what an unanchored key with returns leaves today:
+        # nothing of it in the curve, the ledger, the exit seams or the hole listing.
+        for u in [u for u in anchored_keys if parent.get(u, u) == owner]:
+            anchored_keys.remove(u)
+            del anchored_returns[u]
+            del anchored_flows[u]
+            per_key_equity.pop(u, None)
+            departed_end.pop(u, None)
+            hole_exit_units.discard(u)
+            history_first.discard(u)
+            if u != owner:
+                del unit_anchors[u]
+                del parent[u]
+        unit_anchors[owner] = None
+        departed_end.pop(owner, None)
+        reentry_units[:] = [u for u in reentry_units if parent.get(u, u) != owner]
+        interior_hole_days.pop(owner, None)
+        segmented_keys.discard(owner)
+        del no_capital_exit[owner]
+    if segmented_keys:
+        flag_tokens.add(_NATIVE_UNPRICED_KEY_OMITTED)
+    if fell_back:
+        reasons.add(DegradeReason.NO_ANCHOR)
+        reasons.add(DegradeReason.DROPPED_KEY)
+        # Counts and reason classes only: no key id, no day, no USD (T-166.3.1-34).
+        logger.warning(
+            "compose: %d no-capital candidate(s) fell back to %s (%d refused by the replay, %d "
+            "carried a blocking reason: %s); each is composed as an unanchored key and the book "
+            "is untrustworthy",
+            len(fell_back),
+            DegradeReason.DROPPED_KEY.value,
+            fell_back_refused,
+            len(fell_back) - fell_back_refused,
+            ",".join(sorted(r.value for r in fell_back_blocking)) or "none",
         )
-        for k in anchored_keys
-    }
     for k in anchored_keys:
         if per_key_equity[k].flags.get("writer_basis") is True:
             # D-06: the flows the levels were rolled through are the flows the curve, the
@@ -962,6 +1058,14 @@ def compose_allocator_equity(
             unpriced_native.append(entry)
     if unpriced_native:
         flag_tokens.add(_NATIVE_UNPRICED_KEY_OMITTED)
+    # D-08: the no-capital keys that were composed and rotated out, named by key, reason and day.
+    no_capital_exited: list[dict[str, Any]] = [
+        {"api_key_id": k, "reason": reason, "day": day}
+        for k, (reason, day) in sorted(no_capital_exit.items())
+        if k in departed_present
+    ]
+    if no_capital_exited:
+        flag_tokens.add(_NO_CAPITAL_KEY_EXITED)
     returns_rows = book_returns.rows
     skipped_days = book_returns.skipped_nonpositive_days
     if book_returns.nonfinite_days:
@@ -1026,4 +1130,7 @@ def compose_allocator_equity(
     if unpriced_native:
         # Additive, present only when a key was left out (an older reader never sees it).
         payload["unpriced_native_keys"] = unpriced_native
+    if no_capital_exited:
+        # Additive, present only when a no-capital key exited (an older reader never sees it).
+        payload["no_capital_exited_keys"] = no_capital_exited
     return payload

@@ -29,8 +29,16 @@ The full implementation needs:
 4. **Render route** — a server-rendered HTML route at e.g.
    `/factsheet/[id]/v2/print-view` that Puppeteer navigates to. This
    route can reuse `FactsheetView` directly but disables interactivity.
-5. **Cache layer** — PDFs should be cached by `(strategyId, computed_at)`
-   exactly like the OG image and the payload itself.
+5. **Cache layer** — the payload behind the page is cached by
+   `(strategyId, computed_at, computation_status)`: `computed_at` moves
+   only on a successful compute (166.3.1 D-05) and the status moves the key
+   on entry into `computing` and on a failure. The OG card is NOT keyed on
+   `computed_at`: it is HTTP-cached by its URL with time-based TTLs (and a
+   failed read or compute is sent no-store). The shipped PDF route,
+   `src/app/api/factsheet/[id]/pdf/route.ts`, validates with an ETag of
+   `id:computed_at`. It refuses every non-computed status with a 400 before
+   it computes that ETag, so the held job-start and failure stamps never
+   reach it, and it moves when a successful compute stamps `computed_at`.
 
 ## Integration shape (for a follow-up phase)
 

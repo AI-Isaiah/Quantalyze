@@ -175,18 +175,28 @@ function installZeroRowsClient() {
   });
 }
 
-/** Every `strategy_analytics` read answers a real row with `status`. */
-function installRowClient(status: string) {
+/**
+ * Every `strategy_analytics` read answers a real row with `status`. Phase
+ * 166.3.1 / D-05 panel: the row also carries a `computation_error_job_id` (the
+ * writer-stamped id of the failing job), and every `select(<columns>)` string
+ * the hook sends is recorded in `selects`, so a test can pin which columns each
+ * arm asks for.
+ */
+const ROW_ERROR_JOB_ID = "6f1c2d3e-4a5b-4c6d-8e7f-a1b2c3d4e5f6";
+function installRowClient(status: string, selects: string[] = []) {
   currentClientFactory = () => ({
     from: () => ({
-      select: () =>
-        chain(() =>
+      select: (columns: string) => {
+        selects.push(columns);
+        return chain(() =>
           okRow({
             computation_status: status,
             computation_error: null,
             computed_at: "2026-08-04T11:39:35.342759+00:00",
+            computation_error_job_id: ROW_ERROR_JOB_ID,
           }),
-        ),
+        );
+      },
     }),
   });
 }
@@ -455,11 +465,106 @@ describe("[154-01 / STALE-01a] useStrategySyncPoller — an absent row is not a 
     });
 
     expect(onStatus.mock.calls.length).toBeGreaterThan(0);
+    // Moved by Phase 166.3.1 / D-05 panel: a FOURTH argument, the row's
+    // `computation_error_job_id`. Lineage: this expected three.
     expect(onStatus.mock.calls[0]).toEqual([
       "complete",
       null,
       "2026-08-04T11:39:35.342759+00:00",
+      ROW_ERROR_JOB_ID,
     ]);
+  });
+
+  // Phase 166.3.1 / D-05 panel — evidence (c) needs the server-written error job
+  // id at the panel. The INTERVAL arm selects it and passes it as the fourth
+  // `onStatus` argument; the LADDER arm (the wizard's) must keep its exact
+  // select and its two-argument call, because 167.2 pins it byte-unchanged.
+  it("INTERVAL-SELECTS-ERROR-JOB-ID: the interval arm selects computation_error_job_id and forwards it; a row without one forwards null", async () => {
+    const selects: string[] = [];
+    const onStatus = vi.fn();
+    installRowClient("failed", selects);
+
+    const first = renderHook(() =>
+      useStrategySyncPoller({
+        enabled: true,
+        strategyId: STRATEGY_ID,
+        schedule: INTERVAL_CADENCE_MS,
+        maxAttempts: 40,
+        missingRowGracePolls: 10,
+        onStatus,
+        onError: vi.fn(),
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ADVANCE_MS);
+    });
+
+    expect(selects.length).toBeGreaterThan(0);
+    for (const columns of selects) {
+      expect(columns).toBe("computation_status, computation_error, computed_at, computation_error_job_id");
+    }
+    expect(onStatus.mock.calls[0]?.[3]).toBe(ROW_ERROR_JOB_ID);
+
+    // A row whose column is NULL or absent reports null, never undefined.
+    first.unmount();
+    onStatus.mockClear();
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () =>
+          chain(() =>
+            okRow({
+              computation_status: "failed",
+              computation_error: null,
+              computed_at: "2026-08-04T11:39:35.342759+00:00",
+            }),
+          ),
+      }),
+    });
+    renderHook(() =>
+      useStrategySyncPoller({
+        enabled: true,
+        strategyId: STRATEGY_ID,
+        schedule: INTERVAL_CADENCE_MS,
+        maxAttempts: 40,
+        missingRowGracePolls: 10,
+        onStatus,
+        onError: vi.fn(),
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INTERVAL_CADENCE_MS);
+    });
+    expect(onStatus.mock.calls[0]).toEqual([
+      "failed",
+      null,
+      "2026-08-04T11:39:35.342759+00:00",
+      null,
+    ]);
+  });
+
+  it("LADDER-SELECT-UNCHANGED: the ladder arm's select string is exactly the two columns it always read", async () => {
+    const selects: string[] = [];
+    installRowClient("complete", selects);
+
+    renderHook(() =>
+      useStrategySyncPoller({
+        enabled: true,
+        strategyId: STRATEGY_ID,
+        schedule: LADDER_SCHEDULE,
+        maxConsecutiveErrors: 3,
+        onStatus: vi.fn(),
+        onTerminal: vi.fn(() => "done" as const),
+        onError: vi.fn(),
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ADVANCE_MS);
+    });
+
+    expect(selects.length).toBeGreaterThan(0);
+    for (const columns of selects) {
+      expect(columns).toBe("computation_status, computation_error");
+    }
   });
 
   it("LADDER-TWO-ARGS: the ladder arm's onStatus is called with exactly two arguments", async () => {

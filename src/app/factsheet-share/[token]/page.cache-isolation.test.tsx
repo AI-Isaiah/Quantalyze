@@ -27,7 +27,8 @@
  * ⛔ ZERO IS THE ONLY ACCEPTABLE COUNT, not "a different key" (SL-1a). When
  * this was written the `::computedAt` suffix the id route passed was split off
  * and DISCARDED, so the effective key was id-ONLY. Since 167.2.1-REVIEW WR-02
- * the key is the id plus the row's `computed_at`, which is still nothing about
+ * the key is the id plus the row's `computed_at` and `computation_status`
+ * (166.3.1 D-05), which is still nothing about
  * the viewer or the token. Any safety argument of the form "we vary the cache
  * key" is wrong by construction, and an assertion of the form "the token lane
  * uses a different key" would encode that wrong argument. The token lane must
@@ -206,7 +207,8 @@ function signatureRow(id: string, name: string) {
     name,
     codename: null,
     disclosure_tier: "exploratory",
-    strategy_analytics: { computed_at: "2026-07-01T00:00:00.000Z" },
+    // 166.3.1 D-05: the probe carries the row's status as well, the key's fourth member.
+    strategy_analytics: { computed_at: "2026-07-01T00:00:00.000Z", computation_status: "complete" },
   };
 }
 
@@ -412,7 +414,16 @@ describe("SHARE-02 — the ORDERED adversarial cache isolation", () => {
     // 167.1.2.2.2 plan 10: the key also carries `trades_fetched_at` and a
     // fingerprint of `series_provenance`; the sibling row here has neither, so
     // both members read the literal "none". Still nothing about the viewer.
-    expect(keyParts).toEqual([EXPECTED_KEY_PREFIX, PUBLISHED_ID, "2026-07-01T00:00:00.000Z", "none", "none"]);
+    // 166.3.1 D-05 (2026-10-07): `computation_status` is the last member. It is
+    // also a property of the sibling's row, never of the viewer or the token.
+    expect(keyParts).toEqual([
+      EXPECTED_KEY_PREFIX,
+      PUBLISHED_ID,
+      "2026-07-01T00:00:00.000Z",
+      "none",
+      "none",
+      "complete",
+    ]);
     // ⛔ The private id must appear NOWHERE in the key — not as a part, not as
     // a suffix, not concatenated into one.
     expect(keyParts.join("|")).not.toContain(PRIVATE_ID);

@@ -137,9 +137,13 @@ function mockAdmin(strategy: unknown, error: unknown = null): SupabaseClient {
   return { from } as unknown as SupabaseClient;
 }
 
-/** The outer signature probe (the published lane hits), carrying computed_at. */
+/**
+ * The outer signature probe (the published lane hits), carrying computed_at and,
+ * since 166.3.1 D-05, computation_status (a null status is a row with no status).
+ */
 function mockRequestClient(
   computedAt: string,
+  computationStatus: string | null,
   tradeFacts: { trades_fetched_at?: string | null; series_provenance?: unknown } = {},
 ) {
   const chain = {
@@ -152,7 +156,7 @@ function mockRequestClient(
           name: "Synthetic Published",
           codename: null,
           disclosure_tier: "exploratory",
-          strategy_analytics: { computed_at: computedAt, ...tradeFacts },
+          strategy_analytics: { computed_at: computedAt, computation_status: computationStatus, ...tradeFacts },
         },
         error: null,
       }),
@@ -174,13 +178,20 @@ function findPayload(node: unknown): FactsheetPayload | null {
   return findPayload(el.props?.children ?? null);
 }
 
-/** One public request: the row as the signature probe and the builder see it now. */
+/**
+ * One public request: the row as the signature probe and the builder see it now.
+ * `probeStatus` overrides what the signature probe reports (default: the row's
+ * status), so a row with no status can be keyed without changing what the builder reads.
+ */
 async function request(
   analytics: { computed_at: string; computation_status: string; daily_returns: unknown },
   adminError: unknown = null,
   tradeFacts: { trades_fetched_at?: string | null; series_provenance?: unknown } = {},
+  probeStatus: string | null = analytics.computation_status,
 ) {
-  vi.mocked(createClient).mockResolvedValue(mockRequestClient(analytics.computed_at, tradeFacts) as never);
+  vi.mocked(createClient).mockResolvedValue(
+    mockRequestClient(analytics.computed_at, probeStatus, tradeFacts) as never,
+  );
   vi.mocked(createAdminClient).mockReturnValue(mockAdmin(adminRow(analytics), adminError));
   return FactsheetV2Page({ params: Promise.resolve({ id: STRATEGY_ID }) });
 }
@@ -270,10 +281,11 @@ describe("WR-02 — the public factsheet cache is keyed by the analytics run it 
     }
   });
 
-  it("KEY SHAPE: the key is the shape version, the id, computed_at and the two trade-fact members, and nothing viewer-dependent", async () => {
+  it("KEY SHAPE: the key is the shape version, the id, computed_at, the two trade-fact members and computation_status, and nothing viewer-dependent", async () => {
     await request({ computed_at: T0, computation_status: "complete", daily_returns: CASH_DAILY });
     // No stamp and no provenance on the row: both members read the literal "none".
-    expect(cacheKeys).toEqual([["factsheet-v2-payload-v17", STRATEGY_ID, T0, "none", "none"]]);
+    // 166.3.1 D-05: the row's status is the last member.
+    expect(cacheKeys).toEqual([["factsheet-v2-payload-v17", STRATEGY_ID, T0, "none", "none", "complete"]]);
   });
 });
 
@@ -307,15 +319,62 @@ describe("167.1.2.2.2 plan 10 - a tick or a provenance write that leaves compute
   it("the key carries the raw stamp and a short fingerprint, never the provenance JSON itself", async () => {
     await request(RUN, null, { trades_fetched_at: FETCH_1, series_provenance: GAPS_A });
     expect(cacheKeys).toHaveLength(1);
-    const [version, id, computed, stamp, fingerprint] = cacheKeys[0] as string[];
-    expect([version, id, computed, stamp]).toEqual([
+    const [version, id, computed, stamp, fingerprint, status] = cacheKeys[0] as string[];
+    expect([version, id, computed, stamp, status]).toEqual([
       "factsheet-v2-payload-v17",
       STRATEGY_ID,
       T0,
       FETCH_1,
+      "complete",
     ]);
     expect(fingerprint).toMatch(/^[0-9a-f]{16}$/);
   });
+});
+
+describe("166.3.1 D-05 - the key's last member is the row's computation_status", () => {
+  it("KEY SHAPE edge: a row whose analytics embed carries no status keys on the sentinel \"none\", never on undefined", async () => {
+    // JSON drops `undefined` from an array's key and `join` renders it as an
+    // empty string, so an absent status must be a fixed string or two different
+    // absent states would share a key with the empty slot.
+    await request(
+      { computed_at: T0, computation_status: "complete", daily_returns: CASH_DAILY },
+      null,
+      {},
+      null,
+    );
+    expect(cacheKeys).toEqual([["factsheet-v2-payload-v17", STRATEGY_ID, T0, "none", "none", "none"]]);
+  });
+});
+
+/**
+ * 166.3.1 D-05 (founder, 2026-10-07, "Add status to cache key") - STATUS-MOVES-KEY.
+ *
+ * WHY THIS MATTERS (Rule 9). The D-05 trigger on strategy_analytics holds
+ * `computed_at` on entry into `computing` and on a write to `failed`, so a
+ * timestamp no longer moves on those transitions: it moves only on a
+ * successful compute. Before, the job-start and failure stamps were what moved
+ * this key when a complete row went `computing` or `failed`. STALE-01 withholds
+ * the payload for both statuses, but the withholding lives INSIDE the cached
+ * builder: a request that hits an entry built under the old status never runs
+ * it. So with a key of (id, computed_at) alone, a complete payload cached at T0
+ * is served for the whole 3600 s TTL to readers of a row that is `computing` or
+ * `failed` at the same T0, which is the exact state STALE-01 exists to hide.
+ * Only a status keyPart makes a withheld state get its own, freshly built,
+ * entry. These cases fail on the (id, computed_at) key and pass on the
+ * status-carrying one.
+ */
+describe("166.3.1 D-05 - STATUS-MOVES-KEY: a status change under a held computed_at moves the key", () => {
+  for (const heldStatus of ["computing", "failed"] as const) {
+    it(`STATUS-MOVES-KEY (${heldStatus}): a payload cached as complete is not served once the same computed_at reads ${heldStatus}`, async () => {
+      const built = await request({ computed_at: T0, computation_status: "complete", daily_returns: CASH_DAILY });
+      expect(findPayload(built)).not.toBeNull();
+
+      // Same T0: the trigger held it. Only the status moved.
+      const held = await request({ computed_at: T0, computation_status: heldStatus, daily_returns: CASH_DAILY });
+      expect(findPayload(held), `a complete payload was served for a ${heldStatus} row`).toBeNull();
+      expect(adminReads, "the status change reached the builder").toBe(2);
+    });
+  }
 });
 
 describe("164.6.6.2-07 - the share card link carries the strategy's unit as a cache key", () => {

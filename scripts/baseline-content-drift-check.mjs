@@ -147,7 +147,7 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * run green; a drop means either a real removal (say so, in the same commit) or
  * the parser blinding itself, which is the whole defect.
  */
-export const COMPARED_FLOOR = 126;
+export const COMPARED_FLOOR = 127;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

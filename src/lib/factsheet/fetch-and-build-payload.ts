@@ -19,8 +19,8 @@
  * cached wrapper `buildFactsheetPayloadCached` deliberately did NOT move; it
  * stays private to `v2/page.tsx`, where the lane decision that makes it safe
  * also lives, and this module imports that page nowhere. The effective
- * `unstable_cache` key on that route carries no viewer (the id and
- * `computed_at` only), so any viewer-dependent payload routed through the
+ * `unstable_cache` key on that route carries no viewer (the id,
+ * `computed_at` and `computation_status` only), so any viewer-dependent payload routed through the
  * wrapper would be served to every later reader of that id — anonymous ones
  * included — for the full TTL. A lane needing a
  * viewer-dependent payload calls `fetchAndBuildPayload` DIRECTLY, exactly as
@@ -671,23 +671,37 @@ async function resolveFactsheetInputs(
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
  * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v17", id,
- * computedAt, tradesFetchedAt ?? "none", provenanceKey] (the last two are
- * 167.1.2.2.2 plan 10's trade-fact members), a `null` computedAt included. 167.2.1-REVIEW-R2 IN-01: the key
- * moves more often than "once per successful run". The status bridge
- * `sync_strategy_analytics_status` (latest definition: migration
- * 20260906120000) stamps `computed_at = now()` on every job transition it
- * resolves: branch (a), the non-terminal arm, on every call, so the move INTO
- * `computing` at job start stamps it; branch (b) on an unprotected failure;
- * and branch (c) at a successful completion. Its protected branch (b-prime)
- * writes neither status nor `computed_at`, and so
+ * computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus]
+ * (the middle two are 167.1.2.2.2 plan 10's trade-fact members, the last is
+ * 166.3.1 D-05's), a `null` computedAt included and an absent status keyed on
+ * the fixed string "none".
+ *
+ * 166.3.1 D-05 (founder, 2026-10-07, "Add status to cache key") changed what
+ * moves it. Until then the status bridge `sync_strategy_analytics_status`
+ * (latest definition: migration 20260906120000) stamped `computed_at = now()`
+ * on every job transition it resolved (branch (a) at job start, branch (b) on
+ * an unprotected failure, branch (c) at completion), so `computed_at` alone
+ * moved the key on every status change (167.2.1-REVIEW-R2 IN-01). That is no
+ * longer true: since 166.3.1 a BEFORE UPDATE trigger on `strategy_analytics`
+ * holds `computed_at` on entry into `computing` and on a write to `failed`, so
+ * `computed_at` moves ONLY on a successful write (`complete`,
+ * `complete_with_warnings`). The status keyPart is what now moves the key on
+ * entry into `computing` and on a failure, `computed_at` moves it on a
+ * successful compute, and the trade-fact members move it on a daily tick or a
+ * provenance write (neither moves `computed_at`). Branch (b-prime), the
+ * protected branch, still writes neither status nor `computed_at`, and so
  * changes nothing the builder reads. So a status change is never served from
  * an entry keyed before it. Entries live up to revalidate=3600s only while no
  * transition happens, and the admin publish flow's
  * revalidateTag(`factsheet-v2:${id}`) still handles publish/unpublish flips.
+ * Without the status keyPart a complete payload cached at T0 would be served
+ * to readers of a `computing` or `failed` row held at the same T0, although
+ * the STALE-01 gate (`isComputedAnalytics`) withholds it, because that gate
+ * runs inside the cached builder and never runs on a hit.
  *
  * ⛔ Corollary: viewer/lane separation can NEVER be expressed through the
- * cache key. Nothing in it is about the viewer (`computed_at` is a property of
- * the row), so any viewer-dependent payload built through the cached wrapper
+ * cache key. Nothing in it is about the viewer (`computed_at` and
+ * `computation_status` are properties of the row), so any viewer-dependent payload built through the cached wrapper
  * would be served to every subsequent reader of that id and run — including
  * anonymous ones — for the full TTL. A viewer-dependent payload must bypass
  * the cached wrapper entirely, which is why the wrapper in `v2/page.tsx`

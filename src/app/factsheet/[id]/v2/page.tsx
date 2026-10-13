@@ -119,21 +119,41 @@ function buildFactsheetPayloadCached(
   computedAt: string,
   tradesFetchedAt: string | null,
   provenanceKey: string,
+  computationStatus: string,
 ): Promise<FactsheetPayload | null> {
   // 167.2.1-REVIEW WR-02 (closes DEF-148-A): the key is the shape version, the
-  // id AND `computed_at`, as real `keyParts` members. Before, the page passed
+  // id AND `computed_at`, as real `keyParts` members; 167.1.2.2.2 plan 10 adds
+  // the two trade-fact members and 166.3.1 D-05 adds the row's
+  // `computation_status` as the last one (below). Before, the page passed
   // `${id}::${computedAt}` and this wrapper split the suffix off, so the
   // effective key was the id only, and an entry (a `null` included, which
   // unstable_cache stores unconditionally) outlived the analytics run it was
   // built from for the full TTL. /strategies decides its "right now" share
   // notes with a FRESH probe, so for up to an hour it could say "no note" while
   // this lane served a cached placeholder, or "not available" while it served
-  // a cached payload. `sync_strategy_analytics_status` stamps
-  // `computed_at = now()` on every status write, so the key moves when a
-  // compute starts AND when it completes, i.e. on every run that can change
-  // what the builder answers. Nothing else can revalidate on a compute: the
-  // writer is the Python worker, which cannot reach Next's cache.
-  // `computed_at` is a property of the ROW, never of the viewer, so the key
+  // a cached payload. Nothing else can revalidate on a compute: the writer is
+  // the Python worker, which cannot reach Next's cache.
+  //
+  // What moves the key, member by member (merged 166.3.1 NAVBREACH + 167.1.2.2.2):
+  //   - `computed_at` moves ONLY on a successful write (`complete`,
+  //     `complete_with_warnings`). Before 166.3.1 the status bridge
+  //     `sync_strategy_analytics_status` stamped `computed_at = now()` on every
+  //     transition it resolved, so the key moved when a compute started AND
+  //     when it ended. That is no longer true: since the D-05 trigger on
+  //     `strategy_analytics` (plan 166.3.1-02) holds `computed_at` on entry
+  //     into `computing` and on a write to `failed`.
+  //   - `computation_status` (D-05, founder 2026-10-07, "Add status to cache
+  //     key") moves it on entry into `computing` and on a failure, which
+  //     `computed_at` no longer does. Without it, a complete payload cached at
+  //     T0 would be served for the 3600 s TTL to readers of a row that is
+  //     `computing` or `failed` at the same T0, undoing STALE-01's withholding
+  //     (which lives inside the cached builder and never runs on a hit). An
+  //     absent status keys on the fixed string "none", chosen by the caller:
+  //     `undefined` would be dropped from the key.
+  //   - `trades_fetched_at` and a fingerprint of `series_provenance` (plan 10)
+  //     move it on a daily tick or a runbook provenance write, neither of which
+  //     moves `computed_at`.
+  // All of these are properties of the ROW, never of the viewer, so the key
   // stays viewer-independent (the corollary below still holds).
   //
   // Per-id `factsheet-v2:${id}` tag lets admin status flips invalidate ONE
@@ -237,7 +257,11 @@ function buildFactsheetPayloadCached(
     // Bumped v14→v15 (re-keyed on merging main, 2026-10-10; originally drafted as v12→v13) (Phase 164.6.6.3.3 FACTSHEETTRUTH, 2026-10-09): the payload's `dataQuality` gains `headlineWithheld` and `headlineGuardReasons`, a composite now carries `twrChainBroken` and `headlineCoversFrom`, and a legacy chain-broken row's seven stored scalars are withheld; a stale entry would show mixed-basis figures under the new one-span note during the 1 h drain.
     // Bumped v15→v16 (Phase 167.1.2.2.2 TRADESYNC plan 10, 2026-10-10, re-keyed on merging main: it was drafted as v12→v13 and main shipped v15 meanwhile): the payload gained `tradesFetchedAt`, `tradeFetchVenue` and `unrecoveredGaps` (the header's trade-fetch line and the named-gap record), and the key gained `trades_fetched_at` plus a fingerprint of `series_provenance`. The daily tick stamps `trades_fetched_at`, and a runbook provenance write sets `series_provenance`, with neither moving `computed_at`, so under the v15 key the line would have stayed frozen for the 1 h TTL. A v15 entry lacks the three fields, which read as undefined (no line), not as an error.
     // Bumped v16→v17 (Phase 164.6.6.2.3 FLOWTIMING, 2026-10-13, on merging main): the payload's `dataQuality` gains the optional `flowTimingDayLevel` and `flowTimingDayLevelLarge` (the day-level flow-timing note and the "returns can be extreme" caveat), and the retired `flow_dominated_guard` no longer names a guard reason, so `headlineGuardReasons` is absent where a v16 entry could carry it. A v16 entry lacks the two new fields, so for the 1 h TTL drain a day-level account would show no note and a stored flow-dominance row would still name its retired reason.
-    ["factsheet-v2-payload-v17", id, computedAt, tradesFetchedAt ?? "none", provenanceKey],
+    // Not a payload-shape bump (166.3.1 NAVBREACH D-05, merged with origin/main): the key gains a
+    // sixth member, `computationStatus` (`computation_status ?? "none"`), and the payload shape is
+    // unchanged, so the version stays v17. A longer keyParts array already separates every entry
+    // built under the five-member v17 key.
+    ["factsheet-v2-payload-v17", id, computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
@@ -320,7 +344,7 @@ export default async function FactsheetV2Page({
   const { id } = await params;
   const supabase = await createClient();
 
-  // Lightweight signature probe (id + name + computed_at) + the public trust
+  // Lightweight signature probe (id + name + computed_at + computation_status) + the public trust
   // signal, in parallel. Strategy meta + dailyReturns are fetched INSIDE the
   // cached function so the cache key derivation doesn't serialize a multi-MB
   // array per hit. `name` / `codename` come along on the probe so the
@@ -340,7 +364,7 @@ export default async function FactsheetV2Page({
     withPublishedOnly(
       supabase
         .from("strategies")
-        .select("id, name, codename, disclosure_tier, strategy_analytics ( computed_at, trades_fetched_at, series_provenance )")
+        .select("id, name, codename, disclosure_tier, strategy_analytics ( computed_at, computation_status, trades_fetched_at, series_provenance )")
         .eq("id", id),
     )
       .maybeSingle(),
@@ -351,7 +375,7 @@ export default async function FactsheetV2Page({
   // lane above and is byte-unchanged. Lane B exists ONLY on a Lane A miss: an
   // authenticated owner may read their OWN unpublished strategy, built directly
   // (never through the shared cache — see the header comment: the cache key
-  // carries no viewer, only the id and `computed_at`, so an owner-built entry
+  // carries no viewer, only the id, `computed_at` and `computation_status`, so an owner-built entry
   // would be served to anonymous readers for the full TTL).
   //
   // ⛔ LANE ORDER IS LOAD-BEARING. The published probe runs FIRST and the
@@ -430,7 +454,7 @@ export default async function FactsheetV2Page({
     const { data: ownRow, error: probeError } = await withPublishedOrOwner(
       supabase
         .from("strategies")
-        .select("id, name, codename, disclosure_tier, status, capital_ownership, source, api_key_id, strategy_analytics ( computed_at, trades_fetched_at, series_provenance )")
+        .select("id, name, codename, disclosure_tier, status, capital_ownership, source, api_key_id, strategy_analytics ( computed_at, computation_status, trades_fetched_at, series_provenance )")
         .eq("id", id),
       user.id,
     ).maybeSingle();
@@ -546,11 +570,15 @@ export default async function FactsheetV2Page({
   // not move `computed_at` still moves the cache key (PATTERNS correction 3).
   const tradesFetchedAtKey: string | null = signAnalytics?.trades_fetched_at ?? null;
   const provenanceKey = provenanceFingerprint(signAnalytics?.series_provenance);
+  // 166.3.1 D-05: the row's status is a cache keyPart beside `computed_at`. An
+  // absent analytics row or a NULL status keys on a fixed sentinel, never on
+  // `undefined`, which JSON would drop from the key.
+  const computationStatus = signAnalytics?.computation_status ?? "none";
 
   // ⛔ The owner arm calls the builder DIRECTLY: no cache read, no cache write.
   // It cannot route through `buildFactsheetPayloadCached` — the effective
-  // unstable_cache key carries no viewer (the id and `computed_at` only, header
-  // comment), so an owner-built payload would be served to every subsequent
+  // unstable_cache key carries no viewer (the id, `computed_at` and
+  // `computation_status` only, header comment), so an owner-built payload would be served to every subsequent
   // reader of this id and run, anonymous ones
   // included, for the full 3600s TTL. The same applies to a `null`: unstable_cache
   // stores it unconditionally, so a draft that fails to build must not reach the
@@ -578,7 +606,7 @@ export default async function FactsheetV2Page({
     payload = ownerBuild.payload;
   } else {
     try {
-      payload = await buildFactsheetPayloadCached(id, computedAt, tradesFetchedAtKey, provenanceKey);
+      payload = await buildFactsheetPayloadCached(id, computedAt, tradesFetchedAtKey, provenanceKey, computationStatus);
     } catch (err) {
       // SFH HIGH-1: a degraded build renders its payload, uncached (D-30).
       if (err instanceof FactsheetDegradedBuildError) {

@@ -1,8 +1,8 @@
 ---
-status: resolved
+status: diagnosed
 trigger: "does live API keys' daily trade ingestion actually run on PROD? (no scheduler for /cron-sync found; strategy_sync_cursors has 0 rows on PROD)"
 created: 2026-10-09
-updated: 2026-10-13
+updated: 2026-10-09
 goal: find_root_cause_only
 ---
 
@@ -83,17 +83,3 @@ root_cause: POST /api/cron-sync (analytics-service/routers/cron.py) has no sched
 fix: not applied (diagnose-only)
 verification:
 files_changed: []
-
-## Resolution note (2026-10-13) — resolved by Phase 167.1.2.2.2 TRADESYNC
-
-Everything above is kept as lineage; the diagnosis stands. The `fix:` line above ("not applied") describes the state on 2026-10-09 only.
-
-- **The tick shipped by migration.** `public.cron_sync_tick()` (a vault-reading tick function, the shape the last evidence entry asked for) and the `strategy_analytics.trades_fetched_at` / `series_provenance` columns reached PROD in release 1 (0.129.10.0). The migrations schedule nothing; a census gate pins that.
-- **It was registered by runbook, not by migration.** `docs/runbooks/cron-sync-go-live.md` Step C wrote one `cron.job` row, `cron-sync-trades`, `30 4 * * *`, command `SELECT public.cron_sync_tick();`, on 2026-10-12 (plan 19), behind the marker guard. `scripts/prod-prober/cron-manifest.json` was re-captured in the same session (17 to 18 rows, exactly one added).
-- **The cursor-skip hazard in the evidence above was closed before the schedule.** The route now resumes each strategy from its own newest stored daily-P&L day, floored to 00:00 UTC, so the 14 to 156 day gap backfills instead of being skipped. Three OKX strategies' 124 legacy daily points were carried forward first (D-08), and the one published strategy on a disconnected key got a seeded `trades_fetched_at` (D-10).
-- **One rehearsal tick on PROD (plan 17) measured FITS:** 41.58 s, HTTP 200, 12 of 12 keys, none timed out. The 4 connected strategy keys stored 33 trades and were stamped. The async-route fallback (plan 18) was not needed.
-- **D-13 exclusions, as the tick selects them:** a key with no eligible strategy (16 of 28 keys in the rehearsal), a disconnected key, and a connected allocator-only or revoked allocator-only key are excluded, each with its reason recorded in ADR-0008. MT5 keys are deferred by the route (8), as the evidence above already found. The four ccxt strategy keys (3 okx, 1 bybit) are the ones the tick fetches.
-- **Named, not filled:** two OKX strategies carry an `unrecovered_gaps` record (87 and 70 days, 157 in all). The venue's served reach did not cover them. Nothing was interpolated or written as 0.0. Phase 167.1.2.2.2.1 OKXHISTORY owns the classification and any recovery.
-- **The "Synced Nd ago" masking is fixed.** The badge and the factsheet now read the last trade fetch ("Trades fetched {age}", D-14), not `computed_at`.
-- **Not done yet: no human is paged when the tick stops.** The staleness alarm is booked as `167.1.2.2.2-TRADESYNC-STALENESS-ALARM` (TODOS), owned by Phase 164.6.8 OUTAGEALERT. Until it lands, a silent stop of the daily tick is visible only as the public "Trades fetched {age} · stale" styling past 2 days and in the runbook's manual reads.
-- **First cron day: 2026-10-13, 04:30 UTC.** The first-tick proof is plan 21's.

@@ -110,6 +110,7 @@ same before grepping a rendered file by hand for those words.
 | `r5-candidates` | none | per key: days with an option-symbol holding, latest `asof` |
 | `derive-quiet` | `SINCE` | the derive jobs per key since `SINCE`, by status |
 | `replay-inputs` | `ACCOUNT_RANK` | one account's stored inputs and returns. SCRATCH ONLY |
+| `sc5-null-anchor-keys`, `sc5-key-inputs`, `sc5-book-flags` | see the end of this file | NAVBREACH SC-5: the NULL-anchor return-bearing keys of the allocator books (section `NAVBREACH SC-5`) |
 
 "Connected Deribit key" means `exchange = 'deribit' AND is_active AND disconnected_at IS NULL`.
 Output is keyed by `account_rank` (accounts ordered by their earliest key's `created_at`) and
@@ -815,3 +816,180 @@ A derive the section 5 gate (or another structural refusal) turns away stores it
 `key_capture:<api_key_id>` row with `outcome: refused` (PR-1 review MD-01, fixed in PR-2). Read it
 with `capture-refused`. On 2026-10-10 it read 0 refusal rows across the 8 keys (every key had
 `has_capture_row` false), which is the normal state.
+
+## NAVBREACH SC-5 — null-anchor keys and book flags
+
+Written by plan 08 of Phase 166.3.1 (NAVBREACH). Read-only, like everything above: the same
+renderer, the same write scan, `marker_is_prod` first on every row. The question they answer is
+the one SC-5 was routed here with: which return-bearing keys of the allocator books carry a NULL
+capital anchor, and what does their stored row say about how they could compose. Books are
+`allocator_rank` from `r2-verdict` (re-read per session), keys are by exchange and an ordinal
+inside the book (by `created_at`), never by id.
+
+| Form | Parameters | What it reads |
+|---|---|---|
+| `sc5-null-anchor-keys` | none | per connected key (any exchange) of an allocator `r2-verdict` ranks whose `key_inputs` anchor is NULL and which has return rows: the anchor token, return-day count, staleness, and the shape of its stored realized terminal and writer basis. No id, no amount |
+| `sc5-key-inputs` | `BOOK_RANK` | the stored payload and the `(date, daily_return)` rows of exactly those keys for one allocator rank. SCRATCH ONLY |
+| `sc5-book-flags` | `START` | `r2-verdict`'s columns plus the `flags` array and the count of `no_capital_exited_keys` entries by `reason` (NULL while the field is absent) |
+
+`sc5-null-anchor-keys` columns that need a word. `terminal_vs_last_return` compares the stored
+`realized_terminal_day` with the key's last return day: `equal`, `terminal_later`,
+`terminal_earlier`, or `none` when no terminal is stored. `terminal_sign` is the sign of the stored
+`realized_terminal_usd` (`pos`, `zero`, `neg`, `none`), the amount itself never leaves the
+database. `has_writer_basis` is true when both `composed_flows` and `composed_day_pnl` are stored
+arrays.
+
+<!-- form: sc5-null-anchor-keys -->
+```sql
+WITH m AS (SELECT __MARKER_IS_PROD__ AS marker_is_prod),
+__DERIBIT_KEYS__,
+al AS (
+  SELECT k.user_id AS allocator_id, min(k.account_rank) AS first_account_rank
+    FROM k GROUP BY k.user_id
+),
+alr AS (
+  SELECT allocator_id, row_number() OVER (ORDER BY first_account_rank, allocator_id) AS allocator_rank
+    FROM al
+),
+ck AS (
+  SELECT a.id, a.exchange, alr.allocator_rank,
+         row_number() OVER (PARTITION BY a.user_id ORDER BY a.created_at, a.id) AS key_ordinal
+    FROM api_keys a
+    JOIN alr ON alr.allocator_id = a.user_id
+   WHERE a.is_active AND a.disconnected_at IS NULL
+),
+r AS (
+  SELECT api_key_id, count(*) AS return_days, max(date) AS last_return_day
+    FROM csv_daily_returns
+   WHERE api_key_id IN (SELECT id FROM ck)
+   GROUP BY api_key_id
+),
+x AS (
+  SELECT ck.allocator_rank, ck.exchange, ck.key_ordinal,
+         d.payload->>'anchor_null_reason' AS anchor_null_reason,
+         r.return_days,
+         ((now() AT TIME ZONE 'utc')::date - r.last_return_day) AS days_since_last_return,
+         (d.payload->>'realized_terminal_usd') IS NOT NULL AS has_realized_terminal,
+         CASE WHEN (d.payload->>'realized_terminal_day') IS NULL THEN 'none'
+              WHEN (d.payload->>'realized_terminal_day')::date = r.last_return_day THEN 'equal'
+              WHEN (d.payload->>'realized_terminal_day')::date > r.last_return_day THEN 'terminal_later'
+              ELSE 'terminal_earlier' END AS terminal_vs_last_return,
+         CASE WHEN (d.payload->>'realized_terminal_usd') IS NULL THEN 'none'
+              WHEN (d.payload->>'realized_terminal_usd')::numeric > 0 THEN 'pos'
+              WHEN (d.payload->>'realized_terminal_usd')::numeric < 0 THEN 'neg'
+              ELSE 'zero' END AS terminal_sign,
+         coalesce(jsonb_typeof(d.payload->'composed_flows') = 'array'
+                  AND jsonb_typeof(d.payload->'composed_day_pnl') = 'array', false) AS has_writer_basis
+    FROM ck
+    JOIN r ON r.api_key_id = ck.id
+    JOIN allocator_equity_derived d ON d.kind = 'key_inputs:' || ck.id::text
+   WHERE (d.payload->>'anchor_usd') IS NULL
+)
+SELECT m.marker_is_prod,
+       x.allocator_rank,
+       x.exchange,
+       x.key_ordinal,
+       x.anchor_null_reason,
+       x.return_days,
+       x.days_since_last_return,
+       x.has_realized_terminal,
+       x.terminal_vs_last_return,
+       x.terminal_sign,
+       x.has_writer_basis
+  FROM m
+  LEFT JOIN x ON true
+ ORDER BY x.allocator_rank, x.key_ordinal;
+```
+
+`sc5-key-inputs` is for a SCRATCH CSV only: the payload carries amounts. It writes the stored
+`key_inputs` payload (one `payload` row) and the `(date, daily_return)` rows (one `return` row
+each) of exactly the keys `sc5-null-anchor-keys` lists, for one allocator rank. Keys keep the same
+ordinal.
+
+<!-- form: sc5-key-inputs -->
+```sql
+WITH m AS (SELECT __MARKER_IS_PROD__ AS marker_is_prod),
+__DERIBIT_KEYS__,
+al AS (
+  SELECT k.user_id AS allocator_id, min(k.account_rank) AS first_account_rank
+    FROM k GROUP BY k.user_id
+),
+alr AS (
+  SELECT allocator_id, row_number() OVER (ORDER BY first_account_rank, allocator_id) AS allocator_rank
+    FROM al
+),
+ck AS (
+  SELECT a.id, a.exchange, alr.allocator_rank,
+         row_number() OVER (PARTITION BY a.user_id ORDER BY a.created_at, a.id) AS key_ordinal
+    FROM api_keys a
+    JOIN alr ON alr.allocator_id = a.user_id
+   WHERE a.is_active AND a.disconnected_at IS NULL
+),
+sel AS (
+  SELECT ck.id, ck.exchange, ck.key_ordinal, d.payload
+    FROM ck
+    JOIN allocator_equity_derived d ON d.kind = 'key_inputs:' || ck.id::text
+   WHERE ck.allocator_rank = __BOOK_RANK__::int
+     AND (d.payload->>'anchor_usd') IS NULL
+     AND EXISTS (SELECT 1 FROM csv_daily_returns c WHERE c.api_key_id = ck.id)
+)
+SELECT m.marker_is_prod, 0 AS key_ordinal, NULL::text AS exchange, 'header' AS row_kind,
+       NULL::date AS date, NULL::double precision AS daily_return, NULL::text AS payload
+  FROM m
+UNION ALL
+SELECT m.marker_is_prod, sel.key_ordinal, sel.exchange, 'payload', NULL::date, NULL::double precision, sel.payload::text
+  FROM m CROSS JOIN sel
+UNION ALL
+SELECT m.marker_is_prod, sel.key_ordinal, sel.exchange, 'return', r.date, r.daily_return, NULL::text
+  FROM m CROSS JOIN sel
+  JOIN csv_daily_returns r ON r.api_key_id = sel.id
+ORDER BY key_ordinal, row_kind, date;
+```
+
+`sc5-book-flags` is `r2-verdict` with the two columns SC-5 needs: the curve row's `flags` array
+(a benign flag such as `no_capital_key_exited` shows here) and how many `no_capital_exited_keys`
+entries carry each reason. Both count columns are NULL while the payload field is absent, which
+is the state before the exit rule deploys.
+
+<!-- form: sc5-book-flags -->
+```sql
+WITH m AS (SELECT __MARKER_IS_PROD__ AS marker_is_prod),
+__DERIBIT_KEYS__,
+al AS (
+  SELECT k.user_id AS allocator_id, min(k.account_rank) AS first_account_rank
+    FROM k GROUP BY k.user_id
+),
+alr AS (
+  SELECT allocator_id, row_number() OVER (ORDER BY first_account_rank, allocator_id) AS allocator_rank
+    FROM al
+)
+SELECT m.marker_is_prod,
+       alr.allocator_rank,
+       e.allocator_id IS NOT NULL AS has_equity_curve_row,
+       e.payload->>'is_trustworthy' AS is_trustworthy,
+       e.payload->'degrade_reasons' AS degrade_reasons,
+       e.payload->'flags' AS flags,
+       e.payload->>'version' AS version,
+       CASE jsonb_typeof(e.payload->'curve') WHEN 'array' THEN jsonb_array_length(e.payload->'curve') END AS curve_points,
+       CASE jsonb_typeof(e.payload->'returns') WHEN 'array' THEN jsonb_array_length(e.payload->'returns') END AS returns_points,
+       e.computed_at,
+       CASE WHEN jsonb_typeof(e.payload->'no_capital_exited_keys') = 'array'
+            THEN (SELECT count(*) FROM jsonb_array_elements(e.payload->'no_capital_exited_keys') x
+                   WHERE x->>'reason' = 'dust') END AS exited_dust,
+       CASE WHEN jsonb_typeof(e.payload->'no_capital_exited_keys') = 'array'
+            THEN (SELECT count(*) FROM jsonb_array_elements(e.payload->'no_capital_exited_keys') x
+                   WHERE x->>'reason' = 'nonpositive') END AS exited_nonpositive,
+       (SELECT count(*) FROM compute_jobs j WHERE j.kind = 'derive_allocator_equity'
+           AND j.allocator_id = alr.allocator_id AND j.created_at >= __START__::timestamptz
+           AND j.status = 'done') AS jobs_done,
+       (SELECT count(*) FROM compute_jobs j WHERE j.kind = 'derive_allocator_equity'
+           AND j.allocator_id = alr.allocator_id AND j.created_at >= __START__::timestamptz
+           AND j.status = 'failed_final') AS jobs_failed_final,
+       (SELECT count(*) FROM compute_jobs j WHERE j.kind = 'derive_allocator_equity'
+           AND j.allocator_id = alr.allocator_id AND j.created_at >= __START__::timestamptz
+           AND j.status IN ('pending', 'running', 'failed_retry', 'done_pending_children')) AS jobs_open
+  FROM m
+  LEFT JOIN alr ON true
+  LEFT JOIN allocator_equity_derived e ON e.allocator_id = alr.allocator_id AND e.kind = 'equity_curve'
+ ORDER BY alr.allocator_rank;
+```
