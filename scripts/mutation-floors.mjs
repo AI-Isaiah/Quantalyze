@@ -1141,7 +1141,35 @@
 // `biting: 638`, `lane-invocations: 638 ... plus 66 baseline / 66 restore leg(s)` (the two
 // tallies AGREE), `lane-blocked: 0`, `unreachable: 27`, `per-arm lane time: mean 1.4s over
 // 638 arm run(s)`. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 66;
+// Phase 166.3.1 NAVBREACH, branch-local measurement taken BEFORE merging origin/main
+// (lineage only: these counts are for the branch tree as it stood, not for the merged tree):
+// RAISED 59 -> 60 2026-10-07 (Phase 166.3.1 NAVBREACH, plan 02): the new gate
+// supabase/tests/test_strategy_analytics_computed_at_success_only.sql (five annotated
+// arms: 0 on a `sql` step, C1/F1/A1/A2 on migration edits) took the corpus from 59 to 60
+// annotated files. MEASURED by ONE full lane run of `node scripts/mutation-runner/run.mjs`,
+// no file edited during it, constants at 59 / 578 (the floors were still the old values
+// and the run raised no ratchet defect because 60 and 583 are above them): `scope: FULL
+// 60/60 annotated files`, `coverage: files 60/87`, `arms: 583/583/0`, `biting: 583`,
+// `lane-invocations: 583 ... plus 60 baseline / 60 restore leg(s)` (the two independent
+// tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`,
+// `per-arm lane time: mean 2.8s over 583 arm run(s)`, `No defects. Every annotated arm bit
+// its own arm first.`, exit 0. Per-file line: `test_strategy_analytics_computed_at_success_only.sql:
+// sections 5 / judged 5 / annotated 5 / waived 0 / biting 5`. WAIVED_CEILING stays 0.
+// Two other branches add gates in the same phase; whichever merges later re-measures.
+// RAISED 66 -> 67 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): the NAVBREACH
+// gate supabase/tests/test_strategy_analytics_computed_at_success_only.sql (five annotated
+// arms; the migration it guards moved to 20261013120000, past PROD's tip) joins main's 66 annotated files. The branch
+// had measured 59 -> 60 / 578 -> 583 alone; once main's gates arrived the counts COMBINED and
+// were re-measured, never added by hand. MEASURED by ONE full lane run of
+// `node scripts/mutation-runner/run.mjs` on the merged tree, no file edited during it, constants
+// at 0 / 0 (the placeholders of the unresolved merge): `scope: FULL 67/67 annotated files`,
+// `lane-concurrency: 4`, `coverage: files 67/94`, `arms: 643/643/0`, `biting: 643`,
+// `lane-invocations: 643 ... plus 67 baseline / 67 restore leg(s)` (the two independent
+// tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`,
+// `per-arm lane time: mean 1.4s over 643 arm run(s)`, `No defects. Every annotated arm bit its
+// own arm first.`, exit 0. Per-file line: `test_strategy_analytics_computed_at_success_only.sql:
+// sections 5 / judged 5 / annotated 5 / waived 0 / biting 5`. WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 67;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2966,7 +2994,23 @@ export const FILES_FLOOR = 66;
 // judged 6 / annotated 6 / waived 0 / biting 6` and
 // `test_commit_scenario_batch_fingerprint_unpriced.sql: sections 2 / judged 2 / annotated 2 /
 // waived 0 / biting 2`; `arms: 638/638/0`, `biting: 638`.
-export const ARMS_FLOOR = 638;
+// Phase 166.3.1 NAVBREACH, branch-local measurement taken BEFORE merging origin/main
+// (lineage only: these counts are for the branch tree as it stood, not for the merged tree):
+// RAISED 578 -> 583 2026-10-07 (Phase 166.3.1 NAVBREACH, plan 02): FIVE arms from
+// test_strategy_analytics_computed_at_success_only.sql (0 the trigger dropped; C1 the
+// predicate made unconditional; F1 narrowed to `computing` only; A1 and A2 each exempting
+// one origin status from the hold on entry into `computing`), measured by the same single
+// full run recorded under FILES_FLOOR above: `arms: 583/583/0`, `biting: 583`. Each arm
+// was also driven by hand on the lane and read RED on its own identity first, and F1, A1
+// and A2 were seen failing on the pre-migration tree (W4). WAIVED_CEILING stays 0 - no
+// waiver was added.
+// RAISED 638 -> 643 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): FIVE arms
+// (0, C1, F1, A1, A2) from test_strategy_analytics_computed_at_success_only.sql, measured by
+// the same single full run recorded under FILES_FLOOR above: `arms: 643/643/0`, `biting: 643`,
+// `lane-invocations: 643`. The gate's RED-UNDER-SETUP was re-based on the merge to also apply
+// 20261009120000_sync_status_analytics_scope.sql and fixture 37, so it drives the latest bridge.
+// WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 643;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

@@ -4,9 +4,12 @@
 
 - `loading.tsx` provides a route-level Suspense fallback (skeleton) while
   the server-side `buildFactsheetPayloadCached` runs.
-- `unstable_cache` keyed by `(strategyId, computed_at)` means warm hits
-  skip the 150ms bootstrap CI / event-study compute entirely — the
-  payload is built once per analytics recompute.
+- `unstable_cache` keyed by `(strategyId, computed_at, computation_status)`
+  means warm hits skip the 150ms bootstrap CI / event-study compute
+  entirely. `computed_at` moves only on a successful compute (166.3.1 D-05),
+  and the status moves the key on entry into `computing` and on a failure,
+  so the payload is built once per successful recompute and a withheld state
+  is never served a payload cached for another status.
 - `<LazyMount>` defers below-fold panel mounting (Signatures, Cross
   Signatures, AllocatorSection) until the user scrolls into them, so
   the chart engine doesn't reconcile 30+ SVGs on first paint.

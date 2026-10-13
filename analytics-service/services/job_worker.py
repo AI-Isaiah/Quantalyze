@@ -68,6 +68,8 @@ from postgrest.types import CountMethod
 from supabase import Client
 
 if TYPE_CHECKING:
+    from services.external_flows import ExternalFlow
+
     # Phase 104: the post-branch cash-series persist reads denominator_config
     # UNCONDITIONALLY (initialized at the branch-outer scope like mtm_returns), so
     # the outer-scope default needs the type name — imported type-only to avoid a
@@ -12265,6 +12267,98 @@ def departed_history_inclusion(
     return decisions
 
 
+class _AllocatorKeyInputs(NamedTuple):
+    """The per-key maps ``run_derive_allocator_equity_job`` hands ``compose_allocator_equity``.
+
+    166.3.1 plan 09: the job composes twice at most. Once with the no-capital candidates applied
+    and, if that compose refuses while a candidate is in play, once with them reverted to the
+    inputs stored today (``no_capital_exit`` empty). Bundling the eight maps that differ between
+    the two keeps the second call a different argument, not a second copy of the call."""
+
+    anchors: dict[str, float | None]
+    null_reasons: dict[str, str]
+    flows: dict[str, list[ExternalFlow]]
+    dropped_pnl: dict[str, dict[str, float]]
+    realized_terminal: dict[str, tuple[str, float]]
+    writer_basis: dict[str, tuple[Sequence[ExternalFlow], Mapping[str, float]]]
+    departed_end: dict[str, str]
+    no_capital_exit: dict[str, tuple[str, str]]
+
+
+def _no_capital_level_on_last_return_day(
+    terminal_day: str,
+    terminal_level: float,
+    last_return_day: str,
+    flow_by_day: Mapping[str, float],
+    pnl_by_day: Mapping[str, float],
+) -> float:
+    """166.3.1 D-08 A3: the writer's own level on a no-capital key's last RETURN day ``L``,
+    walked back from its stored realized terminal ``(P, level)`` with ``P`` later than ``L``.
+
+    The writer drops the return of a day whose prior NAV cannot be a denominator (a dust NAV, a
+    withdrawal that dominates it), so a key's returns can end a day before its terminal. The
+    days in ``(L, P]`` have a flow and a P&L but no return, and the replay's own identity for
+    such a day is ``level_{d-1} = level_d - F_d - P&L_d``. Applying it latest day first, over
+    the stored numbers only, gives the level on ``L``; nothing is invented. ``flow_by_day`` and
+    ``pnl_by_day`` are the writer's composed flows and day P&L when the key has a writer basis,
+    else its event-time flows and stored dropped-day P&L. A non-finite result is not handled
+    here: the replay refuses it and the compose falls back to ``dropped_key`` (plan 09 Task 2)."""
+    level = terminal_level
+    for day in sorted(
+        {d for d in (*flow_by_day, *pnl_by_day) if last_return_day < d <= terminal_day},
+        reverse=True,
+    ):
+        level = level - flow_by_day.get(day, 0.0) - pnl_by_day.get(day, 0.0)
+    return level
+
+
+def _no_capital_exit_consumes_only_dust(
+    terminal_day: str,
+    last_return_day: str,
+    flow_days: Iterable[str],
+    dropped_pnl: Mapping[str, float],
+    flow_by_day: Mapping[str, float],
+    pnl_by_day: Mapping[str, float],
+) -> bool:
+    """166.3.1 D-10: may a no-capital candidate with realized terminal day ``P`` and last return
+    day ``L`` leave the book as an exit? Only when the exit consumes or drops dust-sized amounts,
+    the premise D-08 was decided on (0 flows after ``P`` and dust-scale final days on PROD).
+
+    It may not when (1) a flow or a dropped-day P&L is dated after ``P`` (the trim would erase
+    it, and ``out_of_window_flow`` is the gate that names it today); (2) ``|sum of P&L over
+    (L, P]|`` exceeds ``DUST_NAV_FLOOR`` (the walk-back would erase a material result); or (3) any
+    day in ``(L, P]`` has no stored P&L (WR-03: every day, not only the flow days, since an empty
+    window is what a returns/inputs disagreement looks like), so the days there are not evidenced
+    as the writer's own dropped days (``flow_by_day``/``pnl_by_day`` are the writer basis' when
+    the key has one, else the event-time flows and stored dropped-day P&L). Pure over stored
+    numbers."""
+    from services.nav_twr import DUST_NAV_FLOOR
+
+    if any(d > terminal_day for d in flow_days):
+        return False
+    if any(d > terminal_day for d in dropped_pnl):
+        return False
+    if any(d > terminal_day for d in (*flow_by_day, *pnl_by_day)):
+        return False
+    if terminal_day <= last_return_day:
+        return True
+    window_pnl = 0.0
+    for day, amount in pnl_by_day.items():
+        if last_return_day < day <= terminal_day:
+            window_pnl += amount
+    if abs(window_pnl) > DUST_NAV_FLOOR:
+        return False
+    # (3): EVERY day in (L, P] must carry a stored P&L, not only the flow days (WR-03). A writer
+    # stores a P&L row for each NAV day it drops, so a day with none is not evidenced as the
+    # writer's own dropped day; an empty window is what a returns/inputs disagreement looks like.
+    first_day = datetime.fromisoformat(last_return_day)
+    span = (datetime.fromisoformat(terminal_day) - first_day).days
+    return all(
+        (first_day + timedelta(days=offset)).strftime("%Y-%m-%d") in pnl_by_day
+        for offset in range(1, span + 1)
+    )
+
+
 async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult:
     """Phase 115.1 (RD-3 Option B) — CRAWL-FREE, DECRYPTION-FREE allocator
     $-equity compose.
@@ -12307,8 +12401,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         stitch_shared_account,
         working_holder_predicate,
     )
+    from services.equity_reconstruction import _NO_CAPITAL_ANCHOR_REASONS
     from services.external_flows import ExternalFlow, validate_flow_shape
-    from services.nav_twr import NavReconstructionError
+    from services.nav_twr import DUST_NAV_FLOOR, NavReconstructionError
     from services.redact import scrub_freeform_string
 
     allocator_id = job["allocator_id"]
@@ -12768,6 +12863,13 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # 164.6.6.2.1 D-09 / D-20: a BTC key whose live close is missing, mapped to that day. Its
     # series is priced through ``priced_through`` and it leaves the book after it (T1).
     unpriced_close_day_by_key: dict[str, str] = {}
+    # 166.3.1 D-08: a key whose live read found no capital (NULL anchor, ``dust`` or ``nonpositive``)
+    # but which has real stored history, mapped to ``(token, ISO day)``. It is composed at its
+    # writer's own levels through that day and leaves the book after it (see the rule below).
+    no_capital_exit_by_key: dict[str, tuple[str, str]] = {}
+    # 166.3.1 plan 09: the keys that qualify for that rule, mapped to ``(token, (terminal day,
+    # terminal level))`` as stored. Filled in the loop below, applied after the stitch.
+    no_capital_candidates: dict[str, tuple[str, tuple[str, float]]] = {}
     # 164.6.6.2.1 D-09 (mechanism I2): the interior days a missing close left out of a BTC key's
     # USD series, and the realized USD level on the last priced day before each such hole. The
     # compose replays the key in segments split there and rolls each back from its own level.
@@ -12926,6 +13028,34 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                                 for _d, _v in dropped_pnl_by_key[api_key_id].items()
                                 if _d <= _native_inputs.priced_through
                             }
+            # ⭐ 166.3.1 D-08 (option A) — a NO-CAPITAL key with real history. The live read found
+            # nothing (NULL anchor, ``dust`` or ``nonpositive``), yet the key has a stored return
+            # series and its writer stored the realized level it rolled that series from. Dropping
+            # it marks a correct book untrustworthy for as long as the key stays connected;
+            # reading the NULL anchor as capital would invent money. So it is composed at the
+            # writer's own level on its end day and leaves the book after it, like a departed
+            # key: its leaving is an exit, never a return. The token must be one of
+            # ``_NO_CAPITAL_ANCHOR_REASONS``: a failed read (``balance_error``, ``nonfinite``,
+            # ``flow_drop``) or a missing token is not evidence of an empty account.
+            # Plan 09: this loop only NAMES the candidate. The rule is applied once the shared-
+            # account stitch and the writer basis are built (below), so that the job can hand the
+            # compose today's inputs untouched if the candidate is refused, stitched keys included.
+            _nc_reason = null_anchor_reasons.get(api_key_id)
+            _nc_terminal = realized_terminal_by_key.get(api_key_id)
+            if (
+                anchors_by_key.get(api_key_id) is None
+                and _nc_reason in _NO_CAPITAL_ANCHOR_REASONS
+                and api_key_id in last_return_day
+                and api_key_id not in departed_end_by_key
+                and _nc_terminal is not None
+                # A2: the writer must agree the account is small. Its last level is at or below
+                # the dust floor (which sits above the emptied band, so a level inside that band
+                # qualifies too). A live read that says empty over a funded terminal is a
+                # transient zero or a mis-priced balance until proven otherwise: the key keeps
+                # today's ``dropped_key`` rather than exiting while the book reads trustworthy.
+                and _nc_terminal[1] <= DUST_NAV_FLOOR
+            ):
+                no_capital_candidates[api_key_id] = (str(_nc_reason), _nc_terminal)
     except (ValueError, TypeError, KeyError) as exc:
         return await _permanent_corrupt_input(exc)
 
@@ -13077,6 +13207,114 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         if _joined[1]:
             writer_basis_by_key[_k] = _joined
 
+    # ⭐ 166.3.1 D-08 (option A + A2 + A3) — apply the no-capital exit to the keys named above.
+    # A key is composed at the writer's own level on its END day E and leaves the book after E.
+    # E is the stored terminal day P, except when P is LATER than the key's last return day L
+    # (A3: the writer dropped the return of its last day, so the key's history ends on L): then
+    # E = L, and the level on L is the stored terminal walked back through the days in (L, P] by
+    # the replay's own no-return-day identity. Whatever is dated after E happened while the key
+    # was already out of the book, so a flow, a dropped-day P&L or a writer-basis day after E is
+    # trimmed (the walked-back days are consumed, never booked); left in, the replay would read
+    # the series as running past its terminal. Qualification (token, stored terminal, A2) was
+    # decided on the STORED terminal at P before any walk-back.
+    # D-10 (review round 1 CR-01/WR-01) bounds what the exit may consume:
+    # ``_no_capital_exit_consumes_only_dust`` refuses a candidate with anything dated after P, a
+    # material P&L over (L, P], or a flow day in (L, P] with no stored P&L, and that key keeps
+    # today's ``dropped_key`` with its inputs untouched.
+    # Plan 09: the inputs exactly as stored, kept (as shallow copies: the rule below rebinds
+    # entries, it never mutates a value in place) so a compose that refuses with a candidate in
+    # play can be re-run once on today's inputs instead of failing the job.
+    no_capital_stored: _AllocatorKeyInputs | None = None
+    if no_capital_candidates:
+        no_capital_stored = _AllocatorKeyInputs(
+            dict(anchors_by_key),
+            dict(null_anchor_reasons),
+            dict(flows_by_key),
+            dict(dropped_pnl_by_key),
+            dict(realized_terminal_by_key),
+            dict(writer_basis_by_key),
+            dict(departed_end_by_key),
+            {},
+        )
+    no_capital_refused = 0
+    for _k in sorted(no_capital_candidates):
+        _nc_token, (_nc_p, _nc_p_level) = no_capital_candidates[_k]
+        _nc_last = last_return_day[_k]
+        _nc_end, _nc_level = _nc_p, _nc_p_level
+        # D-10 (review round 1 CR-01/WR-01): the exit is only as honest as what it consumes. The
+        # amounts it names or drops must be the dust-sized ones D-08 measured; anything else
+        # keeps today's ``dropped_key`` (D-02: no reconciliation gate is weakened by an exit).
+        _nc_basis_k = writer_basis_by_key.get(_k)
+        if _nc_basis_k is not None:
+            _nc_flow_by_day: dict[str, float] = {}
+            for _f in _nc_basis_k[0]:
+                _nc_flow_by_day[_f.utc_day_iso] = (
+                    _nc_flow_by_day.get(_f.utc_day_iso, 0.0) + _f.usd_signed
+                )
+            _nc_pnl_by_day: Mapping[str, float] = _nc_basis_k[1]
+        else:
+            _nc_flow_by_day = {}
+            for _f in flows_by_key[_k]:
+                _nc_flow_by_day[_f.utc_day_iso] = (
+                    _nc_flow_by_day.get(_f.utc_day_iso, 0.0) + _f.usd_signed
+                )
+            _nc_pnl_by_day = dropped_pnl_by_key[_k]
+        if not _no_capital_exit_consumes_only_dust(
+            _nc_p,
+            _nc_last,
+            (_f.utc_day_iso for _f in flows_by_key[_k]),
+            dropped_pnl_by_key[_k],
+            _nc_flow_by_day,
+            _nc_pnl_by_day,
+        ):
+            no_capital_refused += 1
+            continue
+        if _nc_p > _nc_last:
+            _nc_end = _nc_last
+            _nc_level = _no_capital_level_on_last_return_day(
+                _nc_p, _nc_p_level, _nc_last, _nc_flow_by_day, _nc_pnl_by_day
+            )
+        anchors_by_key[_k] = _nc_level
+        null_anchor_reasons.pop(_k, None)
+        realized_terminal_by_key[_k] = (_nc_end, _nc_level)
+        departed_end_by_key[_k] = _nc_end
+        no_capital_exit_by_key[_k] = (_nc_token, _nc_end)
+        flows_by_key[_k] = [_f for _f in flows_by_key[_k] if _f.utc_day_iso <= _nc_end]
+        dropped_pnl_by_key[_k] = {
+            _d: _v for _d, _v in dropped_pnl_by_key[_k].items() if _d <= _nc_end
+        }
+        if _k in writer_basis_by_key:
+            _nc_wflows = [_f for _f in writer_basis_by_key[_k][0] if _f.utc_day_iso <= _nc_end]
+            _nc_wpnl = {_d: _v for _d, _v in writer_basis_by_key[_k][1].items() if _d <= _nc_end}
+            # A3 pad. The replay's writer mode needs the realized terminal on the basis' LAST day,
+            # and after the trim that day is before L when L is a gap-fill row the writer left
+            # out of its day P&L (it carries the level). Such a day has a stored return of
+            # exactly 0.0 and so no P&L, so a 0.0 writer P&L on L states the same fact. It is
+            # NEVER padded over a non-zero stored return: that would let a zero stand in for a
+            # real day's P&L. That key keeps the unpadded basis, reads ``writer_basis_mismatch``
+            # in the replay and falls back to ``dropped_key`` in the compose.
+            if (
+                _nc_end != _nc_p
+                and _nc_wpnl
+                and _nc_end not in _nc_wpnl
+                and _nc_end in returns_by_key[_k].index
+                and float(returns_by_key[_k].loc[_nc_end]) == 0.0
+            ):
+                _nc_wpnl[_nc_end] = 0.0
+            if _nc_wpnl:
+                writer_basis_by_key[_k] = (_nc_wflows, _nc_wpnl)
+            else:
+                del writer_basis_by_key[_k]
+
+    if no_capital_refused:
+        # Counts only (no key id, no venue id, no USD — T-167.1.2-22).
+        logger.warning(
+            "derive_allocator_equity: %d no-capital key(s) of allocator %s keep "
+            "dropped_key: the exit would consume or drop more than dust (D-10)",
+            no_capital_refused,
+            allocator_id,
+        )
+
     # A departed key the rule includes but whose inputs are gone was left out of
     # departed_end_by_key before the rule's end days were used (WR-R2-02), so it
     # never reached the returns, the flows or the collision gate.
@@ -13149,12 +13387,12 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
     # ── 4. The ONLY derivation call — the frozen-core composition layer. ──────
-    try:
-        payload = compose_allocator_equity(
+    def _compose(inputs: _AllocatorKeyInputs) -> dict[str, Any]:
+        return compose_allocator_equity(
             returns_by_key,
-            flows_by_key,
-            anchors_by_key,
-            null_anchor_reasons,
+            inputs.flows,
+            inputs.anchors,
+            inputs.null_reasons,
             benign_flag_tokens=[
                 token
                 for token, raised in (
@@ -13181,7 +13419,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 if raised
             ]
             or None,
-            departed_end_by_key=departed_end_by_key or None,
+            departed_end_by_key=inputs.departed_end or None,
             # D-13: the venue is known here and not in the pure compose. A key on a
             # venue whose history reaches the account's start gets the zero-start
             # check on its opening flows instead of the positional rule.
@@ -13192,22 +13430,25 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             },
             # D-15: the P&L of the days the TWR left out of the stored returns. An
             # older key_inputs row has none, and its key composes as before.
-            dropped_day_pnl_by_key=dropped_pnl_by_key,
+            dropped_day_pnl_by_key=inputs.dropped_pnl,
             # CR-01: the level each writer rolled its NAV back from. The replay rolls
             # the stored returns back from it, so the open position at the moment of the
             # derive neither shifts a level nor moves the zero-start verdict.
-            realized_terminal_by_key=realized_terminal_by_key,
+            realized_terminal_by_key=inputs.realized_terminal,
             # D-06: the writer's own composed flows and day P&L, where the row carries them.
             # The compose rolls such a key on them, so its levels and its implied start are
             # the writer's; a key without them is composed exactly as before.
-            writer_basis_by_key=writer_basis_by_key,
+            writer_basis_by_key=inputs.writer_basis,
             # D-09 / D-20: the BTC keys whose live close is missing, named by key and day.
             unpriced_close_day_by_key=unpriced_close_day_by_key or None,
             # D-09 (I2): the interior holes, and the level each segment before one rolls from.
             unpriced_days_by_key=unpriced_days_by_key or None,
             segment_terminals_by_key=segment_terminals_by_key or None,
+            # D-08: the no-capital keys composed through their end day and exited.
+            no_capital_exit_by_key=inputs.no_capital_exit or None,
         )
-    except NavReconstructionError as exc:
+
+    async def _compose_refused(exc: NavReconstructionError) -> DispatchResult:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3
         # DatetimeIndex slip, the segment-wise EXCLUSIVE_FILL canary, an
         # unpriceable flow, a ≤−100% liquidation day). Retrying cannot help →
@@ -13227,6 +13468,42 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             ),
             error_kind="permanent",
         )
+
+    try:
+        payload = _compose(
+            _AllocatorKeyInputs(
+                anchors_by_key,
+                null_anchor_reasons,
+                flows_by_key,
+                dropped_pnl_by_key,
+                realized_terminal_by_key,
+                writer_basis_by_key,
+                departed_end_by_key,
+                no_capital_exit_by_key,
+            )
+        )
+    except NavReconstructionError as exc:
+        if no_capital_stored is None or not no_capital_exit_by_key:
+            return await _compose_refused(exc)
+        # 166.3.1 plan 09 (D-08, T-166.3.1-39): the rule exists to make a book better, so a
+        # candidate must never cost the book its stored row. The compose refused while at least
+        # one no-capital candidate was in play; compose ONCE more on the inputs exactly as stored
+        # (every candidate back to its NULL anchor, token, stored terminal, untrimmed flows and
+        # unpadded writer basis), which is today's result, and carry on to the upsert. If that
+        # refuses too, the refusal is not the rule's and the permanent path runs unchanged.
+        # Counts and the refusal class only (no key id, no day, no USD).
+        logger.warning(
+            "derive_allocator_equity: compose refused (%s) with %d no-capital candidate(s) in "
+            "play for allocator %s — re-composing once with them reverted to %s",
+            type(exc).__name__,
+            len(no_capital_exit_by_key),
+            allocator_id,
+            DegradeReason.DROPPED_KEY.value,
+        )
+        try:
+            payload = _compose(no_capital_stored)
+        except NavReconstructionError as exc_again:
+            return await _compose_refused(exc_again)
 
     if absent_stitched_accounts:
         # SFH-02: counts only (no key id, no USD). Both are absent when every stitched

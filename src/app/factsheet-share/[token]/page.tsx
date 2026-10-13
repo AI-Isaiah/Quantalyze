@@ -40,13 +40,17 @@
 // It imports `@/lib/factsheet/fetch-and-build-payload` and does NOT import
 // `factsheet/[id]/v2/page.tsx`, so `buildFactsheetPayloadCached` is not
 // reachable from here at all. That matters because the `unstable_cache` key on
-// the id route carries no viewer: its `keyParts` are the id and the row's
-// `computed_at` only (`buildFactsheetPayloadCached`; 167.2.1-REVIEW WR-02 made
-// `computed_at` a real key member, and before that the key was the id alone).
+// the id route carries no viewer: its `keyParts` are the shape version, the id,
+// the row's `computed_at` and the row's `computation_status`, and none of them
+// is viewer-dependent (`buildFactsheetPayloadCached`; 167.2.1-REVIEW WR-02 made
+// `computed_at` a real key member, and before that the key was the id alone;
+// 166.3.1 D-05 added `computation_status`, because `computed_at` now moves only
+// on a successful write).
 // A viewer-dependent payload routed through that wrapper would be served to
-// every subsequent ANONYMOUS visitor to `/factsheet/<id>` until `computed_at`
-// moves or the 3600s TTL runs out, silently, with the poisoning request being
-// the owner's own and therefore rendering correctly.
+// every subsequent ANONYMOUS visitor to `/factsheet/<id>` until the key moves
+// (a status change or a successful compute) or the 3600s TTL runs out,
+// silently, with the poisoning request being the owner's own and therefore
+// rendering correctly.
 // ⛔ Do not "reuse the cache for speed" here. Do not generalise the wrapper.
 
 import { redirect } from "next/navigation";

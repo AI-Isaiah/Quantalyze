@@ -392,6 +392,23 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
+  {
+    name: "strategy_analytics_hold_computed_at_until_success",
+    side: "snapshot-only",
+    capturedAt: "2026-10-13",
+    clearedBy:
+      "a regeneration of supabase/schema/baseline.sql taken AFTER " +
+      "20261013120000_strategy_analytics_hold_computed_at_until_success.sql " +
+      "has applied to PROD (Phase 166.3.1 NAVBREACH; the migration lands at " +
+      "merge via apply-test then the automatic PROD apply, and the post-apply " +
+      "baseline re-dump clears this row).",
+    reason:
+      "Phase 166.3.1 D-05 ships the BEFORE UPDATE trigger function " +
+      "public.strategy_analytics_hold_computed_at_until_success() in a forward " +
+      "migration. supabase/schema/baseline.sql is a dated PROD dump that " +
+      "predates it, so the function exists in the migration-replay snapshot " +
+      "and not yet in the baseline (the 167.1.2.2.2 cron_sync_tick precedent).",
+  },
   // ⭐ 2026-10-10: the Phase 167.1.2.2.2 TRADESYNC row (`cron_sync_tick`,
   // `snapshot-only`, captured 2026-10-09) was DELETED on the re-dump taken
   // after 20261010140000 applied to PROD, its own clearing condition.

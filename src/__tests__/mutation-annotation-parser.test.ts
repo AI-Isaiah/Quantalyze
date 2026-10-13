@@ -1070,13 +1070,15 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): `armsSeen` 610 -> 615: the NEW gate test_btcusdview_native_balance.sql (5 arms, every twin a single `sql` step, so `stepsSeen` is unchanged). MEASURED: this file's run read `expected 615 to be 610`.
     // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): `armsSeen` 615 -> 630 on the tree merged with origin/main: the TWO NEW gates test_cron_sync_tick.sql (8 arms) and test_strategy_analytics_trade_fetch_provenance.sql (7 arms), beside the BTCUSDVIEW gate main already counted. MEASURED by one full runner run of the merged tree (`arms: 630/630/0`); `stepsSeen` is read below.
     // ⭐ CURRENCY 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): `armsSeen` 630 -> 638 on the tree merged with origin/main: the TWO NEW gates test_allocator_holdings_per_key_unique.sql (6 arms, every twin a `sql` step) and test_commit_scenario_batch_fingerprint_unpriced.sql (2 arms, three `edit` file steps). MEASURED by one full runner run (`arms: 638/638/0`); `stepsSeen` is read below.
-    expect(armsSeen).toBe(638);
+    // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): `armsSeen` 638 -> 643 on the tree merged with origin/main: the NAVBREACH gate test_strategy_analytics_computed_at_success_only.sql (5 arms; arm 0 is a single `sql` step, C1 and F1 carry two `edit` steps each, A1 and A2 one each). MEASURED: the full lane run printed `arms: 643/643/0`, `biting: 643`, and this file's run read `expected 643 to be 638`.
+    expect(armsSeen).toBe(643);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
     // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): `stepsSeen` 716 -> 729: +13 file steps across the two NEW gates across the 15 new arms (the delta is the measured value, not a per-arm count). MEASURED: this file's run read `expected 729 to be 716`.
     // ⭐ CURRENCY 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): `stepsSeen` 729 -> 732: +3 file steps, the two `edit` steps of the unpriced-dropped twin and the one of the older-marker-ignored twin in test_commit_scenario_batch_fingerprint_unpriced.sql. The six twins of the per-key gate are `sql` steps and move nothing.
-    expect(stepsSeen).toBe(732);
+    // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): `stepsSeen` 732 -> 738, the 6 `edit` file steps of the computed_at success-only gate. MEASURED: this file's run read `expected 738 to be 732`.
+    expect(stepsSeen).toBe(738);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1999,7 +2001,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-10-08 (round 4): 711 -> 716, moving WITH `stepsSeen`. MEASURED: `expected 716 to be 711`.
     // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): 716 -> 729, moving WITH `stepsSeen` (the 13 file steps of the two new gates). MEASURED: `expected 729 to be 716`.
     // ⭐ CURRENCY 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): 729 -> 732, the three `edit` file steps of test_commit_scenario_batch_fingerprint_unpriced.sql. MEASURED: this file's run read `expected 732 to be 729`.
-    expect(needles.length).toBe(732);
+    // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): `stepsSeen` and the needle count 732 -> 738, the 6 `edit` file steps of the computed_at success-only gate (its arm 0 twin is a `sql` step and carries no needle). MEASURED: this file's run read `expected 738 to be 732`.
+    expect(needles.length).toBe(738);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2586,7 +2589,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 87 -> 88, the truncate-revoke gate file beside the side-kind scope gate. MEASURED: the full lane run on the merged tree printed `coverage: files 61/88`.
     // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): 88 -> 89, the native-balance GRANT gate file beside the truncate-revoke gate. MEASURED: the full lane run on this branch printed `coverage: files 62/89`.
     // ⭐ CURRENCY 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): 91 -> 93, the per-key unique-index gate file and the fingerprint native-unpriced gate file. MEASURED: the full lane run printed `coverage: files 66/93`.
-    expect(corpus.filesTotal).toBe(93);
+    // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): 93 -> 94, the computed_at success-only gate file. MEASURED: the full lane run printed `coverage: files 67/94`.
+    expect(corpus.filesTotal).toBe(94);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2654,7 +2658,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): 61 -> 62 (test_btcusdview_native_balance.sql), with the denominator and the by-name list below. MEASURED off the full lane run: `coverage: files 62/89`.
     // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): 62 -> 64 (test_cron_sync_tick.sql, test_strategy_analytics_trade_fetch_provenance.sql), with the denominator and the by-name list below. MEASURED off the full lane run of the merged tree: `coverage: files 64/91`.
     // ⭐ CURRENCY 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): 64 -> 66, the two new gate files. MEASURED: this file's run read `expected 66 to be 64`, and the full lane run printed `scope: FULL 66/66 annotated files`.
-    expect(corpus.filesAnnotated).toBe(66);
+    // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): 66 -> 67 (test_strategy_analytics_computed_at_success_only.sql), with the denominator above and the by-name list below. MEASURED: the full lane run printed `scope: FULL 67/67 annotated files`.
+    expect(corpus.filesAnnotated).toBe(67);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2738,6 +2743,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_scenarios_rls.sql",
       "test_set_compute_job_progress.sql",
       "test_strategies_private_owner_isolation.sql",
+      // ⭐ ADDED 2026-10-07 (Phase 166.3.1 NAVBREACH, plan 02) — an annotated file (the 67th on the tree merged with origin/main; it was the 60th on the branch alone): computed_at moves only on a successful write; a failure and a job start both hold it (5 arms).
+      "test_strategy_analytics_computed_at_success_only.sql",
       "test_strategy_analytics_series_completeness.sql",
       "test_strategy_analytics_stuck_computing_reaper.sql",
       // ⭐ ADDED 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): the trade-fetch and provenance column gate (7 arms).
@@ -3174,7 +3181,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 87 -> 88, the truncate-revoke gate file. MEASURED off the full lane run: annotated 61 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 88.
     // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): 88 -> 89, the native-balance GRANT gate file. MEASURED off the full lane run: annotated 62 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 89.
     // ⭐ CURRENCY 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): 91 -> 93, the per-key unique-index gate file and the fingerprint native-unpriced gate file. MEASURED: the full lane run printed `coverage: files 66/93`.
-    expect(corpus.filesTotal).toBe(93);
+    // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): 93 -> 94, the computed_at success-only gate file. MEASURED off the full lane run: annotated 67 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 94.
+    expect(corpus.filesTotal).toBe(94);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3198,7 +3206,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): 61 -> 62 (test_btcusdview_native_balance.sql).
     // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): 62 -> 64, the same two files.
     // ⭐ CURRENCY 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): 64 -> 66, the two new gate files.
-    expect(corpus.annotatedFiles).toHaveLength(66);
+    // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): 66 -> 67 (test_strategy_analytics_computed_at_success_only.sql).
+    expect(corpus.annotatedFiles).toHaveLength(67);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

@@ -265,6 +265,20 @@ export async function GET(
   // computed_at timestamp moves on every recomputation, so it's the
   // strongest cache key tied to actual content state.
   //
+  // 166.3.1 D-05 (2026-10-07): `computed_at` now moves ONLY on a successful
+  // write, so the job-start and failure stamps this ETag never depended on are
+  // held. They cannot reach it: this route refuses every non-computed status
+  // with a 400 above, before this line, so a `computing` or `failed` row never
+  // gets an ETag at all. A change between the two computed statuses stamps
+  // `computed_at` through the status bridge (branch (a) when it moves a warned
+  // `complete` row, branch (c) at completion). The analytics runner's own
+  // terminal write names no `computed_at`, so between that write and the
+  // bridge's branch (c) at `mark_compute_job_done` the ETag still carries the
+  // previous value; that window is booked for Phase 166.5 COMPUTEDATSTAMP
+  // (the runner's stamp must land on the success write). The factsheet payload
+  // cache is the one that needed the status as a key part
+  // (`buildFactsheetPayloadCached`).
+  //
   // ETag is quoted strong-validator per RFC 7232. Format: id:computed_at
   // — id alone is not enough (different strategies could share computed_at
   // by coincidence, though unlikely), and computed_at alone collides

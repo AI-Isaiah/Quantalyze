@@ -33,6 +33,8 @@ from typing import Any
 
 import pytest
 
+from services.nav_twr import DUST_NAV_FLOOR
+
 # Reuse the proven dual-mode key-mode harness (mock _ExchangeContext + capture) for
 # pin 7 rather than re-building it. These are module-level in the dualmode test.
 from tests.test_derive_broker_dailies_dualmode import (
@@ -3126,7 +3128,7 @@ async def test_key_mode_funded_btc_key_is_not_dust_against_the_usd_floor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The dust, non-positive and non-finite checks judge the USD anchor. 0.4213 BTC is far
-    below the 1000 USD dust floor as a NUMBER but is worth 0.4213 x 61950.00 = 24780 +
+    below the USD dust floor (DUST_NAV_FLOOR) as a NUMBER but is worth 0.4213 x 61950.00 = 24780 +
     1319.535 = 26099.535 USD, so it is a real anchor, not ``dust``."""
     closes = _btc_closes_on(
         ("2025-06-01", 61950.00), ("2025-06-02", 61950.00), ("2025-06-03", 61950.00),
@@ -3491,3 +3493,889 @@ def test_native_unit_is_not_a_no_capital_anchor_reason() -> None:
 
     assert "native_unit" not in _NO_CAPITAL_ANCHOR_REASONS
     assert _NO_CAPITAL_ANCHOR_REASONS == frozenset({"dust", "nonpositive"})
+
+
+# --- compose: a no-capital key with real history exits the book (166.3.1 plan 08, D-08) ---------
+#
+# Hand literals: key A (binance) holds 100000.0 on all five days (returns 0.0, realized terminal
+# and anchor 100000.0). Key B (deribit) was emptied: the live read found no capital, so its row
+# has a NULL anchor stamped ``dust``, but its writer stored flat returns on the first three days,
+# a realized terminal of 60.0 on the third (at or below DUST_NAV_FLOOR, D-08 A2) and the
+# basis it rolled on. While B is in the book it is 100060.0; after its last measured day it is
+# an exit, so the book is A's 100000.0. A booked loss on the day it leaves would read
+# -60 / 100060, about -0.0006, which is what this test is written to refuse.
+#
+# ⛔ Every "dust" terminal below is a number chosen against DUST_NAV_FLOOR (A2 compares the
+# stored terminal to it). 166.3.1 followed 167.1.2 D-27 moving that floor from 1000 to 100, and
+# the old 600/650/500 terminals silently became material capital that A2 correctly refused. A
+# fixture that means "dust" must stay at or below the floor; ``test_no_capital_fixture_terminals_
+# are_dust_under_the_current_floor`` fails with a named reason when a floor move leaves one above.
+_NC_DUST_TERMINAL = 60.0
+_NC_A3_TERMINAL = 65.0   # 15.0 on L, walked forward over a 40.0 deposit and 10.0 of P&L
+
+_NOCAP_ALLOC = "alloc-nocap"
+
+
+def _no_capital_book(
+    *, token: str = "dust", terminal_usd: float = _NC_DUST_TERMINAL, b_anchor: float | None = None
+) -> dict[str, list[dict]]:
+    api_keys = [
+        {"id": "key-A", "user_id": _NOCAP_ALLOC, "is_active": True, "exchange": "binance",
+         "sync_status": "connected", "disconnected_at": None},
+        {"id": "key-B", "user_id": _NOCAP_ALLOC, "is_active": True, "exchange": "deribit",
+         "sync_status": "connected", "disconnected_at": None},
+    ]
+    csv = [
+        {"api_key_id": "key-A", "allocator_id": _NOCAP_ALLOC, "date": day, "daily_return": 0.0}
+        for day in _BTC_DAYS
+    ] + [
+        {"api_key_id": "key-B", "allocator_id": _NOCAP_ALLOC, "date": day, "daily_return": 0.0}
+        for day in _BTC_DAYS[:3]
+    ]
+    b_last = _BTC_DAYS[2]
+    derived = [
+        {"allocator_id": _NOCAP_ALLOC, "kind": "key_inputs:key-A",
+         "payload": {"flows": [], "anchor_usd": 100_000.0, "venue": "binance",
+                     "realized_terminal_usd": 100_000.0, "realized_terminal_day": _BTC_DAYS[-1]}},
+        {"allocator_id": _NOCAP_ALLOC, "kind": "key_inputs:key-B",
+         "payload": {"flows": [], "anchor_usd": b_anchor, "anchor_null_reason": token,
+                     "venue": "deribit",
+                     "realized_terminal_usd": terminal_usd, "realized_terminal_day": b_last,
+                     "composed_flows": [],
+                     "composed_day_pnl": [{"utc_day_iso": d, "pnl_usd": 0.0} for d in _BTC_DAYS[:3]]}},
+    ]
+    return {"csv_daily_returns": csv, DERIVED_TABLE: derived, LEGACY_TABLE: [], "api_keys": api_keys}
+
+
+async def _compose_no_capital_book(seed: dict[str, list[dict]]) -> dict:
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(seed)
+    job = {"id": "j-nocap", "kind": "derive_allocator_equity", "allocator_id": _NOCAP_ALLOC}
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    curve = [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+    assert len(curve) == 1, fake.upserts
+    return _extract_payload(curve[0][1])
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_deribit_dust_key_composes_through_its_terminal_and_leaves() -> None:
+    """D-08 (option A, plan 08 tracer). A Deribit account that was emptied has real history: the
+    writer's own levels through its last measured day are the only numbers that are not invented.
+    Dropping the key (``dropped_key``) marks a correct book untrustworthy for as long as the key
+    stays connected; reading its NULL live anchor as capital would invent money. So B composes at
+    its own levels through its realized-terminal day and leaves after it as an exit: never a
+    return, its last level never carried, and named."""
+    payload = await _compose_no_capital_book(_no_capital_book())
+
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "dropped_key" not in payload["degrade_reasons"]
+    assert "no_anchor" not in payload["degrade_reasons"]
+    curve = {r["date"]: r["equity_usd"] for r in payload["curve"]}
+    assert [curve[d] for d in _BTC_DAYS[:3]] == [pytest.approx(100_060.0, abs=1e-9)] * 3
+    assert [curve[d] for d in _BTC_DAYS[3:]] == [pytest.approx(100_000.0, abs=1e-9)] * 2
+    assert {r["date"]: r["r"] for r in payload["returns"]}[_BTC_DAYS[3]] == pytest.approx(
+        0.0, abs=1e-12
+    )
+    assert "no_capital_key_exited" in payload["flags"]
+    assert payload["no_capital_exited_keys"] == [
+        {"api_key_id": "key-B", "reason": "dust", "day": _BTC_DAYS[2]}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_dust_token_over_a_funded_terminal_stays_dropped() -> None:
+    """D-08 sub-option A2. The exit trusts the live read's token, so it must not be the only
+    witness: a transient zero or a mis-priced balance on a FUNDED account would otherwise exit
+    the key while the book still reads trustworthy, its capital understated with no blocking
+    reason. The writer's own last level is the second witness. Here B's live read says ``dust``
+    but its writer stored a terminal of 60000.0, far above the dust floor, so the two disagree and
+    the key keeps today's ``dropped_key`` (blocking) instead of exiting."""
+    payload = await _compose_no_capital_book(_no_capital_book(terminal_usd=60_000.0))
+
+    assert payload["is_trustworthy"] is False
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert "no_capital_key_exited" not in payload["flags"]
+    assert "no_capital_exited_keys" not in payload
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a2_a_terminal_exactly_at_the_dust_floor_exits() -> None:
+    """D-08 A2, the boundary. The writer stamps ``dust`` at ``|equity| <= DUST_NAV_FLOOR`` and A2
+    asks the writer's own terminal to agree at that same line, so a terminal EQUAL to the floor
+    is the writer's idea of dust and the key exits trustworthy. The floor is read by symbol: 167.1.2
+    D-27 moved it from 1000 to 100 and fixtures written against a number went stale. With the
+    pair below, a ``<=`` that drifts to ``<`` (or a floor that forks from the writer's) fails here."""
+    payload = await _compose_no_capital_book(_no_capital_book(terminal_usd=DUST_NAV_FLOOR))
+
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "dropped_key" not in payload["degrade_reasons"]
+    curve = {r["date"]: r["equity_usd"] for r in payload["curve"]}
+    assert [curve[d] for d in _BTC_DAYS[:3]] == [
+        pytest.approx(100_000.0 + DUST_NAV_FLOOR, abs=1e-6)
+    ] * 3
+    assert payload["no_capital_exited_keys"] == [
+        {"api_key_id": "key-B", "reason": "dust", "day": _BTC_DAYS[2]}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a2_a_terminal_one_cent_over_the_dust_floor_stays_dropped() -> None:
+    """D-08 A2, the other side of the boundary. A terminal of ``DUST_NAV_FLOOR + 0.01`` is material
+    capital by the writer's own line, so a ``dust`` token over it is a transient zero or a
+    mis-priced balance until proven otherwise: the key keeps today's blocking ``dropped_key``."""
+    payload = await _compose_no_capital_book(
+        _no_capital_book(terminal_usd=DUST_NAV_FLOOR + 0.01)
+    )
+
+    assert payload["is_trustworthy"] is False
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert "no_capital_key_exited" not in payload["flags"]
+    assert "no_capital_exited_keys" not in payload
+
+
+def test_no_capital_fixture_terminals_are_dust_under_the_current_floor() -> None:
+    """The fixtures that mean "dust" are numbers, and A2 compares them to ``DUST_NAV_FLOOR``. When
+    the floor moves below one of them, every exit test fails with a composed-book symptom
+    (``dropped_key``, a ValueError on unpack) that does not say why. Fail here instead, by name:
+    re-aim these constants at or below the floor and rebuild the levels derived from them."""
+    for name, terminal in (
+        ("_NC_DUST_TERMINAL", _NC_DUST_TERMINAL),
+        ("_NC_A3_TERMINAL", _NC_A3_TERMINAL),
+    ):
+        assert terminal <= DUST_NAV_FLOOR, (
+            f"{name}={terminal} is above DUST_NAV_FLOOR={DUST_NAV_FLOOR}: A2 now refuses it"
+        )
+
+
+# --- compose: every shape a no-capital key can take (166.3.1 plan 09, D-08 A + A2 + A3) ---------
+#
+# Key A (binance) holds 100000.0 flat on every day of its book. Each candidate below is a connected
+# key whose live read found no capital (NULL anchor, ``dust`` or ``nonpositive``) but whose writer
+# stored a return series, a realized terminal and, on Deribit, the basis it rolled on. Day numbers
+# in the docstrings are 1-based over the book's days.
+
+
+def _nc_candidate(
+    key: str,
+    exchange: str,
+    return_days: list[str],
+    payload: dict[str, Any],
+    *,
+    returns: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": key, "exchange": exchange, "return_days": return_days, "payload": payload,
+        "returns": returns or {},
+    }
+
+
+def _nc_assemble(
+    candidates: list[dict[str, Any]], *, a_days: list[str] | None = None
+) -> dict[str, list[dict]]:
+    a_days = a_days or _BTC_DAYS
+    api_keys = [
+        {"id": "key-A", "user_id": _NOCAP_ALLOC, "is_active": True, "exchange": "binance",
+         "sync_status": "connected", "disconnected_at": None}
+    ] + [
+        {"id": c["id"], "user_id": _NOCAP_ALLOC, "is_active": True, "exchange": c["exchange"],
+         "sync_status": "connected", "disconnected_at": None}
+        for c in candidates
+    ]
+    csv = [
+        {"api_key_id": "key-A", "allocator_id": _NOCAP_ALLOC, "date": day, "daily_return": 0.0}
+        for day in a_days
+    ]
+    for c in candidates:
+        csv += [
+            {"api_key_id": c["id"], "allocator_id": _NOCAP_ALLOC, "date": day,
+             "daily_return": c["returns"].get(day, 0.0)}
+            for day in c["return_days"]
+        ]
+    derived = [
+        {"allocator_id": _NOCAP_ALLOC, "kind": "key_inputs:key-A",
+         "payload": {"flows": [], "anchor_usd": 100_000.0, "venue": "binance",
+                     "realized_terminal_usd": 100_000.0, "realized_terminal_day": a_days[-1]}}
+    ] + [
+        {"allocator_id": _NOCAP_ALLOC, "kind": f"key_inputs:{c['id']}", "payload": c["payload"]}
+        for c in candidates
+    ]
+    return {"csv_daily_returns": csv, DERIVED_TABLE: derived, LEGACY_TABLE: [], "api_keys": api_keys}
+
+
+def _nc_payload(
+    token: str,
+    venue: str,
+    terminal_usd: float,
+    terminal_day: str,
+    *,
+    flows: dict[str, float] | None = None,
+    dropped_pnl: dict[str, float] | None = None,
+    basis_flows: dict[str, float] | None = None,
+    basis_pnl: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "flows": [{"utc_day_iso": d, "usd_signed": v} for d, v in (flows or {}).items()],
+        "anchor_usd": None, "anchor_null_reason": token, "venue": venue,
+        "realized_terminal_usd": terminal_usd, "realized_terminal_day": terminal_day,
+    }
+    if dropped_pnl:
+        payload["dropped_day_pnl"] = [
+            {"utc_day_iso": d, "pnl_usd": v} for d, v in dropped_pnl.items()
+        ]
+    if basis_pnl is not None:
+        payload["composed_flows"] = [
+            {"utc_day_iso": d, "flow_usd": v} for d, v in (basis_flows or {}).items()
+        ]
+        payload["composed_day_pnl"] = [{"utc_day_iso": d, "pnl_usd": v} for d, v in basis_pnl.items()]
+    return payload
+
+
+def _nc_curve(payload: dict) -> dict[str, float]:
+    return {r["date"]: r["equity_usd"] for r in payload["curve"]}
+
+
+def _nc_book_returns(payload: dict) -> dict[str, float]:
+    return {r["date"]: r["r"] for r in payload["returns"]}
+
+
+def _nc_deribit_a3_book(*, return_on_last_day: float = 0.0) -> dict[str, list[dict]]:
+    """PROD book 1's Deribit dust key: returns end on day 3 (L), the writer's final day is day 4
+    (P = L + 1) and carries a 40.0 dust deposit and 10.0 of P&L, the stored terminal is 65.0, and
+    the writer's day P&L has NO entry on day 3 (the gap-fill row that carries the level)."""
+    d = _BTC_DAYS
+    return _nc_assemble([
+        _nc_candidate(
+            "key-B", "deribit", d[:3],
+            _nc_payload(
+                "dust", "deribit", _NC_A3_TERMINAL, d[3],
+                flows={d[3]: 40.0}, dropped_pnl={d[3]: 10.0},
+                basis_flows={d[3]: 40.0}, basis_pnl={d[0]: 0.0, d[1]: 0.0, d[3]: 10.0},
+            ),
+            returns={d[2]: return_on_last_day},
+        )
+    ])
+
+
+def _nc_mt5_withdrawal_book() -> dict[str, list[dict]]:
+    """PROD book 2's MT5 nonpositive key: returns end on day 3 (L), a full 20000.0 withdrawal is
+    dated on day 4 (P = L + 1) and the stored terminal on day 4 is exactly 0.0. D-10 (166.3.1
+    review round 1): the writer stores the P&L of every day it drops (D-15), so the withdrawal day
+    carries a stored dropped-day P&L, 0.0 (the account only paid money out)."""
+    d = _BTC_DAYS
+    return _nc_assemble([
+        _nc_candidate(
+            "key-C", "mt5", d[:3],
+            _nc_payload(
+                "nonpositive", "mt5", 0.0, d[3],
+                flows={d[3]: -20_000.0}, dropped_pnl={d[3]: 0.0},
+            ),
+        )
+    ])
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_mt5_nonpositive_key_emptied_by_a_final_withdrawal() -> None:
+    """D-08 for the MT5 shape (return-factor roll, no writer basis). An account closed by a
+    final withdrawal reads zero capital on the day it was emptied, and the withdrawal is a FLOW
+    in the ledger, never a loss in the book. C holds 20000.0 on days 1 to 3, is 0.0 on day 4 (the
+    withdrawal day, explained by the withdrawal), and is out of the book after it; the book's
+    return on day 4 is A's own 0.0. Reading the emptied level as a loss, or dropping the key,
+    both misstate a book whose owner simply took money out."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-C", "mt5", d[:4],
+            _nc_payload("nonpositive", "mt5", 0.0, d[3], flows={d[3]: -20_000.0}),
+        )
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "dropped_key" not in payload["degrade_reasons"]
+    curve = _nc_curve(payload)
+    assert [curve[x] for x in d[:3]] == [pytest.approx(120_000.0, abs=1e-9)] * 3
+    assert [curve[x] for x in d[3:]] == [pytest.approx(100_000.0, abs=1e-9)] * 2
+    assert _nc_book_returns(payload)[d[3]] == pytest.approx(0.0, abs=1e-12)
+    assert payload["no_capital_exited_keys"] == [
+        {"api_key_id": "key-C", "reason": "nonpositive", "day": d[3]}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_mt5_dust_key_with_a_small_positive_terminal() -> None:
+    """D-08 W5 (b). A dust key (no writer basis) whose writer ends at 80.0, under the dust floor
+    and above its own emptied band (a 4000.0 peak gives a band under 40.0), is live capital by
+    DERIBITWEDGE D-09: it composes at the writer's levels (4000.0, 800.0, 80.0), its last level is
+    NOT zeroed, and it exits after day 3 as a named exit, never a loss."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-D", "mt5", d[:3], _nc_payload("dust", "mt5", 80.0, d[2]),
+            returns={d[1]: -0.8, d[2]: -0.9},
+        )
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    curve = _nc_curve(payload)
+    assert [curve[x] for x in d[:3]] == [
+        pytest.approx(104_000.0, abs=1e-6),
+        pytest.approx(100_800.0, abs=1e-6),
+        pytest.approx(100_080.0, abs=1e-6),
+    ]
+    assert [curve[x] for x in d[3:]] == [pytest.approx(100_000.0, abs=1e-9)] * 2
+    assert _nc_book_returns(payload)[d[3]] == pytest.approx(0.0, abs=1e-12)
+    assert payload["no_capital_exited_keys"] == [
+        {"api_key_id": "key-D", "reason": "dust", "day": d[2]}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a3_deribit_dust_deposit_after_last_return() -> None:
+    """D-08 A3 (PROD book 1's Deribit dust key). The writer drops the return of its last day (a
+    dust prior NAV), so the key's history ends on its last RETURN day L (day 3) while its stored
+    terminal sits on day 4 with a 40.0 dust deposit and 10.0 of P&L. The level on L is the writer's
+    own terminal walked back through that dropped day, 65.0 - 40.0 - 10.0 = 15.0, and nothing is
+    invented. B is 15.0 on days 1 to 3 and leaves after day 3; the day-4 deposit is consumed by the
+    walk-back, not booked, so there is no out-of-window flow, and the exit is not a book loss. The
+    fixture leaves day 3 out of the writer day-P&L series, so this is also the pad's proof: without
+    a zero P&L on L the replay would fall out of writer mode (``key_inputs_mismatch``)."""
+    d = _BTC_DAYS
+    payload = await _compose_no_capital_book(_nc_deribit_a3_book())
+
+    assert "out_of_window_flow" not in payload["degrade_reasons"]
+    assert "key_inputs_mismatch" not in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    curve = _nc_curve(payload)
+    assert [curve[x] for x in d[:3]] == [pytest.approx(100_015.0, abs=1e-9)] * 3
+    assert [curve[x] for x in d[3:]] == [pytest.approx(100_000.0, abs=1e-9)] * 2
+    assert _nc_book_returns(payload)[d[3]] == pytest.approx(0.0, abs=1e-12)
+    assert payload["no_capital_exited_keys"] == [
+        {"api_key_id": "key-B", "reason": "dust", "day": d[2]}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a3_mt5_withdrawal_after_last_return() -> None:
+    """D-08 A3 (PROD book 2's MT5 nonpositive key). The writer dropped the return of the day a
+    withdrawal dominated the prior NAV, so the returns end on day 3 (L) and the full 20000.0
+    withdrawal is dated on day 4. The level on L is the terminal walked back through the
+    withdrawal, 0.0 - (-20000.0) - 0.0 = 20000.0. C is 20000.0 on days 1 to 3 and out after day 3;
+    the withdrawal is consumed by the walk-back, never a book loss, and not an out-of-window flow."""
+    d = _BTC_DAYS
+    payload = await _compose_no_capital_book(_nc_mt5_withdrawal_book())
+
+    assert "out_of_window_flow" not in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    curve = _nc_curve(payload)
+    assert [curve[x] for x in d[:3]] == [pytest.approx(120_000.0, abs=1e-9)] * 3
+    assert [curve[x] for x in d[3:]] == [pytest.approx(100_000.0, abs=1e-9)] * 2
+    assert _nc_book_returns(payload)[d[3]] == pytest.approx(0.0, abs=1e-12)
+    assert payload["no_capital_exited_keys"] == [
+        {"api_key_id": "key-C", "reason": "nonpositive", "day": d[2]}
+    ]
+
+
+# --- guards: the rule may only make a book better (166.3.1 plan 09, Task 2) --------------------
+
+
+async def _compose_no_capital_book_spy(
+    seed: dict[str, list[dict]],
+) -> tuple[dict, list[dict[str, Any]]]:
+    """``_compose_no_capital_book`` plus the keyword arguments each real compose call received."""
+    from unittest.mock import patch
+
+    import services.allocator_equity_compose as compose_module
+
+    real = compose_module.compose_allocator_equity
+    calls: list[dict[str, Any]] = []
+
+    def _spy(*args: Any, **kwargs: Any) -> dict:
+        calls.append({"args": args, **kwargs})
+        return real(*args, **kwargs)
+
+    with patch("services.allocator_equity_compose.compose_allocator_equity", _spy):
+        payload = await _compose_no_capital_book(seed)
+    return payload, calls
+
+
+def _nc_deribit_dust_book(
+    *, token: str | None = "dust", terminal: tuple[str, float] | None, **payload_kwargs: Any
+) -> dict[str, list[dict]]:
+    """A Deribit-shaped candidate on days 1 to 3 (flat returns, a writer basis with a zero day P&L
+    on each), terminal on day 3 unless told otherwise."""
+    d = _BTC_DAYS
+    payload = _nc_payload(
+        token or "dust", "deribit", terminal[1] if terminal else 0.0,
+        terminal[0] if terminal else d[2],
+        basis_pnl={d[0]: 0.0, d[1]: 0.0, d[2]: 0.0}, **payload_kwargs,
+    )
+    if token is None:
+        del payload["anchor_null_reason"]
+    if terminal is None:
+        del payload["realized_terminal_usd"]
+        del payload["realized_terminal_day"]
+    return _nc_assemble([_nc_candidate("key-B", "deribit", d[:3], payload)])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token", ["balance_error", "nonfinite", "flow_drop", None])
+async def test_no_capital_exit_read_failures_stay_dropped(token: str | None) -> None:
+    """T-166.3.1-32. A failed read is not an empty account. ``balance_error``, ``nonfinite``,
+    ``flow_drop`` and a missing token say the live balance could not be read, not that it was
+    zero, so a key carrying them keeps the blocking ``dropped_key`` even when it has returns and a
+    small stored terminal. Exiting it would turn an unknown into a clean book."""
+    payload = await _compose_no_capital_book(
+        _nc_deribit_dust_book(token=token, terminal=(_BTC_DAYS[2], _NC_DUST_TERMINAL))
+    )
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert "no_capital_key_exited" not in payload["flags"]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_no_stored_terminal_stays_dropped() -> None:
+    """T-166.3.1-32. Without the writer's stored terminal there is no level that is not invented:
+    the key would have to be anchored at zero. A dust key with returns, a withdrawal on its last
+    day (the shape that WOULD compose as an emptied account) and no terminal keeps ``dropped_key``."""
+    d = _BTC_DAYS
+    payload = await _compose_no_capital_book(
+        _nc_deribit_dust_book(
+            terminal=None, flows={d[2]: -500.0}, basis_flows={d[2]: -500.0}
+        )
+    )
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_terminal_inside_the_emptied_band_composes_as_zero_capital() -> None:
+    """D-08 with DERIBITWEDGE D-01/D-09. An account drained by a withdrawal leaves 5.0 behind,
+    inside its emptied band (a 20000.0 peak gives a band under 100.0). The replay reads that
+    day as zero capital, explained by the withdrawal, and the job must admit the in-band terminal
+    rather than refuse it: the key composes (20000.0, 20000.0, then 0.0), exits after day 3, is
+    named, and the book reads trustworthy."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-B", "deribit", d[:3],
+            _nc_payload(
+                "dust", "deribit", 5.0, d[2],
+                flows={d[2]: -19_995.0}, basis_flows={d[2]: -19_995.0},
+                basis_pnl={d[0]: 0.0, d[1]: 0.0, d[2]: 0.0},
+            ),
+        )
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    curve = _nc_curve(payload)
+    assert [curve[x] for x in d[:3]] == [
+        pytest.approx(120_000.0, abs=1e-9),
+        pytest.approx(120_000.0, abs=1e-9),
+        pytest.approx(100_000.0, abs=1e-9),
+    ]
+    assert payload["no_capital_exited_keys"] == [
+        {"api_key_id": "key-B", "reason": "dust", "day": d[2]}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a3_consumed_days_never_reach_the_compose() -> None:
+    """T-166.3.1-33 (the trim, narrowed by D-10). A candidate whose terminal day P is after its
+    last return day L ends on L, and the days in (L, P] are consumed by the walk-back. Nothing
+    dated after L (day 3) may reach the compose: left in, the replay reads a flow past the last
+    return day (``out_of_window_flow``) and a series running past its terminal. The deposit and
+    the P&L of day 4 are dust-sized, which is what lets this key exit at all (D-10)."""
+    d = _BTC_DAYS
+    payload, calls = await _compose_no_capital_book_spy(_nc_deribit_a3_book())
+
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert payload["no_capital_exited_keys"] == [
+        {"api_key_id": "key-B", "reason": "dust", "day": d[2]}
+    ]
+    (call,) = calls
+    assert all(f.utc_day_iso <= d[2] for f in call["args"][1]["key-B"])  # flows_by_key
+    assert all(day <= d[2] for day in call["dropped_day_pnl_by_key"]["key-B"])
+    basis_flows, basis_pnl = call["writer_basis_by_key"]["key-B"]
+    assert all(f.utc_day_iso <= d[2] for f in basis_flows)
+    assert all(day <= d[2] for day in basis_pnl)
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_anything_dated_after_the_terminal_day_stays_dropped() -> None:
+    """D-10 (1), CR-01. A flow, a dropped-day P&L or a writer-basis day dated AFTER the key's
+    realized terminal day (day 3, also its last return day) is not an exit this rule may name:
+    the trim would erase it, and ``out_of_window_flow`` is the gate that names it today. It was
+    exited here before D-10, with dust-sized amounts; D-10 supersedes that (the premise D-08 was
+    measured on is 0 flows after the terminal day), so the key keeps ``dropped_key``."""
+    d = _BTC_DAYS
+    book = _nc_deribit_dust_book(
+        terminal=(d[2], _NC_DUST_TERMINAL),
+        flows={d[3]: 40.0, d[4]: 30.0}, dropped_pnl={d[3]: 10.0},
+        basis_flows={d[3]: 40.0},
+    )
+    book[DERIVED_TABLE][1]["payload"]["composed_day_pnl"].append(
+        {"utc_day_iso": d[3], "pnl_usd": 10.0}
+    )
+    payload = await _compose_no_capital_book(book)
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert "no_capital_key_exited" not in payload["flags"]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_anything_dated_after_the_terminal_day_stays_dropped_without_a_basis() -> None:
+    """D-10 (1), the return-factor roll (no writer basis, the MT5 shape): the same refusal for a
+    flow and a dropped-day P&L dated after the terminal day (day 3). Superseded by D-10 from the
+    pre-D-10 T-166.3.1-33 expectation that these were trimmed and the key exited."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-C", "mt5", d[:3],
+            _nc_payload(
+                "dust", "mt5", _NC_DUST_TERMINAL, d[2],
+                flows={d[3]: 40.0, d[4]: 30.0}, dropped_pnl={d[3]: 10.0},
+            ),
+        )
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert "no_capital_key_exited" not in payload["flags"]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_margin_call_then_liquidation_stays_dropped() -> None:
+    """D-10 (2), CR-01 reviewer Run 1. An MT5 dust key is flat on days 1 to 3 (L = day 3). Day 4
+    carries a +10000 deposit and -14500 of P&L (a margin call, then a liquidation) and the stored
+    terminal is 50.0, under the dust floor, so A2 passes. The walk-back would put 4550.0 on L and
+    book the 14500 loss as nothing: a TRUSTWORTHY book with the loss erased and the key leaving as
+    a 4550 withdrawal. The consumed P&L is far above the dust floor, so the key keeps
+    ``dropped_key``, which is the honest answer."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-C", "mt5", d[:3],
+            _nc_payload(
+                "dust", "mt5", 50.0, d[3],
+                flows={d[3]: 10_000.0}, dropped_pnl={d[3]: -14_500.0},
+            ),
+        )
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert "no_capital_key_exited" not in payload["flags"]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_deposit_after_the_terminal_day_stays_blocked() -> None:
+    """D-10 (1), CR-01 reviewer Run 2. A dust key has its terminal day P == its last return day L
+    (day 3), a stored terminal of 60.0 and a +50000 flow dated on day 5. On ``origin/main`` that
+    flow is a blocking ``out_of_window_flow``; the exit trim turned it into nothing, so the book
+    read trustworthy with 50000 of capital gone. It keeps ``dropped_key`` and stays untrustworthy."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-C", "mt5", d[:3],
+            _nc_payload("dust", "mt5", _NC_DUST_TERMINAL, d[2], flows={d[4]: 50_000.0}),
+        )
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert "no_capital_key_exited" not in payload["flags"]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a_flow_day_without_a_stored_pnl_stays_dropped() -> None:
+    """D-10 (3), WR-01. A binance dust key has returns on days 1 and 2 only (L = day 2) and a
+    terminal of 50.0 on day 5, with a -8000 flow on day 4 and NO stored P&L anywhere. A writer
+    would not drop day 3 (no flow, and a prior NAV above dust), so (L, P] is not evidenced as the
+    writer's own dropped days: walking back through it would invent a level of 8050.0 on L and
+    disable the ``key_inputs_mismatch`` detector that exists for exactly this row. The key keeps
+    ``dropped_key``."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-E", "binance", d[:2],
+            _nc_payload("dust", "binance", 50.0, d[4], flows={d[3]: -8_000.0}),
+        )
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert "no_capital_key_exited" not in payload["flags"]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_an_empty_window_after_the_last_return_stays_dropped() -> None:
+    """D-10 (3), WR-03. A binance dust key has returns on days 1 and 2 only (L = day 2) and a
+    stored terminal of 50.0 on day 5, with NO flow and NO stored P&L anywhere in (L, P].
+
+    Why it must stay ``dropped_key``: a writer drops a no-flow day only when the prior NAV is dust,
+    and it stores a P&L row for every NAV day it drops. So an empty window is what a
+    returns/inputs disagreement looks like (returns missing, or a terminal that does not belong
+    to this key's history), which is exactly the row the ``realized_terminal_day_mismatch``
+    detector exists for. Treating the empty window as evidence passes the rule vacuously, rescales
+    the key's whole history to the terminal level and silences that detector, so the book would
+    read trustworthy where it was untrustworthy before this phase. Every day in (L, P] must carry
+    a stored P&L, not only the days that carry a flow."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate("key-E", "binance", d[:2], _nc_payload("dust", "binance", 50.0, d[4]))
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert "no_capital_key_exited" not in payload["flags"]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_dust_sized_final_days_still_exit() -> None:
+    """D-10 control. The measured PROD shapes (dust-sized final days, no flow after P) are what
+    A3 exists for and must still exit. An MT5 dust key is flat on days 1 to 3 (L = day 3); day 4
+    (P) carries a deposit of 0.3 x DUST_NAV_FLOOR and a P&L of exactly -DUST_NAV_FLOOR (the
+    boundary: ``>`` refuses, equal exits), both stored, and the terminal is 0.8 x DUST_NAV_FLOOR
+    (under the floor, so A2 passes). The level on L is terminal - deposit + DUST_NAV_FLOOR, which
+    is 1.5 x DUST_NAV_FLOOR for any floor; B composes at it through day 3 and leaves as a named
+    exit."""
+    d = _BTC_DAYS
+    terminal = 0.8 * DUST_NAV_FLOOR
+    deposit = 0.3 * DUST_NAV_FLOOR
+    level_l = terminal - deposit + DUST_NAV_FLOOR
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-C", "mt5", d[:3],
+            _nc_payload(
+                "dust", "mt5", terminal, d[3],
+                flows={d[3]: deposit}, dropped_pnl={d[3]: -DUST_NAV_FLOOR},
+            ),
+        )
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    curve = _nc_curve(payload)
+    assert [curve[x] for x in d[:3]] == [pytest.approx(100_000.0 + level_l, abs=1e-6)] * 3
+    assert [curve[x] for x in d[3:]] == [pytest.approx(100_000.0, abs=1e-9)] * 2
+    assert payload["no_capital_exited_keys"] == [
+        {"api_key_id": "key-C", "reason": "dust", "day": d[2]}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_inception_residual_stays_dropped() -> None:
+    """(c) PROD book 1's MT5 dust key: the founder's "stays blocked, unchanged". Its opening flows
+    do not reconcile with its first return day's level (the capital implied before them is 0.15%
+    of that level, against a 0.01% band), a fact in the writer's stored data that no exit rule may
+    paper over (D-02: the gate is not loosened). Routed by the founder to Phase 167.1.2.1.1
+    WRITERRESIDUALS as SC-9. Until that is fixed the key keeps today's named ``dropped_key``: the
+    candidate falls back before its blocked curve can enter the book, so ``inception_unreconciled``
+    is NOT what the book says, the key is not named as exited, and the book is untrustworthy."""
+    d = _BTC_DAYS
+    book = _nc_assemble([
+        _nc_candidate(
+            "key-D", "mt5", d[2:],
+            _nc_payload("dust", "mt5", 80.0, d[4], flows={d[1]: 79.88}),
+        )
+    ])
+    payload = await _compose_no_capital_book(book)
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert "no_anchor" in payload["degrade_reasons"]
+    assert "inception_unreconciled" not in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+    assert "no_capital_key_exited" not in payload["flags"]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_a3_never_pads_a_writer_basis_over_a_real_return() -> None:
+    """T-166.3.1-41. The pad states that a gap-fill row (stored return exactly 0.0) has no P&L. It
+    is never laid over a day whose stored return is NOT zero: that would let a zero stand in for
+    a real day's P&L. Here the key's return on its last day L is 0.01 and L is absent from its
+    writer day P&L (a row whose basis and returns disagree). The job must not pad, so the replay
+    reads ``writer_basis_mismatch`` and the key keeps ``dropped_key``: not composed, not named."""
+    payload = await _compose_no_capital_book(_nc_deribit_a3_book(return_on_last_day=0.01))
+
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert "no_anchor" in payload["degrade_reasons"]
+    assert "key_inputs_mismatch" not in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert "no_capital_exited_keys" not in payload
+
+
+# --- job level: a candidate must never cost the book its stored row (166.3.1 plan 09, Task 3) ---
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_compose_refusal_reverts_the_candidates_and_keeps_the_row(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T-166.3.1-39. The per-key fallback inside the compose cannot see a refusal that belongs to
+    the WHOLE compose. If the compose refuses while a candidate is in play, the job must not take
+    the permanent-failure path that deletes the stored equity_curve row (the book would show the
+    rebuilding panel because of a rule that exists to make books better). It composes once more
+    with every candidate's STORED inputs restored (NULL anchor, its token, the stored terminal pair
+    on P, the untrimmed flows and the unpadded writer basis) and upserts today's result: B keeps
+    ``dropped_key``. A wrapper is the honest way to reach this refusal: it raises only while a
+    candidate is named, which no single stored row can make the real compose do on its own."""
+    import logging
+    from unittest.mock import patch
+
+    import services.allocator_equity_compose as compose_module
+    from services.job_worker import run_derive_allocator_equity_job
+    from services.nav_twr import NavReconstructionError
+
+    real = compose_module.compose_allocator_equity
+    calls: list[dict[str, Any]] = []
+
+    def _refuse_with_a_candidate(*args: Any, **kwargs: Any) -> dict:
+        calls.append({"args": args, **kwargs})
+        if kwargs.get("no_capital_exit_by_key"):
+            raise NavReconstructionError("allocator equity replay: test-injected refusal")
+        return real(*args, **kwargs)
+
+    seed = _nc_deribit_a3_book()
+    seed[DERIVED_TABLE].append(
+        {"allocator_id": _NOCAP_ALLOC, "kind": "equity_curve",
+         "payload": {"curve": [{"date": "2026-05-01", "equity_usd": 1.0}], "is_trustworthy": True,
+                     "degrade_reasons": []}}
+    )
+    fake = _FakeSupabase(seed)
+    job = {"id": "j-nocap-revert", "kind": "derive_allocator_equity", "allocator_id": _NOCAP_ALLOC}
+    with (
+        patch("services.job_worker.get_supabase", return_value=fake),
+        patch("services.allocator_equity_compose.compose_allocator_equity", _refuse_with_a_candidate),
+        caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"),
+    ):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    assert not [
+        x for x in fake.deletes if x[0] == DERIVED_TABLE and x[1].get("kind") == "equity_curve"
+    ], fake.deletes
+    curve = [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+    assert len(curve) == 1
+    payload = _extract_payload(curve[0][1])
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert "no_anchor" in payload["degrade_reasons"]
+    assert "no_capital_exited_keys" not in payload
+
+    first, second = calls
+    assert first["no_capital_exit_by_key"] == {"key-B": ("dust", _BTC_DAYS[2])}
+    assert not second.get("no_capital_exit_by_key")
+    _, flows_in, anchors_in, null_reasons_in = second["args"]
+    assert anchors_in["key-B"] is None and null_reasons_in["key-B"] == "dust"
+    assert [(f.utc_day_iso, f.usd_signed) for f in flows_in["key-B"]] == [(_BTC_DAYS[3], 40.0)]
+    assert second["realized_terminal_by_key"]["key-B"] == (_BTC_DAYS[3], _NC_A3_TERMINAL)
+    assert "key-B" not in (second.get("departed_end_by_key") or {})
+    assert second["writer_basis_by_key"]["key-B"][1] == {
+        _BTC_DAYS[0]: 0.0, _BTC_DAYS[1]: 0.0, _BTC_DAYS[3]: 10.0,
+    }
+
+    reverted = [r.getMessage() for r in caplog.records if "no-capital" in r.getMessage()]
+    assert len(reverted) == 1, [r.getMessage() for r in caplog.records]
+    assert "key-B" not in reverted[0] and "65.0" not in reverted[0]
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_refusal_without_a_candidate_still_deletes_the_row() -> None:
+    """T-166.3.1-39. The re-compose exists only for candidates. A compose that refuses with none in
+    play is today's permanent failure and deletes the stale row (F2); and when the re-compose
+    itself refuses, the same path runs, so the job never loops and never keeps a row it cannot
+    stand behind."""
+    from unittest.mock import patch
+
+    from services.job_worker import run_derive_allocator_equity_job
+    from services.nav_twr import NavReconstructionError
+
+    def _always_refuse(*_args: Any, **_kwargs: Any) -> dict:
+        raise NavReconstructionError("allocator equity replay: test-injected refusal")
+
+    for seed in (_nc_deribit_a3_book(), _nc_assemble([])):
+        seed[DERIVED_TABLE].append(
+            {"allocator_id": _NOCAP_ALLOC, "kind": "equity_curve",
+             "payload": {"curve": [{"date": "2026-05-01", "equity_usd": 1.0}],
+                         "is_trustworthy": True, "degrade_reasons": []}}
+        )
+        fake = _FakeSupabase(seed)
+        job = {"id": "j-nocap-refuse", "kind": "derive_allocator_equity",
+               "allocator_id": _NOCAP_ALLOC}
+        with (
+            patch("services.job_worker.get_supabase", return_value=fake),
+            patch("services.allocator_equity_compose.compose_allocator_equity", _always_refuse),
+        ):
+            result = await run_derive_allocator_equity_job(job)
+        assert result.outcome.name == "FAILED" and result.error_kind == "permanent"
+        assert [
+            x for x in fake.deletes if x[0] == DERIVED_TABLE and x[1].get("kind") == "equity_curve"
+        ], fake.deletes
+
+
+@pytest.mark.asyncio
+async def test_no_capital_exit_two_candidates_each_leave_on_their_own_day() -> None:
+    """W5 (a). PROD book 1 holds two candidates on different venues and days: a Deribit dust key
+    whose terminal day is one day after its last return day (A3 ends it on day 3 at 15.0) and an
+    MT5 dust key whose terminal is on its last return day (day 5, 80.0, no writer basis). Each
+    leaves on its OWN end day, so the book is A+B+D (104015.0) through day 3, A+D on days 4 and 5
+    (100800.0, 100080.0) and A alone (100000.0) after. B's day-4 deposit is consumed by the
+    walk-back, never booked, and neither exit is a book loss: the book's return on day 6 is A's own
+    0.0. Both are named with their own day, sorted by key id, and the book reads trustworthy."""
+    days7 = [f"2026-06-{n:02d}" for n in range(6, 13)]
+    d = days7
+    book = _nc_assemble(
+        [
+            _nc_candidate(
+                "key-B", "deribit", d[:3],
+                _nc_payload(
+                    "dust", "deribit", _NC_A3_TERMINAL, d[3],
+                    flows={d[3]: 40.0}, dropped_pnl={d[3]: 10.0},
+                    basis_flows={d[3]: 40.0}, basis_pnl={d[0]: 0.0, d[1]: 0.0, d[3]: 10.0},
+                ),
+            ),
+            _nc_candidate(
+                "key-D", "mt5", d[:5], _nc_payload("dust", "mt5", 80.0, d[4]),
+                returns={d[3]: -0.8, d[4]: -0.9},
+            ),
+        ],
+        a_days=d,
+    )
+    payload = await _compose_no_capital_book(book)
+
+    assert "out_of_window_flow" not in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    curve = _nc_curve(payload)
+    assert [curve[x] for x in d] == [
+        pytest.approx(v, abs=1e-6)
+        for v in (104_015.0, 104_015.0, 104_015.0, 100_800.0, 100_080.0, 100_000.0, 100_000.0)
+    ]
+    book_returns = _nc_book_returns(payload)
+    assert book_returns[d[5]] == pytest.approx(0.0, abs=1e-12)
+    assert payload["no_capital_exited_keys"] == [
+        {"api_key_id": "key-B", "reason": "dust", "day": d[2]},
+        {"api_key_id": "key-D", "reason": "dust", "day": d[4]},
+    ]

@@ -105,14 +105,18 @@ const STRATEGY_ID = "44444444-4444-4444-8444-444444444444";
 const OWNER_UID = "11111111-1111-4111-8111-111111111111";
 const OTHER_UID = "22222222-2222-4222-8222-222222222222";
 
-/** The Lane A select list, typed as a LITERAL. Lane B must select a SUPERSET
+/** 166.3.1 D-05 (2026-10-07): the probe also selects `computation_status`, the
+ *  public cache key's fourth member (`computed_at` alone no longer moves at job
+ *  start or on failure). Lane B still carries it as part of the superset.
+ *
+ *  The Lane A select list, typed as a LITERAL. Lane B must select a SUPERSET
  *  of these columns or the payload-pending fallback (which reads
  *  `signature.name / codename / disclosure_tier`) breaks on the owner lane.
  *  Lane B additionally selects `status` — the lane/banner decision is derived
  *  from the ROW's status, never from which probe matched (review WR-01), so
  *  equality between the two lists is deliberately NOT pinned anymore. */
 const SIGNATURE_SELECT =
-  "id, name, codename, disclosure_tier, strategy_analytics ( computed_at, trades_fetched_at, series_provenance )";
+  "id, name, codename, disclosure_tier, strategy_analytics ( computed_at, computation_status, trades_fetched_at, series_provenance )";
 
 /** The owner-inclusive predicate string, typed as a LITERAL. A param-keyed
  *  predicate (`user_id.eq.<route id>`) cannot produce this string. */

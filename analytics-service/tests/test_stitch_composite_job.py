@@ -3511,6 +3511,55 @@ async def test_stamp_failed_preserves_published_composite_coverage_mask() -> Non
 
 
 @pytest.mark.asyncio
+async def test_stitch_inception_breach_failure_stamp_carries_no_computed_at() -> None:
+    """D-04 (Phase 166.3.1 NAVBREACH): a member ledger whose native_nav inception
+    reconciliation breaches fails the composite PERMANENT, and the terminal
+    ``failed`` stamp this module writes carries NO ``computed_at`` key.
+
+    WHY (Rule 9). ``strategy_analytics.computed_at`` is the freshness date the
+    factsheet FreshnessChip and the portfolio PDF vintage read. A failed
+    recompute must not move it. The only writer that moves it on a failure is the
+    SQL status bridge (branch (b), reached from ``mark_compute_job_failed``), and
+    migration 20261013120000 holds the column at the table for it. This test pins
+    the OTHER half of that contract: Python is not a second failure-path writer of
+    the column. A ``computed_at`` added to ``_stamp_failed``'s payload would be a
+    write the trigger restores on a ``failed`` row, so it would do nothing, and it
+    would also be a second writer someone has to reason about. Neuter (add a
+    ``computed_at`` key to the loud payload) -> this reddens.
+
+    The InceptionReconciliationError is built exactly as native_nav.py raises it
+    (codes, venue and the RELATIVE breach ratio only), so the test drives the
+    permanent-ledger-error arm that the NAVBREACH composite actually took."""
+    from services.native_nav import InceptionReconciliationError
+
+    fake = _FakeSupabase(members=[_member(1, "2024-01-01", None)])
+    breach = InceptionReconciliationError(
+        currencies=["BTC"], venue="deribit", breach_ratio=26.1,
+    )
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[breach],
+        has_option_activity=False,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    analytics_upserts = [
+        payload
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics" and isinstance(payload, dict)
+    ]
+    assert analytics_upserts, "the breach must stamp a terminal 'failed' row"
+    assert analytics_upserts[-1].get("computation_status") == "failed"
+    carrying = [p for p in analytics_upserts if "computed_at" in p]
+    assert not carrying, (
+        "a failure stamp must not name computed_at: the SQL bridge is the "
+        f"column's only failure-path writer, and it is held at the table. Got {carrying}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_stamp_failed_first_derive_no_existing_row_falls_back() -> None:
     """M-2 converse: a FIRST-derive failure (no existing strategy_analytics row /
     no flags) stamps just {csv_source, composite} — the read-modify-write falls

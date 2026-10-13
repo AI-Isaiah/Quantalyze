@@ -19,7 +19,12 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, cleanup, act } from "@testing-library/react";
-import { SyncProgress, type EvidenceBaseline, type SyncStatus } from "./SyncProgress";
+import {
+  SyncProgress,
+  type ComputationStatus,
+  type EvidenceBaseline,
+  type SyncStatus,
+} from "./SyncProgress";
 
 // ---------------------------------------------------------------------------
 // Supabase client mock.
@@ -106,15 +111,34 @@ vi.mock("@/lib/supabase/client", () => ({
 // --- Helpers ---------------------------------------------------------------
 
 /** A present, non-terminal-or-terminal analytics row keyed by DB status. */
-function analyticsRow(status: string, computedAt: string | null = null) {
+function analyticsRow(
+  status: string,
+  computedAt: string | null = null,
+  errorJobId: string | null = null,
+) {
   return {
     data: {
       computation_status: status,
       computation_error: null,
       computed_at: computedAt,
+      // Phase 166.3.1 / D-05 panel: the writer-stamped job id of the failure.
+      computation_error_job_id: errorJobId,
     },
     error: null,
   };
+}
+
+/**
+ * Phase 166.3.1 / D-05 panel: the pre-enqueue baseline the caller read. Every
+ * field is explicit at the call site so a case states exactly which evidence
+ * it leaves available.
+ */
+function baselineOf(
+  computedAt: string | null,
+  computationStatus: ComputationStatus | null,
+  errorJobId: string | null = null,
+): EvidenceBaseline {
+  return { computedAt, computationStatus, errorJobId };
 }
 
 // Phase 167.2 / KCS-02: a synthetic server-written computed_at for a row this
@@ -288,7 +312,7 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
     "PIN 5 — FORWARDED: DB %s maps to onStatusChange(%s)",
     async (dbStatus, uiStatus) => {
       mockState.analyticsResult = analyticsRow(dbStatus, T1);
-      const { onStatusChange } = renderPoller("computing", { computedAt: null });
+      const { onStatusChange } = renderPoller("computing", baselineOf(null, null));
       await tick(0);
       await tick(POLL_MS);
       expect(callsWith(onStatusChange, uiStatus)).toBe(1);
@@ -424,6 +448,192 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
 });
 
 // ===========================================================================
+// Phase 166.3.1 / D-05 panel (founder, 2026-10-07, "Adapt the panel") —
+// KCS-02 evidence (c).
+//
+// WHY. D-05 makes `computed_at` move ONLY on a successful write: the trigger
+// holds it through `computing` and through `failed`. Evidence (b) was 167.2's
+// answer to a fast failure (RESEARCH Q1: the bridge moves `computed_at` on the
+// failure). Under D-05 that is no longer true, so a Retry whose job fails
+// before any handler writes `computing` has neither (a) nor (b) and the panel
+// spins to the ~120 s cap. Evidence (c) is the server-written status, or a new
+// non-NULL error job id, moving from the pre-enqueue baseline.
+//
+// WHAT MUST STAY TRUE. KCS-02's reason for existing: the previous run's row
+// must never be shown as this attempt's result. An unchanged baseline admits
+// nothing, and the WR-03 / KCS-18 job-state checks still gate whatever is
+// admitted.
+// ===========================================================================
+describe("SyncProgress — evidence (c): a changed status or error job id admits a terminal (Phase 166.3.1 / D-05)", () => {
+  const T0 = "2026-04-19T11:58:00.000000+00:00";
+  const J1 = "00000000-0000-4000-8000-000000000001";
+  const J2 = "00000000-0000-4000-8000-000000000002";
+
+  it("FAST-FAIL-FROM-COMPLETE: complete -> failed with computed_at HELD and no computing read is forwarded as Sync failed, long before the cap", async () => {
+    // Why this matters (Rule 9): the owner clicked Retry on a green key, the
+    // job failed in seconds, and the row says `failed`. D-05 holds computed_at
+    // (T0 = T0), so (b) is blind; the panel never saw `computing` (the failure
+    // landed between two 3 s polls), so (a) is blind. Without (c) the owner
+    // watches a spinner for two minutes beside a database that already knows.
+    mockState.analyticsResult = analyticsRow("failed", T0, J2);
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "complete"));
+    await tick(0);
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(
+      onStatusChange.mock.calls,
+      "a fast failure under a held computed_at was not answered; the panel would run to the cap",
+    ).toEqual([["error", { computationError: null }]]);
+    expect(mockState.analyticsSelectCount).toBe(1);
+  });
+
+  it("FAST-FAIL-FROM-FAILED: failed -> failed with computed_at HELD and a NEW error job id is forwarded as Sync failed, long before the cap", async () => {
+    // Why this matters (Rule 9): the owner retries a failed key and it fails
+    // again. Status and computed_at are both unchanged; the ONLY server-written
+    // fact that tells this attempt's failure from the old one's is the job id
+    // the failing writer stamped (J2, not the baseline's J1).
+    mockState.analyticsResult = analyticsRow("failed", T0, J2);
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "failed", J1));
+    await tick(0);
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(
+      onStatusChange.mock.calls,
+      "a failed-to-failed Retry under a held computed_at was not answered; the panel would run to the cap",
+    ).toEqual([["error", { computationError: null }]]);
+    expect(mockState.analyticsSelectCount).toBe(1);
+  });
+
+  it("STATUS-ALONE-IS-EVIDENCE: complete -> failed with NO error job id (a bridge- or reaper-written failure) is still admitted by (c1)", async () => {
+    // A failure path that stamps no job id (the pg_cron reaper, a dispatcher
+    // level failure) leaves computation_error_job_id NULL. complete -> failed
+    // is still a status change, so the fast answer survives; only failed ->
+    // failed has nothing to compare (the recorded residue).
+    mockState.analyticsResult = analyticsRow("failed", T0, null);
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "complete"));
+    await tick(0);
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(onStatusChange.mock.calls).toEqual([["error", { computationError: null }]]);
+  });
+
+  it("UNCHANGED-BASELINE-HOLDS: failed with the baseline's own status, computed_at and error job id is never forwarded; the cap ends the attempt", async () => {
+    // KCS-02's intent, the reason the gate exists: this is the PREVIOUS run's
+    // failure, read for the whole first hop of a Retry. Showing it as this
+    // attempt's result is the wrong-run bug. If (c) were loosened to "any
+    // terminal with a job id" this case goes RED.
+    mockState.analyticsResult = analyticsRow("failed", T0, J1);
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "failed", J1));
+    await tick(0);
+
+    await tick(POLL_MS * 40);
+    expect(onStatusChange).not.toHaveBeenCalled();
+    expect(mockState.analyticsSelectCount).toBe(40);
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(onStatusChange.mock.calls).toEqual([["no_result", { stopReason: "poll_cap" }]]);
+  });
+
+  it("UNCHANGED-COMPLETE-HOLDS: complete with the baseline's own status and computed_at is never forwarded", async () => {
+    mockState.analyticsResult = analyticsRow("complete", T0);
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "complete"));
+    await tick(0);
+
+    await tick(POLL_MS * 5);
+    expect(mockState.analyticsSelectCount).toBe(5);
+    expect(onStatusChange).not.toHaveBeenCalled();
+  });
+
+  it("NULL-JOB-ID-IS-NOT-EVIDENCE: failed -> failed whose error job id became NULL (the bridge cleared it) admits nothing", async () => {
+    // (c2) needs a NON-NULL id that differs. The bridge NULLs the id unless a
+    // writer stamped this job's, so a NULL is "no information", not "changed".
+    // Treating null !== J1 as a change would show the previous failure as new.
+    mockState.analyticsResult = analyticsRow("failed", T0, null);
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "failed", J1));
+    await tick(0);
+
+    await tick(POLL_MS * 5);
+    expect(mockState.analyticsSelectCount).toBe(5);
+    expect(onStatusChange).not.toHaveBeenCalled();
+  });
+
+  it("FIRST-ID-IS-EVIDENCE: failed with no baseline id -> failed with a non-NULL id is forwarded", async () => {
+    // The previous failure was bridge-written (no id); this attempt's writer
+    // stamped one. NULL -> non-NULL is a change by (c2).
+    mockState.analyticsResult = analyticsRow("failed", T0, J2);
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "failed", null));
+    await tick(0);
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(onStatusChange.mock.calls).toEqual([["error", { computationError: null }]]);
+  });
+
+  it("STATUS-CHANGE-TO-SUCCESS: failed -> complete with computed_at HELD is admitted by (c1), and still waits for the job queue (KCS-18)", async () => {
+    mockState.analyticsResult = analyticsRow("complete", T0);
+    mockState.jobAnswers = [jobState("pending"), jobState("done")];
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "failed", J1));
+    await tick(0);
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(mockState.jobReadCount).toBe(1);
+    expect(onStatusChange).not.toHaveBeenCalled();
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(onStatusChange.mock.calls).toEqual([["complete"]]);
+  });
+
+  it("WR03-STILL-HOLDS-FOR-C: an (c)-admitted failure is NOT forwarded while the job route says pending, and is forwarded once it settles", async () => {
+    // 167.2-REVIEW WR-03 is unchanged: while this attempt's job is pending the
+    // failure cannot be its own (it may be another job's, landing between the
+    // baseline read and the enqueue). Control: the next settled answer forwards,
+    // so the hold is a hold and not a dead path.
+    mockState.analyticsResult = analyticsRow("failed", T0, J2);
+    mockState.jobAnswers = [jobState("pending"), jobState("done")];
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "failed", J1));
+    await tick(0);
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(mockState.jobReadCount).toBe(1);
+    expect(onStatusChange).not.toHaveBeenCalled();
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(onStatusChange.mock.calls).toEqual([["error", { computationError: null }]]);
+  });
+
+  it("ABSENT-ROW-BASELINE: a baseline of an absent row (three NULLs) is a real baseline, so any later row is a change", async () => {
+    // First-ever sync of a strategy: no analytics row at baseline time. A
+    // fast failure then writes `failed` with computed_at still NULL (D-05
+    // holds a NULL OLD value). Status NULL -> failed is the only evidence.
+    mockState.analyticsResult = analyticsRow("failed", null, J2);
+    const { onStatusChange } = renderPoller("computing", baselineOf(null, null));
+    await tick(0);
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(onStatusChange.mock.calls).toEqual([["error", { computationError: null }]]);
+  });
+
+  it("UNKNOWN-BASELINE-DISABLES-C: an unknown baseline admits no terminal on a status or job id change, only a computing read", async () => {
+    mockState.analyticsResult = analyticsRow("failed", T0, J2);
+    const { onStatusChange } = renderPoller("computing", "unknown");
+    await tick(0);
+
+    await tick(POLL_MS * 5);
+    expect(mockState.analyticsSelectCount).toBe(5);
+    expect(onStatusChange).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
 // Phase 167.2 / KCS-18 — the job-state check before a terminal SUCCESS.
 //
 // RESEARCH P1: the SQL status bridge keeps a `complete_with_warnings` row at
@@ -441,7 +651,7 @@ describe("SyncProgress — a terminal success waits for the job queue (Phase 167
     // reads the same status at T1 (evidence b holds) with the job still pending.
     mockState.analyticsResult = analyticsRow("complete_with_warnings", T1);
     mockState.jobAnswers = [jobState("pending"), jobState("done")];
-    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "complete_with_warnings"));
     await tick(0);
 
     await tick(POLL_MS);
@@ -470,7 +680,7 @@ describe("SyncProgress — the job-state check fails closed (Phase 167.2 / KCS-1
   /** An evidenced `complete` (computed_at moved from the T0 baseline) under the poll. */
   function renderEvidencedComplete() {
     mockState.analyticsResult = analyticsRow("complete", T1);
-    return renderPoller("computing", { computedAt: T0 });
+    return renderPoller("computing", baselineOf(T0, "complete"));
   }
 
   function deferredAnswer() {
@@ -624,7 +834,7 @@ describe("SyncProgress — the job-state check fails closed (Phase 167.2 / KCS-1
   it("FAILED-SETTLED-FORWARDS: an evidenced failed terminal is forwarded once the job queue says no chain job is in flight", async () => {
     mockState.analyticsResult = analyticsRow("failed", T1);
     mockState.jobAnswers = [jobState("failed_final")];
-    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "failed"));
     await tick(0);
 
     await tick(POLL_MS);
@@ -638,7 +848,7 @@ describe("SyncProgress — the job-state check fails closed (Phase 167.2 / KCS-1
   it("WR03-FAILED-WHILE-PENDING: a moved computed_at with failed is NOT forwarded while the job route says pending, and the poll continues", async () => {
     mockState.analyticsResult = analyticsRow("failed", T1);
     mockState.jobAnswers = [jobState("pending"), jobState("pending")];
-    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "failed"));
     await tick(0);
 
     await tick(POLL_MS * 2);
@@ -651,7 +861,7 @@ describe("SyncProgress — the job-state check fails closed (Phase 167.2 / KCS-1
     mockState.analyticsResult = analyticsRow("failed", T1);
     mockState.jobAnswers = [jobRead({ error: "Too many requests" }, 429)];
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "failed"));
     await tick(0);
 
     await tick(POLL_MS);
@@ -669,7 +879,7 @@ describe("SyncProgress — the job-state check fails closed (Phase 167.2 / KCS-1
       },
       error: null,
     };
-    const { onStatusChange } = renderPoller("computing", { computedAt: T0 });
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "failed"));
     await tick(0);
 
     await tick(POLL_MS);

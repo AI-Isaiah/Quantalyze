@@ -103,12 +103,21 @@ export function toSyncStatus(db: ComputationStatus): SyncStatus {
 }
 
 /**
- * Phase 167.2 / KCS-02: the strategy's `strategy_analytics.computed_at` as the
- * caller read it immediately before this attempt's enqueue. `null` is a real
- * answer (no analytics row yet); `"unknown"` means the read failed or did not
- * answer in time, so only a `computing` read can admit a terminal.
+ * Phase 167.2 / KCS-02: the strategy's `strategy_analytics` row as the caller
+ * read it immediately before this attempt's enqueue. Phase 166.3.1 / D-05 panel
+ * widened it from `computed_at` alone to the three server-written columns the
+ * gate compares: `computed_at`, `computation_status` and
+ * `computation_error_job_id`. An absent row is a real answer and reads as three
+ * NULLs (any later row is then a change); `"unknown"` means the read failed or
+ * did not answer in time, so only a `computing` read can admit a terminal.
  */
-export type EvidenceBaseline = { computedAt: string | null } | "unknown";
+export type EvidenceBaseline =
+  | {
+      computedAt: string | null;
+      computationStatus: ComputationStatus | null;
+      errorJobId: string | null;
+    }
+  | "unknown";
 
 /**
  * Phase 167.2 / KCS-18 (RESEARCH P1): does the job queue agree that no
@@ -349,7 +358,7 @@ export function SyncProgress({
     schedule: POLL_INTERVAL_MS,
     maxAttempts: POLL_MAX_ATTEMPTS,
     missingRowGracePolls: MISSING_ROW_GRACE_POLLS,
-    onStatus: (db, computationError, computedAt) => {
+    onStatus: (db, computationError, computedAt, errorJobId) => {
       // audit-2026-05-07 C-0142: route DB status → UI status via the
       // discriminated converter. We only forward states that map cleanly to a
       // UI-visible transition (computing / complete / error); "idle" (from DB
@@ -374,15 +383,33 @@ export function SyncProgress({
         // with evidence that it is this attempt's:
         //   (a) this panel has read `computing` during this attempt, or
         //   (b) the row's `computed_at` differs from the value the caller read
-        //       immediately before the enqueue (`evidenceBaseline`).
-        // Both are server-written values; no client clock is read or compared.
-        // (b) also closes the measured fast-fail case (RESEARCH Q1): a job that
-        // fails before any handler writes `computing` still moves `computed_at`
-        // through the bridge. Without evidence the read is dropped and the poll
-        // continues; the attempt budget and the missing-row grace still apply.
+        //       immediately before the enqueue (`evidenceBaseline`), or
+        //   (c) Phase 166.3.1 / D-05 panel (founder, 2026-10-07, "Adapt the
+        //       panel"): relative to that same baseline, the row's
+        //       `computation_status` differs (c1), or its
+        //       `computation_error_job_id` is non-NULL and differs (c2).
+        // All are server-written values; no client clock is read or compared.
+        //
+        // Why (c) exists. D-05 makes `computed_at` move only on a SUCCESSFUL
+        // write: the trigger holds it through `computing` and through `failed`.
+        // (b) used to cover a fast failure, because the bridge moved
+        // `computed_at` on it (167.2 RESEARCH Q1). That no longer happens, so a
+        // Retry whose job fails before this panel ever reads `computing` has
+        // neither (a) nor (b) and would spin to the cap. A failure shows up as a
+        // status change (complete -> failed) or, failed -> failed, as the new
+        // job id the failing writer stamped (c2). The id must be NON-NULL: the
+        // bridge NULLs it unless a writer stamped this job's, so a NULL says
+        // nothing. A failure path that stamps no id therefore gives no (c) for
+        // failed -> failed, and the cap (M-3 below) is its only exit.
+        // KCS-02's intent is unchanged: a row whose status, error job id and
+        // `computed_at` all equal the baseline is the previous run's and is
+        // dropped. Without evidence the read is dropped and the poll continues;
+        // the attempt budget and the missing-row grace still apply.
         const changed =
           evidenceBaseline !== "unknown" &&
-          (computedAt ?? null) !== evidenceBaseline.computedAt;
+          ((computedAt ?? null) !== evidenceBaseline.computedAt ||
+            db !== evidenceBaseline.computationStatus ||
+            ((errorJobId ?? null) !== null && errorJobId !== evidenceBaseline.errorJobId));
         if (!sawComputingRef.current && !changed) return;
         // 167.2-REVIEW WR-03 (lineage): an evidenced failure used to be
         // forwarded as it stood, with no job-state read ("KCS-18 covers
@@ -392,7 +419,10 @@ export function SyncProgress({
         // writes `failed` while this attempt's job does not exist yet). So
         // evidence (b) admitted ANOTHER job's failure, the card said "Sync
         // failed" with its `computation_error` and offered Retry while this
-        // attempt's job sat pending. A failure now takes the same job-state
+        // attempt's job sat pending. (Under D-05 that failure no longer moves
+        // `computed_at`, but it moves the status or the error job id, which is
+        // evidence (c), so the same hole stays open and this check still closes
+        // it.) A failure now takes the same job-state
         // check as a success, with the same polarity: it is forwarded only
         // when no chain job is in flight, because while this attempt's job is
         // pending the failure cannot be its own. An unreadable answer holds it
@@ -403,8 +433,10 @@ export function SyncProgress({
         //
         // Phase 167.2 / KCS-18 — THE JOB-STATE CHECK (RESEARCH P1). The SQL
         // status bridge keeps a `complete_with_warnings` row at that status while
-        // the chain's jobs run, and still moves `computed_at` on every hop, so
-        // evidence (b) above also accepts a warned row re-stamped MID-CHAIN. The
+        // the chain's jobs run, and re-stamps `computed_at` on every hop that
+        // writes a success status (D-05 holds it only on a write to `failed` and
+        // on entry into `computing`), so evidence (b) above also accepts a warned
+        // row re-stamped MID-CHAIN. The
         // analytics row cannot tell that from the finished run; the job queue is
         // the authority on whether the chain is done. So a success is forwarded
         // only after one read of the sync-progress projection finds no

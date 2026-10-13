@@ -1145,15 +1145,18 @@ export function ApiKeyManager({
   /**
    * Phase 167.2 / KCS-02: read the strategy's `computed_at` immediately before
    * the enqueue, so the panel can tell this attempt's terminal from the previous
-   * run's (see `EvidenceBaseline`). An absent row answers `{ computedAt: null }`,
-   * a real value. An error, a throw, or `BASELINE_READ_BOUND_MS` expiring answers
-   * `"unknown"` and logs; it never fails the attempt.
+   * run's (see `EvidenceBaseline`). Phase 166.3.1 / D-05 panel: it reads
+   * `computation_status` and `computation_error_job_id` in the same row read,
+   * because D-05 holds `computed_at` on a failure and the panel's evidence (c)
+   * compares those two. An absent row answers three NULLs, a real value. An
+   * error, a throw, or `BASELINE_READ_BOUND_MS` expiring answers `"unknown"` and
+   * logs; it never fails the attempt.
    */
   async function readEvidenceBaseline(): Promise<EvidenceBaseline> {
     // 167.2-REVIEW-SFH M-3 / M-6: an unknown baseline silently disables
-    // evidence (b) for the whole attempt (a fast failure can then only end at
-    // the cap), so each of the three arms below is captured at warning level,
-    // tags only.
+    // evidence (b) and (c) for the whole attempt (a fast failure can then only
+    // end at the cap), so each of the three arms below is captured at warning
+    // level, tags only.
     const captureUnknown = (why: string) =>
       captureToSentry(new Error(`the evidence baseline read ${why}; the baseline is unknown`), {
         level: "warning",
@@ -1168,7 +1171,7 @@ export function ApiKeyManager({
       const outcome = await Promise.race([
         supabase
           .from("strategy_analytics")
-          .select("computed_at")
+          .select("computed_at, computation_status, computation_error_job_id")
           .eq("strategy_id", strategyId)
           .maybeSingle(),
         bound,
@@ -1188,7 +1191,11 @@ export function ApiKeyManager({
         captureUnknown("failed");
         return "unknown";
       }
-      return { computedAt: outcome.data?.computed_at ?? null };
+      return {
+        computedAt: outcome.data?.computed_at ?? null,
+        computationStatus: outcome.data?.computation_status ?? null,
+        errorJobId: outcome.data?.computation_error_job_id ?? null,
+      };
     } catch (err) {
       console.error(
         `[ApiKeyManager] the evidence baseline read threw; continuing with an unknown baseline [strategy_id=${strategyId}]:`,

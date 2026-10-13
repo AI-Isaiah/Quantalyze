@@ -88,13 +88,17 @@ export interface UseStrategySyncPollerOptions {
    * Fired on every clean read with the DB status + error (surface forwards/sets).
    * Phase 167.2 / KCS-02: the INTERVAL arm also passes the row's server-written
    * `computed_at` as a third argument, which `SyncProgress` compares with the
-   * value read just before its attempt's enqueue. The LADDER arm (the wizard's)
-   * is unchanged and passes two arguments only.
+   * value read just before its attempt's enqueue. Phase 166.3.1 / D-05 panel:
+   * it also passes the row's `computation_error_job_id` as a fourth (null when
+   * the row carries none), the other server-written fact `SyncProgress` compares
+   * with that baseline. The LADDER arm (the wizard's) is unchanged and passes
+   * two arguments only.
    */
   onStatus: (
     status: ComputationStatus,
     error: string | null,
     computedAt?: string | null,
+    errorJobId?: string | null,
   ) => void;
   /**
    * Ladder mode only. Called on a terminal status; returns `"repoll"` to continue
@@ -192,7 +196,7 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
         const supabase = createClient();
         const { data, error: pollErr } = await supabase
           .from("strategy_analytics")
-          .select("computation_status, computation_error, computed_at")
+          .select("computation_status, computation_error, computed_at, computation_error_job_id")
           .eq("strategy_id", strategyId)
           .single();
         if (cancelled) return;
@@ -239,6 +243,7 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
           data.computation_status,
           data.computation_error ?? null,
           data.computed_at ?? null,
+          data.computation_error_job_id ?? null,
         );
       }, intervalMs);
 

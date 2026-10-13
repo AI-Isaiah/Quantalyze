@@ -64,6 +64,8 @@ const mockState = vi.hoisted(() => ({
   /** KCS-02: what the pre-enqueue baseline read answers. Default: no row. */
   baselineResult: { data: null, error: null } as { data: unknown; error: unknown },
   baselineReadCount: 0,
+  /** Phase 166.3.1 / D-05 panel: the column list each baseline read selected. */
+  baselineSelects: [] as string[],
   keysRows: [] as unknown[],
   /** When true, the NEXT key-list read never settles (one-shot). */
   hangNextKeysRead: false,
@@ -88,7 +90,7 @@ const mockState = vi.hoisted(() => ({
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
     from: (table: string) => ({
-      select: () => ({
+      select: (columns?: string) => ({
         order: () => {
           if (mockState.hangNextKeysRead) {
             mockState.hangNextKeysRead = false;
@@ -120,6 +122,7 @@ vi.mock("@/lib/supabase/client", () => ({
               throw new Error(`unexpected maybeSingle on ${table}`);
             }
             mockState.baselineReadCount += 1;
+            mockState.baselineSelects.push(String(columns));
             return Promise.resolve(mockState.baselineResult);
           },
         }),
@@ -184,9 +187,18 @@ function healthyRow() {
   };
 }
 
-function analyticsRow(status: string, computedAt: string | null = null) {
+function analyticsRow(
+  status: string,
+  computedAt: string | null = null,
+  errorJobId: string | null = null,
+) {
   return {
-    data: { computation_status: status, computation_error: null, computed_at: computedAt },
+    data: {
+      computation_status: status,
+      computation_error: null,
+      computed_at: computedAt,
+      computation_error_job_id: errorJobId,
+    },
     error: null,
   };
 }
@@ -195,9 +207,25 @@ function analyticsRow(status: string, computedAt: string | null = null) {
 const T0 = "2026-04-19T11:58:00.000000+00:00";
 const T1 = "2026-04-19T12:03:00.000000+00:00";
 
-/** The pre-enqueue baseline read answering a row whose computed_at is `computedAt`. */
-function baselineRow(computedAt: string | null) {
-  return { data: { computed_at: computedAt }, error: null };
+// Phase 166.3.1 / D-05 panel: two synthetic writer-stamped failure job ids.
+const J1 = "00000000-0000-4000-8000-000000000001";
+const J2 = "00000000-0000-4000-8000-000000000002";
+
+/**
+ * The pre-enqueue baseline read answering a row with this `computed_at`,
+ * `computation_status` and `computation_error_job_id`. All three explicit, so a
+ * case states which evidence it leaves available (D-05 panel: the baseline
+ * carries the status and the error job id as well as computed_at).
+ */
+function baselineRow(computedAt: string | null, status: string, errorJobId: string | null = null) {
+  return {
+    data: {
+      computed_at: computedAt,
+      computation_status: status,
+      computation_error_job_id: errorJobId,
+    },
+    error: null,
+  };
 }
 
 /**
@@ -292,6 +320,7 @@ beforeEach(() => {
   mockState.analyticsSelectCount = 0;
   mockState.baselineResult = { data: null, error: null };
   mockState.baselineReadCount = 0;
+  mockState.baselineSelects = [];
   mockState.keysRows = [healthyRow()];
   mockState.hangNextKeysRead = false;
   mockState.jobStatuses = [];
@@ -465,7 +494,7 @@ describe("ApiKeyManager + the REAL poller: a terminal ends the attempt only with
   }
 
   it("STALE-TERMINAL: the previous run's complete row (computed_at unchanged, no computing read) never ends the attempt", async () => {
-    mockState.baselineResult = baselineRow(T0);
+    mockState.baselineResult = baselineRow(T0, "complete");
     mockState.analyticsResult = analyticsRow("complete", T0);
     const enqueue = await startResyncWithHeldEnqueue();
     await enqueueAccepted(enqueue);
@@ -484,7 +513,7 @@ describe("ApiKeyManager + the REAL poller: a terminal ends the attempt only with
     // RESEARCH Q1: previous run failed at T0; this job fails fast, the bridge
     // rewrites `failed` with computed_at = now() (T1), and `computing` is never
     // observable. Evidence (b) alone must end the attempt truthfully.
-    mockState.baselineResult = baselineRow(T0);
+    mockState.baselineResult = baselineRow(T0, "failed");
     mockState.analyticsResult = analyticsRow("failed", T1);
     const enqueue = await startResyncWithHeldEnqueue();
     await enqueueAccepted(enqueue);
@@ -495,8 +524,76 @@ describe("ApiKeyManager + the REAL poller: a terminal ends the attempt only with
     expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
   });
 
+  // Phase 166.3.1 / D-05 panel (founder, 2026-10-07, "Adapt the panel"): D-05
+  // holds `computed_at` through `computing` and `failed`, so FAST-FAIL above
+  // (evidence b, a MOVED computed_at) no longer describes what the database
+  // does. Evidence (c) is the status, or a new non-NULL error job id, moving
+  // from the baseline the card read before the enqueue. These cases drive the
+  // whole chain: baseline read -> panel prop -> real poller -> gate.
+  it("D05-BASELINE-READ: the pre-enqueue baseline selects computed_at, computation_status and computation_error_job_id", async () => {
+    mockState.baselineResult = baselineRow(T0, "complete");
+    await startResyncWithHeldEnqueue();
+    expect(mockState.baselineSelects).toEqual([
+      "computed_at, computation_status, computation_error_job_id",
+    ]);
+  });
+
+  it("D05-FAST-FAIL-FROM-COMPLETE: a Retry from a green key that fails in seconds with computed_at HELD ends as Sync failed on the first poll, not at the cap", async () => {
+    mockState.baselineResult = baselineRow(T0, "complete");
+    mockState.analyticsResult = analyticsRow("failed", T0, J2);
+    const enqueue = await startResyncWithHeldEnqueue();
+    await enqueueAccepted(enqueue);
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(mockState.analyticsSelectCount).toBe(1);
+    expect(screen.getByText("Sync failed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resync" })).toBeEnabled();
+  });
+
+  it("D05-FAST-FAIL-FROM-FAILED: a Retry from a failed key that fails again with computed_at HELD and a NEW error job id ends as Sync failed on the first poll", async () => {
+    mockState.baselineResult = baselineRow(T0, "failed", J1);
+    mockState.analyticsResult = analyticsRow("failed", T0, J2);
+    const enqueue = await startResyncWithHeldEnqueue();
+    await enqueueAccepted(enqueue);
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(mockState.analyticsSelectCount).toBe(1);
+    expect(screen.getByText("Sync failed")).toBeInTheDocument();
+  });
+
+  it("D05-ABSENT-ROW-BASELINE: no analytics row before the enqueue (three NULLs) and a fast failure with computed_at still NULL ends as Sync failed", async () => {
+    mockState.baselineResult = { data: null, error: null };
+    mockState.analyticsResult = analyticsRow("failed", null, J2);
+    const enqueue = await startResyncWithHeldEnqueue();
+    await enqueueAccepted(enqueue);
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(screen.getByText("Sync failed")).toBeInTheDocument();
+  });
+
+  it("D05-STALE-FAILED-HOLDS: the previous run's failure (same status, computed_at and error job id as the baseline) never ends the attempt", async () => {
+    // KCS-02's reason for existing, on the failed side: the owner retried, and
+    // for the whole first hop the row is still the old failure.
+    mockState.baselineResult = baselineRow(T0, "failed", J1);
+    mockState.analyticsResult = analyticsRow("failed", T0, J1);
+    const enqueue = await startResyncWithHeldEnqueue();
+    await enqueueAccepted(enqueue);
+
+    await tick(POLL_MS * 5);
+    expect(mockState.analyticsSelectCount).toBe(5);
+    expect(
+      screen.queryByText("Sync failed"),
+      "the previous run's failure was shown as this attempt's result",
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Computing analytics...")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Syncing…" })).toBeDisabled();
+  });
+
   it("COMPUTING-THEN-SUCCESS: a computing read admits the terminal even when computed_at equals the baseline", async () => {
-    mockState.baselineResult = baselineRow(T0);
+    mockState.baselineResult = baselineRow(T0, "complete");
     mockState.analyticsResult = analyticsRow("computing", T0);
     const enqueue = await startResyncWithHeldEnqueue();
     await enqueueAccepted(enqueue);
@@ -539,7 +636,7 @@ describe("ApiKeyManager + the REAL poller: a terminal ends the attempt only with
     // Attempt 1 reads computing, then fails at T1. The panel stays mounted in
     // `error`, so without `key={attemptSeq}` its computing evidence would carry
     // into the Retry and admit attempt 2's stale read of that same failure.
-    mockState.baselineResult = baselineRow(T0);
+    mockState.baselineResult = baselineRow(T0, "complete");
     mockState.analyticsResult = analyticsRow("computing", T0);
     const enqueue = await startResyncWithHeldEnqueue();
     await enqueueAccepted(enqueue);
@@ -549,7 +646,7 @@ describe("ApiKeyManager + the REAL poller: a terminal ends the attempt only with
     expect(screen.getByText("Sync failed")).toBeInTheDocument();
 
     // Retry: the baseline is now T1, and the row still says the old failure.
-    mockState.baselineResult = baselineRow(T1);
+    mockState.baselineResult = baselineRow(T1, "failed");
     const retryEnqueue = deferred<Response>();
     const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
     // 167.2-REVIEW CR-01 (lineage): the Retry now reads the job state before
@@ -609,7 +706,7 @@ describe("ApiKeyManager + the REAL poller: a success waits for the job queue (Ph
     // bridge keeps that status mid-chain and moves computed_at to T1, so the
     // row alone carries this attempt's evidence (b) while the next hop is
     // still pending. Only the job queue can say the run has not finished.
-    mockState.baselineResult = baselineRow(T0);
+    mockState.baselineResult = baselineRow(T0, "complete_with_warnings");
     mockState.analyticsResult = analyticsRow("complete_with_warnings", T1);
     // 167.2-REVIEW CR-01 (lineage): the first read is now the pre-attempt
     // gate's ("done": nothing in flight when the owner clicks), so the panel's
