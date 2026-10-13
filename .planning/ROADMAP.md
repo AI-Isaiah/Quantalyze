@@ -5548,7 +5548,7 @@ Plans:
 
 **Goal:** On a phone every column of a Discovery ranking row is reachable, and a row names the venue its trades actually come from.
 **Requirements**: SC-1, SC-2
-**Depends on:** Phase 170.6
+**Depends on:** Phase 170 (not 170.6: split from it 2026-10-13 and independent of its number rules; founder "Start both", 2026-10-13)
 Split out of 170.6 DISPLAYPOLISH on 2026-10-13 (founder, "Split in three"); SC-1 and SC-2 moved verbatim.
 
 **Success Criteria**:
@@ -5564,7 +5564,7 @@ Plans:
 
 **Goal:** The booked copy fixes land, anonymous /browse never flashes example rows that then vanish, and the admin Compute Jobs kind filter lists every present kind.
 **Requirements**: SC-1..SC-4
-**Depends on:** Phase 170.6
+**Depends on:** Phase 170 (not 170.6: split from it 2026-10-13 and independent of its number rules; founder "Start both", 2026-10-13)
 Split out of 170.6 DISPLAYPOLISH on 2026-10-13 (founder, "Split in three").
 
 **Success Criteria**:
