@@ -39,9 +39,12 @@ class UnitFloors:
     residual_abs_tol: float
 
 
-# The USD row, and the ONLY place 1000.0 / 100.0 / 1.00 are written. ``nav_twr.DUST_NAV_FLOOR``
-# and the job worker's empty-ledger floor are aliases of this row's fields.
-USD_FLOORS = UnitFloors(dust_nav=1000.0, material_equity=100.0, residual_abs_tol=1.00)
+# The USD row, and the ONLY place 100.0 / 100.0 / 1.00 are written. ``nav_twr.DUST_NAV_FLOOR``
+# and the job worker's empty-ledger floor are aliases of this row's fields. 167.1.2 D-27
+# (founder, "$100"): ``dust_nav`` moved from 1000.0 to 100.0, EQUAL to ``material_equity``, so one
+# threshold means "too small to measure" everywhere. A $100-$999 base is real capital, not dust.
+# "One threshold" is one NUMBER: every comparison operator at every dependant is unchanged.
+USD_FLOORS = UnitFloors(dust_nav=100.0, material_equity=100.0, residual_abs_tol=1.00)
 
 # Native-unit rows, keyed by upper-case currency code. Exactly one so far.
 _NATIVE_FLOORS: dict[str, UnitFloors] = {
@@ -53,7 +56,7 @@ _NATIVE_FLOORS: dict[str, UnitFloors] = {
     # discretion note "Recorded 2026-10-07 after the plan check".) D-24 left both in place
     # after the gap-closure plan measured every consumer: no code compares the three to each
     # other, so the row no longer follows one ratio, and that is deliberate. ``dust_nav`` is
-    # BELOW ``material_equity`` here, the reverse of the USD row.
+    # BELOW ``material_equity`` here; the USD row has them EQUAL (167.1.2 D-27).
     "BTC": UnitFloors(dust_nav=1e-7, material_equity=0.0001, residual_abs_tol=1e-6),
 }
 

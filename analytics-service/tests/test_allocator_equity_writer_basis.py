@@ -17,6 +17,7 @@ the identity the stored fields must obey is checked against numbers the code nev
 from __future__ import annotations
 
 import math
+from datetime import date, timedelta
 from fractions import Fraction
 
 import pandas as pd
@@ -34,6 +35,7 @@ from services.native_nav import NativeLedger
 from tests.test_allocator_equity_dropped_day_pnl import _iso, _key_inputs_payload
 from tests.test_allocator_equity_realized_basis import _btc_book
 
+_EPOCH_DAY = date(1970, 1, 1)
 _REL = 1e-12
 _ABS = 1e-9
 
@@ -299,14 +301,17 @@ async def test_a_derive_without_a_terminal_or_day_pnl_stores_neither_field() -> 
     assert "composed_flows" not in payload and "composed_day_pnl" not in payload
 
 
-@pytest.mark.asyncio
-async def test_an_mt5_key_mode_derive_stores_neither_field(monkeypatch) -> None:
-    """MT5 computes a day P&L and a terminal, but no composed flows: its payload keeps its keys."""
+async def _run_mt5_key_derive(
+    monkeypatch, deals: list[dict], *, equity: float, balance: float, currency: str = "USD"
+) -> tuple[dict, dict]:
+    """The MT5 key-mode derive over the offline transport, through the whole job.
+
+    Returns ``(key_inputs payload, capture)``; the capture holds the ``csv_daily_returns``
+    rows the compose later reads back."""
     import services.mt5_concurrency as mt5_conc
     from unittest.mock import AsyncMock, patch
 
     from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
-    from tests.test_allocator_equity_dropped_day_pnl import _mt5_deals, funding_and_dominated_book
     from tests.test_mt5_derive_branch import (
         _apply,
         _build_ctx as _mt5_build_ctx,
@@ -314,11 +319,9 @@ async def test_an_mt5_key_mode_derive_stores_neither_field(monkeypatch) -> None:
     )
 
     monkeypatch.setenv("MT5_ENABLED", "true")
-    book = funding_and_dominated_book()
-    nav_t = float(book.nav[-1])
     transport = _FakeMt5Transport(
-        account={"equity": nav_t, "balance": nav_t, "currency": "USD", "login": 123456},
-        deals=_mt5_deals(book),
+        account={"equity": equity, "balance": balance, "currency": currency, "login": 123456},
+        deals=deals,
     )
     ctx, capture = _mt5_build_ctx(transport)
     ctx.strategy_row = None
@@ -334,10 +337,496 @@ async def test_an_mt5_key_mode_derive_stores_neither_field(monkeypatch) -> None:
             )
     finally:
         mt5_conc.reset_terminal_state_for_tests()
-    assert result.outcome == DispatchOutcome.DONE
-    payload = _key_inputs_payload(capture, "key-mt5")
-    assert "realized_terminal_usd" in payload and "dropped_day_pnl" in payload  # the MT5 basis it has
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    return _key_inputs_payload(capture, "key-mt5"), capture
+
+
+@pytest.mark.asyncio
+async def test_an_mt5_key_mode_derive_stores_its_composed_flows_and_day_pnl(monkeypatch) -> None:
+    """164.6.6.2.3 plan 06 (D-14, founder FLOWTIMING-Q1): the MT5 derive stores the writer basis
+    the Deribit derive does, through the same serializer. The values are checked against the
+    exact book the ledger was built from (day P&L = the book's own P&L, day 0 against an empty
+    account; flows = the book's deposits and withdrawals), and the reader round-trips them."""
+    from tests.test_allocator_equity_dropped_day_pnl import _mt5_deals, funding_and_dominated_book
+
+    book = funding_and_dominated_book()
+    nav_t = float(book.nav[-1])
+    payload, _capture = await _run_mt5_key_derive(
+        monkeypatch, _mt5_deals(book), equity=nav_t, balance=nav_t
+    )
+    assert "realized_terminal_usd" in payload and "dropped_day_pnl" in payload
+
+    stored_flows = {r["utc_day_iso"]: r["flow_usd"] for r in payload["composed_flows"]}
+    stored_pnl = {r["utc_day_iso"]: r["pnl_usd"] for r in payload["composed_day_pnl"]}
+    assert sorted(stored_pnl) == list(book.days)
+    assert sorted(stored_flows) == [d for d, f in zip(book.days, book.flow) if f != 0]
+    for i, day in enumerate(book.days):
+        assert _close(stored_pnl[day], book.pnl[i]), day
+        if book.flow[i] != 0:
+            assert _close(stored_flows[day], book.flow[i]), day
+    # the writer's identity, independent of the code: terminal = sum(pnl) + sum(flows)
+    assert math.isclose(
+        payload["realized_terminal_usd"],
+        math.fsum(stored_pnl.values()) + math.fsum(stored_flows.values()),
+        rel_tol=_REL,
+        abs_tol=_ABS,
+    )
+    assert read_writer_basis(payload) == (stored_flows, stored_pnl)
+
+
+# ── 164.6.6.2.3 plan 06: the compose reproduces the writer's levels on a timed flow day ──────
+
+
+def _event_levels(
+    flows: list[tuple[int, Fraction]], positions: list[tuple[int, int, Fraction]], last_day: int
+) -> dict[int, Fraction]:
+    """The exact end-of-day NAV on every UTC day from the first event to ``last_day``.
+
+    Independent of the code under test: a flow lands on its own day, a position's P&L on the
+    day it CLOSES, and a day with no event carries the previous level. ``flows`` are
+    ``(utc_ms, signed amount)``, ``positions`` ``(open_ms, close_ms, pnl)``; days are
+    ``utc_ms // 86_400_000``. No return convention enters, which is the point."""
+    day_of = lambda ms: ms // 86_400_000  # noqa: E731
+    first = min([day_of(ms) for ms, _a in flows] + [day_of(c) for _o, c, _p in positions])
+    level = Fraction(0)
+    out: dict[int, Fraction] = {}
+    for day in range(first, last_day + 1):
+        level += sum((a for ms, a in flows if day_of(ms) == day), Fraction(0))
+        level += sum((p for _o, c, p in positions if day_of(c) == day), Fraction(0))
+        out[day] = level
+    return out
+
+
+def _replay_from_derive(payload: dict, capture: dict, *, with_basis: bool):
+    """``replay_key_equity`` fed exactly what the compose job reads back from the derive's
+    two stores: the ``csv_daily_returns`` rows and the ``key_inputs`` payload."""
+    from services.allocator_equity_derive import (
+        read_dropped_day_pnl,
+        read_realized_terminal,
+        replay_key_equity,
+    )
+    from tests.test_allocator_equity_dropped_day_pnl import _csv_returns
+
+    kwargs: dict = {}
+    if with_basis:
+        basis = read_writer_basis(payload)
+        assert basis is not None
+        w_flows, w_pnl = basis
+        kwargs = {
+            "writer_day_pnl": w_pnl,
+            "writer_flows": [ExternalFlow(d, a) for d, a in w_flows.items()],
+        }
+    return replay_key_equity(
+        _csv_returns(capture),
+        [ExternalFlow(f["utc_day_iso"], f["usd_signed"]) for f in payload["flows"]],
+        payload["anchor_usd"],
+        history_reaches_inception=True,
+        dropped_day_pnl=read_dropped_day_pnl(payload),
+        realized_terminal=read_realized_terminal(payload),
+        **kwargs,
+    )
+
+
+_MM2X_USD_SCALE = Fraction(100_000)
+
+
+def _timed_mm2x_events(scale: Fraction = _MM2X_USD_SCALE):
+    """The tracer: MM-2x's day with in-day times (plan 05), scaled into dollars. 0.1 x scale
+    deposited at 08:00 on day 0, 1.0 x scale deposited at 09:00 on day 1, one position opened
+    10:00 and closed 15:00 on day 1 for +0.011 x scale. The return is measured on the capital
+    the position was opened on, 0.011 / 1.1 = 0.01, at any scale.
+
+    The scale only lifts the book over the USD dust floor ($1000), which a 0.1 BTC base is
+    under; the SHAPE (prior level / deposit / P&L = 0.1 / 1.0 / 0.011) is the founder's."""
+    from tests.test_mt5_deal_reconstruction import (
+        _MM2X_FIRST_DEPOSIT,
+        _timed_flow_deal,
+        _timed_position_deals,
+        _utc_ms,
+    )
+
+    d0 = _MM2X_FIRST_DEPOSIT
+    d1 = d0 + timedelta(1)
+    flows = [(_utc_ms(d0, 8), Fraction("0.1") * scale), (_utc_ms(d1, 9), Fraction(1) * scale)]
+    d2, d3 = d0 + timedelta(2), d0 + timedelta(3)
+    positions = [
+        (_utc_ms(d1, 10), _utc_ms(d1, 15), Fraction("0.011") * scale),
+        # two ordinary trading days after it (a key needs two usable return days to derive)
+        (_utc_ms(d2, 9), _utc_ms(d2, 16), Fraction("0.021") * scale),
+        (_utc_ms(d3, 8), _utc_ms(d3, 12), Fraction("-0.013") * scale),
+    ]
+    deals = [_timed_flow_deal(ms, amount) for ms, amount in flows]
+    for position_id, position in enumerate(positions, start=1001):
+        deals += _timed_position_deals(position_id, *position)
+    return deals, flows, positions
+
+
+@pytest.mark.asyncio
+async def test_a_timed_deposit_day_replays_to_the_writers_own_levels(monkeypatch) -> None:
+    """Pitfall 1 closed (D-14): with the stored basis the compose's prior level on the deposit
+    day is the writer's NAV, 0.1 of the book; the legacy inversion of the cohort return gives
+    0.1099 of it.
+
+    The oracle is the event list in ``Fraction`` (``_event_levels``): the prior level is
+    exactly 0.1 x scale, whatever return convention the stored returns use."""
+    from tests.test_allocator_equity_dropped_day_pnl import _csv_returns
+    from tests.test_mt5_deal_reconstruction import _MM2X_FIRST_DEPOSIT, _utc_ms
+
+    scale = _MM2X_USD_SCALE
+    deals, flows, positions = _timed_mm2x_events()
+    day0 = _utc_ms(_MM2X_FIRST_DEPOSIT) // 86_400_000
+    levels = _event_levels(flows, positions, last_day=day0 + 3)
+    day1 = day0 + 1
+    assert levels[day0] == Fraction(1, 10) * scale
+    assert levels[day1] == Fraction(1111, 1000) * scale
+    terminal = float(levels[day0 + 3])
+
+    payload, capture = await _run_mt5_key_derive(
+        monkeypatch, deals, equity=terminal, balance=terminal
+    )
+    iso0, iso1 = ((_EPOCH_DAY + timedelta(days=d)).isoformat() for d in (day0, day1))
+
+    # the stored return is the cohort one, so the legacy inversion CANNOT be exact here
+    assert float(_csv_returns(capture)[iso1]) == pytest.approx(0.011 / 1.1, rel=1e-9)
+
+    with_basis = _replay_from_derive(payload, capture, with_basis=True)
+    assert with_basis.flags.get("writer_basis") is True
+    assert "writer_basis_mismatch" not in with_basis.flags
+    assert with_basis.degrade_reasons == frozenset()
+    for day, level in levels.items():
+        iso = (_EPOCH_DAY + timedelta(days=day)).isoformat()
+        assert _close(float(with_basis.equity[iso]), level), iso
+
+    legacy = _replay_from_derive(payload, capture, with_basis=False)
+    miss = float(legacy.equity[iso0]) / float(scale)
+    assert miss == pytest.approx(0.111 / 1.01, rel=1e-9)  # the Pitfall 1 figure, about 0.1099
+    assert abs(miss - 0.1) / 0.1 > 0.05  # the test can fail: the legacy roll is off by ~10%
+
+
+def _timed_shape(name: str):
+    """Exact event lists ``(flows, positions)`` in dollars for the shapes below."""
+    from tests.test_mt5_deal_reconstruction import _MM2X_FIRST_DEPOSIT, _utc_ms
+
+    S = _MM2X_USD_SCALE
+    d = [_MM2X_FIRST_DEPOSIT + timedelta(i) for i in range(6)]
+    if name == "mixed":
+        flows = [
+            (_utc_ms(d[0], 8), Fraction("0.1") * S),
+            (_utc_ms(d[1], 9), Fraction(1) * S),
+            (_utc_ms(d[3], 12), Fraction("-0.5") * S),  # a withdrawal AFTER position C opened
+            (_utc_ms(d[4], 12), Fraction("0.3") * S),
+        ]
+        positions = [
+            (_utc_ms(d[1], 10), _utc_ms(d[1], 15), Fraction("0.011") * S),
+            (_utc_ms(d[1], 20), _utc_ms(d[3], 11), Fraction("-0.02") * S),  # overnight, d2 quiet
+            (_utc_ms(d[3], 9), _utc_ms(d[3], 18), Fraction("0.05") * S),
+            (_utc_ms(d[4], 13), _utc_ms(d[4], 20), Fraction("0.03") * S),  # opened after the deposit
+        ]
+    elif name == "deposit-after-every-open":
+        # the end-of-day case: the deposit lands after the position closed, so the cohort return
+        # IS the end-of-day return and the legacy inversion is exact too
+        flows = [(_utc_ms(d[0], 8), Fraction("0.1") * S), (_utc_ms(d[1], 16), Fraction(1) * S)]
+        positions = [
+            (_utc_ms(d[1], 8), _utc_ms(d[1], 15), Fraction("0.011") * S),
+            (_utc_ms(d[2], 9), _utc_ms(d[2], 16), Fraction("0.021") * S),
+            (_utc_ms(d[3], 8), _utc_ms(d[3], 12), Fraction("-0.013") * S),
+        ]
+    else:
+        raise AssertionError(name)
+    return flows, positions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("shape", "legacy_misses"), [("mixed", True), ("deposit-after-every-open", False)]
+)
+async def test_the_writer_basis_replays_every_level_of_a_timed_ledger_exactly(
+    monkeypatch, shape: str, legacy_misses: bool
+) -> None:
+    """Every level of a multi-day timed ledger (overnight position, a quiet gap day, a
+    withdrawal after a position opened, a deposit before and after opens) equals the exact
+    event-list NAV when the compose rolls on the stored basis. The legacy roll is wrong on the
+    shape with a deposit BEFORE an open and exact on the one without, which is what shows the
+    basis is doing the work and not the fixture."""
+    from tests.test_mt5_deal_reconstruction import (
+        _timed_flow_deal,
+        _timed_position_deals,
+    )
+
+    flows, positions = _timed_shape(shape)
+    day_of = lambda ms: ms // 86_400_000  # noqa: E731
+    last = max([day_of(ms) for ms, _a in flows] + [day_of(c) for _o, c, _p in positions])
+    levels = _event_levels(flows, positions, last_day=last)
+    deals = [_timed_flow_deal(ms, amount) for ms, amount in flows]
+    for position_id, position in enumerate(positions, start=2001):
+        deals += _timed_position_deals(position_id, *position)
+    terminal = float(levels[last])
+
+    payload, capture = await _run_mt5_key_derive(
+        monkeypatch, deals, equity=terminal, balance=terminal
+    )
+    with_basis = _replay_from_derive(payload, capture, with_basis=True)
+    assert with_basis.flags.get("writer_basis") is True
+    assert "writer_basis_mismatch" not in with_basis.flags
+    assert with_basis.degrade_reasons == frozenset()
+    worst_basis = 0.0
+    for day, level in levels.items():
+        iso = (_EPOCH_DAY + timedelta(days=day)).isoformat()
+        assert _close(float(with_basis.equity[iso]), level), iso
+        worst_basis = max(worst_basis, abs(float(with_basis.equity[iso]) - float(level)) / float(level))
+    assert worst_basis < 1e-9
+
+    legacy = _replay_from_derive(payload, capture, with_basis=False)
+    worst_legacy = max(
+        abs(float(legacy.equity[(_EPOCH_DAY + timedelta(days=day)).isoformat()]) - float(level))
+        / float(level)
+        for day, level in levels.items()
+    )
+    if legacy_misses:
+        assert worst_legacy > 0.05
+    else:
+        assert worst_legacy < 1e-9
+
+
+# ── 164.6.6.2.3 plan 06 Task 2: a native-unit (BTC) MT5 key ─────────────────────────────────
+
+_BTC_DAYS = [date(2026, 10, 4) + timedelta(i) for i in range(5)]  # 10-04 .. 10-08
+# Moving closes, quiet days included: a quiet native day still has a USD return and a USD P&L
+# (the held balance revalued), which is why the stored basis must cover every calendar day.
+_BTC_CLOSES = {
+    "2026-10-04": 60000.0,
+    "2026-10-05": 61000.0,
+    "2026-10-06": 59500.0,
+    "2026-10-07": 63000.0,
+    "2026-10-08": 64000.0,
+}
+
+
+def _btc_timed_ledger(hole: bool = False):
+    """The MM-2x timed shape in BTC (0.1 deposited 08:00, 1.0 deposited 09:00 with a position
+    opened 10:00 and closed 15:00 on the second day), then a quiet day and two trading days.
+    Exact events for the oracle plus the MT5 deals that carry the same instants."""
+    from tests.test_mt5_deal_reconstruction import _timed_flow_deal, _timed_position_deals, _utc_ms
+
+    d = _BTC_DAYS
+    flows = [(_utc_ms(d[0], 8), Fraction("0.1")), (_utc_ms(d[1], 9), Fraction(1))]
+    positions = [
+        (_utc_ms(d[1], 10), _utc_ms(d[1], 15), Fraction("0.011")),
+        (_utc_ms(d[3], 9), _utc_ms(d[3], 16), Fraction("0.021")),
+        (_utc_ms(d[4], 8), _utc_ms(d[4], 12), Fraction("-0.013")),
+    ]
+    deals = [_timed_flow_deal(ms, amount) for ms, amount in flows]
+    for position_id, position in enumerate(positions, start=3001):
+        deals += _timed_position_deals(position_id, *position)
+    return deals, flows, positions
+
+
+def _btc_usd_oracle(flows, positions, closes: dict[str, float]):
+    """Per-day USD level, flow and P&L of the BTC key, in ``Fraction``.
+
+    ``N_d`` is the exact native level (event list, carried across quiet days). The USD level is
+    that level times ITS OWN day's close, the USD flow is the native flow times ITS OWN day's
+    close, and the P&L is the level identity ``L_d - L_{d-1} - F_d`` with an empty account
+    before the first day. Nothing here reads a deal row or a return."""
+    day_of = lambda ms: ms // 86_400_000  # noqa: E731
+    first = _BTC_DAYS[0]
+    last = _BTC_DAYS[-1]
+    n_levels = _event_levels(flows, positions, last_day=(last - _EPOCH_DAY).days)
+    out = {}
+    prev_level = Fraction(0)
+    for i in range((last - first).days + 1):
+        day = first + timedelta(i)
+        key = (day - _EPOCH_DAY).days
+        close = Fraction(str(closes[day.isoformat()]))
+        level = n_levels[key] * close
+        flow = sum((a for ms, a in flows if day_of(ms) == key), Fraction(0)) * close
+        out[day.isoformat()] = (level, flow, level - prev_level - flow)
+        prev_level = level
+    return out
+
+
+async def _derive_btc_key(monkeypatch, deals, *, equity: float, closes: dict[str, float]):
+    from tests.test_derive_allocator_equity_job import _derive_mt5_key, _persisted_ki_payload
+    from tests.test_mt5_derive_branch import _btc_closes_on
+
+    result, capture = await _derive_mt5_key(
+        monkeypatch,
+        {"equity": equity, "balance": equity, "currency": "BTC", "login": 123456},
+        deals=deals,
+        btc_closes=_btc_closes_on(*closes.items()),
+    )
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    return _persisted_ki_payload(capture), capture
+
+
+@pytest.mark.asyncio
+async def test_a_hole_free_btc_key_stores_the_usd_level_identity_and_replays_exactly(
+    monkeypatch,
+) -> None:
+    """164.6.6.2.3 plan 06 (D-14), native half. A BTC key with no unpriced day stores
+    ``composed_day_pnl_t = L_t - L_{t-1} - F_t`` with ``L`` the native level times its own day's
+    close, ``F`` the native flow times its own day's close, on EVERY calendar day (the quiet
+    day included, where the held balance is revalued). The compose then reproduces the USD
+    levels exactly although the stored returns are cohort returns x price moves."""
+    deals, flows, positions = _btc_timed_ledger()
+    oracle = _btc_usd_oracle(flows, positions, _BTC_CLOSES)
+    last = _BTC_DAYS[-1].isoformat()
+    native_terminal = float(
+        sum((a for _m, a in flows), Fraction(0)) + sum((p for *_x, p in positions), Fraction(0))
+    )
+    payload, capture = await _derive_btc_key(
+        monkeypatch, deals, equity=native_terminal, closes=_BTC_CLOSES
+    )
+
+    assert payload["unpriced_days"] == [] and payload["segment_terminals"] == []
+    stored_pnl = {r["utc_day_iso"]: r["pnl_usd"] for r in payload["composed_day_pnl"]}
+    stored_flows = {r["utc_day_iso"]: r["flow_usd"] for r in payload["composed_flows"]}
+    assert sorted(stored_pnl) == [d.isoformat() for d in _BTC_DAYS]  # dense, the quiet day too
+    for day, (_level, flow, pnl) in oracle.items():
+        assert math.isclose(stored_pnl[day], float(pnl), rel_tol=1e-9, abs_tol=1e-6), day
+        if flow != 0:
+            assert math.isclose(stored_flows[day], float(flow), rel_tol=1e-9), day
+    assert sorted(stored_flows) == sorted(d for d, (_l, f, _p) in oracle.items() if f != 0)
+    # the quiet day's USD P&L is the revaluation of the held balance, not zero
+    assert oracle["2026-10-06"][2] != 0 and abs(stored_pnl["2026-10-06"]) > 1.0
+    # the writer-mode conditions hold on the derive's own output
+    assert payload["realized_terminal_day"] == last == max(stored_pnl)
+
+    replay = _replay_from_derive(payload, capture, with_basis=True)
+    assert replay.flags.get("writer_basis") is True
+    assert "writer_basis_mismatch" not in replay.flags
+    assert replay.degrade_reasons == frozenset()
+    for day, (level, _f, _p) in oracle.items():
+        assert math.isclose(float(replay.equity[day]), float(level), rel_tol=1e-9), day
+
+    # without the basis the cohort return makes the legacy roll miss the deposit day's level
+    legacy = _replay_from_derive(payload, capture, with_basis=False)
+    first = _BTC_DAYS[0].isoformat()
+    want_first = float(oracle[first][0])
+    assert abs(float(legacy.equity[first]) - want_first) / want_first > 0.05
+
+
+_HOLE_BTC_CLOSES = {  # no close on 10-06: 10-06 and 10-07 cannot be priced
+    "2026-10-04": 60000.0,
+    "2026-10-05": 61000.0,
+    "2026-10-07": 63000.0,
+    "2026-10-08": 64000.0,
+}
+
+
+def _btc_hole_timed_ledger():
+    """Five BTC days with a timed deposit-and-trade day (10-05) and a hole at 10-06 / 10-07."""
+    from tests.test_mt5_deal_reconstruction import _timed_flow_deal, _timed_position_deals, _utc_ms
+
+    d = _BTC_DAYS
+    flows = [(_utc_ms(d[0], 8), Fraction(1)), (_utc_ms(d[1], 9), Fraction("0.5"))]
+    positions = [
+        (_utc_ms(d[1], 10), _utc_ms(d[1], 15), Fraction("0.015")),
+        (_utc_ms(d[2], 9), _utc_ms(d[2], 16), Fraction("0.02")),
+        (_utc_ms(d[3], 9), _utc_ms(d[3], 16), Fraction("0.005")),
+        (_utc_ms(d[4], 9), _utc_ms(d[4], 16), Fraction("0.03")),
+    ]
+    deals = [_timed_flow_deal(ms, amount) for ms, amount in flows]
+    for position_id, position in enumerate(positions, start=4001):
+        deals += _timed_position_deals(position_id, *position)
+    return deals
+
+
+@pytest.mark.asyncio
+async def test_a_holed_btc_key_with_a_timed_day_withholds_the_basis_and_the_terminals(
+    monkeypatch,
+) -> None:
+    """The one shape the compose cannot replay exactly. The key has an interior unpriced hole,
+    so the compose would split it in segments and roll each from a stored level; a stored
+    terminal rolls the segment back through the cohort returns, which is off on the timed day.
+    The derive therefore stores no basis AND no ``segment_terminals``; the compose's existing
+    missing-terminal rule then composes the key unsplit and degrades the book as
+    ``key_inputs_mismatch`` (blocking). Better a loud refusal than silently wrong levels."""
+    deals = _btc_hole_timed_ledger()
+    payload, capture = await _derive_btc_key(
+        monkeypatch, deals, equity=1.57, closes=_HOLE_BTC_CLOSES
+    )
+
+    assert payload["unpriced_days"] == ["2026-10-06", "2026-10-07"]
+    assert payload["segment_terminals"] == []  # withheld (an empty list is the absent shape)
     assert "composed_flows" not in payload and "composed_day_pnl" not in payload
+
+    from tests.test_allocator_equity_dropped_day_pnl import _csv_returns
+
+    book = await _compose_job(
+        [{"id": "key-mt5", "payload": payload, "returns": _csv_returns(capture),
+          "api_key": {"exchange": "mt5"}}]
+    )
+    assert "key_inputs_mismatch" in book["degrade_reasons"]
+    assert book["is_trustworthy"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_holed_btc_key_with_no_timed_day_is_stored_exactly_as_today(monkeypatch) -> None:
+    """No day was measured on a DayTiming (untimed deals: the day-level rule, whose return the
+    legacy inversion handles), so the hole keeps its stored level and the key composes in
+    segments as before. No basis either: a holed key never gets one (its segments would roll
+    from a whole-key basis that does not fit them)."""
+    from tests.test_derive_allocator_equity_job import _HOLE_CLOSES, _hole_deals
+
+    payload, capture = await _derive_btc_key(
+        monkeypatch, _hole_deals(), equity=1.06, closes=dict(_HOLE_CLOSES)
+    )
+
+    assert payload["unpriced_days"] == ["2026-10-06", "2026-10-07"]
+    assert payload["segment_terminals"] == [
+        {"utc_day_iso": "2026-10-05", "level_usd": pytest.approx(61610.0, abs=1e-9)}
+    ]
+    assert "composed_flows" not in payload and "composed_day_pnl" not in payload
+
+    from tests.test_allocator_equity_dropped_day_pnl import _csv_returns
+
+    book = await _compose_job(
+        [{"id": "key-mt5", "payload": payload, "returns": _csv_returns(capture),
+          "api_key": {"exchange": "mt5"}}]
+    )
+    assert "key_inputs_mismatch" not in book["degrade_reasons"]
+
+
+def _convert(closes: dict[str, float], *, days: int = 3):
+    """``_convert_native_key_to_usd`` over a hand-built native key: levels 2.0, 2.2, 2.2, ...
+    (a quiet third day), native P&L 0.5 then 0.2 then 0, no flows, so the native capital before
+    day 0 is 2.0 - 0.5 = 1.5 BTC."""
+    from services.job_worker import _convert_native_key_to_usd
+
+    idx = pd.DatetimeIndex([pd.Timestamp(2026, 10, 4 + i) for i in range(days)])
+    levels = pd.Series([2.0, 2.2, 2.2][:days], index=idx)
+    pnl = pd.Series([0.5, 0.2, 0.0][:days], index=idx)
+    returns = pd.Series([float("nan"), 0.1, 0.0][:days], index=idx)
+    closes_s = pd.Series(
+        list(closes.values()), index=pd.DatetimeIndex([pd.Timestamp(d) for d in closes])
+    )
+    return _convert_native_key_to_usd(
+        unit="BTC", closes=closes_s, native_returns=returns, native_day_pnl=pnl,
+        native_nav_levels=levels, native_flow_by_day={},
+    )
+
+
+def test_the_native_key_basis_is_the_usd_level_identity_with_a_priced_opening_capital() -> None:
+    """Hand figures. Levels 2.0, 2.2, 2.2 BTC at closes 100, 110, 90: USD levels 200, 242, 198.
+    The capital before day 0 is 1.5 BTC priced at day 0's close, 150, so P_0 = 200 - 150 = 50
+    (native 0.5 x 100), P_1 = 242 - 200 = 42 (0.2 x 110 earned + 2.0 x 10 of price), and the
+    quiet day P_2 = 198 - 242 = -44 (2.2 x -20 of price alone)."""
+    out = _convert({"2026-10-04": 100.0, "2026-10-05": 110.0, "2026-10-06": 90.0})
+    assert out.composed_day_pnl is not None and out.composed_flows is not None
+    assert [float(v) for v in out.composed_day_pnl] == pytest.approx([50.0, 42.0, -44.0], abs=1e-9)
+    assert len(out.composed_flows) == 0
+    assert [d.date().isoformat() for d in out.composed_day_pnl.index] == [
+        "2026-10-04", "2026-10-05", "2026-10-06",
+    ]
+    assert out.realized_terminal is not None
+    assert out.realized_terminal[0] == out.composed_day_pnl.index[-1]  # the writer-mode terminal day
+
+
+def test_the_native_key_basis_is_none_when_a_close_is_missing_never_a_neighbours() -> None:
+    out = _convert({"2026-10-04": 100.0, "2026-10-06": 90.0})  # no close on 10-05
+    assert out.unpriced_days
+    assert out.composed_day_pnl is None and out.composed_flows is None
 
 
 @pytest.mark.asyncio
@@ -854,8 +1343,20 @@ async def test_a_stitched_account_on_the_measured_shape_composes_on_the_writer_b
 
 
 # sha256 of the equity_curve payload today's code produces from the fieldless rows (the
-# ``composed_at`` stamp excluded), measured at the plan base before the compose changed.
-_FIELDLESS_STITCHED_SHA256 = "f0b6dda4fcff5153eb1d2e359f3f2d238ff07337e3ac9ac610c241ff3dd3b304"
+# ``composed_at`` stamp excluded).
+#
+# FLOWTIMING (164.6.6.2.3 D-05) moved this pin, once, for one reason. The fixture account
+# (``_btc_book``) deposits 9 BTC on day 2 against roughly 4 BTC held. The writer used to drop
+# that day (``flow_dominated_guard``: no stored return, its P&L in ``dropped_day_pnl``); the
+# guard is deleted, so day 2 now carries a return (its P&L over the prior NAV, the flow counted
+# at the end of the day) and ``dropped_day_pnl`` keeps only the funding day.
+# ``test_the_fieldless_pin_moved_only_by_the_measured_deposit_day`` proves that is the ONLY
+# difference: withdraw the day-2 return and restore its dropped row, and the compose reproduces
+# the sha recorded before the change, byte for byte.
+_FIELDLESS_STITCHED_SHA256_BEFORE_FLOWTIMING = (
+    "f0b6dda4fcff5153eb1d2e359f3f2d238ff07337e3ac9ac610c241ff3dd3b304"
+)
+_FIELDLESS_STITCHED_SHA256 = "4ab9c4094ace82c71116e49237bf2ffd35b28713117e04c68ebfbf190029bccb"
 
 
 # SFH-02 (fix round 1): a stitched account that falls to today's roll because a member lacks a
@@ -900,7 +1401,42 @@ async def test_a_stitched_account_without_the_fields_composes_as_today(
 
     assert payload["degrade_reasons"] == ["inception_unreconciled"]
     assert "writer_basis" not in payload["flags"]
+    # The day-2 deposit (9 BTC on ~4 BTC held) is a MEASURED day now (D-05): its stored return is
+    # the exact oracle (NAV2 - NAV1 - F2) / NAV1, not a dropped day.
+    day2 = (measured.nav[2] - measured.nav[1] - measured.flow_usd[2]) / measured.nav[1]
+    assert measured.flow_usd[2] > measured.nav[1] / 2  # the deposit does dominate the prior NAV
+    assert float(measured.stored_returns[_iso(2)]) == pytest.approx(float(day2), rel=1e-12)
+    # And the pinned payload is not just stable, it is right: every level but the live-anchor
+    # day is the oracle's exact NAV (the legacy roll differs from the writer only in the start).
+    _assert_curve_is_the_oracle(payload, measured.nav, measured.n - 1)
     assert hashlib.sha256(_stable(payload).encode()).hexdigest() == _FIELDLESS_STITCHED_SHA256
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["all", "key-A", "key-B", "key-M"])
+async def test_the_fieldless_pin_moved_only_by_the_measured_deposit_day(
+    measured: _Measured, measured_payload: dict, missing: str
+) -> None:
+    """The FLOWTIMING re-pin, justified. Put the account back as the retired guard stored it
+    (day 2 has no return row and its real P&L is a dropped-day row) and the compose reproduces
+    the sha recorded before the change. So the only thing the new sha differs by is the day-2
+    return the writer now stores."""
+    import copy
+    import hashlib
+
+    strip = frozenset(_STITCH_WINDOWS) if missing == "all" else frozenset({missing})
+    old_account = copy.copy(measured)
+    old_account.stored_returns = measured.stored_returns.drop(_iso(2))
+    old_payload = copy.deepcopy(measured_payload)
+    pnl2 = {r["utc_day_iso"]: r["pnl_usd"] for r in measured_payload["composed_day_pnl"]}[_iso(2)]
+    old_payload["dropped_day_pnl"] = sorted(
+        old_payload["dropped_day_pnl"] + [{"utc_day_iso": _iso(2), "pnl_usd": pnl2}],
+        key=lambda r: r["utc_day_iso"],
+    )
+    payload = await _compose_job(_member_rows(old_account, old_payload, strip=strip))
+
+    assert hashlib.sha256(_stable(payload).encode()).hexdigest() == _FIELDLESS_STITCHED_SHA256_BEFORE_FLOWTIMING
+    assert _FIELDLESS_STITCHED_SHA256 != _FIELDLESS_STITCHED_SHA256_BEFORE_FLOWTIMING
 
 
 @pytest.mark.asyncio
@@ -943,16 +1479,16 @@ async def test_a_stitched_account_on_the_writer_basis_carries_no_absence_marker(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("venue", ["binance", "okx", "mt5"])
+@pytest.mark.parametrize("venue", ["binance", "okx"])
 @pytest.mark.parametrize("missing", ["all", "key-A"])
 async def test_a_stitched_account_on_a_venue_that_writes_no_basis_carries_no_absence_marker(
     measured: _Measured, measured_payload: dict, venue: str, missing: str
 ) -> None:
-    """R2-WR-03: only the Deribit NAV path writes a writer basis, so a stitched Binance, OKX or
-    MT5 account has none on any member, ever. The legacy roll is its only roll, not a
-    degradation, and flagging it would bury the one case SFH-02 exists to surface (a Deribit
-    stitched account on the legacy roll). Neither token nor either count appears, whether no
-    member or only some carry the fields."""
+    """R2-WR-03: only the Deribit and MT5 key-mode paths write a writer basis, so a stitched
+    Binance or OKX account has none on any member, ever. The legacy roll is its only roll, not a
+    degradation, and flagging it would bury the case SFH-02 exists to surface (a stitched
+    account on a basis-writing venue that fell back to the legacy roll). Neither token nor
+    either count appears, whether no member or only some carry the fields."""
     strip = frozenset(_STITCH_WINDOWS) if missing == "all" else frozenset({missing})
     rows = _member_rows(measured, measured_payload, strip=strip)
     for r in rows:
@@ -966,12 +1502,71 @@ async def test_a_stitched_account_on_a_venue_that_writes_no_basis_carries_no_abs
     assert _STITCHED_COUNT not in payload["inputs"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("missing", "n_missing", "partial"),
+    [("all", 3, False), ("key-A", 1, True), ("key-B", 1, True), ("key-M", 1, True)],
+)
+async def test_a_stitched_mt5_account_without_the_basis_is_counted_not_blocked(
+    measured: _Measured, measured_payload: dict, missing: str, n_missing: int, partial: bool
+) -> None:
+    """164.6.6.2.3 plan 06: MT5 now writes a basis, so a stitched MT5 account whose members lack
+    one (every PROD MT5 row until the Wave 5 recompute) is on the legacy roll as a DEGRADATION
+    and the SFH-02 visibility must say so, exactly as it does for Deribit.
+
+    Read from ``derive_allocator_equity``: the two tokens go to ``benign_flag_tokens`` and the
+    two counts to ``payload["inputs"]``; neither feeds ``degrade_reasons``. So the count is
+    VISIBILITY ONLY and cannot turn a book that composed before into a blocking one: the
+    degrade reasons below are the ones the same account carries on the Deribit venue."""
+    strip = frozenset(_STITCH_WINDOWS) if missing == "all" else frozenset({missing})
+    rows = _member_rows(measured, measured_payload, strip=strip)
+    for r in rows:
+        r["api_key"] = {**r["api_key"], "exchange": "mt5"}
+    payload = await _compose_job(rows)
+
+    assert _ABSENT_TOKEN in payload["flags"]
+    assert (_PARTIAL_TOKEN in payload["flags"]) is partial
+    assert payload["inputs"][_MISSING_COUNT] == n_missing
+    assert payload["inputs"][_STITCHED_COUNT] == 3
+    assert payload["degrade_reasons"] == ["inception_unreconciled"]  # nothing the count added
+
+    # and the same account on Deribit reads identically: one venue set, two readers
+    for r in rows:
+        r["api_key"] = {**r["api_key"], "exchange": "deribit"}
+    deribit = await _compose_job(rows)
+    assert deribit["degrade_reasons"] == payload["degrade_reasons"]
+    assert deribit["is_trustworthy"] == payload["is_trustworthy"]  # benign tokens never move trust
+    assert deribit["inputs"][_MISSING_COUNT] == payload["inputs"][_MISSING_COUNT]
+
+
+@pytest.mark.asyncio
+async def test_a_stitched_mt5_account_on_the_writer_basis_carries_no_absence_marker(
+    measured: _Measured, measured_payload: dict
+) -> None:
+    """The other half of the MT5 pin: every member carries a basis, so the joined basis is used
+    and no visibility token or count is written (a healthy payload is unchanged)."""
+    rows = _member_rows(measured, measured_payload)
+    for r in rows:
+        r["api_key"] = {**r["api_key"], "exchange": "mt5"}
+    payload = await _compose_job(rows)
+
+    assert "writer_basis" in payload["flags"]
+    assert _ABSENT_TOKEN not in payload["flags"]
+    assert _PARTIAL_TOKEN not in payload["flags"]
+    assert _MISSING_COUNT not in payload["inputs"]
+
+
 def test_the_writer_basis_venue_set_is_the_one_the_writer_gates_on() -> None:
     """R2-WR-03: one source of truth. The key_inputs writer and the compose-side visibility
-    counts both read ``WRITER_BASIS_VENUES``; the Deribit NAV path is the only writer today."""
+    counts both read ``WRITER_BASIS_VENUES``. 164.6.6.2.3 widened it from the Deribit NAV path
+    to the MT5 key-mode path ON PURPOSE (position-relative MT5 returns cannot be inverted by the
+    legacy roll); a ccxt venue still writes none. Both readers are pinned in this file: the
+    writer by ``test_an_mt5_key_mode_derive_stores_its_composed_flows_and_day_pnl`` and
+    ``test_a_ccxt_key_mode_derive_stores_neither_field``, the visibility counts by the stitched
+    MT5 / binance / okx tests above."""
     from services.job_worker import WRITER_BASIS_VENUES
 
-    assert WRITER_BASIS_VENUES == frozenset({"deribit"})
+    assert WRITER_BASIS_VENUES == frozenset({"deribit", "mt5"})
 
 
 # ═══ Task 2: the writer-basis mode degrades honestly and keeps SC-3's hardening ═══

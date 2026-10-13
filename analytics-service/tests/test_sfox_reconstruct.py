@@ -286,26 +286,33 @@ def test_interior_missing_nav_day_breaks_that_day_and_next_never_bridged():
     assert meta.get("nav_coverage_gap_days", 0) >= 1
 
 
-def test_flow_dominated_guard_fires_and_surfaces_in_meta():
-    """DQ-01 inherited: |flow| >= FLOW_DOM_RATIO(1.0) * prior NAV → the day breaks
-    (NaN) and flow_dominated_guard rides the meta."""
+def test_flow_larger_than_the_prior_nav_is_measured_at_day_level():
+    """164.6.6.2.3 D-05/D-07 (moved from DQ-01's flow-dominance guard): a deposit
+    LARGER than the prior NAV no longer breaks the day. The sFOX feed has a UTC day
+    and no time of day, so the flow counts at the end of the day and the day is
+    MEASURED: r = (5100 - 2010 - 3000) / 2010 = 90 / 2010. The retired flag is
+    absent, the day-level rule rides the meta as an annotation, and nothing warns."""
     nav = _nav([2000.0, 2010.0, 5100.0, 5110.0], start="2026-05-01")
-    flows = _flows({"2026-05-03": 3000.0})  # 3000 >= 1.0 * 2010 → dominated
+    flows = _flows({"2026-05-03": 3000.0})  # 3000 >= 2010: the retired guard's trigger
 
     returns, meta = combine_sfox_balance_history(nav, flows)
 
     d = pd.Timestamp("2026-05-03").as_unit("us")
-    assert math.isnan(returns.loc[d])
-    assert meta.get("flow_dominated_guard") is True
-    assert meta.get("computation_status_hint") == "complete_with_warnings"
+    assert returns.loc[d] == pytest.approx(90.0 / 2010.0, abs=1e-12)
+    # The next day is the plain (5110 - 5100) / 5100 move, not poisoned by the flow day.
+    d4 = pd.Timestamp("2026-05-04").as_unit("us")
+    assert returns.loc[d4] == pytest.approx(10.0 / 5100.0, abs=1e-12)
+    assert "flow_dominated_guard" not in meta
+    assert meta.get("flow_timing_day_level") is True
+    assert meta.get("computation_status_hint") == "complete"
 
 
 def test_dust_nav_guard_fires_when_prev_below_floor():
-    """DQ-01 inherited: a prior NAV below DUST_NAV_FLOOR ($1000) is not a usable
-    denominator → dust_nav_guard break."""
-    nav = _nav([500.0, 600.0, 650.0], start="2026-06-01")
+    """DQ-01 inherited: a prior NAV below DUST_NAV_FLOOR ($100, 167.1.2 D-27; it was
+    $1000, with NAVs 500/600/650) is not a usable denominator → dust_nav_guard break."""
+    nav = _nav([50.0, 60.0, 65.0], start="2026-06-01")
     returns, meta = combine_sfox_balance_history(nav, _flows({}))
-    assert math.isnan(returns.iloc[1])  # prev = 500 < floor
+    assert math.isnan(returns.iloc[1])  # prev = 50 < floor
     assert meta.get("dust_nav_guard") is True
     assert meta.get("computation_status_hint") == "complete_with_warnings"
 

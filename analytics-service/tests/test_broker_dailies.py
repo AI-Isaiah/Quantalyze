@@ -1372,3 +1372,43 @@ def test_external_flows_param_threads_through_combine_to_core():
     # not silently ignored).
     shared_day = pd.Timestamp("2026-01-01")
     assert with_flow.loc[shared_day] != pytest.approx(without_flow.loc[shared_day])
+
+
+# ---------------------------------------------------------------------------
+# 164.6.6.2.3 plan 07 (D-01 / D-11): combine_realized_and_funding forwards ``full_history``.
+# ---------------------------------------------------------------------------
+
+
+def _inception_combine(*, full_history: bool):
+    """A 5000 deposit on day 0 onto a reconstructed ZERO base: anchor 5100, P&L 0 then +100,
+    so the base is 5100 - 100 - 0 = 5000 on day 0 before the deposit: 5000 - 0 - 5000 = 0."""
+    realized = [
+        _realized_record("2026-01-01", 0.0),
+        _realized_record("2026-01-02", 100.0),
+    ]
+    return combine_realized_and_funding(
+        realized,
+        [],
+        account_balance=5100.0,
+        external_flows=[("2026-01-01", 5000.0)],
+        full_history=full_history,
+    )
+
+
+def test_full_history_combine_day_zero_is_inception_no_flag():
+    """D-01/D-12: with ``full_history=True`` a day 0 that holds a positive flow on a zero base
+    has no return and NO dust / negative flag. Neuter (drop the keyword in the combine) and
+    this goes RED."""
+    returns, meta = _inception_combine(full_history=True)
+    assert pd.isna(returns.iloc[0])
+    assert "dust_nav_guard" not in meta
+    assert "negative_nav_guard" not in meta
+    assert returns.iloc[1] == pytest.approx(100.0 / 5000.0, rel=1e-12)
+
+
+def test_default_combine_day_zero_keeps_todays_label():
+    """The SAME inputs without the keyword (the default) keep today's day-0 label: the
+    keyword is opt-in, so every existing caller is byte-identical."""
+    returns, meta = _inception_combine(full_history=False)
+    assert pd.isna(returns.iloc[0])
+    assert meta.get("dust_nav_guard") or meta.get("negative_nav_guard")

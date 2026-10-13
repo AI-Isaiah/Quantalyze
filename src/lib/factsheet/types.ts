@@ -828,6 +828,24 @@ export type FactsheetCommon = {
      * other data-quality caveats.
      */
     smallBaseMeasured?: boolean;
+    /**
+     * Phase 164.6.6.2.3 (D-07) — single-key only, present only when true:
+     * `data_quality_flags.flow_timing_day_level`. INFORMATIONAL: some deposit or
+     * withdrawal days have no time of day, so the flow counts at the end of that
+     * day; the day is kept and the row is not a warning. The factsheet says so as a
+     * neutral note beside the other data-quality caveats.
+     */
+    flowTimingDayLevel?: boolean;
+    /**
+     * Phase 164.6.6.2.3 (D-15, founder 2026-10-12, silent-failure hunt F1) — single-key
+     * only, present only when true: `data_quality_flags.flow_timing_day_level_large`. At
+     * least one MEASURED day-level flow day carried a deposit or withdrawal at least as
+     * large as that day's prior balance, so the end-of-day formula can read its return
+     * as extreme. INFORMATIONAL: the day is kept, the chain is not broken, and the row is
+     * not a warning. It drives the same "returns can be extreme" caveat as
+     * `smallBaseMeasured`.
+     */
+    flowTimingDayLevelLarge?: boolean;
   };
   /** Phase 90.5 (LEV-01/D2): #597 annualization basis (365 crypto / 252 traditional) — enables the client leverage recompute. Optional: absent (stale v4 cache drain) => leverage control hidden, fail-closed. */
   periodsPerYear?: number;

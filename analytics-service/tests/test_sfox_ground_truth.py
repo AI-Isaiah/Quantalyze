@@ -266,27 +266,34 @@ def test_sparse_flow_day_uncovered_requires_founder_not_silent_green():
     assert evidence["requires_founder_decision"] is True
 
 
-def test_designed_flow_dominated_break_no_false_raise_surfaces_founder():
-    """Red-team HIGH-1: combine_sfox_balance_history NaN-breaks a flow-DOMINATED day
-    BY DESIGN (deposit ≥ prior NAV → flow_dominated_guard). The oracle keeps that
-    day's return (0.0 here) finite → a one-sided finite/NaN. It must NOT be
-    auto-condemned as a combine bug (that false-raised ordinary staged-funding
-    accounts); surface it for the founder instead."""
-    # NAV 2000 on 01-01, +5000 deposit on 01-02 (EOD 7000): 5000/2000 = 2.5 ≥ 1.0
-    # → the combine flow-dominated guard NaNs 01-02; account_balance == usd_value on
-    # both txn days so a2_total_mtm reconciles and F4 is armed.
-    bh = [_bh("2026-01-01", "2000"), _bh("2026-01-02", "7000")]
+def test_flow_larger_than_prior_nav_is_measured_and_agrees_with_the_oracle():
+    """Moved by 164.6.6.2.3 D-05 (was: a flow-DOMINATED day NaN-broken by design and
+    surfaced to the founder as a one-sided break). A deposit at or above the prior NAV
+    no longer breaks the day: combine_sfox_balance_history MEASURES it, so the
+    reconstruction and the oracle both hold a finite return and F4 genuinely compares
+    them. The old one-sided break is gone, and so is its founder surfacing.
+
+    NAV 2000 on 01-01, +5000 deposit on 01-02 and a +100 gain (EOD 7100): the day's
+    return is (7100 - 2000 - 5000) / 2000 = 100 / 2000 = 0.05 on both sides. It must be
+    COMPARED (compared_days == 1) with no residual; a combine that ignored the deposit
+    would read 5100 / 2000 - 1 = 1.55 against the oracle's 0.05 and the harness would
+    raise. account_balance == usd_value on both txn days so a2_total_mtm reconciles and
+    F4 is armed."""
+    bh = [_bh("2026-01-01", "2000"), _bh("2026-01-02", "7100")]
     txns = [
         {"id": 1, "action": "buy", "currency": "BTC", "amount": "0.01",
          "timestamp": _ms("2026-01-01"), "account_balance": "2000"},
         {"id": 2, "action": "deposit", "currency": "USD", "amount": "5000",
-         "timestamp": _ms("2026-01-02"), "account_balance": "7000"},
+         "timestamp": _ms("2026-01-02"), "account_balance": "7100"},
     ]
-    evidence = check_parity(bh, txns)  # must NOT raise (pre-fix this false-raised)
+    evidence = check_parity(bh, txns)
     p = evidence["parity"]
-    assert "2026-01-02" in p["reconstruction_vs_oracle_one_sided_break_days"]
-    assert p["reconstruction_vs_oracle_material_days"] == []  # NOT auto-material
-    assert evidence["requires_founder_decision"] is True  # surfaced, not condemned
+    assert p["reconstruction_vs_oracle_compared_days"] == 1  # the flow day IS measured
+    assert p["reconstruction_vs_oracle_one_sided_break_days"] == []  # no designed break
+    assert p["reconstruction_vs_oracle_material_days"] == []
+    assert p["reconstruction_vs_oracle_max_return_residual"] == pytest.approx(0.0, abs=1e-12)
+    assert p["under_test_status_hint"] == "complete"  # a big flow does not warn
+    assert evidence["requires_founder_decision"] is False  # nothing left to surface
 
 
 def test_asymmetric_start_bh_after_txns_no_false_raise():

@@ -20,29 +20,57 @@ describe("readHeadlineBasis", () => {
       readHeadlineBasis({
         twr_chain_broken: true,
         headline_since: "2026-04-18",
+        pnl_dominated_guard: true,
         dust_nav_guard: true,
-        flow_dominated_guard: true,
         negative_nav_guard: true,
       }),
     ).toEqual({
       twrChainBroken: true,
       headlineSince: "2026-04-18",
-      reasons: ["negative_nav", "dust_nav", "flow_dominated"],
+      reasons: ["negative_nav", "dust_nav", "pnl_dominated"],
       withheld: false,
     });
   });
 
-  it("carries all four reasons in the UI-SPEC order", () => {
+  it("carries all three reasons in the UI-SPEC order, whatever order the flags were written in", () => {
     expect(
       readHeadlineBasis({
         twr_chain_broken: true,
         headline_since: "2026-04-18",
         pnl_dominated_guard: true,
-        flow_dominated_guard: true,
         dust_nav_guard: true,
         negative_nav_guard: true,
       }).reasons,
-    ).toEqual(["negative_nav", "dust_nav", "flow_dominated", "pnl_dominated"]);
+    ).toEqual(["negative_nav", "dust_nav", "pnl_dominated"]);
+  });
+
+  // Phase 164.6.6.2.3 FLOWTIMING (D-05, D-14). Stored PROD rows keep the retired
+  // flag until the recompute rewrites them; no page may print copy for it. These
+  // fail if the retired flag is ever put back in the flag-to-reason table.
+  it("D-14: a stored retired flow-dominance flag is ignored and names no reason", () => {
+    const out = readHeadlineBasis({
+      twr_chain_broken: true,
+      headline_since: "2026-04-18",
+      flow_dominated_guard: true,
+    });
+    expect(out.reasons).toEqual([]);
+    expect(out).toMatchObject({ twrChainBroken: true, headlineSince: "2026-04-18", withheld: false });
+    expect(joinGuardPhrases(out.reasons)).toBe("a break in the return chain");
+  });
+
+  it("D-14: beside a real guard the retired flag is ignored and the real reason stays", () => {
+    expect(
+      readHeadlineBasis({
+        twr_chain_broken: true,
+        headline_since: "2026-04-18",
+        negative_nav_guard: true,
+        flow_dominated_guard: true,
+      }).reasons,
+    ).toEqual(["negative_nav"]);
+  });
+
+  it("D-14: no phrase in the public table speaks of a deposit or withdrawal", () => {
+    expect(Object.values(GUARD_REASON_PHRASES).join(" | ")).not.toMatch(/deposit|withdrawal/);
   });
 
   it.each([["true"], [1], [{}], [[true]], [null]])(
@@ -102,11 +130,10 @@ describe("readHeadlineBasis", () => {
 });
 
 describe("joinGuardPhrases (UI-SPEC §1.2 join rule)", () => {
-  it("pins the four public phrases verbatim", () => {
+  it("pins the three public phrases verbatim", () => {
     expect(GUARD_REASON_PHRASES).toEqual({
       negative_nav: "a zero or negative account balance",
       dust_nav: "a near-zero account balance",
-      flow_dominated: "a deposit or withdrawal larger than the balance",
       pnl_dominated: "a one-day gain or loss larger than the balance",
     });
   });
@@ -115,26 +142,28 @@ describe("joinGuardPhrases (UI-SPEC §1.2 join rule)", () => {
     expect(joinGuardPhrases([])).toBe("a break in the return chain");
   });
 
+  // D-14: a payload cached before the retired reason left the table can still
+  // carry it for the cache TTL. Fails if the unknown reason is printed.
+  it("D-14: a cached retired reason is dropped, never printed as undefined", () => {
+    const stale = ["negative_nav", "flow_dominated"] as unknown as GuardReason[];
+    expect(joinGuardPhrases(stale)).toBe("a zero or negative account balance");
+    expect(joinGuardPhrases(["flow_dominated"] as unknown as GuardReason[])).toBe("a break in the return chain");
+  });
+
   it("one reason stands alone", () => {
     expect(joinGuardPhrases(["dust_nav"])).toBe("a near-zero account balance");
   });
 
   it("two reasons are joined with ' and '", () => {
-    expect(joinGuardPhrases(["negative_nav", "flow_dominated"])).toBe(
-      "a zero or negative account balance and a deposit or withdrawal larger than the balance",
+    expect(joinGuardPhrases(["negative_nav", "pnl_dominated"])).toBe(
+      "a zero or negative account balance and a one-day gain or loss larger than the balance",
     );
   });
 
   it("three reasons: commas and a final ' and '", () => {
-    expect(joinGuardPhrases(["negative_nav", "dust_nav", "flow_dominated"])).toBe(
-      "a zero or negative account balance, a near-zero account balance and a deposit or withdrawal larger than the balance",
-    );
-  });
-
-  it("four reasons: commas and a final ' and '", () => {
-    const all: GuardReason[] = ["negative_nav", "dust_nav", "flow_dominated", "pnl_dominated"];
+    const all: GuardReason[] = ["negative_nav", "dust_nav", "pnl_dominated"];
     expect(joinGuardPhrases(all)).toBe(
-      "a zero or negative account balance, a near-zero account balance, a deposit or withdrawal larger than the balance and a one-day gain or loss larger than the balance",
+      "a zero or negative account balance, a near-zero account balance and a one-day gain or loss larger than the balance",
     );
   });
 });

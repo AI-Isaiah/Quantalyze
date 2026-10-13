@@ -26,12 +26,15 @@ import { render, fireEvent, act } from "@testing-library/react";
 import { buildFactsheetPayload, deriveSeriesBundle, fixtureBenchmarkPrices } from "@/lib/factsheet/build-payload";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 
+import { applyHeadlineBasis } from "@/lib/factsheet/composite-read-path";
 import { FactsheetProvider, useXRange } from "./factsheet-context";
 import { BasisProvider, useBasis, type Basis } from "./basis-context";
 import { MetricsColumn, headlineCoverageNote } from "./MetricsColumn";
 import { FactsheetBody } from "./FactsheetView";
 import { ownerStateLine } from "@/lib/status-surface-copy";
 
+// `composite-read-path` imports `server-only` (a Next.js RSC build guard).
+vi.mock("server-only", () => ({}));
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: vi.fn() }),
@@ -58,8 +61,10 @@ beforeEach(() => {
 const SINCE = "2026-04-18";
 const D = "Apr 18, 2026";
 const R3 =
-  "a zero or negative account balance, a near-zero account balance and a deposit or withdrawal larger than the balance";
-const ALL_THREE = ["negative_nav", "dust_nav", "flow_dominated"] as const;
+  "a zero or negative account balance, a near-zero account balance and a one-day gain or loss larger than the balance";
+// 164.6.6.2.3 D-14: the flow-dominance reason is retired, so the three reasons a
+// page can still name are these.
+const ALL_THREE = ["negative_nav", "dust_nav", "pnl_dominated"] as const;
 
 /** UI-SPEC 1.3, Dated, S1 without and with the alpha / IR cells. HAND-TYPED. */
 const S1 = `Measured since ${D}; earlier history is unreliable (it includes ${R3}). Every figure in this strip covers only that span; the chart shows the whole record.`;
@@ -210,6 +215,26 @@ describe("the Dated note beside the headline, the KPI strip (D-01, UI-SPEC 1.3 S
     const { container } = renderBody(payloadWith(dq));
     const expected = `Measured since ${D}; earlier history is unreliable (it includes a break in the return chain). Every figure in this strip covers only that span; the chart shows the whole record.`;
     expect(stripNotes(container).filter((p) => (p.textContent ?? "").trim() === expected)).toHaveLength(1);
+  });
+
+  // 164.6.6.2.3 D-14, end to end: the stored dqf of a row that still carries the
+  // retired flow-dominance flag, through the real read-path helper, into the real
+  // rendered strip and rail. Fails if the retired reason is put back in the
+  // reader's flag-to-reason table.
+  it("D-14: a stored row with the retired flag prints no copy for it, only the no-cause break (strip and rail)", () => {
+    const stored = { twr_chain_broken: true, headline_since: SINCE, flow_dominated_guard: true };
+    const { quality } = applyHeadlineBasis({}, stored);
+    const dq: DQ = { composite: false, ...quality };
+    expect(dq.headlineGuardReasons, "premise: the reader named no reason").toBeUndefined();
+    const retired = "deposit or withdrawal larger than the balance";
+    const expected = `Measured since ${D}; earlier history is unreliable (it includes a break in the return chain). Every figure in this strip covers only that span; the chart shows the whole record.`;
+    const body = renderBody(payloadWith(dq));
+    expect(stripNotes(body.container).filter((p) => (p.textContent ?? "").trim() === expected)).toHaveLength(1);
+    expect(body.container.textContent).not.toContain(retired);
+    body.unmount();
+    const rail = renderColumn(payloadWith(dq));
+    expect(rail.container.textContent).toContain("it includes a break in the return chain");
+    expect(rail.container.textContent).not.toContain(retired);
   });
 
   it("CONTROL: a clean row shows no note anywhere on the page", () => {

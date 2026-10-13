@@ -214,7 +214,7 @@ INCEPTION_NATIVE_DUST_REL: float = 1e-4
 # readings taken before and after the gate change compare like for like.
 INCEPTION_DUST_CAP_USD: float = 5.0
 # Both constants are tuned against the three real Deribit keys at the P78-style
-# live acceptance gate (the FLOW_DOM_RATIO precedent, nav_twr.py:64-65); real-key
+# live acceptance gate (the PNL_DOM_RATIO precedent in nav_twr.py); real-key
 # green is Phase 80's INCEPT-01, NOT claimed here. Tightening after calibration is
 # expected; loosening requires evidence.
 
@@ -715,11 +715,25 @@ def reconstruct_native_nav_and_twr(
     nav_usd, composed_pnl_usd, composed_flows_usd, prev0_usd = levels
 
     # Step 5 — chain-link with the native day-0 capital injected as prev0_usd.
+    # 164.6.6.2.3 D-01/D-11/D-12: a ``full_history`` ledger starts at the account's inception,
+    # so its day 0 (a positive flow on a ``prev0_usd`` that is zero within tolerance, by the
+    # section-5 gate) is the inception day, not a data-quality defect. No ``timing`` is
+    # passed (D-10 measurement): Deribit has millisecond timestamps and open/close sides in
+    # its raw log, but no per-position P&L attribution on its cash / MTM / smoothed bases,
+    # so a Deribit flow day is measured at day level (D-07) and sets
+    # ``flow_timing_day_level``. The inception predicate accepts the supplied ``prev0_usd``.
+    # WR-03: the section-5 gate in ``_native_nav_levels`` has already CERTIFIED a
+    # ``full_history`` ledger's day-0 base (it raised otherwise), and it accepts a residue the
+    # chain's own $1 tolerance would refuse (per-currency dust up to ``INCEPTION_DUST_CAP_USD``,
+    # a total up to ``max($1, 1e-4 x NAV)``). Hand the gate's verdict to the chain so the two
+    # agree: a Deribit key whose accepted residue is $1.06 must not warn on day 0 (D-01).
     returns, flags = chain_linked_twr(
         nav_usd,
         composed_pnl_usd,
         composed_flows_usd,
         prev0=prev0_usd,
+        full_history=ledger.full_history,
+        inception_certified=ledger.full_history,
     )
 
     # Step 6 — meta + the §6 interior-chain-break key (79-03 merge, one detector).
@@ -738,7 +752,7 @@ def native_day_pnl(
     ``reconstruct_native_nav_and_twr`` chains its returns from (167.1.2.2 D-15).
 
     The days that function breaks (``negative_nav_guard`` on the funding day,
-    ``flow_dominated_guard`` ...) have no return and still have this P&L. Empty
+    ``pnl_dominated_guard`` ...) have no return and still have this P&L. Empty
     when no bucket rolled. Raises what ``reconstruct_native_nav_and_twr`` raises,
     including the §5 inception refusal."""
     levels = _native_nav_levels(

@@ -1704,6 +1704,94 @@ async def test_a_non_true_small_base_measured_is_not_carried(bad) -> None:  # ty
 
 
 # ===========================================================================
+# Phase 164.6.6.2.3 (D-07) — `flow_timing_day_level` is an INFORMATIONAL note: a deposit or
+# withdrawal was counted at the end of its day because the venue gave no time of day. Same
+# contract as `small_base_measured` above: carried present-only through the wholesale
+# data_quality_flags rebuild, strictly `is True`, and it NEVER promotes the status.
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_flow_timing_day_level_is_carried_and_never_promotes() -> None:
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "flow_timing_day_level": True}
+    )
+    dq = payload["data_quality_flags"]
+    assert dq.get("flow_timing_day_level") is True, (
+        "the pre-stamped note must survive the wholesale rebuild; "
+        f"got {dq!r}"
+    )
+    assert payload["computation_status"] == "complete", (
+        "an informational note must not promote the status"
+    )
+    assert payload["computation_warned"] is False
+
+
+@pytest.mark.asyncio
+async def test_flow_timing_day_level_beside_a_real_guard_still_warns() -> None:
+    """The note does not mask or replace a genuine warning."""
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "flow_timing_day_level": True, "dust_nav_guard": True}
+    )
+    assert payload["computation_status"] == "complete_with_warnings"
+    dq = payload["data_quality_flags"]
+    assert dq.get("dust_nav_guard") is True and dq.get("flow_timing_day_level") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [False, None, 1, "true", ["x"], {}])
+async def test_a_non_true_flow_timing_day_level_is_not_carried(bad) -> None:  # type: ignore[no-untyped-def]
+    """Strict `is True`, present-only: anything else is absent, so a stale or malformed
+    value can never print the note. Loosening the carry to truthiness turns the `1`, `"true"`,
+    `["x"]` rows RED."""
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "flow_timing_day_level": bad}
+    )
+    assert "flow_timing_day_level" not in payload["data_quality_flags"]
+
+
+# ===========================================================================
+# Phase 164.6.6.2.3 (D-15) — `flow_timing_day_level_large` is an INFORMATIONAL annotation: a
+# measured day-level flow day carried a flow at least as large as its prior NAV, so the
+# end-of-day return can be extreme. Same contract as `small_base_measured`: carried
+# present-only through the wholesale rebuild, strictly `is True`, never promotes the status.
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_flow_timing_day_level_large_is_carried_and_never_promotes() -> None:
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "flow_timing_day_level": True, "flow_timing_day_level_large": True}
+    )
+    dq = payload["data_quality_flags"]
+    assert dq.get("flow_timing_day_level_large") is True, (
+        "the pre-stamped annotation must survive the wholesale rebuild; "
+        f"got {dq!r}"
+    )
+    assert payload["computation_status"] == "complete"
+    assert payload["computation_warned"] is False
+
+
+@pytest.mark.asyncio
+async def test_flow_timing_day_level_large_beside_a_real_guard_still_warns() -> None:
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "flow_timing_day_level_large": True, "dust_nav_guard": True}
+    )
+    assert payload["computation_status"] == "complete_with_warnings"
+    dq = payload["data_quality_flags"]
+    assert dq.get("dust_nav_guard") is True and dq.get("flow_timing_day_level_large") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [False, None, 1, "true", ["x"], {}])
+async def test_a_non_true_flow_timing_day_level_large_is_not_carried(bad) -> None:  # type: ignore[no-untyped-def]
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "flow_timing_day_level_large": bad}
+    )
+    assert "flow_timing_day_level_large" not in payload["data_quality_flags"]
+
+
+# ===========================================================================
 # Phase 164.6.6.2.2 (D-05) — the single-key row names the cumulative method its
 # curve was built with, as composites already do. Readers default to geometric
 # when the key is absent, so a simple (allocated-capital) curve WITHOUT the stamp

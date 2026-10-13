@@ -2393,28 +2393,14 @@ class TestDeriveBrokerDailies:
         )
         assert captured["csv_rows"], "expected a reconstructed daily-return series"
 
-    @pytest.mark.asyncio
-    async def test_guarded_broker_day_prestamps_dq01_guard_flag(self) -> None:
-        """MED-2: a broker account with a DQ-01-guarded day (a dominating
-        withdrawal → flow_dominated_guard, the day NaN-broken and SKIPPED from
-        csv_daily_returns) must PRE-STAMP the guard flag onto strategy_analytics so
-        the CSV factsheet reads complete_with_warnings — closing the P74
-        broker→CSV guard-meta gap. Mutation-honest: neutering the guard-flag bridge
-        (pre-stamping only flow_coverage_incomplete) drops the flag → RED.
-
-        MEDIUM-2 note: the fixture carries TWO interpretable (non-NaN) days plus the
-        one guarded day, so ``returns.notna().sum() == 2`` clears the insufficient-
-        history short-circuit and the account actually COMPILES a complete_with_
-        warnings factsheet — the guard-flag bridge is only meaningful on a
-        computable account (a lone interpretable day is genuine insufficient
-        history and short-circuits before any factsheet)."""
+    @staticmethod
+    def _guarded_day_inputs(realized_pnls: list[float], withdrawal_usdt: float | None):
+        """Three consecutive UTC days ending two days ago, one ``daily_pnl`` row per day, and
+        an optional non-internal USDT withdrawal on the last of them."""
         import datetime as _dt
-        from services.job_worker import run_derive_broker_dailies_job
 
         now = _dt.datetime.now(_dt.timezone.utc)
-        d0 = (now - _dt.timedelta(days=4)).date().isoformat()
-        d1 = (now - _dt.timedelta(days=3)).date().isoformat()
-        d2 = (now - _dt.timedelta(days=2)).date().isoformat()
+        days = [(now - _dt.timedelta(days=n)).date().isoformat() for n in (4, 3, 2)]
 
         def _rec(day: str, pnl: float) -> dict:
             return {
@@ -2424,20 +2410,82 @@ class TestDeriveBrokerDailies:
                 "timestamp": f"{day}T00:00:00+00:00", "order_type": "daily_pnl",
             }
 
-        # anchor 5000 + realized [+500, +800, +15000] reconstructs positive NAV on
-        # d0/d1 (both interpretable); a -90000 USDT withdrawal on d2 has |F|=90000
-        # >= NAV → flow_dominated_guard on d2 only (the LTP068-shaped dominating-
-        # withdrawal fixture, proven in test_derive_broker_dailies_dualmode). Two
-        # clean days keep the account above the MEDIUM-2 non-NaN insufficient-
-        # history floor so the guard-flag bridge genuinely fires.
-        realized = [_rec(d0, 500.0), _rec(d1, 800.0), _rec(d2, 15000.0)]
-        d2_ms = int(
-            _dt.datetime.fromisoformat(d2 + "T00:00:00+00:00").timestamp() * 1000
-        )
-        withdrawal = {"id": "w1", "type": "withdrawal", "currency": "USDT",
-                      "amount": 90_000.0, "timestamp": d2_ms, "internal": False}
+        realized = [_rec(d, p) for d, p in zip(days, realized_pnls)]
+        withdrawals: list[dict] = []
+        if withdrawal_usdt is not None:
+            ms = int(
+                _dt.datetime.fromisoformat(days[-1] + "T00:00:00+00:00").timestamp() * 1000
+            )
+            withdrawals = [{"id": "w1", "type": "withdrawal", "currency": "USDT",
+                            "amount": withdrawal_usdt, "timestamp": ms, "internal": False}]
+        return days, realized, withdrawals
+
+    @pytest.mark.asyncio
+    async def test_guarded_broker_day_prestamps_dq01_guard_flag(self) -> None:
+        """MED-2: a broker account with a DQ-01-guarded day (the day NaN-broken and
+        SKIPPED from csv_daily_returns) must PRE-STAMP the guard flag onto
+        strategy_analytics so the CSV factsheet reads complete_with_warnings — closing
+        the P74 broker→CSV guard-meta gap. Mutation-honest: neutering the guard-flag
+        bridge (pre-stamping only flow_coverage_incomplete) drops the flag → RED.
+
+        MEDIUM-2 note: the fixture carries TWO interpretable (non-NaN) days plus the
+        one guarded day, so ``returns.notna().sum() == 2`` clears the insufficient-
+        history short-circuit and the account actually COMPILES a complete_with_
+        warnings factsheet — the guard-flag bridge is only meaningful on a
+        computable account (a lone interpretable day is genuine insufficient
+        history and short-circuits before any factsheet).
+
+        FLOWTIMING (164.6.6.2.3 D-05): this fixture used to be the LTP068 dominating
+        withdrawal, which tripped ``flow_dominated_guard``. That guard is deleted (a
+        flow never drops a day), so the bridge is proven on a guard that remains,
+        ``pnl_dominated_guard`` (D-06): anchor 16400 with realized [+50, +80, +15000]
+        reconstructs NAV 1320 / 1400 on the first two days (prior NAVs 1270 and 1320
+        clear the $1000 dust floor, both interpretable) and the third day's +15000
+        is >= 10 x its 1400 prior NAV, so only that day is guarded. No flows."""
+        from services.job_worker import run_derive_broker_dailies_job
+
+        days, realized, withdrawals = self._guarded_day_inputs([50.0, 80.0, 15000.0], None)
         mock_ctx, stack, captured = self._flow_harness(
-            venue="binance", deposits=[], withdrawals=[withdrawal],
+            venue="binance", deposits=[], withdrawals=withdrawals,
+            realized=realized, equity=16_400.0,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        # the guarded day is SKIPPED from the stored returns, the two clean days are kept
+        assert sorted(r["date"] for r in captured["csv_rows"]) == days[:2]
+        guarded = [
+            u for u in captured["analytics_upserts"]
+            if (u.get("data_quality_flags") or {}).get("pnl_dominated_guard")
+        ]
+        assert guarded, (
+            "expected a pnl_dominated_guard pre-stamp on strategy_analytics so "
+            "the broker factsheet reads complete_with_warnings (P74 gap closed)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_dominating_withdrawal_day_is_measured_and_prestamps_no_flow_guard(self) -> None:
+        """FLOWTIMING D-05 on the LTP068-shaped fixture this file used to pin as a guard:
+        anchor 5000, realized [+500, +800, +15000] and a 90000 USDT withdrawal on the last
+        day, whose |F| exceeds the 80000 prior NAV. The withdrawal no longer drops the day
+        (a flow, however large, is never a reason to drop a return or warn): the day keeps
+        its stored return, 15000 / 80000 with the flow counted at the end of the day (the
+        broker path supplies no time of day, D-07), and no upsert carries the retired
+        ``flow_dominated_guard`` or any other guard key.
+
+        The pre-stamp carries the D-07 note ``flow_timing_day_level`` (the withdrawal was
+        counted at the end of its day) as a present-only BOOL, never the in-process day
+        counts, and it does not warn (no guard key). Mutation-honest: reinstating the flow
+        branch in ``_guard_denominator`` drops the day and re-stamps the retired key → RED;
+        removing the pre-stamp carry in ``job_worker`` drops the note → RED."""
+        from services.job_worker import run_derive_broker_dailies_job
+        from services.nav_twr import NAV_TWR_GUARD_KEYS
+
+        days, realized, withdrawals = self._guarded_day_inputs([500.0, 800.0, 15000.0], 90_000.0)
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="binance", deposits=[], withdrawals=withdrawals,
             realized=realized, equity=5_000.0,
         )
         job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
@@ -2445,14 +2493,34 @@ class TestDeriveBrokerDailies:
             result = await run_derive_broker_dailies_job(job)
 
         assert result.outcome == DispatchOutcome.DONE
-        guarded = [
-            u for u in captured["analytics_upserts"]
-            if (u.get("data_quality_flags") or {}).get("flow_dominated_guard")
+        rows = {r["date"]: r["daily_return"] for r in captured["csv_rows"]}
+        assert sorted(rows) == days  # the dominating-withdrawal day is kept, not skipped
+        # nav2 = 5000, nav1 = 5000 - 15000 + 90000 = 80000: r2 = 15000 / 80000 (independent)
+        assert rows[days[2]] == pytest.approx(15000.0 / 80000.0, rel=1e-9)
+        stamped = {
+            k
+            for u in captured["analytics_upserts"]
+            for k, v in (u.get("data_quality_flags") or {}).items()
+            if v is True and k in NAV_TWR_GUARD_KEYS
+        }
+        assert stamped == set(), stamped
+        # D-07: the note is stamped as a bool; the in-process ints never reach a row.
+        prestamp_flags = [
+            u["data_quality_flags"]
+            for u in captured["analytics_upserts"]
+            if "data_quality_flags" in u
         ]
-        assert guarded, (
-            "expected a flow_dominated_guard pre-stamp on strategy_analytics so "
-            "the broker factsheet reads complete_with_warnings (P74 gap closed)"
-        )
+        assert prestamp_flags
+        assert all(f.get("flow_timing_day_level") is True for f in prestamp_flags)
+        for f in prestamp_flags:
+            assert "flow_timing_day_level_days" not in f
+            assert "flow_timing_timed_days" not in f
+        # D-15 (F1): the 90000 withdrawal is at least the 80000 prior NAV, so the kept day is
+        # ALSO annotated "returns can be extreme", as a bool, never a guard. Mutation-honest:
+        # removing the pre-stamp carry in ``job_worker`` drops the key -> RED.
+        assert all(f.get("flow_timing_day_level_large") is True for f in prestamp_flags)
+        for f in prestamp_flags:
+            assert "flow_timing_day_level_large_days" not in f
 
     @pytest.mark.asyncio
     async def test_clean_broker_rederive_clears_stale_warn_flags(self) -> None:
@@ -2503,9 +2571,18 @@ class TestDeriveBrokerDailies:
             "flag from an earlier gapped run is wholesale-cleared"
         )
         clean = prestamps[-1]["data_quality_flags"]
-        assert clean == {"csv_source": True}, (
+        # 164.6.6.2.3 D-07: the sub-NAV deposit on day 8 has no time of day on the broker path,
+        # so it counts at the end of its day and the pre-stamp carries the INFO note
+        # `flow_timing_day_level`. That note is not a warning: every other key stays absent,
+        # which is what "all warn flags cleared" means. (Before 164.6.6.2.3 this asserted
+        # `clean == {"csv_source": True}`.)
+        assert clean == {"csv_source": True, "flow_timing_day_level": True}, (
             f"clean re-derive must clear all warn flags; got {clean!r}"
         )
+        from services.allocated_capital import ALLOCATED_CAPITAL_GUARD_KEYS
+        from services.nav_twr import NAV_TWR_GUARD_KEYS
+
+        assert not (set(clean) & (set(NAV_TWR_GUARD_KEYS) | set(ALLOCATED_CAPITAL_GUARD_KEYS)))
 
     # ------------------------------------------------------------------
     # FLOW-04 (v1.8, 77-03): venue-gated open-uPnL wedge threading + the
@@ -2769,10 +2846,11 @@ class TestDeriveBrokerDailies:
         from services.job_worker import run_derive_broker_dailies_job
 
         realized = self._recent_daily_pnl("okx", {10: 5.0, 5: 3.0, 1: 2.0})
-        # equity 500 < DUST_NAV_FLOOR (1000) → dust base.
+        # 167.1.2 D-27: DUST_NAV_FLOOR is 100 (it was 1000), so the dust base is re-aimed from
+        # 500 to 50 (same 0.8 wedge ratio, upnl 40) to keep this test on the dust branch.
         mock_ctx, stack, captured = self._flow_harness(
             venue="okx", deposits=[], realized=realized,
-            equity=500.0, upnl=400.0,
+            equity=50.0, upnl=40.0,
         )
         job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
         with stack:
@@ -2782,6 +2860,29 @@ class TestDeriveBrokerDailies:
             "a dust anchor must force the wedge to 0.0; "
             f"got {captured['open_unrealized_usd']!r}"
         )
+
+    @pytest.mark.asyncio
+    async def test_d27_a_500_anchor_is_no_longer_dust_so_the_wedge_threads(self) -> None:
+        """167.1.2 D-27 sibling of ``test_dust_anchor_forces_wedge_zero``. The dust floor moved
+        from 1000 to 100, so the old dust equity of 500 is a real anchor: the noise guard does
+        not force the wedge to 0.0, and the OKX companion open-uPnL reaches the roll terminal.
+        Fails if the floor returns to 1000 (the guard would zero the wedge)."""
+        from services.job_worker import run_derive_broker_dailies_job
+
+        realized = self._recent_daily_pnl("okx", {10: 5.0, 5: 3.0, 1: 2.0})
+        mock_ctx, stack, captured = self._flow_harness(
+            venue="okx", deposits=[], realized=realized,
+            equity=500.0, upnl=40.0,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            await run_derive_broker_dailies_job(job)
+
+        assert captured["open_unrealized_usd"] == pytest.approx(40.0), (
+            "a $500 anchor is above the D-27 floor of 100, so the wedge must thread; "
+            f"got {captured['open_unrealized_usd']!r}"
+        )
+        assert captured["account_balance"] == pytest.approx(500.0)
 
     @pytest.mark.asyncio
     async def test_material_wedge_does_not_mutate_stored_equity_scalar(

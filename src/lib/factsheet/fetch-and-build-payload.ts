@@ -437,7 +437,7 @@ async function resolveFactsheetInputs(
   // 164.6.6.2.2 D-05: the curve is read by the row's own method, so the flags
   // are read BEFORE the series is resolved.
   const dqf = analytics?.data_quality_flags as
-    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown; native_unit?: unknown; twr_chain_broken?: unknown; headline_since?: unknown; negative_nav_guard?: unknown; dust_nav_guard?: unknown; flow_dominated_guard?: unknown; pnl_dominated_guard?: unknown }
+    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown; native_unit?: unknown; twr_chain_broken?: unknown; headline_since?: unknown; negative_nav_guard?: unknown; dust_nav_guard?: unknown; pnl_dominated_guard?: unknown; flow_timing_day_level?: unknown; flow_timing_day_level_large?: unknown }
     | null
     | undefined;
   let dailyReturns = resolveDailyReturnSeries(
@@ -670,7 +670,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v16", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v17", id,
  * computedAt, tradesFetchedAt ?? "none", provenanceKey] (the last two are
  * 167.1.2.2.2 plan 10's trade-fact members), a `null` computedAt included. 167.2.1-REVIEW-R2 IN-01: the key
  * moves more often than "once per successful run". The status bridge
