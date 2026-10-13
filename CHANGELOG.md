@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.131.0.2] - 2026-10-13 — TRADESYNC (registration): the daily trade-sync cron `cron-sync-trades` is registered on PROD, and the prober's cron oracle learns it
+
+Phase 167.1.2.2.2, plans 16, 17, 19 and 20. No application code changes. The release 1 and release 2 code (0.129.10.0, 0.131.0.0) is already on `main`; this PR carries the one non-planning file that changes, plus planning records. Like DERIVECRON's registration (0.129.3.1), the job was written to PROD by the runbook's guarded Step C, never by a migration.
+
+### Changed
+- `scripts/prod-prober/cron-manifest.json` was re-captured from PROD in the same session the job was registered. The diff against the old file is the `captured_at` stamp plus exactly one added job row and nothing else: `cron-sync-trades`, jobid 43, `30 4 * * *`, active, `SELECT public.cron_sync_tick();`. The file now holds 18 jobs, and `--preflight-repoint` exits 0 against it. Until this merges, the hourly prober on `main` reports the job as cron drift. That report is expected, and this merge ends it.
+
+### Added
+- **The daily trade sync is scheduled.** `docs/runbooks/cron-sync-go-live.md` Step C registered the job on 2026-10-12, outside the 04:15 to 05:45 UTC merge hold, behind the marker guard (the guard read the production marker before and after the write). **The first cron day is 2026-10-13, 04:30 UTC.** Plan 21 owns the first-tick proof.
+
+### Notes
+- **The rehearsal measured FITS.** One manual `cron_sync_tick()` on PROD ran the full first backfill in 41.58 s with HTTP 200, 12 of 12 keys and none timed out. That is below the 90 s ceiling, so the async-route fallback (plan 18) was not needed. The four connected strategy keys (3 okx, 1 bybit) stored 33 trades and were stamped, and all derive jobs drained in about 12.4 minutes. The widest first-fetch window was 159 days, so the 41.58 s is an upper bound for the daily tick.
+- **The D-08 carry-forward ran first.** 124 legacy daily points for 3 OKX strategies (73, 26 and 25) moved into `csv_daily_returns`, each verified by an independent compounding oracle and marked in `series_provenance.legacy_ranges`. The one published strategy on a disconnected key got a seeded `trades_fetched_at` 150 days old (D-10), so it reads stale to every viewer rather than current.
+- **Named gaps, not filled.** 2 OKX strategies carry an `unrecovered_gaps` record, 87 and 70 days, 157 days in all. The venue's served reach did not cover them, and no day was interpolated or written as 0.0. A third span of 47 days (a strategy with no legacy range) sits on the OKXHISTORY work list only. Three spans, 204 calendar days, go to Phase 167.1.2.2.2.1 OKXHISTORY to classify as truncated or quiet.
+- **Which keys the tick reads (D-13).** The rehearsal's population was 12 keys: the 4 ccxt strategy keys it fetches, and 8 MT5 keys the route defers without a venue call. A further 16 keys back no eligible strategy and are skipped, and a disconnected key is not read at all. ADR-0008 records each exclusion with its reason.
+- **No human is paged when the tick stops yet.** The staleness alarm is booked as `167.1.2.2.2-TRADESYNC-STALENESS-ALARM` in TODOS, owned by Phase 164.6.8 OUTAGEALERT. Until it lands, a silent stop shows only as the public "Trades fetched {age} · stale" styling past 2 days and in the runbook's manual reads.
+- **Debug ledger.** `.planning/debug/cron-sync-unscheduled.md` is marked resolved with a dated note; its diagnosis is kept as lineage.
+- **Branch accounting.** Besides the manifest re-capture and this release, the branch's commits beyond `origin/main` are planning records, or TRADESYNC code whose content is already on `main` through the earlier PRs (`git diff --name-only origin/main...HEAD -- . ':!.planning'` lists only this entry's four files). Those commits appear in the 0.129.10.0 and 0.131.0.0 entries.
+
+### Tests
+- No code changed. The planning-reading vitest files (16 files, 670 tests, run one file per invocation), `check:planning-hygiene` (ROADMAP rule 6: 151 headings, 151 bullets, 147 Progress rows) and `verify-plan-anchors --pending` all pass on the branch. The prober's `--self-test` (91 of 91) and `prod-prober-wiring` (118 of 118) passed against the re-captured manifest.
+
 ## [0.131.0.1] - 2026-10-12 — Close-out records: DERIBITWEDGE closed, three routed items placed in their owning phases
 
 Docs and ledger only. No code changes.
