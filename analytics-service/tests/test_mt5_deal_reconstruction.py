@@ -1278,7 +1278,7 @@ _DAY0_RESIDUES = [
 def test_day0_of_a_full_history_ledger_is_its_inception_whatever_the_residue_sign(
     residue: str, reading: str
 ) -> None:
-    """164.6.6.2.3 D-01 (root cause in .planning/debug/mm2x-dust-guard-after-floor.md): the
+    """164.6.6.2.3 D-01 (root cause recorded in the MM-2x dust-guard debug note): the
     first funding day of a full-history account is its inception, and "its near-zero start is
     not a warning, whatever the noise's sign". Before this change the sign of float residue
     decided which warning day 0 raised (``negative_nav_guard`` for -1e-17, ``dust_nav_guard``
