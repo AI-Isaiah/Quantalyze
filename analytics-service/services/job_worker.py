@@ -297,13 +297,24 @@ WORKER_FENCE_V2: Final[bool] = (
 _DERIBIT_EMPTY_LEDGER_FLOOR_USD: Final[float] = USD_FLOORS.material_equity
 
 # 167.1.2.2.1 R2-WR-03: the venues whose key_inputs row can carry the writer's own basis
-# (``composed_flows`` + ``composed_day_pnl``). The Deribit NAV path is the only writer; the MT5
-# and ccxt payloads never set ``_composed_flows_usd``. BOTH sides read this set: the key_inputs
-# writer (derive_broker_dailies) stores the basis only for these venues, and the compose-side
-# visibility counts (derive_allocator_equity, SFH-02) flag a stitched account on the legacy roll
-# only for these venues. A stitched account on any other venue has no basis to lack, so it is
-# not a degradation and must not carry the tokens.
-WRITER_BASIS_VENUES: Final[frozenset[str]] = frozenset({"deribit"})
+# (``composed_flows`` + ``composed_day_pnl``). The Deribit NAV path and, since 164.6.6.2.3, the
+# MT5 key-mode path write it; the ccxt payloads never set ``_composed_flows_usd``. BOTH sides
+# read this set: the key_inputs writer (derive_broker_dailies) stores the basis only for these
+# venues, and the compose-side visibility counts (derive_allocator_equity, SFH-02) flag a
+# stitched account on the legacy roll only for these venues. A stitched account on any other
+# venue has no basis to lack, so it is not a degradation and must not carry the tokens.
+#
+# 164.6.6.2.3 (D-14, founder FLOWTIMING-Q1 ACCEPT 2026-10-11): MT5 joins on purpose. A timed MT5
+# flow day's stored return is a COHORT return (each position measured on the capital it was
+# opened on), and the compose's legacy roll ``equity_{t-1} = (equity_t - F_t)/(1 + r_t)`` is
+# exact only for an end-of-day return, so it mis-states the prior level on such a day (about
+# 0.1099 against a true 0.1 on the MM-2x shape). The writer-basis roll
+# ``equity_{t-1} = equity_t - F_t - P_t`` has no return factor, so the return convention stops
+# mattering. No compose code changes; the MT5 derive stores the two fields the Deribit derive
+# already does, through the same serializer. Both readers of this set therefore change with it:
+# the writer stores the basis for MT5, and a stitched MT5 account whose members lack it (every
+# row written before the Wave 5 recompute) is now counted by the SFH-02 visibility tokens.
+WRITER_BASIS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "mt5"})
 
 # Phase 164.6.6.2 / D-01, D-03, D-06 — the FIXED texts of the MT5 account-currency refusals.
 # Every one lands in `compute_jobs.error_message` or `strategy_analytics.computation_error`,
@@ -3430,6 +3441,12 @@ class _NativeKeyUsd(NamedTuple):
     unpriced_days: list[str]
     priced_through: str | None
     segment_terminals: "list[tuple[str, float]]"
+    # 164.6.6.2.3 plan 06 (D-14): the writer basis in USD, the level identity
+    # ``P_t = L_t - L_{t-1} - F_t`` on every calendar day from the key's first NAV day to
+    # ``priced_through``. Both ``None`` for a key with an interior hole (its segments roll from
+    # stored terminals, not from a whole-key basis) or when any needed close is missing.
+    composed_day_pnl: "pd.Series | None"
+    composed_flows: "pd.Series | None"
 
 
 def _convert_native_key_to_usd(
@@ -3465,6 +3482,16 @@ def _convert_native_key_to_usd(
       The allocator compose replays the series in segments split at those days and rolls each
       segment back from its own level; across a hole the stored returns alone cannot say what the
       level was on the far side (MEASUREMENT M3).
+    * ``composed_day_pnl`` / ``composed_flows`` (164.6.6.2.3 plan 06, D-14): the writer basis the
+      compose rolls on instead of inverting the stored returns, which a cohort return (a position
+      measured on the capital it was opened on) makes inexact. The USD level ``L_d`` is the native
+      realized level (carried across quiet days, legitimately) times ITS OWN day's close, ``F_d``
+      the native flow times its own day's close, and ``P_d = L_d - L_{d-1} - F_d`` with the
+      capital before the first day priced at the first day's close (about 0 on a full-history
+      ledger). The days are the dense calendar from the first NAV day to ``priced_through``:
+      a quiet day's price move is a real USD return, so it must be a day of the basis. Never
+      priced on a neighbour's close: a missing close on any of those days sets both to ``None``,
+      as does an interior hole (``segment_terminals`` / ``unpriced_days`` non-empty).
     """
     import pandas as pd
 
@@ -3539,6 +3566,21 @@ def _convert_native_key_to_usd(
             continue  # no level to state; the compose reports the missing one, never a guess
         segment_terminals.append((end_iso, float(levels_to_end.iloc[-1]) * end_close))
 
+    composed_day_pnl: pd.Series | None = None
+    composed_flows: pd.Series | None = None
+    hole_ends = hole_segment_ends(event_days, unpriced_iso)
+    if priced_through is not None and not hole_ends and not unpriced_iso:
+        basis = _native_key_usd_writer_basis(
+            native_nav_levels=native_nav_levels,
+            native_day_pnl=native_day_pnl,
+            native_flow_by_day=native_flow_by_day,
+            flows=flows,
+            close_by_day=close_by_day,
+            priced_through=pd.Timestamp(priced_through),
+        )
+        if basis is not None:
+            composed_day_pnl, composed_flows = basis
+
     return _NativeKeyUsd(
         returns=returns,
         day_pnl=day_pnl,
@@ -3547,6 +3589,110 @@ def _convert_native_key_to_usd(
         unpriced_days=unpriced_iso,
         priced_through=priced_through,
         segment_terminals=segment_terminals,
+        composed_day_pnl=composed_day_pnl,
+        composed_flows=composed_flows,
+    )
+
+
+def _native_key_usd_writer_basis(
+    *,
+    native_nav_levels: "pd.Series",
+    native_day_pnl: "pd.Series",
+    native_flow_by_day: dict[str, float],
+    flows: "list[Any]",
+    close_by_day: "dict[pd.Timestamp, float]",
+    priced_through: "pd.Timestamp",
+) -> "tuple[pd.Series, pd.Series] | None":
+    """``(composed_day_pnl, composed_flows)`` in USD for a hole-free native key, else ``None``.
+
+    164.6.6.2.3 plan 06. Pure bookkeeping on the levels the key's returns were chained from:
+    the USD level on each calendar day from the first NAV day to ``priced_through`` is the
+    native realized level (the last level on or before the day) x that day's own close, and
+    ``nav_twr.level_day_pnl`` turns those levels and the persisted USD flows into
+    ``P_d = L_d - L_{d-1} - F_d`` (the shared builder, no second subtraction). ``None`` when any
+    day on that calendar has no usable close: a level is never priced on a neighbour's close."""
+    import pandas as pd
+
+    from services.nav_twr import _flows_to_daily_usd, level_day_pnl
+
+    if native_nav_levels.empty or native_day_pnl.empty:
+        return None
+    native_levels = {
+        pd.Timestamp(ts).normalize(): float(level)
+        for ts, level in native_nav_levels.sort_index().items()
+    }
+    pnl_by_day = {pd.Timestamp(ts).normalize(): float(v) for ts, v in native_day_pnl.items()}
+    first = min(native_levels)
+    if first > priced_through or first not in pnl_by_day:
+        return None
+    days = list(pd.date_range(first, priced_through, freq="D"))
+    if any(day not in close_by_day for day in days):
+        return None
+
+    usd_levels: list[float] = []
+    carried: float | None = None
+    for day in days:
+        carried = native_levels.get(day, carried)
+        if carried is None:
+            return None
+        usd_levels.append(carried * close_by_day[day])
+    # The native capital before the first day, off the fold's own day-0 identity
+    # ``N_0 = N_{-1} + P_0 + f_0``, priced at the first day's close (about 0 on a full history).
+    prev0_native = native_levels[first] - pnl_by_day[first] - native_flow_by_day.get(
+        first.date().isoformat(), 0.0
+    )
+    prev0_usd = prev0_native * close_by_day[first]
+
+    limit = priced_through.date().isoformat()
+    composed_flows = _flows_to_daily_usd([f for f in flows if f.utc_day_iso <= limit])
+    index = pd.DatetimeIndex(days).as_unit("us")
+    composed_day_pnl = level_day_pnl(
+        pd.Series(usd_levels, index=index, name="nav"), composed_flows, prev0=prev0_usd
+    )
+    return composed_day_pnl, composed_flows
+
+
+def _ccxt_full_history_verdict(
+    venue: str, realized: Any, funding: Any, now_utc: datetime
+) -> bool:
+    """164.6.6.2.3 D-11: is a ccxt account's history full, so its first day may be the
+    inception day (D-01)? ONE verdict for BOTH ccxt paths that build an account's daily
+    returns: the single-key derive and the stitched-composite member
+    (``_reconstruct_ccxt_member``), each handing it the same P&L inputs its combine receives.
+
+    The input is the first day of the account's P&L HISTORY (the realized records plus the
+    funding rows, keyed exactly as ``trades_to_daily_returns_with_status`` keys a record),
+    NOT the first fetched flow. The flow fetch starts at the retention floor, so a verdict on
+    fetched flows would be True for every account by construction; the first deposit of an
+    account is on or before its first P&L day, so a P&L history that starts before the
+    floor is proof of capital older than the cap. The verdict itself is
+    ``nav_twr.ccxt_history_reaches_inception``, the existing DQ-02 coverage terminus.
+
+    Bybit note: its P&L fetch bound is the same 365 days as its deposit floor
+    (``exchange.fetch_daily_pnl``), so this is True for every Bybit account. What keeps a
+    Bybit account whose first deposit is older than the cap out of the inception rule is the
+    core predicate (``chain_linked_twr``): the older deposit is unfetched, so the day-0 base
+    is real capital above ``residual_abs_tol``. OKX is different: its realized P&L reads the
+    bills archive, so its history can predate the 90-day floor and this is then False.
+
+    ``False`` when there is no record to measure (today's behaviour). ``now_utc`` is the
+    caller's own instant, so the verdict and that site's flow-fetch floor share one clock."""
+    import pandas as pd
+
+    from services.broker_dailies import funding_rows_to_daily_pnl_records
+    from services.nav_twr import ccxt_history_reaches_inception
+
+    records = list(realized) + funding_rows_to_daily_pnl_records(funding)
+    if not records:
+        return False
+    stamps = pd.to_datetime(
+        pd.Series([r["timestamp"] for r in records]), format="ISO8601", utc=True
+    )
+    first = stamps.min()
+    if pd.isna(first):
+        return False
+    return ccxt_history_reaches_inception(
+        venue, pd.Timestamp(first.date()), now_utc.replace(tzinfo=None)
     )
 
 
@@ -4304,9 +4450,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # allocated-capital path, whose key_inputs row then carries no such field.
         _day_pnl_usd: "pd.Series | None" = None
         # 167.1.2.2.1 D-06: the flows the writer's NAV obeys (native quantity x the day mark),
-        # set ONLY on the Deribit key-mode NAV path beside ``_day_pnl_usd``. Stored with it so the
-        # allocator compose rolls on the writer's own basis. ``None`` for every other venue.
+        # set on the Deribit key-mode NAV path beside ``_day_pnl_usd`` and, since 164.6.6.2.3, on
+        # the MT5 key-mode path (the day-summed account-unit flows the deal fold's NAV obeys).
+        # Stored with it so the allocator compose rolls on the writer's own basis. ``None`` for
+        # every other venue.
         _composed_flows_usd: "pd.Series | None" = None
+        # 164.6.6.2.3 plan 06: the writer's day P&L when it is NOT ``_day_pnl_usd``. A native-unit
+        # (BTC) MT5 key's ``_day_pnl_usd`` is the native P&L x its day's close (the dropped-day
+        # P&L the compose reads); its writer basis is the USD LEVEL identity, which also carries
+        # the revaluation of the held balance. ``None`` everywhere else, where the basis P&L is
+        # ``_day_pnl_usd`` itself.
+        _composed_day_pnl_usd: "pd.Series | None" = None
         # CR-01 (167.1.2.2 round 1): the REALIZED terminal the NAV above was rolled back from,
         # ``(last NAV day, USD)``. It is NOT the live equity the epilogue stores as
         # ``anchor_usd``: MT5 rolls from ``equity - upnl``, Deribit from the native balance less
@@ -6234,6 +6388,16 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 ExternalFlow(utc_day_iso=_day, usd_signed=_amt)
                 for _day, _amt in sorted(_mt5_flow_by_day.items())
             ]
+            if is_key_mode and not _native_key_usd and _day_pnl_usd is not None:
+                # 164.6.6.2.3 plan 06 (D-14): the writer basis for a USD MT5 key. The fold's NAV
+                # obeys exactly these flows (``mt5_day_pnl`` = ``NAV_t - NAV_{t-1} - F_t`` over
+                # the SAME day-summed account-unit flows), so storing them beside the day P&L lets
+                # the compose roll on the writer's own levels whatever return convention the
+                # stored returns use. One summing rule: ``nav_twr._flows_to_daily_usd``, the one
+                # the day P&L itself is built from.
+                from services.nav_twr import _flows_to_daily_usd
+
+                _composed_flows_usd = _flows_to_daily_usd(external_flows)
             if _native_key_usd:
                 # ⭐ 164.6.6.2.1 / D-03, D-09 — everything above is NATIVE (BTC). From here
                 # the key's inputs are the USD ones derived from it, so the per-key series,
@@ -6253,6 +6417,26 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 _day_pnl_usd = _usd_key.day_pnl
                 _realized_terminal = _usd_key.realized_terminal
                 external_flows = _usd_key.flows
+                # 164.6.6.2.3 plan 06 (D-14): the writer basis of a hole-free key (``None`` for
+                # a holed one, which composes in segments).
+                _composed_day_pnl_usd = _usd_key.composed_day_pnl
+                _composed_flows_usd = _usd_key.composed_flows
+                _segment_terminals = _usd_key.segment_terminals
+                if _segment_terminals and int(meta.get("flow_timing_timed_days", 0)) > 0:
+                    # A holed key whose days were measured on a DayTiming returns cohort
+                    # returns, which the segment roll (an inversion of the stored returns from
+                    # the stored terminal) cannot reproduce. Withhold the terminals: the compose's
+                    # existing missing-terminal rule then composes the key unsplit and raises
+                    # key_inputs_mismatch (blocking) rather than rolling silently wrong levels.
+                    # Counts only (T-164.6.6.2.3-16).
+                    logger.warning(
+                        "derive_broker_dailies: native mt5 key has %d interior unpriced hole(s) "
+                        "and %d timed flow day(s) - segment terminals withheld, the book "
+                        "reports key_inputs_mismatch (164.6.6.2.3 plan 06)",
+                        len(_segment_terminals),
+                        int(meta.get("flow_timing_timed_days", 0)),
+                    )
+                    _segment_terminals = []
                 _native_usd_inputs = {
                     "native_unit": _mt5_unit.code,
                     "priced_through": _usd_key.priced_through,
@@ -6260,7 +6444,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     # The realized USD level on the last priced day before each interior hole.
                     "segment_terminals": [
                         {"utc_day_iso": _day, "level_usd": _level}
-                        for _day, _level in _usd_key.segment_terminals
+                        for _day, _level in _segment_terminals
                     ],
                 }
         else:
@@ -6498,6 +6682,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 balance_error=balance_error,
                 external_flows=external_flows,
                 open_unrealized_usd=open_unrealized_usd,
+                # 164.6.6.2.3 D-11: the account's first day is its inception when its
+                # P&L history starts inside the venue's flow coverage (the same
+                # verdict the stitched member passes). The derive's own ``_now_utc``.
+                full_history=_ccxt_full_history_verdict(
+                    venue, realized, funding, _now_utc
+                ),
             )
         except NavReconstructionError as exc:
             # A STRUCTURAL NAV/TWR reconstruction failure surfacing from the honest
@@ -6770,7 +6960,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # a row written before them, are both fine (the compose reads a missing field as no
         # dropped-day P&L and composes as before). No payload version exists on this row,
         # so none is bumped. ``dropped_day_pnl`` holds the actual P&L of each day the TWR
-        # left out of the stored returns (the funding day, a flow-dominated day): those
+        # left out of the stored returns (the funding day, a day a guard drops): those
         # days have no return but their P&L is already inside the account's NAV.
         if _day_pnl_usd is not None:
             from services.allocator_equity_derive import dropped_day_pnl_payload
@@ -6798,11 +6988,16 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             from services.allocator_equity_derive import realized_terminal_payload
 
             _key_inputs_payload.update(realized_terminal_payload(*_realized_terminal))
+        # 164.6.6.2.3 plan 06: the P&L the basis stores. A native-unit MT5 key stores its USD
+        # level identity (``_composed_day_pnl_usd``); every other venue stores ``_day_pnl_usd``.
+        _basis_day_pnl = (
+            _composed_day_pnl_usd if _composed_day_pnl_usd is not None else _day_pnl_usd
+        )
         if (
             venue in WRITER_BASIS_VENUES
             and _composed_flows_usd is not None
-            and _day_pnl_usd is not None
-            and not _day_pnl_usd.empty
+            and _basis_day_pnl is not None
+            and not _basis_day_pnl.empty
             and _realized_terminal is not None
         ):
             # 167.1.2.2.1 D-06 (founder 2026-10-10): the writer's own composed flows and day
@@ -6810,13 +7005,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # from ``realized_terminal_*`` through exactly these, so it reproduces the writer's
             # levels instead of drifting through the event-time ``flows`` field (D-03: a stored
             # input). Additive: the event-time ``flows`` and every other field are unchanged,
-            # and a payload with neither field is the old row. Deribit NAV path only; the MT5
-            # and ccxt payloads never set ``_composed_flows_usd`` (``WRITER_BASIS_VENUES``).
-            # No amount is logged.
+            # and a payload with neither field is the old row. The Deribit NAV path and the MT5
+            # key-mode path (164.6.6.2.3) set ``_composed_flows_usd``; the ccxt payloads never do
+            # (``WRITER_BASIS_VENUES``). No amount is logged.
             from services.allocator_equity_derive import writer_basis_payload
 
             _key_inputs_payload.update(
-                writer_basis_payload(_day_pnl_usd, _composed_flows_usd)
+                writer_basis_payload(_basis_day_pnl, _composed_flows_usd)
             )
         if _native_inception_verdict is not None:
             _key_inputs_payload["native_inception"] = _native_inception_verdict
@@ -7103,7 +7298,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 
     # 74-04 NaN policy (74-01 sink-(b) finding). The flow-aware core
     # (services.nav_twr) emits np.nan for a GUARDED day (estimated_start<=0 ->
-    # negative_nav_guard, dust, or flow-dominated) rather than silently
+    # negative_nav_guard, dust, or P&L-dominated) rather than silently
     # substituting a floor. csv_daily_returns is DOUBLE PRECISION (it *stores*
     # NaN), but the postgrest-py/httpx JSON encoder raises "Out of range float
     # values are not JSON compliant: nan" BEFORE the request is sent — so a NaN
@@ -7448,7 +7643,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 
     # DQ-02 + DQ-01 (v1.8): PRE-STAMP the coverage terminus flag AND the DQ-01
     # NAV-denominator guard flags (negative_nav_guard / dust_nav_guard /
-    # flow_dominated_guard) onto strategy_analytics so the CSV analytics run
+    # pnl_dominated_guard) onto strategy_analytics so the CSV analytics run
     # (run_csv_strategy_analytics) SURFACES them → complete_with_warnings.
     # csv_daily_returns carries ONLY the interpretable return rows — a
     # guard-broken day is np.nan and SKIPPED at write time (74-04 NaN policy),
@@ -7500,6 +7695,20 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # data_quality_flags wholesale, so a re-derive that no longer has such a day clears it.
     if meta.get("small_base_measured"):
         _prestamp_flags["small_base_measured"] = True
+    # 164.6.6.2.3 / D-07 — a flow counted at the end of its day (the venue gave no time of day)
+    # is an INFO note, "flow timing at day level". BOOL only (the day counts the core also
+    # returns are never persisted, T-73-02), present-only, and NEVER a member of
+    # NAV_TWR_GUARD_KEYS: membership promotes a row to complete_with_warnings, and a note is
+    # not a warning. The prestamp replaces data_quality_flags wholesale, so a re-derive that
+    # no longer has such a day clears it.
+    if meta.get("flow_timing_day_level") is True:
+        _prestamp_flags["flow_timing_day_level"] = True
+    # 164.6.6.2.3 / D-15 — a measured day-level flow day whose flow was at least the prior NAV
+    # reads as an extreme return on the end-of-day formula; it is kept and ANNOTATED, same
+    # rules as the two annotations above: BOOL only, present-only, `is True`, NEVER a member of
+    # NAV_TWR_GUARD_KEYS (an annotation on a kept day is not a warning).
+    if meta.get("flow_timing_day_level_large") is True:
+        _prestamp_flags["flow_timing_day_level_large"] = True
 
     # MTM-01 (Phase 101): this seam now ALSO owns the single-key by-basis write.
     # The prestamp runs BEFORE the CSV finalizer, and the finalizer's _mark_complete
@@ -8637,7 +8846,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         byte-consistent with the derive semantics (research A3 / SC-4). The derive
         path (``run_derive_broker_dailies_job``) is DELIBERATELY not refactored —
         composing the shared primitives here avoids extracting an orchestrator
-        while keeping the MATH single-sourced (research Pitfall 3).
+        while keeping the MATH single-sourced (research Pitfall 3). The D-11
+        full-history verdict (164.6.6.2.3) is shared the same way: both paths call
+        ``_ccxt_full_history_verdict``.
 
         Returns ``(returns, has_option_activity=False, meta)`` in the SAME shape as
         ``_reconstruct_deribit``. ``has_option_activity=False`` keeps the MTM gate
@@ -8749,6 +8960,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             balance_error=balance_error,
             external_flows=external_flows,
             open_unrealized_usd=open_unrealized_usd,
+            # 164.6.6.2.3 D-11: the SAME full-history verdict the single-key derive passes,
+            # from this member's own P&L inputs and the ``_now_utc`` its flow floor uses.
+            full_history=_ccxt_full_history_verdict(venue, realized, funding, _now_utc),
         )
 
         # MUST-2: an unreadable open-uPnL field on a TRUSTWORTHY anchor →
@@ -9882,7 +10096,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # csv_daily_returns above stays for charting only; the headline no longer routes
     # through that recompute, so headline == by-basis.cash_settlement by construction.
     from services.allocated_capital import ALLOCATED_CAPITAL_GUARD_KEYS
-    from services.nav_twr import NAV_TWR_GUARD_KEYS
+    from services.nav_twr import NAV_TWR_GUARD_KEYS, NAV_TWR_LEGACY_GUARD_KEYS
 
     # The by-basis object OMITS an unavailable basis key (SQL NULL never JSON null —
     # Phase 85 CHECK): only computed bases are inserted.
@@ -10056,8 +10270,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     if not _composite_chain_broken:
         merged_flags.pop("twr_chain_broken", None)
     # FACTSHEETTRUTH WR-02: the same drop-stale step for EVERY NAV_TWR_GUARD_KEYS
-    # member. The four reason keys (negative_nav / dust_nav / flow_dominated /
-    # pnl_dominated) are now public text ("it includes {R}",
+    # member. The three reason keys (negative_nav / dust_nav / pnl_dominated; the
+    # flow_dominated key is retired, 164.6.6.2.3 D-05, and is popped next via the legacy
+    # tuple) are now public text ("it includes {R}",
     # src/lib/factsheet/headline-basis.ts), and this path MERGES, so a guard flag an
     # earlier stitch set, or one a since-removed member carried, would otherwise
     # outlive its cause forever. Clear them all, then re-apply THIS stitch's verdict
@@ -10075,6 +10290,12 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # attribution would have to be invented. The fix for that is upstream: the guard
     # NaN days must carry their cause per day through the clip.
     for _flag in NAV_TWR_GUARD_KEYS:
+        merged_flags.pop(_flag, None)
+    # 164.6.6.2.3 D-14: a RETIRED guard key (nothing emits it after D-05) that an earlier stitch
+    # stored on the composite is dropped too. A composite recompute is a fresh computation from
+    # its members, so the stale flag has no cause left; member_warn_flags below cannot re-add
+    # it because it iterates NAV_TWR_GUARD_KEYS only.
+    for _flag in NAV_TWR_LEGACY_GUARD_KEYS:
         merged_flags.pop(_flag, None)
     for _flag, _val in member_warn_flags.items():
         merged_flags[_flag] = _val

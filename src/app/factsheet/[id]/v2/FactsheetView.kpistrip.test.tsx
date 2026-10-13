@@ -537,6 +537,112 @@ describe("FactsheetView hero strip — D-25 small_base_measured server-truth cav
   });
 });
 
+describe("FactsheetView hero strip — 164.6.6.2.3 D-15 flow_timing_day_level_large 'returns can be extreme' caveat", () => {
+  // The same amber caveat small_base_measured drives (one paragraph, the same style); the
+  // large-flow wording says what is different about its days.
+  const LARGE_FLOW_COPY =
+    "Some days carried a deposit or withdrawal at least as large as the balance before it, with no time of day, so their returns can be extreme.";
+  const SMALL_BASE_COPY =
+    "Some days were measured on a very small balance, so their returns can be extreme.";
+
+  function largeFlowPayload(opts: { large?: unknown; small?: unknown }): FactsheetPayload {
+    const p = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturnsSeries(300),
+      benchmark: null,
+    });
+    return {
+      ...p,
+      dataQuality: {
+        composite: false,
+        ...(opts.large === undefined ? {} : { flowTimingDayLevelLarge: opts.large }),
+        ...(opts.small === undefined ? {} : { smallBaseMeasured: opts.small }),
+      },
+    } as unknown as FactsheetPayload;
+  }
+
+  it("renders the returns-can-be-extreme caveat when dataQuality.flowTimingDayLevelLarge is true", () => {
+    const { getByText, queryByText } = renderComposite(largeFlowPayload({ large: true }));
+    expect(getByText(new RegExp(LARGE_FLOW_COPY))).toBeInTheDocument();
+    expect(queryByText(/very small balance/)).not.toBeInTheDocument();
+  });
+
+  it("uses the same amber caveat styling as the small-balance caveat, not a new component", () => {
+    const { getByText } = renderComposite(largeFlowPayload({ large: true }));
+    const el = getByText(new RegExp(LARGE_FLOW_COPY));
+    expect(el.tagName).toBe("P");
+    expect(el.className).toContain("text-micro");
+    expect(el.getAttribute("style") ?? "").toContain("var(--color-warning");
+  });
+
+  it("prints ONE caveat when both flags are true, and the small-balance copy is unchanged", () => {
+    const { container } = renderComposite(largeFlowPayload({ large: true, small: true }));
+    const found = [...container.querySelectorAll<HTMLElement>("p")].filter((p) =>
+      (p.textContent ?? "").includes("their returns can be extreme"),
+    );
+    expect(found).toHaveLength(1);
+    expect((found[0].textContent ?? "").trim()).toBe(`⚠ ${SMALL_BASE_COPY}`);
+  });
+
+  it.each([[false], [undefined], [null], ["true"], [1]])(
+    "renders nothing when the value is %j (strict === true)",
+    (value) => {
+      const { container } = renderComposite(largeFlowPayload({ large: value }));
+      expect(container.textContent).not.toContain("returns can be extreme");
+    },
+  );
+});
+
+describe("FactsheetView hero strip — 164.6.6.2.3 D-07 flow_timing_day_level information note", () => {
+  // n=300 (>=252) so the client-count n<252 heuristic caveat does NOT fire, and a
+  // single-key payload (composite:false): the note is single-key only.
+  const FLOW_TIMING_COPY =
+    "Flow timing at day level: some deposits and withdrawals have no time of day, so on those days we count the flow at the end of the day.";
+
+  function flowTimingPayload(flowTimingDayLevel: unknown): FactsheetPayload {
+    const p = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturnsSeries(300),
+      benchmark: null,
+    });
+    return {
+      ...p,
+      dataQuality: {
+        composite: false,
+        ...(flowTimingDayLevel === undefined ? {} : { flowTimingDayLevel }),
+      },
+    } as unknown as FactsheetPayload;
+  }
+
+  it("renders one note starting 'Flow timing at day level' when dataQuality.flowTimingDayLevel is true", () => {
+    const { container } = renderComposite(flowTimingPayload(true));
+    const found = [...container.querySelectorAll<HTMLElement>("p")].filter((p) =>
+      (p.textContent ?? "").startsWith("Flow timing at day level"),
+    );
+    expect(found).toHaveLength(1);
+    expect((found[0].textContent ?? "").trim()).toBe(FLOW_TIMING_COPY);
+  });
+
+  it.each([[false], [undefined], [null], ["true"], [1]])(
+    "renders nothing when the value is %j (strict === true)",
+    (value) => {
+      const { container } = renderComposite(flowTimingPayload(value));
+      expect(container.textContent).not.toContain("Flow timing at day level");
+    },
+  );
+
+  // Fails if the note is switched to the warning token or given the warning glyph:
+  // D-07 says an information note, never a warning.
+  it("is an information note: the muted token, no warning token, no warning glyph", () => {
+    const { getByText } = renderComposite(flowTimingPayload(true));
+    const el = getByText(/^Flow timing at day level/);
+    expect(el.tagName).toBe("P");
+    expect(el.className).toContain("text-micro");
+    const style = el.getAttribute("style") ?? "";
+    expect(style).toContain("var(--color-text-muted, #64748B)");
+    expect(style).not.toContain("color-warning");
+    expect(el.textContent).not.toContain("⚠");
+  });
+});
+
 describe("FactsheetView hero strip — HARD-05 degraded_members server-truth caveat", () => {
   // n=300 (>=252) so the client-count n<252 heuristic caveat does NOT fire —
   // isolating the SERVER-truth degraded-member signal.

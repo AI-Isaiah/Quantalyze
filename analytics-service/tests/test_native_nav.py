@@ -899,6 +899,54 @@ def test_inception_dust_floor_zero_throughput_orphan_still_breaches() -> None:
         )
 
 
+def _usd_inception_residue_ledger(residue_usd: float, *, full_history: bool) -> NativeLedger:
+    """A USD-family ledger whose rolled day-0 residue is ``residue_usd`` (signed) on 100,000
+    of day-0 deposit. Day 0 only deposits; day 1 earns +50. Backward from the terminal equity
+    T: B(day 1) = T, B(day 0) = T - 50, residue = B(day 0) - 0 - 100000. Throughput 100,050
+    makes the relative dust allowance about $10, so a residue of about $1 is dust to the
+    section-5 gate (and is under its $5 cap)."""
+    return NativeLedger(
+        native_pnl={"USDC": _dense([0.0, 50.0])},
+        terminal_native_equity={"USDC": 100_000.0 + 50.0 + residue_usd},
+        marks={},
+        native_flows=[ExternalFlow("2026-01-01", 100_000.0, "USDC", 100_000.0)],
+        terminal_upnl_native={},
+        full_history=full_history,
+    )
+
+
+@pytest.mark.parametrize("residue_usd", [1.06, -1.06, 4.5, -4.5])
+def test_inception_gate_accepted_residue_does_not_warn_on_day_zero(residue_usd: float) -> None:
+    """WR-03 (round 1) / D-01. The section-5 gate accepts a per-currency dust up to $5 (here
+    1.06, the recorded PROD shape, and 4.5); the chain's own inception test used a $1
+    tolerance, so the SAME certified ledger still raised ``dust_nav_guard`` (or
+    ``negative_nav_guard`` for a negative residue) on day 0 and stayed
+    ``complete_with_warnings``. The gate's verdict now reaches the chain: day 0 is the
+    inception day (no return, no flag), day 1 is measured on the real base.
+
+    NEUTER: dropping ``inception_certified=ledger.full_history`` at the call in
+    ``reconstruct_native_nav_and_twr`` brings the guard back and this test goes RED."""
+    ledger = _usd_inception_residue_ledger(residue_usd, full_history=True)
+    returns, meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+    )
+    assert np.isnan(returns.iloc[0])
+    assert "dust_nav_guard" not in meta and "negative_nav_guard" not in meta
+    assert meta["computation_status_hint"] == "complete"
+    assert returns.iloc[1] == pytest.approx(50.0 / (100_000.0 + residue_usd), abs=1e-12)
+
+
+def test_inception_certified_residue_on_a_retention_capped_ledger_keeps_its_guard() -> None:
+    """Nothing else is widened: the gate does not run on a ``full_history=False`` ledger, so no
+    verdict reaches the chain and the same $1.06 residue keeps today's day-0 label."""
+    ledger = _usd_inception_residue_ledger(1.06, full_history=False)
+    returns, meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"}), venue="okx"
+    )
+    assert np.isnan(returns.iloc[0])
+    assert meta["dust_nav_guard"] is True
+
+
 def test_inception_full_history_false_skips_gate() -> None:
     """§5.3: the SAME breaching ledger with full_history=False does NOT raise — a
     truncated (retention-capped) ledger can never reconcile to zero and must not
@@ -1222,3 +1270,79 @@ def test_blowup_fixture_nav_valuation_matches_hand_model() -> None:
         )
     # d3 (the P&L-dominated day) is intentionally NOT asserted here.
     assert d3 in returns.index  # present, magnitude captured by the xfail repro
+
+
+# ===========================================================================
+# 164.6.6.2.3 plan 07 Task 1 (D-01 / D-11 / D-12): a full-history Deribit ledger's day 0
+# is its INCEPTION, end to end through reconstruct_native_nav_and_twr.
+# ===========================================================================
+
+
+def _deribit_inception_ledger(*, full_history: bool) -> NativeLedger:
+    """A USD-native ledger whose first event is a 5000 deposit on day 0.
+
+    Backward roll from the terminal 6060: B(d4)=6060, B(d3)=6030, B(d2)=5050,
+    B(d1)=5000, pre-history = 5000 - 0 - 5000 = EXACTLY 0, so the section-5 inception gate
+    passes under ``full_history=True`` and ``prev0_usd`` is zero. A second 1000 deposit on
+    d3 is the later flow day (Deribit has no timestamp on its P&L, so it is day level)."""
+    return NativeLedger(
+        native_pnl={"USDC": _dense([0.0, 50.0, -20.0, 30.0])},
+        terminal_native_equity={"USDC": 6060.0},
+        marks={},
+        native_flows=[
+            ExternalFlow("2026-01-01", 5000.0, "USDC", 5000.0),
+            ExternalFlow("2026-01-03", 1000.0, "USDC", 1000.0),
+        ],
+        terminal_upnl_native={},
+        full_history=full_history,
+    )
+
+
+def test_full_history_deribit_day_zero_is_inception_no_warning() -> None:
+    """D-01/D-12: day 0 of a full-history ledger has no return and NO dust or negative
+    flag; a day-0 deposit alone does not set the day-level annotation.
+
+    Neuter (drop ``full_history=ledger.full_history`` from the chain call) and this goes
+    RED: day 0 takes the zero-base guard again."""
+    returns, meta = reconstruct_native_nav_and_twr(
+        _deribit_inception_ledger(full_history=True),
+        indexable_currencies=_INDEXABLE,
+        venue="deribit",
+    )
+    assert pd.isna(returns.iloc[0])
+    assert "dust_nav_guard" not in meta
+    assert "negative_nav_guard" not in meta
+    # The day-0 deposit is the inception, not a day-level flow; the only flow measured at
+    # day level is the d3 deposit.
+    assert meta.get("flow_timing_day_level_days") == 1
+    assert meta["computation_status_hint"] == "complete"
+
+
+def test_not_full_history_deribit_day_zero_keeps_todays_label() -> None:
+    """The SAME ledger with ``full_history=False`` (the section-5 gate skips) keeps
+    today's day-0 behaviour: a zero base is a guarded, labelled day."""
+    returns, meta = reconstruct_native_nav_and_twr(
+        _deribit_inception_ledger(full_history=False),
+        indexable_currencies=_INDEXABLE,
+        venue="deribit",
+    )
+    assert pd.isna(returns.iloc[0])
+    assert meta.get("dust_nav_guard") or meta.get("negative_nav_guard")
+    assert meta["computation_status_hint"] == "complete_with_warnings"
+
+
+def test_deribit_later_flow_day_is_measured_at_day_level() -> None:
+    """D-07/D-10: Deribit carries no per-position P&L attribution, so a later deposit day
+    is measured at day level: the flow counts at the end of the day, the return is
+    exact, and the day sets ``flow_timing_day_level`` (an annotation, never a warning)."""
+    returns, meta = reconstruct_native_nav_and_twr(
+        _deribit_inception_ledger(full_history=True),
+        indexable_currencies=_INDEXABLE,
+        venue="deribit",
+    )
+    # d2: 50 / 5000; d3: (6030 - 5050 - 1000) / 5050 = -20 / 5050 (flow in the numerator).
+    assert returns.iloc[1] == pytest.approx(50.0 / 5000.0, rel=1e-12)
+    assert returns.iloc[2] == pytest.approx(-20.0 / 5050.0, rel=1e-12)
+    assert returns.iloc[3] == pytest.approx(30.0 / 6030.0, rel=1e-12)
+    assert meta.get("flow_timing_day_level") is True
+    assert "flow_dominated_guard" not in meta

@@ -1992,7 +1992,13 @@ function KpiStrip() {
           was under the unit's material equity keeps its exact return and can be
           extreme; this says so. Informational (the day is kept, the chain is not
           broken). Reuses the identical amber caveat pattern above, no new component. */}
-      {payload.dataQuality?.smallBaseMeasured === true && (
+      {/* Phase 164.6.6.2.3 (D-15, founder 2026-10-12): the same caveat is also driven by
+          data_quality_flags.flow_timing_day_level_large, a measured day-level flow day whose
+          deposit or withdrawal was at least the balance before it. One paragraph, so both
+          flags never print two caveats; the small-balance sentence keeps its copy and the
+          large-flow case says what is different about its day. */}
+      {(payload.dataQuality?.smallBaseMeasured === true ||
+        payload.dataQuality?.flowTimingDayLevelLarge === true) && (
         <p
           className="px-3 sm:px-4 py-2 text-micro font-mono"
           style={{
@@ -2000,7 +2006,26 @@ function KpiStrip() {
             color: "var(--color-warning, #B45309)",
           }}
         >
-          ⚠ Some days were measured on a very small balance, so their returns can be extreme.
+          {payload.dataQuality?.smallBaseMeasured === true
+            ? "⚠ Some days were measured on a very small balance, so their returns can be extreme."
+            : "⚠ Some days carried a deposit or withdrawal at least as large as the balance before it, with no time of day, so their returns can be extreme."}
+        </p>
+      )}
+      {/* Phase 164.6.6.2.3 FLOWTIMING (D-07): server-truth flag from
+          data_quality_flags.flow_timing_day_level. Some deposit or withdrawal days
+          have no time of day, so the return counts that flow at the end of the day.
+          An information note, never a warning: the muted token and no glyph (the
+          same muted value headlineNoteColor gives a non-withheld note). Reuses the
+          caveat paragraph above, no new component. */}
+      {payload.dataQuality?.flowTimingDayLevel === true && (
+        <p
+          className="px-3 sm:px-4 py-2 text-micro font-mono"
+          style={{
+            borderTop: "1px solid var(--color-border)",
+            color: "var(--color-text-muted, #64748B)",
+          }}
+        >
+          Flow timing at day level: some deposits and withdrawals have no time of day, so on those days we count the flow at the end of the day.
         </p>
       )}
       {spanNote && (

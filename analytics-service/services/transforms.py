@@ -6,6 +6,11 @@ from typing import TYPE_CHECKING, Any, TypedDict
 import numpy as np
 import pandas as pd
 
+# 167.1.2 D-27: the heuristic-capital anchor threshold below IS the USD dust floor. account_unit is
+# a leaf module (it imports only services.external_flows), so this module-level import cannot
+# close a cycle with services.nav_twr, which imports from this module.
+from services.account_unit import USD_FLOORS
+
 if TYPE_CHECKING:
     # NavTWRMeta extends ReturnsComputationMeta with the additive DQ-01 guard
     # keys. Imported under TYPE_CHECKING only: the runtime import of the core
@@ -87,6 +92,7 @@ def trades_to_daily_returns_with_status(
     *,
     external_flows: Sequence[Any] | None = None,
     open_unrealized_usd: float = 0.0,
+    full_history: bool = False,
 ) -> tuple[pd.Series, "NavTWRMeta"]:
     """Audit-2026-05-07 #9 — same conversion as ``trades_to_daily_returns``
     but ALSO returns a ``ReturnsComputationMeta`` describing how
@@ -104,6 +110,11 @@ def trades_to_daily_returns_with_status(
             DISTINCT from "balance legitimately None" (e.g. drained
             paper account); pre-fix the API collapsed both into a bare
             None and the factsheet showed degraded numbers as canonical.
+        full_history: 164.6.6.2.3 D-01/D-11. ``True`` declares that the trades start at
+            the account's inception, so day 0 of the reconstructed series is the
+            inception day when it carries a positive flow on a base within tolerance of
+            zero (no dust / negative flag, no return). Forwarded to the core unchanged.
+            Default ``False`` is byte-identical to every existing caller.
 
     Returns:
         ``(returns, meta)`` where ``meta`` is a ``ReturnsComputationMeta``
@@ -161,10 +172,16 @@ def trades_to_daily_returns_with_status(
         # The docstring is explicit about intent ("ignore dust accounts,
         # e.g., $0.50 after withdrawal"), so the threshold should be a
         # small absolute number well above genuine dust but well below
-        # any real trading balance. $1,000 USDT mirrors the audit's
-        # explicit example and is the smallest defensible institutional
-        # balance — below that, the % returns are likely already gibberish.
-        _DUST_BALANCE_THRESHOLD = 1000.0  # USDT — fixed, not PnL-scaled
+        # any real trading balance.
+        #
+        # 167.1.2 D-27: that number is the USD dust floor itself
+        # (``USD_FLOORS.dust_nav``, 100 USD, equal to the material-equity line), so
+        # one threshold means "too small to measure" everywhere. The audit's
+        # original $1,000 was a second literal of the same idea; a $100-$999
+        # balance is real capital and is the anchor, not a reason to fabricate a
+        # heuristic base of at least $10,000 that mis-sizes every return. The
+        # point of C-0233 stands: the floor is fixed and absolute, not PnL-scaled.
+        _DUST_BALANCE_THRESHOLD = USD_FLOORS.dust_nav  # USD — fixed, not PnL-scaled
         min_balance = _DUST_BALANCE_THRESHOLD
         if account_balance and account_balance > min_balance:
             # Real exchange anchor: today's balance IS the terminal NAV. The core
@@ -206,6 +223,7 @@ def trades_to_daily_returns_with_status(
             anchor_nav,
             external_flows=external_flows,
             open_unrealized_usd=open_unrealized_usd,
+            full_history=full_history,
         )
         return returns, _merge_status_meta(
             nav_meta,
@@ -221,8 +239,9 @@ def trades_to_daily_returns_with_status(
 
     # audit-2026-05-07 C-0233 — fixed absolute dust floor (not PnL-scaled), same
     # as the daily_pnl branch: one outlier day must not force the heuristic
-    # branch when the caller has a legitimate institutional balance.
-    min_balance_t = 1000.0  # USDT — fixed dust floor, matches daily_pnl path
+    # branch when the caller has a legitimate real balance. 167.1.2 D-27: the
+    # floor is the USD dust floor (``USD_FLOORS.dust_nav``), not a separate 1000.
+    min_balance_t = USD_FLOORS.dust_nav  # USD — fixed dust floor, matches daily_pnl path
     if account_balance and account_balance > min_balance_t:
         # Real anchor: today's balance is the terminal NAV (SC-4 byte-identity
         # for estimated_start>0). A reconstructed non-positive base now FLAGS via
@@ -250,6 +269,7 @@ def trades_to_daily_returns_with_status(
         anchor_nav,
         external_flows=external_flows,
         open_unrealized_usd=open_unrealized_usd,
+        full_history=full_history,
     )
     return returns, _merge_status_meta(
         nav_meta,
@@ -300,7 +320,7 @@ def _merge_status_meta(
     function is the single place the two signal families combine:
     ``complete_with_warnings`` iff the heuristic was used OR the balance read
     errored OR any core warn flag fired. The additive keys (dust/negative/
-    flow-dominated NAV guards + the FLOW-04 ``unrealized_pnl_in_anchor`` /
+    P&L-dominated NAV guards + the FLOW-04 ``unrealized_pnl_in_anchor`` /
     DQ-02 ``flow_coverage_incomplete``) are carried THROUGH onto the returned meta
     so 74-03 can lift them into the data-quality flags — the core's judgment is the
     single source and is never dropped here (MEDIUM-1)."""
@@ -344,6 +364,17 @@ def _merge_status_meta(
         meta["pre_summary_rollout_option_dailies"] = nav_meta[
             "pre_summary_rollout_option_dailies"
         ]
+    # 164.6.6.2.3 D-07: the flow-timing note rides its OWN present-only carry, OUTSIDE the
+    # guard loop above and after `guard_fired` was computed, so it can never promote the
+    # hint or feed the warn decision. An INFORMATIONAL annotation (a deposit or withdrawal was
+    # counted at the end of its day because the venue gave no time of day), a BOOL only: the
+    # in-process day counts the core also returns are never carried (T-73-02).
+    if nav_meta.get("flow_timing_day_level") is True:
+        meta["flow_timing_day_level"] = True
+    # 164.6.6.2.3 D-15: same present-only carry for the large-flow annotation (a day-level flow
+    # at least the prior NAV, whose end-of-day return can be extreme). Never a warning.
+    if nav_meta.get("flow_timing_day_level_large") is True:
+        meta["flow_timing_day_level_large"] = True
     return meta
 
 

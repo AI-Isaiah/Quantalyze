@@ -29,7 +29,7 @@ from services.broker_dailies import combine_realized_and_funding
 from services.deribit_txn import deribit_dated_external_flows_usd
 from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
 from services.metrics import periods_per_year_for_asset_class
-from services.nav_twr import NavReconstructionError
+from services.nav_twr import NavReconstructionError, reconstruct_nav_and_twr
 from tests.fixtures.deribit_flow_fixtures import (
     BTC_INDEX_2026_03_14,
     BTC_INDEX_2026_03_16,
@@ -743,30 +743,33 @@ class TestLtp068AcceptanceSubNavPureFlow:
         ), "dropping the load-bearing flow must change the reconstructed result"
 
 
-class TestLtp068AcceptanceDominatingWithdrawal:
-    """FLOW-02 acceptance (75-CONTEXT.md SC4, reconciled) — the DOMINATING case.
-    LTP068's motivating event was a ~$2.5M withdrawal that DWARFED prior-day
-    capital. When the valued ``|F| >= NAV_{t-1}`` (FLOW_DOM_RATIO=1.0) the
-    chain-link is not interpretable, so ``reconstruct_nav_and_twr`` breaks the
-    day (``r_t = NaN``) and raises ``flow_dominated_guard`` +
-    ``complete_with_warnings`` — the CORRECT honest behavior. It never fabricates
-    a +/-100% day and never collapses to ``r_t == 0``.
+class TestLtp068AcceptanceDominatingWithdrawalIsMeasured:
+    """FLOW-02 acceptance (75-CONTEXT.md SC4, reconciled; moved by 164.6.6.2.3 D-05) —
+    the DOMINATING case. LTP068's motivating event was a ~$2.5M withdrawal that
+    DWARFED prior-day capital. When the valued ``|F| >= NAV_{t-1}`` the withdrawal day
+    is now MEASURED, never dropped: a flow of any size neither breaks the day nor
+    warns (D-05). The Deribit flow carries a UTC day and no time of day, so the day
+    is measured at day level (flow counted at the end of the day, D-07) and the
+    ``flow_timing_day_level`` annotation says so; status stays ``complete``.
 
-    Boundary distinction (the subtle SC4 point, 75-RESEARCH.md Pitfall 5 +
-    Open Q2): the SAME machinery yields ``r_t == 0`` for a sub-NAV pure flow
-    (``TestLtp068AcceptanceSubNavPureFlow``) and the guard for a dominating flow
-    (here). BOTH reconciled outcomes are pinned so a future change cannot collapse
-    them into one another.
+    The reference day: prior NAV 80000, a -90000 withdrawal, a +15000 same-day gain.
+    ``r = (NAV_t - NAV_{t-1} - F_t) / NAV_{t-1} = (5000 - 80000 + 90000) / 80000
+    = 15000 / 80000 = 0.1875``. It never fabricates a +/-100% day and never
+    collapses to ``r_t == 0``.
 
-    Mutation-honest: removing the guard would divide the dominating flow through
-    a base it dwarfs and surface a fabricated magnitude instead of NaN -> the
-    ``np.isnan`` assertion reddens."""
+    Boundary distinction (75-RESEARCH.md Pitfall 5 + Open Q2): the SAME machinery
+    yields ``r_t == 0`` for a sub-NAV pure flow (``TestLtp068AcceptanceSubNavPureFlow``)
+    and the gain over the prior capital for a dominating flow (here). BOTH outcomes
+    are pinned so a future change cannot collapse them into one another.
 
-    def test_ltp068_dominating_withdrawal_trips_flow_dominated_guard(self) -> None:
+    Mutation-honest: reinstating a flow-dominance guard turns the day back into NaN
+    with the retired flag and ``complete_with_warnings``, and the ``0.1875``
+    assertion reddens."""
+
+    def test_ltp068_dominating_withdrawal_day_is_measured_at_day_level(self) -> None:
         # The scenario-4 fixture: a -2.0 BTC withdrawal valued via its OWN
         # same-day settlement index (BTC_INDEX_2026_03_16) -> -90000 USD on
-        # 2026-03-16. The guard is about MAGNITUDE, not a valuation failure, so
-        # the flow is fully valued.
+        # 2026-03-16. The flow is fully valued; only its size is in question.
         flows = deribit_dated_external_flows_usd(dominating_withdrawal_rows())
         assert len(flows) == 1
         (flow,) = flows
@@ -775,33 +778,58 @@ class TestLtp068AcceptanceDominatingWithdrawal:
         assert flow.usd_signed < 0.0
 
         # Realized pnl [+800 (03-15), +15000 (03-16)] with anchor 5000
-        # reconstructs NAV_{03-15}=80000; the -90000 withdrawal on 03-16 has
-        # |F|=90000 >= 80000 -> flow_dominated_guard. (The big same-day gain is
+        # reconstructs NAV_{03-15} = 5000 + 90000 - 15000 = 80000; the -90000
+        # withdrawal on 03-16 has |F| = 90000 >= 80000. (The big same-day gain is
         # inherent to a dominating withdrawal: to withdraw MORE than prior-day
-        # capital the day's intraday gains must have funded it — LTP068's LP
-        # withdrew nearly the whole account after an up day.)
+        # capital the day's intraday gains must have funded it.)
         realized = [
-            _daily_pnl_record("2026-03-15", 800.0),  # a normal, non-guarded day
+            _daily_pnl_record("2026-03-15", 800.0),  # a normal day
             _daily_pnl_record(DAY_DOMINATING, 15000.0),
         ]
         returns, meta = combine_realized_and_funding(
             realized, [], account_balance=5_000.0, external_flows=flows
         )
 
-        # The dominating day is NaN (a break) — NOT r_t==0, NOT a fabricated
-        # +/-100% magnitude. Removing the guard would compute a number here.
-        assert np.isnan(returns.loc[DAY_DOMINATING])
-        # The guard fired and it is a WARNING (honest, surfaced), not an error /
-        # permanent fail — the day is flagged, never fabricated.
-        assert meta.get("flow_dominated_guard") is True
-        assert meta["computation_status_hint"] == "complete_with_warnings"
-        # Boundary distinction: ONLY the flow-dominated guard fired here (the
-        # sub-NAV case fires NO guard) — the two SC4 outcomes stay distinct.
+        # Measured: 15000 / 80000 = 0.1875 exactly (the flow cancels in the
+        # numerator and the day's gain is divided by the capital that funded it).
+        assert returns.loc[DAY_DOMINATING] == pytest.approx(0.1875, abs=1e-12)
+        # The retired flag is gone and the day does not warn (D-05) ...
+        assert "flow_dominated_guard" not in meta
+        assert meta["computation_status_hint"] == "complete"
+        # Boundary distinction: no guard of any kind fired.
         assert "negative_nav_guard" not in meta
         assert "dust_nav_guard" not in meta
-        # The normal prior day is a healthy, non-guarded finite return.
-        assert np.isfinite(returns.loc["2026-03-15"])
-        assert returns.loc["2026-03-15"] != 0.0
+        assert "pnl_dominated_guard" not in meta
+        # The normal prior day is a healthy return: 800 / 79200 (NAV_{03-14} =
+        # 80000 - 800), not a zero and not a NaN.
+        assert returns.loc["2026-03-15"] == pytest.approx(800.0 / 79200.0, abs=1e-12)
+
+        # D-07: the day-level rule is NAMED as an annotation: a Deribit flow has no
+        # time of day, so it counts at the end of the day. Asserted on the wrapper's meta
+        # (plan 04's present-only carry in ``transforms._merge_status_meta``) and again at
+        # the core (``reconstruct_nav_and_twr``), where the annotation is produced.
+        assert meta.get("flow_timing_day_level") is True
+        assert "flow_timing_day_level_days" not in meta  # in-process count, never carried
+        # D-15 (F1): |-90000| >= the 80000 prior NAV, so the kept day is annotated as one whose
+        # end-of-day return can be extreme (never a guard: the status stays "complete").
+        assert meta.get("flow_timing_day_level_large") is True
+        assert "flow_timing_day_level_large_days" not in meta
+        core_returns, core_meta = reconstruct_nav_and_twr(
+            pd.Series(
+                [800.0, 15000.0],
+                index=pd.DatetimeIndex(["2026-03-15", DAY_DOMINATING]),
+                name="daily_pnl",
+            ),
+            5_000.0,
+            external_flows=flows,
+        )
+        assert core_returns.loc[pd.Timestamp(DAY_DOMINATING)] == pytest.approx(
+            0.1875, abs=1e-12
+        )
+        assert core_meta.get("flow_timing_day_level") is True
+        assert core_meta.get("flow_timing_day_level_large") is True
+        assert "flow_dominated_guard" not in core_meta
+        assert core_meta["computation_status_hint"] == "complete"
 
 
 class TestLtp068PureFlowNoTradeDayUnioned:
@@ -1600,3 +1628,228 @@ class TestSeriesCompletenessVerdictSeam:
         )
         # And the series really was persisted (the happy path is not vacuous).
         assert len([u for u in capture["upserts"] if u[0] == "csv_daily_returns"]) == 1
+
+
+# ── 164.6.6.2.3 plan 07 (D-01 / D-11): the ccxt derive passes the full-history verdict ──
+# The verdict is the DQ-02 coverage terminus read on the account's P&L HISTORY (not on the
+# fetched flows: the flow fetch starts at the retention floor, so a flow-based verdict would
+# be True for every account). The REAL combine runs; the spy records what the derive handed
+# it. Dates are relative to the live clock because the verdict is relative to it.
+
+
+def _utc_day(days_before_now: int) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(days=days_before_now)).date().isoformat()
+
+
+def _stable_deposit(days_before_now: int, amount: float = 5000.0) -> dict[str, object]:
+    """A USDT deposit row (valued 1.0, no price index needed) at noon UTC."""
+    return {
+        "id": f"dep-{days_before_now}",
+        "type": "deposit",
+        "currency": "USDT",
+        "amount": amount,
+        "timestamp": _utc_day(days_before_now) + "T12:00:00+00:00",
+        "internal": None,
+        "info": {},
+    }
+
+
+async def _ccxt_key_derive_with_real_combine(
+    *,
+    venue: str,
+    realized: list[dict[str, object]],
+    deposits: list[dict[str, object]],
+    equity: float,
+) -> dict[str, object]:
+    """Run a ccxt KEY-MODE derive with the REAL combine behind a spy. Returns what the
+    derive handed the combine (``full_history``, ``external_flows``) and what came back."""
+    import services.broker_dailies as _bd
+
+    real_combine = _bd.combine_realized_and_funding
+    seen: dict[str, object] = {}
+
+    def _spy(*args: object, **kwargs: object) -> tuple[pd.Series, dict]:
+        returns, meta = real_combine(*args, **kwargs)  # type: ignore[arg-type]
+        seen["full_history"] = kwargs.get("full_history", "ABSENT")
+        seen["external_flows"] = list(kwargs.get("external_flows") or [])  # type: ignore[call-overload]
+        seen["returns"] = returns
+        seen["meta"] = meta
+        return returns, meta
+
+    ctx, _capture = _build_ctx(
+        key_row={"id": "key-fh", "exchange": venue, "user_id": "alloc-fh"},
+        strategy_row=None,
+    )
+
+    async def _transfers(_ex: object, kind: str, _since: int, _now: int) -> list:
+        return list(deposits) if kind == "deposits" else []
+
+    patches = [
+        patch("services.job_worker._allocator_key_preflight", new=AsyncMock(return_value=ctx)),
+        patch("services.job_worker.fetch_all_trades", new=AsyncMock(return_value=list(realized))),
+        patch("services.job_worker.aclose_exchange", new=AsyncMock()),
+        patch(
+            "services.exchange.fetch_account_equity_and_upnl_usd",
+            new=AsyncMock(return_value=(equity, False, 0.0, False)),
+        ),
+        patch("services.funding_fetch.fetch_funding_binance", new=AsyncMock(return_value=[])),
+        patch("services.funding_fetch.fetch_funding_okx", new=AsyncMock(return_value=[])),
+        patch("services.funding_fetch.fetch_funding_bybit", new=AsyncMock(return_value=[])),
+        patch(
+            "services.ccxt_flow_fetch.fetch_ccxt_transfers",
+            new=AsyncMock(side_effect=_transfers),
+        ),
+        patch(
+            "services.job_worker._resolve_ccxt_flow_price_index",
+            new=AsyncMock(return_value={}),
+        ),
+        patch("services.broker_dailies.combine_realized_and_funding", new=_spy),
+        patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ),
+    ]
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        result = await run_derive_broker_dailies_job(
+            {"id": "j-fh", "kind": "derive_broker_dailies", "api_key_id": "key-fh"}
+        )
+    seen["result"] = result
+    return seen
+
+
+def _day_zero_unflagged(seen: dict[str, object]) -> bool:
+    meta = seen["meta"]
+    return not (meta.get("dust_nav_guard") or meta.get("negative_nav_guard"))  # type: ignore[union-attr]
+
+
+class TestCcxtFullHistoryVerdictThroughTheDerive:
+    """D-11 on the single-key ccxt derive. Every case asserts the verdict the derive handed
+    the combine AND the day-0 consequence, so neither a dropped keyword nor a wrong input
+    can pass."""
+
+    @pytest.mark.asyncio
+    async def test_binance_first_deposit_on_day_zero_is_inception(self) -> None:
+        """Binance has no deposit cap: full history. A 5000 deposit on day 0 onto a
+        reconstructed zero base is the inception day: no return and no dust/negative flag.
+        Neuter (drop the keyword in the derive) and the zero-base guard returns."""
+        realized = [
+            _daily_pnl_record(_utc_day(6), 0.0),
+            _daily_pnl_record(_utc_day(5), 100.0),
+            _daily_pnl_record(_utc_day(4), 50.0),
+        ]
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="binance", realized=realized, deposits=[_stable_deposit(6)], equity=5150.0,
+        )
+        assert seen["result"].outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        assert seen["full_history"] is True
+        returns = seen["returns"]
+        assert returns.index[0] == pd.Timestamp(_utc_day(6))  # type: ignore[attr-defined]
+        assert np.isnan(returns.iloc[0])  # type: ignore[attr-defined]
+        assert _day_zero_unflagged(seen)
+
+    @pytest.mark.asyncio
+    async def test_okx_pnl_history_older_than_the_floor_is_not_full_history(self) -> None:
+        """The production-reachable False case. OKX realized P&L reads the bills archive, so
+        it starts 120 days ago, before the 90-day deposit floor, while every FETCHED flow
+        (a deposit 30 days ago) sits inside the floor. A verdict on fetched flows would say
+        True here; the P&L history says the account is older than the cap. Day 0 keeps
+        today's behaviour: a real-capital base, measured."""
+        from datetime import datetime, timezone
+
+        from services.nav_twr import flow_retention_floor
+
+        realized = [_daily_pnl_record(_utc_day(120 - i), 10.0) for i in range(0, 118)]
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="okx", realized=realized, deposits=[_stable_deposit(30, 1000.0)],
+            equity=20_000.0,
+        )
+        assert seen["result"].outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        floor_iso = flow_retention_floor("okx", datetime.now(timezone.utc)).date().isoformat()  # type: ignore[union-attr]
+        flows = seen["external_flows"]
+        assert flows and all(f.utc_day_iso >= floor_iso for f in flows)  # type: ignore[attr-defined,union-attr]
+        returns = seen["returns"]
+        assert returns.index[0] == pd.Timestamp(_utc_day(120))  # type: ignore[attr-defined]
+        assert seen["full_history"] is False
+        assert not np.isnan(returns.iloc[0])  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_okx_history_inside_the_floor_with_a_day_zero_deposit_is_inception(self) -> None:
+        realized = [_daily_pnl_record(_utc_day(30 - i), 0.0 if i == 0 else 10.0) for i in range(0, 25)]
+        equity = 5000.0 + 10.0 * 24
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="okx", realized=realized, deposits=[_stable_deposit(30)], equity=equity,
+        )
+        assert seen["result"].outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        assert seen["full_history"] is True
+        returns = seen["returns"]
+        assert returns.index[0] == pd.Timestamp(_utc_day(30))  # type: ignore[attr-defined]
+        assert np.isnan(returns.iloc[0])  # type: ignore[attr-defined]
+        assert _day_zero_unflagged(seen)
+
+    @pytest.mark.asyncio
+    async def test_bybit_older_unfetched_deposit_keeps_todays_day_zero(self) -> None:
+        """Bybit's P&L fetch bound equals its 365-day deposit floor, so its verdict is True
+        for every account. What keeps an account whose first deposit is OLDER than the cap
+        out of the inception rule is the core predicate: the older deposit is unfetched, so
+        the day-0 base is real capital far above the tolerance. Day 0 is measured, exactly as
+        today, even though a later top-up lands on it."""
+        realized = [_daily_pnl_record(_utc_day(60 - i), 10.0) for i in range(0, 50)]
+        seen = await _ccxt_key_derive_with_real_combine(
+            venue="bybit", realized=realized, deposits=[_stable_deposit(60, 1000.0)],
+            equity=20_000.0,
+        )
+        assert seen["result"].outcome == DispatchOutcome.DONE  # type: ignore[attr-defined]
+        assert seen["full_history"] is True
+        returns = seen["returns"]
+        assert returns.index[0] == pd.Timestamp(_utc_day(60))  # type: ignore[attr-defined]
+        assert not np.isnan(returns.iloc[0])  # type: ignore[attr-defined]
+        assert _day_zero_unflagged(seen)
+
+
+class TestCcxtFullHistoryVerdictHelper:
+    """The shared helper itself: it reads the SAME combined input the combine receives."""
+
+    def test_no_record_is_not_full_history(self) -> None:
+        from datetime import datetime, timezone
+
+        from services.job_worker import _ccxt_full_history_verdict
+
+        assert _ccxt_full_history_verdict("binance", [], [], datetime.now(timezone.utc)) is False
+
+    def test_the_earliest_of_realized_and_funding_decides(self) -> None:
+        """A funding row older than every realized record is the account's first P&L day: it
+        is part of the combined input the combine receives, so it must decide the verdict."""
+        from datetime import datetime, timedelta, timezone
+
+        from services.job_worker import _ccxt_full_history_verdict
+
+        now = datetime.now(timezone.utc)
+        realized = [_daily_pnl_record(_utc_day(30), 10.0)]
+        old_funding = [
+            {"amount": 1.0, "timestamp": now - timedelta(days=120)},
+        ]
+        assert _ccxt_full_history_verdict("okx", realized, [], now) is True
+        assert _ccxt_full_history_verdict("okx", realized, old_funding, now) is False
+
+    def test_the_day_is_keyed_in_utc_like_the_combine(self) -> None:
+        """23:30 UTC on the floor's day is that day (on or after the floor), whatever the
+        wall clock; one second before the floor's midnight is the day before (not covered)."""
+        from datetime import datetime, timezone
+
+        from services.job_worker import _ccxt_full_history_verdict
+        from services.nav_twr import flow_retention_floor
+
+        now = datetime(2026, 7, 6, 9, 0, tzinfo=timezone.utc)
+        floor = flow_retention_floor("okx", now)
+        assert floor is not None
+        floor_day = floor.date().isoformat()
+        on_floor = [{**_daily_pnl_record(floor_day, 1.0), "timestamp": floor_day + "T23:30:00+00:00"}]
+        before = [{**_daily_pnl_record(floor_day, 1.0), "timestamp": (floor - pd.Timedelta(seconds=1)).isoformat()}]
+        assert _ccxt_full_history_verdict("okx", on_floor, [], now) is True
+        assert _ccxt_full_history_verdict("okx", before, [], now) is False

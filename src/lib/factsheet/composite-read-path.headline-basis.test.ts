@@ -43,7 +43,9 @@ function mockAdmin(): SupabaseClient {
 }
 
 // The D-12 dqf shape: a composite whose chain broke on a dust balance and a
-// flow-dominated day, measured since a marker day.
+// flow-dominated day, measured since a marker day. The flow-dominated flag is
+// the RETIRED one (164.6.6.2.3 D-14): a stored row keeps it until the recompute,
+// and every reader must ignore it. It stays in this stored shape on purpose.
 const D12_DQF = {
   composite: true,
   twr_chain_broken: true,
@@ -120,6 +122,32 @@ describe("WR-02 — guard reasons are named for a single-key row, never for a co
     const note = headlineCoverageNote(opts.dataQuality, "cash_settlement", "main");
     expect(note?.text).toContain("it includes a break in the return chain");
     expect(note?.text).not.toContain("account balance");
+  });
+
+  // 164.6.6.2.3 D-14: a stored row still carrying the retired flow-dominance flag
+  // names no reason on either surface. Fails if the flag returns to the reader's
+  // flag-to-reason table.
+  it("D-14: a single-key row whose only flag is the retired one names no reason and prints the no-cause copy", async () => {
+    const out = await readSingleKey({
+      twr_chain_broken: true,
+      headline_since: "2026-04-18",
+      flow_dominated_guard: true,
+    });
+    expect(out.dataQuality).toMatchObject({ twrChainBroken: true, headlineCoversFrom: "2026-04-18" });
+    expect("headlineGuardReasons" in (out.dataQuality ?? {})).toBe(false);
+    const note = headlineCoverageNote(out.dataQuality, "cash_settlement", "main");
+    expect(note?.text).toContain("it includes a break in the return chain");
+    expect(note?.text).not.toMatch(/deposit|withdrawal/);
+  });
+
+  it("D-14: beside a real guard, the retired flag adds no second reason", async () => {
+    const out = await readSingleKey({
+      twr_chain_broken: true,
+      headline_since: "2026-04-18",
+      dust_nav_guard: true,
+      flow_dominated_guard: true,
+    });
+    expect(out.dataQuality?.headlineGuardReasons).toEqual(["dust_nav"]);
   });
 
   it("a single-key row with the same flag still names its reason", async () => {

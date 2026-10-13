@@ -184,6 +184,84 @@ class TestTradesToDailyReturnsWithStatus:
         assert "unrealized_pnl_in_anchor" not in meta2
         assert meta2["computation_status_hint"] == "complete"
 
+    def test_flow_timing_day_level_carried_as_a_bool_and_never_promotes(self):
+        """164.6.6.2.3 D-07: the core's ``flow_timing_day_level`` note rides the
+        ``_merge_status_meta`` boundary (the ccxt path) as a present-only BOOL, OUTSIDE the
+        guard loop, so it can never feed ``guard_fired`` or promote the status hint, and the
+        in-process day counts are not carried. This is the wrapper-level carry that
+        ``combine_realized_and_funding`` (and so the Deribit LTP068 path) goes through.
+        Mutation-honest: removing the carry drops the key → RED; moving it into
+        NAV_TWR_GUARD_KEYS promotes the hint → the second assert RED."""
+        import services.transforms as transforms_mod
+
+        meta = transforms_mod._merge_status_meta(
+            {
+                "computation_status_hint": "complete",
+                "flow_timing_day_level": True,
+                "flow_timing_day_level_days": 3,
+                "flow_timing_timed_days": 2,
+            },
+            used_heuristic_capital=False,
+            balance_error=False,
+        )
+        assert meta.get("flow_timing_day_level") is True
+        assert meta["computation_status_hint"] == "complete"
+        assert "flow_timing_day_level_days" not in meta
+        assert "flow_timing_timed_days" not in meta
+
+        # Present-only and strict: a non-True value, or none, is not carried.
+        for bad in (False, None, 1, "true"):
+            m = transforms_mod._merge_status_meta(
+                {"computation_status_hint": "complete", "flow_timing_day_level": bad},
+                used_heuristic_capital=False,
+                balance_error=False,
+            )
+            assert "flow_timing_day_level" not in m, bad
+
+        # Beside a real guard the hint still warns, and the note is still carried.
+        both = transforms_mod._merge_status_meta(
+            {"flow_timing_day_level": True, "dust_nav_guard": True},
+            used_heuristic_capital=False,
+            balance_error=False,
+        )
+        assert both["computation_status_hint"] == "complete_with_warnings"
+        assert both.get("flow_timing_day_level") is True
+
+    def test_flow_timing_day_level_large_carried_as_a_bool_and_never_promotes(self):
+        """164.6.6.2.3 D-15: the large-flow annotation rides the same present-only
+        ``_merge_status_meta`` carry as ``flow_timing_day_level`` (the ccxt path), strictly
+        ``is True``, OUTSIDE the guard loop so it can never promote the hint. Mutation-honest:
+        removing the carry drops the key -> RED."""
+        import services.transforms as transforms_mod
+
+        meta = transforms_mod._merge_status_meta(
+            {
+                "computation_status_hint": "complete",
+                "flow_timing_day_level": True,
+                "flow_timing_day_level_large": True,
+                "flow_timing_day_level_large_days": 2,
+            },
+            used_heuristic_capital=False,
+            balance_error=False,
+        )
+        assert meta.get("flow_timing_day_level_large") is True
+        assert meta["computation_status_hint"] == "complete"
+        assert "flow_timing_day_level_large_days" not in meta  # in-process count only
+        for bad in (False, None, 1, "true"):
+            m = transforms_mod._merge_status_meta(
+                {"computation_status_hint": "complete", "flow_timing_day_level_large": bad},
+                used_heuristic_capital=False,
+                balance_error=False,
+            )
+            assert "flow_timing_day_level_large" not in m, bad
+        both = transforms_mod._merge_status_meta(
+            {"flow_timing_day_level_large": True, "dust_nav_guard": True},
+            used_heuristic_capital=False,
+            balance_error=False,
+        )
+        assert both["computation_status_hint"] == "complete_with_warnings"
+        assert both.get("flow_timing_day_level_large") is True
+
     def test_twr_chain_broken_carried_through_merge_status_meta(self):
         """DQ-03 (§6.2): the core's ``twr_chain_broken`` INTERIOR-chain-break flag
         must survive the ``_merge_status_meta`` boundary onto the returned meta so
@@ -379,7 +457,7 @@ class TestDustThresholdC0233:
     branch even when the caller had a legitimate institutional balance,
     distorting CAGR/Sharpe by 5–10× on the public factsheet.
 
-    Post-fix: threshold is a FIXED absolute floor ($1,000 USDT), so any
+    Post-fix: threshold is a FIXED absolute floor (the USD dust floor, 100 since D-27; $1,000 USDT before), so any
     realistic institutional balance flows through the real-capital
     branch and the factsheet renders accurate numbers."""
 
@@ -413,7 +491,7 @@ class TestDustThresholdC0233:
         """The headline case: account_balance = $1.5M (legitimate
         institutional), max daily PnL = $1M. Pre-fix, min_balance =
         $1M × 2 = $2M so a $1.5M balance (< $2M) still fired the heuristic
-        branch. Post-fix, the fixed $1k floor means real balance wins and the
+        branch. Post-fix, the fixed dust floor (100, D-27) means real balance wins and the
         factsheet renders accurate numbers.
 
         74-02 note: the balance was $500k pre-wiring, but $500k with a $1M
@@ -438,7 +516,7 @@ class TestDustThresholdC0233:
         assert meta["computation_status_hint"] == "complete"
 
     def test_genuine_dust_balance_still_falls_back_to_heuristic(self):
-        """Negative control — a balance BELOW the $1k dust floor (e.g.,
+        """Negative control — a balance BELOW the $100 dust floor (D-27) (e.g.,
         a drained paper account with $50 leftover) MUST still trigger
         the heuristic branch. The fix decouples threshold from PnL
         magnitude; it does not remove dust filtering entirely."""
@@ -448,7 +526,7 @@ class TestDustThresholdC0233:
         )
         assert len(returns) == 2
         assert meta["used_heuristic_capital"] is True, (
-            "balance below the $1k dust floor MUST take the heuristic "
+            "balance below the $100 dust floor (D-27) MUST take the heuristic "
             "branch; the audit fix preserves dust filtering"
         )
 
@@ -488,7 +566,7 @@ class TestDustThresholdC0233:
                 "order_type": "market",
             },
         ]
-        # $50k balance — well above the $1k dust floor, but below the
+        # $50k balance — well above the $100 dust floor (D-27), but below the
         # pre-fix threshold derived from the $510k notional.
         returns, meta = trades_to_daily_returns_with_status(
             trades, account_balance=50_000.0, balance_error=False
@@ -498,6 +576,66 @@ class TestDustThresholdC0233:
             "from per-day PnL magnitude; realistic balance must flow "
             "through the real-capital branch"
         )
+
+
+def _d27_trades(order_type: str) -> list[dict]:
+    """Two days of +10 and +20 P&L. ``daily_pnl`` rows carry the P&L in ``price``; the
+    individual-trades shape uses two buys (notional = price x quantity), which reduce to the
+    same per-day P&L, so both branches roll the same numbers."""
+    return [
+        {
+            "timestamp": f"2026-04-0{day}T10:00:00Z",
+            "symbol": "PORTFOLIO",
+            "side": "buy",
+            "price": price,
+            "quantity": "1",
+            "fee": "0",
+            "order_type": order_type,
+        }
+        for day, price in ((1, "10"), (2, "20"))
+    ]
+
+
+@pytest.mark.parametrize("order_type", ["daily_pnl", "market"], ids=["daily_pnl", "individual"])
+class TestUsdDustFloorD27:
+    """167.1.2 D-27 (Phase 164.6.6.2.3 plan 12): the heuristic-capital anchor threshold of
+    ``trades_to_daily_returns_with_status`` IS the USD dust floor (``USD_FLOORS.dust_nav``, 100),
+    on both branches, so one number means "too small to measure" everywhere. It was a second
+    literal of 1000. The founder's reason: a $100-$999 balance is real capital, so it is the
+    anchor, never replaced by a fabricated base of at least $10k. The ``>`` comparison is
+    unchanged: a balance of exactly the floor still takes the heuristic."""
+
+    def test_a_balance_from_100_to_999_is_the_anchor_not_a_heuristic_base(self, order_type):
+        returns, meta = trades_to_daily_returns_with_status(
+            _d27_trades(order_type), account_balance=500.0, balance_error=False
+        )
+        assert meta["used_heuristic_capital"] is False
+        # The anchor is the real 500: NAV is 500 at the end of day 2, 480 before it and 470
+        # before day 1 (500 - 30). A heuristic base (>= 10000) would give returns near 1e-3.
+        assert float(returns.iloc[0]) == pytest.approx(10.0 / 470.0, rel=1e-9)
+        assert float(returns.iloc[1]) == pytest.approx(20.0 / 480.0, rel=1e-9)
+
+    def test_a_balance_under_100_still_takes_the_heuristic(self, order_type):
+        _returns, meta = trades_to_daily_returns_with_status(
+            _d27_trades(order_type), account_balance=50.0, balance_error=False
+        )
+        assert meta["used_heuristic_capital"] is True
+
+    def test_a_balance_of_exactly_the_floor_still_takes_the_heuristic(self, order_type):
+        """The comparison is ``>``, as it always was: only the number moved (D-27)."""
+        from services.account_unit import USD_FLOORS
+
+        assert USD_FLOORS.dust_nav == 100.0
+        _returns, at_floor = trades_to_daily_returns_with_status(
+            _d27_trades(order_type), account_balance=USD_FLOORS.dust_nav, balance_error=False
+        )
+        _returns, above = trades_to_daily_returns_with_status(
+            _d27_trades(order_type),
+            account_balance=USD_FLOORS.dust_nav + 0.01,
+            balance_error=False,
+        )
+        assert at_floor["used_heuristic_capital"] is True
+        assert above["used_heuristic_capital"] is False
 
 
 class TestCapDataPoints:
@@ -838,3 +976,41 @@ class TestIndividualTradesDelegationDivergence:
             "forbidden estimated_start<=0 -> account_balance substitution "
             "reintroduced on the individual-trades branch"
         )
+
+
+# ---------------------------------------------------------------------------
+# 164.6.6.2.3 plan 07 (D-01 / D-11): ``full_history`` reaches the core on BOTH branches.
+# ---------------------------------------------------------------------------
+
+
+def _fill(ts: str, side: str, price: float) -> dict:
+    return {
+        "timestamp": ts, "symbol": "BTCUSDT", "side": side, "price": str(price),
+        "quantity": "1", "fee": "0", "order_type": "market",
+    }
+
+
+def _inception_fills() -> list[dict]:
+    """Individual fills: day 0 nets to 0, day 1 nets +100 (this branch's convention is
+    ``pnl = sum(buy notional) - sum(sell notional) - fees``). With a 5100 anchor and a 5000
+    deposit on day 0 the reconstructed pre-inception base is exactly zero."""
+    return [
+        _fill("2026-01-01T10:00:00Z", "buy", 100.0),
+        _fill("2026-01-01T11:00:00Z", "sell", 100.0),
+        _fill("2026-01-02T10:00:00Z", "buy", 200.0),
+        _fill("2026-01-02T11:00:00Z", "sell", 100.0),
+    ]
+
+
+def test_full_history_reaches_the_core_on_the_individual_fills_branch() -> None:
+    """The individual-fills branch forwards ``full_history`` (the daily_pnl branch is pinned
+    in test_broker_dailies). Neuter the forward and the day-0 zero-base flag comes back."""
+    kwargs = dict(account_balance=5100.0, external_flows=[("2026-01-01", 5000.0)])
+    on, on_meta = trades_to_daily_returns_with_status(
+        _inception_fills(), full_history=True, **kwargs
+    )
+    assert np.isnan(on.iloc[0])
+    assert "dust_nav_guard" not in on_meta and "negative_nav_guard" not in on_meta
+    off, off_meta = trades_to_daily_returns_with_status(_inception_fills(), **kwargs)
+    assert np.isnan(off.iloc[0])
+    assert off_meta.get("dust_nav_guard") or off_meta.get("negative_nav_guard")

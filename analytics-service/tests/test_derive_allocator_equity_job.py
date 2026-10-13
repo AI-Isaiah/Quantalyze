@@ -1220,16 +1220,33 @@ async def test_pin_m1_nonfinite_equity_persists_null_anchor() -> None:
 
 @pytest.mark.asyncio
 async def test_pin_m2_dust_equity_persists_null_anchor() -> None:
-    """M2: a dust equity (|equity| <= DUST_NAV_FLOOR=$1000) is immaterial — the
+    """M2: a dust equity (|equity| <= DUST_NAV_FLOOR=$100, D-27) is immaterial — the
     epilogue must persist a null anchor, consistent with the function's materiality
-    contract (:2651-2655), never a trustworthy near-zero curve basis."""
-    capture = await _run_key_epilogue_with_equity_read(500.0, balance_error=False)
+    contract (:2651-2655), never a trustworthy near-zero curve basis.
+
+    167.1.2 D-27 moved the floor from 1000 to 100, so the dust equity here is re-aimed from
+    500 to 50; the sibling ``test_pin_m2_d27_500_equity_is_a_real_anchor`` pins the old 500."""
+    capture = await _run_key_epilogue_with_equity_read(50.0, balance_error=False)
     assert _persisted_anchor(capture) is None, (
         "a dust equity must persist anchor_usd null (materiality contract)"
     )
     assert _persisted_null_reason(capture) == "dust", (
         f"a dust equity must stamp anchor_null_reason='dust' (materiality omit); "
         f"got {_persisted_null_reason(capture)!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pin_m2_d27_500_equity_is_a_real_anchor() -> None:
+    """167.1.2 D-27 sibling of ``test_pin_m2_dust_equity_persists_null_anchor``: with the dust
+    floor at 100 an equity of 500 (dust under the old 1000 floor) is a real anchor, so the
+    epilogue persists it and stamps no 'dust' reason. Fails if the floor returns to 1000."""
+    capture = await _run_key_epilogue_with_equity_read(500.0, balance_error=False)
+    assert _persisted_anchor(capture) == pytest.approx(500.0), (
+        "a $500 equity is above the D-27 floor of 100 and must persist as the anchor"
+    )
+    assert _persisted_null_reason(capture) != "dust", (
+        f"a $500 equity must not be stamped dust; got {_persisted_null_reason(capture)!r}"
     )
 
 

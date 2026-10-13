@@ -101,11 +101,16 @@ def test_well_formed_unknown_code_is_unsupported_with_its_code(raw: str) -> None
 
 
 def test_usd_floors_are_todays_constants() -> None:
-    """The USD row is the three constants that were hidden in nav_twr / job_worker:
-    $1000 dust NAV, $100 material equity, $1.00 residual tolerance."""
+    """The USD row: $100 dust NAV, $100 material equity, $1.00 residual tolerance.
+
+    167.1.2 D-27 (founder, "$100") moved ``dust_nav`` from the $1000 it was when these three were
+    hidden in nav_twr / job_worker down to 100, equal to ``material_equity``: ONE threshold means
+    "too small to measure" everywhere, and a $100-$999 base is real capital, not dust."""
     assert USD_FLOORS == UnitFloors(
-        dust_nav=1000.0, material_equity=100.0, residual_abs_tol=1.00
+        dust_nav=100.0, material_equity=100.0, residual_abs_tol=1.00
     )
+    # One threshold is one NUMBER (D-27): the two cannot drift apart again unnoticed.
+    assert USD_FLOORS.dust_nav == USD_FLOORS.material_equity
 
 
 def test_btc_floors_are_the_d24_dust_floor_and_the_unchanged_d20_scaled_pair() -> None:
@@ -133,7 +138,8 @@ def test_btc_floors_are_the_d24_dust_floor_and_the_unchanged_d20_scaled_pair() -
 def test_dust_nav_floor_name_is_an_alias_of_the_usd_row() -> None:
     """Non-MT5 importers (scripts/mt5_soak.py, job_worker, tests) keep importing
     ``DUST_NAV_FLOOR``; it must be the USD row, never a second copy of the number."""
-    assert nav_twr.DUST_NAV_FLOOR == 1000.0
+    # D-27: the USD floor is 100 (it was 1000); the alias identity below is the load-bearing part.
+    assert nav_twr.DUST_NAV_FLOOR == 100.0
     assert nav_twr.DUST_NAV_FLOOR == USD_FLOORS.dust_nav
 
 

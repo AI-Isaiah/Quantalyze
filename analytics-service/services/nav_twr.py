@@ -16,10 +16,15 @@ base:
   2. Chain-link a true daily time-weighted return with the flow in the
      NUMERATOR (end-of-day convention):
      ``r_t = (NAV_t - NAV_{t-1} - F_t) / NAV_{t-1}``  and cumulative ``Π(1+r)-1``.
-  3. Guard EVERY NAV denominator fail-loud (dust / negative / flow-dominated):
-     the day's chain-link breaks and ``computation_status_hint`` becomes
+  3. Guard EVERY NAV denominator fail-loud (dust / negative / pnl-dominated): the
+     day's chain-link breaks and ``computation_status_hint`` becomes
      ``complete_with_warnings`` — a wrong NAV denominator is the harm class this
-     whole milestone kills, so we flag, we never substitute a floor.
+     whole milestone kills, so we flag, we never substitute a floor. A flow, however
+     large, is NOT one of these (164.6.6.2.3 D-05): where a venue supplies the time of
+     day of its flows and position opens, a day is split at each flow and every position
+     is measured against the capital in the account when it was opened (``DayTiming``);
+     elsewhere the flow counts at the end of the day and the strategy says so
+     (``flow_timing_day_level``, an annotation, never a warning).
 
 Purity: stdlib + pandas + numpy + in-repo discipline only. No network, no I/O,
 no DB, no logging of raw NAV/flow USD values (account-size leak — T-73-02).
@@ -34,9 +39,10 @@ Discipline mirrors ``services/deribit_txn.py`` (``LedgerValuationError`` ->
 the single shared UTC-day bucketing helper so a midnight-adjacent flow lands on
 the same ``t`` as the pnl it offsets — Pitfall #11).
 """
+import bisect
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -61,26 +67,28 @@ from services.transforms import ReturnsComputationMeta
 # own unit's floors through the ``floors=`` keyword instead (Phase 164.6.6.2, D-07).
 DUST_NAV_FLOOR = USD_FLOORS.dust_nav
 
-# Flow-dominated guard ratio: when ``|F_t| >= FLOW_DOM_RATIO * NAV_{t-1}`` the
-# external flow dwarfs the prior capital and the day's return is not
-# interpretable — break the link + flag. 1.0 (flow >= 100% of prior NAV) is the
-# conservative locked default (DQ-01); it only raises a WARNING, never alters a
-# computed return, and is tuned against real accounts at the Phase 78 gate.
-FLOW_DOM_RATIO = 1.0
-
-# P&L-dominated guard ratio (Phase 92 HARD-01): the missing sibling of
-# ``FLOW_DOM_RATIO``. Where FLOW_DOM_RATIO guards a dominating external *flow*,
-# this guards a dominating single-day *P&L* on a small-but-above-dust prior NAV
-# — the inverse-perpetual near-zero-equity blow-up class. When the day's P&L
+# P&L-dominated guard ratio (Phase 92 HARD-01): guards a dominating single-day *P&L*
+# on a small-but-above-dust prior NAV — the inverse-perpetual near-zero-equity
+# blow-up class. (Its former sibling, a flow-dominance ratio, was deleted in
+# 164.6.6.2.3 D-05: a flow never drops a day's return.) When the day's P&L
 # numerator ``|cur - prev - F_t| >= PNL_DOM_RATIO * NAV_{t-1}`` the resulting
 # per-day return ``r`` is |r| >= 10 (>=1,000%/day), which is beyond any
 # legitimate daily return: the live blow-up class is 10–100x/day and the phase
 # repro emits ~17x/day (research §a). Break the link + flag (NaN, never a
-# substituted/clamped value), mirroring FLOW_DOM_RATIO exactly. 10.0 is the
-# founder-tunable, warning-locked default — a NO-OP for every normal account so
-# the SC-4 byte-identity pins hold (research §h Q3 / Pitfall 5); tuned against
-# real accounts at the acceptance gate exactly like FLOW_DOM_RATIO.
+# substituted/clamped value). 10.0 is the founder-tunable, warning-locked default
+# — a NO-OP for every normal account so the SC-4 byte-identity pins hold
+# (research §h Q3 / Pitfall 5). On a timed day it is judged per cohort against that
+# cohort's own base (164.6.6.2.3 D-06).
 PNL_DOM_RATIO = 10.0
+
+# 164.6.6.2.3 D-15 (silent-failure hunt F1): the size at which a flow counted at the END of its
+# day (the day-level rule, D-07) is flagged as able to inflate that day's return. It is the
+# retired flow-dominance condition, ``|F_t| >= 1.0 * NAV_{t-1}`` (the former FLOW_DOM_RATIO),
+# kept as an ANNOTATION threshold only: it never drops a day, never breaks the chain and never
+# changes the status (D-05 stands). A day with a prior NAV of 150 and a 50,000 deposit that
+# earned 500 reads +333% on the end-of-day formula; the day is kept and the factsheet says
+# its return can be extreme (``flow_timing_day_level_large``).
+FLOW_TIMING_LARGE_RATIO = 1.0
 
 # Phase 77 FLOW-04 — terminal uPnL wedge materiality (Q5). When the MTM anchor's
 # open-uPnL wedge is |open_unrealized_usd|/anchor_nav > 5%, the realized-basis
@@ -89,8 +97,8 @@ PNL_DOM_RATIO = 10.0
 # only (never alters a return); rides the SAME complete_with_warnings channel as
 # the DQ guards. 5% is the smallest wedge that visibly moves the terminal vs a
 # typical daily return; it sits above measurement noise and below the account-
-# scale guards (DUST_NAV_FLOOR, FLOW_DOM_RATIO) and is tuned against real accounts
-# at the Phase 78 gate exactly like FLOW_DOM_RATIO.
+# scale guards (DUST_NAV_FLOOR, PNL_DOM_RATIO) and is tuned against real accounts
+# at the Phase 78 gate exactly like PNL_DOM_RATIO.
 UNREALIZED_MATERIALITY_RATIO = 0.05
 
 # --- DQ-02 flow-coverage terminus retention (per venue) ----------------------
@@ -132,12 +140,13 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
 
     dust_nav_guard: bool
     negative_nav_guard: bool
-    flow_dominated_guard: bool
+    # The flow-dominance guard is RETIRED (164.6.6.2.3 D-05) and is deliberately NOT declared
+    # here: nothing emits it. A STORED flag is carried only through ``NAV_TWR_LEGACY_GUARD_KEYS``.
     # Phase 92 HARD-01: the day's P&L numerator dwarfed a small-but-above-dust
-    # prior NAV (``|cur - prev - F_t| >= PNL_DOM_RATIO * NAV_{t-1}``) — the
-    # inverse-perpetual near-zero-equity blow-up. The missing sibling of
-    # ``flow_dominated_guard``: FLOW guards a dominating flow, this guards a
-    # dominating P&L day. Break-and-flag (NaN, never substitute); rides the SAME
+    # prior NAV (``|cur - prev - F_t| >= PNL_DOM_RATIO * NAV_{t-1}``; on a timed day
+    # judged per cohort against that cohort's own base, 164.6.6.2.3 D-06) — the
+    # inverse-perpetual near-zero-equity blow-up. Guards a dominating P&L day.
+    # Break-and-flag (NaN, never substitute); rides the SAME
     # complete_with_warnings channel. A BOOL only — never the raw NAV/P&L
     # magnitude (account-size leak, T-73-02 / :24-25 leak discipline).
     pnl_dominated_guard: bool
@@ -203,6 +212,27 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     small_base_measured: bool
     small_base_measured_days: int
     small_base_measured_min_nav: float
+    # Phase 164.6.6.2.3 (D-07) — an ANNOTATION, never a warning: at least one day carrying a
+    # deposit or withdrawal was measured WITHOUT a time of day for the flow, so the flow
+    # counts at the end of that day (today's end-of-day convention) instead of against the
+    # capital each position was opened on. Present only when it fired. ⛔ Deliberately NOT a
+    # member of ``NAV_TWR_GUARD_KEYS`` (no promotion to ``complete_with_warnings``) and not
+    # a chain break: it rides its own present-only carry exactly like ``small_base_measured``.
+    # Only the BOOL is persisted. The two ints are in-process counts for logs and tests:
+    # ``flow_timing_day_level_days`` is how many such days, ``flow_timing_timed_days`` how
+    # many days were measured on a ``DayTiming``. Neither is an amount (T-73-02).
+    flow_timing_day_level: bool
+    flow_timing_day_level_days: int
+    flow_timing_timed_days: int
+    # Phase 164.6.6.2.3 (D-15, silent-failure hunt F1) — an ANNOTATION, never a warning, never a
+    # guard: at least one MEASURED day-level flow day carried a flow at least as large as the
+    # day's prior NAV (``|F_t| >= FLOW_TIMING_LARGE_RATIO * NAV_{t-1}``, the retired
+    # flow-dominance condition). The day keeps its end-of-day return and the chain is not
+    # broken; the factsheet says its return can be extreme. Present only when it fired. Same
+    # carry as ``small_base_measured`` (deliberately NOT in ``NAV_TWR_GUARD_KEYS``). Only the
+    # BOOL is persisted; ``flow_timing_day_level_large_days`` is an in-process count (T-73-02).
+    flow_timing_day_level_large: bool
+    flow_timing_day_level_large_days: int
     # MT5-12 (D-15/D-16) — the SERIES-COMPLETENESS VERDICT: the producing combiner's
     # judgement of whether the raw venue inputs it consumed were WHOLE. One of
     # ``broker_dailies.SERIES_COMPLETENESS_VALUES``; stamped by the combiner that
@@ -237,7 +267,6 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
 NAV_TWR_GUARD_KEYS: tuple[str, ...] = (
     "dust_nav_guard",
     "negative_nav_guard",
-    "flow_dominated_guard",
     "pnl_dominated_guard",
     "flow_coverage_incomplete",
     "unrealized_pnl_in_anchor",
@@ -247,6 +276,16 @@ NAV_TWR_GUARD_KEYS: tuple[str, ...] = (
     "pre_mark_retention_option_dailies",
 )
 
+# 164.6.6.2.3 D-05 / D-14: guard keys that are RETIRED. CARRY-ONLY: no code emits them after
+# D-05 (a flow, however large, never drops a day), so they are in neither ``NAV_TWR_GUARD_KEYS``
+# nor ``NavTWRMeta``. They are read in exactly two places: the CSV-bridge carry in
+# ``analytics_runner.run_csv_strategy_analytics`` (a stored row keeps its old flag, and the
+# ``complete_with_warnings`` it earned, until the Wave 5 recompute re-derives the row, D-14:
+# "Stored rows keep their old flags until the Wave 5 recompute") and the composite drop-stale
+# loop in ``job_worker.run_stitch_composite_job`` (a composite recompute is a fresh computation
+# from members, so it pops them). A fresh derive's pre-stamp never carries one.
+NAV_TWR_LEGACY_GUARD_KEYS: tuple[str, ...] = ("flow_dominated_guard",)
+
 # D-25: the flags ``chain_linked_twr`` may return that are ANNOTATIONS, not warnings. They
 # are deliberately outside ``NAV_TWR_GUARD_KEYS``: ``_build_nav_meta`` neither promotes the
 # status on them nor does any guard-key bridge carry them (see ``small_base_measured``).
@@ -254,7 +293,20 @@ NAV_TWR_ANNOTATION_KEYS: tuple[str, ...] = (
     "small_base_measured",
     "small_base_measured_days",
     "small_base_measured_min_nav",
+    "flow_timing_day_level",
+    "flow_timing_day_level_days",
+    "flow_timing_timed_days",
+    "flow_timing_day_level_large",
+    "flow_timing_day_level_large_days",
 )
+
+# A carry-only key must not also be an emitted guard or an annotation: it would then be
+# carried by two loops with different promotion rules. Checked at import so a future edit
+# that re-adds the retired key to the guard tuple fails at once, not in a downstream test.
+assert not (
+    set(NAV_TWR_LEGACY_GUARD_KEYS)
+    & (set(NAV_TWR_GUARD_KEYS) | set(NAV_TWR_ANNOTATION_KEYS))
+), "NAV_TWR_LEGACY_GUARD_KEYS must be disjoint from the guard and annotation tuples"
 
 
 class NavReconstructionError(ValueError):
@@ -336,9 +388,9 @@ def _union_flow_days(daily_pnl: pd.Series, flows_by_day: pd.Series) -> pd.Series
 
     Placing every flow day into the index (pnl filled 0.0) makes such a day
     flow-neutral: ``pnl_t == 0`` and ``F_t == flow`` so
-    ``r_t == (NAV_t - NAV_{t-1} - F_t)/NAV_{t-1} == 0`` — while a DOMINATING flow
-    on that same day still trips ``flow_dominated_guard`` (the union changes WHICH
-    days exist, never the guard math). Realized cash is never lost: every flow day
+    ``r_t == (NAV_t - NAV_{t-1} - F_t)/NAV_{t-1} == 0`` (the union changes WHICH
+    days exist, never the guard math; a flow of any size is never a reason to drop
+    the day, 164.6.6.2.3 D-05). Realized cash is never lost: every flow day
     is represented. Flow-less input is returned unchanged (SC-4 byte-identity)."""
     if flows_by_day is None or flows_by_day.empty:
         return daily_pnl
@@ -407,6 +459,172 @@ def reconstruct_nav(
     return pd.Series(nav, index=index, name="nav")
 
 
+# 164.6.6.2.3 D-10 venue timing measurement (2026-10-11): which venues carry BOTH a flow
+# instant and a position-open instant on the path that builds their daily series. A venue
+# earns a ``DayTiming`` only when both exist; every other venue uses today's day-level rule
+# (D-07: the flow counts at the end of the day, annotated ``flow_timing_day_level``, never
+# a warning, and no time is ever invented).
+#   * MT5: both. Balance/credit/bonus deals carry ``time_msc``; the first entry-in deal of
+#     a ``position_id`` is the position's open. Intraday (``broker_dailies._fold_mt5_deals``).
+#   * Deribit: DAY LEVEL on the founder's recorded answer FLOWTIMING-Q2 (2026-10-11, ACCEPT;
+#     CONTEXT.md). The raw log has ms timestamps and open/close sides, but its cash / MTM /
+#     smoothed-MTM series bases do not attribute P&L to a position, so there is no open
+#     instant to pair with a flow. Intraday Deribit timing is booked as
+#     [164.6.6.2.3-DERIBIT-INTRADAY-TIMING]. Its day 0 is still the inception day
+#     (``native_nav.reconstruct_native_nav_and_twr`` passes ``full_history``).
+#   * OKX: day level. Flow rows carry a timestamp, but the realized P&L comes from account
+#     bills (per-bill timestamp, no open), so no open instant pairs with a flow.
+#   * Bybit: day level. Closed-pnl rows carry only ``createdTime`` and are summed per day.
+#   * Binance: day level. Income events (realized P&L, commission) are summed per day.
+#   * sFOX: day level. The NAV is a sampled end-of-day balance history with no positions.
+#   * CSV (a hand upload, or the broker-to-CSV bridge): no flows on an upload; the bridge
+#     carries the broker's day-level series. Day level, and no guard is re-run on the bridge.
+
+
+class DayTiming(NamedTuple):
+    """One UTC day's intraday record, pure data built by a venue fold (164.6.6.2.3).
+
+    ``flows``: ``(instant_ms, signed_amount)`` per external flow, ascending by instant
+    (deposit +, withdrawal -), in the same unit as the NAV series. ``pnl``:
+    ``(open_instant_ms | None, cash_effect, realized_instant_ms)`` per trading cash effect.
+    ``open_instant_ms`` is when the POSITION that produced the cash was opened, and ``None``
+    means it was opened before this UTC day (D-04: it belongs to the start-of-day base).
+    ``realized_instant_ms`` is when the cash itself reached the account (the instant of the
+    deal that booked it); it is validated (never before its open) but the D-17 telescoping
+    base does not read it. Every instant is UTC epoch milliseconds
+    (D-08).
+
+    A fold that cannot resolve an instant MUST NOT build a record for that day: the day
+    then takes the day-level rule and says so (D-07). Nothing here, and nothing in
+    ``chain_linked_twr``, ever supplies a default instant (never invent a time)."""
+
+    flows: tuple[tuple[int, float], ...]
+    pnl: tuple[tuple[int | None, float, int], ...]
+
+
+def _is_instant(value: object) -> bool:
+    """An integer epoch-ms instant (a bool is an int subclass and is NOT an instant)."""
+    return isinstance(value, (int, np.integer)) and not isinstance(value, bool)
+
+
+def _validate_day_timing(timing: DayTiming, *, day: object) -> None:
+    """Fail loud on a malformed ``DayTiming`` (the venue-fold trust boundary).
+
+    Instants must be integers, flows must be ascending by instant (the cohort split is a
+    bisect over them), and every amount must be finite. The message names the day and the
+    field, never an amount (T-73-02)."""
+    previous: int | None = None
+    for i, (instant, amount) in enumerate(timing.flows):
+        row = {"day": str(day), "flow_index": i}
+        if not _is_instant(instant):
+            raise NavReconstructionError(f"nav_twr DayTiming flow instant is not an int ({row})")
+        if previous is not None and instant < previous:
+            raise NavReconstructionError(f"nav_twr DayTiming flows not ascending ({row})")
+        previous = int(instant)
+        _coerce_float(amount, field="timing_flow", row=row)
+    for i, (open_instant, cash, realized_instant) in enumerate(timing.pnl):
+        row = {"day": str(day), "pnl_index": i}
+        if open_instant is not None and not _is_instant(open_instant):
+            raise NavReconstructionError(f"nav_twr DayTiming open instant is not an int ({row})")
+        if not _is_instant(realized_instant):
+            raise NavReconstructionError(
+                f"nav_twr DayTiming realized instant is not an int ({row})"
+            )
+        if open_instant is not None and realized_instant < open_instant:
+            # Cash cannot reach the account before the position that produced it opened.
+            raise NavReconstructionError(
+                f"nav_twr DayTiming cash is realized before its position opened ({row})"
+            )
+        _coerce_float(cash, field="timing_pnl", row=row)
+
+
+def _judged_cohorts(
+    prev: float, timing: DayTiming, *, inception: bool
+) -> list[tuple[float, float]]:
+    """The ``(base, pnl)`` of every cohort that is MEASURED on a timed day (D-02/D-17).
+
+    A zero-amount flow is dropped first: it moves no capital, so it must not split the
+    day (D-16: a zero flow is a no-op, and the return is continuous as a flow tends to 0).
+
+    A P&L entry belongs to cohort ``bisect_right(flow_instants, open)``: a flow at the
+    exact instant of an open counts FIRST, because a deposit funds the trade (D-09). An
+    entry opened before the day (``None``) belongs to cohort 0, the start-of-day base
+    (D-04).
+
+    The base is the TELESCOPING base (D-17, founder 2026-10-13, amending D-16):
+    ``B_0 = prev`` and ``B_k = B_{k-1} + P_{k-1} + F_k``, where ``P_{k-1}`` is the earlier
+    cohort's FULL day P&L, realized or not, and ``F_k`` is the flow that opens cohort
+    ``k``. So ``B_k = prev + sum(P_j, j < k) + sum(F_j, j <= k)``. The product of the
+    cohort returns then telescopes to ``(prev + sum P) / prev`` as every flow tends to 0,
+    in every shape, overlap included: a zero flow is an exact no-op and the day return is
+    continuous as a flow tends to 0 (D-16's two required invariants). Only the position's
+    own open time orders the cohorts; no mark-to-market input is read.
+
+    A cohort ``k >= 1`` with no P&L is skipped: nothing was opened on that capital, so it
+    has no return and no guard (its flow still enters every later base). Cohort 0 is
+    always measured, except on an inception day whose cohort 0 holds no P&L: a
+    full-history account has no capital before its first deposit (D-12).
+
+    Accepted cost (D-17, recorded not hidden): an earlier cohort's P&L that is realized
+    only AFTER a later cohort's open still counts as capital in that later base. That is an
+    approximation of the equity at the open, not the cash realized at it. Measured against
+    the literal "realized at the open" base it moves a return by under 1 bp on the non-tiny
+    cases (a 100k deposit on a 10k account: 11.000% literal vs 10.991% telescoping). The
+    literal base was dropped because it jumped 3.0000% to 3.0200% for a $0.000001 flow
+    whenever an earlier position was still open at a later open (R2-02)."""
+    flows = [(instant, amount) for instant, amount in timing.flows if amount != 0.0]
+    instants = [instant for instant, _ in flows]
+    n_cohorts = len(flows) + 1
+    cohort_pnl = [0.0] * n_cohorts
+    for open_instant, cash, _realized_instant in timing.pnl:
+        k = 0 if open_instant is None else bisect.bisect_right(instants, open_instant)
+        cohort_pnl[k] += cash
+    judged: list[tuple[float, float]] = []
+    capital = prev  # prev plus the flows of cohorts 1..k plus the P&L of cohorts 0..k-1
+    for k in range(n_cohorts):
+        if k > 0:
+            capital += flows[k - 1][1]
+        pnl = cohort_pnl[k]
+        if (k > 0 or inception) and pnl == 0.0:
+            # Nothing was opened on this capital (an inception day's cohort 0 has none
+            # before the first deposit, D-12). Its flow already sits in ``capital``.
+            continue
+        judged.append((capital, pnl))
+        capital += pnl
+    return judged
+
+
+def _timed_day_return(
+    prev: float, timing: DayTiming, floors: UnitFloors, *, inception: bool
+) -> tuple[float, str | None]:
+    """One timed day's return ``prod_k(1 + P_k / B_k) - 1`` and the guard key that broke
+    it, if any (164.6.6.2.3 D-02/D-03/D-16/D-17).
+
+    Each position is measured against the capital in the account when it was opened (the
+    earlier flows and the earlier cohorts' day P&L, the D-17 telescoping base), and the sub-period
+    returns are chain-linked (a true time-weighted return,
+    never an end-of-day flow assumption where timestamps exist). The D-06 guards are judged
+    PER COHORT against that cohort's own base, the base D-02 defines: negative, dust, then
+    the P&L-dominated test (the day-level path keeps its whole-day test). A guard returns
+    ``(nan, key)``, a day with nothing to measure returns ``(nan, None)``, and no base is
+    ever clamped, floored or substituted. No flow, however large, is a reason to drop a
+    cohort (D-05)."""
+    judged = _judged_cohorts(prev, timing, inception=inception)
+    if not judged:
+        # An inception day holding no P&L at all: a deposit-only first day. Nothing was
+        # measured, which is not a defect (D-12).
+        return float("nan"), None
+    growth = 1.0
+    for base, pnl in judged:
+        key = _guard_denominator(base, floors.dust_nav)
+        if key is not None:
+            return float("nan"), key
+        if abs(pnl) >= PNL_DOM_RATIO * base:
+            return float("nan"), "pnl_dominated_guard"
+        growth *= 1.0 + pnl / base
+    return growth - 1.0, None
+
+
 def chain_linked_twr(
     nav: pd.Series,
     daily_pnl: pd.Series,
@@ -414,6 +632,9 @@ def chain_linked_twr(
     *,
     prev0: float | None = None,
     floors: UnitFloors = USD_FLOORS,
+    timing: Mapping[pd.Timestamp, DayTiming] | None = None,
+    full_history: bool = False,
+    inception_certified: bool = False,
 ) -> tuple[pd.Series, dict[str, Any]]:
     """Chain-link the daily time-weighted return from a reconstructed NAV series.
 
@@ -424,11 +645,12 @@ def chain_linked_twr(
 
     This function handles only the intrinsic zero-NAV break (a ``NAV_{t-1}`` of
     exactly 0 would divide by zero): that day's return is omitted and the
-    ``negative_nav_guard`` flag is raised. The threshold-based dust / negative /
-    flow-dominated guards live in the fail-loud guard block (DQ-01) which
-    generalises this same break — see ``_guard_denominator``. Phase 92 adds one
-    more break at THIS call site: the ``pnl_dominated_guard`` (the missing
-    sibling of ``flow_dominated_guard``) NaN-breaks a day whose P&L numerator
+    ``negative_nav_guard`` flag is raised. The threshold-based dust / negative
+    guards live in the fail-loud guard block (DQ-01) which generalises this same
+    break — see ``_guard_denominator``. A flow, however large, is no longer one of
+    them (164.6.6.2.3 D-05). Phase 92 adds one
+    more break at THIS call site: the ``pnl_dominated_guard``
+    NaN-breaks a day whose P&L numerator
     dwarfs a small-but-above-dust prior NAV (``|pnl_t| >= PNL_DOM_RATIO * prev``)
     — it lives here, not in ``_guard_denominator``, because that helper is not
     passed the day's P&L.
@@ -443,6 +665,46 @@ def chain_linked_twr(
     day-0 ``prev`` is that supplied value (fail-loud coerced via ``_coerce_float``)
     and the ``_guard_denominator`` guards apply to it UNCHANGED.
 
+    ``timing`` (164.6.6.2.3 D-02/D-03) is an ADDITIVE keyword, a ``{utc_day: DayTiming}``
+    map built by a venue fold. A day it holds is measured by ``_timed_day_return``: each
+    position against the capital in the account when it was opened, the sub-periods
+    chain-linked. Every other day, and every day when ``timing=None`` (default), runs
+    EXACTLY today's end-of-day arithmetic, so every existing caller and test is
+    byte-identical (SC-4).
+
+    ``full_history`` (164.6.6.2.3 D-01/D-12, default ``False`` = byte-identical) declares
+    that the series starts at the account's inception, so the capital before its first
+    deposit is zero by construction. Day 0 is then the INCEPTION day when it carries a
+    positive flow and its reconstructed base is within ``floors.residual_abs_tol`` of zero:
+    float residue of either sign on that base is not evidence of a defect, so no dust or
+    negative flag is raised for it. With a ``DayTiming`` the positions opened after the
+    first deposit are measured against it (day 0 gets a real return); without one day 0
+    has no return and no warning. An interior near-zero base, a real negative day-0 base
+    and any day-0 P&L on a zero base keep their guards (D-06).
+
+    ``inception_certified`` (default ``False`` = byte-identical, 164.6.6.2.3 round 1 WR-03)
+    is for a caller whose OWN reconciliation gate already certified that the day-0 base is the
+    pre-history zero (the native core's section-5 gate, which accepts a per-currency dust up to
+    ``INCEPTION_DUST_CAP_USD`` and a total up to ``max($1, 1e-4 x NAV)`` before it lets a ledger
+    through). The tolerance test above is then not re-run with a second, tighter tolerance:
+    the predicate agrees with the gate that certified the ledger. It widens nothing by itself
+    (it still needs ``full_history`` and a positive day-0 flow) and the interior guards are
+    untouched.
+
+    A day that carries a flow and is measured WITHOUT a ``DayTiming`` (and is not the
+    inception day) counts the flow at the end of the day (D-07). The flags then carry the
+    ANNOTATION ``flow_timing_day_level`` (``True``) and ``flow_timing_day_level_days`` (how
+    many such days); a day measured on a ``DayTiming`` is counted in
+    ``flow_timing_timed_days``. Annotations, not warnings: ``_build_nav_meta`` does not
+    promote the status on them and they are not in ``NAV_TWR_GUARD_KEYS``.
+
+    D-15 (``flow_timing_day_level_large``): a MEASURED day-level flow day whose flow is at
+    least the prior NAV (``|F_t| >= FLOW_TIMING_LARGE_RATIO * NAV_{t-1}``, the retired
+    flow-dominance condition) is also counted in ``flow_timing_day_level_large_days`` and raises
+    the bool ``flow_timing_day_level_large``. The end-of-day formula can read such a day as an
+    extreme return; the day is kept EXACTLY as computed (not a guard: never a drop, never a
+    status change) and the factsheet says its return can be extreme.
+
     Phase 164.6.6.2 D-25 (``small_base_measured``): a day that PASSES every guard and is
     therefore measured, but whose prior NAV is below ``floors.material_equity``, is kept
     EXACTLY as computed and ALSO counted. The flags then carry ``small_base_measured``
@@ -450,14 +712,14 @@ def chain_linked_twr(
     ``small_base_measured_min_nav`` (the smallest prior NAV among them). It is an
     annotation, not a guard: the day keeps its return, the chain is not broken, and
     ``_build_nav_meta`` does not promote the status on it. For the USD row it can never
-    fire (``dust_nav`` 1000 sits above ``material_equity`` 100, so any prior NAV under 100
-    is dust-guarded first); for the BTC row ``dust_nav`` (1e-7) is below ``material_equity``
+    fire (``dust_nav`` equals ``material_equity``, both 100 since 167.1.2 D-27, so any prior
+    NAV under 100 is dust-guarded first); for the BTC row ``dust_nav`` (1e-7) is below ``material_equity``
     (1e-4), which is the zone it covers.
 
     Returns ``(returns, flags)`` where ``returns`` is a ``"returns"``-named
     Series on the NAV DatetimeIndex (broken days are NaN) and ``flags`` maps the
     DQ flag keys that fired to ``True`` (plus the two D-25 counts above when that
-    annotation fired).
+    annotation fired, plus the D-07 annotations above).
     """
     index = nav.index
     flows = _align_flows(flows_by_day, index).to_numpy(dtype=float)
@@ -476,6 +738,9 @@ def chain_linked_twr(
     returns = np.full(n, np.nan)
     small_base_days = 0
     small_base_min_nav = float("inf")
+    timed_days = 0
+    day_level_flow_days = 0
+    large_flow_days = 0
     for t in range(n):
         cur = nav_vals[t]
         flow_t = flows[t]
@@ -486,14 +751,65 @@ def chain_linked_twr(
         else:
             prev = nav_vals[t - 1]  # NAV_{t-1}
 
-        guard_key = _guard_denominator(prev, flow_t, floors.dust_nav)
+        # D-01/D-12: day 0 of a full-history account is its inception. The test reads the
+        # base the day actually uses, so a supplied ``prev0`` (the native core) qualifies too.
+        inception = bool(
+            t == 0
+            and full_history
+            and flow_t > 0
+            and (inception_certified or abs(prev) <= floors.residual_abs_tol)
+        )
+
+        day_timing = None if timing is None else timing.get(index[t])
+        if day_timing is not None:
+            # 164.6.6.2.3 D-02/D-03: a timed day is measured per cohort. The record must
+            # reproduce the day's own level change, or its cohorts would measure a
+            # different day than the NAV series holds (fail loud, never a silent mix).
+            _validate_day_timing(day_timing, day=index[t])
+            timed_sum = sum(a for _, a in day_timing.flows) + sum(
+                entry[1] for entry in day_timing.pnl
+            )
+            if abs((cur - prev) - timed_sum) > max(
+                floors.residual_abs_tol, 1e-6 * abs(cur)
+            ):
+                raise NavReconstructionError(
+                    f"nav_twr DayTiming does not reproduce the day's NAV change "
+                    f"(day={index[t]})"
+                )
+            timed_return, timed_key = _timed_day_return(
+                prev, day_timing, floors, inception=inception
+            )
+            if timed_key is not None:
+                flags[timed_key] = True
+                continue
+            if np.isnan(timed_return):
+                continue
+            returns[t] = timed_return
+            timed_days += 1
+            # D-25 on a timed day: the smallest base any measured cohort used.
+            cohort_min = min(
+                base for base, _ in _judged_cohorts(prev, day_timing, inception=inception)
+            )
+            if cohort_min < floors.material_equity:
+                small_base_days += 1
+                small_base_min_nav = min(small_base_min_nav, cohort_min)
+            continue
+
+        if inception:
+            # D-12: with no timestamps day 0 is the inception day: no return, no warning.
+            continue
+        if flow_t != 0.0:
+            # D-07: this flow counts at the end of its day, because no time of day was
+            # supplied for it. Named per strategy as an annotation, never a warning.
+            day_level_flow_days += 1
+
+        guard_key = _guard_denominator(prev, floors.dust_nav)
         if guard_key is not None:
             flags[guard_key] = True
             continue  # break the chain-link for this day; NEVER substitute
 
-        # Phase 92 HARD-01 — the P&L-magnitude guard, the missing sibling of
-        # flow_dominated_guard. _guard_denominator sees only (prev, flow), not
-        # the day's P&L, so this check lives at the call site (research §b1). A
+        # Phase 92 HARD-01 — the P&L-magnitude guard. _guard_denominator sees only
+        # the base, not the day's P&L, so this check lives at the call site (research §b1). A
         # day whose P&L numerator dwarfs a small-but-above-dust prior NAV
         # (|pnl_t| >= PNL_DOM_RATIO * prev, i.e. |r| >= 10) is not an
         # interpretable return — break the chain (NaN) + flag, mirroring the
@@ -504,6 +820,13 @@ def chain_linked_twr(
             continue
 
         returns[t] = (cur - prev - flow_t) / prev
+
+        # D-15: a MEASURED day-level flow day whose flow is at least the prior NAV (the retired
+        # flow-dominance condition) is kept exactly as computed and COUNTED, because the
+        # end-of-day formula can read it as an extreme return. An annotation: no ``continue``,
+        # no chain break, no status change. ``prev`` is positive here (the guard passed).
+        if flow_t != 0.0 and abs(flow_t) >= FLOW_TIMING_LARGE_RATIO * prev:
+            large_flow_days += 1
 
         # D-25 — a MEASURED day on a base under the unit's material equity: kept exact,
         # counted, never dropped and never a chain break (no ``continue`` here, and the
@@ -516,6 +839,14 @@ def chain_linked_twr(
         flags["small_base_measured"] = True
         flags["small_base_measured_days"] = small_base_days
         flags["small_base_measured_min_nav"] = small_base_min_nav
+    if day_level_flow_days:
+        flags["flow_timing_day_level"] = True
+        flags["flow_timing_day_level_days"] = day_level_flow_days
+    if timed_days:
+        flags["flow_timing_timed_days"] = timed_days
+    if large_flow_days:
+        flags["flow_timing_day_level_large"] = True
+        flags["flow_timing_day_level_large_days"] = large_flow_days
 
     return pd.Series(returns, index=index, name="returns"), flags
 
@@ -528,8 +859,8 @@ def level_day_pnl(
 
     167.1.2.2 D-15. This is the numerator ``chain_linked_twr`` divides by the prior
     NAV, so it is defined on EVERY day, including the ones that function breaks
-    (``negative_nav_guard``, ``flow_dominated_guard``, ...). A broken day has no
-    return but it still has this P&L, and it is already inside ``NAV_t``. The
+    (``negative_nav_guard``, ``dust_nav_guard``, ``pnl_dominated_guard``). A day those
+    guards drop has no return but it still has this P&L, and it is already inside ``NAV_t``. The
     allocator compose needs it on those days: with only the stored returns it can
     only assume the day was flat, which mis-states every earlier level by it.
 
@@ -548,10 +879,10 @@ def level_day_pnl(
 
 
 def _guard_denominator(
-    prev_nav: float, flow: float, dust_floor: float = DUST_NAV_FLOOR
+    prev_nav: float, dust_floor: float = DUST_NAV_FLOOR
 ) -> str | None:
     """Return the DQ-01 flag key if ``prev_nav`` is not a usable denominator,
-    else None. Three fail-loud guards, checked BEFORE the denominator divides —
+    else None. Two fail-loud guards, checked BEFORE the denominator divides —
     each breaks the chain-link for that day and flags, NEVER substitutes a base:
 
       * negative reconstructed NAV (``prev_nav <= 0``, incl. exactly 0 which
@@ -560,26 +891,25 @@ def _guard_denominator(
         flags here instead of silently substituting today's balance.
       * dust NAV (``0 < prev_nav < dust_floor``) -> ``dust_nav_guard`` — a
         percentage return on a sub-floor base is gibberish. ``dust_floor`` is the
-        account unit's ``dust_nav`` (default: the USD $1000 row).
-      * flow-dominated (``|flow| >= FLOW_DOM_RATIO * prev_nav``) ->
-        ``flow_dominated_guard`` — the external flow dwarfs prior capital.
+        account unit's ``dust_nav`` (default: the USD $100 row, 167.1.2 D-27).
+
+    ``flow_dominated_guard`` is deleted (164.6.6.2.3 D-05). A flow, however large,
+    never drops a day's return and never warns: the base a position is measured
+    against is the capital in the account when it was opened, flows included (D-02).
 
     There is deliberately NO clamp/floor/replace here: a guarded day yields NaN
     (a break), never a fabricated number (the forbidden substitution class the
     source-scan test bans).
 
-    NOTE (Phase 92 HARD-01): this helper sees only ``prev_nav`` and ``flow`` — it
-    canNOT judge a P&L-dominated day (the day's P&L is not passed here). Its
-    missing sibling, the ``pnl_dominated_guard``, is therefore wired at the
-    ``chain_linked_twr`` call site (``|pnl_t| >= PNL_DOM_RATIO * prev_nav``),
-    guarding a dominating *P&L* just as ``flow_dominated_guard`` guards a
-    dominating *flow*."""
+    NOTE (Phase 92 HARD-01): this helper sees only ``prev_nav`` — it canNOT judge
+    a P&L-dominated day (the day's P&L is not passed here). The
+    ``pnl_dominated_guard`` is therefore wired at the ``chain_linked_twr`` call site
+    (``|pnl_t| >= PNL_DOM_RATIO * prev_nav``) and, on a timed day, in
+    ``_timed_day_return`` per cohort."""
     if prev_nav <= 0:
         return "negative_nav_guard"
     if prev_nav < dust_floor:
         return "dust_nav_guard"
-    if abs(flow) >= FLOW_DOM_RATIO * prev_nav:
-        return "flow_dominated_guard"
     return None
 
 
@@ -676,6 +1006,21 @@ def _build_nav_meta(flags: Mapping[str, Any]) -> NavTWRMeta:
         meta["small_base_measured"] = True
         meta["small_base_measured_days"] = int(flags["small_base_measured_days"])
         meta["small_base_measured_min_nav"] = float(flags["small_base_measured_min_nav"])
+    # 164.6.6.2.3 D-07: the flow-timing annotations, present-only, outside the guard loop.
+    if flags.get("flow_timing_day_level"):
+        meta["flow_timing_day_level"] = True
+        if "flow_timing_day_level_days" in flags:
+            meta["flow_timing_day_level_days"] = int(flags["flow_timing_day_level_days"])
+    if flags.get("flow_timing_timed_days"):
+        meta["flow_timing_timed_days"] = int(flags["flow_timing_timed_days"])
+    # 164.6.6.2.3 D-15: a large end-of-day flow can inflate a measured day's return. Present-only,
+    # outside the guard loop (an annotation: the status never promotes on it).
+    if flags.get("flow_timing_day_level_large"):
+        meta["flow_timing_day_level_large"] = True
+        if "flow_timing_day_level_large_days" in flags:
+            meta["flow_timing_day_level_large_days"] = int(
+                flags["flow_timing_day_level_large_days"]
+            )
     return meta
 
 
@@ -783,6 +1128,39 @@ def flow_coverage_terminus_day(
     if pd.Timestamp(first_return_day) >= terminus:
         return None  # entire window within retention → no coverage gap
     return terminus
+
+
+def ccxt_history_reaches_inception(
+    venue: str,
+    first_return_day: Any,
+    now_utc: Any,
+) -> bool:
+    """164.6.6.2.3 D-11: does a ccxt account's P&L history start inside the venue's flow
+    coverage, so that its first day can be the inception day (D-01)?
+
+    This is the existing DQ-02 coverage terminus read as a boolean, nothing more: ``True``
+    exactly when ``flow_coverage_terminus_day`` is ``None`` (a no-cap venue, or a first
+    return day on or after ``flow_retention_floor``). There is no second retention
+    definition. D-11 words it as "a capped venue whose first deposit is newer than the
+    cap, through the existing flow_retention_floor".
+
+    The input is the first day of the account's P&L HISTORY, not its first fetched flow.
+    The flow fetch starts at the retention floor, so a verdict on fetched flows would be
+    ``True`` for every account by construction. The first deposit of an account is on or
+    before its first P&L day, so a P&L history that starts before the floor proves capital
+    older than the cap: not full-history. A history that starts on or after the floor is
+    full-history only TOGETHER with the core predicate (``chain_linked_twr``: a positive
+    day-0 flow and a day-0 base within ``residual_abs_tol``). A deposit older than the
+    cap that was never fetched leaves a real-capital base, which fails that predicate, so
+    the account keeps today's day-0 behaviour.
+
+    Pure: ``now_utc`` is supplied by the caller, tz-naive like the returns index."""
+    return (
+        flow_coverage_terminus_day(
+            venue, first_return_day=first_return_day, now_utc=now_utc
+        )
+        is None
+    )
 
 
 def apply_flow_coverage_terminus(
@@ -911,9 +1289,19 @@ def reconstruct_nav_and_twr(
     external_flows: Sequence[Any] | None = None,
     open_unrealized_usd: float = 0.0,
     floors: UnitFloors = USD_FLOORS,
+    timing: Mapping[pd.Timestamp, DayTiming] | None = None,
+    full_history: bool = False,
 ) -> tuple[pd.Series, NavTWRMeta]:
     """Public entry: reconstruct the daily NAV backward from ``anchor_nav`` and
     chain-link the daily time-weighted return.
+
+    ``timing`` (164.6.6.2.3) is forwarded to ``chain_linked_twr`` untouched: a
+    ``{utc_day: DayTiming}`` map whose days are measured against the capital each
+    position was opened on. ``None`` (default) keeps every existing caller byte-identical.
+    NAV levels never depend on it (only ``r_t`` does), so the reconstruction and the
+    DQ-02 residual check above are untouched. ``full_history`` (default ``False``,
+    byte-identical) is forwarded too: it declares the series starts at the account's
+    inception, so day 0's near-zero base is not a defect (see ``chain_linked_twr``).
 
     ``terminal_nav = anchor_nav - open_unrealized_usd`` (realized basis; the
     uPnL wedge defaults to 0.0). With ``external_flows`` empty and
@@ -942,7 +1330,8 @@ def reconstruct_nav_and_twr(
     # a flow on a no-trade day (initial deposit before the first trade; a terminal
     # / quiet-day withdrawal — the LTP068 shape) becomes a valid zero-pnl NAV day
     # (r_t == 0) instead of an orphan that fails the whole job. Placed by
-    # inclusion, so realized cash is never lost and a dominating flow still guards.
+    # inclusion, so realized cash is never lost and a large flow day is still measured
+    # (164.6.6.2.3 D-05: a flow never drops a day).
     daily_pnl = _union_flow_days(daily_pnl, flows_by_day)
     if daily_pnl.empty:
         return pd.Series(dtype=float, name="returns"), _build_nav_meta({})
@@ -973,7 +1362,10 @@ def reconstruct_nav_and_twr(
         flows_by_day,
         abs_tol=floors.residual_abs_tol,
     )
-    returns, flags = chain_linked_twr(nav, daily_pnl, flows_by_day, floors=floors)
+    returns, flags = chain_linked_twr(
+        nav, daily_pnl, flows_by_day, floors=floors, timing=timing,
+        full_history=full_history,
+    )
     # DQ-03 (§6.2): the SAME function that computes the honest cumulative decides
     # brokenness — ONE break-detection semantics, no forked detector. An INTERIOR
     # break (a guard-NaN flanked by valid returns) merges {"twr_chain_broken":

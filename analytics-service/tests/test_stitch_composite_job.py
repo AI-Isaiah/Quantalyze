@@ -2047,7 +2047,7 @@ async def test_d13_other_guard_keys_still_union_from_members() -> None:
     with _apply(_deribit_patches(
         fake,
         combine_returns=[
-            (m1, {"negative_nav_guard": True, "flow_dominated_guard": True}),
+            (m1, {"negative_nav_guard": True, "dust_nav_guard": True}),
             (m2, {"pnl_dominated_guard": True}),
         ],
         has_option_activity=True,
@@ -2057,7 +2057,7 @@ async def test_d13_other_guard_keys_still_union_from_members() -> None:
     headline = _headline_row(fake)
     assert headline is not None
     dq = headline["data_quality_flags"]
-    for k in ("negative_nav_guard", "flow_dominated_guard", "pnl_dominated_guard"):
+    for k in ("negative_nav_guard", "dust_nav_guard", "pnl_dominated_guard"):
         assert dq.get(k) is True, k
     assert "twr_chain_broken" not in dq
     assert headline["computation_status"] == "complete_with_warnings"
@@ -2095,6 +2095,39 @@ async def test_wr02_stale_guard_flags_dropped_on_a_clean_restitch() -> None:
         assert k not in dq, f"stale guard flag {k} outlived the stitch that set it"
     assert dq.get("benchmark_unavailable") is True  # unrelated key preserved
     assert headline["computation_status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_a_composite_recompute_drops_the_retired_flow_dominated_flag() -> None:
+    """164.6.6.2.3 D-14. The flow-dominance guard is retired (D-05): it is carry-only in
+    NAV_TWR_LEGACY_GUARD_KEYS and not in NAV_TWR_GUARD_KEYS, so the WR-02 drop-stale loop
+    alone would let a stale composite keep it forever. A composite recompute is a fresh
+    computation from its members, so the stored legacy key is popped, and a member meta that
+    still names it (stored input) is NOT unioned back, so the composite returns to `complete`.
+    A genuine guard beside it survives. Neuter the legacy pop → the stale key lingers → RED."""
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-02-01"),
+            _member(2, "2024-02-01", None),
+        ],
+        existing_flags={"flow_dominated_guard": True, "benchmark_unavailable": True},
+    )
+    m1 = _returns([("2024-01-01", 0.02), ("2024-01-02", 0.01)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", 0.03)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {"flow_dominated_guard": True}), (m2, {})],
+        has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    headline = _headline_row(fake)
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    assert "flow_dominated_guard" not in dq, "the retired flag outlived the recompute"
+    assert dq.get("benchmark_unavailable") is True  # unrelated key preserved
+    assert headline["computation_status"] == "complete"
+    assert headline["computation_warned"] is False
 
 
 @pytest.mark.asyncio
@@ -2485,6 +2518,8 @@ async def test_ccxt_reconstructed_series_byte_consistent_with_primitives() -> No
     in-test by calling combine_realized_and_funding DIRECTLY on the SAME fixture
     inputs then clipping with clip_to_window. A forked / silently-divergent
     orchestration goes RED here."""
+    from datetime import timezone
+
     from services.broker_dailies import combine_realized_and_funding
     from services.ccxt_flows import ccxt_rows_to_dated_flows
     from services.stitch_composite import clip_to_window
@@ -2517,6 +2552,11 @@ async def test_ccxt_reconstructed_series_byte_consistent_with_primitives() -> No
         balance_error=False,
         external_flows=ref_flows,
         open_unrealized_usd=0.0,
+        # 164.6.6.2.3 D-11: the member passes the full-history verdict; the hand-composed
+        # reference mirrors the exact keyword (same helper, same inputs, same clock).
+        full_history=_jw._ccxt_full_history_verdict(
+            "bybit", list(_CCXT_REALIZED), list(_CCXT_FUNDING), datetime.now(timezone.utc)
+        ),
     )
     ref_clipped = clip_to_window(ref_returns, "2026-06-01", None)
     ref_map = {
@@ -2540,6 +2580,128 @@ async def test_ccxt_reconstructed_series_byte_consistent_with_primitives() -> No
         assert persisted[day] == pytest.approx(ref_val, rel=1e-12, abs=0.0), (
             f"byte-consistency broke on {day}: {persisted[day]} != {ref_val}"
         )
+
+
+def _combine_spy(seen: dict[str, Any]) -> Any:
+    """Patch ``services.broker_dailies.combine_realized_and_funding`` with a spy that runs
+    the REAL combine and records what the stitched member handed it (the member imports it
+    function-locally, so the source module is the patch site)."""
+    import services.broker_dailies as _bd
+
+    real = _bd.combine_realized_and_funding
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        returns, meta = real(*args, **kwargs)
+        seen["full_history"] = kwargs.get("full_history", "ABSENT")
+        seen["external_flows"] = list(kwargs.get("external_flows") or [])
+        seen["returns"] = returns
+        seen["meta"] = meta
+        return returns, meta
+
+    return patch("services.broker_dailies.combine_realized_and_funding", new=_spy)
+
+
+@pytest.mark.asyncio
+async def test_ccxt_member_binance_day_zero_deposit_is_inception_like_the_single_key_derive() -> None:
+    """164.6.6.2.3 D-11 on the stitched member: a Binance member (no deposit cap, full
+    history) whose first deposit is day 0 onto a reconstructed zero base reconstructs with
+    NO dust/negative guard on day 0, in its member series AND its merged flags. The verdict
+    is the one the single-key derive computes on the same inputs.
+
+    Neuter (drop the keyword at the member's combine call) and the zero-base guard comes
+    back on day 0."""
+    from datetime import timezone
+
+    realized = [
+        _ccxt_realized("2026-06-01", 0.0),
+        _ccxt_realized("2026-06-02", 100.0),
+        _ccxt_realized("2026-06-03", 50.0),
+    ]
+    deposit_row = {
+        "id": "dep-day0", "type": "deposit", "currency": "USDT", "amount": 5000.0,
+        "timestamp": "2026-06-01T12:00:00+00:00", "internal": None, "info": {},
+    }
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2026-05-01", "2026-05-10"),   # deribit
+            _member(2, "2026-06-01", None),           # binance — reconstructs
+        ],
+        # Geometric/calendar convention: the inception day's NaN is a chain-break, which
+        # the geometric compute honours (the simple/arithmetic path refuses interior NaNs).
+        strategy_row={
+            "id": _STRATEGY_ID, "asset_class": "crypto",
+            "returns_denominator_config": None,
+        },
+    )
+    m1 = _returns([("2026-05-01", 0.02), ("2026-05-02", 0.01)])
+    seen: dict[str, Any] = {}
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],
+        has_option_activity=True,
+        preflight_side_effect=[_ctx("deribit"), _ctx("binance")],
+    ) + _ccxt_fetch_patches(
+        equity=(5150.0, False, 0.0, False), realized=realized, deposits=[deposit_row],
+    ) + [_combine_spy(seen)]):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    # The member passed the verdict, and it is the single-key derive's verdict.
+    assert seen["full_history"] is True
+    assert seen["full_history"] == _jw._ccxt_full_history_verdict(
+        "binance", realized, [], datetime.now(timezone.utc)
+    )
+    returns = seen["returns"]
+    assert returns.index[0] == pd.Timestamp("2026-06-01")
+    assert pd.isna(returns.iloc[0])
+    assert not (seen["meta"].get("dust_nav_guard") or seen["meta"].get("negative_nav_guard"))
+    headline = _headline_row(fake)
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    assert "degraded_members" not in dq
+    assert "dust_nav_guard" not in dq and "negative_nav_guard" not in dq
+
+
+@pytest.mark.asyncio
+async def test_ccxt_member_okx_history_older_than_the_floor_keeps_todays_day_zero() -> None:
+    """164.6.6.2.3 D-11 on the stitched member, the production-reachable False case: an OKX
+    member whose realized P&L starts 120 days ago (bills archive, before the 90-day floor)
+    while its only fetched flow sits inside the floor is NOT full history. Same verdict as
+    the single-key OKX 120-day case; a verdict on fetched flows would say True."""
+    from datetime import timedelta, timezone
+
+    from services.nav_twr import flow_retention_floor
+
+    now = datetime.now(timezone.utc)
+    day = lambda n: (now - timedelta(days=n)).date().isoformat()  # noqa: E731
+    realized = [_ccxt_realized(day(120 - i), 10.0) for i in range(0, 118)]
+    deposit_row = {
+        "id": "dep-30", "type": "deposit", "currency": "USDT", "amount": 1000.0,
+        "timestamp": day(30) + "T12:00:00+00:00", "internal": None, "info": {},
+    }
+    fake = _FakeSupabase(members=[
+        _member(1, "2020-01-01", "2020-02-01"),   # deribit, far-past disjoint window
+        _member(2, day(120), None),               # okx — reconstructs
+    ])
+    m1 = _returns([("2020-01-01", 0.02), ("2020-01-02", 0.01)])
+    seen: dict[str, Any] = {}
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],
+        has_option_activity=True,
+        preflight_side_effect=[_ctx("deribit"), _ctx("okx")],
+    ) + _ccxt_fetch_patches(
+        equity=(20_000.0, False, 0.0, False), realized=realized, deposits=[deposit_row],
+    ) + [_combine_spy(seen)]):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    floor_iso = flow_retention_floor("okx", now).date().isoformat()
+    assert seen["external_flows"]
+    assert all(f.utc_day_iso >= floor_iso for f in seen["external_flows"])
+    assert seen["full_history"] is False
+    assert seen["full_history"] == _jw._ccxt_full_history_verdict("okx", realized, [], now)
+    returns = seen["returns"]
+    assert returns.index[0] == pd.Timestamp(day(120))
+    assert not pd.isna(returns.iloc[0])   # day 0 is a measured real-capital day, as today
 
 
 @pytest.mark.asyncio
@@ -2809,6 +2971,11 @@ async def test_ccxt_byte_consistent_with_real_flows_and_terminus_segmentation() 
         list(my_realized), [],
         account_balance=10_000.0, balance_error=False,
         external_flows=ref_flows, open_unrealized_usd=0.0,
+        # 164.6.6.2.3 D-11: mirror the member's full-history keyword (its window starts
+        # before the floor, so the verdict is False here; the same helper decides).
+        full_history=_jw._ccxt_full_history_verdict(
+            "bybit", list(my_realized), [], now_utc
+        ),
     )
     _pre_seg_present = int(ref_returns.notna().sum())
     now_naive = now_utc.replace(tzinfo=None)

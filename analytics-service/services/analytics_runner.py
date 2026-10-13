@@ -57,7 +57,7 @@ from services.dispersion import dispersion_is_residue
 from services.transforms import downsample_series
 from services.equity.fallback import merge_dq_flags
 from services.position_reconstruction import _normalize_side
-from services.nav_twr import NAV_TWR_GUARD_KEYS
+from services.nav_twr import NAV_TWR_GUARD_KEYS, NAV_TWR_LEGACY_GUARD_KEYS
 from services.strategy_analytics_provenance import (
     provenance_source,
     upsert_or_drop_provenance,
@@ -156,13 +156,14 @@ class DataQualityFlags(TypedDict, total=False):
     # base; each promotes computation_status to complete_with_warnings. ---
     negative_nav_guard: bool
     dust_nav_guard: bool
-    flow_dominated_guard: bool
+    # ``flow_dominated_guard`` (Phase 74) is RETIRED (164.6.6.2.3 D-05): nothing emits it and
+    # it is no longer declared here. A STORED flag is still carried (and still warns) by the
+    # CSV bridge through ``NAV_TWR_LEGACY_GUARD_KEYS`` until the Wave 5 recompute (D-14).
     # Phase 92 (HARD-01): a single-day P&L dwarfed a small-but-above-dust prior
     # NAV (the inverse-perpetual near-zero-equity blow-up: |pnl_t| >=
     # PNL_DOM_RATIO * NAV_{t-1}). The honest core NaNs that day rather than
     # emitting an un-interpretable ~10-100x/day return that would compound into
-    # a millions-of-% per-key contribution. The missing sibling of
-    # flow_dominated_guard; a BOOL only (no raw NAV/P&L magnitude, the
+    # a millions-of-% per-key contribution. A BOOL only (no raw NAV/P&L magnitude, the
     # account-size leak T-73-02); promotes computation_status to
     # complete_with_warnings on the same NAV_TWR_GUARD_KEYS channel.
     pnl_dominated_guard: bool
@@ -235,6 +236,22 @@ class DataQualityFlags(TypedDict, total=False):
     # computation_warned, and it is not a chain break (no day is dropped). The factsheet
     # says "measured on a very small balance". A BOOL only (T-73-02). ---
     small_base_measured: bool
+    # --- Phase 164.6.6.2.3 (D-07): at least one day carrying a deposit or withdrawal was
+    # measured WITHOUT a time of day for the flow, so the flow counts at the end of that day
+    # ("flow timing at day level"). Stamped by the broker derive's pre-stamp and carried
+    # present-only by run_csv_strategy_analytics. An INFORMATIONAL note, never a warning: it is
+    # in neither NAV_TWR_GUARD_KEYS nor ALLOCATED_CAPITAL_GUARD_KEYS, so it can never promote
+    # computation_status or set computation_warned, and no day is dropped. A BOOL only (the
+    # day counts the core returns in-process are never persisted, T-73-02). ---
+    flow_timing_day_level: bool
+    # --- Phase 164.6.6.2.3 (D-15): at least one MEASURED day-level flow day carried a flow at
+    # least as large as that day's prior NAV (the retired flow-dominance condition), so the
+    # end-of-day formula can read its return as extreme. The day is kept exactly as computed.
+    # Stamped by the broker derive's pre-stamp and carried present-only by
+    # run_csv_strategy_analytics, same as small_base_measured: an INFORMATIONAL annotation,
+    # never a warning (in neither NAV_TWR_GUARD_KEYS nor ALLOCATED_CAPITAL_GUARD_KEYS), no day is
+    # dropped. A BOOL only (T-73-02). ---
+    flow_timing_day_level_large: bool
     # --- Phase 164.6.6.2.2 (D-05): the cumulative method this row's returns_series
     # was built with, RAW ('geometric' | 'simple'). Stamped by
     # run_csv_strategy_analytics beside the curve (the composite stitch already wrote
@@ -1849,7 +1866,7 @@ async def run_csv_strategy_analytics(
 
             # MEDIUM-1 (v1.9, DQ-03): reinstate the interior-break NaN for a
             # BROKER-sourced series at the load boundary. A guarded interior day
-            # (flow-dominated / negative-NAV / dust) is np.nan and SKIPPED at the
+            # (P&L-dominated / negative-NAV / dust) is np.nan and SKIPPED at the
             # csv_daily_returns write (74-04 NaN policy) → ABSENT from the stored
             # rows. Because the broker path gap-fills to a DENSE daily calendar
             # BEFORE that NaN-skip (broker_dailies.gap_fill_daily_returns), an in-span
@@ -2039,6 +2056,16 @@ async def run_csv_strategy_analytics(
                 if existing_flags.get(_flag):
                     data_quality_flags[_flag] = True  # type: ignore[literal-required]
                     _warned = True
+            # 164.6.6.2.3 D-14: a RETIRED guard key (no code emits it after D-05) that a STORED
+            # row still carries is kept, and it still warns, until a derive recomputes the row
+            # ("Stored rows keep their old flags until the Wave 5 recompute"). Its day is still
+            # missing from csv_daily_returns until then, so dropping the flag here on a CSV-only
+            # re-run would silently turn the row back into a clean `complete`. A fresh derive's
+            # pre-stamp never carries one (the core cannot emit it), so a recompute clears it.
+            for _flag in NAV_TWR_LEGACY_GUARD_KEYS:
+                if existing_flags.get(_flag):
+                    data_quality_flags[_flag] = True  # type: ignore[literal-required]
+                    _warned = True
             # S3 — the allocated-capital warn flags (NOT NAV_TWR_GUARD_KEYS members: they
             # originate in the allocated_capital meta, not NavTWRMeta) ride the SAME
             # bridge via the ONE shared ALLOCATED_CAPITAL_GUARD_KEYS source, iterated
@@ -2085,6 +2112,21 @@ async def run_csv_strategy_analytics(
             # "complete" with computation_warned False.
             if existing_flags.get("small_base_measured") is True:
                 data_quality_flags["small_base_measured"] = True
+
+            # Phase 164.6.6.2.3 (D-07): carry the flow-timing note PRESENT-ONLY, strictly
+            # `is True`, and OUTSIDE both `_warned` loops above, exactly like
+            # small_base_measured. The rebuild is wholesale, so an unbridged pre-stamp would be
+            # wiped seconds after the derive wrote it. A note, not a warning: a clean account
+            # whose flows were counted at day level stays exact-string "complete".
+            if existing_flags.get("flow_timing_day_level") is True:
+                data_quality_flags["flow_timing_day_level"] = True
+
+            # Phase 164.6.6.2.3 (D-15): the large-flow annotation rides the same PRESENT-ONLY,
+            # strictly-`is True`, outside-the-`_warned`-loops carry as small_base_measured: the
+            # rebuild is wholesale, so an unbridged pre-stamp would be wiped. A kept day on
+            # which the factsheet says "returns can be extreme", not a warning.
+            if existing_flags.get("flow_timing_day_level_large") is True:
+                data_quality_flags["flow_timing_day_level_large"] = True
 
             csv_status = "complete_with_warnings" if _warned else "complete"
 

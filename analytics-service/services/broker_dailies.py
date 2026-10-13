@@ -62,10 +62,14 @@ from services.allocated_capital import (
 )
 from services.external_flows import ExternalFlow
 from services.mt5_deals import (
+    MT5_DEAL_ENTRY_IN,
     _coerce_money,
     classify_deal,
     deal_cash_effect,
+    deal_entry_code,
+    deal_position_id,
     deal_utc_day,
+    deal_utc_instant_ms,
 )
 from services.native_nav import (
     NativeLedger,
@@ -76,6 +80,7 @@ from services.native_nav import (
     reconstruct_native_nav_and_twr,
 )
 from services.nav_twr import (
+    DayTiming,
     _build_nav_meta,
     _flows_to_daily_usd,
     _union_flow_days,
@@ -234,6 +239,7 @@ def combine_realized_and_funding(
     *,
     external_flows: Sequence[Any] | None = None,
     open_unrealized_usd: float = 0.0,
+    full_history: bool = False,
     realized_reach_start: str | None = None,
 ) -> tuple[pd.Series, dict[str, Any]]:
     """Combine realized daily PnL + funding into one anchored, gap-filled
@@ -248,6 +254,12 @@ def combine_realized_and_funding(
     Phase 75's job. An in-window flow adjusts the chain-linked TWR numerator; a
     flow dated outside the return window fails loud (``NavReconstructionError``)
     rather than silently dropping realized cash.
+
+    ``full_history`` (164.6.6.2.3 D-01/D-11, default ``False`` = byte-identical) is forwarded
+    to the core: the caller declares that the P&L records start at the account's inception,
+    so a day 0 that carries a positive flow on a base within tolerance of zero is the
+    inception day (no dust / negative flag, no return). The ccxt jobs derive the verdict
+    from the account's P&L history through ``nav_twr.ccxt_history_reaches_inception``.
 
     ``realized_reach_start`` (an ISO ``YYYY-MM-DD`` UTC day, or ``None``): the
     first day the REALIZED fetch could reach. Funding dated before it is dropped
@@ -304,6 +316,7 @@ def combine_realized_and_funding(
         balance_error=balance_error,
         external_flows=external_flows,
         open_unrealized_usd=open_unrealized_usd,
+        full_history=full_history,
     )
     returns = gap_fill_daily_returns(returns)
     out_meta = dict(meta)
@@ -539,6 +552,11 @@ def combine_sfox_balance_history(
     # only load-bearing cell (iloc[0]) is a finite 0.0.
     daily_pnl = nav.diff().fillna(0.0)
 
+    # 164.6.6.2.3 D-01 / D-11: sFOX passes NO ``full_history``, on purpose. Its day-0 base is
+    # the FIRST OBSERVED balance (real capital already in the account) and its day-0 flow
+    # was dropped above (WR-01), so the zero-base inception condition (a positive day-0
+    # flow on a base within tolerance of zero) cannot arise here. D-01 keeps today's
+    # behaviour on a venue whose day-0 base is real capital.
     returns, flags = chain_linked_twr(
         nav=nav,
         daily_pnl=daily_pnl,
@@ -588,38 +606,148 @@ def combine_sfox_balance_history(
     return returns, meta
 
 
+# MT5 DEAL_TYPE codes that open and close positions (BUY=0, SELL=1). The commission
+# family 7..11 is also "trading" but is account-level: it carries no position (D-07 below
+# places it by its own instant).
+_MT5_POSITION_DEAL_TYPES: frozenset[int] = frozenset({0, 1})
+
+
+def _mt5_flow_day_timing(
+    day: str,
+    flow_deals: Sequence[tuple[Mapping[str, Any], float]],
+    trading_deals: Sequence[tuple[Mapping[str, Any], int | None, int | None, int, float]],
+    in_days_by_position: Mapping[int, Sequence[tuple[str, Mapping[str, Any]]]],
+    server_utc_offset_s: int,
+) -> DayTiming | None:
+    """The ``DayTiming`` of ONE flow day, or ``None`` when any instant it needs cannot be
+    trusted (164.6.6.2.3 D-02/D-04/D-07/D-09).
+
+    ``flow_deals``: this day's external-flow deals with their amounts, in fold order.
+    ``trading_deals``: this day's trading deals as ``(deal, position_id, entry_code,
+    type_code, cash)``. ``in_days_by_position``: for every position id, its
+    ``DEAL_ENTRY_IN`` deals with the UTC day the fold already bucketed them on.
+
+    This is the only place an instant is resolved, and only for the deals of a flow day
+    (plus the IN deals those days need), so a bad ``time_msc`` anywhere else cannot reach
+    the derive (D-07: a derive that succeeds today must still succeed). Anything that
+    cannot be resolved makes the WHOLE day ``None``: the caller then leaves it to the
+    day-level rule and the core names that. No instant is ever invented, not the day
+    start, not the deal's own time, not the flow's time.
+
+    Open of a trading deal:
+      * a commission-family deal (7..11) with no position: its own instant;
+      * a BUY/SELL deal needs a position id with IN deals recorded and a known entry code;
+      * a position whose earliest IN deal sits on an EARLIER UTC day is carried overnight:
+        open ``None``, the start-of-day base (D-04), with no OPEN instant resolved;
+      * otherwise the open is the earliest IN-deal instant on this day, and it must resolve
+        and must not be later than the deal that closes it.
+
+    Realized instant (D-16): every entry also carries its own deal's instant, the moment the
+    cash reached the account, which must resolve for every trading deal of a flow day (an
+    overnight position's closing deal included)."""
+    own_instant: dict[int, int | None] = {}
+
+    def instant_of(deal: Mapping[str, Any]) -> int | None:
+        key = id(deal)
+        if key not in own_instant:
+            own_instant[key] = deal_utc_instant_ms(deal, server_utc_offset_s)
+        return own_instant[key]
+
+    flow_events: list[tuple[int, float]] = []
+    for deal, amount in flow_deals:
+        flow_instant = instant_of(deal)
+        if flow_instant is None:
+            return None
+        flow_events.append((flow_instant, amount))
+    flow_events.sort(key=lambda event: event[0])  # stable: equal instants keep fold order
+
+    pnl_events: list[tuple[int | None, float, int]] = []
+    for deal, position_id, entry_code, type_code, cash in trading_deals:
+        # D-16: every cash effect carries the instant its own deal booked it, because the
+        # capital a later position opened on includes the P&L realized before that open. A
+        # deal whose instant cannot be trusted degrades the whole day (D-07), exactly like an
+        # unresolvable open.
+        deal_instant = instant_of(deal)
+        if deal_instant is None:
+            return None
+        if type_code not in _MT5_POSITION_DEAL_TYPES and position_id is None:
+            # Commission family with no position: placed by its own instant.
+            pnl_events.append((deal_instant, cash, deal_instant))
+            continue
+        if position_id is None or entry_code is None:
+            return None
+        in_deals = in_days_by_position.get(position_id)
+        if not in_deals:
+            return None
+        if any(in_day < day for in_day, _in_deal in in_deals):
+            pnl_events.append((None, cash, deal_instant))  # D-04: carried overnight
+            continue
+        today_ins = [in_deal for in_day, in_deal in in_deals if in_day == day]
+        if not today_ins:
+            return None  # every IN deal is on a LATER day: the open is after the deal
+        in_instants = [instant_of(in_deal) for in_deal in today_ins]
+        if any(i is None for i in in_instants):
+            return None
+        open_instant = min(i for i in in_instants if i is not None)
+        if open_instant > deal_instant:
+            return None
+        pnl_events.append((open_instant, cash, deal_instant))
+    return DayTiming(flows=tuple(flow_events), pnl=tuple(pnl_events))
+
+
 def _fold_mt5_deals(
     deals: Sequence[Mapping[str, Any]],
     server_utc_offset_s: int,
-) -> tuple[pd.Series, list[ExternalFlow]]:
+) -> tuple[pd.Series, list[ExternalFlow], dict[pd.Timestamp, DayTiming]]:
     """The ONE MT5 deal fold — classify, bucket per UTC day, shape.
 
-    Returns ``(daily_pnl_series, flows)``: the per-day TRADING PnL as an ascending
-    daily float Series (``DatetimeIndex``, unit ``[us]``) and the per-day external
-    capital movements as dated ``ExternalFlow`` entries.
+    Returns ``(daily_pnl_series, flows, timing)``: the per-day TRADING PnL as an ascending
+    daily float Series (``DatetimeIndex``, unit ``[us]``), the per-day external capital
+    movements as dated ``ExternalFlow`` entries, and the intraday ``DayTiming`` of every
+    flow day whose instants could all be resolved (164.6.6.2.3). ``timing`` holds ONLY
+    flow days: a day without a flow is measured by the plain daily formula, so no instant
+    is read for it and a malformed ``time_msc`` there changes nothing.
 
-    WHY THIS IS A SHARED HELPER AND NOT AN INLINE LOOP (A-01). Two public functions
-    in this module need these SAME two objects: ``combine_mt5_deal_ledger`` chain-links
-    them into a RETURN series, and ``reconstruct_mt5_nav_levels`` rolls them into a NAV
-    LEVEL series. Re-running ``classify_deal`` / ``deal_utc_day`` / ``deal_cash_effect``
-    at a second site would be a PARALLEL IMPLEMENTATION of the hardened, fail-loud,
-    security-relevant half of this path — precisely where a drift between two copies is
-    a money bug. One fold, two consumers; the deal semantics can only be changed once.
+    WHY THIS IS A SHARED HELPER AND NOT AN INLINE LOOP (A-01). Three public functions
+    in this module need these SAME objects: ``combine_mt5_deal_ledger`` chain-links
+    them into a RETURN series, ``reconstruct_mt5_nav_levels`` rolls them into a NAV
+    LEVEL series, and ``mt5_day_pnl`` reads the day P&L. Re-running ``classify_deal`` /
+    ``deal_utc_day`` / ``deal_cash_effect`` at a second site would be a PARALLEL
+    IMPLEMENTATION of the hardened, fail-loud, security-relevant half of this path —
+    precisely where a drift between two copies is a money bug. One fold, three consumers;
+    the deal semantics can only be changed once. The timing is built from the same single
+    pass: the loop only RECORDS (flow deals, trading deals with their position id and
+    entry code, each position's IN deals); ``_mt5_flow_day_timing`` resolves instants
+    afterwards, for flow days only.
 
     ⚠️ This helper is PURE and RAISES rather than returning anything partial: an
     unclassifiable / ambiguous ``DEAL_TYPE`` raises ``Mt5DealClassificationError`` out
     of the loop BEFORE any series exists (the deribit-``correction`` fail-loud lesson),
-    and so does a non-finite / non-numeric / bool money field.
+    and so does a non-finite / non-numeric / bool money field. A timing anomaly never
+    raises: it degrades that flow day to the day-level rule (D-07).
     """
     trading_by_day: dict[str, float] = {}
     flow_by_day: dict[str, float] = {}
+    flow_deals_by_day: dict[str, list[tuple[Mapping[str, Any], float]]] = {}
+    trading_deals_by_day: dict[
+        str, list[tuple[Mapping[str, Any], int | None, int | None, int, float]]
+    ] = {}
+    in_days_by_position: dict[int, list[tuple[str, Mapping[str, Any]]]] = {}
     for deal in deals:
         # classify_deal raises on an unknown/ambiguous type — it propagates so the
         # whole combine fails loud (nothing partial), never a silent drop/coerce.
         kind = classify_deal(deal)
         day = deal_utc_day(deal.get("time"), server_utc_offset_s)
         if kind == "trading":
-            trading_by_day[day] = trading_by_day.get(day, 0.0) + deal_cash_effect(deal)
+            cash = deal_cash_effect(deal)
+            trading_by_day[day] = trading_by_day.get(day, 0.0) + cash
+            position_id = deal_position_id(deal)
+            entry_code = deal_entry_code(deal)
+            trading_deals_by_day.setdefault(day, []).append(
+                (deal, position_id, entry_code, int(deal["type"]), cash)
+            )
+            if position_id is not None and entry_code == MT5_DEAL_ENTRY_IN:
+                in_days_by_position.setdefault(position_id, []).append((day, deal))
         else:  # external_flow — capital in/out, subtracted from the return numerator
             # WR-01: route the flow amount through the SAME bool-rejecting money
             # coercer the trading fold uses (``mt5_deals._coerce_money``, via
@@ -633,6 +761,7 @@ def _fold_mt5_deals(
             raw = deal.get("profit", 0.0)
             amount = 0.0 if raw is None else _coerce_money(raw, field="mt5_flow_profit")
             flow_by_day[day] = flow_by_day.get(day, 0.0) + amount
+            flow_deals_by_day.setdefault(day, []).append((deal, amount))
 
     # Per-day trading PnL as an ascending daily Series (unit ``[us]``, the canonical
     # analytics unit) — the DIRECT input to the honest core, not the CSV-shaped
@@ -654,7 +783,22 @@ def _fold_mt5_deals(
         ExternalFlow(utc_day_iso=day, usd_signed=amount)
         for day, amount in sorted(flow_by_day.items())
     ]
-    return daily_pnl_series, flows
+
+    # 164.6.6.2.3: the intraday record of every flow day whose instants all resolve. Keyed
+    # by the same ``[us]`` Timestamp the series index holds (the core looks a day up by its
+    # index Timestamp).
+    timing: dict[pd.Timestamp, DayTiming] = {}
+    for day, flow_deals in flow_deals_by_day.items():
+        day_timing = _mt5_flow_day_timing(
+            day,
+            flow_deals,
+            trading_deals_by_day.get(day, []),
+            in_days_by_position,
+            server_utc_offset_s,
+        )
+        if day_timing is not None:
+            timing[pd.Timestamp(day).as_unit("us")] = day_timing
+    return daily_pnl_series, flows, timing
 
 
 def combine_mt5_deal_ledger(
@@ -675,7 +819,7 @@ def combine_mt5_deal_ledger(
 
     The account is single-currency in its deposit unit; the caller passes that unit's
     ``floors`` (``services.account_unit``, D-01..D-07), so a BTC account's NAV is judged
-    against BTC thresholds and never against the USD $1000 dust floor. It has a LIVE
+    against BTC thresholds and never against the USD dust floor (``USD_FLOORS.dust_nav``). It has a LIVE
     ``account_info().equity`` anchor — there is NO per-currency coin-margined
     reconstruction (deribit's ``native_nav`` machinery). It is structurally
     CLOSEST to sFOX, but unlike sFOX's SAMPLED NAV it is a ledger-COMPLETE venue,
@@ -717,10 +861,11 @@ def combine_mt5_deal_ledger(
     Don't Hand-Roll), while ``gap_fill`` is applied here as the two siblings do. We
     do NOT delegate to ``combine_realized_and_funding`` →
     ``trades_to_daily_returns_with_status``: that CSV/ccxt path carries a
-    dust→heuristic-capital fallback (any anchor ≤ $1000 → fabricated ≥$10k base)
+    dust→heuristic-capital fallback (any anchor at or under the USD dust floor,
+    ``USD_FLOORS.dust_nav`` → fabricated ≥$10k base)
     that is correct for a balance-less CSV upload but WRONG for MT5, whose
     ``account_info().equity`` is ALWAYS authoritative. Anchoring straight to the
-    core keeps the heuristic base unreachable so a real sub-$1000 anchor is honored
+    core keeps the heuristic base unreachable so a real small anchor is honored
     (scaled correctly) and a genuinely dust account fails the DQ-01 dust guard
     honestly — never a silent rescale (mirrors how ``combine_native_ledger`` /
     ``combine_sfox_balance_history`` anchor to their real venue NAV). The two
@@ -729,23 +874,32 @@ def combine_mt5_deal_ledger(
     The deal fold (steps 1–3 above) is SHARED — it lives in ``_fold_mt5_deals`` so the
     NAV-LEVELS sibling ``reconstruct_mt5_nav_levels`` folds the ledger through the very
     same classification loop rather than a second copy of it (A-01). Nothing about this
-    function's signature, return shape or values changed when the fold moved.
+    function's signature or return shape changed when the fold moved.
+
+    FLOWTIMING (164.6.6.2.3). The fold also returns a ``DayTiming`` for every flow day whose
+    instants all resolve, and this function hands it to the core with ``full_history`` declared:
+    a flow day is then measured per position on the capital in the account when the position
+    opened (D-02/D-03), and day 0 is the account's inception (D-01/D-11/D-12). A flow day
+    with any instant that cannot be resolved takes the day-level rule and is named so
+    (D-07); no time is ever invented.
     """
-    daily_pnl_series, flows = _fold_mt5_deals(deals, server_utc_offset_s)
+    daily_pnl_series, flows, timing = _fold_mt5_deals(deals, server_utc_offset_s)
 
     # CR-01: reconstruct DIRECTLY against the authoritative live-equity anchor via
     # the honest core, BYPASSING ``combine_realized_and_funding`` →
     # ``trades_to_daily_returns_with_status`` and its CSV/ccxt dust→heuristic-capital
-    # fallback (``transforms.py`` ``_DUST_BALANCE_THRESHOLD``). That fallback DISCARDS
-    # any anchor ≤ $1000 and substitutes a fabricated ≥$10k base — correct for a
+    # fallback (``transforms.py`` ``_DUST_BALANCE_THRESHOLD``, which reads the USD dust
+    # floor ``USD_FLOORS.dust_nav`` since 167.1.2 D-27). That fallback DISCARDS any anchor
+    # at or under the floor and substitutes a fabricated ≥$10k base — correct for a
     # balance-less CSV upload, but WRONG for MT5, which ALWAYS has an authoritative
-    # ``account_info().equity`` read. Routing MT5 through it let a sub-$1000 account
-    # (forex/CFD margin accounts are commonly in ($100, $1000]) be silently rescaled
-    # 5–10× off a fabricated base, inflated above the $1000 DUST_NAV_FLOOR so the
-    # DQ-01 dust guard never fired, and published as an ``api_verified`` factsheet.
+    # ``account_info().equity`` read. Routing MT5 through it let a small account
+    # (forex/CFD margin accounts are commonly a few hundred dollars, which the floor of
+    # 1000 at the time discarded) be silently rescaled 5–10× off a fabricated base,
+    # inflated above DUST_NAV_FLOOR so the DQ-01 dust guard never fired, and published
+    # as an ``api_verified`` factsheet.
     # Calling the core directly (the way ``combine_native_ledger`` /
     # ``combine_sfox_balance_history`` anchor to their real venue NAV) makes the
-    # heuristic base UNREACHABLE for MT5: a real sub-$1000 anchor is HONORED (scaled
+    # heuristic base UNREACHABLE for MT5: a real small anchor is HONORED (scaled
     # correctly), while a genuinely dust/degenerate account falls to the honest DQ-01
     # dust guard (every day NaN → <2 usable → the job-worker material-equity floor
     # rejects it PERMANENT) — never a silent rescale, never a false ``api_verified``.
@@ -774,6 +928,12 @@ def combine_mt5_deal_ledger(
         external_flows=flows,
         open_unrealized_usd=account_equity - account_balance,
         floors=floors,
+        # 164.6.6.2.3 D-02/D-03: a flow day with resolvable instants is measured per
+        # position on the capital in the account when it opened. D-11: "every MT5 and CSV
+        # account" is full-history; ``history_deals_get`` is a full-history fetch (the same
+        # reason the ``ledger_complete`` verdict below gives), so day 0 is the inception.
+        timing=timing,
+        full_history=True,
     )
     returns = gap_fill_daily_returns(returns)
     out_meta = dict(meta)
@@ -858,7 +1018,7 @@ def reconstruct_mt5_nav_levels(
     forwarded to that meta call ONLY: the ``reconstruct_nav`` roll above it is
     unit-neutral arithmetic, so the levels themselves never depend on it.
     """
-    daily_pnl_series, flows = _fold_mt5_deals(deals, server_utc_offset_s)
+    daily_pnl_series, flows, timing = _fold_mt5_deals(deals, server_utc_offset_s)
 
     if daily_pnl_series.empty:
         # MT5-12 EXEMPT — the SAME early return ``combine_mt5_deal_ledger`` takes, for
@@ -894,6 +1054,11 @@ def reconstruct_mt5_nav_levels(
         external_flows=flows,
         open_unrealized_usd=account_equity - account_balance,
         floors=floors,
+        # The SAME timing and full_history the returns path passes (164.6.6.2.3 D-11): the
+        # meta must stay identical facts about ONE reconstruction. The LEVELS above never
+        # depend on either; only the return convention does.
+        timing=timing,
+        full_history=True,
     )
     out_meta = dict(meta)
     # MT5-12 verdict: ``ledger_complete``, for the identical reason the returns combiner
@@ -921,7 +1086,7 @@ def mt5_day_pnl(
     The fold and the union are the shared ones (``_fold_mt5_deals``,
     ``_union_flow_days``), not a second copy. Empty for a ledger with no trading deal,
     like the returns path. Raises what the fold raises."""
-    daily_pnl_series, flows = _fold_mt5_deals(deals, server_utc_offset_s)
+    daily_pnl_series, flows, _timing = _fold_mt5_deals(deals, server_utc_offset_s)
     if daily_pnl_series.empty:
         return pd.Series(dtype="float64", name="day_pnl")
     unioned = _union_flow_days(daily_pnl_series, _flows_to_daily_usd(flows))

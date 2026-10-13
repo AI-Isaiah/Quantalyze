@@ -348,7 +348,6 @@ export async function readCompositeFactsheet(
           headline_since?: unknown;
           negative_nav_guard?: unknown;
           dust_nav_guard?: unknown;
-          flow_dominated_guard?: unknown;
           pnl_dominated_guard?: unknown;
         }
       | null
@@ -515,9 +514,10 @@ export async function readCompositeFactsheet(
  * empty `quality`, so its opts are byte-identical to before.
  *
  * WR-02 (review 164.6.6.3.3): `options.composite` drops the named guard reasons.
- * A composite's `negative_nav_guard`, `dust_nav_guard`, `flow_dominated_guard`
- * and `pnl_dominated_guard` are a union of member flags computed on each
- * member's UNCLIPPED history, and they are bare booleans with no dated span, so
+ * A composite's `negative_nav_guard`, `dust_nav_guard` and `pnl_dominated_guard`
+ * (the retired flow-dominance flag is read by no one, 164.6.6.2.3 D-14) are a
+ * union of member flags computed on each member's UNCLIPPED history, and they
+ * are bare booleans with no dated span, so
  * neither Python nor this reader can tell whether the cause lies inside the
  * window the composite shows (and a flag from an earlier stitch outlives its
  * cause). Naming one on a public page could name a cause the shown series never
@@ -592,7 +592,13 @@ export function applyHeadlineBasis(
  */
 export function singleKeyDataQuality(
   dqf:
-    | { insufficient_window?: unknown; twr_chain_broken?: unknown; small_base_measured?: unknown }
+    | {
+        insufficient_window?: unknown;
+        twr_chain_broken?: unknown;
+        small_base_measured?: unknown;
+        flow_timing_day_level?: unknown;
+        flow_timing_day_level_large?: unknown;
+      }
     | null
     | undefined,
 ): NonNullable<BuildFactsheetOpts["dataQuality"]> {
@@ -606,6 +612,14 @@ export function singleKeyDataQuality(
     // annotation, present only when true under the same strict coercion (a string
     // "true" or 1 never prints the caveat, T-92-05).
     ...(dqf?.small_base_measured === true ? { smallBaseMeasured: true } : {}),
+    // Phase 164.6.6.2.3 (D-07): an informational "flow timing at day level" note,
+    // present only when true under the same strict coercion. Single-key only: the
+    // composite arm builds its own `dataQuality` and never carries it.
+    ...(dqf?.flow_timing_day_level === true ? { flowTimingDayLevel: true } : {}),
+    // Phase 164.6.6.2.3 (D-15): a measured day-level flow day whose flow was at least the
+    // prior balance can read as an extreme return. Informational, present only when true
+    // under the same strict coercion, and it drives the same caveat as `smallBaseMeasured`.
+    ...(dqf?.flow_timing_day_level_large === true ? { flowTimingDayLevelLarge: true } : {}),
   };
 }
 
@@ -856,7 +870,6 @@ export async function readSingleKeyBasisOpts(
         headline_since?: unknown;
         negative_nav_guard?: unknown;
         dust_nav_guard?: unknown;
-        flow_dominated_guard?: unknown;
         pnl_dominated_guard?: unknown;
       }
     | null

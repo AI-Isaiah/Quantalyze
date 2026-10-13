@@ -3,8 +3,8 @@
 THE DEFECT (debug .planning/debug/derivecron-compose-divergence.md, Follow-up 2). The
 D-13 zero-start check read "this day has no stored return" as "this day had no P&L". It
 did: the writer leaves a day out when its prior capital cannot be a denominator (the
-funding day, ``negative_nav_guard``; a day whose flow dominates the prior NAV,
-``flow_dominated_guard``), and such a day's P&L is real and already inside the NAV. So
+funding day, ``negative_nav_guard``; a day whose prior NAV is dust,
+``dust_nav_guard``), and such a day's P&L is real and already inside the NAV. So
 the check measured one ordinary day's P&L as "missing start capital", and the replay's
 forced ``r = 0`` moved a dropped interior day's P&L into every earlier level.
 
@@ -15,10 +15,22 @@ THE FIX UNDER TEST. The derive stores each dropped day's actual P&L in ``key_inp
 THE ORACLE IS INDEPENDENT OF THE CODE UNDER TEST. Every book is built FORWARD in exact
 ``fractions.Fraction`` arithmetic from a CHOSEN pre-funding capital (0 for a clean
 account): ``nav_t = nav_{t-1} + pnl_t + F_t``. The expected levels are those navs. The
-expected dropped set is the writer's own published guard rule restated here as four
-literals (prev <= 0, prev < the $1000 dust floor, |F| >= prev, |pnl| >= 10 x prev), and
+expected dropped set is the writer's own published guard rule restated here as three
+literals (prev <= 0, prev < the $100 dust floor, |pnl| >= 10 x prev), and
 ``test_the_oracle_book_is_what_the_real_writer_produces`` pins that restatement against
 the real ``chain_linked_twr`` so the fixture cannot drift from the writer.
+
+FLOWTIMING (164.6.6.2.3 D-05): the writer used to drop a FOURTH kind of day, one whose flow
+was at least the prior NAV (``flow_dominated_guard``). That guard is deleted; a flow, however
+large, never drops a day. So the rule above has three literals, the "dominated" fixture's
+deposit day is a MEASURED day (it carries a return and is no longer in ``dropped_idx``), and
+the tests that need an INTERIOR dropped day use a day the remaining guards still drop
+(``funding_and_dust_interior_book``).
+
+167.1.2 D-27 moved the dust floor from 1000 to 100. The interior dropped days those fixtures
+exist to produce used to be dust-base drops; they are now ``pnl_dominated_guard`` drops on a
+base of at least 100 (a base under 100 would be an EMPTIED level, which is not the case under
+test). The ``dust`` names of the fixture and of its parametrize id are kept as lineage.
 """
 from __future__ import annotations
 
@@ -51,9 +63,12 @@ BAND = Fraction(1, 10_000)
 
 D0 = date(2026, 2, 1)
 
-# The writer's guard rule, restated as literals (DQ-01 / Phase 92 HARD-01).
-_DUST = Fraction(1000)
-_FLOW_DOM = Fraction(1)
+# The writer's guard rule, restated as literals (DQ-01 / Phase 92 HARD-01). The flow clause
+# (|F| >= prev) is gone with the flow-dominated guard (164.6.6.2.3 D-05).
+# 167.1.2 D-27: the USD dust floor is 100 (it was 1000), restated here as a literal, never read
+# from the module it checks. It equals EMPTIED_RESTART_FLOOR_USD, so a dropped day that is meant
+# to stay INTERIOR must open on a base of at least 100 and be dropped by the P&L guard instead.
+_DUST = Fraction(100)
 _PNL_DOM = Fraction(10)
 
 
@@ -86,11 +101,10 @@ class Book:
         return [_iso(i) for i in range(len(self.pnl))]
 
     def is_dropped(self, i: int) -> bool:
-        prev, f, p = self.prev[i], self.flow[i], self.pnl[i]
+        prev, p = self.prev[i], self.pnl[i]
         return (
             prev <= 0
             or prev < _DUST
-            or abs(f) >= _FLOW_DOM * prev
             or abs(p) >= _PNL_DOM * prev
         )
 
@@ -145,18 +159,46 @@ def _window_flow(n: int) -> list[Fraction]:
 
 def funding_and_dominated_book(c0: Fraction = Fraction(0)) -> Book:
     """The PROD account-A shape: a funding day with P&L (day 0), an ordinary day, a
-    deposit larger than the prior NAV carrying its own P&L (day 2, flow-dominated),
-    then ordinary days."""
+    deposit larger than the prior NAV carrying its own P&L (day 2), then ordinary days.
+
+    FLOWTIMING D-05: day 2 was dropped by ``flow_dominated_guard``; it is now a MEASURED
+    day (P&L / prior NAV, the flow counted at the end of the day), so the only dropped
+    day is the funding day 0. The shape is kept: it is the account the writer used to
+    drop twice, and the compose must now reproduce its levels from one dropped day."""
     pnl = [Fraction(-683), Fraction(-110), Fraction(-700), Fraction(7600)] + _window_pnl(26)
     flow = [Fraction(192875), Fraction(0), Fraction(450000), Fraction(9000)] + _window_flow(26)
     return Book(c0, pnl, flow)
 
 
+def funding_and_dust_interior_book(c0: Fraction = Fraction(0)) -> Book:
+    """The funding-and-dominated account with an INTERIOR dropped day the writer still drops.
+
+    FLOWTIMING D-05 retired the flow-dominated drop that used to make day 2 of
+    ``funding_and_dominated_book`` the interior dropped day. The tests that exist to prove
+    an interior dropped day's P&L keeps every earlier level exact need a day the remaining
+    guards still drop. Here day 2 withdraws almost the whole book (NAV 382, above the
+    emptied band, and at the D-27 floor of 100 a measured base, no longer dust), so day 3,
+    which opens on that 382 NAV and carries a 450000 deposit and a 7600 P&L (at least ten
+    times the base), is dropped by ``pnl_dominated_guard``. Day 2 itself is a measured day
+    (its withdrawal no longer drops it). The base stays at or above 100 on purpose: under
+    100 the level would be an EMPTIED level, not an interior dropped day."""
+    pnl = [Fraction(-683), Fraction(-110), Fraction(-700), Fraction(7600)] + _window_pnl(26)
+    flow = [Fraction(192875), Fraction(0), Fraction(-191000), Fraction(450000)] + _window_flow(26)
+    return Book(c0, pnl, flow)
+
+
 def two_day_run_book() -> Book:
     """The MT5 opening shape: TWO consecutive funding days before the first return day
-    (day 1's deposit exceeds day 0's NAV), each with P&L."""
-    pnl = [Fraction(-683), Fraction(40), Fraction(-90)] + _window_pnl(27)
-    flow = [Fraction(192875), Fraction(300000), Fraction(0)] + _window_flow(27)
+    (day 1's deposit exceeds day 0's NAV), each with P&L.
+
+    FLOWTIMING D-05: day 1 used to be dropped because its 300000 deposit dominated day 0's
+    NAV. A dominating deposit is measured now, so the run is kept by the guard that still
+    applies: day 0 funds only 900 (NAV 217 after its -683). 167.1.2 D-27 moved the dust floor
+    to 100, so 217 is a measured base, not dust; day 1 is kept dropped by ``pnl_dominated_guard``
+    instead: its P&L of 2400 is at least ten times the 217 prior NAV (2170), and it carries the
+    large deposit. The base stays at or above 100 so the day is not an emptied level."""
+    pnl = [Fraction(-683), Fraction(2400), Fraction(-90)] + _window_pnl(27)
+    flow = [Fraction(900), Fraction(300000), Fraction(0)] + _window_flow(27)
     return Book(Fraction(0), pnl, flow)
 
 
@@ -180,8 +222,22 @@ def _replay(book: Book, *, with_pnl: bool = True):
 
 @pytest.mark.parametrize(
     "book",
-    [funding_and_dominated_book(), two_day_run_book(), funding_and_dominated_book(Fraction(20000))],
-    ids=["funding+dominated", "two-day-run", "missing-start-capital"],
+    [
+        funding_and_dominated_book(),
+        two_day_run_book(),
+        funding_and_dust_interior_book(),
+        # D-27: a 900 start is a measured base at the 100 floor; 99 is still dust (and still
+        # outside the band), so the funding day stays dropped and the zero-start check is made.
+        funding_and_dominated_book(Fraction(99)),
+        funding_and_dominated_book(Fraction(20000)),
+    ],
+    ids=[
+        "funding+dominated",
+        "two-day-run",
+        "dust-interior",
+        "missing-start-capital",
+        "real-start-capital-measured-funding-day",
+    ],
 )
 def test_the_oracle_book_is_what_the_real_writer_produces(book: Book) -> None:
     """The restated guard rule must match ``chain_linked_twr`` day for day, and
@@ -232,12 +288,53 @@ def test_without_the_stored_pnl_the_funding_day_reads_as_missing_capital() -> No
     assert ke.flags["inception_unreconciled_flows"] == 1
 
 
-# ── 2. a flow-dominated interior day, every early level equals the true NAV ──
+# ── 2. an interior dropped day, every early level equals the true NAV ──
 
 
-def test_pnl_on_a_flow_dominated_interior_day_keeps_every_early_level_exact() -> None:
+def test_the_dominating_deposit_day_is_measured_not_dropped() -> None:
+    """FLOWTIMING D-05, pinned on the fixture the guard used to drop: day 2's 450000 deposit
+    exceeds the 192082 prior NAV, and the writer now gives the day a return (its P&L over the
+    prior NAV, the flow at the end of the day), so only the funding day is left out and the
+    replay still reproduces every level from that one stored P&L."""
     book = funding_and_dominated_book()
-    assert 2 in book.dropped_idx and book.pnl[2] == -700  # the interior dropped day
+    assert book.flow[2] > book.prev[2]  # the deposit dominates the prior NAV
+    assert book.dropped_idx == [0]
+    assert _iso(2) in book.stored_returns.index
+    # the prior NAV is 192875 - 683 - 110 = 192082
+    assert book.stored_returns[_iso(2)] == pytest.approx(-700 / 192082, rel=1e-12)
+    ke = _replay(book)
+
+    assert ke.degrade_reasons == frozenset()
+    for i, day in enumerate(book.days):
+        assert float(ke.equity[day]) == pytest.approx(float(book.nav[i]), rel=1e-9), day
+    assert ke.flags["dropped_day_pnl_days"] == 1
+
+
+def test_a_real_start_capital_makes_the_funding_day_a_measured_day() -> None:
+    """With 20000 in the account before the first flow the funding day has a real base, so
+    FLOWTIMING D-05 measures it (a 192875 deposit no longer drops it). There is no dropped
+    funding day and so no zero-start check to fail: the capital is inside the day-0 return."""
+    book = funding_and_dominated_book(Fraction(20000))
+    assert book.dropped_idx == []
+    assert _iso(0) in book.stored_returns.index
+    ke = _replay(book)
+
+    assert ke.degrade_reasons == frozenset()
+    assert "inception_unreconciled_flows" not in ke.flags
+    for i, day in enumerate(book.days):
+        assert float(ke.equity[day]) == pytest.approx(float(book.nav[i]), rel=1e-9), day
+
+
+def test_pnl_on_a_dust_base_interior_day_keeps_every_early_level_exact() -> None:
+    """Re-aimed (FLOWTIMING D-05, then D-27). This test used to drop a flow-dominated interior
+    day; that drop is gone, so it drops an interior day the guards still drop: day 3 opens on
+    a 382 NAV after day 2's near-total withdrawal. 167.1.2 D-27 made 382 a measured base (the
+    floor is 100), so the day is dropped by ``pnl_dominated_guard`` (7600 >= 10 x 382), on a
+    base that is still at or above 100 and therefore not an emptied level."""
+    book = funding_and_dust_interior_book()
+    assert book.dropped_idx == [0, 3] and book.pnl[3] == 7600  # the interior dropped day
+    assert book.prev[3] >= _DUST  # D-27: a measured base, not dust and not emptied
+    assert abs(book.pnl[3]) >= _PNL_DOM * book.prev[3]  # dropped by pnl_dominated_guard
     ke = _replay(book)
 
     # EVERY level, the early ones (days 0-1, before the dropped day) included, is the
@@ -249,12 +346,14 @@ def test_pnl_on_a_flow_dominated_interior_day_keeps_every_early_level_exact() ->
 
 def test_without_the_stored_pnl_the_early_levels_are_off_by_the_dropped_days_pnl() -> None:
     """Why the fix is needed at all, as a number: forcing r = 0 on the dropped day
-    mis-states the levels BEFORE it by that day's P&L (here -700 in magnitude)."""
-    book = funding_and_dominated_book()
+    mis-states the levels BEFORE it by that day's P&L (here 7600 in magnitude). The dropped
+    day is the pnl-dominated interior day 3 (FLOWTIMING D-05 retired the flow-dominated one;
+    D-27 moved the dust floor under its 382 base)."""
+    book = funding_and_dust_interior_book()
     err = _levels_error(book, _replay(book, with_pnl=False))
 
-    assert abs(err[1]) == pytest.approx(700, rel=1e-6)  # day 1 is before dropped day 2
-    assert abs(err[3]) < 1e-6  # days after it are exact either way
+    assert abs(err[2]) == pytest.approx(7600, rel=1e-6)  # day 2 is before dropped day 3
+    assert abs(err[4]) < 1e-6  # days after it are exact either way
 
 
 def test_a_two_day_opening_run_reads_the_capital_before_its_first_flow() -> None:
@@ -276,7 +375,11 @@ def test_a_two_day_opening_run_reads_the_capital_before_its_first_flow() -> None
     [
         (Fraction(9), False),  # ~0.47 x the band
         (Fraction(40), True),  # ~2.1 x the band
-        (Fraction(20000), True),  # ~10% of the book
+        # ~0.05% of the book. A larger positive start (e.g. 20000) is no longer a case: with
+        # a real base the funding day is MEASURED (D-05), so there is no dropped day to check.
+        # D-27 moved the dust floor to 100, so a 900 start is a real base too; 99 is the largest
+        # whole start still under it (dust), keeping the funding day dropped.
+        (Fraction(99), True),
         (Fraction(-20000), True),  # an overdrawn start is as unreconciled
     ],
 )
@@ -480,20 +583,33 @@ def _stored(returns: pd.Series) -> pd.Series:
 
 @pytest.mark.parametrize(
     "book",
-    [funding_and_dominated_book(), two_day_run_book()],
-    ids=["funding+dominated", "two-day-run"],
+    [funding_and_dominated_book(), two_day_run_book(), funding_and_dust_interior_book()],
+    ids=["funding+dominated", "two-day-run", "dust-interior"],
 )
 def test_mt5_deal_ledger_shape_end_to_end(book: Book) -> None:
     """MT5: deals -> the real combine (returns) + ``mt5_day_pnl`` (P&L) -> the stored
     payload -> the compose's replay. The levels are the oracle's navs."""
     deals = _mt5_deals(book)
-    returns, _meta = combine_mt5_deal_ledger(
+    returns, meta = combine_mt5_deal_ledger(
         deals, account_equity=book.anchor, account_balance=book.anchor
     )
     day_pnl = mt5_day_pnl(deals)
 
     stored_pnl = _persisted_roundtrip(returns, day_pnl)
     assert stored_pnl == pytest.approx(book.dropped_pnl)  # exactly the dropped days
+    if book.c0 == 0:
+        # 164.6.6.2.3 D-01/D-12: the MT5 combiner declares full history, so a funding day with
+        # no capital before it is the INCEPTION day. It is still dropped from the returns (the
+        # dropped set above is unchanged, and so is its stored P&L), but by the inception rule,
+        # not by a negative or dust warning the account would carry for ever.
+        assert pd.isna(returns.iloc[0]) and book.dropped_idx[0] == 0
+        if book.dropped_idx == [0]:
+            # Nothing else is dropped, so no guard key can come from another day: the
+            # inception day alone raised no warning. (The other books drop a LATER day as
+            # pnl-dominated on purpose (D-27), and that day does warn.)
+            assert not any(
+                k in meta for k in ("negative_nav_guard", "dust_nav_guard", "pnl_dominated_guard")
+            )
 
     ke = replay_key_equity(
         _stored(returns),
@@ -539,8 +655,8 @@ def _usdc_native_ledger(book: Book) -> NativeLedger:
 
 @pytest.mark.parametrize(
     "book",
-    [funding_and_dominated_book(), two_day_run_book()],
-    ids=["funding+dominated", "two-day-run"],
+    [funding_and_dominated_book(), two_day_run_book(), funding_and_dust_interior_book()],
+    ids=["funding+dominated", "two-day-run", "dust-interior"],
 )
 def test_deribit_native_ledger_shape_end_to_end(book: Book) -> None:
     ledger = _usdc_native_ledger(book)
@@ -567,11 +683,24 @@ def test_deribit_coin_margined_pnl_includes_the_revaluation_of_the_balance() -> 
     flows (``NAV_t - NAV_{t-1} - F_t``), which includes the mark move on the balance
     already held; the native P&L times the day's mark alone would miss it, and the
     replay's levels would then not equal the NAV. Built forward in exact arithmetic
-    from a zero start in BTC, marks changing every day."""
+    from a zero start in BTC, marks changing every day.
+
+    FLOWTIMING D-05: this used to drop the day of a 9-BTC deposit (flow-dominated), whose
+    prior balance was ~4 BTC. That drop is gone, so the dropped day with a prior balance
+    to revalue is re-aimed at a guard that remains: day 2 withdraws all but 1/256 BTC
+    (about 193 USD, above the emptied band), and the 9-BTC deposit
+    lands on day 3, which opens on that small balance.
+
+    167.1.2 D-27 (the dust floor is 100): that balance is now a measured base, no longer dust,
+    so day 3 is dropped by ``pnl_dominated_guard`` instead. Its native P&L is raised from 2/64
+    to 3/64 BTC so its USD P&L (about 2407) is at least ten times the roughly 193 USD prior NAV,
+    while the base stays at or above 100 (under 100 it would be an EMPTIED level, not the
+    interior dropped day this test exists to prove). Day 3's P&L still has to include the mark
+    move on the 1/256 BTC already held."""
     q_pnl = [Fraction(-1, 64), Fraction(-3, 64), Fraction(5, 64)] + [
-        Fraction(k, 64) for k in (2, -3, 4, -1, 5, -2, 3, 1, -4, 2, -1, 3, 2, -2, 1)
+        Fraction(k, 64) for k in (3, -3, 4, -1, 5, -2, 3, 1, -4, 2, -1, 3, 2, -2, 1)
     ]
-    q_flow = [Fraction(4), Fraction(0), Fraction(9)] + [Fraction(0)] * 15
+    q_flow = [Fraction(4), Fraction(0), Fraction(-1027, 256), Fraction(9)] + [Fraction(0)] * 14
     marks = [Fraction(m) for m in (
         50000, 50800, 49500, 51200, 50100, 52300, 51700, 50900, 53100, 52400,
         51000, 52800, 53500, 52100, 51300, 54000, 53200, 52600,
@@ -591,12 +720,14 @@ def test_deribit_coin_margined_pnl_includes_the_revaluation_of_the_balance() -> 
 
     def dropped(i: int) -> bool:
         return (
-            prev[i] <= 0 or prev[i] < _DUST or abs(flow_usd[i]) >= _FLOW_DOM * prev[i]
-            or abs(pnl_usd[i]) >= _PNL_DOM * prev[i]
+            prev[i] <= 0 or prev[i] < _DUST or abs(pnl_usd[i]) >= _PNL_DOM * prev[i]
         )
 
     dropped_idx = [i for i in range(n) if dropped(i)]
-    assert dropped_idx == [0, 2]  # the funding day and the 9-BTC deposit day
+    assert dropped_idx == [0, 3]  # the funding day and the pnl-dominated day of the 9-BTC deposit
+    assert prev[3] >= _DUST  # D-27: a measured base (not dust), and not an emptied level either
+    assert abs(pnl_usd[3]) >= _PNL_DOM * prev[3]  # day 3 is dropped by pnl_dominated_guard
+    assert abs(q_flow[2]) > bal[1]  # day 2's withdrawal exceeds the BTC held, and the day is MEASURED
 
     idx = pd.DatetimeIndex([pd.Timestamp(_iso(i)) for i in range(n)])
     ledger = NativeLedger(
@@ -701,8 +832,9 @@ async def test_mt5_key_mode_persists_the_dropped_day_pnl_and_the_compose_reads_i
     monkeypatch,
 ) -> None:
     """MT5, through the whole key-mode derive job: the deal ledger -> csv_daily_returns
-    (the writer drops the funding day and the dominated day) AND key_inputs.dropped_day_pnl
-    (their real P&L). Feeding both to the compose's replay gives the oracle's navs."""
+    (the writer drops the funding day and the pnl-dominated interior day, D-27; FLOWTIMING D-05 retired
+    the flow-dominated drop this test used to name) AND key_inputs.dropped_day_pnl (their
+    real P&L). Feeding both to the compose's replay gives the oracle's navs."""
     import services.mt5_concurrency as mt5_conc
     from unittest.mock import AsyncMock, patch
 
@@ -714,7 +846,8 @@ async def test_mt5_key_mode_persists_the_dropped_day_pnl_and_the_compose_reads_i
     )
 
     monkeypatch.setenv("MT5_ENABLED", "true")
-    book = funding_and_dominated_book()
+    book = funding_and_dust_interior_book()
+    assert book.dropped_idx == [0, 3]
     transport = _FakeMt5Transport(
         account={"equity": book.anchor, "balance": book.anchor, "currency": "USD",
                  "login": 123456},
@@ -922,8 +1055,12 @@ async def _compose_curve(
 
 
 @pytest.mark.asyncio
-async def test_the_compose_job_uses_the_stored_pnl_and_the_curve_is_trustworthy() -> None:
-    book = funding_and_dominated_book()
+@pytest.mark.parametrize(
+    "book",
+    [funding_and_dominated_book(), funding_and_dust_interior_book()],
+    ids=["funding+dominated", "dust-interior"],
+)
+async def test_the_compose_job_uses_the_stored_pnl_and_the_curve_is_trustworthy(book: Book) -> None:
     payload = await _compose_curve(book, with_pnl=True)
 
     assert payload["degrade_reasons"] == []

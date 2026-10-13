@@ -564,6 +564,77 @@ describe("Finding B — singleKeyDataQuality single-key DQ opt (one owner)", () 
     ).toMatchObject({ twrChainBroken: true, smallBaseMeasured: true });
   });
 
+  it("164.6.6.2.3 D-07: flow_timing_day_level is lifted present-only under strict `=== true` coercion", () => {
+    // The persisted truth lifts to the payload opt.
+    expect(singleKeyDataQuality({ flow_timing_day_level: true })).toEqual({
+      composite: false,
+      insufficientWindow: false,
+      flowTimingDayLevel: true,
+    });
+    // A clean row's opt is byte-unchanged: the key is ABSENT, not false.
+    expect(singleKeyDataQuality({})).toEqual({ composite: false, insufficientWindow: false });
+    expect(singleKeyDataQuality(null)).toEqual({ composite: false, insufficientWindow: false });
+    // Informational: it rides beside, and never replaces, the other markers.
+    expect(
+      singleKeyDataQuality({ twr_chain_broken: true, small_base_measured: true, flow_timing_day_level: true }),
+    ).toMatchObject({ twrChainBroken: true, smallBaseMeasured: true, flowTimingDayLevel: true });
+  });
+
+  // Tampering guard (T-92-05, T-164.6.6.2.3-04): a stored value that is not the
+  // boolean true never prints the note. Fails if `=== true` becomes a truthy check.
+  it.each([[false], [null], [undefined], ["true"], [1], [{}], [[true]]])(
+    "164.6.6.2.3 D-07: flow_timing_day_level spelled %j gives no flowTimingDayLevel key",
+    (bad) => {
+      expect("flowTimingDayLevel" in singleKeyDataQuality({ flow_timing_day_level: bad })).toBe(false);
+    },
+  );
+
+  it("164.6.6.2.3 D-15: flow_timing_day_level_large is lifted present-only under strict `=== true` coercion", () => {
+    expect(singleKeyDataQuality({ flow_timing_day_level_large: true })).toEqual({
+      composite: false,
+      insufficientWindow: false,
+      flowTimingDayLevelLarge: true,
+    });
+    expect(singleKeyDataQuality({})).toEqual({ composite: false, insufficientWindow: false });
+    expect(
+      singleKeyDataQuality({ small_base_measured: true, flow_timing_day_level: true, flow_timing_day_level_large: true }),
+    ).toMatchObject({ smallBaseMeasured: true, flowTimingDayLevel: true, flowTimingDayLevelLarge: true });
+  });
+
+  it.each([[false], [null], [undefined], ["true"], [1], [{}], [[true]]])(
+    "164.6.6.2.3 D-15: flow_timing_day_level_large spelled %j gives no flowTimingDayLevelLarge key",
+    (bad) => {
+      expect("flowTimingDayLevelLarge" in singleKeyDataQuality({ flow_timing_day_level_large: bad })).toBe(false);
+    },
+  );
+
+  it("164.6.6.2.3 D-15: a composite row never carries flowTimingDayLevelLarge (single-key only)", async () => {
+    const stored = { ...DQF, flow_timing_day_level_large: true };
+    const out = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+      strategyId: "s1",
+      dqf: stored,
+      metricsJsonByBasis: { cash_settlement: FULL_CASH },
+      returnsDenominatorConfig: null,
+    });
+    expect(out).not.toBeNull();
+    expect("flowTimingDayLevelLarge" in (out!.buildOpts.dataQuality ?? {})).toBe(false);
+  });
+
+  it("164.6.6.2.3 D-07: a composite row never carries flowTimingDayLevel (single-key only)", async () => {
+    // A stored composite row may carry the key (a stitch copies member flags); it is
+    // not part of the composite reader's dqf shape, so it is built outside the literal.
+    const stored = { ...DQF, flow_timing_day_level: true };
+    const out = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+      strategyId: "s1",
+      dqf: stored,
+      metricsJsonByBasis: { cash_settlement: FULL_CASH },
+      returnsDenominatorConfig: null,
+    });
+    expect(out).not.toBeNull();
+    expect(out!.buildOpts.dataQuality?.composite).toBe(true);
+    expect("flowTimingDayLevel" in (out!.buildOpts.dataQuality ?? {})).toBe(false);
+  });
+
   it("regression: threaded single-key opts surface insufficientWindow on the payload; the pre-fix undefined opts (buildOpts unassigned) drop it", () => {
     const series: DailyReturn[] = [
       { date: "2025-08-01", value: 0.01 },

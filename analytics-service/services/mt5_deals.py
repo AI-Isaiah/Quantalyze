@@ -27,13 +27,28 @@ TAX classification is locked behind the plan 136-05 human-verify checkpoint, see
     BUY/SELL_CANCELED 13/14 [ASSUMED]      → FAIL LOUD (no economic effect? confirm)
     DIVIDEND 15/16, TAX=17 [ASSUMED]       → FAIL LOUD (return vs cost undecided)
     any unlisted int                       → FAIL LOUD
+
+DEAL_ENTRY enum (FLOWTIMING D-10; closes RESEARCH assumption A1):
+
+    IN=0, OUT=1, INOUT=2 (reverse), OUT_BY=3 (closed by an opposite position)
+        [VERIFIED — vendor package MetaTrader5 5.0.6231 (cp312 win_amd64 wheel,
+        sha256 b94b1f8f52087ae36dfac5f352a96f5d04fe308704d9515f82cf5d1470bc31d4),
+        file MetaTrader5/__init__.py (sha256 2e3bc321ab35b5c9e6c777665f381bc686bbf60791160838a0e84406dc0052cf),
+        block ``# ENUM_DEAL_ENTRY``: DEAL_ENTRY_IN = 0, DEAL_ENTRY_OUT = 1,
+        DEAL_ENTRY_INOUT = 2, DEAL_ENTRY_OUT_BY = 3. The same file's
+        ``ENUM_DEAL_TYPE`` block agrees with the DEAL_TYPE table above.
+        Read as text, never imported or executed.]
+    any other int, or a non-int       → unresolvable (``deal_entry_code`` is None)
 """
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from typing import Any, Literal
+
+_EPOCH0 = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 # The realized-PnL / trading-cost types whose ``profit+swap+commission+fee`` is
 # folded into daily trading PnL. BUY/SELL are market fills; 7..11 are the
@@ -52,6 +67,23 @@ _MT5_EXTERNAL_FLOW_DEAL_TYPES: frozenset[int] = frozenset({2, 3, 6})
 # import (deribit_txn.py:552 precedent).
 assert not (_MT5_TRADING_DEAL_TYPES & _MT5_EXTERNAL_FLOW_DEAL_TYPES), (
     "MT5 trading and external-flow DEAL_TYPE sets must be disjoint"
+)
+
+
+# DEAL_ENTRY codes, pinned from the vendor package (module header). An entry code
+# outside this set is unresolvable, never a default: the fold sends the day to
+# the day-level rule (D-07) instead of guessing which deal opened a position.
+MT5_DEAL_ENTRY_IN = 0
+MT5_DEAL_ENTRY_OUT = 1
+MT5_DEAL_ENTRY_INOUT = 2
+MT5_DEAL_ENTRY_OUT_BY = 3
+_MT5_KNOWN_DEAL_ENTRIES: frozenset[int] = frozenset(
+    {
+        MT5_DEAL_ENTRY_IN,
+        MT5_DEAL_ENTRY_OUT,
+        MT5_DEAL_ENTRY_INOUT,
+        MT5_DEAL_ENTRY_OUT_BY,
+    }
 )
 
 
@@ -149,6 +181,49 @@ def deal_cash_effect(deal: Mapping[str, Any]) -> float:
     return total
 
 
+def _require_offset_seconds(server_utc_offset_s: Any) -> None:
+    """Validate the one server-UTC offset argument the day and the instant share."""
+    if isinstance(server_utc_offset_s, bool) or not isinstance(server_utc_offset_s, int):
+        raise Mt5DealClassificationError(
+            "MT5 server_utc_offset_s must be an int (seconds) — fail loud"
+        )
+
+
+def _server_epoch_seconds(time_value: Any) -> float:
+    """Read a deal's broker-server ``time`` as epoch seconds or fail loud.
+
+    The ONE place a deal's ``time`` is parsed: ``deal_utc_day`` and
+    ``deal_utc_instant_ms`` both go through it, so the day and the instant can
+    never read the same field two ways."""
+    if isinstance(time_value, datetime):
+        aware = (
+            time_value
+            if time_value.tzinfo is not None
+            else time_value.replace(tzinfo=timezone.utc)
+        )
+        return aware.timestamp()
+    if isinstance(time_value, bool) or not isinstance(time_value, (int, float)):
+        raise Mt5DealClassificationError(
+            f"MT5 deal time={time_value!r} is not a datable epoch/datetime — fail loud"
+        )
+    if not math.isfinite(time_value):
+        raise Mt5DealClassificationError(
+            "MT5 deal time is non-finite (NaN/Inf) — fail loud"
+        )
+    return float(time_value)
+
+
+def _utc_day_of_server_epoch(epoch: float, server_utc_offset_s: int) -> str:
+    """The UTC calendar day (ISO) of a server-time epoch, offset removed first."""
+    try:
+        utc_epoch = epoch - server_utc_offset_s
+        return datetime.fromtimestamp(utc_epoch, tz=timezone.utc).date().isoformat()
+    except (OverflowError, OSError, ValueError) as exc:
+        raise Mt5DealClassificationError(
+            "MT5 deal time is out of the datable epoch range — fail loud"
+        ) from exc
+
+
 def deal_utc_day(time_value: Any, server_utc_offset_s: int) -> str:
     """Normalize a broker-server-time deal timestamp to its UTC calendar day
     (ISO ``YYYY-MM-DD``) — the ONE server-time→UTC seam (mt5-spike-gonogo.md §7).
@@ -163,31 +238,95 @@ def deal_utc_day(time_value: Any, server_utc_offset_s: int) -> str:
     A missing / undatable / non-numeric / non-finite time RAISES — a deal we
     cannot date must never be silently dropped (mirror
     ``deribit_txn._row_utc_day``'s fail-loud posture)."""
-    if isinstance(server_utc_offset_s, bool) or not isinstance(server_utc_offset_s, int):
-        raise Mt5DealClassificationError(
-            "MT5 server_utc_offset_s must be an int (seconds) — fail loud"
-        )
-    if isinstance(time_value, datetime):
-        aware = (
-            time_value
-            if time_value.tzinfo is not None
-            else time_value.replace(tzinfo=timezone.utc)
-        )
-        epoch = aware.timestamp()
-    elif isinstance(time_value, bool) or not isinstance(time_value, (int, float)):
-        raise Mt5DealClassificationError(
-            f"MT5 deal time={time_value!r} is not a datable epoch/datetime — fail loud"
-        )
+    _require_offset_seconds(server_utc_offset_s)
+    return _utc_day_of_server_epoch(_server_epoch_seconds(time_value), server_utc_offset_s)
+
+
+def _integral_millis(value: Any) -> int | None:
+    """``value`` as a plain int millisecond count, or None when it is not one:
+    a bool, a fractional or non-finite float, or any non-numeric shape."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    return None
+
+
+def deal_utc_instant_ms(deal: Mapping[str, Any], server_utc_offset_s: int) -> int | None:
+    """A deal's UTC instant in epoch MILLISECONDS, or ``None`` when it cannot be
+    trusted (FLOWTIMING D-08, D-09, D-07).
+
+    The instant is ``time_msc - server_utc_offset_s * 1000`` when the venue gives
+    ``time_msc`` (millisecond precision, D-09), else the deal's own ``time`` in
+    milliseconds with the same offset removed. It shares ONE offset argument and
+    ONE ``time`` parser with ``deal_utc_day``, so its UTC day is always the day
+    ``deal_utc_day`` gives the same deal (D-08); a second conversion would
+    mis-bucket near-midnight deals.
+
+    The only raise is the shared ``time`` parse, exactly where ``deal_utc_day``
+    already raises for every deal today (same class, same message), so no derive
+    that succeeds today can fail on the instant. Everything else that is wrong
+    answers ``None`` — D-07: an untrustworthy instant is NO instant, and the fold
+    degrades that day to the day-level rule. ``None`` is returned when
+    ``time_msc`` is present but a bool, fractional, non-finite or non-numeric, or
+    falls in a different second than the deal's own ``time``. Nothing is ever
+    defaulted: not to ``time``, not to midnight, not to noon.
+
+    Known limit (Pitfall 3, recorded here, not fixed): ``server_utc_offset_s`` is
+    one fixed integer, so across a broker DST change it is an hour off for WHICH
+    UTC DAY a near-midnight deal lands on. The order of deals and flows within the
+    broker clock is exact either way, and that order is all the fold uses."""
+    _require_offset_seconds(server_utc_offset_s)
+    epoch = _server_epoch_seconds(deal.get("time"))
+    # Same range check deal_utc_day performs, so the instant never succeeds where
+    # the day raises; the day string is also the agreement oracle below.
+    day = _utc_day_of_server_epoch(epoch, server_utc_offset_s)
+
+    raw_msc = deal.get("time_msc")
+    if raw_msc is None:
+        if epoch.is_integer():
+            server_ms = int(epoch) * 1000
+        else:
+            server_ms = math.floor(Fraction(epoch) * 1000)
     else:
-        if not math.isfinite(time_value):
-            raise Mt5DealClassificationError(
-                "MT5 deal time is non-finite (NaN/Inf) — fail loud"
-            )
-        epoch = float(time_value)
+        msc = _integral_millis(raw_msc)
+        if msc is None or msc // 1000 != math.floor(epoch):
+            return None
+        server_ms = msc
+    instant_ms = server_ms - server_utc_offset_s * 1000
+
+    # The instant must sit on the UTC day deal_utc_day gives this deal. Exact
+    # integer arithmetic; a disagreement (a sub-millisecond rounding edge at a
+    # midnight) is an untrustworthy instant, never a time on another day.
     try:
-        utc_epoch = epoch - server_utc_offset_s
-        return datetime.fromtimestamp(utc_epoch, tz=timezone.utc).date().isoformat()
-    except (OverflowError, OSError, ValueError) as exc:
-        raise Mt5DealClassificationError(
-            "MT5 deal time is out of the datable epoch range — fail loud"
-        ) from exc
+        instant_day = (_EPOCH0 + timedelta(milliseconds=instant_ms)).date().isoformat()
+    except OverflowError:
+        return None
+    return instant_ms if instant_day == day else None
+
+
+def deal_entry_code(deal: Mapping[str, Any]) -> int | None:
+    """The deal's ``DEAL_ENTRY`` code (IN=0, OUT=1, INOUT=2, OUT_BY=3) or ``None``.
+
+    ``None`` for an absent, ``bool``, non-int or unknown code. Unknown is
+    unresolvable and is never defaulted; it never raises, because an unresolvable
+    open sends the whole day to the day-level rule (D-07) rather than failing the
+    derive."""
+    raw = deal.get("entry")
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw if raw in _MT5_KNOWN_DEAL_ENTRIES else None
+
+
+def deal_position_id(deal: Mapping[str, Any]) -> int | None:
+    """The deal's ``position_id`` (a positive int ticket) or ``None``.
+
+    ``None`` for an absent, ``bool``, non-int, zero or negative id: MT5 gives
+    account-level commission/fee/balance deals ``position_id == 0``, which belong
+    to no position. Never raises (D-07, same reason as ``deal_entry_code``)."""
+    raw = deal.get("position_id")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return None
+    return raw

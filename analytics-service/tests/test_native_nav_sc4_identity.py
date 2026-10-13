@@ -38,7 +38,11 @@ emits only the guard + chain-break flags.
   E flow-day union into the pnl index          → quiet_day_flow
   F backward roll loop                         → every fixture
   G day-0 prev and r_t = (cur−prev−flow)/prev  → no_flows (day-0), quiet_day_flow
-  H guard comparisons (<=0, <DUST, flow-dom)   → neg_nav_interior / dust_day / flow_dominated
+  H guard comparisons (<=0, <DUST, pnl-dom)    → neg_nav_interior / dust_day / pnl_dominated
+    (the flow-dominance comparison was deleted in 164.6.6.2.3 D-05: a flow of any
+    size is measured, so the former ``flow_dominated`` fixture is now the
+    ``flow_exceeds_prior_nav`` identity fixture and op H lost that arm; the arm that
+    replaces it in the break-parity role is ``pnl_dominated``, D-06)
   I wedge-materiality anchor>DUST ∧ |upnl|/anchor>0.05 → wedge_above_5pct
   J downstream series                          → (consumed by metrics, out of scope)
 
@@ -193,13 +197,23 @@ _FIXTURES: list[_Fixture] = [
         [(0, "USDC", 100000.0), (2, "USDC", -20000.0)],
         flows=[(1, "USDC", -5000.0)],
     ),
-    # {flow-dominated day}: op H flow_dominated_guard (|flow| >= prev) on an
-    # INTERIOR day flanked by valid returns → twr_chain_broken parity.
+    # {flow larger than the prior NAV}: a +60000 deposit on a day-1 NAV of 60000. The
+    # flow-dominance guard that used to break this day is gone (164.6.6.2.3 D-05); the
+    # day is MEASURED at day level, r = 3000 / 60000 = 0.05, so legacy and native must
+    # agree on a finite number and on an annotation (not a warning).
     _Fixture(
-        "flow_dominated",
-        [(0, "USDC", 50000.0), (1, "USDC", 10000.0), (2, "USDC", -65000.0),
+        "flow_exceeds_prior_nav",
+        [(0, "USDC", 50000.0), (1, "USDC", 10000.0), (2, "USDC", 3000.0),
          (3, "USDC", -15000.0), (4, "USDC", 5000.0)],
         flows=[(2, "USDC", 60000.0)],
+    ),
+    # {pnl-dominated day}: op H pnl_dominated_guard (|pnl| >= 10 x prev) on an INTERIOR
+    # day flanked by valid returns → twr_chain_broken parity. Day 1 leaves 2000 (above
+    # the 1000 dust floor, so no dust guard), and day 2's +25000 is 12.5x that base.
+    _Fixture(
+        "pnl_dominated",
+        [(0, "USDC", 50000.0), (1, "USDC", -48000.0), (2, "USDC", 25000.0),
+         (3, "USDC", 5000.0), (4, "USDC", -2000.0)],
     ),
     # {negative-reconstructed-NAV day}: op H negative_nav_guard on an INTERIOR day
     # (retained valid returns on BOTH sides) → twr_chain_broken fires in the legacy
@@ -285,6 +299,46 @@ def test_inception_gate_green_on_matrix() -> None:
         assert meta["computation_status_hint"] in (
             "complete", "complete_with_warnings"
         )
+
+
+def _fixture(name: str) -> _Fixture:
+    return next(f for f in _FIXTURES if f.name == name)
+
+
+@pytest.mark.parametrize("run", [_legacy, _native], ids=["legacy", "native"])
+def test_flow_exceeding_the_prior_nav_is_measured_in_both_paths(run: Any) -> None:
+    """164.6.6.2.3 D-05/D-07: the day-2 deposit (60000) equals the day-1 NAV (60000),
+    the shape the retired flow-dominance guard broke. It is now measured at day
+    level: r = (123000 - 60000 - 60000) / 60000 = 3000 / 60000 = 0.05, with the
+    day-level annotation and no guard on the flow day, no chain break.
+
+    The expected 0.05 is derived by hand from the fixture rows (pnl 3000 on a prior
+    NAV of 60000), not read off either path. The retired flag may not return."""
+    returns, meta = run(_fixture("flow_exceeds_prior_nav"))
+    assert returns.loc[_day(2)] == pytest.approx(0.05, abs=1e-12)
+    assert meta.get("flow_timing_day_level") is True
+    assert "flow_dominated_guard" not in meta
+    assert "twr_chain_broken" not in meta
+    assert "pnl_dominated_guard" not in meta
+    assert "dust_nav_guard" not in meta
+    # The only warning source is the account's day 0 (the inception residue of this
+    # fixture, a separate rule owned by later plans of this phase), never the flow day:
+    # day 1 and every day after day 0 is finite.
+    assert returns.iloc[1:].notna().all()
+
+
+@pytest.mark.parametrize("run", [_legacy, _native], ids=["legacy", "native"])
+def test_pnl_dominated_interior_day_still_breaks_in_both_paths(run: Any) -> None:
+    """D-06: the pnl-dominated guard is unchanged and is the live arm of op H. Day 2
+    (+25000 on a prior NAV of 2000, 12.5x) is NaN with the flag and a chain break; the
+    days either side are finite (day 1 = -48000 / 50000 = -0.96)."""
+    returns, meta = run(_fixture("pnl_dominated"))
+    assert pd.isna(returns.loc[_day(2)])
+    assert returns.loc[_day(1)] == pytest.approx(-0.96, abs=1e-12)
+    assert returns.loc[_day(3)] == pytest.approx(5000.0 / 27000.0, abs=1e-12)
+    assert meta.get("pnl_dominated_guard") is True
+    assert meta.get("twr_chain_broken") is True
+    assert meta["computation_status_hint"] == "complete_with_warnings"
 
 
 def test_ieee_x_times_one_is_bit_identity() -> None:
@@ -505,7 +559,7 @@ def test_dual_run_bit_exact_real_adapter(fx: _Fixture, monkeypatch: Any) -> None
     reproduce the legacy returns bit-for-bit and the legacy guard/chain-break/
     materiality meta byte-for-byte.
 
-    MUTATION-HONESTY: the interior-break fixtures (flow_dominated, neg_nav_interior_
+    MUTATION-HONESTY: the interior-break fixtures (pnl_dominated, neg_nav_interior_
     break) redden the META equality if the native path's twr_chain_broken detection
     forks one-sided; the wedge_above_5pct fixture reddens if the FLOW-04
     unrealized_pnl_in_anchor materiality flag is dropped from the native seam (see

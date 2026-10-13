@@ -80,12 +80,12 @@ _CALENDAR_DAYS_PER_YEAR = 365.0
 # HARD-04 (#67, phase decision 2026-07-11): an annualization window under
 # ~MIN_ANNUALIZATION_DAYS calendar days is FLAGGED as insufficient (the
 # `insufficient_window` DQ flag) rather than silently over-annualized. A
-# days-old / flow-dominated live track annualizes CAGR with exponent
+# days-old / flow-heavy live track annualizes CAGR with exponent
 # 365 / elapsed_days, which EXPLODES for a tiny elapsed span (e.g. a 3-day
 # suffix left after an upstream chain-break annualizes a +3% move to +3,960%).
 # The flag is a DQ ANNOTATION ONLY — the CAGR value it annotates is NEVER
 # altered (HARD-04 hard rule, value-invariant). Conservative founder-tunable
-# default (tune like FLOW_DOM_RATIO / PNL_DOM_RATIO): 90 days ≈ one quarter,
+# default (tune like PNL_DOM_RATIO): 90 days ≈ one quarter,
 # below which annualizing a short live window is not statistically meaningful.
 MIN_ANNUALIZATION_DAYS = 90
 
@@ -1729,7 +1729,7 @@ def compute_all_metrics(
     # active view (they are neither activity nor a real 0).
     #
     # FACTSHEETTRUTH D-01 — ONE headline series. To the compute every integrity
-    # guard (negative / dust / flow-dominated / P&L-dominated NAV) is just a NaN
+    # guard (negative / dust / P&L-dominated NAV) is just a NaN
     # day. When one leaves an INTERIOR NaN, the headline cumulative return and CAGR
     # already compound only the post-break suffix, while every other stat used to
     # read the whole record: the stored row mixed two bases (Sharpe 8.1 beside a
@@ -1929,9 +1929,9 @@ def compute_all_metrics(
         # touched. Flag when the RETAINED-suffix calendar span (the SAME days
         # total_return compounds — reusing the already-computed _elapsed_days) is
         # under MIN_ANNUALIZATION_DAYS, or when the window is trivially degenerate
-        # (<2 days / no total_return). A flow-heavy / P&L-dominated window already
-        # breaks the chain upstream (flow_dominated_guard / pnl_dominated_guard),
-        # which SHORTENS this retained _cagr_index suffix — so the elapsed-days
+        # (<2 days / no total_return). A P&L-dominated window already
+        # breaks the chain upstream (pnl_dominated_guard; a large flow no longer does,
+        # 164.6.6.2.3 D-05), which SHORTENS this retained _cagr_index suffix — so the elapsed-days
         # rule fires on the trustworthy window and no separate flow trigger is
         # needed at this site (research §d + resolved decision 2).
         if total_return is None or len(_cagr_index) < 2:
@@ -2863,7 +2863,7 @@ def sharpe_vol_status_from_backbone(
       * else -> ``(vol, sharpe, "ok")``.
 
     Interior-NaN days (a guard-NaN flanked by valid returns, the shape
-    reconstruct_nav_and_twr emits on a dust/negative/flow-dominated interior day,
+    reconstruct_nav_and_twr emits on a dust/negative/P&L-dominated interior day,
     reachable via verify_strategy) are DROPPED by pandas skipna exactly as the
     deleted helper did — vol/mean are over the valid days only.
 

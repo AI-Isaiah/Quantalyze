@@ -499,8 +499,229 @@ def test_forward_terminal_nav_includes_flow_only_days():
     subtracted it, reconstructing ~0 and FALSE-failing the fidelity gate for exactly
     the real prod account (first $10k deposit 03-17, first return 03-20). Rolling over
     the UNION of return-days and flow-days lands the deposit at the right point."""
-    returns_by_day = {"2026-03-20": 0.10}  # returns start day 3; funding day has none
+    pnl_by_day = {"2026-03-20": 10_000.0}  # trading starts day 3; funding day has none
     flows_by_day = {"2026-03-17": 100_000.0, "2026-03-20": 0.0}
-    # initial = 0 (funded-inside-window). day1 deposit: 0*(1+0)+100000; day3: 100000*1.10.
-    nav = _forward_terminal_nav(returns_by_day, initial=0.0, flows_by_day=flows_by_day)
+    # initial = 0 (funded-inside-window). day1 deposit: 0+0+100000; day3: 100000+10000.
+    nav = _forward_terminal_nav(pnl_by_day, initial=0.0, flows_by_day=flows_by_day)
     assert nav == pytest.approx(110_000.0)  # pre-fix (return-days only) reconstructs 0.0
+
+
+# ---------------------------------------------------------------------------
+# FLOWTIMING WR-01 — the fidelity roll is on LEVELS, not on the returns.
+#
+# Since plan 05 a timed flow day's return is a COHORT return, so the end-of-day identity
+# NAV_t = NAV_{t-1}*(1+r_t) + F_t no longer holds on it. The ledger below is the review's
+# reproduction: 10_000 deposited on 10-16, 100_000 deposited at 09:00 on 10-17, a position
+# opened at 10:00 that day and closed at 15:00 for +1_100, then +500 the next day. The
+# account ends at 10_000 + 100_000 + 1_100 + 500 = 111_600 and the soak's reconstruction is
+# CORRECT, so the gate must be green. Rolling the returns forward gave 110_595.50 here (a
+# -1_004.50 residual on a $1 tolerance) and exited 1 on a correct account.
+# ---------------------------------------------------------------------------
+def _ms(day: int, hh: int, mm: int = 0) -> int:
+    return int(datetime(2025, 10, day, hh, mm, tzinfo=timezone.utc).timestamp()) * 1000
+
+
+def _stamped_deal(row: dict, utc_ms: int) -> dict:
+    return {
+        **row,
+        "swap": 0.0, "commission": 0.0, "fee": 0.0,
+        "time": utc_ms // 1000, "time_msc": utc_ms,
+    }
+
+
+def _timed_deposit_then_trade_deals() -> list[dict]:
+    return [
+        _stamped_deal({"type": _DEAL_TYPE_BALANCE, "profit": 10_000.0}, _ms(16, 8)),
+        _stamped_deal({"type": _DEAL_TYPE_BALANCE, "profit": 100_000.0}, _ms(17, 9)),
+        _stamped_deal(
+            {"type": _DEAL_TYPE_BUY, "entry": 0, "position_id": 7, "profit": 0.0}, _ms(17, 10)
+        ),
+        _stamped_deal(
+            {"type": _DEAL_TYPE_SELL, "entry": 1, "position_id": 7, "profit": 1_100.0},
+            _ms(17, 15),
+        ),
+        _stamped_deal({"type": _DEAL_TYPE_SELL, "entry": 1, "profit": 500.0}, _ms(18, 12)),
+    ]
+
+
+def test_a_timed_deposit_then_trade_day_reconciles_to_the_balance():
+    factory = _make_factory(
+        equity=111_600.0, balance=111_600.0, deals=_timed_deposit_then_trade_deals()
+    )
+    parity = _reconcile(factory)
+
+    assert parity["observation"] == "populated"
+    assert parity["total_trading_pnl"] == pytest.approx(1_600.0)
+    assert parity["total_flows"] == pytest.approx(110_000.0)
+    # The level roll NAV_t = NAV_{t-1} + P_t + F_t lands on the balance to the cent; the
+    # return roll landed 110_595.50 (off by -1_004.50) because day 10-17's r_t is cohort-based.
+    assert parity["reconstructed_terminal"] == pytest.approx(111_600.0)
+    assert parity["recon_ok"] is True
+    assert parity["parity_ok"] is True
+
+
+def test_a_timed_deposit_then_trade_day_exits_zero(tmp_path, monkeypatch):
+    _set_env(monkeypatch, tmp_path)
+    factory = _make_factory(
+        equity=111_600.0, balance=111_600.0, deals=_timed_deposit_then_trade_deals()
+    )
+    assert main([], client_factory=factory, utc_now=_UTC_NOW) == 0
+
+
+# ---------------------------------------------------------------------------
+# FLOWTIMING R2-01 — the fidelity gate must still see the PUBLISHED return series.
+#
+# After the WR-01 level roll, `initial = balance - Σtrading_pnl - Σflows` and the roll
+# `initial + Σfold_pnl + Σflows` reduce to `Σfold_pnl - Σtrading_pnl`, an identity over the
+# same primitives: recon_ok was True for ANY return series the combiner produced (the review
+# reproduced +700% a day certified green). The tests below go through `reconcile_parity`
+# itself (not the roll helper) and corrupt what the combiner PUBLISHES. Each must fail on an
+# identity-only gate, and the positive controls above (the real combiner) must stay green.
+# ---------------------------------------------------------------------------
+import pandas as pd  # noqa: E402
+
+import scripts.mt5_soak as _soak  # noqa: E402
+
+
+def _publish_corrupted(monkeypatch, corrupt):
+    """Make the soak's combiner hand back `corrupt(real_returns)`; meta untouched."""
+    real = _soak.combine_mt5_deal_ledger
+
+    def wrapped(*args, **kwargs):
+        returns, meta = real(*args, **kwargs)
+        return corrupt(returns.copy()), meta
+
+    monkeypatch.setattr(_soak, "combine_mt5_deal_ledger", wrapped)
+
+
+def _canonical_parity():
+    return _reconcile(
+        _make_factory(equity=110_500.0, balance=110_500.0, deals=_canonical_deals())
+    )
+
+
+def _assert_returns_breach(parity, kind: str) -> None:
+    assert parity["observation"] == "populated"
+    # The LEVEL roll is untouched by a corrupted return series, which is exactly why it
+    # cannot be the only fidelity check.
+    assert parity["recon_level_ok"] is True
+    assert parity["return_check_ok"] is False
+    assert parity["recon_ok"] is False
+    assert parity["parity_ok"] is False
+    assert kind in {m["kind"] for m in parity["return_check"]["mismatches"]}
+
+
+def test_a_dropped_day_pnl_in_the_published_returns_reddens_the_gate(monkeypatch):
+    # 2025-06-05 books -200 on a 110_700 base. Zeroing its published return is "the day's
+    # P&L was dropped from the series".
+    def drop(returns):
+        returns[pd.Timestamp("2025-06-05")] = 0.0
+        return returns
+
+    _publish_corrupted(monkeypatch, drop)
+    parity = _canonical_parity()
+    _assert_returns_breach(parity, "return_off_ledger")
+    bad = [m for m in parity["return_check"]["mismatches"] if m["day"] == "2025-06-05"]
+    assert bad and bad[0]["expected"] == pytest.approx(-200.0 / 110_700.0)
+
+
+def test_a_nan_the_guards_cannot_explain_reddens_the_gate(monkeypatch):
+    def nan_out(returns):
+        returns[pd.Timestamp("2025-06-05")] = float("nan")
+        return returns
+
+    _publish_corrupted(monkeypatch, nan_out)
+    _assert_returns_breach(_canonical_parity(), "checked_day_not_finite")
+
+
+def test_a_small_perturbation_on_one_untimed_day_reddens_the_gate(monkeypatch):
+    # The review's negative control: 1e-3 on one untimed day.
+    def nudge(returns):
+        returns[pd.Timestamp("2025-06-02")] += 1e-3
+        return returns
+
+    _publish_corrupted(monkeypatch, nudge)
+    _assert_returns_breach(_canonical_parity(), "return_off_ledger")
+
+
+def test_a_constant_garbage_return_series_no_longer_certifies_green(monkeypatch):
+    # The review's reproduction: every value replaced by +700% a day was certified
+    # recon_ok=True, recon_residual=0.0 by the identity-only gate.
+    _publish_corrupted(monkeypatch, lambda returns: returns.mask(returns.notna(), 7.0))
+    parity = _canonical_parity()
+    _assert_returns_breach(parity, "return_off_ledger")
+    assert parity["recon_residual"] == pytest.approx(0.0)  # levels alone said green
+
+
+def test_a_corrupted_flat_day_reddens_the_gate(monkeypatch):
+    def poison(returns):
+        returns[pd.Timestamp("2025-06-03")] = 0.01  # no deal, no flow that day
+        return returns
+
+    _publish_corrupted(monkeypatch, poison)
+    _assert_returns_breach(_canonical_parity(), "flat_day_not_zero")
+
+
+def test_the_real_combiner_passes_and_every_excluded_day_is_counted():
+    parity = _canonical_parity()
+    check = parity["return_check"]
+    assert parity["return_check_ok"] is True and parity["recon_ok"] is True
+    # 06-02, 06-04, 06-05 are exact-checked; 06-03 is the gap-filled flat day.
+    assert (check["checked"], check["flat"], check["timed"], check["guarded"]) == (3, 1, 0, 0)
+    assert check["mismatch_count"] == 0 and check["max_abs_err"] < check["tolerance"]
+
+
+def test_timed_days_are_counted_not_silently_dropped(monkeypatch):
+    # In the timed ledger 10-16 and 10-17 are cohort-measured (excluded from the exact
+    # check, and said so); 10-18 is exact-checked, and corrupting it still reddens.
+    factory = _make_factory(
+        equity=111_600.0, balance=111_600.0, deals=_timed_deposit_then_trade_deals()
+    )
+    check = _reconcile(factory)["return_check"]
+    assert (check["checked"], check["timed"]) == (1, 2)
+
+    _publish_corrupted(
+        monkeypatch,
+        lambda returns: returns.mask(returns.index == pd.Timestamp("2025-10-18"), 0.0),
+    )
+    parity = _reconcile(factory)
+    assert parity["return_check_ok"] is False and parity["recon_ok"] is False
+
+
+def test_a_run_that_excludes_every_day_is_vacuous_and_not_green():
+    # A single timed flow day: nothing is exact-checked, so nothing about the returns was
+    # certified. That must be said, not passed.
+    deals = [
+        _stamped_deal({"type": _DEAL_TYPE_BALANCE, "profit": 10_000.0}, _ms(16, 8)),
+        _stamped_deal(
+            {"type": _DEAL_TYPE_BUY, "entry": 0, "position_id": 9, "profit": 0.0}, _ms(16, 10)
+        ),
+        _stamped_deal(
+            {"type": _DEAL_TYPE_SELL, "entry": 1, "position_id": 9, "profit": 100.0},
+            _ms(16, 15),
+        ),
+    ]
+    parity = _reconcile(_make_factory(equity=10_100.0, balance=10_100.0, deals=deals))
+    assert parity["return_check"]["checked"] == 0
+    assert parity["return_check"]["vacuous"] is True
+    assert parity["recon_level_ok"] is True
+    assert parity["recon_ok"] is False and parity["parity_ok"] is False
+
+
+def test_guard_explained_nan_is_accepted_and_a_finite_value_there_is_not():
+    # A 50-dollar base is under the $100 dust floor, so the DQ-01 guard breaks the day:
+    # NaN is the CORRECT published value, and a finite one is the defect.
+    kwargs = dict(
+        pnl_by_day={"2025-06-02": 1.0, "2025-06-03": 2.0},
+        flows_by_day={},
+        timed_days=set(),
+        initial=50.0,
+    )
+    idx = pd.DatetimeIndex(["2025-06-02", "2025-06-03"]).as_unit("us")
+    nan_ok = _soak._reconcile_published_returns(
+        pd.Series([float("nan"), float("nan")], index=idx), **kwargs
+    )
+    assert nan_ok["guarded"] == 2 and nan_ok["mismatch_count"] == 0
+    finite = _soak._reconcile_published_returns(pd.Series([0.02, 0.03], index=idx), **kwargs)
+    assert finite["mismatch_count"] == 2
+    assert {m["kind"] for m in finite["mismatches"]} == {"guarded_day_not_nan"}

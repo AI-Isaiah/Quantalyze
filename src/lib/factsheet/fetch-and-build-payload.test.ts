@@ -891,6 +891,65 @@ describe("164.6.6.2 D-25 — small_base_measured on the analytics row reaches th
 });
 
 // ---------------------------------------------------------------------------
+// Phase 164.6.6.2.3 (D-07) — `data_quality_flags.flow_timing_day_level` on the
+// analytics row becomes `payload.dataQuality.flowTimingDayLevel` through the same
+// shared owner, present only when the persisted flag is literally true. D-14: a
+// stored row that still carries the retired flow-dominance flag names no reason.
+// ---------------------------------------------------------------------------
+describe("164.6.6.2.3 D-07 — flow_timing_day_level on the analytics row reaches the payload", () => {
+  it("a flagged row carries dataQuality.flowTimingDayLevel true", async () => {
+    seed(single({ daily_returns: points(30), data_quality_flags: { native_unit: "BTC", flow_timing_day_level: true } }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.dataQuality?.flowTimingDayLevel).toBe(true);
+  });
+
+  it.each([
+    ["absent flag", null],
+    ["a flags blob without it", { native_unit: "BTC" }],
+    ["false", { flow_timing_day_level: false }],
+    ["null", { flow_timing_day_level: null }],
+    ["the string true", { flow_timing_day_level: "true" }],
+    ["a number", { flow_timing_day_level: 1 }],
+  ])("%s: the payload has no flowTimingDayLevel KEY", async (_label, flags) => {
+    seed(single({ daily_returns: points(30), data_quality_flags: flags }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload).not.toBeNull();
+    expect(payload?.dataQuality && "flowTimingDayLevel" in payload.dataQuality).toBe(false);
+  });
+
+  it("D-15: a flow_timing_day_level_large row carries dataQuality.flowTimingDayLevelLarge true", async () => {
+    seed(single({ daily_returns: points(30), data_quality_flags: { flow_timing_day_level: true, flow_timing_day_level_large: true } }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.dataQuality?.flowTimingDayLevelLarge).toBe(true);
+  });
+
+  it.each([
+    ["absent flag", null],
+    ["a flags blob without it", { flow_timing_day_level: true }],
+    ["false", { flow_timing_day_level_large: false }],
+    ["the string true", { flow_timing_day_level_large: "true" }],
+    ["a number", { flow_timing_day_level_large: 1 }],
+  ])("D-15 %s: the payload has no flowTimingDayLevelLarge KEY", async (_label, flags) => {
+    seed(single({ daily_returns: points(30), data_quality_flags: flags }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload).not.toBeNull();
+    expect(payload?.dataQuality && "flowTimingDayLevelLarge" in payload.dataQuality).toBe(false);
+  });
+
+  it("D-14: a stored retired flow-dominance flag reaches the payload as no guard reason", async () => {
+    seed(
+      single({
+        daily_returns: points(30),
+        data_quality_flags: { native_unit: "BTC", twr_chain_broken: true, headline_since: "2026-01-02", flow_dominated_guard: true },
+      }),
+    );
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.dataQuality?.twrChainBroken).toBe(true);
+    expect(payload?.dataQuality && "headlineGuardReasons" in payload.dataQuality).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Phase 167.1.2.2.2 (TRADESYNC, plan 10) - the trade-fetch fact and the named-gap
 // record reach the payload. F3: the venue is the api key's exchange, never
 // `supported_exchanges`. Absence is null / [], never an epoch or now sentinel.

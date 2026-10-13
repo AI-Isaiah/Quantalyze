@@ -20,8 +20,16 @@
 import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { BASIS_KPI_MAP } from "./basis-metrics";
 
-/** The closed set of reasons a guard flag can put on a public page. */
-export type GuardReason = "negative_nav" | "dust_nav" | "flow_dominated" | "pnl_dominated";
+/**
+ * The closed set of reasons a guard flag can put on a public page.
+ *
+ * Phase 164.6.6.2.3 FLOWTIMING (D-05, D-14): the flow-dominance reason is
+ * retired. A deposit or withdrawal, however large, no longer drops a day's
+ * return, so no page names it. Stored rows keep the retired guard flag until
+ * the recompute rewrites them; it is ignored here by construction, because it
+ * is no longer a row of {@link GUARD_FLAGS}.
+ */
+export type GuardReason = "negative_nav" | "dust_nav" | "pnl_dominated";
 
 /**
  * Flag-to-reason table, in the UI-SPEC §1.2 order. That order is also the order
@@ -30,7 +38,6 @@ export type GuardReason = "negative_nav" | "dust_nav" | "flow_dominated" | "pnl_
 const GUARD_FLAGS = [
   ["negative_nav_guard", "negative_nav"],
   ["dust_nav_guard", "dust_nav"],
-  ["flow_dominated_guard", "flow_dominated"],
   ["pnl_dominated_guard", "pnl_dominated"],
 ] as const satisfies ReadonlyArray<readonly [string, GuardReason]>;
 
@@ -41,20 +48,23 @@ const GUARD_FLAGS = [
 export const GUARD_REASON_PHRASES = {
   negative_nav: "a zero or negative account balance",
   dust_nav: "a near-zero account balance",
-  flow_dominated: "a deposit or withdrawal larger than the balance",
   pnl_dominated: "a one-day gain or loss larger than the balance",
 } as const satisfies Record<GuardReason, string>;
 
-/** The phrase when the break has none of the four named causes. */
+/** The phrase when the break has none of the three named causes. */
 const NO_REASON_PHRASE = "a break in the return chain";
 
 /**
  * UI-SPEC §1.2 join rule `{R}`: phrases in table order; one stands alone, two
- * are joined with " and ", three or four with ", " and a final " and ". No
+ * are joined with " and ", three with ", " and a final " and ". No
  * reasons at all is {@link NO_REASON_PHRASE}.
  */
 export function joinGuardPhrases(reasons: ReadonlyArray<GuardReason>): string {
-  const phrases = reasons.map((r) => GUARD_REASON_PHRASES[r]);
+  // A cached payload built before the retired reason left the table (164.6.6.2.3,
+  // D-14) can still carry it in `headlineGuardReasons` for the cache TTL. The type
+  // says it cannot, the data can; a reason with no phrase is dropped, never printed
+  // as "undefined".
+  const phrases: string[] = reasons.map((r): string | undefined => GUARD_REASON_PHRASES[r]).filter((p) => p !== undefined);
   if (phrases.length === 0) return NO_REASON_PHRASE;
   if (phrases.length === 1) return phrases[0];
   return `${phrases.slice(0, -1).join(", ")} and ${phrases[phrases.length - 1]}`;

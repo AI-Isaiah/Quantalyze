@@ -20,6 +20,11 @@ THE ORACLE IS INDEPENDENT OF THE CODE UNDER TEST. The expected returns are
 expected absent days are the book's restated guard rule (pinned against the real
 ``chain_linked_twr`` in ``test_allocator_equity_dropped_day_pnl.py``), and the multi-key
 expectation is the capital-weighted mean over exact ``Fraction`` levels.
+
+FLOWTIMING (164.6.6.2.3 D-05): the interior dropped day these tests used to name was a
+flow-dominated deposit day, and that guard is deleted (the day is measured now). They use
+``funding_and_dust_interior_book`` instead, whose interior dropped day (day 3, on a dust
+prior NAV) is one the writer still drops.
 """
 from __future__ import annotations
 
@@ -39,6 +44,7 @@ from tests.test_allocator_equity_dropped_day_pnl import (
     _window_flow,
     _window_pnl,
     funding_and_dominated_book,
+    funding_and_dust_interior_book,
 )
 
 
@@ -62,16 +68,17 @@ def _curve(payload: dict) -> dict[str, float]:
 
 
 def test_a_dropped_day_is_absent_from_the_returns_never_zero() -> None:
-    book = funding_and_dominated_book()
+    book = funding_and_dust_interior_book()
     interior_dropped = [i for i in book.dropped_idx if i >= 1]
-    assert interior_dropped == [2] and book.pnl[2] == -700  # the flow-dominated day, P&L -700
+    assert interior_dropped == [3] and book.pnl[3] == 7600  # the dust-base day, P&L 7600
     payload = _compose(book)
     returns = _ret(payload)
 
     # the first union day has no prior level; the dropped day has no defined return
     expected_days = [book.days[i] for i in range(1, len(book.days)) if i not in book.dropped_idx]
     assert sorted(returns) == expected_days
-    assert book.days[2] not in returns
+    assert book.days[3] not in returns
+    assert book.days[2] in returns  # the near-total withdrawal day is MEASURED (D-05), not dropped
     # and every day that is there is the writer's own definition, pnl / prior nav, exactly
     for i in range(1, len(book.days)):
         if i in book.dropped_idx:
@@ -86,7 +93,7 @@ def test_the_returns_chained_with_the_flows_reproduce_the_curve_on_every_returne
     """The reviewer's pin: curve and KPIs in one payload agree. On each returned day
     ``curve_t = curve_{t-1} (1 + r_t) + F_t``; on the dropped day the curve moves by exactly
     that day's real P&L plus its flow, and the returns say nothing about it."""
-    book = funding_and_dominated_book()
+    book = funding_and_dust_interior_book()
     payload = _compose(book)
     returns, curve = _ret(payload), _curve(payload)
     flow = {_iso(i): float(f) for i, f in enumerate(book.flow)}
@@ -95,13 +102,13 @@ def test_the_returns_chained_with_the_flows_reproduce_the_curve_on_every_returne
         day, prev = book.days[i], book.days[i - 1]
         if day in returns:
             assert curve[day] == pytest.approx(curve[prev] * (1 + returns[day]) + flow[day], rel=1e-9), day
-    dropped = book.days[2]
-    assert curve[dropped] - curve[book.days[1]] - flow[dropped] == pytest.approx(float(book.pnl[2]), abs=1e-6)
+    dropped = book.days[3]
+    assert curve[dropped] - curve[book.days[2]] - flow[dropped] == pytest.approx(float(book.pnl[3]), abs=1e-6)
     assert dropped not in returns
 
 
 def test_a_dropped_day_is_reported_not_silent(caplog: pytest.LogCaptureFixture) -> None:
-    book = funding_and_dominated_book()
+    book = funding_and_dust_interior_book()
     with caplog.at_level(logging.WARNING, logger="services.allocator_equity_compose"):
         payload = _compose(book)
 
@@ -116,11 +123,16 @@ def test_a_dropped_day_is_reported_not_silent(caplog: pytest.LogCaptureFixture) 
 def test_a_dust_dropped_day_that_is_not_a_flow_day_keeps_its_signal() -> None:
     """The signal the reviewer found lost. Day 1 is below the dust floor with no flow:
     before D-15 it had no level and was counted as a gap; D-15 gave it one, and it is
-    still not a return."""
+    still not a return.
+
+    167.1.2 D-27 moved the dust floor from 1000 to 100, and the shared oracle with it. The two
+    opening levels were 700 and 800 (dust under the old floor); they are re-aimed to 70 and 80
+    so day 1 (prior NAV 70) and day 2 (prior NAV 80) stay dust under the new floor, with no
+    other change to the shape."""
     book = Book(
         Fraction(0),
-        [Fraction(500), Fraction(100), Fraction(50), Fraction(300)] + _window_pnl(20),
-        [Fraction(200), Fraction(0), Fraction(5000), Fraction(0)] + _window_flow(20),
+        [Fraction(50), Fraction(10), Fraction(5), Fraction(300)] + _window_pnl(20),
+        [Fraction(20), Fraction(0), Fraction(5000), Fraction(0)] + _window_flow(20),
     )
     assert book.dropped_idx == [0, 1, 2] and book.flow[1] == 0  # day 1: dust, not a flow day
     payload = compose_allocator_equity(
@@ -143,9 +155,9 @@ def test_a_book_with_no_dropped_day_is_unchanged() -> None:
 
 
 def test_with_several_keys_the_dropped_key_sits_out_and_the_others_carry_the_day() -> None:
-    """Key A drops day 2; key B is ordinary. The book return that day is B's alone, exactly;
+    """Key A drops day 3; key B is ordinary. The book return that day is B's alone, exactly;
     on every other day it is the capital-weighted mean over exact levels."""
-    book = funding_and_dominated_book()
+    book = funding_and_dust_interior_book()
     n = len(book.days)
     rb = Fraction(1, 1000)
     b_anchor = Fraction(250_000)
@@ -162,7 +174,7 @@ def test_with_several_keys_the_dropped_key_sits_out_and_the_others_carry_the_day
     )
     returns = _ret(payload)
 
-    assert returns[book.days[2]] == pytest.approx(float(rb), rel=1e-12)  # B's, alone
+    assert returns[book.days[3]] == pytest.approx(float(rb), rel=1e-12)  # B's, alone
     for i in range(1, n):
         if i in book.dropped_idx:
             continue

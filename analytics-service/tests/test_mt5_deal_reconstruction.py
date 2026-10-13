@@ -30,6 +30,7 @@ Run: cd analytics-service && pytest tests/test_mt5_deal_reconstruction.py -x
 from __future__ import annotations
 
 import math
+import random
 from datetime import date, datetime, timedelta, timezone
 from fractions import Fraction
 
@@ -401,7 +402,8 @@ def test_returns_series_unambiguous_for_quantstats() -> None:
 # trades_to_daily_returns_with_status, whose dust gate DISCARDS any anchor
 # <= $1000 and substitutes heuristic_base = max(mean_abs_pnl*100, |Σpnl|, 10_000).
 # For an MT5 account with equity in (100, 1000] this (a) rescaled the returns
-# 5–10×, (b) inflated the reconstructed prev_nav above the $1000 DUST_NAV_FLOOR so
+# 5–10×, (b) inflated the reconstructed prev_nav above the DUST_NAV_FLOOR (then $1000, $100
+# since 167.1.2 D-27; the sub-$100 oracle below keeps the dust branch alive) so
 # the DQ-01 dust guard never fired and the account slipped past the material-equity
 # floor, and (c) published the wrong series stamped api_verified. MT5 ALWAYS has an
 # authoritative account_info().equity read, so the heuristic base must never be
@@ -430,7 +432,7 @@ def test_sub_1000_equity_reconstructs_off_real_anchor_not_fabricated_base() -> N
       flow-in-numerator returns r_t = (NAV_t − NAV_{t−1})/NAV_{t−1}:
         day1: (1_400 − 2_000)/2_000 = −600/2_000 = −0.30
         day2: (900 − 1_400)/1_400   = −500/1_400 = −0.3571428571428571…
-      Both prior NAVs (2_000, 1_400) are ABOVE the $1000 dust floor, so both days
+      Both prior NAVs (2_000, 1_400) are ABOVE the $100 dust floor (D-27), so both days
       are interpretable — NO dust guard, 2 usable days.
 
     The FABRICATED-base series the buggy code produced (heuristic_base =
@@ -452,7 +454,7 @@ def test_sub_1000_equity_reconstructs_off_real_anchor_not_fabricated_base() -> N
     assert vals[0] == pytest.approx(-600 / 2_000, abs=1e-12)    # −0.30, REAL base
     assert vals[1] == pytest.approx(-500 / 1_400, abs=1e-12)    # off real prior NAV
     # The honest core reconstructs from the real anchor: NO heuristic base, NO dust
-    # guard (both prior NAVs are above the $1000 floor), 2 usable days.
+    # guard (both prior NAVs are above the $100 floor, D-27), 2 usable days.
     assert not meta.get("used_heuristic_capital")
     assert not meta.get("dust_nav_guard")
     assert int(returns.notna().sum()) == 2
@@ -461,37 +463,39 @@ def test_sub_1000_equity_reconstructs_off_real_anchor_not_fabricated_base() -> N
 
 
 def test_genuinely_dust_equity_fails_dust_guard_not_rescaled() -> None:
-    """CR-01 (the other honest outcome). Equity $500 whose entire reconstructed NAV
-    path stays below the $1000 dust floor. The honest core dust-guards EVERY day
+    """CR-01 (the other honest outcome). Equity $50 whose entire reconstructed NAV
+    path stays below the $100 dust floor. (167.1.2 D-27 moved the USD floor from $1000 to
+    $100: the oracle was a $500 account with profits +40/-20, re-aimed ten times smaller so
+    it still exercises the dust branch.) The honest core dust-guards EVERY day
     (NaN) → <2 usable days → the job-worker material-equity floor rejects the
     account PERMANENT. It is NEVER silently rescaled off a fabricated ≥$10k base.
 
-    Hand arithmetic (equity 500, balance 500 ⇒ open_unrealized 0; consecutive UTC
+    Hand arithmetic (equity 50, balance 50 ⇒ open_unrealized 0; consecutive UTC
     days, no flows):
-      day1 (06-02): BUY profit +40  → day PnL +40
-      day2 (06-03): SELL profit −20 → day PnL −20
-      Σpnl = +20
-      terminal NAV = 500
+      day1 (06-02): BUY profit +4  → day PnL +4
+      day2 (06-03): SELL profit −2 → day PnL −2
+      Σpnl = +2
+      terminal NAV = 50
       backward roll:
-        NAV(06-03) = 500
-        NAV(06-02) = 500 − (−20) = 520
-        base       = 520 − 40    = 480
-      prior NAVs are {480 (day1), 520 (day2)} — BOTH 0 < prev < $1000 ⇒
+        NAV(06-03) = 50
+        NAV(06-02) = 50 − (−2) = 52
+        base       = 52 − 4    = 48
+      prior NAVs are {48 (day1), 52 (day2)} — BOTH 0 < prev < $100 ⇒
       dust_nav_guard fires on both days ⇒ both returns NaN ⇒ 0 usable days.
 
-    The buggy heuristic path (base max(30*100, 20, 10_000)=10_000, anchor 10_020)
-    instead emitted +40/10_000=+0.0040 and ≈ −20/10_040 with NO dust guard and 2
+    The buggy heuristic path (base max(3*100, 2, 10_000)=10_000, anchor 10_002)
+    instead emitted +4/10_000=+0.0004 and ≈ −2/10_004 with NO dust guard and 2
     usable days — an empty-but-green track record fabricated off $10k. This test
     reddens against that.
     """
     deals = [
-        {"type": 0, "entry": 1, "profit": 40.0, "swap": 0.0,
+        {"type": 0, "entry": 1, "profit": 4.0, "swap": 0.0,
          "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 2)},
-        {"type": 1, "entry": 1, "profit": -20.0, "swap": 0.0,
+        {"type": 1, "entry": 1, "profit": -2.0, "swap": 0.0,
          "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 3)},
     ]
     returns, meta = combine_mt5_deal_ledger(
-        deals, account_equity=500.0, account_balance=500.0
+        deals, account_equity=50.0, account_balance=50.0
     )
     # Honest DQ-01 dust rejection, NOT a fabricated base:
     assert not meta.get("used_heuristic_capital")
@@ -738,14 +742,13 @@ def test_levels_sibling_fails_loud_on_an_unclassifiable_deal() -> None:
         )
 
 
-def test_guard_broken_day_still_has_an_honest_level() -> None:
-    """A DQ-01 guard-broken day has NO interpretable RETURN (NaN) but DOES have an honest
-    LEVEL — because the roll is PnL-based (``NAV_{t−1} = NAV_t − pnl_t − F_t``) with no
-    ``(1 + r_t)`` denominator to break. This is the measured reason A-01 rejected
-    inverting the returns: an inversion refuses a non-finite return, i.e. refuses exactly
-    the days the guards exist to MARK.
+def test_flow_dominated_day_is_measured_and_its_level_is_honest() -> None:
+    """164.6.6.2.3 D-05 (moved from "a flow-dominated day has an honest LEVEL but no
+    RETURN"): a deposit larger than the prior NAV no longer breaks the day. The RETURN
+    is measured and the LEVEL is honest, both from the same PnL-based roll
+    (``NAV_{t−1} = NAV_t − pnl_t − F_t``).
 
-    Fixture — a flow-dominated day (``|F| ≥ FLOW_DOM_RATIO · NAV_{t−1}``):
+    Fixture — a day whose flow is twice the prior NAV (``|F| ≥ NAV_{t−1}``):
       06-01: BUY +400                                     → pnl +400
       06-02: BALANCE +200_000 AND SELL +300                → pnl +300, flow +200_000
       06-03: SELL −200                                     → pnl −200
@@ -753,9 +756,12 @@ def test_guard_broken_day_still_has_an_honest_level() -> None:
       06-03 = 300_100
       06-02 = 300_100 + 200                  = 300_300
       06-01 = 300_300 − 300 − 200_000        = 100_000
-    On 06-02 the chain-link denominator is NAV(06-01) = 100_000 while F = 200_000, so
-    ``flow_dominated_guard`` breaks that day's return to NaN — and the $300_300 level
-    stands regardless."""
+    On 06-02 the chain-link denominator is NAV(06-01) = 100_000 while F = 200_000. The
+    SELL on the flow day has no ``position_id`` (this fixture predates the position
+    fields), so when its position opened is unknown: the day has no timing record, the
+    flow counts at the end of the day (D-07) and
+    ``r = (300_300 − 100_000 − 200_000) / 100_000 = 300 / 100_000 = 0.003``. The retired
+    ``flow_dominated_guard`` is absent and the day-level rule is named instead."""
     deals = [
         {"type": 0, "entry": 1, "profit": 400.0, "swap": 0.0,
          "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 1)},
@@ -769,23 +775,85 @@ def test_guard_broken_day_still_has_an_honest_level() -> None:
     nav, nav_meta = reconstruct_mt5_nav_levels(
         deals, account_equity=300_100.0, account_balance=300_100.0
     )
-    returns, _r_meta = combine_mt5_deal_ledger(
+    returns, r_meta = combine_mt5_deal_ledger(
         deals, account_equity=300_100.0, account_balance=300_100.0
+    )
+    flow_day = pd.Timestamp("2025-06-02")
+
+    # The RETURN is measured: 300 / 100_000 (hand-derived above), not a NaN.
+    assert float(returns.loc[flow_day]) == pytest.approx(0.003, abs=1e-12)
+    # The LEVEL is present, finite and hand-derived, exactly as before.
+    assert flow_day in nav.index
+    _assert_band(float(nav.loc[flow_day]), 300_300.0, "flow-day level")
+    _assert_band(float(nav.loc[pd.Timestamp("2025-06-01")]), 100_000.0, "06-01 level")
+    _assert_band(float(nav.iloc[-1]), 300_100.0, "terminal level")
+
+    # ONE reconstruction, one set of facts: the returns meta and the levels meta agree,
+    # and neither carries the retired flag or a warning status.
+    for meta in (nav_meta, r_meta):
+        assert "flow_dominated_guard" not in meta
+        assert meta.get("flow_timing_day_level") is True
+        assert meta["computation_status_hint"] == "complete"
+        assert meta["series_completeness"] == "ledger_complete"
+
+
+def test_guard_broken_day_still_has_an_honest_level() -> None:
+    """A DQ-01 guard-broken day has NO interpretable RETURN (NaN) but DOES have an honest
+    LEVEL — because the roll is PnL-based (``NAV_{t−1} = NAV_t − pnl_t − F_t``) with no
+    ``(1 + r_t)`` denominator to break. This is the measured reason A-01 rejected
+    inverting the returns: an inversion refuses a non-finite return, i.e. refuses exactly
+    the days the guards exist to MARK.
+
+    The guard that marks such a day is now the live P&L-dominated one (164.6.6.2.3 D-06;
+    the flow-dominance guard that used to stand here was deleted, D-05, and its day is
+    pinned measured in ``test_flow_dominated_day_is_measured_and_its_level_is_honest``).
+
+    Fixture — a day whose P&L is at least 10x the prior NAV:
+      06-01: BUY −2_000                                    → pnl −2_000
+      06-02: SELL +30_000                                  → pnl +30_000
+      06-03: SELL −200                                     → pnl −200
+    Anchor equity == balance == 31_000 ⇒ terminal 31_000.
+      06-03 = 31_000
+      06-02 = 31_000 + 200                   = 31_200
+      06-01 = 31_200 − 30_000                =  1_200
+      base  =  1_200 + 2_000                 =  3_200
+    On 06-02 the chain-link denominator is NAV(06-01) = 1_200, above the 100 dust floor (D-27),
+    and 30_000 ≥ 10 · 1_200, so ``pnl_dominated_guard`` breaks that day's return to NaN
+    — and the $31_200 level stands regardless."""
+    deals = [
+        {"type": 0, "entry": 1, "profit": -2_000.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 1)},
+        {"type": 1, "entry": 1, "profit": 30_000.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 2)},
+        {"type": 1, "entry": 1, "profit": -200.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 3)},
+    ]
+    nav, nav_meta = reconstruct_mt5_nav_levels(
+        deals, account_equity=31_000.0, account_balance=31_000.0
+    )
+    returns, _r_meta = combine_mt5_deal_ledger(
+        deals, account_equity=31_000.0, account_balance=31_000.0
     )
     broken = pd.Timestamp("2025-06-02")
 
     # The RETURN is unusable on that day...
     assert math.isnan(float(returns.loc[broken]))
+    # ...its neighbours are measured (day 0 = −2_000 / 3_200, 06-03 = −200 / 31_200)...
+    assert float(returns.loc[pd.Timestamp("2025-06-01")]) == pytest.approx(-0.625, abs=1e-12)
+    assert float(returns.loc[pd.Timestamp("2025-06-03")]) == pytest.approx(
+        -200.0 / 31_200.0, abs=1e-12
+    )
     # ...while the LEVEL is present, finite and hand-derived.
     assert broken in nav.index
     assert math.isfinite(float(nav.loc[broken]))
-    _assert_band(float(nav.loc[broken]), 300_300.0, "guard-broken-day level")
-    _assert_band(float(nav.loc[pd.Timestamp("2025-06-01")]), 100_000.0, "06-01 level")
-    _assert_band(float(nav.iloc[-1]), 300_100.0, "terminal level")
+    _assert_band(float(nav.loc[broken]), 31_200.0, "guard-broken-day level")
+    _assert_band(float(nav.loc[pd.Timestamp("2025-06-01")]), 1_200.0, "06-01 level")
+    _assert_band(float(nav.iloc[-1]), 31_000.0, "terminal level")
 
     # ONE reconstruction, one set of facts: the guard that broke the RETURN is reported
     # in the LEVELS meta too, rather than being a second independently-derived opinion.
-    assert nav_meta.get("flow_dominated_guard") is True
+    assert nav_meta.get("pnl_dominated_guard") is True
+    assert "flow_dominated_guard" not in nav_meta
     assert nav_meta["computation_status_hint"] == "complete_with_warnings"
     assert nav_meta["series_completeness"] == "ledger_complete"
 
@@ -990,8 +1058,9 @@ def _mm2x_ledger(terminal: Fraction, scale: Fraction):
     """MM-2x's shape as exact events ``(day, kind, Fraction)`` plus the exact expectation.
 
     Returns ``(events, expected, small_days)``: ``expected[day]`` is the exact return
-    ``pnl_day / NAV_{day-1}`` (a flat gap day is exactly 0), for every day from the third
-    ledger day on. The withdrawal is DERIVED so the ledger closes to ``terminal`` with no
+    ``pnl_day / NAV_{day-1}`` (a flat gap day is exactly 0), for every day from the second
+    ledger day on (day 1's 1.0 deposit carries no P&L, so its exact return is 0 on the
+    0.1 base; 164.6.6.2.3 D-05 measures it, it used to be guarded). The withdrawal is DERIVED so the ledger closes to ``terminal`` with no
     residue: NAV after the withdrawal day = terminal - sum(small-balance pnl).
     """
     d0 = _MM2X_FIRST_DEPOSIT
@@ -1003,10 +1072,9 @@ def _mm2x_ledger(terminal: Fraction, scale: Fraction):
     ]
     nav_after_withdrawal = terminal - sum(small)
     nav_before = Fraction("1.1") + sum(big)
-    # A LOSS on the withdrawal day keeps |withdrawal| < the prior NAV, so the day is not
-    # flow-dominated (FLOW_DOM_RATIO 1.0). A gain larger than the balance left behind would
-    # make |withdrawal| >= prior NAV and guard that day, which is existing, unchanged
-    # behaviour and not what this oracle is about.
+    # The withdrawal day carries a small LOSS, so its P&L numerator is an ordinary
+    # return. The withdrawal itself is a flow: measured at day level, never a reason to
+    # guard the day (164.6.6.2.3 D-05 deleted the flow-dominance guard).
     withdrawal_day_pnl = Fraction("-0.004")
     withdrawal = nav_after_withdrawal - nav_before - withdrawal_day_pnl  # negative
     wd = d0 + timedelta(8)
@@ -1028,7 +1096,7 @@ def _mm2x_ledger(terminal: Fraction, scale: Fraction):
     while day <= last:
         prev = nav
         nav = prev + pnl_by_day.get(day, Fraction(0)) + flow_by_day.get(day, Fraction(0))
-        if day >= d0 + timedelta(2):
+        if day >= d0 + timedelta(1):
             expected[day] = pnl_by_day.get(day, Fraction(0)) / prev
         day += timedelta(1)
     assert nav == terminal  # the exact ledger closes with no residue
@@ -1076,13 +1144,15 @@ def test_mm2x_shape_every_small_balance_day_is_measured_and_exact(
     withdrawal, then small-balance trading ending at ``terminal`` with per-trade P&L down to
     2e-5 (scaled with the balance in the two lower variants).
 
-    Every day after the second ledger day must be MEASURED (never ``dust_nav_guard`` NaN) at
+    Every day after the first ledger day must be MEASURED (never ``dust_nav_guard`` NaN) at
     the 1e-7 floor and equal ``pnl / prior NAV`` computed in exact Fraction arithmetic to
-    1e-12. The first two ledger days are NaN by design and are asserted as such, not skipped:
-    day 0 has no opening capital (see the pre-inception test) and day 1's 1.0 deposit is not
-    below the prior 0.1 NAV, so it is flow-dominated (FLOW_DOM_RATIO 1.0). A variant below
-    D-20's 0.001 floor is the case D-24 exists for: the old floor guarded every one of its
-    small-balance days."""
+    1e-12. The first ledger day is NaN by design and is asserted as such, not skipped: it is
+    the account's INCEPTION (164.6.6.2.3 D-01/D-12, every MT5 ledger is full-history), so it
+    has no opening capital, no return and, whatever sign the float residue of the backward
+    roll has, no dust or negative warning. Day 1's 1.0 deposit, ten times the prior 0.1 NAV,
+    is MEASURED (D-05: no flow-dominance guard) and its exact return is 0, a deposit-only
+    day. A variant below D-20's 0.001 floor is the case D-24 exists for: the old floor
+    guarded every one of its small-balance days."""
     events, expected, small_days = _mm2x_ledger(terminal, scale)
     returns, meta = combine_mt5_deal_ledger(
         _mm2x_deals(events),
@@ -1092,16 +1162,30 @@ def test_mm2x_shape_every_small_balance_day_is_measured_and_exact(
     )
     first = pd.Timestamp(_MM2X_FIRST_DEPOSIT)
     assert returns.index[0] == first
-    assert returns.iloc[:2].isna().all()  # deposit-only day, and the flow-dominated deposit
+    assert math.isnan(returns.iloc[0])  # the deposit-only first day has no opening capital
+    # Day 1 (the 1.0 BTC deposit on a 0.1 BTC base, the case the retired flag broke) is
+    # measured, and exactly flat: the Fraction oracle in ``expected`` carries it, and this
+    # pins the value by hand too (no P&L on a deposit-only day, so 0 / 0.1).
+    assert returns.iloc[1] == pytest.approx(0.0, abs=1e-12)
     for day, exact in expected.items():
         got = returns.loc[pd.Timestamp(day)]
         assert not math.isnan(got), f"{day} was guarded, not measured"
         assert got == pytest.approx(float(exact), abs=1e-12), f"{day}"
     assert all(pd.Timestamp(d) in returns.index for d in small_days)
-    # No P&L-dominated day, and no NaN beyond the first two: the count of NaN is exactly 2.
-    # (dust_nav_guard may be set by day 0 alone, when float noise leaves a positive 1e-17.)
-    assert "pnl_dominated_guard" not in meta
-    assert int(returns.isna().sum()) == 2
+    # No guard of any kind and no retired flow flag, and no NaN beyond the first: the count of
+    # NaN is exactly 1 (the inception day carries NO dust or negative flag any more, D-01).
+    for guard in ("pnl_dominated_guard", "flow_dominated_guard", "dust_nav_guard",
+                  "negative_nav_guard"):
+        assert guard not in meta
+    # How each flow day was measured (D-07, D-10). Day 1 is a deposit-only day: its record
+    # resolves (the deposit has a time of day) and no position was opened, so it is a TIMED
+    # day whose value is the same exact 0. Day 8 carries a withdrawal AND a trading deal
+    # without a position id (this fixture predates the position fields): its open cannot be
+    # resolved, so it takes the day-level rule and the strategy says so.
+    assert meta.get("flow_timing_day_level") is True
+    assert meta["flow_timing_day_level_days"] == 1
+    assert meta["flow_timing_timed_days"] == 1
+    assert int(returns.isna().sum()) == 1
 
     # D-25: the measured days whose EXACT prior NAV is under the BTC material equity (1e-4)
     # are flagged, and only those. The expectation comes from the Fraction forward ledger,
@@ -1125,22 +1209,31 @@ def test_mm2x_shape_every_small_balance_day_is_measured_and_exact(
     assert "twr_chain_broken" not in meta
 
 
-@pytest.mark.parametrize("residue", ["0", "5e-8", "1e-7", "3e-5", "5e-4", "0.02", "0.2"])
-def test_no_return_is_emitted_before_the_first_deposit(residue: str) -> None:
-    """The pre-inception guard (founder follow-up to D-24). The account holds NOTHING before
-    its first deposit, so the backward roll's opening capital ``NAV_0 - pnl_0 - F_0`` is
-    exactly zero in theory and only float noise or an incomplete ledger leaves a residue R.
-    The old 0.001 floor hid any 0 < R < 0.001 as dust; at 1e-7 the range [1e-7, 0.001) is
-    measurable, so this pins that R is still never turned into a return.
+# BTC ``residual_abs_tol`` (services/account_unit.py), restated: the residue band inside which
+# the base before a full-history account's first deposit is float noise, not capital.
+_BTC_RESIDUE_TOL = Fraction("1e-6")
 
-    Measured behaviour (this test is the pin):
-      * the reconstructed series STARTS on the first ledger day: no row exists for any
+
+@pytest.mark.parametrize(
+    "residue", ["0", "5e-8", "1e-7", "9e-7", "2e-6", "3e-5", "5e-4", "0.02", "0.2"]
+)
+def test_no_return_is_emitted_before_the_first_deposit(residue: str) -> None:
+    """The account holds NOTHING before its first deposit, so the backward roll's opening
+    capital ``NAV_0 - pnl_0 - F_0`` is exactly zero in theory and only float noise or an
+    incomplete ledger leaves a residue R.
+
+    164.6.6.2.3 D-01/D-12 (every MT5 ledger is full-history): day 0 is the INCEPTION day.
+    A residue within the unit's ``residual_abs_tol`` (BTC 1e-6) is noise whatever its sign:
+    day 0 has no return and no warning. A residue above it is real capital, judged as it
+    always was by the negative and dust guards and, once it passes them, MEASURED; a
+    deposit-only day has no P&L, so its return is exactly 0, never a gain.
+
+    The test pins:
+      * the reconstructed series STARTS on the first ledger day: no row exists for an
         earlier calendar day, so no return can be booked before the first deposit;
-      * that first day's own return is guarded for every R below the deposit itself
-        (negative / dust guard for float noise, ``flow_dominated_guard`` once R >= 1e-7
-        because the 0.1 deposit exceeds the base R, FLOW_DOM_RATIO 1.0);
-      * only when R is LARGER than the deposit (0.2 > 0.1) is the day measured, and then it
-        is exactly 0.0: a deposit-only day has no P&L, so it is flat, never a gain.
+      * |R| <= 1e-6: day 0 is NaN (this used to depend on which side of the 1e-7 dust
+        floor float noise landed, and R = 1e-7 had to accept either answer);
+      * |R| > 1e-6: day 0 is measured and flat, within 1e-9 of 0.
     """
     terminal = Fraction("0.00961461")
     events, _expected, _small = _mm2x_ledger(terminal, Fraction(1))
@@ -1152,44 +1245,52 @@ def test_no_return_is_emitted_before_the_first_deposit(residue: str) -> None:
     assert returns.index.min() == first, "a row exists before the first deposit"
     assert not (returns.index < first).any()
     day0 = returns.loc[first]
-    assert math.isnan(day0) or day0 == 0.0, "the first deposit day booked a return"
-    if Fraction(residue) <= Fraction("0.1"):
-        # IN-04: day 0 itself is NaN. WHICH guard decided it is pinned by the
-        # day-0-isolated test below, because ``meta`` here is account-wide (a later day
-        # of this ledger already sets ``flow_dominated_guard``).
-        assert math.isnan(day0)
+    if Fraction(residue) <= _BTC_RESIDUE_TOL:
+        assert math.isnan(day0), "the inception day booked a return"
+        assert "dust_nav_guard" not in meta and "negative_nav_guard" not in meta
+    else:
+        # Measured, and flat: the 0.1 deposit is a flow, not P&L (hand-derived 0).
+        assert day0 == pytest.approx(0.0, abs=1e-9)
 
 
-@pytest.mark.parametrize(
-    ("residue", "named", "absent"),
-    [
-        # R = 0: float noise leaves a prior NAV of about +/-1e-17 -> negative or dust.
-        ("0", ("negative_nav_guard", "dust_nav_guard"), ("flow_dominated_guard",)),
-        # R = 5e-8 is under the 1e-7 dust floor by a wide margin -> dust, and only dust.
-        ("5e-8", ("dust_nav_guard",), ("negative_nav_guard", "flow_dominated_guard")),
-        # R well above 1e-7 and under the 0.1 deposit -> the flow guard decides day 0.
-        ("3e-5", ("flow_dominated_guard",), ("negative_nav_guard", "dust_nav_guard")),
-        ("5e-4", ("flow_dominated_guard",), ("negative_nav_guard", "dust_nav_guard")),
-        ("0.02", ("flow_dominated_guard",), ("negative_nav_guard", "dust_nav_guard")),
-        # R = 0.2 is larger than the deposit: no guard, and the day books exactly 0.0.
-        ("0.2", (), ("negative_nav_guard", "dust_nav_guard", "flow_dominated_guard")),
-    ],
-)
-def test_pre_inception_day0_names_the_guard_that_decides_it(
-    residue: str, named: tuple[str, ...], absent: tuple[str, ...]
+# (residue R, how day 0 reads). The two-day ledger isolates day 0 as a function of R alone.
+_DAY0_RESIDUES = [
+    # Inside the unit's residue band, either sign: the inception day. No return, no warning.
+    ("0", "inception"),
+    ("1e-16", "inception"),
+    ("-1e-16", "inception"),
+    ("5e-8", "inception"),
+    ("-5e-8", "inception"),
+    ("1e-7", "inception"),
+    ("9e-7", "inception"),
+    # Above the band: real capital. It passes the dust floor (1e-7) and is MEASURED, flat.
+    ("2e-6", "measured"),
+    ("3e-5", "measured"),
+    ("5e-4", "measured"),
+    ("0.02", "measured"),
+    ("0.2", "measured"),
+    # A real negative base is a defect, not noise: the negative guard is kept (D-06).
+    ("-0.02", "negative"),
+]
+
+
+@pytest.mark.parametrize(("residue", "reading"), _DAY0_RESIDUES)
+def test_day0_of_a_full_history_ledger_is_its_inception_whatever_the_residue_sign(
+    residue: str, reading: str
 ) -> None:
-    """IN-04 (code review of plan 14): the previous assertion was
-    ``any(meta.get(k) for k in (negative, dust, flow_dominated))`` over an ACCOUNT-WIDE
-    meta, which any later day can satisfy, so it discriminated nothing about day 0.
+    """164.6.6.2.3 D-01 (root cause recorded in the MM-2x dust-guard debug note): the
+    first funding day of a full-history account is its inception, and "its near-zero start is
+    not a warning, whatever the noise's sign". Before this change the sign of float residue
+    decided which warning day 0 raised (``negative_nav_guard`` for -1e-17, ``dust_nav_guard``
+    for +1e-17) and every MT5 account carried it.
 
-    This ledger has exactly two days so that every guard key in ``meta`` belongs to day 0
-    or day 1, and day 1 (a +0.001 trade on a 0.1 + R base, no flow) cannot trip any guard:
+    This ledger has exactly two days so every guard key in ``meta`` belongs to day 0 or day 1,
+    and day 1 (a +0.001 trade on a 0.1 + R base, no flow) cannot trip any guard:
       deposit 0.1 on day 0, trade +0.001 on day 1, terminal equity 0.101 + R
       NAV(day 1) = 0.101 + R     NAV(day 0) = 0.101 + R - 0.001 = 0.1 + R
       day-0 prior NAV = NAV(day 0) - pnl(day 0) - flow(day 0) = 0.1 + R - 0 - 0.1 = R
-    so the day-0 decision is a function of R alone. R = 1e-7 is left out on purpose: the
-    float noise of the roll (about 1e-17) decides whether it lands a hair under the dust
-    floor or a hair over it, and a pin there would assert the noise.
+    so the day-0 decision is a function of R alone, and the band is the BTC
+    ``residual_abs_tol`` 1e-6 (D-12 / the debug note).
     """
     d0 = date(2025, 10, 16)
     events = [
@@ -1201,21 +1302,78 @@ def test_pre_inception_day0_names_the_guard_that_decides_it(
         _mm2x_deals(events), account_equity=equity, account_balance=equity, floors=_BTC
     )
     day0 = returns.loc[pd.Timestamp(d0)]
-    if named:
+    guards = ("negative_nav_guard", "dust_nav_guard", "pnl_dominated_guard",
+              "flow_dominated_guard")
+    if reading == "inception":
         assert math.isnan(day0)
-        assert any(meta.get(k) is True for k in named), (
-            f"day 0 (R={residue}) should be decided by one of {named}, meta={meta!r}"
-        )
+        assert not any(k in meta for k in guards), f"R={residue}: {meta!r}"
+        assert meta["computation_status_hint"] == "complete"
+        assert "flow_timing_day_level" not in meta
+    elif reading == "measured":
+        # Pnl 0, flow 0.1, base R: r = (NAV_0 - R - 0.1) / R = 0 up to float noise (about
+        # 1e-17 / R, far inside 1e-9 for every R here). The deposit has a time of day and
+        # no position was opened, so this is a TIMED day, not a day-level one.
+        assert day0 == pytest.approx(0.0, abs=1e-9)
+        assert not any(k in meta for k in guards), f"R={residue}: {meta!r}"
+        assert meta["computation_status_hint"] == "complete"
+        assert meta["flow_timing_timed_days"] == 1
+        assert "flow_timing_day_level" not in meta
     else:
-        assert day0 == 0.0
-    for key in absent:
-        assert key not in meta, f"R={residue}: {key} must not fire, meta={meta!r}"
+        assert reading == "negative"
+        assert math.isnan(day0)
+        assert meta.get("negative_nav_guard") is True
+        assert meta["computation_status_hint"] == "complete_with_warnings"
     # Day 1 is measured on its exact base 0.1 + R (a normal day, never flagged).
     exact_day1 = Fraction("0.001") / (Fraction("0.1") + Fraction(residue))
     assert returns.loc[pd.Timestamp(d0 + timedelta(1))] == pytest.approx(
         float(exact_day1), abs=1e-12
     )
-    assert "small_base_measured" not in meta
+    # D-25 (the annotation, never a warning): a MEASURED day 0 whose base R is under the BTC
+    # material equity (1e-4) is counted as "measured on a very small balance": one day,
+    # smallest prior NAV R. An inception or guarded day 0 is not measured, so not counted,
+    # and day 1's base (0.1 + R) is never small.
+    if reading == "measured" and Fraction(residue) < Fraction(1, 10000):
+        assert meta.get("small_base_measured") is True
+        assert meta["small_base_measured_days"] == 1
+        assert meta["small_base_measured_min_nav"] == pytest.approx(
+            float(Fraction(residue)), rel=1e-6
+        )
+    else:
+        assert "small_base_measured" not in meta
+
+
+def test_the_inception_rule_needs_full_history_so_a_window_keeps_its_day0_guard() -> None:
+    """D-01 "Retention-windowed venues, where day 0's base is real capital, keep today's
+    behaviour": the SAME folded ledger through the core WITHOUT ``full_history`` (what a
+    capped venue passes) still raises the day-0 guard for a zero residue, and WITH it (what
+    the MT5 combiner passes, its deal fetch being the whole record) raises none."""
+    from services.broker_dailies import _fold_mt5_deals
+    from services.nav_twr import reconstruct_nav_and_twr
+
+    d0 = date(2025, 10, 16)
+    events = [(d0, "flow", Fraction("0.1")), (d0 + timedelta(1), "pnl", Fraction("0.001"))]
+    pnl, flows, timing = _fold_mt5_deals(_mm2x_deals(events), 0)
+    kwargs = dict(external_flows=flows, floors=_BTC, timing=timing)
+    _r, windowed = reconstruct_nav_and_twr(pnl, 0.101, **kwargs)
+    _r, full = reconstruct_nav_and_twr(pnl, 0.101, full_history=True, **kwargs)
+    assert windowed.get("negative_nav_guard") is True or windowed.get("dust_nav_guard") is True
+    assert "negative_nav_guard" not in full and "dust_nav_guard" not in full
+
+
+def test_legacy_deals_without_position_ids_keep_the_day_level_rule() -> None:
+    """D-07: a deal row that predates the position fields (no ``position_id``, no
+    ``time_msc``) cannot say when its position opened. The deposit day that holds such a
+    trade is measured at day level exactly as before, and the strategy says so (an
+    annotation, not a warning). Canonical ledger: +10_000 deposit and +300 P&L on 06-04,
+    prior NAV 100_400, so r = 300 / 100_400 (the deposit is not a gain)."""
+    returns, meta = combine_mt5_deal_ledger(
+        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0
+    )
+    assert float(returns.loc[pd.Timestamp("2025-06-04")]) == pytest.approx(300 / 100_400, abs=1e-12)
+    assert meta["flow_timing_day_level"] is True
+    assert meta["flow_timing_day_level_days"] == 1
+    assert "flow_timing_timed_days" not in meta
+    assert meta["computation_status_hint"] == "complete"
 
 
 # ---------------------------------------------------------------------------
@@ -1303,3 +1461,650 @@ def test_small_base_flag_follows_the_material_equity_threshold(
         assert "small_base_measured_days" not in meta
     assert "twr_chain_broken" not in meta
     assert meta["computation_status_hint"] == "complete"  # informational, never a warning
+
+
+# ---------------------------------------------------------------------------
+# 164.6.6.2.3 FLOWTIMING plan 05 (D-02/D-03/D-04/D-09/D-10): MT5 is the one venue whose
+# fetched deals carry BOTH the flow instants and each position's open instant, so the fold
+# builds a per-day ``DayTiming`` and a deposit changes the base only for positions opened
+# AFTER it. The oracle below is exact Fraction arithmetic over the EVENT LIST (flows and
+# positions with UTC millisecond instants). It imports nothing from ``services`` and does
+# not look at a deal row, so it is an independent invariant, not the fold re-run.
+# ---------------------------------------------------------------------------
+
+_MS_PER_DAY = 86_400_000
+
+
+def _utc_ms(d: date, hh: int = 0, mm: int = 0, ss: int = 0, ms: int = 0) -> int:
+    """UTC epoch milliseconds of ``d`` at hh:mm:ss.ms."""
+    whole = datetime(d.year, d.month, d.day, hh, mm, ss, tzinfo=timezone.utc)
+    return int(whole.timestamp()) * 1000 + ms
+
+
+def _stamped(row: dict, utc_ms: int, offset_s: int) -> dict:
+    """``row`` as the broker serves it: ``time`` (seconds) and ``time_msc`` (milliseconds)
+    on the SERVER clock, which runs ``offset_s`` ahead of UTC."""
+    server_ms = utc_ms + offset_s * 1000
+    return {**row, "time": server_ms // 1000, "time_msc": server_ms}
+
+
+_ZERO_COSTS = {"swap": 0.0, "commission": 0.0, "fee": 0.0}
+
+
+def _timed_flow_deal(utc_ms: int, amount: Fraction, offset_s: int = 0) -> dict:
+    """A BALANCE deal (deposit +, withdrawal -)."""
+    return _stamped({"type": 2, "profit": float(amount), **_ZERO_COSTS}, utc_ms, offset_s)
+
+
+def _timed_position_deals(
+    position_id: int, open_ms: int, close_ms: int, pnl: Fraction, offset_s: int = 0
+) -> list[dict]:
+    """A position as MT5 books it: an IN deal at the open (no P&L) and an OUT deal at the
+    close carrying the realized P&L."""
+    opening = _stamped(
+        {"type": 0, "entry": 0, "position_id": position_id, "profit": 0.0, **_ZERO_COSTS},
+        open_ms, offset_s,
+    )
+    closing = _stamped(
+        {"type": 1, "entry": 1, "position_id": position_id, "profit": float(pnl),
+         **_ZERO_COSTS},
+        close_ms, offset_s,
+    )
+    return [opening, closing]
+
+
+def _timed_oracle(
+    flows: list[tuple[int, Fraction]],
+    positions: list[tuple[int, int, Fraction]],
+) -> dict[date, Fraction | None]:
+    """Exact per-UTC-day return of each day that holds an event, in Fraction arithmetic.
+
+    ``flows``: ``(utc_ms, signed amount)``. ``positions``: ``(open_ms, close_ms, cash)``; its
+    cash lands, and is realized, at the close instant (a commission is ``(t, t, cost)``).
+    D-02/D-17: a position is measured against the capital in the account when it was OPENED,
+    i.e. the start-of-day NAV, plus the non-zero flows of that day at or before the open (a
+    flow at the same millisecond counts first, D-09), plus the FULL day P&L of that day's
+    EARLIER capital levels, realized by the open or not (the D-17 telescoping base; a flow of
+    exactly 0 moves nothing and splits nothing). A position opened on an earlier day belongs
+    to the start-of-day base (D-04). Positions that opened after the same flows share one
+    capital level and one base: that level's base is read at its first P&L-bearing open. The
+    day's return links the levels: ``prod(1 + P_k / B_k) - 1``. A level with no P&L adds a
+    factor of exactly 1, so a day that held capital at its start and made no money is a
+    measured 0; a day that opened with no capital at all (the inception day) and made no
+    money has no return (``None``)."""
+    day_of = lambda ms: ms // _MS_PER_DAY  # noqa: E731
+    days = sorted({day_of(ms) for ms, _a in flows} | {day_of(c) for _o, c, _p in positions})
+    out: dict[date, Fraction | None] = {}
+    for day in range(days[0], days[-1] + 1):
+        start_nav = sum((a for ms, a in flows if day_of(ms) < day), Fraction(0)) + sum(
+            (p for _o, c, p in positions if day_of(c) < day), Fraction(0)
+        )
+        todays = sorted((ms, a) for ms, a in flows if day_of(ms) == day and a != 0)
+        entries = [(o, c, p) for o, c, p in positions if day_of(c) == day]
+
+        def level(open_ms: int) -> int:
+            if day_of(open_ms) < day:
+                return 0
+            return sum(1 for ms, _a in todays if ms <= open_ms)
+
+        level_pnl = [Fraction(0)] * (len(todays) + 1)
+        first_open: dict[int, int] = {}
+        for open_ms, _close_ms, pnl in entries:
+            k = level(open_ms)
+            level_pnl[k] += pnl
+            if k > 0 and pnl != 0:
+                first_open[k] = min(first_open.get(k, open_ms), open_ms)
+        growth: Fraction | None = None
+        for k, pnl in enumerate(level_pnl):
+            if pnl == 0:
+                continue
+            if k == 0:
+                base = start_nav
+            else:
+                t = first_open[k]
+                base = (
+                    start_nav
+                    + sum((a for ms, a in todays if ms <= t), Fraction(0))
+                    + sum((p for o, _c, p in entries if level(o) < k), Fraction(0))
+                )
+            growth = (growth if growth is not None else Fraction(1)) * (1 + pnl / base)
+        if growth is None and start_nav != 0:
+            growth = Fraction(1)
+        calendar = date(1970, 1, 1) + timedelta(day)
+        if any(day_of(ms) == day for ms, _a in flows) or any(
+            day_of(c) == day for _o, c, _p in positions
+        ):
+            out[calendar] = None if growth is None else growth - 1
+    return out
+
+
+def _mm2x_timed_deals(
+    *,
+    open_at: tuple[int, int, int, int] = (10, 0, 0, 0),
+    close_at: tuple[int, int, int, int] = (15, 0, 0, 0),
+    open_day_offset: int = 1,
+    pnl: Fraction = Fraction("0.011"),
+    offset_s: int = 0,
+) -> tuple[list[dict], list[tuple[int, Fraction]], list[tuple[int, int, Fraction]]]:
+    """The MM-2x shape with in-day times: 0.1 BTC deposited 08:00 on day 0, 1.0 BTC
+    deposited 09:00 on day 1, one position closed on day 1 with ``pnl``. ``open_at`` is the
+    open's (hh, mm, ss, ms), ``open_day_offset`` 1 = opened on day 1, 0 = overnight from day
+    0. Returns ``(deals, flows, positions)``; the last two feed the oracle."""
+    d0 = _MM2X_FIRST_DEPOSIT
+    d1 = d0 + timedelta(1)
+    flows = [
+        (_utc_ms(d0, 8), Fraction("0.1")),
+        (_utc_ms(d1, 9), Fraction(1)),
+    ]
+    open_ms = _utc_ms(d0 + timedelta(open_day_offset), *open_at)
+    close_ms = _utc_ms(d1, *close_at)
+    positions = [(open_ms, close_ms, pnl)]
+    deals = [_timed_flow_deal(ms, amount, offset_s) for ms, amount in flows]
+    deals += _timed_position_deals(1001, open_ms, close_ms, pnl, offset_s)
+    return deals, flows, positions
+
+
+def _terminal(flows, positions) -> float:
+    return float(sum((a for _m, a in flows), Fraction(0)) + sum((p for *_x, p in positions), Fraction(0)))
+
+
+def test_mm2x_timed_deposit_day_is_measured_on_the_capital_the_position_opened_on() -> None:
+    """The tracer (D-02/D-03). Day 0: 0.1 BTC deposited at 08:00. Day 1: 1.0 BTC deposited
+    at 09:00, then a position opened at 10:00 and closed at 15:00 for +0.011 BTC.
+
+    Hand arithmetic: the position opened AFTER the deposit, on 0.1 + 1.0 = 1.1 BTC, so its
+    return is 0.011 / 1.1 = 0.01 exactly. The end-of-day formula ((NAV_1 - NAV_0 - F) / NAV_0
+    = 0.011 / 0.1) would book 0.11, eleven times too large: the deposit is capital the
+    position was never run on.
+    """
+    deals, flows, positions = _mm2x_timed_deals()
+    returns, meta = combine_mt5_deal_ledger(
+        deals, account_equity=_terminal(flows, positions),
+        account_balance=_terminal(flows, positions), floors=_BTC,
+    )
+    d0, d1 = _MM2X_FIRST_DEPOSIT, _MM2X_FIRST_DEPOSIT + timedelta(1)
+    oracle = _timed_oracle(flows, positions)
+    assert oracle[d1] == Fraction(1, 100)  # the independent figure is the hand figure
+    got = float(returns.loc[pd.Timestamp(d1)])
+    assert got == pytest.approx(0.01, abs=1e-12)
+    assert got == pytest.approx(float(oracle[d1]), abs=1e-12)
+    assert got != pytest.approx(0.011 / 0.1, abs=1e-3)  # the end-of-day answer, 0.11
+    # Day 0 is the inception: a deposit-only day, no return and no warning.
+    assert math.isnan(float(returns.loc[pd.Timestamp(d0)]))
+    for guard in ("dust_nav_guard", "negative_nav_guard", "pnl_dominated_guard"):
+        assert guard not in meta
+    # Both flow days were measured on their timestamps, so none is "at day level".
+    assert "flow_timing_day_level" not in meta
+    assert meta["flow_timing_timed_days"] >= 1
+    assert meta["computation_status_hint"] == "complete"
+
+
+@pytest.mark.parametrize(
+    ("what", "kwargs", "expected_str"),
+    [
+        # Opened 08:30, BEFORE the 09:00 deposit: cohort 0, base 0.1. D-02 "a deposit
+        # changes the base only for positions opened after it".
+        ("opened-before-deposit", {"open_at": (8, 30, 0, 0)}, "0.11"),
+        # One millisecond before the deposit: still cohort 0 (the boundary, below the tie).
+        ("one-ms-before-deposit", {"open_at": (8, 59, 59, 999)}, "0.11"),
+        # The exact millisecond of the deposit: the deposit funds the trade (D-09), 1.1.
+        ("same-millisecond-as-deposit", {"open_at": (9, 0, 0, 0)}, "0.01"),
+        # One millisecond after: 1.1.
+        ("one-ms-after-deposit", {"open_at": (9, 0, 0, 1)}, "0.01"),
+        # Opened the day before, after day 0's deposit: it belongs to the start-of-day base
+        # of day 1 (D-04), 0.1, whatever the clock says on day 1.
+        ("carried-overnight", {"open_day_offset": 0, "open_at": (12, 0, 0, 0)}, "0.11"),
+    ],
+)
+@pytest.mark.parametrize("offset_s", [0, 10_800])
+def test_timed_deposit_day_cohort_follows_the_open_instant(
+    what: str, kwargs: dict, expected_str: str, offset_s: int
+) -> None:
+    """Which base a position is measured against, at the boundaries (D-02, D-04, D-09), on a
+    UTC server clock and on one running 3 hours ahead (D-08: instants are UTC, the same
+    offset the day uses). Day-1 hand figures: 0.011 / 0.1 = 0.11 and 0.011 / 1.1 = 0.01."""
+    deals, flows, positions = _mm2x_timed_deals(offset_s=offset_s, **kwargs)
+    equity = _terminal(flows, positions)
+    returns, meta = combine_mt5_deal_ledger(
+        deals, account_equity=equity, account_balance=equity, floors=_BTC,
+        server_utc_offset_s=offset_s,
+    )
+    d1 = _MM2X_FIRST_DEPOSIT + timedelta(1)
+    got = float(returns.loc[pd.Timestamp(d1)])
+    assert got == pytest.approx(float(Fraction(expected_str)), abs=1e-12), what
+    oracle = _timed_oracle(flows, positions)
+    assert oracle[d1] == Fraction(expected_str)
+    assert "flow_timing_day_level" not in meta, what
+
+
+def _random_timed_ledger(seed: int, offset_s: int):
+    """A seeded multi-day MT5 ledger: deposits and withdrawals at random instants (some
+    sharing a millisecond with a position open), positions opened the same day or carried
+    overnight, and a commission on every opening deal. Returns ``(deals, flows, positions)``
+    in the oracle's terms (UTC milliseconds, Fractions)."""
+    rng = random.Random(seed)
+    d0 = date(2025, 10, 16)
+    n_days = 6
+    flows: list[tuple[int, Fraction]] = []
+    positions: list[tuple[int, int, Fraction]] = []
+    commissions: list[tuple[int, Fraction]] = []
+    nav = Fraction(0)
+    first_deposit = Fraction(rng.randint(8000, 20000))
+    flows.append((_utc_ms(d0, 0, 0, 5), first_deposit))
+    nav += first_deposit
+    pid = 5000
+    deals: list[dict] = [_timed_flow_deal(_utc_ms(d0, 0, 0, 5), first_deposit, offset_s)]
+    open_pool: list[tuple[int, int, int]] = []  # (pid, open_ms, day index) carried positions
+    for day_i in range(n_days):
+        day = d0 + timedelta(day_i)
+        today_flow_ms: list[int] = []
+        for _ in range(rng.choice([0, 0, 1, 1, 2])):
+            if day_i == 0:
+                break
+            ms = _utc_ms(day, rng.randint(0, 23), rng.randint(0, 59), rng.randint(0, 59),
+                         rng.randint(0, 999))
+            amount = Fraction(rng.randint(500, 9000))
+            if rng.random() < 0.4:
+                amount = -min(amount, nav // 4)
+            flows.append((ms, amount))
+            nav += amount
+            today_flow_ms.append(ms)
+            deals.append(_timed_flow_deal(ms, amount, offset_s))
+        # positions that CLOSE today: carried ones opened on an earlier day, and new ones.
+        for _ in range(rng.randint(0, 3)):
+            lo = _utc_ms(day, 1) if day_i == 0 else _utc_ms(day)
+            close_ms = rng.randint(lo + 60_000, _utc_ms(day, 23, 59, 59))
+            if day_i > 0 and rng.random() < 0.35:
+                open_ms = rng.randint(_utc_ms(d0 + timedelta(rng.randint(0, day_i - 1)), 1),
+                                      _utc_ms(day) - 1)
+            elif today_flow_ms and rng.random() < 0.4:
+                open_ms = rng.choice(today_flow_ms)  # a tie with a flow
+                close_ms = max(close_ms, open_ms + 1000)
+            else:
+                open_ms = rng.randint(lo, close_ms - 1)
+            commission = -Fraction(rng.randint(0, 40), 100)
+            pnl = Fraction(rng.randint(-250, 400), 1) + Fraction(rng.randint(0, 99), 100)
+            pid += 1
+            opening, closing = _timed_position_deals(pid, open_ms, close_ms, pnl, offset_s)
+            opening["commission"] = float(commission)
+            deals += [opening, closing]
+            positions.append((open_ms, close_ms, pnl))
+            if commission != 0:
+                positions.append((open_ms, open_ms, commission))
+            nav += pnl + commission
+    return deals, flows, positions
+
+
+@pytest.mark.parametrize("offset_s", [0, 10_800, -7_200])
+@pytest.mark.parametrize("seed", range(40))
+def test_timed_returns_match_the_fraction_oracle_on_random_multi_day_ledgers(
+    seed: int, offset_s: int
+) -> None:
+    """Property: on seeded multi-day ledgers (flows at random instants, ties between a flow
+    and an open, overnight positions, commissions on the opening deals, deal order shuffled,
+    a server clock ahead of or behind UTC) every event day's return equals the exact
+    Fraction oracle's ``prod(1 + P_k / B_k) - 1`` to 1e-9, and a day the oracle cannot
+    measure (a deposit-only day) is NaN."""
+    deals, flows, positions = _random_timed_ledger(seed, offset_s)
+    random.Random(seed ^ 0x5EED).shuffle(deals)
+    equity = _terminal(flows, positions)
+    returns, meta = combine_mt5_deal_ledger(
+        deals, account_equity=equity, account_balance=equity, server_utc_offset_s=offset_s
+    )
+    oracle = _timed_oracle(flows, positions)
+    assert oracle
+    for day, exact in oracle.items():
+        got = float(returns.loc[pd.Timestamp(day)])
+        if exact is None:
+            assert math.isnan(got), f"{day} should have no return"
+        else:
+            assert got == pytest.approx(float(exact), abs=1e-9), f"{day}"
+    for guard in ("dust_nav_guard", "negative_nav_guard", "pnl_dominated_guard"):
+        assert guard not in meta
+    assert "flow_timing_day_level" not in meta  # every instant is resolvable here
+
+
+def test_timing_keys_are_days_of_the_nav_index_in_the_same_unit() -> None:
+    """The core looks a timed day up by the NAV index Timestamp, so a key of another unit or
+    on another day would silently never be read: every key is in the index (D-02)."""
+    from services.broker_dailies import _fold_mt5_deals
+    from services.nav_twr import _flows_to_daily_usd, _union_flow_days
+
+    for seed in range(8):
+        deals, _flows, _positions = _random_timed_ledger(seed, 10_800)
+        pnl, flow_list, timing = _fold_mt5_deals(deals, 10_800)
+        index = _union_flow_days(pnl, _flows_to_daily_usd(flow_list)).index
+        assert timing
+        assert set(timing) <= set(index)
+        assert all(key.unit == index.unit for key in timing)
+        # Only flow days are timed: no instant is read for any other day (D-07).
+        assert {key.date().isoformat() for key in timing} <= {f.utc_day_iso for f in flow_list}
+
+
+# ---------------------------------------------------------------------------
+# 164.6.6.2.3 D-16 (round 1 WR-02): the base a position opened on includes the P&L realized
+# earlier the same day, and a flow of nothing changes nothing. Written from the reviewer's
+# reproduction and from the two invariants, in dollars (USD floors), not from the formula.
+# ---------------------------------------------------------------------------
+
+
+def _wr02_ledger(flow: Fraction | None) -> tuple[list[dict], float]:
+    """USD account. Day 0: 10,000 deposited 08:00. Day 1: a position opened 09:00 and closed
+    09:30 for +1,000; a flow of ``flow`` at 10:00 (omitted when ``None``); a second position
+    opened 11:00 and closed 12:00 for +1,000. Returns ``(deals, terminal equity)``."""
+    d0, d1 = _D0, _D1
+    deals = [_timed_flow_deal(_utc_ms(d0, 8), Fraction(10_000))]
+    deals += _timed_position_deals(7001, _utc_ms(d1, 9), _utc_ms(d1, 9, 30), Fraction(1000))
+    if flow is not None:
+        deals.append(_timed_flow_deal(_utc_ms(d1, 10), flow))
+    deals += _timed_position_deals(7002, _utc_ms(d1, 11), _utc_ms(d1, 12), Fraction(1000))
+    equity = Fraction(10_000) + Fraction(2000) + (flow or Fraction(0))
+    return deals, float(equity)
+
+
+def _wr02_day_return(flow: Fraction | None) -> float:
+    deals, equity = _wr02_ledger(flow)
+    returns, meta = combine_mt5_deal_ledger(deals, account_equity=equity, account_balance=equity)
+    assert not (set(meta) & {"dust_nav_guard", "negative_nav_guard", "pnl_dominated_guard"})
+    return float(returns.loc[pd.Timestamp(_D1)])
+
+
+def test_wr02_no_flow_day_is_twenty_percent() -> None:
+    assert _wr02_day_return(None) == pytest.approx(0.2, abs=1e-12)
+
+
+def test_wr02_a_zero_amount_balance_deal_is_a_no_op() -> None:
+    """D-16 invariant. A BALANCE deal with a profit of 0 sits between the two trades: the day
+    is still 20.0%, as with no deal at all. On D-03's base it was 21.0%."""
+    assert _wr02_day_return(Fraction(0)) == pytest.approx(_wr02_day_return(None), abs=1e-12)
+    assert _wr02_day_return(Fraction(0)) == pytest.approx(0.2, abs=1e-12)
+
+
+def test_wr02_a_zero_amount_balance_deal_is_a_no_op_when_positions_overlap() -> None:
+    """The same invariant where it bites: position A (09:00-13:00) is still open when B opens
+    at 11:00, and a BALANCE deal of 0 sits at 10:00. The day is the plain 20.0%, not the 21.0%
+    two split cohorts would give."""
+    d0, d1 = _D0, _D1
+    for with_zero in (False, True):
+        deals = [_timed_flow_deal(_utc_ms(d0, 8), Fraction(10_000))]
+        deals += _timed_position_deals(7301, _utc_ms(d1, 9), _utc_ms(d1, 13), Fraction(1000))
+        if with_zero:
+            deals.append(_timed_flow_deal(_utc_ms(d1, 10), Fraction(0)))
+        deals += _timed_position_deals(7302, _utc_ms(d1, 11), _utc_ms(d1, 14), Fraction(1000))
+        returns, _meta = combine_mt5_deal_ledger(
+            deals, account_equity=12_000.0, account_balance=12_000.0
+        )
+        assert float(returns.loc[pd.Timestamp(d1)]) == pytest.approx(0.2, abs=1e-12), with_zero
+
+
+def test_wr02_a_one_dollar_deposit_is_about_twenty_percent() -> None:
+    """The reviewer's reproduction: a $1 deposit between the two trades. Exact figure:
+    1.1 x (1 + 1000 / 11001) - 1."""
+    assert _wr02_day_return(Fraction(1)) == pytest.approx(0.2, abs=1e-5)
+    assert _wr02_day_return(Fraction(1)) == pytest.approx(
+        1.1 * (1.0 + 1000.0 / 11_001.0) - 1.0, abs=1e-12
+    )
+
+
+@pytest.mark.parametrize("flow", [Fraction(100), Fraction(1), Fraction("0.001"), Fraction("-0.001"), Fraction(-1)])
+def test_wr02_return_is_continuous_as_the_deposit_tends_to_zero(flow: Fraction) -> None:
+    """D-16 invariant: |r(F) - r(0)| stays under 1e-5 per dollar of flow (true slope 9.1e-6)."""
+    assert abs(_wr02_day_return(flow) - 0.2) <= 1e-5 * abs(float(flow)) + 1e-11
+
+
+def test_fold_records_the_instant_each_cash_effect_was_booked() -> None:
+    """D-16: the DayTiming the fold builds carries, per P&L entry, the instant of the deal that
+    booked the cash: the opening deal's own instant for its (zero) cost, the closing deal's for
+    the profit, and for a position carried overnight the instant its closing deal booked on the
+    flow day (open None)."""
+    from services.broker_dailies import _fold_mt5_deals
+
+    d0, d1 = _D0, _D1
+    carried_open, carried_close = _utc_ms(d0, 12), _utc_ms(d1, 7)
+    deals = [_timed_flow_deal(_utc_ms(d0, 8), Fraction(10_000))]
+    deals += _timed_position_deals(7100, carried_open, carried_close, Fraction(50))
+    deals.append(_timed_flow_deal(_utc_ms(d1, 10), Fraction(500)))
+    deals += _timed_position_deals(7101, _utc_ms(d1, 11), _utc_ms(d1, 12), Fraction(70))
+    _pnl, _flows, timing = _fold_mt5_deals(deals, 0)
+    record = timing[pd.Timestamp(d1).as_unit("us")]
+    assert sorted(record.pnl, key=lambda e: e[2]) == [
+        (None, 50.0, carried_close),
+        (_utc_ms(d1, 11), 0.0, _utc_ms(d1, 11)),
+        (_utc_ms(d1, 11), 70.0, _utc_ms(d1, 12)),
+    ]
+
+
+def test_overnight_cash_booked_before_a_later_open_is_in_that_opens_base() -> None:
+    """D-16 end to end through the fold: a position carried from day 0 books +300 at 07:00 on
+    day 1 (cohort 0 on the start-of-day base 10,000), a deposit of 1,000 lands at 10:00, and a
+    position opened 11:00 earns +110. That position opened on 10,000 + 300 + 1,000 = 11,300,
+    so the day is (1 + 300/10000)(1 + 110/11300) - 1."""
+    d0, d1 = _D0, _D1
+    deals = [_timed_flow_deal(_utc_ms(d0, 8), Fraction(10_000))]
+    deals += _timed_position_deals(7200, _utc_ms(d0, 12), _utc_ms(d1, 7), Fraction(300))
+    deals.append(_timed_flow_deal(_utc_ms(d1, 10), Fraction(1000)))
+    deals += _timed_position_deals(7201, _utc_ms(d1, 11), _utc_ms(d1, 12), Fraction(110))
+    equity = float(Fraction(10_000 + 300 + 1000 + 110))
+    returns, _meta = combine_mt5_deal_ledger(deals, account_equity=equity, account_balance=equity)
+    assert float(returns.loc[pd.Timestamp(d1)]) == pytest.approx(
+        1.03 * (1.0 + 110.0 / 11_300.0) - 1.0, abs=1e-12
+    )
+
+
+# ---------------------------------------------------------------------------
+# 164.6.6.2.3 plan 05 Task 2: the levels path reads the same timing; an unresolvable open
+# or an untrustworthy time sends THAT flow day to the day-level rule by name (D-07) and
+# never fails a derive that succeeds today.
+# ---------------------------------------------------------------------------
+
+_D0 = _MM2X_FIRST_DEPOSIT
+_D1 = _D0 + timedelta(1)
+
+
+def _combine(deals, equity: float, *, offset_s: int = 0):
+    return combine_mt5_deal_ledger(
+        deals, account_equity=equity, account_balance=equity, floors=_BTC,
+        server_utc_offset_s=offset_s,
+    )
+
+
+def _levels(deals, equity: float, *, offset_s: int = 0):
+    return reconstruct_mt5_nav_levels(
+        deals, account_equity=equity, account_balance=equity, floors=_BTC,
+        server_utc_offset_s=offset_s,
+    )
+
+
+def _assert_deposit_day_at_day_level(returns, meta, day: date = _D1) -> None:
+    """The flow day took the day-level rule: the flow counts at the end of the day, so
+    0.011 of P&L is measured on the 0.1 start-of-day base (0.011 / 0.1 = 0.11), and the
+    strategy says so (an annotation, never a warning)."""
+    assert float(returns.loc[pd.Timestamp(day)]) == pytest.approx(0.11, abs=1e-12)
+    assert meta["flow_timing_day_level"] is True
+    assert meta["flow_timing_day_level_days"] == 1
+    assert meta["computation_status_hint"] == "complete"
+
+
+def _unresolvable_open_deals(case: str) -> list[dict]:
+    """The MM-2x timed ledger with ONE defect in the position that closes on the deposit day."""
+    deals, _flows, _positions = _mm2x_timed_deals()
+    opening, closing = deals[2], deals[3]
+    assert opening["entry"] == 0 and closing["entry"] == 1
+    if case == "buy-deal-without-position-id":
+        closing.pop("position_id")
+    elif case == "unknown-entry-code":
+        closing["entry"] = 9
+    elif case == "position-in-deal-missing-from-the-ledger":
+        deals.remove(opening)
+    elif case == "open-instant-after-the-closing-deal":
+        late = _stamped({**opening}, _utc_ms(_D1, 16), 0)
+        deals[2] = late
+    else:  # pragma: no cover - a typo in the parametrization must not pass silently
+        raise AssertionError(case)
+    return deals
+
+
+_UNRESOLVABLE_CASES = [
+    "buy-deal-without-position-id",
+    "unknown-entry-code",
+    "position-in-deal-missing-from-the-ledger",
+    "open-instant-after-the-closing-deal",
+]
+
+
+@pytest.mark.parametrize("case", _UNRESOLVABLE_CASES)
+def test_an_unresolvable_open_sends_the_whole_flow_day_to_the_day_level_rule(case: str) -> None:
+    """D-07 (T-164.6.6.2.3-12): a trading deal on a flow day whose position open cannot be
+    resolved leaves NO ``DayTiming`` for that day: it is measured at day level and the
+    annotation says so. No instant is invented (a default would give 0.01, the cohort
+    answer, and would hide that the open is unknown)."""
+    deals = _unresolvable_open_deals(case)
+    equity = float(Fraction("1.111"))
+    returns, meta = _combine(deals, equity)
+    _assert_deposit_day_at_day_level(returns, meta)
+    # One reconstruction, one set of facts: the levels path says the same thing.
+    _nav, nav_meta = _levels(deals, equity)
+    assert nav_meta == meta
+
+
+def _anomalous(row: dict, how: str) -> dict:
+    """``row`` with a ``time_msc`` that disagrees with its own ``time`` or is not a
+    millisecond count."""
+    if how == "removed":
+        return {k: v for k, v in row.items() if k != "time_msc"}
+    bad = {
+        "other-second": row["time_msc"] + 5_000,
+        "fractional": float(row["time_msc"]) + 0.5,
+        "bool": True,
+        "text": "not-a-number",
+    }[how]
+    return {**row, "time_msc": bad}
+
+
+@pytest.mark.parametrize("how", ["other-second", "fractional", "bool", "text"])
+@pytest.mark.parametrize("victim", ["the-flow-deal", "the-closing-deal", "the-same-day-in-deal"])
+def test_a_time_anomaly_on_a_flow_day_degrades_that_day_and_never_raises(
+    victim: str, how: str
+) -> None:
+    """D-07 (T-164.6.6.2.3-14): an inconsistent or non-integral ``time_msc`` on a deal the
+    flow day needs (the deposit, the deal that closes the position, or the IN deal that
+    opened it) makes the day unresolvable. The derive still succeeds, the day takes the
+    day-level rule, and the annotation names it."""
+    deals, _flows, _positions = _mm2x_timed_deals()
+    index = {"the-flow-deal": 1, "the-same-day-in-deal": 2, "the-closing-deal": 3}[victim]
+    assert deals[1]["type"] == 2  # the day-1 deposit
+    deals[index] = _anomalous(deals[index], how)
+    returns, meta = _combine(deals, float(Fraction("1.111")))
+    _assert_deposit_day_at_day_level(returns, meta)
+    _nav, nav_meta = _levels(deals, float(Fraction("1.111")))
+    assert nav_meta == meta
+
+
+def _quiet_day_ledger(anomaly: str | None) -> list[dict]:  # None = well-formed, "removed" = key dropped
+    """The MM-2x timed ledger plus two QUIET (flow-free) days that carry timing anomalies:
+    day 2 holds position X opened at 10:00 (its IN deal is the anomaly) and closed on day 3
+    at 11:00, day 3 holds a 09:00 withdrawal; day 2 also holds position Y opened and closed
+    in the day. X is carried overnight onto the day-3 flow day."""
+    deals, _flows, _positions = _mm2x_timed_deals()
+    d2, d3 = _D0 + timedelta(2), _D0 + timedelta(3)
+    x_in, x_out = _timed_position_deals(2001, _utc_ms(d2, 10), _utc_ms(d3, 11), Fraction("0.004"))
+    y_in, y_out = _timed_position_deals(2002, _utc_ms(d2, 11), _utc_ms(d2, 12), Fraction("0.002"))
+    if anomaly is not None:
+        x_in = _anomalous(x_in, anomaly)
+        y_in = _anomalous(y_in, anomaly)
+        y_out = _anomalous(y_out, anomaly)
+    deals += [x_in, x_out, y_in, y_out, _timed_flow_deal(_utc_ms(d3, 9), Fraction("-0.3"))]
+    return deals
+
+
+@pytest.mark.parametrize("how", ["other-second", "fractional", "bool", "text"])
+def test_a_time_anomaly_off_a_flow_day_leaves_the_derive_exactly_as_it_is_today(how: str) -> None:
+    """D-07 (T-164.6.6.2.3-14): instants are read ONLY for flow-day deals, so a malformed
+    ``time_msc`` on a quiet day (here the IN deal of a position carried onto a flow day, and
+    both deals of a position that never touches one) changes nothing: returns, meta and
+    levels equal the same ledger with that ``time_msc`` removed."""
+    equity = float(Fraction("1.111") + Fraction("0.004") + Fraction("0.002") - Fraction("0.3"))
+    anomalous = _quiet_day_ledger(how)
+    # Two references: the same ledger with the offending time_msc REMOVED, and with it
+    # well-formed. The derive must not be able to tell any of the three apart.
+    for reference in (_quiet_day_ledger("removed"), _quiet_day_ledger(None)):
+        r_bad, m_bad = _combine(anomalous, equity)
+        r_ref, m_ref = _combine(reference, equity)
+        pd.testing.assert_series_equal(r_bad, r_ref)
+        assert m_bad == m_ref
+        n_bad, nm_bad = _levels(anomalous, equity)
+        n_ref, nm_ref = _levels(reference, equity)
+        pd.testing.assert_series_equal(n_bad, n_ref)
+        assert nm_bad == nm_ref
+    assert "flow_timing_day_level" not in m_bad  # the flow days were still measured on time
+
+
+def test_a_commission_without_a_position_is_placed_by_its_own_instant() -> None:
+    """A commission-family deal (type 7) carries no position: on a flow day it is placed by
+    its own instant and does not push the day to the day-level rule. At 10:00 (after the
+    09:00 deposit) it is cohort 1, at 08:00 cohort 0. The oracle takes it as an event whose
+    open and close are its own instant."""
+    for hour in (10, 8):
+        deals, flows, positions = _mm2x_timed_deals()
+        fee_ms = _utc_ms(_D1, hour, 30)
+        fee = Fraction("-0.001")
+        deals.append(_stamped({"type": 7, "profit": float(fee), **_ZERO_COSTS}, fee_ms, 0))
+        positions = [*positions, (fee_ms, fee_ms, fee)]
+        equity = _terminal(flows, positions)
+        returns, meta = _combine(deals, equity)
+        oracle = _timed_oracle(flows, positions)
+        got = float(returns.loc[pd.Timestamp(_D1)])
+        assert got == pytest.approx(float(oracle[_D1]), abs=1e-12)
+        # Hand figures. 10:30: the fee joins the position in cohort 1, so (0.011 - 0.001) on
+        # 1.1 = 1/110. 08:30: the fee is cohort 0 (-0.001 on 0.1 = -1%), the position is
+        # cohort 1 and, D-16, opened on the capital that included the fee already booked at
+        # 08:30: 0.1 + 1.0 - 0.001 = 1.099, so it earns 0.011 / 1.099 and they link:
+        # 0.99 * (1 + 0.011 / 1.099) - 1 = 0.99 * 1110/1099 - 1 = -1/10990. (On D-03's
+        # flows-only base 1.1 this was 0.99 * 1.01 - 1 = -0.0001.)
+        hand = (
+            Fraction(1, 110)
+            if hour == 10
+            else Fraction(99, 100) * Fraction(1110, 1099) - 1
+        )
+        if hour == 8:
+            assert hand == Fraction(-1, 10990)
+        assert got == pytest.approx(float(hand), abs=1e-12)
+        assert "flow_timing_day_level" not in meta
+
+
+def test_levels_and_returns_meta_agree_on_the_timed_ledger_and_levels_ignore_timing() -> None:
+    """T-164.6.6.2.3-13: the levels path takes its meta from a second core call, which must
+    receive the same ``timing`` and ``full_history`` as the returns path, or the two disagree
+    about the flow-timing facts and about day 0. And the LEVELS themselves never depend on the
+    return convention: they equal a plain forward Fraction roll of the events."""
+    deals, flows, positions = _mm2x_timed_deals()
+    equity = _terminal(flows, positions)
+    _r, ret_meta = _combine(deals, equity)
+    nav, nav_meta = _levels(deals, equity)
+    assert nav_meta == ret_meta
+    assert ret_meta["flow_timing_timed_days"] >= 1 and "flow_timing_day_level" not in ret_meta
+    # Day-end NAV by hand: day 0 = 0.1, day 1 = 0.1 + 1.0 + 0.011 = 1.111.
+    assert float(nav.loc[pd.Timestamp(_D0)]) == pytest.approx(0.1, abs=1e-12)
+    assert float(nav.loc[pd.Timestamp(_D1)]) == pytest.approx(1.111, abs=1e-12)
+
+    # The same account without any time of day (no time_msc, no position ids) takes the
+    # day-level rule on the trading day: a different return, the SAME levels.
+    stripped = [
+        {k: v for k, v in d.items() if k not in ("time_msc", "position_id")} for d in deals
+    ]
+    nav_plain, _m = _levels(stripped, equity)
+    pd.testing.assert_series_equal(nav, nav_plain)
+    r_plain, plain_meta = _combine(stripped, equity)
+    assert float(r_plain.loc[pd.Timestamp(_D1)]) == pytest.approx(0.11, abs=1e-12)
+    assert plain_meta["flow_timing_day_level"] is True
+
+
+def test_mt5_day_pnl_is_untouched_by_the_timing() -> None:
+    """``mt5_day_pnl`` reads the day P&L from the same fold and ignores the timing: per day
+    the trading deals' cash on the union of trading days and flow days, a flow-only day
+    being zero (day 0 here, then 0.011 on the deposit day)."""
+    from services.broker_dailies import mt5_day_pnl
+
+    deals, _flows, _positions = _mm2x_timed_deals()
+    pnl = mt5_day_pnl(deals)
+    assert [float(v) for v in pnl.to_numpy()] == pytest.approx([0.0, 0.011], abs=1e-15)
