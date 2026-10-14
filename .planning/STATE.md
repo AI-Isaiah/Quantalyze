@@ -1461,6 +1461,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.1.2.1 edited: re-scoped to SC-1..7; SFH-R3-07 and WR-02 recorded CLOSED (founder D-01/D-02, 2026-10-13)
 - Phase 167.1.2.1.1 edited: success criterion 9 added: MT5 BTC-unit inception residual routed from NAVBREACH D-08 (founder 2026-10-13)
 - Phase 170.6 edited: edited fields: success_criteria (Discovery exchange label vs the connected key's venue, routed from TRADESYNC plan 21, founder 2026-10-13)
+- Phase 164.9.8.1 inserted after Phase 164.9.8: PYXDIST: python CI job runs pytest in parallel (founder 2026-10-14: starts after 166.5 COMPUTEDATSTAMP)
 
 ### Decisions
 

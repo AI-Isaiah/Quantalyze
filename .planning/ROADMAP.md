@@ -146,6 +146,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables** (INSERTED 2026-10-03) — shipped v0.129.2.0 (merged 2026-10-08); verification: passed (plan 04 PROD after-reading 2026-10-08) (completed 2026-10-08)
 - [x] **Phase 164.9.7.1: TRIGGERREVOKE — anon and authenticated no longer hold TRIGGER or MAINTAIN on public tables** (INSERTED 2026-10-08) — shipped v0.129.5.0 (merged 2026-10-09, #987; applied to TEST then PROD, PROD after-reading `0 0 0 0`); verification: passed 2026-10-09 (founder D-06, 164.9.7)
 - [x] **Phase 164.9.8: APTHANG — a CI job's apt step never hangs on a dead package mirror** (INSERTED 2026-10-07) — shipped v0.129.1.2 (merged 2026-10-08); verification: passed (D-04 runner measurement recorded) (completed 2026-10-08)
+- [ ] **Phase 164.9.8.1: PYXDIST — the python CI job runs pytest in parallel and finishes in about half its time** (INSERTED 2026-10-14) — not yet planned; starts after 166.5 COMPUTEDATSTAMP (founder 2026-10-14)
 - [x] **~~Phase 165~~: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"), as 165 ACTIONSDEPS: #643 (superseded by #916), #627, #626 and #612 landed green; deviations in `165-VERIFICATION.md`.
 - [x] **~~Phase 165.1~~: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"): the maintenance landings meet the criteria, C1 in substance and not to the letter (the pandas fix rode inside #898); deviations in `165.1-VERIFICATION.md`.
 - [x] **~~Phase 165.2~~: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -3799,6 +3800,29 @@ Plans:
 - [x] 164.9.8-03-PLAN.md — supabase-migrate, test-restore, mutex-probe, prod-prober, nightly.yml; mutex suffix kept identical (wave 2)
 - [x] 164.9.8-04-PLAN.md — glob-census guard test, neutered RED and restored from a byte backup (wave 3)
 - [x] 164.9.8-05-PLAN.md — ship: version re-picked from origin/main, CHANGELOG, PR bound by check count, D-04 runner measurement recorded (wave 4)
+
+### Phase 164.9.8.1: PYXDIST — the python CI job runs pytest in parallel and finishes in about half its time (INSERTED)
+
+**Goal:** The `python` CI job, which every PR waits on, runs its pytest suite in parallel and finishes in about half its current time, with no flake hidden to get there.
+**Booked:** 2026-10-14, founder decision: "after computedatstamp". Start it after Phase 166.5 COMPUTEDATSTAMP. Priority: CI throughput.
+**Measured 2026-10-14:**
+- The `python` job takes 18-20 min per PR (runs `38611627110`, `38615032784`, `38621574070`). The pytest step alone is about 15 min, and it runs SERIALLY on a 4-vCPU `ubuntu-latest` runner.
+- `pytest-xdist` is already a dev dependency, and `tests/conftest.py` already pins the shared-DB tests to one `xdist_group`.
+- Serial is a recorded decision: Makefile `test:` says "SERIAL (v1.9.1 Phase 97): `-n auto --dist loadgroup` deferred — the global-claim fence tests flake under xdist ordering".
+- Locally the full suite passed twice under `-n 4` (10009 and 10091 passed). Under load it showed one flake, `tests/test_limiter_identity.py::TestClassClosure::test_every_router_limiter_is_the_one_singleton`, which passed when run alone.
+
+**Success criteria:**
+1. The Phase 97 global-claim fence flake and the limiter-identity flake are each reproduced or ruled out by measurement. Any reproduced flake is fixed at its root cause: no retry, no skip, and no marker that hides it.
+2. CI's `python` job and Makefile `test:` run `-n auto --dist loadgroup`, byte-identical. The coverage gate (`--cov-fail-under=80`) is still enforced on the combined result. The command pin in `src/__tests__/local-stack-lane-wiring.test.ts` is moved deliberately.
+3. Before merge, a soak of at least 20 consecutive green runs of the CI command, either on CI or in an equivalent local loop.
+4. The `python` job's wall time is measured before and after, on the PR.
+
+**Requirements**: SC-1..SC-4 above
+**Depends on:** Phase 164.9.8 (ordering only); starts after Phase 166.5
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.9.8.1 to break down)
 
 ### Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables (measured read-only on PROD 2026-10-03: anon 56 of 63 tables, authenticated 59, api_keys included; RLS never covers TRUNCATE). One migration revokes it and the default privilege; migration-reviewer + rls-policy-auditor + silent-failure-hunter before merge, since merges auto-apply to PROD. (INSERTED)
 
