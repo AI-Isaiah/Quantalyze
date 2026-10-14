@@ -110,7 +110,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.4: MT5KEEPALIVE — nothing TRIGGERS a recovery, so the terminal sits dark for hours while recovery itself takes minutes** (INSERTED)
 - [x] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verified 2026-10-06 (completed 2026-10-06; was `human_needed` 2026-09-26 → 2026-10-06)
 - [x] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — verified 2026-10-04 (completed 2026-10-04)
-- [ ] **Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out** (INSERTED) — not yet planned (waits for the founder's live scrub spike)
+- [x] **Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out** (INSERTED) — 8 plans, shipped v0.125.0.0 (#950); closed 2026-10-14 (records PR), live half of criterion 2 booked as MT5SCRUB-L3-JOBS-TERMINAL-READING-01
 - [x] **Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series** (INSERTED) — shipped v0.126.0.0 (#969, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
 - [ ] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — not yet planned (booked 2026-10-07 by 164.6.6.2 D-15)
 - [x] **Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend** (INSERTED) — shipped v0.128.0.0 (#973, merged 2026-10-08); verification: passed (D-03 post-deploy reading 2026-10-08) (completed 2026-10-08)
@@ -156,7 +156,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — complete with routed residuals 2026-10-01 (halted 2026-09-27, resumed after 166.4); verification passed 2026-10-12, residuals owned by 166.3.1 NAVBREACH and 170.2 item 5 (completed 2026-10-12)
 - [ ] **Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds** (INSERTED) — not planned; inserted 2026-10-01 (founder); 166.3's R5 recompute waits on it
 - [x] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
-- [ ] **Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly** (INSERTED) — not yet planned (data integrity)
+- [x] **Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly** (INSERTED) — 4 plans; closed 2026-10-14 (records PR) (verification passed, PROD glance taken 2026-10-14)
 - [ ] **Phase 166.5: COMPUTEDATSTAMP — the analytics runner stamps computed_at on a real finish** (INSERTED 2026-10-03) — not yet planned
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [x] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed (completed 2026-10-04)
@@ -185,10 +185,10 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned — shipped v0.129.11.0 (#997); closed 2026-10-12 after the founder phone re-check (completed 2026-10-12)
 - [x] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 3 plans (completed 2026-10-11)
 - [x] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — 14 plans, two PRs (#1003, #1006) (completed 2026-10-11)
-- [ ] **Phase 170.5: FACTSHEETV2PANELS — /strategy/[id]/v2 panels render or say why** (INSERTED 2026-10-03) — not yet planned
+- [x] **Phase 170.5: FACTSHEETV2PANELS — /strategy/[id]/v2 panels render or say why** (INSERTED 2026-10-03) — 7 plans; closed 2026-10-14 (records PR) (verification passed, live readings 2026-10-14; two observations booked in TODOS)
 - [ ] **Phase 170.6: DISPLAYPOLISH — no signed zeros or red positives; short overlaps read em-dash** (INSERTED 2026-10-03; NUMBERS only since 2026-10-13) — not yet planned
 - [ ] **Phase 170.6.1: DISCOVERYPHONE — the Discovery table works on a phone and names the right venue** (INSERTED 2026-10-13) — not yet planned
-- [ ] **Phase 170.6.2: COPYPASS — copy fixes, the /browse example flash, the admin kind filter** (INSERTED 2026-10-13) — not yet planned
+- [x] **Phase 170.6.2: COPYPASS — copy fixes, the /browse example flash, the admin kind filter** (INSERTED 2026-10-13) — 4 plans, shipped v0.131.4.0 (#1023) (completed 2026-10-14); closed 2026-10-14 (records PR)
 - [x] **Phase 170.7: MYSTRATTABLE — My Strategies uses the ranking table, and the name opens the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 9 plans (completed 2026-10-11)
 
 ### Phase 158: OPS-CI — A merge means a deploy
@@ -3182,6 +3182,8 @@ Plans:
 
 ### Phase 164.6.6.2.3: FLOWTIMING — a deposit never breaks a return, and an account's first day is its inception, not a warning (INSERTED)
 
+**Status 2026-10-14 (records PR):** complete. VERIFICATION `passed` (9/9), shipped v0.131.1.0 (#1018); phase records brought to `main` by this PR.
+
 **Goal:** Returns are measured against the capital that was in the account when each position was opened, using the hour-and-minute timestamps of deposits, withdrawals and position opens. A deposit or withdrawal is not "the day's return being uninterpretable", and an account's own start is not a data-quality defect. Today two guards in `analytics-service/services/nav_twr.py` turn both into warnings and drop the day's return.
 **Measured 2026-10-08** (PROD read-only, marker checked; debug note `.planning/debug/mm2x-dust-guard-after-floor.md`):
 - MM-2x re-derived on the plan 14 code (1e-7 BTC floor) and still carries `dust_nav_guard` and `flow_dominated_guard`, at `complete_with_warnings`. The numbers themselves are complete: 356 of 356 daily returns from 2025-10-18 are measured, and the BTC floors are threaded end to end (`job_worker.py:5615` → `chain_linked_twr` → `_guard_denominator`).
@@ -3244,6 +3246,8 @@ Plans:
 - [ ] TBD (run /gsd-plan-phase 164.6.6.2.1 to break down)
 
 ### Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out (INSERTED)
+
+**Status 2026-10-14 (records PR):** complete. **Founder decision 2026-10-14 (AskUserQuestion): "Close, book L-3"** (D-16 in `164.6.6.1-CONTEXT.md`). VERIFICATION `passed`; L-1 and L-2 PASS 2026-10-05; `L-3: NOT OBSERVED (no ipc_fault in 2026-10-05..2026-10-14; Railway logs only cover the deploy booted 2026-10-14, so a fault cannot be ruled out either)`, so criterion 2's live half is booked, not proven, as `TODOS.md` `MT5SCRUB-L3-JOBS-TERMINAL-READING-01`. Plan 07 SUMMARY written.
 
 **Goal:** The validation terminal is wiped of every validated account after each use, and the jobs
 terminal's saved client accounts and history are removed, without ever leaving the jobs terminal
@@ -4610,6 +4614,8 @@ Plans:
 
 ### Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly (INSERTED)
 
+**Status 2026-10-14 (records PR):** complete. VERIFICATION `passed`; item 4, the founder's logged-in PROD glance, PASS 2026-10-14 (empty state renders at 1470 and 367 CSS px, no horizontal overflow, no error boundary).
+
 **Goal:** The `/portfolios/[id]` analytics compute reads only `strategy_analytics` columns that exist, treats each strategy's stored series as what it is (cumulative or daily, measured, not assumed), and fails loudly when it cannot compute, so the portfolio's risk decomposition and other analytics are real numbers or an honest failure.
 **Priority:** data integrity (founder priority rule, 2026-09-27: data integrity ahead of features). Registered through `/gsd-phase --insert 166.4`; gsd-tools numbered it 166.4.1 and the number is kept. It is independent of 166.4 BENCHALIGN in code; 166.4 is only its anchor in the list.
 **Requirements**: TBD (criteria below)
@@ -4923,6 +4929,8 @@ Plans:
 ⭐ **CLOSED 2026-10-12.** VERIFICATION passed (6/6) after plan 08's PROD readings around the 2026-10-12 05:30 UTC derive. SC-4's clause "the refused allocator then reads a trustworthy v2 book" is routed by name to Phase 166.3.1 NAVBREACH (founder: "Close, route to NAVBREACH"; its success criterion 5; TODOS `167.1.2.2.1-DROPPED-KEY-NULL-ANCHOR`).
 
 ### Phase 167.1.2.2.2: TRADESYNC — live strategy keys ingest trades daily again: /cron-sync gets a runbook-registered pg_cron tick, each stale key's cursor is seeded at its last stored trade so the gap backfills, and "Synced" reads the last trade fetch (INSERTED)
+
+**Status 2026-10-14 (records PR):** complete. VERIFICATION `passed`; the two post-merge readings PASS 2026-10-14 (main CI run on the #1012 merge: success, 26 jobs = 24 success, 2 skipped, 0 failed; prod-prober after the merge: 18 PROD job(s) vs 18 manifest job(s), 0 differing). Plan 18 stays deferred (verdict FITS) and has no SUMMARY.
 
 **Goal:** Every live strategy key on a ccxt venue (OKX, Bybit) ingests its trades and daily returns every day, the days it missed are backfilled, and the factsheet's "Synced" label tells the truth about when trades were last fetched.
 **Booked:** founder 2026-10-09 (AskUserQuestion: "New phase, pg_cron"). Data integrity. Root cause: `.planning/debug/cron-sync-unscheduled.md`.
@@ -5612,7 +5620,7 @@ Plans:
 
 ### Phase 170.6.2: COPYPASS — copy fixes, the anonymous /browse example flash and the admin Compute Jobs kind filter (INSERTED)
 
-**Goal:** The booked copy fixes land, anonymous /browse never flashes example rows that then vanish, and the admin Compute Jobs kind filter lists every present kind.
+**Goal:** /recommendations with no mandate reads "Strategies from the daily match engine. Set your mandate to see yours." (D-01). The equity-history rebuilding panel says "One of your keys", names the key by `dataSourceLabel`, drops "yet", and gives each class its own heading, the same on Overview and Risk (D-02..D-05). Anonymous /browse starts with examples hidden, so its server HTML and first paint never show an example row that then vanishes; a `managerRows` mount keeps its own (D-06). The admin Compute Jobs Kind filter lists every kind that has jobs, from its own gated `?facets=kinds` query, and keeps the selected kind (D-07). No migration.
 **Requirements**: SC-1..SC-4
 **Depends on:** Phase 170 (not 170.6: split from it 2026-10-13 and independent of its number rules; founder "Start both", 2026-10-13)
 Split out of 170.6 DISPLAYPOLISH on 2026-10-13 (founder, "Split in three").
@@ -5623,12 +5631,19 @@ Split out of 170.6 DISPLAYPOLISH on 2026-10-13 (founder, "Split in three").
 3. Anonymous /browse never flashes example rows that then vanish.
 4. The admin Compute Jobs kind filter lists every present kind.
 
-**Plans:** 0 plans
+**Plans:** 4/4 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 170.6.2 to break down)
+- [x] 170.6.2-01-PLAN.md — wave 1: SC-1 unset-mandate header (tracer) and SC-2 rebuilding-panel copy and per-class headings; every old-string pin re-pointed (D-01..D-05)
+- [x] 170.6.2-02-PLAN.md — wave 1: SC-3 showExamples starts hidden for non-managerRows mounts; renderToString, per-commit probe and managerRows inverse guard, neuter proof (D-06)
+- [x] 170.6.2-03-PLAN.md — wave 1: SC-4 `?facets=kinds` branch behind the admin gate and a Kind select fed by it, selected kind retained, neuter proof (D-07)
+- [x] 170.6.2-04-PLAN.md — wave 2: full gate, CHANGELOG and byte-equal VERSION release commit; review and ship checkpoint
+
+**Status 2026-10-14 (records PR):** complete. VERIFICATION `passed`, SECURITY secured, shipped v0.131.4.0 (#1023).
 
 ### Phase 170.5: FACTSHEETV2PANELS — /strategy/[id]/v2 panels render or say why: the Rolling Alpha and Beta panel is an empty heading in 3M and 6M, benchmark greeks read all em-dash ('Benchmark correlation unavailable') while the factsheet shows alpha, beta, IR and Treynor, the Net and Gross Exposure axis reads 5000000%, Turnover is empty, and the footer calls an API-verified strategy self-reported. (INSERTED)
+
+**Status 2026-10-14 (records PR):** complete. VERIFICATION `passed`; the four live items taken on PROD 2026-10-14 (founder decision "Close 170.5, book the jump"). Two observations booked in TODOS: `170.5-ROLLING-PLACEHOLDER-HEIGHT` and `V2-CHART-TABS-OVERFLOW-NARROW`.
 
 **Goal:** On `/strategy/[id]/v2` every panel either renders or says why it can't: rolling alpha and beta, the benchmark greeks (the factsheet's own five figures, D-07), net and gross exposure in USD, turnover, and a footer that follows the real trust tier.
 **Requirements**: TBD (phase-local P1-P5, one per defect, defined in 170.5-RESEARCH.md)
@@ -5985,7 +6000,7 @@ kept verbatim.
 | 170.5 FACTSHEETV2PANELS | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 170.6 DISPLAYPOLISH | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 170.6.1 DISCOVERYPHONE | 0/? | Queued — user-facing, split from 170.6 2026-10-13 | - |
-| 170.6.2 COPYPASS | 0/? | Queued — user-facing, split from 170.6 2026-10-13 | - |
+| 170.6.2 COPYPASS | 4/4 | Complete | 2026-10-14 |
 | 170.7 MYSTRATTABLE | 9/9 | Complete | 2026-10-11 |
 
 Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
