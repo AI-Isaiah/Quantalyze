@@ -2,45 +2,9 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260526095850_log_audit_event_null_auth_errcode.sql
--- Migration: audit-2026-05-26 NEW-C10-04
--- ==========================================================================
--- Context
--- -------
--- `log_audit_event` (migration 049) raises SQLSTATE 42501
--- ('insufficient_privilege') when auth.uid() IS NULL. The TS classifier in
--- `src/lib/audit.ts` maps 42501 → permission_denied (fatal: Sentry capture
--- tagged `audit_permission_denied=true`, row dropped, re-throw).
---
--- The 42501 fatal alarm was designed to catch one specific catastrophe:
--- EXECUTE-grant drift on the `log_audit_event` function (the P701/P702
--- threat). But migration 049's NULL-auth guard ALSO raises 42501 — and an
--- expired JWT in the deferred `after()` window is an EVERYDAY occurrence
--- (the JWT may lapse between response-flush and the post-flush RPC settle).
---
--- Result: every session-expiry-in-after() emits a FATAL Sentry event tagged
--- `audit_permission_denied=true`, training operators to ignore the exact tag
--- meant to scream on real EXECUTE-grant drift. Signal/noise collapsed.
---
--- Fix
--- ---
--- Change the NULL-auth guard's ERRCODE from `insufficient_privilege` (42501)
--- to `invalid_authorization_specification` (28000). This is the same SQLSTATE
--- used by the sibling RPCs `update_allocator_mandates` (migration 062) and
--- `validate_scenario_diff_numeric_cast_hardening` for their own NULL-auth
--- guards — consistent with the codebase convention.
---
--- The TS classifier (NEW-C10-04 companion) then maps 28000 → unauthenticated
--- (non-fatal: console.warn + Sentry warning, NOT fatal, no `audit_permission_
--- denied=true` tag). The 42501 path is now exclusively the EXECUTE-grant-drift
--- signal — the catastrophic case — so the Sentry alert rule regains its
--- intended precision.
---
--- NOTE: the `audit_log.user_id` column is still NOT NULL (migration 049
--- hardened it); NULL auth.uid() is still rejected by the function. Only
--- the SQLSTATE changes — the guard's semantics are identical.
--- ==========================================================================
-
+-- source migration: 20261014120100_log_audit_event_deny_worker_only_actions.sql
+-- Schema-qualified deliberately (see 20260924233749's note on unqualified
+-- CREATE OR REPLACE under a session search_path that does not put public first).
 CREATE OR REPLACE FUNCTION public.log_audit_event(
   p_action      TEXT,
   p_entity_type TEXT,
@@ -69,6 +33,27 @@ BEGIN
 
   IF p_action IS NULL OR length(p_action) = 0 THEN
     RAISE EXCEPTION 'log_audit_event: p_action is required'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Phase 167.1.2.1 D-18: the worker-only actions are refused to every caller
+  -- that is not service_role. This function is SECURITY DEFINER and granted to
+  -- `authenticated`, so without this a signed-in user could write
+  -- an outcome-shaped row (for example allocator.equity.reconstruct_complete)
+  -- about their own key and forge the evidence the reconstruct marker backfill
+  -- reads. The worker writes through log_audit_event_service, which is
+  -- service_role only and is unaffected. allocator.holdings.sync_requested is
+  -- NOT denied: /api/allocator/holdings/sync writes it with the user's session.
+  -- O-1: the same holds for the two worker-only ENTITY TYPES a reader counts as
+  -- platform evidence (the flag-monitor error-rate denominator and the Phase 19
+  -- soak count), whatever the action.
+  IF (p_action LIKE 'allocator.equity.%'
+      OR p_action IN ('allocator.holdings.sync_completed',
+                      'allocator.holdings.sync_failed',
+                      'allocator.holdings.persist_failed')
+      OR p_entity_type IN ('process_key', 'verification_requests_legacy_write'))
+     AND auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'log_audit_event: action % on entity type % is written only by the platform (log_audit_event_service), not by a client session', p_action, p_entity_type
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
 

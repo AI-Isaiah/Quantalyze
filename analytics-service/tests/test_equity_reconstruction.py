@@ -2378,10 +2378,8 @@ async def test_stale_snapshots_preserved_when_other_key_exists(monkeypatch):
     """Multi-key safety: when the allocator has ANOTHER CONNECTED api_key,
     the fresh reconstruct MUST NOT wipe existing rows. DO NOTHING semantics
     protect multi-key aggregation (T-07-V5b). This guards the fix against
-    over-correction. (Disconnected siblings are covered by the separate
-    test_stale_snapshots_replaced_when_sibling_is_disconnected test —
-    per migration 075 a disconnected key cannot produce new data and must
-    not block the sole-source purge.)"""
+    over-correction. (D-07: a disconnected sibling blocks the purge too, see
+    test_stale_snapshots_preserved_when_sibling_is_disconnected_d07.)"""
     fake_supabase = FakeSupabaseClient()
     audit_mock = _install_fake_audit(monkeypatch)
 
@@ -2403,11 +2401,9 @@ async def test_stale_snapshots_preserved_when_other_key_exists(monkeypatch):
 
     # Allocator has BOTH api_keys — the new one (API_KEY_ID_1) and the
     # prior one (API_KEY_ID_2). The prior key's existence is the signal
-    # that stale rows are legitimately aggregated, not orphaned. Both
-    # must be ACTIVE + CONNECTED for the sibling-count filter to see
-    # them (H-1162 / H-1164: the filter mirrors migration 075's worker
-    # dispatch — is_active=true AND disconnected_at IS NULL AND
-    # sync_status != 'revoked').
+    # that stale rows are legitimately aggregated, not orphaned. Since D-07
+    # any other api_keys row counts as a sibling; this one is also ACTIVE and
+    # CONNECTED, the plainest case.
     fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
         "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
         "is_active": True, "disconnected_at": None, "sync_status": "ok",
@@ -2479,30 +2475,36 @@ async def test_stale_snapshots_preserved_when_other_key_exists(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stale_snapshots_replaced_when_sibling_is_disconnected(monkeypatch):
-    """/investigate 2026-04-24: disconnected sibling must not block purge.
+async def test_stale_snapshots_preserved_when_sibling_is_disconnected_d07(monkeypatch):
+    """D-07 (SC-3, R-13-1): a DISCONNECTED sibling BLOCKS the sole-key replace.
 
-    Reproduces the v0.15.3.3 follow-up bug: user soft-disconnected their
-    previous exchange key (migration 075: api_keys.disconnected_at set),
-    then added a new read-only key and hit Sync now. The stale V-shaped
-    curve persisted because _allocator_has_other_api_keys counted the
-    disconnected row as a sibling, the sole-source purge was skipped,
-    and DO NOTHING protected the stale rows.
+    INVERTED from ``test_stale_snapshots_replaced_when_sibling_is_disconnected``
+    (/investigate 2026-04-24, v0.15.3.3 / H-1162 / H-1164). That test held
+    that a soft-disconnected key (migration 075: api_keys.disconnected_at set)
+    is not a live contributor, so ``_allocator_has_other_api_keys`` excluded
+    it and the fresh reconstruct replaced the whole series, which cured the
+    "stale V-shaped curve persists after I uploaded a fresh key" trap.
 
-    Expected: disconnected sibling is NOT a live contributor (worker
-    dispatch skips it per migration 075 STEP 4). The purge MUST fire
-    and the fresh reconstruct must own the series.
+    D-07 reverses that: ``allocator_equity_snapshots`` rows are allocator
+    TOTALS, not per key, so the rows the disconnected key wrote are still
+    part of the allocator's history and the replace RPC's allocator-wide
+    DELETE would erase them. Every other api_keys row of the owner now counts
+    as a sibling (this schema has no soft delete).
 
-    FAILS without the `.is_("disconnected_at", "null")` filter on the
-    sibling-count query."""
+    Accepted consequence (D-07 is locked): a user who disconnects key A and
+    adds key B gets first-writer-wins persist, so days key A wrote keep A's
+    values instead of being replaced. This test is kept, inverted, as the
+    readable record of that trade-off.
+
+    FAILS if the sibling-count query filters out ``disconnected_at``."""
     fake_supabase = FakeSupabaseClient()
     audit_mock = _install_fake_audit(monkeypatch)
 
     end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
     start_date = end_date - timedelta(days=9)
 
-    # Seed stale rows from the (now-disconnected) prior key's era.
-    # Sentinel value -999_999 makes it trivial to detect the wipe.
+    # Seed rows from the (now-disconnected) prior key's era.
+    # Sentinel value -999_999 makes it trivial to detect a wipe.
     for day_offset in range(10):
         asof = (start_date + timedelta(days=day_offset)).date().isoformat()
         fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
@@ -2521,13 +2523,10 @@ async def test_stale_snapshots_replaced_when_sibling_is_disconnected(monkeypatch
         "is_active": True, "sync_status": "ok",
         "disconnected_at": None,
     }
-    # SPEC-PTA-8 (specialist apply 2026-05-16): mirror production-shape
-    # api_keys row so the ONLY remaining sibling-exclusion path is the
-    # ``disconnected_at`` filter. Pre-fix this fixture omitted is_active /
-    # sync_status, so the FakeTable's missing-key comparison excluded the
-    # row via the is_active filter and the test would still pass if a
-    # regression silently dropped the disconnected_at clause from
-    # _allocator_has_other_api_keys.
+    # SPEC-PTA-8 (specialist apply 2026-05-16): production-shape api_keys row
+    # that differs from a plain connected sibling ONLY in ``disconnected_at``,
+    # so the arm names the attribute under test. (Pre-D-07 the sibling count
+    # filtered on it, and this row was the one that had to be excluded.)
     fake_supabase.store[("api_keys", (API_KEY_ID_2,))] = {
         "id": API_KEY_ID_2, "user_id": ALLOCATOR_ID, "exchange": "okx",
         "is_active": True, "sync_status": "ok",
@@ -2568,48 +2567,36 @@ async def test_stale_snapshots_replaced_when_sibling_is_disconnected(monkeypatch
     from services.job_worker import DispatchOutcome
     assert result.outcome == DispatchOutcome.DONE, result
 
-    # Stale sentinel rows MUST be purged — disconnected sibling is not a
-    # live contributor, so sole-source semantics apply.
+    # D-07: the disconnected key's rows MUST survive. A disconnected sibling
+    # is a non-deleted sibling, so the replace RPC (an allocator-wide DELETE)
+    # must not run and the persist path (ON CONFLICT DO NOTHING) keeps them.
     stored = fake_supabase.rows_for("allocator_equity_snapshots")
-    stale_survivors = [r for r in stored if r.get("value_usd") == -999_999.0]
-    assert not stale_survivors, (
-        "Disconnected-sibling regression: stale snapshots survived because "
-        "the sole-source purge was skipped. A disconnected key (migration 075) "
-        "cannot produce new data (worker dispatch filters disconnected_at IS "
-        "NULL) and must not block the fresh reconstruct. "
-        f"Got {len(stale_survivors)} stale sentinel rows still in store: {stored!r}"
+    survivors = [r for r in stored if r.get("value_usd") == -999_999.0]
+    assert len(survivors) == 10, (
+        "D-07 regression: the disconnected sibling's allocator snapshot rows "
+        "were deleted by a reconstruct for the other key. Expected all 10 "
+        f"seeded rows to survive, got {len(survivors)}: {stored!r}"
     )
-    # And the fresh reconstruct's rows must now be present.
-    assert stored, "Fresh reconstruct wrote zero rows — upstream regression"
+    assert not [
+        c for c in fake_supabase.rpc_calls
+        if c[0] == "replace_allocator_equity_snapshots"
+    ], fake_supabase.rpc_calls
 
-    # E4 (HIGH8): disconnected sibling is not a live contributor, so the
-    # sole-source recovery path fires — now via the atomic replace RPC. The
-    # audit field MUST flag atomic_replace and report a non-zero written count
-    # — operator-visible proof the disconnected-sibling path replaced history
-    # rather than no-op'd.
+    # The audit trail must agree that nothing was replaced or purged.
     complete_calls = [
         c for c in audit_mock.call_args_list
         if c.kwargs.get("action") == "allocator.equity.reconstruct_complete"
     ]
     assert complete_calls, audit_mock.call_args_list
     meta = complete_calls[-1].kwargs.get("metadata") or {}
-    assert meta.get("atomic_replace") is True, (
-        "disconnected sibling → sole-key atomic replace must fire; "
+    assert meta.get("atomic_replace") is False, (
+        "disconnected sibling → persist path, no atomic replace; "
         f"atomic_replace={meta.get('atomic_replace')!r}. metadata={meta!r}"
     )
-    assert (meta.get("days_written") or 0) > 0, (
-        "atomic replace wrote zero rows on the disconnected-sibling path. "
-        f"metadata={meta!r}"
-    )
-    # The atomic replace RPC must have been called exactly once.
-    replace_rpc_calls = [
-        c for c in fake_supabase.rpc_calls
-        if c[0] == "replace_allocator_equity_snapshots"
-    ]
-    assert len(replace_rpc_calls) == 1, (
-        f"expected exactly one replace_allocator_equity_snapshots RPC call, "
-        f"got {fake_supabase.rpc_calls!r}"
-    )
+    assert meta.get("stale_snapshots_purged") == 0, meta
+    # Every reconstructed asof collides with a seeded row, so first-writer-wins
+    # ON CONFLICT DO NOTHING writes nothing: the persist path ran, no replace.
+    assert meta.get("days_written") == 0, meta
 
 
 @pytest.mark.asyncio
@@ -3952,9 +3939,16 @@ async def test_h1161_refresh_keeps_perp_breakdown_entry_when_upnl_is_zero(monkey
 # ---- H-1162 / H-1164 - is_active sibling filter -------------------------
 
 @pytest.mark.asyncio
-async def test_h1162_sibling_with_is_active_false_does_not_block_purge(monkeypatch):
-    """Deactivated sibling (is_active=false) must NOT block the
-    sole-source purge.
+async def test_h1162_sibling_with_is_active_false_blocks_purge_d07(monkeypatch):
+    """D-07 (SC-3): a deactivated sibling (is_active=false) BLOCKS the
+    sole-key replace.
+
+    INVERTED from ``test_h1162_sibling_with_is_active_false_does_not_block_purge``
+    (H-1162 / H-1164), which held that a deactivated key cannot produce new
+    snapshots and so must not count as a sibling. D-07 reverses that: the
+    allocator's snapshot rows are totals the deactivated key already
+    contributed to, and the replace RPC deletes all of them. The old rule's
+    stale-curve fix is the accepted cost (see the disconnected arm above).
     """
     fake_supabase = FakeSupabaseClient()
     _install_fake_audit(monkeypatch)
@@ -4015,17 +4009,30 @@ async def test_h1162_sibling_with_is_active_false_does_not_block_purge(monkeypat
     assert result.outcome == DispatchOutcome.DONE, result
 
     stored = fake_supabase.rows_for("allocator_equity_snapshots")
-    stale = [r for r in stored if r.get("value_usd") == -777_777.0]
-    assert not stale, (
-        f"Got {len(stale)} stale rows: {stored!r}"
+    survivors = [r for r in stored if r.get("value_usd") == -777_777.0]
+    assert len(survivors) == 10, (
+        f"D-07: a deactivated sibling blocks the replace, so all 10 existing "
+        f"rows survive; got {len(survivors)}: {stored!r}"
     )
+    assert not [
+        c for c in fake_supabase.rpc_calls
+        if c[0] == "replace_allocator_equity_snapshots"
+    ], fake_supabase.rpc_calls
 
 
 @pytest.mark.asyncio
-async def test_h1162_sibling_with_revoked_sync_status_does_not_block_purge(
+async def test_h1162_sibling_with_revoked_sync_status_blocks_purge_d07(
     monkeypatch,
 ):
-    """Symmetric: revoked sibling must not block purge either."""
+    """D-07 (SC-3): a revoked sibling (sync_status='revoked') BLOCKS the
+    sole-key replace.
+
+    INVERTED from
+    ``test_h1162_sibling_with_revoked_sync_status_does_not_block_purge``
+    (H-1162 / H-1164): symmetric with the is_active arm. A revoked key still
+    wrote rows that are part of the allocator's totals, and the replace RPC
+    deletes all of them.
+    """
     fake_supabase = FakeSupabaseClient()
     _install_fake_audit(monkeypatch)
 
@@ -4085,8 +4092,15 @@ async def test_h1162_sibling_with_revoked_sync_status_does_not_block_purge(
     assert result.outcome == DispatchOutcome.DONE, result
 
     stored = fake_supabase.rows_for("allocator_equity_snapshots")
-    stale = [r for r in stored if r.get("value_usd") == -555_555.0]
-    assert not stale, stored
+    survivors = [r for r in stored if r.get("value_usd") == -555_555.0]
+    assert len(survivors) == 10, (
+        f"D-07: a revoked sibling blocks the replace, so all 10 existing "
+        f"rows survive; got {len(survivors)}: {stored!r}"
+    )
+    assert not [
+        c for c in fake_supabase.rpc_calls
+        if c[0] == "replace_allocator_equity_snapshots"
+    ], fake_supabase.rpc_calls
 
 
 # ---- H-1163 / C-0328 - Sibling-lookup failure surfacing ------------------
@@ -4129,6 +4143,128 @@ async def test_h1163_sibling_lookup_exception_returns_fail_safe(monkeypatch):
     assert bool(result) is True, bool(result)
     assert result.lookup_failed is True
     assert result.error_message and "transient" in result.error_message
+
+
+def _head_request_without_count_header(fake_supabase, monkeypatch):
+    """Make the api_keys sibling lookup answer the way a PostgREST head request
+    does when the Content-Range count header is absent: ``count=None`` and no
+    rows (a head request never returns rows, whatever exists)."""
+    class _Res:
+        count = None
+        data: list = []
+
+    class _HeadTable:
+        def select(self, *a, **kw): return self
+        def eq(self, *a, **kw): return self
+        def neq(self, *a, **kw): return self
+        def execute(self): return _Res()
+
+    original_table = fake_supabase.table
+
+    def _table(name):
+        if name == "api_keys":
+            return _HeadTable()
+        return original_table(name)
+
+    monkeypatch.setattr(fake_supabase, "table", _table)
+
+
+@pytest.mark.asyncio
+async def test_sfh4_sibling_lookup_without_count_header_is_fail_safe(monkeypatch):
+    """SFH-4 (RECONMARKER, D-07). The sibling check is a head request, which
+    never returns rows. When the count header is absent the old fallback read
+    ``len(res.data) > 0`` -> False -> "no siblings", and the destructive
+    sole-key DELETE ran, erasing other keys' history. A missing count is an
+    unanswered question: it must return the same fail-safe as a raised lookup.
+    """
+    from services.equity_reconstruction import _allocator_has_other_api_keys
+
+    fake_supabase = FakeSupabaseClient()
+    _head_request_without_count_header(fake_supabase, monkeypatch)
+
+    result = await _allocator_has_other_api_keys(
+        fake_supabase, ALLOCATOR_ID, API_KEY_ID_1,
+    )
+
+    assert bool(result) is True, "an absent count must not read as 'no siblings'"
+    assert result.lookup_failed is True
+    assert result.error_message == "count header absent"
+
+
+@pytest.mark.asyncio
+async def test_sfh4_absent_count_routes_to_sibling_lookup_failed_do_nothing(
+    monkeypatch,
+):
+    """SFH-4 end to end: an absent count header takes the SAME path as a
+    raised sibling lookup: the ``sibling_lookup_failed`` audit, no sole-key
+    replace RPC, and existing allocator history survives."""
+    fake_supabase = FakeSupabaseClient()
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=4)
+
+    for d in range(5):
+        asof = (start_date + timedelta(days=d)).date().isoformat()
+        fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID, "asof": asof,
+            "value_usd": -999_999.0,
+            "breakdown": {"STALE": -999_999.0},
+            "source": "exchange_primary",
+        }
+
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "is_active": True, "sync_status": "ok", "disconnected_at": None,
+    }
+
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50_000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + d * day_ms, 50_000.0) for d in range(5)]
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+    # Install AFTER the preflight so the sibling lookup (and only api_keys
+    # reads that go through ``table``) sees the head-request shape.
+    _head_request_without_count_header(fake_supabase, monkeypatch)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    job = {
+        "id": "sfh4-absent-count",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    }
+    result = await run_reconstruct_allocator_history_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    actions = [c.kwargs.get("action") for c in audit_mock.call_args_list]
+    assert "allocator.equity.sibling_lookup_failed" in actions, actions
+    assert not [
+        c for c in fake_supabase.rpc_calls
+        if c[0] == "replace_allocator_equity_snapshots"
+    ], fake_supabase.rpc_calls
+    stored = fake_supabase.rows_for("allocator_equity_snapshots")
+    assert [r for r in stored if r.get("value_usd") == -999_999.0], (
+        "an absent sibling count must not wipe the allocator's history"
+    )
 
 
 # ---- H-1166 - Purge count semantics --------------------------------------

@@ -1169,7 +1169,21 @@
 // `per-arm lane time: mean 1.4s over 643 arm run(s)`, `No defects. Every annotated arm bit its
 // own arm first.`, exit 0. Per-file line: `test_strategy_analytics_computed_at_success_only.sql:
 // sections 5 / judged 5 / annotated 5 / waived 0 / biting 5`. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 67;
+// Phase 167.1.2.1 RECONMARKER plan 01, 2026-10-13: 66 -> 67, the NEW annotated gate file
+// supabase/tests/test_api_keys_history_reconstruct_marker.sql (18 arms: C1, B1-B8, A1-A3, K1, F1,
+// R1-R4); denominator 93 -> 94. MEASURED by ONE full run of `node scripts/mutation-runner/run.mjs` with the tree frozen (Phase 167.1.2.1 RECONMARKER plan 01, 2026-10-13): `scope: FULL 67/67 annotated files`, `coverage: files 67/94`, `arms: 656/656/0`, `biting: 656`, `lane-invocations: 656 ... plus 67 baseline / 67 restore leg(s)` (the two tallies AGREE), `unreachable: 27`, `lane-blocked: 0`, `per-arm lane time: mean 1.5s over 656 arm run(s)`, `No defects`. WAIVED_CEILING stays 0.
+// Phase 167.1.2.1 RECONMARKER, 2026-10-14 (merge of origin/main, CR-01 / O-3): 67 -> 68. Both
+// branches had counted ONE new annotated gate file against main's 66 (RECONMARKER's
+// test_api_keys_history_reconstruct_marker.sql, NAVBREACH's
+// test_strategy_analytics_computed_at_success_only.sql), so each said 67 and the union is 68, not
+// 67. MEASURED by ONE full run of `node scripts/mutation-runner/run.mjs` on the merged tree with
+// the tree frozen (exit 0, constants then at the unresolved-merge placeholders 67 / 668):
+// `scope: FULL 68/68 annotated files`, `lane-concurrency: 4`, `coverage: files 68/95`,
+// `arms: 673/673/0`, `biting: 673`, `lane-invocations: 673 ... plus 68 baseline / 68 restore
+// leg(s)` (the two tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`,
+// `unreachable: 27`, `per-arm lane time: mean 3.2s over 673 arm run(s)`, `No defects. Every
+// annotated arm bit its own arm first.`. WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 68;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3010,7 +3024,31 @@ export const FILES_FLOOR = 67;
 // `lane-invocations: 643`. The gate's RED-UNDER-SETUP was re-based on the merge to also apply
 // 20261009120000_sync_status_analytics_scope.sql and fixture 37, so it drives the latest bridge.
 // WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 643;
+// Phase 167.1.2.1 RECONMARKER plan 01, 2026-10-13: 638 -> 656 (+18 biting arms), from the same
+// full run that set FILES_FLOOR: `test_api_keys_history_reconstruct_marker.sql: sections 18 / judged
+// 18 / annotated 18 / waived 0 / biting 18`; `arms: 656/656/0`, `biting: 656`.
+// Phase 167.1.2.1 RECONMARKER plan 01 (D-18), 2026-10-13: 656 -> 661 (+5 biting arms), from ONE full
+// run of `node scripts/mutation-runner/run.mjs` with the tree frozen: `scope: FULL 67/67 annotated
+// files`, `coverage: files 67/94`, `arms: 661/661/0`, `biting: 661`, `lane-invocations: 661 ... plus
+// 67 baseline / 67 restore leg(s)`, `No defects`; `test_api_keys_history_reconstruct_marker.sql:
+// sections 23 / judged 23 / annotated 23 / waived 0 / biting 23` (D1-D5, the log_audit_event
+// worker-only-action refusal of migration 20261014120100). FILES_FLOOR stays 67.
+// Phase 167.1.2.1 RECONMARKER PR 1 review round, 2026-10-13: 661 -> 668 (+7 biting arms), from ONE
+// full run of `node scripts/mutation-runner/run.mjs` with the tree frozen (exit 0): `scope: FULL
+// 67/67 annotated files`, `coverage: files 67/94`, `arms: 668/668/0`, `biting: 668`,
+// `lane-invocations: 668 ... plus 67 baseline / 67 restore leg(s)`, `No defects`;
+// `test_api_keys_history_reconstruct_marker.sql: sections 30 / judged 30 / annotated 30 / waived 0
+// / biting 30` (B9-B12 the backfill evidence filters SFH-2, WR-01 and WR-02, D6-D7 the O-1
+// entity-type refusal, R5 the O-2 marker-authoritative gate). FILES_FLOOR stays 67.
+// Phase 167.1.2.1 RECONMARKER, 2026-10-14 (merge of origin/main, CR-01 / O-3): 668 -> 673 (+5),
+// the union of the two branches' gates: RECONMARKER's 668 already counted its 30 arms over main's
+// 638, NAVBREACH adds its FIVE (0, C1, F1, A1, A2), and 668 + 5 = 673 agrees with the merged run
+// rather than being added by hand: `arms: 673/673/0`, `biting: 673`, `lane-invocations: 673`, from
+// the same single full run recorded under FILES_FLOOR above; per-file lines
+// `test_api_keys_history_reconstruct_marker.sql: sections 30 / judged 30 / annotated 30 / waived 0 /
+// biting 30` and `test_strategy_analytics_computed_at_success_only.sql: sections 5 / judged 5 /
+// annotated 5 / waived 0 / biting 5`. WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 673;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
