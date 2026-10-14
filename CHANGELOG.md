@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.131.8.1] - 2026-10-14 — OUTAGEALERT go-live (plan 09): the staleness reader is registered on PROD and ticking, the cron manifest carries it, five OUTAGEALERT TODOS close on live evidence, and the email channel is booked
+## [0.131.8.2] - 2026-10-14 — OUTAGEALERT go-live (plan 09): the staleness reader is registered on PROD and ticking, the cron manifest carries it, five OUTAGEALERT TODOS close on live evidence, and the email channel is booked
 
 Phase 164.6.8, plan 09. Bookkeeping only: no application code, no migration, no workflow changed. `ops_staleness_check()` shipped in `0.131.5.0` and scheduled nothing; this release records what the live registration and the drill proved.
 
@@ -17,6 +17,19 @@ Phase 164.6.8, plan 09. Bookkeeping only: no application code, no migration, no 
 ### Notes
 - Not seen live, and said so in each closure: a real stale `cron_sync` heartbeat, a stalled backfill queue, a dark validation terminal, a non-`scrubbed` scrub row, and a heal tick owing a relaunch debt on a busy lease. Those arms are proven by the SQL gate's RED-UNDER twins and by the plan 06 and 07 neuter cycles, and the route to a human by the drill.
 - The old prober issue (#773) is still open; the last prober runs succeeded but the first clean full run after the incident code merged has not happened yet, so its auto-close is pending, not failed.
+
+## [0.131.8.1] - 2026-10-14 — BASELINE: automated re-dump after the PROD apply of ad6bf65b
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38634481177`, after the PROD apply of merge `ad6bf65b`: sha256 `a53d0e6f…` → `84b15efe…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 130 → 130, distinct function names 128 → 128, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261021120000_refresh_fanout_owed_key_reconstruct.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-14` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.131.8.0 → 0.131.8.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=301 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 130 — MATCH 127, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38634481177` succeeded, and this entry was composed by the `redump-pr` job. Run `38634481177` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
 
 ## [0.131.8.0] - 2026-10-14 — RECONMARKER (2/2): the daily fan-out retries every key that still owes its equity history, counts each try and stops loudly at five; the worker records each rebuild on its key
 
