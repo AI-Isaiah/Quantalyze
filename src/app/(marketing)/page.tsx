@@ -4,28 +4,57 @@ import { createClient } from "@/lib/supabase/server";
 import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
 import { withPublishedOnly } from "@/lib/visibility";
 import { EXCHANGES } from "@/lib/constants";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { VerificationSection } from "@/components/landing/VerificationSection";
 
-async function getSocialProofStats() {
+type SocialProofStats = {
+  strategies: number | null;
+  intros: number | null;
+  aum: number | null;
+};
+
+/**
+ * Anonymous visitors read these three stats, so a column-grant failure here
+ * (42501 after Phase 170.6.1.1's revoke) is an expected failure class. An errored
+ * stat is reported to Sentry and comes back `null`, which the page renders as the
+ * same dash it already shows for "no value". It is never coerced to a
+ * plausible-looking 0. The page itself keeps rendering: a vanity stat must not
+ * take the marketing page down.
+ */
+async function getSocialProofStats(): Promise<SocialProofStats> {
   try {
     const supabase = await createClient();
-    const [{ count: strategyCount }, { count: introCount }, { data: aumData }] = await Promise.all([
-      withPublishedOnly(supabase.from("strategies").select("*", { count: "exact", head: true })),
+    const [strategyRes, introRes, aumRes] = await Promise.all([
+      withPublishedOnly(supabase.from("strategies").select("id", { count: "exact", head: true })),
       supabase.from("contact_requests").select("*", { count: "exact", head: true }),
       withPublishedOnly(supabase.from("strategies").select("aum")).not("aum", "is", null),
     ]);
-    const totalAum = aumData?.reduce((sum, s) => sum + (s.aum ?? 0), 0) ?? 0;
-    return {
-      strategies: strategyCount ?? 0,
-      intros: introCount ?? 0,
-      aum: totalAum,
+    const reported = (stat: string, error: { code?: string; message?: string } | null) => {
+      if (!error) return false;
+      console.error(`[marketing.getSocialProofStats] ${stat} read failed:`, error.message ?? error);
+      captureToSentry(error, {
+        tags: { op: "getSocialProofStats", stat, code: error.code ?? "none" },
+        level: "error",
+      });
+      return true;
     };
-  } catch {
-    return { strategies: 0, intros: 0, aum: 0 };
+    const strategiesFailed = reported("strategies", strategyRes.error);
+    const introsFailed = reported("intros", introRes.error);
+    const aumFailed = reported("aum", aumRes.error);
+    return {
+      strategies: strategiesFailed ? null : strategyRes.count ?? 0,
+      intros: introsFailed ? null : introRes.count ?? 0,
+      aum: aumFailed ? null : (aumRes.data?.reduce((sum, s) => sum + (s.aum ?? 0), 0) ?? 0),
+    };
+  } catch (err) {
+    console.error("[marketing.getSocialProofStats] read threw:", err);
+    captureToSentry(err, { tags: { op: "getSocialProofStats", stat: "all" }, level: "error" });
+    return { strategies: null, intros: null, aum: null };
   }
 }
 
-function formatAum(value: number): string {
+function formatAum(value: number | null): string {
+  if (value === null) return "—";
   if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(1)}B`;
   if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `$${(value / 1_000).toFixed(0)}K`;
@@ -189,7 +218,7 @@ export default async function Home() {
           <div className="grid gap-8 text-center md:grid-cols-4">
             <div>
               <p className="text-page-title font-semibold text-text-primary font-metric">
-                {stats.strategies > 0 ? `${stats.strategies}+` : "—"}
+                {stats.strategies ? `${stats.strategies}+` : "—"}
               </p>
               <p className="mt-1 text-caption text-text-muted">
                 Verified strategies
@@ -205,7 +234,7 @@ export default async function Home() {
             </div>
             <div>
               <p className="text-page-title font-semibold text-text-primary font-metric">
-                {stats.intros > 0 ? `${stats.intros}+` : "—"}
+                {stats.intros ? `${stats.intros}+` : "—"}
               </p>
               <p className="mt-1 text-caption text-text-muted">
                 Introductions made

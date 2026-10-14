@@ -1476,8 +1476,11 @@ export interface SeededSfoxVerifiedStrategy {
  *   - an `api_keys` row with `exchange='sfox'` owned by the owner (drives the
  *     "SFOX" mono tag in ApiKeyManager on /strategies/[id]/edit — 122-01);
  *   - a `published` `strategies` row owned by the owner, `source='sfox'`,
- *     `api_key_id` linked to the sfox key (the browse-page VerifiedBadge is
- *     gated on `strategy.api_key_id`, so the link is REQUIRED for that surface),
+ *     `api_key_id` linked to the sfox key (since Phase 170.6.1.1 the
+ *     browse-page VerifiedBadge follows the public trust tier,
+ *     `trust_tier = api_verified` from `get_published_trust_signals`, because
+ *     public rows no longer carry `api_key_id`; the link stays because owner
+ *     surfaces and the key-scope badge read it),
  *     with enough analytics to render the public factsheet;
  *   - a `strategy_analytics` row (`computation_status='complete'`);
  *   - a `strategy_verifications` row `{ source:'sfox', trust_tier:'api_verified' }`
@@ -1685,8 +1688,11 @@ export interface SeededMt5VerifiedStrategy {
  *   - an `api_keys` row with `exchange='mt5'` owned by the owner (drives the
  *     "MT5" mono tag in ApiKeyManager on /strategies/[id]/edit — 138-03 Task 1);
  *   - a `published` `strategies` row owned by the owner, `source='mt5'`,
- *     `api_key_id` linked (the browse-page VerifiedBadge is gated on
- *     `strategy.api_key_id`), with enough analytics to render the factsheet;
+ *     `api_key_id` linked (since Phase 170.6.1.1 the browse-page
+ *     VerifiedBadge follows the public trust tier, `trust_tier = api_verified`
+ *     from `get_published_trust_signals`, because public rows no longer carry
+ *     `api_key_id`; the link stays because owner surfaces and the key-scope
+ *     badge read it), with enough analytics to render the factsheet;
  *   - a `strategy_analytics` row (`computation_status='complete'`);
  *   - a `strategy_verifications` row `{ source:'mt5', trust_tier:'api_verified' }`
  *     — projected onto `strategy.trust_tier` to drive VerifiedBadge +

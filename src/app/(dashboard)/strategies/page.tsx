@@ -605,7 +605,7 @@ export default async function StrategiesPage() {
             memberCount: membersReadFailed
               ? { ok: false, message: "strategy_keys member read failed" }
               : { ok: true, count: membersByStrategy.get(s.id)?.length ?? 0 },
-            apiKeyId: s.api_key_id,
+            apiKeyId: s.api_key_id ?? null,
           },
         );
   // 164.6.6.3.3 D-08: `kind` is `analytics_failed` for a row whose analytics

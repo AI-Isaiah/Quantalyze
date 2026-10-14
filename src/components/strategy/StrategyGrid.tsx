@@ -75,12 +75,14 @@ export function StrategyGrid({
                     {s.name}
                   </h3>
                   <HealthScore analytics={s.analytics} startDate={s.start_date} className="shrink-0 mt-0.5" />
-                  {s.api_key_id && (
-                    <VerifiedBadge
-                      trustTier={s.trust_tier}
-                      className="shrink-0 mt-0.5"
-                    />
-                  )}
+                  {/* Phase 170.6.1.1 (census G): the badge follows the public
+                      trust signal, not api_key_id. Public rows no longer carry
+                      the key id (anon cannot read it); VerifiedBadge renders
+                      only for trust_tier api_verified. */}
+                  <VerifiedBadge
+                    trustTier={s.trust_tier}
+                    className="shrink-0 mt-0.5"
+                  />
                   {s.is_example && (
                     <span className="shrink-0 mt-0.5 inline-flex items-center rounded-md bg-badge-other/10 text-badge-other px-1.5 py-0.5 text-micro font-semibold uppercase tracking-wider">
                       Example

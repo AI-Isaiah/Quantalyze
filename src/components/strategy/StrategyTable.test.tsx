@@ -1454,3 +1454,39 @@ describe("StrategyTable — native-unit chip (164.6.6.2.1 D-05)", () => {
     );
   });
 });
+
+describe("StrategyTable - Verified check follows the public trust signal (Phase 170.6.1.1, census G)", () => {
+  const CHECK = '[title="Verified via exchange API"]';
+
+  function renderRow(overrides: Partial<Strategy>, dropKey = false) {
+    const row = makeStrategy({
+      id: STRATEGY_ID_A,
+      name: "Alpha Stellar",
+      ...overrides,
+    }) as Partial<StrategyWithAnalytics>;
+    // Public /browse rows (getStrategiesByCategory) carry NO api_key_id key
+    // once anon cannot read it; the owner's rows (getMyStrategies) still do.
+    if (dropKey) delete row.api_key_id;
+    return render(
+      <StrategyTable
+        strategies={[row as StrategyWithAnalytics]}
+        categorySlug="crypto-sma"
+      />,
+    );
+  }
+
+  it("shows the check for trust_tier api_verified on a public row with api_key_id absent", () => {
+    const { container } = renderRow({ trust_tier: "api_verified" }, true);
+    expect(container.querySelector(CHECK)).not.toBeNull();
+  });
+
+  it("keeps the check for an owner row carrying api_key_id and no trust_tier (getMyStrategies: unpublished, so the published-gated RPC returns no tier)", () => {
+    const { container } = renderRow({ api_key_id: "key-1" });
+    expect(container.querySelector(CHECK)).not.toBeNull();
+  });
+
+  it("shows no check for a row with neither a verified tier nor a key", () => {
+    const { container } = renderRow({ trust_tier: "csv_uploaded" }, true);
+    expect(container.querySelector(CHECK)).toBeNull();
+  });
+});

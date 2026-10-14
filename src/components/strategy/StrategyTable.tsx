@@ -1382,7 +1382,16 @@ export function StrategyTable({
                             >
                               <NowrapWords text={s.name} />
                             </Link>
-                            {s.api_key_id && (
+                            {/* Phase 170.6.1.1 (census G): public rows
+                                (getStrategiesByCategory) no longer carry
+                                api_key_id because anon cannot read it, so the
+                                public check follows the trust tier. The
+                                owner's own rows (getMyStrategies,
+                                authenticated) still carry the key, and the
+                                published-gated trust RPC returns no tier for
+                                an unpublished draft, so dropping the key half
+                                would take the check off an owner's drafts. */}
+                            {(s.trust_tier === "api_verified" || s.api_key_id) && (
                               <span title="Verified via exchange API" className="text-accent">
                                 <svg className="h-4 w-4" viewBox="0 0 16 16" fill="currentColor">
                                   <path d="M8 0a8 8 0 110 16A8 8 0 018 0zm3.78 5.22a.75.75 0 00-1.06 0L7 8.94 5.28 7.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.06 0l4.25-4.25a.75.75 0 000-1.06z" />

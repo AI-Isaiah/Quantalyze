@@ -126,3 +126,41 @@ describe("StrategyGrid — TYPE-02 tile-name truncation recovery", () => {
     expect(h3!.textContent).toContain(longName);
   });
 });
+
+describe("StrategyGrid - Verified badge follows the public trust signal (Phase 170.6.1.1, census G)", () => {
+  /**
+   * `getStrategiesByCategory` stops returning `api_key_id` once anon cannot
+   * read it, so a public row has the key ABSENT (not null). The badge must
+   * come from `trust_tier`, which `get_published_trust_signals` supplies.
+   */
+  function publicRow(trustTier: Strategy["trust_tier"]): StrategyWithAnalytics {
+    const row = makeStrategy({
+      id: STRATEGY_ID,
+      name: "Alpha Card",
+      trust_tier: trustTier,
+    }) as Partial<StrategyWithAnalytics>;
+    delete row.api_key_id;
+    return row as StrategyWithAnalytics;
+  }
+
+  it("renders VerifiedBadge for trust_tier api_verified with api_key_id absent", () => {
+    const row = publicRow("api_verified");
+    expect("api_key_id" in row).toBe(false);
+    const { container } = render(
+      <StrategyGrid strategies={[row]} categorySlug="crypto-sma" />,
+    );
+    expect(container.textContent).toContain("Verified");
+  });
+
+  it("renders no VerifiedBadge for a row with api_key_id set and no trust tier (the key is not a trust claim)", () => {
+    const row = makeStrategy({
+      id: STRATEGY_ID,
+      name: "Alpha Card",
+      api_key_id: "key-1",
+    });
+    const { container } = render(
+      <StrategyGrid strategies={[row]} categorySlug="crypto-sma" />,
+    );
+    expect(container.textContent).not.toContain("Verified");
+  });
+});

@@ -9453,6 +9453,71 @@ assertion.
 **Fix.** Give the mock a status, or assert the response type, then neuter to RED.
 **Owner / Trigger:** fixed together with 170.3-OG-MALFORMED-ID.
 
+## Phase 170.6.1.1 (ANONKEYID) — routed review items, PR-A (logged 2026-10-14)
+
+Five MEDIUM findings from the PR-A review army (plan 03), booked rather than fixed because none is
+user-facing today and each sits below the confidence bar for a fixer round. Verdict files:
+`03-REVIEW-SFH.md` and `03-REVIEW-SFH-R2.md` in the phase directory.
+
+### 170.6.1.1-CENSUS-STALE-AXES — the static census pin can go stale silently on three axes (booked 2026-10-14, SFH-4, MEDIUM, confidence 6)
+
+**Why it is open.** `src/lib/anon-strategies-projection.test.ts` reads source text from hand-copied lists.
+(a) `ANON_ROUTE_DIRS` is a subset of `PUBLIC_ROUTES` in `src/proxy.ts`, and nothing asserts that a new public
+prefix is added to it, so an anonymous strategies read under a new public prefix is unscanned and reads clean.
+(b) `ANON_READERS` is a closed list of three `queries.ts` functions; `getStrategyDetail` still projects a
+wildcard and is correctly out of scope today (authenticated), but nothing records that exclusion, so the day it
+gains an anonymous caller the pin stays green. (c) The exemptions are keyed by file path plus an exact hit
+count, so the factsheet v2 Lane B exemption would still pass if Lane B were deleted and an anonymous
+wildcard added elsewhere in the same file.
+**Fix.** Cross-check `ANON_ROUTE_DIRS` against `PUBLIC_ROUTES`; pin Lane B by its select text rather than a
+count; name the authenticated wildcard readers (`getStrategyDetail`, `getMyStrategies`) in an allowlist with a
+reason so an omission is a decision. Neuter each axis once and see it RED.
+**Owner / Trigger:** PR-B of this phase (it moves the census); otherwise the next phase that touches the pin
+or adds a public route prefix.
+
+### 170.6.1.1-API-KEY-ID-OPTIONAL-OWNER-GUARD — `Strategy.api_key_id` optional removes the compiler's guard on owner reads (booked 2026-10-14, SFH-5, MEDIUM, confidence 5)
+
+**Why it is open.** Making the field optional lets owner-surface code that truth-tests `strategy.api_key_id`
+(`strategies/page.tsx`, `edit/page.tsx`) compile against a row that may be a public projection and silently read
+"no key". Latent today: those pages select the wildcard as the owner.
+**Fix.** A `PublicStrategy = Omit<Strategy, "api_key_id">` for the three public readers, keeping
+`Strategy.api_key_id` required so the owner path stays type-checked.
+**Owner / Trigger:** the next phase that touches `src/lib/types.ts`'s `Strategy`, or any owner page that
+reports "no key" for a connected strategy.
+
+### 170.6.1.1-TEARSHEET-PDF-STATUS — the tearsheet PDF route prints an error page as a cached 200 PDF (booked 2026-10-14, SFH-R2 R2-1, MEDIUM, confidence 6)
+
+**Why it is open.** `src/app/api/factsheet/[id]/tearsheet.pdf/route.ts` pre-checks the strategy with the admin
+client, then drives puppeteer to the anonymous tearsheet page and never checks `page.goto`'s response status. If
+that page answers an error (for example a column-grant miss after the revoke), `page.pdf()` prints the error page
+and the route answers 200 `application/pdf` with `Cache-Control: public, s-maxage=300`. Inherited behaviour
+(the old not-found render was printed the same way); the new fail-loud reader changes the render, not the route's
+blindness. The route's own catch and Sentry capture never fire.
+**Fix.** After `goto`, throw into the existing catch when the response is absent or its status is 400 or above.
+**Owner / Trigger:** PR-B of this phase (the failure mode only becomes reachable with the revoke); otherwise
+the next phase touching the tearsheet routes.
+
+### 170.6.1.1-LANDING-CAPTURE-THROTTLE — the landing social-proof read errors capture up to 3 events per page view (booked 2026-10-14, SFH-R2 R2-2, MEDIUM, confidence 6)
+
+**Why it is open.** `getSocialProofStats` in `src/app/(marketing)/page.tsx` calls `captureToSentry` for each failed
+count on every request. Under a column-grant outage on the most-visited anonymous page that burns Sentry quota
+and drops other alerts. `shouldCaptureNow` in `src/lib/sentry-capture.ts` exists for this. Related: `null` and `0`
+render the same dash, so a visitor cannot tell an outage from a genuine zero; Sentry is the only signal.
+**Fix.** Keep the `console.error` unconditional; throttle the remote capture keyed on stat plus code, and make
+sure the first event per window is still sent.
+**Owner / Trigger:** the next phase touching the landing page's stats, or any Sentry quota alert from it.
+
+### 170.6.1.1-FAILANONREAD-CAPTURE-HELD — `failAnonRead` fires its capture without holding the promise (booked 2026-10-14, SFH-R2 R2-3, MEDIUM, confidence 4)
+
+**Why it is open.** `failAnonRead` in `src/lib/queries.ts` calls `captureToSentry` and throws at once without
+holding the returned promise, so on a serverless cold finish the tagged `{op, code}` event can be lost. Low
+confidence because the thrown error also reaches `onRequestError`, which captures it with route tags and the
+message (but not the `code` tag). The landing helper has the same shape.
+**Fix.** Hold the capture the way `scheduleDerivedRowCapture` does (`after()` plus a microtask fallback) in
+`failAnonRead` and in the landing helper.
+**Owner / Trigger:** fixed together with 170.6.1.1-LANDING-CAPTURE-THROTTLE; or the first Sentry event seen
+without its `code` tag.
+
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
 - **"Do NOT implement" landmines (keep documented, do not touch):** bridge-scoring precompute;

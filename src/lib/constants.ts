@@ -207,6 +207,61 @@ export const API_KEY_USER_COLUMNS = API_KEY_USER_COLUMNS_ARR.join(", ") as
 export type ApiKeyUserColumn = (typeof API_KEY_USER_COLUMNS_ARR)[number];
 
 /**
+ * The anon-safe `public.strategies` projection (Phase 170.6.1.1, D-02, D-03):
+ * every strategies column EXCEPT `api_key_id`, in table order.
+ *
+ * `api_key_id` is excluded because `anon` will hold no SELECT on it once the
+ * PR-B migration applies (table-level SELECT revoked, column-level SELECT
+ * granted on every other column). Any reader a signed-out visitor can reach
+ * must project this list instead of a wildcard: a `select("*")` or a named
+ * `api_key_id` answers 42501 for anon after the revoke, which takes the public
+ * page down.
+ *
+ * Once PR-B lands, a column added to `strategies` is NOT anon-readable until a
+ * migration grants it. A column added to this list therefore needs that grant
+ * in the same change.
+ *
+ * The authenticated owner/admin readers keep their table-level SELECT and do
+ * not use this list.
+ */
+export const STRATEGY_PUBLIC_COLUMNS_ARR = [
+  "id",
+  "user_id",
+  "category_id",
+  "name",
+  "description",
+  "strategy_types",
+  "subtypes",
+  "markets",
+  "supported_exchanges",
+  "leverage_range",
+  "avg_daily_turnover",
+  "aum",
+  "max_capacity",
+  "start_date",
+  "status",
+  "is_example",
+  "benchmark",
+  "created_at",
+  "review_note",
+  "organization_id",
+  "disclosure_tier",
+  "public_contact_email",
+  "tenant_id",
+  "codename",
+  "partner_tag",
+  "source",
+  "fingerprint",
+  "wizard_session_id",
+  "returns_denominator_config",
+  "asset_class",
+  "capital_ownership",
+] as const;
+
+/** PostgREST projection string derived from the anon-safe strategies tuple. */
+export const STRATEGY_PUBLIC_COLUMNS = STRATEGY_PUBLIC_COLUMNS_ARR.join(", ");
+
+/**
  * The encrypted columns that migration 027 revokes SELECT on for
  * anon/authenticated. Kept here as a single source of truth so tests
  * and audits can reference the same list the migration uses.
