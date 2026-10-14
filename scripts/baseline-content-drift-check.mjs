@@ -146,8 +146,22 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * edit here rather than a silent decrement. ⛔ Never lower this to make a red
  * run green; a drop means either a real removal (say so, in the same commit) or
  * the parser blinding itself, which is the whole defect.
+ *
+ * MOVED 2026-10-14 (Phase 167.1.2.1 RECONMARKER, merge of origin/main, CR-01 /
+ * O-3), 127 -> 128. The two branches each added ONE function to the chain and
+ * each read 127 alone against the 126 they started from: main's NAVBREACH
+ * ships `public.strategy_analytics_hold_computed_at_until_success()`
+ * (20261013120000), RECONMARKER ships
+ * `public.backfill_api_keys_history_reconstructed_at()` (20261014120000); the
+ * union is 126 + 2 = 128. MEASURED by `node scripts/baseline-content-drift-check.mjs`
+ * on the merged tree: `functions compared 128 — MATCH 121, DRIFT 5,
+ * SNAPSHOT_MISSING 2`. ⚠️ Both added functions are SNAPSHOT_MISSING findings
+ * (and `log_audit_event/4` and `request_allocator_holdings_sync/1`, re-based by
+ * RECONMARKER's migrations, are DRIFT findings) until baseline.sql is
+ * regenerated from PROD after the apply; raising this floor records the
+ * functions joining the corpus and does NOT suppress those findings.
  */
-export const COMPARED_FLOOR = 127;
+export const COMPARED_FLOOR = 128;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

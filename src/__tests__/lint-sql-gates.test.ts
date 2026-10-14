@@ -1152,7 +1152,9 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): 89 -> 91 on the tree merged with origin/main, `node scripts/lint-sql-gates.mjs` printed `scanned 91 file(s); 0 finding(s)` with the cron_sync_tick gate and the trade-fetch column gate in the corpus beside the BTCUSDVIEW gate.
     // ⭐ CURRENCY 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): 91 -> 93 on the tree merged with origin/main, `node scripts/lint-sql-gates.mjs` printed `scanned 93 file(s); 0 finding(s)` with the per-key unique-index gate and the fingerprint native-unpriced gate in the corpus beside the cron_sync_tick and trade-fetch column gates.
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): 93 -> 94 on the tree merged with origin/main, `node scripts/lint-sql-gates.mjs` printed `scanned 94 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).` with the computed_at success-only gate (supabase/tests/test_strategy_analytics_computed_at_success_only.sql, one new gate file) in the corpus beside main's 93.
-    expect(res.out).toMatch(/scanned 94 file/);
+    // ⭐ CURRENCY 2026-10-13 (Phase 167.1.2.1 RECONMARKER, plan 01): 93 -> 94, `node scripts/lint-sql-gates.mjs` printed `scanned 94 file(s); 0 finding(s)` with the per-key reconstruct-marker gate. MEASURED: this file's run read `expected 'lint-sql-gates: scanned 94 file(s); 0…' to match /scanned 93 file/`.
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, merge of origin/main, CR-01 / O-3): 94 -> 95, the union of the two branches' gate files (each counted alone as 94). MEASURED: this file's run read `expected 'lint-sql-gates: scanned 95 file(s); 0…' to match /scanned 94 file/`, and `node scripts/lint-sql-gates.mjs` printed `scanned 95 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
+    expect(res.out).toMatch(/scanned 95 file/);
     expect(res.status, res.out).toBe(0);
   });
 

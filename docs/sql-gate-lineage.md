@@ -307,3 +307,44 @@ arm on a `sql` or `edit` step, none waived. A DATED reading of one full
 `lane-invocations: 638` plus 66 baseline / 66 restore legs, `unreachable: 27`, `lane-blocked: 0`,
 `No defects.`, exit 0. Plan 13 re-measured it independently of plan 09 and read the same figures.
 Not a live constant: read `FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-13 (Phase 167.1.2.1 RECONMARKER, plan 01, decisions D-04, D-05, D-12, D-13,
+D-15): the gate file `supabase/tests/test_api_keys_history_reconstruct_marker.sql` (migration
+20261014120000: the per-key `api_keys.history_reconstructed_at` / `history_reconstruct_attempts`
+marker, its column grants and CHECK, `backfill_api_keys_history_reconstructed_at()`, and
+`request_allocator_holdings_sync` counting `failed_retry` and a set marker) arrived with
+twenty-three arms, C1, B1-B8, A1-A3, K1, F1, D1-D5, R3, R1, R2, R4 (file order; D1-D5 pin the
+second migration 20261014120100, D-18: `log_audit_event` refuses the worker-only audit actions to a
+non-service_role caller), each on an `edit` or `sql` step, none waived. A DATED reading of one full
+`node scripts/mutation-runner/run.mjs` on that branch, no file edited during it:
+`scope: FULL 67/67 annotated files`, `coverage: files 67/94`,
+`arms: 661/661/0`, `biting: 661`, `lane-invocations: 661` plus 67 baseline / 67 restore legs,
+`unreachable: 27`, `lane-blocked: 0`, `No defects.`, exit 0. Not a live constant: read `FILES_FLOOR`
+and `ARMS_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-13 (Phase 167.1.2.1 RECONMARKER, PR 1 review round): the same gate file
+`supabase/tests/test_api_keys_history_reconstruct_marker.sql` grew from twenty-three to THIRTY arms,
+C1, B1-B12, A1-A3, K1, F1, D1-D4, D6, D7, D5, R3, R1, R2, R4, R5 (file order): B9-B12 pin the
+backfill's evidence filters (SFH-2 transient-failure rows, WR-01 the 2026-04-24 heal bound, WR-02
+the `days_written` shape), D6-D7 pin the O-1 entity-type refusal of `log_audit_event` (and D4 also
+asserts service_role still writes both), R5 pins the O-2 marker-authoritative reconstruct gate of
+`request_allocator_holdings_sync`. A DATED reading of one full `node scripts/mutation-runner/run.mjs`
+on that branch, no file edited during it: `scope: FULL 67/67 annotated files`,
+`coverage: files 67/94`, `arms: 668/668/0`, `biting: 668`, `lane-invocations: 668` plus 67 baseline /
+67 restore legs, `unreachable: 27`, `lane-blocked: 0`, `No defects.`, exit 0; per-file row
+`sections 30 / judged 30 / annotated 30 / waived 0 / biting 30`. It supersedes the 661 reading above
+as the latest dated one and is itself not a live constant: read `FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
+Merge order (CR-01) is untouched by this round: after NAVBREACH merges, every pin is re-measured again.
+
+⚠️ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, merge of origin/main, CR-01 / O-3): the merge
+order recorded above happened. NAVBREACH (#1020, with FLOWTIMING and TRADESYNC) merged first, so the
+census was re-measured on the merged tree instead of added by hand: each branch had counted ONE new
+gate file against main's 66 and each said 67, the union is 68 (`test_api_keys_history_reconstruct_marker.sql`
+30 arms, `test_strategy_analytics_computed_at_success_only.sql` 5 arms). A DATED reading of one full
+`node scripts/mutation-runner/run.mjs`, no file edited during it, exit 0: `scope: FULL 68/68 annotated
+files`, `coverage: files 68/95`, `arms: 673/673/0`, `biting: 673`, `lane-invocations: 673` plus 68
+baseline / 68 restore legs, `unreachable: 27`, `lane-blocked: 0`, `per-arm lane time: mean 3.2s over
+673 arm run(s)`, `No defects.`. The lint corpus reads `scanned 95 file(s)` and
+`scripts/baseline-content-drift-check.mjs` compares 128 functions (`COMPARED_FLOOR` 127 -> 128). It
+supersedes the 668 reading above as the latest dated one and is itself not a live constant: read
+`FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.

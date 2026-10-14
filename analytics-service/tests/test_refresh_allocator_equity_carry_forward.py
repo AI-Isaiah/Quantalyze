@@ -596,6 +596,7 @@ def _seed_poll_outcome(
     action: str = "allocator.holdings.sync_completed",
     asof: date | None = None,
     without_asof: bool = False,
+    user_id: str = ALLOCATOR_ID,
 ) -> None:
     """The audit row a holdings poll of ``key_id`` wrote at ``at``.
     ``final_status=None`` is the shape a poll wrote before round 2. ``asof``
@@ -613,7 +614,7 @@ def _seed_poll_outcome(
     event_id = f"audit-{key_id}-{at.isoformat()}-{action}"
     fake.store[("audit_log", (event_id,))] = {
         "id": event_id,
-        "user_id": ALLOCATOR_ID,
+        "user_id": user_id,
         "action": action,
         "entity_type": "api_key",
         "entity_id": key_id,
@@ -697,6 +698,34 @@ async def test_account_polled_empty_after_its_last_row_contributes_zero(
     metadata = _refresh_complete_metadata(audit)
     assert metadata["emptied_accounts"] == 1
     assert metadata["carried_keys"] == 0
+
+
+@pytest.mark.asyncio
+async def test_poll_outcome_of_another_user_is_not_proof_of_emptiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECONMARKER RLS finding 2 (D-18). ``_polled_empty_since`` reads the
+    audit_log with the service-role client, which bypasses RLS, so the owner
+    check has to be in the query: the TS reader and the migration both filter
+    ``user_id`` and this one filtered only ``entity_id``. A clean, empty
+    ``sync_completed`` row whose ``user_id`` is NOT the key owner must be
+    ignored, so the account is carried and not zeroed (first-writer-wins, so a
+    wrong $0 here is permanent)."""
+    fake = FakeSupabaseClient()
+    _seed_emptied_candidate(fake)
+    _seed_poll_outcome(
+        fake, API_KEY_ID_2, _at(TODAY - timedelta(days=1)),
+        user_id="00000000-0000-0000-0000-00000000dead",
+    )
+    _seed_key_inputs(fake, API_KEY_ID_2, _at(TODAY - timedelta(days=1)) + timedelta(minutes=30))
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    assert _today_row(fake)["value_usd"] != pytest.approx(HOLDER_USD), (
+        "a poll outcome owned by another user zeroed this allocator's account"
+    )
+    assert "BTC" in _today_row(fake)["breakdown"]
+    assert _refresh_complete_metadata(audit)["emptied_accounts"] == 0
 
 
 @pytest.mark.asyncio

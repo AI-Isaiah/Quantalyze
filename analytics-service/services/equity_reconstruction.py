@@ -1424,41 +1424,49 @@ class SiblingCheckResult:
 async def _allocator_has_other_api_keys(
     supabase: Any, allocator_id: str, api_key_id: str,
 ) -> SiblingCheckResult:
-    """Does this allocator own any CONNECTED, ACTIVE api_keys OTHER than
-    `api_key_id`?
+    """Does this allocator own ANY api_keys row OTHER than `api_key_id`?
+
+    D-07 (SC-3, R-13-1): ``allocator_equity_snapshots`` rows are allocator
+    TOTALS, not per key. The sole-key replace
+    (``replace_allocator_equity_snapshots``) DELETEs every snapshot row of the
+    allocator, so it is safe only when no other key could have contributed to
+    them. ``api_keys`` has no soft delete (a delete is a hard ``DELETE``, and
+    the row is gone), so every surviving row of the same ``user_id`` is a
+    non-deleted sibling, whatever its ``is_active``, ``sync_status`` (revoked
+    and NULL included) or ``disconnected_at``. A disconnected, deactivated or
+    revoked key stopped syncing, but the history it wrote is still in the
+    allocator's rows and a replace for the other key would erase it.
 
     The reconstruction-upsert path uses ON CONFLICT DO NOTHING to protect
-    multi-key aggregation (threat T-07-V5b) — the first key to land for a
-    given (allocator, asof) wins; subsequent keys are benign no-ops. That
-    invariant is load-bearing when multiple keys contribute, but it traps
-    single-key users whose snapshots are stale (e.g. pre-v0.15.3.0 buggy
-    perp replay, or orphans from a deleted key). When this key is the
-    allocator's sole authoritative source, the fresh reconstruct should
-    own the series outright.
+    multi-key aggregation (threat T-07-V5b): the first key to land for a
+    given (allocator, asof) wins; subsequent keys are benign no-ops. With any
+    sibling present that path is taken; only a truly sole key replaces.
 
-    Soft-disconnected keys (migration 075: disconnected_at IS NOT NULL),
-    deactivated keys (is_active = false), and revoked keys
-    (sync_status = 'revoked') MUST be excluded from the sibling count.
-    Their rows persist in api_keys for audit continuity, but the worker
-    stopped syncing them, so they cannot produce new snapshots. Counting
-    them as siblings re-opens the "I uploaded a fresh key but my stale
-    V-shaped curve persists" trap that v0.15.3.3 was meant to close.
-    Mirrors the worker-dispatch filter in migration 075 byte-for-byte —
-    enqueue_poll_allocator_positions_for_all_keys (line 193-196) and
-    enqueue_refresh_allocator_equity_for_all (line 244-248) both filter
-    ``WHERE is_active = true AND sync_status IS DISTINCT FROM 'revoked'
-    AND disconnected_at IS NULL``. See H-1162 / H-1164.
+    This REVERSES the v0.15.3.3 / H-1162 / H-1164 stale-curve fix, which
+    excluded soft-disconnected, deactivated and revoked keys from the count
+    so that "I uploaded a fresh key but my stale V-shaped curve persists"
+    could not happen. Accepted consequence (D-07 is locked): a user who
+    disconnects key A and adds key B now gets first-writer-wins persist, so
+    days key A wrote keep A's values instead of being replaced. The three
+    tests that asserted the old rule are inverted, not deleted, in
+    ``test_equity_reconstruction.py``.
 
-    api_keys has FK cascade to compute_jobs (migration 066 STEP 2) — if a
-    prior key was hard-deleted, its api_keys row is gone. So checking
-    connected api_keys presence is a sufficient proxy for "are there
-    OTHER keys whose data we must not clobber".
+    The old filter ``.neq("sync_status", "revoked")`` also dropped any row
+    whose ``sync_status`` is NULL (PostgREST ``neq`` on NULL is not true), so
+    a key with no status yet was silently not a sibling. That quirk went away
+    with the filter.
+
+    Known limit (not fixed here, D-07 is Python only): the count and the RPC
+    are separate round-trips, so a key added between them is not seen. The
+    RPC's DELETE has no sibling guard in SQL.
 
     Returns ``SiblingCheckResult``. ``bool(result)`` is True when at
-    least one connected sibling exists OR when the lookup raised
-    (fail-safe: preserve DO NOTHING rather than risk wiping legitimate
-    multi-key data on a transient read error). ``.lookup_failed`` is
-    True in the second case so the caller can audit the latch.
+    least one other key row exists OR when the lookup raised or came back
+    without a count (SFH-4: a head request returns no rows, so an absent
+    count is unanswered, not "none"). That is the fail-safe: preserve DO
+    NOTHING rather than risk wiping legitimate multi-key data on a
+    transient read error. ``.lookup_failed`` is True in the second case so
+    the caller can audit the latch.
     """
     def _sel() -> Any:
         return (
@@ -1466,9 +1474,6 @@ async def _allocator_has_other_api_keys(
             .select("id", count="exact", head=True)
             .eq("user_id", allocator_id)
             .neq("id", api_key_id)
-            .eq("is_active", True)
-            .neq("sync_status", "revoked")
-            .is_("disconnected_at", "null")
             .execute()
         )
 
@@ -1486,10 +1491,23 @@ async def _allocator_has_other_api_keys(
             error_message=str(exc)[:300],
         )
     count = getattr(res, "count", None)
-    if count is not None:
-        return SiblingCheckResult(has_siblings=int(count) > 0)
-    data = getattr(res, "data", None) or []
-    return SiblingCheckResult(has_siblings=len(data) > 0)
+    if count is None:
+        # SFH-4: this is a head request, which never returns rows, so an absent
+        # count header cannot be answered from ``res.data`` (it is always
+        # empty and would read as "no siblings", letting the destructive
+        # sole-key DELETE run). An unanswered question is the fail-safe, the
+        # same as a raised lookup.
+        logger.warning(
+            "api_keys sibling lookup returned no count for allocator=%s "
+            "(key=%s) — defaulting to multi-key safe (no snapshot wipe)",
+            allocator_id, api_key_id,
+        )
+        return SiblingCheckResult(
+            has_siblings=True,
+            lookup_failed=True,
+            error_message="count header absent",
+        )
+    return SiblingCheckResult(has_siblings=int(count) > 0)
 
 
 async def _purge_allocator_equity_snapshots(
@@ -1625,14 +1643,15 @@ async def replace_equity_snapshots(
     NULL — so the row shape passed here only needs the four projected columns.
     """
     if not rows:
-        # Item 7 (b), D-05: _allocator_has_other_api_keys counts only CONNECTED
-        # siblings, so a book whose other keys were disconnected still looks
-        # sole-key. replace_allocator_equity_snapshots DELETEs every legacy row
-        # and then inserts the payload. An empty payload would delete departed
-        # keys' history and insert nothing. Refuse that when any
-        # allocator_equity_snapshots row exists, or when the existence lookup
-        # itself errors (fail-safe: keep the rows). A book with no snapshots
-        # keeps today's empty-payload call.
+        # Item 7 (b), D-05: replace_allocator_equity_snapshots DELETEs every
+        # legacy row and then inserts the payload. An empty payload would delete
+        # departed keys' history and insert nothing. (Since D-07,
+        # _allocator_has_other_api_keys counts every other api_keys row, so a
+        # disconnected sibling no longer makes a book look sole-key; this guard
+        # stays for a key whose siblings were hard-deleted but whose rows remain.)
+        # Refuse that when any allocator_equity_snapshots row exists, or when
+        # the existence lookup itself errors (fail-safe: keep the rows). A book
+        # with no snapshots keeps today's empty-payload call.
         presence = await _allocator_has_equity_snapshots(supabase, allocator_id)
         if presence.present or presence.lookup_failed:
             raise EmptyReplaceRefusedError(
@@ -2226,6 +2245,11 @@ async def _polled_empty_since(
         return (
             supabase.table("audit_log")
             .select("entity_id, metadata, created_at")
+            # D-18: the service-role client bypasses RLS, so the owner check
+            # lives here. The poll writes its audit row with user_id = the
+            # key's owner (``_emit_audit``); the TS reader
+            # (latest-holdings-per-key.ts) and the migration filter the same.
+            .eq("user_id", allocator_id)
             .eq("action", _POLL_COMPLETED_ACTION)
             .eq("entity_type", "api_key")
             .in_("entity_id", candidate_ids)

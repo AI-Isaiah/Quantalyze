@@ -2,21 +2,12 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260924233749_allocator_sync_restore_inflight_prefetch.sql
--- --------------------------------------------------------------------------
--- 076's body, verbatim, plus 075's disconnected-key refusal and 067's
--- in-flight prefetch (see the header for the exact edits). Returns one of:
---   {already_inflight: true, next_attempt_at}  a live poll job exists;
---   {ok: true, job_id}                         a poll job was enqueued (or a
---                                              concurrent caller's was reused);
---   raises 42501 not_authenticated / api_key_not_found_or_not_owned, or
---   raises P0001 api_key_disconnected for a soft-disconnected key.
---
--- ⚠️ SCHEMA-QUALIFIED DELIBERATELY. An unqualified CREATE OR REPLACE resolves
--- against the SESSION search_path. Under a search_path that does not put public
--- first, it CREATES a second function in another schema, and a new function
--- arrives with default privileges (see the mig 118 note in the header).
--- --------------------------------------------------------------------------
+-- source migration: 20261014120000_api_keys_history_reconstruct_marker.sql
+-- ───────────────────────────── 5. request_allocator_holdings_sync, RE-BASED
+-- Schema-qualified deliberately: an unqualified CREATE OR REPLACE resolves
+-- against the SESSION search_path, and under one that does not put public first
+-- it CREATES a second function elsewhere, which arrives with default privileges.
+-- The edits are listed in the header ("THE RPC RE-BASE").
 CREATE OR REPLACE FUNCTION public.request_allocator_holdings_sync(p_api_key_id UUID)
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -30,6 +21,7 @@ DECLARE
   v_job_id             UUID;
   v_next_attempt       TIMESTAMPTZ;
   v_prior_reconstruct  BOOLEAN;
+  v_reconstructed_at   TIMESTAMPTZ;
 BEGIN
   IF v_uid IS NULL THEN
     RAISE EXCEPTION 'not_authenticated'
@@ -83,14 +75,27 @@ BEGIN
   );
 
   -- Per-api_key reconstruction gate (replaces migration 070's allocator-
-  -- scoped snapshot-count check). Skip enqueue ONLY if THIS key has
-  -- previously completed a reconstruct OR is currently in-flight.
+  -- scoped snapshot-count check). Skip enqueue ONLY if THIS key's marker says it
+  -- was reconstructed (below) OR a reconstruct for it is currently in flight.
+  -- Phase 167.1.2.1 SC-5 / D-13: a job awaiting its retry (failed_retry) IS in
+  -- flight. The in-flight unique index omits it, so without it here a second
+  -- pending row would be inserted and a 30-minute crawl would run twice.
+  -- O-2: a finished (`done`) job is NOT listed. The marker is authoritative, and
+  -- a retained `done` job alone must not suppress a reconstruct (a D-15 key
+  -- keeps one for up to 30 days and is still owed).
   SELECT EXISTS (
     SELECT 1 FROM compute_jobs
     WHERE api_key_id = p_api_key_id
       AND kind = 'reconstruct_allocator_history'
-      AND status IN ('done','pending','running','done_pending_children')
+      AND status IN ('pending','running','done_pending_children','failed_retry')
   ) INTO v_prior_reconstruct;
+
+  -- Phase 167.1.2.1 D-04 / O-2: the per-key marker is the decider. It outlives the
+  -- 30-day job retention, and a set marker counts as a prior reconstruct.
+  SELECT history_reconstructed_at INTO v_reconstructed_at
+    FROM api_keys
+    WHERE id = p_api_key_id;
+  v_prior_reconstruct := v_prior_reconstruct OR v_reconstructed_at IS NOT NULL;
 
   IF NOT v_prior_reconstruct THEN
     BEGIN
