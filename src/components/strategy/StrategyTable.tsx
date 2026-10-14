@@ -82,6 +82,17 @@ type StrategyWithAnalytics = Strategy & {
    * section prop as `RankedStrategyRow[]`, where it is required.
    */
   analyticsPresent?: boolean;
+  /**
+   * Phase 170.6.1 / DISCOVERYPHONE (SC-2, D-04) — set by
+   * `getStrategiesByCategory` only: the exchange(s) this strategy's trades come
+   * from (its API key's venue, distinct and lowercase). OPTIONAL: a strategy
+   * with no key (CSV or demo), a read that failed, and every other mount
+   * (`getMyStrategies`, fixtures) omit it, and the row then keeps its listed
+   * exchange (D-05). It changes the badge LABEL and TOOLTIP only (D-07).
+   */
+  tradeVenues?: readonly string[];
+  /** The venue read failed or was malformed: the badge shows no venue label (review WR-01). */
+  tradeVenuesUnavailable?: boolean;
 };
 
 // "created_at" (170.7 / D-09) is a TABLE sort key only: it is not a `SortKey`,
@@ -1545,16 +1556,27 @@ export function StrategyTable({
                                 /* Phase 167.1.2.2.2 / SC-4, D-07 — the
                                    trade-fetch claim is the cron's own record,
                                    seen by every viewer (D-06). F3 — the venue
-                                   is the api-key exchange or NULL, never
-                                   `supported_exchanges`: these rows carry the
-                                   key's id and not its exchange (and the
-                                   anonymous reads cannot see `api_keys`), so
-                                   NULL. A recorded fetch time still reads
-                                   current or stale; only never-fetched turns
-                                   into "no claim", the cautious direction. */
+                                   that decides the STATE is the api-key
+                                   exchange or NULL, never
+                                   `supported_exchanges`, and here it is NULL.
+                                   A recorded fetch time still reads current or
+                                   stale; only never-fetched turns into "no
+                                   claim", the cautious direction.
+                                   Phase 170.6.1 / D-05, D-07 — the row now
+                                   also carries the key's venue
+                                   (`tradeVenues`, read through the
+                                   published-only function), which the badge
+                                   uses for its LABEL and TOOLTIP only. That is
+                                   why `tradeFetchVenue` stays NULL: feeding the
+                                   state's venue is TRADESYNC's decision, and
+                                   would turn a null-stamp row into "No trade
+                                   fetch recorded yet". */
                                 tradesFetchedAt={s.analytics.trades_fetched_at ?? null}
                                 tradeFetchVenue={null}
                                 exchange={s.supported_exchanges?.[0]}
+                                tradeVenues={s.tradeVenues ?? null}
+                                listedExchanges={s.supported_exchanges ?? null}
+                                tradeVenuesUnavailable={s.tradeVenuesUnavailable ?? false}
                               />
                             )}
                             {/* Phase 149 Delta 4 — the honest pending chip fills

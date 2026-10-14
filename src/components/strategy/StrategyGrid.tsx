@@ -13,7 +13,19 @@ import { StarToggle } from "./StarToggle";
 import { formatPercent, formatCurrency, metricColor } from "@/lib/utils";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
-type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
+type StrategyWithAnalytics = Strategy & {
+  analytics: StrategyAnalytics;
+  /**
+   * Phase 170.6.1 / DISCOVERYPHONE (SC-2, D-04) — set by
+   * `getStrategiesByCategory` only: the exchange(s) this strategy's trades come
+   * from (its API key's venue, distinct and lowercase). OPTIONAL: a strategy
+   * with no key (CSV or demo), a failed read and every fixture omit it, and the
+   * card then keeps its listed exchange (D-05). LABEL and TOOLTIP only (D-07).
+   */
+  tradeVenues?: readonly string[];
+  /** The venue read failed or was malformed: the badge shows no venue label (review WR-01). */
+  tradeVenuesUnavailable?: boolean;
+};
 
 interface StrategyGridProps {
   strategies: StrategyWithAnalytics[];
@@ -128,15 +140,22 @@ export function StrategyGrid({
                   /* Phase 167.1.2.2.2 / SC-4, D-07 — the trade-fetch claim is
                      the cron's own record (`trades_fetched_at`), seen by every
                      viewer (D-06).
-                     F3 — the venue is the api-key exchange or NULL, never
-                     `supported_exchanges`. This card is fed by the anonymous
-                     list read, which cannot read `api_keys`, so it has no key
-                     exchange to name: NULL. A recorded fetch time still reads
-                     current or stale; only the never-fetched case becomes
-                     "no claim", the cautious direction. */
+                     F3 — the venue that decides the STATE is the api-key
+                     exchange or NULL, never `supported_exchanges`, and here it
+                     is NULL. A recorded fetch time still reads current or
+                     stale; only the never-fetched case becomes "no claim", the
+                     cautious direction.
+                     Phase 170.6.1 / D-05, D-07 — the card now also carries the
+                     key's venue (`tradeVenues`, read through the published-only
+                     function), which the badge uses for its LABEL and TOOLTIP
+                     only. `tradeFetchVenue` stays NULL: feeding the state's
+                     venue is TRADESYNC's decision. */
                   tradesFetchedAt={s.analytics.trades_fetched_at ?? null}
                   tradeFetchVenue={null}
                   exchange={s.supported_exchanges?.[0]}
+                  tradeVenues={s.tradeVenues ?? null}
+                  listedExchanges={s.supported_exchanges ?? null}
+                  tradeVenuesUnavailable={s.tradeVenuesUnavailable ?? false}
                   className="mb-2"
                 />
               )}
