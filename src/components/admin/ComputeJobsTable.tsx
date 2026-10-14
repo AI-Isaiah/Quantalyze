@@ -56,12 +56,10 @@ const STATUS_OPTIONS = [
   { value: "failed_final", label: "Failed" },
 ];
 
-const KIND_OPTIONS = [
-  { value: "", label: "All kinds" },
-  { value: "sync_trades", label: "sync_trades" },
-  { value: "compute_portfolio", label: "compute_portfolio" },
-  { value: "poll_positions", label: "poll_positions" },
-];
+// D-07: the kinds themselves are not listed here. They come from the facet read
+// (`GET /api/admin/compute-jobs?facets=kinds`), so a kind that has jobs is
+// always offered. Only the "All kinds" entry is fixed.
+const ALL_KINDS_OPTION = { value: "", label: "All kinds" };
 
 const AUTO_REFRESH_KEY = "admin-compute-jobs-auto-refresh";
 
@@ -84,6 +82,10 @@ export function ComputeJobsTable() {
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState("");
   const [kindFilter, setKindFilter] = useState("");
+  const [kinds, setKinds] = useState<string[]>([]);
+  // null = no failure. Otherwise the line shown under the filters, with the
+  // HTTP status in it when the failure had one.
+  const [kindsError, setKindsError] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(true);
   // B7 — auto-refresh preference routes through the cross-tab primitive
@@ -127,11 +129,48 @@ export function ComputeJobsTable() {
     [statusFilter, kindFilter],
   );
 
-  // Initial fetch + filter change
+  // D-07: the Kind filter's options. A failed or malformed read keeps the list
+  // the admin already has (only the error line is set), logs its cause, and
+  // never touches the jobs list or its own alert. Reads can overlap (a filter
+  // change starts a new one while an older one is in flight), so only the
+  // latest request may write state: an older response that lands late, good or
+  // failed, is dropped.
+  const kindsRequestRef = useRef(0);
+  const fetchKinds = useCallback(async () => {
+    const requestId = ++kindsRequestRef.current;
+    let status: number | null = null;
+    try {
+      const res = await fetch("/api/admin/compute-jobs?facets=kinds");
+      if (!res.ok) {
+        status = res.status;
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const body: unknown = await res.json();
+      const list = (body as { kinds?: unknown } | null)?.kinds;
+      if (!Array.isArray(list) || !list.every((k) => typeof k === "string")) {
+        throw new Error("Malformed kinds response");
+      }
+      if (requestId !== kindsRequestRef.current) return;
+      setKinds(list as string[]);
+      setKindsError(null);
+    } catch (err) {
+      console.error("[ComputeJobsTable] fetchKinds failed", { status, error: err });
+      if (requestId !== kindsRequestRef.current) return;
+      setKindsError(
+        status === null
+          ? "Could not load the job kinds."
+          : `Could not load the job kinds (HTTP ${status}).`,
+      );
+    }
+  }, []);
+
+  // Initial fetch + filter change. The kind facet is read here and ONLY here:
+  // on mount and on a filter change, never on Load more or the auto-refresh tick.
   useEffect(() => {
     setOffset(0);
     fetchJobs(0, false);
-  }, [fetchJobs]);
+    fetchKinds();
+  }, [fetchJobs, fetchKinds]);
 
   // Auto-refresh interval
   useEffect(() => {
@@ -154,6 +193,15 @@ export function ComputeJobsTable() {
     fetchJobs(next, true);
   }
 
+  // D-07: "All kinds" plus the fetched kinds, with the selected kind always
+  // present even when a later facet read no longer returns it.
+  const kindOptions = [
+    ALL_KINDS_OPTION,
+    ...Array.from(new Set(kindFilter ? [...kinds, kindFilter] : kinds))
+      .sort()
+      .map((kind) => ({ value: kind, label: kind })),
+  ];
+
   const now = Date.now();
 
   return (
@@ -174,7 +222,7 @@ export function ComputeJobsTable() {
 
         <Field label="Kind">
           <Select
-            options={KIND_OPTIONS}
+            options={kindOptions}
             value={kindFilter}
             onChange={(e) => setKindFilter(e.target.value)}
             className="min-h-0 px-2 py-1 text-caption"
@@ -195,6 +243,18 @@ export function ComputeJobsTable() {
           <span className="pb-1.5 text-micro text-text-muted">Loading...</span>
         )}
       </div>
+
+      {/* Deliberately role="status", not "alert": the alert below means the jobs
+          list failed, and a second alert would blur that. */}
+      {kindsError !== null && (
+        <p
+          className="text-small text-negative"
+          role="status"
+          data-testid="compute-jobs-kinds-error"
+        >
+          {kindsError}
+        </p>
+      )}
 
       {error && (
         <p className="text-small text-negative" role="alert">

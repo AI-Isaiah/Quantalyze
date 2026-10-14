@@ -44,6 +44,7 @@ import {
   deriveEmptySeriesState,
 } from "@/lib/closed-sets";
 import {
+  DEFAULTS,
   useDiscoveryPrefs,
   type DiscoveryViewPreferences,
 } from "@/lib/discovery-prefs";
@@ -285,6 +286,12 @@ const COLUMNS: {
 const PAGE_SIZE = 20;
 
 /**
+ * 170.6.2 WR-01 — set on <html> by a client effect once the table has
+ * hydrated and read its prefs; the e2e specs wait on it. Never rendered.
+ */
+const PREFS_APPLIED_ATTR = "data-strategy-table-prefs-applied";
+
+/**
  * Phase 149 Delta 5 — one row per ACTIVE api_key that has produced no strategy
  * yet. Server-formatted: `exchangeLabel` already has EXCHANGE_DISPLAY applied
  * upstream, so this client component never owns exchange naming.
@@ -503,7 +510,12 @@ export function StrategyTable({
   const tabIdBase = `watchlist${reactId}`;
   const panelId = `strategy-list${reactId}`;
   const [search, setSearch] = useState("");
-  const [showExamples, setShowExamples] = useState(true);
+  // 170.6.2 / D-06 — start where the prefs-mirror effect lands for an anonymous
+  // mount, so SSR and the first paint carry no example row. `managerRows` keeps
+  // true (170.7 SFH-1).
+  const [showExamples, setShowExamples] = useState(
+    () => !!managerRows || !DEFAULTS.hide_examples,
+  );
   const [sortKey, setSortKey] = useState<SortKey>("sharpe");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [viewMode, setViewMode] = useState<ViewMode>("table");
@@ -622,6 +634,23 @@ export function StrategyTable({
       setShowExamples(!prefs.hide_examples);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefsHydrated]);
+
+  // 170.6.2 WR-01 — the client-only hydration signal for the e2e specs. Since
+  // D-06 the server HTML already renders "Hide examples" checked, so
+  // `toBeChecked()` no longer proves React hydrated, and a keypress sent
+  // before hydration is lost. An effect runs only after this component has
+  // hydrated and its prefs have been read, so it is the one honest "ready"
+  // mark. It lives on <html>, never inside the table: the default-mounts byte
+  // pin compares `container.innerHTML` after effects, and the server HTML must
+  // not carry it either. Declared after the prefs-mirror effect so the mirror
+  // has already run in the same commit. Pinned by
+  // StrategyTable.prefs-applied.test.tsx.
+  useEffect(() => {
+    if (!prefsHydrated) return;
+    const root = document.documentElement;
+    root.setAttribute(PREFS_APPLIED_ATTR, "true");
+    return () => root.removeAttribute(PREFS_APPLIED_ATTR);
   }, [prefsHydrated]);
 
   const handleOpenCustomize = useCallback(() => {
