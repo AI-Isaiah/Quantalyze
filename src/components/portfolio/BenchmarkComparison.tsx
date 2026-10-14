@@ -1,7 +1,7 @@
 "use client";
 
 import { Card } from "@/components/ui/Card";
-import { formatPercent, formatNumber } from "@/lib/utils";
+import { formatPercent, formatNumber, metricColor } from "@/lib/utils";
 
 interface BenchmarkComparisonProps {
   benchmarkComparison: {
@@ -12,11 +12,6 @@ interface BenchmarkComparisonProps {
     stale: boolean;
     note?: string;
   } | null;
-}
-
-function metricColor(value: number | null | undefined): string {
-  if (value == null) return "text-text-muted";
-  return value >= 0 ? "text-positive" : "text-negative";
 }
 
 export function BenchmarkComparison({ benchmarkComparison }: BenchmarkComparisonProps) {
@@ -74,7 +69,7 @@ export function BenchmarkComparison({ benchmarkComparison }: BenchmarkComparison
           <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
             Portfolio TWR
           </p>
-          <p className={`mt-1 text-h3 font-bold font-metric ${metricColor(portfolio_twr)}`}>
+          <p className={`mt-1 text-h3 font-bold font-metric ${metricColor(portfolio_twr, "percent")}`}>
             {formatPercent(portfolio_twr)}
           </p>
         </div>
@@ -82,7 +77,7 @@ export function BenchmarkComparison({ benchmarkComparison }: BenchmarkComparison
           <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
             {symbol} TWR
           </p>
-          <p className={`mt-1 text-h3 font-bold font-metric ${metricColor(benchmark_twr)}`}>
+          <p className={`mt-1 text-h3 font-bold font-metric ${metricColor(benchmark_twr, "percent")}`}>
             {formatPercent(benchmark_twr)}
           </p>
         </div>
@@ -90,7 +85,7 @@ export function BenchmarkComparison({ benchmarkComparison }: BenchmarkComparison
           <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
             Alpha
           </p>
-          <p className={`mt-1 text-h3 font-bold font-metric ${metricColor(alpha)}`}>
+          <p className={`mt-1 text-h3 font-bold font-metric ${metricColor(alpha, "percent")}`}>
             {formatPercent(alpha)}
           </p>
         </div>

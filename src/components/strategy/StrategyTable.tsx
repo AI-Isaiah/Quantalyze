@@ -38,6 +38,7 @@ import { SimulateImpactButton } from "@/components/discovery/SimulateImpactButto
 import { OwnershipTag } from "./OwnershipTag";
 import { ReturnsUnitChip } from "./ReturnsUnitChip";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import { signTone, drawdownTone } from "@/lib/factsheet/display-sign";
 import { formatPercent, formatNumber, formatCurrency, formatIsoDay } from "@/lib/utils";
 import {
   isComputedAnalytics,
@@ -208,7 +209,9 @@ const PERCENTILE_BY_SORT_KEY: Partial<Record<TableSortKey, PercentileMetric>> = 
 // the factsheet honest-absence rule.
 function signColor(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "text-text-muted";
-  return value >= 0 ? "text-positive" : "text-negative";
+  // Rounded 2 dp sign (D-03): a value `formatPercent` prints as 0.00% is neutral.
+  const tone = signTone(value, 2, 100);
+  return tone === "positive" ? "text-positive" : tone === "negative" ? "text-negative" : "text-text-primary";
 }
 
 // Magnitude cells (Sharpe, CAGR) render neutral ink: the sign, when it
@@ -225,7 +228,7 @@ function magnitudeColor(value: number | null | undefined): string {
 // 0 / null / non-finite render neutral rather than a blanket red column.
 function drawdownColor(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "text-text-muted";
-  return value < 0 ? "text-negative" : "text-text-primary";
+  return drawdownTone(value, 2, 100) === "negative" ? "text-negative" : "text-text-primary";
 }
 
 // Phase 149 Delta 4 — the ONE chip-state status derivation, hoisted to module

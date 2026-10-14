@@ -8,7 +8,7 @@ import {
   outcomesWidgetDataSchema,
   type OutcomesWidgetData,
 } from "../lib/widget-data";
-import { formatPercent } from "@/lib/utils";
+import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 import { computeOutcomeKPIs, type OutcomeKPIs } from "@/lib/outcomes-kpi";
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
 // Phase 08 Plan 04 Task 2 — "Your note" section inside ExpandedPanel
@@ -115,15 +115,18 @@ function sliceToWindow(
   }));
 }
 
-function formatDelta(
+/** A realized delta as a signed 1 dp percent; a delta that rounds to zero prints `0.0%` (170.6 D-02). */
+function formatDeltaPercent(v: number | null | undefined): string {
+  return formatFixedSigned(v, { dp: 1, scale: 100, suffix: "%", plus: true });
+}
+
+export function formatDelta(
   v: number | null,
 ): { text: string; tone: "positive" | "negative" | "neutral" } {
   if (v === null) return { text: "Pending", tone: "neutral" };
-  const pct = v * 100;
-  const sign = pct > 0 ? "+" : "";
   return {
-    text: `${sign}${pct.toFixed(1)}%`,
-    tone: v > 0 ? "positive" : v < 0 ? "negative" : "neutral",
+    text: formatDeltaPercent(v),
+    tone: signTone(v, 1, 100) ?? "neutral",
   };
 }
 
@@ -207,15 +210,9 @@ function KpiStrip({
           contradictory "3 pending" vs "7 pending cycle" pair. */}
       <KpiCell
         label="Avg realized α (latest)"
-        value={formatPercent(kpis.avgRealizedDelta, 1)}
+        value={formatDeltaPercent(kpis.avgRealizedDelta)}
         sub={`${kpis.pendingCount} pending`}
-        tone={
-          kpis.avgRealizedDelta == null
-            ? "neutral"
-            : kpis.avgRealizedDelta >= 0
-              ? "positive"
-              : "negative"
-        }
+        tone={signTone(kpis.avgRealizedDelta, 1, 100) ?? "neutral"}
         divider
       />
       <KpiCell
@@ -460,9 +457,7 @@ function ExpandedPanel({
 
           const barColor = isPending
             ? "var(--color-warning)"
-            : col.delta != null && col.delta >= 0
-              ? "var(--color-positive)"
-              : "var(--color-negative)";
+            : toneColor(d.tone);
 
           return (
             <div
@@ -586,7 +581,9 @@ function TimelineRow({
     // survives JSDOM style-attribute normalization in tests (which would
     // otherwise rewrite `#15803D` -> `rgb(22, 163, 74)`). The visual
     // result is identical in a real browser.
-    const cellColor = v >= 0 ? "#15803D" : "#DC2626";
+    const tone = signTone(v, 1, 100);
+    const cellColor =
+      tone === "positive" ? "#15803D" : tone === "negative" ? "#DC2626" : "#1A1A2E";
     return (
       <span
         className="font-mono text-fixed-13 font-medium tabular-nums"
@@ -595,7 +592,7 @@ function TimelineRow({
           color: "var(--delta-color)",
         } as React.CSSProperties}
       >
-        {formatPercent(v, 1)}
+        {formatDeltaPercent(v)}
       </span>
     );
   }

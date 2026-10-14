@@ -120,11 +120,13 @@ describe("NEW-C20-04/C20-09: formatters handle null/NaN/non-finite values", () =
     expect(pct(0, 1)).toBe("0.0%");
   });
 
-  it("pctSigned in format.ts returns '—' for null/NaN and '+0.0%' for 0 (no false red tone)", async () => {
+  it("pctSigned in format.ts returns '—' for null/NaN and '0.0%' for 0 (no false red or green tone)", async () => {
     const { pctSigned } = await import("../../app/factsheet/[id]/v2/format");
     expect(pctSigned(null)).toBe("—");
     expect(pctSigned(NaN)).toBe("—");
-    expect(pctSigned(0, 1)).toBe("+0.0%");
+    // 170.6 D-02: a value that rounds to zero prints unsigned. This pinned "+0.0%", the
+    // exact output D-02 forbids ("`-0.00`, `-0.0%` and `+0.0%` never appear").
+    expect(pctSigned(0, 1)).toBe("0.0%");
   });
 
   it("ratio (imported as num) in format.ts returns '—' for null/NaN and '0.00' for 0", async () => {

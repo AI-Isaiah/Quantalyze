@@ -824,3 +824,42 @@ describe("163-REVIEW finding 3 — a row composed over EMPTY_ANALYTICS", () => {
     expect(container.querySelectorAll(".bg-amber-400")).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 170.6 D-03, D-04 (plan 02) — the Max DD cell is red only when the drawdown ROUNDS
+// below zero. It carried a constant text-negative, so a "0.00%" or a "—" drawdown read as
+// a loss. Hand-typed expectations; the column index is the header order (name, weight, TWR,
+// Sharpe, Max DD, contribution).
+// ---------------------------------------------------------------------------
+describe("<StrategyBreakdownTable> — Max DD tone (170.6 D-03, D-04)", () => {
+  function maxDdCell(max_drawdown: number | null): HTMLTableCellElement {
+    render(
+      <StrategyBreakdownTable
+        strategies={[strat("a", "Alpha", 0.5, { cagr: 0.2, sharpe: 1.5, max_drawdown })]}
+        attribution={null}
+        portfolioId="p-1"
+      />,
+    );
+    const row = screen.getAllByRole("row")[1];
+    return row.querySelectorAll("td")[4] as HTMLTableCellElement;
+  }
+
+  it("a drawdown of -0.00004 prints 0.00% and is not red", () => {
+    const cell = maxDdCell(-0.00004);
+    expect(cell.textContent).toBe("0.00%");
+    expect(cell.className).not.toContain("text-negative");
+    expect(cell.className).not.toContain("text-positive");
+  });
+
+  it("a withheld drawdown prints the dash and is not red", () => {
+    const cell = maxDdCell(null);
+    expect(cell.textContent).toBe("—");
+    expect(cell.className).not.toContain("text-negative");
+  });
+
+  it("a drawdown of -0.0342 prints -3.42% and is red", () => {
+    const cell = maxDdCell(-0.0342);
+    expect(cell.textContent).toBe("-3.42%");
+    expect(cell.className).toContain("text-negative");
+  });
+});

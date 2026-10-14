@@ -8,6 +8,7 @@ import {
 } from "./chart-tokens";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
+import { formatUnsignedPercent } from "@/lib/factsheet/display-sign";
 
 interface ReturnQuantilesProps {
   data: Record<string, number[]>;
@@ -100,7 +101,7 @@ export function ReturnQuantiles({ data }: ReturnQuantilesProps) {
               fill={CHART_AXIS_TICK}
               fontFamily={CHART_FONT_MONO}
             >
-              {(val * 100).toFixed(1)}%
+              {formatUnsignedPercent(val, 1)}
             </text>
           </g>
         );

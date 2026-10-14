@@ -1,6 +1,7 @@
 import type { JointMetrics } from "./types";
 import { mean } from "@/lib/portfolio-math-utils";
 import { beta as betaOf, dispersion, pearson, sharpe } from "@/lib/return-stats";
+import { formatAbsoluteDate } from "@/lib/utils";
 
 /**
  * 169.4 review SFH MEDIUM-4: the fewest PAIRED strategy/benchmark
@@ -24,15 +25,23 @@ export const MIN_PAIRED_OBSERVATIONS = 10;
  * WINDOW's paired count, so they pass "range", which reads "the selected range
  * has <paired>." The record noun there would put the slice's count beside "this
  * record", which has many more paired days.
+ *
+ * Phase 170.6 (D-08, founder 2026-10-13): `comparatorThrough` is the comparator's last
+ * price day (an ISO date) when its prices end BEFORE the strategy's window does; the
+ * sentence then ends " {comparator} prices end {Mon D}." so a reader sees why so few
+ * days pair. Null or omitted (full coverage, or a caller with no comparator end date:
+ * the Allocations book, the strategy page's BTC reason) leaves the sentence unchanged.
  */
 export function pairedFloorReason(
   comparator: string,
   paired: number,
   noun: "book" | "record" | "range",
   floor: number = MIN_PAIRED_OBSERVATIONS,
+  comparatorThrough: string | null = null,
 ): string {
   const subject = noun === "range" ? "the selected range" : `this ${noun}`;
-  return `Alpha and beta need at least ${floor} days paired with ${comparator}; ${subject} has ${paired}.`;
+  const base = `Alpha and beta need at least ${floor} days paired with ${comparator}; ${subject} has ${paired}.`;
+  return comparatorThrough == null ? base : `${base} ${comparator} prices end ${formatAbsoluteDate(comparatorThrough)}.`;
 }
 
 /**

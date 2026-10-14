@@ -20,7 +20,7 @@ import { parseReturnsUnit, withUnit } from "@/lib/factsheet/returns-unit";
 // Phase 164.6.6.3.3 (B7, B8, D-07): the sign and the tone of CAGR and Max DD come
 // from the value rounded to the printed precision, so a dash or a rounded zero is
 // never printed with a sign nor coloured.
-import { formatSignedPercent, formatUnsignedPercent, percentTone } from "@/lib/factsheet/display-sign";
+import { formatRatio, formatSignedPercent, formatUnsignedPercent, percentTone } from "@/lib/factsheet/display-sign";
 
 /**
  * Dynamic OG card for the v2 factsheet. Renders strategy name + headline
@@ -211,7 +211,7 @@ export async function GET(
     // show it to people who never open the page and never see a correction.
     //
     // Not computing is ALREADY this card's designed answer to "analytics
-    // aren't ready" — the docblock says so and `fmtNum` and the display-sign formatters render the
+    // aren't ready" — the docblock says so and the display-sign formatters render the
     // NaN sentinel as "—". A non-terminal row is the same answer to the same
     // question, so it reuses the same path: name + description + three
     // em-dashes. No new layout, no error card, and the route still cannot 500.
@@ -238,8 +238,6 @@ export async function GET(
     failed = true;
     reportOgFailure("compute", id, err);
   }
-
-  const fmtNum = (x: number) => (Number.isFinite(x) ? x.toFixed(2) : "—");
 
   // CAGR: signed, tone from the rounded value. Max DD: unsigned, and only a real
   // (rounded below zero) drawdown is `neg`; a drawdown is never "good", so it has
@@ -275,7 +273,7 @@ export async function GET(
           </div>
         )}
         <div style={{ marginTop: 48, display: "flex", gap: 56 }}>
-          <Stat label="Sharpe" value={fmtNum(sharpe)} />
+          <Stat label="Sharpe" value={formatRatio(sharpe, 2)} />
           <Stat
             label={withUnit("CAGR", unit)}
             value={formatSignedPercent(cagr, 1)}

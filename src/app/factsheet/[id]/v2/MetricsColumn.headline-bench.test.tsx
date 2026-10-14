@@ -147,9 +147,11 @@ function firstBench(container: HTMLElement, title: string): string {
 // Hand-typed renderers (the rail's own are not exported, and an import would be no oracle).
 const dash = "—";
 const fin = (v: number | null | undefined): v is number => v != null && Number.isFinite(v);
-const pctS = (v: number | null | undefined) => (fin(v) ? `${v * 100 >= 0 ? "+" : ""}${(v * 100).toFixed(2)}%` : dash);
-const pctU = (v: number | null | undefined) => (fin(v) ? `${(v * 100).toFixed(2)}%` : dash);
-const n2 = (v: number | null | undefined) => (fin(v) ? v.toFixed(2) : dash);
+// Phase 170.6 D-02: a figure whose printed digits are all zero carries no sign (`-0.00`, `+0.00%` never print).
+const unsignedZero = (s: string) => s.replace(/^[-+](?=0(?:\.0+)?%$)/, "").replace(/^-(?=0\.0+$)/, "");
+const pctS = (v: number | null | undefined) => (fin(v) ? unsignedZero(`${v * 100 >= 0 ? "+" : ""}${(v * 100).toFixed(2)}%`) : dash);
+const pctU = (v: number | null | undefined) => (fin(v) ? unsignedZero(`${(v * 100).toFixed(2)}%`) : dash);
+const n2 = (v: number | null | undefined) => (fin(v) ? unsignedZero(v.toFixed(2)) : dash);
 const cnt = (v: number | null | undefined) => (fin(v) ? String(v) : dash);
 
 /** compute() over the comparator's covered daily returns dated on or after `from` (or all of them). */
@@ -189,14 +191,20 @@ function headlineBenchCells(container: HTMLElement) {
   };
 }
 
-function expectedHeadline(s: ReturnType<typeof oracle>) {
+/**
+ * Phase 170.6 plan 11 (D-07): a comparator span under 90 elapsed calendar days has no
+ * annualized figures, so CAGR, Ann. Volatility, Sharpe, Sortino and Calmar read the
+ * em-dash. `annualized` is false for the 12-day suffix below; the whole 400-day record
+ * annualizes. Cumulative return and max drawdown never depend on it.
+ */
+function expectedHeadline(s: ReturnType<typeof oracle>, annualized = true) {
   return {
     cum: pctS(s.cum_ret),
-    cagr: pctS(s.cagr),
-    vol: pctU(s.ann_vol),
-    sharpe: n2(s.sharpe),
-    sortino: n2(s.sortino),
-    calmar: n2(s.calmar),
+    cagr: annualized ? pctS(s.cagr) : dash,
+    vol: annualized ? pctU(s.ann_vol) : dash,
+    sharpe: annualized ? n2(s.sharpe) : dash,
+    sortino: annualized ? n2(s.sortino) : dash,
+    calmar: annualized ? n2(s.calmar) : dash,
     month: pctS(s.mtd),
     ytd: pctS(s.ytd),
     p3m: pctS(s.p3m),
@@ -210,10 +218,12 @@ describe("a Dated row: each headline benchmark cell is the comparator over the s
   it("precondition: the suffix and the whole-record comparator figures really differ", () => {
     const p = build(DATED);
     const whole = expectedHeadline(oracle(p));
-    const since = expectedHeadline(oracle(p, SINCE));
+    const since = expectedHeadline(oracle(p, SINCE), false);
     expect(since.cum).not.toBe(whole.cum);
-    expect(since.vol).not.toBe(whole.vol);
     expect(since.maxdd).not.toBe(whole.maxdd);
+    // D-07 (170.6 plan 11): the suffix's volatility is a real, different number that is withheld
+    // below the 90-day floor, so it is the raw oracle values that must differ, not the printed cells.
+    expect(pctU(oracle(p, SINCE).ann_vol)).not.toBe(pctU(oracle(p).ann_vol));
     // The rail prints the 12-day suffix as the strategy's own span; the oracle agrees it is 12 days.
     expect(p.dates.filter((d) => d >= SINCE)).toHaveLength(12);
   });
@@ -221,7 +231,12 @@ describe("a Dated row: each headline benchmark cell is the comparator over the s
   it("Main Metrics, Returns and Max Drawdown bench cells equal the independent suffix oracle", () => {
     const p = build(DATED);
     const { container } = mount(p);
-    expect(headlineBenchCells(container)).toEqual(expectedHeadline(oracle(p, SINCE)));
+    // D-07: the 12-day suffix is under the 90-day floor. The oracle's annualized numbers are finite
+    // (the dash below is the floor, not missing data); the five annualized cells read the em-dash.
+    for (const k of ["cagr", "ann_vol", "sharpe", "sortino", "calmar"] as const) {
+      expect(Number.isFinite(oracle(p, SINCE)[k]), k).toBe(true);
+    }
+    expect(headlineBenchCells(container)).toEqual(expectedHeadline(oracle(p, SINCE), false));
   });
 
   it("the cells that need more than the suffix hold read the em-dash, not the whole-record value", () => {

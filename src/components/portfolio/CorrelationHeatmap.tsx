@@ -3,6 +3,7 @@
 import { Fragment } from "react";
 
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 
 interface CorrelationHeatmapProps {
   correlationMatrix: Record<string, Record<string, number>> | null;
@@ -288,7 +289,7 @@ export function CorrelationHeatmap({
               const isDiag = rowId === colId;
               const hasValue = v != null;
               const ariaLabel = hasValue
-                ? `${label(rowId)} and ${label(colId)}: ${v.toFixed(2)} correlation`
+                ? `${label(rowId)} and ${label(colId)}: ${formatFixedSigned(v, { dp: 2 })} correlation`
                 : `${label(rowId)} and ${label(colId)}: no data`;
 
               let backgroundColor: string;
@@ -312,7 +313,7 @@ export function CorrelationHeatmap({
                   className="flex items-center justify-center py-2 font-metric text-caption"
                   style={{ backgroundColor, color }}
                 >
-                  {hasValue ? v.toFixed(2) : "\u2014"}
+                  {hasValue ? formatFixedSigned(v, { dp: 2 }) : "\u2014"}
                 </div>
               );
             })}

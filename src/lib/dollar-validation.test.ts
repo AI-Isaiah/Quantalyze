@@ -181,6 +181,48 @@ describe("[169 D-50] formatUsdSigned — P&L at 2 decimals, sign from the ROUNDE
   });
 });
 
+// Phase 170.6 WR-02 (D-05) CHARACTERIZATION. signAtCents / formatUsdSigned now delegate their
+// rounding to display-sign. This table was typed BEFORE the refactor and passes on the
+// pre-refactor code; it pins every byte the P&L columns of OpenPositionsTable and HoldingsTable
+// print, including the half-cent ties (decided by the exact binary value, as toFixed does),
+// the signed zeros, the grouping and the U+2212 minus.
+describe("[170.6 WR-02] formatUsdSigned / signAtCents — byte-identical characterization", () => {
+  const CASES: Array<[number, string, "positive" | "negative" | "zero"]> = [
+    [0.37, "+$0.37", "positive"],
+    [-0.21, "−$0.21", "negative"],
+    [1300, "+$1,300.00", "positive"],
+    [-1234.6, "−$1,234.60", "negative"],
+    [1234567.891, "+$1,234,567.89", "positive"],
+    [-1000000000, "−$1,000,000,000.00", "negative"],
+    [0.01, "+$0.01", "positive"],
+    [-0.01, "−$0.01", "negative"],
+    // 0.005 is stored just above the tie (0.005000000000000000104), so it rounds up to 0.01.
+    [0.005, "+$0.01", "positive"],
+    [-0.005, "−$0.01", "negative"],
+    // 0.015 is stored just below the tie, so it rounds down to 0.01.
+    [0.015, "+$0.01", "positive"],
+    // 1.005 is stored just below the tie (1.00499999999999989), so it rounds down to 1.00.
+    [1.005, "+$1.00", "positive"],
+    [0.004, "$0.00", "zero"],
+    [-0.004, "$0.00", "zero"],
+    [-0.0001, "$0.00", "zero"],
+    [0, "$0.00", "zero"],
+    [-0, "$0.00", "zero"],
+  ];
+
+  it.each(CASES)("%s prints %s and reads as %s", (value, text, sign) => {
+    expect(formatUsdSigned(value)).toBe(text);
+    expect(signAtCents(value)).toBe(sign);
+  });
+
+  it("null, NaN and both infinities print the dash and have no sign", () => {
+    for (const v of [null, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(formatUsdSigned(v)).toBe("—");
+      expect(signAtCents(v)).toBeNull();
+    }
+  });
+});
+
 describe("[169 D-50] signAtCents — the one rounding decision the text sign and the P&L colour read", () => {
   it("reads the sign of the value rounded to cents", () => {
     expect(signAtCents(0.37)).toBe("positive");

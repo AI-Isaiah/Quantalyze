@@ -49,6 +49,7 @@ import {
   attributionBasisFromConfig,
 } from "@/lib/composite/compositeAttribution";
 import { hasBasisHeadline } from "@/lib/factsheet/basis-metrics";
+import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { parseIsoDay, utcEpoch } from "@/lib/dateday";
 import { drainById } from "@/lib/drain-by-id";
@@ -419,17 +420,13 @@ type Phase =
   | "gate_failed"
   | "passed";
 
-function formatMetric(value: number | null, suffix = ""): string {
-  if (value === null || value === undefined || Number.isNaN(value)) return "—";
-  if (suffix === "%") return `${(value * 100).toFixed(1)}%`;
-  return value.toFixed(2);
+export function formatMetric(value: number | null, suffix = ""): string {
+  if (suffix === "%") return formatFixedSigned(value, { dp: 1, scale: 100, suffix: "%" });
+  return formatFixedSigned(value, { dp: 2 });
 }
 
-function formatCagr(value: number | null): string {
-  if (value === null) return "—";
-  const pct = value * 100;
-  const sign = pct >= 0 ? "+" : "";
-  return `${sign}${pct.toFixed(1)}%`;
+export function formatCagr(value: number | null): string {
+  return formatFixedSigned(value, { dp: 1, scale: 100, suffix: "%", plus: true });
 }
 
 /**
@@ -447,15 +444,23 @@ function memberDisplayName(
 }
 
 /**
- * Signed percentage contribution string (`+X.X%` / `−X.X%`), or an em dash for
+ * Signed percentage contribution string (`+X.X%` / `−X.X%`, unsigned `0.0%` when it
+ * rounds to zero), or an em dash for
  * a no-data member (`null` contribution — never a fabricated 0%). Uses the
  * U+2212 MINUS SIGN for negatives, matching the tabular financial convention.
  */
-function formatContribution(value: number | null): string {
-  if (value === null) return "—";
-  const pct = value * 100;
-  const sign = pct >= 0 ? "+" : "−";
-  return `${sign}${Math.abs(pct).toFixed(1)}%`;
+export function formatContribution(value: number | null): string {
+  return formatFixedSigned(value, { dp: 1, scale: 100, suffix: "%", plus: true, minus: "−" });
+}
+
+/**
+ * Tone class for a member's attribution cell. Exported so the rule is testable
+ * without rendering the whole composite table.
+ */
+export function contributionToneClass(value: number | null): string {
+  if (value === null) return "text-text-muted";
+  const tone = signTone(value, 1, 100);
+  return tone === "positive" ? "text-positive" : tone === "negative" ? "text-negative" : "text-text-primary";
 }
 
 /**
@@ -2752,12 +2757,7 @@ export function SyncPreviewStep({
                     : member?.windowStart
                       ? `${member.windowStart} – ${member.windowEnd ?? "live"}`
                       : "—";
-                const contributionClass =
-                  row.contribution === null
-                    ? "text-text-muted"
-                    : row.contribution < 0
-                      ? "text-negative"
-                      : "text-positive";
+                const contributionClass = contributionToneClass(row.contribution);
                 return (
                   <tr key={row.seq} className="border-b border-border">
                     <td className="py-2 pr-4 font-metric text-caption tabular-nums text-text-muted">

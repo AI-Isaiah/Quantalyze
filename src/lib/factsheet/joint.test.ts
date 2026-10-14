@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { jointMetrics } from "./joint";
+import { jointMetrics, pairedFloorReason } from "./joint";
 
 describe("jointMetrics", () => {
   it("returns beta ≈ 1 and corr ≈ 1 for an identical series", () => {
@@ -96,5 +96,30 @@ describe("jointMetrics", () => {
       expect(levered.alpha).toBeCloseTo(base.alpha * L, 10);
       expect(levered.corr).toBeCloseTo(base.corr, 10);
     });
+  });
+});
+
+/**
+ * Phase 170.6 plan 11 (D-08, founder 2026-10-13): when the comparator's prices end before the
+ * strategy's window, the paired-floor sentence adds "{CN} prices end Mon D." (CN is the
+ * comparator's display name, the date its last price day). Every sentence is typed by hand.
+ */
+describe("pairedFloorReason (D-08)", () => {
+  it("names the day a record's comparator prices end", () => {
+    expect(pairedFloorReason("SPX", 4, "record", 10, "2024-07-25")).toBe(
+      "Alpha and beta need at least 10 days paired with SPX; this record has 4. SPX prices end Jul 25.",
+    );
+  });
+
+  it("names the day a selected range's comparator prices end", () => {
+    expect(pairedFloorReason("BTC", 3, "range", 10, "2025-01-05")).toBe(
+      "Alpha and beta need at least 10 days paired with BTC; the selected range has 3. BTC prices end Jan 5.",
+    );
+  });
+
+  it("is the unchanged sentence without a through date (omitted, or null for full coverage)", () => {
+    const plain = "Alpha and beta need at least 10 days paired with SPX; this record has 4.";
+    expect(pairedFloorReason("SPX", 4, "record")).toBe(plain);
+    expect(pairedFloorReason("SPX", 4, "record", 10, null)).toBe(plain);
   });
 });

@@ -277,7 +277,8 @@ describe("EquityChart", () => {
       (t) => t.textContent,
     );
     // The 0% baseline tick is always rendered (we clamp yMin <= 1 <= yMax).
-    expect(labels).toContain("+0%");
+    // Phase 170.6 (D-02): the baseline is a rounded zero, so it prints unsigned ("0%"), not "+0%".
+    expect(labels).toContain("0%");
   });
 
   it("renders multiple Y-axis percentage tick labels (not just 0%)", () => {

@@ -1,7 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { KpiStrip } from "./KpiStrip";
 import type { ComputedMetrics } from "@/lib/scenario";
+import { captureToSentry } from "@/lib/sentry-capture";
+
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
 /**
  * Phase 09.1 / Plan 06 (D-09) — KpiStrip shape tests.
@@ -402,5 +405,160 @@ describe("KpiStrip — designer 4-cell return-form shape (D-09 · Phase 64/PRESE
         expect(rendered).toContain(v);
       }
     });
+  });
+});
+
+// Phase 170.6 SFH-3 (D-04) + R2-SFH-2: the Max DD 12m cell is never green, and a drawdown
+// above zero (impossible data: the sign convention flipped upstream) prints the dash it
+// prints for a missing value, and is reported once.
+describe("KpiStrip — Max DD 12m is never green (170.6 D-04)", () => {
+  beforeEach(() => {
+    vi.mocked(captureToSentry).mockClear();
+  });
+
+  function strip(maxDd: number) {
+    return (
+      <KpiStrip
+        analytics={{ ytd_twr: 0.12, sharpe: 1.5, max_drawdown_12m: maxDd, avg_correlation: 0.42 }}
+        metrics={EMPTY_METRICS}
+        timeframe="ALL"
+        snapshotCount={30}
+      />
+    );
+  }
+
+  /** The value element of the "Max DD 12m" cell, found by its label. */
+  function maxDdCell(maxDd: number): HTMLElement {
+    const view = render(strip(maxDd));
+    return ddValueIn(view.container);
+  }
+
+  function ddValueIn(container: HTMLElement): HTMLElement {
+    const group = screen.getAllByRole("group", { name: "Portfolio KPIs" }).find((g) => container.contains(g))!;
+    const cell = Array.from(group.children).find(
+      (c) => c.querySelector("div")?.textContent === "Max DD 12m",
+    )!;
+    return cell.querySelector<HTMLElement>("div.font-mono")!;
+  }
+
+  it("a positive 0.04 is impossible data: it prints the dash, not +4.00%, and carries no tone", () => {
+    const cell = maxDdCell(0.04);
+    // Typed by hand. Before R2-SFH-2 this cell read "+4.00%" in neutral grey with no signal.
+    expect(cell.textContent?.trim()).toBe("—");
+    expect(cell.className).not.toContain("text-positive");
+    expect(cell.className).not.toContain("text-negative");
+  });
+
+  it("reports a positive max drawdown once, and stays silent on a re-render with the same value", () => {
+    const view = render(strip(0.04));
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    const [err, opts] = vi.mocked(captureToSentry).mock.calls[0];
+    expect((err as Error).message).toContain("positive max drawdown");
+    expect(opts.tags).toEqual({ component: "KpiStrip", check: "max-drawdown-sign" });
+    expect(opts.extra).toMatchObject({ max_drawdown: 0.04 });
+    view.rerender(strip(0.04));
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not report a real drawdown, a rounded zero or a missing value", () => {
+    for (const v of [-0.08, -0.00004, 0.000004]) {
+      render(strip(v));
+    }
+    render(
+      <KpiStrip analytics={null} metrics={EMPTY_METRICS} timeframe="ALL" snapshotCount={30} />,
+    );
+    expect(captureToSentry).not.toHaveBeenCalled();
+  });
+
+  it("a real drawdown of -0.08 (-8.00%) is still red", () => {
+    const cell = maxDdCell(-0.08);
+    expect(cell.textContent?.trim()).toBe("-8.00%");
+    expect(cell.className).toContain("text-negative");
+  });
+
+  it("a drawdown that rounds to zero (-0.00004) prints 0.00% with no tone", () => {
+    const cell = maxDdCell(-0.00004);
+    expect(cell.textContent?.trim()).toBe("0.00%");
+    expect(cell.className).not.toMatch(/text-(positive|negative)/);
+  });
+
+  it("a positive drawdown that rounds to zero (0.000004) is a zero, not a violation: 0.00%, no report", () => {
+    const cell = maxDdCell(0.000004);
+    expect(cell.textContent?.trim()).toBe("0.00%");
+    expect(captureToSentry).not.toHaveBeenCalled();
+  });
+});
+
+// R3-SFH-1 (170.6 round 3): the impossible-drawdown gate covers BOTH operands of the scenario
+// delta, not only the figure the cell prints. A scenario value or a live baseline that prints
+// above zero must not feed a delta pill or the "Live: ..." tooltip, and either side is reported.
+describe("KpiStrip — an impossible drawdown on either scenario operand (170.6 R3-SFH-1)", () => {
+  beforeEach(() => {
+    vi.mocked(captureToSentry).mockClear();
+  });
+
+  const GOOD: ComputedMetrics = { ...EMPTY_METRICS, n: 252, twr: 0.15, max_drawdown: -0.08 };
+
+  function scenarioStrip(scenarioMaxDd: number, liveMaxDd: number) {
+    return (
+      <KpiStrip
+        analytics={{ ytd_twr: 0.15, sharpe: 1.2, max_drawdown_12m: -0.08, avg_correlation: 0.42 }}
+        metrics={GOOD}
+        timeframe="ALL"
+        snapshotCount={30}
+        mode="scenario"
+        scenarioMetrics={{ ...GOOD, max_drawdown: scenarioMaxDd }}
+        liveMetrics={{ ...GOOD, max_drawdown: liveMaxDd }}
+      />
+    );
+  }
+
+  /** The Max DD cell's primary value and its delta pill, found by the pill's aria-label. */
+  function ddPartsIn(container: HTMLElement) {
+    const pill = container.querySelector<HTMLElement>('[aria-label^="Max DD 12m delta:"]')!;
+    const cell = pill.parentElement!;
+    return { primary: cell.querySelector<HTMLElement>("div.font-mono")!, pill };
+  }
+
+  it("scenario value impossible (+0.04), live valid: the pill prints the dash, not a delta from 0.04", () => {
+    const { container } = render(scenarioStrip(0.04, -0.08));
+    const { primary, pill } = ddPartsIn(container);
+    expect(primary.textContent?.trim()).toBe("—");
+    // Typed by hand. Before R3-SFH-1 this pill read "+12.0%" (0.04 - -0.08), improved, green.
+    expect(pill.textContent?.trim()).toBe("—");
+    expect(pill.getAttribute("aria-label")).toBe("Max DD 12m delta: — (no change)");
+    expect(pill.className).not.toMatch(/text-(positive|negative)/);
+    expect(pill.getAttribute("title")).toBe("Live: -8.00%");
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+  });
+
+  it("live value impossible (+0.04), scenario valid: no delta, no '+4.00%' tooltip, and it is reported", () => {
+    const { container } = render(scenarioStrip(-0.04, 0.04));
+    const { primary, pill } = ddPartsIn(container);
+    expect(primary.textContent?.trim()).toBe("-4.00%");
+    expect(primary.className).toContain("text-negative");
+    // Before R3-SFH-1: pill "−4.0%" computed against the garbage baseline, tooltip "Live: +4.00%", no report.
+    expect(pill.textContent?.trim()).toBe("—");
+    expect(pill.className).not.toMatch(/text-(positive|negative)/);
+    expect(pill.getAttribute("title")).toBe("Live: —");
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    const [, opts] = vi.mocked(captureToSentry).mock.calls[0];
+    expect(opts.extra).toMatchObject({ max_drawdown: 0.04, impossible: "live:0.04" });
+  });
+
+  it("both sides valid: the pill still prints its real delta and the tooltip its real baseline", () => {
+    const { container } = render(scenarioStrip(-0.04, -0.08));
+    const { pill } = ddPartsIn(container);
+    expect(pill.textContent?.trim()).toBe("+4.0%");
+    expect(pill.getAttribute("title")).toBe("Live: -8.00%");
+    expect(pill.className).toContain("text-positive");
+    expect(captureToSentry).not.toHaveBeenCalled();
+  });
+
+  it("a live baseline that only rounds to zero (+0.000004) is a zero, not a violation", () => {
+    const { container } = render(scenarioStrip(-0.04, 0.000004));
+    const { pill } = ddPartsIn(container);
+    expect(pill.getAttribute("title")).toBe("Live: 0.00%");
+    expect(captureToSentry).not.toHaveBeenCalled();
   });
 });

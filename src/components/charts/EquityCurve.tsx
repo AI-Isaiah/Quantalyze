@@ -11,6 +11,7 @@ import {
   CHART_TEXT_MUTED,
   CHART_TRACK,
 } from "./chart-tokens";
+import { formatUnsignedPercent } from "@/lib/factsheet/display-sign";
 
 interface EquityCurveProps {
   data: { date: string; value: number }[];
@@ -30,7 +31,7 @@ interface EquityCurveProps {
   hideBenchmarkToggle?: boolean;
 }
 
-const PRICE_FORMATTER = (v: number) => `${((v - 1) * 100).toFixed(1)}%`;
+export const PRICE_FORMATTER = (v: number) => formatUnsignedPercent(v - 1, 1);
 
 export function EquityCurve({
   data,

@@ -15,15 +15,16 @@
  * present renders numbers.
  */
 import type { HoldingCompareItem } from "@/app/(dashboard)/compare/lib/holding-compare-adapter";
+import { formatRatio, formatUnsignedPercent } from "@/lib/factsheet/display-sign";
 
 function fmtPct(v: number | null): string {
   if (v === null || !Number.isFinite(v)) return "—";
-  return `${(v * 100).toFixed(2)}%`;
+  return formatUnsignedPercent(v, 2);
 }
 
 function fmtNum(v: number | null): string {
   if (v === null || !Number.isFinite(v)) return "—";
-  return v.toFixed(2);
+  return formatRatio(v, 2);
 }
 
 export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {

@@ -16,6 +16,7 @@ import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 import { formatRelativeTime } from "@/lib/utils";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { pow10 } from "@/lib/chart-ticks";
+import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 import {
   isMonotonicByDay,
   localMidnightFromIsoString,
@@ -39,6 +40,15 @@ import {
 // without the cap a long hover/Tweaks session would saturate the Sentry
 // tier.
 const sentryEmittedSites = new Set<string>();
+
+// Phase 170.6 (D-03): a figure's colour follows the sign of the value ROUNDED to the
+// precision it prints (`signTone`). A rounded zero has no tone, so it takes the primary
+// text colour rather than green or red.
+function toneColor(tone: "positive" | "negative" | undefined): string {
+  if (tone === "positive") return "var(--color-positive)";
+  if (tone === "negative") return "var(--color-negative)";
+  return "var(--color-text-primary)";
+}
 
 // PR-3+4 performance H1 helper: shared by the x-tick month-midEpoch
 // resolver and handleMove. Both pre-fix had character-identical binary-
@@ -775,8 +785,10 @@ export function EquityChart({
       visibleNormalized.length > 0
         ? visibleNormalized[visibleNormalized.length - 1] - 1
         : 0;
-    const periodReturnPositive = periodReturn >= 0;
-    const periodReturnLabel = `${periodReturnPositive ? "+" : ""}${(periodReturn * 100).toFixed(2)}%`;
+    // Phase 170.6 (D-02, D-03, D-05): the glyph and the colour follow the value ROUNDED to
+    // the 2 dp it prints, so a window return of -0.00004 reads "0.00%" and is neutral.
+    const periodReturnTone = signTone(periodReturn, 2, 100);
+    const periodReturnLabel = formatFixedSigned(periodReturn, { dp: 2, scale: 100, suffix: "%", plus: true });
 
     const baseBench =
       visibleBenchmark
@@ -1094,7 +1106,7 @@ export function EquityChart({
       chartH,
       n,
       visibleNormalized,
-      periodReturnPositive,
+      periodReturnTone,
       periodReturnLabel,
       visibleBenchmarkNormalized,
       yTicks,
@@ -1184,7 +1196,7 @@ export function EquityChart({
     chartH,
     n,
     visibleNormalized,
-    periodReturnPositive,
+    periodReturnTone,
     periodReturnLabel,
     visibleBenchmarkNormalized,
     yTicks,
@@ -1432,9 +1444,7 @@ export function EquityChart({
               style={{
                 fontSize: 14,
                 fontWeight: 600,
-                color: periodReturnPositive
-                  ? "var(--color-positive)"
-                  : "var(--color-negative)",
+                color: toneColor(periodReturnTone),
               }}
             >
               {periodReturnLabel}
@@ -1559,7 +1569,11 @@ export function EquityChart({
             const isBaseline = Math.abs(v - 1) < 1e-9;
             const yPos = y(v);
             const pct = (v - 1) * 100;
-            const label = `${pct >= 0 ? "+" : ""}${pct.toFixed(pct !== 0 && Math.abs(pct) < 10 ? 1 : 0)}%`;
+            const label = formatFixedSigned(pct, {
+              dp: pct !== 0 && Math.abs(pct) < 10 ? 1 : 0,
+              suffix: "%",
+              plus: true,
+            });
             return (
               <g key={i}>
                 <line
@@ -1937,7 +1951,7 @@ function TooltipRow({
   pct: number;
   dashed?: boolean;
 }) {
-  const positive = pct >= 0;
+  const tone = signTone(pct, 2);
   return (
     <div
       style={{
@@ -1962,14 +1976,11 @@ function TooltipRow({
         style={{
           fontFamily: "var(--font-mono), monospace",
           fontVariantNumeric: "tabular-nums",
-          color: positive
-            ? "var(--color-positive)"
-            : "var(--color-negative)",
+          color: toneColor(tone),
           fontWeight: 500,
         }}
       >
-        {positive ? "+" : ""}
-        {pct.toFixed(2)}%
+        {formatFixedSigned(pct, { dp: 2, suffix: "%", plus: true })}
       </span>
     </div>
   );
@@ -2344,13 +2355,10 @@ function EquityChartWidgetInner({
               <span
                 className="text-sm font-semibold tabular-nums"
                 style={{
-                  color:
-                    periodReturn >= 0
-                      ? "var(--color-positive)"
-                      : "var(--color-negative)",
+                  color: toneColor(signTone(periodReturn, 2, 100)),
                 }}
               >
-                {`${periodReturn >= 0 ? "+" : ""}${(periodReturn * 100).toFixed(2)}%`}
+                {formatFixedSigned(periodReturn, { dp: 2, scale: 100, suffix: "%", plus: true })}
               </span>
             </div>
           )}

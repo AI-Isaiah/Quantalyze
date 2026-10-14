@@ -1,14 +1,19 @@
 import type { StrategyAnalytics } from "./types";
+import { formatFixedSigned, isPrintedZero, signTone } from "@/lib/factsheet/display-sign";
 
 export function formatPercent(
   value: number | null | undefined,
   decimals = 2,
   options?: { signed?: boolean },
 ): string {
-  if (value == null || !Number.isFinite(value)) return "—";
-  const signed = options?.signed ?? true;
-  const sign = signed && value >= 0 ? "+" : "";
-  return `${sign}${(value * 100).toFixed(decimals)}%`;
+  // Phase 170.6 D-05: the sign and rounding rule lives in display-sign, not here. A value
+  // that rounds to zero at `decimals` prints unsigned (D-02).
+  return formatFixedSigned(value, {
+    dp: decimals,
+    scale: 100,
+    suffix: "%",
+    plus: options?.signed ?? true,
+  });
 }
 
 const numberFormatters = new Map<number, Intl.NumberFormat>();
@@ -26,7 +31,11 @@ function getNumberFormatter(decimals: number) {
 
 export function formatNumber(value: number | null | undefined, decimals = 2): string {
   if (value == null || !Number.isFinite(value)) return "—";
-  return getNumberFormatter(decimals).format(value);
+  const text = getNumberFormatter(decimals).format(value);
+  // Phase 170.6 D-02 / D-05, detect-only (plan-check W3): the digits stay Intl's, so no
+  // non-zero figure changes. Only a printed zero loses its minus ("-0.00" becomes "0.00");
+  // display-sign owns the "is this a zero" test.
+  return isPrintedZero(text) ? text.replace(/^[-\u2212]/, "") : text;
 }
 
 export function formatCurrency(value: number | null | undefined): string {
@@ -59,14 +68,32 @@ export function formatCurrency(value: number | null | undefined): string {
     if (parseFloat(kStr) >= 1_000) return `$${(value / 1_000_000).toFixed(1)}M`;
     return `$${kStr.endsWith(".0") ? kStr.slice(0, -2) : kStr}K`;
   }
-  // Negative sub-threshold values: render -$500 not $-500.
-  if (value < 0) return `-$${(-value).toFixed(0)}`;
+  // Negative sub-threshold values: render -$500 not $-500. A negative whose printed dollars
+  // are zero (-0.4) is "$0", never "-$0" (Phase 170.6 D-02; display-sign owns the zero test).
+  if (value < 0) {
+    const dollars = (-value).toFixed(0);
+    return isPrintedZero(dollars) ? `$${dollars}` : `-$${dollars}`;
+  }
   return `$${value.toFixed(0)}`;
 }
 
-export function metricColor(value: number | null | undefined): string {
-  if (value == null) return "text-text-muted";
-  return value >= 0 ? "text-positive" : "text-negative";
+/**
+ * Tailwind tone class for a figure. The tone follows the sign of the value ROUNDED to the
+ * `unit` and `dp` it prints at (Phase 170.6 D-03): a ratio that prints `0.00` is neutral,
+ * not red. `unit` is required so every caller states what it prints: "percent" for a
+ * decimal return shown through `formatPercent`, "ratio" for a figure shown through
+ * `formatNumber`. A missing or non-finite value is muted (no value, not a zero).
+ */
+export function metricColor(
+  value: number | null | undefined,
+  unit: "percent" | "ratio",
+  dp = 2,
+): string {
+  if (value == null || !Number.isFinite(value)) return "text-text-muted";
+  const tone = signTone(value, dp, unit === "percent" ? 100 : 1);
+  if (tone === "positive") return "text-positive";
+  if (tone === "negative") return "text-negative";
+  return "text-text-primary";
 }
 
 export function cn(...classes: (string | false | undefined | null)[]): string {

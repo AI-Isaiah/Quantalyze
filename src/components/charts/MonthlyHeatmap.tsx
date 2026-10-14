@@ -1,5 +1,6 @@
 import { Fragment } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
+import { formatUnsignedPercent } from "@/lib/factsheet/display-sign";
 import {
   CHART_AXIS_TICK,
   CHART_NEGATIVE_100,
@@ -109,9 +110,9 @@ export function MonthlyHeatmap({ data }: MonthlyHeatmapProps) {
                     backgroundColor: s.backgroundColor,
                     color: s.color,
                   }}
-                  title={`${(val * 100).toFixed(1)}%`}
+                  title={formatUnsignedPercent(val, 1)}
                 >
-                  {`${(val * 100).toFixed(1)}%`}
+                  {formatUnsignedPercent(val, 1)}
                 </div>
               );
             })}

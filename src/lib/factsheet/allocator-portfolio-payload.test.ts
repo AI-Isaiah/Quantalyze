@@ -280,14 +280,16 @@ describe("buildAllocatorPortfolioFactsheetPayload — the dashboard's BTC closes
   const DAY_MS = 86_400_000;
   const isoDay = (startIso: string, i: number) =>
     new Date(Date.parse(`${startIso}T00:00:00Z`) + i * DAY_MS).toISOString().slice(0, 10);
-  // 60 book returns, 2026-08-01 .. 2026-09-29 ("yesterday" for these cases).
-  const BOOK: DailyReturn[] = Array.from({ length: 60 }, (_, i) => ({
-    date: isoDay("2026-08-01", i),
+  // 101 book returns, 2026-06-21 .. 2026-09-29 ("yesterday" for these cases). 170.6 plan 11 (D-07):
+  // the span is 100 elapsed days, above the 90-day annualization floor, so the BTC comparator's
+  // annualized volatility is still a number here (it was 60 days from 2026-08-01 before).
+  const BOOK: DailyReturn[] = Array.from({ length: 101 }, (_, i) => ({
+    date: isoDay("2026-06-21", i),
     value: 0.002 * Math.sin(i / 3) + 0.0005,
   }));
   // BTC closes from the day before the book's first date through its last.
-  const CLOSES = Array.from({ length: 61 }, (_, i) => ({
-    date: isoDay("2026-07-31", i),
+  const CLOSES = Array.from({ length: 102 }, (_, i) => ({
+    date: isoDay("2026-06-20", i),
     close: 60_000 * (1 + 0.01 * Math.cos(i / 4)),
   }));
   const meta = { allocatorId: "a-1", dailyReturns: BOOK };
@@ -309,7 +311,7 @@ describe("buildAllocatorPortfolioFactsheetPayload — the dashboard's BTC closes
   it("the unavailable marker: the BTC comparator is the unavailable form, never fixture closes", () => {
     // A book dated INSIDE the bundled fixture's range, so a build that ignored
     // the marker would fall back to fixture closes and show a BTC summary.
-    const bookInFixture: DailyReturn[] = BOOK.map((r, i) => ({ ...r, date: isoDay("2026-03-01", i) }));
+    const bookInFixture: DailyReturn[] = BOOK.slice(0, 60).map((r, i) => ({ ...r, date: isoDay("2026-03-01", i) }));
     const withoutOpt = buildAllocatorPortfolioFactsheetPayload([], { allocatorId: "a-1", dailyReturns: bookInFixture });
     expect(withoutOpt!.comparators.btc.summary).not.toBeNull(); // the fixture path this case guards against
     const payload = buildAllocatorPortfolioFactsheetPayload([], {

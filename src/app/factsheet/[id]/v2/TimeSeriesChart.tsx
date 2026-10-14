@@ -8,6 +8,7 @@ import { resolveSeries, type ChartConfig, type ChartValueFormat, type ResolvedSe
 import { trackFactsheetEvent } from "./factsheet-analytics";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { niceStepValues, pow10, tickTolerance } from "@/lib/chart-ticks";
+import { drawdownTone, formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 
 const VB_W = 880;
 const PAD = { top: 20, right: 30, bottom: 24, left: 50 };
@@ -947,10 +948,14 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
                   textAnchor="middle"
                   fontSize={9}
                   fontFamily="var(--font-mono)"
-                  fill="var(--color-negative)"
+                  fill={
+                    drawdownTone(p.depth, 1, 100) === "negative"
+                      ? "var(--color-negative)"
+                      : "var(--color-text-muted)"
+                  }
                   opacity={0.85}
                 >
-                  #{i + 1} {Number.isFinite(p.depth) ? `${(p.depth * 100).toFixed(1)}%` : "—"}
+                  #{i + 1} {formatFixedSigned(p.depth, { dp: 1, scale: 100, suffix: "%" })}
                 </text>
               )}
             </g>
@@ -994,7 +999,9 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
                 fill={series[0].color}
                 fillOpacity={0.75}
               >
-                avg {(config.valueFormat === "percent" ? (avg * 100).toFixed(1) + "%" : avg.toFixed(2))}
+                avg {config.valueFormat === "percent"
+                  ? formatFixedSigned(avg, { dp: 1, scale: 100, suffix: "%" })
+                  : formatFixedSigned(avg, { dp: 2 })}
               </text>
             </g>
           );
@@ -1027,13 +1034,16 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
                   const top = Math.min(baselineY, yV);
                   const h = Math.abs(yV - baselineY);
                   if (h < 0.4) continue;
-                  // Sign-based color: positive teal, negative red. Comparator bars
-                  // stay muted-gray to keep the strategy as the visual focal point.
-                  const fill = sIdx === 0
-                    ? v >= 0
-                      ? "var(--color-positive)"
-                      : "var(--color-negative)"
-                    : "var(--color-text-muted)";
+                  // Sign-based color: positive teal, negative red, taken from the figure the
+                  // tooltip prints (170.6 D-03, O-3), so a bar that reads 0.0% is muted, not
+                  // red or green. Comparator bars stay muted-gray to keep the strategy as the
+                  // visual focal point.
+                  const tone = sIdx === 0 ? valueTone(v, config.valueFormat) : undefined;
+                  const fill = tone === "positive"
+                    ? "var(--color-positive)"
+                    : tone === "negative"
+                      ? "var(--color-negative)"
+                      : "var(--color-text-muted)";
                   bars.push(
                     <rect
                       key={`bar-${sIdx}-${i}`}
@@ -1557,17 +1567,25 @@ function makeXTicks(dates: string[], xStart: number, xEnd: number) {
   return out;
 }
 
+/**
+ * What `formatValue` prints for a chart value format: the quantity (a growth multiple prints its
+ * return, so 1 is subtracted), the precision and the scale. One mapping, so the text and the
+ * bar tone below read the same rounded figure (Phase 170.6 D-02, D-03, D-06).
+ */
+function printedFigure(v: number, format: ChartValueFormat): { v: number; dp: number; scale: number } {
+  if (format === "growth") return { v: v - 1, dp: 1, scale: 100 };
+  if (format === "percent") return { v, dp: 1, scale: 100 };
+  return { v, dp: 2, scale: 1 };
+}
+
 function formatValue(v: number | null | undefined, format: ChartValueFormat): string {
   if (v == null || !Number.isFinite(v)) return "—";
-  if (format === "growth") {
-    const pct = (v - 1) * 100;
-    const sign = pct >= 0 ? "+" : "";
-    return `${sign}${pct.toFixed(1)}%`;
-  }
-  if (format === "percent") {
-    const pct = v * 100;
-    const sign = pct >= 0 ? "+" : "";
-    return `${sign}${pct.toFixed(1)}%`;
-  }
-  return (v >= 0 ? "+" : "") + v.toFixed(2);
+  const f = printedFigure(v, format);
+  return formatFixedSigned(f.v, { dp: f.dp, scale: f.scale, suffix: format === "ratio" ? "" : "%", plus: true });
+}
+
+/** The sign tone of the figure `formatValue` prints for `v`: a rounded zero has none (D-03). */
+function valueTone(v: number, format: ChartValueFormat): "positive" | "negative" | undefined {
+  const f = printedFigure(v, format);
+  return signTone(f.v, f.dp, f.scale);
 }

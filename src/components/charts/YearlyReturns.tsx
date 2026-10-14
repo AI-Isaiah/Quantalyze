@@ -2,10 +2,26 @@
 
 import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis, Cell } from "recharts";
 import { TouchTooltip } from "./TouchTooltip";
-import { CHART_BORDER, CHART_NEGATIVE, CHART_POSITIVE, CHART_TICK_STYLE } from "./chart-tokens";
+import {
+  CHART_BORDER,
+  CHART_NEGATIVE,
+  CHART_POSITIVE,
+  CHART_TEXT_MUTED,
+  CHART_TICK_STYLE,
+} from "./chart-tokens";
+import { formatUnsignedPercent, signTone } from "@/lib/factsheet/display-sign";
 
 interface YearlyReturnsProps {
   monthlyReturns: Record<string, Record<string, number>>;
+}
+
+/**
+ * Bar fill from the sign of the year's return ROUNDED to the 2 dp its tooltip prints (D-03):
+ * a year that prints 0.00% is muted, not red or green.
+ */
+function barFill(value: number): string {
+  const tone = signTone(value, 2, 100);
+  return tone === "positive" ? CHART_POSITIVE : tone === "negative" ? CHART_NEGATIVE : CHART_TEXT_MUTED;
 }
 
 /**
@@ -38,15 +54,15 @@ export function YearlyReturns({ monthlyReturns }: YearlyReturnsProps) {
           tick={CHART_TICK_STYLE}
           tickLine={false}
           axisLine={false}
-          tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
+          tickFormatter={(v: number) => formatUnsignedPercent(v, 0)}
         />
         <TouchTooltip
-          formatter={(v) => [`${(Number(v) * 100).toFixed(2)}%`, "Annual Return"]}
+          formatter={(v) => [formatUnsignedPercent(Number(v), 2), "Annual Return"]}
           contentStyle={{ fontSize: 12, borderColor: CHART_BORDER }}
         />
         <Bar dataKey="value" radius={[4, 4, 0, 0]} barSize={40}>
           {yearly.map((entry, i) => (
-            <Cell key={i} fill={entry.value >= 0 ? CHART_POSITIVE : CHART_NEGATIVE} />
+            <Cell key={i} fill={barFill(entry.value)} />
           ))}
         </Bar>
       </BarChart>

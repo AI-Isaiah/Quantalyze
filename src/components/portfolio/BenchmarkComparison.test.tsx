@@ -120,3 +120,41 @@ describe("<BenchmarkComparison> note colour by meaning", () => {
     expect(screen.getAllByText(formatPercent(null)).length).toBeGreaterThanOrEqual(3);
   });
 });
+
+// Phase 170.6 plan 02 (D-02, D-03, D-05): the comparator panel colours a figure by the
+// sign of the value ROUNDED to the 2 dp it prints, through the one utils tone helper.
+describe("<BenchmarkComparison> rounded-sign tone (170.6 D-03)", () => {
+  function alphaEl(alphaInputs: { portfolio_twr: number; benchmark_twr: number }) {
+    render(
+      <BenchmarkComparison
+        benchmarkComparison={{
+          symbol: "BTC",
+          correlation: 0.5,
+          stale: false,
+          ...alphaInputs,
+        }}
+      />,
+    );
+    return screen.getByText("Alpha").nextElementSibling as HTMLElement;
+  }
+
+  it("an alpha of -0.00004 prints 0.00% and carries neither tone", () => {
+    // 0.1 - 0.10004 = -0.00004 (alpha is the portfolio TWR minus the benchmark TWR).
+    const el = alphaEl({ portfolio_twr: 0.1, benchmark_twr: 0.10004 });
+    expect(el.textContent).toBe("0.00%");
+    expect(el.className).not.toContain("text-negative");
+    expect(el.className).not.toContain("text-positive");
+  });
+
+  it("an alpha of -0.05 prints -5.00% and is red", () => {
+    const neg = alphaEl({ portfolio_twr: 0.1, benchmark_twr: 0.15 });
+    expect(neg.textContent).toBe("-5.00%");
+    expect(neg.className).toContain("text-negative");
+  });
+
+  it("an alpha of +0.05 prints +5.00% and is green", () => {
+    const pos = alphaEl({ portfolio_twr: 0.15, benchmark_twr: 0.1 });
+    expect(pos.textContent).toBe("+5.00%");
+    expect(pos.className).toContain("text-positive");
+  });
+});

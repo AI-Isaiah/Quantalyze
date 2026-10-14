@@ -21,6 +21,7 @@ import { dateMapStrict } from "@/lib/keys";
 // `Redis.fromEnv()` singleton into the bundle for every user.
 import { seamErrorCode, seamHumanMessage } from "@/lib/seam-discriminator";
 import { parseRetryAfterSeconds } from "@/lib/retry";
+import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 
 interface PortfolioImpactPanelProps {
   portfolioId: string;
@@ -565,8 +566,12 @@ function DeltaChipCard({ chip }: { chip: DeltaChip }) {
   const notComputable = chip.value === null;
   // Narrow on chip.value directly (not via !notComputable) so TS strips the
   // `null` from `number | null` — the boolean indirection defeats narrowing.
-  const improving = chip.value !== null && chip.value > 0;
-  const neutral = chip.value !== null && chip.value === 0;
+  // 170.6 D-03: the tone follows the sign of the delta as PRINTED (rounded to the chip's
+  // precision), so a delta shown "0.000" or "0.00%" is neutral rather than red or green.
+  const { dp, scale } = deltaPrecision(chip.format);
+  const tone = signTone(chip.value, dp, scale);
+  const improving = tone === "positive";
+  const neutral = chip.value !== null && tone === undefined;
   const color = notComputable
     ? "text-text-muted"
     : neutral
@@ -607,15 +612,18 @@ function DeltaChipCard({ chip }: { chip: DeltaChip }) {
   );
 }
 
-// NEW-C11-01: null renders as "—" (em dash) — visually distinct from ±0.000
-// so the allocator cannot mistake "not computable" for "no impact."
-function formatDelta(value: number | null, format: "ratio" | "percent"): string {
+// NEW-C11-01: null renders as "—" (em dash), the "not computable" state.
+// 170.6 D-02 (founder, 2026-10-13): a delta that rounds to zero prints UNSIGNED ("0.000" /
+// "0.00%"), replacing the "±" this printed at an exact zero. The "—" for null is unchanged,
+// so "not computable" and "no impact" stay distinct without the "±".
+// The printed precision is one definition, shared by the text and the chip tone below.
+function deltaPrecision(format: "ratio" | "percent"): { dp: number; scale: number; suffix: string } {
+  return format === "percent" ? { dp: 2, scale: 100, suffix: "%" } : { dp: 3, scale: 1, suffix: "" };
+}
+
+export function formatDelta(value: number | null, format: "ratio" | "percent"): string {
   if (value === null) return "—";
-  const sign = value > 0 ? "+" : value < 0 ? "" : "±";
-  if (format === "percent") {
-    return `${sign}${(value * 100).toFixed(2)}%`;
-  }
-  return `${sign}${value.toFixed(3)}`;
+  return formatFixedSigned(value, { ...deltaPrecision(format), plus: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -814,9 +822,12 @@ function formatAnnouncementChip(
 ): string {
   // NEW-C11-01: null delta = not computable, emit a distinct phrase.
   if (value === null) return `${label} not computable`;
-  const direction =
-    value > 0 ? "improved" : value < 0 ? "regressed" : "unchanged";
-  if (value === 0) return `${label} unchanged`;
+  // 170.6 D-03: "improved"/"regressed" is read from the delta as PRINTED, so a delta that
+  // rounds to 0.000 / 0.00% is announced "unchanged", matching the neutral chip.
+  const { dp, scale } = deltaPrecision(format);
+  const tone = signTone(value, dp, scale);
+  const direction = tone === "positive" ? "improved" : tone === "negative" ? "regressed" : "unchanged";
+  if (tone === undefined) return `${label} unchanged`;
   // NEW-C11-07: use Math.abs() so the word ("improved"/"regressed") carries
   // the sign once — "regressed by 0.50%" is unambiguous; "regressed by -0.50%"
   // is a double-negative that screen-reader users hear as an improvement.

@@ -1,5 +1,6 @@
 import { cn, formatPercent } from "@/lib/utils";
 import type { OptimizerSuggestionRow } from "@/lib/types";
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 
 /**
  * `<WhatWedDoCard>` — Moment 3 narrative ("what we'd do in your shoes").
@@ -46,7 +47,7 @@ export function WhatWedDoCard({ suggestions, className }: WhatWedDoCardProps) {
       : null;
   const corrLine =
     corr !== null && Number.isFinite(corr) && corr < 0.3
-      ? `reduce average correlation toward ${corr.toFixed(2)}`
+      ? `reduce average correlation toward ${formatFixedSigned(corr, { dp: 2 })}`
       : null;
   const ddLine =
     top.dd_improvement > 0
@@ -66,7 +67,7 @@ export function WhatWedDoCard({ suggestions, className }: WhatWedDoCardProps) {
       <p className="text-small sm:text-body text-text-secondary leading-relaxed max-w-2xl">
         Add{" "}
         <span className="font-medium text-text-primary">{top.strategy_name}</span>{" "}
-        at a 10% allocation to {why}. Optimizer score {top.score.toFixed(2)} on the
+        at a 10% allocation to {why}. Optimizer score {formatFixedSigned(top.score, { dp: 2 })} on the
         latest run.
       </p>
     </section>

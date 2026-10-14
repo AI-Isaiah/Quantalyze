@@ -1,5 +1,6 @@
 import { type ReactNode } from "react";
-import { cn, formatPercent } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { drawdownTone, formatSignedPercent } from "@/lib/factsheet/display-sign";
 
 /**
  * `<EditorialHero>` — the verdict block at the top of /demo.
@@ -39,9 +40,12 @@ interface MetricCellProps {
   negative?: boolean;
 }
 
+// `negative` means "this cell is a drawdown" (170.6 D-04). A drawdown is red only when it
+// rounds below zero at its printed 2 dp percent; a 0.00% drawdown is not red, and no drawdown
+// is ever green.
 function metricValueClass(value: number | null, negative?: boolean): string {
   if (value == null) return "text-text-muted";
-  if (negative) return "text-negative";
+  if (negative && drawdownTone(value, 2, 100) === "negative") return "text-negative";
   return "text-text-primary";
 }
 
@@ -60,7 +64,7 @@ function MetricCell({ label, value, negative }: MetricCellProps) {
           metricValueClass(value, negative),
         )}
       >
-        {formatPercent(value)}
+        {formatSignedPercent(value, 2)}
       </dd>
     </div>
   );

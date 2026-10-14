@@ -8,6 +8,8 @@ import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { comparatorPartialYear, isoToMonthDay } from "./MetricsColumn";
 import { COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
 import { benchmarkWithheldReason } from "@/lib/factsheet/returns-unit";
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
+import { pctSigned, ratio, signed } from "./format";
 
 /**
  * Three compact analytical panels sharing a common visual language:
@@ -441,7 +443,7 @@ export function CorrelationStripPanel() {
               fontFamily="var(--font-mono)"
               fill="var(--color-text-muted)"
             >
-              {t.toFixed(1)}
+              {formatFixedSigned(t, { dp: 1 })}
             </text>
           </g>
         ))}
@@ -474,7 +476,7 @@ export function CorrelationStripPanel() {
                 fontFamily="var(--font-mono)"
                 fill="var(--color-text-primary)"
               >
-                {signedNum(r.rho)}
+                {signed(r.rho)}
               </text>
             </g>
           );
@@ -621,7 +623,7 @@ export function CorrelationsMatrixPanel() {
                       fill={tint.fg}
                       fontWeight={isDiag ? 600 : 500}
                     >
-                      {Number.isFinite(rho) ? rho.toFixed(2) : "—"}
+                      {ratio(rho)}
                     </text>
                   </g>
                 );
@@ -660,17 +662,4 @@ function mixRgb(a: [number, number, number], b: [number, number, number], t: num
   const g = Math.round(a[1] + (b[1] - a[1]) * t);
   const bl = Math.round(a[2] + (b[2] - a[2]) * t);
   return `rgb(${r}, ${g}, ${bl})`;
-}
-
-/* -------------------- Format helpers -------------------- */
-
-function pctSigned(v: number): string {
-  if (!Number.isFinite(v)) return "—";
-  const x = v * 100;
-  return `${x >= 0 ? "+" : ""}${x.toFixed(1)}%`;
-}
-
-function signedNum(v: number): string {
-  if (!Number.isFinite(v)) return "—";
-  return (v >= 0 ? "+" : "") + v.toFixed(2);
 }

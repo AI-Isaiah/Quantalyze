@@ -290,6 +290,146 @@ describe("computeRegimeChange", () => {
     );
     expect(insight).toBeNull();
   });
+
+  // Phase 170.6 WR-01 (D-02): a leg that collapses to a rounded zero prints "0.00",
+  // never "-0.00". The expected sentences are typed by hand.
+  it("prints a negative recent average that rounds to zero as 0.00, never -0.00", () => {
+    const series = [
+      { date: "1", value: 0.62 },
+      { date: "2", value: 0.62 },
+      { date: "3", value: 0.62 },
+      { date: "4", value: 0.62 },
+      { date: "5", value: 0.62 },
+      { date: "6", value: -0.003 },
+      { date: "7", value: -0.003 },
+      { date: "8", value: -0.003 },
+      { date: "9", value: -0.003 },
+      { date: "10", value: -0.003 },
+    ];
+    const insight = computeRegimeChange(
+      buildAnalytics({ rolling_correlation: { "a:b": series } }),
+      { window: 5, minDelta: 0.15 },
+    );
+    expect(insight?.sentence).toBe(
+      "Correlation regime shift: pairwise correlation loosened from 0.62 to 0.00 between two strategies in your portfolio.",
+    );
+  });
+
+  // Phase 170.6 R2-SFH-3 + R3-SFH-2: a bad point (NaN, undefined or, as JSON delivers a NaN,
+  // null) is EXCLUDED from both the sum and the count of its window, so one bad point never
+  // moves an average. `null` used to coerce to 0 and dilute the average into a manufactured
+  // "regime shift"; NaN used to make the whole average NaN and print "from — to 0.62". A pair
+  // is skipped only when a window has no valid point left (uncomputable metrics are null, never
+  // invented). Expected values are typed by hand.
+  describe("a series with a bad point (R2-SFH-3, R3-SFH-2)", () => {
+    const toPoints = (values: unknown[]) =>
+      values.map((value, i) => ({ date: String(i + 1), value: value as number }));
+    const healthy = (v1: number, v2: number) =>
+      toPoints([v1, v1, v1, v1, v1, v2, v2, v2, v2, v2]);
+    const opts = { window: 5, minDelta: 0.15 };
+
+    it.each([
+      ["NaN", Number.NaN],
+      ["undefined", undefined],
+      ["null", null],
+    ])("a %s point is excluded: the other four 0.62 points average to 0.62", (_name, bad) => {
+      const insight = computeRegimeChange(
+        buildAnalytics({
+          rolling_correlation: { "a:b": toPoints([0.1, 0.1, 0.1, 0.1, 0.1, 0.62, bad, 0.62, 0.62, 0.62]) },
+        }),
+        opts,
+      );
+      expect(insight?.sentence).toBe(
+        "Correlation regime shift: pairwise correlation tightened from 0.10 to 0.62 between two strategies in your portfolio.",
+      );
+      expect(insight?.sentence).not.toContain("—");
+    });
+
+    it("a null point does not count as correlation 0 (the diluted 0.40 would be wrong; the answer is 0.50)", () => {
+      const insight = computeRegimeChange(
+        buildAnalytics({
+          rolling_correlation: { "a:b": toPoints([0.1, 0.1, 0.1, 0.1, 0.1, 0.5, 0.5, null, 0.5, 0.5]) },
+        }),
+        opts,
+      );
+      expect(insight?.sentence).toBe(
+        "Correlation regime shift: pairwise correlation tightened from 0.10 to 0.50 between two strategies in your portfolio.",
+      );
+    });
+
+    it("a null point in the PRIOR window leaves its average at the valid points too", () => {
+      const insight = computeRegimeChange(
+        buildAnalytics({
+          rolling_correlation: { "a:b": toPoints([0.3, 0.3, null, 0.3, 0.3, 0.7, 0.7, 0.7, 0.7, 0.7]) },
+        }),
+        opts,
+      );
+      expect(insight?.sentence).toBe(
+        "Correlation regime shift: pairwise correlation tightened from 0.30 to 0.70 between two strategies in your portfolio.",
+      );
+    });
+
+    it("three null points that would manufacture a shift build no insight: 0.3 flat is flat, not 0.12 vs 0.3", () => {
+      const insight = computeRegimeChange(
+        buildAnalytics({
+          rolling_correlation: { "a:b": toPoints([0.3, 0.3, 0.3, 0.3, 0.3, null, null, null, 0.3, 0.3]) },
+        }),
+        opts,
+      );
+      expect(insight).toBeNull();
+    });
+
+    it.each([
+      ["null", null],
+      ["NaN", Number.NaN],
+      ["undefined", undefined],
+    ])("a window with no valid point left (all %s) skips the pair, and a healthy pair still wins", (_name, bad) => {
+      const insight = computeRegimeChange(
+        buildAnalytics({
+          rolling_correlation: {
+            "c:d": toPoints([0.9, 0.9, 0.9, 0.9, 0.9, bad, bad, bad, bad, bad]),
+            "a:b": healthy(0.1, 0.5),
+          },
+        }),
+        opts,
+      );
+      expect(insight?.sentence).toBe(
+        "Correlation regime shift: pairwise correlation tightened from 0.10 to 0.50 between two strategies in your portfolio.",
+      );
+    });
+
+    it("a lone pair whose recent window is entirely bad builds no insight", () => {
+      const insight = computeRegimeChange(
+        buildAnalytics({
+          rolling_correlation: { "a:b": toPoints([0.5, 0.5, 0.5, 0.5, 0.5, null, null, null, null, null]) },
+        }),
+        opts,
+      );
+      expect(insight).toBeNull();
+    });
+  });
+
+  it("keeps the minus on a negative figure that does not round to zero", () => {
+    const series = [
+      { date: "1", value: 0.3 },
+      { date: "2", value: 0.3 },
+      { date: "3", value: 0.3 },
+      { date: "4", value: 0.3 },
+      { date: "5", value: 0.3 },
+      { date: "6", value: -0.25 },
+      { date: "7", value: -0.25 },
+      { date: "8", value: -0.25 },
+      { date: "9", value: -0.25 },
+      { date: "10", value: -0.25 },
+    ];
+    const insight = computeRegimeChange(
+      buildAnalytics({ rolling_correlation: { "a:b": series } }),
+      { window: 5, minDelta: 0.15 },
+    );
+    expect(insight?.sentence).toBe(
+      "Correlation regime shift: pairwise correlation loosened from 0.30 to -0.25 between two strategies in your portfolio.",
+    );
+  });
 });
 
 describe("computeUnderperformance", () => {

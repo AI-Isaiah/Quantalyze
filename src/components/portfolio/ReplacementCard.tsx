@@ -4,6 +4,7 @@ import { useState, useCallback } from "react";
 import type { BridgeCandidate, BridgeFitLabel, Improvement } from "@/lib/types";
 import { asImprovement } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 
 const FIT_STYLES: Record<BridgeFitLabel, string> = {
   "Strong fit": "bg-positive/10 text-positive",
@@ -12,26 +13,38 @@ const FIT_STYLES: Record<BridgeFitLabel, string> = {
   "Weak fit": "bg-badge-other/10 text-badge-other",
 };
 
+// 170.6 D-02/D-03/D-05: the printed precision of each delta, shared by the text and the tone
+// so the colour is read from the same rounded value the label prints. MaxDD and Corr are
+// fractions shown as a 1 dp percent; Sharpe is a unitless 2 dp delta.
+function deltaPrecision(label: string): { dp: number; scale: number; suffix: string } {
+  return label === "MaxDD" || label === "Corr"
+    ? { dp: 1, scale: 100, suffix: "%" }
+    : { dp: 2, scale: 1, suffix: "" };
+}
+
 // NEW-C21-02: color driven by Improvement brand — positive = improvement = green,
 // regardless of which field this is. No invertedBetter table needed.
 // 166.1 D7 (founder 2026-09-26): a null delta does not exist, so it carries no
 // semantic color (DESIGN.md: a "—" cell never carries a semantic color).
-function deltaColor(improvement: Improvement | null): string {
+// 170.6 D-03: the tone follows the sign of the ROUNDED delta, so a delta printed "0.00" or
+// "0.0%" is neutral rather than green or red.
+function deltaColor(improvement: Improvement | null, label: string): string {
   if (improvement === null) return "text-text-muted";
-  return improvement >= 0 ? "text-positive" : "text-negative";
+  const { dp, scale } = deltaPrecision(label);
+  const tone = signTone(improvement, dp, scale);
+  if (tone === "positive") return "text-positive";
+  if (tone === "negative") return "text-negative";
+  return "text-text-primary";
 }
 
 // Format for display using the RAW delta value (for correct magnitude/sign in label)
 // and label for unit formatting. The Improvement brand is for coloring only.
 // A null delta renders "— {label}", never "+0.00" (166.1 D7; round-1 SFH HIGH-2:
 // a flat leg's undefined delta used to arrive as 0.0 and read as "unchanged").
+// 170.6 D-02: a delta that rounds to zero prints unsigned ("0.00 Sharpe", "0.0% MaxDD").
 function formatDelta(raw: number | null, label: string): string {
   if (raw === null) return `— ${label}`;
-  const sign = raw >= 0 ? "+" : "";
-  if (label === "MaxDD" || label === "Corr") {
-    return `${sign}${(raw * 100).toFixed(1)}% ${label}`;
-  }
-  return `${sign}${raw.toFixed(2)} ${label}`;
+  return `${formatFixedSigned(raw, { ...deltaPrecision(label), plus: true })} ${label}`;
 }
 
 interface ReplacementCardProps {
@@ -71,7 +84,7 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           strategy_id: candidate.strategy_id,
-          message: `[Bridge] Replacement candidate for strategy ${replacementFor}. Composite score: ${candidate.composite_score.toFixed(2)}.`,
+          message: `[Bridge] Replacement candidate for strategy ${replacementFor}. Composite score: ${formatFixedSigned(candidate.composite_score, { dp: 2 })}.`,
           source: "bridge",
           replacement_for: replacementFor,
         }),
@@ -141,7 +154,7 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
             key={d.label}
             className={cn(
               "font-metric text-caption tabular-nums",
-              deltaColor(d.improvement),
+              deltaColor(d.improvement, d.label),
             )}
           >
             {formatDelta(d.raw, d.label)}

@@ -8,6 +8,7 @@ import { Disclaimer } from "@/components/ui/Disclaimer";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Button } from "@/components/ui/Button";
 import { formatPercent, formatNumber, metricColor } from "@/lib/utils";
+import { drawdownTone } from "@/lib/factsheet/display-sign";
 // User-gated private note card on the factsheet, rendered between the
 // sparkline card and the CTA card.
 import { createClient } from "@/lib/supabase/server";
@@ -149,22 +150,25 @@ export default async function PublicStrategyPage({
               <MetricCard
                 label="CAGR"
                 value={formatPercent(analytics.cagr)}
-                colorClass={metricColor(analytics.cagr)}
+                colorClass={metricColor(analytics.cagr, "percent")}
               />
               <MetricCard
                 label="Sharpe Ratio"
                 value={formatNumber(analytics.sharpe)}
-                colorClass={metricColor(analytics.sharpe)}
+                colorClass={metricColor(analytics.sharpe, "ratio")}
               />
               <MetricCard
                 label="Sortino Ratio"
                 value={formatNumber(analytics.sortino)}
-                colorClass={metricColor(analytics.sortino)}
+                colorClass={metricColor(analytics.sortino, "ratio")}
               />
               <MetricCard
                 label="Max Drawdown"
                 value={formatPercent(analytics.max_drawdown)}
-                colorClass="text-negative"
+                colorClass={
+                  // D-03/D-04: red only when the ROUNDED drawdown is below zero; never green.
+                  drawdownTone(analytics.max_drawdown, 2, 100) === "negative" ? "text-negative" : "text-text-primary"
+                }
               />
               <MetricCard
                 label="Volatility"
@@ -173,7 +177,7 @@ export default async function PublicStrategyPage({
               <MetricCard
                 label="Cumulative Return"
                 value={formatPercent(analytics.cumulative_return)}
-                colorClass={metricColor(analytics.cumulative_return)}
+                colorClass={metricColor(analytics.cumulative_return, "percent")}
               />
             </div>
 

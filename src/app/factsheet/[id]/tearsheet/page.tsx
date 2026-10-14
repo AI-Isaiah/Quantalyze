@@ -4,6 +4,7 @@ import { getFactsheetDetail, getPercentiles } from "@/lib/queries";
 import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { formatPercent, formatNumber } from "@/lib/utils";
+import { formatUnsignedPercent, signTone } from "@/lib/factsheet/display-sign";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
@@ -483,7 +484,9 @@ export default async function TearSheetPage({
         <HeroMetric
           label="Max DD"
           value={unitUndetermined ? WITHHELD : formatPercent(analytics.max_drawdown)}
-          danger
+          // Phase 170.6 D-03, D-04: red only when the drawdown ROUNDS below zero at the 2 dp
+          // it prints; a 0.00% or a withheld drawdown is not a loss.
+          danger={!unitUndetermined && signTone(analytics.max_drawdown, 2, 100) === "negative"}
         />
       </section>
 
@@ -585,18 +588,23 @@ export default async function TearSheetPage({
                       <td className="py-1 pr-2 font-medium text-text-primary">{year}</td>
                       {MONTHS.map((mm) => {
                         const val = (months as Record<string, number>)[mm];
+                        // Phase 170.6 D-02, D-03: print and colour through the one rule at the
+                        // 1 dp the cell shows; a month that rounds to 0.0% is unsigned, neutral.
+                        const tone = signTone(val, 1, 100);
                         return (
                           <td
                             key={mm}
                             className={`py-1 px-1 text-right font-metric ${
                               val == null
                                 ? "text-text-muted"
-                                : val >= 0
+                                : tone === "positive"
                                   ? "text-positive"
-                                  : "text-negative"
+                                  : tone === "negative"
+                                    ? "text-negative"
+                                    : "text-text-primary"
                             }`}
                           >
-                            {val != null ? `${(val * 100).toFixed(1)}%` : ""}
+                            {val != null ? formatUnsignedPercent(val, 1) : ""}
                           </td>
                         );
                       })}

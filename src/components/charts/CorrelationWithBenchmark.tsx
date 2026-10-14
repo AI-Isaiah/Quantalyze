@@ -10,6 +10,7 @@ import {
   YAxis,
 } from "recharts";
 import { TouchTooltip } from "./TouchTooltip";
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import type { StrategyAnalytics } from "@/lib/types";
 import {
   CORRELATION_90D_MIN_DAYS,
@@ -252,14 +253,14 @@ export function CorrelationWithBenchmark({
           tick={CHART_TICK_STYLE}
           tickLine={false}
           axisLine={false}
-          tickFormatter={(v: number) => v.toFixed(1)}
+          tickFormatter={(v: number) => formatFixedSigned(v, { dp: 1 })}
         />
         <ReferenceLine y={0} stroke={CHART_TEXT_MUTED} strokeDasharray={CHART_REFERENCE_DASH} />
         <TouchTooltip
           contentStyle={{ fontSize: 12, borderColor: CHART_BORDER }}
           formatter={(v) => {
-            const n = Number(v);
-            return [Number.isFinite(n) ? n.toFixed(3) : "—", "90d correlation"];
+            // A non-finite value prints the dash (formatFixedSigned's own non-finite form).
+            return [formatFixedSigned(Number(v), { dp: 3 }), "90d correlation"];
           }}
         />
         <Line

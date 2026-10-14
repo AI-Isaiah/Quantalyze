@@ -14,12 +14,25 @@ import {
   YAxis,
 } from "recharts";
 import { TouchTooltip } from "@/components/charts/TouchTooltip";
+import { formatUnsignedPercent } from "@/lib/factsheet/display-sign";
 import {
   CHART_BORDER,
   CHART_NEGATIVE,
   CHART_TICK_STYLE,
   CHART_TOOLTIP_STYLE,
 } from "@/components/charts/chart-tokens";
+
+/**
+ * Y-axis tick and tooltip text, lifted to named exports so a test can read them (Recharts
+ * does not render ticks or tooltips in jsdom). Phase 170.6 (D-02): a drawdown that rounds
+ * to zero prints unsigned ("0%", "0.00%"), through the one rule in display-sign.
+ */
+export function formatDrawdownTick(v: number): string {
+  return formatUnsignedPercent(v, 0);
+}
+export function formatDrawdownTooltip(v: unknown): string {
+  return formatUnsignedPercent(Number(v), 2);
+}
 
 /**
  * Phase 07 / 07-03 / VOICES-ACCEPTED f7 — parallel-prop extension to
@@ -240,11 +253,11 @@ export default function DrawdownChart({
               tick={CHART_TICK_STYLE}
               tickLine={false}
               axisLine={false}
-              tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
+              tickFormatter={formatDrawdownTick}
               domain={["dataMin", 0]}
             />
             <TouchTooltip
-              formatter={(v) => [`${(Number(v) * 100).toFixed(2)}%`, "Drawdown"]}
+              formatter={(v) => [formatDrawdownTooltip(v), "Drawdown"]}
               contentStyle={CHART_TOOLTIP_STYLE}
             />
             {visibilityMode !== "scenario" && liveDrawdownData.length > 0 && (

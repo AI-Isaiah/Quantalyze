@@ -6,6 +6,7 @@ import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { useTapPin } from "@/hooks/useTapPin";
 import { decimalExponent, pow10 } from "@/lib/chart-ticks";
+import { pct, pctSigned, ratio } from "./format";
 
 /**
  * Three analytical panels rounding out the v2 page:
@@ -331,9 +332,9 @@ export function CalmarByYearPanel() {
                     </span>
                   )}
                 </td>
-                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{pctSigned(r.ret)}</td>
-                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{pct(r.max_dd)}</td>
-                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{num(r.calmar)}</td>
+                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{pctSigned(r.ret, 2)}</td>
+                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{pct(r.max_dd, 2)}</td>
+                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{ratio(r.calmar)}</td>
                 <td className="py-1 pl-2 text-right font-mono tabular-nums text-text-2">{r.days}</td>
               </tr>
             );
@@ -404,9 +405,9 @@ export function BootstrapCIPanel() {
           </tr>
         </thead>
         <tbody>
-          <Row label="Sharpe" point={num(b.sharpe.point)} ci={`[${num(b.sharpe.lo)}, ${num(b.sharpe.hi)}]`} />
-          <Row label="Sortino" point={num(b.sortino.point)} ci={`[${num(b.sortino.lo)}, ${num(b.sortino.hi)}]`} />
-          <Row label="Max Drawdown" point={pct(b.max_dd.point)} ci={`[${pct(b.max_dd.lo)}, ${pct(b.max_dd.hi)}]`} />
+          <Row label="Sharpe" point={ratio(b.sharpe.point)} ci={`[${ratio(b.sharpe.lo)}, ${ratio(b.sharpe.hi)}]`} />
+          <Row label="Sortino" point={ratio(b.sortino.point)} ci={`[${ratio(b.sortino.lo)}, ${ratio(b.sortino.hi)}]`} />
+          <Row label="Max Drawdown" point={pct(b.max_dd.point, 2)} ci={`[${pct(b.max_dd.lo, 2)}, ${pct(b.max_dd.hi, 2)}]`} />
         </tbody>
       </table>
 
@@ -414,9 +415,9 @@ export function BootstrapCIPanel() {
           density, not just the CI bounds. Sharpe = primary (accent), Sortino
           + Max-DD stacked below in muted tones. */}
       <div className="mt-3 flex flex-col gap-2.5">
-        <BootHist title="Sharpe" hist={b.sharpe.hist} point={b.sharpe.point} ci={[b.sharpe.lo, b.sharpe.hi]} fmt={n => n.toFixed(2)} nValid={sharpeUsed} nTotal={b.n_resamples} accent />
-        <BootHist title="Sortino" hist={b.sortino.hist} point={b.sortino.point} ci={[b.sortino.lo, b.sortino.hi]} fmt={n => n.toFixed(2)} nValid={sortinoUsed} nTotal={b.n_resamples} />
-        <BootHist title="Max DD" hist={b.max_dd.hist} point={b.max_dd.point} ci={[b.max_dd.lo, b.max_dd.hi]} fmt={n => `${(n * 100).toFixed(1)}%`} />
+        <BootHist title="Sharpe" hist={b.sharpe.hist} point={b.sharpe.point} ci={[b.sharpe.lo, b.sharpe.hi]} fmt={n => ratio(n)} nValid={sharpeUsed} nTotal={b.n_resamples} accent />
+        <BootHist title="Sortino" hist={b.sortino.hist} point={b.sortino.point} ci={[b.sortino.lo, b.sortino.hi]} fmt={n => ratio(n)} nValid={sortinoUsed} nTotal={b.n_resamples} />
+        <BootHist title="Max DD" hist={b.max_dd.hist} point={b.max_dd.point} ci={[b.max_dd.lo, b.max_dd.hi]} fmt={n => pct(n)} />
       </div>
 
       {!withheld && (
@@ -567,19 +568,4 @@ function Row({ label, point, ci }: { label: string; point: string; ci: string })
       <td className="py-1 pl-2 text-right font-mono tabular-nums text-text-2">{ci}</td>
     </tr>
   );
-}
-
-function pct(v: number): string {
-  if (!Number.isFinite(v)) return "—";
-  return `${(v * 100).toFixed(2)}%`;
-}
-
-function pctSigned(v: number): string {
-  if (!Number.isFinite(v)) return "—";
-  return (v >= 0 ? "+" : "") + (v * 100).toFixed(2) + "%";
-}
-
-function num(v: number): string {
-  if (!Number.isFinite(v)) return "—";
-  return v.toFixed(2);
 }

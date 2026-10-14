@@ -191,13 +191,13 @@ export function StrategyGrid({
               <div className="flex items-center justify-between border-t border-border pt-2.5 min-h-[44px]">
                 <div className="text-xs">
                   <span className="text-text-muted">Return </span>
-                  <span className={`font-metric font-medium ${metricColor(s.analytics.cumulative_return)}`}>
+                  <span className={`font-metric font-medium ${metricColor(s.analytics.cumulative_return, "percent")}`}>
                     {formatPercent(s.analytics.cumulative_return)}
                   </span>
                 </div>
                 <div className="text-xs">
                   <span className="text-text-muted">CAGR </span>
-                  <span className={`font-metric font-medium ${metricColor(s.analytics.cagr)}`}>
+                  <span className={`font-metric font-medium ${metricColor(s.analytics.cagr, "percent")}`}>
                     {formatPercent(s.analytics.cagr)}
                   </span>
                 </div>

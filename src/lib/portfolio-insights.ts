@@ -12,6 +12,7 @@
  * "No unusual activity" empty-state copy.
  */
 
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import type { PortfolioAnalytics } from "./types";
 
 export type InsightSeverity = "high" | "medium" | "low";
@@ -55,6 +56,21 @@ function formatPct0(n: number): string {
 
 function average(values: number[]): number {
   return values.reduce((sum, v) => sum + v, 0) / values.length;
+}
+
+/**
+ * The finite values of a window of points. R3-SFH-2: a `null` (how JSON delivers a NaN the
+ * analytics side wrote), an `undefined` or a NaN point is NOT a measurement. It is dropped
+ * from the sum AND the count, so it can neither count as 0 (`sum + null`) nor turn the
+ * whole average into NaN: one bad point does not move an average.
+ */
+function finiteValues(points: { value: number }[]): number[] {
+  const out: number[] = [];
+  for (const p of points) {
+    const v: unknown = p.value;
+    if (typeof v === "number" && Number.isFinite(v)) out.push(v);
+  }
+  return out;
 }
 
 /**
@@ -135,8 +151,15 @@ export function computeRegimeChange(
   let best: { delta: number; recent: number; prior: number } | null = null;
   for (const series of Object.values(analytics.rolling_correlation)) {
     if (series.length < window * 2) continue;
-    const recent = average(series.slice(-window).map((p) => p.value));
-    const prior = average(series.slice(-window * 2, -window).map((p) => p.value));
+    // R2-SFH-3 / R3-SFH-2: a bad point is excluded from its window (see finiteValues). The
+    // length rule above stays on the raw series; a pair is skipped only when a window has no
+    // valid point left, so no average is ever built from nothing and no "from — to …" card
+    // is invented. A healthy pair elsewhere in the portfolio can still win.
+    const recentValues = finiteValues(series.slice(-window));
+    const priorValues = finiteValues(series.slice(-window * 2, -window));
+    if (recentValues.length === 0 || priorValues.length === 0) continue;
+    const recent = average(recentValues);
+    const prior = average(priorValues);
     const delta = Math.abs(recent - prior);
     if (best == null || delta > best.delta) {
       best = { delta, recent, prior };
@@ -153,7 +176,7 @@ export function computeRegimeChange(
   return {
     key: "regime_change",
     severity: "medium",
-    sentence: `Correlation regime shift: pairwise correlation ${direction} from ${best.prior.toFixed(2)} to ${best.recent.toFixed(2)} between two strategies in your portfolio.`,
+    sentence: `Correlation regime shift: pairwise correlation ${direction} from ${formatFixedSigned(best.prior, { dp: 2 })} to ${formatFixedSigned(best.recent, { dp: 2 })} between two strategies in your portfolio.`,
   };
 }
 

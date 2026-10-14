@@ -3,6 +3,7 @@
 // (D-14) because the cron failed or the delta column is still null.
 
 import { formatPercent } from "./utils";
+import { signTone } from "@/lib/factsheet/display-sign";
 import {
   REJECTION_REASON_LABELS,
   mostMatureDelta,
@@ -42,10 +43,10 @@ function diffInDays(todayIso: string, anchorIso: string): number {
   return Math.max(0, Math.floor((t - a) / (24 * 60 * 60 * 1000)));
 }
 
+// Phase 170.6 W-A (D-02, D-03): the label prints `formatPercent(…, 1)`, so the tone is
+// decided at that 1 dp percent precision. A delta that prints 0.0% is neutral.
 function toneOf(ratio: number): "positive" | "negative" | "neutral" {
-  if (ratio > 0) return "positive";
-  if (ratio < 0) return "negative";
-  return "neutral";
+  return signTone(ratio, 1, 100) ?? "neutral";
 }
 
 export function deriveOutcomeLabel(input: OutcomeLabelInput): OutcomeLabel {

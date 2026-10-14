@@ -2,6 +2,7 @@
 
 import { Line, LineChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
 import { TouchTooltip } from "./TouchTooltip";
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import {
   CHART_ACCENT,
   CHART_BORDER,
@@ -18,7 +19,7 @@ interface RollingSortinoChartProps {
  *
  * Single-line Recharts wrapper. Identical structure to
  * RollingVolatilityChart but Y-axis renders as a unitless ratio
- * (`v.toFixed(2)`) — Sortino is a ratio, not a percent. Returns `null`
+ * (2 dp, through the shared sign rule) — Sortino is a ratio, not a percent. Returns `null`
  * on empty data.
  */
 export function RollingSortinoChart({ data }: RollingSortinoChartProps) {
@@ -39,11 +40,11 @@ export function RollingSortinoChart({ data }: RollingSortinoChartProps) {
             tick={CHART_TICK_STYLE}
             tickLine={false}
             axisLine={false}
-            tickFormatter={(v: number) => v.toFixed(2)}
+            tickFormatter={(v: number) => formatFixedSigned(v, { dp: 2 })}
           />
           <TouchTooltip
             contentStyle={CHART_TOOLTIP_STYLE}
-            formatter={(v) => [Number(v).toFixed(2), "Sortino"]}
+            formatter={(v) => [formatFixedSigned(Number(v), { dp: 2 }), "Sortino"]}
           />
           <Line
             type="monotone"

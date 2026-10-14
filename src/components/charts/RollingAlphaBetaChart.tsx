@@ -10,6 +10,7 @@ import {
   YAxis,
 } from "recharts";
 import { TouchTooltip } from "./TouchTooltip";
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import {
   CHART_ACCENT,
   CHART_BORDER,
@@ -85,11 +86,11 @@ export function RollingAlphaBetaChart({
             tick={CHART_TICK_STYLE}
             tickLine={false}
             axisLine={false}
-            tickFormatter={(v: number) => v.toFixed(2)}
+            tickFormatter={(v: number) => formatFixedSigned(v, { dp: 2 })}
           />
           <TouchTooltip
             contentStyle={CHART_TOOLTIP_STYLE}
-            formatter={(v, name) => [Number(v).toFixed(3), String(name)]}
+            formatter={(v, name) => [formatFixedSigned(Number(v), { dp: 3 }), String(name)]}
           />
           <Legend />
           {hasAlpha && (

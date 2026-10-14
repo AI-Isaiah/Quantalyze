@@ -7,6 +7,7 @@ import { computeVaR, computeExpectedShortfall } from "@/lib/portfolio-stats";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
 import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 import { formatPercent } from "@/lib/utils";
+import { signTone } from "@/lib/factsheet/display-sign";
 
 // ---------------------------------------------------------------------------
 // VaR & Expected Shortfall Widget
@@ -29,6 +30,15 @@ const ZONE_COLORS = {
   yellow: "#CA8A04",
   red: "#DC2626",
 } as const;
+
+/**
+ * Phase 170.6 (D-03, W-B): a VaR / CVaR figure is red only when the value it PRINTS (`formatPercent`,
+ * 2 dp) rounds below zero. A positive or rounded-zero figure takes the neutral primary text colour
+ * (DESIGN.md `--color-text-primary`), not green: a positive VaR is not a gain to celebrate.
+ */
+function figureColor(v: number): string {
+  return signTone(v, 2, 100) === "negative" ? ZONE_COLORS.red : "var(--color-text-primary)";
+}
 
 function VarExpectedShortfallInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
   const { var95, var99, es95, zone } = useMemo(() => {
@@ -68,7 +78,7 @@ function VarExpectedShortfallInner({ data }: { data: RiskWidgetData } & BaseWidg
         <div className="text-center">
           <div
             className="font-metric text-xl tabular-nums"
-            style={{ color: "#DC2626" }}
+            style={{ color: figureColor(var95) }}
           >
             {formatPercent(var95)}
           </div>
@@ -82,7 +92,7 @@ function VarExpectedShortfallInner({ data }: { data: RiskWidgetData } & BaseWidg
         <div className="text-center">
           <div
             className="font-metric text-xl tabular-nums"
-            style={{ color: "#DC2626" }}
+            style={{ color: figureColor(var99) }}
           >
             {formatPercent(var99)}
           </div>
@@ -96,7 +106,7 @@ function VarExpectedShortfallInner({ data }: { data: RiskWidgetData } & BaseWidg
         <div className="text-center">
           <div
             className="font-metric text-xl tabular-nums"
-            style={{ color: "#DC2626" }}
+            style={{ color: figureColor(es95) }}
           >
             {formatPercent(es95)}
           </div>

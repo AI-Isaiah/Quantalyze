@@ -205,7 +205,10 @@ describe("deriveOutcomeLabel", () => {
     expect(result).toEqual({ label: "Pending", value: "Pending", tone: "neutral" });
   });
 
-  it("case 13 — 30-day exact zero: +0.0% tone=neutral (D-13)", () => {
+  // Phase 170.6 D-02 (founder, 2026-10-13: a rounded zero "prints unsigned ... `+0.0%` never
+  // appear[s]") supersedes D-13's "+" sign on a rounded zero. The tone half of D-13 (neutral)
+  // is unchanged. This case pinned "30-day: +0.0%".
+  it("case 13 — 30-day exact zero: 0.0% tone=neutral (D-13 tone, D-02 unsigned)", () => {
     const result = deriveOutcomeLabel({
       kind: "allocated",
       allocated_at: daysAgo(45),
@@ -218,7 +221,52 @@ describe("deriveOutcomeLabel", () => {
       created_at: daysAgo(45),
       today: TODAY,
     });
-    expect(result).toEqual({ label: "30-day", value: "30-day: +0.0%", tone: "neutral" });
+    expect(result).toEqual({ label: "30-day", value: "30-day: 0.0%", tone: "neutral" });
+  });
+
+  // Phase 170.6 W-A (D-02, D-03): the tone follows the sign of the value printed at 1 dp,
+  // not the raw sign. OutcomeRecordedRow draws tone "negative" as text-negative.
+  function thirtyDay(delta: number) {
+    return deriveOutcomeLabel({
+      kind: "allocated",
+      allocated_at: daysAgo(45),
+      delta_30d: delta,
+      delta_90d: null,
+      delta_180d: null,
+      estimated_delta_bps: null,
+      estimated_days: null,
+      needs_recompute: false,
+      created_at: daysAgo(45),
+      today: TODAY,
+    });
+  }
+
+  it("W-A — 30-day -0.0004 prints 0.0% and is neutral, not a red -0.0%", () => {
+    expect(thirtyDay(-0.0004)).toEqual({ label: "30-day", value: "30-day: 0.0%", tone: "neutral" });
+  });
+
+  it("W-A — 30-day +0.0004 prints 0.0% and is neutral, not a green +0.0%", () => {
+    expect(thirtyDay(0.0004)).toEqual({ label: "30-day", value: "30-day: 0.0%", tone: "neutral" });
+  });
+
+  it("W-A — 30-day -0.0006 prints -0.1% and is negative", () => {
+    expect(thirtyDay(-0.0006)).toEqual({ label: "30-day", value: "30-day: -0.1%", tone: "negative" });
+  });
+
+  it("W-A — 90-day +4.3% stays positive", () => {
+    const result = deriveOutcomeLabel({
+      kind: "allocated",
+      allocated_at: daysAgo(90),
+      delta_30d: null,
+      delta_90d: 0.043,
+      delta_180d: null,
+      estimated_delta_bps: null,
+      estimated_days: null,
+      needs_recompute: false,
+      created_at: daysAgo(90),
+      today: TODAY,
+    });
+    expect(result).toEqual({ label: "90-day", value: "90-day: +4.3%", tone: "positive" });
   });
 
   it("case 14 — 180-day double-digit negative: -15.0%", () => {

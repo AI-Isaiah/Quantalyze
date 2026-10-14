@@ -205,6 +205,56 @@ describe("TradeAndPositionPanel — Phase 14b-04 Task 2", () => {
     void container;
   });
 
+  it("Test 5c (170.6-14, D-02, D-03): Expectancy -0.004 prints 0.00 and is not flagged negative; SQN -0.5 prints -0.50 and is", () => {
+    const { container } = render(
+      <TradeAndPositionPanel
+        strategyId="s1"
+        trade_metrics={{ ...TM_FULL, expectancy: -0.004, sqn: -0.5 }}
+      />,
+    );
+    const cellFor = (label: string) =>
+      Array.from(container.querySelectorAll("dt")).find(
+        (el) => el.textContent === label,
+      )!.nextElementSibling as HTMLElement;
+    const expectancy = cellFor("Expectancy");
+    expect(expectancy.textContent).toBe("0.00");
+    expect(expectancy.className).not.toContain("text-negative");
+    const sqn = cellFor("SQN");
+    expect(sqn.textContent).toBe("-0.50");
+    expect(sqn.className).toContain("text-negative");
+  });
+
+  it("Test 5d (170.6-14, D-02, D-03): R:R and Weighted R:R that round to zero print 0.00 and are not flagged negative", () => {
+    const { container } = render(
+      <TradeAndPositionPanel
+        strategyId="s1"
+        trade_metrics={{
+          ...TM_FULL,
+          risk_reward_ratio: -0.004,
+          weighted_risk_reward_ratio: -0.0049,
+        }}
+      />,
+    );
+    for (const label of ["R:R", "Weighted R:R"]) {
+      const cell = Array.from(container.querySelectorAll("dt")).find(
+        (el) => el.textContent === label,
+      )!.nextElementSibling as HTMLElement;
+      expect(cell.textContent, label).toBe("0.00");
+      expect(cell.className, label).not.toContain("text-negative");
+    }
+  });
+
+  it("Test 5e (170.6-14, D-02): a Win rate of -0.0004 prints 0.0% with no minus", () => {
+    render(
+      <TradeAndPositionPanel
+        strategyId="s1"
+        trade_metrics={{ ...TM_FULL, win_rate: -0.0004 }}
+      />,
+    );
+    expect(screen.queryByText("-0.0%")).toBeNull();
+    expect(screen.getAllByText("0.0%").length).toBeGreaterThanOrEqual(1);
+  });
+
   it("Test 5b: Risk-Reward — null values render em-dash", () => {
     const tmNull = {
       ...TM_FULL,

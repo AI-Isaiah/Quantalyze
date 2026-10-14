@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { normalizeDailyReturns, type DailyPoint } from "@/lib/portfolio-math-utils";
 import { pearson } from "@/lib/return-stats";
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
 import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 
@@ -234,9 +235,9 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
                         minWidth: 40,
                         borderRadius: 2,
                       }}
-                      aria-label={`${names[i].name} and ${names[j].name}: ${val.toFixed(2)} correlation`}
+                      aria-label={`${names[i].name} and ${names[j].name}: ${formatFixedSigned(val, { dp: 2 })} correlation`}
                     >
-                      {val.toFixed(2)}
+                      {formatFixedSigned(val, { dp: 2 })}
                     </td>
                   ),
                 )}

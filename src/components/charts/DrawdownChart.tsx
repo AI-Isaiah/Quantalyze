@@ -2,6 +2,7 @@
 
 import { Area, AreaChart, Line, ResponsiveContainer, XAxis, YAxis } from "recharts";
 import { TouchTooltip } from "./TouchTooltip";
+import { formatUnsignedPercent } from "@/lib/factsheet/display-sign";
 import {
   CHART_ACCENT,
   CHART_BORDER,
@@ -82,12 +83,12 @@ export function DrawdownChart({ data, benchmarkSeries }: DrawdownChartProps) {
           tick={CHART_TICK_STYLE}
           tickLine={false}
           axisLine={false}
-          tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
+          tickFormatter={(v: number) => formatUnsignedPercent(v, 0)}
           domain={["dataMin", 0]}
         />
         <TouchTooltip
           formatter={(v, name) => [
-            `${(Number(v) * 100).toFixed(2)}%`,
+            formatUnsignedPercent(Number(v), 2),
             name === "benchmarkDrawdown" ? "BTC" : "Drawdown",
           ]}
           contentStyle={{ fontSize: 12, borderColor: CHART_BORDER }}

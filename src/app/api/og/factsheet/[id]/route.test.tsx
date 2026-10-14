@@ -373,6 +373,30 @@ describe("GET /api/og/factsheet/[id]", () => {
     expect(strings).toContain("-8.9%");
   });
 
+  it("O1d-170.6 — D-02, D-06: a persisted Sharpe of -0.004 prints 0.00 on the card, never -0.00", async () => {
+    // Same fixture shape as O1d; only the stored Sharpe differs. The card's Sharpe
+    // stat used a bare toFixed(2), which prints "-0.00" for a value that rounds to zero.
+    STATE.strategyRow!.strategy_analytics = [
+      {
+        daily_returns: null,
+        returns_series: LONG_WEALTH_INDEX,
+        computation_status: "complete",
+        sharpe: -0.004,
+        cagr: 0.567,
+        max_drawdown: -0.089,
+      },
+    ];
+    const { GET } = await import("./route");
+    await GET(makeRequest(), ctx(PUBLISHED_ID));
+
+    expect(headlineCalls).toHaveLength(1);
+    expect(headlineCalls[0].persisted).toMatchObject({ sharpe: -0.004 });
+
+    const strings = latestCardStrings();
+    expect(strings).toContain("0.00");
+    expect(strings).not.toContain("-0.00");
+  });
+
   it("O1e — review round 1 CR-01: a chain-broken row's stored CAGR is hidden on the card; Sharpe and Max DD still show", async () => {
     // Same stored figures as O1d, plus the flag the analytics service stamps
     // when the stored CAGR covers only the suffix after an interior TWR chain

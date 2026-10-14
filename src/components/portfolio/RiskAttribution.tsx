@@ -3,6 +3,7 @@
 import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
 import { TouchTooltip } from "@/components/charts/TouchTooltip";
 import { formatPercent, STRATEGY_PALETTE } from "@/lib/utils";
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 
 interface RiskAttributionProps {
   /**
@@ -33,6 +34,14 @@ interface RiskAttributionProps {
 /** The producer's percent (0 to 100) as `formatPercent`'s fraction; null stays null. */
 function percentToFraction(pct: number | null): number | null {
   return pct === null ? null : pct / 100;
+}
+
+/**
+ * The stacked bar's tooltip value: a risk share as a 1 dp percent. The share is SIGNED (a
+ * hedge's is negative), so a share that rounds to zero must print unsigned.
+ */
+export function formatRiskShareTooltip(v: unknown): string {
+  return formatFixedSigned(Number(v), { dp: 1, scale: 100, suffix: "%" });
 }
 
 export function RiskAttribution({ data }: RiskAttributionProps) {
@@ -70,7 +79,7 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
           <XAxis type="number" hide domain={[0, 1]} />
           <YAxis type="category" dataKey="label" hide />
           <TouchTooltip
-            formatter={(v, name) => [`${(Number(v) * 100).toFixed(1)}%`, name]}
+            formatter={(v, name) => [formatRiskShareTooltip(v), name]}
             contentStyle={{ fontSize: 12, borderColor: "#E2E8F0", borderRadius: 6 }}
           />
           {data.map((d, i) => (
