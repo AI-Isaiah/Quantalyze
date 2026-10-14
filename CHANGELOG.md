@@ -18,6 +18,9 @@ Phase 164.6.8, plan 09. Bookkeeping only: no application code, no migration, no 
 - Not seen live, and said so in each closure: a real stale `cron_sync` heartbeat, a stalled backfill queue, a dark validation terminal, a non-`scrubbed` scrub row, and a heal tick owing a relaunch debt on a busy lease. Those arms are proven by the SQL gate's RED-UNDER twins and by the plan 06 and 07 neuter cycles, and the route to a human by the drill.
 - The old prober issue (#773) is still open; the last prober runs succeeded but the first clean full run after the incident code merged has not happened yet, so its auto-close is pending, not failed.
 
+### Notes
+- **Phase 164.9.8.1 PYXDIST is booked and started** (founder 2026-10-14). The `python` CI job (18-20 min per PR, about 15 of it serial pytest) moves to `-n auto --dist loadgroup` once the Phase 97 fence flake and the limiter-identity flake are reproduced or ruled out. It runs outside the in-flight phase limit. The ROADMAP entry and the STATE roadmap-evolution line only.
+
 ## [0.131.8.1] - 2026-10-14 — BASELINE: automated re-dump after the PROD apply of ad6bf65b
 
 ### Changed
