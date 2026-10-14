@@ -8,6 +8,7 @@
 - Migrations the dump newly carries, from the marker diff: `20261013120000_strategy_analytics_hold_computed_at_until_success.sql`.
 - `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-13` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.131.2.0 → 0.131.2.1.
 - The gates on the composed tree, verbatim: `baseline-currency: carried=296 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 127 — MATCH 124, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+- `scripts/dump-sql-functions.ts`: the Phase 166.3.1 NAVBREACH `NAME_SET_RATCHET` row for `strategy_analytics_hold_computed_at_until_success` (`snapshot-only`, captured 2026-10-13) is deleted. The function is now in the dump, which was the row's own clearing condition, and the snapshot gate on this PR named it `ratchet-stale`.
 
 ### Notes
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38465831758` succeeded, and this entry was composed by the `redump-pr` job. Run `38465831758` is the provenance anchor.
