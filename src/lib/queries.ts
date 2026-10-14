@@ -4,7 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { castRow } from "@/lib/supabase/cast";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
-import { extractAnalytics, EMPTY_ANALYTICS, seriesEndOf } from "./utils";
+import { extractAnalytics, EMPTY_ANALYTICS, seriesEndOf, isUuid } from "./utils";
 import {
   blendPeriodsPerYear,
   deriveEmptySeriesState,
@@ -35,7 +35,7 @@ import {
   type V2JointStatus,
 } from "@/lib/factsheet/v2-joint";
 import type { BenchmarkPricesOpt } from "@/lib/factsheet/types";
-import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
+import { API_KEY_USER_COLUMNS, STRATEGY_PUBLIC_COLUMNS, type ApiKeyUserColumn } from "./constants";
 import {
   buildDateMapCache,
   computeScenario,
@@ -388,6 +388,28 @@ export const COMPARE_ANALYTICS_COLUMNS =
 export const CATEGORY_RANKING_ANALYTICS_COLUMNS =
   "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date, native_unit:data_quality_flags->>native_unit, trades_fetched_at";
 
+/**
+ * Phase 170.6.1.1 (ANONKEYID) review round 1 (WR-01, SFH-1, SFH-2). The three
+ * anonymous strategies readers share ONE failure contract: a read error is
+ * reported to Sentry and THROWN, so the route's error boundary engages. It is
+ * never folded into the value a page renders as a normal state (an empty
+ * category, a 404). After PR-B revokes the anon column grants a 42501 here is an
+ * expected failure class, and the outage must be loud rather than look like "no
+ * strategies" or "no such strategy". Callers handle the legitimate not-found
+ * case (PGRST116) BEFORE calling this.
+ */
+function failAnonRead(op: string, subject: string, error: { code?: string; message?: string }): never {
+  console.error(`[queries.${op}] supabase error:`, error.message ?? error);
+  captureToSentry(error, { tags: { op, code: error.code ?? "none" }, level: "error" });
+  throw new Error(`${op}(${subject}) failed: ${error.message ?? "unknown error"}`);
+}
+
+/**
+ * Reads the ranked list for a category. Anonymous visitors reach this through
+ * /browse/[slug], so the strategies half of the select is `STRATEGY_PUBLIC_COLUMNS`:
+ * anon will hold no SELECT on `api_key_id` (Phase 170.6.1.1), so this projection must
+ * never become a wildcard again.
+ */
 export async function getStrategiesByCategory(categorySlug: string): Promise<RankedStrategyRow[]> {
   const supabase = await createClient();
 
@@ -409,15 +431,12 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Ran
     supabase
       .from("strategies")
       .select(
-        `*, discovery_categories!inner(slug), strategy_analytics (${CATEGORY_RANKING_ANALYTICS_COLUMNS})`,
+        `${STRATEGY_PUBLIC_COLUMNS}, discovery_categories!inner(slug), strategy_analytics (${CATEGORY_RANKING_ANALYTICS_COLUMNS})`,
       )
       .eq("discovery_categories.slug", categorySlug),
   );
 
-  if (error) {
-    console.error("Strategy query failed:", error.message);
-    return [];
-  }
+  if (error) failAnonRead("getStrategiesByCategory", categorySlug, error);
 
   if (!strategies || strategies.length === 0) return [];
 
@@ -1237,12 +1256,21 @@ export async function readPublicVerificationSignals(
   return byStrategy;
 }
 
+/**
+ * Anonymous visitors reach this through /browse/[slug]/[strategyId] and /strategy/[id],
+ * so the strategies half of the select is `STRATEGY_PUBLIC_COLUMNS`: anon will hold no
+ * SELECT on `api_key_id` (Phase 170.6.1.1), so this projection must never become a
+ * wildcard again.
+ */
 export async function getPublicStrategyDetail(strategyId: string): Promise<{
   strategy: Strategy;
   analytics: ReturnType<typeof extractAnalytics>;
   manager: ManagerIdentity | null;
   disclosureTier: DisclosureTier;
 } | null> {
+  // A malformed id is "no such strategy" (a 404), never an outage: strategies.id is
+  // uuid, so querying it would answer 22P02 and page Sentry on every probe.
+  if (!isUuid(strategyId)) return null;
   const supabase = await createClient();
 
   // Phase 15 / CSV-03 + QA report 2026-05-21 ISSUE-007: the public factsheet
@@ -1259,14 +1287,17 @@ export async function getPublicStrategyDetail(strategyId: string): Promise<{
   const { data: strategy, error } = await withPublishedOnly(
     supabase
       .from("strategies")
-      .select(`*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS})`)
+      .select(`${STRATEGY_PUBLIC_COLUMNS}, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS})`)
       .eq("id", strategyId),
   )
     .single<Strategy & {
       strategy_analytics: { daily_returns?: unknown; computed_at: string | null; computation_status: string | null } | null;
     }>();
 
-  if (error || !strategy) return null;
+  // PGRST116 = .single() found no published row: the legitimate not-found.
+  // Anything else (42501 after the ANONKEYID grants, timeout, 5xx) is an outage.
+  if (error && error.code !== "PGRST116") failAnonRead("getPublicStrategyDetail", strategyId, error);
+  if (!strategy) return null;
 
   const verificationSignals = await readPublicVerificationSignals([strategyId]);
   const strategyWithTier: Strategy = {
@@ -1298,25 +1329,36 @@ export async function getPublicStrategyDetail(strategyId: string): Promise<{
   };
 }
 
+/**
+ * Anonymous visitors reach this through /factsheet/[id]/tearsheet, so the strategies half
+ * of the select is `STRATEGY_PUBLIC_COLUMNS`: anon will hold no SELECT on `api_key_id`
+ * (Phase 170.6.1.1), so this projection must never become a wildcard again.
+ */
 export async function getFactsheetDetail(strategyId: string): Promise<{
   strategy: Strategy & { discovery_categories?: { slug: string } | null };
   analytics: StrategyAnalytics;
   manager: ManagerIdentity | null;
   disclosureTier: DisclosureTier;
 } | null> {
+  // A malformed id is "no such strategy" (a 404), never an outage: strategies.id is
+  // uuid, so querying it would answer 22P02 and page Sentry on every probe.
+  if (!isUuid(strategyId)) return null;
   const supabase = await createClient();
 
   const { data: strategy, error } = await withPublishedOnly(
     supabase
       .from("strategies")
       .select(
-        `*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS}, monthly_returns, metrics_json), discovery_categories (slug)`,
+        `${STRATEGY_PUBLIC_COLUMNS}, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS}, monthly_returns, metrics_json), discovery_categories (slug)`,
       )
       .eq("id", strategyId),
   )
     .single<Strategy & { discovery_categories: { slug: string } | null; strategy_analytics: { daily_returns?: unknown; computed_at: string | null; computation_status: string | null; monthly_returns?: unknown; metrics_json?: unknown } | null }>();
 
-  if (error || !strategy) return null;
+  // PGRST116 = .single() found no published row: the legitimate not-found.
+  // Anything else (42501 after the ANONKEYID grants, timeout, 5xx) is an outage.
+  if (error && error.code !== "PGRST116") failAnonRead("getFactsheetDetail", strategyId, error);
+  if (!strategy) return null;
 
   const analytics = extractAnalytics(strategy.strategy_analytics);
   if (!analytics) return null;

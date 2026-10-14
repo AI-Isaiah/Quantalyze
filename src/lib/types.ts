@@ -156,7 +156,8 @@ export interface Strategy {
   id: string;
   user_id: string;
   category_id: string | null;
-  api_key_id: string | null;
+  // Optional: anon-safe projections (STRATEGY_PUBLIC_COLUMNS) omit it.
+  api_key_id?: string | null;
   name: string;
   description: string | null;
   strategy_types: string[];

@@ -63,12 +63,12 @@ export default async function PublicStrategyDetailPage({
             <h1 className="text-2xl font-bold text-text-primary">
               {displayName}
             </h1>
-            {strategy.api_key_id && (
-              <VerifiedBadge
-                trustTier={strategy.trust_tier}
-                className="text-accent"
-              />
-            )}
+            {/* Phase 170.6.1.1 (census G): follows the public trust tier,
+                not api_key_id, which public rows no longer carry. */}
+            <VerifiedBadge
+              trustTier={strategy.trust_tier}
+              className="text-accent"
+            />
           </div>
           <div className="flex gap-1.5 mt-2">
             {strategy.strategy_types?.map((t: string) => (

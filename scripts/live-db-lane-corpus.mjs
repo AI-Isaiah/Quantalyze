@@ -93,8 +93,14 @@ const SPEC_SUFFIX = /\.test\.tsx?$/;
  * after `src/__tests__/factsheet-buildable-live-db.test.ts` joined it, and the
  * contract test's stale-low arm went RED at 4 files of headroom. Pinned 3 under
  * the measured corpus, the same distance as the 2026-09-21 pin.
+ *
+ * RAISED 47 -> 48 on 2026-10-14 (Phase 170.6.1.1 plan 01): the corpus MEASURED 51
+ * (`node scripts/live-db-lane-corpus.mjs` printed `corpus: 51 file(s)`) after
+ * `src/lib/anon-strategies-live-probe.test.ts` joined it, and the contract test's
+ * stale-low arm went RED at 4 files of headroom (the old floor of 47, max 3).
+ * Pinned 3 under the measured corpus, the same distance as the two earlier pins.
  */
-export const CORPUS_FLOOR = 47;
+export const CORPUS_FLOOR = 48;
 
 /**
  * Every test file under `root` whose source references the live-DB gate symbol,

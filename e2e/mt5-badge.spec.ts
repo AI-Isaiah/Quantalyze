@@ -20,8 +20,11 @@
  *   - OWNER ("both" role): the manager /strategies/[id]/edit surface (the MT5
  *     tag) AND the public factsheet /strategy/[id] (the badge).
  *   - ALLOCATOR (the SAME "both" user): the /browse/<slug>/<id> discovery
- *     presentation, whose VerifiedBadge is gated on strategy.api_key_id (the
- *     seed links the mt5 key, so it renders).
+ *     presentation, whose VerifiedBadge follows the public trust tier
+ *     (trust_tier = api_verified, from get_published_trust_signals) since
+ *     Phase 170.6.1.1, because public rows no longer carry api_key_id (the
+ *     seed still links the mt5 key: owner surfaces and the key-scope badge
+ *     read it).
  *   - ADMIN (a separate is_admin-elevated session): a NON-owner viewer reads the
  *     same seeded mt5 strategy's api_verified tier through the public factsheet.
  *   - ANON (logged-out): the /strategy/[id] factsheet is publicly viewable and
@@ -165,7 +168,8 @@ test.describe("Plan 138-03 — connected-MT5 badge + tag (MT5UI-02)", () => {
 
     // The browse detail page fetches the strategy by id (getPublicStrategyDetail)
     // — category membership is not required for the direct-id route. Its
-    // VerifiedBadge is gated on strategy.api_key_id, which the seed links.
+    // VerifiedBadge follows the public trust tier (trust_tier = api_verified)
+    // since Phase 170.6.1.1; the seed's api_verified verification drives it.
     await page.goto(`/browse/crypto-sma/${seeded.strategyId}`);
     await expect(
       page.locator("h1").first(),

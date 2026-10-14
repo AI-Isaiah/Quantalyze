@@ -562,7 +562,7 @@ describe("getStrategyDetail — RANK-02 caller-scoped analytics projection", () 
    */
   it("public variant stays in lockstep with the anon factsheet projection", async () => {
     const detail = await captureEmbed(() => getStrategyDetail("strat_123"));
-    const factsheet = await captureEmbed(() => getPublicStrategyDetail("strat_123"));
+    const factsheet = await captureEmbed(() => getPublicStrategyDetail("11111111-1111-4111-8111-111111111111"));
     const members = (embed: string) =>
       embed.split(",").map((c) => c.trim()).sort();
     expect(members(detail.embed).length).toBeGreaterThan(0);
@@ -580,7 +580,7 @@ describe("PUBLIC_ANALYTICS_COLUMNS — the trade fetch time reaches every anon s
   const members = (embed: string) => embed.split(",").map((c) => c.trim());
 
   it("getPublicStrategyDetail projects trades_fetched_at", async () => {
-    const { cols, embed } = await captureEmbed(() => getPublicStrategyDetail("strat_123"));
+    const { cols, embed } = await captureEmbed(() => getPublicStrategyDetail("11111111-1111-4111-8111-111111111111"));
     expect(members(embed)).toContain("trades_fetched_at");
     expect(cols).not.toContain("series_provenance");
   });
@@ -659,7 +659,7 @@ describe("getPublicStrategyDetail — disclosure tier redaction", () => {
     };
     recorders.managerRowData = fullManagerRow;
 
-    const result = await getPublicStrategyDetail("strat_123");
+    const result = await getPublicStrategyDetail("11111111-1111-4111-8111-111111111111");
 
     expect(result).not.toBeNull();
     expect(result!.disclosureTier).toBe("exploratory");
@@ -675,7 +675,7 @@ describe("getPublicStrategyDetail — disclosure tier redaction", () => {
     };
     recorders.managerRowData = fullManagerRow;
 
-    const result = await getPublicStrategyDetail("strat_123");
+    const result = await getPublicStrategyDetail("11111111-1111-4111-8111-111111111111");
 
     expect(result!.disclosureTier).toBe("institutional");
     expect(result!.manager).toEqual({

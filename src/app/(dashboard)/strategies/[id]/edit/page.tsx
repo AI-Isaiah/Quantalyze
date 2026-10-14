@@ -160,7 +160,7 @@ export default async function EditStrategyPage({
             <>
               <ApiKeyManager
                 strategyId={strategy.id}
-                currentKeyId={strategy.api_key_id}
+                currentKeyId={strategy.api_key_id ?? null}
                 defaultExchange={strategy.supported_exchanges?.[0]?.toLowerCase()}
                 keyShape={keyShape}
                 compositeMemberKeyIds={compositeMemberKeyIds}
