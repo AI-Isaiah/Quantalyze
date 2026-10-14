@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.131.4.1] - 2026-10-14 — BASELINE: automated re-dump after the PROD apply of 7579622c
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38548221327`, after the PROD apply of merge `7579622c`: sha256 `17a51332…` → `a28e44f7…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 127 → 128, distinct function names 125 → 126, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261014120000_api_keys_history_reconstruct_marker.sql`, `20261014120100_log_audit_event_deny_worker_only_actions.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-14` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.131.4.0 → 0.131.4.1 (re-picked after COPYPASS #1023 merged first).
+- The gates on the composed tree, verbatim: `baseline-currency: carried=298 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 128 — MATCH 125, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+- `scripts/dump-sql-functions.ts`: the Phase 167.1.2.1 RECONMARKER `NAME_SET_RATCHET` row for `backfill_api_keys_history_reconstructed_at` (`snapshot-only`, captured 2026-10-13) is deleted. The function is now in the dump, which was the row's own clearing condition.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38548221327` succeeded, and this entry was composed by the `redump-pr` job. Run `38548221327` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.131.4.0] - 2026-10-14 — COPYPASS: the unset-mandate header and the rebuilding panel say what is true, the anonymous /browse page stops flashing example rows, and the admin Kind filter lists the kinds that have jobs
 
 Phase 170.6.2, one PR, plans 01 to 04 plus one review fix round. Split out of 170.6 DISPLAYPOLISH on 2026-10-13 (founder, "Split in three"), with every decision D-01 to D-07 accepted as recommended. **No migration, no new table, no schema change.** Nothing under `supabase/` moves, and no PROD row is written.
