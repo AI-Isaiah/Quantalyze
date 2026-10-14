@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.131.7.1] - 2026-10-14 — BASELINE: automated re-dump after the PROD apply of fc040995
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38621573993`, after the PROD apply of merge `fc040995`: sha256 `2e32e2d7…` → `a53d0e6f…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 129 → 130, distinct function names 127 → 128, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261020120000_ops_staleness_check.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-14` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.131.7.0 → 0.131.7.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=300 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 130 — MATCH 127, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38621573993` succeeded, and this entry was composed by the `redump-pr` job. Run `38621573993` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.131.7.0] - 2026-10-14 — OUTAGEALERT: a shared terminal MT5 outage, a stalled trade sync or backfill, and a prober incident each reach a human, once, and say when it ends
 
 63 commits since the merge-base with `origin/main` (49 non-merge and 14 merge commits, counting the first release commit `ba46df3b5` and the test fix `155234c1f`), plus a second release commit that only maps those two, grouped by theme below. Every commit maps to a bullet; the map is the hash in parentheses. The release was first cut as v0.131.5.0 (`aad5ffc12`); `origin/main` then took ANONKEYID, DISCOVERYPHONE, the baseline re-dump and a records PR (v0.131.5.2), so this entry replaces that cut and the version is re-picked as the next minor above main, a new capability. The migration is stamped `20261020120000` (re-picked above every in-flight stamp, `20261019120000` included, from `git for-each-ref` and the open worktrees on 2026-10-14; it was `20261015120000` while the phase was on its branch). Re-checked at release time against a freshly fetched `origin/main`: its highest stamp is `20261019120000`, so this migration sorts after every file on main.

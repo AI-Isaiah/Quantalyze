@@ -392,26 +392,9 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  {
-    name: "ops_staleness_check",
-    side: "snapshot-only",
-    capturedAt: "2026-10-13",
-    clearedBy:
-      "a regeneration of supabase/schema/baseline.sql taken AFTER " +
-      "20261020120000_ops_staleness_check.sql has applied to PROD (Phase " +
-      "164.6.8 OUTAGEALERT ships the reader ahead of the baseline re-dump, " +
-      "which is a later plan of that phase). The function lands in PROD's " +
-      "catalogue at merge, via apply-test then the automatic PROD apply, " +
-      "independent of the go-live runbook step that registers it with " +
-      "pg_cron.",
-    reason:
-      "Phase 164.6.8 plan 02 ships public.ops_staleness_check() in a forward " +
-      "migration. supabase/schema/baseline.sql is a dated PROD dump (see " +
-      "supabase/schema/BASELINE.md) that predates this migration, so the " +
-      "function exists in the migration-replay snapshot and not yet in the " +
-      "baseline until the next refresh (the Phase 167.1.2.2.2 cron_sync_tick " +
-      "and 164.1.1 precedent).",
-  },
+  // ⭐ 2026-10-14: the Phase 164.6.8 OUTAGEALERT row (`ops_staleness_check`,
+  // `snapshot-only`, captured 2026-10-13) was DELETED on the re-dump taken
+  // after 20261020120000 applied to PROD, its own clearing condition.
   // ⭐ 2026-10-14: the Phase 170.6.1 DISCOVERYPHONE row (`get_published_
   // trade_venues`, `snapshot-only`, captured 2026-10-14) was DELETED on the
   // re-dump taken after 20261019120000 applied to PROD, its own clearing

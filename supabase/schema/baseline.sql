@@ -7821,6 +7821,237 @@ COMMENT ON FUNCTION "public"."match_engine_cron_tick"() IS 'Phase 164.7 / SC-2 /
 
 
 
+CREATE OR REPLACE FUNCTION "public"."ops_staleness_check"() RETURNS bigint
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $_$
+DECLARE
+  -- ══════════════════════════════════════════════════════════════════════
+  -- THE CONSTANTS. Each is declared ONCE, here. Every other reference in this
+  -- tree is by SYMBOL, never by a restated value ([164.7-CITATION-DRIFT-01]).
+  -- ══════════════════════════════════════════════════════════════════════
+  -- D-11: the TODOS gate value, and the same ceiling as D-05 of 167.1.2.2.2.
+  c_cron_sync_ceiling CONSTANT INTERVAL := '2 days';
+  -- Pinned to main_worker.BACKFILL_KINDS by the parity test.
+  c_backfill_kinds CONSTANT TEXT[] := ARRAY['derive_broker_dailies','derive_allocator_equity'];
+  -- The largest watchdog threshold over c_backfill_kinds (see the header).
+  c_backfill_ceiling CONSTANT INTERVAL := '30 minutes';
+  -- Source: the `interval` default of main_worker.watchdog_loop (60.0 seconds).
+  c_watchdog_interval CONSTANT INTERVAL := '60 seconds';
+
+  v_cs_last       TIMESTAMPTZ;
+  v_cs_errs       INTEGER;
+  v_cs_cause      TEXT;
+  v_cs_gap        BIGINT;
+  v_bf_last_claim TIMESTAMPTZ;
+  v_bf_waiting    BOOLEAN;
+  v_bf_stuck      BOOLEAN;
+  v_bf_cause      TEXT;
+  v_bf_gap        BIGINT;
+  v_posts         BIGINT := 0;
+
+  -- The Vault + system_settings + pg_net read, copied from cron_sync_tick().
+  v_key TEXT;
+  v_cnt INTEGER;
+  v_url TEXT;
+  v_req BIGINT;
+  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b). BYTE-IDENTICAL to the CHECK
+  --    constraint's expression on system_settings and to the constant in
+  --    cron_sync_tick() and match_engine_cron_tick().
+  c_url_allowed CONSTANT TEXT :=
+    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
+BEGIN
+  -- ----- ARM 1: the cron_sync heartbeat --------------------------------
+  -- Narrowed by cron_name, and by a CLOSED row: a heartbeat is a completed run.
+  SELECT max(r.completed_at) INTO v_cs_last
+    FROM public.cron_runs r
+   WHERE r.cron_name = 'cron_sync'
+     AND r.completed_at IS NOT NULL;
+
+  -- How many of the TWO newest closed rows are `error`. Zero rows counts 0.
+  SELECT count(*) FILTER (WHERE t.status = 'error') INTO v_cs_errs
+    FROM (
+      SELECT r.status
+        FROM public.cron_runs r
+       WHERE r.cron_name = 'cron_sync'
+         AND r.completed_at IS NOT NULL
+       ORDER BY r.completed_at DESC
+       LIMIT 2
+    ) t;
+
+  -- ⛔ THE NULL LEG IS WRITTEN FIRST AND EXPLICITLY. An absent heartbeat is the
+  -- LOUDEST signal (the sync has never run), and a bare interval comparison
+  -- against NULL yields NULL, which every IF in plpgsql treats as FALSE, i.e.
+  -- reports healthy. That silent-healthy shape is the defect class this phase
+  -- exists to remove.
+  IF v_cs_last IS NULL THEN
+    v_cs_cause := 'never_ran';
+  ELSIF v_cs_last < now() - c_cron_sync_ceiling THEN
+    v_cs_cause := 'heartbeat_stale';
+  ELSIF v_cs_errs >= 2 THEN
+    v_cs_cause := 'two_consecutive_errors';
+  END IF;
+
+  -- A DURATION in whole minutes, null when the sync never ran.
+  v_cs_gap := CASE
+                WHEN v_cs_last IS NULL THEN NULL
+                ELSE floor(extract(epoch FROM (now() - v_cs_last)) / 60)::BIGINT
+              END;
+
+  -- ----- ARM 2: the backfill queue -------------------------------------
+  -- The newest claim over the backfill kinds, any status: a claim is the proof
+  -- a worker is alive. Null when none was ever claimed.
+  SELECT max(j.claimed_at) INTO v_bf_last_claim
+    FROM public.compute_jobs j
+   WHERE j.kind = ANY (c_backfill_kinds);
+
+  -- An ELIGIBLE job is one the worker could claim now and has not, for longer
+  -- than the ceiling. `done_pending_children` is waiting on a parent, not on a
+  -- worker, so it is not eligible.
+  SELECT EXISTS (
+           SELECT 1
+             FROM public.compute_jobs j
+            WHERE j.kind = ANY (c_backfill_kinds)
+              AND j.status IN ('pending', 'failed_retry')
+              AND j.next_attempt_at <= now() - c_backfill_ceiling
+         ) INTO v_bf_waiting;
+
+  -- A running job past the ceiling PLUS one watchdog tick: the watchdog should
+  -- already have reclaimed it.
+  SELECT EXISTS (
+           SELECT 1
+             FROM public.compute_jobs j
+            WHERE j.kind = ANY (c_backfill_kinds)
+              AND j.status = 'running'
+              AND j.claimed_at < now() - (c_backfill_ceiling + c_watchdog_interval)
+         ) INTO v_bf_stuck;
+
+  IF v_bf_waiting
+     AND (v_bf_last_claim IS NULL OR v_bf_last_claim < now() - c_backfill_ceiling) THEN
+    v_bf_cause := 'backfill_queue_stalled';
+  ELSIF v_bf_stuck THEN
+    v_bf_cause := 'backfill_running_stuck';
+  END IF;
+
+  v_bf_gap := CASE
+                WHEN v_bf_last_claim IS NULL THEN NULL
+                ELSE floor(extract(epoch FROM (now() - v_bf_last_claim)) / 60)::BIGINT
+              END;
+
+  -- ----- THE OBSERVER'S OWN ROW, BEFORE any outbound call --------------
+  INSERT INTO public.cron_runs (cron_name, started_at, completed_at, status, error, metadata)
+  VALUES (
+    'ops_staleness_check',
+    now(),
+    now(),
+    CASE WHEN v_cs_cause IS NOT NULL OR v_bf_cause IS NOT NULL THEN 'error' ELSE 'ok' END,
+    CASE
+      WHEN v_cs_cause IS NOT NULL OR v_bf_cause IS NOT NULL
+        THEN format('ops_staleness_check: cron_sync=%s backfill=%s',
+                    COALESCE(v_cs_cause, 'ok'), COALESCE(v_bf_cause, 'ok'))
+      ELSE NULL
+    END,
+    jsonb_build_object(
+      'cron_sync_cause', v_cs_cause,
+      'cron_sync_gap_minutes', v_cs_gap,
+      'backfill_cause', v_bf_cause,
+      'backfill_gap_minutes', v_bf_gap
+    )
+  );
+
+  -- Healthy on both arms: nothing to page.
+  IF v_cs_cause IS NULL AND v_bf_cause IS NULL THEN
+    RETURN 0;
+  END IF;
+
+  -- ----- A page is due: resolve the key and the destination ------------
+  -- THE VAULT READ — ONE statement, count and value off the SAME scan. Not
+  -- `INTO STRICT`: STRICT would replace the by-name absent-key message with a
+  -- generic P0002.
+  SELECT count(*), max(decrypted_secret) INTO v_cnt, v_key
+    FROM vault.decrypted_secrets
+   WHERE name = 'analytics_service_key';
+  IF v_cnt > 1 THEN
+    RAISE EXCEPTION 'analytics_service_key is not unique in vault (% rows) — refusing to pick one', v_cnt;
+  END IF;
+  IF v_key IS NULL OR btrim(v_key) = '' THEN
+    RAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';
+  END IF;
+
+  SELECT s.value INTO v_url
+    FROM public.system_settings s
+   WHERE s.key = 'analytics_service_url';
+  IF v_url IS NULL OR v_url = '' THEN
+    RAISE EXCEPTION 'analytics_service_url missing from system_settings — refusing to post to a null url';
+  END IF;
+
+  -- ⛔ AND IT MUST BE A DESTINATION THE ALLOW-LIST PERMITS (T-164.7-06, layer
+  -- (b)). This re-test is the last thing between an admin-writable row and a
+  -- live service key in an outbound header.
+  --
+  -- ⚠️ THE MESSAGE DOES NOT ECHO THE OFFENDING URL. RAISE text lands in the cron
+  -- job-run row, the Postgres log and whatever ships those onward; echoing an
+  -- attacker-chosen string writes their collector's hostname into every
+  -- downstream reader. Name the SETTING, never its value (T-161.1-10).
+  IF v_url !~ c_url_allowed THEN
+    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';
+  END IF;
+
+  -- ⚠️ net.http_post is ASYNC. The BIGINT it returns is a REQUEST ID, not an HTTP
+  -- status. NOTHING below is wrapped in an exception handler that swallows: if
+  -- net.http_post is absent or errors, this function RAISES and the tick is red.
+  -- An alarm that catches its own delivery failure and returns normally reports
+  -- success for a message nobody received.
+  IF v_cs_cause IS NOT NULL THEN
+    SELECT net.http_post(
+             url := v_url || '/api/prober-cadence-alert',
+             headers := jsonb_build_object(
+                          'Content-Type', 'application/json',
+                          'X-Service-Key', v_key
+                        ),
+             body := jsonb_build_object(
+                       'cron_name', 'cron_sync',
+                       'gap_minutes', v_cs_gap,
+                       'ceiling', c_cron_sync_ceiling::text,
+                       'detected_at', now(),
+                       'cause', v_cs_cause
+                     ),
+             timeout_milliseconds := 60000
+           ) INTO v_req;
+    v_posts := v_posts + 1;
+  END IF;
+
+  IF v_bf_cause IS NOT NULL THEN
+    SELECT net.http_post(
+             url := v_url || '/api/prober-cadence-alert',
+             headers := jsonb_build_object(
+                          'Content-Type', 'application/json',
+                          'X-Service-Key', v_key
+                        ),
+             body := jsonb_build_object(
+                       'cron_name', 'backfill',
+                       'gap_minutes', v_bf_gap,
+                       'ceiling', c_backfill_ceiling::text,
+                       'detected_at', now(),
+                       'cause', v_bf_cause
+                     ),
+             timeout_milliseconds := 60000
+           ) INTO v_req;
+    v_posts := v_posts + 1;
+  END IF;
+
+  RETURN v_posts;
+END
+$_$;
+
+
+ALTER FUNCTION "public"."ops_staleness_check"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."ops_staleness_check"() IS 'Phase 164.6.8 / plan 02 (OUTAGEALERT): the READER that pages on a stale cron_sync heartbeat (none ever, older than 2 days, or two consecutive error rows) and on a stalled backfill queue (eligible jobs unclaimed past the derived ceiling, or a running job outliving it plus one watchdog tick). Posts one alert per stale arm to /api/prober-cadence-alert on the analytics service with a cron_name and a cause, reads the service key from the Vault in ONE scan and re-tests the url against the destination allow-list without echoing it, and writes ONE observer row to public.cron_runs per call. Returns the number of posts queued (0 when healthy); that number is a count of REQUESTS and not of deliveries. EXECUTE is held by the owner alone. This function registers nothing: the pg_cron registration is a live PROD operation owned by the go-live runbook.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."parse_holding_ref"("p_ref" "text") RETURNS TABLE("venue" "text", "symbol" "text", "holding_type" "text")
     LANGUAGE "plpgsql" IMMUTABLE PARALLEL SAFE
     AS $$
@@ -16800,6 +17031,10 @@ GRANT ALL ON FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_e
 
 
 REVOKE ALL ON FUNCTION "public"."match_engine_cron_tick"() FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "public"."ops_staleness_check"() FROM PUBLIC;
 
 
 
