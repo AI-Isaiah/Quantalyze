@@ -251,7 +251,7 @@ function cellText(row: HTMLElement, index: number): string {
   return (cells(row)[index]?.textContent ?? "").trim();
 }
 
-/** The visible metric cells of a 13-td row: Return, CAGR, Sharpe, Max DD, Vol, 6M, AUM. */
+/** The visible metric cells of a 12-td row (13 before 2026-10-13 Phase 170.6.1 D-01): Return, CAGR, Sharpe, Max DD, Vol, 6M, AUM. */
 const METRIC_CELL_INDEXES = [2, 3, 4, 5, 6, 7, 8];
 
 function chipIn(row: HTMLElement, label: string): HTMLElement | null {
@@ -599,13 +599,14 @@ describe("StrategyTable Delta 5 — unranked placeholder rows for bare keys", ()
 
     const headerCount = document.querySelectorAll("thead th").length;
     // No star column on this surface (no userId prop): rank + 8 COLUMNS +
-    // Return spark + Underwater spark + Details + Actions = 13.
-    expect(headerCount).toBe(13);
+    // Return spark + Underwater spark + Actions = 12.
+    // 2026-10-13 Phase 170.6.1 D-01: the per-row Details column is gone (13 -> 12)
+    expect(headerCount).toBe(12);
     // Guard against a vacuous pass: the loop below must actually iterate.
     expect(placeholderRows()).toHaveLength(2);
 
     for (const p of placeholderRows()) {
-      expect(cells(p)).toHaveLength(13);
+      expect(cells(p)).toHaveLength(12);
       // If a column is ever added to the header, this reddens instead of the
       // placeholder rows silently misaligning against the ranked rows.
       expect(cells(p).length).toBe(headerCount);

@@ -1154,7 +1154,8 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⭐ CURRENCY 2026-10-13 (Phase 166.3.1 NAVBREACH, merge with origin/main): 93 -> 94 on the tree merged with origin/main, `node scripts/lint-sql-gates.mjs` printed `scanned 94 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).` with the computed_at success-only gate (supabase/tests/test_strategy_analytics_computed_at_success_only.sql, one new gate file) in the corpus beside main's 93.
     // ⭐ CURRENCY 2026-10-13 (Phase 167.1.2.1 RECONMARKER, plan 01): 93 -> 94, `node scripts/lint-sql-gates.mjs` printed `scanned 94 file(s); 0 finding(s)` with the per-key reconstruct-marker gate. MEASURED: this file's run read `expected 'lint-sql-gates: scanned 94 file(s); 0…' to match /scanned 93 file/`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, merge of origin/main, CR-01 / O-3): 94 -> 95, the union of the two branches' gate files (each counted alone as 94). MEASURED: this file's run read `expected 'lint-sql-gates: scanned 95 file(s); 0…' to match /scanned 94 file/`, and `node scripts/lint-sql-gates.mjs` printed `scanned 95 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
-    expect(res.out).toMatch(/scanned 95 file/);
+    // ⭐ CURRENCY 2026-10-14 (Phase 170.6.1 DISCOVERYPHONE, plan 03): 95 -> 96 on the tree merged with origin/main, the published-trade-venues gate file. MEASURED: `node scripts/lint-sql-gates.mjs` printed `scanned 96 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s)`.
+    expect(res.out).toMatch(/scanned 96 file/);
     expect(res.status, res.out).toBe(0);
   });
 

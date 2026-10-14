@@ -609,9 +609,10 @@ describe("StrategyTable — prefs mirror per scope (F9 M-0475/M-0476)", () => {
 // --- 50-06 STATE-03/04 dense reshape ----------------------------------------
 //
 // Pins the four reshape behaviors added in Plan 50-06: (a) the sticky header +
-// sticky first column class contract; (b) HONEST priority-collapse — the per-row
-// <details> relocates the SAME real value (and a genuinely-null source stays the
-// honest-null em-dash, never a fabricated 0); (c) the table-scoped density
+// sticky first column class contract; (b) HONEST values — each metric sits in
+// its own always-rendered cell (2026-10-13 Phase 170.6.1 D-01 retired the
+// priority collapse and its per-row disclosure) and a genuinely-null source
+// stays the honest-null em-dash, never a fabricated 0; (c) the table-scoped density
 // control flips data-density on the TABLE ROOT (not <body>), wrapped in the
 // reduced-motion-safe View-Transition helper; (d) the WatchlistTabs role=tabpanel
 // / aria-labelledby wiring (Plan 50-05 contract) still resolves through the
@@ -640,10 +641,12 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     const strategyHeader = screen.getByRole("columnheader", { name: /Strategy/ });
     // 2026-10-09 Phase 170.2 D-05: pinning keys on the table's own width (@3xl)
     // 2026-10-09 Phase 170.2 UI-SPEC P-1 / X-1 / D-06: pinned header at z-30; widths stay natural and offsets follow the measured header widths at runtime
+    // 2026-10-14 Phase 170.6.1 D-09: the Strategy column is ALSO pinned below
+    // @3xl (bare left-0 + an ungated hairline); the @3xl offset follows rank+star.
     expect(strategyHeader.className).toContain("@3xl:left-(--pin-strategy-left)");
-    expect(strategyHeader.className).toContain("@3xl:border-r");
-    expect(strategyHeader.className).not.toMatch(/(^|\s)left-/);
-    expect(strategyHeader.className).not.toMatch(/(^|\s)border-r(\s|$)/);
+    expect(strategyHeader.className).toMatch(/(^|\s)left-0(\s|$)/);
+    expect(strategyHeader.className).toMatch(/(^|\s)border-r(\s|$)/);
+    expect(strategyHeader.className).not.toContain("@3xl:border-r");
     // Level with the rank and star headers, above every scrolling header: at
     // z-20 it tied with them and the later cells painted over it (X-1).
     expect(strategyHeader.className).toContain("z-30");
@@ -695,7 +698,8 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     expect(starCell.className).not.toMatch(/(^|\s)left-/);
     const nameCell = screen.getByRole("link", { name: "Alpha Stellar" }).closest("td")!;
     expect(nameCell.className).toContain("@3xl:left-(--pin-strategy-left)");
-    expect(nameCell.className).not.toMatch(/(^|\s)left-/);
+    // 2026-10-14 Phase 170.6.1 D-09: pinned below @3xl too, at left-0.
+    expect(nameCell.className).toMatch(/(^|\s)left-0(\s|$)/);
   });
 
   it("the table frame carries the previous fixed offsets as its pre-measure values for both custom properties (jsdom has no layout; the measured values are proven by the e2e)", () => {
@@ -747,10 +751,11 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     // the leading rank cell, which owns left-0).
     // 2026-10-09 Phase 170.2 D-05: pinning keys on the table's own width (@3xl)
     // 2026-10-09 Phase 170.2 UI-SPEC P-1 / X-1 / D-06: pinned header at z-30; widths stay natural and offsets follow the measured header widths at runtime
+    // 2026-10-14 Phase 170.6.1 D-09: the name cell is pinned below @3xl too.
     expect(firstCell!.className).toContain("@3xl:left-(--pin-strategy-left)");
-    expect(firstCell!.className).toContain("@3xl:border-r");
-    expect(firstCell!.className).not.toMatch(/(^|\s)left-/);
-    expect(firstCell!.className).not.toMatch(/(^|\s)border-r(\s|$)/);
+    expect(firstCell!.className).toMatch(/(^|\s)left-0(\s|$)/);
+    expect(firstCell!.className).toMatch(/(^|\s)border-r(\s|$)/);
+    expect(firstCell!.className).not.toContain("@3xl:border-r");
     expect(firstCell!.className).toContain("bg-surface");
     // The translucent hover lives on the OTHER cells (group-hover:bg-page/50);
     // the sticky first column must not carry it or scrolled cells bleed through.
@@ -771,47 +776,53 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     expect(rankCell!.className).not.toContain("group-hover:bg-page/50");
   });
 
-  it("a collapsed-column <details> relocates the SAME real value the visible cell shows", () => {
+  // 2026-10-13 Phase 170.6.1 D-01: every column is always rendered; the More disclosure is gone
+  // The two tests below used to pin the <details> relocation. They now pin the
+  // replacement: each value sits in its own always-rendered cell, once.
+  const cellUnderHeader = (label: string): HTMLTableCellElement => {
+    const heads = Array.from(
+      document.querySelectorAll<HTMLTableCellElement>("thead tr th"),
+    );
+    const idx = heads.findIndex((th) => (th.textContent ?? "").trim() === label);
+    expect(idx, `header "${label}" must exist`).toBeGreaterThanOrEqual(0);
+    return document
+      .querySelector("tbody tr")!
+      .querySelectorAll<HTMLTableCellElement>(":scope > td")[idx];
+  };
+
+  it("the Volatility value renders in its own always-rendered cell, exactly once, with no <details> disclosure", () => {
     const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
-    // Distinctive volatility so we can prove the details value === the cell value.
+    // Distinctive volatility so we can prove the cell value is the real one.
     fixture.analytics.volatility = 0.3377;
     render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
 
     const expected = "+33.77%"; // formatPercent(0.3377)
-    // The value appears in BOTH the (CSS-collapsed) visible cell and the details
-    // disclosure — getAllByText proves the relocated value is the real one.
-    const matches = screen.getAllByText(expected);
-    expect(matches.length).toBeGreaterThanOrEqual(2);
-
-    // And it lives inside a <details> "More" disclosure (the reachable detail).
-    const summary = screen.getByText("More");
-    const details = summary.closest("details");
-    expect(details).not.toBeNull();
-    expect(within(details as HTMLElement).getByText(expected)).toBeDefined();
+    // 2026-10-13 Phase 170.6.1 D-01: every column is always rendered; the More disclosure is gone
+    expect(screen.getAllByText(expected)).toHaveLength(1);
+    expect(cellUnderHeader("Volatility").textContent).toContain(expected);
+    expect(document.querySelector("details")).toBeNull();
+    expect(screen.queryByText("More")).toBeNull();
   });
 
-  it("a NULL collapsed source renders the honest-null em-dash in the details — NEVER a fabricated 0 (no-invented-data / T-50-09)", () => {
+  it("a NULL source renders the honest-null em-dash in its own cell — NEVER a fabricated 0 (no-invented-data / T-50-09)", () => {
     const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
     // Genuinely-absent volatility AND aum: the honest path must surface "—".
     fixture.analytics.volatility = null as unknown as number;
     fixture.aum = null as unknown as number;
     render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
 
-    const summary = screen.getByText("More");
-    const details = summary.closest("details") as HTMLElement;
-    // The Volatility row in the details shows the honest-null em-dash…
-    const volDt = within(details).getByText("Volatility");
-    const volDd = volDt.nextElementSibling as HTMLElement;
-    expect(volDd.textContent).toBe("—");
+    // 2026-10-13 Phase 170.6.1 D-01: every column is always rendered; the More disclosure is gone
+    const volCell = cellUnderHeader("Volatility");
+    expect(volCell.textContent).toBe("—");
     // …and crucially NOT a fabricated zero / demo value.
-    expect(volDd.textContent).not.toBe("0");
-    expect(volDd.textContent).not.toBe("0.00%");
-    expect(volDd.textContent).not.toMatch(/\$?0/);
+    expect(volCell.textContent).not.toBe("0");
+    expect(volCell.textContent).not.toBe("0.00%");
+    expect(volCell.textContent).not.toMatch(/\$?0/);
 
-    const aumDt = within(details).getByText("AUM");
-    const aumDd = aumDt.nextElementSibling as HTMLElement;
-    expect(aumDd.textContent).toBe("—");
-    expect(aumDd.textContent).not.toMatch(/\$0/);
+    const aumCell = cellUnderHeader("AUM");
+    expect(aumCell.textContent).toBe("—");
+    expect(aumCell.textContent).not.toMatch(/\$0/);
+    expect(document.querySelector("details")).toBeNull();
   });
 
   it("the density control has accessible name 'Table density' and toggling sets data-density on the TABLE ROOT (not <body>)", async () => {
@@ -1291,7 +1302,11 @@ describe("StrategyTable — N-TABLE sticky header and whole words (170-10)", () 
 // the name cell stack (rank + star + Strategy) is as wide as the scroller and
 // leaves 0 px for Return %, CAGR and Sharpe; every horizontal offset must sit
 // behind `@3xl:` so below the table's own 48rem nothing is pinned.
-describe("StrategyTable — container-gated pinning (170.2 D-05)", () => {
+// 2026-10-14 Phase 170.6.1 D-09 (supersedes D-03, reverses 170.2 D-05 for ONE
+// column): the Strategy column alone also pins below `@3xl`, at a bare `left-0`
+// with an ungated hairline, so every row stays identifiable while the table
+// scrolls. Rank and star stay gated. The census below pins exactly that split.
+describe("StrategyTable — container-gated pinning (170.2 D-05, 170.6.1 D-09)", () => {
   // Every pinned class string in the source, comments excluded. Each of the three
   // pinned columns (rank, star, Strategy) appears as a header cell, a data-row
   // cell and a placeholder-row cell: nine strings.
@@ -1321,7 +1336,7 @@ describe("StrategyTable — container-gated pinning (170.2 D-05)", () => {
     return tokens;
   };
 
-  it("every sticky horizontal offset in the source is behind @3xl:", () => {
+  it("every sticky horizontal offset is behind @3xl:, except the Strategy column's own left-0 (D-09)", () => {
     const tokens = pinnedStrings();
     // Floor against vacuity: rank, star and Strategy, each as header, data row
     // and placeholder row. 2026-10-09 (170.2-08): the Strategy header's two
@@ -1329,7 +1344,34 @@ describe("StrategyTable — container-gated pinning (170.2 D-05)", () => {
     // accounts for the star column, so the count is the nine cells, not twelve.
     expect(tokens.length).toBeGreaterThanOrEqual(9);
     const bare = tokens.filter((tok) => !tok.includes("@3xl:left-"));
-    expect(bare, `un-gated pinned offsets: ${bare.join(", ")}`).toEqual([]);
+    // D-09: exactly three bare left-0 tokens (Strategy header, data cell,
+    // placeholder cell), and nothing else un-gated: a rank or star cell that lost
+    // its @3xl: gate would add a fourth and fail here.
+    expect(bare, `un-gated pinned offsets: ${bare.join(", ")}`).toEqual([
+      "left-0",
+      "left-0",
+      "left-0",
+    ]);
+    // Each bare left-0 sits on a Strategy-column string, i.e. on the same line as
+    // the Strategy offset variable, never on a rank or star cell.
+    const src = readFileSync(
+      join(process.cwd(), "src/components/strategy/StrategyTable.tsx"),
+      "utf8",
+    );
+    const bareLines = src
+      .split("\n")
+      .filter(
+        (l) =>
+          !l.trim().startsWith("//") &&
+          !l.includes("sticky left-0 w-[100cqw]") &&
+          /(^|[\s"'`])left-0(?=[\s"'`]|$)/.test(l),
+      );
+    expect(bareLines).toHaveLength(3);
+    for (const l of bareLines) {
+      expect(l, "a bare left-0 outside the Strategy column").toContain(
+        "@3xl:left-(--pin-strategy-left)",
+      );
+    }
   });
 
   it("the one un-gated left-0 in the source is the note row's region-wide block (170.7-02)", () => {
@@ -1357,8 +1399,10 @@ describe("StrategyTable — container-gated pinning (170.2 D-05)", () => {
     expect(count("@3xl:left-0")).toBe(3);
     expect(count("@3xl:left-(--pin-star-left)")).toBe(3);
     expect(count("@3xl:left-(--pin-strategy-left)")).toBe(3);
+    // 170.6.1 D-09: plus the Strategy column's three bare left-0 tokens.
+    expect(count("left-0")).toBe(3);
     // Nothing else (no fixed 14 / 6.25rem survives next to the variables).
-    expect(tokens.length).toBe(9);
+    expect(tokens.length).toBe(12);
   });
 
   it("the placeholder star and Strategy cells carry the same widths and offsets as the data row", () => {
@@ -1376,15 +1420,18 @@ describe("StrategyTable — container-gated pinning (170.2 D-05)", () => {
       "sticky @3xl:left-(--pin-star-left) z-10 w-11 bg-surface-subtle px-2",
     );
     expect(placeholderSrc).toContain(
-      "sticky z-10 bg-surface-subtle px-4 py-3 @3xl:border-r @3xl:border-border @3xl:left-(--pin-strategy-left)",
+      "sticky left-0 z-10 bg-surface-subtle px-4 py-3 border-r border-border @3xl:left-(--pin-strategy-left)",
     );
     // The data row's counterparts, with the surface background.
     expect(src).toContain("sticky @3xl:left-0 z-10 w-14 bg-surface px-2");
     expect(src).toContain(
       "sticky @3xl:left-(--pin-star-left) z-10 w-11 bg-surface px-2",
     );
+    // 170.6.1 D-09: the data cell also caps its width below @3xl (max-w-[60cqw],
+    // lifted at @3xl), so a long name or badge row cannot make the pinned cell as
+    // wide as the region.
     expect(src).toContain(
-      "sticky z-10 bg-surface px-4 py-3 @3xl:border-r @3xl:border-border @3xl:left-(--pin-strategy-left)",
+      "sticky left-0 z-10 max-w-[60cqw] bg-surface px-4 py-3 border-r border-border @3xl:left-(--pin-strategy-left) @3xl:max-w-none",
     );
     // D-06: no min-w-* and no arbitrary w-[Npx] on any rank / star cell.
     expect(src).not.toMatch(/left-0 [^"`]*\bmin-w-/);

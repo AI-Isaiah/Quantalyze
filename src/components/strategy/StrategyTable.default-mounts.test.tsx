@@ -39,6 +39,31 @@
  * reads checked after mount either way. Nothing else moved; the fixture was
  * not regenerated.
  *
+ * 2026-10-13 Phase 170.6.1 (D-01, D-02): the priority collapse and the per-row
+ * "More" disclosure were deleted so a phone shows every column by scroll. Five
+ * classes of hunk were removed or rewritten BY HAND from all three mounts;
+ * nothing else moved; the fixture was not regenerated. Per mount
+ * (discovery / browse / myStrategiesOwner): (a) the max-3xl collapse class on
+ * header and data cells, 20 / 20 / 35 tokens, now 0; (b) the Details header,
+ * 1 / 1 / 1, now 0; (c) the per-row Details cell, the <details> cell on ranked
+ * rows (3 / 3 / 5) and the empty cell on placeholder rows (0 / 0 / 1), now 0;
+ * (d) the trailing space on the five non-collapsed COLUMNS header classNames,
+ * 5 / 5 / 5, now 0; (e) the Actions inset px-4 to pl-4 pr-8 on the header and
+ * every ranked and placeholder Actions cell, 4 / 4 / 7 cells, each now pr-8.
+ * No mount renders the scroll-cue fade (jsdom never overflows), so its new
+ * test id added no hunk.
+ *
+ * 2026-10-14 Phase 170.6.1 (D-09, review WR-02): the Strategy column also pins
+ * below @3xl, so its three class strings changed BY HAND, in all three mounts,
+ * and nothing else moved: the header th and the ranked-row td (and, on the
+ * owner mount, the placeholder td) gained a bare left-0, and their @3xl-gated
+ * hairline (border-r, border-border) became ungated. 3 header + 11 data +
+ * 1 placeholder occurrences in all, across the three mounts. The ranked-row td
+ * (11 occurrences) also gained max-w-[60cqw] with its @3xl:max-w-none lift, so a
+ * long name or badge row cannot make the pinned cell as wide as the region, and
+ * the badge-and-sync row beneath the name (the same 11 rows) gained
+ * @max-3xl:flex-wrap so that cap can take effect.
+ *
  * The clock is frozen (Date only; timers stay real so RTL's async helpers keep
  * working): SyncBadge and the empty-series state derive from `Date.now()`.
  */

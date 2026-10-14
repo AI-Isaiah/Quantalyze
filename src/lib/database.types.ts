@@ -3981,6 +3981,13 @@ export type Database = {
           isSetofReturn: true
         }
       }
+      get_published_trade_venues: {
+        Args: { p_strategy_ids: string[] }
+        Returns: {
+          exchange: string
+          strategy_id: string
+        }[]
+      }
       get_published_trust_signals: {
         Args: { p_strategy_ids: string[] }
         Returns: {

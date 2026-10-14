@@ -392,6 +392,24 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
+  {
+    name: "get_published_trade_venues",
+    side: "snapshot-only",
+    capturedAt: "2026-10-14",
+    clearedBy:
+      "a regeneration of supabase/schema/baseline.sql taken AFTER " +
+      "20261019120000_get_published_trade_venues.sql has applied to PROD " +
+      "(Phase 170.6.1 PR-A ships the function ahead of its reader). The " +
+      "function lands in PROD's catalogue at merge, via apply-test then the " +
+      "automatic PROD apply.",
+    reason:
+      "Phase 170.6.1 plan 01 ships public.get_published_trade_venues(uuid[]) in " +
+      "a forward migration. supabase/schema/baseline.sql is a dated PROD dump " +
+      "(see supabase/schema/BASELINE.md) that predates this migration, so the " +
+      "function exists in the migration-replay snapshot and not yet in the " +
+      "baseline until the next refresh (the Phase 167.1.2.2.2 cron_sync_tick " +
+      "and 164.1.1 precedent).",
+  },
   // ⭐ 2026-10-14: the Phase 167.1.2.1 RECONMARKER row (`backfill_api_keys_
   // history_reconstructed_at`, `snapshot-only`, captured 2026-10-13) was
   // DELETED on the re-dump taken after 20261014120000 applied to PROD, its
