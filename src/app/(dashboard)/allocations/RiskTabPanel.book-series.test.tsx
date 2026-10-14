@@ -112,6 +112,32 @@ describe("RiskTabPanel — the book series (SC2)", () => {
     ).toBeNull();
   });
 
+  // 170.6.2 D-04 / D-05: the Risk tab shows the class heading, not "being
+  // rebuilt" for a reason that is not a wait. Typed by hand, never read from
+  // the component's map.
+  it.each([
+    ["history_read_failed", "We could not load your equity history"],
+    ["key_not_syncing", "Your equity history is waiting on a key"],
+  ])("%s: the Overview's panel renders the h2 '%s', and NO risk widget", (reason, heading) => {
+    render(
+      <RiskTabPanel
+        {...payload({
+          equityHistoryState: "rebuilding",
+          equityHistoryRebuildReason: reason,
+          equityDailyReturns: [],
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { level: 2, name: heading }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Your equity history is being rebuilt" }),
+    ).toBeNull();
+    expect(document.querySelectorAll("[data-widget-id]")).toHaveLength(0);
+  });
+
   it("fail-closed: a missing state reads as rebuilding, as on the Overview", () => {
     render(<RiskTabPanel {...payload({ equityHistoryState: undefined })} />);
     expect(screen.getByTestId("overview-equity-rebuilding")).toBeInTheDocument();

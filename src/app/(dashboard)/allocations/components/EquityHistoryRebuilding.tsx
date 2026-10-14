@@ -27,7 +27,8 @@ import { dataSourceLabel } from "@/lib/api-key-label";
  * `equityHistoryReadiness`). No reason, no line. The line names a condition,
  * never an id or a number (T-167.1.2-22a), with one exception (review C2
  * round 2 IN-04): when exactly one key is not syncing, the key_not_syncing
- * line names it by the owner's own label, `{Exchange} — {nickname}`, or the
+ * line ("One of your keys, {label}, is not syncing, ...") names it by the
+ * owner's own label, `{Exchange} — {nickname}`, or the
  * masked id tail (`••••` + last 4) when the key has no nickname. That is the
  * label the Exchanges page key note and the Scenario rows already show the
  * same owner (`dataSourceLabel`), so it discloses nothing new. Review C2
@@ -65,14 +66,15 @@ const HEADING_ID = "overview-equity-rebuilding-heading";
  * - `held_back` (review C3 round 2 WR-02 / SFH-C3R2-03): the history is not
  *   shown and the reason's line names no run that retries it
  *   (`derivation_rejected`: "did not pass its checks, so it is not shown";
- *   `shared_account_history_truncated`: "we cannot join its history ... yet,
- *   so your history is not shown"). Nothing here is a wait (C2 SFH-05 /
+ *   `shared_account_history_truncated`: "we cannot join its history ... to the
+ *   new key's, so your history is not shown"). Nothing here is a wait (C2 SFH-05 /
  *   SFH-06 and R3-WR-03, see the lines' own comments), so the Scenario says
  *   the history is held back, never that it is being rebuilt.
  *
  * The Overview heading follows the same class (review C3 round 3 WR-01,
- * `HEADING_BY_CLASS` below), so for a `held_back` reason the heading says the
- * history is held back, as the Scenario does, and never "being rebuilt".
+ * `HEADING_BY_CLASS` below), so a `held_back` reason says the history is held
+ * back, as the Scenario does, and only a `rebuilding` reason says "being
+ * rebuilt" (170.6.2 D-04).
  */
 const REBUILD_REASON_CLASS = {
   duplicate_account: "needs_action",
@@ -123,15 +125,16 @@ export function equityHistoryRebuildClass(
 }
 
 /**
- * Review C3 round 3 WR-01. The Overview heading, by class. Only `held_back`
- * differs: its reason lines name no run that retries it, so the heading
- * mirrors the Scenario's "We are holding back your book's own history" and
- * promises no wait. Every other class keeps the "being rebuilt" heading. Keyed
- * by every class, so a class added to the table above fails to compile here.
+ * Review C3 round 3 WR-01, 170.6.2 D-04. The Overview heading, by class. Each
+ * class has its own, and only `rebuilding` promises a rebuild: a key to fix
+ * and a failed read are not a wait on any run, and `held_back` names no run
+ * that retries it, so its heading mirrors the Scenario's "We are holding back
+ * your book's own history". Keyed by every class, so a class added to the
+ * table above fails to compile here.
  */
 const HEADING_BY_CLASS: Record<EquityHistoryRebuildClass, string> = {
-  needs_action: "Your equity history is being rebuilt",
-  read_failed: "Your equity history is being rebuilt",
+  needs_action: "Your equity history is waiting on a key",
+  read_failed: "We could not load your equity history",
   rebuilding: "Your equity history is being rebuilt",
   held_back: "We are holding back your equity history",
 };
@@ -173,7 +176,7 @@ const REASON_LINE: Record<
   // No action is named because none heals it in this release: disconnecting
   // the old key drops its history.
   shared_account_history_truncated:
-    "One of your exchange accounts changed keys, and we cannot join its history from before the change to the new key's yet, so your history is not shown.",
+    "One of your exchange accounts changed keys, and we cannot join its history from before the change to the new key's, so your history is not shown.",
   // Review C2 round 2 IN-05: active voice (DESIGN.md Voice).
   history_read_failed:
     "We could not load your history just now. Reload the page to try again.",
@@ -182,9 +185,11 @@ const REASON_LINE: Record<
 type NotSyncingKey = { id: string; exchange: string; label: string };
 
 /**
- * Review C2 round 2 IN-04. The key_not_syncing line. It names the key when
- * there is exactly one, uses a plural line for two or more, and falls back to
- * an unnamed line that is true for any count when the keys are unknown (null).
+ * Review C2 round 2 IN-04, 170.6.2 D-02. The key_not_syncing line. With exactly
+ * one key it reads "One of your keys, {label}, is not syncing, ..."; with two or
+ * more, "Some of your keys are not syncing, ..."; and with the keys unknown
+ * (null) or unresolvable, "One of your keys is not syncing, ...", which is
+ * true for any count of at least one.
  */
 function NotSyncingLine({ keys }: { keys: readonly NotSyncingKey[] | null }) {
   if (keys !== null && keys.length === 1) {
@@ -192,8 +197,8 @@ function NotSyncingLine({ keys }: { keys: readonly NotSyncingKey[] | null }) {
     const name = `${exchange} — ${nickname ?? maskedTail}`;
     return (
       <>
-        Your key {name} is not syncing, so we cannot confirm which exchange
-        account it reads. Check it on the <ExchangesPageLink />.
+        One of your keys, {name}, is not syncing, so we cannot confirm which
+        exchange account it reads. Check it on the <ExchangesPageLink />.
       </>
     );
   }
@@ -207,8 +212,8 @@ function NotSyncingLine({ keys }: { keys: readonly NotSyncingKey[] | null }) {
   }
   return (
     <>
-      A key is not syncing, so we cannot confirm which exchange account it
-      reads. Check it on the <ExchangesPageLink />.
+      One of your keys is not syncing, so we cannot confirm which exchange
+      account it reads. Check it on the <ExchangesPageLink />.
     </>
   );
 }

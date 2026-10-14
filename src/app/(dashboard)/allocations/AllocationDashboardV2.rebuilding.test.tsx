@@ -75,8 +75,9 @@ const REASON_LINES = [
   [
     // Review C2 round 2 IN-04: with no key list to name from (a payload
     // without the ids), the line stays true for any number of keys.
+    // 170.6.2 D-02: "One of your keys", not "A key".
     "key_not_syncing",
-    "A key is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+    "One of your keys is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
   ],
   [
     "awaiting_derivation",
@@ -98,9 +99,25 @@ const REASON_LINES = [
     "The keys that read one of your exchange accounts are all failing to sync, so that account's history stops. Fix or reconnect one of them on the Exchanges page.",
   ],
   [
+    // 170.6.2 D-03: no "yet", it implies a heal that never ships.
     "shared_account_history_truncated",
-    "One of your exchange accounts changed keys, and we cannot join its history from before the change to the new key's yet, so your history is not shown.",
+    "One of your exchange accounts changed keys, and we cannot join its history from before the change to the new key's, so your history is not shown.",
   ],
+] as const satisfies ReadonlyArray<
+  readonly [NonNullable<MyAllocationDashboardPayload["equityHistoryRebuildReason"]>, string]
+>;
+
+// 170.6.2 D-04: the heading each reason renders, typed by hand (never read from
+// the component's map, which could not fail when the component changes).
+const HEADING_BY_REASON = [
+  ["duplicate_account", "Your equity history is waiting on a key"],
+  ["key_not_syncing", "Your equity history is waiting on a key"],
+  ["shared_account_no_working_key", "Your equity history is waiting on a key"],
+  ["history_read_failed", "We could not load your equity history"],
+  ["account_identity_pending", "Your equity history is being rebuilt"],
+  ["awaiting_derivation", "Your equity history is being rebuilt"],
+  ["derivation_rejected", "We are holding back your equity history"],
+  ["shared_account_history_truncated", "We are holding back your equity history"],
 ] as const satisfies ReadonlyArray<
   readonly [NonNullable<MyAllocationDashboardPayload["equityHistoryRebuildReason"]>, string]
 >;
@@ -375,9 +392,10 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
           equityCurveSource={equityCurveSource}
         />,
       );
-      expect(
-        screen.getByTestId("overview-equity-rebuilding").textContent,
-      ).toContain(line);
+      const panelText = screen.getByTestId("overview-equity-rebuilding").textContent;
+      expect(panelText).toContain(line);
+      // 170.6.2 D-03: no reason line or panel body promises a heal with "yet".
+      expect(panelText).not.toMatch(/\byet\b/);
       expect(screen.queryByTestId("overview-factsheet-warmup")).toBeNull();
       expect(screen.queryByText(/appear once/)).toBeNull();
       expect(screen.queryByTestId("overview-equity-curve")).toBeNull();
@@ -428,6 +446,8 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     );
     const panel = screen.getByTestId("overview-equity-rebuilding");
     expect(panel.textContent).toContain(line);
+    // 170.6.2 D-03: no reason line or panel body promises a heal with "yet".
+    expect(panel.textContent).not.toMatch(/\byet\b/);
     // Review C2 round 3 R3-WR-03: neither shared-account line falls back to
     // the generic refusal.
     if (reason.startsWith("shared_account_")) {
@@ -448,7 +468,8 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
   // Review C2 round 2 IN-04. The key_not_syncing line names the key when there
   // is exactly one, with the label the Exchanges page and the Scenario rows
   // use (`{Exchange} — {nickname}`, or the masked id tail when the key has no
-  // nickname). Two or more keys get a plural line, never "one of your keys".
+  // nickname). 170.6.2 D-02: the singular lines open "One of your keys";
+  // two or more keys get the plural "Some of your keys" line instead.
   const notSyncing = (id: string, exchange: string, label: string) => ({
     id,
     exchange,
@@ -467,13 +488,13 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       "one key with a nickname is named",
       [notSyncing("k-bad-0001", "okx", "Main")],
       ["k-bad-0001"],
-      "Your key OKX — Main is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+      "One of your keys, OKX — Main, is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
     ],
     [
       "one key with no nickname is named by its masked tail",
       [notSyncing("k-bad-7f3a", "bybit", "  ")],
       ["k-bad-7f3a"],
-      "Your key Bybit — ••••7f3a is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+      "One of your keys, Bybit — ••••7f3a, is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
     ],
     [
       "two keys get the plural line",
@@ -485,7 +506,7 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
       "an id missing from the key list falls back to the unnamed line",
       [notSyncing("k-a", "okx", "Main")],
       ["k-gone"],
-      "A key is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
+      "One of your keys is not syncing, so we cannot confirm which exchange account it reads. Check it on the Exchanges page.",
     ],
   ])("key_not_syncing: %s", (_label, apiKeys, ids, line) => {
     render(
@@ -499,9 +520,35 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
     );
     const panel = screen.getByTestId("overview-equity-rebuilding");
     expect(panel.textContent).toContain(line);
+    // 170.6.2 D-03: every key arm and the panel body carry no "yet".
+    expect(panel.textContent).not.toMatch(/\byet\b/);
+    // The plural line is NOT a "one of your keys" line (D-02).
+    if (ids.length > 1) {
+      expect(panel.textContent).not.toContain("One of your keys");
+    }
     expect(screen.getByRole("link", { name: "Exchanges page" })).toHaveAttribute(
       "href",
       "/profile?tab=exchanges",
     );
   });
+
+  // 170.6.2 D-04: every class has its own heading. The table is written out
+  // literally above, so a change to the component's map fails here.
+  it.each(HEADING_BY_REASON)(
+    "rebuilding reason %s: the h2 reads '%s' and labels the region",
+    (reason, heading) => {
+      render(
+        <AllocationDashboardV2
+          {...baseProps}
+          equityHistoryState="rebuilding"
+          equityHistoryRebuildReason={reason}
+        />,
+      );
+      const panel = screen.getByTestId("overview-equity-rebuilding");
+      expect(
+        screen.getByRole("heading", { level: 2, name: heading }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("region", { name: heading })).toBe(panel);
+    },
+  );
 });

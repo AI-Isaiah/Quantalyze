@@ -175,15 +175,16 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     // rowsLocator is used only by the post-toggle diagnostic capture below.
     const rowsLocator = page.locator("table tbody tr");
 
-    // Settle gate — wait for React hydration to APPLY the hide_examples=true
-    // default, not for a globally-empty table. StrategyTable renders with
-    // showExamples=true (all rows, examples included) on first paint, then the
-    // prefsHydrated effect (StrategyTable.tsx:258-266) flips showExamples=false
-    // per DEFAULTS.hide_examples=true. The "Hide examples" checkbox is bound
-    // `checked={!showExamples}` (StrategyFilters.tsx:329), so it transitions
-    // unchecked→checked in the SAME render that applies the is_example filter
-    // (StrategyTable.tsx:340-341). Waiting for checked=true is therefore an
-    // exact, pollution-immune signal that examples have been filtered out.
+    // Settle gate — wait for StrategyTable's CLIENT effect, not for the box to
+    // read checked. 170.6.2 D-06 made the server HTML carry the settled state
+    // (examples already filtered out, "Hide examples" already checked), so
+    // `toBeChecked()` passes before React hydrates and proves nothing: a Space
+    // keypress sent then flips only the DOM `checked` and never reaches
+    // `onChange`. StrategyTable sets `data-strategy-table-prefs-applied` on
+    // <html> from an effect once it has hydrated and read its prefs (WR-01),
+    // and nothing in the server markup carries it. The checked assertion below
+    // stays as the check that the DEFAULT held; it is no longer the hydration
+    // proof.
     //
     // The prior design waited for a "No strategies" empty-state row, which
     // silently assumed the crypto-sma category held ZERO non-example published
@@ -206,8 +207,15 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
     const hideExamplesCheckbox = hideExamplesLabel.locator(
       'input[type="checkbox"]',
     );
-    // hide_examples=true default → checked=true once hydration commits. This is
-    // the deterministic settle signal (it replaces the removed empty-state poll).
+    // Hydration proof first (client-effect-only mark), then the default.
+    await expect(
+      page.locator("html"),
+      "StrategyTable must hydrate (client effect sets the prefs-applied mark) before Hide examples is toggled",
+    ).toHaveAttribute("data-strategy-table-prefs-applied", "true", {
+      timeout: 15000,
+    });
+    // hide_examples=true default → the box is checked (server HTML and client
+    // agree since D-06).
     await expect(hideExamplesCheckbox).toBeChecked({ timeout: 15000 });
 
     // C-0301/C-0302/H-1034 fix: no silent `if (rowCount > 0)` gate. The seeded

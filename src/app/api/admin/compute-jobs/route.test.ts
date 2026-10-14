@@ -42,29 +42,54 @@ const EXPECTED_COLUMNS = [
 
 type Call = { method: string; args: unknown[] };
 
+type Result = { data: unknown; error: unknown };
+
 const { state, mockIsAdmin, mockCreateAdminClient } = vi.hoisted(() => {
   const state = {
     calls: [] as { method: string; args: unknown[] }[],
-    result: { data: [] as unknown, error: null as unknown },
+    // Default result for a page chain (the paginated compute_jobs_admin read).
+    result: { data: [] as unknown, error: null as unknown } as Result,
+    // D-07 facet seeds. `registry` answers a `compute_job_kinds` chain. `probes`
+    // answers a `compute_jobs_admin` chain that ended in `.eq("kind", name)`,
+    // keyed by name; a name not in `probes` falls through to `result`, so the
+    // page-filter arms (which also use `.eq("kind", …)`) keep their meaning.
+    registry: { data: [] as unknown, error: null as unknown } as Result,
+    probes: {} as Record<string, Result>,
   };
   // A chainable, awaitable stand-in for the supabase-js query builder: every
-  // method records itself and returns the builder; awaiting it yields `result`.
-  const builder: Record<string, unknown> = {};
-  for (const method of ["from", "select", "eq", "order", "range"]) {
-    builder[method] = (...args: unknown[]) => {
-      state.calls.push({ method, args });
-      return builder;
+  // method records itself and returns the SAME chain; awaiting it yields the
+  // result selected by the chain's own table and kind filter. `from()` returns
+  // a FRESH chain per call, so the parallel per-kind probes each resolve their
+  // own result instead of sharing one builder's state.
+  function makeChain(table: unknown) {
+    const chain: Record<string, unknown> = {};
+    let eqKind: string | undefined;
+    for (const method of ["select", "eq", "order", "range", "limit"]) {
+      chain[method] = (...args: unknown[]) => {
+        state.calls.push({ method, args });
+        if (method === "eq" && args[0] === "kind") eqKind = String(args[1]);
+        return chain;
+      };
+    }
+    chain.then = (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) => {
+      let result = state.result;
+      if (table === "compute_job_kinds") result = state.registry;
+      else if (eqKind !== undefined && eqKind in state.probes) result = state.probes[eqKind];
+      return Promise.resolve(result).then(resolve, reject);
     };
+    return chain;
   }
-  builder.then = (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
-    Promise.resolve(state.result).then(resolve, reject);
+  const from = (...args: unknown[]) => {
+    state.calls.push({ method: "from", args });
+    return makeChain(args[0]);
+  };
   // `rpc` is recorded too, so a regression back to the database function
   // fails on an assertion (the call log) rather than on a missing method.
   const rpc = (...args: unknown[]) => {
     state.calls.push({ method: "rpc", args });
     return Promise.resolve(state.result);
   };
-  const mockCreateAdminClient = vi.fn(() => ({ from: builder.from, rpc }));
+  const mockCreateAdminClient = vi.fn(() => ({ from, rpc }));
   return { state, mockIsAdmin: vi.fn(), mockCreateAdminClient };
 });
 
@@ -129,6 +154,8 @@ describe("GET /api/admin/compute-jobs", () => {
     vi.clearAllMocks();
     state.calls.length = 0;
     state.result = { data: SAMPLE_JOBS, error: null };
+    state.registry = { data: [], error: null };
+    state.probes = {};
     mockIsAdmin.mockResolvedValue(true);
   });
 
@@ -181,6 +208,8 @@ describe("GET /api/admin/compute-jobs", () => {
     await GET(makeReq());
 
     expect(callsOf("eq")).toEqual([]);
+    // A page request never touches the kind registry: the facet is its own query.
+    expect(callsOf("from").map((c) => c.args[0])).not.toContain("compute_job_kinds");
   });
 
   it("adds exactly one .eq per present filter param", async () => {
@@ -248,5 +277,98 @@ describe("GET /api/admin/compute-jobs", () => {
     expect(res.status).toBe(403);
     expect(mockIsAdmin).not.toHaveBeenCalled();
     expect(mockCreateAdminClient).not.toHaveBeenCalled();
+  });
+
+  describe("?facets=kinds (D-07)", () => {
+    const REGISTRY = ["sync_trades", "derive_allocator_equity", "stitch_composite"];
+    const HIT = { data: [{ id: "j" }], error: null };
+    const MISS = { data: [], error: null };
+
+    function seedKinds() {
+      state.registry = { data: REGISTRY.map((name) => ({ name })), error: null };
+      state.probes = {
+        sync_trades: HIT,
+        derive_allocator_equity: HIT,
+        stitch_composite: MISS,
+      };
+    }
+
+    it("F1: returns, sorted, exactly the registered kinds that have a job", async () => {
+      seedKinds();
+      const { GET } = await import("./route");
+      const res = await GET(makeReq({ facets: "kinds" }));
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toMatch(/no-store/);
+      expect(await res.json()).toEqual({ kinds: ["derive_allocator_equity", "sync_trades"] });
+    });
+
+    it("F2: is its own query: registry, one limit(1) probe per kind, no page read", async () => {
+      seedKinds();
+      const { GET } = await import("./route");
+      // Page-only params must be ignored on a facets request.
+      await GET(makeReq({ facets: "kinds", status: "done", kind: "ignored", exchange: "okx", limit: "5" }));
+
+      expect(callsOf("from").map((c) => c.args[0])).toEqual([
+        "compute_job_kinds",
+        "compute_jobs_admin",
+        "compute_jobs_admin",
+        "compute_jobs_admin",
+      ]);
+      expect(callsOf("eq")).toEqual(
+        REGISTRY.map((name) => ({ method: "eq", args: ["kind", name] })),
+      );
+      expect(callsOf("limit")).toEqual(REGISTRY.map(() => ({ method: "limit", args: [1] })));
+      expect(callsOf("range")).toEqual([]);
+      expect(callsOf("order")).toEqual([]);
+      expect(callsOf("rpc")).toEqual([]);
+    });
+
+    it("F3: a non-admin gets 403 and the service-role client is never constructed", async () => {
+      mockIsAdmin.mockResolvedValue(false);
+      const { GET } = await import("./route");
+      const res = await GET(makeReq({ facets: "kinds" }));
+
+      expect(res.status).toBe(403);
+      expect(mockCreateAdminClient).not.toHaveBeenCalled();
+      expect(state.calls).toEqual([]);
+    });
+
+    it("F3b: a cross-origin facets request is refused before any auth or database work", async () => {
+      const { GET } = await import("./route");
+      const res = await GET(makeReq({ facets: "kinds" }, "https://evil.example"));
+
+      expect(res.status).toBe(403);
+      expect(mockIsAdmin).not.toHaveBeenCalled();
+      expect(mockCreateAdminClient).not.toHaveBeenCalled();
+    });
+
+    it("F4: a registry read error is a generic 500 and the raw error is logged", async () => {
+      state.registry = { data: null, error: { message: "registry read failed" } };
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { GET } = await import("./route");
+      const res = await GET(makeReq({ facets: "kinds" }));
+
+      expect(res.status).toBe(500);
+      expect(res.headers.get("cache-control")).toMatch(/no-store/);
+      const body = await res.json();
+      expect(body).toEqual({ error: "Failed to fetch compute job kinds" });
+      expect(JSON.stringify(body)).not.toContain("registry read failed");
+      expect(spy).toHaveBeenCalledWith(expect.any(String), { message: "registry read failed" });
+      spy.mockRestore();
+    });
+
+    it("F4b: any probe error is the same generic 500, never a silently shorter list", async () => {
+      seedKinds();
+      state.probes.stitch_composite = { data: null, error: { message: "probe failed" } };
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { GET } = await import("./route");
+      const res = await GET(makeReq({ facets: "kinds" }));
+
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: "Failed to fetch compute job kinds" });
+      expect(spy).toHaveBeenCalledWith(expect.any(String), { message: "probe failed" });
+      spy.mockRestore();
+    });
   });
 });

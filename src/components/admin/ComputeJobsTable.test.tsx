@@ -60,14 +60,15 @@ beforeEach(() => {
   lsStore.clear();
   localStorageMock.getItem.mockClear();
   localStorageMock.setItem.mockClear();
-  // The table fetches the job list on mount; return an empty page so the
-  // component settles without network.
+  // The table fetches the job list and the kind facet on mount; return an
+  // empty page and an empty facet so the component settles without network.
+  // URL-aware (D-07): the facets URL gets `{ kinds: [] }`, everything else `[]`.
   vi.stubGlobal(
     "fetch",
-    vi.fn(async () => ({
+    vi.fn(async (url: string) => ({
       ok: true,
       status: 200,
-      json: async () => [],
+      json: async () => (String(url).includes("facets=kinds") ? { kinds: [] } : []),
     })) as unknown as typeof fetch,
   );
 });
@@ -339,5 +340,339 @@ describe("ComputeJobsTable — a failed load is not an empty queue", () => {
     expect(screen.getAllByRole("row")).toHaveLength(51);
     expect(screen.queryByText(EMPTY_TEXT)).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+/**
+ * Phase 170.6.2 plan 03 (SC-4, D-07) — the Kind filter lists every kind that
+ * has jobs. It used to be a hardcoded three-kind list, so an admin could not
+ * filter to `derive_allocator_equity`. The list now comes from the facet read
+ * (`GET /api/admin/compute-jobs?facets=kinds`), a query of its own.
+ */
+describe("ComputeJobsTable — the Kind filter lists the kinds that have jobs (D-07)", () => {
+  const FACETS_ERROR_ID = "compute-jobs-kinds-error";
+
+  type FacetReply =
+    | { ok: true; body: unknown }
+    | { ok: false; status: number; body: unknown };
+
+  // A URL-aware fetch stub: `facets` answers the facets URL one reply per call
+  // (the last reply repeats), every other URL answers `[]`. Returns the mock so
+  // a test can read which URLs were requested.
+  function stubFetch(facets: FacetReply[]) {
+    let facetCalls = 0;
+    const mock = vi.fn(async (url: string) => {
+      if (String(url).includes("facets=kinds")) {
+        const reply = facets[Math.min(facetCalls, facets.length - 1)];
+        facetCalls += 1;
+        return {
+          ok: reply.ok,
+          status: reply.ok ? 200 : reply.status,
+          json: async () => reply.body,
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    });
+    vi.stubGlobal("fetch", mock as unknown as typeof fetch);
+    return mock;
+  }
+
+  function kindOptionLabels(): string[] {
+    const select = screen.getByLabelText("Kind") as HTMLSelectElement;
+    return Array.from(select.options).map((o) => o.textContent ?? "");
+  }
+
+  function urlsRequested(mock: ReturnType<typeof stubFetch>): string[] {
+    return mock.mock.calls.map((c) => String(c[0]));
+  }
+
+  it("K1: offers a kind outside the old three, and selecting it filters the next page read", async () => {
+    const mock = stubFetch([
+      { ok: true, body: { kinds: ["derive_allocator_equity", "sync_trades"] } },
+    ]);
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+
+    await waitFor(() =>
+      expect(kindOptionLabels()).toEqual(["All kinds", "derive_allocator_equity", "sync_trades"]),
+    );
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Kind"), {
+        target: { value: "derive_allocator_equity" },
+      });
+    });
+    await waitFor(() =>
+      expect(
+        urlsRequested(mock).some(
+          (u) => !u.includes("facets=") && u.includes("kind=derive_allocator_equity"),
+        ),
+      ).toBe(true),
+    );
+  });
+
+  it("K2: the selected kind stays listed when a later facet read no longer returns it", async () => {
+    stubFetch([
+      { ok: true, body: { kinds: ["derive_allocator_equity", "sync_trades"] } },
+      { ok: true, body: { kinds: ["sync_trades"] } },
+    ]);
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+    await waitFor(() => expect(kindOptionLabels()).toHaveLength(3));
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Kind"), {
+        target: { value: "derive_allocator_equity" },
+      });
+    });
+
+    // The second facet read (on filter change) dropped the kind; it must stay.
+    await waitFor(() =>
+      expect((screen.getByLabelText("Kind") as HTMLSelectElement).value).toBe(
+        "derive_allocator_equity",
+      ),
+    );
+    expect(kindOptionLabels()).toEqual(["All kinds", "derive_allocator_equity", "sync_trades"]);
+  });
+
+  it("K3: a failed facet read is said, not hidden, and the jobs list is unaffected", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    stubFetch([
+      { ok: false, status: 500, body: { error: "Failed to fetch compute job kinds" } },
+    ]);
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+
+    const line = await screen.findByTestId(FACETS_ERROR_ID);
+    // SFH-1: the HTTP status is part of the visible message when it is known.
+    expect(line.textContent).toBe("Could not load the job kinds (HTTP 500).");
+    // role="status", deliberately not "alert": the alert means the jobs list failed.
+    expect(line.getAttribute("role")).toBe("status");
+    expect(kindOptionLabels()).toEqual(["All kinds"]);
+    expect(await screen.findByText("No compute jobs found.")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("K3b: a rejected facet fetch is the same visible failure", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const mock = vi.fn(async (url: string) => {
+      if (String(url).includes("facets=kinds")) throw new Error("network down");
+      return { ok: true, status: 200, json: async () => [] };
+    });
+    vi.stubGlobal("fetch", mock as unknown as typeof fetch);
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+
+    const line = await screen.findByTestId(FACETS_ERROR_ID);
+    // No HTTP status exists for a rejected fetch, so none is invented.
+    expect(line.textContent).toBe("Could not load the job kinds.");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("K4: a facet body that is not { kinds: string[] } is a failure", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const body of [[], { kinds: "sync_trades" }, { kinds: [1, 2] }, null]) {
+      stubFetch([{ ok: true, body }]);
+      let unmount: () => void = () => {};
+      await act(async () => {
+        ({ unmount } = render(<ComputeJobsTable />));
+      });
+      expect(await screen.findByTestId(FACETS_ERROR_ID)).toBeTruthy();
+      expect(kindOptionLabels()).toEqual(["All kinds"]);
+      unmount();
+    }
+  });
+
+  it("a good read after a failed one clears the failure line", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    stubFetch([
+      { ok: false, status: 500, body: { error: "Failed to fetch compute job kinds" } },
+      { ok: true, body: { kinds: ["sync_trades"] } },
+    ]);
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+    await screen.findByTestId(FACETS_ERROR_ID);
+
+    // A status-filter change re-reads the facet (mount + filter change only).
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Status"), { target: { value: "done" } });
+    });
+    await waitFor(() => expect(screen.queryByTestId(FACETS_ERROR_ID)).toBeNull());
+    expect(kindOptionLabels()).toEqual(["All kinds", "sync_trades"]);
+  });
+
+  it("K5: a failed re-read keeps the previous good list and sets only the error line", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    stubFetch([
+      { ok: true, body: { kinds: ["derive_allocator_equity", "sync_trades"] } },
+      { ok: false, status: 403, body: { error: "Forbidden" } },
+    ]);
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+    await waitFor(() =>
+      expect(kindOptionLabels()).toEqual(["All kinds", "derive_allocator_equity", "sync_trades"]),
+    );
+
+    // A status-filter change re-reads the facet; this read fails.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Status"), { target: { value: "done" } });
+    });
+
+    const line = await screen.findByTestId(FACETS_ERROR_ID);
+    expect(line.textContent).toBe("Could not load the job kinds (HTTP 403).");
+    // WHY: one transient failure must not take away the filter the admin was
+    // already using. The list that was good stays good.
+    expect(kindOptionLabels()).toEqual(["All kinds", "derive_allocator_equity", "sync_trades"]);
+  });
+
+  it("K6: a failed facet read is logged with its cause, not swallowed", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    stubFetch([{ ok: false, status: 403, body: { error: "Forbidden" } }]);
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+    await screen.findByTestId(FACETS_ERROR_ID);
+
+    const call = spy.mock.calls.find((c) => String(c[0]).includes("ComputeJobsTable"));
+    expect(call, "console.error with the [ComputeJobsTable] prefix").toBeTruthy();
+    expect(JSON.stringify(call)).toContain("403");
+  });
+
+  it("K6b: a rejected facet fetch logs the error it threw", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("facets=kinds")) throw new Error("network down");
+        return { ok: true, status: 200, json: async () => [] };
+      }) as unknown as typeof fetch,
+    );
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+    await screen.findByTestId(FACETS_ERROR_ID);
+
+    const call = spy.mock.calls.find((c) => String(c[0]).includes("ComputeJobsTable"));
+    expect(call, "console.error with the [ComputeJobsTable] prefix").toBeTruthy();
+    expect(JSON.stringify(call, (_k, v) => (v instanceof Error ? v.message : v))).toContain(
+      "network down",
+    );
+  });
+
+  // Out-of-order guard. The mount read is held open while a filter change
+  // starts a second read; the second lands first, then the first lands.
+  // Only the latest request may write state.
+  function deferredFacetStub(secondReply: FacetReply) {
+    let release!: (r: FacetReply) => void;
+    const first = new Promise<FacetReply>((res) => {
+      release = res;
+    });
+    let facetCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (!String(url).includes("facets=kinds")) {
+          return { ok: true, status: 200, json: async () => [] };
+        }
+        facetCalls += 1;
+        const reply = facetCalls === 1 ? await first : secondReply;
+        return {
+          ok: reply.ok,
+          status: reply.ok ? 200 : reply.status,
+          json: async () => reply.body,
+        };
+      }) as unknown as typeof fetch,
+    );
+    return release;
+  }
+
+  it("K7: an older failed read that lands after a newer good one does not show the failure", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const release = deferredFacetStub({ ok: true, body: { kinds: ["sync_trades"] } });
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Status"), { target: { value: "done" } });
+    });
+    await waitFor(() => expect(kindOptionLabels()).toEqual(["All kinds", "sync_trades"]));
+
+    await act(async () => {
+      release({ ok: false, status: 500, body: { error: "late failure" } });
+    });
+
+    expect(screen.queryByTestId(FACETS_ERROR_ID)).toBeNull();
+    expect(kindOptionLabels()).toEqual(["All kinds", "sync_trades"]);
+  });
+
+  it("K7b: an older good read that lands after a newer one does not overwrite the list", async () => {
+    const release = deferredFacetStub({ ok: true, body: { kinds: ["sync_trades"] } });
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Status"), { target: { value: "done" } });
+    });
+    await waitFor(() => expect(kindOptionLabels()).toEqual(["All kinds", "sync_trades"]));
+
+    await act(async () => {
+      release({ ok: true, body: { kinds: ["stale_kind"] } });
+    });
+
+    expect(kindOptionLabels()).toEqual(["All kinds", "sync_trades"]);
+  });
+
+  it("reads the facet on mount and on filter change, never on Load more or the auto-refresh tick", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      lsStore.set(KEY, "true");
+      const mock = vi.fn(async (url: string) => {
+        if (String(url).includes("facets=kinds")) {
+          return { ok: true, status: 200, json: async () => ({ kinds: ["sync_trades"] }) };
+        }
+        return { ok: true, status: 200, json: async () => fullPage() };
+      });
+      vi.stubGlobal("fetch", mock as unknown as typeof fetch);
+      await act(async () => {
+        render(<ComputeJobsTable />);
+      });
+      await waitFor(() => expect(checkbox().checked).toBe(true));
+      const facetCount = () =>
+        mock.mock.calls.filter((c) => String(c[0]).includes("facets=kinds")).length;
+      const pageCount = () =>
+        mock.mock.calls.filter((c) => !String(c[0]).includes("facets=kinds")).length;
+      const facetsAfterMount = facetCount();
+      expect(facetsAfterMount).toBe(1);
+
+      // Load more: one more page read, no facet read.
+      const pagesBefore = pageCount();
+      await act(async () => {
+        fireEvent.click(await screen.findByRole("button", { name: /load more/i }));
+      });
+      await waitFor(() => expect(pageCount()).toBeGreaterThan(pagesBefore));
+      expect(facetCount()).toBe(facetsAfterMount);
+
+      // Two auto-refresh ticks: the page re-reads, the facet does not.
+      const pagesBeforeTick = pageCount();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20_500);
+      });
+      expect(pageCount()).toBeGreaterThan(pagesBeforeTick);
+      expect(facetCount()).toBe(facetsAfterMount);
+
+      // A filter change reads the facet again.
+      await act(async () => {
+        fireEvent.change(screen.getByLabelText("Status"), { target: { value: "done" } });
+      });
+      await waitFor(() => expect(facetCount()).toBe(facetsAfterMount + 1));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
