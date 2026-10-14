@@ -48,7 +48,7 @@ export function PortfolioKpiPanel({ analytics }: PortfolioKpiPanelProps) {
       key: "mtd",
       label: "MTD TWR",
       value: formatPercent(analytics.return_mtd),
-      valueClassName: metricColor(analytics.return_mtd),
+      valueClassName: metricColor(analytics.return_mtd, "percent"),
     },
     {
       key: "corr",
@@ -60,7 +60,7 @@ export function PortfolioKpiPanel({ analytics }: PortfolioKpiPanelProps) {
       key: "sharpe",
       label: "Portfolio Sharpe",
       value: formatNumber(analytics.portfolio_sharpe),
-      valueClassName: metricColor(analytics.portfolio_sharpe),
+      valueClassName: metricColor(analytics.portfolio_sharpe, "ratio"),
     },
   ];
 

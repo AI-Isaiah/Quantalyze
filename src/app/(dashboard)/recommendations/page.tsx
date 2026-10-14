@@ -9,6 +9,7 @@ import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
 import { SyncBadge } from "@/components/strategy/SyncBadge";
 import { AccreditedInvestorGate } from "@/components/legal/AccreditedInvestorGate";
 import { formatPercent, formatNumber } from "@/lib/utils";
+import { drawdownTone } from "@/lib/factsheet/display-sign";
 import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { deriveMandateIsSet } from "@/lib/queries";
@@ -551,7 +552,7 @@ function RecommendationCard({
             <Metric
               label="Max DD"
               value={formatPercent(strategy.max_drawdown)}
-              negative
+              negative={drawdownTone(strategy.max_drawdown, 2, 100) === "negative"}
             />
           </div>
         </div>

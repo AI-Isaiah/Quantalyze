@@ -146,7 +146,10 @@ describe("169.5-01 SC3: BTC coverage, `through` and null windows", () => {
 });
 
 describe("169.5-01 D-54 / D-64: interval pairing by the engine's rule", () => {
-  const btc = closes("2026-02-20", "2026-04-10", false, 4242);
+  // 170.6 plan 11 (D-07): the end moved from 2026-04-10 to 2026-06-10 so the two summary tests
+  // below can span the 90-day annualization floor. The closes are a seeded sequence, so every
+  // close before the old end is unchanged and every hand-typed return in this block still holds.
+  const btc = closes("2026-02-20", "2026-06-10", false, 4242);
 
   it("weekday strategy vs contiguous 7-day BTC: Monday pairs with the Friday-to-Monday move (166.4 D-A)", () => {
     const dates = weekdays("2026-03-02", "2026-03-13");
@@ -201,25 +204,28 @@ describe("169.5-01 D-54 / D-64: interval pairing by the engine's rule", () => {
   });
 
   it("a dropped close is never bridged: both intervals touching it are null and out of the summary", () => {
-    const dates = days("2026-03-01", "2026-03-06");
+    // 170.6 plan 11 (D-07): 2026-03-01 .. 2026-06-05 (96 elapsed days) so the covered summary
+    // is above the 90-day annualization floor and its ann_vol still bites.
+    const dates = days("2026-03-01", "2026-06-05");
     const prices = btc.filter((p) => p.date !== "2026-03-03");
     const a = alignCoveredReturns(prices, ["2026-03-03"], dates, CALENDAR_7D);
     expect(a.returns[2]).toBeNull();
     expect(a.returns[3]).toBeNull();
     const block = build(STRATEGY, dates, opt(prices, ["2026-03-03"])).comparators.btc;
-    const cov = [0, 1, 4, 5];
-    const covRets = cov.map((i) => close(btc, dates[i]) / close(btc, addDays(dates[i], -1)) - 1);
-    const covDates = cov.map((i) => dates[i]);
-    const oracle = compute(covRets, covDates, 0, 365);
-    expect(block.summary!.win_rate).toBe(oracle.win_rate);
-    expect(block.summary!.ann_vol).toBeCloseTo(oracle.ann_vol, 12);
+    // Hand-typed (170.6 review WR-05), computed outside the project code: the 95 covered
+    // returns (every date except 03-03 and 03-04, each a 1-day close ratio), win rate 43 / 95,
+    // population-sd ann_vol on the 365 basis.
+    expect(block.summary!.win_rate).toBeCloseTo(0.45263157894736844, 12);
+    expect(block.summary!.ann_vol).toBeCloseTo(0.3388644459328932, 12);
   });
 
   it("D-58 missing BTC day at k: k null, k+1 bridged in the series but unpaired, summary and joint exclude them", () => {
-    // 14 dates, 12 paired: at or above `MIN_PAIRED_OBSERVATIONS` (169.4 review
+    // 12 or more paired: at or above `MIN_PAIRED_OBSERVATIONS` (169.4 review
     // SFH MEDIUM-4), so the block carries a joint for this case to check. The
-    // window was 10 dates (8 paired) before that floor existed.
-    const dates = days("2026-03-01", "2026-03-14");
+    // window was 10 dates (8 paired) before that floor existed. 170.6 plan 11
+    // (D-07): 2026-03-01 .. 2026-06-05 (96 elapsed days), above the 90-day
+    // annualization floor, so the covered summary's ann_vol still bites.
+    const dates = days("2026-03-01", "2026-06-05");
     const k = dates.indexOf("2026-03-04");
     const prices = btc.filter((p) => p.date !== "2026-03-04");
     const a = alignCoveredReturns(prices, [], dates, CALENDAR_7D);
@@ -231,12 +237,11 @@ describe("169.5-01 D-54 / D-64: interval pairing by the engine's rule", () => {
 
     const payload = build(STRATEGY, dates, opt(prices));
     const block = payload.comparators.btc;
-    const cov = dates.map((_, i) => i).filter((i) => i !== k);
-    const covRets = cov.map((i) => a.returns[i] as number);
-    const covDates = cov.map((i) => dates[i]);
-    const oracle = compute(covRets, covDates, 0, 365);
-    expect(block.summary!.win_rate).toBe(oracle.win_rate);
-    expect(block.summary!.ann_vol).toBeCloseTo(oracle.ann_vol, 12);
+    // Hand-typed (170.6 review WR-05), computed outside the project code: the 96 covered
+    // returns (every date except 03-04; 03-05 is the 2-day ratio over the gap), win rate
+    // 44 / 96, population-sd ann_vol on the 365 basis.
+    expect(block.summary!.win_rate).toBeCloseTo(0.4583333333333333, 12);
+    expect(block.summary!.ann_vol).toBeCloseTo(0.33742174194520497, 12);
     const strat = strategyRows(dates).map((r) => r.value);
     const pairedIdx = dates.map((_, i) => i).filter((i) => i !== k && i !== k + 1);
     const want = jointMetrics(pairedIdx.map((i) => strat[i]), pairedIdx.map((i) => a.returns[i] as number), 0, 365);
@@ -283,19 +288,40 @@ describe("169.5-01 SC3 / D-09: the opt's three states", () => {
 });
 
 describe("169.5-01 D-59: a comparator's summary annualizes on the smaller of the two bases", () => {
+  // 170.6 plan 11 (D-07): both windows below span at least the 90-day annualization floor
+  // (before it they were 30 days, and a comparator under the floor has NaN here by design).
+  // 170.6 review WR-05: every figure below is a hand-typed literal. They were computed OUTSIDE
+  // the project code (a scratch script that re-implements the seeded close generator, the
+  // pairing rule and the statistics from their definitions), never by `compute()`, so a
+  // regression in the alignment or in `compute` moves the actual and not the expectation.
+  //   population sd of the covered per-day returns, ann_vol = sd * sqrt(basis),
+  //   sharpe = mean / sd * sqrt(basis) at rf 0, and the 365 reading typed beside it so the
+  //   basis (smaller of the two) is what is pinned.
+
   it("7-day strategy vs the weekday SPX shape: SPX ann_vol and sharpe on 252, joint on 365", () => {
-    const dates = days("2026-03-02", "2026-03-31");
+    // Seed 777 weekday closes 2025-11-03 .. 2026-06-05, strategy 2026-03-02 .. 2026-06-05:
+    // the 70 weekday returns (each a close over the previous close, Monday over Friday).
+    //   252: ann_vol 0.27231658986911744, sharpe 0.7385171259946766
+    //   365: ann_vol 0.32773306663876967 (the reading this must NOT be)
+    const dates = days("2026-03-02", "2026-06-05");
     const block = build(STRATEGY, dates).comparators.spx;
-    expect(block.summary!.ann_vol).toBeCloseTo(0.23196458527486924, 12);
-    expect(block.summary!.sharpe).toBeCloseTo(0.4445740025160893, 12);
+    expect(block.summary!.ann_vol).toBeCloseTo(0.27231658986911744, 12);
+    expect(block.summary!.sharpe).toBeCloseTo(0.7385171259946766, 12);
+    expect(block.summary!.ann_vol).not.toBeCloseTo(0.32773306663876967, 6);
   });
 
   it("weekday strategy vs 7-day BTC (amendment): BTC ann_vol and sharpe on 252, never BTC's own 365", () => {
-    const dates = weekdays("2026-03-02", "2026-03-31");
-    const btc = closes("2026-02-20", "2026-04-10", false, 4242);
+    // Seed 4242 7-day closes 2026-02-20 .. 2026-06-10, weekday strategy 2026-03-02 .. 2026-06-05:
+    // 70 returns (day one is BTC's own 03-01 -> 03-02 return, every later one runs from the
+    // previous strategy date, so Monday spans the weekend).
+    //   252: ann_vol 0.35486893203639935, sharpe -1.9919576662855796
+    //   365: ann_vol 0.42708482581620255 (the reading this must NOT be)
+    const dates = weekdays("2026-03-02", "2026-06-05");
+    const btc = closes("2026-02-20", "2026-06-10", false, 4242);
     const block = build(WEEKDAY_STRATEGY, dates, opt(btc)).comparators.btc;
-    expect(block.summary!.ann_vol).toBeCloseTo(0.3295726382836115, 12);
-    expect(block.summary!.sharpe).toBeCloseTo(-3.2996046778540213, 12);
+    expect(block.summary!.ann_vol).toBeCloseTo(0.35486893203639935, 12);
+    expect(block.summary!.sharpe).toBeCloseTo(-1.9919576662855796, 12);
+    expect(block.summary!.ann_vol).not.toBeCloseTo(0.42708482581620255, 6);
   });
 
   it("index 0 (D-64, 166.4 D-05): Saturday start null; Tuesday and Monday start the comparator's own return; BTC with no prior close null", () => {

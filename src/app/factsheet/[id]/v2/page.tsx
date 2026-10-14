@@ -257,11 +257,13 @@ function buildFactsheetPayloadCached(
     // Bumped v14→v15 (re-keyed on merging main, 2026-10-10; originally drafted as v12→v13) (Phase 164.6.6.3.3 FACTSHEETTRUTH, 2026-10-09): the payload's `dataQuality` gains `headlineWithheld` and `headlineGuardReasons`, a composite now carries `twrChainBroken` and `headlineCoversFrom`, and a legacy chain-broken row's seven stored scalars are withheld; a stale entry would show mixed-basis figures under the new one-span note during the 1 h drain.
     // Bumped v15→v16 (Phase 167.1.2.2.2 TRADESYNC plan 10, 2026-10-10, re-keyed on merging main: it was drafted as v12→v13 and main shipped v15 meanwhile): the payload gained `tradesFetchedAt`, `tradeFetchVenue` and `unrecoveredGaps` (the header's trade-fetch line and the named-gap record), and the key gained `trades_fetched_at` plus a fingerprint of `series_provenance`. The daily tick stamps `trades_fetched_at`, and a runbook provenance write sets `series_provenance`, with neither moving `computed_at`, so under the v15 key the line would have stayed frozen for the 1 h TTL. A v15 entry lacks the three fields, which read as undefined (no line), not as an error.
     // Bumped v16→v17 (Phase 164.6.6.2.3 FLOWTIMING, 2026-10-13, on merging main): the payload's `dataQuality` gains the optional `flowTimingDayLevel` and `flowTimingDayLevelLarge` (the day-level flow-timing note and the "returns can be extreme" caveat), and the retired `flow_dominated_guard` no longer names a guard reason, so `headlineGuardReasons` is absent where a v16 entry could carry it. A v16 entry lacks the two new fields, so for the 1 h TTL drain a day-level account would show no note and a stored flow-dominance row would still name its retired reason.
-    // Not a payload-shape bump (166.3.1 NAVBREACH D-05, merged with origin/main): the key gains a
-    // sixth member, `computationStatus` (`computation_status ?? "none"`), and the payload shape is
-    // unchanged, so the version stays v17. A longer keyParts array already separates every entry
-    // built under the five-member v17 key.
-    ["factsheet-v2-payload-v17", id, computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus],
+    // Not a payload-shape bump (166.3.1 NAVBREACH D-05, merged with origin/main): the key gained a
+    // sixth member, `computationStatus` (`computation_status ?? "none"`), and the payload shape was
+    // unchanged, so the version stayed v17 at that merge (the v17→v18 bump below is a later,
+    // separate change). A longer keyParts array already separated every entry built under the
+    // five-member v17 key.
+    // Bumped v17→v18 (Phase 170.6 DISPLAYPOLISH SFH-2, 2026-10-14): the values inside `comparators.*.summary`, `summarySince` and the windowed comparator views change without a shape change. Below the 90-day overlap floor (D-07) the comparator's Sharpe, Sortino, Calmar, CAGR and annualized volatility are NaN, not the figures a v17 entry holds (SPX over 5 days read a Sharpe of 10.24). The key's other members (`computedAt`, `tradesFetchedAt`, provenance, status) do not move at deploy, so under v17 an entry built before the deploy would keep serving the old figures for the 1 h TTL drain, beside a fresh build and the OG card that show "—".
+    ["factsheet-v2-payload-v18", id, computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],

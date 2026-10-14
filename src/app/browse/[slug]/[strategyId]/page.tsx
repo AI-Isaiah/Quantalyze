@@ -10,6 +10,7 @@ import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getPublicStrategyDetail } from "@/lib/queries";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { formatPercent, formatNumber, metricColor } from "@/lib/utils";
+import { drawdownTone } from "@/lib/factsheet/display-sign";
 import type { Metadata } from "next";
 
 export async function generateMetadata({
@@ -98,17 +99,20 @@ export default async function PublicStrategyDetailPage({
         <HeroMetric
           label="CAGR"
           value={formatPercent(analytics.cagr)}
-          colorClass={metricColor(analytics.cagr)}
+          colorClass={metricColor(analytics.cagr, "percent")}
         />
         <HeroMetric
           label="Sharpe"
           value={formatNumber(analytics.sharpe)}
-          colorClass={metricColor(analytics.sharpe)}
+          colorClass={metricColor(analytics.sharpe, "ratio")}
         />
         <HeroMetric
           label="Max Drawdown"
           value={formatPercent(analytics.max_drawdown)}
-          colorClass="text-negative"
+          colorClass={
+            // D-03/D-04: red only when the ROUNDED drawdown is below zero; never green.
+            drawdownTone(analytics.max_drawdown, 2, 100) === "negative" ? "text-negative" : "text-text-primary"
+          }
         />
         <HeroMetric
           label="Volatility"

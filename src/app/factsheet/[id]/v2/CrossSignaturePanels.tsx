@@ -9,6 +9,7 @@ import type { EventSignature, EventSignaturesSet } from "@/lib/factsheet/types";
 import { niceStepValues } from "@/lib/chart-ticks";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 
 /**
  * Cross Signatures — mean-trajectory overlays per horizon.
@@ -422,8 +423,5 @@ function niceTicks(lo: number, hi: number, count: number): { value: number; labe
 }
 
 function formatPct(v: number): string {
-  if (!Number.isFinite(v)) return "—";
-  const x = v * 100;
-  const sign = x > 0 ? "+" : "";
-  return `${sign}${x.toFixed(1)}%`;
+  return formatFixedSigned(v, { dp: 1, scale: 100, suffix: "%", plus: true });
 }

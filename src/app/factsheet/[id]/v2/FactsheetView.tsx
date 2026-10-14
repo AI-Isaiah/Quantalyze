@@ -3,6 +3,7 @@
 import React, { type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import type { FactsheetPayload, FactsheetUsdView, RollWindowPick } from "@/lib/factsheet/types";
+import { COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
 import { flatLegReason, pairedFloorReason } from "@/lib/factsheet/joint";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 // Phase 163 / HONEST-08 — the SERIES ladder (3d/7d) is shared with the
@@ -67,6 +68,7 @@ import { HistogramChart } from "./HistogramChart";
 import {
   MetricsColumn,
   RangeEyebrow,
+  comparatorPartialThrough,
   headlineCoverageNote,
   headlineNoteColor,
   headlineNoteGlyph,
@@ -1785,9 +1787,18 @@ function KpiStrip() {
     : leverageApplied
       ? null
       : headlineCoverageNote(payload.dataQuality, basis, items.length > 7 ? "stripRelative" : "strip");
+  // Phase 170.6 (D-08): the sentence also says when the comparator's prices end, for the
+  // windowed view this strip reads, and only when they end before that view's last date
+  // (the rule §IV of the rail uses: `comparatorPartialThrough`).
   const jointFloorReason =
     jointWithheld && cmpKey !== "none"
-      ? pairedFloorReason(cn, jointWithheld.paired, selected ? "range" : "record", jointWithheld.floor)
+      ? pairedFloorReason(
+          cn,
+          jointWithheld.paired,
+          selected ? "range" : "record",
+          jointWithheld.floor,
+          comparatorPartialThrough(wv.comparators[cmpKey].through, wv.dates[wv.dates.length - 1], COMPARATOR_CALENDARS[cmpKey]),
+        )
       : null;
   // Phase 164.6.6.3.3 (D-04, UI-SPEC 2.1): a flat strategy leg's α and IR cells read "—"
   // (the block's joint carries NaN for them) and ONE muted line says why. It is picked by

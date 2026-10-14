@@ -150,12 +150,14 @@ describe("TimeSeriesChart daily-returns y-ticks, server vs browser (169.1.1 SC-3
     expect(browser === server, "server and browser markup must be byte-identical").toBe(true);
   });
 
-  it("under the Chromium-exact regime the zero tick reads +0.0% and is the one solid baseline", () => {
+  // Phase 170.6 (D-02, D-06): the baseline tick used to read "+0.0%", a signed zero. A figure
+  // that rounds to zero prints unsigned, so the zero tick reads "0.0%".
+  it("under the Chromium-exact regime the zero tick reads 0.0% and is the one solid baseline", () => {
     const ticks = yTicks(renderUnder("chromium-exact"));
     const baselines = ticks.filter(
       (t) => t.stroke === "var(--color-text-muted)" && t.dash === null,
     );
     expect(baselines.length, `baseline-styled ticks in ${ticks.map((t) => t.label).join(" ")}`).toBe(1);
-    expect(baselines[0].label).toBe("+0.0%");
+    expect(baselines[0].label).toBe("0.0%");
   });
 });

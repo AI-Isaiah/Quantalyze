@@ -1,4 +1,5 @@
-import { cn, formatPercent } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { formatSignedPercent, signTone } from "@/lib/factsheet/display-sign";
 import type { AttributionRow } from "@/lib/types";
 import { computeWinnersLosers } from "@/lib/winners-losers";
 
@@ -18,17 +19,23 @@ export interface WinnersLosersStripProps {
 }
 
 function Row({ name, contribution }: { name: string; contribution: number }) {
-  const positive = contribution >= 0;
+  // 170.6 D-03: the tone follows the sign of the contribution as PRINTED (2 dp percent), so a
+  // contribution shown "0.00%" is neutral, not red or green.
+  const tone = signTone(contribution, 2, 100);
   return (
     <li className="flex items-baseline justify-between gap-4 py-2">
       <span className="text-small text-text-primary truncate">{name}</span>
       <span
         className={cn(
           "font-metric tabular-nums text-small",
-          positive ? "text-positive" : "text-negative",
+          tone === "positive"
+            ? "text-positive"
+            : tone === "negative"
+              ? "text-negative"
+              : "text-text-primary",
         )}
       >
-        {formatPercent(contribution)}
+        {formatSignedPercent(contribution, 2)}
       </span>
     </li>
   );

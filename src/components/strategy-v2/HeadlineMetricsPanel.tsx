@@ -10,6 +10,12 @@ import { SegmentedControl } from "./SegmentedControl";
 import { PartialDataBanner } from "./PartialDataBanner";
 import { Button } from "@/components/ui/Button";
 import { withUnit } from "@/lib/factsheet/returns-unit";
+import {
+  drawdownTone,
+  formatRatio,
+  formatUnsignedPercent,
+  signTone,
+} from "@/lib/factsheet/display-sign";
 
 interface HeadlineMetricsPanelProps {
   /** Strategy id used by the Log returns lazy fetch (panel 2 is eager-mounted; no observer). */
@@ -35,23 +41,27 @@ interface HeadlineMetricsPanelProps {
   returnsUnit?: string | null;
 }
 
-const EM_DASH = "—";
-
+// Phase 170.6 DISPLAYPOLISH (D-02, D-03, D-04, D-05): every figure and tone below comes
+// from display-sign, so a value that rounds to zero prints unsigned and neutral, and the
+// colour follows the ROUNDED sign. This panel holds no rounding or sign rule of its own.
 function fmtPct(value: number | null): string {
-  if (value === null || value === undefined) return EM_DASH;
-  return `${(value * 100).toFixed(2)}%`;
+  return formatUnsignedPercent(value, 2);
 }
 
 function fmtRatio(value: number | null): string {
-  if (value === null || value === undefined) return EM_DASH;
-  return value.toFixed(2);
+  return formatRatio(value, 2);
 }
 
 function signColor(value: number | null): string {
-  if (value === null || value === undefined) return "text-text-primary";
-  if (value > 0) return "text-positive";
-  if (value < 0) return "text-negative";
+  const tone = signTone(value, 2, 100);
+  if (tone === "positive") return "text-positive";
+  if (tone === "negative") return "text-negative";
   return "text-text-primary";
+}
+
+/** Max DD is red only when it rounds below zero, and is never green (D-04). */
+function drawdownColor(value: number | null): string {
+  return drawdownTone(value, 2, 100) === "negative" ? "text-negative" : "text-text-primary";
 }
 
 type ActiveView = "cumulative" | "underwater" | "rolling_sharpe" | "log_returns";
@@ -260,7 +270,11 @@ export function HeadlineMetricsPanel({
           </div>
           <div>
             <dt className="text-xs font-normal text-text-muted">Max DD</dt>
-            <dd className="mt-1 text-lg font-semibold text-negative tabular-nums">
+            <dd
+              className={`mt-1 text-lg font-semibold tabular-nums ${drawdownColor(
+                panel2Headline.max_drawdown,
+              )}`}
+            >
               {fmtPct(panel2Headline.max_drawdown)}
             </dd>
           </div>

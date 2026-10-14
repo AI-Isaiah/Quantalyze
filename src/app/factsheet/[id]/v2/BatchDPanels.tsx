@@ -4,6 +4,8 @@ import { useState } from "react";
 import { usePayload } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, BaseLeverageNote } from "./basis-context";
 import { isoToMonthDay } from "./MetricsColumn";
+import { drawdownTone, formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
+import { pct as pctUnsigned, pctSigned, signed } from "./format";
 
 /**
  * Batch D analytical panels. Three pieces:
@@ -27,7 +29,7 @@ export function StyleDriftPanel() {
   // Each half should have >=126 trading days (~6 months) for the half-vs-half
   // comparison to be meaningful. Flag if either half is below that.
   const thinHalf = h1.n < 126 || h2.n < 126;
-  const rows: Array<[string, number, number, "pct" | "ratio" | "pctSigned" | "intSigned"]> = [
+  const rows: Array<[string, number, number, DriftKind]> = [
     ["Sharpe", h1.sharpe, h2.sharpe, "ratio"],
     ["Sortino", h1.sortino, h2.sortino, "ratio"],
     ["Ann. Volatility", h1.ann_vol, h2.ann_vol, "pct"],
@@ -211,12 +213,12 @@ function DeltaRow({
   value: number | null;
   kind: "ratio" | "maxdd";
 }) {
+  // The sign is carried in TEXT as "+" or U+2212 (WCAG non-color-only); a delta that
+  // rounds to zero at the printed precision prints unsigned (170.6 D-02).
   const display =
-    value == null || !Number.isFinite(value)
-      ? "—"
-      : kind === "maxdd"
-        ? `${signGlyph(value)}${Math.abs(value * 100).toFixed(1)}pp`
-        : `${signGlyph(value)}${Math.abs(value).toFixed(2)}`;
+    kind === "maxdd"
+      ? formatFixedSigned(value, { dp: 1, scale: 100, suffix: "pp", plus: true, minus: "−" })
+      : formatFixedSigned(value, { dp: 2, plus: true, minus: "−" });
   // Color follows FAVORABILITY, not the raw sign. For ratios, higher (positive
   // delta) is better. For max_dd the delta is `blend.max_dd − book.max_dd` on
   // negative drawdown values, so a POSITIVE delta = blend's max_dd is LESS
@@ -224,11 +226,11 @@ function DeltaRow({
   // positive→positive here; the UI-SPEC "inversion" is relative to the naive
   // reading that a positive change in a drawdown (loss) field is bad, which it
   // is NOT once the delta is taken on the signed (negative) drawdown values.
-  let color: string | undefined;
-  if (value != null && Number.isFinite(value) && value !== 0) {
-    const favorable = value > 0;
-    color = favorable ? "var(--color-positive)" : "var(--color-negative)";
-  }
+  // Phase 170.6 (D-03, O-4): the mapping reads the sign of the ROUNDED delta, so a delta that
+  // prints "0.00" or "0.0pp" is neutral. D-04 (never green) governs a drawdown VALUE, not this delta.
+  const tone = kind === "maxdd" ? signTone(value, 1, 100) : signTone(value, 2);
+  const color =
+    tone === "positive" ? "var(--color-positive)" : tone === "negative" ? "var(--color-negative)" : undefined;
   return (
     <tr className="border-b border-border/30 last:border-0">
       <td className="py-1.5 pr-2 text-text-2">{label}</td>
@@ -240,13 +242,6 @@ function DeltaRow({
       </td>
     </tr>
   );
-}
-
-/** Sign glyph carried in TEXT (WCAG non-color-only): "+" or U+2212 minus. "" for 0. */
-function signGlyph(v: number): string {
-  if (v > 0) return "+";
-  if (v < 0) return "−";
-  return "";
 }
 
 function PercentileBar({ label, pct }: { label: string; pct: number | null }) {
@@ -348,13 +343,13 @@ export function AllocatorSection() {
           </p>
           <table className="w-full text-caption">
             <tbody>
-              <KvRow k="Portfolio Vol (ann)" v={pct1(p.ann_vol)} />
+              <KvRow k="Portfolio Vol (ann)" v={pctUnsigned(p.ann_vol)} />
               <KvRow k="Correlation with MultiMarket" v={signed(p.corr)} />
               <KvRow k="Cum. Return (full window)" v={pctSigned(p.cum_ret)} />
-              <KvRow k="Max Drawdown" v={pct1(p.max_dd)} negative />
+              <KvRow k="Max Drawdown" v={pctUnsigned(p.max_dd)} negative={drawdownTone(p.max_dd, 1, 100) === "negative"} />
               <KvSep />
               <KvRow k="Suggested MultiMarket sleeve" v={pctRound(p.sleeve_pct)} accent />
-              <KvRow k="Blended Vol at sleeve %" v={pct1(p.blend_vol)} />
+              <KvRow k="Blended Vol at sleeve %" v={pctUnsigned(p.blend_vol)} />
             </tbody>
           </table>
         </div>
@@ -369,8 +364,8 @@ export function AllocatorSection() {
           <table className="w-full text-caption">
             <tbody>
               <KvRow k="Stress windows in sample" v={p.tail_count === null ? "—" : String(p.tail_count)} />
-              <KvRow k="MultiMarket mean return" v={pctSigned2(p.tail_mm_mean)} />
-              <KvRow k="MultiMarket median return" v={pctSigned2(p.tail_mm_median)} />
+              <KvRow k="MultiMarket mean return" v={pctSigned(p.tail_mm_mean, 2)} />
+              <KvRow k="MultiMarket median return" v={pctSigned(p.tail_mm_median, 2)} />
               <KvRow k="Windows MM was positive" v={pctRound(p.tail_mm_pos)} accent />
             </tbody>
           </table>
@@ -442,46 +437,25 @@ function monthYear(iso: string): string {
   return `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
 }
 
-function fmt(v: number, kind: "pct" | "ratio" | "pctSigned" | "intSigned"): string {
-  if (!Number.isFinite(v)) return "—";
-  if (kind === "pct") return `${(v * 100).toFixed(1)}%`;
-  if (kind === "pctSigned") return `${(v * 100).toFixed(1)}%`; // depth-style — sign already in value
-  if (kind === "intSigned") return (v >= 0 ? "+" : "") + v.toFixed(2);
-  return v.toFixed(2);
+type DriftKind = "pct" | "ratio" | "pctSigned" | "intSigned";
+
+function fmt(v: number, kind: DriftKind): string {
+  if (kind === "pct") return formatFixedSigned(v, { dp: 1, scale: 100, suffix: "%" });
+  if (kind === "pctSigned") return formatFixedSigned(v, { dp: 1, scale: 100, suffix: "%" }); // depth-style — sign already in value
+  if (kind === "intSigned") return formatFixedSigned(v, { dp: 2, plus: true });
+  return formatFixedSigned(v, { dp: 2 });
 }
 
-function fmtDelta(a: number, b: number, kind: "pct" | "ratio" | "pctSigned" | "intSigned"): string {
+function fmtDelta(a: number, b: number, kind: DriftKind): string {
   if (!Number.isFinite(a) || !Number.isFinite(b)) return "—";
   const d = b - a;
-  if (kind === "pct" || kind === "pctSigned") {
-    const x = d * 100;
-    return `${x >= 0 ? "+" : ""}${x.toFixed(1)}pp`;
-  }
-  return (d >= 0 ? "+" : "") + d.toFixed(2);
-}
-
-function signed(v: number | null): string {
-  // An undefined correlation (NaN, or null after a JSON round-trip) is "—" (D7).
-  if (v == null || !Number.isFinite(v)) return "—";
-  return (v >= 0 ? "+" : "") + v.toFixed(2);
+  if (kind === "pct" || kind === "pctSigned") return formatFixedSigned(d, { dp: 1, scale: 100, suffix: "pp", plus: true });
+  return formatFixedSigned(d, { dp: 2, plus: true });
 }
 
 // Phase 169.4 D-70(4): an allocator figure is null when its blend cannot be
-// measured; null or non-finite renders the em-dash (DESIGN.md), never 0.
-function pctSigned(v: number | null): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return (v >= 0 ? "+" : "") + (v * 100).toFixed(1) + "%";
-}
-
-function pctSigned2(v: number | null): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return (v >= 0 ? "+" : "") + (v * 100).toFixed(2) + "%";
-}
-
-function pct1(v: number | null): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return `${(v * 100).toFixed(1)}%`;
-}
+// measured; null or non-finite renders the em-dash (DESIGN.md), never 0. The
+// signed and unsigned percent and the signed ratio come from ./format (170.6 D-05).
 
 function pctRound(v: number | null): string {
   if (v == null || !Number.isFinite(v)) return "—";

@@ -5,6 +5,7 @@ import { PartialDataBanner } from "./PartialDataBanner";
 import { MetricCell } from "./MetricCell";
 import { TradeMixSubPanel } from "./TradeMixSubPanel";
 import type { TradeMetrics, AnalyticsDataQualityFlags } from "@/lib/types";
+import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 
 interface TradeAndPositionPanelProps {
   strategyId: string;
@@ -40,12 +41,12 @@ function fmtUsdCompactDeterministic(v: number): string {
 
 function fmtNum(v: number | null | undefined, digits = 2): string | null {
   if (v == null || !Number.isFinite(v)) return null;
-  return v.toFixed(digits);
+  return formatFixedSigned(v, { dp: digits });
 }
 
 function fmtPct(v: number | null | undefined): string | null {
   if (v == null || !Number.isFinite(v)) return null;
-  return `${(v * 100).toFixed(1)}%`;
+  return formatFixedSigned(v, { dp: 1, scale: 100, suffix: "%" });
 }
 
 function fmtUsdCompact(v: number | null | undefined): string | null {
@@ -56,6 +57,11 @@ function fmtUsdCompact(v: number | null | undefined): string | null {
 function fmtCount(v: number | null | undefined): string | null {
   if (v == null || !Number.isFinite(v)) return null;
   return Math.round(v).toLocaleString();
+}
+
+/** Every ratio cell prints at fmtNum's 2 dp, so the flag reads the value rounded to 2 dp (D-03). */
+function isNegativeRatio(v: number | null | undefined): boolean {
+  return signTone(v, 2) === "negative";
 }
 
 /**
@@ -184,12 +190,12 @@ function Body({
           <MetricCell
             label="R:R"
             value={fmtNum(tm.risk_reward_ratio)}
-            negative={(tm.risk_reward_ratio ?? 0) < 0}
+            negative={isNegativeRatio(tm.risk_reward_ratio)}
           />
           <MetricCell
             label="Weighted R:R"
             value={fmtNum(tm.weighted_risk_reward_ratio)}
-            negative={(tm.weighted_risk_reward_ratio ?? 0) < 0}
+            negative={isNegativeRatio(tm.weighted_risk_reward_ratio)}
           />
           <MetricCell label="Profit factor" value={fmtNum(profitFactor)} />
           <MetricCell label="Payoff ratio" value={fmtNum(payoffRatio)} />
@@ -198,12 +204,12 @@ function Body({
           <MetricCell
             label="Expectancy"
             value={fmtNum(tm.expectancy)}
-            negative={(tm.expectancy ?? 0) < 0}
+            negative={isNegativeRatio(tm.expectancy)}
           />
           <MetricCell
             label="SQN"
             value={fmtNum(tm.sqn)}
-            negative={(tm.sqn ?? 0) < 0}
+            negative={isNegativeRatio(tm.sqn)}
           />
         </Grid>
       </Section>

@@ -12,6 +12,7 @@ import {
 import { TouchTooltip } from "@/components/charts/TouchTooltip";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import { formatPercent } from "@/lib/utils";
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import { curveMethodFromFlags } from "@/lib/factsheet/resolve-series";
 import {
   CHART_BORDER,
@@ -242,7 +243,7 @@ export function CompareEquityOverlay({ items }: { items: CompareItem[] }) {
             tick={{ fontSize: 10, fill: CHART_AXIS_TICK, fontFamily: CHART_FONT_MONO }}
             tickLine={false}
             axisLine={false}
-            tickFormatter={(v: number) => `${v.toFixed(0)}%`}
+            tickFormatter={(v: number) => formatFixedSigned(v, { dp: 0, suffix: "%" })}
             width={48}
           />
           <TouchTooltip

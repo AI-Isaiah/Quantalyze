@@ -13,6 +13,7 @@ import {
   formatNumber,
   formatPercent,
 } from "@/lib/utils";
+import { drawdownTone } from "@/lib/factsheet/display-sign";
 import { getPersona, type PersonaKey } from "@/lib/personas";
 import { warmupAnalytics } from "@/lib/warmup-analytics";
 import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
@@ -279,7 +280,7 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
                     <Metric
                       label="Max DD"
                       value={formatPercent(h.analytics?.max_drawdown)}
-                      negative
+                      negative={drawdownTone(h.analytics?.max_drawdown, 2, 100) === "negative"}
                     />
                   </div>
                 </div>
@@ -493,7 +494,7 @@ function RecommendationCard({ rec }: { rec: RecommendationRow }) {
             <Metric
               label="Max DD"
               value={formatPercent(rec.analytics?.max_drawdown)}
-              negative
+              negative={drawdownTone(rec.analytics?.max_drawdown, 2, 100) === "negative"}
             />
           </div>
         </div>

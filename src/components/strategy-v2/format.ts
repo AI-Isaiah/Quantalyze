@@ -1,7 +1,7 @@
 /**
  * Phase 170.5 (D-07) - the v2 formatters for the five Benchmark greeks cells.
  *
- * One formatter module for the surface family (DESIGN: no inline `toFixed` in a
+ * One formatter module for the surface family (DESIGN: no inline number formatting in a
  * component). The digits are the factsheet's `pct(v, true)` and `num(v)`
  * (`MetricsColumn.tsx`, module-private there): the percent is x100 to 2 dp, the
  * number is 2 dp, so a non-zero figure prints the same string on both pages.
@@ -16,9 +16,12 @@
  * A non-finite or nullish input returns `null`, which `MetricCell` prints as
  * the em dash (UI-SPEC "NaN to dash rule"). It is never 0.
  *
- * 170.6 DISPLAYPOLISH owns signed zero and red-for-non-negative everywhere else
- * on the page; it rebases onto these two functions.
+ * Phase 170.6 DISPLAYPOLISH (D-05): this module no longer rounds or signs anything
+ * itself. The text is `formatFixedSigned` and the tone is `signTone`, both from
+ * `@/lib/factsheet/display-sign`, the one place the rule lives.
  */
+import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
+
 export interface FormattedFigure {
   text: string;
   /** True only when the ROUNDED, printed value is below zero. */
@@ -32,12 +35,10 @@ function roundedFigure(
   plus: boolean,
 ): FormattedFigure | null {
   if (value == null || !Number.isFinite(value)) return null;
-  const fixed = (value * scale).toFixed(2);
-  const rounded = Number(fixed);
-  // Rounds to zero (including -0): unsigned, neutral.
-  if (rounded === 0) return { text: `0.00${suffix}`, negative: false };
-  if (rounded < 0) return { text: `${fixed}${suffix}`, negative: true };
-  return { text: `${plus ? "+" : ""}${fixed}${suffix}`, negative: false };
+  return {
+    text: formatFixedSigned(value, { dp: 2, scale, suffix, plus }),
+    negative: signTone(value, 2, scale) === "negative",
+  };
 }
 
 /** A fraction as a signed percent to 2 dp: 0.123456 -> `+12.35%`. */

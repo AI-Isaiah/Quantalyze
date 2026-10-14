@@ -163,3 +163,43 @@ describe("NEW-C20-10 — brand-aware formatters", () => {
     expect(formatRatio(r)).toBe("1.50");
   });
 });
+
+// Phase 170.6 DISPLAYPOLISH plan 01 (D-02, D-05): a value that rounds to zero at its
+// display precision prints unsigned. `-0.00`, `-0.0%` and `+0.0%` never appear. The
+// helpers delegate to display-sign, so these pin the printed strings (hand-typed).
+describe("170.6 D-02 — a rounded zero prints unsigned", () => {
+  it("pctSigned: an exact zero and a sub-precision negative both print 0.0%", () => {
+    expect(pctSigned(0, 1)).toBe("0.0%");
+    expect(pctSigned(-0.0004)).toBe("0.0%");
+    expect(pctSigned(0.25)).toBe("+25.0%");
+  });
+
+  it("pct: a sub-precision negative prints 0.0%", () => {
+    expect(pct(-0.0004)).toBe("0.0%");
+    expect(pct(-0.0368)).toBe("-3.7%");
+  });
+
+  it("ratio and signed: -0.004 prints 0.00, never -0.00", () => {
+    expect(ratio(-0.004)).toBe("0.00");
+    expect(signed(-0.004)).toBe("0.00");
+    expect(signed(0.5)).toBe("+0.50");
+    expect(signed(0)).toBe("0.00");
+  });
+
+  it("ppDelta: a delta that rounds to zero prints 0.0pp", () => {
+    expect(ppDelta(0.1, 0.1004)).toBe("0.0pp");
+    expect(ppDelta(0.12, 0.1)).toBe("+2.0pp");
+  });
+
+  it("the brand-aware aliases follow the same rule", () => {
+    expect(formatDecimalReturn(safeDecimalReturn(0))).toBe("0.0%");
+    expect(formatDecimalReturn(safeDecimalReturn(-0.0004))).toBe("0.0%");
+    expect(formatDecimalReturn(safeDecimalReturn(-0.0004), { signed: false })).toBe("0.0%");
+    expect(formatRatio(safeRatio(-0.004))).toBe("0.00");
+  });
+
+  it("W3: no digit regression, 1.005 at 2dp keeps the digits toFixed prints", () => {
+    expect(ratio(1.005)).toBe("1.00");
+    expect(ratio(-1.005)).toBe("-1.00");
+  });
+});

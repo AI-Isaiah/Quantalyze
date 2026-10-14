@@ -7,8 +7,11 @@ import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { recordCoversWindow } from "@/lib/factsheet/compute";
 import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
 import { flatLegReason, pairedFloorReason } from "@/lib/factsheet/joint";
+import { COMPARATOR_ANNUALIZATION_FLOOR_DAYS, comparatorAnnualizationWithheld } from "@/lib/factsheet/comparator-block";
 import { joinGuardPhrases } from "@/lib/factsheet/headline-basis";
 import { benchmarkWithheldReason, nativeUnitReason, withUnit } from "@/lib/factsheet/returns-unit";
+import { drawdownTone, signTone } from "@/lib/factsheet/display-sign";
+import { pct, pctSigned, ppDelta, ratio, signed } from "./format";
 import { usePayload, useActiveComparator } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, useWindowedView, type Basis, type RangeScope } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel, FULL_HISTORY_NOTE, ScopeNote } from "./AnalyticalPanels";
@@ -324,15 +327,23 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
               {spanNote.text}
             </p>
           )}
+          {/* Phase 170.6 SFH-1 (founder override of O-5): the comparator's annualized figures
+              read "—" under the overlap floor (D-07). Say so beside the dashes, so a short
+              overlap is not mistaken for missing data. Muted italic, as the span notes above. */}
+          {bn != null && comparatorAnnualizationWithheld(hb) && (
+            <p className="mb-2 text-fixed-10 italic text-text-muted" data-testid="comparator-annualization-reason">
+              {bn} annualized figures need {COMPARATOR_ANNUALIZATION_FLOOR_DAYS} days of overlap.
+            </p>
+          )}
           <Kpm>
-            <Row label={withUnit("Cumulative Return", payload.returnsUnit ?? null)} value={pct(m.cum_ret, true)} bench={pct(hb?.cum_ret, true)} />
-            <Row label={withUnit("CAGR", payload.returnsUnit ?? null)} value={pct(m.cagr, true)} bench={pct(hb?.cagr, true)} />
-            <Row label="Ann. Volatility" value={pct(m.ann_vol)} bench={pct(hb?.ann_vol)} />
-            <Row label="Sharpe" value={num(m.sharpe)} bench={num(hb?.sharpe)} accent />
-            <Row label="Sortino" value={num(m.sortino)} bench={num(hb?.sortino)} />
-            <Row label="Calmar" value={num(m.calmar)} bench={num(hb?.calmar)} />
+            <Row label={withUnit("Cumulative Return", payload.returnsUnit ?? null)} value={pctSigned(m.cum_ret, 2)} bench={pctSigned(hb?.cum_ret, 2)} />
+            <Row label={withUnit("CAGR", payload.returnsUnit ?? null)} value={pctSigned(m.cagr, 2)} bench={pctSigned(hb?.cagr, 2)} />
+            <Row label="Ann. Volatility" value={pct(m.ann_vol, 2)} bench={pct(hb?.ann_vol, 2)} />
+            <Row label="Sharpe" value={ratio(m.sharpe)} bench={ratio(hb?.sharpe)} accent />
+            <Row label="Sortino" value={ratio(m.sortino)} bench={ratio(hb?.sortino)} />
+            <Row label="Calmar" value={ratio(m.calmar)} bench={ratio(hb?.calmar)} />
             <Row label="Skew" value={signed(m.skew)} bench="" />
-            <Row label="Kurtosis" value={num(m.kurt)} bench="" />
+            <Row label="Kurtosis" value={ratio(m.kurt)} bench="" />
           </Kpm>
         </Panel>
         <Panel title="Returns" benchHeader={bnDated}>
@@ -354,15 +365,15 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
           <Kpm>
             {!selected && (
               <>
-                <Row windowKey="mtd" label={monthRowLabel(m.end)} value={pct(m.mtd, true)} bench={pct(hb?.mtd, true)} />
-                <Row windowKey="ytd" label="Year-to-date" value={pct(m.ytd, true)} bench={pct(hb?.ytd, true)} />
-                <Row windowKey="p3m" label="3 Month" value={pct(m.p3m, true)} bench={pct(hb?.p3m, true)} />
-                {(m.p6m != null || covers6m) && <Row windowKey="p6m" label="6 Month" value={pct(m.p6m, true)} bench={pct(hb?.p6m, true)} />}
-                {(m.p1y != null || covers1y) && <Row windowKey="p1y" label="1 Year" value={pct(m.p1y, true)} bench={pct(hb?.p1y, true)} />}
+                <Row windowKey="mtd" label={monthRowLabel(m.end)} value={pctSigned(m.mtd, 2)} bench={pctSigned(hb?.mtd, 2)} />
+                <Row windowKey="ytd" label="Year-to-date" value={pctSigned(m.ytd, 2)} bench={pctSigned(hb?.ytd, 2)} />
+                <Row windowKey="p3m" label="3 Month" value={pctSigned(m.p3m, 2)} bench={pctSigned(hb?.p3m, 2)} />
+                {(m.p6m != null || covers6m) && <Row windowKey="p6m" label="6 Month" value={pctSigned(m.p6m, 2)} bench={pctSigned(hb?.p6m, 2)} />}
+                {(m.p1y != null || covers1y) && <Row windowKey="p1y" label="1 Year" value={pctSigned(m.p1y, 2)} bench={pctSigned(hb?.p1y, 2)} />}
               </>
             )}
-            <Row label="Win Rate (days)" value={pct(m.win_rate)} bench={pct(b?.win_rate)} />
-            <Row label="Profit Factor" value={num(m.profit_factor)} bench={num(b?.profit_factor)} />
+            <Row label="Win Rate (days)" value={pct(m.win_rate, 2)} bench={pct(b?.win_rate, 2)} />
+            <Row label="Profit Factor" value={ratio(m.profit_factor)} bench={ratio(b?.profit_factor)} />
           </Kpm>
         </Panel>
         <EoyReturnsPanel scopeNote={selected ? FULL_HISTORY_NOTE : undefined} />
@@ -376,12 +387,12 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         <Panel title="Max Drawdown" benchHeader={benchThrough != null ? bnDated : undefined}>
           {maxDdSpan && <p className="mb-2 text-fixed-10 italic text-text-muted">{maxDdSpan.text}</p>}
           <Kpm>
-            <Row label="Max Drawdown" value={pctNeg(m.max_dd)} bench={pctNeg(hb?.max_dd)} accent />
+            <Row label="Max Drawdown" value={pct(m.max_dd, 2)} bench={pct(hb?.max_dd, 2)} accent />
             <Row label="Longest DD (days)" value={count(m.longest_dd)} bench={count(b?.longest_dd)} />
-            <Row label="VaR 95%" value={pct(m.var95, true)} bench="" />
-            <Row label="CVaR 95%" value={pct(m.cvar95, true)} bench="" />
-            <Row label="Avg Win" value={pct(m.avg_win, true)} bench="" />
-            <Row label="Avg Loss" value={pct(m.avg_loss, true)} bench="" />
+            <Row label="VaR 95%" value={pctSigned(m.var95, 2)} bench="" />
+            <Row label="CVaR 95%" value={pctSigned(m.cvar95, 2)} bench="" />
+            <Row label="Avg Win" value={pctSigned(m.avg_win, 2)} bench="" />
+            <Row label="Avg Loss" value={pctSigned(m.avg_loss, 2)} bench="" />
           </Kpm>
         </Panel>
         <BootstrapCIPanel />
@@ -483,6 +494,8 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
               // D-85: inside a window the count is the slice's, named as the range's.
               selected ? "range" : "record",
               jointCmp.jointWithheld.floor,
+              // D-08 (170.6): dated only when the comparator's prices end before the strategy's.
+              benchThrough,
             )}
           />
         </EditorialSection>
@@ -536,15 +549,15 @@ function BenchmarkMetricsBody({
   return (
     <Panel title="Joint Metrics" hideHeaderRule>
       <Kpm>
-        <Row label="Alpha (ann)" value={v(j => pct(j.alpha, true))} bench="" accent={joint != null} />
-        <Row label="Beta" value={v(j => num(j.beta))} bench="" />
-        <Row label="Correlation" value={v(j => num(j.corr))} bench="" />
-        <Row label="R²" value={v(j => num(j.r2))} bench="" />
-        <Row label="Information Ratio" value={v(j => num(j.info_ratio))} bench="" />
-        <Row label="Treynor" value={v(j => num(j.treynor))} bench="" />
-        <Row label="Tracking Error" value={v(j => pct(j.tracking_error))} bench="" />
-        <Row label="Up Capture" value={v(j => num(j.up_capture))} bench="" />
-        <Row label="Down Capture" value={v(j => num(j.down_capture))} bench="" />
+        <Row label="Alpha (ann)" value={v(j => pctSigned(j.alpha, 2))} bench="" accent={joint != null} />
+        <Row label="Beta" value={v(j => ratio(j.beta))} bench="" />
+        <Row label="Correlation" value={v(j => ratio(j.corr))} bench="" />
+        <Row label="R²" value={v(j => ratio(j.r2))} bench="" />
+        <Row label="Information Ratio" value={v(j => ratio(j.info_ratio))} bench="" />
+        <Row label="Treynor" value={v(j => ratio(j.treynor))} bench="" />
+        <Row label="Tracking Error" value={v(j => pct(j.tracking_error, 2))} bench="" />
+        <Row label="Up Capture" value={v(j => ratio(j.up_capture))} bench="" />
+        <Row label="Down Capture" value={v(j => ratio(j.down_capture))} bench="" />
       </Kpm>
       {withheldReason && (
         <p className="mt-2 text-fixed-11 text-text-muted" data-testid={reasonTestId}>
@@ -641,6 +654,11 @@ function Row({
   );
 }
 
+/** The inline colour of a tone: the token for positive / negative, no style at a rounded zero or a missing value (D-03). */
+function toneStyle(tone: "positive" | "negative" | undefined) {
+  return tone ? { color: `var(--color-${tone})` } : undefined;
+}
+
 function BwRow({ scale, best, worst }: { scale: string; best: number; worst: number }) {
   return (
     <tr className="border-b border-border/30 last:border-0">
@@ -649,15 +667,15 @@ function BwRow({ scale, best, worst }: { scale: string; best: number; worst: num
       </td>
       <td
         className="py-1 px-2 text-right font-mono tabular-nums"
-        style={{ color: "var(--color-positive)" }}
+        style={toneStyle(signTone(best, 2, 100))}
       >
-        {pct(best, true)}
+        {pctSigned(best, 2)}
       </td>
       <td
         className="py-1 pl-2 text-right font-mono tabular-nums"
-        style={{ color: "var(--color-negative)" }}
+        style={toneStyle(signTone(worst, 2, 100))}
       >
-        {pct(worst, true)}
+        {pctSigned(worst, 2)}
       </td>
     </tr>
   );
@@ -766,28 +784,6 @@ export function isoToMonthDay(iso: string): string {
   return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
 }
 
-function pct(v: number | null | undefined, signed = false): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  const x = v * 100;
-  const sign = signed ? (x >= 0 ? "+" : "") : "";
-  return `${sign}${x.toFixed(2)}%`;
-}
-
-function pctNeg(v: number | null | undefined): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return `${(v * 100).toFixed(2)}%`;
-}
-
-function signed(v: number | null | undefined): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return (v >= 0 ? "+" : "") + v.toFixed(2);
-}
-
-function num(v: number | null | undefined): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return v.toFixed(2);
-}
-
 /** A day count; "—" when absent or withheld (a withheld window's NaN, D-27 W1). */
 function count(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return "—";
@@ -849,7 +845,7 @@ function RollingRow({
   stats: ReturnType<typeof rollingStats>;
   accent?: boolean;
 }) {
-  const f = (v: number | null) => (v == null ? "—" : fmt === "pct" ? `${(v * 100).toFixed(1)}%` : v.toFixed(2));
+  const f = (v: number | null) => (fmt === "pct" ? pct(v, 1) : ratio(v));
   return (
     <tr className="border-b border-border/30 last:border-0">
       <td className="py-1 pr-2 text-text-2">{label}</td>
@@ -895,15 +891,15 @@ function CumulativeReturnsPanel() {
     <Panel title="Cumulative Return Metrics">
       {spanNote && <p className="mb-2 text-fixed-10 italic text-text-muted">{spanNote.text}</p>}
       <Kpm>
-        <Row label={monthRowLabel(m.end)} value={pct(m.mtd, true)} bench="" />
-        <Row label="3 Month" value={pct(m.p3m, true)} bench="" />
-        {(m.p6m != null || covers6m) && <Row label="6 Month" value={pct(m.p6m, true)} bench="" />}
-        <Row label="Year-to-date" value={pct(m.ytd, true)} bench="" />
-        {(m.p1y != null || covers1y) && <Row label="1 Year" value={pct(m.p1y, true)} bench="" />}
-        {m.p3y != null && <Row label="3 Year" value={pct(m.p3y, true)} bench="" />}
-        {m.p5y != null && <Row label="5 Year" value={pct(m.p5y, true)} bench="" />}
-        <Row label="Since Inception" value={pct(m.cum_ret, true)} bench="" accent />
-        <Row label="CAGR" value={pct(m.cagr, true)} bench="" />
+        <Row label={monthRowLabel(m.end)} value={pctSigned(m.mtd, 2)} bench="" />
+        <Row label="3 Month" value={pctSigned(m.p3m, 2)} bench="" />
+        {(m.p6m != null || covers6m) && <Row label="6 Month" value={pctSigned(m.p6m, 2)} bench="" />}
+        <Row label="Year-to-date" value={pctSigned(m.ytd, 2)} bench="" />
+        {(m.p1y != null || covers1y) && <Row label="1 Year" value={pctSigned(m.p1y, 2)} bench="" />}
+        {m.p3y != null && <Row label="3 Year" value={pctSigned(m.p3y, 2)} bench="" />}
+        {m.p5y != null && <Row label="5 Year" value={pctSigned(m.p5y, 2)} bench="" />}
+        <Row label="Since Inception" value={pctSigned(m.cum_ret, 2)} bench="" accent />
+        <Row label="CAGR" value={pctSigned(m.cagr, 2)} bench="" />
       </Kpm>
     </Panel>
   );
@@ -937,19 +933,19 @@ function ExtendedMetricsPanel() {
     <Panel title="Extended Metrics">
       <Kpm>
         <Row label="Skew" value={signed(m.skew)} bench="" />
-        <Row label="Kurtosis (excess)" value={num(m.kurt)} bench="" accent={m.kurt > 6} />
-        <Row label="VaR 95%" value={pct(m.var95, true)} bench="" />
-        <Row label="CVaR 95%" value={pct(m.cvar95, true)} bench="" />
-        <Row label="P5 (daily)" value={pct(q.p05, true)} bench="" />
-        <Row label="P95 (daily)" value={pct(q.p95, true)} bench="" />
-        <Row label="Median (daily)" value={pct(q.p50, true)} bench="" />
-        <Row label="Profit Factor" value={num(m.profit_factor)} bench="" />
-        <Row label="Omega (θ=0)" value={num(m.omega_ratio)} bench="" />
-        <Row label="Tail Ratio (P95/|P5|)" value={num(tailRatio)} bench="" />
-        <Row label="Common-sense Ratio" value={num(commonSenseRatio)} bench="" />
-        <Row label="Recovery Factor" value={num(m.recovery_factor)} bench="" accent={m.recovery_factor != null && m.recovery_factor >= 3} />
-        <Row label="Pain Index" value={pct(m.pain_index)} bench="" />
-        <Row label="Ulcer Index" value={pct(m.ulcer_index)} bench="" />
+        <Row label="Kurtosis (excess)" value={ratio(m.kurt)} bench="" accent={m.kurt > 6} />
+        <Row label="VaR 95%" value={pctSigned(m.var95, 2)} bench="" />
+        <Row label="CVaR 95%" value={pctSigned(m.cvar95, 2)} bench="" />
+        <Row label="P5 (daily)" value={pctSigned(q.p05, 2)} bench="" />
+        <Row label="P95 (daily)" value={pctSigned(q.p95, 2)} bench="" />
+        <Row label="Median (daily)" value={pctSigned(q.p50, 2)} bench="" />
+        <Row label="Profit Factor" value={ratio(m.profit_factor)} bench="" />
+        <Row label="Omega (θ=0)" value={ratio(m.omega_ratio)} bench="" />
+        <Row label="Tail Ratio (P95/|P5|)" value={ratio(tailRatio)} bench="" />
+        <Row label="Common-sense Ratio" value={ratio(commonSenseRatio)} bench="" />
+        <Row label="Recovery Factor" value={ratio(m.recovery_factor)} bench="" accent={m.recovery_factor != null && m.recovery_factor >= 3} />
+        <Row label="Pain Index" value={pct(m.pain_index, 2)} bench="" />
+        <Row label="Ulcer Index" value={pct(m.ulcer_index, 2)} bench="" />
         <Row label="Avg Win / Avg Loss" value={ratioStr(m.avg_win, m.avg_loss)} bench="" />
       </Kpm>
     </Panel>
@@ -1050,8 +1046,8 @@ function WorstDrawdownsTablePanel() {
                 <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{ymd(view.dates[r.start])}</td>
                 <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{ymd(view.dates[r.trough])}</td>
                 <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{ymd(view.dates[r.recover])}</td>
-                <td className="py-1 px-1 text-right font-mono tabular-nums" style={{ color: "var(--color-negative)" }}>
-                  {(r.depth * 100).toFixed(2)}%
+                <td className="py-1 px-1 text-right font-mono tabular-nums" style={toneStyle(drawdownTone(r.depth, 2, 100))}>
+                  {pct(r.depth, 2)}
                 </td>
                 <td className="py-1 px-1 text-right font-mono tabular-nums text-text-primary">{ddDays}d</td>
                 <td className="py-1 px-1 text-right font-mono tabular-nums text-text-primary">{recDays}d</td>
@@ -1130,23 +1126,23 @@ function EoyReturnsPanel({ scopeNote }: { scopeNote?: string }) {
                 <td className="py-1 pr-2 font-mono tabular-nums text-text-2">{year}</td>
                 <td
                   className="py-1 px-2 text-right font-mono tabular-nums"
-                  style={{ color: s != null && s >= 0 ? "var(--color-positive)" : "var(--color-negative)" }}
+                  style={toneStyle(signTone(s, 2, 100))}
                 >
-                  {pct(s, true)}
+                  {pctSigned(s, 2)}
                 </td>
                 {hasBench && (
                   <>
                     <td
                       className="py-1 px-2 text-right font-mono tabular-nums"
-                      style={{ color: b != null && b >= 0 ? "var(--color-positive)" : "var(--color-negative)" }}
+                      style={toneStyle(signTone(b, 2, 100))}
                     >
-                      {pct(b, true)}
+                      {pctSigned(b, 2)}
                     </td>
                     <td
                       className="py-1 pl-2 text-right font-mono tabular-nums"
-                      style={{ color: delta != null && delta >= 0 ? "var(--color-positive)" : "var(--color-negative)" }}
+                      style={toneStyle(signTone(delta, 1, 100))}
                     >
-                      {delta != null ? `${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(1)}pp` : "—"}
+                      {ppDelta(s, b, 1)}
                     </td>
                   </>
                 )}

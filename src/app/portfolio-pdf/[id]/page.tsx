@@ -3,6 +3,7 @@ import { extractAnalytics } from "@/lib/queries";
 import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { formatCurrency, formatPercent, formatNumber } from "@/lib/utils";
 import { Disclaimer } from "@/components/ui/Disclaimer";
+import { drawdownTone } from "@/lib/factsheet/display-sign";
 import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
 import { verifyPdfRenderToken } from "@/lib/pdf-render-token";
 import { formatDataVintage } from "./vintage";
@@ -282,7 +283,13 @@ export default async function PortfolioPdfPage({
                   <td className="text-right py-1 px-1 font-metric text-text-primary">
                     {formatNumber(row.sharpe)}
                   </td>
-                  <td className="text-right py-1 px-1 font-metric text-negative">
+                  <td
+                    className={`text-right py-1 px-1 font-metric ${
+                      drawdownTone(row.max_dd, 2, 100) === "negative"
+                        ? "text-negative"
+                        : "text-text-primary"
+                    }`}
+                  >
                     {formatPercent(row.max_dd)}
                   </td>
                   <td className="text-right py-1 px-1 font-metric text-text-primary">

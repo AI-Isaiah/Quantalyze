@@ -10,6 +10,8 @@ import {
   Cell,
 } from "recharts";
 import { TouchTooltip } from "@/components/charts/TouchTooltip";
+import { CHART_TEXT_MUTED } from "@/components/charts/chart-tokens";
+import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
 import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
@@ -64,6 +66,22 @@ function buildCovMatrix(
   }
 
   return cov;
+}
+
+/**
+ * The tooltip text and the bar fill, lifted to named exports so a test can read them
+ * (Recharts does not render a tooltip or a Cell fill in jsdom).
+ */
+export function formatRiskContribution(v: unknown): string {
+  return formatFixedSigned(Number(v), { dp: 1, suffix: "%" });
+}
+export function riskContributionFill(contribution: number): string {
+  // Phase 170.6 (D-03): the colour follows the contribution ROUNDED to the 1 dp it prints
+  // (percent units, scale 1). A rounded zero is the muted chart colour, not red or accent.
+  const tone = signTone(contribution, 1);
+  if (tone === "positive") return "#1B6B5A";
+  if (tone === "negative") return "#DC2626";
+  return CHART_TEXT_MUTED;
 }
 
 interface StrategyData {
@@ -172,13 +190,13 @@ function RiskDecompositionInner({ data }: { data: RiskWidgetData } & BaseWidgetP
               borderColor: "#E2E8F0",
               borderRadius: 6,
             }}
-            formatter={(v) => [`${Number(v).toFixed(1)}%`, "Risk Contribution"]}
+            formatter={(v) => [formatRiskContribution(v), "Risk Contribution"]}
           />
           <Bar dataKey="contribution" radius={[0, 3, 3, 0]} maxBarSize={20}>
             {chartData.map((entry, i) => (
               <Cell
                 key={`cell-${i}`}
-                fill={entry.contribution >= 0 ? "#1B6B5A" : "#DC2626"}
+                fill={riskContributionFill(entry.contribution)}
               />
             ))}
           </Bar>

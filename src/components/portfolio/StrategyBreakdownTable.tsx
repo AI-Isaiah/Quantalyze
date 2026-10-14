@@ -3,6 +3,7 @@
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import { formatPercent, formatNumber, metricColor, extractAnalytics, seriesEndOf } from "@/lib/utils";
+import { drawdownTone } from "@/lib/factsheet/display-sign";
 import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { SyncBadge } from "@/components/strategy/SyncBadge";
 import type { StrategyAnalytics, AttributionRow } from "@/lib/types";
@@ -243,16 +244,22 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
               <td className="px-4 py-3 text-right font-metric text-text-secondary">
                 {row.weight != null ? formatPercent(row.weight) : "\u2014"}
               </td>
-              <td className={`px-4 py-3 text-right font-metric ${metricColor(row.twr)}`}>
+              <td className={`px-4 py-3 text-right font-metric ${metricColor(row.twr, "percent")}`}>
                 {formatPercent(row.twr)}
               </td>
-              <td className={`px-4 py-3 text-right font-metric ${metricColor(row.sharpe)}`}>
+              <td className={`px-4 py-3 text-right font-metric ${metricColor(row.sharpe, "ratio")}`}>
                 {formatNumber(row.sharpe)}
               </td>
-              <td className="px-4 py-3 text-right font-metric text-negative">
+              {/* Phase 170.6 D-03, D-04: red only when the drawdown ROUNDS below zero at the
+                  2 dp it prints; a 0.00% or a withheld drawdown is neutral, never green. */}
+              <td
+                className={`px-4 py-3 text-right font-metric ${
+                  drawdownTone(row.max_dd, 2, 100) === "negative" ? "text-negative" : "text-text-primary"
+                }`}
+              >
                 {formatPercent(row.max_dd)}
               </td>
-              <td className={`px-4 py-3 text-right font-metric ${metricColor(row.contribution)}`}>
+              <td className={`px-4 py-3 text-right font-metric ${metricColor(row.contribution, "percent")}`}>
                 {row.contribution != null ? formatPercent(row.contribution) : "\u2014"}
               </td>
             </tr>

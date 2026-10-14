@@ -1009,7 +1009,8 @@ describe("StrategyTable — v1.11 sign-restricted color policy", () => {
     const zero = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
     zero.analytics.max_drawdown = 0;
     render(<StrategyTable strategies={[zero]} categorySlug="crypto-sma" />);
-    const cell = screen.getByText("+0.00%").closest("td")!;
+    // Phase 170.6 D-02: a rounded zero prints unsigned. This pinned "+0.00%".
+    const cell = screen.getByText("0.00%").closest("td")!;
     expect(cell.className).toContain("text-text-primary");
     expect(cell.className).not.toContain("text-negative");
   });

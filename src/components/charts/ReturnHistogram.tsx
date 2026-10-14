@@ -10,6 +10,7 @@ import {
   CHART_TICK_STYLE,
 } from "./chart-tokens";
 import { equityCurveToDailyReturns, type CurveMethod } from "@/lib/factsheet/resolve-series";
+import { formatUnsignedPercent, signTone } from "@/lib/factsheet/display-sign";
 
 interface ReturnHistogramProps {
   returns: { date: string; value: number }[];
@@ -29,6 +30,15 @@ interface ReturnHistogramProps {
    * series always are. The benchmark overlay is always read geometric.
    */
   curveMethod?: CurveMethod;
+}
+
+/**
+ * Bar fill from the sign of the bin centre ROUNDED to 1 dp as a percent, the precision the bin
+ * labels print at (D-03): a bin centred on 0.0% is muted, not red or green.
+ */
+function barFill(centre: number): string {
+  const tone = signTone(centre, 1, 100);
+  return tone === "positive" ? CHART_POSITIVE : tone === "negative" ? CHART_NEGATIVE : CHART_TEXT_MUTED;
 }
 
 /**
@@ -72,7 +82,7 @@ export function ReturnHistogram({
     const count = dailyReturns.filter(inBin).length;
     const benchmarkCount = benchmarkAvailable ? benchmarkDailyReturns.filter(inBin).length : 0;
     return {
-      label: `${(low * 100).toFixed(1)}%`,
+      label: formatUnsignedPercent(low, 1),
       value: low + binWidth / 2,
       count,
       benchmarkCount,
@@ -100,7 +110,7 @@ export function ReturnHistogram({
         />
         <Bar dataKey="count" radius={[2, 2, 0, 0]}>
           {histogram.map((entry, i) => (
-            <Cell key={i} fill={entry.value >= 0 ? CHART_POSITIVE : CHART_NEGATIVE} />
+            <Cell key={i} fill={barFill(entry.value)} />
           ))}
         </Bar>
         {benchmarkAvailable && (

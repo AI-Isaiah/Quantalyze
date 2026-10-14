@@ -9,6 +9,7 @@ import { Skeleton, SkeletonText } from "@/components/ui/Skeleton";
 import { LiveRegion } from "@/components/ui/LiveRegion";
 import { cn, formatNumber, formatPercent } from "@/lib/utils";
 import { RouteResponseError } from "@/lib/route-response-error";
+import { signTone } from "@/lib/factsheet/display-sign";
 
 /**
  * The one sentence shown when the failure did NOT come from a route response —
@@ -47,9 +48,12 @@ function daysSince(iso: string | null): number | null {
   return Math.floor((Date.now() - t) / MS_PER_DAY);
 }
 
-function liftClass(value: number | null): string {
+// 170.6 D-03: green only when the figure PRINTS above zero, read at the precision and scale
+// its unit prints at (a percent is x100). A lift that prints "0.00" is not green.
+function liftClass(value: number | null, unit: MetricUnit): string {
   if (value == null) return "text-text-muted";
-  return value > 0 ? "text-positive" : "text-text-secondary";
+  const tone = unit === "percent" ? signTone(value, 2, 100) : signTone(value, 2);
+  return tone === "positive" ? "text-positive" : "text-text-secondary";
 }
 
 /**
@@ -69,7 +73,9 @@ function formatMetric(value: number | null, unit: MetricUnit): string {
   if (unit === "percent") return formatPercent(value);
   if (value == null || !Number.isFinite(value)) return "—";
   const decimal = formatNumber(value, 2); // negatives keep their natural "-".
-  return unit === "signedDecimal" && value > 0 ? `+${decimal}` : decimal;
+  // 170.6 D-02: the "+" goes only on a figure that prints above zero; a rounded zero prints
+  // unsigned. (formatNumber's own signed zero is plan 02's, via utils delegation.)
+  return unit === "signedDecimal" && signTone(value, 2) === "positive" ? `+${decimal}` : decimal;
 }
 
 // Phase 100 / PI-05 (UI-SPEC W3): verbatim narrative tooltips on the metric
@@ -98,7 +104,7 @@ function MetricCell({
       <p
         className={cn(
           "mt-0.5 text-small font-metric tabular-nums",
-          liftClass(value),
+          liftClass(value, unit),
         )}
       >
         {formatMetric(value, unit)}

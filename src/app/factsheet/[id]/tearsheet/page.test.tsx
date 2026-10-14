@@ -144,6 +144,7 @@ vi.mock("@/lib/supabase/admin", () => {
 
 import TearSheetPage from "./page";
 import { createClient } from "@/lib/supabase/server";
+import { getFactsheetDetail } from "@/lib/queries";
 
 type GetUserResult = {
   data: { user: { id: string; email?: string } | null };
@@ -525,5 +526,83 @@ describe("TearSheet page - returns unit (164.6.6.2-07, D-09, D-21)", () => {
     await renderPage();
     expect(screen.queryByText(NOTE)).toBeNull();
     expect(screen.getByText("CAGR in BTC").nextElementSibling?.textContent).not.toBe("\u2014");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 170.6 plan 02 (D-03, D-04): the tear sheet's monthly cells take their tone from the
+// value ROUNDED to the 1 dp they print at, and the Max DD hero is red only when the rounded
+// drawdown is below zero. Hand-typed expectations.
+// ---------------------------------------------------------------------------
+describe("TearSheet page - rounded-sign tones (170.6 D-03, D-04)", () => {
+  const ANON = { data: { user: null }, error: null } as const;
+
+  /** Render with the default fixture but the given analytics overrides (one read only). */
+  async function renderWith(
+    overrides: Record<string, unknown>,
+    unitRead?: UnitRead,
+  ) {
+    const base = (await vi.mocked(getFactsheetDetail)("s-1")) as unknown as {
+      analytics: Record<string, unknown>;
+    };
+    vi.mocked(getFactsheetDetail).mockResolvedValueOnce({
+      ...base,
+      analytics: { ...base.analytics, ...overrides },
+    } as unknown as Awaited<ReturnType<typeof getFactsheetDetail>>);
+    stubAuth(ANON, undefined, unitRead);
+    return renderPage();
+  }
+
+  /** The value paragraph under a hero label. */
+  function heroValue(label: string): HTMLElement {
+    return screen.getByText(label).nextElementSibling as HTMLElement;
+  }
+
+  it("a month of -0.0004 prints 0.0% and carries neither tone", async () => {
+    await renderWith({ monthly_returns: { "2024": { Jan: -0.0004 } } });
+    const cell = screen.getByText("0.0%");
+    expect(cell.className).not.toContain("text-positive");
+    expect(cell.className).not.toContain("text-negative");
+    expect(cell.className).toContain("text-text-primary");
+  });
+
+  it("a month of 0.012 prints 1.2% in green and a month of -0.012 prints -1.2% in red", async () => {
+    await renderWith({ monthly_returns: { "2024": { Jan: 0.012, Feb: -0.012 } } });
+    expect(screen.getByText("1.2%").className).toContain("text-positive");
+    expect(screen.getByText("-1.2%").className).toContain("text-negative");
+  });
+
+  it("the Max DD hero is not red for a drawdown of 0", async () => {
+    await renderWith({ max_drawdown: 0 });
+    const hero = heroValue("Max DD");
+    expect(hero.textContent).toBe("0.00%");
+    expect(hero.className).not.toContain("text-negative");
+    expect(hero.className).not.toContain("text-positive");
+  });
+
+  it("the Max DD hero is not red for a drawdown of -0.00004 (prints 0.00%)", async () => {
+    await renderWith({ max_drawdown: -0.00004 });
+    const hero = heroValue("Max DD");
+    expect(hero.textContent).toBe("0.00%");
+    expect(hero.className).not.toContain("text-negative");
+  });
+
+  it("the Max DD hero is not red in the withheld state (the dash)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await renderWith({ max_drawdown: -0.1 }, "throw");
+    } finally {
+      errSpy.mockRestore();
+    }
+    const hero = heroValue("Max DD");
+    expect(hero.textContent).toBe("—");
+    expect(hero.className).not.toContain("text-negative");
+  });
+
+  it("the Max DD hero is red for a drawdown of -0.0342 and prints -3.42%", async () => {
+    await renderWith({ max_drawdown: -0.0342 });
+    const hero = heroValue("Max DD");
+    expect(hero.textContent).toBe("-3.42%");
+    expect(hero.className).toContain("text-negative");
   });
 });

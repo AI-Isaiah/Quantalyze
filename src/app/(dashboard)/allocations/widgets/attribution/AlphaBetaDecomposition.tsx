@@ -7,6 +7,7 @@ import { dispersion } from "@/lib/return-stats";
 import { annualizationPeriods } from "@/lib/closed-sets";
 import { alignCoveredReturns, COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
 import { jointMetrics, MIN_PAIRED_OBSERVATIONS, pairedFloorReason } from "@/lib/factsheet/joint";
+import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 import { ALLOCATOR_PORTFOLIO_ASSET_CLASS } from "@/lib/factsheet/allocator-portfolio-payload";
 import {
   BarChart,
@@ -50,6 +51,13 @@ export type AlphaBetaWidgetData = z.infer<typeof alphaBetaWidgetDataSchema>;
 
 /** The book's annualization basis: the Overview factsheet's, by construction. */
 const BOOK_PERIODS_PER_YEAR = annualizationPeriods(ALLOCATOR_PORTFOLIO_ASSET_CLASS);
+
+/** The Alpha callout's text colour by the ROUNDED sign (170.6 D-03): a rounded zero is neutral. */
+const ALPHA_TONE_CLASS = {
+  positive: "text-positive",
+  negative: "text-negative",
+  neutral: "text-text-primary",
+} as const;
 
 export type BookAlphaBeta =
   | { kind: "not_ready" }
@@ -128,6 +136,16 @@ export function computeBookAlphaBeta(data: AlphaBetaWidgetData): BookAlphaBeta {
     betaContribution,
     residual: totalReturn - alpha - betaContribution,
   };
+}
+
+/** The decomposition chart's x-axis tick, in percent of the book's return. */
+export function formatDecompositionTick(v: number): string {
+  return formatFixedSigned(v, { dp: 0, scale: 100, suffix: "%" });
+}
+
+/** The decomposition chart's tooltip value for one component (Beta, Alpha or Residual). */
+export function formatDecompositionTooltip(v: unknown): string {
+  return formatFixedSigned(Number(v), { dp: 2, scale: 100, suffix: "%" });
 }
 
 /**
@@ -226,11 +244,10 @@ function AlphaBetaDecompositionInner({ data }: { data: AlphaBetaWidgetData } & B
         </span>
         <span
           className={`text-2xl font-metric tabular-nums font-bold ${
-            result.alpha >= 0 ? "text-positive" : "text-negative"
+            ALPHA_TONE_CLASS[signTone(result.alpha, 1, 100) ?? "neutral"]
           }`}
         >
-          {result.alpha >= 0 ? "+" : ""}
-          {(result.alpha * 100).toFixed(1)}%
+          {formatFixedSigned(result.alpha, { dp: 1, scale: 100, suffix: "%", plus: true })}
         </span>
         <span className="text-xs text-text-muted">annualized</span>
       </div>
@@ -253,7 +270,7 @@ function AlphaBetaDecompositionInner({ data }: { data: AlphaBetaWidgetData } & B
               }}
               tickLine={false}
               axisLine={{ stroke: "#E2E8F0" }}
-              tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
+              tickFormatter={formatDecompositionTick}
             />
             <YAxis
               type="category"
@@ -264,7 +281,7 @@ function AlphaBetaDecompositionInner({ data }: { data: AlphaBetaWidgetData } & B
               width={0}
             />
             <TouchTooltip
-              formatter={(v) => [`${(Number(v) * 100).toFixed(2)}%`]}
+              formatter={(v) => [formatDecompositionTooltip(v)]}
               contentStyle={{ fontSize: 12, borderColor: "#E2E8F0" }}
             />
             <Legend

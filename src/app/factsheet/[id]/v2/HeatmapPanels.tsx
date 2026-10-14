@@ -8,6 +8,7 @@ import { resolvePalette } from "./palette";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { useTapPin } from "@/hooks/useTapPin";
 import type { DailyHeatmapYear, MonthlyReturnsRow } from "@/lib/factsheet/types";
+import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 
 /** Resolve the heatmap mixing trio from the central palette. */
 function useHeatmapBase(): { base: string; accent: string; negative: string } {
@@ -142,7 +143,7 @@ function MonthlyRow({ row, maxAbs, palette }: { row: MonthlyReturnsRow; maxAbs: 
       <td
         className="text-right text-micro tabular-nums pl-1 pr-1"
         style={{
-          color: row.ytd >= 0 ? "var(--color-positive)" : "var(--color-negative)",
+          ...toneStyle(row.ytd, 1),
           fontWeight: 600,
         }}
       >
@@ -552,7 +553,7 @@ function YearCalendarCanvas({
             }}
           >
             <span className="text-text-muted mr-1">{reveal.iso}</span>
-            <span style={{ color: reveal.v >= 0 ? "var(--color-positive)" : "var(--color-negative)", fontWeight: 600 }}>
+            <span style={{ ...toneStyle(reveal.v, 2), fontWeight: 600 }}>
               {formatPct(reveal.v, 2)}
             </span>
           </div>
@@ -673,17 +674,18 @@ function percentileOfAbs(rows: MonthlyReturnsRow[]): number {
 }
 
 function formatPct(v: number, dp: number): string {
-  if (!Number.isFinite(v)) return "—";
-  const x = v * 100;
-  const sign = x >= 0 ? "+" : "";
-  return `${sign}${x.toFixed(dp)}%`;
+  return formatFixedSigned(v, { dp, scale: 100, suffix: "%", plus: true });
 }
 
 function formatPctShort(v: number): string {
-  if (!Number.isFinite(v)) return "—";
-  const x = v * 100;
-  const sign = x >= 0 ? "+" : "−";
-  const abs = Math.abs(x);
-  if (abs >= 10) return `${sign}${abs.toFixed(0)}`;
-  return `${sign}${abs.toFixed(1)}`;
+  // 0 dp from 10 percentage points up, 1 dp below, chosen from the raw magnitude as before.
+  // The U+2212 minus stays; a month that rounds to zero at its dp prints unsigned (D-02).
+  const dp = Math.abs(v * 100) >= 10 ? 0 : 1;
+  return formatFixedSigned(v, { dp, scale: 100, plus: true, minus: "−" });
+}
+
+/** The colour style of a printed percent figure: none at a rounded zero (D-03). */
+function toneStyle(v: number, dp: number): { color: string } | undefined {
+  const tone = signTone(v, dp, 100);
+  return tone === undefined ? undefined : { color: `var(--color-${tone})` };
 }

@@ -18,8 +18,15 @@
  * `number` to a legacy helper still works, but the units module's smart
  * constructors emit a boundary warn for implausibly out-of-range inputs
  * so the most likely unit-mix bugs surface in logs.
+ *
+ * Phase 170.6 DISPLAYPOLISH (D-02, D-05): the sign rule does NOT live here. Every signed
+ * or rounded figure below is a call into `@/lib/factsheet/display-sign`
+ * (`formatFixedSigned`), which prints a value that rounds to zero unsigned (`0.0%`,
+ * `0.00`, `0.0pp`, never `-0.0%` or `+0.0%`). Only the unsigned USD helpers
+ * (`usdCompact`, `formatUsd`) keep their own `toFixed`: an amount carries no sign rule.
  */
 import type { Usd, DecimalReturn, Ratio } from "@/lib/units";
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 
 const PCT_DEFAULT_DP = 1;
 const RATIO_DP = 2;
@@ -34,9 +41,7 @@ const RATIO_DP = 2;
  * sites are kept compiling; new code paths should adopt the brand.
  */
 export function pctSigned(v: number | null | undefined, dp = PCT_DEFAULT_DP): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  const x = v * 100;
-  return `${x >= 0 ? "+" : ""}${x.toFixed(dp)}%`;
+  return formatFixedSigned(v, { dp, scale: 100, suffix: "%", plus: true });
 }
 
 /**
@@ -47,8 +52,7 @@ export function pctSigned(v: number | null | undefined, dp = PCT_DEFAULT_DP): st
  * `DecimalReturn`-branded value.
  */
 export function pct(v: number | null | undefined, dp = PCT_DEFAULT_DP): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return `${(v * 100).toFixed(dp)}%`;
+  return formatFixedSigned(v, { dp, scale: 100, suffix: "%" });
 }
 
 /**
@@ -57,14 +61,12 @@ export function pct(v: number | null | undefined, dp = PCT_DEFAULT_DP): string {
  * @deprecated Prefer `formatRatio` with an `asRatioMetric`-branded value.
  */
 export function ratio(v: number | null | undefined, dp = RATIO_DP): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return v.toFixed(dp);
+  return formatFixedSigned(v, { dp });
 }
 
 /** Signed scalar (Skew etc.) — 2dp with sign prefix. */
 export function signed(v: number | null | undefined, dp = RATIO_DP): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return (v >= 0 ? "+" : "") + v.toFixed(dp);
+  return formatFixedSigned(v, { dp, plus: true });
 }
 
 /** Integer with thousand separators. */
@@ -89,8 +91,7 @@ export function usdCompact(v: number | null | undefined): string {
 /** Percentage-points delta (a − b) — for "vs benchmark" delta cells. */
 export function ppDelta(a: number | null | undefined, b: number | null | undefined, dp = 1): string {
   if (a == null || b == null || !Number.isFinite(a) || !Number.isFinite(b)) return "—";
-  const x = (a - b) * 100;
-  return `${x >= 0 ? "+" : ""}${x.toFixed(dp)}pp`;
+  return formatFixedSigned(a - b, { dp, scale: 100, suffix: "pp", plus: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -128,10 +129,7 @@ export function formatDecimalReturn(
   options: { signed?: boolean; dp?: number } = {},
 ): string {
   const { signed: withSign = true, dp = PCT_DEFAULT_DP } = options;
-  if (v == null || !Number.isFinite(v)) return "—";
-  const x = v * 100;
-  const sign = x >= 0 && withSign ? "+" : "";
-  return `${sign}${x.toFixed(dp)}%`;
+  return formatFixedSigned(v, { dp, scale: 100, suffix: "%", plus: withSign });
 }
 
 /**
@@ -143,6 +141,5 @@ export function formatRatio(
   v: Ratio | null,
   dp: number = RATIO_DP,
 ): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return v.toFixed(dp);
+  return formatFixedSigned(v, { dp });
 }

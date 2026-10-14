@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createChart, LineSeries, type IChartApi } from "lightweight-charts";
 import { STRATEGY_PALETTE } from "@/lib/utils";
+import { formatUnsignedPercent } from "@/lib/factsheet/display-sign";
 
 interface PortfolioEquityCurveProps {
   portfolioEquityCurve: { date: string; value: number }[] | null;
@@ -28,7 +29,8 @@ interface PortfolioEquityCurveProps {
 }
 
 const PNL_FORMATTER = (v: number) => `$${v.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
-const RETURN_FORMATTER = (v: number) => `${((v - 1) * 100).toFixed(1)}%`;
+// 170.6 D-02: a growth that rounds to 0.0% prints unsigned; a negative return keeps its own minus.
+export const RETURN_FORMATTER = (v: number) => formatUnsignedPercent(v - 1, 1);
 
 export function PortfolioEquityCurve({
   portfolioEquityCurve,

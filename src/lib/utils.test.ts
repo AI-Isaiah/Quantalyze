@@ -24,6 +24,26 @@ describe("formatPercent", () => {
     expect(formatPercent(null)).toBe("—");
   });
 
+  // Phase 170.6 D-02 (founder, 2026-10-13): a value that rounds to zero at its
+  // printed precision prints unsigned. `+0.00%` and `-0.00%` never appear.
+  it("D-02: an exact zero prints 0.00% with no plus", () => {
+    expect(formatPercent(0)).toBe("0.00%");
+  });
+  it("D-02: a tiny negative that rounds to zero prints 0.00% with no minus", () => {
+    expect(formatPercent(-0.00004)).toBe("0.00%");
+  });
+  it("D-02: a tiny positive that rounds to zero prints 0.00% with no plus", () => {
+    expect(formatPercent(0.00004)).toBe("0.00%");
+  });
+  it("D-02: the first value that rounds to a non-zero digit keeps its sign", () => {
+    expect(formatPercent(-0.00005)).toBe("-0.01%");
+    expect(formatPercent(0.00005)).toBe("+0.01%");
+  });
+  it("signed: false drops the plus and keeps the minus", () => {
+    expect(formatPercent(-0.0342, 2, { signed: false })).toBe("-3.42%");
+    expect(formatPercent(0.0342, 1, { signed: false })).toBe("3.4%");
+  });
+
   // ─────────────────────────────────────────────────────────────────
   // Phase 07 / 07-03 regression guards per VOICES-ACCEPTED f8.
   // `src/lib/utils.ts` line 8 already has the `if (value == null) return "—"`
@@ -70,6 +90,22 @@ describe("formatNumber", () => {
   });
   it("formats large numbers with commas", () => {
     expect(formatNumber(12345.67)).toBe("12,345.67");
+  });
+  it("D-02: a negative that rounds to zero prints 0.00, never -0.00", () => {
+    expect(formatNumber(-0.004)).toBe("0.00");
+  });
+  it("D-02: a negative that rounds to zero at 0 dp prints 0", () => {
+    expect(formatNumber(-0.4, 0)).toBe("0");
+  });
+  it("keeps the sign and the thousands grouping on a non-zero negative", () => {
+    expect(formatNumber(-12345.678)).toBe("-12,345.68");
+  });
+  // Plan-check W3: Intl rounds the decimal, toFixed the binary. formatNumber stays
+  // Intl so no non-zero figure changes by a digit (hand-typed from Intl's output).
+  it("W3: no digit regression against Intl on half-way decimals", () => {
+    expect(formatNumber(1.005)).toBe("1.01");
+    expect(formatNumber(-1.005)).toBe("-1.01");
+    expect(formatNumber(2.675)).toBe("2.68");
   });
   it("returns dash for null", () => {
     expect(formatNumber(null)).toBe("—");
@@ -163,17 +199,43 @@ describe("formatCurrency", () => {
   it("regression (M-02): negative K-to-M boundary -999_999.5 renders -$1M not -$1000K", () => {
     expect(formatCurrency(-999_999.5)).toBe("-$1.0M");
   });
+  it("D-02: a negative that prints as zero dollars is $0, never -$0", () => {
+    expect(formatCurrency(-0.4)).toBe("$0");
+  });
+  it("D-02: -0.6 rounds to a non-zero dollar and keeps its sign", () => {
+    expect(formatCurrency(-0.6)).toBe("-$1");
+  });
 });
 
 describe("metricColor", () => {
+  // Phase 170.6 D-03: the tone follows the sign of the value ROUNDED to the unit and
+  // precision it prints at. The unit is required so a caller states what it prints.
   it("returns positive class for positive values", () => {
-    expect(metricColor(0.5)).toBe("text-positive");
+    expect(metricColor(0.5, "ratio")).toBe("text-positive");
   });
   it("returns negative class for negative values", () => {
-    expect(metricColor(-0.1)).toBe("text-negative");
+    expect(metricColor(-0.1, "percent")).toBe("text-negative");
   });
   it("returns muted class for null", () => {
-    expect(metricColor(null)).toBe("text-text-muted");
+    expect(metricColor(null, "ratio")).toBe("text-text-muted");
+  });
+  it("D-03: NaN is no value, so muted, not red", () => {
+    expect(metricColor(Number.NaN, "ratio")).toBe("text-text-muted");
+  });
+  it("D-03: a ratio that prints 0.00 is neutral, not red", () => {
+    expect(metricColor(-0.004, "ratio")).toBe("text-text-primary");
+  });
+  it("D-03: an exact zero is neutral, not green", () => {
+    expect(metricColor(0, "percent")).toBe("text-text-primary");
+  });
+  it("D-03: a percent that prints 0.00% is neutral at -0.00004", () => {
+    expect(metricColor(-0.00004, "percent")).toBe("text-text-primary");
+  });
+  it("D-03: the first percent that prints -0.01% is red", () => {
+    expect(metricColor(-0.00005, "percent")).toBe("text-negative");
+  });
+  it("D-03: the first ratio that prints -0.01 is red", () => {
+    expect(metricColor(-0.006, "ratio")).toBe("text-negative");
   });
 });
 

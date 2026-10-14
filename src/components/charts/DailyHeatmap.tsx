@@ -3,6 +3,7 @@
 import { memo, useEffect, useMemo, useRef } from "react";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { useTapPin } from "@/hooks/useTapPin";
+import { formatUnsignedPercent } from "@/lib/factsheet/display-sign";
 import {
   CHART_BORDER,
   CHART_AXIS_TICK,
@@ -137,7 +138,7 @@ const SVG_TOP_GUTTER = 24; // room for the month label
  *  `<title>` shows (DailyHeatmap.test.tsx:206 asserts the format). Single value
  *  source for both the desktop `<title>`/AT path and the touch pinned reveal. */
 function cellLabel(d: DailyHeatmapDataPoint): string {
-  return `${d.date}: ${(d.value * 100).toFixed(2)}%`;
+  return `${d.date}: ${formatUnsignedPercent(d.value, 2)}`;
 }
 
 const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapDataPoint[] }) {
@@ -433,7 +434,7 @@ const CanvasRenderer = memo(function CanvasRenderer({
             <tr key={row.year}>
               <th scope="row">{row.year}</th>
               {row.days.map((d) => (
-                <td key={d.date}>{`${d.date}: ${(d.value * 100).toFixed(2)}%`}</td>
+                <td key={d.date}>{`${d.date}: ${formatUnsignedPercent(d.value, 2)}`}</td>
               ))}
             </tr>
           ))}

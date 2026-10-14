@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { Line, LineChart, ReferenceLine, ResponsiveContainer, XAxis, YAxis, Legend } from "recharts";
 import { TouchTooltip } from "./TouchTooltip";
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import {
   CHART_ACCENT,
   CHART_BORDER,
@@ -157,7 +158,7 @@ export function RollingMetrics({
           />
           <TouchTooltip
             contentStyle={{ fontSize: 12, borderColor: CHART_BORDER }}
-            formatter={(v, name) => [Number(v).toFixed(2), labelFor(String(name))]}
+            formatter={(v, name) => [formatFixedSigned(Number(v), { dp: 2 }), labelFor(String(name))]}
           />
           <Legend formatter={(name: string) => labelFor(name)} />
           {renderReferenceLine && (

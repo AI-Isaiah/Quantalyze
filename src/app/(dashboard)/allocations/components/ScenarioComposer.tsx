@@ -204,6 +204,7 @@ import { ProvenanceNote } from "./ProvenanceNote";
 import { BridgeDrawer } from "./BridgeDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { ScenarioFooter } from "./ScenarioFooter";
+import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 import { ScenarioFlaggedHoldingsList } from "../ScenarioFlaggedHoldingsList";
 import { ScenarioBenchmarkSection } from "./ScenarioBenchmarkSection";
 import { StressVarSection } from "./StressVarSection";
@@ -4701,7 +4702,7 @@ export function ScenarioComposer({
       label: string,
       direction: "up-good" | "down-good",
       noise: number,
-      formatter: (n: number) => string,
+      printed: { dp: number; scale?: number; suffix?: string },
       liveVal: number | null,
       scVal: number | null,
     ) {
@@ -4712,20 +4713,21 @@ export function ScenarioComposer({
         const improved = direction === "up-good" ? d > 0 : d < 0;
         tier = improved ? "positive" : "negative";
       }
-      // Sign convention matches KpiStrip.formatSignedDelta verbatim:
-      // ASCII '+' for non-negative, Unicode minus '−' (U+2212) for
-      // negative. The mix is deliberate (typographic minus reads as a
-      // single signed-numeric glyph in the proportional font; the ASCII
-      // plus matches the rest of the dashboard's signed-percentage UI).
-      // Single source of truth for the convention lives in KpiStrip.
-      const sign = d >= 0 ? "+" : "−";
-      items.push({ label, value: `${sign}${formatter(Math.abs(d))}`, tier });
+      // Sign convention matches KpiStrip.formatSignedDelta: ASCII '+' for a
+      // positive figure, Unicode minus '−' (U+2212) for a negative one, and no
+      // sign at all when the figure rounds to zero (170.6 D-02). Both call the
+      // one implementation in display-sign with the same options.
+      items.push({
+        label,
+        value: formatFixedSigned(d, { ...printed, plus: true, minus: "−" }),
+        tier,
+      });
     }
     pushDelta(
       "Sharpe",
       "up-good",
       0.01,
-      (n) => n.toFixed(2),
+      { dp: 2 },
       live.sharpe,
       sc.sharpe,
     );
@@ -4733,7 +4735,7 @@ export function ScenarioComposer({
       "Max DD",
       "up-good",
       0.01,
-      (n) => `${(n * 100).toFixed(1)}%`,
+      { dp: 1, scale: 100, suffix: "%" },
       live.max_drawdown,
       sc.max_drawdown,
     );
@@ -4741,7 +4743,7 @@ export function ScenarioComposer({
       "TWR",
       "up-good",
       0.01,
-      (n) => `${(n * 100).toFixed(1)}%`,
+      { dp: 1, scale: 100, suffix: "%" },
       live.twr,
       sc.twr,
     );
@@ -6048,7 +6050,10 @@ export function ScenarioComposer({
                     {Object.entries(diversification.pcr)
                       .sort(([, a], [, b]) => b - a)
                       .map(([id, pcr]) => {
-                        const isHedge = pcr < 0;
+                        // D-03: a hedge is a figure that PRINTS below zero. The sign is read from
+                        // the value rounded to the 1 dp / percent precision `formatPcrPercent`
+                        // prints at, so a PCR that prints "0.0%" is neither tagged nor green.
+                        const isHedge = signTone(pcr, 1, 100) === "negative";
                         // Bar magnitude clamped to [0,100]% (decorative). The
                         // signed % text below carries the true value.
                         const barWidth = Math.min(
@@ -6092,7 +6097,7 @@ export function ScenarioComposer({
                               />
                             </div>
                             <span className="text-fixed-12 font-metric tabular-nums text-text-primary w-[48px] text-right">
-                              {(pcr * 100).toFixed(1)}%
+                              {formatPcrPercent(pcr)}
                             </span>
                           </li>
                         );
@@ -6902,6 +6907,14 @@ interface CompositionListProps {
    * tell a running job from terminal absence — UI-SPEC §3).
    */
   addedSeriesStateByRef: Record<string, SeriesState>;
+}
+
+/**
+ * A strategy's percent contribution to risk, 1 dp. It is SIGNED: a negative value is a
+ * hedge taking risk out of the book.
+ */
+export function formatPcrPercent(pcr: number): string {
+  return formatFixedSigned(pcr, { dp: 1, scale: 100, suffix: "%" });
 }
 
 // WEIGHTS-04 (Phase 113) — the honest failure copy for a `!ok` solve. Mirrors

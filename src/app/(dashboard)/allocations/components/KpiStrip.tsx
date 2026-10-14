@@ -1,7 +1,10 @@
 "use client";
 
+import { useEffect } from "react";
 import type React from "react";
 import { formatPercent, formatNumber } from "@/lib/utils";
+import { captureToSentry } from "@/lib/sentry-capture";
+import { drawdownTone, formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 import type { ComputedMetrics } from "@/lib/scenario";
 import { KpiPanel, type KpiPanelCell } from "@/components/kpi/KpiPanel";
 
@@ -190,12 +193,36 @@ function pairCoverage(
 
 /** Color-token className for the value text — green/red for signed metrics.
  * Uses DESIGN.md tokens (text-positive / text-negative) so the strip stays
- * in lockstep with the rest of the dashboard's signed-value rendering. */
-function valueColorClass(raw: number | null): string {
-  if (raw == null) return "";
-  if (raw > 0) return "text-positive";
-  if (raw < 0) return "text-negative";
+ * in lockstep with the rest of the dashboard's signed-value rendering.
+ *
+ * Phase 170.6 D-03: the tone follows the sign of the value ROUNDED to the 2 dp every
+ * cell prints at (`scale` is 100 for the percent cells, 1 for the unitless ones), so a
+ * figure printed "0.00%" is never red or green.
+ *
+ * D-04: the Max DD cell (`drawdown`) goes through `drawdownTone`, which can only be red or
+ * neutral. A drawdown is non-positive by construction, so a positive value there is an
+ * upstream sign bug and must not read as good news. The cell does not print it either:
+ * `isImpossibleDrawdown` sends it to the dash (R2-SFH-2). */
+function valueColorClass(raw: number | null, scale: number, drawdown = false): string {
+  const tone = drawdown ? drawdownTone(raw, 2, scale) : signTone(raw, 2, scale);
+  if (tone === "positive") return "text-positive";
+  if (tone === "negative") return "text-negative";
   return "";
+}
+
+/**
+ * R2-SFH-2 (170.6 round 2): a max drawdown that PRINTS above zero is impossible data. A
+ * drawdown is `cumulative / peak - 1`, so it is at most 0 by construction (scenario.ts); a
+ * positive one means the sign convention flipped upstream (the scenario engine or the
+ * analytics service). Painting it neutral and plus-signed ("+4.00%") hid the fault, and
+ * painting it green sold it as good news. It is treated as uncomputable instead: the cell
+ * prints the dash it prints for a missing value, and the component reports it once.
+ *
+ * The test is on the value ROUNDED to the 2 dp the cell prints at (D-03), so float noise
+ * that prints "0.00%" is a zero, not a violation.
+ */
+function isImpossibleDrawdown(raw: number | null): boolean {
+  return signTone(raw, 2, 100) === "positive";
 }
 
 /**
@@ -243,6 +270,16 @@ const KPI_NOISE_FLOOR: Record<string, number> = {
   volatility: 0.01,
 };
 
+/**
+ * Whether a delta that is ALREADY past the noise floor is an improvement. The floor
+ * (0.01) is at least the unit the pill prints at (2 dp unitless, 1 dp of percent), so a
+ * delta that reaches this call never rounds to zero and its rounded sign is its sign.
+ * The sign is read through display-sign (170.6 D-03/D-05), not compared with zero here.
+ */
+function isImprovement(delta: number, direction: KpiDirection): boolean {
+  return (signTone(delta, 2) === "positive") === (direction === "up-good");
+}
+
 /** Phase 10 / 10-04. Direction-aware delta pill color token. */
 function deltaPillClass(
   delta: number | null,
@@ -250,8 +287,7 @@ function deltaPillClass(
   noiseFloor: number,
 ): string {
   if (delta == null || Math.abs(delta) < noiseFloor) return "text-text-muted";
-  const improved = direction === "up-good" ? delta > 0 : delta < 0;
-  return improved ? "text-positive" : "text-negative";
+  return isImprovement(delta, direction) ? "text-positive" : "text-negative";
 }
 
 /** Phase 10 / 10-04. Direction-aware accessibility word for aria-label. */
@@ -261,8 +297,7 @@ function deltaSign(
   noiseFloor: number,
 ): "improved" | "regressed" | "no change" {
   if (delta == null || Math.abs(delta) < noiseFloor) return "no change";
-  const improved = direction === "up-good" ? delta > 0 : delta < 0;
-  return improved ? "improved" : "regressed";
+  return isImprovement(delta, direction) ? "improved" : "regressed";
 }
 
 /**
@@ -271,10 +306,8 @@ function deltaSign(
  *   - Sharpe / Sortino / score / Avg |ρ| → unitless 2-decimal number
  *   - twr / cagr / max_drawdown / volatility → percent with sign
  */
-function formatSignedDelta(delta: number | null, key: string): string {
+export function formatSignedDelta(delta: number | null, key: string): string {
   if (delta == null) return "—";
-  const sign = delta >= 0 ? "+" : "−";
-  const abs = Math.abs(delta);
   if (
     key === "sharpe" ||
     key === "sortino" ||
@@ -282,10 +315,10 @@ function formatSignedDelta(delta: number | null, key: string): string {
     key === "avg_correlation" ||
     key === "avg_pairwise_correlation"
   ) {
-    return `${sign}${abs.toFixed(2)}`;
+    return formatFixedSigned(delta, { dp: 2, plus: true, minus: "−" });
   }
   // Default: percent (twr, cagr, max_drawdown, volatility)
-  return `${sign}${(abs * 100).toFixed(1)}%`;
+  return formatFixedSigned(delta, { dp: 1, scale: 100, suffix: "%", plus: true, minus: "−" });
 }
 
 /** Phase 10 / 10-04. Format a live baseline value for the tooltip. */
@@ -458,6 +491,11 @@ export function KpiStrip({
     },
   ];
 
+  // R2-SFH-2 / R3-SFH-1: the positive max drawdowns the strip is about to hide (the figure the
+  // cell prints, the scenario value and the live baseline), collected while the cells resolve
+  // and reported once by the effect below.
+  const impossibleDrawdowns: { value: number; side: "scenario" | "live" }[] = [];
+
   // Phase 100 / 100-03 (PI-06) — resolve each cell to a KpiPanel descriptor.
   // ALL warmup / stale / scenario / delta logic stays HERE; the shared
   // KpiPanel primitive renders the (render-tree-neutral) presentational shell.
@@ -487,14 +525,28 @@ export function KpiStrip({
       const primaryFormatted = showScenarioPrimary
         ? formatLiveValue(scenVal, metricKey!)
         : formatted;
-      const primaryRaw = showScenarioPrimary ? scenVal : raw;
+      // R3-SFH-1: the impossible-drawdown test covers BOTH operands, not only the one the cell
+      // prints. A scenario value or a live baseline that PRINTS above zero is impossible data, so
+      // no delta is derived from it and the tooltip does not print it.
+      const isDd = metricKey === "max_drawdown";
+      const scenImpossible = isDd && showScenarioPrimary && isImpossibleDrawdown(scenVal);
+      const liveImpossible = isDd && showScenarioPrimary && isImpossibleDrawdown(liveVal);
+      const liveCellImpossible = isDd && !showScenarioPrimary && isImpossibleDrawdown(raw);
+      if (scenImpossible) impossibleDrawdowns.push({ value: scenVal!, side: "scenario" });
+      if (liveImpossible) impossibleDrawdowns.push({ value: liveVal!, side: "live" });
+      if (liveCellImpossible) impossibleDrawdowns.push({ value: raw!, side: "live" });
+      const drawdownImpossible = scenImpossible || liveCellImpossible;
+      // An impossible drawdown is uncomputable: no figure, and (tone needs a finite value) no tone.
+      const primaryRaw = drawdownImpossible ? null : showScenarioPrimary ? scenVal : raw;
 
       // Delta pill renders only when both scenario AND live values are
       // available — graceful degradation when liveMetrics is null.
       const showDeltaPill =
         showScenarioPrimary && liveMetrics != null && metricKey != null;
+      // An impossible operand makes the delta uncomputable: the pill prints the dash it prints
+      // for a missing value, never a figure derived from the impossible one.
       const delta =
-        showDeltaPill && scenVal != null && liveVal != null
+        showDeltaPill && scenVal != null && liveVal != null && !scenImpossible && !liveImpossible
           ? scenVal - liveVal
           : null;
       const direction =
@@ -508,8 +560,12 @@ export function KpiStrip({
       return {
         key: label,
         label,
-        value: primaryFormatted,
-        valueClassName: valueColorClass(primaryRaw),
+        value: drawdownImpossible ? "—" : primaryFormatted,
+        valueClassName: valueColorClass(
+          primaryRaw,
+          metricKey === "sharpe" || metricKey === "avg_pairwise_correlation" ? 1 : 100,
+          metricKey === "max_drawdown",
+        ),
         children: (
           <>
             {/* Phase 10 / 10-04 D-13. Delta pill renders BELOW the primary
@@ -519,7 +575,7 @@ export function KpiStrip({
             {showDeltaPill ? (
               <div
                 className={`mt-1 font-mono text-xs tabular-nums ${deltaPillClass(delta, direction, noiseFloor)}`}
-                title={`Live: ${formatLiveValue(liveVal, metricKey!)}`}
+                title={`Live: ${formatLiveValue(liveImpossible ? null : liveVal, metricKey!)}`}
                 aria-label={`${label} delta: ${formatSignedDelta(delta, metricKey!)} (${sign})`}
               >
                 {formatSignedDelta(delta, metricKey!)}
@@ -533,6 +589,24 @@ export function KpiStrip({
       };
     },
   );
+
+  // R2-SFH-2 / R3-SFH-1: report an impossible drawdown ONCE per distinct set of values, through
+  // the Sentry path the allocations surface already uses (ScenarioCommitDrawer, ScenarioComposer).
+  // The effect keys on a string of the values and their sides, so a re-render with the same
+  // figures stays silent. It covers the scenario value and the live baseline, not only the one
+  // the cell prints, so a bad live baseline is reported whichever mode the allocator is viewing.
+  const impossibleKey = impossibleDrawdowns.map((d) => `${d.side}:${d.value}`).join("|");
+  useEffect(() => {
+    if (impossibleKey === "") return;
+    captureToSentry(
+      new Error("KpiStrip: positive max drawdown (sign convention violated upstream)"),
+      {
+        tags: { component: "KpiStrip", check: "max-drawdown-sign" },
+        extra: { max_drawdown: impossibleDrawdowns[0].value, impossible: impossibleKey, mode },
+      },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `impossibleKey` carries every value read; `mode` is context for the report, not a trigger
+  }, [impossibleKey]);
 
   return (
     <KpiPanel cells={panelCells} ariaLabel="Portfolio KPIs" variant={variant} />

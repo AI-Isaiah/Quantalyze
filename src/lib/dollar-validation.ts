@@ -17,6 +17,7 @@
  */
 
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
+import { roundForDisplay } from "@/lib/factsheet/display-sign";
 
 /**
  * The AUM / max-capacity dollar bound: a finite number in [0, 1e12).
@@ -68,16 +69,17 @@ export function formatUsd(n: number | null): string {
  * and the neutral colour, never a red "−$0" (DESIGN.md: red is never for a
  * zero). `null` means there is no value to sign (null or non-finite input).
  *
- * `toFixed(2)` rounds the exact binary value half away from zero, the same
- * rule `toLocaleString` applies, so the rounded value here is the one the text
- * shows. A negative that rounds to zero parses back as -0, which is neither
- * above nor below 0.
+ * Phase 170.6 WR-02 (D-05): the rounding is NOT implemented here. It is
+ * `roundForDisplay(n, 2)` from `src/lib/factsheet/display-sign.ts`, the one place
+ * the rounded-sign rule lives. That is `Number(n.toFixed(2))`, which rounds the
+ * exact binary value half away from zero (the same rule `toLocaleString`
+ * applies), with a negative that rounds to zero normalised to a plain 0.
  */
 export type MoneySign = "positive" | "negative" | "zero";
 
 export function signAtCents(n: number | null): MoneySign | null {
-  if (n == null || !Number.isFinite(n)) return null;
-  const rounded = Number(n.toFixed(2));
+  const rounded = roundForDisplay(n, 2);
+  if (rounded == null) return null;
   if (rounded > 0) return "positive";
   if (rounded < 0) return "negative";
   return "zero";
@@ -86,14 +88,16 @@ export function signAtCents(n: number | null): MoneySign | null {
 /**
  * Phase 169 D-50 — a signed money amount (unrealized P&L) at 2 decimals, e.g.
  * "+$0.37", "−$0.21" (U+2212 minus), "+$1,300.00". The sign comes from
- * `signAtCents`, so a value that rounds to zero reads "$0.00" with no sign.
+ * `signAtCents`, so a value that rounds to zero reads "$0.00" with no sign. The
+ * digits come from the same `roundForDisplay` value the sign reads.
  * Null or non-finite renders the em-dash, never a fabricated $0.00.
  * Assignable to `KeyTrustClauseRender.amount`.
  */
 export function formatUsdSigned(n: number | null): string {
+  const rounded = roundForDisplay(n, 2);
+  if (rounded == null) return "—";
   const sign = signAtCents(n);
-  if (sign === null) return "—";
-  const magnitude = Math.abs(Number((n as number).toFixed(2))).toLocaleString(
+  const magnitude = Math.abs(rounded).toLocaleString(
     "en-US",
     {
       style: "currency",

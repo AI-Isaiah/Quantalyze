@@ -2,9 +2,11 @@
 
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { benchmarkWithheldReason, withUnit } from "@/lib/factsheet/returns-unit";
+import { drawdownTone, signTone } from "@/lib/factsheet/display-sign";
 
 import { usePayload } from "./factsheet-context";
 import { useBasisSeriesView } from "./basis-context";
+import { pct, pctSigned } from "./format";
 
 /**
  * Named market-stress windows — how the strategy fared during specific
@@ -118,22 +120,16 @@ export function StressWindowsPanel() {
               <td className="py-1.5 px-2 text-right font-mono tabular-nums text-text-2">
                 {w.days}d{w.coverage === "partial" && <span className="text-text-muted">/{w.expectedCalendarDays}</span>}
               </td>
-              <td
-                className="py-1.5 px-2 text-right font-mono tabular-nums"
-                style={{ color: w.stratReturn >= 0 ? "var(--color-positive)" : "var(--color-negative)" }}
-              >
+              <td className="py-1.5 px-2 text-right font-mono tabular-nums" style={toneStyle(signTone(w.stratReturn, 1, 100))}>
                 {pctSigned(w.stratReturn)}
               </td>
-              <td className="py-1.5 px-2 text-right font-mono tabular-nums" style={{ color: "var(--color-negative)" }}>
+              <td className="py-1.5 px-2 text-right font-mono tabular-nums" style={toneStyle(drawdownTone(w.stratMaxDD, 1, 100))}>
                 {pct(w.stratMaxDD)}
               </td>
-              <td
-                className="py-1.5 px-2 text-right font-mono tabular-nums"
-                style={{ color: benchColor(w.benchReturn, w.benchReturn != null && w.benchReturn >= 0 ? "var(--color-positive)" : "var(--color-negative)") }}
-              >
+              <td className="py-1.5 px-2 text-right font-mono tabular-nums" style={benchStyle(w.benchReturn, signTone(w.benchReturn, 1, 100))}>
                 {pctSigned(w.benchReturn)}
               </td>
-              <td className="py-1.5 pl-2 text-right font-mono tabular-nums" style={{ color: benchColor(w.benchMaxDD, "var(--color-negative)") }}>
+              <td className="py-1.5 pl-2 text-right font-mono tabular-nums" style={benchStyle(w.benchMaxDD, drawdownTone(w.benchMaxDD, 1, 100))}>
                 {pct(w.benchMaxDD)}
               </td>
             </tr>
@@ -146,17 +142,19 @@ export function StressWindowsPanel() {
   );
 }
 
-/** CR-01 (SC3): a null bench field is an uncovered comparator day inside the
- *  window — rendered "—" in the muted color, never as a green 0%. */
-function benchColor(v: number | null, covered: string): string {
-  return v == null ? "var(--color-text-muted)" : covered;
+/**
+ * Phase 170.6 (D-03, D-04, D-05): a cell is red or green by the sign of the value ROUNDED to
+ * the precision it prints at (`signTone`, `drawdownTone` in display-sign), and a rounded zero
+ * carries no colour. This function only maps a tone to a colour token.
+ */
+function toneStyle(tone: "positive" | "negative" | undefined): { color: string } | undefined {
+  if (tone === "positive") return { color: "var(--color-positive)" };
+  if (tone === "negative") return { color: "var(--color-negative)" };
+  return undefined;
 }
 
-function pctSigned(v: number | null): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return (v >= 0 ? "+" : "") + (v * 100).toFixed(1) + "%";
-}
-function pct(v: number | null): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return (v * 100).toFixed(1) + "%";
+/** CR-01 (SC3): a null bench field is an uncovered comparator day inside the
+ *  window — rendered "—" in the muted color, never as a green 0%. */
+function benchStyle(v: number | null, tone: "positive" | "negative" | undefined): { color: string } | undefined {
+  return v == null ? { color: "var(--color-text-muted)" } : toneStyle(tone);
 }

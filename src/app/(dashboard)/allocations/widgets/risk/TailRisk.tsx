@@ -9,6 +9,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { TouchTooltip } from "@/components/charts/TouchTooltip";
+import { formatUnsignedPercent } from "@/lib/factsheet/display-sign";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { buildCompositeReturns } from "../lib/composite-returns";
 import { withWidgetBoundary, type BaseWidgetProps } from "../lib/widget-boundary";
@@ -32,6 +33,11 @@ function quantile(sorted: number[], q: number): number {
   const upper = Math.ceil(pos);
   if (lower === upper) return sorted[lower];
   return sorted[lower] + (pos - lower) * (sorted[upper] - sorted[lower]);
+}
+
+/** A histogram bin's lower edge as text. Lifted so a test can read it (jsdom does not render ticks). */
+export function tailBinLabel(low: number): string {
+  return formatUnsignedPercent(low, 1);
 }
 
 function TailRiskInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
@@ -64,7 +70,7 @@ function TailRiskInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
         (r) => r >= low && (i === BINS - 1 ? r <= high : r < high),
       ).length;
       return {
-        label: `${(low * 100).toFixed(1)}%`,
+        label: tailBinLabel(low),
         midpoint: low + binWidth / 2,
         count,
       };
@@ -102,13 +108,13 @@ function TailRiskInner({ data }: { data: RiskWidgetData } & BaseWidgetProps) {
             className="font-metric text-fixed-10 tabular-nums"
             style={{ color: "#CA8A04" }}
           >
-            P5 {(p5 * 100).toFixed(1)}%
+            P5 {formatUnsignedPercent(p5, 1)}
           </span>
           <span
             className="font-metric text-fixed-10 tabular-nums"
             style={{ color: "#DC2626" }}
           >
-            P1 {(p1 * 100).toFixed(1)}%
+            P1 {formatUnsignedPercent(p1, 1)}
           </span>
           <span
             className="rounded bg-red-50 px-1.5 py-0.5 font-metric text-fixed-10 tabular-nums"

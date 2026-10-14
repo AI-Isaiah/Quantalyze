@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import { pearson } from "@/lib/return-stats";
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import {
   curveMethodFromFlags,
   resolveDailyReturnSeries,
@@ -146,7 +147,7 @@ export function CompareCorrelationMatrix({ items }: { items: CompareItem[] }) {
                         : undefined
                     }
                   >
-                    {val === null ? "—" : val.toFixed(2)}
+                    {val === null ? "—" : formatFixedSigned(val, { dp: 2 })}
                   </td>
                 );
               })}

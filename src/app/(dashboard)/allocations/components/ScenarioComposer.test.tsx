@@ -431,6 +431,25 @@ vi.mock("./WeightOptimizerSection", () => ({
   ),
 }));
 
+// Phase 170.6 WR-03: a test seam over the REAL computeDiversification. When `pcrOverride` is
+// set, the real result is returned with its `pcr` replaced, so a near-zero percent contribution
+// to risk (not reachable from a hand-built return series) can be rendered. Null by default,
+// so every other test runs the real computation untouched.
+const diversificationSeam = vi.hoisted(() => ({
+  pcrOverride: null as ((ids: string[]) => Record<string, number>) | null,
+}));
+vi.mock("@/lib/diversification", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/diversification")>();
+  return {
+    ...actual,
+    computeDiversification: (...args: Parameters<typeof actual.computeDiversification>) => {
+      const result = actual.computeDiversification(...args);
+      const override = diversificationSeam.pcrOverride;
+      return override ? { ...result, pcr: override(args[0].ids) } : result;
+    },
+  };
+});
+
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer } from "./ScenarioComposer";
@@ -5011,6 +5030,46 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     ) as HTMLElement;
     expect(fill.className).toContain("bg-positive");
     expect(parseFloat((fill.style.width || "0").replace("%", ""))).toBeGreaterThan(0);
+  });
+
+  it("WR-03 (170.6, D-03) — a PCR that prints 0.0% is neither risk-reducing nor green; -0.1% is", () => {
+    // Hand-typed: -0.0004 x 100 = -0.04 -> "-0.0" -> prints "0.0%", a rounded zero.
+    //             -0.0006 x 100 = -0.06 -> "-0.1" -> prints "-0.1%", a real (tiny) hedge.
+    diversificationSeam.pcrOverride = (ids) => ({
+      [ids[0]]: -0.0004,
+      [ids[1]]: -0.0006,
+    });
+    try {
+      const payload = makePayload(withRefLabels(mockHedgeBlend()));
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      const list = screen
+        .getByText("Risk contribution per constituent (% of total)")
+        .closest("div")
+        ?.querySelector('ul[role="list"]') as HTMLElement;
+      const rows = within(list).getAllByRole("listitem");
+      expect(rows).toHaveLength(2);
+      const zeroRow = rows.find((li) => li.textContent!.endsWith("0.0%") && !li.textContent!.endsWith("-0.0%") && !li.textContent!.endsWith("-0.1%"))!;
+      const hedgeRow = rows.find((li) => li.textContent!.endsWith("-0.1%"))!;
+      expect(zeroRow).toBeDefined();
+      expect(hedgeRow).toBeDefined();
+      // Rounded zero: no chip, accent (neutral) bar, never green.
+      expect(within(zeroRow).queryByTestId("pcr-risk-reducing-tag")).toBeNull();
+      const zeroFill = zeroRow.querySelector("div[aria-hidden] > div") as HTMLElement;
+      expect(zeroFill.className).toContain("bg-accent");
+      expect(zeroFill.className).not.toContain("bg-positive");
+      // A figure that prints -0.1% is still a hedge.
+      expect(within(hedgeRow).getByTestId("pcr-risk-reducing-tag")).toBeInTheDocument();
+      const hedgeFill = hedgeRow.querySelector("div[aria-hidden] > div") as HTMLElement;
+      expect(hedgeFill.className).toContain("bg-positive");
+    } finally {
+      diversificationSeam.pcrOverride = null;
+    }
   });
 
   it("IN-01 — ENB < 1 surfaces the 'below 1 — a hedge offsets risk' disclosure", () => {

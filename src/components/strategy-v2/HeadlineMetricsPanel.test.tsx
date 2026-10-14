@@ -601,3 +601,74 @@ describe("HeadlineMetricsPanel - returns unit (164.6.6.2-07, UI-SPEC C1-C4, D-10
     }
   });
 });
+
+describe("HeadlineMetricsPanel - one sign rule (170.6-14, D-02, D-03, D-04, D-05)", () => {
+  // The <dd> that sits under a headline label.
+  const ddFor = (container: HTMLElement, label: string): HTMLElement => {
+    const dt = Array.from(container.querySelectorAll("dt")).find(
+      (el) => el.textContent === label,
+    );
+    expect(dt, `no <dt> labelled ${label}`).toBeTruthy();
+    return dt!.nextElementSibling as HTMLElement;
+  };
+  const renderWith = (over: Partial<typeof PANEL2_HEADLINE>) =>
+    render(
+      <HeadlineMetricsPanel
+        {...BASE_PROPS}
+        panel2Headline={{ ...PANEL2_HEADLINE, ...over }}
+      />,
+    ).container;
+
+  it("a CAGR of -0.00004 prints 0.00% with neither red nor green (D-02, D-03)", () => {
+    const dd = ddFor(renderWith({ cagr: -0.00004 }), "CAGR");
+    expect(dd.textContent).toBe("0.00%");
+    expect(dd.className).not.toContain("text-negative");
+    expect(dd.className).not.toContain("text-positive");
+  });
+
+  it("a Cum return of 0.0123 prints 1.23% in green; -0.0123 prints -1.23% in red", () => {
+    const up = ddFor(renderWith({ cumulative_return: 0.0123 }), "Cum return");
+    expect(up.textContent).toBe("1.23%");
+    expect(up.className).toContain("text-positive");
+    const down = ddFor(renderWith({ cumulative_return: -0.0123 }), "Cum return");
+    expect(down.textContent).toBe("-1.23%");
+    expect(down.className).toContain("text-negative");
+  });
+
+  it("a Cum return of +0.00004 prints 0.00% and is not green (D-03)", () => {
+    const dd = ddFor(renderWith({ cumulative_return: 0.00004 }), "Cum return");
+    expect(dd.textContent).toBe("0.00%");
+    expect(dd.className).not.toContain("text-positive");
+  });
+
+  it("a Sharpe of -0.004 prints 0.00, not -0.00 (D-02)", () => {
+    expect(ddFor(renderWith({ sharpe: -0.004 }), "Sharpe").textContent).toBe("0.00");
+    expect(ddFor(renderWith({ sortino: -0.004 }), "Sortino").textContent).toBe("0.00");
+  });
+
+  it("a Max DD of 0 prints 0.00% and is not red (D-04)", () => {
+    const dd = ddFor(renderWith({ max_drawdown: 0 }), "Max DD");
+    expect(dd.textContent).toBe("0.00%");
+    expect(dd.className).not.toContain("text-negative");
+    expect(dd.className).not.toContain("text-positive");
+  });
+
+  it("a Max DD of -0.00004 rounds to zero: prints 0.00%, not red (D-03, D-04)", () => {
+    const dd = ddFor(renderWith({ max_drawdown: -0.00004 }), "Max DD");
+    expect(dd.textContent).toBe("0.00%");
+    expect(dd.className).not.toContain("text-negative");
+  });
+
+  it("a Max DD of -0.0342 prints -3.42% in red and is never green (D-04)", () => {
+    const dd = ddFor(renderWith({ max_drawdown: -0.0342 }), "Max DD");
+    expect(dd.textContent).toBe("-3.42%");
+    expect(dd.className).toContain("text-negative");
+    expect(dd.className).not.toContain("text-positive");
+  });
+
+  it("a missing value prints a dash with no tone", () => {
+    const dd = ddFor(renderWith({ max_drawdown: null as unknown as number }), "Max DD");
+    expect(dd.textContent).toBe("—");
+    expect(dd.className).not.toContain("text-negative");
+  });
+});

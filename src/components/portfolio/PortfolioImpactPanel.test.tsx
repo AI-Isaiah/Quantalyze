@@ -949,7 +949,10 @@ describe("<PortfolioImpactPanel>", () => {
     expect(value.className).toContain("text-negative");
   });
 
-  it("H-1132: renders a zero ratio delta with the '±' prefix and neutral color", async () => {
+  // 170.6 D-02 (founder, 2026-10-13): a delta that rounds to zero prints UNSIGNED, so the "±"
+  // this case used to pin at an exact zero is replaced by "0.000". The neutral color is kept, and
+  // a null delta still prints "—", so "no impact" and "not computable" stay distinct.
+  it("H-1132 / D-02: renders a zero ratio delta unsigned ('0.000') and neutral color", async () => {
     mockFetch(async () =>
       new Response(
         JSON.stringify(
@@ -975,7 +978,7 @@ describe("<PortfolioImpactPanel>", () => {
       />,
     );
 
-    const value = await screen.findByText("±0.000");
+    const value = await screen.findByText("0.000");
     expect(value).toBeInTheDocument();
     expect(value.className).toContain("text-text-secondary");
   });
@@ -1132,7 +1135,7 @@ describe("<PortfolioImpactPanel>", () => {
     );
     // Must NOT render the delta chips as a confident projection.
     expect(screen.queryByText("Projected impact")).toBeNull();
-    expect(screen.queryByText("±0.000")).toBeNull();
+    expect(screen.queryByText("0.000")).toBeNull();
   });
 
   it("NEW-C11-05: ok row with all-null deltas renders fallback copy, not ±0 chips", async () => {
@@ -1253,8 +1256,8 @@ describe("<PortfolioImpactPanel>", () => {
     );
     // "—" must appear for the not-computable chip.
     expect(screen.getByText("—")).toBeInTheDocument();
-    // Must NOT render ±0.000 — that's indistinguishable from a real zero delta.
-    expect(screen.queryByText("±0.000")).toBeNull();
+    // Must NOT render a zero delta ("0.000", D-02 replaced the "±0.000") — a not-computable chip is "—".
+    expect(screen.queryByText("0.000")).toBeNull();
     // ARIA live region must say "not computable", not "unchanged".
     const status = screen.getByRole("status");
     expect(status.textContent).toMatch(/Sharpe not computable/);
@@ -1302,7 +1305,7 @@ describe("<PortfolioImpactPanel>", () => {
     );
     // The not-computable em-dash must be rendered for the Correlation chip.
     expect(screen.getByText("—")).toBeInTheDocument();
-    expect(screen.queryByText("±0.000")).toBeNull();
+    expect(screen.queryByText("0.000")).toBeNull();
     // ARIA live region: "Correlation not computable", not "Correlation unchanged".
     const status = screen.getByRole("status");
     expect(status.textContent).toMatch(/Correlation not computable/);

@@ -3,7 +3,7 @@ import { render, screen, within, fireEvent, act } from "@testing-library/react";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
 import type { BenchmarkPricesOpt } from "@/lib/factsheet/build-payload";
 import type { DailyPrice, DailyReturn, FactsheetPayload } from "@/lib/factsheet/types";
-import { flatLegReason, pairedFloorReason } from "@/lib/factsheet/joint";
+import { flatLegReason } from "@/lib/factsheet/joint";
 import { FactsheetProvider, useXRange } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
 
@@ -222,8 +222,10 @@ describe("a flat strategy leg on the factsheet (D-04, B13), the KPI strip", () =
     for (const slot of [strip, four]) {
       expect(slot).toHaveLength(1);
       expect(slot[0].getAttribute("data-testid")).toBe("joint-floor-reason");
+      // 170.6 plan 11 (D-08): SPX's last close (2026-05-08) is before this record's last date, so the
+      // floor sentence ends with the day its prices end. Typed by hand, not rebuilt by the function.
       expect(slot[0].textContent).toBe(
-        pairedFloorReason("SPX", spx.jointWithheld!.paired, "record", spx.jointWithheld!.floor),
+        `Alpha and beta need at least ${spx.jointWithheld!.floor} days paired with SPX; this record has ${spx.jointWithheld!.paired}. SPX prices end May 8.`,
       );
     }
     expect(screen.queryByTestId("joint-flat-leg-reason")).toBeNull();

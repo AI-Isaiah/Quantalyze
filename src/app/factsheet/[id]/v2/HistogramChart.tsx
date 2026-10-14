@@ -6,6 +6,7 @@ import { usePayload, useXRange, useActiveComparator } from "./factsheet-context"
 import { useBasisSeriesView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
+import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 
 const VB_W = 880;
 // Desktop viewBox height = today's literal (200). CHART-03 portrait: a taller
@@ -355,8 +356,7 @@ export function HistogramChart() {
 }
 
 function pctTick(v: number): string {
-  const sign = v > 0 ? "+" : "";
   const abs = Math.abs(v) * 100;
   const dp = abs < 1 ? 2 : abs < 10 ? 1 : 0;
-  return `${sign}${(v * 100).toFixed(dp)}%`;
+  return formatFixedSigned(v, { dp, scale: 100, suffix: "%", plus: true });
 }
