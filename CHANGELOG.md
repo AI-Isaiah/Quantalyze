@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.131.8.2] - 2026-10-14 — OUTAGEALERT go-live (plan 09): the staleness reader is registered on PROD and ticking, the cron manifest carries it, five OUTAGEALERT TODOS close on live evidence, and the email channel is booked
+
+Phase 164.6.8, plan 09. Bookkeeping only: no application code, no migration, no workflow changed. `ops_staleness_check()` shipped in `0.131.5.0` and scheduled nothing; this release records what the live registration and the drill proved.
+
+⚠️ **Sentry is the only live paging channel (founder decision D-15, 2026-10-14).** The drill at 19:50 UTC (`source=drill`, `event=outage`, `cause=arrival_test`) reached the Sentry rule "Ops alert: outage (164.6.8)", and the founder confirmed it notified them without opening Sentry. The founder-email route answered 502 (`EmailSkippedError: [email] Resend not configured`) because production has no Resend key. It failed loud, as designed; the founder chose "Sentry only for now". Every closure below relies on the Sentry delivery the founder confirmed.
+
+### Added
+- **`ops_staleness_check` in `scripts/prod-prober/cron-manifest.json` (commit `4f426c6c9`).** The manifest was re-captured after the job was registered at `40 * * * *` (19:54 UTC, marker query named PRODUCTION first). The diff against the committed manifest was exactly one new row plus `captured_at`; the prober `--self-test` reads 91/91 and the wiring suite 118/118.
+- **`164.6.8-OPS-ALERT-EMAIL-UNCONFIGURED` in `TODOS.md`** (owner: the founder). Closes when Resend is configured in Vercel production, the plan 09 drill is re-sent and the email arrives.
+
+### Changed
+- **Five `TODOS.md` entries closed with dated evidence.** `167.1.2.2.2-TRADESYNC-STALENESS-ALARM` (with item 4 of `[167.1.2.2.2-CRON-TICK-RESIDUALS]`), `167.1.2.2-BACKFILL-STALENESS-ALARM`, `MT5-RELAUNCH-DEBT-LEASE-WAIT-01` (plan 07's RED cycle, shipped in `0.131.7.0`, #1031) and `MT5-VALIDATION-TERMINAL-COVERAGE-01` (the validation liveness line read `already_authorized` on five monitor ticks, 20:00 to 20:40 UTC, and no outage page fired on the healthy terminal; the newest `mt5_terminal_scrub` row reads `scrubbed`). The first scheduled tick of the reader, 20:40 UTC, succeeded and recorded an `ok` row with no page.
+- **`MT5-PROBER-WEDGE-CALIBRATION-01` and `MT5-SWITCH-WEDGE-CAUSE-01` stay open**, each with a dated note marking it a live-gated human item (D-12): a real `-10005` wedge is the only close. `PROBER-ALERT-DELIVERY-UNVERIFIED-01` is untouched (D-03).
+
+### Notes
+- Not seen live, and said so in each closure: a real stale `cron_sync` heartbeat, a stalled backfill queue, a dark validation terminal, a non-`scrubbed` scrub row, and a heal tick owing a relaunch debt on a busy lease. Those arms are proven by the SQL gate's RED-UNDER twins and by the plan 06 and 07 neuter cycles, and the route to a human by the drill.
+- The old prober issue (#773) is still open; the last prober runs succeeded but the first clean full run after the incident code merged has not happened yet, so its auto-close is pending, not failed.
+
+### Notes
+- **Phase 164.9.8.1 PYXDIST is booked and started** (founder 2026-10-14). The `python` CI job (18-20 min per PR, about 15 of it serial pytest) moves to `-n auto --dist loadgroup` once the Phase 97 fence flake and the limiter-identity flake are reproduced or ruled out. It runs outside the in-flight phase limit. The ROADMAP entry and the STATE roadmap-evolution line only.
+
 ## [0.131.8.1] - 2026-10-14 — BASELINE: automated re-dump after the PROD apply of ad6bf65b
 
 ### Changed
