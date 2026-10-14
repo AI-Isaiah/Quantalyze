@@ -362,3 +362,34 @@ file(s)` and `scripts/baseline-content-drift-check.mjs` compares 129 functions (
 -> 129). The migration stamp was re-picked from 20261016120000 to 20261019120000 at release time
 because an in-flight branch held 20261018120000. It supersedes the 673 reading above as the latest
 dated one and is itself not a live constant: read `FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-14 (Phase 164.6.8 OUTAGEALERT, merge with origin/main): two gate files met
+on one corpus, `supabase/tests/test_ops_staleness_check.sql` (migration 20261020120000, fourteen
+arms, LANE-ONLY on the pg-net stand-in) and main's
+`supabase/tests/test_strategy_analytics_computed_at_success_only.sql` (migration 20261013120000,
+five arms). Each branch had raised `FILES_FLOOR` 66 to 67 for its own gate, so git kept the shared
+67 without a conflict. A DATED reading of one full `node scripts/mutation-runner/run.mjs` on the
+merged tree, no file edited during it, run with the pre-merge constants in place:
+`scope: FULL 68/68 annotated files`, `coverage: files 68/95`, `arms: 657/657/0`, `biting: 657`,
+`lane-invocations: 657` plus 68 baseline / 68 restore legs, `unreachable: 27`, `lane-blocked: 0`,
+`No defects.`, exit 0. `node scripts/lint-sql-gates.mjs` printed `scanned 95 file(s); 0
+finding(s)`; `scripts/baseline-content-drift-check.mjs` compared 128 functions (MATCH 124, DRIFT 3,
+SNAPSHOT_MISSING 1, the one being `ops_staleness_check/0` until its migration applies to PROD and
+the baseline is re-dumped). `ci.yml`'s `SENTINEL_FLOOR` 17 and `ARMS_FLOOR` 299 did not move
+(the NAVBREACH gate declares no sentinel). Not a live constant: read `FILES_FLOOR`, `ARMS_FLOOR`
+and `COMPARED_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-14 (Phase 164.6.8 OUTAGEALERT plan 08, release merge with origin/main
+v0.131.5.1): the branch met main's DISCOVERYPHONE gate
+(`supabase/tests/test_get_published_trade_venues.sql`, migration 20261019120000, ten arms) on one
+corpus beside `supabase/tests/test_ops_staleness_check.sql` (migration 20261020120000, fourteen
+arms). A DATED reading of one full `node scripts/mutation-runner/run.mjs` on the COMMITTED merged
+tree, no file edited during it, run with main's constants (69 / 683) in place: `scope: FULL 70/70
+annotated files`, `coverage: files 70/97`, `arms: 697/697/0`, `biting: 697`, `lane-invocations:
+697` plus 70 baseline / 70 restore legs, `unreachable: 27`, `lane-blocked: 0`, `per-arm lane time:
+mean 4.9s over 697 arm run(s)`, `No defects.`, exit 0. `node scripts/lint-sql-gates.mjs` printed
+`scanned 97 file(s); 0 finding(s)`; `scripts/baseline-content-drift-check.mjs` compared 130
+functions (MATCH 126, DRIFT 3, SNAPSHOT_MISSING 1, the one being `ops_staleness_check/0` until its
+migration applies to PROD and the baseline is re-dumped). It supersedes the 657 reading above as
+the latest dated one and is itself not a live constant: read `FILES_FLOOR`, `ARMS_FLOOR` and
+`COMPARED_FLOOR` by SYMBOL.

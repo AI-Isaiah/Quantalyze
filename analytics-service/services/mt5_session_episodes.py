@@ -867,6 +867,11 @@ def _reset_session_episode_state_for_tests() -> None:
     _clear_blind_run()
     end_ipc_fault_run()
     _clear_ipc_fault_recycle_window()
+    # ⭐ 164.6.8 plan 04: the outage tracker's run is per-process state too. A
+    # function-local import for the same cycle reason as the hook above.
+    from services.mt5_outage_alert import _reset_outage_state_for_tests
+
+    _reset_outage_state_for_tests()
 
 
 def _stamp_reading_and_measure_gap() -> tuple[float | None, bool]:
@@ -1360,6 +1365,21 @@ async def record_mt5_session_reading(
     """
     try:
         reading = classify_reading(kind, code)
+        # ⭐ 164.6.8 plan 04 (D-04) - THE OUTAGE TRACKER SEES EVERY READING, before
+        # the not_measured early return, so both branches feed it. FUNCTION-LOCAL
+        # import: `mt5_outage_alert` imports THIS module at module level (the
+        # state constants and the threshold), so a module-level import here would
+        # be a cycle. It sits inside the single `try` (the never-raises shape is
+        # pinned by an AST gate); the tracker itself never raises.
+        from services.mt5_outage_alert import ROLE_JOBS, note_outage_reading
+
+        await note_outage_reading(
+            ROLE_JOBS,
+            reading.state,
+            reading.kind,
+            reading.code,
+            poll_interval_s=poll_interval_s,
+        )
         if reading.state == STATE_NOT_MEASURED:
             # ⛔ CLOSES NOTHING. A busy skip, a budget abandon and the `code=0`
             # sentinel all land here; the ABSENCE of a row is the record that
@@ -1385,8 +1405,12 @@ async def record_mt5_session_reading(
                 and consecutive >= threshold
                 and reading.kind not in _DECIDED_BLIND_KINDS
             )
+            # ⭐ 164.6.8 plan 04 (D-04) - ERROR, no longer WARNING. WARNING is
+            # BELOW the Sentry event level, so a blind run at WARNING reached no
+            # human; that is the defect OUTAGEALERT removes. The message text is
+            # unchanged so every log-text pin holds.
             logger.log(
-                logging.WARNING if blind else logging.INFO,
+                logging.ERROR if blind else logging.INFO,
                 "mt5 session episode: reading MEASURED NOTHING "
                 "(kind=%s code=%s unattributed=%s source=%s) — no row written "
                 "and no episode closed. consecutive_not_measured=%s "

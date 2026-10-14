@@ -9,6 +9,13 @@ escalation window, the escalation-failure containment, and the body
 validation — was manually neutered in `routers/cron.py`, observed RED by
 name, and restored. See the plan 04 SUMMARY for the neuter applied and the
 exact failure observed per behaviour.
+
+Phase 164.6.8 plan 01 re-pointed the escalation at ``services.ops_alert.page``
+(the shared channel): the window, the capture and the email POST now live
+there and are keyed by (source, cause, event). Assertions here were MOVED, never
+deleted -- see the plan 01 SUMMARY for each moved pin and why. The email POST
+itself is stubbed in the sync tests below (it is proven in
+tests/test_ops_alert.py); the leak test drives the real POST.
 """
 
 from __future__ import annotations
@@ -22,6 +29,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routers import cron as cron_mod
+from services import ops_alert
+
+_REAL_SCHEDULE_FOUNDER_EMAIL = ops_alert._schedule_founder_email
 
 # An obviously-fake canary, used ONLY to prove the key never lands in a log
 # record or an escalation call.
@@ -50,6 +60,18 @@ class _FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
+
+
+@pytest.fixture(autouse=True)
+def _stub_founder_email(monkeypatch):
+    """The sync TestClient tears its event loop down with the request, so a
+    background email task cannot be observed here; stub the scheduler and keep
+    the payloads. The real POST is proven in tests/test_ops_alert.py and in the
+    leak test below."""
+    emails: list[Any] = []
+    monkeypatch.setattr(ops_alert, "_schedule_founder_email", emails.append)
+    monkeypatch.delenv("OPS_ALERT_APP_URL", raising=False)
+    return emails
 
 
 @pytest.fixture
@@ -94,6 +116,26 @@ def _error_records(caplog: pytest.LogCaptureFixture) -> list[Any]:
     return [r for r in caplog.records if r.levelname == "ERROR"]
 
 
+def _route_records(caplog: pytest.LogCaptureFixture) -> list[Any]:
+    """The route's OWN ERROR line (logger ``quantalyze.analytics``)."""
+    return [r for r in _error_records(caplog) if r.name == "quantalyze.analytics"]
+
+
+def _helper_records(caplog: pytest.LogCaptureFixture) -> list[Any]:
+    """``ops_alert.page``'s ERROR line, logged on EVERY call before its window."""
+    return [
+        r
+        for r in _error_records(caplog)
+        if r.name == "quantalyze.analytics.ops_alert"
+    ]
+
+
+def _scope_tags(spy: MagicMock) -> dict[str, str]:
+    """Tags set on the capture's own ``new_scope`` (never the global scope)."""
+    scope = spy.new_scope.return_value.__enter__.return_value
+    return {c.args[0]: c.args[1] for c in scope.set_tag.call_args_list}
+
+
 # ---------------------------------------------------------------------------
 # Accepted body — 200, one log line carrying the measurement
 # ---------------------------------------------------------------------------
@@ -107,10 +149,14 @@ def test_accepted_body_returns_200_and_logs_the_measurement(client, caplog):
         )
 
     assert resp.status_code == 200
-    records = _error_records(caplog)
+    records = _route_records(caplog)
     assert len(records) == 1, (
-        "expected exactly one structured log line for one accepted alert; got "
+        "expected exactly one structured route log line for one accepted alert; got "
         + repr([r.message for r in caplog.records])
+    )
+    assert len(_helper_records(caplog)) == 1, (
+        "ops_alert.page logs its own ERROR line on every call, so one alert is "
+        "two ERROR lines (route + helper)"
     )
     assert "625" in records[0].message
     assert "10:25:00" in records[0].message
@@ -125,7 +171,7 @@ def test_escalation_message_carries_detected_at(client, monkeypatch, caplog):
     before ever reaching the Sentry message — assert it surfaces there too.
     """
     spy = MagicMock()
-    monkeypatch.setattr(cron_mod, "sentry_sdk", spy)
+    monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
     cron_mod._reset_prober_cadence_alert()
 
     with caplog.at_level("ERROR", logger="quantalyze.analytics"):
@@ -147,7 +193,7 @@ def test_null_gap_minutes_is_accepted_and_logged_as_never(client, caplog):
         resp = client.post("/api/prober-cadence-alert", json=_body(gap_minutes=None))
 
     assert resp.status_code == 200
-    records = _error_records(caplog)
+    records = _route_records(caplog)
     assert len(records) == 1
     assert "never" in records[0].message, (
         "a null gap_minutes must log the WORD 'never', not a blank/None value; got "
@@ -162,7 +208,7 @@ def test_null_gap_minutes_is_accepted_and_logged_as_never(client, caplog):
 
 def test_missing_gap_minutes_is_4xx_and_no_escalation(client, caplog, monkeypatch):
     spy = MagicMock()
-    monkeypatch.setattr(cron_mod, "sentry_sdk", spy)
+    monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
 
     with caplog.at_level("ERROR", logger="quantalyze.analytics"):
         resp = client.post(
@@ -200,9 +246,9 @@ def test_two_alerts_inside_window_produce_two_logs_one_escalation(
     client, monkeypatch, caplog
 ):
     spy = MagicMock()
-    monkeypatch.setattr(cron_mod, "sentry_sdk", spy)
+    monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
     clock = _FakeClock()
-    monkeypatch.setattr(cron_mod, "time", clock)
+    monkeypatch.setattr(ops_alert, "time", clock)
     cron_mod._reset_prober_cadence_alert()
 
     with caplog.at_level("ERROR", logger="quantalyze.analytics"):
@@ -211,7 +257,11 @@ def test_two_alerts_inside_window_produce_two_logs_one_escalation(
         r2 = client.post("/api/prober-cadence-alert", json=_body())
 
     assert r1.status_code == 200 and r2.status_code == 200
-    assert len(_error_records(caplog)) == 2, "every accepted alert must log, window or not"
+    # Two alerts, two lines each: the route's own and the helper's, both
+    # BEFORE any window check.
+    assert len(_route_records(caplog)) == 2, "every accepted alert must log, window or not"
+    assert len(_helper_records(caplog)) == 2, "the helper logs on every call too"
+    assert len(_error_records(caplog)) == 4
     assert spy.capture_message.call_count == 1, (
         "a second alert inside the window must not re-escalate to Sentry"
     )
@@ -221,9 +271,9 @@ def test_two_alerts_either_side_of_window_produce_two_escalations(
     client, monkeypatch, caplog
 ):
     spy = MagicMock()
-    monkeypatch.setattr(cron_mod, "sentry_sdk", spy)
+    monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
     clock = _FakeClock()
-    monkeypatch.setattr(cron_mod, "time", clock)
+    monkeypatch.setattr(ops_alert, "time", clock)
     cron_mod._reset_prober_cadence_alert()
 
     with caplog.at_level("ERROR", logger="quantalyze.analytics"):
@@ -246,9 +296,9 @@ def test_two_alerts_for_different_cron_names_inside_window_both_escalate(
     opened, silently downgrading its Sentry-paged signal to log-only.
     """
     spy = MagicMock()
-    monkeypatch.setattr(cron_mod, "sentry_sdk", spy)
+    monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
     clock = _FakeClock()
-    monkeypatch.setattr(cron_mod, "time", clock)
+    monkeypatch.setattr(ops_alert, "time", clock)
     cron_mod._reset_prober_cadence_alert()
 
     with caplog.at_level("ERROR", logger="quantalyze.analytics"):
@@ -256,17 +306,62 @@ def test_two_alerts_for_different_cron_names_inside_window_both_escalate(
             "/api/prober-cadence-alert", json=_body(cron_name="prod_prober")
         )
         clock.advance(cron_mod._PROBER_CADENCE_ALERT_WINDOW_S - 1)
+        # The window is keyed by (source, cause, event). `cron_name` maps to
+        # the closed source set, so the second cron must be a DIFFERENT KNOWN
+        # source: an unknown name would collapse to `unrecognised`.
         r2 = client.post(
             "/api/prober-cadence-alert",
-            json=_body(cron_name="some_other_prober"),
+            json=_body(cron_name="cron_sync"),
         )
 
     assert r1.status_code == 200 and r2.status_code == 200
-    assert len(_error_records(caplog)) == 2, "every accepted alert must log"
+    assert len(_route_records(caplog)) == 2, "every accepted alert must log"
     assert spy.capture_message.call_count == 2, (
         "a different cron_name inside the same window must escalate "
         "independently, not be suppressed by an unrelated cron's window"
     )
+
+
+def test_cause_defaults_to_cadence_gap_and_an_explicit_cause_is_paged(
+    client, monkeypatch
+):
+    """Plan 02's SQL readers send a cause class; the original
+    prod_prober_cadence_check() body omits it. Both must page, and the cause
+    keys the hourly window."""
+    spy = MagicMock()
+    monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
+
+    client.post("/api/prober-cadence-alert", json=_body())
+    client.post(
+        "/api/prober-cadence-alert",
+        json={**_body(), "cause": "stale_heartbeat"},
+    )
+
+    scopes = [c for c in spy.new_scope.call_args_list]
+    assert len(scopes) == 2, "a different cause inside the window pages again"
+    causes = [
+        c.args[1]
+        for c in spy.new_scope.return_value.__enter__.return_value.set_tag.call_args_list
+        if c.args[0] == "ops_alert_cause"
+    ]
+    assert causes == ["cadence_gap", "stale_heartbeat"]
+
+
+def test_an_unknown_cron_name_pages_as_unrecognised_and_keeps_its_name_in_the_detail(
+    client, monkeypatch
+):
+    """cron_name is an unconstrained wire string; the alert source is a closed
+    set. Never drop the alert, never lose which cron it was."""
+    spy = MagicMock()
+    monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
+
+    resp = client.post(
+        "/api/prober-cadence-alert", json=_body(cron_name="some_other_prober")
+    )
+
+    assert resp.status_code == 200
+    assert _scope_tags(spy)["ops_alert_source"] == "unrecognised"
+    assert "some_other_prober" in spy.capture_message.call_args.args[0]
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +374,7 @@ def test_escalation_that_raises_does_not_change_response_or_propagate(
 ):
     spy = MagicMock()
     spy.capture_message.side_effect = RuntimeError("sentry transport down")
-    monkeypatch.setattr(cron_mod, "sentry_sdk", spy)
+    monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
     cron_mod._reset_prober_cadence_alert()
 
     with caplog.at_level("ERROR", logger="quantalyze.analytics"):
@@ -289,9 +384,12 @@ def test_escalation_that_raises_does_not_change_response_or_propagate(
         "an escalation-transport failure must never surface as a non-200 — "
         f"got {resp.status_code}: {resp.text}"
     )
-    assert len(_error_records(caplog)) == 1, (
+    assert len(_route_records(caplog)) == 1, (
         "the structured log must already have been emitted before the failed capture"
     )
+    assert any(
+        "exc_class=RuntimeError" in r.message for r in _helper_records(caplog)
+    ), "the failed capture is logged by class only, never swallowed silently"
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +401,7 @@ def test_no_log_or_escalation_carries_the_request_service_key(
     client, monkeypatch, caplog
 ):
     spy = MagicMock()
-    monkeypatch.setattr(cron_mod, "sentry_sdk", spy)
+    monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
     cron_mod._reset_prober_cadence_alert()
 
     with caplog.at_level("ERROR", logger="quantalyze.analytics"):
@@ -315,11 +413,64 @@ def test_no_log_or_escalation_carries_the_request_service_key(
 
     assert resp.status_code == 200
     rendered_logs = " ".join(r.message for r in caplog.records)
-    rendered_escalation = repr(spy.set_tag.call_args_list) + repr(
-        spy.capture_message.call_args_list
-    )
+    rendered_escalation = repr(spy.mock_calls)
     assert _CANARY_SERVICE_KEY not in rendered_logs
     assert _CANARY_SERVICE_KEY not in rendered_escalation
+
+
+@pytest.mark.asyncio
+async def test_the_email_post_never_logs_or_bodies_the_service_key(
+    monkeypatch, caplog
+):
+    """The email POST must carry the key in its Authorization header (that is
+    the auth) and NOWHERE ELSE: not in the JSON body, not in any log line, not
+    in the Sentry capture. Drives the REAL scheduler and POST with a fake
+    httpx, through the route.
+    """
+    seen: dict[str, Any] = {}
+
+    class _Client:
+        def __init__(self, **kwargs: Any) -> None:
+            seen["kwargs"] = kwargs
+
+        async def __aenter__(self) -> "_Client":
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def post(self, url: str, *, json: Any = None, headers: Any = None):
+            seen.update(url=url, json=json, headers=headers)
+            return type("R", (), {"status_code": 502})()
+
+    spy = MagicMock()
+    monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
+    monkeypatch.setattr(
+        ops_alert, "httpx", type("H", (), {"AsyncClient": _Client})
+    )
+    monkeypatch.setattr(
+        ops_alert, "_schedule_founder_email", _REAL_SCHEDULE_FOUNDER_EMAIL
+    )
+    monkeypatch.setenv("SERVICE_KEY", _CANARY_SERVICE_KEY)
+    cron_mod._reset_prober_cadence_alert()
+
+    app = FastAPI()
+    app.include_router(cron_mod.router)
+    transport = httpx.ASGITransport(app=app)
+    with caplog.at_level("ERROR"):
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as ac:
+            resp = await ac.post("/api/prober-cadence-alert", json=_body())
+        await ops_alert._drain_ops_alert_tasks_for_tests()
+
+    assert resp.status_code == 200
+    assert seen["headers"] == {"Authorization": f"Bearer {_CANARY_SERVICE_KEY}"}
+    assert _CANARY_SERVICE_KEY not in repr(seen["json"])
+    assert _CANARY_SERVICE_KEY not in " ".join(r.message for r in caplog.records)
+    assert _CANARY_SERVICE_KEY not in repr(spy.mock_calls)
+    # The 502 answer (the Next.js route could not send) is logged by status.
+    assert any("status=502" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

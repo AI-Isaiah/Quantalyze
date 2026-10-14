@@ -978,6 +978,23 @@ _LEASE_VERB = "mt5_terminal_lease"
 #: (`run_owed_validation_scrub_in_lease`) takes NO lease of its own: it runs
 #: under the worker's validation lease, and builds its own fresh client the
 #: same way. `scrub_validation_terminal` takes the lease ONCE.
+#:
+#: ⭐ RE-CUT 2026-10-13 (Phase 164.6.8 OUTAGEALERT plan 06, D-09 (a)), THE ROSTER'S
+#: QUESTION ANSWERED. The new entry is `services/mt5_validation_liveness.py::
+#: probe_validation_terminal`, the validation terminal's credential-free liveness
+#: probe, run on the session monitor's cadence (held for `validation`, site
+#: `validation_liveness`).
+#:
+#: ⭐ *Does the new site touch an `Mt5Client` that was ALREADY touched under a
+#: DIFFERENT lease?* **NO, by construction.** `_probe_blocking` builds a FRESH
+#: `Mt5Client` inside the `to_thread` body that runs under this one acquisition and
+#: closes it in its `finally`; it is handed no client by anyone.
+#:
+#: ⭐ *Does it steal the terminal?* **NO.** The acquire is bounded at
+#: `_MT5_RELOGIN_LEASE_WAIT_DEFAULT_S` (a validation that holds the terminal makes
+#: the probe a `busy_skip`, never a queue), the probe is credential-free (it logs
+#: nothing in, so it changes no account and the lease records NO handover row), and
+#: it is a different terminal key from the jobs heal's.
 _PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
     {
         ("services/allocator_positions.py", "_fetch_mt5_account_rows"),
@@ -993,6 +1010,9 @@ _PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
         # Phase 164.6.6.1 / D-08 — the validation terminal's post-verdict scrub.
         # See the 2026-10-04 re-cut note above.
         ("services/mt5_terminal_scrub.py", "scrub_validation_terminal"),
+        # Phase 164.6.8 plan 06 / D-09 (a) -- the validation terminal's liveness
+        # probe. See the 2026-10-13 re-cut note above.
+        ("services/mt5_validation_liveness.py", "probe_validation_terminal"),
     }
 )
 
@@ -1288,6 +1308,12 @@ _VALIDATE_SITES: frozenset[tuple[str, str]] = frozenset(
 _VALIDATION_ENDPOINT_MARK_ONLY_READERS: frozenset[tuple[str, str]] = frozenset(
     {
         ("services/mt5_terminal_scrub.py", "mark_validation_terminal_owed_at_boot"),
+        # ⭐ Phase 164.6.8 plan 06 (2026-10-13) -- the second named allowance. The
+        # liveness probe reads the validation endpoint to MEASURE that terminal
+        # (credential-free), under a lease on the VALIDATION key. It is a reader
+        # that can only ever look at the validation terminal; it cannot route a job
+        # onto it. Kept out of `_VALIDATE_SITES` so rule (b) does not reach it.
+        ("services/mt5_validation_liveness.py", "probe_validation_terminal"),
     }
 )
 

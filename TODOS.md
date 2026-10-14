@@ -1612,6 +1612,8 @@ stays green.
 ⛔ **Not a close:** raising the default wait for every tick (a healthy busy terminal would then queue
 the heal ahead of real work, which the heal's busy arm refuses, D-29), or editing only the log text.
 
+- **Shipped in v0.131.5.0 (Phase 164.6.8 OUTAGEALERT, 2026-10-14), live check pending in plan 09, NOT closed.** The heal's lease acquire waits the lease ceiling while a relaunch debt is owed, the busy-with-debt arm pages `mt5_relaunch_debt`, and the first heal that pays a paged debt sends one recovered notice. This entry's gate says a human is reached, which is a live fact, so it closes only on plan 09's live observation. Residual booked as `164.6.8-F4-WR03-DEBT-PAGE-NEVER-ENDS`.
+
 ### UPSTASH-RATELIMIT-KEY-LOCKING-01 — @upstash/ratelimit is held at 2.0.8; 2.2.0's scripts are refused by the CI Redis (booked 2026-10-05, Dependabot #951)
 
 **Why it is open.** Dependabot #951 bumped @upstash/ratelimit 2.0.8 → 2.2.0. The `frontend-seam-redis`
@@ -5888,6 +5890,7 @@ away (D-02). Those are mitigations, not a mechanism.
 from 2026-09-21 12:52:04 with no reconnect line until the 2026-09-25 restarts. Read at face value,
 the second wedge was not recovered for about four days.
 
+- **Booked as a live-gated human item owned by Phase 164.6.8 (D-12, 2026-10-14); Phase 164.6.8 closes WITHOUT it.** The mechanism is named only from a real wedge. Since v0.131.5.0 the outage page carries the scrubbed pre-recycle wedge evidence snapshot (D-13), so the next real wedge produces the evidence; a hand-written fixture is never a close.
 
 ### MT5-PROBER-WEDGE-CALIBRATION-01 — the prod-prober's `-10005` classification has never been calibrated against a REAL wedge (booked 2026-09-26, Phase 164.6.5 D-11)
 
@@ -5926,6 +5929,8 @@ recycles the terminal on `ipc_fault` (plan 05), so a wedge can heal before a sch
 run reads it. Capturing one may need a deliberate, founder-supervised window rather than
 waiting.
 
+- **Booked as a live-gated human item owned by Phase 164.6.8 (D-12, 2026-10-14); Phase 164.6.8 closes WITHOUT it.** It closes only on a real `-10005` wedge, not on a hand-written fixture. Since v0.131.5.0 the outage page carries the scrubbed pre-recycle wedge evidence snapshot (D-13), so the next real wedge hands over the capture this entry needs.
+
 ### MT5-VALIDATION-TERMINAL-COVERAGE-01 — the validation-only MT5 gateway is dark to every monitor, and nothing reads a skipped cleanup (booked 2026-09-27, Phase 164.6.6 D-06)
 
 **Why it is open.** Phase 164.6.6 (founder decision D-02, 2026-09-27) moves key validation onto a
@@ -5949,6 +5954,8 @@ terminal, whichever comes first. Part (b) is live only once 164.6.6.1 ships its 
 the job terminal and an outage on it reaches a human without one clicking a button; (b) a non-`scrubbed`
 `mt5_terminal_scrub` row reaches a human, with a test that fails first when the reader is removed.
 ⛔ **Not a close:** a log line nobody reads, or a check that only runs when someone validates a key.
+
+- **Shipped in v0.131.5.0 (Phase 164.6.8 OUTAGEALERT, 2026-10-14), live check pending in plan 09, NOT closed.** The session monitor now measures the validation gateway with a credential-free probe and reads the newest `mt5_terminal_scrub` row, paging once per row that is not `scrubbed`. Closes only on plan 09's live observation. Residuals booked as `164.6.8-F6-SCRUB-READER-NEWEST-ONLY`, `164.6.8-N3-SCRUB-SECOND-FAILURE-SUPPRESSED` and `164.6.8-WR05-ALERT-PATH-HANDLERS-AT-WARNING`.
 
 ### MT5-JOB-TERMINAL-TRADES-SCRUB-01 — the jobs terminal's per-account deal history is kept after every scrub until Finding C is fixed (booked 2026-10-04, Phase 164.6.6.1 D-04)
 
@@ -8851,6 +8858,8 @@ derive jobs that stopped moving, whichever comes first.
 reach a human without one running a query, with a test that fails first when the reader is removed.
 ⛔ **Not a close:** the manual backlog read in the runbook, or a log line nobody reads.
 
+- **Shipped in v0.131.5.0 (Phase 164.6.8 OUTAGEALERT, 2026-10-14), live check pending in plan 09, NOT closed.** `public.ops_staleness_check()` pages `backfill_queue_stalled` and `backfill_running_stuck` through the cadence-alert route; the migration schedules nothing, so no page can fire until plan 09 registers the job (runbook `docs/runbooks/ops-staleness-go-live.md`). Closes only on that live registration and a reading that reaches a human.
+
 ### 167.1.2.2-MT5-CROSS-SERVICE-TERMINAL — the MT5 terminal lease serializes one process, and the backfill service is a second (booked 2026-10-07, Phase 167.1.2.2 research OQ-5, accepted)
 
 **Why it is open.** The MT5 terminal lease in `analytics-service/services/mt5_concurrency.py`
@@ -9160,6 +9169,8 @@ failed or timed-out tick reaches a human without anyone running a query, with a 
 the reader is removed.
 ⛔ **Not a close:** the review round's CLEAN verdicts, or a rehearsal that happened to read green once.
 
+- **Shipped in v0.131.5.0 (Phase 164.6.8 OUTAGEALERT, 2026-10-14), live check pending in plan 09, NOT closed.** Item 4 (nothing reads the run) is answered in code by the `cron_sync` heartbeat arm of `public.ops_staleness_check()`. Items 1-3 are untouched. Item 4 closes with `167.1.2.2.2-TRADESYNC-STALENESS-ALARM`, on plan 09's live check.
+
 ### [167.1.2.2.2-PROVENANCE-GATE-RESIDUALS] — MEDIUM residuals of the `trades_fetched_at` / `series_provenance` column migration and its gate that the plan 02 review round recorded and did not fix (booked 2026-10-09, Phase 167.1.2.2.2 plan 02 Task 3)
 
 **Why it is open.** migration-reviewer, rls-policy-auditor and silent-failure-hunter reported
@@ -9239,6 +9250,8 @@ public stale badge) shows the daily sync older than 2 days, whichever comes firs
 is removed. This also closes item 4 of `[167.1.2.2.2-CRON-TICK-RESIDUALS]` (nothing reads the run).
 ⛔ **Not a close:** the public stale styling of D-06, the runbook's manual reads, a `succeeded` row in
 `cron.job_run_details`, or a heartbeat table that is written and read by no one.
+
+- **Shipped in v0.131.5.0 (Phase 164.6.8 OUTAGEALERT, 2026-10-14), live check pending in plan 09, NOT closed.** `public.ops_staleness_check()` pages `never_ran`, `heartbeat_stale` and `two_consecutive_errors` for `cron_sync`. Not live until plan 09 registers the job. Residual booked as `164.6.8-WR06-CRON-SYNC-ERRORS-PAGE-ON-PER-KEY-FAULTS` and the reader's own delivery as `164.6.8-F5-READER-DELIVERY-UNOBSERVED`.
 
 ### 167.1.2.2.2-SYNCTRADES-LASTSYNC-SEED — the user-triggered trade fetch and the queued sync job still seed from `last_sync_at` (booked 2026-10-10, Phase 167.1.2.2.2 SC-3 sibling)
 
@@ -9455,6 +9468,132 @@ passes, because the ImageResponse mock has no `status`. A 404 is still caught in
 assertion.
 **Fix.** Give the mock a status, or assert the response type, then neuter to RED.
 **Owner / Trigger:** fixed together with 170.3-OG-MALFORMED-ID.
+
+## Phase 164.6.8 (OUTAGEALERT) — routed review items (logged 2026-10-14)
+
+Booked at the release commit from the phase's review rounds (`164.6.8-REVIEW*.md` in the phase directory). Every
+item is MEDIUM at confidence 5-6, survived the fix rounds, and is recorded rather than fixed under the founder's
+stopping rule. Each names an owner and a trigger and none is routed to a phase of its own. Most share one theme,
+the alert path's own failure modes.
+
+### 164.6.8-F3-SENTRY-HALF-NOOP — the Sentry half of a page can no-op silently, leaving the email as the only channel with no signal (booked 2026-10-14, SFH F3, MEDIUM, confidence 6)
+
+**Failure scenario.** `SENTRY_DSN` is unset or `before_send` drops the event: `capture_message` returns None, the
+code ignores it, and the page goes out on one hop (email) without any log that it is one hop. A 502 on the email
+then loses the page with nothing at ERROR.
+**Fix.** Log ERROR when the capture produced no event id, feed that into the window decision, and emit one ERROR at
+startup when the DSN is unset in production. Place: `analytics-service/services/ops_alert.py`.
+**Owner / Trigger:** the next phase touching `ops_alert.py`; or any page found to have reached nobody.
+
+### 164.6.8-F4-WR03-DEBT-PAGE-NEVER-ENDS — a relaunch debt paid outside the heal tick's check leaves the page open with stale state (booked 2026-10-14, SFH F4 and REVIEW WR-03, MEDIUM, confidence 5-6)
+
+**Failure scenario.** A debt-owed busy tick pages. The debt is later cleared by the validation scrub path, the boot
+relaunch, or a heal cancelled by the monitor's `wait_for` before the settle check. The next heal starts with
+`debt_owed_at_start == False`, so `note_relaunch_debt_settled` never runs, the founder's last message says the lease
+is busy with a relaunch debt, and the next debt episode's page carries the earlier incident's `since` and tick count.
+**Fix.** Decide the settled notice from `_DEBT.debt_paged and not mt5_relaunch_debt(terminal_key)` at the top of
+every tick, or call the settle from `clear_mt5_relaunch_debt`'s callers. Test: debt cleared between two ticks.
+**Owner / Trigger:** the next phase touching `mt5_relogin.py` or `mt5_outage_alert.py`; or a debt page with no end.
+
+### 164.6.8-F5-READER-DELIVERY-UNOBSERVED — `ops_staleness_check()`'s own delivery failure is invisible (booked 2026-10-14, SFH F5, MEDIUM, confidence 6; acknowledged out of scope by D-03)
+
+**Failure scenario.** `net.http_post` is asynchronous and the function never reads `net._http_response`. A rotated
+service key (401), a 5xx or a timeout leaves the tick green with the observer row saying `error` and the route
+returning `acknowledged`: "sync stopped for 2 days" is then an alert that itself stopped, and nobody is told. The
+header comment's "that absence is itself the next tick's evidence" is not read by any code.
+**Fix.** Read the previous tick's `net._http_response` status for the request ids stored in the observer row and
+RAISE on non-2xx; add `ops_staleness_check` to the prober's cadence list so a missing observer row pages; correct the
+comment. **Related, a release gate and not a defect:** the migration schedules nothing, so no staleness page can fire
+until plan 09 registers the job.
+**Owner / Trigger:** sibling of `PROBER-ALERT-DELIVERY-UNVERIFIED-01` (untouched by D-03); same close. Trigger: any
+staleness page that should have fired and did not.
+
+### 164.6.8-F6-SCRUB-READER-NEWEST-ONLY — the scrub-row reader reads one row per tick and hides its own read errors at WARNING (booked 2026-10-14, SFH F6, MEDIUM, confidence 6)
+
+**Failure scenario.** A `failed` or `refused` scrub row followed by a `scrubbed` row inside one monitor interval is
+never seen (only the newest row is read), so a client login possibly left on the terminal is never paged. Separately,
+a read that raises or times out logs at WARNING, below the Sentry event level, so a dead reader looks healthy.
+**Fix.** Select rows newer than the last seen `completed_at` (or limit 10) and page any non-scrubbed one; count
+consecutive read failures and page `mt5_terminal_scrub` / `reader_failed` at a small threshold. Place:
+`analytics-service/services/mt5_validation_liveness.py`.
+**Owner / Trigger:** the next phase touching `mt5_validation_liveness.py`; or a scrub failure found unpaged.
+
+### 164.6.8-N2-OPEN-RECORD-FAILS-AT-WARNING — a failed open-page write is logged at WARNING, so the loss of restart recovery is invisible (booked 2026-10-14, SFH round 2 N2, MEDIUM, confidence 6)
+
+**Failure scenario.** Supabase is down through an incident: no `ops_alert_open` row exists, so a redeploy ends the
+incident silently and the founder's last message stays OUTAGE. The only trace is WARNING lines.
+**Fix.** Log ERROR from `record_open_page` when the write fails for a page that already went out, or count
+consecutive failures per source and raise to ERROR at 2-3. Keep the retry. Place:
+`analytics-service/services/ops_alert_open.py`.
+**Owner / Trigger:** as `164.6.8-F3-SENTRY-HALF-NOOP`.
+
+### 164.6.8-N3-SCRUB-SECOND-FAILURE-SUPPRESSED — a second failed scrub of the same cause inside an hour is marked paged and dropped (booked 2026-10-14, SFH round 2 N3, MEDIUM, confidence 6)
+
+**Failure scenario.** Scrub row A `failed` pages at T; no `scrubbed` row follows; row B `failed` with the same cause
+at T+20m is a new row, the reader marks it paged, and the hourly window drops it. B, possibly a different account,
+is never reported. The code delivers one page per cause per hour, not one per row.
+**Fix.** Key the window on the row identity for the scrub source, or have `_advance_scrub_state` use a `page` variant
+that skips the window. Test: outage A, outage B with no recovery, B captures.
+**Owner / Trigger:** fixed together with `164.6.8-F6-SCRUB-READER-NEWEST-ONLY`.
+
+### 164.6.8-WR05-ALERT-PATH-HANDLERS-AT-WARNING — the paging path's own failure handlers log below the Sentry event level (booked 2026-10-14, REVIEW WR-05, MEDIUM, confidence 6)
+
+**Failure scenario.** The tracker, debt, scrub-reader and probe handlers catch failures of the paging path and log
+at WARNING. A probe whose outer tick bound always bites never feeds `note_outage_reading`, so a validation terminal
+that always hangs that way never reaches the threshold and never pages, leaving a WARNING line every ten minutes
+that no rule sees.
+**Fix.** Log those arms at ERROR; feed the probe's outer `TimeoutError` to `note_outage_reading` as a
+`tick_deadline` reading. Places: `mt5_outage_alert.py`, `mt5_validation_liveness.py`, `mt5_session_monitor.py`.
+**Owner / Trigger:** as `164.6.8-F3-SENTRY-HALF-NOOP`.
+
+### 164.6.8-WR06-CRON-SYNC-ERRORS-PAGE-ON-PER-KEY-FAULTS — the `two_consecutive_errors` arm pages on one flaky key and re-pages hourly with no recovery (booked 2026-10-14, REVIEW WR-06, MEDIUM, confidence 5)
+
+**Failure scenario.** The `cron_sync` heartbeat row is `error` when ANY key's status is non-ok (`transient_failure`,
+`held`, `partial`, `timeout`). One venue flaky for two days gives two consecutive `error` rows, and
+`ops_staleness_check` (hourly) then pages `cron_sync / two_consecutive_errors` by Sentry and email every hour until
+an `ok` row lands, with by-design no RECOVERED. That is the alert-fatigue shape that gets a channel muted, and a
+muted channel cannot report a real outage either.
+**Fix.** Page the arm only on rows that mean the RUN failed (`error LIKE 'cron_sync aborted%'`), and add a recovered
+notice or a once-per-episode bound. Place: the `ops_staleness_check` reader (migration) and
+`analytics-service/routers/cron.py` `_cron_sync_heartbeat_row`. A migration change, so it needs a new stamp.
+**Owner / Trigger:** the first false `two_consecutive_errors` page after plan 09 registers the job.
+
+### 164.6.8-WR-R4-01-SENTRY-CREDIT-INSIDE-RULE-INTERVAL — an outage is credited to Sentry although the rule's 60-minute action interval suppresses the notification (booked 2026-10-14, round-4 review WR-R4-01, MEDIUM, confidence 6)
+
+**Failure scenario.** 10:00 the jobs terminal pages OUTAGE (Sentry notifies, email sent). 10:20 it recovers and the
+RECOVERED email is the founder's newest message. 10:40 it relapses with the same cause: the recovery dropped the
+window entry so the page is admitted, `capture_message` returns an id on the SAME Sentry issue last notified at
+10:00, and the rule's 60-minute action interval suppresses the notification. The email POST fails (a 502 blip). The
+outage is credited to Sentry, the window is kept, and for up to an hour the founder's inbox ends on RECOVERED while
+the terminal is down, with no ERROR logged that the page reached nobody.
+**Fix.** Credit Sentry for an outage only when its rule would notify, that is no notified capture of the same
+fingerprint inside the rule's action interval (a per-fingerprint last-credit timestamp in `ops_alert.py`, interval
+read from one named constant that cites the rule), or retry the email on a relapse regardless of the Sentry credit.
+**Owner / Trigger:** the next phase touching `ops_alert.py`; or a flapping terminal. Needs a relapse with the same
+cause inside 60 minutes plus one email failure.
+
+### 164.6.8-R4-SFH-F1-DUPLICATE-RECOVERY — a second healthy reading during the held recovery wait starts a duplicate recovery with false "restarted" wording (booked 2026-10-14, round-4 SFH F1, MEDIUM, confidence 5)
+
+**Failure scenario.** A run ends on a healthy reading; `_send_recovered` sends the notice and holds the delivery wait
+in a task for up to 15 s. The next healthy reading for the same role finds no run, calls `_durable_recovery_request`,
+finds the source unchecked and the open record not yet closed, and builds a SECOND recovered request whose detail
+carries the default "after the analytics service restarted" text. No restart happened, and the founder can get two
+RECOVERED messages, one with false wording.
+**Fix.** Add the source to an in-flight set when the held task starts (removed in its `finally`), and have
+`_durable_recovery_request` return None while the source is in it. Place:
+`analytics-service/services/mt5_outage_alert.py`.
+**Owner / Trigger:** fixed together with `164.6.8-WR-R4-01-SENTRY-CREDIT-INSIDE-RULE-INTERVAL`.
+
+### CI-CLASSIFY-SCRATCHREPO-ENOTEMPTY — `scratchRepo` cleanup can fail with ENOTEMPTY on a temp directory (booked 2026-10-14)
+
+**Failure scenario.** A CI run of the changed-path classifier's self-test failed with
+`ENOTEMPTY: directory not empty, rmdir '/tmp/gsd-classify-subset-forced-*'`, from the `cleanup` closure that
+`scratchRepo` in `scripts/classify-changed-paths.mjs` returns (`rmSync(dir, { recursive: true, force: true })`, no
+retries). Suspected cause, not measured: a background git process (auto gc) is still writing into the throwaway
+repository when the remove runs. A red from this is a flake, not a verdict on the SHA.
+**Fix (candidates).** Pass `maxRetries` and `retryDelay` to the `rmSync` in `cleanup`, and/or add `-c gc.auto=0`
+to the helper's `g()` so no background gc runs in a throwaway repository. Prove it with a loop of self-test runs.
+**Owner / Trigger:** the next phase touching `scripts/classify-changed-paths.mjs`; or the second occurrence.
 
 ## Phase 170.6.1.1 (ANONKEYID) — routed review items, PR-A (logged 2026-10-14)
 

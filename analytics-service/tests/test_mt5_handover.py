@@ -436,7 +436,7 @@ async def test_the_row_is_a_CLOSED_point_event_with_a_CLOSED_metadata_key_set(
 
 
 def test_the_handover_site_set_is_closed_and_names_the_scrub() -> None:
-    """⭐ Phase 164.6.6.1 plan 05. The site set is pinned by EQUALITY, as eight
+    """⭐ Phase 164.6.6.1 plan 05. The site set is pinned by EQUALITY, as nine
     literals, so a site added without updating this test (or a production lease
     whose `SITE_*` constant was left out of `_SITES`, and so silently written
     as `unattributed`) goes red here. PATTERNS recorded that no equality pin
@@ -452,10 +452,14 @@ def test_the_handover_site_set_is_closed_and_names_the_scrub() -> None:
             "validate_worker",
             "session_heal",
             "terminal_scrub",
+            # Phase 164.6.8 plan 06: the validation terminal's liveness probe.
+            "validation_liveness",
         }
     )
     assert mt5_handover.SITE_TERMINAL_SCRUB == "terminal_scrub"
     assert "SITE_TERMINAL_SCRUB" in mt5_handover.__all__
+    assert mt5_handover.SITE_VALIDATION_LIVENESS == "validation_liveness"
+    assert "SITE_VALIDATION_LIVENESS" in mt5_handover.__all__
 
 
 async def test_a_site_outside_the_closed_set_is_written_as_unattributed(

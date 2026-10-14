@@ -2058,6 +2058,9 @@ async def test_a_blind_run_ESCALATES_only_once_it_covers_the_independent_window(
         )
         assert f"consecutive_not_measured={threshold}" in at_threshold[0].getMessage()
         assert "blind=True" in at_threshold[0].getMessage()
+        # ⭐ 164.6.8 plan 04 (D-04): ERROR, not WARNING. WARNING is below the
+        # Sentry event level, so the escalation this test pins reached no human.
+        assert at_threshold[0].levelno == logging.ERROR, at_threshold[0].levelname
 
         # --- ABOVE the threshold: still escalated ------------------------ #
         await _observe(_BUDGET_READING)
