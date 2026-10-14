@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.131.8.1] - 2026-10-14 — BASELINE: automated re-dump after the PROD apply of ad6bf65b
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38634481177`, after the PROD apply of merge `ad6bf65b`: sha256 `a53d0e6f…` → `84b15efe…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 130 → 130, distinct function names 128 → 128, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261021120000_refresh_fanout_owed_key_reconstruct.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-14` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.131.8.0 → 0.131.8.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=301 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 130 — MATCH 127, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38634481177` succeeded, and this entry was composed by the `redump-pr` job. Run `38634481177` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.131.8.0] - 2026-10-14 — RECONMARKER (2/2): the daily fan-out retries every key that still owes its equity history, counts each try and stops loudly at five; the worker records each rebuild on its key
 
 Phase 167.1.2.1, second of two PRs (D-08), plans 04 to 08 plus plan 09's three review rounds and four merges of `origin/main` (the last at `0.131.7.1`). PR 1 (`0.131.3.0`) added the per-key marker and its backfill and switched nothing; this PR switches the daily fan-out, the worker and the Overview reader onto it, with a retry cap. It closes success criteria SC-2 (a book that already has snapshots but whose key was never rebuilt is retried), SC-4 (a failed rebuild is retried by the next 05:00 run, no more than five times) and SC-7 (the daily refresh cannot write a first row for a book while a key that will still be rebuilt is owed).
