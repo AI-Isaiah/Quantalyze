@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.131.5.3] - 2026-10-14 — SHARELINK FLAKE: the revoke tests wait for the Modal's close instead of racing it
+
+Test-only release. The `ShareableLink` revoke tests went red intermittently on CI with `expected "close" to be called 1 times, but got 0 times` (for example on PR #1027, green on re-run). No product code changes.
+
+### Root cause
+- A successful revoke updates the row and closes the panel in one React commit that starts after an `await`, so it is not a sync lane.
+- `Modal` calls the dialog's native `close()` from a passive `useEffect`. For a non-sync lane React 19 schedules passive effects as a separate Scheduler task.
+- On a slow runner the Scheduler yields before that task runs. The test's `waitFor` saw the new row label first, and its plain `expect` on the close spy then read 0 calls. Close always runs, exactly once; the test asserted one task too early.
+
+### Tests
+- The revoke 200 and 404 tests now `await waitFor` the close call, then assert the dialog is not open. A Modal that never closes still fails on the `waitFor` timeout (checked by neutering `Modal`'s `close()`: the Close-button, revoke 200 and revoke 404 tests all go red).
+- The block that opens the Modal pre-loads `FactsheetView` once in a `beforeAll`. Under CPU load its first cold `next/dynamic` import outlasted `findBy`'s 1 s limit ("Unable to find role=button name Copy share link").
+- Measured over 30 runs each: with `performance.now` skewed so the Scheduler yields on every check, the old test failed 30/30 and the new one 0/30; the whole file under 20 busy-loop processes went from 24/30 failures to 0/30.
+
+### Notes
+- Not changed: a browser can paint one frame between the commit and the passive close, showing the dialog's title and Close button with an empty body. Moving `Modal`'s close to `useLayoutEffect` would remove it, but `Modal` is shared UI; booked as `SHARED-MODAL-CLOSE-FRAME`.
+
 ## [0.131.5.2] - 2026-10-14 — RECORDS: restore #1019's records, close MT5SCRUB, PORTFOLIOANALYTICS, FACTSHEETV2PANELS and COPYPASS
 
 ### Fixed

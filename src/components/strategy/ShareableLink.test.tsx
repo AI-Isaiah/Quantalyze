@@ -27,7 +27,7 @@
  * clipboard failure, and neither may reach the success badge.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import {
   fireEvent,
   render,
@@ -444,6 +444,15 @@ describe("ShareableLink — Manage private link (164.6.6.3.1 D-05)", () => {
 
   let fetchMock: ReturnType<typeof vi.fn>;
 
+  // The Modal mounts OwnerUnpublishedPanel through `next/dynamic`, so the first
+  // test to open it would otherwise pay the cold import of FactsheetView.tsx
+  // inside findBy's 1 s budget, and under CPU load that import alone exceeds
+  // it. Load the module once here, under its own timeout, so each test's
+  // dynamic import resolves from the module cache.
+  beforeAll(async () => {
+    await import("@/app/factsheet/[id]/v2/FactsheetView");
+  }, 30_000);
+
   beforeEach(() => {
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -559,7 +568,17 @@ describe("ShareableLink — Manage private link (164.6.6.3.1 D-05)", () => {
       await waitFor(() =>
         expect(screen.getByRole("button", { name: GET })).toBeTruthy(),
       );
-      expect(closeSpy).toHaveBeenCalledTimes(1);
+      // AWAIT the close; never assert it synchronously here. The row label and
+      // `panelOpen=false` land in ONE commit, but Modal calls `dialog.close()`
+      // from a passive useEffect. This update starts after `await fetch`, so it
+      // is not a sync lane, and React flushes its passive effects in a LATER
+      // Scheduler task. On a CPU-starved worker the Scheduler yields before
+      // that task, waitFor sees the label first, and a synchronous assert reads
+      // 0 calls (CI run 38587166468). The contract is that close runs once and
+      // leaves the dialog closed. A component that never closes still fails
+      // here, on the waitFor timeout.
+      await waitFor(() => expect(closeSpy).toHaveBeenCalledTimes(1));
+      expect(document.querySelector("dialog")?.open).toBe(false);
       expect(screen.queryByRole("button", { name: "Revoke link" })).toBeNull();
     },
   );

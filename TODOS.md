@@ -12253,3 +12253,11 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 **What to do.** At the next natural `ipc_fault` on the jobs terminal, read-only: the escalation line ("escalated to a terminal-process recycle with a saved-account scrub"), its `relaunch_elapsed_s`, whether it fit inside `_RELAUNCH_SETTLE_S`, that no VNC session was used, the Journal `logs` count against the 2026-10-05 baseline, and the four process booleans (count, `/portable`, anything beyond it, parent pid 1). Counts, kinds and booleans only; never print an argument line. Record it in `164.6.6.1-CONTEXT.md` and close this entry.
 **Never induce a fault** to take the reading. Railway retains analytics logs for the current deployment only, so look soon after the fault.
 **Owner:** founder/ops. **Trigger:** the next `ipc_fault` escalation log line. Related, not this entry: `MT5-RELAUNCH-DEBT-LEASE-WAIT-01`, `MT5-JOB-TERMINAL-TRADES-SCRUB-01`, Phase 164.6.8 OUTAGEALERT criterion 2 (WR-02).
+
+## Shared UI — booked 2026-10-14 (ShareableLink flake fix, v0.131.5.3)
+
+### SHARED-MODAL-CLOSE-FRAME — the shared Modal can paint one empty frame before its native close (booked 2026-10-14)
+
+**Failure scenario.** `src/components/ui/Modal.tsx` calls the dialog's native `close()` from a passive `useEffect([open])`. When `open` turns false in a commit that is not a sync lane (for example after an `await`, as on a successful share revoke), React schedules that effect as a separate task. A browser can then paint one frame where the dialog shows its title and Close button with its body already unmounted. Nothing gets stuck: close always runs once, and the top layer and inert state clear when it does.
+**Fix.** Run the close in `useLayoutEffect`, so it lands in the same commit, and re-run every Modal consumer's tests.
+**Owner:** the next phase touching `Modal.tsx`.
