@@ -273,7 +273,7 @@ describe("Overview / Risk history parity matrix (D-04, D-07, D-09)", () => {
         "one resolvable key is named",
         [key("k-bad-0001", "okx", "Main")],
         ["k-bad-0001"],
-        "Your key OKX — Main is not syncing",
+        "One of your keys, OKX — Main, is not syncing",
       ],
       [
         "two keys get the plural line",
@@ -285,7 +285,7 @@ describe("Overview / Risk history parity matrix (D-04, D-07, D-09)", () => {
         "an id missing from the key list falls back to the unnamed line",
         [key("k-a", "okx", "Main")],
         ["k-gone"],
-        "A key is not syncing",
+        "One of your keys is not syncing",
       ],
     ])("%s", (_label, apiKeys, ids, sentence) => {
       for (const empty of [true, false]) {
@@ -301,6 +301,58 @@ describe("Overview / Risk history parity matrix (D-04, D-07, D-09)", () => {
         expect(overview.kind).toBe("panel");
         expect(overview.text).toContain(sentence);
         expect(riskOf(p)).toEqual(overview);
+      }
+    });
+  });
+
+  // 170.6.2 D-04 / D-05: both tabs render the same heading for the same
+  // reason, and it is the heading of that reason's class. The expected heading
+  // is typed by hand per reason; it is never read from the component's map.
+  describe("the panel heading is the same on both tabs for every reason (D-05)", () => {
+    const HEADINGS = [
+      ["duplicate_account", "Your equity history is waiting on a key"],
+      ["key_not_syncing", "Your equity history is waiting on a key"],
+      ["shared_account_no_working_key", "Your equity history is waiting on a key"],
+      ["history_read_failed", "We could not load your equity history"],
+      ["account_identity_pending", "Your equity history is being rebuilt"],
+      ["awaiting_derivation", "Your equity history is being rebuilt"],
+      ["derivation_rejected", "We are holding back your equity history"],
+      ["shared_account_history_truncated", "We are holding back your equity history"],
+    ] as const satisfies ReadonlyArray<
+      readonly [EquityHistoryRebuildReason, string]
+    >;
+
+    // Compile-time exhaustiveness: a ninth reason fails tsc until a heading is typed for it.
+    const ALL_HEADINGS_LISTED: [
+      Exclude<EquityHistoryRebuildReason, (typeof HEADINGS)[number][0]>,
+    ] extends [never]
+      ? true
+      : never = true;
+    void ALL_HEADINGS_LISTED;
+
+    function h2Of(p: MyAllocationDashboardPayload, tab: "overview" | "risk") {
+      render(tab === "overview" ? <AllocationDashboardV2 {...p} /> : <RiskTabPanel {...p} />);
+      const h2 = screen
+        .getByTestId("overview-equity-rebuilding")
+        .querySelector("h2");
+      const text = h2?.textContent ?? null;
+      cleanup();
+      return text;
+    }
+
+    it.each(HEADINGS)("%s: Overview and Risk both read '%s'", (reason, heading) => {
+      for (const empty of [true, false]) {
+        const p = payload({
+          hasConnectedKeys: true,
+          holdingsSummary: empty ? [] : [SPOT_ROW],
+          equityHistoryState: "rebuilding",
+          equityHistoryRebuildReason: reason,
+        });
+        const overview = h2Of(p, "overview");
+        const risk = h2Of(p, "risk");
+        expect(overview, `Overview, ${empty ? "empty" : "non-empty"} book`).toBe(heading);
+        expect(risk, `Risk, ${empty ? "empty" : "non-empty"} book`).toBe(heading);
+        expect(risk).toBe(overview);
       }
     });
   });

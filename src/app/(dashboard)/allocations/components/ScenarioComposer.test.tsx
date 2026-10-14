@@ -18058,8 +18058,8 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
   // (account_identity_pending: "Each daily sync checks it again";
   // awaiting_derivation: "recomputed ... once a day"). derivation_rejected
   // ("did not pass its checks, so it is not shown") and
-  // shared_account_history_truncated ("we cannot join its history ... yet, so
-  // your history is not shown") name no such run, so they are "held_back".
+  // shared_account_history_truncated ("we cannot join its history ... to the
+  // new key's, so your history is not shown") name no such run, so they are "held_back".
   const REASON_CLASSES = [
     ["duplicate_account", "needs_action"],
     ["key_not_syncing", "needs_action"],
@@ -18093,11 +18093,12 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
       "We are holding back your book's own history, so the comparison with your current book is not shown.",
   } as const;
   // Review C3 round 3 WR-01: the Overview heading per class, written out
-  // literally for the same reason as the class table above.
+  // literally for the same reason as the class table above. 170.6.2 D-04: each
+  // class has its own heading; only `rebuilding` promises a rebuild.
   const OVERVIEW_HEADING_BY_CLASS = {
     rebuilding: "Your equity history is being rebuilt",
-    read_failed: "Your equity history is being rebuilt",
-    needs_action: "Your equity history is being rebuilt",
+    read_failed: "We could not load your equity history",
+    needs_action: "Your equity history is waiting on a key",
     held_back: "We are holding back your equity history",
   } as const;
   const EXCHANGES_HREF = "/profile?tab=exchanges";
@@ -18153,14 +18154,14 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
 
       // Review C3 round 3 WR-01: the Overview heading follows the same class.
       // For a held_back reason the heading and the Scenario both say the
-      // history is held back, and neither says "being rebuilt"; every other
-      // class keeps the "being rebuilt" heading.
+      // history is held back, and neither says "being rebuilt"; 170.6.2 D-04:
+      // only the `rebuilding` class says "being rebuilt".
       const heading = within(overview).getByRole("heading", { level: 2 });
       expect(heading.textContent).toBe(OVERVIEW_HEADING_BY_CLASS[reasonClass]);
       const heldBack = reasonClass === "held_back";
       expect(/holding back/.test(heading.textContent ?? "")).toBe(heldBack);
       expect(/holding back/.test(scenario.textContent ?? "")).toBe(heldBack);
-      expect(/being rebuilt/.test(heading.textContent ?? "")).toBe(!heldBack);
+      expect(/being rebuilt/.test(heading.textContent ?? "")).toBe(reasonClass === "rebuilding");
     },
   );
 

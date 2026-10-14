@@ -342,7 +342,7 @@ export default async function RecommendationsPage() {
           mandateState === "set"
             ? "Top 3 strategies that fit your mandate. Updated daily."
             : mandateState === "unset"
-              ? "Strategies matched to your mandate, updated daily. No mandate is set yet."
+              ? "Strategies from the daily match engine. Set your mandate to see yours."
               : "Strategies from the daily match engine."
         }
         breadcrumb={[{ label: "My Allocation", href: "/allocations" }, { label: "Recommendations" }]}
@@ -373,7 +373,7 @@ export default async function RecommendationsPage() {
           D-73 (founder, 2026-09-30): the withhold reads a WIDER rule than the
           header. It fires only when no engine-read preference is saved, so an
           allocator whose saved mandate lives outside max_weight / strategy
-          types sees the list under the D-03 "No mandate is set yet" header. */}
+          types sees the list under the D-01 "Set your mandate to see yours" header. */}
       {mandateState === "unknown" && <MandateUnknownNotice />}
       {withholdList ? (
         <NoMandateState />

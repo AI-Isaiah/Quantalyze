@@ -209,6 +209,10 @@ async function renderPage() {
 
 const CTA = "Set your mandate to see recommendations";
 const MANDATE_FIT_HEADER = "Top 3 strategies that fit your mandate. Updated daily.";
+// 170.6.2 D-01: the header with NO mandate set. Typed by hand, never read from the page.
+const UNSET_HEADER = "Strategies from the daily match engine. Set your mandate to see yours.";
+// The unknown-mandate header is a strict PREFIX of UNSET_HEADER, so only an exact match tells them apart.
+const UNKNOWN_HEADER = "Strategies from the daily match engine.";
 
 beforeEach(() => {
   seeded.prefs = MANDATE;
@@ -282,6 +286,17 @@ describe("SC8 · /recommendations — one mandate branch drives the header and t
     expect(screen.queryByText("Your first batch is computing")).toBeNull();
     expect(screen.queryByText("No candidates match today")).toBeNull();
     expect(container.textContent ?? "").not.toMatch(/fit your mandate/i);
+  });
+
+  it("D-01: no mandate: the header reads the daily-match-engine sentence and never 'matched to your mandate'", async () => {
+    seeded.prefs = null;
+    const { container } = await renderPage();
+
+    expect(screen.getByText(UNSET_HEADER)).toBeTruthy();
+    expect(
+      container.textContent ?? "",
+      "the unset header claimed the list is matched to a mandate that is not set",
+    ).not.toMatch(/matched to your mandate/i);
   });
 });
 
@@ -369,9 +384,9 @@ describe("SC8 / D-03 · /recommendations decides 'mandate set' with the /allocat
 describe("D-73 · the list is withheld only when NO engine-read preference is saved", () => {
   // WHY (founder ruling 2026-09-30, WR-01): the engine scored this allocator's
   // batch against their saved drawdown tolerance. Withholding it behind "set
-  // your mandate" hid a list built from the mandate they did set. The D-03
-  // wording stays, so the header still says no mandate is set.
-  it("EP1: only a drawdown tolerance — the list renders under the D-03 'No mandate is set yet' header, no CTA", async () => {
+  // your mandate" hid a list built from the mandate they did set. The header
+  // still says no mandate is set (D-01 wording).
+  it("EP1: only a drawdown tolerance — the list renders under the D-01 unset header, no CTA", async () => {
     seeded.prefs = {
       mandate_archetype: null,
       max_weight: null,
@@ -385,11 +400,11 @@ describe("D-73 · the list is withheld only when NO engine-read preference is sa
       expect(screen.getByText(name), `${name} withheld from a scored mandate`).toBeTruthy();
     }
     expect(screen.queryByText(CTA)).toBeNull();
-    expect(container.textContent ?? "").toMatch(/No mandate is set yet/);
+    expect(container.textContent ?? "").toContain(UNSET_HEADER);
     expect(screen.queryByText(MANDATE_FIT_HEADER)).toBeNull();
   });
 
-  it("EP3: only a drawdown tolerance + no batch — the first-batch card makes no 'mandate is set' claim under the 'No mandate is set yet' header", async () => {
+  it("EP3: only a drawdown tolerance + no batch — the first-batch card makes no 'mandate is set' claim under the D-01 unset header", async () => {
     // Review round 2 WR-01 / R2-SFH-01: D-73 opened the no-batch card to an
     // UNSET mandate. Its hard-coded "Your mandate is set" then contradicted
     // the header directly above it.
@@ -406,7 +421,7 @@ describe("D-73 · the list is withheld only when NO engine-read preference is sa
     const text = container.textContent ?? "";
 
     expect(screen.getByText("Your first batch is computing")).toBeTruthy();
-    expect(text).toMatch(/No mandate is set yet/);
+    expect(text).toContain(UNSET_HEADER);
     expect(text, "the card said the mandate is set under a header saying it is not").not.toMatch(
       /Your mandate is set/,
     );
@@ -440,7 +455,10 @@ describe("CR-01 · a failed preferences read is UNKNOWN, never 'no mandate'", ()
       const text = container.textContent ?? "";
 
       expect(screen.queryByText(CTA), "a failed read rendered the set-mandate CTA").toBeNull();
-      expect(text).not.toMatch(/No mandate is set yet/);
+      expect(text).not.toContain(UNSET_HEADER);
+      // The unknown header is a strict prefix of UNSET_HEADER: the exact-match
+      // positive is what proves THIS header rendered, not the unset one.
+      expect(screen.getByText(UNKNOWN_HEADER)).toBeTruthy();
       // Unknown is not "set" either: the page makes no mandate-fit claim.
       expect(screen.queryByText(MANDATE_FIT_HEADER)).toBeNull();
       expect(screen.getByText("We couldn't load your mandate")).toBeTruthy();

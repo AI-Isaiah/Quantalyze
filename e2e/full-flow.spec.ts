@@ -87,21 +87,30 @@ test.describe("Public browsing flow", () => {
     // must FAIL this test, never pass it with zero assertions.
     //
     // Debug session e2e-seeded-lane-flake (2026-10-02): the seeded lane's
-    // crypto-sma category holds only is_example rows. /browse SSRs them, then
-    // the hide_examples=true default hides them on mount. Sampling the first
-    // paint either hung 60 s on a row that vanished, or took the old
-    // `if (hasStrategies)` branch and asserted nothing. So wait for the
-    // hydrated default first (checkbox checked: the same settle signal
-    // discovery-hide-examples-default.spec.ts uses), untick it, then require a
-    // row. Toggling before that settle would race the mount effect again.
+    // crypto-sma category holds only is_example rows. /browse used to SSR them
+    // and then hide them on mount, so sampling the first paint either hung 60 s
+    // on a row that vanished or took the old `if (hasStrategies)` branch and
+    // asserted nothing.
+    //
+    // 170.6.2 D-06 changed what the first paint is: the server HTML now ships
+    // the settled state (examples hidden, "Hide examples" already checked), so
+    // `toBeChecked()` passes BEFORE React hydrates and no longer proves it. A
+    // Space keypress that lands pre-hydration flips only the DOM and is lost.
+    // The settle signal is therefore `data-strategy-table-prefs-applied` on
+    // <html>, which only StrategyTable's client effect sets (WR-01). Wait for
+    // it, then untick, then require a row.
     await page.goto("/browse/crypto-sma");
+    await expect(
+      page.locator("html"),
+      "StrategyTable must hydrate (client effect sets the prefs-applied mark) before Hide examples is toggled",
+    ).toHaveAttribute("data-strategy-table-prefs-applied", "true");
     const hideExamples = page
       .locator('label:has-text("Hide examples")')
       .first()
       .locator('input[type="checkbox"]');
     await expect(
       hideExamples,
-      "Hide examples must reach its hydrated default (checked) before it is toggled",
+      "Hide examples must hold its default (checked) before it is toggled",
     ).toBeChecked();
     // Keyboard toggle, as in discovery-hide-examples-default.spec.ts.
     await hideExamples.focus();

@@ -29,6 +29,16 @@
  * states the cron's trade fetch and these rows carry none. Nothing else moved;
  * the fixture was not regenerated.
  *
+ * SECOND SURGICAL EDIT, 2026-10-13, 170.6.2 COPYPASS D-06: ` checked=""` was
+ * ADDED BY HAND to the "Hide examples" input in the fixture's three mounts
+ * (three occurrences in all). The old pin lacked the attribute because the box
+ * was created unchecked (`showExamples` started true) and then flipped by an
+ * effect, which only moves the DOM property: the missing attribute was the
+ * example-row flash itself. With the fix the box is created checked, so React
+ * writes the attribute at creation. The visible state is identical: the box
+ * reads checked after mount either way. Nothing else moved; the fixture was
+ * not regenerated.
+ *
  * The clock is frozen (Date only; timers stay real so RTL's async helpers keep
  * working): SyncBadge and the empty-series state derive from `Date.now()`.
  */
