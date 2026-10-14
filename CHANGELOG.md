@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.131.3.1] - 2026-10-14 — BASELINE: automated re-dump after the PROD apply of 7579622c
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38548221327`, after the PROD apply of merge `7579622c`: sha256 `17a51332…` → `a28e44f7…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 127 → 128, distinct function names 125 → 126, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261014120000_api_keys_history_reconstruct_marker.sql`, `20261014120100_log_audit_event_deny_worker_only_actions.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-14` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.131.3.0 → 0.131.3.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=298 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 128 — MATCH 125, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38548221327` succeeded, and this entry was composed by the `redump-pr` job. Run `38548221327` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.131.3.0] - 2026-10-14 — RECONMARKER (1/2): every API key records whether its equity history was rebuilt; Sync now counts a retrying reconstruct; a reconstruct never wipes a sibling key's history
 
 Phase 167.1.2.1, first of two PRs (D-08), plans 01 and 02 plus the PR 1 review round. This PR adds the marker and its backfill, re-bases one RPC, closes a forgery path into the evidence the backfill reads, and narrows one destructive replace. It switches no reader of the daily fan-out and no writer in the worker: PR 2 does that.

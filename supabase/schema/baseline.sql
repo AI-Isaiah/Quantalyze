@@ -1219,6 +1219,121 @@ COMMENT ON FUNCTION "public"."api_key_cooldown_remaining"("p_api_key_id" "uuid",
 
 
 
+CREATE OR REPLACE FUNCTION "public"."backfill_api_keys_history_reconstructed_at"() RETURNS integer
+    LANGUAGE "sql"
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+  WITH newest_outcome AS (
+    SELECT DISTINCT ON (a.entity_id)
+           a.entity_id,
+           a.action,
+           a.created_at
+      FROM public.audit_log a
+      JOIN public.api_keys ak ON ak.id = a.entity_id
+     WHERE a.entity_type = 'api_key'
+       -- FORGEABLE-EVIDENCE GUARD. public.log_audit_event(...) is SECURITY
+       -- DEFINER, granted to `authenticated`, and takes any action, entity_type
+       -- and entity_id from the caller (user_id = auth.uid()), so a signed-in
+       -- user can write an outcome-shaped row about ANY key id. The worker writes
+       -- through log_audit_event_service with user_id = the key's owner. Requiring
+       -- the two to match closes the CROSS-TENANT forgery. A user forging a row
+       -- about their OWN key is refused at the source from 20261014120100 (D-18):
+       -- log_audit_event denies the worker-only actions to every caller that is
+       -- not service_role. A row written before D-18 applied is not cleaned; the
+       -- days_written predicate below narrows it.
+       AND a.user_id = ak.user_id
+       AND a.action IN (
+             'allocator.equity.reconstruct_complete',
+             'allocator.equity.reconstruct_partial_unsupported',
+             'allocator.equity.reconstruct_no_data',
+             'allocator.equity.reconstruct_unexpected_noop')
+       AND a.created_at IS NOT NULL
+       -- WR-02. A GENUINE outcome row carries `days_written`: every one of the four
+       -- actions is emitted from the single audit_metadata dict at the end of
+       -- run_reconstruct_allocator_history (equity_reconstruction.py), which always
+       -- includes it, and only the short-circuit echo (excluded below) lacks it.
+       -- A row a user forged about their OWN key through public.log_audit_event
+       -- before D-18 (20261014120100) shipped carries whatever metadata the caller
+       -- sent, `{}` in the common case. Requiring the key does not make a forgery
+       -- impossible, only no longer free. MEASURED on PROD 2026-10-13 (read-only,
+       -- counts only): every outcome row dated after the WR-01 bound below carries
+       -- it (22 of 22); the 3 rows that lack it all predate the bound.
+       AND a.metadata ? 'days_written'
+       -- WR-01. Migrations 20260424012820 and 20260424031238 deleted every
+       -- allocator_equity_snapshots row and every `done` reconstruct job (to un-mark
+       -- every key) but left audit_log alone, which keeps its rows 2 years. An
+       -- outcome older than the LATER heal describes a series that heal deleted, so
+       -- it is no evidence that the key has history now. The ledger stores no
+       -- applied-at (supabase_migrations.schema_migrations: version, statements,
+       -- name, created_by, idempotency_key, rollback; commit timestamps are not
+       -- tracked), so the bound is the later migration's own version timestamp, read
+       -- as UTC. MEASURED on PROD 2026-10-13 (read-only): the first post-heal
+       -- reconstruct_started is 11 s after that timestamp and no outcome row exists
+       -- between the previous heal's last one and it, so any bound inside that
+       -- window sorts every PROD row identically.
+       AND a.created_at >= TIMESTAMPTZ '2026-04-24 03:12:38+00'
+       -- IS NOT DISTINCT FROM, not `=`: a real crawl completion carries no
+       -- `reason`, so `->>` is NULL, and `NULL = 'x'` would make the NOT NULL and
+       -- drop every ordinary reconstruct_complete row from the evidence.
+       AND NOT (a.action = 'allocator.equity.reconstruct_complete'
+                AND a.metadata ->> 'reason' IS NOT DISTINCT FROM 'already_reconstructed_for_api_key')
+       -- SFH-2. Two rows the worker writes are TRANSIENT FAILURES, not outcomes, and
+       -- like the echo above they are dropped BEFORE the newest event is picked:
+       -- a reconstruct_no_data whose sole-key purge was refused because the snapshot
+       -- lookup failed (snapshot_lookup_failed), and a reconstruct_complete written
+       -- while the sibling lookup failed so the purge was skipped fail-safe
+       -- (sibling_check_failed). Neither says the key's history was rebuilt; the
+       -- next run of the worker may. IS NOT DISTINCT FROM for the same reason as
+       -- above: a row without the key must stay IN the evidence.
+       AND NOT (a.action = 'allocator.equity.reconstruct_no_data'
+                AND a.metadata ->> 'snapshot_lookup_failed' IS NOT DISTINCT FROM 'true')
+       AND NOT (a.action = 'allocator.equity.reconstruct_complete'
+                AND a.metadata ->> 'sibling_check_failed' IS NOT DISTINCT FROM 'true')
+     ORDER BY a.entity_id, a.created_at DESC
+  ),
+  done_job AS (
+    SELECT cj.api_key_id,
+           max(cj.updated_at) AS done_at
+      FROM public.compute_jobs cj
+     WHERE cj.kind = 'reconstruct_allocator_history'
+       AND cj.status = 'done'
+       AND cj.api_key_id IS NOT NULL
+     GROUP BY cj.api_key_id
+  ),
+  evidence AS (
+    SELECT k.id,
+           CASE
+             WHEN o.entity_id IS NOT NULL THEN
+               CASE
+                 WHEN o.action <> 'allocator.equity.reconstruct_unexpected_noop'
+                   THEN o.created_at
+               END
+             ELSE d.done_at
+           END AS marker_at
+      FROM public.api_keys k
+      LEFT JOIN newest_outcome o ON o.entity_id = k.id
+      LEFT JOIN done_job d ON d.api_key_id = k.id
+  ),
+  marked AS (
+    UPDATE public.api_keys k
+       SET history_reconstructed_at = e.marker_at
+      FROM evidence e
+     WHERE k.id = e.id
+       AND e.marker_at IS NOT NULL
+       AND k.history_reconstructed_at IS NULL
+    RETURNING k.id
+  )
+  SELECT count(*)::integer FROM marked;
+$$;
+
+
+ALTER FUNCTION "public"."backfill_api_keys_history_reconstructed_at"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."backfill_api_keys_history_reconstructed_at"() IS 'Phase 167.1.2.1. Seeds api_keys.history_reconstructed_at for keys whose marker is NULL and returns the number of keys it marked. Evidence order: D-12, the key''s newest retained allocator.equity.reconstruct_* OUTCOME audit event, success marks the key with that event''s created_at; D-15, a newest event of reconstruct_unexpected_noop leaves the key owed even when a done job is retained; a reconstruct_complete echo with metadata reason already_reconstructed_for_api_key is not an outcome event, and neither is a reconstruct_no_data with snapshot_lookup_failed = true or a reconstruct_complete with sibling_check_failed = true (transient failures, SFH-2); an audit row older than 2026-04-24 03:12:38+00, the later heal migration that deleted the snapshots and done jobs it described, is not evidence (WR-01), and neither is one whose metadata lacks days_written, which every genuine worker outcome row carries (WR-02); D-05, only a key with no outcome event at all falls back to the newest updated_at of its done reconstruct_allocator_history jobs. Never overwrites a set marker. SECURITY INVOKER; service_role only.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."bridge_outcomes_set_updated_at"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     SET "search_path" TO 'public', 'pg_catalog'
@@ -7267,6 +7382,27 @@ BEGIN
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
 
+  -- Phase 167.1.2.1 D-18: the worker-only actions are refused to every caller
+  -- that is not service_role. This function is SECURITY DEFINER and granted to
+  -- `authenticated`, so without this a signed-in user could write
+  -- an outcome-shaped row (for example allocator.equity.reconstruct_complete)
+  -- about their own key and forge the evidence the reconstruct marker backfill
+  -- reads. The worker writes through log_audit_event_service, which is
+  -- service_role only and is unaffected. allocator.holdings.sync_requested is
+  -- NOT denied: /api/allocator/holdings/sync writes it with the user's session.
+  -- O-1: the same holds for the two worker-only ENTITY TYPES a reader counts as
+  -- platform evidence (the flag-monitor error-rate denominator and the Phase 19
+  -- soak count), whatever the action.
+  IF (p_action LIKE 'allocator.equity.%'
+      OR p_action IN ('allocator.holdings.sync_completed',
+                      'allocator.holdings.sync_failed',
+                      'allocator.holdings.persist_failed')
+      OR p_entity_type IN ('process_key', 'verification_requests_legacy_write'))
+     AND auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'log_audit_event: action % on entity type % is written only by the platform (log_audit_event_service), not by a client session', p_action, p_entity_type
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
   IF p_entity_type IS NULL OR length(p_entity_type) = 0 THEN
     RAISE EXCEPTION 'log_audit_event: p_entity_type is required'
       USING ERRCODE = 'invalid_parameter_value';
@@ -7289,7 +7425,7 @@ $$;
 ALTER FUNCTION "public"."log_audit_event"("p_action" "text", "p_entity_type" "text", "p_entity_id" "uuid", "p_metadata" "jsonb") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."log_audit_event"("p_action" "text", "p_entity_type" "text", "p_entity_id" "uuid", "p_metadata" "jsonb") IS 'Fire-and-forget audit event emitter. SECURITY DEFINER; derives user_id from auth.uid() so the caller cannot spoof attribution. Raises SQLSTATE 28000 if unauthenticated (auth.uid() IS NULL), SQLSTATE 42501 if EXECUTE-grant drifted. See migrations 049 + NEW-C10-04 and ADR-0023.';
+COMMENT ON FUNCTION "public"."log_audit_event"("p_action" "text", "p_entity_type" "text", "p_entity_id" "uuid", "p_metadata" "jsonb") IS 'Fire-and-forget audit event emitter. SECURITY DEFINER; derives user_id from auth.uid() so the caller cannot spoof attribution. Raises SQLSTATE 28000 if unauthenticated (auth.uid() IS NULL), SQLSTATE 42501 if EXECUTE-grant drifted. See migrations 049 + NEW-C10-04 and ADR-0023. Phase 167.1.2.1 D-18: refuses the worker-only actions (the allocator.equity. prefix and allocator.holdings.sync_completed, sync_failed, persist_failed) and the worker-only entity types process_key and verification_requests_legacy_write (O-1) to any caller that is not service_role, SQLSTATE 22023; the worker writes them through log_audit_event_service.';
 
 
 
@@ -8370,6 +8506,7 @@ DECLARE
   v_job_id             UUID;
   v_next_attempt       TIMESTAMPTZ;
   v_prior_reconstruct  BOOLEAN;
+  v_reconstructed_at   TIMESTAMPTZ;
 BEGIN
   IF v_uid IS NULL THEN
     RAISE EXCEPTION 'not_authenticated'
@@ -8423,14 +8560,27 @@ BEGIN
   );
 
   -- Per-api_key reconstruction gate (replaces migration 070's allocator-
-  -- scoped snapshot-count check). Skip enqueue ONLY if THIS key has
-  -- previously completed a reconstruct OR is currently in-flight.
+  -- scoped snapshot-count check). Skip enqueue ONLY if THIS key's marker says it
+  -- was reconstructed (below) OR a reconstruct for it is currently in flight.
+  -- Phase 167.1.2.1 SC-5 / D-13: a job awaiting its retry (failed_retry) IS in
+  -- flight. The in-flight unique index omits it, so without it here a second
+  -- pending row would be inserted and a 30-minute crawl would run twice.
+  -- O-2: a finished (`done`) job is NOT listed. The marker is authoritative, and
+  -- a retained `done` job alone must not suppress a reconstruct (a D-15 key
+  -- keeps one for up to 30 days and is still owed).
   SELECT EXISTS (
     SELECT 1 FROM compute_jobs
     WHERE api_key_id = p_api_key_id
       AND kind = 'reconstruct_allocator_history'
-      AND status IN ('done','pending','running','done_pending_children')
+      AND status IN ('pending','running','done_pending_children','failed_retry')
   ) INTO v_prior_reconstruct;
+
+  -- Phase 167.1.2.1 D-04 / O-2: the per-key marker is the decider. It outlives the
+  -- 30-day job retention, and a set marker counts as a prior reconstruct.
+  SELECT history_reconstructed_at INTO v_reconstructed_at
+    FROM api_keys
+    WHERE id = p_api_key_id;
+  v_prior_reconstruct := v_prior_reconstruct OR v_reconstructed_at IS NOT NULL;
 
   IF NOT v_prior_reconstruct THEN
     BEGIN
@@ -8454,7 +8604,7 @@ $$;
 ALTER FUNCTION "public"."request_allocator_holdings_sync"("p_api_key_id" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."request_allocator_holdings_sync"("p_api_key_id" "uuid") IS 'Authenticated wrapper for a holdings sync request. Returns {already_inflight: true, next_attempt_at} when a poll_allocator_positions job for the key is already pending, running or done_pending_children; otherwise enqueues one and returns {ok: true, job_id}, and for an api_key with no prior reconstruct_allocator_history job (done or in-flight) also enqueues that. Raises 42501 for an unauthenticated caller or a key the caller does not own, and P0001 api_key_disconnected for a soft-disconnected key. Phase 164.9.1: restores migration 067''s in-flight look-up and migration 075''s disconnected-key refusal on migration 076''s per-api_key reconstruct gate.';
+COMMENT ON FUNCTION "public"."request_allocator_holdings_sync"("p_api_key_id" "uuid") IS 'Authenticated wrapper for a holdings sync request. Returns {already_inflight: true, next_attempt_at} when a poll_allocator_positions job for the key is already pending, running or done_pending_children; otherwise enqueues one and returns {ok: true, job_id}, and for an api_key whose history_reconstructed_at marker is NULL and with no reconstruct_allocator_history job in flight (pending, running, done_pending_children) or awaiting retry (failed_retry) also enqueues that; a finished (done) job alone does not suppress it, the marker is authoritative (O-2). Raises 42501 for an unauthenticated caller or a key the caller does not own, and P0001 api_key_disconnected for a soft-disconnected key. Phase 164.9.1: restores migration 067''s in-flight look-up and migration 075''s disconnected-key refusal on migration 076''s per-api_key reconstruct gate. Phase 167.1.2.1: the reconstruct gate counts failed_retry (SC-5, D-13) and a set marker (D-04) and no longer counts a done job (O-2); the poll look-up is unchanged.';
 
 
 
@@ -11509,6 +11659,8 @@ CREATE TABLE IF NOT EXISTS "public"."api_keys" (
     "account_currency" "text",
     "account_balance_native" numeric,
     "account_balance_usdt_close_date" "date",
+    "history_reconstructed_at" timestamp with time zone,
+    "history_reconstruct_attempts" integer DEFAULT 0 NOT NULL,
     CONSTRAINT "api_keys_account_currency_code" CHECK ((("account_currency" IS NULL) OR ("account_currency" ~ '^[A-Z]{2,10}$'::"text"))),
     CONSTRAINT "api_keys_account_share_both_or_neither" CHECK ((("account_shared_with_api_key_id" IS NULL) = ("account_share_kind" IS NULL))),
     CONSTRAINT "api_keys_account_share_kind_valid" CHECK ((("account_share_kind" IS NULL) OR ("account_share_kind" = ANY (ARRAY['duplicate'::"text", 'composite_member'::"text"])))),
@@ -11516,6 +11668,7 @@ CREATE TABLE IF NOT EXISTS "public"."api_keys" (
     CONSTRAINT "api_keys_attested_venue_matches_exchange" CHECK ((("attested_venue" IS NULL) OR ("attested_venue" = "exchange"))),
     CONSTRAINT "api_keys_exchange_check" CHECK (("exchange" = ANY (ARRAY['binance'::"text", 'okx'::"text", 'bybit'::"text", 'deribit'::"text", 'sfox'::"text", 'mt5'::"text"]))),
     CONSTRAINT "api_keys_history_inclusion_valid" CHECK ((("history_inclusion" IS NULL) OR ("history_inclusion" = ANY (ARRAY['include'::"text", 'exclude'::"text"])))),
+    CONSTRAINT "api_keys_history_reconstruct_attempts_nonneg" CHECK (("history_reconstruct_attempts" >= 0)),
     CONSTRAINT "api_keys_sync_status_check" CHECK (("sync_status" = ANY (ARRAY['idle'::"text", 'syncing'::"text", 'computing'::"text", 'complete'::"text", 'complete_with_warnings'::"text", 'error'::"text", 'revoked'::"text", 'rate_limited'::"text", 'sign_in_failed'::"text"]))),
     CONSTRAINT "api_keys_venue_account_id_nonblank" CHECK ((("venue_account_id" IS NULL) OR ("btrim"("venue_account_id") <> ''::"text")))
 );
@@ -11589,6 +11742,14 @@ COMMENT ON COLUMN "public"."api_keys"."account_balance_native" IS 'Phase 164.6.6
 
 
 COMMENT ON COLUMN "public"."api_keys"."account_balance_usdt_close_date" IS 'Phase 164.6.6.2.1 D-17. For a native-unit key, the date of the stored daily BTC close that priced account_balance_usdt: the latest completed UTC day''s close at derive time. The key card prints it as "at {Mon D} close", so it is a STORED date and never the viewer''s clock. Written only by the analytics worker''s derive beside account_balance_usdt (service role); no client INSERT or UPDATE path exists. NULL means no USD value was priced, and is NORMAL for every USD-family and non-MT5 key. READABLE BY authenticated (column GRANT, 20261010120000), scoped by the owner RLS on api_keys. anon has NO grant.';
+
+
+
+COMMENT ON COLUMN "public"."api_keys"."history_reconstructed_at" IS 'Phase 167.1.2.1 D-04. When this key''s equity-history reconstruct was recorded as done. NULL means the key still OWES its reconstruct. Written only by the analytics worker and the daily fan-out under service_role; no client INSERT or UPDATE path exists. Seeded by backfill_api_keys_history_reconstructed_at() from audit_log outcome events (D-12) and retained done jobs (D-05); a reconstruct_unexpected_noop outcome leaves it NULL (D-15). READABLE BY authenticated (column GRANT), scoped by the owner RLS on api_keys. anon has NO grant.';
+
+
+
+COMMENT ON COLUMN "public"."api_keys"."history_reconstruct_attempts" IS 'Phase 167.1.2.1 D-04. How many times the daily fan-out has enqueued a reconstruct for this key. Incremented only by the fan-out SQL, in the same transaction as the enqueue (D-17), and capped at 5 by PR 2 (D-09). Not reset on reconnect (D-16). Written only under service_role; no client INSERT or UPDATE path exists. READABLE BY authenticated (column GRANT), scoped by the owner RLS on api_keys. anon has NO grant.';
 
 
 
@@ -16219,6 +16380,11 @@ GRANT ALL ON FUNCTION "public"."api_key_cooldown_remaining"("p_api_key_id" "uuid
 
 
 
+REVOKE ALL ON FUNCTION "public"."backfill_api_keys_history_reconstructed_at"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."backfill_api_keys_history_reconstructed_at"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."bridge_outcomes_set_updated_at"() TO "anon";
 GRANT ALL ON FUNCTION "public"."bridge_outcomes_set_updated_at"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."bridge_outcomes_set_updated_at"() TO "service_role";
@@ -16990,6 +17156,14 @@ GRANT SELECT("account_balance_native") ON TABLE "public"."api_keys" TO "authenti
 
 
 GRANT SELECT("account_balance_usdt_close_date") ON TABLE "public"."api_keys" TO "authenticated";
+
+
+
+GRANT SELECT("history_reconstructed_at") ON TABLE "public"."api_keys" TO "authenticated";
+
+
+
+GRANT SELECT("history_reconstruct_attempts") ON TABLE "public"."api_keys" TO "authenticated";
 
 
 
