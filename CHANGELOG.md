@@ -54,6 +54,20 @@ Three review rounds ran on this PR (migration-reviewer, rls-policy-auditor, the 
 - **No package changed.** `package.json` moves its `version` field only; `package-lock.json` is untouched.
 
 
+## [0.131.7.2] - 2026-10-14 — RECORDS: close DISCOVERYPHONE; bring RECONMARKER's phase records current so PR 2's anchor check reads them
+
+Planning records only. No product code, migration, gate or census change.
+
+### Changed
+- **Phase 170.6.1 DISCOVERYPHONE is closed.** The phase directory now carries all five plan SUMMARYs, `170.6.1-VERIFICATION.md` (passed, 2/2 success criteria, verified at the PR-B merge) and `170.6.1-SECURITY.md` (secured, 27/27 threats closed). The ROADMAP's stale "not yet planned" entry is replaced by the phase's real section: plans 01-05 ticked, the line marked complete with both ships (#1026, #1030), and the progress row at 5/5.
+- **Phase 167.1.2.1 RECONMARKER's records on `main` are brought up to its phase branch.** That covers plans 03-09 SUMMARYs, the review and fix records, and the plan 09 gate-literal deviation. Plan 10, the post-merge follow-up, stays pending.
+
+### Root cause
+- RECONMARKER PR 2 (#1033) went red on `plan-anchor-verify` and on `verify-plan-anchors.test.ts` in `frontend-test`. `main` held an older copy of the phase directory in which plan 05 had no SUMMARY, so the anchor check treated it as pending. Plan 05 names `_inflight_reconstructs_for_zero_snapshot_book`, which PR 2 removes, so the check flagged it as a stale claim. The ship branch may not touch `.planning` (it must not revert records), so the records land here first. Measured on both trees before this PR opened: `OK: 3 plan file(s), no stale claims` on `main`, and the same with PR 2's code applied; `verify-plan-anchors.test.ts` passed 58/58.
+
+### Notes
+- The DISCOVERYPHONE plan 05 SUMMARY used to quote a home-path search pattern while reporting zero hits, which the planning-hygiene scanner flags. It now names the scan instead.
+
 ## [0.131.7.1] - 2026-10-14 — BASELINE: automated re-dump after the PROD apply of fc040995
 
 ### Changed
