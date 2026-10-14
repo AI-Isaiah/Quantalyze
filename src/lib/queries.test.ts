@@ -2424,6 +2424,253 @@ describe("departedHistoryUnavailable: the derived payload's benign flag reaches 
 });
 
 // ---------------------------------------------------------------------------
+// Phase 167.1.2.1 plan 06 (D-09, D-14). A key the daily fan-out gave up on
+// (marker NULL, five attempts) is named on the Overview, as a NOTE: it never
+// changes the readiness state or reason, so a trustworthy curve stays on
+// screen. The fan-out only counts attempts for keys it qualifies, so a Deribit
+// or strategy-linked key sits at 0 and never reaches the note.
+// ---------------------------------------------------------------------------
+describe("historyReconstructFailed: a capped key is a non-gating note (167.1.2.1 D-09, D-14)", () => {
+  const readyRow = {
+    payload: {
+      version: 2,
+      is_trustworthy: true,
+      curve: [{ date: "2026-03-10", equity_usd: 100 }],
+      returns: [{ date: "2026-03-10", r: 0.01 }],
+      flags: [],
+    } as Record<string, unknown>,
+    computed_at: "2026-03-11T05:30:00Z",
+  };
+  type Key = Parameters<typeof derivePhase07Fields>[0][number];
+  const key = (over: Partial<Key> = {}): Key => ({
+    id: "k-live",
+    exchange: "binance",
+    is_active: true,
+    sync_status: "ok",
+    last_sync_at: null,
+    disconnected_at: null,
+    venue_account_id: "acct-1",
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+    history_reconstructed_at: null,
+    history_reconstruct_attempts: 0,
+    ...over,
+  });
+  type LinkSource = Parameters<typeof derivePhase07Fields>[8];
+  const call = (keys: Key[], linkSource?: LinkSource) =>
+    derivePhase07Fields(keys, [], 0, [], false, readyRow, [], {}, linkSource);
+
+  it("a key at marker NULL and five attempts raises the flag over a ready curve", () => {
+    const result = call([key({ history_reconstruct_attempts: 5 })]);
+    expect(result.historyReconstructFailed).toBe(true);
+    expect(result.equityHistoryState).toBe("ready");
+    expect(result.equityHistoryRebuildReason).toBeNull();
+    expect(result.equityDailyPoints).toEqual([{ date: "2026-03-10", value: 100 }]);
+  });
+
+  it("the same key at four attempts does not raise it", () => {
+    expect(
+      call([key({ history_reconstruct_attempts: 4 })]).historyReconstructFailed,
+    ).toBe(false);
+  });
+
+  it("the same key with the marker set does not raise it", () => {
+    expect(
+      call([
+        key({
+          history_reconstruct_attempts: 5,
+          history_reconstructed_at: "2026-10-01T05:00:00Z",
+        }),
+      ]).historyReconstructFailed,
+    ).toBe(false);
+  });
+
+  // Exclusions (review 09 WR-02, SFH F4). The attempt count is never reset
+  // (D-16), so a key that capped and was LATER disconnected, revoked,
+  // deactivated or linked to a strategy keeps five attempts for ever. The note
+  // may only name a key the fan-out still qualifies. Every case below holds
+  // the attempts AT THE CAP and the marker NULL, and varies exactly ONE
+  // attribute from the capped control above, so each goes red on its own
+  // conjunct alone.
+  it.each<[string, Partial<Key>]>([
+    ["disconnected", { disconnected_at: "2026-10-10T00:00:00Z" }],
+    ["revoked", { sync_status: "revoked" }],
+    ["inactive", { is_active: false }],
+    ["a sign-in failure", { sync_status: "sign_in_failed" }],
+    ["an errored sync", { sync_status: "error" }],
+    ["a Deribit key", { exchange: "deribit" }],
+    ["a Deribit key in upper case", { exchange: "Deribit" }],
+  ])("a capped key that is %s does not raise it", (_label, over) => {
+    expect(
+      call([key({ history_reconstruct_attempts: 5, ...over })])
+        .historyReconstructFailed,
+    ).toBe(false);
+  });
+
+  // The two link forms the fan-out's NOT EXISTS pair reads.
+  it("a capped key linked to a strategy through strategies.api_key_id does not raise it", () => {
+    expect(
+      call([key({ history_reconstruct_attempts: 5 })], {
+        strategies: [{ id: "s-1", api_key_id: "k-live", status: "published" }],
+        links: [],
+      }).historyReconstructFailed,
+    ).toBe(false);
+  });
+
+  it("a capped key linked to a strategy through strategy_keys does not raise it", () => {
+    expect(
+      call([key({ history_reconstruct_attempts: 5 })], {
+        strategies: [{ id: "s-1", api_key_id: null, status: "published" }],
+        links: [{ strategy_id: "s-1", api_key_id: "k-live" }],
+      }).historyReconstructFailed,
+    ).toBe(false);
+  });
+
+  // An own-capital strategy still counts: the fan-out excludes ANY live
+  // strategy link, whatever its capital mark, so the link source is the
+  // owner's strategies unfiltered.
+  it("a capped key linked only to an ARCHIVED strategy still raises it (archived is not a link)", () => {
+    expect(
+      call([key({ history_reconstruct_attempts: 5 })], {
+        strategies: [
+          { id: "s-1", api_key_id: "k-live", status: "archived" },
+          { id: "s-2", api_key_id: null, status: "archived" },
+        ],
+        links: [{ strategy_id: "s-2", api_key_id: "k-live" }],
+      }).historyReconstructFailed,
+    ).toBe(true);
+  });
+
+  it("a capped key beside a strategy-linked sibling is still named", () => {
+    expect(
+      call(
+        [
+          key({ id: "k-linked", history_reconstruct_attempts: 5 }),
+          key({ id: "k-capped", venue_account_id: "acct-2", history_reconstruct_attempts: 5 }),
+        ],
+        {
+          strategies: [{ id: "s-1", api_key_id: "k-linked", status: "published" }],
+          links: [],
+        },
+      ).historyReconstructFailed,
+    ).toBe(true);
+  });
+
+  // The link reads are non-fatal and degrade to "no links" for the book gate.
+  // For this note the same degradation would name a linked key, so an unknown
+  // link set raises nothing: a missing note is recoverable, a false one is not.
+  it("an unreadable link set (null) raises nothing", () => {
+    expect(
+      call([key({ history_reconstruct_attempts: 5 })], null)
+        .historyReconstructFailed,
+    ).toBe(false);
+  });
+
+  // Review 09 round 2 WR-02 (in-flight half of SFH F4). The fan-out counts an
+  // attempt at ENQUEUE, so the fifth attempt reads as capped while its job is
+  // still pending, running or backing off. A key with a reconstruct in flight
+  // is waited on, not named; an unreadable in-flight set names nothing.
+  describe("a reconstruct in flight", () => {
+    const withInFlight = (keys: Key[], inFlight: ReadonlySet<string> | null) =>
+      derivePhase07Fields(
+        keys,
+        [],
+        0,
+        [],
+        false,
+        readyRow,
+        [],
+        {},
+        { strategies: [], links: [] },
+        inFlight,
+      );
+    const capped = () => key({ history_reconstruct_attempts: 5 });
+
+    it("a capped key whose id is in the in-flight set does not raise it", () => {
+      expect(
+        withInFlight([capped()], new Set(["k-live"])).historyReconstructFailed,
+      ).toBe(false);
+    });
+
+    it("the same capped key with nothing in flight raises it (the control)", () => {
+      expect(
+        withInFlight([capped()], new Set()).historyReconstructFailed,
+      ).toBe(true);
+    });
+
+    it("an in-flight id that is not the capped key does not hide it", () => {
+      expect(
+        withInFlight([capped()], new Set(["k-other"])).historyReconstructFailed,
+      ).toBe(true);
+    });
+
+    it("an unreadable in-flight set (null) raises nothing", () => {
+      expect(
+        withInFlight([capped()], null).historyReconstructFailed,
+      ).toBe(false);
+    });
+
+    it("an in-flight key beside a second capped key still names the second", () => {
+      expect(
+        withInFlight(
+          [
+            capped(),
+            key({ id: "k-2", venue_account_id: "acct-2", history_reconstruct_attempts: 5 }),
+          ],
+          new Set(["k-live"]),
+        ).historyReconstructFailed,
+      ).toBe(true);
+    });
+  });
+
+  it("one capped key beside one healthy key raises it and leaves the ready curve whole", () => {
+    const result = call([
+      key({ id: "k-capped", history_reconstruct_attempts: 5 }),
+      key({
+        id: "k-healthy",
+        venue_account_id: "acct-2",
+        history_reconstructed_at: "2026-10-01T05:00:00Z",
+        history_reconstruct_attempts: 1,
+      }),
+    ]);
+    expect(result.historyReconstructFailed).toBe(true);
+    expect(result.equityHistoryState).toBe("ready");
+    expect(result.equityHistoryRebuildReason).toBeNull();
+    expect(result.equityDailyPoints).toEqual([{ date: "2026-03-10", value: 100 }]);
+    expect(result.equityDailyReturns).toEqual([{ date: "2026-03-10", value: 0.01 }]);
+  });
+
+  it("a key list that predates the columns reads as healthy (absent is not capped)", () => {
+    const old = key();
+    delete old.history_reconstructed_at;
+    delete old.history_reconstruct_attempts;
+    expect(call([old]).historyReconstructFailed).toBe(false);
+  });
+
+  // The flag never relabels a book that is rebuilding for its own reason.
+  it.each([
+    [
+      "no derived row yet",
+      [key({ history_reconstruct_attempts: 5 })],
+      null,
+      "awaiting_derivation",
+    ],
+    [
+      "an account identity still pending",
+      [key({ history_reconstruct_attempts: 5, venue_account_id: null })],
+      readyRow,
+      "account_identity_pending",
+    ],
+  ])("a capped key on a book rebuilding for %s keeps that reason", (_label, keys, row, reason) => {
+    const result = derivePhase07Fields(keys, [], 0, [], false, row);
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe(reason);
+    expect(result.historyReconstructFailed).toBe(true);
+    expect(result.equityDailyPoints).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Phase 164.6.6.2.1 plan 17 (D-09, D-20). The derive leaves a native-unit
 // account out of the dollar total on a day whose BTC close is not stored, and
 // says which key and day under `native_unpriced_key_omitted` +

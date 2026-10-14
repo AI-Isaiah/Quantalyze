@@ -13559,6 +13559,196 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+# Phase 167.1.2.1 D-09: ONE static message for the cap event, so Sentry groups
+# every capped key under one issue. It names no key, allocator, exchange URL or
+# USD figure; the only identifying tag is the compute job.
+_HISTORY_RECONSTRUCT_CAPPED_MESSAGE = (
+    "history reconstruct: a key's equity history could not be rebuilt after "
+    "the capped number of fan-out attempts"
+)
+
+
+# Verdict of the cap check. ``unknown`` means the key read FAILED, so the check
+# could not be evaluated; it is distinct from ``not_capped`` so a caller that
+# remembers what it has checked (the orphan sweep) does not remember a failure.
+_CapVerdict = Literal["capped", "not_capped", "unknown"]
+
+
+async def _capture_history_reconstruct_capped(job: dict[str, Any]) -> _CapVerdict:
+    """D-09: raise ONE Sentry event when a reconstruct job's key ends a terminal
+    attempt with its marker still NULL and ``history_reconstruct_attempts`` at or
+    above ``HISTORY_RECONSTRUCT_ATTEMPT_CAP``. SQL cannot raise a Sentry event,
+    which is why this is a worker hook (D-17: the attempt count itself is
+    incremented in the fan-out SQL, so this reads it and never writes it).
+
+    Every terminal route to "capped and unmarked" raises it: a permanent or
+    attempts-exhausted FAILED, a handler that RAISED (the preflight-exception
+    path ``dispatch`` catches, because the hook runs after the raise is
+    classified), and a fifth attempt that ends as a DONE no-op (D-15, revision 1
+    W5: the marker is deliberately not set there, so the key is capped and owed).
+
+    Not covered here, by construction: a job terminalized by the pg_cron orphan
+    sweep (``retention_compute_jobs_orphaned_running``) never returns through
+    ``dispatch``. ``report_orphaned_capped_reconstructs`` runs this same check
+    for those from the watchdog loop (silent-failure review F1). A job the
+    watchdog merely RESETS to pending (``reset_stalled_compute_jobs``) is claimed
+    again and does return through ``dispatch``, so its eventual terminal attempt
+    is covered here. The fan-out's daily ``history_reconstruct_capped``
+    ``cron_runs`` row and the Overview note remain a backstop (D-17).
+
+    Sentry hygiene (the T-167.1.2-22/32 convention): a static message, tags
+    ``compute_job_id`` and ``history_reconstruct_outcome`` only, and an inline
+    ``new_scope`` so the tags do not leak. A ``logger.warning`` would be only a
+    breadcrumb (the default LoggingIntegration's event level is ERROR).
+
+    A failed read for the check is itself captured (``capture_exception`` under
+    the same tags) and logged, never swallowed; it never changes the dispatch
+    result and never raises.
+
+    Returns the verdict: ``capped`` (the event was raised), ``not_capped`` (the
+    key was evaluated and is marked, under the cap, absent, or the job has no
+    key), or ``unknown`` (the key read failed, nothing could be evaluated). The
+    dispatch path ignores it; the orphan sweep marks a job reported only on a
+    definite verdict.
+    """
+    from services.equity_reconstruction import HISTORY_RECONSTRUCT_ATTEMPT_CAP
+
+    job_id = job.get("id")
+    api_key_id = job.get("api_key_id")
+    if not api_key_id:
+        # The handler reads job["api_key_id"] unconditionally, so a job without
+        # one already FAILED for that reason; there is no key to check.
+        return "not_capped"
+    try:
+        supabase = get_supabase()
+
+        def _sel() -> Any:
+            return (
+                supabase.table("api_keys")
+                .select("history_reconstructed_at, history_reconstruct_attempts")
+                .eq("id", api_key_id)
+                .limit(1)
+                .execute()
+            )
+
+        key_rows = getattr(await db_execute(_sel), "data", None) or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "history reconstruct cap check: key read failed for compute_job %s: "
+            "%s (the cap event could not be evaluated)",
+            job_id, _read_failure_text(exc),
+        )
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("compute_job_id", str(job_id))
+            scope.set_tag("history_reconstruct_outcome", "capped")
+            sentry_sdk.capture_exception(exc)
+        return "unknown"
+    if not key_rows:
+        return "not_capped"
+    row = key_rows[0]
+    if row.get("history_reconstructed_at") is not None:
+        return "not_capped"
+    if int(row.get("history_reconstruct_attempts") or 0) < HISTORY_RECONSTRUCT_ATTEMPT_CAP:
+        return "not_capped"
+    logger.error(
+        "history reconstruct: a key of compute_job %s ended a terminal attempt "
+        "capped and unmarked", job_id,
+    )
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("compute_job_id", str(job_id))
+        scope.set_tag("history_reconstruct_outcome", "capped")
+        sentry_sdk.capture_message(_HISTORY_RECONSTRUCT_CAPPED_MESSAGE, level="error")
+    return "capped"
+
+
+# Silent-failure review F1. How far back the orphan sweep looks. The pg_cron
+# sweep runs hourly, so the window must exceed one period plus a worker restart;
+# a job older than this was either already reported or is no longer news.
+_ORPHAN_CAP_LOOKBACK = timedelta(hours=3)
+
+# Job ids already EVALUATED by this process (a definite capped / not-capped
+# verdict, never an unknown one). Bounded by the query itself: after every sweep
+# the set is cut back to the ids the query still returns, so an id leaves the set
+# when its job leaves the lookback window.
+_orphan_cap_reported: set[str] = set()
+
+
+async def report_orphaned_capped_reconstructs() -> None:
+    """Raise the D-09 capped-key event for a reconstruct job that the pg_cron
+    orphan sweep terminalized, which is the one terminal route that never returns
+    through ``dispatch`` (see ``_capture_history_reconstruct_capped``).
+
+    The sweep (``retention_compute_jobs_orphaned_running``, migration
+    20260826140000) flips a ``running`` job whose worker died holding the claim to
+    ``failed_final`` with ``error_kind = 'orphaned'`` and stamps
+    ``next_attempt_at = now()``, entirely in SQL. When that job was a key's fifth
+    attempt the key is capped and unmarked, the fan-out never enqueues it again,
+    and nothing else told an operator. This selects the reconstruct jobs
+    terminalized that way inside ``_ORPHAN_CAP_LOOKBACK`` and runs the same check
+    on each, once per job id per process. A job id is remembered only after the
+    check returns a definite verdict: a failed key read (``unknown``) or a raise
+    from the check leaves the id unremembered, so the next tick retries it inside
+    the window instead of losing the event. A job that failed through ``dispatch``
+    carries another ``error_kind`` and already raised its own event there.
+
+    Called from ``watchdog_loop`` after each reclaim tick, which only ticks while a
+    worker runs, so the lookback also covers a restart gap. Known limit: a
+    restart inside the window raises the event again for a still-listed job
+    (Sentry groups it under the one static message), which is chosen over a
+    lost event. Several replicas each report once.
+
+    Never raises: it runs inside the watchdog loop. A failed read is captured
+    (``capture_exception`` under the capped tags) and logged, never read as
+    "nothing to report".
+    """
+    cutoff = (datetime.now(timezone.utc) - _ORPHAN_CAP_LOOKBACK).isoformat()
+    try:
+        supabase = get_supabase()
+
+        def _sel() -> Any:
+            return (
+                supabase.table("compute_jobs")
+                .select("id, api_key_id")
+                .eq("kind", "reconstruct_allocator_history")
+                .eq("status", "failed_final")
+                .eq("error_kind", "orphaned")
+                .gte("next_attempt_at", cutoff)
+                .limit(100)
+                .execute()
+            )
+
+        rows = getattr(await db_execute(_sel), "data", None) or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "history reconstruct orphan sweep: job read failed: %s "
+            "(capped events for orphan-terminalized jobs could not be evaluated)",
+            _read_failure_text(exc),
+        )
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("history_reconstruct_outcome", "capped")
+            sentry_sdk.capture_exception(exc)
+        return
+    listed = {str(r["id"]) for r in rows if r.get("id")}
+    for row in rows:
+        job_id = str(row.get("id") or "")
+        if not job_id or job_id in _orphan_cap_reported:
+            continue
+        try:
+            verdict = await _capture_history_reconstruct_capped(
+                {"id": job_id, "api_key_id": row.get("api_key_id")}
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Not marked: the next tick retries this job.
+            logger.warning(
+                "history reconstruct cap event failed for orphaned compute_job %s: %s",
+                job_id, _read_failure_text(exc),
+            )
+            continue
+        if verdict != "unknown":
+            _orphan_cap_reported.add(job_id)
+    _orphan_cap_reported.intersection_update(listed)
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
@@ -13671,6 +13861,31 @@ async def dispatch(job: dict[str, Any]) -> DispatchResult:
         )
         if is_final:
             await _mark_intro_snapshot_failed(job)
+
+    # Phase 167.1.2.1 D-09: a key that ends a TERMINAL reconstruct attempt
+    # capped and unmarked raises one Sentry event. Terminal = DONE, or FAILED
+    # that is final under the same rule as above (permanent, or the job's own
+    # attempts exhausted). A DEFERRED outcome, or a FAILED that will retry,
+    # raises nothing. The hook runs after a handler RAISE too (classified into
+    # FAILED above) and can never change `result`.
+    if kind == "reconstruct_allocator_history" and (
+        result.outcome == DispatchOutcome.DONE
+        or (
+            result.outcome == DispatchOutcome.FAILED
+            and (
+                result.error_kind == "permanent"
+                or job.get("attempts", 0) >= job.get("max_attempts", 3)
+            )
+        )
+    ):
+        try:
+            await _capture_history_reconstruct_capped(job)
+        except Exception as exc:  # noqa: BLE001
+            # Best-effort observability: the terminal result is already decided.
+            logger.warning(
+                "history reconstruct cap event failed for compute_job %s: %s",
+                job.get("id"), _read_failure_text(exc),
+            )
 
     # UI status bridge (DEFERRED-only). For TERMINAL outcomes the authoritative
     # status bridge is the in-RPC `PERFORM sync_strategy_analytics_status`

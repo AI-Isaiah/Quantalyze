@@ -170,6 +170,15 @@ const state = vi.hoisted(() => ({
     strategy_id: string;
     api_key_id: string;
   }>,
+  // Phase 167.1.2.1 review 09 (WR-02) — compute_jobs rows, read by the
+  // dashboard (admin client, deny-all RLS) only to learn which capped keys have
+  // a reconstruct job in flight.
+  computeJobs: [] as Array<{
+    id: string;
+    kind: string;
+    status: string;
+    api_key_id: string | null;
+  }>,
   // 151 test-analyzer gap 2 — per-table read-error injection. A PostgREST
   // failure (or a `strategy_keys` missing from the schema cache on a
   // pre-migration environment) must degrade, not blank the dashboard: the
@@ -202,6 +211,7 @@ function resetState() {
   state.allocatorEquityDerived = [];
   state.strategies = [];
   state.strategyKeys = [];
+  state.computeJobs = [];
   state.tableErrors = {};
   state.maxRows = null;
   state.auditLog = [];
@@ -216,6 +226,8 @@ type ChainAuditEntry = {
   table: string;
   select: string | null;
   eqs: Array<{ column: string; value: unknown }>;
+  // Phase 167.1.2.1 review 09 (WR-02): `.in()` calls, to pin the compute_jobs read.
+  ins: Array<{ column: string; value: unknown }>;
   limitN: number | null;
   headCount: boolean;
 };
@@ -240,6 +252,7 @@ function buildChain(table: string) {
     table,
     select: null,
     eqs: [],
+    ins: [],
     limitN: null,
     headCount: false,
   };
@@ -343,6 +356,8 @@ function buildChain(table: string) {
         return applyFilters(
           state.strategyKeys as Array<Record<string, unknown>>,
         );
+      case "compute_jobs":
+        return applyFilters(state.computeJobs as Array<Record<string, unknown>>);
       case "audit_log":
         return applyFilters(state.auditLog);
       default:
@@ -392,6 +407,7 @@ function buildChain(table: string) {
     },
     in: (column: string, value: unknown) => {
       filters.push({ column, value, op: "in" });
+      audit.ins.push({ column, value });
       return chain;
     },
     is: (column: string, value: unknown) => {
@@ -5261,5 +5277,235 @@ describe("getMyAllocationDashboard — a native account's Holdings row carries i
     const result = await getMyAllocationDashboard("user-1");
 
     expect(result.holdingsSummary[0].quantity_unit).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2.1 review 09 (WR-02, SFH F4). `historyReconstructFailed` may only
+// name a key the daily fan-out still qualifies, and "linked to a strategy" is
+// the fan-out's own test: ANY non-archived strategy of the owner, through
+// `strategies.api_key_id` or `strategy_keys`, whatever its capital mark. These
+// run the REAL reader against the owner-scoped table reads, so they pin the
+// wiring that the unit cases on derivePhase07Fields cannot see: which strategies
+// reach the link set (unfiltered by capital mark) and what a failed link read
+// does (the note names nothing).
+// ---------------------------------------------------------------------------
+describe("getMyAllocationDashboard — historyReconstructFailed names only a key the fan-out still qualifies (167.1.2.1 WR-02)", () => {
+  beforeEach(resetState);
+
+  const cappedKey = () => ({
+    ...aum04Key("k-capped", "bybit"),
+    history_reconstructed_at: null,
+    history_reconstruct_attempts: 5,
+  });
+
+  async function read() {
+    const { getMyAllocationDashboard } = await import("./queries");
+    return getMyAllocationDashboard("user-1");
+  }
+
+  it("a capped key with no strategy link raises it (the control)", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [cappedKey()];
+    expect((await read()).historyReconstructFailed).toBe(true);
+  });
+
+  it("a capped key behind a live strategy raises nothing, whatever the capital mark (own_capital is still a link)", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [cappedKey()];
+    state.strategies = [
+      {
+        id: "s-own",
+        user_id: "user-1",
+        api_key_id: "k-capped",
+        status: "private",
+        capital_ownership: "own_capital",
+      },
+    ];
+    expect((await read()).historyReconstructFailed).toBe(false);
+  });
+
+  it("a capped key behind a strategy_keys composite link raises nothing, even with own_capital on the strategy", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [cappedKey()];
+    state.strategies = [
+      {
+        id: "s-composite",
+        user_id: "user-1",
+        api_key_id: null,
+        status: "private",
+        capital_ownership: "own_capital",
+      },
+    ];
+    state.strategyKeys = [
+      { owner_id: "user-1", strategy_id: "s-composite", api_key_id: "k-capped" },
+    ];
+    expect((await read()).historyReconstructFailed).toBe(false);
+  });
+
+  it("a capped key behind an ARCHIVED strategy still raises it", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [cappedKey()];
+    state.strategies = [
+      {
+        id: "s-old",
+        user_id: "user-1",
+        api_key_id: "k-capped",
+        status: "archived",
+        capital_ownership: null,
+      },
+    ];
+    expect((await read()).historyReconstructFailed).toBe(true);
+  });
+
+  it.each(["strategy_keys", "strategies"])(
+    "an unreadable %s read raises nothing, never a note about a key that may be linked",
+    async (table) => {
+      state.portfolios = [P7_PORTFOLIO];
+      state.apiKeys = [cappedKey()];
+      state.tableErrors[table] = { message: "PGRST002 schema cache lookup failed (test)" };
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const sentry = await import("./sentry-capture");
+      vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
+      expect((await read()).historyReconstructFailed).toBe(false);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2.1 review 09 round 2 (WR-02, the in-flight half of SFH F4). The
+// fan-out counts an attempt at ENQUEUE, so the fifth attempt reads as capped
+// while its job is still pending, running or backing off, and the job may yet
+// succeed. The note waits on a job in flight, using the statuses the fan-out and
+// the Python hold wait on. These run the REAL reader against a seeded
+// compute_jobs table.
+// ---------------------------------------------------------------------------
+describe("getMyAllocationDashboard — historyReconstructFailed waits on a reconstruct in flight (167.1.2.1 WR-02 round 2)", () => {
+  beforeEach(resetState);
+
+  const cappedKey = () => ({
+    ...aum04Key("k-capped", "bybit"),
+    history_reconstructed_at: null,
+    history_reconstruct_attempts: 5,
+  });
+
+  const job = (status: string, over: Record<string, unknown> = {}) => ({
+    id: "j-1",
+    kind: "reconstruct_allocator_history",
+    status,
+    api_key_id: "k-capped",
+    ...over,
+  });
+
+  const computeJobReads = () =>
+    chainAudit.entries.filter((e) => e.table === "compute_jobs");
+
+  async function read() {
+    const { getMyAllocationDashboard } = await import("./queries");
+    return getMyAllocationDashboard("user-1");
+  }
+
+  it("a capped key with no job at all raises it (the control)", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [cappedKey()];
+    expect((await read()).historyReconstructFailed).toBe(true);
+    expect(computeJobReads()).toHaveLength(1);
+  });
+
+  // Hand-typed on purpose: these four are the statuses migration 20261021120000
+  // counts as in flight. The twin test pins the constant to the migration; this
+  // pins the behaviour to the words.
+  it.each(["pending", "running", "done_pending_children", "failed_retry"])(
+    "a capped key whose reconstruct is %s raises nothing",
+    async (status) => {
+      state.portfolios = [P7_PORTFOLIO];
+      state.apiKeys = [cappedKey()];
+      state.computeJobs = [job(status)];
+      expect((await read()).historyReconstructFailed).toBe(false);
+    },
+  );
+
+  it.each(["done", "failed_final"])(
+    "a capped key whose last reconstruct is %s (finished) still raises it",
+    async (status) => {
+      state.portfolios = [P7_PORTFOLIO];
+      state.apiKeys = [cappedKey()];
+      state.computeJobs = [job(status)];
+      expect((await read()).historyReconstructFailed).toBe(true);
+    },
+  );
+
+  it("an in-flight job of ANOTHER kind does not hold the note", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [cappedKey()];
+    state.computeJobs = [job("running", { kind: "poll_allocator_positions" })];
+    expect((await read()).historyReconstructFailed).toBe(true);
+  });
+
+  it("an in-flight reconstruct of a key the owner does not hold does not hold the note", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [cappedKey()];
+    state.computeJobs = [job("running", { api_key_id: "k-someone-else" })];
+    expect((await read()).historyReconstructFailed).toBe(true);
+  });
+
+  it("two capped keys, one in flight: the other is still named", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [
+      cappedKey(),
+      { ...cappedKey(), id: "k-other", venue_account_id: "acct-other" },
+    ];
+    state.computeJobs = [job("pending")];
+    expect((await read()).historyReconstructFailed).toBe(true);
+  });
+
+  it("no capped key means no compute_jobs read at all (the common dashboard pays nothing)", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    const healthy = cappedKey();
+    healthy.history_reconstruct_attempts = 1;
+    state.apiKeys = [healthy];
+    expect((await read()).historyReconstructFailed).toBe(false);
+    expect(computeJobReads()).toHaveLength(0);
+  });
+
+  it("the read asks only for the reconstruct kind, the four in-flight statuses and the capped key ids", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [cappedKey()];
+    await read();
+    const [entry] = computeJobReads();
+    expect(entry.select).toBe("api_key_id");
+    expect(entry.eqs).toContainEqual({
+      column: "kind",
+      value: "reconstruct_allocator_history",
+    });
+    expect(entry.ins).toContainEqual({
+      column: "status",
+      value: ["pending", "running", "done_pending_children", "failed_retry"],
+    });
+    expect(entry.ins).toContainEqual({
+      column: "api_key_id",
+      value: ["k-capped"],
+    });
+  });
+
+  it("an unreadable compute_jobs read raises nothing and is captured, never a note that may be false", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [cappedKey()];
+    state.tableErrors.compute_jobs = { message: "42501 permission denied (test)" };
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const capture = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(async () => {});
+    expect((await read()).historyReconstructFailed).toBe(false);
+    expect(capture).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tags: expect.objectContaining({
+          reason: "reconstruct_in_flight_read_failed",
+        }),
+        level: "warning",
+      }),
+    );
   });
 });

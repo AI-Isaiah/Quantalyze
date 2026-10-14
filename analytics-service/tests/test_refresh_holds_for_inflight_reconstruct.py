@@ -1,20 +1,35 @@
-"""Phase 167.1.2 plan 12, review SFH-R2-01: the daily refresh must not write the
-FIRST legacy snapshot row of a book while that book's history reconstruct is
-still in flight.
+"""The daily refresh must not write the FIRST legacy snapshot row of a book while
+a key of that book still owes its history reconstruct.
 
-WHY this matters. The daily fan-out (migration 20260927120000) bootstraps a
-book with ZERO ``allocator_equity_snapshots`` rows: it enqueues one
+Phase 167.1.2 plan 12 (review SFH-R2-01) introduced the hold for a reconstruct
+IN FLIGHT. Phase 167.1.2.1 (RECONMARKER, SC-7, plan 05) re-keys it on the
+per-key marker ``api_keys.history_reconstructed_at``. The filename is kept: the
+167.1.2 threat register cites it.
+
+WHY this matters. The daily fan-out bootstraps a book with ZERO
+``allocator_equity_snapshots`` rows: it enqueues one
 ``reconstruct_allocator_history`` job per qualifying key, and the book's
 ``refresh_allocator_equity_daily`` job in the SAME run. The refresh is fast and
-the reconstruct crawl runs up to 30 minutes, so the refresh usually runs first.
-If it wrote today's row, the book would have a snapshot, and when the
-reconstruct then ended ``failed_final`` the fan-out would never bootstrap the
-book again (it only bootstraps zero-snapshot books, D-17 (c)): the key's
-backfill would be lost for good. So while the book has zero snapshots and any
-of its keys has a reconstruct in flight (pending, running,
-done_pending_children, failed_retry), the refresh writes nothing, audits the
-hold under its own action, and ends DONE. A failed reconstruct then leaves the
-book at zero, and the next fan-out run retries it.
+the reconstruct crawl runs up to 30 minutes. If the refresh wrote today's row
+the book would have a snapshot, and a reconstruct that then failed would strand
+the key's backfill. The old probe held only while a job was in flight, so a
+reconstruct that reached ``failed_final`` BEFORE the refresh was claimed no
+longer held the row (the SC-7 race). The hold now depends on the KEY, not on job
+timing. While the book has zero snapshots and some key of the allocator either
+
+  (a) is one the fan-out would still retry: marker NULL, 1 <= attempts < 5,
+      is_active, sync_status not revoked / sign_in_failed / error, not
+      disconnected, not Deribit, and not linked to one of the owner's
+      non-archived strategies (``strategies.api_key_id`` or ``strategy_keys``,
+      review WR-01); or
+  (b) has a reconstruct job genuinely in flight (pending, running,
+      done_pending_children, failed_retry) with its marker NULL,
+
+the refresh writes nothing, audits the hold under its own action with reason
+``reconstruct_owed``, and ends DONE. A capped, marked, never-attempted, or
+no-longer-qualifying key (sign_in_failed, disconnected, inactive, revoked, error,
+Deribit, strategy-linked) never holds a book, or the book would be frozen by a key nobody retries. Every
+probe read RAISES (a swallowed read would fall through to the write).
 
 Every test drives the real job against the in-memory fake the other refresh
 tests use, so the assertion is on the persisted snapshot row, not on a helper.
@@ -68,7 +83,10 @@ class _ProbeFakeClient(FakeSupabaseClient):
         return _FailingTable(name, self.store, self.fail_tables)
 
 
-def _seed_key(fake: FakeSupabaseClient, key_id: str) -> None:
+MARKED = "2026-09-01T00:00:00+00:00"
+
+
+def _seed_key(fake: FakeSupabaseClient, key_id: str, **overrides: Any) -> None:
     fake.store[("api_keys", (key_id,))] = {
         "id": key_id,
         "user_id": ALLOCATOR_ID,
@@ -77,6 +95,30 @@ def _seed_key(fake: FakeSupabaseClient, key_id: str) -> None:
         "disconnected_at": None,
         "account_share_kind": None,
         "account_shared_with_api_key_id": None,
+        **overrides,
+    }
+
+
+def _seed_strategy(
+    fake: FakeSupabaseClient,
+    strategy_id: str,
+    *,
+    api_key_id: str | None = None,
+    status: str = "published",
+    user_id: str = ALLOCATOR_ID,
+) -> None:
+    fake.store[("strategies", (strategy_id,))] = {
+        "id": strategy_id,
+        "user_id": user_id,
+        "api_key_id": api_key_id,
+        "status": status,
+    }
+
+
+def _seed_strategy_key(fake: FakeSupabaseClient, strategy_id: str, api_key_id: str) -> None:
+    fake.store[("strategy_keys", (strategy_id, api_key_id))] = {
+        "strategy_id": strategy_id,
+        "api_key_id": api_key_id,
     }
 
 
@@ -114,10 +156,14 @@ def _seed_snapshot(fake: FakeSupabaseClient, asof: date) -> None:
     }
 
 
-def _book(*, holding_keys: tuple[str, ...] = (API_KEY_ID_1,)) -> _ProbeFakeClient:
+def _book(
+    *,
+    holding_keys: tuple[str, ...] = (API_KEY_ID_1,),
+    key_fields: dict[str, dict[str, Any]] | None = None,
+) -> _ProbeFakeClient:
     fake = _ProbeFakeClient()
     for key_id in (API_KEY_ID_1, API_KEY_ID_2):
-        _seed_key(fake, key_id)
+        _seed_key(fake, key_id, **(key_fields or {}).get(key_id, {}))
     for key_id in holding_keys:
         _seed_holding(fake, key_id, 1000.0)
     return fake
@@ -181,8 +227,8 @@ async def test_zero_snapshot_book_with_inflight_reconstruct_is_held(
     held = [c for c in audit.call_args_list if c.kwargs.get("action") == HELD_ACTION]
     assert len(held) == 1, _actions(audit)
     metadata = held[0].kwargs["metadata"]
-    assert metadata["reason"] == "reconstruct_in_flight"
-    assert metadata["inflight_reconstructs"] == 1
+    assert metadata["reason"] == "reconstruct_owed"
+    assert metadata["owed_reconstructs"] == 1
     # Counts and the venue only: no USD figure, no key id in the metadata.
     assert "value_usd" not in metadata and "total" not in metadata
     assert all(str(v) not in (API_KEY_ID_1, API_KEY_ID_2) for v in metadata.values())
@@ -245,6 +291,271 @@ async def test_no_holdings_path_is_unchanged_by_the_hold(
         if c.kwargs.get("action") == "allocator.equity.refresh_complete"
     ]
     assert len(complete) == 1 and complete[0].kwargs["metadata"]["reason"] == "no_holdings_today"
+    assert HELD_ACTION not in _actions(audit)
+
+
+# The refreshing key is healthy and marked in every test below; the OTHER key of
+# the book (API_KEY_ID_2) is the one under test, so each case differs from its
+# control in exactly one attribute.
+_REFRESHING_KEY_MARKED = {API_KEY_ID_1: {"history_reconstructed_at": MARKED}}
+
+
+def _book_with_owed_sibling(**sibling_fields: Any) -> _ProbeFakeClient:
+    return _book(
+        key_fields={
+            **_REFRESHING_KEY_MARKED,
+            API_KEY_ID_2: {
+                "history_reconstructed_at": None,
+                "history_reconstruct_attempts": 1,
+                **sibling_fields,
+            },
+        }
+    )
+
+
+async def _assert_held(monkeypatch: pytest.MonkeyPatch, fake: FakeSupabaseClient, why: str) -> None:
+    result, audit = await _run(monkeypatch, fake)
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert _today_rows(fake) == [], why
+    held = [c for c in audit.call_args_list if c.kwargs.get("action") == HELD_ACTION]
+    assert len(held) == 1, _actions(audit)
+    assert held[0].kwargs["metadata"]["reason"] == "reconstruct_owed"
+
+
+async def _assert_writes(monkeypatch: pytest.MonkeyPatch, fake: FakeSupabaseClient, why: str) -> None:
+    result, audit = await _run(monkeypatch, fake)
+    assert result.outcome == DispatchOutcome.DONE, result
+    assert len(_today_rows(fake)) == 1, why
+    assert HELD_ACTION not in _actions(audit), why
+
+
+@pytest.mark.asyncio
+async def test_failed_final_reconstruct_of_a_qualifying_owed_key_still_holds_the_first_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SC-7, the race. The key's only reconstruct job already reached
+    failed_final BEFORE the refresh was claimed; nothing is in flight. The key is
+    still owed (marker NULL, attempted once, under the cap, qualifying), so the
+    fan-out will retry it tomorrow, and a first row written now would strand it.
+    RED on the in-flight-only probe, which counted zero jobs here and wrote."""
+    fake = _book_with_owed_sibling()
+    _seed_reconstruct(fake, API_KEY_ID_2, "failed_final")
+
+    await _assert_held(
+        monkeypatch, fake,
+        "the refresh wrote the FIRST row over a key the fan-out will retry "
+        "(its reconstruct reached failed_final before the refresh was claimed)",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_capped_owed_key_does_not_hold_the_book(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Attempts at the cap (5): the fan-out has given up and the D-09 event and
+    the Overview note carry it. A hold that never lifts would freeze the book."""
+    fake = _book_with_owed_sibling(history_reconstruct_attempts=5)
+    _seed_reconstruct(fake, API_KEY_ID_2, "failed_final")
+
+    await _assert_writes(monkeypatch, fake, "a capped key held the book's first row")
+
+
+@pytest.mark.asyncio
+async def test_an_attempt_short_of_the_cap_still_holds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Control for the cap: attempts 4 is under the cap of 5 and still holds."""
+    fake = _book_with_owed_sibling(history_reconstruct_attempts=4)
+
+    await _assert_held(monkeypatch, fake, "a key at attempts 4 (under the cap) did not hold")
+
+
+@pytest.mark.asyncio
+async def test_a_marked_key_does_not_hold_the_book(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The key's reconstruct completed (marker set): nothing is owed."""
+    fake = _book_with_owed_sibling(history_reconstructed_at=MARKED)
+
+    await _assert_writes(monkeypatch, fake, "a marked key held the book's first row")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exchange", ["deribit", "okx"])
+async def test_a_never_attempted_key_with_nothing_in_flight_does_not_hold(
+    monkeypatch: pytest.MonkeyPatch, exchange: str
+) -> None:
+    """Attempts 0 and no job in flight: no job has ever touched this key, so
+    there is nothing for the refresh to wait on and it does not hold the book.
+    This is the one asymmetry with the fan-out's owed predicate, which treats
+    attempts 0 as owed (see ``_fanout_would_still_retry``). It is NOT a stand-in
+    for the strategy-link filter any more: that filter is applied for real (the
+    tests below)."""
+    fake = _book_with_owed_sibling(exchange=exchange, history_reconstruct_attempts=0)
+
+    await _assert_writes(
+        monkeypatch, fake, f"a never-attempted {exchange} key held the book's first row"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_never_attempted_key_with_a_pending_reconstruct_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The user-RPC path: attempts are still 0 but a reconstruct is pending, so
+    it is in flight and holds."""
+    fake = _book_with_owed_sibling(history_reconstruct_attempts=0)
+    _seed_reconstruct(fake, API_KEY_ID_2, "pending")
+
+    await _assert_held(monkeypatch, fake, "an in-flight reconstruct (attempts 0) did not hold")
+
+
+@pytest.mark.asyncio
+async def test_a_marked_key_with_a_recrawl_in_flight_does_not_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-flight holds only while the marker is NULL: a marked key whose
+    reconstruct is running again owes nothing."""
+    fake = _book_with_owed_sibling(history_reconstructed_at=MARKED)
+    _seed_reconstruct(fake, API_KEY_ID_2, "running")
+
+    await _assert_writes(monkeypatch, fake, "a marked key with a re-crawl in flight held the book")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"sync_status": "sign_in_failed"},
+        {"sync_status": "error"},
+        {"sync_status": "revoked"},
+        {"disconnected_at": "2026-09-10T00:00:00+00:00"},
+        {"is_active": False},
+    ],
+    ids=["sign_in_failed", "error", "revoked", "disconnected", "inactive"],
+)
+async def test_a_key_the_fanout_no_longer_retries_never_holds_the_book(
+    monkeypatch: pytest.MonkeyPatch, changes: dict[str, Any]
+) -> None:
+    """B2, matched set. The control below (the same key, qualifying) holds. Each
+    case here changes exactly one attribute that makes the fan-out stop retrying
+    the key after an attempt, and the refresh must then write: a key nobody will
+    retry must not freeze the book."""
+    fake = _book_with_owed_sibling(**changes)
+    _seed_reconstruct(fake, API_KEY_ID_2, "failed_final")
+
+    await _assert_writes(monkeypatch, fake, f"a key that stopped qualifying held the book: {changes}")
+
+
+@pytest.mark.asyncio
+async def test_the_qualifying_control_of_the_matched_set_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control for the matched set above: same key, same failed_final job,
+    still qualifying (active, sync_status ok, connected). It holds."""
+    fake = _book_with_owed_sibling()
+    _seed_reconstruct(fake, API_KEY_ID_2, "failed_final")
+
+    await _assert_held(monkeypatch, fake, "the qualifying control did not hold")
+
+
+# Review WR-01. M2's per-key owed query excludes a key linked to one of its
+# owner's non-archived strategies (strategies.api_key_id, or strategy_keys joined
+# to a non-archived strategy of the same owner). The fan-out therefore never
+# retries such a key and its attempts never reach the cap. The Python hold must
+# apply the same filter, or a key that failed once and was then linked holds its
+# book's refresh for ever while the SQL refresh arm keeps enqueueing it.
+
+
+@pytest.mark.asyncio
+async def test_a_key_linked_to_a_strategy_after_an_attempt_does_not_hold_the_book(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scenario from the review. Key B (attempts 1, failed_final, otherwise
+    qualifying) is then linked to an active strategy through
+    ``strategies.api_key_id``. The fan-out will never retry it, so it must not
+    hold the book's first row. RED on the hold that counts it as owed."""
+    fake = _book_with_owed_sibling()
+    _seed_reconstruct(fake, API_KEY_ID_2, "failed_final")
+    _seed_strategy(fake, "strategy-1", api_key_id=API_KEY_ID_2)
+
+    await _assert_writes(
+        monkeypatch, fake,
+        "a key linked to a strategy after one attempt held its book's refresh",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_key_linked_through_strategy_keys_does_not_hold_the_book(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same, through the composite link: ``strategy_keys`` joined to a
+    non-archived strategy of the same owner. RED on the unfiltered hold."""
+    fake = _book_with_owed_sibling()
+    _seed_reconstruct(fake, API_KEY_ID_2, "failed_final")
+    _seed_strategy(fake, "composite-1", api_key_id=None)
+    _seed_strategy_key(fake, "composite-1", API_KEY_ID_2)
+
+    await _assert_writes(
+        monkeypatch, fake,
+        "a key linked through strategy_keys held its book's refresh",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "link",
+    ["archived_direct", "archived_composite", "other_owner_direct", "other_owner_composite"],
+)
+async def test_a_link_the_fanout_ignores_still_holds_the_book(
+    monkeypatch: pytest.MonkeyPatch, link: str
+) -> None:
+    """Controls for the pair above, each differing in exactly one attribute: the
+    strategy is ARCHIVED, or owned by someone else. M2 ignores both (``status <>
+    'archived'`` and ``strategies.user_id = key.user_id``), so the key still
+    qualifies, the fan-out will retry it, and it must still hold. Without these
+    a hold that dropped every key with any strategy row would pass."""
+    fake = _book_with_owed_sibling()
+    _seed_reconstruct(fake, API_KEY_ID_2, "failed_final")
+    archived = link.startswith("archived")
+    owner = ALLOCATOR_ID if archived else "00000000-0000-0000-0000-0000000000ee"
+    status = "archived" if archived else "published"
+    if link.endswith("_direct"):
+        _seed_strategy(fake, "s-ctl", api_key_id=API_KEY_ID_2, status=status, user_id=owner)
+    else:
+        _seed_strategy(fake, "s-ctl", api_key_id=None, status=status, user_id=owner)
+        _seed_strategy_key(fake, "s-ctl", API_KEY_ID_2)
+
+    await _assert_held(monkeypatch, fake, f"a key with an ignored link ({link}) did not hold")
+
+
+@pytest.mark.asyncio
+async def test_a_linked_key_with_a_reconstruct_in_flight_still_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The link filter belongs to the fan-out-retry half only. A reconstruct job
+    genuinely in flight (the user-RPC path) is waited on whatever the key is
+    linked to: the job will write rows, and the refresh must not pre-empt it."""
+    fake = _book_with_owed_sibling(history_reconstruct_attempts=0)
+    _seed_reconstruct(fake, API_KEY_ID_2, "running")
+    _seed_strategy(fake, "strategy-1", api_key_id=API_KEY_ID_2)
+
+    await _assert_held(monkeypatch, fake, "an in-flight reconstruct of a linked key did not hold")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_table", ["strategies", "strategy_keys"])
+async def test_a_failed_strategy_link_read_fails_the_job_and_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, failing_table: str
+) -> None:
+    """The link read is part of the probe, so it RAISES like the others: a
+    swallowed read would treat every key as unlinked or linked at random and fall
+    through to the write the hold exists to prevent."""
+    fake = _book_with_owed_sibling()
+    _seed_reconstruct(fake, API_KEY_ID_2, "failed_final")
+    _seed_strategy(fake, "composite-1", api_key_id=None)
+    _seed_strategy_key(fake, "composite-1", API_KEY_ID_1)
+    fake.fail_tables.add(failing_table)
+
+    result, audit = await _run(monkeypatch, fake)
+
+    assert result.outcome == DispatchOutcome.FAILED, result
+    assert _today_rows(fake) == []
+    assert "allocator.equity.refresh_failed" in _actions(audit)
     assert HELD_ACTION not in _actions(audit)
 
 

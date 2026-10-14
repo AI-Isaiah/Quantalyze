@@ -1295,6 +1295,12 @@ export interface ApiKey {
   account_currency: string | null;
   account_balance_native: number | null;
   account_balance_usdt_close_date: string | null;
+  // Migration 20261014120000 (Phase 167.1.2.1 RECONMARKER, D-04). NULL = the
+  // key still owes its equity-history reconstruct. The attempt count is
+  // incremented by the daily fan-out (D-17); at the cap (D-09) the Overview
+  // says the history could not be rebuilt. Read-only to the client.
+  history_reconstructed_at: string | null;
+  history_reconstruct_attempts: number;
 }
 
 /** Phase 167.1.2 D-11 / D-04 — the closed set of `api_keys.account_share_kind`. */
@@ -1346,6 +1352,10 @@ export const ApiKeyRowSchema = z
       .string()
       .regex(/^\d{4}-\d{2}-\d{2}$/)
       .nullable(),
+    // Phase 167.1.2.1 (D-04): the per-key reconstruct marker and the fan-out's
+    // attempt count (integer NOT NULL DEFAULT 0, CHECK >= 0).
+    history_reconstructed_at: _isoTimestampNullable,
+    history_reconstruct_attempts: z.number().int().nonnegative(),
   })
   .strict() satisfies z.ZodType<ApiKey>;
 

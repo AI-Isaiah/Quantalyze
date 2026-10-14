@@ -12370,6 +12370,32 @@ It runs the marker query first and reports counts only.
 **What to build.** Re-point `TRUNC 4`'s positive control at an existing table (as `VERB 4` does with `cron_runs`), or assert the default-ACL row the project actually has, keeping the twin biting.
 **Owner:** the next edit of that gate after the first re-dump taken after 2026-10-30. **Trigger:** `sql-tests` going RED on `TRUNC 4` after that re-dump; read it as this entry, not as a regression of the revoke.
 
+## Phase 167.1.2.1 (RECONMARKER) — routed items (logged 2026-10-14)
+
+### 167.1.2.1-TWIN-STALE-DEFINITION — the two fan-out twin tests can silently pin an older definition of `enqueue_refresh_allocator_equity_for_all` (booked 2026-10-14, RECONMARKER PR 2 round-3 code review WR-01, MEDIUM, confidence 6; the three-round limit applied)
+
+**Scenario.** `src/__tests__/history-reconstruct-note-predicate-twins.test.ts` (`FN_RE`, `newestFanoutBody`) and `analytics-service/tests/test_fanout_owed_predicate_twins.py` (`_newest_fanout_body`) take the newest migration whose body their regex can read AND that contains `v_reconstruct_attempt_cap`. `FN_RE` matches one exact spelling: `CREATE OR REPLACE FUNCTION public.enqueue_refresh_allocator_equity_for_all()` with an unnamed `AS $$ ... $$;` body. A later migration that redefines the fan-out with a named dollar tag (`AS $fn$`, 37 migrations already use one), without the `public.` qualifier, or with an indented closing delimiter is skipped without a message, and both twins keep classifying `20261021120000`'s body and stay green. Their "no match at all" guard can never fire once any older definition exists. The Overview "could not be rebuilt" note and the Python refresh hold would then keep counting a key the new fan-out no longer counts, which is the round-1 WR-02 false note re-entered through the drift event the twins exist to catch.
+
+**Fix.** Bind the parsed body to the real newest definition: fail when any later migration mentions a CREATE of the function that `FN_RE` did not parse (or assert `parsed.file` against the `-- source migration:` line of `supabase/schema/functions/enqueue_refresh_allocator_equity_for_all.sql`), loosen `FN_RE` to any dollar tag, and make the same change in `_newest_fanout_body`. Add a neutered scratch migration that redefines the function under `$fn$` and watch both twins go RED.
+
+**Owner:** the next phase that redefines `enqueue_refresh_allocator_equity_for_all` or touches either twin. **Trigger:** any new migration that contains `CREATE ... FUNCTION ... enqueue_refresh_allocator_equity_for_all`; until then the twins read the only definition there is.
+
+### 167.1.2.1-TRANSIENT-NEVER-CAPS — a key whose own enqueue hits a transient SQLSTATE every day never reaches the cap and nothing alerts (booked 2026-10-14, RECONMARKER PR 2 round-3 silent-failure review F1, MEDIUM, confidence 6; the three-round limit applied)
+
+**Scenario.** Round 2 (SFH R2-1) narrowed the per-book handler's attempt count so that an error that says nothing about the key (class 40, class 53, `lock_not_available` 55P03) counts nothing; without that, a deadlock on the day's batch could burn attempts on a healthy key. The inverse is open: a key whose own enqueue fails with such a SQLSTATE every day (a custom trigger or enqueue path that raises `40001` deterministically, a table held by a stuck session or prepared transaction under `lock_timeout`, persistent resource exhaustion on that key's data) stays owed with attempts below five. It is retried and fails each day for ever, never reaches the cap, and so never reaches the capped-key `cron_runs` row, the worker's Sentry event or the Overview note. The only trace is one `bootstrap_book_skipped` `cron_runs` row and a `RAISE WARNING` per day, and no worker, CI step or Sentry check reads those rows. A book with no snapshots keeps its first row withheld by the refresh hold. The migration header records the opposite residual (a non-transient error carrying a transient-looking SQLSTATE is counted) and not this one.
+
+**Fix.** Keep the exclusion and bound it: write a distinct `cron_runs.error` (for example `bootstrap_book_skipped_transient`) that carries the key id, and add a check, on the existing prober cadence or the daily fan-out itself, that raises when the same key appears on N consecutive days (3 is the review's suggestion); or count a transient-class error after K consecutive days. Pin it with a gate arm that forces the same transient SQLSTATE on one key for N days. The same check should read the other `equity_refresh_fanout` error values (`history_reconstruct_capped`, `bootstrap_book_skipped`, `history_reconstruct_capped_trace_failed`), which no prober reads today.
+
+**Owner:** the next phase that touches the prod prober or the daily fan-out. **Trigger:** the first `bootstrap_book_skipped` row naming the same key two days running, or the prober gaining a `cron_runs` reader.
+
+### 167.1.2.1-CAPPED-KEY-STAYS-CAPPED — a key at the attempt cap stays capped after its owner fixes the cause (booked 2026-10-14, RECONMARKER D-16, out of scope by decision)
+
+**Scenario.** A key that reaches five attempts with the marker NULL is no longer enqueued by the fan-out (D-09). If the owner then reconnects the key or fixes the credential that made the rebuild fail, `history_reconstruct_attempts` is not reset, so the daily fan-out never retries it and the Overview note keeps saying the history could not be rebuilt. `request_allocator_holdings_sync` (the user's "Sync now") does not read the attempt count, so it can still enqueue a reconstruct for such a key by hand; that is the way out today.
+
+**Fix.** Reset `history_reconstruct_attempts` to 0 on a successful reconnect or credential update of the key, in the same write that clears the failed `sync_status`, with a gate arm that proves a capped key is retried the next day after a reconnect.
+
+**Owner:** the next phase that touches the reconnect path or the key-edit RPCs. **Trigger:** a user reports the "could not be rebuilt" note after reconnecting, or the first `history_reconstruct_capped` row on PROD.
+
 ## Phase 170.5 (FACTSHEETV2PANELS) — booked at close 2026-10-14
 
 Both entries came out of the live PROD readings taken in the founder's signed-in browser on 2026-10-14 (see the `Live readings` section of `170.5-VERIFICATION.md`). Founder decision 2026-10-14: "Close 170.5, book the jump".

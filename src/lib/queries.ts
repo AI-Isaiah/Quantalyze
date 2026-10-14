@@ -35,7 +35,15 @@ import {
   type V2JointStatus,
 } from "@/lib/factsheet/v2-joint";
 import type { BenchmarkPricesOpt } from "@/lib/factsheet/types";
-import { API_KEY_USER_COLUMNS, STRATEGY_PUBLIC_COLUMNS, type ApiKeyUserColumn } from "./constants";
+import {
+  API_KEY_USER_COLUMNS,
+  HISTORY_RECONSTRUCT_ATTEMPT_CAP,
+  NON_RETRYABLE_SYNC_STATUSES,
+  RECONSTRUCT_IN_FLIGHT_STATUSES,
+  RECONSTRUCT_JOB_KIND,
+  STRATEGY_PUBLIC_COLUMNS,
+  type ApiKeyUserColumn,
+} from "./constants";
 import {
   buildDateMapCache,
   computeScenario,
@@ -3315,6 +3323,18 @@ export interface MyAllocationDashboardPayload {
    */
   departedHistoryUnavailable?: boolean;
   /**
+   * Phase 167.1.2.1 (D-09, D-14). True when at least one of the owner's keys
+   * has no history marker and has used every reconstruct attempt the daily
+   * fan-out gets (`HISTORY_RECONSTRUCT_ATTEMPT_CAP`): its history could not be
+   * rebuilt. A NOTE, never a gate: `equityHistoryState` and the curve are
+   * chosen without it, so a trustworthy v2 curve stays on screen. Counts only a
+   * key the fan-out STILL qualifies (active, connected, not revoked, not
+   * Deribit, not strategy-linked): attempts are never reset, so a capped key
+   * that was later disconnected, revoked or linked must not raise it. Optional so legacy
+   * fixtures compile; the producer always sets it.
+   */
+  historyReconstructFailed?: boolean;
+  /**
    * Phase 164.6.6.2.1 plan 17 (D-09, D-20). The native-unit accounts the derive
    * left out of the dollar total because the BTC close for one of their days is
    * not stored yet (the writer's `native_unpriced_key_omitted` flag plus its
@@ -4425,6 +4445,11 @@ export type EquityHistoryKey = {
   venue_account_id: string | null;
   account_share_kind: string | null;
   account_shared_with_api_key_id: string | null;
+  // Phase 167.1.2.1 (D-04, D-09): optional so a key list that predates the
+  // columns compiles; an absent value reads as "not capped" (the quiet side).
+  // getUserApiKeys projects both (API_KEY_USER_COLUMNS).
+  history_reconstructed_at?: string | null;
+  history_reconstruct_attempts?: number | null;
 };
 
 function knownVenueAccountId(id: string | null | undefined): boolean {
@@ -4548,6 +4573,107 @@ export function equityHistoryReadiness(
 }
 
 /**
+ * Phase 167.1.2.1 review 09 (WR-01, WR-02): the keys the Overview "could not be
+ * rebuilt" note may name, BEFORE the in-flight check. A key the fan-out gave up
+ * on (marker NULL, attempts at the cap) AND still qualifies for it: active, not
+ * disconnected, `sync_status` outside `NON_RETRYABLE_SYNC_STATUSES`, not
+ * Deribit, and not linked to a non-archived strategy of the owner through
+ * `strategies.api_key_id` or `strategy_keys`.
+ *
+ * ⚠️ This is a hand copy of the `ck` count in
+ * `enqueue_refresh_allocator_equity_for_all` (migration 20261021120000, aliases
+ * ck, cks, cksk, ckks). A comment does not keep it equal;
+ * `src/__tests__/history-reconstruct-note-predicate-twins.test.ts` reads the
+ * newest such migration and fails by name on any term this function does not
+ * know, and on any sync_status list that is not the shared constant.
+ *
+ * `null` when the link set is unreadable (`linkSource === null`): the link
+ * reads are non-fatal and degrade to "no links" for the book gate, which here
+ * would name a key that is linked. A missing note is recoverable; a false one
+ * is not.
+ */
+export function reconstructCappedKeyIds(
+  apiKeys: ReadonlyArray<{
+    id: string;
+    is_active: boolean;
+    exchange: string;
+    sync_status: string | null;
+    disconnected_at: string | null;
+    history_reconstructed_at?: string | null;
+    history_reconstruct_attempts?: number | null;
+  }>,
+  linkSource: {
+    strategies: readonly { id: string; api_key_id: string | null; status: string }[];
+    links: readonly { strategy_id: string; api_key_id: string }[];
+  } | null,
+): Set<string> | null {
+  if (linkSource === null) return null;
+  const linked = deriveStrategyLinkedKeyIds(linkSource.strategies, linkSource.links);
+  const nonRetryable: readonly string[] = NON_RETRYABLE_SYNC_STATUSES;
+  return new Set(
+    apiKeys
+      .filter(
+        (k) =>
+          k.history_reconstructed_at == null &&
+          (k.history_reconstruct_attempts ?? 0) >= HISTORY_RECONSTRUCT_ATTEMPT_CAP &&
+          k.is_active &&
+          k.disconnected_at == null &&
+          !nonRetryable.includes(k.sync_status ?? "") &&
+          k.exchange.toLowerCase() !== "deribit" &&
+          !linked.has(k.id),
+      )
+      .map((k) => k.id),
+  );
+}
+
+/**
+ * Phase 167.1.2.1 review 09 (WR-02): which of `candidateKeyIds` still have a
+ * reconstruct job in flight. `null` when the read failed (the caller then shows
+ * no note).
+ *
+ * Read through the ADMIN client, scoped by `api_key_id IN (the owner's own
+ * capped key ids)`: `compute_jobs` carries a deny-all RLS policy and no table
+ * grant to `authenticated` (migrations 20260411144407, 20260516104201), so the
+ * owner's client would answer zero rows with `error: null` and every capped key
+ * would read as "nothing in flight", the false note this read exists to prevent.
+ * `get_user_compute_jobs` is no way around it: it scopes by the job's strategy
+ * or portfolio owner, and a reconstruct job has neither. The ids come from
+ * `getUserApiKeys(userId)`, so the ownership boundary is the same inline gate
+ * the other admin reads of this function use. No new grant.
+ */
+async function readReconstructInFlightKeyIds(
+  admin: ReturnType<typeof createAdminClient>,
+  userId: string,
+  candidateKeyIds: readonly string[],
+): Promise<Set<string> | null> {
+  try {
+    const { data, error } = await admin
+      .from("compute_jobs")
+      .select("api_key_id")
+      .eq("kind", RECONSTRUCT_JOB_KIND)
+      .in("status", [...RECONSTRUCT_IN_FLIGHT_STATUSES])
+      .in("api_key_id", [...candidateKeyIds]);
+    if (error) throw error;
+    return new Set(
+      (data ?? [])
+        .map((r) => r.api_key_id)
+        .filter((id): id is string => typeof id === "string"),
+    );
+  } catch (err) {
+    console.error(
+      "[queries.getMyAllocationDashboard] reconstruct in-flight read failed (the history-could-not-be-rebuilt note is hidden):",
+      err instanceof Error ? err.message : err,
+    );
+    captureToSentry(err, {
+      tags: { op: "getMyAllocationDashboard", reason: "reconstruct_in_flight_read_failed" },
+      extra: { userId },
+      level: "warning",
+    });
+    return null;
+  }
+}
+
+/**
  * Phase 07 / 07-03: compute the Phase 07 payload derivations shared by
  * both branches (portfolio-exists and !portfolio). The dashboard function
  * is the only production caller.
@@ -4579,6 +4705,9 @@ export function derivePhase07Fields(
     venue_account_id: string | null;
     account_share_kind: string | null;
     account_shared_with_api_key_id: string | null;
+    // Phase 167.1.2.1 (D-04, D-09): optional, like EquityHistoryKey's.
+    history_reconstructed_at?: string | null;
+    history_reconstruct_attempts?: number | null;
   }>,
   equitySnapshots: MyAllocationDashboardPayload["equitySnapshots"],
   snapshotCount: number,
@@ -4623,6 +4752,21 @@ export function derivePhase07Fields(
   // (`fetchLatestHoldingsPerKey`'s `accountByKey`). A key it does not name is its
   // own account, so a caller that passes none counts every key.
   accountByKey: Readonly<Record<string, string>> = {},
+  // Phase 167.1.2.1 review 09 (WR-02, SFH F4): the owner's OWN strategies and
+  // `strategy_keys` links, UNFILTERED by capital mark, the two halves the
+  // fan-out's link test reads. `null` means the link read failed: the note then
+  // names nothing (see `historyReconstructFailed` below). The default, no links,
+  // is for fixtures that carry none.
+  reconstructLinkSource: {
+    strategies: readonly { id: string; api_key_id: string | null; status: string }[];
+    links: readonly { strategy_id: string; api_key_id: string }[];
+  } | null = { strategies: [], links: [] },
+  // Phase 167.1.2.1 review 09 (WR-02): the capped keys that have a reconstruct
+  // job in flight (`readReconstructInFlightKeyIds`). The fan-out counts an
+  // attempt at ENQUEUE, so the fifth attempt reads as capped while its job is
+  // still pending, running or backing off. `null` means the read failed: the
+  // note then names nothing. The default, none in flight, is for fixtures.
+  reconstructInFlightKeyIds: ReadonlySet<string> | null = new Set<string>(),
 ): Pick<
   MyAllocationDashboardPayload,
   | "equitySnapshots"
@@ -4639,6 +4783,7 @@ export function derivePhase07Fields(
   | "equityHistoryRebuildReason"
   | "equityHistoryNotSyncingKeyIds"
   | "departedHistoryUnavailable"
+  | "historyReconstructFailed"
   | "unpricedNativeAccounts"
   | "partialPositionReads"
   | "holdingsFingerprintRows"
@@ -4704,6 +4849,25 @@ export function derivePhase07Fields(
     equityHistoryState === "ready" &&
     Array.isArray(payloadFlags) &&
     payloadFlags.includes(DEPARTED_HISTORY_UNAVAILABLE_FLAG);
+  // Phase 167.1.2.1 (D-09, D-14): a key the daily fan-out gave up on. Read from
+  // the key list alone and deliberately NOT folded into `readiness` above, so
+  // it never changes the state, the reason or the curve (non-gating).
+  //
+  // Review 09 WR-02 / SFH F4: the attempt count is never reset (D-16), so a key
+  // that capped and was LATER disconnected, revoked, deactivated or linked to a
+  // strategy keeps five attempts for ever, while the fan-out (and its own
+  // capped-key count in `enqueue_refresh_allocator_equity_for_all`) stops
+  // counting it. The note must name only a key the fan-out still qualifies:
+  // `reconstructCappedKeyIds` (pinned to the SQL by a twin test). And, review 09
+  // WR-02 (in-flight half): not a key whose reconstruct is still running, since
+  // attempts are counted at enqueue and the fifth may yet succeed. An unreadable
+  // link set or in-flight read (null) names nothing: a missing note is
+  // recoverable; a false one is not.
+  const cappedKeyIds = reconstructCappedKeyIds(apiKeys, reconstructLinkSource);
+  const historyReconstructFailed =
+    cappedKeyIds !== null &&
+    reconstructInFlightKeyIds !== null &&
+    [...cappedKeyIds].some((id) => !reconstructInFlightKeyIds.has(id));
   // Phase 164.6.6.2.1 plan 17 (D-20): the accounts the total leaves out on an
   // unpriced day, named. Same defensive read as the flag above: the JSONB is
   // worker-written and untrusted, so only a string key id the owner holds and a
@@ -4852,6 +5016,7 @@ export function derivePhase07Fields(
     equityHistoryRebuildReason,
     equityHistoryNotSyncingKeyIds,
     departedHistoryUnavailable,
+    historyReconstructFailed,
     unpricedNativeAccounts,
     partialPositionReads: partialReads
       .filter((p) => shownKeyIds.has(p.api_key_id))
@@ -5408,6 +5573,37 @@ export const getMyAllocationDashboard = cache(
       updated_at: string;
     }>;
 
+    // Phase 167.1.2.1 review 09 (WR-02): the reconstruct note's link source.
+    // The SAME two owner-scoped reads the book gate below uses (no extra
+    // grant, no extra query), but UNFILTERED by capital mark: the fan-out
+    // excludes any non-archived strategy link, own-capital or not. A failed
+    // read passes null so the note names nothing.
+    const reconstructLinkSource =
+      phase151OwnStrategiesRes.error || phase151StrategyKeyLinksRes.error
+        ? null
+        : {
+            strategies: (phase151OwnStrategiesRes.data ?? []) as Array<{
+              id: string;
+              api_key_id: string | null;
+              status: string;
+            }>,
+            links: phase151StrategyKeyLinksRes.data ?? [],
+          };
+    // Review 09 WR-02 (in-flight half): one read, and only when a key is capped
+    // (the common dashboard makes none). A failed read passes null: no note.
+    const cappedReconstructKeyIds = reconstructCappedKeyIds(
+      apiKeys,
+      reconstructLinkSource,
+    );
+    const reconstructInFlightKeyIds =
+      cappedReconstructKeyIds !== null && cappedReconstructKeyIds.size > 0
+        ? await readReconstructInFlightKeyIds(
+            admin,
+            userId,
+            [...cappedReconstructKeyIds],
+          )
+        : new Set<string>();
+
     const phase07 = derivePhase07Fields(
       apiKeys,
       equitySnapshots,
@@ -5422,6 +5618,8 @@ export const getMyAllocationDashboard = cache(
       // Phase 170.4 D-10: each contributing key's exchange account, so keys that
       // share one account count once per day in the dollar totals.
       phase07HoldingsRes.accountByKey,
+      reconstructLinkSource,
+      reconstructInFlightKeyIds,
     );
 
     // Phase 169.4 plan 02 (SC3, D-09, D-69): the Overview's BTC comparator

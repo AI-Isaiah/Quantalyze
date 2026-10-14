@@ -1078,7 +1078,11 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-14 (Phase 170.6.1 DISCOVERYPHONE, plan 03): `armsSeen` 673 -> 683: the NEW gate test_get_published_trade_venues.sql adds ten biting arms. MEASURED off the full lane run on the tree merged with origin/main: `arms: 683/683/0`, `biting: 683`.
     // ⭐ CURRENCY 2026-10-13 (Phase 164.6.8 OUTAGEALERT, plan 05): `armsSeen` 638 -> 652: the NEW gate test_ops_staleness_check.sql (14 arms, S1 to S13 and G1). MEASURED: this file's run read `expected 652 to be 638`, and one full lane run printed `arms: 652/652/0`.
     // ⭐ CURRENCY 2026-10-14 (Phase 164.6.8 OUTAGEALERT, release merge with origin/main, plan 08): `armsSeen` 683 -> 697: the ops_staleness_check gate's fourteen arms (S1-S13, G1) join the ten DISCOVERYPHONE arms on one corpus. MEASURED: this file's run read `expected 697 to be 683`, and one full lane run on the committed merged tree printed `arms: 697/697/0`, `biting: 697`.
-    expect(armsSeen).toBe(697);
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): `armsSeen` 673 -> 684: +12 arms of the NEW gate test_refresh_fanout_owed_key_reconstruct.sql (plan 04), -1 for arm N5 moved out of test_refresh_fanout_zero_snapshot_bootstrap.sql (it asserted the inverse of SC-2; arm O1 holds the new behaviour). MEASURED: this file's run read `expected 684 to be 673`, and ONE full lane run printed `arms: 684/684/0`.
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round, SFH F2 + F3): `armsSeen` 684 -> 689: +5 arms (O11, O11i, O11g, O12, O12g) in test_refresh_fanout_owed_key_reconstruct.sql. MEASURED: this file's run read `expected 689 to be 684`, and ONE full lane run printed `arms: 689/689/0`.
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round 2, SFH R2-1): `armsSeen` 689 -> 692: +3 arms (O13, O13l, O13r) in test_refresh_fanout_owed_key_reconstruct.sql. MEASURED: this file's run read `expected 692 to be 689`.
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): `armsSeen` 697 -> 716: the owed-key gate's 20 arms less N5 moved out of the 167.1.2 gate (+19 net) join main's 697. MEASURED: this file's run read `expected 716 to be 697`, and the full lane run printed `arms: 716/716/0`, `biting: 716`.
+    expect(armsSeen).toBe(716);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1092,7 +1096,11 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-14 (Phase 170.6.1 DISCOVERYPHONE, plan 03): `stepsSeen` 766 -> 775: +9 file steps in the NEW gate test_get_published_trade_venues.sql (TV-shape 4 layered `edit` steps; TV-1, TV-unpublished, TV-unpublished-composite, TV-strategy-keys and TV-distinct-lower one `edit` each; its TV-secdef, TV-searchpath, TV-anon-exec and TV-auth-exec twins are single `sql` steps). MEASURED: this file's run read `expected 775 to be 766`.
     // ⭐ CURRENCY 2026-10-13 (Phase 164.6.8 OUTAGEALERT, plan 05): `stepsSeen` 732 -> 745: +13 file steps across the 14 arms of the NEW gate test_ops_staleness_check.sql (13 `edit` twins and one `sql` twin; the delta is the measured value, not a per-arm count). MEASURED: this file's run read `expected 745 to be 732`.
     // ⭐ CURRENCY 2026-10-14 (Phase 164.6.8 OUTAGEALERT, release merge with origin/main, plan 08): `stepsSeen` 775 -> 788: +13 file steps in the ops_staleness_check gate (13 `edit` twins; G1 is a single `sql` step). MEASURED: this file's run read `expected 788 to be 775`.
-    expect(stepsSeen).toBe(788);
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): `stepsSeen` 766 -> 779: the owed-key gate's 15 file steps (plan 04 summary: 12 twins carry 15 steps), -1 for N5's edit step and -1 for N4d, whose re-expressed twin edits ONE copy (the bk marker term) where the done-list twin edited two. MEASURED: this file's run read `expected 779 to be 766`.
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round, SFH F2 + F3): `stepsSeen` 779 -> 784: one file step for each of the five new twins (O11, O11i, O11g, O12, O12g). MEASURED: the needle test read `expected 784 to be 779`.
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round 2, SFH R2-1): `stepsSeen` 784 -> 787: one file step for each of the three new twins (O13, O13l, O13r). MEASURED: the needle test read `expected 787 to be 784`.
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): `stepsSeen` 788 -> 809: +21 file steps from the owed-key gate (15 at plan 04, +5 at the first fix round, +3 at the second, -1 for N5's edit step, -1 for N4d's second copy). MEASURED: the needle test read `expected 809 to be 788`.
+    expect(stepsSeen).toBe(809);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2023,7 +2031,11 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-10-14 (Phase 170.6.1 DISCOVERYPHONE, plan 03): the needle count 766 -> 775, moving WITH `stepsSeen` (the 9 file steps of the new gate). MEASURED: this file's run read `expected 775 to be 766`.
     // ⭐ CURRENCY 2026-10-13 (Phase 164.6.8 OUTAGEALERT, plan 05): 732 -> 745, moving WITH `stepsSeen` (the 13 `edit` file steps of the new gate). MEASURED: `expected 745 to be 732`.
     // ⭐ CURRENCY 2026-10-14 (Phase 164.6.8 OUTAGEALERT, release merge with origin/main, plan 08): the needle count 775 -> 788, moving WITH `stepsSeen` (the ops_staleness_check gate's 13 file steps). MEASURED: this file's run read `expected 788 to be 775`.
-    expect(needles.length).toBe(788);
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): the needle count 766 -> 779, moving WITH `stepsSeen`.
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round): the needle count 779 -> 784, moving WITH `stepsSeen`.
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round 2, SFH R2-1): the needle count 784 -> 787, moving WITH `stepsSeen`. MEASURED: this file's run read `expected 787 to be 784`.
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): the needle count 788 -> 809, moving WITH `stepsSeen`. MEASURED: this file's run read `expected 809 to be 788`.
+    expect(needles.length).toBe(809);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2615,7 +2627,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, merge of origin/main, CR-01 / O-3): 94 -> 95, the union of the two branches' new gate files (RECONMARKER's reconstruct-marker gate and NAVBREACH's computed_at success-only gate, each counted alone as 94). MEASURED: this file's run read `expected 95 to be 94`, and the full lane run printed `coverage: files 68/95`.
     // ⭐ CURRENCY 2026-10-14 (Phase 170.6.1 DISCOVERYPHONE, plan 03): 95 -> 96, the published-trade-venues gate file. MEASURED: the full lane run printed `coverage: files 69/96`.
     // ⭐ CURRENCY 2026-10-14 (Phase 164.6.8 OUTAGEALERT, release merge with origin/main, plan 08): 96 -> 97, the ops_staleness_check gate file. MEASURED: this file's run read `expected 97 to be 96`, and the full lane run on the committed merged tree printed `coverage: files 70/97`.
-    expect(corpus.filesTotal).toBe(97);
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): 95 -> 96, the owed-key fan-out gate file. MEASURED: this file's run read `expected 96 to be 95`, and the full lane run printed `coverage: files 69/96`.
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): 97 -> 98, the owed-key fan-out gate on top of main's 97. MEASURED: this file's run read `expected 98 to be 97`, and the full lane run printed `coverage: files 71/98`.
+    expect(corpus.filesTotal).toBe(98);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2689,7 +2703,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-14 (Phase 170.6.1 DISCOVERYPHONE, plan 03): 68 -> 69, the published-trade-venues gate file. MEASURED: the full lane run printed `coverage: files 69/96`.
     // ⭐ CURRENCY 2026-10-13 (Phase 164.6.8 OUTAGEALERT, plan 05): 66 -> 67 (test_ops_staleness_check.sql), with the denominator 93 -> 94 and the by-name list below. MEASURED off the full lane run: `coverage: files 67/94`.
     // ⭐ CURRENCY 2026-10-14 (Phase 164.6.8 OUTAGEALERT, release merge with origin/main, plan 08): 69 -> 70, the ops_staleness_check gate file. MEASURED: this file's run read `expected 70 to be 69`, and the full lane run printed `coverage: files 70/97`.
-    expect(corpus.filesAnnotated).toBe(70);
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): 68 -> 69, the owed-key fan-out gate file (test_refresh_fanout_owed_key_reconstruct.sql), with the denominator above and the by-name list below.
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): 70 -> 71, moving WITH `filesTotal`; the by-name list below holds the owed-key gate and both main gates.
+    expect(corpus.filesAnnotated).toBe(71);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2771,6 +2787,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_prod_prober_cadence.sql",
       "test_profiles_privileged_columns_locked.sql",
       "test_reconcile_dropped_enqueue_sweep.sql",
+      // ⭐ ADDED 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): the owed-key fan-out gate (12 arms) for migration 20261021120000.
+      "test_refresh_fanout_owed_key_reconstruct.sql",
       "test_refresh_fanout_zero_snapshot_bootstrap.sql",
       "test_resync_retry_single_job.sql",
       "test_retention_orphaned_running.sql",
@@ -3222,7 +3240,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, merge of origin/main, CR-01 / O-3): 94 -> 95, the union of the two branches' new gate files (RECONMARKER's reconstruct-marker gate and NAVBREACH's computed_at success-only gate, each counted alone as 94). MEASURED: this file's run read `expected 95 to be 94`, and the full lane run printed `coverage: files 68/95`.
     // ⭐ CURRENCY 2026-10-14 (Phase 170.6.1 DISCOVERYPHONE, plan 03): 95 -> 96, the published-trade-venues gate file. MEASURED: the full lane run printed `coverage: files 69/96`.
     // ⭐ CURRENCY 2026-10-14 (Phase 164.6.8 OUTAGEALERT, release merge with origin/main, plan 08): 96 -> 97, the ops_staleness_check gate file. MEASURED: this file's run read `expected 97 to be 96`, and the full lane run on the committed merged tree printed `coverage: files 70/97`.
-    expect(corpus.filesTotal).toBe(97);
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): 95 -> 96, the owed-key fan-out gate file. MEASURED: this file's run read `expected 96 to be 95`, and the full lane run printed `coverage: files 69/96`.
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): 97 -> 98, the owed-key fan-out gate on top of main's 97. MEASURED: this file's run read `expected 98 to be 97`, and the full lane run printed `coverage: files 71/98`.
+    expect(corpus.filesTotal).toBe(98);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3252,7 +3272,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-14 (Phase 170.6.1 DISCOVERYPHONE, plan 03): 68 -> 69, moving WITH `filesAnnotated`; the by-name list above gained test_get_published_trade_venues.sql.
     // ⭐ CURRENCY 2026-10-13 (Phase 164.6.8 OUTAGEALERT, plan 05): 66 -> 67, the same file.
     // ⭐ CURRENCY 2026-10-14 (Phase 164.6.8 OUTAGEALERT, release merge with origin/main, plan 08): 69 -> 70, moving WITH `filesAnnotated`. MEASURED: this file's run read `expected [ …(70) ] to have a length of 69`.
-    expect(corpus.annotatedFiles).toHaveLength(70);
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): 68 -> 69, moving WITH `filesAnnotated`.
+    // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): 70 -> 71, moving WITH `filesAnnotated`.
+    expect(corpus.annotatedFiles).toHaveLength(71);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

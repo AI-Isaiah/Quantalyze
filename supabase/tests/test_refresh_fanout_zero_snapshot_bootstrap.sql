@@ -24,6 +24,56 @@
 --     catch a lost enqueue race (serialization_failure) per key in both loops,
 --     so neither can cancel the daily refresh of every allocator.
 --
+-- REPOINTED TO 20261021120000 (Phase 167.1.2.1 RECONMARKER, plan 07, 2026-10-14).
+-- Migration 20261021120000 re-bases public.enqueue_refresh_allocator_equity_for_all()
+-- on the body 20260928140000 installed: the reconstruct loop now selects every OWED qualifying key
+-- (api_keys.history_reconstructed_at IS NULL, history_reconstruct_attempts under
+-- 5, no reconstruct pending, running, done_pending_children or failed_retry), on
+-- a book with snapshots as well as without, and a 'done' job and the zero-snapshot
+-- term no longer decide anything. This file therefore runs against THAT body: its
+-- apply list gains the marker migrations (20261014120000, 20261014120100) and
+-- 20261021120000, and every mutation edit below names 20261021120000's file,
+-- with each find string and occurrence count measured against its text. The
+-- header above is the 167.1.2 lineage and describes 20260928140000.
+-- A key seeded WITHOUT the history columns is owed (marker NULL, attempts 0),
+-- so a fixture meant as "already reconstructed" sets the marker instead of
+-- seeding a done job. ONE ROW PER ORIGINAL ARM (32), machine-checked: KEEP and
+-- RE-EXPRESSED name a live arm of this file, MOVED names a live arm of
+-- test_refresh_fanout_owed_key_reconstruct.sql, which holds the new behaviour.
+-- This file gains no arm id.
+--   CLASS Z1: KEEP (the refresh of a qualifying key on a zero-snapshot book; its owed key is enqueued, so the book is bootstrapped)
+--   CLASS Z2: KEEP (the reconstruct carries the correlation label reconstruct-alloc-<key>-initial; a default-seeded key is owed)
+--   CLASS N1: KEEP (a disconnected key is neither enqueued nor refreshed; all four copies keep the term)
+--   CLASS R: KEEP (a revoked key on a snapshot book is not refreshed)
+--   CLASS N2: KEEP (a revoked key on a zero-snapshot book gets neither job)
+--   CLASS N3: KEEP (strategies.api_key_id link excludes the key from every copy)
+--   CLASS N3b: KEEP (strategy_keys link excludes the key from every copy)
+--   CLASS N3c: KEEP (an archived-only link counts as unlinked)
+--   CLASS N4: KEEP (a failed_final reconstruct is retried, and under the owed-key body on any book; the mutation lost 'done' from the status list it replaces)
+--   CLASS N4d: RE-EXPRESSED (the done-row semantics are gone (a done row is reaped at 30 days and no longer says reconstructed); the same guard now holds on a MARKED key on a zero-snapshot book: no second reconstruct, no attempt, and the book is not held un-bootstrapped (mutation: the marker term of the bk copy); the bq and rk marker terms are pinned by arm O4 of test_refresh_fanout_owed_key_reconstruct.sql)
+--   CLASS N4r: KEEP (a failed_retry reconstruct is in flight; the lists lost 'done', the find strings are re-derived)
+--   CLASS N5: MOVED -> O1 (N5 asserted that a book WITH snapshots is never sent a reconstruct, the exact inverse of SC-2; arm O1 asserts that a qualifying owed key on a snapshot book gets exactly one)
+--   CLASS N6: KEEP (a Deribit key is refreshed (vacuously bootstrapped) and never reconstructed)
+--   CLASS E: KEEP (a strategy-linked key on a snapshot book keeps its refresh)
+--   CLASS N7: KEEP (sign_in_failed and error keys are refreshed and never reconstructed)
+--   CLASS MX: KEEP (the mixed book: the qualifying key gets both jobs, and the disconnected term of the bk copy alone keeps an excluded key from withholding that key's refresh)
+--   CLASS M1: KEEP (the rk copy alone filters a disconnected key)
+--   CLASS M2: KEEP (the rk copy alone filters a revoked key)
+--   CLASS M3: KEEP (the rk copy alone filters a strategies.api_key_id link)
+--   CLASS M4: KEEP (the rk copy alone filters a strategy_keys link)
+--   CLASS M5: KEEP (the rk copy alone filters a Deribit key)
+--   CLASS M6: KEEP (the rk copy alone filters sign_in_failed and error keys)
+--   CLASS B: KEEP (a default-seeded key is owed, so no fixture change; a book beyond the cap waits whole for a later call)
+--   CLASS F: KEEP (a failed_final key is owed with no reconstruct in flight, so its book beyond the cap is not bootstrapped; the mutation lost 'done' from the bkj list it replaces)
+--   CLASS C: KEEP (the per-run cap of 25 books holds; v_bootstrap_cap is unchanged)
+--   CLASS S: KEEP (the cap is checked per book, never per key)
+--   CLASS X1: KEEP (a lost enqueue race in the reconstruct loop skips one key; the attempt UPDATE shares the inner block, so it is rolled back with it)
+--   CLASS X2: KEEP (an error enqueueing one book skips that book only)
+--   CLASS X2t: KEEP (the skipped book leaves its durable cron_runs row)
+--   CLASS X3: KEEP (a lost enqueue race in the refresh loop skips one key)
+--   CLASS X4: KEEP (an error escaping every book block reaches the sub-block and leaves its durable row)
+--   CLASS G: KEEP (anon and authenticated cannot EXECUTE the fan-out; service_role can)
+--
 -- pgTAP is not set up in this project, so every assertion RAISEs
 -- `TEST FAILED (<arm>)` on failure and a clean run prints NOTICEs only.
 -- ⚠️ supabase/tests/test_*.sql is the ONLY DB assertion form that runs in CI.
@@ -52,20 +102,21 @@
 -- make a call skip and redden the positive arms for the wrong reason. The repo
 -- runs supabase/tests/*.sql one file at a time; keep it that way.
 --
--- THE TRACER GROUP (Z) and the RED-on-075 contract. Group Z's seed and call sit
--- OUTSIDE every arm marker and name no object only migration 20260928140000
--- creates, and nothing that can RAISE precedes arm Z1. On migration 075's body
--- the full file must fail with arm Z1 first; with Z1's marked block deleted it
--- must fail with arm Z2. Keep Z1 and Z2 the FIRST TWO assertions in the file.
--- On 075's body R, N3c, N4, N4d, N4r, N6, N7, MX, C, S, X1, X2, X2t, X3, X4
--- and G can also fail, so none of them may move ahead of Z1 or between Z1 and Z2. Every
--- later group seeds its own fixtures and makes its own call(s) after Z2,
+-- THE TRACER GROUP (Z). The RED-on-075 contract that stood here (on migration
+-- 075's body Z1 fails first, then Z2) was a 167.1.2 contract about
+-- 20260928140000 and is retired with this repoint. The tracer contract for the
+-- owed-key behaviour now lives in test_refresh_fanout_owed_key_reconstruct.sql
+-- (its RED-on-20260928140000 runs are recorded in plan 167.1.2.1-04). Group Z's
+-- seed and call still sit OUTSIDE every arm marker, nothing that can RAISE
+-- precedes arm Z1, and Z1 and Z2 stay the FIRST TWO assertions in the file.
+-- Every later group seeds its own fixtures and makes its own call(s) after Z2,
 -- never before.
 --
 -- ⭐ ORDER IS LOAD-BEARING. Each arm must be the FIRST failure under its own
 -- mutation (scripts/mutation-runner). File order, fixed:
---   Z1, Z2, N1, R, N2, N3, N3b, N3c, N4, N4d, N4r, N5, N6, E, N7, MX, M1, M2,
+--   Z1, Z2, N1, R, N2, N3, N3b, N3c, N4, N4d, N4r, N6, E, N7, MX, M1, M2,
 --   M3, M4, M5, M6, B, F, C, S, X1, X2, X2t, X3, X4, G.
+-- (N5 left this file in 167.1.2.1: arm O1 of the owed-key gate holds its inverse.)
 -- MATCHED PAIRS: every negative-control key (N1, R, N2, N3, N3b, N3c, N6, N7
 -- and the mixed book's M1 to M6 keys) differs from a qualifying key in
 -- exactly ONE attribute, the one its arm's mutation removes; everything else
@@ -96,19 +147,18 @@
 --   N4   Z to N3c: earlier keys have pending reconstruct rows or none, and a
 --        pending row counts under any status rule; each earlier arm asserted
 --        right after its own first call.
---   N4d  Z to N4: no earlier fixture has a done reconstruct row; N4's retry
---        row is pending, which the edited list still counts.
+--   N4d  Z to N4: its mutation drops the marker term of the bk* copy only, and
+--        no earlier fixture sets a marker, so no earlier book changes its
+--        bootstrapped answer. N4's retry row is pending, which the bk list
+--        still counts.
 --   N4r  Z to N4d: no earlier fixture has a failed_retry row; N4's retry row
---        is pending and N4d's row is done, both still counted by the edited
---        lists. Under N4d's mutation N4r's failed_retry row still counts.
---        Later mutations of the bk* copy (B, F, MX) leave N4r's book
---        bootstrapped, so its one refresh is unchanged.
---   N5   Z to N4r: R's snapshot book has no qualifying key; the rest are
---        zero-snapshot books already; foreign snapshot books rank behind the
---        century-ahead seeds.
---   N6   Z to N5: no earlier Deribit key.
---   E    Z to N6: no earlier linked key on a snapshot book; N5's key is
---        unlinked.
+--        is pending and N4d's key is marked, neither affected by the edited
+--        lists. N4d's mutation touches the bk* copy only and N4r's failed_retry
+--        row still keeps its book bootstrapped. Later mutations of the bk*
+--        copy (B, F, MX) leave N4r's book bootstrapped, so its one refresh is
+--        unchanged.
+--   N6   Z to N4r: no earlier Deribit key.
+--   E    Z to N6: no earlier linked key on a snapshot book.
 --   N7   Z to E: every earlier key's sync_status is idle or revoked.
 --   MX   Z to N7: N1's book holds only its disconnected key, which the
 --        refresh loop's ak copy still filters; no other earlier book holds a
@@ -157,7 +207,7 @@
 -- Usage:
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/test_refresh_fanout_zero_snapshot_bootstrap.sql
 --
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260922120000_api_keys_sync_status_sign_in_failed.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql","scripts/pg-lane/fixtures/33-fixture-cron-runs.sql","supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","scripts/pg-lane/fixtures/39-fixture-audit-log.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260922120000_api_keys_sync_status_sign_in_failed.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql","supabase/migrations/20260526095850_log_audit_event_null_auth_errcode.sql","supabase/migrations/20260924233749_allocator_sync_restore_inflight_prefetch.sql","scripts/pg-lane/fixtures/33-fixture-cron-runs.sql","supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","supabase/migrations/20261014120000_api_keys_history_reconstruct_marker.sql","supabase/migrations/20261014120100_log_audit_event_deny_worker_only_actions.sql","supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql"]}
 
 BEGIN;
 
@@ -186,10 +236,10 @@ BEGIN
 
   -- ARM Z1 BEGIN
   -- ----- Z1: a zero-snapshot book's qualifying key gets its daily refresh ---
-  -- RED-UNDER: in migration 20260928140000, restore the refresh loop's plain
+  -- RED-UNDER: in migration 20261021120000, restore the refresh loop's plain
   --            snapshot conjunct (the zero-snapshot branch becomes FALSE AND …),
   --            so a book with no snapshot row is never refreshed, as on 075.
-  -- RED-UNDER-M: {"arm":"Z1","apply":[{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"          OR (\n            NOT EXISTS (SELECT 1 FROM strategies aks","replace":"          OR FALSE AND (\n            NOT EXISTS (SELECT 1 FROM strategies aks","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"Z1","apply":[{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"          OR (\n            NOT EXISTS (SELECT 1 FROM strategies aks","replace":"          OR FALSE AND (\n            NOT EXISTS (SELECT 1 FROM strategies aks","occurrences":1}]}
   SELECT count(*) INTO v_n
     FROM compute_jobs
    WHERE api_key_id = k_z AND kind = 'refresh_allocator_equity_daily';
@@ -199,13 +249,13 @@ BEGIN
   -- ARM Z1 END
 
   -- ----- Z2: the same call enqueued ONE reconstruct under the RPC's key ----
-  -- RED-UNDER: in migration 20260928140000, corrupt the bootstrap enqueue's
+  -- RED-UNDER: in migration 20261021120000, corrupt the bootstrap enqueue's
   --            idempotency key suffix. The reconstruct row still exists (so the
   --            book stays bootstrapped and Z1 stays green), but it no longer
   --            carries the correlation label request_allocator_holdings_sync
   --            writes. The label dedupes nothing: dedupe is the in-flight
   --            partial unique index and the in-flight-or-done NOT EXISTS.
-  -- RED-UNDER-M: {"arm":"Z2","apply":[{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"                p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial',","replace":"                p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial-mutated',","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"Z2","apply":[{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"                p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial',","replace":"                p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial-mutated',","occurrences":1}]}
   SELECT count(*) INTO v_n
     FROM compute_jobs
    WHERE api_key_id = k_z
@@ -242,9 +292,9 @@ BEGIN
   -- ----- N1: a disconnected key gets neither job ---------------------------
   -- RED-UNDER: drop the disconnected_at conjunct from EVERY copy (book
   --            selection, per-key selection, refresh loop, bootstrapped
-  --            subquery) in migration 20260928140000. The disconnected key
+  --            subquery) in migration 20261021120000. The disconnected key
   --            then qualifies and gets a reconstruct and a refresh.
-  -- RED-UNDER-M: {"arm":"N1","apply":[{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"bq.disconnected_at IS NULL","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"rk.disconnected_at IS NULL","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"ak.disconnected_at IS NULL","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"bk.disconnected_at IS NULL","replace":"TRUE","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"N1","apply":[{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"bq.disconnected_at IS NULL","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"rk.disconnected_at IS NULL","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"ak.disconnected_at IS NULL","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"bk.disconnected_at IS NULL","replace":"TRUE","occurrences":1}]}
   SELECT count(*) INTO v_n
     FROM compute_jobs
    WHERE api_key_id = k_n1
@@ -279,9 +329,9 @@ BEGIN
 
   -- ----- R: a revoked key on a snapshot book is no longer refreshed --------
   -- RED-UNDER: drop the revoked conjunct from the refresh loop's copy only in
-  --            migration 20260928140000 (075's population, which refreshed a
+  --            migration 20261021120000 (075's population, which refreshed a
   --            revoked key every day).
-  -- RED-UNDER-M: {"arm":"R","apply":[{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"ak.sync_status IS DISTINCT FROM 'revoked'","replace":"TRUE","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"R","apply":[{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"ak.sync_status IS DISTINCT FROM 'revoked'","replace":"TRUE","occurrences":1}]}
   SELECT count(*) INTO v_n
     FROM compute_jobs
    WHERE api_key_id = k_r AND kind = 'refresh_allocator_equity_daily';
@@ -314,9 +364,9 @@ BEGIN
   -- ----- N2: a revoked key on a zero-snapshot book gets neither job --------
   -- RED-UNDER: drop the revoked conjunct from BOTH reconstruct-loop copies
   --            (book selection and per-key selection) in migration
-  --            20260928140000. An edit of one copy alone is inert while the
+  --            20261021120000. An edit of one copy alone is inert while the
   --            other still filters the key.
-  -- RED-UNDER-M: {"arm":"N2","apply":[{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"bq.sync_status IS DISTINCT FROM 'revoked'","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"rk.sync_status IS DISTINCT FROM 'revoked'","replace":"TRUE","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"N2","apply":[{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"bq.sync_status IS DISTINCT FROM 'revoked'","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"rk.sync_status IS DISTINCT FROM 'revoked'","replace":"TRUE","occurrences":1}]}
   SELECT count(*) INTO v_n
     FROM compute_jobs
    WHERE api_key_id = k_n2
@@ -353,9 +403,9 @@ BEGIN
 
   -- ----- N3: a strategy-linked key (direct link) gets neither job ----------
   -- RED-UNDER: drop the strategies.api_key_id half of the discriminator from
-  --            EVERY copy in migration 20260928140000. The manager's key then
+  --            EVERY copy in migration 20261021120000. The manager's key then
   --            qualifies and is reconstructed into the allocator store.
-  -- RED-UNDER-M: {"arm":"N3","apply":[{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"WHERE bqs.api_key_id = bq.id","replace":"WHERE FALSE AND bqs.api_key_id = bq.id","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"WHERE rks.api_key_id = rk.id","replace":"WHERE FALSE AND rks.api_key_id = rk.id","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"WHERE aks.api_key_id = ak.id","replace":"WHERE FALSE AND aks.api_key_id = ak.id","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"WHERE bks.api_key_id = bk.id","replace":"WHERE FALSE AND bks.api_key_id = bk.id","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"N3","apply":[{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"WHERE bqs.api_key_id = bq.id","replace":"WHERE FALSE AND bqs.api_key_id = bq.id","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"WHERE rks.api_key_id = rk.id","replace":"WHERE FALSE AND rks.api_key_id = rk.id","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"WHERE aks.api_key_id = ak.id","replace":"WHERE FALSE AND aks.api_key_id = ak.id","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"WHERE bks.api_key_id = bk.id","replace":"WHERE FALSE AND bks.api_key_id = bk.id","occurrences":1}]}
   SELECT count(*) INTO v_n
     FROM compute_jobs
    WHERE api_key_id = k_n3
@@ -395,9 +445,9 @@ BEGIN
 
   -- ----- N3b: a strategy-linked key (strategy_keys link) gets neither job --
   -- RED-UNDER: drop the strategy_keys half of the discriminator from EVERY
-  --            copy in migration 20260928140000. A composite member key then
+  --            copy in migration 20261021120000. A composite member key then
   --            qualifies and is reconstructed into the allocator store.
-  -- RED-UNDER-M: {"arm":"N3b","apply":[{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"WHERE bqsk.api_key_id = bq.id","replace":"WHERE FALSE AND bqsk.api_key_id = bq.id","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"WHERE rksk.api_key_id = rk.id","replace":"WHERE FALSE AND rksk.api_key_id = rk.id","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"WHERE aksk.api_key_id = ak.id","replace":"WHERE FALSE AND aksk.api_key_id = ak.id","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"WHERE bksk.api_key_id = bk.id","replace":"WHERE FALSE AND bksk.api_key_id = bk.id","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"N3b","apply":[{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"WHERE bqsk.api_key_id = bq.id","replace":"WHERE FALSE AND bqsk.api_key_id = bq.id","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"WHERE rksk.api_key_id = rk.id","replace":"WHERE FALSE AND rksk.api_key_id = rk.id","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"WHERE aksk.api_key_id = ak.id","replace":"WHERE FALSE AND aksk.api_key_id = ak.id","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"WHERE bksk.api_key_id = bk.id","replace":"WHERE FALSE AND bksk.api_key_id = bk.id","occurrences":1}]}
   SELECT count(*) INTO v_n
     FROM compute_jobs
    WHERE api_key_id = k_n3b
@@ -434,9 +484,9 @@ BEGIN
 
   -- ----- N3c: an archived-only link counts as unlinked ---------------------
   -- RED-UNDER: drop the archived term from EVERY copy of the strategies.api_key_id
-  --            half in migration 20260928140000, so an archived strategy still
+  --            half in migration 20261021120000, so an archived strategy still
   --            counts as coverage and the key is left at zero.
-  -- RED-UNDER-M: {"arm":"N3c","apply":[{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"bqs.status <> 'archived'","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"rks.status <> 'archived'","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"aks.status <> 'archived'","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"bks.status <> 'archived'","replace":"TRUE","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"N3c","apply":[{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"bqs.status <> 'archived'","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"rks.status <> 'archived'","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"aks.status <> 'archived'","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"bks.status <> 'archived'","replace":"TRUE","occurrences":1}]}
   SELECT count(*) FILTER (WHERE kind = 'refresh_allocator_equity_daily'),
          count(*) FILTER (WHERE kind = 'reconstruct_allocator_history')
     INTO v_ref, v_rec
@@ -478,11 +528,11 @@ BEGIN
 
   -- ----- N4: a failed_final reconstruct is retried, never counted as done --
   -- RED-UNDER: count a reconstruct row in ANY status in BOTH reconstruct-loop
-  --            copies (bqj, rkj) in migration 20260928140000, as the first
-  --            version did. The failed key is then never retried, and a
-  --            refresh that writes the book's first row loses its backfill
-  --            for good.
-  -- RED-UNDER-M: {"arm": "N4", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "AND bqj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done')", "replace": "AND TRUE", "occurrences": 1}, {"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "AND rkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done')", "replace": "AND TRUE", "occurrences": 1}]}
+  --            copies (bqj, rkj) in migration 20261021120000, as the first
+  --            version of 20260928140000 did. The failed key is then never
+  --            retried, and a refresh that writes the book's first row loses
+  --            its backfill for good.
+  -- RED-UNDER-M: {"arm": "N4", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "AND bqj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')", "replace": "AND TRUE", "occurrences": 1}, {"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "AND rkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')", "replace": "AND TRUE", "occurrences": 1}]}
   SELECT count(*) FILTER (WHERE kind = 'refresh_allocator_equity_daily'),
          count(*) FILTER (WHERE kind = 'reconstruct_allocator_history' AND status <> 'failed_final')
     INTO v_ref, v_rec
@@ -494,9 +544,12 @@ BEGIN
 END $grpn4$;
 
 -- ==========================================================================
--- GROUP N4d — a key whose reconstruct is DONE (it wrote no row), on a
--- zero-snapshot book: the book is bootstrapped, so the key gets the refresh
--- and NO second reconstruct (review SFH-01, the sibling of N4).
+-- GROUP N4d — a key whose history is MARKED reconstructed (it also holds the
+-- DONE reconstruct row the backfill reads), on a zero-snapshot book: the book is
+-- bootstrapped, so the key gets the refresh and NO second reconstruct (review
+-- SFH-01, the sibling of N4). Re-expressed in Phase 167.1.2.1 (decision D-04):
+-- the MARKER, not the done row, now says a key was reconstructed, because the
+-- done row is reaped after 30 days.
 -- ==========================================================================
 DO $grpn4d$
 DECLARE
@@ -506,33 +559,39 @@ DECLARE
   k_n4d  uuid := gen_random_uuid();
   v_ref  int;
   v_rec  int;
+  v_att  int;
 BEGIN
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (uid, '00000000-0000-0000-0000-000000000000', 'test-fanout-boot-n4d-' || v_run || '@quantalyze.test', now(), now());
   INSERT INTO profiles (id, display_name, email)
   VALUES (uid, 'fanout boot N4d', 'test-fanout-boot-n4d-' || v_run || '@quantalyze.test')
   ON CONFLICT (id) DO NOTHING;
-  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, created_at)
-  VALUES (k_n4d, uid, 'okx', 'fanout boot N4d', 'enc', true, v_base);
+  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, history_reconstructed_at, created_at)
+  VALUES (k_n4d, uid, 'okx', 'fanout boot N4d', 'enc', true, now(), v_base);
   -- A done row is outside the in-flight index and the enqueue helper's
-  -- pre-check too, so a fan-out that ignored it would insert a second row.
+  -- pre-check, as before; under the owed-key body it is also outside the
+  -- fan-out's own in-flight list, so only the marker keeps this key out.
   INSERT INTO compute_jobs (kind, api_key_id, status)
   VALUES ('reconstruct_allocator_history', k_n4d, 'done');
 
   PERFORM public.enqueue_refresh_allocator_equity_for_all();
 
-  -- ----- N4d: a done reconstruct is not repeated --------------------------
-  -- RED-UNDER: drop 'done' from the status list of BOTH reconstruct-loop
-  --            copies (bqj, rkj) in migration 20260928140000. A key whose
-  --            reconstruct finished is then reconstructed again every day.
-  -- RED-UNDER-M: {"arm": "N4d", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "bqj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done')", "replace": "bqj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')", "occurrences": 1}, {"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "rkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done')", "replace": "rkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')", "occurrences": 1}]}
+  -- ----- N4d: a marked key is not repeated and does not hold its book -------
+  -- RED-UNDER: drop the marker conjunct from the bootstrapped (bk) copy ONLY in
+  --            migration 20261021120000. The marked key then counts as owed
+  --            with no reconstruct in flight (the reconstruct-loop copies, bq
+  --            and rk, still skip it), the book is never bootstrapped, and the
+  --            key's refresh is withheld every day. (The bq and rk marker terms
+  --            are pinned by arm O4 of test_refresh_fanout_owed_key_reconstruct.sql.)
+  -- RED-UNDER-M: {"arm": "N4d", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "bk.history_reconstructed_at IS NULL", "replace": "TRUE", "occurrences": 1}]}
   SELECT count(*) FILTER (WHERE kind = 'refresh_allocator_equity_daily'),
          count(*) FILTER (WHERE kind = 'reconstruct_allocator_history')
     INTO v_ref, v_rec
     FROM compute_jobs
    WHERE api_key_id = k_n4d;
-  IF v_ref <> 1 OR v_rec <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (N4d): a key with a DONE reconstruct on a zero-snapshot book got % refresh job(s) and now has % reconstruct row(s), expected 1 and the 1 seeded. A finished reconstruct must not be repeated by the daily fan-out, and its book is bootstrapped.', v_ref, v_rec;
+  SELECT history_reconstruct_attempts INTO v_att FROM api_keys WHERE id = k_n4d;
+  IF v_ref <> 1 OR v_rec <> 1 OR v_att IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (N4d): a key with its history marked reconstructed (and a done reconstruct row) on a zero-snapshot book got % refresh job(s), now has % reconstruct row(s) and % attempt(s), expected 1, the 1 seeded and 0. A marked key must not be reconstructed again, and it must not hold its book un-bootstrapped (the refresh would be withheld).', v_ref, v_rec, v_att;
   END IF;
 END $grpn4d$;
 
@@ -570,10 +629,10 @@ BEGIN
   -- ----- N4r: a reconstruct scheduled for retry is in flight ---------------
   -- RED-UNDER: drop 'failed_retry' from the status list of BOTH
   --            reconstruct-loop copies (bqj, rkj) in migration
-  --            20260928140000. The cron then enqueues a second 30-minute
+  --            20261021120000. The cron then enqueues a second 30-minute
   --            reconstruct while the first is scheduled for its retry, and
   --            nothing else stops the duplicate.
-  -- RED-UNDER-M: {"arm": "N4r", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "bqj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done')", "replace": "bqj.status IN ('pending', 'running', 'done_pending_children', 'done')", "occurrences": 1}, {"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "rkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done')", "replace": "rkj.status IN ('pending', 'running', 'done_pending_children', 'done')", "occurrences": 1}]}
+  -- RED-UNDER-M: {"arm": "N4r", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "bqj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')", "replace": "bqj.status IN ('pending', 'running', 'done_pending_children')", "occurrences": 1}, {"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "rkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')", "replace": "rkj.status IN ('pending', 'running', 'done_pending_children')", "occurrences": 1}]}
   SELECT count(*) FILTER (WHERE kind = 'refresh_allocator_equity_daily'),
          count(*) FILTER (WHERE kind = 'reconstruct_allocator_history')
     INTO v_ref, v_rec
@@ -583,47 +642,6 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (N4r): a key whose reconstruct is scheduled for retry (failed_retry), on a zero-snapshot book, got % refresh job(s) and now has % reconstruct row(s), expected 1 and the 1 seeded. A reconstruct awaiting its retry is in flight: a second one doubles a 30-minute crawl.', v_ref, v_rec;
   END IF;
 END $grpn4r$;
-
--- ==========================================================================
--- GROUP N5 — a key with NO reconstruct row on a book WITH snapshots gets the
--- refresh and NO reconstruct (D-17 (c): the 30-day reap of done rows must not
--- turn the arm into a monthly re-reconstruct of every allocator key).
--- ==========================================================================
-DO $grpn5$
-DECLARE
-  v_run  text := replace(gen_random_uuid()::text, '-', '');
-  v_base timestamptz := now() + INTERVAL '100 years' + INTERVAL '8 days';
-  uid    uuid := gen_random_uuid();
-  k_n5   uuid := gen_random_uuid();
-  v_ref  int;
-  v_rec  int;
-BEGIN
-  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
-  VALUES (uid, '00000000-0000-0000-0000-000000000000', 'test-fanout-boot-n5-' || v_run || '@quantalyze.test', now(), now());
-  INSERT INTO profiles (id, display_name, email)
-  VALUES (uid, 'fanout boot N5', 'test-fanout-boot-n5-' || v_run || '@quantalyze.test')
-  ON CONFLICT (id) DO NOTHING;
-  INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, created_at)
-  VALUES (k_n5, uid, 'okx', 'fanout boot N5', 'enc', true, v_base);
-  INSERT INTO allocator_equity_snapshots (allocator_id, asof, value_usd, source)
-  VALUES (uid, DATE '2026-01-01', 100, 'exchange_primary');
-
-  PERFORM public.enqueue_refresh_allocator_equity_for_all();
-
-  -- ----- N5: a book with snapshots is never sent a bootstrap reconstruct ---
-  -- RED-UNDER: drop the zero-snapshot conjunct from the book selection in
-  --            migration 20260928140000. Every key whose done reconstruct row
-  --            was reaped after 30 days is then re-reconstructed.
-  -- RED-UNDER-M: {"arm":"N5","apply":[{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"WHERE bqe.allocator_id = bq.user_id","replace":"WHERE FALSE AND bqe.allocator_id = bq.user_id","occurrences":1}]}
-  SELECT count(*) FILTER (WHERE kind = 'refresh_allocator_equity_daily'),
-         count(*) FILTER (WHERE kind = 'reconstruct_allocator_history')
-    INTO v_ref, v_rec
-    FROM compute_jobs
-   WHERE api_key_id = k_n5;
-  IF v_ref <> 1 OR v_rec <> 0 THEN
-    RAISE EXCEPTION 'TEST FAILED (N5): a key with no reconstruct row on a book WITH snapshots got % refresh and % reconstruct job(s), expected 1 and 0. A book that already has history must never be sent a bootstrap reconstruct.', v_ref, v_rec;
-  END IF;
-END $grpn5$;
 
 -- ==========================================================================
 -- GROUP N6 — a book whose only unlinked key is DERIBIT, with zero snapshots:
@@ -651,9 +669,9 @@ BEGIN
 
   -- ----- N6: a Deribit key is refreshed but never reconstructed ------------
   -- RED-UNDER: drop the Deribit conjunct from BOTH reconstruct-loop copies in
-  --            migration 20260928140000 (the bootstrapped copy is left alone).
+  --            migration 20261021120000 (the bootstrapped copy is left alone).
   --            A reconstruct the worker always refuses would be enqueued.
-  -- RED-UNDER-M: {"arm":"N6","apply":[{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"lower(bq.exchange) <> 'deribit'","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"lower(rk.exchange) <> 'deribit'","replace":"TRUE","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"N6","apply":[{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"lower(bq.exchange) <> 'deribit'","replace":"TRUE","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"lower(rk.exchange) <> 'deribit'","replace":"TRUE","occurrences":1}]}
   SELECT count(*) FILTER (WHERE kind = 'refresh_allocator_equity_daily'),
          count(*) FILTER (WHERE kind = 'reconstruct_allocator_history')
     INTO v_ref, v_rec
@@ -691,10 +709,10 @@ BEGIN
   PERFORM public.enqueue_refresh_allocator_equity_for_all();
 
   -- ----- E: a linked key on a snapshot book keeps its refresh --------------
-  -- RED-UNDER: in migration 20260928140000, add a "not strategy-linked"
+  -- RED-UNDER: in migration 20261021120000, add a "not strategy-linked"
   --            requirement to the snapshot branch of the refresh conjunct, so
   --            the discriminator leaks into the population 075 already served.
-  -- RED-UNDER-M: {"arm":"E","apply":[{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"EXISTS (SELECT 1 FROM allocator_equity_snapshots aes WHERE aes.allocator_id = ak.user_id)","replace":"EXISTS (SELECT 1 FROM allocator_equity_snapshots aes WHERE aes.allocator_id = ak.user_id) AND NOT EXISTS (SELECT 1 FROM strategies aesx WHERE aesx.api_key_id = ak.id AND aesx.user_id = ak.user_id AND aesx.status <> 'archived')","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"E","apply":[{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"EXISTS (SELECT 1 FROM allocator_equity_snapshots aes WHERE aes.allocator_id = ak.user_id)","replace":"EXISTS (SELECT 1 FROM allocator_equity_snapshots aes WHERE aes.allocator_id = ak.user_id) AND NOT EXISTS (SELECT 1 FROM strategies aesx WHERE aesx.api_key_id = ak.id AND aesx.user_id = ak.user_id AND aesx.status <> 'archived')","occurrences":1}]}
   SELECT count(*) INTO v_n
     FROM compute_jobs
    WHERE api_key_id = k_e AND kind = 'refresh_allocator_equity_daily';
@@ -739,10 +757,10 @@ BEGIN
 
   -- ----- N7: a refused credential is refreshed but never reconstructed -----
   -- RED-UNDER: drop the sign_in_failed/error conjunct from BOTH
-  --            reconstruct-loop copies (bq and rk) in migration 20260928140000.
+  --            reconstruct-loop copies (bq and rk) in migration 20261021120000.
   --            An edit of one copy alone is inert while the other still
   --            filters the key.
-  -- RED-UNDER-M: {"arm": "N7", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "coalesce(bq.sync_status, '') NOT IN ('sign_in_failed', 'error')", "replace": "TRUE", "occurrences": 1}, {"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "coalesce(rk.sync_status, '') NOT IN ('sign_in_failed', 'error')", "replace": "TRUE", "occurrences": 1}]}
+  -- RED-UNDER-M: {"arm": "N7", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "coalesce(bq.sync_status, '') NOT IN ('sign_in_failed', 'error')", "replace": "TRUE", "occurrences": 1}, {"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "coalesce(rk.sync_status, '') NOT IN ('sign_in_failed', 'error')", "replace": "TRUE", "occurrences": 1}]}
   SELECT count(*) FILTER (WHERE kind = 'reconstruct_allocator_history'),
          count(*) FILTER (WHERE kind = 'refresh_allocator_equity_daily')
     INTO v_rec, v_ref
@@ -807,10 +825,10 @@ BEGIN
 
   -- ----- MX: the qualifying key of a mixed book gets both jobs ------------
   -- RED-UNDER: drop the disconnected conjunct from the bootstrapped (bk)
-  --            copy ONLY in migration 20260928140000. The disconnected key
+  --            copy ONLY in migration 20261021120000. The disconnected key
   --            then counts as qualifying with no reconstruct, the book is never
   --            bootstrapped, and the qualifying key's refresh is withheld.
-  -- RED-UNDER-M: {"arm": "MX", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "bk.disconnected_at IS NULL", "replace": "TRUE", "occurrences": 1}]}
+  -- RED-UNDER-M: {"arm": "MX", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "bk.disconnected_at IS NULL", "replace": "TRUE", "occurrences": 1}]}
   SELECT count(*) FILTER (WHERE kind = 'refresh_allocator_equity_daily'),
          count(*) FILTER (WHERE kind = 'reconstruct_allocator_history')
     INTO v_ref, v_rec
@@ -822,8 +840,8 @@ BEGIN
 
   -- ----- M1: the per-key copy alone filters a disconnected key ------------
   -- RED-UNDER: drop the disconnected conjunct from the per-key (rk) copy ONLY
-  --            in migration 20260928140000.
-  -- RED-UNDER-M: {"arm": "M1", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "rk.disconnected_at IS NULL", "replace": "TRUE", "occurrences": 1}]}
+  --            in migration 20261021120000.
+  -- RED-UNDER-M: {"arm": "M1", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "rk.disconnected_at IS NULL", "replace": "TRUE", "occurrences": 1}]}
   SELECT count(*) INTO v_n FROM compute_jobs
    WHERE api_key_id = k_d AND kind = 'reconstruct_allocator_history';
   IF v_n <> 0 THEN
@@ -832,8 +850,8 @@ BEGIN
 
   -- ----- M2: the per-key copy alone filters a revoked key -----------------
   -- RED-UNDER: drop the revoked conjunct from the per-key (rk) copy ONLY in
-  --            migration 20260928140000.
-  -- RED-UNDER-M: {"arm": "M2", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "rk.sync_status IS DISTINCT FROM 'revoked'", "replace": "TRUE", "occurrences": 1}]}
+  --            migration 20261021120000.
+  -- RED-UNDER-M: {"arm": "M2", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "rk.sync_status IS DISTINCT FROM 'revoked'", "replace": "TRUE", "occurrences": 1}]}
   SELECT count(*) INTO v_n FROM compute_jobs
    WHERE api_key_id = k_r AND kind = 'reconstruct_allocator_history';
   IF v_n <> 0 THEN
@@ -842,8 +860,8 @@ BEGIN
 
   -- ----- M3: the per-key copy alone filters a directly linked key ---------
   -- RED-UNDER: drop the strategies.api_key_id half of the discriminator from
-  --            the per-key (rk) copy ONLY in migration 20260928140000.
-  -- RED-UNDER-M: {"arm": "M3", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "WHERE rks.api_key_id = rk.id", "replace": "WHERE FALSE AND rks.api_key_id = rk.id", "occurrences": 1}]}
+  --            the per-key (rk) copy ONLY in migration 20261021120000.
+  -- RED-UNDER-M: {"arm": "M3", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "WHERE rks.api_key_id = rk.id", "replace": "WHERE FALSE AND rks.api_key_id = rk.id", "occurrences": 1}]}
   SELECT count(*) INTO v_n FROM compute_jobs
    WHERE api_key_id = k_l1 AND kind = 'reconstruct_allocator_history';
   IF v_n <> 0 THEN
@@ -852,8 +870,8 @@ BEGIN
 
   -- ----- M4: the per-key copy alone filters a strategy_keys-linked key ----
   -- RED-UNDER: drop the strategy_keys half of the discriminator from the
-  --            per-key (rk) copy ONLY in migration 20260928140000.
-  -- RED-UNDER-M: {"arm": "M4", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "WHERE rksk.api_key_id = rk.id", "replace": "WHERE FALSE AND rksk.api_key_id = rk.id", "occurrences": 1}]}
+  --            per-key (rk) copy ONLY in migration 20261021120000.
+  -- RED-UNDER-M: {"arm": "M4", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "WHERE rksk.api_key_id = rk.id", "replace": "WHERE FALSE AND rksk.api_key_id = rk.id", "occurrences": 1}]}
   SELECT count(*) INTO v_n FROM compute_jobs
    WHERE api_key_id = k_l2 AND kind = 'reconstruct_allocator_history';
   IF v_n <> 0 THEN
@@ -862,8 +880,8 @@ BEGIN
 
   -- ----- M5: the per-key copy alone filters a Deribit key -----------------
   -- RED-UNDER: drop the Deribit conjunct from the per-key (rk) copy ONLY in
-  --            migration 20260928140000.
-  -- RED-UNDER-M: {"arm": "M5", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "lower(rk.exchange) <> 'deribit'", "replace": "TRUE", "occurrences": 1}]}
+  --            migration 20261021120000.
+  -- RED-UNDER-M: {"arm": "M5", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "lower(rk.exchange) <> 'deribit'", "replace": "TRUE", "occurrences": 1}]}
   SELECT count(*) INTO v_n FROM compute_jobs
    WHERE api_key_id = k_x AND kind = 'reconstruct_allocator_history';
   IF v_n <> 0 THEN
@@ -872,8 +890,8 @@ BEGIN
 
   -- ----- M6: the per-key copy alone filters refused credentials -----------
   -- RED-UNDER: drop the sign_in_failed/error conjunct from the per-key (rk)
-  --            copy ONLY in migration 20260928140000.
-  -- RED-UNDER-M: {"arm": "M6", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "coalesce(rk.sync_status, '') NOT IN ('sign_in_failed', 'error')", "replace": "TRUE", "occurrences": 1}]}
+  --            copy ONLY in migration 20261021120000.
+  -- RED-UNDER-M: {"arm": "M6", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "coalesce(rk.sync_status, '') NOT IN ('sign_in_failed', 'error')", "replace": "TRUE", "occurrences": 1}]}
   SELECT count(*) INTO v_n FROM compute_jobs
    WHERE api_key_id IN (k_s, k_e) AND kind = 'reconstruct_allocator_history';
   IF v_n <> 0 THEN
@@ -943,10 +961,10 @@ BEGIN
 
   -- ----- B: a book beyond the cap waits, whole, for a later call -----------
   -- RED-UNDER: drop the bootstrapped conjunct from the refresh loop in
-  --            migration 20260928140000. The target book beyond the cap is then
+  --            migration 20261021120000. The target book beyond the cap is then
   --            refreshed in the first call, and its first snapshot row would
   --            close the zero-snapshot gate before its reconstruct exists.
-  -- RED-UNDER-M: {"arm":"B","apply":[{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"WHERE bk.user_id = ak.user_id","replace":"WHERE FALSE AND bk.user_id = ak.user_id","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"B","apply":[{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"WHERE bk.user_id = ak.user_id","replace":"WHERE FALSE AND bk.user_id = ak.user_id","occurrences":1}]}
   IF v_first <> 0 OR v_rec_t <> 1 OR v_ref_t <> 1 OR v_ref_td <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (B): a zero-snapshot book beyond the per-run cap got % job(s) in the FIRST call (expected 0), then % reconstruct for its qualifying key and % + % refresh(es) for its two keys in the SECOND call (expected 1, 1, 1). A refreshed key beyond the cap strands its reconstruct at zero forever.', v_first, v_rec_t, v_ref_t, v_ref_td;
   END IF;
@@ -999,10 +1017,10 @@ BEGIN
 
   -- ----- F: a failed reconstruct never bootstraps a book ------------------
   -- RED-UNDER: count a reconstruct row in ANY status in the bootstrapped
-  --            (bkj) copy ONLY in migration 20260928140000. The target book
+  --            (bkj) copy ONLY in migration 20261021120000. The target book
   --            beyond the cap is then refreshed on its failed row, and that
   --            refresh's first snapshot row strands the key at zero.
-  -- RED-UNDER-M: {"arm": "F", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "AND bkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done')", "replace": "AND TRUE", "occurrences": 1}]}
+  -- RED-UNDER-M: {"arm": "F", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "AND bkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry')", "replace": "AND TRUE", "occurrences": 1}]}
   SELECT count(*) FILTER (WHERE kind = 'refresh_allocator_equity_daily'),
          count(*) FILTER (WHERE kind = 'reconstruct_allocator_history' AND status <> 'failed_final')
     INTO v_ref, v_rec
@@ -1046,8 +1064,8 @@ BEGIN
 
   -- ----- C: the per-run cap holds at 25 ------------------------------------
   -- RED-UNDER: raise the cap constant by exactly one in migration
-  --            20260928140000, so the 26th book is bootstrapped too.
-  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"v_bootstrap_cap CONSTANT integer := 25;","replace":"v_bootstrap_cap CONSTANT integer := 26;","occurrences":1}]}
+  --            20261021120000, so the 26th book is bootstrapped too.
+  -- RED-UNDER-M: {"arm":"C","apply":[{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"v_bootstrap_cap CONSTANT integer := 25;","replace":"v_bootstrap_cap CONSTANT integer := 26;","occurrences":1}]}
   SELECT count(*) FILTER (WHERE kind = 'reconstruct_allocator_history'),
          count(*) FILTER (WHERE kind = 'refresh_allocator_equity_daily'),
          count(*) FILTER (WHERE api_key_id = v_keys[1])
@@ -1098,11 +1116,11 @@ BEGIN
   PERFORM public.enqueue_refresh_allocator_equity_for_all();
 
   -- ----- S: the cap is checked per BOOK, never per key ---------------------
-  -- RED-UNDER: in migration 20260928140000, move the cap check from before
+  -- RED-UNDER: in migration 20261021120000, move the cap check from before
   --            each book to before each key. The two-key book is then split:
   --            one key reconstructed, the sibling left for a run whose gate
   --            the first key's snapshot row has already closed.
-  -- RED-UNDER-M: {"arm":"S","apply":[{"kind":"edit","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","find":"        EXIT WHEN v_bootstrap_enqueued >= v_bootstrap_cap;\n","replace":"","occurrences":1},{"kind":"insert-after","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","anchor":"            ORDER BY rk.created_at DESC, rk.id\n          LOOP","text":"\n            EXIT WHEN v_bootstrap_enqueued >= v_bootstrap_cap;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S","apply":[{"kind":"edit","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","find":"        EXIT WHEN v_bootstrap_enqueued >= v_bootstrap_cap;\n","replace":"","occurrences":1},{"kind":"insert-after","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","anchor":"            ORDER BY rk.created_at DESC, rk.id\n          LOOP","text":"\n            EXIT WHEN v_bootstrap_enqueued >= v_bootstrap_cap;","occurrences":1}]}
   SELECT count(*) FILTER (WHERE api_key_id = k_s1),
          count(*) FILTER (WHERE api_key_id = k_s2)
     INTO v_rec1, v_rec2
@@ -1170,10 +1188,10 @@ BEGIN
 
   -- ----- X1 ---
   -- RED-UNDER: catch unique_violation ONLY in the bootstrap loop's per-key
-  --            handler in migration 20260928140000. The 40001 then reaches the
+  --            handler in migration 20261021120000. The 40001 then reaches the
   --            per-book block, which rolls back the whole book, so one lost
   --            race costs the refused key's SIBLING its reconstruct.
-  -- RED-UNDER-M: {"arm": "X1", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "EXCEPTION WHEN unique_violation OR serialization_failure THEN\n              RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: reconstruct enqueue skipped", "replace": "EXCEPTION WHEN unique_violation THEN\n              RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: reconstruct enqueue skipped", "occurrences": 1}]}
+  -- RED-UNDER-M: {"arm": "X1", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "EXCEPTION WHEN unique_violation OR serialization_failure THEN\n              RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: reconstruct enqueue skipped", "replace": "EXCEPTION WHEN unique_violation THEN\n              RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: reconstruct enqueue skipped", "occurrences": 1}]}
   SELECT count(*) FILTER (WHERE api_key_id = k_a2 AND kind = 'reconstruct_allocator_history'),
          count(*) FILTER (WHERE api_key_id = k_b AND kind = 'reconstruct_allocator_history'),
          count(*) FILTER (WHERE api_key_id = k_refused AND kind = 'refresh_allocator_equity_daily')
@@ -1243,10 +1261,10 @@ BEGIN
 
   -- ----- X2 ---
   -- RED-UNDER: make the per-book block's WHEN OTHERS re-raise in migration
-  --            20260928140000. The P0001 then reaches the bootstrap
+  --            20261021120000. The P0001 then reaches the bootstrap
   --            sub-block, which rolls back every bootstrap enqueue of the run,
   --            so one refused book costs every later book its reconstruct.
-  -- RED-UNDER-M: {"arm": "X2", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "          RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap of one book was rolled back and skipped; the other books continue (api_key %, SQLSTATE %)', v_boot_key, SQLSTATE;", "replace": "          RAISE;", "occurrences": 1}]}
+  -- RED-UNDER-M: {"arm": "X2", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "          RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap of one book was rolled back and skipped; the other books continue (api_key %, SQLSTATE %)', v_boot_key, SQLSTATE;", "replace": "          RAISE;", "occurrences": 1}]}
   SELECT count(*) FILTER (WHERE api_key_id = k_b AND kind = 'reconstruct_allocator_history'),
          count(*) FILTER (WHERE api_key_id = k_d AND kind = 'refresh_allocator_equity_daily'),
          count(*) FILTER (WHERE api_key_id = k_refused AND kind = 'refresh_allocator_equity_daily')
@@ -1259,10 +1277,10 @@ BEGIN
 
   -- ----- X2t: the skipped book leaves a DURABLE row, not a log line only ---
   -- RED-UNDER: delete the per-book block's public.cron_runs INSERT in
-  --            migration 20260928140000. The skip then leaves a WARNING in the
+  --            migration 20261021120000. The skip then leaves a WARNING in the
   --            server log only, and pg_cron records the run as succeeded, so a
   --            book skipped every day is invisible (review SFH-R2-02).
-  -- RED-UNDER-M: {"arm": "X2t", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "          INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)\n          VALUES ('equity_refresh_fanout', 'error', now(), 'bootstrap_book_skipped',\n                  jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',\n                                     'cause', 'bootstrap_book_skipped',\n                                     'owner_id', v_book.owner_id,\n                                     'api_key_id', v_boot_key,\n                                     'sqlstate', SQLSTATE,\n                                     'message', SQLERRM));", "replace": "          NULL;", "occurrences": 1}]}
+  -- RED-UNDER-M: {"arm": "X2t", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "          INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)\n          VALUES ('equity_refresh_fanout', 'error', now(), 'bootstrap_book_skipped',\n                  jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',\n                                     'cause', 'bootstrap_book_skipped',\n                                     'owner_id', v_book.owner_id,\n                                     'api_key_id', v_boot_key,\n                                     'sqlstate', SQLSTATE,\n                                     'message', SQLERRM));", "replace": "          NULL;", "occurrences": 1}]}
   SELECT count(*) INTO v_trace
     FROM public.cron_runs
    WHERE cron_name = 'equity_refresh_fanout'
@@ -1328,10 +1346,10 @@ BEGIN
 
   -- ----- X3 ---
   -- RED-UNDER: catch unique_violation ONLY in the refresh loop's per-key
-  --            handler in migration 20260928140000 (075's handler). The 40001
+  --            handler in migration 20261021120000 (075's handler). The 40001
   --            then unwinds the whole function, and no allocator gets its
   --            daily refresh that day.
-  -- RED-UNDER-M: {"arm": "X3", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "EXCEPTION WHEN unique_violation OR serialization_failure THEN\n        RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: refresh enqueue skipped", "replace": "EXCEPTION WHEN unique_violation THEN\n        RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: refresh enqueue skipped", "occurrences": 1}]}
+  -- RED-UNDER-M: {"arm": "X3", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "EXCEPTION WHEN unique_violation OR serialization_failure THEN\n        RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: refresh enqueue skipped", "replace": "EXCEPTION WHEN unique_violation THEN\n        RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: refresh enqueue skipped", "occurrences": 1}]}
   SELECT count(*) INTO v_ref_f
     FROM compute_jobs
    WHERE api_key_id = k_f AND kind = 'refresh_allocator_equity_daily';
@@ -1395,11 +1413,11 @@ BEGIN
 
   -- ----- X4 ---
   -- RED-UNDER: delete the bootstrap sub-block's public.cron_runs INSERT in
-  --            migration 20260928140000. An error outside every book then
+  --            migration 20261021120000. An error outside every book then
   --            rolls the whole run's bootstrap back with nothing but a
   --            server-log WARNING, while pg_cron records success, so a cause
   --            that recurs every day disables the bootstrap silently.
-  -- RED-UNDER-M: {"arm": "X4", "apply": [{"kind": "edit", "file": "supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql", "find": "        INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)\n        VALUES ('equity_refresh_fanout', 'error', now(), 'bootstrap_loop_failed',\n                jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',\n                                   'cause', 'bootstrap_loop_failed',\n                                   'sqlstate', v_loop_state,\n                                   'message', v_loop_msg));", "replace": "        NULL;", "occurrences": 1}]}
+  -- RED-UNDER-M: {"arm": "X4", "apply": [{"kind": "edit", "file": "supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql", "find": "        INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)\n        VALUES ('equity_refresh_fanout', 'error', now(), 'bootstrap_loop_failed',\n                jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',\n                                   'cause', 'bootstrap_loop_failed',\n                                   'sqlstate', v_loop_state,\n                                   'message', v_loop_msg));", "replace": "        NULL;", "occurrences": 1}]}
   SELECT count(*) FILTER (WHERE api_key_id = k_h AND kind = 'refresh_allocator_equity_daily'),
          count(*) FILTER (WHERE api_key_id = k_refused AND kind = 'refresh_allocator_equity_daily')
     INTO v_ref_h, v_ref_g
@@ -1428,9 +1446,9 @@ DECLARE
 BEGIN
   -- ----- G: a cross-tenant SECURITY DEFINER enqueue is service_role only ---
   -- RED-UNDER: grant EXECUTE to authenticated AFTER the self-verify block in
-  --            migration 20260928140000, so the apply survives and any
+  --            migration 20261021120000, so the apply survives and any
   --            signed-in user could fan out reconstructs for every book.
-  -- RED-UNDER-M: {"arm":"G","apply":[{"kind":"insert-after","file":"supabase/migrations/20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql","anchor":"END $selfverify$;","text":"\nGRANT EXECUTE ON FUNCTION public.enqueue_refresh_allocator_equity_for_all() TO authenticated;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"G","apply":[{"kind":"insert-after","file":"supabase/migrations/20261021120000_refresh_fanout_owed_key_reconstruct.sql","anchor":"END $selfverify$;","text":"\nGRANT EXECUTE ON FUNCTION public.enqueue_refresh_allocator_equity_for_all() TO authenticated;","occurrences":1}]}
   IF v_oid IS NULL
      OR has_function_privilege('anon', v_oid, 'EXECUTE')
      OR has_function_privilege('authenticated', v_oid, 'EXECUTE')

@@ -349,6 +349,8 @@ export type Database = {
           disconnected_at: string | null
           exchange: string
           history_inclusion: string | null
+          history_reconstruct_attempts: number
+          history_reconstructed_at: string | null
           id: string
           is_active: boolean
           kek_version: number
@@ -379,6 +381,8 @@ export type Database = {
           disconnected_at?: string | null
           exchange: string
           history_inclusion?: string | null
+          history_reconstruct_attempts?: number
+          history_reconstructed_at?: string | null
           id?: string
           is_active?: boolean
           kek_version?: number
@@ -409,6 +413,8 @@ export type Database = {
           disconnected_at?: string | null
           exchange?: string
           history_inclusion?: string | null
+          history_reconstruct_attempts?: number
+          history_reconstructed_at?: string | null
           id?: string
           is_active?: boolean
           kek_version?: number

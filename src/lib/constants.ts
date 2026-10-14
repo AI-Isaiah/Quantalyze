@@ -197,11 +197,68 @@ export const API_KEY_USER_COLUMNS_ARR = [
   "account_currency",
   "account_balance_native",
   "account_balance_usdt_close_date",
+  // Migration 20261014120000 (Phase 167.1.2.1 RECONMARKER, D-04) — GRANT SELECT
+  // (history_reconstructed_at, history_reconstruct_attempts) ON api_keys TO
+  // authenticated, owner-only through the existing RLS. NULL marker = the key
+  // still owes its equity-history reconstruct; the attempt count is the
+  // fan-out's own (D-17). queries.ts derives `historyReconstructFailed` from
+  // the pair (D-09, D-14).
+  // ⛔ Code PR only: PROD applied the GRANT before this list gained the
+  // columns, so no key list selects a column PROD lacks (42501 on every read).
+  "history_reconstructed_at",
+  "history_reconstruct_attempts",
+] as const;
+
+/**
+ * Phase 167.1.2.1 (D-09): how many fan-out attempts a key gets before it is
+ * capped and surfaced as "history could not be rebuilt". ⚠️ Three twins that
+ * must agree: the SQL constant `v_reconstruct_attempt_cap` in
+ * `enqueue_refresh_allocator_equity_for_all`, the Python
+ * `HISTORY_RECONSTRUCT_ATTEMPT_CAP` in `analytics-service`, and this one. The
+ * equality is pinned by `src/__tests__/history-reconstruct-cap-twins.test.ts` (and
+ * its Python twin `analytics-service/tests/test_history_reconstruct_cap_twins.py`),
+ * not by this comment.
+ */
+export const HISTORY_RECONSTRUCT_ATTEMPT_CAP = 5;
+
+/**
+ * Phase 167.1.2.1 review 09 (WR-01): the `sync_status` values after which the
+ * daily fan-out no longer counts or retries a key
+ * (`coalesce(sync_status, '') NOT IN ('sign_in_failed', 'error')` plus
+ * `sync_status IS DISTINCT FROM 'revoked'` in
+ * `enqueue_refresh_allocator_equity_for_all`). A NULL status still qualifies.
+ * The Overview "could not be rebuilt" note reads THIS constant, never an inline
+ * array, so that
+ * `src/__tests__/history-reconstruct-note-predicate-twins.test.ts` can pin the
+ * one list to the migration text: a status added to the SQL reddens that test
+ * until this list follows. Python twin: `_NON_RETRYABLE_SYNC_STATUSES`.
+ */
+export const NON_RETRYABLE_SYNC_STATUSES = [
+  "revoked",
+  "sign_in_failed",
+  "error",
+] as const;
+
+/**
+ * Phase 167.1.2.1 review 09 (WR-02): the `compute_jobs.kind` of an allocator
+ * history reconstruct, and the statuses in which one is still in flight (the
+ * fan-out's `NOT EXISTS (... compute_jobs ... status IN (...))` term; Python
+ * twin `_RECONSTRUCT_IN_FLIGHT_STATUSES`). The note waits on such a job: the
+ * fan-out counts the attempt at ENQUEUE, so the fifth attempt reads as capped
+ * while it is still pending, running or backing off. Pinned to the migration by
+ * the same twin test as the list above.
+ */
+export const RECONSTRUCT_JOB_KIND = "reconstruct_allocator_history";
+export const RECONSTRUCT_IN_FLIGHT_STATUSES = [
+  "pending",
+  "running",
+  "done_pending_children",
+  "failed_retry",
 ] as const;
 
 /** PostgREST projection string derived from the allowlist tuple. */
 export const API_KEY_USER_COLUMNS = API_KEY_USER_COLUMNS_ARR.join(", ") as
-  "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error, last_429_at, disconnected_at, venue_account_id, account_shared_with_api_key_id, account_share_kind, history_inclusion, account_currency, account_balance_native, account_balance_usdt_close_date";
+  "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error, last_429_at, disconnected_at, venue_account_id, account_shared_with_api_key_id, account_share_kind, history_inclusion, account_currency, account_balance_native, account_balance_usdt_close_date, history_reconstructed_at, history_reconstruct_attempts";
 
 /** Single api_keys column name as a narrow string literal union type. */
 export type ApiKeyUserColumn = (typeof API_KEY_USER_COLUMNS_ARR)[number];
