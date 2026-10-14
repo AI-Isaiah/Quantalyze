@@ -144,7 +144,31 @@ type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
  * Public consumers that only read `Strategy & { analytics }` ignore the extra
  * field (structural typing — zero behaviour change for discovery/browse).
  */
-export type RankedStrategyRow = StrategyWithAnalytics & { analyticsPresent: boolean };
+export type RankedStrategyRow = StrategyWithAnalytics & {
+  analyticsPresent: boolean;
+  /**
+   * Phase 170.6.1 / DISCOVERYPHONE (SC-2, D-04) — the exchange(s) this
+   * strategy's TRADES come from: its API key's venue, distinct and lowercase,
+   * read through the published-only `get_published_trade_venues` function.
+   * Set ONLY by `getStrategiesByCategory` (D-06: `getMyStrategies` attaches
+   * none) and ONLY on a row that has a key: a CSV or demo strategy carries no
+   * field at all, so its listed exchange stays the label (D-05). It feeds the
+   * badge's LABEL and TOOLTIP only, never its state (D-07). Display ordering
+   * is the badge's, by label.
+   */
+  tradeVenues?: readonly string[];
+  /**
+   * Phase 170.6.1 / D-05 (review WR-01, SFH-1, SFH-2) — true when the venue
+   * read FAILED or came back malformed, so `tradeVenues` is absent because the
+   * venue is UNKNOWN, not because the strategy has no key. The badge then
+   * renders no venue label at all: falling back to the listed exchange would
+   * put the very wrong label SC-2 removes back on the row as a confident claim.
+   * Absent on a row whose venues were read (including read-and-empty, the
+   * CSV/demo no-key case, which keeps its listed exchange). Set ONLY by
+   * `getStrategiesByCategory`; display only, never a badge state (D-07).
+   */
+  tradeVenuesUnavailable?: true;
+};
 
 // Phase 149 (149-02): PERCENTILE_METRICS / LOWER_IS_BETTER / PercentileMap and
 // the scoring formula itself now live in ./percentile-core — the ONE core both
@@ -460,9 +484,26 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Ran
   // same shape `getMyStrategies` already casts at its own tail, and the runtime
   // contract it stands in for is pinned by the projection tests in
   // queries.test.ts, not by this line.
-  return shapeRankingRows(
-    strategies as unknown as { id: string; strategy_analytics: unknown }[],
-  );
+  const listRows = strategies as unknown as { id: string; strategy_analytics: unknown }[];
+
+  // Phase 170.6.1 / DISCOVERYPHONE (SC-2, D-04) — name the venue each strategy's
+  // trades come from. ONE batched call for the whole list, beside the
+  // trust-signal read inside the shaper, so the two round-trips overlap. D-06:
+  // here and not in `shapeRankingRows`, so `getMyStrategies` is untouched. The
+  // reader never throws: on failure it returns null and every row is marked
+  // `tradeVenuesUnavailable`, so the badge shows NO venue label rather than
+  // the listed exchange (WR-01). A map that merely lacks a row is the no-key
+  // case and keeps the listed exchange (D-05).
+  const [shaped, venues] = await Promise.all([
+    shapeRankingRows(listRows),
+    readPublishedTradeVenues(listRows.map((s) => s.id)),
+  ]);
+
+  return shaped.map((row) => {
+    if (venues === null) return { ...row, tradeVenuesUnavailable: true as const };
+    const tradeVenues = venues.get(row.id);
+    return tradeVenues && tradeVenues.length > 0 ? { ...row, tradeVenues } : row;
+  });
 }
 
 /**
@@ -1251,6 +1292,116 @@ export async function readPublicVerificationSignals(
       tags: { op: "readPublicVerificationSignals" },
       level: "error",
     });
+  }
+
+  return byStrategy;
+}
+
+/**
+ * Phase 170.6.1 / DISCOVERYPHONE (SC-2, D-04) — the exchange each PUBLISHED
+ * strategy's trades come from: its API key's venue (plan 01's
+ * `get_published_trade_venues(uuid[])` SECURITY DEFINER function).
+ *
+ * WHY A FUNCTION AND NOT A TABLE READ. Anon cannot read `api_keys`, and the
+ * Discovery list is anonymous. The function is the trust boundary: its
+ * `RETURNS TABLE (strategy_id, exchange)` is the column allow-list (the key id
+ * is structurally unreachable) and its `status = 'published'` predicate is the
+ * published-gate. So this reader uses the REQUEST client (anon or the signed-in
+ * viewer, both hold EXECUTE) and never `createAdminClient`: a service-role read
+ * on a public page would turn any bug here into a cross-tenant disclosure
+ * (T-170.6.1-15).
+ *
+ * Returns distinct LOWERCASE codes per strategy, in no particular order.
+ * Display ordering is the badge's, by label (orchestrator O-1), because the
+ * label is what a reader sees and the code order is an implementation detail.
+ *
+ * Fail-soft but LOUD (T-170.6.1-17), the `readPublicVerificationSignals` shape,
+ * and UNAVAILABLE is a distinct answer from EMPTY (review WR-01, SFH-2): a
+ * failure (the function renamed, anon EXECUTE revoked, the migration rolled
+ * back, a payload that is not the expected row list) returns `null`, which the
+ * caller turns into `tradeVenuesUnavailable` on every row so the badge shows NO
+ * venue label. An empty map means "read fine, these strategies have no key"
+ * (CSV or demo), which keeps the listed exchange (D-05). The page still
+ * renders either way (a display label does not earn an error boundary). The
+ * console is written FIRST (`captureToSentry` swallows transport failures) and
+ * Sentry is paged at `error`, ONCE per call and never per row (SFH-1).
+ *
+ * A partially malformed payload (some rows without `strategy_id` or
+ * `exchange`) is logged and captured once with the dropped count; the rows
+ * that are well formed still label. A payload whose rows ALL fail the shape
+ * check is wholly malformed (the column was renamed), so it is unavailable.
+ */
+async function readPublishedTradeVenues(
+  strategyIds: readonly string[],
+): Promise<Map<string, string[]> | null> {
+  const byStrategy = new Map<string, string[]>();
+  const ids = Array.from(new Set(strategyIds.filter(Boolean)));
+  if (ids.length === 0) return byStrategy;
+
+  const reportFailure = (message: string, err: unknown, extra?: Record<string, unknown>) => {
+    console.error(`[readPublishedTradeVenues] ${message}`, err);
+    captureToSentry(err, {
+      tags: { op: "readPublishedTradeVenues" },
+      ...(extra ? { extra } : {}),
+      level: "error",
+    });
+  };
+
+  try {
+    const supabase = await createClient();
+    const { data, error } = await supabase.rpc("get_published_trade_venues", {
+      p_strategy_ids: ids,
+    });
+
+    if (error) {
+      reportFailure(
+        "get_published_trade_venues RPC failed — Discovery rows show no venue label:",
+        error,
+      );
+      return null;
+    }
+
+    if (data != null && !Array.isArray(data)) {
+      reportFailure(
+        "get_published_trade_venues returned a payload that is not a row list — Discovery rows show no venue label:",
+        new Error("get_published_trade_venues returned a non-array payload"),
+        { payloadType: typeof data },
+      );
+      return null;
+    }
+
+    const rows = (data ?? []) as {
+      strategy_id?: string | null;
+      exchange?: string | null;
+    }[];
+    let dropped = 0;
+    for (const row of rows) {
+      const venue =
+        typeof row?.exchange === "string" ? row.exchange.trim().toLowerCase() : "";
+      if (!row?.strategy_id || !venue) {
+        dropped += 1;
+        continue;
+      }
+      const venues = byStrategy.get(row.strategy_id);
+      if (!venues) byStrategy.set(row.strategy_id, [venue]);
+      else if (!venues.includes(venue)) venues.push(venue);
+    }
+
+    if (dropped > 0) {
+      const wholly = byStrategy.size === 0;
+      reportFailure(
+        `get_published_trade_venues returned ${dropped} of ${rows.length} malformed row(s) (missing strategy_id or exchange) —${wholly ? " Discovery rows show no venue label:" : " those rows are skipped:"}`,
+        new Error("get_published_trade_venues returned malformed rows"),
+        { droppedRows: dropped, totalRows: rows.length },
+      );
+      if (wholly) return null;
+    }
+  } catch (err) {
+    reportFailure(
+      "get_published_trade_venues read threw unexpectedly — Discovery rows show no venue label:",
+      err,
+    );
+    return null;
   }
 
   return byStrategy;

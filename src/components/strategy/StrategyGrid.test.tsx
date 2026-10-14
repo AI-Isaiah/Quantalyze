@@ -164,3 +164,76 @@ describe("StrategyGrid - Verified badge follows the public trust signal (Phase 1
     expect(container.textContent).not.toContain("Verified");
   });
 });
+
+describe("StrategyGrid - the card names the key's venue (Phase 170.6.1 DISCOVERYPHONE, SC-2, D-05, O-2)", () => {
+  /**
+   * The grid is the Discovery table's other view mode (D-06), fed by the same
+   * `getStrategiesByCategory` rows, so the same defect lives here: a card read
+   * "Bybit" from `supported_exchanges` while its connected key sits on OKX.
+   * A recent `trades_fetched_at` lets the badge render its `current` state.
+   */
+  function venueCard(
+    exchanges: string[],
+    tradeVenues?: readonly string[],
+    tradeVenuesUnavailable?: boolean,
+  ): StrategyWithAnalytics & {
+    tradeVenues?: readonly string[];
+    tradeVenuesUnavailable?: boolean;
+  } {
+    const row = makeStrategy({
+      id: STRATEGY_ID,
+      name: "Venue Card",
+      supported_exchanges: exchanges,
+    });
+    row.analytics.trades_fetched_at = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    return { ...row, tradeVenues, tradeVenuesUnavailable };
+  }
+
+  function badgeOf(container: HTMLElement): HTMLElement {
+    const badge = container.querySelector<HTMLElement>("span[title*='rades']");
+    if (!badge) throw new Error("no SyncBadge on the card");
+    return badge;
+  }
+
+  it("a card listed as Bybit whose key is on OKX reads OKX and says it is listed as Bybit", () => {
+    const { container } = render(
+      <StrategyGrid strategies={[venueCard(["bybit"], ["okx"])]} categorySlug="crypto-sma" />,
+    );
+    const badge = badgeOf(container);
+    expect(badge.querySelector("span.font-medium")?.textContent).toBe("OKX");
+    expect(badge.getAttribute("title")).toContain("Listed as Bybit; trades come from OKX");
+  });
+
+  it("a card with no venues keeps its listed exchange and makes no mismatch claim", () => {
+    const { container } = render(
+      <StrategyGrid strategies={[venueCard(["bybit"])]} categorySlug="crypto-sma" />,
+    );
+    const badge = badgeOf(container);
+    expect(badge.querySelector("span.font-medium")?.textContent).toBe("Bybit");
+    expect(badge.getAttribute("title")).not.toContain("Listed as");
+  });
+
+  it("a card marked tradeVenuesUnavailable shows NO venue label, not its listed Bybit, and no venue claim (review WR-01)", () => {
+    const { container } = render(
+      <StrategyGrid
+        strategies={[venueCard(["bybit"], undefined, true)]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    const badge = badgeOf(container);
+    expect(badge.querySelector("span.font-medium")).toBeNull();
+    expect(badge.textContent).not.toContain("Bybit");
+    const title = badge.getAttribute("title") ?? "";
+    expect(title).toContain("Trades last fetched");
+    expect(title).not.toContain("from the exchange");
+    expect(title).not.toContain("Bybit");
+    expect(title).not.toContain("Listed as");
+  });
+
+  it("a listed deribit, with no venues, renders Deribit (O-2: display names, not the raw code)", () => {
+    const { container } = render(
+      <StrategyGrid strategies={[venueCard(["deribit"])]} categorySlug="crypto-sma" />,
+    );
+    expect(badgeOf(container).querySelector("span.font-medium")?.textContent).toBe("Deribit");
+  });
+});

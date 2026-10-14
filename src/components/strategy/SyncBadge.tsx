@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
+import { EXCHANGE_DISPLAY } from "@/lib/closed-sets";
 import {
   resolveEffectiveRecency,
   resolveTradeFetch,
@@ -50,7 +51,44 @@ interface SyncBadgeProps {
    * show none today.
    */
   tradeFetchVenue: string | null;
+  /**
+   * The strategy's LISTED exchange (`supported_exchanges[0]`), rendered as the
+   * visible venue label when no key venue is known. Display only; it never
+   * feeds `resolveTradeFetch`.
+   */
   exchange?: string | null;
+  /**
+   * Phase 170.6.1 / DISCOVERYPHONE (SC-2, D-05, D-07) — the exchange(s) the
+   * strategy's trades actually come from (its API key's venue, from
+   * `get_published_trade_venues`), or null/absent when it has no key (CSV or
+   * demo) or the read failed. When present it REPLACES the listed exchange as
+   * the visible label and names the venue in the "Trades fetched" tooltip.
+   *
+   * ⛔ LABEL AND TOOLTIP ONLY. It is separate from `tradeFetchVenue` exactly as
+   * `exchange` is, and it never reaches `resolveTradeFetch`: feeding the
+   * state's venue is a TRADESYNC decision (D-07), and doing it here would turn
+   * a null-stamp row into "No trade fetch recorded yet" on a surface that never
+   * claimed it. Dot, sentence and render gate are identical with and without it.
+   */
+  tradeVenues?: readonly string[] | null;
+  /**
+   * Phase 170.6.1 / O-3 — the strategy's WHOLE listed set
+   * (`supported_exchanges`). The mismatch sentence fires only when some key
+   * venue is NOT in this set (case-insensitive); comparing against
+   * `exchange` alone would flag a strategy that lists both venues. Absent or
+   * empty means there is no listing to disagree with, so no cue.
+   */
+  listedExchanges?: readonly string[] | null;
+  /**
+   * Phase 170.6.1 / D-05 (review WR-01) — true when the venue read FAILED or
+   * came back malformed, so the venue is UNKNOWN (distinct from `tradeVenues`
+   * being absent because the strategy has no key). The badge then names NO
+   * venue: no label, no "from the exchange" wording in the tooltip, and no
+   * mismatch cue, instead of falling back to the listed exchange, which is the
+   * wrong label SC-2 removes. Ignored when `tradeVenues` is non-empty. Display
+   * only: it never reaches `resolveTradeFetch` (D-07).
+   */
+  tradeVenuesUnavailable?: boolean;
   className?: string;
 }
 
@@ -82,11 +120,34 @@ function timeAgo(date: Date): string {
   return `${days}d ago`;
 }
 
-const EXCHANGE_LABELS: Record<string, string> = {
-  binance: "Binance",
-  okx: "OKX",
-  bybit: "Bybit",
-};
+/**
+ * Phase 170.6.1 / O-2 — `EXCHANGE_DISPLAY` is the ONE label source (it carries
+ * every `SupportedExchange` and makes a missing label a compile error). This
+ * badge used to keep a private three-entry map, so a listed `deribit`, `sfox`
+ * or `mt5` rendered raw; it now renders `Deribit`, `sFOX`, `MT5`. An unknown
+ * code falls back to itself, never to a blank. `hasOwnProperty` keeps a code
+ * like `constructor` from resolving to an inherited member.
+ */
+function exchangeLabelOf(code: string): string {
+  const key = code.trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(EXCHANGE_DISPLAY, key)
+    ? EXCHANGE_DISPLAY[key as keyof typeof EXCHANGE_DISPLAY]
+    : code;
+}
+
+/**
+ * Distinct venue LABELS ordered case-insensitively by label (orchestrator
+ * O-1), so OKX plus Bybit reads `Bybit, OKX`. No locale: a locale-aware
+ * compare would order differently per viewer.
+ */
+function venueLabelsOf(venues: readonly string[] | null | undefined): string[] {
+  const labels = Array.from(new Set((venues ?? []).filter(Boolean).map(exchangeLabelOf)));
+  return labels.sort((a, b) => {
+    const la = a.toLowerCase();
+    const lb = b.toLowerCase();
+    return la < lb ? -1 : la > lb ? 1 : 0;
+  });
+}
 
 /**
  * How bad each verdict is, so the two facts are directly comparable (UI-SPEC
@@ -139,6 +200,9 @@ export function SyncBadge({
   tradesFetchedAt,
   tradeFetchVenue,
   exchange,
+  tradeVenues,
+  listedExchanges,
+  tradeVenuesUnavailable,
   className,
 }: SyncBadgeProps) {
   const now = new Date();
@@ -188,9 +252,35 @@ export function SyncBadge({
       ? ` Analytics last computed ${timeAgo(computedDate)}.`
       : "";
 
-  const exchangeLabel = exchange
-    ? EXCHANGE_LABELS[exchange.toLowerCase()] ?? exchange
-    : null;
+  // Phase 170.6.1 / D-05 — the label names the venue the trades come from when
+  // the strategy has a key, else the listed exchange. Everything here is
+  // display: `trade` above was resolved from the stamp and `tradeFetchVenue`
+  // alone, so none of it can move a state (D-07).
+  const venueLabels = venueLabelsOf(tradeVenues);
+  const venueNames = venueLabels.length > 0 ? venueLabels.join(", ") : null;
+  // A failed or malformed venue read (WR-01) is an UNKNOWN venue: name nothing,
+  // not the listed exchange and not the generic "the exchange".
+  const venueUnknown = !venueNames && tradeVenuesUnavailable === true;
+  const exchangeLabel = venueUnknown
+    ? null
+    : (venueNames ?? (exchange ? exchangeLabelOf(exchange) : null));
+  const fromVenue = venueUnknown ? null : (venueNames ?? "the exchange");
+  const fromClause = fromVenue ? ` from ${fromVenue}` : "";
+
+  // The mismatch cue (O-3): some key venue is outside the strategy's WHOLE
+  // listed set. {Listed} is the label of `listedExchanges[0]`, falling back to
+  // `exchange` only when no listed set was handed over.
+  const listedSet = new Set(
+    (listedExchanges ?? []).filter(Boolean).map((e) => e.trim().toLowerCase()),
+  );
+  const venueOutsideListing =
+    listedSet.size > 0 &&
+    (tradeVenues ?? []).some((v) => v && !listedSet.has(v.trim().toLowerCase()));
+  const listedFirst = listedExchanges?.find(Boolean) ?? exchange ?? null;
+  const mismatchSuffix =
+    venueNames && venueOutsideListing && listedFirst
+      ? ` Listed as ${exchangeLabelOf(listedFirst)}; trades come from ${venueNames}.`
+      : "";
 
   // A series bar dated ahead but inside the day allowance is a CURRENT bar
   // (WR-06-UTC): `timeAgo` would call it "in the future" beside a positive
@@ -211,13 +301,13 @@ export function SyncBadge({
     dot = seriesDot;
     sentence = <span>Track record ends {seriesAge()}</span>;
     if (trade.state === "not_applicable") {
-      title = `Track record ends ${seriesAge()}.${computedSuffix}`;
+      title = `Track record ends ${seriesAge()}.${mismatchSuffix}${computedSuffix}`;
     } else {
       const tradeSentence =
         trade.state === "never"
           ? "No trade fetch recorded yet."
           : `Trades last fetched ${timeAgo(trade.fetchedAt!)}.`;
-      title = `Track record ends ${seriesAge()}. ${tradeSentence}${computedSuffix}`;
+      title = `Track record ends ${seriesAge()}. ${tradeSentence}${mismatchSuffix}${computedSuffix}`;
     }
   } else if (trade.state === "stale") {
     const age = timeAgo(trade.fetchedAt!);
@@ -229,7 +319,7 @@ export function SyncBadge({
         <span className="text-negative">stale</span>
       </span>
     );
-    title = `No trades fetched from the exchange in more than ${TRADE_FETCH_STALE_DAYS} days. Last fetch ${age}.${computedSuffix}`;
+    title = `No trades fetched${fromClause} in more than ${TRADE_FETCH_STALE_DAYS} days. Last fetch ${age}.${mismatchSuffix}${computedSuffix}`;
   } else if (trade.state === "future") {
     dot = FUTURE_SERIES_DOT;
     sentence = (
@@ -239,16 +329,16 @@ export function SyncBadge({
         future — check data
       </span>
     );
-    title = `The recorded trade fetch time is in the future, so no fetch age is shown.${computedSuffix}`;
+    title = `The recorded trade fetch time is in the future, so no fetch age is shown.${mismatchSuffix}${computedSuffix}`;
   } else if (trade.state === "never") {
     dot = FUTURE_SERIES_DOT;
     sentence = <span>No trade fetch recorded yet</span>;
-    title = `No trade fetch is recorded for this strategy yet. Trades are fetched daily.${computedSuffix}`;
+    title = `No trade fetch is recorded for this strategy yet. Trades are fetched daily.${mismatchSuffix}${computedSuffix}`;
   } else {
     const age = timeAgo(trade.fetchedAt!);
     dot = FRESHNESS_COLORS.fresh.dot;
     sentence = <span>Trades fetched {age}</span>;
-    title = `Trades last fetched from the exchange ${age}. Fetched daily; marked stale after ${TRADE_FETCH_STALE_DAYS} days without a fetch.${computedSuffix}`;
+    title = `Trades last fetched${fromClause} ${age}. Fetched daily; marked stale after ${TRADE_FETCH_STALE_DAYS} days without a fetch.${mismatchSuffix}${computedSuffix}`;
   }
 
   return (

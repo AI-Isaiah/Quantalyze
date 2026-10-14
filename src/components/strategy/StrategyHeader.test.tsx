@@ -74,4 +74,28 @@ describe("StrategyHeader", () => {
     expect(container.textContent).not.toContain("stale");
     expect(container.textContent).not.toContain("synced");
   });
+
+  /**
+   * Phase 170.6.1 / DISCOVERYPHONE (O-2, D-07) — as far as it is reachable.
+   * The literal pin "StrategyHeader renders Deribit" cannot hold: this header
+   * passes `tradesFetchedAt={null}` and `seriesEnd={null}`, so its badge
+   * resolves to `bound === "none"` and renders NOTHING (the test above), and
+   * making it render would change a badge STATE, which D-07 forbids. The
+   * `Deribit` label pin therefore lives at the SyncBadge level
+   * (SyncBadge.venue.test.tsx) and on the StrategyTable and StrategyGrid mounts,
+   * the two that can render one. What this header CAN assert is that it never
+   * shows the raw code, and that the badge still renders nothing.
+   * (Measured 2026-10-14: no page mounts <StrategyHeader> at all.)
+   */
+  it("renders no raw deribit and still renders no badge for a deribit-listed strategy", () => {
+    const { container } = render(
+      <StrategyHeader
+        strategy={makeStrategy({ supported_exchanges: ["deribit"] })}
+        computedAt={new Date().toISOString()}
+      />,
+    );
+    expect(container.textContent).not.toContain("deribit");
+    expect(container.textContent).not.toMatch(/Deribit|Trades fetched|No trade fetch|Track record/);
+    expect(container.querySelector("span.rounded-full")).toBeNull();
+  });
 });
