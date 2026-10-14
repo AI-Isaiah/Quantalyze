@@ -45,6 +45,12 @@ const baseRow = {
   account_currency: null,
   account_balance_native: null,
   account_balance_usdt_close_date: null,
+  // Phase 167.1.2.1 plan 06 (D-04, D-09) — the per-key reconstruct marker and
+  // the fan-out's attempt count joined the projection (migration
+  // 20261014120000 GRANTs them), so the fixture carries them for `.strict()`
+  // to accept the row.
+  history_reconstructed_at: null,
+  history_reconstruct_attempts: 0,
 };
 
 describe("ApiKeyRowSchema — M-0583 trust-boundary guard", () => {
@@ -188,6 +194,40 @@ describe("ApiKeyRowSchema — M-0583 trust-boundary guard", () => {
     expect(out[0].account_balance_native).toBe(0.4213);
     expect(out[0].account_balance_usdt_close_date).toBe("2026-10-08");
   });
+
+  // Phase 167.1.2.1 plan 06 (D-04, D-09). The Overview's "history could not be
+  // rebuilt" note is computed from these two values, so a malformed pair must
+  // drop the row at this boundary rather than read as "not capped".
+  it("preserves a capped key (marker NULL, five attempts) and a marked key", () => {
+    const capped = parseApiKeyRows([{ ...baseRow, history_reconstruct_attempts: 5 }]);
+    expect(capped).toHaveLength(1);
+    expect(capped[0].history_reconstructed_at).toBeNull();
+    expect(capped[0].history_reconstruct_attempts).toBe(5);
+    const marked = parseApiKeyRows([
+      { ...baseRow, history_reconstructed_at: "2026-10-01T05:00:00+00:00" },
+    ]);
+    expect(marked).toHaveLength(1);
+    expect(marked[0].history_reconstructed_at).toBe("2026-10-01T05:00:00+00:00");
+  });
+
+  it.each([
+    ["a negative attempt count", { history_reconstruct_attempts: -1 }],
+    ["a fractional attempt count", { history_reconstruct_attempts: 1.5 }],
+    ["a string attempt count", { history_reconstruct_attempts: "5" }],
+    ["a prose marker", { history_reconstructed_at: "yesterday" }],
+  ])("rejects %s at the boundary", (_name, bad) => {
+    expect(parseApiKeyRows([{ ...baseRow, ...bad }])).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it.each(["history_reconstructed_at", "history_reconstruct_attempts"] as const)(
+    "rejects rows missing %s (strict schema)",
+    (field) => {
+      const row: Record<string, unknown> = { ...baseRow };
+      delete row[field];
+      expect(parseApiKeyRows([row])).toHaveLength(0);
+    },
+  );
 
   it("coerces NUMERIC-as-string account_balance_native", () => {
     const out = parseApiKeyRows([{ ...baseRow, account_currency: "BTC", account_balance_native: "0.4213" }]);

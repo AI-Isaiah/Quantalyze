@@ -349,6 +349,71 @@ baseline / 68 restore legs, `unreachable: 27`, `lane-blocked: 0`, `per-arm lane 
 supersedes the 668 reading above as the latest dated one and is itself not a live constant: read
 `FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
 
+⚠️ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): two gate files moved for migration
+`20261021120000`, which re-bases `enqueue_refresh_allocator_equity_for_all` so the daily fan-out
+reconstructs every OWED key (marker NULL, attempts under 5, nothing in flight) on a book with
+snapshots as well as without. (1) NEW gate `supabase/tests/test_refresh_fanout_owed_key_reconstruct.sql`
+(plan 04), twelve arms, O1-O10, O6t and G, each on an `edit` or `sql` step, none waived. (2) The
+167.1.2 gate `supabase/tests/test_refresh_fanout_zero_snapshot_bootstrap.sql` was REPOINTED to the
+new body in the same PR, because `sql-tests` applies every migration and the old file went RED at
+arm N4d on any lane that applied it, while `sql-mutation`'s explicit apply list kept it green and
+hid that. Its header now holds one machine-checked `CLASS` row per original arm (32): 30 KEEP, one
+RE-EXPRESSED (N4d: the done-row guard became a marked-key guard on the `bk` copy; the `bq` and `rk`
+marker terms are arm O4's), and one MOVED (N5 -> O1: N5 asserted that a book WITH snapshots is never
+sent a reconstruct, the exact inverse of SC-2, so its assertion and twin were removed and O1 holds
+the inverse). The status-list finds of N4, N4r and F were re-derived because the lists lost `'done'`.
+A DATED reading of one full `node scripts/mutation-runner/run.mjs`, tree committed and frozen, exit
+0: `scope: FULL 69/69 annotated files`, `coverage: files 69/96`, `arms: 684/684/0`, `biting: 684`,
+`lane-invocations: 684` plus 69 baseline / 69 restore legs, `unreachable: 27`, `lane-blocked: 0`,
+`per-arm lane time: mean 2.8s over 684 arm run(s)`, `No defects.`; per-file rows
+`test_refresh_fanout_owed_key_reconstruct.sql: sections 11 / judged 12 / annotated 12 / waived 0 /
+biting 12` and `test_refresh_fanout_zero_snapshot_bootstrap.sql: sections 26 / judged 31 / annotated
+31 / waived 0 / biting 31` (was 27 / 32). The lint corpus reads `scanned 96 file(s)`. It supersedes
+the 673 reading above as the latest dated one and is itself not a live constant: read `FILES_FLOOR`
+and `ARMS_FLOOR` by SYMBOL. An earlier first full run of the same tree reported one defect, a
+`dirty-checkout` (files edited while it ran); it was rerun on a committed tree, which is the run
+recorded here.
+
+⚠️ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round, SFH F2 + F3): migration
+`20261021120000` (unmerged, edited in place) gained two guarded handlers and the owed-key gate
+`supabase/tests/test_refresh_fanout_owed_key_reconstruct.sql` gained five arms, none waived. F3: the
+per-book handler of the bootstrap loop rolled back a failing book's attempt increments with the book,
+so a book that raised every day never reached the cap; it now counts one attempt on the one key that
+was being enqueued, after the rollback (O11 the count, O11i the innocent sibling is not charged, O11g a
+count that itself raises is contained to its own book). F2: the capped-key count's handler wrote a
+WARNING only; it now writes a `history_reconstruct_capped_trace_failed` cron_runs row (O12), nested and
+guarded so a sink that refuses it too never cancels the refresh (O12g). O11 and O12 were seen RED on
+the unfixed migration body; O11i, O11g and O12g are regression guards on the new handlers and are
+RED only under their own twins. A DATED reading of one full `node scripts/mutation-runner/run.mjs`,
+tree committed and frozen, exit 0: `scope: FULL 69/69 annotated files`, `coverage: files 69/96`,
+`arms: 689/689/0`, `biting: 689`, `lane-invocations: 689` plus 69 baseline / 69 restore legs,
+`unreachable: 27`, `lane-blocked: 0`, `per-arm lane time: mean 2.1s over 689 arm run(s)`, `No defects.`;
+per-file rows `test_refresh_fanout_owed_key_reconstruct.sql: sections 13 / judged 17 / annotated 17 /
+waived 0 / biting 17` (was 11 / 12) and the 167.1.2 gate unchanged at 26 / 31. The lint corpus still
+reads `scanned 96 file(s)`. It supersedes the 684 reading above as the latest dated one and is itself
+not a live constant: read `FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round 2, SFH R2-1): migration
+`20261021120000` (unmerged, edited in place) narrowed the per-book handler's attempt count and the
+owed-key gate `supabase/tests/test_refresh_fanout_owed_key_reconstruct.sql` gained three arms, none
+waived. The round-1 handler counted one attempt for ANY error that escaped the per-key handler, so a
+deadlock, a lock timeout or an error raised away from the key's enqueue could cap a key that never had a
+job, and a key capped without a job has no worker-side Sentry event. The handler now counts only while
+`v_boot_in_enqueue` is TRUE (the key's own enqueue section) and only for a SQLSTATE outside class 40,
+class 53 and 55P03. O13 (40P01), O13l (55P03) and O13r (53200) each assert the key keeps its seeded
+attempts, has no job, and still leaves its `bootstrap_book_skipped` trace row; each was seen RED on the
+previous body (5 attempts, expected 4) and GREEN here, with its own edit mutation. The attribution flag
+has NO gate arm: the per-key query ends in a blocking Sort, so every predicate runs before the first
+row and a later cursor advance can raise system errors only, which the class clauses already exclude;
+that limit is recorded in the migration header. A DATED reading of one full
+`node scripts/mutation-runner/run.mjs`, tree committed and frozen, exit 0: `scope: FULL 69/69 annotated
+files`, `coverage: files 69/96`, `arms: 692/692/0`, `biting: 692`, `lane-invocations: 692` plus 69
+baseline / 69 restore legs, `unreachable: 27`, `lane-blocked: 0`, `per-arm lane time: mean 2.3s over 692
+arm run(s)`, `No defects.`; per-file rows `test_refresh_fanout_owed_key_reconstruct.sql: sections 14 /
+judged 20 / annotated 20 / waived 0 / biting 20` (was 13 / 17) and the 167.1.2 gate unchanged at 26 / 31.
+It supersedes the 689 reading above as the latest dated one and is itself not a live constant: read
+`FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
+
 ⚠️ CURRENCY 2026-10-14 (Phase 170.6.1 DISCOVERYPHONE, plan 03): the gate file
 `supabase/tests/test_get_published_trade_venues.sql` (migration 20261019120000: the published-only
 SECURITY DEFINER function `get_published_trade_venues(uuid[])` that names the venue a published
@@ -391,5 +456,51 @@ mean 4.9s over 697 arm run(s)`, `No defects.`, exit 0. `node scripts/lint-sql-ga
 `scanned 97 file(s); 0 finding(s)`; `scripts/baseline-content-drift-check.mjs` compared 130
 functions (MATCH 126, DRIFT 3, SNAPSHOT_MISSING 1, the one being `ops_staleness_check/0` until its
 migration applies to PROD and the baseline is re-dumped). It supersedes the 657 reading above as
+the latest dated one and is itself not a live constant: read `FILES_FLOOR`, `ARMS_FLOOR` and
+`COMPARED_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, first merge of origin/main, SUPERSEDED by the later reading below, kept as lineage): the two branches'
+new gate files meet. RECONMARKER's owed-key fan-out gate
+(`supabase/tests/test_refresh_fanout_owed_key_reconstruct.sql`, migration
+`20261021120000_refresh_fanout_owed_key_reconstruct.sql`) and DISCOVERYPHONE's
+`supabase/tests/test_get_published_trade_venues.sql` each counted one new annotated file against
+main's 68 and said 69, so the union is 70 of 97. M2 was re-stamped from 20261018120000 to
+20261021120000 in the same step, so it sorts after DISCOVERYPHONE (20261019120000) and OUTAGEALERT
+(20261020120000). A DATED reading of one full `node scripts/mutation-runner/run.mjs` on the committed,
+re-stamped tree, no file edited during it, exit 0: `scope: FULL 70/70 annotated files`,
+`lane-concurrency: 4`, `coverage: files 70/97`, `arms: 702/702/0`, `biting: 702`,
+`lane-invocations: 702` plus 70 baseline / 70 restore legs, `unreachable: 27`, `lane-blocked: 0`,
+`per-arm lane time: mean 2.2s over 702 arm run(s)`, `No defects.`; per-file rows unchanged for both
+(`test_refresh_fanout_owed_key_reconstruct.sql: sections 14 / judged 20 / annotated 20 / waived 0 /
+biting 20`, the 167.1.2 gate 26 / 31). The lint corpus reads `scanned 97 file(s)`; `COMPARED_FLOOR`
+stays 129 (M2 redefines a function that already existed). `baseline-content-drift-check.mjs` reads
+DRIFT 4 and SNAPSHOT_MISSING 1 until the post-apply re-dump: the extra DRIFT is
+`enqueue_refresh_allocator_equity_for_all`, whose snapshot is M2's body while the committed dump still
+carries the previous one. It supersedes the 683 reading above as the latest dated one and is itself
+not a live constant: read `FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0):
+main now carries DISCOVERYPHONE's and OUTAGEALERT's gate files (70 annotated of 97, 697 arms), and
+this branch adds the owed-key fan-out gate on top. A DATED reading of one full
+`node scripts/mutation-runner/run.mjs` on the COMMITTED merge, no file edited during it, run with
+main's constants (70 / 697) in place, exit 0: `scope: FULL 71/71 annotated files`,
+`lane-concurrency: 4`, `coverage: files 71/98`, `arms: 716/716/0`, `biting: 716`,
+`lane-invocations: 716` plus 71 baseline / 71 restore legs, `unreachable: 27`, `lane-blocked: 0`,
+`lane-probe: pg_cron AVAILABLE`, `per-arm lane time: mean 1.4s over 716 arm run(s)`,
+`No defects.`. Per-file rows: `test_refresh_fanout_owed_key_reconstruct.sql: sections 14 / judged 20 /
+annotated 20 / waived 0 / biting 20`, `test_refresh_fanout_zero_snapshot_bootstrap.sql: 26 / 31 / 31 / 0
+/ 31`, `test_ops_staleness_check.sql: 14 / 14 / 14 / 0 / 14`, `test_get_published_trade_venues.sql:
+10 / 10 / 10 / 0 / 10`. `FILES_FLOOR` 70 -> 71 and `ARMS_FLOOR` 697 -> 716 (+19 net: the owed-key
+gate's 20 arms less N5, moved out of the 167.1.2 gate); `WAIVED_CEILING` stays 0. Every dependent
+pin was seen RED at main's value first (the ratchet read `RATCHET STALE: 71 of 98 gate files are now
+annotated but FILES_FLOOR is still 70`; the parser file read `expected 716 to be 697`, `809 to be
+788` and `98 to be 97`; the lint corpus pin read `scanned 98` against 97). `lint-sql-gates` scans 98
+files; `COMPARED_FLOOR` stays 130. After the second merge of origin/main (v0.131.7.1, the baseline
+re-dump after the PROD apply of OUTAGEALERT's migration, which carries no gate or migration change
+so the run above stands) the drift check reads `functions compared 130 - MATCH 126, DRIFT 4,
+SNAPSHOT_MISSING 0`, findings 1: `enqueue_refresh_allocator_equity_for_all`, whose snapshot is M2's
+body, until M2 applies to PROD and the baseline is re-dumped again; the other three DRIFT rows are
+the allowlisted ones. M2's stamp `20261021120000` sorts above
+OUTAGEALERT's `20261020120000`, the highest on `origin/main`. It supersedes the 702 reading above as
 the latest dated one and is itself not a live constant: read `FILES_FLOOR`, `ARMS_FLOOR` and
 `COMPARED_FLOOR` by SYMBOL.

@@ -410,6 +410,22 @@ def _install_fake_preflight(monkeypatch, venue: str, fake_supabase: FakeSupabase
     async def _fake_preflight(job, caller_name):
         # The handler passes its own api_key_id; allow tests to override key
         requested_id = job.get("api_key_id")
+        # Phase 167.1.2.1 D-04: a completed reconstruct stamps its key's
+        # history_reconstructed_at, and that write FAILS the job when it matches
+        # no api_keys row. So the key under reconstruction needs a row in the
+        # store. Reconstruct jobs only (a refresh job would gain a phantom
+        # eligible key), and setdefault, so a row a test seeded itself (a marker
+        # it set, a sibling's fields) is left alone.
+        if job.get("kind") == "reconstruct_allocator_history":
+            _own_id = requested_id or API_KEY_ID_1
+            fake_supabase.store.setdefault(("api_keys", (_own_id,)), {
+                "id": _own_id,
+                "user_id": ALLOCATOR_ID,
+                "exchange": venue,
+                "is_active": True,
+                "history_reconstructed_at": None,
+                "history_reconstruct_attempts": 0,
+            })
         if requested_id and requested_id != API_KEY_ID_1:
             return jw._ExchangeContext(
                 supabase=fake_supabase,
@@ -581,19 +597,15 @@ async def test_reconstruct_idempotent(monkeypatch):
         (r["allocator_id"], r["asof"]): r.get("reconstructed_at") for r in rows_first
     }
 
-    # Simulate the real worker: after a successful run, compute_jobs has a
-    # status='done' row for this api_key. The per-api_key gate (migration
-    # 076) then short-circuits any subsequent reconstruct for the same
-    # key, which is the production idempotency guarantee — not the
-    # DO NOTHING at the persist layer. Without this seed, the second run
-    # would legitimately purge + re-upsert (sole-key fresh-source
-    # behavior from the 2026-04-22 /investigate fix).
-    fake_supabase.store[("compute_jobs", ("done-first-run",))] = {
-        "id": "done-first-run",
-        "api_key_id": API_KEY_ID_1,
-        "kind": "reconstruct_allocator_history",
-        "status": "done",
-    }
+    # The real worker: after a successful run the key carries its
+    # history_reconstructed_at marker (Phase 167.1.2.1 D-04), and the per-api_key
+    # gate (migration 076) short-circuits any subsequent reconstruct for the
+    # same key, which is the production idempotency guarantee — not the
+    # DO NOTHING at the persist layer. The first run set it; nothing is seeded
+    # (a retained `done` compute_jobs row is no longer the gate).
+    assert fake_supabase.store[("api_keys", (API_KEY_ID_1,))][
+        "history_reconstructed_at"
+    ] is not None, "the first run must record its completion on the key"
 
     # Second run — handler early-returns via the per-api_key gate; the
     # rows written by the first run remain untouched.
@@ -1722,18 +1734,25 @@ async def test_m076_reconstruct_runs_for_new_api_key_when_allocator_has_other_ke
 @pytest.mark.asyncio
 async def test_m076_reconstruct_short_circuits_when_same_api_key_already_done(monkeypatch):
     """Migration 076 regression: the per-api_key gate must still gate.
-    When a `done` reconstruct_allocator_history compute_jobs row exists
-    for the SAME api_key, the handler must short-circuit without
-    touching the exchange — protects against duplicate retries."""
+    When the key's ``history_reconstructed_at`` marker is set, the handler
+    must short-circuit without touching the exchange — protects against
+    duplicate retries.
+
+    Phase 167.1.2.1 (D-04): the gate is the MARKER, not a retained `done`
+    compute_jobs row. This test used to seed a `done` row; that row is no
+    longer evidence (a D-15 no-op also ends `done`, plan-checker B1), and the
+    inverse is pinned in test_reconstruct_marker_writer.py."""
     fake_supabase = FakeSupabaseClient()
     audit_mock = _install_fake_audit(monkeypatch)
 
-    # Pre-existing DONE reconstruct job for API_KEY_ID_1.
-    fake_supabase.store[("compute_jobs", ("done-job-1",))] = {
-        "id": "done-job-1",
-        "api_key_id": API_KEY_ID_1,
-        "kind": "reconstruct_allocator_history",
-        "status": "done",
+    # The key was reconstructed: its marker is set.
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1,
+        "user_id": ALLOCATOR_ID,
+        "exchange": "binance",
+        "is_active": True,
+        "history_reconstructed_at": "2026-04-01T00:00:00+00:00",
+        "history_reconstruct_attempts": 1,
     }
 
     mock_exchange = AsyncMock()
@@ -1759,7 +1778,7 @@ async def test_m076_reconstruct_short_circuits_when_same_api_key_already_done(mo
     # No exchange calls — gate must short-circuit BEFORE any I/O.
     assert mock_exchange.fetch_my_trades.await_count == 0, (
         "per-api_key gate failed to short-circuit: handler still hit "
-        "fetch_my_trades despite an existing done job for this key."
+        "fetch_my_trades despite a set history_reconstructed_at for this key."
     )
 
     # Audit records the new short-circuit reason.
@@ -4154,16 +4173,24 @@ def _head_request_without_count_header(fake_supabase, monkeypatch):
         data: list = []
 
     class _HeadTable:
-        def select(self, *a, **kw): return self
+        # Only the sibling COUNT (a head request) gets the header-less answer.
+        # Phase 167.1.2.1 D-04: the same table is also read and updated for the
+        # per-key reconstruct marker, and those calls go to the real fake.
+        def __init__(self, real): self._real = real
+        def select(self, *a, **kw):
+            if kw.get("head"):
+                return self
+            return self._real.select(*a, **kw)
         def eq(self, *a, **kw): return self
         def neq(self, *a, **kw): return self
         def execute(self): return _Res()
+        def __getattr__(self, name): return getattr(self._real, name)
 
     original_table = fake_supabase.table
 
     def _table(name):
         if name == "api_keys":
-            return _HeadTable()
+            return _HeadTable(original_table(name))
         return original_table(name)
 
     monkeypatch.setattr(fake_supabase, "table", _table)
