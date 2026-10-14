@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.131.5.2] - 2026-10-14 — RECORDS: restore #1019's records, close MT5SCRUB, PORTFOLIOANALYTICS, FACTSHEETV2PANELS and COPYPASS
+
+### Fixed
+- The planning records #1019 landed (FLOWTIMING and TRADESYNC closure, the 170.6 split in three, RECONMARKER routing) are back on main. The NAVBREACH squash #1020 carried a pre-#1019 `.planning` tree and changed exactly the 109 files #1019 had changed, deleting 106 phase files and the ROADMAP edits; no file outside `.planning/` was reverted. Repaired by re-applying #1019 (cherry-pick of `1eb1b3d97`).
+
+### Changed
+- **164.6.6.1 MT5SCRUB** closed on founder decision D-16 (2026-10-14, "Close, book L-3"): VERIFICATION re-verified to passed, folding in the 2026-10-05 L-1/L-2 PASS, D-14 and D-15 and the PROD scrub rows; `L-3: NOT OBSERVED (no ipc_fault in 2026-10-05..2026-10-14)`, with the follow-up booked; plan 07 SUMMARY written.
+- **166.4.1 PORTFOLIOANALYTICS** closed: the founder's logged-in PROD glance at `/portfolios/[id]` passed at 1470 and 367 CSS px (empty state, no overflow, no error boundary); VERIFICATION passed.
+- **170.5 FACTSHEETV2PANELS** closed: all four live readings passed on PROD 2026-10-14 (rolling alpha & beta block height, greeks parity with the factsheet at the default view for all three published strategies, the greeks strip and exposure chart at 367 px, the Verified chip and footer); VERIFICATION passed.
+- **167.1.2.2.2 TRADESYNC**: the two open post-merge readings recorded PASS (main CI run 38425693760; prod-prober run 38578463836, 18 PROD jobs vs 18 manifest, 0 differing).
+- **170.6.2 COPYPASS** phase records brought to main (VERIFICATION passed, SECURITY secured, shipped v0.131.4.0 #1023).
+- ROADMAP checklist and Progress rows updated for the closed phases.
+
+### Notes
+- Booked in TODOS.md: `170.5-ROLLING-PLACEHOLDER-HEIGHT` (the 3M/6M/12M toggle shifts /strategy/[id]/v2 by about 650 px because the rolling placeholders are one line tall; founder "Close 170.5, book the jump"), `V2-CHART-TABS-OVERFLOW-NARROW` (the v2 chart tab row overflows below about 386 px), `MT5SCRUB-L3-JOBS-TERMINAL-READING-01` (take L-3 at the next natural ipc_fault; never induce one).
+- 170.5's say-why state for a strategy under 91 days and its CSV/self-reported footer cannot be reached on PROD today (no such published strategy); both stay covered by component tests.
+- Docs only: no code, migration or workflow change.
+
 ## [0.131.5.1] - 2026-10-14 — BASELINE: automated re-dump after the PROD apply of 9c982aaa
 
 ### Changed

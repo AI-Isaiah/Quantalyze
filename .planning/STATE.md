@@ -1454,6 +1454,13 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 170.6 edited: edited fields: success_criteria (routed from the 170.2 phone re-check, founder 2026-10-12)
 - Phase 164.6.8 edited: edited fields: success_criteria (WR-02 routed from MT5SCRUB, founder 2026-10-12)
 - Phase 166.3.1 edited: edited fields: success_criteria (--force; dropped_key routed from DERIBITWEDGE SC-4, founder 2026-10-12)
+- Phase 170.6.1 inserted after Phase 170.6: DISCOVERYPHONE: Discovery phone table (SC-1) and venue label (SC-2), split from 170.6 (founder 2026-10-13, Split in three)
+- Phase 170.6.2 inserted after Phase 170.6: COPYPASS: /recommendations copy, D-26 rebuilding-panel copy, /browse example flash, admin kind filter, split from 170.6 (founder 2026-10-13)
+- Phase 167.1.2.1.1 inserted after Phase 167.1.2.1: WRITERRESIDUALS split out of RECONMARKER (founder D-01, 2026-10-13)
+- Phase 167.1.2.1.2 inserted after Phase 167.1.2.1: HISTORYREADER split out of RECONMARKER (founder D-01, 2026-10-13)
+- Phase 167.1.2.1 edited: re-scoped to SC-1..7; SFH-R3-07 and WR-02 recorded CLOSED (founder D-01/D-02, 2026-10-13)
+- Phase 167.1.2.1.1 edited: success criterion 9 added: MT5 BTC-unit inception residual routed from NAVBREACH D-08 (founder 2026-10-13)
+- Phase 170.6 edited: edited fields: success_criteria (Discovery exchange label vs the connected key's venue, routed from TRADESYNC plan 21, founder 2026-10-13)
 
 ### Decisions
 

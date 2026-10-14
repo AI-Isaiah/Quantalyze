@@ -12227,3 +12227,29 @@ It runs the marker query first and reports counts only.
 **Why.** Arm `TRUNC 4` of `supabase/tests/test_truncate_revoke_anon_authenticated.sql` creates a probe table as `postgres` and asserts that `anon` and `authenticated` still hold SELECT on it (the positive control that the revoke did not widen into a blanket withdrawal). The Supabase default-grant withdrawal dated 2026-10-30 stops new tables from inheriting S/I/U/D for the client roles. After the first re-dump of `supabase/schema/baseline.sql` taken after that date, `TRUNC 4` is expected to go RED on the lane although nothing in the revoke regressed. How the platform applies the change to each project's `pg_default_acl` is not documented (RESEARCH A2), so the exact moment is unmeasured. The 164.9.7.1 arms VERB 1 to VERB 5 avoid the shape on purpose: their positive controls read EXISTING tables.
 **What to build.** Re-point `TRUNC 4`'s positive control at an existing table (as `VERB 4` does with `cron_runs`), or assert the default-ACL row the project actually has, keeping the twin biting.
 **Owner:** the next edit of that gate after the first re-dump taken after 2026-10-30. **Trigger:** `sql-tests` going RED on `TRUNC 4` after that re-dump; read it as this entry, not as a regression of the revoke.
+
+## Phase 170.5 (FACTSHEETV2PANELS) — booked at close 2026-10-14
+
+Both entries came out of the live PROD readings taken in the founder's signed-in browser on 2026-10-14 (see the `Live readings` section of `170.5-VERIFICATION.md`). Founder decision 2026-10-14: "Close 170.5, book the jump".
+
+### 170.5-ROLLING-PLACEHOLDER-HEIGHT — the Rolling Sharpe, Volatility and Sortino placeholders are one line tall, so the 3M / 6M / 12M toggle shifts /strategy/[id]/v2 by about 650 px (booked 2026-10-14, Phase 170.5 close)
+
+**Failure scenario.** On `/strategy/[id]/v2` for a strategy with under 180 days of history (measured on a 146-day PROD strategy), the viewer changes the Rolling metrics window. Rolling alpha & beta keeps its 334 px block at every window, but the Rolling Sharpe, Volatility and Sortino panels show a one-line placeholder ("Awaiting more data - need >=180 days") where a longer window shows a chart. The page height changes by about 650 px at the toggle and the viewer loses their place.
+**Fix.** Make the placeholder keep the chart's height (the same fixed-height block the Rolling alpha & beta say-why state already uses) so the toggle does not move the page. Add a render test that the placeholder and the chart block share a height.
+**Owner:** the next phase touching `/strategy/[id]/v2`.
+
+### V2-CHART-TABS-OVERFLOW-NARROW — the /strategy/[id]/v2 chart tab row overflows below about 386 px (booked 2026-10-14, Phase 170.5 close)
+
+**Failure scenario.** On `/strategy/[id]/v2` at 367 CSS px (the narrowest width reachable in the founder's browser), the chart tab row (Cumulative | Underwater | Rolling Sharpe | Log returns) ends at 385 px, so the document scrolls horizontally below about 386 px. Phone widths of 320 to 375 px see a sideways-scrolling page. The greeks strip and the exposure chart do not overflow.
+**Fix.** Let the tab row wrap, or make it a horizontally scrollable strip contained to its own box, so the document width never exceeds the viewport. Check at 320 px in a test that can measure layout (the jsdom suite cannot).
+**Owner:** the next phase touching `/strategy/[id]/v2`.
+
+## Phase 164.6.6.1 (MT5SCRUB) — booked at close 2026-10-14
+
+### MT5SCRUB-L3-JOBS-TERMINAL-READING-01 — take the jobs terminal's L-3 reading (heal timing and launch command line) at the next natural ipc_fault (booked 2026-10-14, founder decision D-16 "Close, book L-3")
+
+**Why it is open.** Phase 164.6.6.1 closed `passed` without ever observing a jobs-terminal `ipc_fault`: `L-3: NOT OBSERVED (no ipc_fault in 2026-10-05..2026-10-14; Railway logs only cover the deploy booted 2026-10-14, so a fault cannot be ruled out either)`. So criterion 2's live half is booked, not proven: nobody has measured the jobs terminal's kill-to-authorized time against `_RELAUNCH_SETTLE_S`, or read its credentialed-launch command line after a real scrub relaunch (the 2026-10-05 baseline booleans exist, the post-fault ones do not).
+**Failure scenario.** The first real `ipc_fault` takes longer to relaunch than the settle window, or leaves an argument on the command line beyond `/portable`. Nothing in the unit gates would show it, because they run against an in-memory double.
+**What to do.** At the next natural `ipc_fault` on the jobs terminal, read-only: the escalation line ("escalated to a terminal-process recycle with a saved-account scrub"), its `relaunch_elapsed_s`, whether it fit inside `_RELAUNCH_SETTLE_S`, that no VNC session was used, the Journal `logs` count against the 2026-10-05 baseline, and the four process booleans (count, `/portable`, anything beyond it, parent pid 1). Counts, kinds and booleans only; never print an argument line. Record it in `164.6.6.1-CONTEXT.md` and close this entry.
+**Never induce a fault** to take the reading. Railway retains analytics logs for the current deployment only, so look soon after the fault.
+**Owner:** founder/ops. **Trigger:** the next `ipc_fault` escalation log line. Related, not this entry: `MT5-RELAUNCH-DEBT-LEASE-WAIT-01`, `MT5-JOB-TERMINAL-TRADES-SCRUB-01`, Phase 164.6.8 OUTAGEALERT criterion 2 (WR-02).
