@@ -187,7 +187,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — 14 plans, two PRs (#1003, #1006) (completed 2026-10-11)
 - [x] **Phase 170.5: FACTSHEETV2PANELS — /strategy/[id]/v2 panels render or say why** (INSERTED 2026-10-03) — 7 plans; closed 2026-10-14 (records PR) (verification passed, live readings 2026-10-14; two observations booked in TODOS)
 - [ ] **Phase 170.6: DISPLAYPOLISH — no signed zeros or red positives; short overlaps read em-dash** (INSERTED 2026-10-03; NUMBERS only since 2026-10-13) — not yet planned
-- [ ] **Phase 170.6.1: DISCOVERYPHONE — the Discovery table works on a phone and names the right venue** (INSERTED 2026-10-13) — not yet planned
+- [x] **Phase 170.6.1: DISCOVERYPHONE — the Discovery table works on a phone and names the right venue** (INSERTED 2026-10-13) — 5 plans, shipped v0.131.5.0 (#1026) and v0.131.6.0 (#1030) (completed 2026-10-14); verification passed 2/2, security secured 27/27
 - [x] **Phase 170.6.2: COPYPASS — copy fixes, the /browse example flash, the admin kind filter** (INSERTED 2026-10-13) — 4 plans, shipped v0.131.4.0 (#1023) (completed 2026-10-14); closed 2026-10-14 (records PR)
 - [x] **Phase 170.7: MYSTRATTABLE — My Strategies uses the ranking table, and the name opens the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 9 plans (completed 2026-10-11)
 
@@ -5613,10 +5613,15 @@ Split out of 170.6 DISPLAYPOLISH on 2026-10-13 (founder, "Split in three"); SC-1
 1. At 360, 375 and 390 CSS px, every column of a row on the Crypto SMA Discovery ranking table is reachable by scrolling the table, with no "More" disclosure, and the last column ("Simulate Impact") is fully visible at the scroll end, not under the right-edge fade; a test fails on today's markup. (Routed 2026-10-12 from the founder's 170.2 phone re-check; founder: "Close 170.2, route to DISPLAYPOLISH".)
 2. A Discovery row's exchange label, and the "Trades fetched" tooltip that says "from the exchange", name the venue the strategy's trades actually come from. Measured 2026-10-13 by TRADESYNC plan 21 (anon curl on PROD): one published strategy's row reads "Bybit", taken from its descriptive `strategies.supported_exchanges`, while its connected key is on OKX. Either the label reads the connected key's venue, or the mismatch is surfaced; a test fails on today's behaviour. (Routed 2026-10-13 from 167.1.2.2.2 TRADESYNC plan 21; founder: "Route to DISPLAYPOLISH".)
 
-**Plans:** 0 plans
+**Decision 2026-10-14 (founder, D-09, supersedes D-03):** below `@3xl` the Strategy name column is pinned, reversing 170.2 D-05 for that width range, because removing the collapse also widened laptop tables (PR-A review WR-02). Scroll-cue checks run at every viewport.
+**Plans:** 5 plans (two PRs: PR-A = plans 01-03, the venue function and the phone table; PR-B = plans 04-05, the venue reader, merged only after the function is live on PROD)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 170.6.1 to break down)
+- [x] 170.6.1-01-PLAN.md — wave 1: `get_published_trade_venues` SECURITY DEFINER migration, rollback, RED-UNDER gate and function censuses (SC-2, D-04, D-08)
+- [x] 170.6.1-02-PLAN.md — wave 1: every column rendered on a phone, no More disclosure, scroll cue only while there is more to scroll, Simulate Impact clear at the scroll end (SC-1, D-01, D-02, D-03)
+- [x] 170.6.1-03-PLAN.md — wave 2: PR-A release: gate floors and censuses, database reviews, release commit (anon `api_key_id` exposure pointed at 170.6.1.1 ANONKEYID), ship and PROD presence check (D-08)
+- [x] 170.6.1-04-PLAN.md — wave 3: the batched venue reader and the SyncBadge label and mismatch tooltip on the Discovery table and grid (SC-2, D-04, D-05, D-06, D-07)
+- [x] 170.6.1-05-PLAN.md — wave 4: PR-B release behind the PROD function, follow-ups booked, SC-2 confirmed on PROD as anon
 
 ### Phase 170.6.2: COPYPASS — copy fixes, the anonymous /browse example flash and the admin Compute Jobs kind filter (INSERTED)
 
@@ -5999,7 +6004,7 @@ kept verbatim.
 | 170.4 ALLOCHOLDINGS | 14/14 | Complete | 2026-10-11 |
 | 170.5 FACTSHEETV2PANELS | 7/7 | Complete | 2026-10-14 |
 | 170.6 DISPLAYPOLISH | 0/? | Queued — user-facing, booked 2026-10-03 | - |
-| 170.6.1 DISCOVERYPHONE | 0/? | Queued — user-facing, split from 170.6 2026-10-13 | - |
+| 170.6.1 DISCOVERYPHONE | 5/5 | Complete | 2026-10-14 |
 | 170.6.2 COPYPASS | 4/4 | Complete | 2026-10-14 |
 | 170.7 MYSTRATTABLE | 9/9 | Complete | 2026-10-11 |
 
