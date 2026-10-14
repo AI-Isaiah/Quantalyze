@@ -19,7 +19,7 @@ import {
   assertInsideViewport,
   assertFitsOrScrollsInside,
   assertNotClippedByAncestors,
-  assertColumnUnpinnedBelow3xl,
+  assertColumnPinnedBelow3xl,
   assertNotCovered,
   assertPinnedCellsMatchHeaders,
   assertPinnedHeaderNotPaintedOver,
@@ -562,7 +562,7 @@ test.describe("/strategies — MYSTRATTABLE phones", () => {
   );
 
   for (const vp of MYSTR_PHONE_VIEWPORTS) {
-    test(`${vp.id}: no page scroll, the table scrolls inside, nothing is pinned, names open factsheets, empty metrics read —, the note stays in view`, async ({
+    test(`${vp.id}: no page scroll, the table scrolls inside, the Strategy name is pinned, names open factsheets, empty metrics read —, the note stays in view`, async ({
       page,
     }) => {
       test.setTimeout(180_000);
@@ -614,19 +614,20 @@ test.describe("/strategies — MYSTRATTABLE phones", () => {
           );
         }
 
-        // 3. Unpinned below @3xl (D-04): at the maximum scroll the Strategy
-        //    header and every Strategy body cell have moved left with the row.
-        //    The relation is 170.2's, exported from geometry.ts (D-07); the
-        //    guards make it fail, not pass, on a container at or above the step
-        //    or a region that barely scrolled.
-        await collect("unpinned", async () => {
-          const res = await assertColumnUnpinnedBelow3xl(
+        // 3. Pinned below @3xl (170.6.1 D-09, which reverses 170.7 D-04 here):
+        //    at the maximum scroll the Strategy header and every Strategy body
+        //    cell still sit at the region's left edge and are not covered, so
+        //    every row stays identifiable. The relation is exported from
+        //    geometry.ts (D-07); the guards make it fail, not pass, on a
+        //    container at or above the step or a region that barely scrolled.
+        await collect("pinned", async () => {
+          const res = await assertColumnPinnedBelow3xl(
             region,
             `${vp.id} Strategy column`,
             { at3xl: MYSTR_AT_3XL_PX, requireBelow3xl: true, minScrolled: 40 },
           );
           console.log(
-            `MYSTRATTABLE ${vp.id} unpinned container=${res.container} scrolled=${res.scrolled} cells=${res.cells}`,
+            `MYSTRATTABLE ${vp.id} pinned container=${res.container} name-col=${res.pinnedWidth.toFixed(1)} scrolled=${res.scrolled} cells=${res.cells}`,
           );
         });
 
@@ -851,7 +852,7 @@ test.describe("/strategies — MYSTRATTABLE wide", () => {
   );
 
   for (const vp of MYSTR_WIDE_VIEWPORTS) {
-    test(`${vp.id}: ${vp.pinned ? "the pinned Strategy column covers no metric nor its own header, widths agree" : "nothing is pinned"}, each note lines up with its strategy`, async ({
+    test(`${vp.id}: ${vp.pinned ? "the pinned Strategy column covers no metric nor its own header, widths agree" : "the Strategy name is pinned"}, each note lines up with its strategy`, async ({
       page,
     }) => {
       test.setTimeout(180_000);
@@ -918,17 +919,18 @@ test.describe("/strategies — MYSTRATTABLE wide", () => {
 
         // The Strategy column, either side of the step.
         if (!vp.pinned) {
-          // D-04, D-07: unpinned, so the Strategy header and every Strategy cell
-          // move left with the row. Fails on a container at or above the step or
+          // 170.6.1 D-09 (reverses 170.7 D-04), D-07: pinned at the region's left
+          // edge, so the Strategy header and every Strategy cell stay in view
+          // while the rest scrolls. Fails on a container at or above the step or
           // a region that barely scrolled.
-          await collect("unpinned", async () => {
-            const r = await assertColumnUnpinnedBelow3xl(region, `${vp.id} Strategy column`, {
+          await collect("pinned", async () => {
+            const r = await assertColumnPinnedBelow3xl(region, `${vp.id} Strategy column`, {
               at3xl: MYSTR_AT_3XL_PX,
               requireBelow3xl: true,
               minScrolled: 40,
             });
             console.log(
-              `MYSTRATTABLE wide ${vp.id} unpinned container=${r.container} scrolled=${r.scrolled} cells=${r.cells}`,
+              `MYSTRATTABLE wide ${vp.id} pinned container=${r.container} scrolled=${r.scrolled} cells=${r.cells}`,
             );
           });
         } else {
@@ -968,7 +970,7 @@ test.describe("/strategies — MYSTRATTABLE wide", () => {
           });
         }
 
-        // D-06: each note lines up with its strategy. At V1080 (unpinned) the
+        // D-06: each note lines up with its strategy. At V1080 (below the step) the
         // note's first line starts at the region's left edge + 16 px. Where the
         // table pins, it starts at the Strategy name text's left edge, whatever
         // the scroll position. Always: the note block lies inside the region.
@@ -1465,9 +1467,10 @@ test.describe("/allocations holdings — SC1-HOLDINGS", () => {
 // What the contract says (UI-SPEC D-1, D-4, D-5, D-6, scroller rules): no
 // horizontal page scroll; the `Strategies` region scrolls inside itself with its
 // right edge in the viewport; the `Scroll for more columns` hint is inside the
-// viewport and the table frame on one line; below `@3xl` NOTHING is pinned, so the
-// Strategy name moves left with the row and every Return %, CAGR and Sharpe cell
-// can be scrolled into plain view (D-01, D-05).
+// viewport and the table frame on one line; below `@3xl` the rank and star scroll
+// away but the Strategy name is PINNED (170.6.1 D-09, which reverses 170.2 D-05 for
+// that one column), and every Return %, CAGR and Sharpe cell can still be scrolled
+// into plain view (D-01).
 const DISCOVERY_VIEWPORTS: { id: string; width: number; height: number }[] = [
   { id: "V360", width: 360, height: 780 },
   { id: "V375", width: 375, height: 667 },
@@ -1486,7 +1489,7 @@ test.describe("/discovery — SC6-DISCOVERY unpinned", () => {
   );
 
   for (const vp of DISCOVERY_VIEWPORTS) {
-    test(`${vp.id}: no page scroll, the Strategies region scrolls inside, the hint fits, nothing is pinned`, async ({
+    test(`${vp.id}: no page scroll, the Strategies region scrolls inside, the hint fits, the Strategy name is pinned`, async ({
       page,
     }) => {
       test.setTimeout(180_000);
@@ -1644,15 +1647,23 @@ test.describe("/discovery — SC6-DISCOVERY unpinned", () => {
           });
         }
 
-        // 5a. Unpinned below @3xl (D-01): the Strategy header and every Strategy
-        //     body cell move left with the row. The relation is
-        //     assertColumnUnpinnedBelow3xl in geometry.ts: Phase 170.7 moved it
-        //     there, unedited, so the manager's /strategies describes call it
-        //     instead of copying it.
-        await collect("unpinned", async () => {
-          await assertColumnUnpinnedBelow3xl(region, `${vp.id} Strategy column`, {
+        // 5a. Pinned below @3xl (170.6.1 D-09, which supersedes D-03 and reverses
+        //     170.2 D-05 for this one column): after scrolling to the end the
+        //     Strategy header and every Strategy body cell are still at the
+        //     region's left edge and not covered, so every row stays identifiable
+        //     at the scroll end where Simulate Impact is. The relation is
+        //     assertColumnPinnedBelow3xl in geometry.ts, shared with the manager's
+        //     /strategies describes. Every viewport of this block is below the
+        //     step, so a container that is not is a failure, not a silent pass.
+        await collect("Strategy name pinned (D-09)", async () => {
+          const r = await assertColumnPinnedBelow3xl(region, `${vp.id} Strategy column`, {
             at3xl: AT_3XL_PX,
+            requireBelow3xl: true,
+            minScrolled: 40,
           });
+          console.log(
+            `SC6-DISCOVERY ${vp.id} pinned container=${r.container} name-col=${r.pinnedWidth.toFixed(1)} scrolled=${r.scrolled} cells=${r.cells}`,
+          );
         });
 
         // 5b. Every metric cell reachable (D-01, D-05).
@@ -1729,6 +1740,142 @@ test.describe("/discovery — SC6-DISCOVERY unpinned", () => {
             `SC6-DISCOVERY ${vp.id} unpinned check container=${res.containerPx} problems=${res.problems.length}`,
           );
           if (res.problems.length) throw new Error(res.problems.join("; "));
+        });
+
+        // 6. Phase 170.6.1 SC-1 (D-01, D-02) — on a phone EVERY column is in the
+        //    scrolling region (no `More` disclosure) and the right-edge cue shows
+        //    only while there is more to scroll, so Simulate Impact is clear at
+        //    the scroll end. 170.6.1 review WR-02 / D-09: the cue logic is identical
+        //    at every width and the old collapse was keyed to the container, so
+        //    laptop widths below @3xl show every column too. These checks run at
+        //    EVERY viewport in this block, not only on phones.
+        await collect("every column rendered, no disclosure (D-01)", async () => {
+          const res = await region.evaluate((el) => {
+            const heads = Array.from(el.querySelectorAll<HTMLElement>("thead th"));
+            return {
+              labels: heads.map((h) => (h.textContent ?? "").trim()),
+              zeroWidth: heads
+                .filter((h) => h.getBoundingClientRect().width <= 0)
+                .map((h) => (h.textContent ?? "").trim() || "(unlabelled)"),
+              details: el.querySelectorAll("details").length,
+            };
+          });
+          console.log(
+            `SC6-DISCOVERY ${vp.id} columns=${res.labels.length} zero-width=[${res.zeroWidth.join("|")}] details=${res.details}`,
+          );
+          const problems: string[] = [];
+          if (res.zeroWidth.length)
+            problems.push(
+              `header(s) with no rendered width: ${res.zeroWidth.join(", ")}`,
+            );
+          if (res.details > 0)
+            problems.push(`${res.details} <details> disclosure(s) in the table`);
+          if (problems.length) throw new Error(problems.join("; "));
+        });
+
+        // D-02: the hint is present at scroll start ...
+        await collect("hint present at scroll start (D-02)", async () => {
+          await region.evaluate((el) => {
+            el.scrollLeft = 0;
+          });
+          await expect
+            .poll(() => page.getByText("Scroll for more columns").count(), {
+              message: `${vp.id}: hint missing at scrollLeft 0 although the region overflows`,
+              timeout: 5_000,
+            })
+            .toBeGreaterThan(0);
+        });
+
+        // ... and absent at the scroll end, where Simulate Impact must be
+        // inside the region, the element at its own centre, and not under the
+        // fade. The fade is located STRUCTURALLY (the aria-hidden ancestor div
+        // of the hint text), so this can fail on markup that predates any
+        // test id.
+        await collect("hint absent at the scroll end (D-02)", async () => {
+          await region.evaluate((el) => {
+            el.scrollLeft = el.scrollWidth;
+          });
+          await expect
+            .poll(() => page.getByText("Scroll for more columns").count(), {
+              message: `${vp.id}: hint still shown at the scroll end`,
+              timeout: 5_000,
+            })
+            .toBe(0);
+        });
+        // Separate collect: a lingering hint must not hide the geometry check.
+        await collect("scroll end: Simulate Impact clear (D-02)", async () => {
+          await region.evaluate((el) => {
+            el.scrollLeft = el.scrollWidth;
+          });
+          const btn = region
+            .getByRole("button", { name: /^Simulate impact of adding/ })
+            .first();
+          const res = await btn.evaluate((b) => {
+            // Bring the row to mid-viewport vertically first (as 5b does), so
+            // the sticky filter bar or the fold cannot be what covers it: this
+            // check is about the horizontal fade, not vertical position.
+            const main = document.getElementById("main-content")!;
+            const r0 = b.getBoundingClientRect();
+            main.scrollTop += r0.top + r0.height / 2 - window.innerHeight / 2;
+            const region = b.closest<HTMLElement>(
+              '[role="region"][aria-label^="Strategies:"]',
+            )!;
+            const rr = region.getBoundingClientRect();
+            const r = b.getBoundingClientRect();
+            const top = document.elementFromPoint(
+              r.left + r.width / 2,
+              r.top + r.height / 2,
+            );
+            // The fade: the closest aria-hidden div around the hint text.
+            let fade: HTMLElement | null = null;
+            const walker = document.createTreeWalker(
+              document.body,
+              NodeFilter.SHOW_TEXT,
+            );
+            for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+              if ((n.textContent ?? "").includes("Scroll for more columns")) {
+                fade = n.parentElement!.closest<HTMLElement>(
+                  'div[aria-hidden="true"]',
+                );
+                break;
+              }
+            }
+            let fadeHit = false;
+            if (fade) {
+              const f = fade.getBoundingClientRect();
+              fadeHit =
+                r.left < f.right &&
+                r.right > f.left &&
+                r.top < f.bottom &&
+                r.bottom > f.top;
+            }
+            return {
+              inside: r.left >= rr.left - 1 && r.right <= rr.right + 1,
+              btnRight: r.right,
+              regionRight: rr.right,
+              atCentre: !!top && (top === b || b.contains(top)),
+              topIs: top
+                ? `${top.tagName.toLowerCase()}.${String((top as HTMLElement).className).split(" ").slice(0, 3).join(".")}`
+                : "null",
+              fadePresent: !!fade,
+              fadeHit,
+            };
+          });
+          console.log(
+            `SC6-DISCOVERY ${vp.id} scroll-end simulate inside=${res.inside} btnRight=${res.btnRight.toFixed(1)} regionRight=${res.regionRight.toFixed(1)} atCentre=${res.atCentre} fade=${res.fadePresent} fadeHit=${res.fadeHit}`,
+          );
+          const problems: string[] = [];
+          if (!res.inside)
+            problems.push(
+              `Simulate Impact right ${res.btnRight.toFixed(1)} is outside the region right ${res.regionRight.toFixed(1)}`,
+            );
+          if (!res.atCentre)
+            problems.push(
+              `Simulate Impact is not the element at its own centre (it is ${res.topIs})`,
+            );
+          if (res.fadeHit)
+            problems.push("the right-edge fade intersects Simulate Impact");
+          if (problems.length) throw new Error(problems.join("; "));
         });
       } finally {
         await cleanupStrategiesByNamePrefix(prefix);

@@ -163,6 +163,9 @@ afterEach(() => {
 
 // --- Helpers -------------------------------------------------------------
 
+// 2026-10-13 Phase 170.6.1 D-01: "Details" is gone from this list (the per-row
+// disclosure column was deleted), so every length-based assertion below moves
+// with it rather than being edited to a literal.
 const MANAGER_HEADERS = [
   "Rank",
   "Strategy",
@@ -177,7 +180,6 @@ const MANAGER_HEADERS = [
   "AUM",
   "Return",
   "Underwater",
-  "Details",
   "Actions",
 ];
 

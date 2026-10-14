@@ -34,7 +34,7 @@
  * SimulateImpactButton stub); mocks ONLY what that suite already mocks.
  */
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { StrategyTable } from "@/components/strategy/StrategyTable";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
@@ -193,7 +193,24 @@ describe("Phase 52 container-query tabular-nums alignment contract (TYPE-04)", (
     }
   });
 
-  it("Test 2a — collapsed columns (@max-3xl:hidden) are RIGHTMOST in priority order (no ragged middle gap)", () => {
+  // 2026-10-13 Phase 170.6.1 D-01: every column is always rendered; the More
+  // disclosure is gone. Tests 2a-2c used to pin the priority collapse and the
+  // relocation into a per-row <details>; they now pin the replacement contract
+  // (no collapse class, each value in its OWN cell exactly once, honest nulls).
+  const headerCells = () =>
+    Array.from(
+      document.querySelectorAll<HTMLTableCellElement>("thead tr th"),
+    );
+  const bodyCellUnder = (label: string): HTMLTableCellElement => {
+    const idx = headerCells().findIndex(
+      (th) => (th.textContent ?? "").trim() === label,
+    );
+    expect(idx, `header "${label}" must exist`).toBeGreaterThanOrEqual(0);
+    const row = document.querySelector("tbody tr")!;
+    return row.querySelectorAll<HTMLTableCellElement>(":scope > td")[idx];
+  };
+
+  it("Test 2a — no header carries a collapse class, and the collapse-era priority columns render in COLUMNS order left of Actions", () => {
     render(
       <StrategyTable
         strategies={[makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" })]}
@@ -201,89 +218,63 @@ describe("Phase 52 container-query tabular-nums alignment contract (TYPE-04)", (
       />,
     );
 
-    const headerRow = document.querySelector("thead tr");
-    expect(headerRow).not.toBeNull();
-    const headers = Array.from(
-      headerRow!.querySelectorAll<HTMLTableCellElement>("th"),
-    );
-    // The priority-collapse contract: every @max-3xl:hidden column sits to the
-    // RIGHT of every always-visible data column — collapsing from the right
-    // edge inward leaves no ragged hole in the middle of the table.
-    const collapseIdxs = headers
-      .map((th, i) => (th.className.includes("@max-3xl:hidden") ? i : -1))
-      .filter((i) => i >= 0);
-    // Non-vacuity: there must BE collapsible columns to order.
-    expect(collapseIdxs.length).toBeGreaterThan(0);
-
-    // The first always-visible NUMERIC header after the sticky name column
-    // (Return/CAGR/Sharpe/MaxDD are never collapsed) must precede every
-    // collapsed one. Take the minimum collapse index and assert at least one
-    // non-collapsed data header sits left of it.
-    const firstCollapse = Math.min(...collapseIdxs);
-    const nonCollapsedBefore = headers
-      .slice(0, firstCollapse)
-      .filter((th) => !th.className.includes("@max-3xl:hidden"));
-    // The sticky Strategy name + the 4 always-on metric columns are all left of
-    // the first collapse → a healthy right-edge collapse, not a middle gap.
-    expect(nonCollapsedBefore.length).toBeGreaterThan(0);
-
-    // And no always-visible (non-collapsed, non-chrome) data header appears
-    // AFTER a collapsed one except the right-edge Details + Actions chrome — the
-    // collapsed block is contiguous on the right. We assert the LAST collapse
-    // index is within the final few columns (Details/Actions trail it).
-    const lastCollapse = Math.max(...collapseIdxs);
-    expect(lastCollapse).toBeGreaterThanOrEqual(firstCollapse);
-    expect(headers.length - lastCollapse).toBeLessThanOrEqual(3);
+    const headers = headerCells();
+    expect(headers.length).toBeGreaterThan(0);
+    // 2026-10-13 Phase 170.6.1 D-01: every column is always rendered; the More disclosure is gone
+    for (const th of headers) {
+      expect(th.className).not.toContain("@max-3xl:hidden");
+      expect(th.className).not.toContain("@3xl:hidden");
+    }
+    const labels = headers.map((th) => (th.textContent ?? "").trim());
+    const at = (l: string) => labels.indexOf(l);
+    const order = ["Volatility", "6 Month", "AUM", "Return", "Underwater", "Actions"];
+    for (const l of order) expect(at(l), `${l} header present`).toBeGreaterThanOrEqual(0);
+    for (let k = 1; k < order.length; k++) {
+      expect(at(order[k]), `${order[k]} sits right of ${order[k - 1]}`).toBeGreaterThan(
+        at(order[k - 1]),
+      );
+    }
+    // The disclosure column is gone: no Details header, Actions is last.
+    expect(labels).not.toContain("Details");
+    expect(at("Actions")).toBe(labels.length - 1);
   });
 
-  it("Test 2b — a collapsed-column value RELOCATES into the per-row <details> (the SAME real value, never fabricated)", () => {
+  it("Test 2b — the Volatility cell itself shows the real value exactly once, in a tabular-nums cell (no relocation copy)", () => {
     const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
-    // Distinctive volatility so we can prove the relocated value is the REAL one.
+    // Distinctive volatility so we can prove the cell shows the REAL one.
     fixture.analytics.volatility = 0.3377;
     render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
 
     const expected = "+33.77%"; // formatPercent(0.3377)
-    // The value appears in BOTH the CSS-collapsed visible cell and the <details>
-    // relocation — getAllByText proves the relocated value is the real one, not
-    // a fabricated placeholder.
-    const matches = screen.getAllByText(expected);
-    expect(matches.length).toBeGreaterThanOrEqual(2);
-
-    const summary = screen.getByText("More");
-    const details = summary.closest("details");
-    expect(details).not.toBeNull();
-    const relocated = within(details as HTMLElement).getByText(expected);
-    expect(relocated).toBeDefined();
-    // The relocated value lives in a tabular-nums cell too, so the details
-    // disclosure stays aligned just like the table column it mirrors.
-    const relocatedCell = relocated.closest("dd, td");
-    expect(relocatedCell?.className).toContain("tabular-nums");
+    // 2026-10-13 Phase 170.6.1 D-01: every column is always rendered; the More disclosure is gone
+    // Exactly once: a second copy would mean a relocation survived.
+    expect(screen.getAllByText(expected)).toHaveLength(1);
+    const volCell = bodyCellUnder("Volatility");
+    expect(volCell.textContent).toContain(expected);
+    expect(volCell.className).toContain("tabular-nums");
+    expect(volCell.className).not.toContain("@max-3xl:hidden");
+    expect(document.querySelector("details")).toBeNull();
   });
 
-  it("Test 2c — a NULL collapsed source renders the honest-null em-dash, NEVER a fabricated 0 (no-invented-data / STATE-02)", () => {
+  it("Test 2c — a NULL source renders the honest-null em-dash in its OWN cell, NEVER a fabricated 0 (no-invented-data / STATE-02)", () => {
     const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
     // Genuinely-absent volatility AND aum — the honest path must surface "—".
     fixture.analytics.volatility = null as unknown as number;
     fixture.aum = null as unknown as number;
     render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
 
-    const summary = screen.getByText("More");
-    const details = summary.closest("details") as HTMLElement;
-
-    // The Volatility relocation shows the honest-null em-dash…
-    const volDt = within(details).getByText("Volatility");
-    const volDd = volDt.nextElementSibling as HTMLElement;
-    expect(volDd.textContent).toBe("—");
+    // 2026-10-13 Phase 170.6.1 D-01: every column is always rendered; the More disclosure is gone
+    const volCell = bodyCellUnder("Volatility");
+    expect(volCell.textContent).toBe("—");
     // …and crucially NOT a fabricated zero / demo value (the TYPE-04 + STATE-02
-    // honesty floor: a container migration must never invent a value to fill a
-    // collapsed column).
-    expect(volDd.textContent).not.toBe("0");
-    expect(volDd.textContent).not.toBe("0.00%");
-    expect(volDd.textContent).not.toMatch(/\$?0/);
+    // honesty floor: showing every column must never invent a value to fill one).
+    expect(volCell.textContent).not.toBe("0");
+    expect(volCell.textContent).not.toBe("0.00%");
+    expect(volCell.textContent).not.toMatch(/\$?0/);
 
-    const aumDt = within(details).getByText("AUM");
-    const aumDd = aumDt.nextElementSibling as HTMLElement;
-    expect(aumDd.textContent).toBe("—");
-    expect(aumDd.textContent).not.toMatch(/\$0/);
+    const aumCell = bodyCellUnder("AUM");
+    expect(aumCell.textContent).toBe("—");
+    expect(aumCell.textContent).not.toMatch(/\$0/);
+    expect(document.querySelector("details")).toBeNull();
   });
 });
