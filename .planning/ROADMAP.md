@@ -5991,6 +5991,7 @@ kept verbatim.
 | 164.9.7 TRUNCATEREVOKE | 4/4 | Complete — verification passed after the plan 04 PROD after-reading | 2026-10-08 · v0.129.2.0 · #980 |
 | 164.9.7.1 TRIGGERREVOKE | 5/5 | Complete — merged and applied, PROD after-reading `0 0 0 0`; verification passed | 2026-10-09 · v0.129.5.0 · #987 |
 | 164.9.8 APTHANG | 5/5 | Complete — verification passed after the D-04 runner measurement | 2026-10-08 · v0.129.1.2 · #979 |
+| 164.9.8.1 PYXDIST | 0/? | In progress — CI throughput, started 2026-10-14 outside the phase limit (founder) | - |
 | 166. QSTATS-TRUTH | 10/10 | Complete    | 2026-10-04 |
 | 166.1 ENGINEFLOOR | 4/4 | Complete    | 2026-10-04 |
 | 166.1.1 DDSIGN | 3/3 | Complete | v0.129.6.0 · #988 · verification passed 2026-10-09 |
