@@ -69,7 +69,7 @@ const PLATFORM_NAME = process.env.PLATFORM_NAME ?? "Quantalyze";
  * silent-failure G9.B.7 was meant to prevent. Red-team specialist
  * regression.
  */
-function founderEmail(): string {
+export function founderEmail(): string {
   return process.env.ADMIN_EMAIL ?? "";
 }
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.xyz";

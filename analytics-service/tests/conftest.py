@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import pytest
 import pandas as pd
@@ -146,6 +147,149 @@ def _validation_scrub_never_reaches_a_real_terminal_or_project(monkeypatch):
     yield
     mt5_concurrency.reset_terminal_state_for_tests()
     mt5_terminal_scrub._reset_terminal_scrub_state_for_tests()
+
+
+# Phase 164.6.8 plan 04 (D-04): `record_mt5_session_reading` now feeds the outage
+# tracker, which PAGES (a Sentry capture and a scheduled founder-email POST) once a
+# run of non-authorized readings reaches the escalation threshold. Many existing
+# tests drive well past that threshold, so unpatched they would capture to Sentry
+# and schedule a real POST. The default here swaps the tracker's `ops_alert` for a
+# recording stub, and the fixture yields the list of pages it received so a test can
+# assert on them. A test that wants the real channel puts `ops_alert` back on
+# `mt5_outage_alert` itself (this fixture runs first, so its patch wins). The
+# tracker's per-role run is process state, so it is cleared around every test.
+@pytest.fixture(autouse=True)
+def mt5_outage_pages(monkeypatch):
+    import types
+
+    from services import mt5_outage_alert, ops_alert
+
+    pages: list[types.SimpleNamespace] = []
+
+    async def _record_page(
+        source, cause, *, event="outage", since=None, detail="", extra_tags=None
+    ):
+        pages.append(
+            types.SimpleNamespace(
+                source=source, cause=cause, event=event, since=since, detail=detail
+            )
+        )
+        # The real `page` returns its delivery OUTCOME (review WR-R2-01). The stub
+        # delivers by default; a test of a page that reaches no channel sets
+        # `mt5_outage_alert.ops_alert.page.delivers = False`.
+        outcome = asyncio.get_running_loop().create_future()
+        outcome.set_result(_record_page.delivers)
+        return outcome
+
+    _record_page.delivers = True
+
+    monkeypatch.setattr(
+        mt5_outage_alert,
+        "ops_alert",
+        types.SimpleNamespace(
+            page=_record_page, scrub_alert_detail=ops_alert.scrub_alert_detail
+        ),
+    )
+    mt5_outage_alert._reset_outage_state_for_tests()
+    yield pages
+    mt5_outage_alert._reset_outage_state_for_tests()
+
+
+# Phase 164.6.8 review WR-01 - the durable "a page is open" record
+# (`services.ops_alert_open`, a `cron_runs` row per open page). Every test gets an
+# in-memory store in its place, so no tracker test reaches a real project, and a
+# test can read what was recorded, pre-seed an open page "from before a restart",
+# or make the sink fail. `store.read_calls` / `record_calls` / `close_calls` count
+# the sink round trips (the tracker must not read it on every tick).
+@pytest.fixture(autouse=True)
+def ops_alert_open_store(monkeypatch):
+    import types
+
+    from services import ops_alert_open
+
+    store = types.SimpleNamespace(
+        pages={},
+        read_fails=False,
+        record_fails=False,
+        close_fails=False,
+        read_calls=0,
+        record_calls=0,
+        close_calls=0,
+        stale=set(),
+    )
+
+    async def _read(source):
+        store.read_calls += 1
+        if store.read_fails:
+            raise RuntimeError("sink unreadable")
+        return store.pages.get(source)
+
+    async def _record(source, cause, since):
+        store.record_calls += 1
+        if store.record_fails:
+            return False
+        if source in store.stale:
+            # The real record supersedes a row the caller marked stale (review
+            # WR-R2-02): the new incident does not inherit its cause or `since`.
+            store.pages.pop(source, None)
+            store.stale.discard(source)
+        store.pages.setdefault(
+            source, ops_alert_open.OpenPage(source=source, cause=cause, since=since)
+        )
+        return True
+
+    async def _close(source):
+        store.close_calls += 1
+        if store.close_fails:
+            store.stale.add(source)
+            return False
+        store.pages.pop(source, None)
+        store.stale.discard(source)
+        return True
+
+    def _mark_stale(source):
+        store.stale.add(source)
+
+    monkeypatch.setattr(ops_alert_open, "read_open_page", _read)
+    monkeypatch.setattr(ops_alert_open, "record_open_page", _record)
+    monkeypatch.setattr(ops_alert_open, "close_open_page", _close)
+    monkeypatch.setattr(ops_alert_open, "mark_open_page_stale", _mark_stale, raising=False)
+    return store
+
+
+# Phase 164.6.8 plan 06 (D-09): `run_mt5_session_monitor_tick` now runs the
+# validation terminal's liveness probe and the scrub-row reader after the jobs heal,
+# so every test that
+# drives the tick with a validation gateway configured would build a REAL
+# `Mt5Client`, whose rpyc connect to a fabricated host has no timeout of its own.
+# The default refuses it; the probe's never-raises contract turns the refusal into a
+# counted `probe_failed` reading. A test that wants a fake terminal patches
+# `mt5_validation_liveness.Mt5Client` itself (this fixture runs first, so its patch
+# wins).
+@pytest.fixture(autouse=True)
+def _validation_liveness_never_opens_a_real_connection(monkeypatch, mt5_outage_pages):
+    from services import mt5_outage_alert, mt5_validation_liveness
+
+    def _refuse_client(*_args, **_kwargs):
+        raise RuntimeError(
+            "unit tests never open a real rpyc connection from the validation "
+            "liveness probe"
+        )
+
+    def _refuse_project():
+        raise RuntimeError(
+            "unit tests never read a scrub row from a real project"
+        )
+
+    monkeypatch.setattr(mt5_validation_liveness, "Mt5Client", _refuse_client)
+    # The scrub-row reader pages through its own `ops_alert` binding; it shares the
+    # recording stub (and the `pages` list) `mt5_outage_pages` installed, and the
+    # sink refuses so a test that wants rows patches `get_supabase` itself.
+    monkeypatch.setattr(mt5_validation_liveness, "ops_alert", mt5_outage_alert.ops_alert)
+    monkeypatch.setattr(mt5_validation_liveness, "get_supabase", _refuse_project)
+    mt5_validation_liveness._reset_validation_liveness_state_for_tests()
+    yield
+    mt5_validation_liveness._reset_validation_liveness_state_for_tests()
 
 
 # Phase 164.6.6.3 / D-04 — the MT5 deal-history settle loop never sleeps for real.

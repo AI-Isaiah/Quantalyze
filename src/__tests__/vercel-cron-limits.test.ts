@@ -221,6 +221,13 @@ describe("vercel.json crons cover every production cron handler (H-1155)", () =>
   // enumerated explicitly. Keep this tiny — new crons belong under api/cron/.
   const NON_CRON_DIR_HANDLERS = ["/api/alert-digest"] as const;
 
+  // Handlers that live under src/app/api/cron/ ONLY because `/api/cron/*`
+  // bypasses the session proxy, and that Vercel must NEVER schedule. Phase
+  // 164.6.8 plan 01: `ops-alert` is a POST-only endpoint the analytics service
+  // calls with its own service key (Bearer ANALYTICS_SERVICE_KEY). Vercel Cron
+  // sends GET with CRON_SECRET, so a schedule for it could only ever 401.
+  const UNSCHEDULED_CRON_DIR_HANDLERS = ["ops-alert"] as const;
+
   function expectedCronPathsFromDisk(): string[] {
     const cronRoot = join(process.cwd(), "src", "app", "api", "cron");
     const handlerExists = (dir: string) =>
@@ -229,11 +236,25 @@ describe("vercel.json crons cover every production cron handler (H-1155)", () =>
       );
 
     const fromCronDir = readdirSync(cronRoot, { withFileTypes: true })
-      .filter((d) => d.isDirectory() && handlerExists(d.name))
+      .filter(
+        (d) =>
+          d.isDirectory() &&
+          handlerExists(d.name) &&
+          !(UNSCHEDULED_CRON_DIR_HANDLERS as readonly string[]).includes(d.name),
+      )
       .map((d) => `/api/cron/${d.name}`);
 
     return [...fromCronDir, ...NON_CRON_DIR_HANDLERS].sort();
   }
+
+  it("never schedules an UNSCHEDULED_CRON_DIR_HANDLERS entry", () => {
+    // The exclusion above must not become a hiding place: these handlers are
+    // service-key endpoints, and a Vercel schedule for one would 401 forever.
+    const scheduled = loadCrons().map((c) => c.path);
+    for (const name of UNSCHEDULED_CRON_DIR_HANDLERS) {
+      expect(scheduled).not.toContain(`/api/cron/${name}`);
+    }
+  });
 
   it("declares a non-empty crons array (a missing/empty key is a regression)", () => {
     // Guards the most catastrophic drop: deleting the whole `crons` key.

@@ -240,7 +240,7 @@ function credentialStepHasIf(text: string): boolean {
 
 /** The `if:` expression guarding the auto-issue step. */
 function issueStepIfExpression(text: string): string {
-  const start = anchorIndex(text, "- name: Open or update the prod-prober issue");
+  const start = anchorIndex(text, "- name: Open, update or close the prod-prober incident issue");
   const m = text.slice(start).match(/^\s*if:(.*)$/m);
   if (!m) {
     throw new Error(
@@ -748,7 +748,7 @@ describe("[164.1-05] workflow policy", () => {
     // above must go RED — which is what makes them a control rather than a
     // restatement of the current text.
     const mutant = WORKFLOW_TEXT.replace(
-      "if: ${{ !cancelled() && inputs.arm == '' && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '0' }}",
+      "if: ${{ !cancelled() && inputs.arm == '' && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '' }}",
       "if: failure() && steps.probe.outcome == 'failure' && inputs.arm == ''",
     );
     expect(mutant, "the mutation must actually change the text").not.toBe(WORKFLOW_TEXT);
@@ -759,7 +759,7 @@ describe("[164.1-05] workflow policy", () => {
 
   it("CALIBRATION: dropping the narrowed-dispatch clause flips the guard predicate", () => {
     const mutant = WORKFLOW_TEXT.replace(
-      "if: ${{ !cancelled() && inputs.arm == '' && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '0' }}",
+      "if: ${{ !cancelled() && inputs.arm == '' && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '' }}",
       "if: ${{ !cancelled() && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '0' }}",
     );
     expect(mutant, "the deletion must actually change the text").not.toBe(WORKFLOW_TEXT);
@@ -2463,8 +2463,8 @@ describe("[164.8.6-07] manifest-side hygiene survives every early return (TODOS 
 // SELECTION read the defect kind, a new kind could be SUPPRESSED behind an old
 // kind's issue, or could open a SECOND parallel P1 beside it. It does neither,
 // and this is the expression that settles it, quoted verbatim from
-// `.github/workflows/prod-prober.yml`, step `Open or update the prod-prober
-// issue`:
+// `.github/workflows/prod-prober.yml`, step `Open, update or close the
+// prod-prober incident issue` (renamed by 164.6.8-03; selection unchanged):
 //
 //     const dedupLabel = "prod-prober";
 //     …
@@ -2492,7 +2492,7 @@ describe("[164.8.6-07] manifest-side hygiene survives every early return (TODOS 
 // that history is prohibited; the operator reads the newest comment.
 // ---------------------------------------------------------------------------
 
-const AUTO_ISSUE_ANCHOR = "- name: Open or update the prod-prober issue";
+const AUTO_ISSUE_ANCHOR = "- name: Open, update or close the prod-prober incident issue";
 
 /**
  * The header of the NEXT step, at the job's step indent.
@@ -2588,6 +2588,16 @@ describe("[164.8.3-01] AUTO-ISSUE DEDUP — issue selection cannot read a defect
     expect(DEFECT_KINDS, "the roster this ranges over must cover the kind 164.8.3 added").toContain(
       "mt5-not-authorized",
     );
+
+    // 164.6.8-03: incident boundaries (open / comment / close) live in
+    // `scripts/prod-prober/incident.mjs` now. The same predicate runs over it, so
+    // moving the decision out of the step cannot move a kind-read out of this gate.
+    const incidentText = readFileSync(join(PROBER_DIR, "incident.mjs"), "utf8");
+    expect(incidentText.length, "the incident module must be non-trivial for this to mean anything").toBeGreaterThan(1000);
+    expect(
+      kindsMentioned(incidentText),
+      "the incident module mentions a defect kind — incident boundaries have stopped being kind-independent",
+    ).toEqual([]);
   });
 
   it("AUTO-ISSUE DEDUP: CALIBRATION — a kind-derived label is CAUGHT by the same predicate", () => {

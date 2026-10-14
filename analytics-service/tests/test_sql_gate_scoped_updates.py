@@ -130,6 +130,12 @@ _SCOPED_RE = re.compile(
 #     supabase/tests/test_strategy_analytics_trade_fetch_provenance.sql with SIX
 #     seed-scoped UPDATEs and its census plan missed this key; PR-A's CI python
 #     job found the pin red                        -> (absent) -> 6
+#   * Phase 164.6.8 (OUTAGEALERT) added supabase/tests/test_ops_staleness_check.sql
+#     (14 arms). MEASURED 2026-10-13: it carries ZERO strategy_analytics UPDATEs
+#     (its only UPDATEs target public.system_settings), so it is correctly ABSENT
+#     from the map below, and adding a `: 0` entry would fail the comparison (see
+#     the next paragraph). Recorded so the next reader does not repeat the
+#     "missed key" search that TRADESYNC's plan sent a census planner on.
 #
 # ⚠️ A count of ZERO is expressed by ABSENCE, not by an explicit `: 0` entry.
 # `actual` below is built with a truthiness filter, so a file with no matches

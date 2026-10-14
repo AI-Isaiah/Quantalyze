@@ -152,6 +152,26 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * `snapshot-only` row in NAME_SET_RATCHET in scripts/dump-sql-functions.ts, cleared
  * by that re-dump). Raising this floor records the function joining the corpus; it
  * does NOT suppress that finding, which the post-apply re-dump clears.
+ * MOVED 2026-10-13 (Phase 164.6.8 OUTAGEALERT plan 02), 126 -> 127: one
+ * ADDITION, not a removal. `public.ops_staleness_check()` enters the chain via
+ * forward migration 20261020120000_ops_staleness_check.sql. Same shape as the
+ * 167.1.2.2.2 move above: the function is compared but NOT matched, so it is the
+ * gate's one SNAPSHOT_MISSING finding until baseline.sql is regenerated from PROD
+ * after the apply (recorded as a dated `snapshot-only` row in NAME_SET_RATCHET in
+ * scripts/dump-sql-functions.ts, cleared by that re-dump). Raising this floor
+ * records the function joining the corpus; it does NOT suppress that finding.
+ *
+ * MOVED 2026-10-14 (Phase 164.6.8 OUTAGEALERT, merge with origin/main), 127 -> 128: one
+ * ADDITION, not a removal. Both branches had raised this floor 126 -> 127 for their own
+ * new function (main: NAVBREACH's `strategy_analytics_hold_computed_at_until_success`,
+ * which the re-dump taken after its apply to PROD then moved into MATCH; this branch:
+ * `public.ops_staleness_check()`), so git saw two identical edits and kept 127. The merged
+ * corpus holds both: MEASURED by `node scripts/baseline-content-drift-check.mjs` on the
+ * merged tree, `functions compared 128 — MATCH 124, DRIFT 3, SNAPSHOT_MISSING 1`. The one
+ * SNAPSHOT_MISSING row is `ops_staleness_check/0`, the function whose migration is not on
+ * PROD yet. The ratchet test read `the real corpus now compares 128 function(s) but
+ * COMPARED_FLOOR is pinned at 127` first. Raising this floor records the function joining
+ * the corpus; it does NOT suppress that finding.
  *
  * MEASURED 2026-09-08 at this tree: 122. Same contract as `FILES_FLOOR` /
  * `ARMS_FLOOR` in scripts/mutation-runner/run.mjs — pinned AT the measured
@@ -182,8 +202,20 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * merged tree: `functions compared 129 — MATCH 125, DRIFT 3, SNAPSHOT_MISSING 1`
  * (the one finding is the new function). Raising this floor records the function joining the corpus; it does NOT
  * suppress its SNAPSHOT_MISSING finding, which the post-apply re-dump clears.
+ *
+ * MOVED 2026-10-14 (Phase 164.6.8 OUTAGEALERT plan 08, release merge with origin/main v0.131.5.1),
+ * 129 -> 130: one ADDITION, not a removal. `public.ops_staleness_check()` enters the chain via
+ * forward migration 20261020120000_ops_staleness_check.sql, on top of main's 129 (whose last
+ * addition was DISCOVERYPHONE's `get_published_trade_venues`, now carried by the baseline).
+ * MEASURED by `node scripts/baseline-content-drift-check.mjs` on the committed merged tree:
+ * `functions compared 130 — MATCH 126, DRIFT 3, SNAPSHOT_MISSING 1`. The one SNAPSHOT_MISSING
+ * finding is `ops_staleness_check/0`, whose migration is not on PROD yet (recorded as a dated
+ * `snapshot-only` row in NAME_SET_RATCHET in scripts/dump-sql-functions.ts, cleared by the re-dump
+ * taken after the apply). The ratchet test read `the real corpus now compares 130 function(s) but
+ * COMPARED_FLOOR is pinned at 129` first. Raising this floor records the function joining the
+ * corpus; it does NOT suppress that finding.
  */
-export const COMPARED_FLOOR = 129;
+export const COMPARED_FLOOR = 130;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

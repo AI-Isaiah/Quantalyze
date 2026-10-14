@@ -103,6 +103,7 @@ __all__ = [
     "SITE_TERMINAL_SCRUB",
     "SITE_VALIDATE_WIZARD",
     "SITE_VALIDATE_WORKER",
+    "SITE_VALIDATION_LIVENESS",
     "normalize_mt5_holder",
     "record_mt5_terminal_handover",
 ]
@@ -133,6 +134,12 @@ SITE_HEAL: Final[str] = "session_heal"
 #: Phase 164.6.6.1 (MT5SCRUB, D-08) — the validation terminal's post-verdict
 #: scrub, in its own lease (`services.mt5_terminal_scrub`).
 SITE_TERMINAL_SCRUB: Final[str] = "terminal_scrub"
+#: Phase 164.6.8 (OUTAGEALERT, plan 06, D-09 (a)) — the credential-free liveness
+#: probe of the validation terminal, in its own bounded lease
+#: (`services.mt5_validation_liveness`). It logs nothing in, so it records no
+#: handover; the site is in the closed set only so a lease that carries it is not
+#: written as `unattributed` should a future change make it record one.
+SITE_VALIDATION_LIVENESS: Final[str] = "validation_liveness"
 
 _SITES: Final[frozenset[str]] = frozenset(
     {
@@ -144,6 +151,7 @@ _SITES: Final[frozenset[str]] = frozenset(
         SITE_VALIDATE_WORKER,
         SITE_HEAL,
         SITE_TERMINAL_SCRUB,
+        SITE_VALIDATION_LIVENESS,
     }
 )
 

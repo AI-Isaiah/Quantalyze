@@ -1197,7 +1197,31 @@
 // run(s)`, `No defects. Every annotated arm bit its own arm first.`. Per-file line:
 // `test_get_published_trade_venues.sql: sections 10 / judged 10 / annotated 10 / waived 0 /
 // biting 10`. The delta is exactly +1 file and +10 arms; nothing else moved. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 69;
+// Phase 164.6.8 OUTAGEALERT plan 05, 2026-10-13: 66 -> 67 (+1 annotated gate file,
+// test_ops_staleness_check.sql, 14 arms: S1-S13 and G1, LANE-ONLY on the pg-net stand-in).
+// MEASURED by ONE full run of `node scripts/mutation-runner/run.mjs` on the phase branch with
+// plans 01-03 merged: `scope: FULL 67/67 annotated files`, `coverage: files 67/94`,
+// `arms: 652/652/0`, `biting: 652`, `lane-invocations: 652 ... plus 67 baseline / 67 restore
+// leg(s)` (the two tallies AGREE), `lane-blocked: 0`, `unreachable: 27`, `per-arm lane time:
+// mean 2.0s over 652 arm run(s)`. The stale-low direction was observed first: the ratchet
+// vitest file read `RATCHET STALE: 67 of 94 gate files are now annotated but FILES_FLOOR is
+// still 66.` WAIVED_CEILING stays 0. A branch that merges another gate-adding branch
+// re-measures both constants on the merged tree; they are never added by hand.
+// RAISED 69 -> 70 2026-10-14 (Phase 164.6.8 OUTAGEALERT plan 08, release merge with origin/main
+// v0.131.5.1): the phase branch's plan 05 count of 66 -> 67 for test_ops_staleness_check.sql is
+// restated against main's 69 (DISCOVERYPHONE's test_get_published_trade_venues.sql arrived on main
+// in between), so the merged corpus holds both and the floor is 70, not 67 and not 69. MEASURED by
+// ONE full run of `node scripts/mutation-runner/run.mjs` on the COMMITTED merged tree, no file
+// edited during it, with main's constants (69 / 683) in place: `scope: FULL 70/70 annotated
+// files`, `lane-concurrency: 4`, `coverage: files 70/97`, `arms: 697/697/0`, `biting: 697`,
+// `lane-invocations: 697 ... plus 70 baseline / 70 restore leg(s)` (the two independent tallies
+// AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane
+// time: mean 4.9s over 697 arm run(s)`, `No defects. Every annotated arm bit its own arm first.`,
+// exit 0. Per-file lines: `test_ops_staleness_check.sql: sections 14 / judged 14 / annotated 14 /
+// waived 0 / biting 14` and `test_get_published_trade_venues.sql: sections 10 / judged 10 /
+// annotated 10 / waived 0 / biting 10`. The stale-low direction was observed first: `RATCHET
+// STALE: 70 of 97 gate files are now annotated but FILES_FLOOR is still 69.` WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 70;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3067,7 +3091,18 @@ export const FILES_FLOOR = 69;
 // waived 0 / biting 10`, measured by the same single full run recorded under FILES_FLOOR above:
 // `arms: 683/683/0`, `biting: 683`, `lane-invocations: 683`. WAIVED_CEILING stays 0 - no waiver
 // was added.
-export const ARMS_FLOOR = 683;
+// Phase 164.6.8 OUTAGEALERT plan 05, 2026-10-13: 638 -> 652 (+14 biting arms), from the same
+// full run that set FILES_FLOOR: `test_ops_staleness_check.sql: sections 14 / judged 14 /
+// annotated 14 / waived 0 / biting 14`; `arms: 652/652/0`, `biting: 652`. The stale-low
+// direction was observed first: `The corpus declares 652 twin(s) of which 0 are waivers, so a
+// green run bites 652. ARMS_FLOOR is 638.`
+// RAISED 683 -> 697 2026-10-14 (Phase 164.6.8 OUTAGEALERT plan 08, release merge with origin/main
+// v0.131.5.1): main's 683 plus the ops_staleness_check gate's FOURTEEN arms (S1-S13 and G1), MEASURED
+// by the same single full run recorded under FILES_FLOOR above, not by this addition: `arms:
+// 697/697/0`, `biting: 697`, `lane-invocations: 697`. The stale-low direction was observed first:
+// `The corpus declares 697 twin(s) of which 0 are waivers, so a green run bites 697. ARMS_FLOOR is
+// 683.` WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 697;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

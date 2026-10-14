@@ -1155,7 +1155,9 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⭐ CURRENCY 2026-10-13 (Phase 167.1.2.1 RECONMARKER, plan 01): 93 -> 94, `node scripts/lint-sql-gates.mjs` printed `scanned 94 file(s); 0 finding(s)` with the per-key reconstruct-marker gate. MEASURED: this file's run read `expected 'lint-sql-gates: scanned 94 file(s); 0…' to match /scanned 93 file/`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, merge of origin/main, CR-01 / O-3): 94 -> 95, the union of the two branches' gate files (each counted alone as 94). MEASURED: this file's run read `expected 'lint-sql-gates: scanned 95 file(s); 0…' to match /scanned 94 file/`, and `node scripts/lint-sql-gates.mjs` printed `scanned 95 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
     // ⭐ CURRENCY 2026-10-14 (Phase 170.6.1 DISCOVERYPHONE, plan 03): 95 -> 96 on the tree merged with origin/main, the published-trade-venues gate file. MEASURED: `node scripts/lint-sql-gates.mjs` printed `scanned 96 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s)`.
-    expect(res.out).toMatch(/scanned 96 file/);
+    // ⭐ CURRENCY 2026-10-13 (Phase 164.6.8 OUTAGEALERT, plan 05): 93 -> 94, `node scripts/lint-sql-gates.mjs` printed `scanned 94 file(s); 0 finding(s)` with the ops_staleness_check gate (test_ops_staleness_check.sql) in the corpus. MEASURED: this pin read `expected 'lint-sql-gates: scanned 94 file(s); 0…' to match /scanned 93 file/` first.
+    // ⭐ CURRENCY 2026-10-14 (Phase 164.6.8 OUTAGEALERT, release merge with origin/main, plan 08): 96 -> 97 on the committed merged tree, the ops_staleness_check gate beside the published-trade-venues gate. MEASURED: this pin read `expected 'lint-sql-gates: scanned 97 file(s); 0…' to match /scanned 96 file/` first, and `node scripts/lint-sql-gates.mjs` printed `scanned 97 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
+    expect(res.out).toMatch(/scanned 97 file/);
     expect(res.status, res.out).toBe(0);
   });
 

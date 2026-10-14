@@ -2233,3 +2233,28 @@ def test_the_declared_cadence_BOUNDS_are_DERIVATIONS_and_not_free_numbers() -> N
         "the module uses itself makes a rejection indistinguishable from an "
         "acceptance in the operator's log"
     )
+
+
+async def test_a_DISABLED_kill_switch_runs_neither_the_validation_probe_nor_the_scrub_row_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 164.6.8 plan 06. The disabled arm returns before anything is
+    constructed, and that must cover the two validation-terminal calls too: an
+    operator who turned MT5 off must not see the monitor touch the validation
+    terminal or read its scrub rows (the probe would otherwise hold a lease and
+    open a connection on a switch that says no)."""
+    calls: list[str] = []
+
+    async def _probe(**_kwargs: object) -> None:
+        calls.append("probe")
+
+    async def _reader() -> None:
+        calls.append("reader")
+
+    monkeypatch.setenv("MT5_ENABLED", "false")
+    monkeypatch.setattr(monitor, "probe_validation_terminal", _probe)
+    monkeypatch.setattr(monitor, "read_unscrubbed_validation_terminal", _reader)
+
+    await monitor.run_mt5_session_monitor_tick()
+
+    assert calls == []

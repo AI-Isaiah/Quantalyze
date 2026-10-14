@@ -388,43 +388,53 @@ jobs:
       # clause this step would file an auto-issue whose body reads
       # "0 defect(s)". On a `schedule` trigger `inputs.arm` is empty, so
       # the guard is inert exactly where the real gate runs.
-      - name: Open or update the prod-prober issue
-        if: ${{ !cancelled() && inputs.arm == '' && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '0' }}
+      #
+      # ONE ISSUE PER INCIDENT (phase 164.6.8 / D-07). This step now runs on CLEAN
+      # full runs too. The decision is the pure `decideIncidentAction` in
+      # scripts/prod-prober/incident.mjs: a defect run opens a new issue when none
+      # is open and comments on the open one otherwise; the first clean full run
+      # comments "recovered" and CLOSES it, so the next defect opens a fresh issue,
+      # and a fresh issue is the one GitHub event that emails a human. The old
+      # shape (one forever-open issue) turned every outage after the first into a
+      # comment nobody was told about.
+      # `steps.probe.outputs.status != ''` keeps the guard keyed on the MEASURED
+      # status: a probe that never published one is not a clean reading, so it can
+      # never close an incident.
+      # Issue #773 needs no special case: it carries the `prod-prober` label, so
+      # the first clean scheduled run after this merges closes it as the end of its
+      # incident, and the next defect opens a new issue.
+      # The step still changes no exit code: the POSTURE LINE above is untouched.
+      - name: Open, update or close the prod-prober incident issue
+        if: ${{ !cancelled() && inputs.arm == '' && steps.probe.outcome != 'skipped' && steps.probe.outputs.status != '' }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           RUN_ID: ${{ github.run_id }}
           REPO_NAME: ${{ github.repository }}
           HEAD_SHA: ${{ github.sha }}
           LOG_PATH: ${{ runner.temp }}/prod-prober.log
+          PROBE_STATUS: ${{ steps.probe.outputs.status }}
+          ARM_INPUT: ${{ inputs.arm }}
+          MODE_INPUT: ${{ inputs.mode }}
         with:
           script: |
             const fs = require("node:fs");
-            const { RUN_ID, REPO_NAME, HEAD_SHA, LOG_PATH } = process.env;
+            const path = require("node:path");
+            const { pathToFileURL } = require("node:url");
+            const { RUN_ID, REPO_NAME, HEAD_SHA, LOG_PATH, PROBE_STATUS, ARM_INPUT, MODE_INPUT } = process.env;
+            const incident = await import(
+              pathToFileURL(path.join(process.env.GITHUB_WORKSPACE, "scripts/prod-prober/incident.mjs")).href
+            );
             const today = new Date().toISOString().slice(0, 10);
             const dedupLabel = "prod-prober";
             const runUrl = `https://github.com/${REPO_NAME}/actions/runs/${RUN_ID}`;
 
-            // The body is the run's OWN text, never a re-description of it: the
-            // defect table and its remedy lines, plus the arms tally. A summary
-            // written here would be a second account able to disagree with the log.
             let log = "";
             try {
               log = fs.readFileSync(LOG_PATH, "utf8");
             } catch {
               log = "";
             }
-            const lines = log.split("\n");
-            const tableAt = lines.findIndex((l) => l.startsWith("❌"));
-            const table =
-              tableAt >= 0
-                ? lines.slice(tableAt).join("\n").replace(/\s+$/, "")
-                : "(the prober produced no defect table - it died before it could report. Read the run log.)";
-            const armsLine =
-              lines.find((l) => l.startsWith("arms: ")) || "(no arms: line - the run did not reach its report)";
-            const countMatch = table.match(/^❌ (\d+) defect/);
-            const defectCount = countMatch ? countMatch[1] : "?";
-
-            const detail = ["```", armsLine, "", table, "```"].join("\n");
+            const { detail, defectCount } = incident.parseLog(log);
 
             const { data: existing } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
@@ -433,29 +443,42 @@ jobs:
               labels: dedupLabel,
               per_page: 1,
             });
-            if (existing.length > 0) {
+            const openIssue = existing.length > 0 ? existing[0] : null;
+            const action = incident.decideIncidentAction({
+              status: PROBE_STATUS,
+              armInput: ARM_INPUT,
+              mode: MODE_INPUT,
+              openIssue,
+            });
+            core.info(`incident action: ${action}`);
+
+            if (action === "comment") {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: existing[0].number,
-                body: [`Still failing on ${today} (repo ${HEAD_SHA}).`, "", detail, "", `Workflow run: ${runUrl}`].join("\n"),
+                issue_number: openIssue.number,
+                body: incident.stillFailingComment({ today, headSha: HEAD_SHA, detail, runUrl }),
               });
-              return;
+            } else if (action === "open") {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: incident.incidentTitle({ defectCount, today }),
+                body: incident.openBody({ detail, runUrl, headSha: HEAD_SHA, dedupLabel }),
+                labels: [dedupLabel, "p1"],
+              });
+            } else if (action === "close") {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: openIssue.number,
+                body: incident.recoveredComment({ today, headSha: HEAD_SHA, runUrl }),
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: openIssue.number,
+                state: "closed",
+                state_reason: "completed",
+              });
             }
-            const body = [
-              "The hourly production prober reported at least one defect. Each row below carries its own remedy, copied from the run log verbatim.",
-              "",
-              detail,
-              "",
-              `Workflow run: ${runUrl}`,
-              `Repository SHA at dispatch: \`${HEAD_SHA}\``,
-              "",
-              "Auto-filed by .github/workflows/prod-prober.yml (phase 164.1). Deduplicated by the `" + dedupLabel + "` label; subsequent failures comment here until this issue is closed.",
-            ].join("\n");
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `prod-prober: ${defectCount} defect(s) on ${today}`,
-              body,
-              labels: [dedupLabel, "p1"],
-            });

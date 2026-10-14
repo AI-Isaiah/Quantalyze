@@ -87,6 +87,16 @@ from services.mt5_session_episodes import (
     record_mt5_session_reading,
 )
 
+# ⭐ Phase 164.6.8 plan 06 (D-09): the validation terminal's liveness probe, run
+# AFTER the jobs heal each tick. See that module's docstring for the instrument
+# choice, the cadence argument and the never-raises shape.
+from services.mt5_validation_liveness import (
+    PROBE_TICK_BOUND_S,
+    READ_TICK_BOUND_S,
+    probe_validation_terminal,
+    read_unscrubbed_validation_terminal,
+)
+
 logger = logging.getLogger("quantalyze.analytics.mt5_session_monitor")
 
 #: The ONE new knob this phase adds. ⛔ It is the DETECTION POLL INTERVAL.
@@ -194,12 +204,25 @@ async def run_mt5_session_monitor_tick() -> None:
     round 1 (SFH-10), a count that had drifted twice.
 
     ⛔ NO second detector, NO second lease acquisition, NO second budget and NO
-    second verdict vocabulary. ⭐ Delegating adds ZERO entries to
-    ``_PRODUCTION_LEASE_SITES`` and zero new ``Mt5Client`` lifetimes to reason
-    about — write that as the argument, because it is the reason the roster stays
-    at SIX and the reason criterion 4's "it must not steal the terminal from live
-    job processing" is inherited rather than re-argued: the heal's acquire is
-    BOUNDED, so a busy terminal means SKIP and never QUEUE.
+    second verdict vocabulary FOR THE JOBS TERMINAL. ⭐ Delegating adds ZERO entries
+    to ``_PRODUCTION_LEASE_SITES`` and zero new ``Mt5Client`` lifetimes to reason
+    about — write that as the argument, because it is the reason the monitor module
+    itself holds no lease and the reason criterion 4's "it must not steal the
+    terminal from live job processing" is inherited rather than re-argued: the
+    heal's acquire is BOUNDED, so a busy terminal means SKIP and never QUEUE.
+
+    ⭐ Phase 164.6.8 plan 06 (D-09 (a)) -- ONE lease is taken on this tick's behalf
+    that is NOT the heal's: the VALIDATION terminal's liveness probe, after the heal
+    (``mt5_validation_liveness.probe_validation_terminal``). Its roster entry is
+    NAMED in ``tests/test_mt5_concurrency.py::_PRODUCTION_LEASE_SITES`` and this
+    sentence does not restate the roster's size, because a live count beside a
+    roster that grows is the citation-drift class that file's own header records.
+    It does not steal that terminal either, by the same two arguments: it is a
+    DIFFERENT terminal key from the jobs heal's, it is CREDENTIAL-FREE (it never
+    logs in, so it changes no account and records no handover), and its acquire is
+    short and BOUNDED (``_MT5_RELOGIN_LEASE_WAIT_DEFAULT_S``), so a validation that
+    holds the terminal makes the probe a ``busy_skip`` and never a queue. The
+    monitor module STILL holds no lease; the probe's lives in its own module.
 
     ⛔ THE MONITOR NEVER LOGS IN TO MEASURE (criterion 3, D-1). The only reading
     it takes is the credential-free detector; the credentialed verb runs only
@@ -326,6 +349,36 @@ async def run_mt5_session_monitor_tick() -> None:
                 None,
                 source=HEAL_SOURCE_SESSION_MONITOR,
                 poll_interval_s=interval,
+            )
+        # ⭐ Phase 164.6.8 plan 06 (D-09 (a)) -- AFTER the jobs heal, whether it
+        # completed or hit the deadline above. The validation terminal is a
+        # DIFFERENT terminal (its own lease key), measured credential-free, and
+        # its reading goes to the outage tracker under its own role. Its own
+        # bound, so a hang here costs this tick at most `PROBE_TICK_BOUND_S` and
+        # can never reach the loop's guard.
+        try:
+            await asyncio.wait_for(
+                probe_validation_terminal(poll_interval_s=interval),
+                timeout=PROBE_TICK_BOUND_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "mt5 session monitor: the validation terminal probe did not "
+                "complete inside its %.1fs bound - the tick continues",
+                PROBE_TICK_BOUND_S,
+            )
+        # ⭐ Phase 164.6.8 plan 06 (D-09 (b)) -- the reader of non-scrubbed
+        # `mt5_terminal_scrub` rows, after the probe and under its own bound.
+        try:
+            await asyncio.wait_for(
+                read_unscrubbed_validation_terminal(),
+                timeout=READ_TICK_BOUND_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "mt5 session monitor: the scrub-row reader did not complete "
+                "inside its %.1fs bound - the tick continues",
+                READ_TICK_BOUND_S,
             )
     except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control
         # ⛔ IN-06 — the handler body is itself guarded, because `logger`'s

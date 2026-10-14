@@ -298,7 +298,9 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
     // ⭐ CURRENCY 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): TWO files are now declared
     // but not checked against a run (test_prod_prober_cadence.sql and test_cron_sync_tick.sql,
     // both LANE-ONLY), so the verified count sits two under the floor, not one.
-    expect(Number(verified)).toBe(sentinelFloor - 2);
+    // ⭐ CURRENCY 2026-10-13 (Phase 164.6.8 OUTAGEALERT, plan 05): a THIRD, test_ops_staleness_check.sql
+    // (LANE-ONLY on the same pg-net stand-in), so the verified count sits three under the floor.
+    expect(Number(verified)).toBe(sentinelFloor - 3);
     // Guard the guard: proves the excluded file's OWN sentinel was skipped
     // this run — not merely that the totals still add up. A different file,
     // test_sync_status_curated_sentence_survives.sql, shares the SAME "ALL 7
@@ -711,6 +713,17 @@ const LANE_ONLY_SITES: readonly { file: string; object: string; fixture: string;
       "needs COMMITTED seed rows and a trust-auth superuser loopback connection, which the local " +
       "Supabase stack behind sql-tests does not give without a password in a committed file, and " +
       "the dblink extension is not in the schema of record (Phase 164.5.2).",
+  },
+  {
+    file: "test_ops_staleness_check.sql",
+    object: "net._lane_posts",
+    fixture: "scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql",
+    why:
+      "Every arm asserts against the pg-net stand-in that fixture 34's own header marks as never " +
+      "applied to TEST or PROD; shared TEST carries the real pg_net, so a version of this gate " +
+      "made to run there would issue genuine outbound HTTP from shared CI infrastructure on every " +
+      "run. Its arms execute and are mutation-checked twin-by-twin on the pg-lane under " +
+      "sql-mutation (Phase 164.6.8).",
   },
   {
     file: "test_prod_prober_cadence.sql",

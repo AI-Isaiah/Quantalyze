@@ -4921,6 +4921,7 @@ jobs:
           #   test_ledger_refresh_composite_arm.sql          23
           #   test_ledger_refresh_fanout.sql                 26
           #   test_ledger_refresh_staleness.sql               8
+          #   test_ops_staleness_check.sql                   14
           #   test_prod_prober_cadence.sql                    7
           #   test_retention_crons_safe.sql                   4
           # Re-measured 2026-08-27 (164-06): test_strategy_shares_rls.sql goes
@@ -5038,14 +5039,24 @@ jobs:
           #   accounting. The plan expected the LANE-ONLY file to sit outside this census;
           #   ci-anti-skip-gate.contract.test.ts re-derives the table from the corpus and
           #   read 16 files declaring a sentinel, not 15.
+          # Re-measured 2026-10-13 (Phase 164.6.8 OUTAGEALERT, plan 05), ONE file joined:
+          #   test_ops_staleness_check.sql declares `ALL 14 ARMS EXECUTED`, so SENTINEL_FLOOR
+          #   moves 16 -> 17 and ARMS_FLOOR 285 -> 299. Like test_cron_sync_tick.sql the file is
+          #   LANE-ONLY (it asserts against the pg-net stand-in), so this step DECLARES it
+          #   without checking it against a run and it stays in the static accounting; its arms
+          #   execute and bite on the pg-lane under sql-mutation (mutation runner, same date:
+          #   FILES_FLOOR 66 -> 67 and ARMS_FLOOR 638 -> 652, the same +14 arms, one full run).
+          #   Merged with origin/main 2026-10-14 (NAVBREACH, whose gate declares no sentinel): the
+          #   mutation figures became FILES_FLOOR 68 and ARMS_FLOOR 657, one full run; SENTINEL_FLOOR
+          #   17 and ARMS_FLOOR 299 here are unchanged, and the contract test re-derived them.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_analytics_scope.sql             21
           #   test_sync_status_bridge_residues.sql             16
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=16  # files declaring a sentinel
-          ARMS_FLOOR=285     # 13 + 8 + 9 + 8 + 3 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 21 + 16 + 7 + 23
+          SENTINEL_FLOOR=17  # files declaring a sentinel
+          ARMS_FLOOR=299     # 13 + 8 + 9 + 8 + 3 + 6 + 23 + 26 + 8 + 14 + 7 + 4 + 103 + 21 + 16 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

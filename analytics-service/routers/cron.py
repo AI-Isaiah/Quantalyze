@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from services import benchmark as benchmark_service
 from services.benchmark import get_benchmark_returns
 from services.error_contract import service_error
+from services import ops_alert
 from services.db import db_execute, get_supabase, rows
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions, get_and_clear_last_dq_flags, EXCHANGE_CLASSES, DAILY_PNL_VENUES
@@ -2912,42 +2913,47 @@ class ProberCadenceAlert(BaseModel):
     gap_minutes: int | None
     ceiling: str
     detected_at: datetime
+    # Optional and backward compatible (Phase 164.6.8 plan 01): the SQL readers
+    # of plan 02 send a cause class; the original `prod_prober_cadence_check()`
+    # body omits it and pages as `cadence_gap`.
+    cause: str | None = None
 
 
-# Bounds how often a SUSTAINED cadence alarm re-escalates to Sentry while the
-# gap stays open. The structured log below fires on EVERY occurrence
-# regardless of this window — only the Sentry capture is bounded, the shape
-# `_alert_kek_unavailable` (routers/internal.py) already established in this
-# service: an unbounded capture becomes a flood that gets muted, which is
-# indistinguishable from having no signal at all.
-_PROBER_CADENCE_ALERT_WINDOW_S = 3600.0
-# Keyed by `alert.cron_name` — NOT a single shared timestamp. There is only
-# one caller today (`prod_prober`), but `cron_name` is an unconstrained
-# string and a second cadence source reusing this route would otherwise have
-# an in-window escalation for cron A silently downgrade cron B's own
-# Sentry-paged signal to log-only (WR-02, 164.1.1 code review).
-_last_prober_cadence_alert_at: dict[str, float] = {}
+# Bounds how often a SUSTAINED cadence alarm re-pages while the gap stays
+# open. The window itself now lives in `services.ops_alert` (Phase 164.6.8
+# D-05), keyed by (source, cause, event); this module imports it rather than
+# spelling a second literal, so the two cannot drift. The structured log below
+# still fires on EVERY occurrence regardless of the window.
+_PROBER_CADENCE_ALERT_WINDOW_S = ops_alert.OPS_ALERT_WINDOW_S
+
+# `cron_name` is an unconstrained string on the wire; the alert source is a
+# closed set. A name outside this map pages as `unrecognised` (never dropped),
+# with the original name carried in the detail text.
+_CRON_NAME_TO_ALERT_SOURCE: dict[str, str] = {
+    "prod_prober": "prod_prober",
+    "cron_sync": "cron_sync",
+    "backfill": "backfill",
+    "drill": "drill",
+}
 
 
 def _reset_prober_cadence_alert() -> None:
     """Test-only helper to clear the escalation window between cases."""
-    _last_prober_cadence_alert_at.clear()
+    ops_alert._reset_ops_alert_for_tests()
 
 
-def _escalate_prober_cadence_gap(alert: ProberCadenceAlert) -> None:
-    """Log every occurrence; escalate to Sentry at most once per window.
+async def _escalate_prober_cadence_gap(alert: ProberCadenceAlert) -> None:
+    """Log every occurrence, then page through the shared channel.
 
-    Shape cloned from ``_alert_kek_unavailable`` (routers/internal.py):
-    ``logger.error`` BEFORE any window check — the RATE of these lines is
-    itself the operator's evidence, unconditional on whether the Sentry
-    capture actually fires — then ``set_tag`` before ``capture_message`` so
-    events are greppable per-cause, with the whole capture wrapped in a bare
-    ``try/except: pass``. A Sentry transport failure (DSN misconfigured,
-    network down before the SDK connected) must never mask or crash the path
-    it is reporting on; here that path is an async ``net.http_post`` on the
-    database side that nothing downstream would otherwise notice failing.
+    The route's own ``logger.error`` fires BEFORE the page and on every
+    occurrence — the RATE of these lines is itself the operator's evidence.
+    ``ops_alert.page`` then logs its own line, applies the hourly
+    (source, cause, event) window to the Sentry capture and the founder email,
+    and never raises: a Sentry or email failure must never mask or crash the
+    path it is reporting on; here that path is an async ``net.http_post`` on
+    the database side that nothing downstream would otherwise notice failing.
 
-    Neither the log line nor the capture may carry any credential, header
+    Neither the log line nor the page may carry any credential, header
     value, or the request's own ``X-Service-Key`` — the alert body carries
     only a cron name, an integer (or null), an interval rendered as text and
     a timestamp, and nothing else may be echoed.
@@ -2963,21 +2969,22 @@ def _escalate_prober_cadence_gap(alert: ProberCadenceAlert) -> None:
         alert.ceiling,
         detected_display,
     )
-    now = time.monotonic()
-    last_at = _last_prober_cadence_alert_at.get(alert.cron_name)
-    if last_at is not None and (now - last_at) < _PROBER_CADENCE_ALERT_WINDOW_S:
-        return
-    _last_prober_cadence_alert_at[alert.cron_name] = now
-    try:
-        sentry_sdk.set_tag("prober_cadence_alert", alert.cron_name)
-        sentry_sdk.capture_message(
-            f"prod-prober cadence alarm: {alert.cron_name} last contact "
-            f"{gap_display} min ago (ceiling {alert.ceiling}, detected "
-            f"{detected_display})",
-            level="error",
-        )
-    except Exception:
-        pass  # never mask the path this is reporting on
+    since = (
+        alert.detected_at - timedelta(minutes=alert.gap_minutes)
+        if alert.gap_minutes is not None
+        else None
+    )
+    await ops_alert.page(
+        _CRON_NAME_TO_ALERT_SOURCE.get(alert.cron_name, "unrecognised"),
+        alert.cause or "cadence_gap",
+        event="outage",
+        since=since,
+        detail=(
+            f"cron_name={alert.cron_name} last contact {gap_display} min ago "
+            f"(ceiling {alert.ceiling}, detected {detected_display})"
+        ),
+        extra_tags={"prober_cadence_alert": alert.cron_name},
+    )
 
 
 @router.post("/prober-cadence-alert")
@@ -3008,7 +3015,7 @@ async def prober_cadence_alert(alert: ProberCadenceAlert) -> dict[str, Any]:
     hand, not an automated one — see ``TODOS.md``
     ``[PROBER-ALERT-DELIVERY-UNVERIFIED-01]``.
     """
-    _escalate_prober_cadence_gap(alert)
+    await _escalate_prober_cadence_gap(alert)
     return {"acknowledged": True}
 
 

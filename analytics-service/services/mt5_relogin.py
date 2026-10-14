@@ -58,7 +58,7 @@ import logging
 import math
 import os
 import time
-from typing import Callable, Final, NamedTuple
+from typing import Awaitable, Callable, Final, NamedTuple
 
 import sentry_sdk
 
@@ -121,6 +121,16 @@ from services.mt5_session_episodes import (
     restore_ipc_fault_attempt,
     record_mt5_heal_outcome,
     record_mt5_session_reading,
+)
+# ⭐ 164.6.8 plan 04 (D-13): the pre-recycle wedge evidence is stashed for the
+# outage page. `mt5_outage_alert` imports `mt5_session_episodes` and never this
+# module, so this import is not a cycle.
+from services.mt5_outage_alert import (
+    ROLE_JOBS,
+    note_recycle_file_versions,
+    note_relaunch_debt_lease_busy,
+    note_relaunch_debt_settled,
+    note_wedge_evidence,
 )
 from services.mt5_validation import (
     _IPC_TRANSPORT_CODES,
@@ -1200,6 +1210,52 @@ def _describe_capture_failure(exc: Exception) -> str:
     return f"exc_class={type(exc).__name__} code={code}"
 
 
+def _stash_for_outage_alert(
+    stash: Callable[[str, str], None], value: str
+) -> None:
+    """Hand ``value`` to the outage tracker for the jobs terminal. CANNOT RAISE.
+
+    ⭐ 164.6.8 plan 04 (D-13). The tracker's own stash functions never raise, and
+    this wrapper does not trust that: the heal is the never-raises path, a raise
+    here would replace the recycle's verdict with a crash, and the evidence is a
+    courtesy to the page and not part of the recovery.
+    """
+    try:
+        stash(ROLE_JOBS, value)
+    except Exception as exc:  # noqa: BLE001 - the heal must never see this
+        try:
+            logger.warning(
+                "mt5 session heal: the outage-alert evidence stash failed - the "
+                "recycle is unaffected (exc_class=%s)",
+                type(exc).__name__,
+            )
+        except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
+            pass
+
+
+async def _page_for_outage_alert(
+    notify: Callable[..., Awaitable[None]], **kwargs: str
+) -> None:
+    """Await one of the relaunch-debt notifiers. CANNOT RAISE.
+
+    ⭐ 164.6.8 plan 07 (SC-2). The notifiers never raise, and this wrapper does not
+    trust that: the busy arm records its ``busy_skip`` reading AFTER the page, and a
+    page that escaped would skip that reading and replace the heal's outcome with
+    the outer catch-all. The alert is a courtesy to a human, not part of the heal.
+    """
+    try:
+        await notify(**kwargs)
+    except Exception as exc:  # noqa: BLE001 - the heal must never see this
+        try:
+            logger.warning(
+                "mt5 session heal: the relaunch-debt alert failed - the heal is "
+                "unaffected (exc_class=%s)",
+                type(exc).__name__,
+            )
+        except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
+            pass
+
+
 def _capture_wedge_evidence(
     client: Mt5Client, env_server: str, deadline: float
 ) -> str:
@@ -1874,6 +1930,11 @@ def _escalate_ipc_fault(
             "not_captured (the capture itself failed: "
             f"{_describe_capture_failure(exc)})"
         )
+    # ⭐ 164.6.8 plan 04 (D-13) - the page sent later in this outage run carries
+    # THIS fragment: the recycle erases the evidence, and the page path runs
+    # outside the lease and must not touch the terminal. First fragment of a run
+    # wins inside the tracker.
+    _stash_for_outage_alert(note_wedge_evidence, evidence)
     logger.warning(
         "mt5 session heal: ipc_fault code=%s — pre-recycle wedge evidence "
         "(MT5-SWITCH-WEDGE-CAUSE-01; read credential-free, no login made): %s",
@@ -1976,6 +2037,11 @@ def _escalate_ipc_fault(
             restore_ipc_fault_attempt()
         raise
     verdict = result.verdict
+    # ⭐ 164.6.8 plan 04 (D-13) - the bridge-side file version is read by the recycle
+    # itself, AFTER the pre-recycle capture above; the outage page carries it too.
+    file_versions = verdict.get("file_versions")
+    if file_versions is not None:
+        _stash_for_outage_alert(note_recycle_file_versions, str(file_versions))
     kind = _classify_scrub_relaunch(result)
     elapsed_part = (
         "None"
@@ -2792,16 +2858,39 @@ async def heal_mt5_terminal_session(
         # the catch-all). ⛔ It carries no host, no port and no credential: the
         # module's rule is NAMES ONLY (T-164.6.2-12), and the endpoint is not even
         # a name.
-        logger.info(
-            "%s: starting — acquiring the terminal and probing the "
-            "broker session (a second line always follows).",
-            label,
-        )
-
+        # ⭐ 164.6.8 plan 07 (D-14, MT5-RELAUNCH-DEBT-LEASE-WAIT-01) — read ONCE,
+        # before the lease: the SAME reading picks the wait here and decides the
+        # recovered notice after the outcome, so a debt that changes mid-tick
+        # cannot make the two halves disagree. While a debt is owed the jobs that
+        # hold the terminal are most likely failing against it, and the bounded
+        # acquire is the only way the credentialed relaunch that pays the debt
+        # gets a turn, so it waits the CEILING (one rpyc round trip, the
+        # documented bound of "waiting for a terminal somebody else is driving").
+        # With no debt it is `_relogin_lease_wait_s()` unchanged: the default is
+        # NOT raised for every tick (D-29).
         # The lease key WITHOUT a client — plan 01's helper exists for this call
         # site. ⛔ Never a second hand-spelled `f"{host}:{port}"`: the epoch
         # registry and the lock registry must be keyed byte-identically or the
         # fence guards a different terminal than the lock serializes.
+        terminal_key = mt5_terminal_key(host, port)
+        debt_owed_at_start = mt5_relaunch_debt(terminal_key)
+        lease_wait_s = (
+            _MT5_RELOGIN_LEASE_WAIT_CEILING_S
+            if debt_owed_at_start
+            else _relogin_lease_wait_s()
+        )
+        logger.info(
+            "%s: starting — acquiring the terminal (lease wait %.1fs: %s) and "
+            "probing the broker session (a second line always follows).",
+            label,
+            lease_wait_s,
+            (
+                "relaunch debt owed, so the ceiling"
+                if debt_owed_at_start
+                else "no relaunch debt, so the default"
+            ),
+        )
+
         budget_s = _relogin_budget_s()
         # ⛔ WR-05 — TWO OUTCOMES THAT ARE NOT FAILURES OF THE SAME KIND, AND WERE
         # LOGGED AS ONE. Both used to exit through the entry's catch-all as
@@ -2815,8 +2904,8 @@ async def heal_mt5_terminal_session(
             # heal that re-logs it records a handover from whoever held the
             # terminal before; a tick that only reads records nothing.
             async with mt5_terminal_lease(
-                mt5_terminal_key(host, port),
-                wait_s=_relogin_lease_wait_s(),
+                terminal_key,
+                wait_s=lease_wait_s,
                 holder=HOLDER_HOUSE,
                 site=SITE_HEAL,
             ):
@@ -2863,10 +2952,18 @@ async def heal_mt5_terminal_session(
             # only runs after the lease is won, so without this branch a backlog
             # that starves every tick's bounded acquire reports the terminal fine
             # on every tick. The SKIP itself is unchanged (never queue ahead of
-            # real work, and the lease wait is NOT lengthened); only the claim is.
-            # Closed literal text and the source label only: no credential, host,
-            # port or account.
-            if mt5_relaunch_debt(mt5_terminal_key(host, port)):
+            # real work); only the claim is.
+            #
+            # 📜 LINEAGE (164.6.6.1 D-15, kept): "the lease wait is NOT lengthened".
+            # ⭐ AMENDED 2026-10-14 (164.6.8 plan 07, D-14): while a debt is owed the
+            # acquire now waits `_MT5_RELOGIN_LEASE_WAIT_CEILING_S` instead of
+            # `_relogin_lease_wait_s()` (see where `lease_wait_s` is chosen); with no
+            # debt it is unchanged. The monitor's poll-interval floor already sums
+            # that ceiling, so no tick can overrun its interval. This arm also PAGES,
+            # because an ERROR log alone reaches a human only through an unverified
+            # Sentry rule (SC-2). Closed literal text and the source label only: no
+            # credential, host, port or account.
+            if mt5_relaunch_debt(terminal_key):
                 logger.error(
                     "%s: relaunch debt OUTSTANDING and the heal could not get the "
                     "terminal lease — the bounded acquire expired while the "
@@ -2875,6 +2972,14 @@ async def heal_mt5_terminal_session(
                     "terminal are most likely failing against a terminal with no "
                     "account; an OPERATOR is needed if this persists.",
                     label,
+                )
+                await _page_for_outage_alert(
+                    note_relaunch_debt_lease_busy,
+                    detail=(
+                        "terminal=jobs relaunch debt OUTSTANDING and the heal "
+                        "could not get the terminal lease: the bounded acquire "
+                        "expired while the terminal was in use."
+                    ),
                 )
             else:
                 logger.info(
@@ -2948,6 +3053,10 @@ async def heal_mt5_terminal_session(
         await record_mt5_heal_outcome(
             outcome, source=source, poll_interval_s=poll_interval_s
         )
+        # ⭐ 164.6.8 plan 07 (D-06) — the debt was owed when the tick began and
+        # reads paid now: one recovered notice, only if a debt page went out.
+        if debt_owed_at_start and not mt5_relaunch_debt(terminal_key):
+            await _page_for_outage_alert(note_relaunch_debt_settled)
     except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control
         # ⛔ IN-06 — THE HANDLER BODY IS ITSELF GUARDED, because "structurally
         # incapable of raising" is the declared standard and `logger.warning`'s
