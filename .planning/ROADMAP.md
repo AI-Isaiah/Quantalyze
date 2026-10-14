@@ -5925,7 +5925,7 @@ kept verbatim.
 | 164.6.4 MT5KEEPALIVE | 5/5 | Complete | #800 |
 | 164.6.5 MT5VALIDATEWEDGE | 8/8 | Complete    | 2026-10-06 · v0.96.0.0 · #863 |
 | 164.6.6 MT5TERMINALISOLATION | 9/9 | Complete    | 2026-10-04 |
-| 164.6.6.1 MT5SCRUB | 7/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed (this row read `Waiting`, 0/4, until 2026-10-08) | v0.125.0.0 · #950 |
+| 164.6.6.1 MT5SCRUB | 8/8 | Complete — L-3 NOT OBSERVED, booked (founder 2026-10-14) | 2026-10-14 |
 | 164.6.6.2 BTCNATIVE | 12/13 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
 | 164.6.6.2.1 BTCUSDVIEW | 0/? | Queued — booked 2026-10-07 by 164.6.6.2 D-15 | - |
 | 164.6.6.2.2 WEALTHRETURNS | 7/7 | Complete — verification passed after the D-03 post-deploy reading | 2026-10-08 · v0.128.0.0 · #973 |
@@ -5968,7 +5968,7 @@ kept verbatim.
 | 166.3 RECOMPUTE | 1/1 | Complete (residuals routed) | 2026-10-12 |
 | 166.3.1 NAVBREACH | 0/? | Queued | - |
 | 166.4 BENCHALIGN | 4/4 | Complete | v0.108.0.0 · #892 · (verification passed 7/7) |
-| 166.4.1 PORTFOLIOANALYTICS | 0/? | Queued — data integrity | - |
+| 166.4.1 PORTFOLIOANALYTICS | 4/4 | Complete | 2026-10-14 |
 | 166.5 COMPUTEDATSTAMP | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Complete    | 2026-10-04 |
@@ -5997,7 +5997,7 @@ kept verbatim.
 | 170.2 PROBEFIXES | 11/11 | Complete | 2026-10-12 |
 | 170.3 OGPUBLIC | 3/3 | Complete | 2026-10-11 |
 | 170.4 ALLOCHOLDINGS | 14/14 | Complete | 2026-10-11 |
-| 170.5 FACTSHEETV2PANELS | 0/? | Queued — user-facing, booked 2026-10-03 | - |
+| 170.5 FACTSHEETV2PANELS | 7/7 | Complete | 2026-10-14 |
 | 170.6 DISPLAYPOLISH | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 170.6.1 DISCOVERYPHONE | 0/? | Queued — user-facing, split from 170.6 2026-10-13 | - |
 | 170.6.2 COPYPASS | 4/4 | Complete | 2026-10-14 |
