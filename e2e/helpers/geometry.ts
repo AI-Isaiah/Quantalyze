@@ -534,9 +534,20 @@ export async function settleStrategyTableLayout(page: Page): Promise<void> {
 }
 
 /**
- * Below the table's `@3xl` container step nothing is pinned: after scrolling the
- * region to its maximum the pinned-column header and every body cell of that
- * column have moved left with the row, by the scrolled amount, within 1 px.
+ * Phase 170.6.1 D-09 (supersedes D-03, reverses 170.2 D-05 for this one column) —
+ * below the table's `@3xl` container step the Strategy column is PINNED at the
+ * left edge of the scroll region, so every row stays identifiable while the
+ * table scrolls. This replaces 170.2's `assertColumnUnpinnedBelow3xl`, which
+ * asserted the opposite relation (the column moves left with the row) and is
+ * deleted, not kept beside it. After scrolling the region to its maximum the
+ * pinned-column header and every body cell of that column must (1) still sit at
+ * the region's left edge, within 1 px, (2) be the element at their own centre
+ * point (nothing paints over them), and (3) have started to the right of that
+ * edge at scrollLeft 0, so a column that never moved cannot pass vacuously. It
+ * must also leave room for the rest: the column is at most `maxShare` (default
+ * 0.7) of the region wide, since a pinned column as wide as the scroller hides
+ * every column that scrolls under it, and a cell wider than the region is clamped
+ * by its table and cannot stay at the left edge at all.
  *
  * `requireBelow3xl` false (Discovery, the default): a container at or above the
  * step is skipped, as 170.2 had it. True (the manager describes): that is a
@@ -544,7 +555,7 @@ export async function settleStrategyTableLayout(page: Page): Promise<void> {
  * `minScrolled` (default 0): the region must really have scrolled this far,
  * else the check is vacuous.
  */
-export async function assertColumnUnpinnedBelow3xl(
+export async function assertColumnPinnedBelow3xl(
   region: Locator,
   label: string,
   opts: {
@@ -552,8 +563,9 @@ export async function assertColumnUnpinnedBelow3xl(
     at3xl?: number;
     requireBelow3xl?: boolean;
     minScrolled?: number;
+    maxShare?: number;
   } = {},
-): Promise<{ container: number; scrolled: number; cells: number }> {
+): Promise<{ container: number; scrolled: number; cells: number; pinnedWidth: number }> {
   if ((await region.count()) === 0) {
     throw new Error(`${label}: locator resolved to 0 elements — an empty page must not pass (W-02)`);
   }
@@ -568,21 +580,24 @@ export async function assertColumnUnpinnedBelow3xl(
       const problems: string[] = [];
       const container = el.clientWidth;
       if (colIdx < 0) {
-        return { problems: [`${args.pinnedLabel} header not found`], container, scrolled: 0, cells: 0 };
+        return { problems: [`${args.pinnedLabel} header not found`], container, scrolled: 0, cells: 0, pinnedWidth: 0 };
       }
       if (rows.length === 0) {
-        return { problems: ["no body row to measure (W-02)"], container, scrolled: 0, cells: 0 };
+        return { problems: ["no body row to measure (W-02)"], container, scrolled: 0, cells: 0, pinnedWidth: 0 };
       }
       const cells = [
         heads[colIdx],
         ...rows.map((r) => r.querySelectorAll<HTMLElement>(":scope > td")[colIdx]),
       ];
       const below = container < args.at3xl;
+      const pinnedWidth = heads[colIdx].getBoundingClientRect().width;
+      const main = document.getElementById("main-content");
       el.scrollLeft = 0;
-      const before = cells.map((c) => c.getBoundingClientRect().left);
+      const regionLeft0 = el.getBoundingClientRect().left;
+      const before = cells.map((c) => c.getBoundingClientRect().left - regionLeft0);
       el.scrollLeft = el.scrollWidth;
       const scrolled = el.scrollLeft;
-      const after = cells.map((c) => c.getBoundingClientRect().left);
+      const regionLeft = el.getBoundingClientRect().left;
       if (args.requireBelow3xl && !below) {
         problems.push(`container ${container} px is not below the ${args.at3xl} px step`);
       }
@@ -590,26 +605,51 @@ export async function assertColumnUnpinnedBelow3xl(
         problems.push(`region only scrolled ${scrolled} px; the check would be vacuous`);
       }
       if (below) {
-        cells.forEach((_, k) => {
-          const moved = before[k] - after[k];
-          if (Math.abs(moved - scrolled) > 1)
+        // A pinned column wider than this share of the region leaves no room for
+        // the columns that scroll under it (170.2 measured a pinned stack as wide
+        // as the whole scroller); a cell wider than the region is also clamped by
+        // its table and cannot stay at the left edge at all.
+        if (pinnedWidth > args.maxShare * container)
+          problems.push(
+            `${args.pinnedLabel} column is ${pinnedWidth.toFixed(1)} px wide, over ${Math.round(args.maxShare * 100)}% of the ${container} px region: it would swallow the columns that scroll under it`,
+          );
+        cells.forEach((c, k) => {
+          const what = k === 0 ? "header" : `cell ${k}`;
+          // Bring the cell to mid-viewport vertically first, so the sticky
+          // filter bar or the fold cannot be what covers it: this relation is
+          // about the horizontal pin.
+          if (main) {
+            const r0 = c.getBoundingClientRect();
+            main.scrollTop += r0.top + r0.height / 2 - window.innerHeight / 2;
+          }
+          const r = c.getBoundingClientRect();
+          const offset = r.left - regionLeft;
+          if (scrolled > 0 && before[k] <= 1)
             problems.push(
-              `${args.pinnedLabel} ${k === 0 ? "header" : `cell ${k}`} is pinned: moved ${moved.toFixed(1)} px of ${scrolled} px scrolled`,
+              `${args.pinnedLabel} ${what} already sat at the region edge at scrollLeft 0 (${before[k].toFixed(1)} px): nothing proves it is pinned`,
             );
+          if (Math.abs(offset) > 1)
+            problems.push(
+              `${args.pinnedLabel} ${what} is not pinned: ${offset.toFixed(1)} px from the region's left edge after scrolling ${scrolled} px`,
+            );
+          const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+          if (!hit || !(hit === c || c.contains(hit)))
+            problems.push(`${args.pinnedLabel} ${what} is covered at its centre point after scrolling`);
         });
       }
       el.scrollLeft = 0;
-      return { problems, container, scrolled, cells: cells.length };
+      return { problems, container, scrolled, cells: cells.length, pinnedWidth };
     },
     {
       pinnedLabel: opts.pinnedLabel ?? "Strategy",
       at3xl: opts.at3xl ?? 768,
       requireBelow3xl: opts.requireBelow3xl ?? false,
       minScrolled: opts.minScrolled ?? 0,
+      maxShare: opts.maxShare ?? 0.7,
     },
   );
   if (res.problems.length) throw new Error(res.problems.join("; "));
-  return { container: res.container, scrolled: res.scrolled, cells: res.cells };
+  return { container: res.container, scrolled: res.scrolled, cells: res.cells, pinnedWidth: res.pinnedWidth };
 }
 
 /**

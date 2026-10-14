@@ -392,6 +392,11 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
+  // ⭐ 2026-10-14: the Phase 170.6.1 DISCOVERYPHONE row (`get_published_
+  // trade_venues`, `snapshot-only`, captured 2026-10-14) was DELETED on the
+  // re-dump taken after 20261019120000 applied to PROD, its own clearing
+  // condition.
+  //
   // ⭐ 2026-10-14: the Phase 167.1.2.1 RECONMARKER row (`backfill_api_keys_
   // history_reconstructed_at`, `snapshot-only`, captured 2026-10-13) was
   // DELETED on the re-dump taken after 20261014120000 applied to PROD, its

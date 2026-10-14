@@ -140,6 +140,19 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * scripts/dump-sql-functions.ts, cleared by that re-dump). Raising this floor
  * records the function joining the corpus; it does NOT suppress that finding.
  *
+ * MOVED 2026-10-14 (Phase 170.6.1 DISCOVERYPHONE plan 01), 126 -> 127: one
+ * ADDITION, not a removal. `public.get_published_trade_venues(uuid[])` enters the
+ * chain via forward migration 20261019120000_get_published_trade_venues.sql.
+ * MEASURED on the real corpus by `node scripts/baseline-content-drift-check.mjs`:
+ * before the snapshot file, `functions compared 126 — MATCH 123, DRIFT 3,
+ * SNAPSHOT_MISSING 0`; after it, `functions compared 127 — MATCH 123, DRIFT 3,
+ * SNAPSHOT_MISSING 1`. ⚠️ Same shape as the TRADESYNC move above: the function is
+ * compared but NOT matched, so it is the gate's one SNAPSHOT_MISSING finding until
+ * baseline.sql is regenerated from PROD after the apply (recorded as a dated
+ * `snapshot-only` row in NAME_SET_RATCHET in scripts/dump-sql-functions.ts, cleared
+ * by that re-dump). Raising this floor records the function joining the corpus; it
+ * does NOT suppress that finding, which the post-apply re-dump clears.
+ *
  * MEASURED 2026-09-08 at this tree: 122. Same contract as `FILES_FLOOR` /
  * `ARMS_FLOOR` in scripts/mutation-runner/run.mjs — pinned AT the measured
  * value, so a drop is a hard failure and a legitimate removal is an EXPLICIT
@@ -160,8 +173,17 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * RECONMARKER's migrations, are DRIFT findings) until baseline.sql is
  * regenerated from PROD after the apply; raising this floor records the
  * functions joining the corpus and does NOT suppress those findings.
+ *
+ * MOVED 2026-10-14 (Phase 170.6.1 DISCOVERYPHONE plan 03, merge of origin/main),
+ * 128 -> 129. The plan 01 move above read 126 -> 127 against the 126 that branch
+ * started from; origin/main then took the RECONMARKER and NAVBREACH additions
+ * (-> 128), so the union with `public.get_published_trade_venues(uuid[])` is
+ * 128 + 1 = 129. MEASURED by `node scripts/baseline-content-drift-check.mjs` on the
+ * merged tree: `functions compared 129 — MATCH 125, DRIFT 3, SNAPSHOT_MISSING 1`
+ * (the one finding is the new function). Raising this floor records the function joining the corpus; it does NOT
+ * suppress its SNAPSHOT_MISSING finding, which the post-apply re-dump clears.
  */
-export const COMPARED_FLOOR = 128;
+export const COMPARED_FLOOR = 129;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

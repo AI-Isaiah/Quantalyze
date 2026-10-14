@@ -1183,7 +1183,21 @@
 // leg(s)` (the two tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`,
 // `unreachable: 27`, `per-arm lane time: mean 3.2s over 673 arm run(s)`, `No defects. Every
 // annotated arm bit its own arm first.`. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 68;
+// Phase 170.6.1 DISCOVERYPHONE plan 01 (released by plan 03), 2026-10-14: 68 -> 69, the NEW
+// annotated gate file supabase/tests/test_get_published_trade_venues.sql (ten arms: TV-secdef,
+// TV-searchpath, TV-shape, TV-anon-exec, TV-auth-exec, TV-1, TV-unpublished,
+// TV-unpublished-composite, TV-strategy-keys, TV-distinct-lower; its migration is
+// 20261019120000_get_published_trade_venues.sql); denominator 95 -> 96. MEASURED by ONE full run
+// of `node scripts/mutation-runner/run.mjs` on the tree merged with origin/main (v0.131.4.1),
+// nothing edited during it (exit 0, constants then at 68 / 673, below the new corpus so the run
+// raised no ratchet defect): `scope: FULL 69/69 annotated files`, `lane-concurrency: 4`,
+// `coverage: files 69/96`, `arms: 683/683/0`, `biting: 683`, `lane-invocations: 683 ... plus 69
+// baseline / 69 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`,
+// `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean 2.2s over 683 arm
+// run(s)`, `No defects. Every annotated arm bit its own arm first.`. Per-file line:
+// `test_get_published_trade_venues.sql: sections 10 / judged 10 / annotated 10 / waived 0 /
+// biting 10`. The delta is exactly +1 file and +10 arms; nothing else moved. WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 69;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3048,7 +3062,12 @@ export const FILES_FLOOR = 68;
 // `test_api_keys_history_reconstruct_marker.sql: sections 30 / judged 30 / annotated 30 / waived 0 /
 // biting 30` and `test_strategy_analytics_computed_at_success_only.sql: sections 5 / judged 5 /
 // annotated 5 / waived 0 / biting 5`. WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 673;
+// Phase 170.6.1 DISCOVERYPHONE plan 01 (released by plan 03), 2026-10-14: 673 -> 683 (+10 biting
+// arms), all from `test_get_published_trade_venues.sql: sections 10 / judged 10 / annotated 10 /
+// waived 0 / biting 10`, measured by the same single full run recorded under FILES_FLOOR above:
+// `arms: 683/683/0`, `biting: 683`, `lane-invocations: 683`. WAIVED_CEILING stays 0 - no waiver
+// was added.
+export const ARMS_FLOOR = 683;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

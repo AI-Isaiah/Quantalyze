@@ -261,29 +261,36 @@ function isRankedRow(s: StrategyWithAnalytics): boolean {
   return isComputedAnalytics(rowChipStatus(s));
 }
 
-// Priority order (50-UI-SPEC §Dense Reshape behavior 2): Strategy > Return% >
-// CAGR > Sharpe > Max DD stay visible at every container width; Volatility,
-// 6 Month, AUM (and the two sparkline columns, handled inline below) collapse
-// first at narrow widths via the Tailwind v4 `@container` `@max-3xl:hidden`
-// variant — their REAL values relocate into the per-row <details>, never a
-// fabricated zero/em-dash (no-invented-data / STATE-02).
+// Every column is always rendered, at every container width (2026-10-13 Phase
+// 170.6.1 D-01). On a phone the scroll region (ResponsiveTable) carries the
+// extra width, so Volatility, 6 Month, AUM and the two sparkline columns are
+// reached by horizontal scroll. The earlier priority collapse (the 50-UI-SPEC
+// §Dense Reshape behavior 2 container-query hide plus a per-row disclosure that
+// relocated the same values) is gone: the disclosure hid four columns from a
+// phone user for no gain. Cells keep their single-source values and the honest
+// em-dash for a null, never a fabricated zero (no-invented-data / STATE-02).
 const COLUMNS: {
   key: TableSortKey;
   label: string;
   align?: "right";
-  collapse?: boolean;
 }[] = [
   { key: "name", label: "Strategy" },
   { key: "cumulative_return", label: "Return %", align: "right" },
   { key: "cagr", label: "CAGR", align: "right" },
   { key: "sharpe", label: "Sharpe", align: "right" },
   { key: "max_drawdown", label: "Max DD", align: "right" },
-  { key: "volatility", label: "Volatility", align: "right", collapse: true },
-  { key: "six_month_return", label: "6 Month", align: "right", collapse: true },
-  { key: "aum", label: "AUM", align: "right", collapse: true },
+  { key: "volatility", label: "Volatility", align: "right" },
+  { key: "six_month_return", label: "6 Month", align: "right" },
+  { key: "aum", label: "AUM", align: "right" },
 ];
 
 const PAGE_SIZE = 20;
+
+// Slack, in CSS px, when deciding the scroll region still has content to its
+// right. High-DPR phones report a fractional `scrollLeft`, so a region resting
+// at its true end can read 1 px short of `scrollWidth - clientWidth`; 2 px
+// absorbs that without hiding the cue while a real column's width remains.
+const SCROLL_CUE_EPSILON_PX = 2;
 
 /**
  * 170.6.2 WR-01 — set on <html> by a client effect once the table has
@@ -543,11 +550,13 @@ export function StrategyTable({
   const [density, setDensity] = useState<"comfortable" | "compact">("comfortable");
 
   // Visible scroll-cue gate. The cue (and the ResponsiveTable aria announcement
-  // it pairs with) is only meaningful when the table actually overflows its
-  // horizontal scroll container. Measured from the scroll container on mount,
-  // resize, and whenever the rendered column set changes (density/paging).
+  // it pairs with) is only meaningful while the table has MORE to scroll to the
+  // right (2026-10-13 Phase 170.6.1 D-02): once the region is scrolled to its
+  // end the fade and hint go, so they never sit over the last column. Measured
+  // from the scroll container on mount, resize, scroll, and whenever the
+  // rendered column set changes (density/paging).
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
-  const [isOverflowing, setIsOverflowing] = useState(false);
+  const [hasMoreToScroll, setHasMoreToScroll] = useState(false);
 
   // 2026-10-09 Phase 170.2 SC-6: pinned-stack offsets that follow the measured
   // rank and star header widths (see usePinnedStackOffsets).
@@ -911,33 +920,63 @@ export function StrategyTable({
   useEffect(() => {
     const el = scrollContainerRef.current;
     if (!el) {
-      setIsOverflowing(false);
+      setHasMoreToScroll(false);
       return;
     }
     const measure = () => {
       const node = scrollContainerRef.current;
-      if (node) setIsOverflowing(node.scrollWidth > node.clientWidth);
+      if (node)
+        setHasMoreToScroll(
+          node.scrollLeft + node.clientWidth <
+            node.scrollWidth - SCROLL_CUE_EPSILON_PX,
+        );
     };
     measure();
+    // The cue must also re-evaluate as the user scrolls, not only when the box
+    // resizes (D-02). Passive: it never calls preventDefault.
+    el.addEventListener("scroll", measure, { passive: true });
+    // 2026-10-14 Phase 170.6.1 review WR-01 / SFH-01: a web-font swap lands after
+    // the first measure and widens the table without resizing the scroll box, so
+    // re-measure once the fonts have loaded. `document.fonts` is absent in jsdom
+    // and older runtimes.
+    let fontsCancelled = false;
+    void document.fonts?.ready.then(() => {
+      if (!fontsCancelled) measure();
+    });
     // ResizeObserver tracks the container's own box (container-query-correct);
     // guard for jsdom / older runtimes where it is absent.
     if (typeof ResizeObserver !== "undefined") {
       const ro = new ResizeObserver(measure);
       ro.observe(el);
-      return () => ro.disconnect();
+      // 2026-10-14 Phase 170.6.1 review WR-01 / SFH-01: also observe the
+      // `<table>` itself. A re-sort, a search or a font swap changes the table's
+      // content width but not the scroll container's box, so observing `el`
+      // alone left the cue stale (hidden while columns were still off-screen).
+      const table = el.querySelector("table");
+      if (table) ro.observe(table);
+      return () => {
+        fontsCancelled = true;
+        ro.disconnect();
+        el.removeEventListener("scroll", measure);
+      };
     }
     window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
+    return () => {
+      fontsCancelled = true;
+      window.removeEventListener("resize", measure);
+      el.removeEventListener("scroll", measure);
+    };
   }, [density, page, effectiveViewMode, paged.length]);
 
   // Column count for the "no rows" placeholder. Leading rank column (1) +
-  // Strategy + Return% + CAGR + Sharpe + Max DD (5). Priority-collapsed but
-  // still in the DOM (CSS @max-3xl:hidden): Volatility + 6 Month + AUM + Return
-  // spark + Underwater spark (5). Plus the per-row Details disclosure column (1)
-  // and Actions (1) = 13; +1 leading star column when userId is present, and
-  // +2 (Status and Created) when managerRows is set (170.7 / D-01, D-09).
+  // Strategy + Return% + CAGR + Sharpe + Max DD (5), then Volatility + 6 Month
+  // + AUM + Return spark + Underwater spark (5), and Actions (1) = 12; +1
+  // leading star column when userId is present, and +2 (Status and Created)
+  // when managerRows is set (170.7 / D-01, D-09).
+  // 2026-10-13 Phase 170.6.1 D-01: one fewer column than before, because the
+  // per-row disclosure column is gone (13 -> 12, star 14 -> 13).
   const showStarColumn = userId !== undefined;
-  const emptyRowColSpan = (showStarColumn ? 14 : 13) + (managerRows ? 2 : 0);
+  const emptyRowColSpan = (showStarColumn ? 13 : 12) + (managerRows ? 2 : 0);
 
   const showEmptyWatchlist = scope === "watchlist" && watchedSet.size === 0;
 
@@ -1071,7 +1110,7 @@ export function StrategyTable({
             {/* ResponsiveTable is the SINGLE scroll region \u2014 it owns the
                 role=region + unique aria-label landmark (the SR scroll-affordance
                 announcement) and, via `className`, doubles as the @container
-                containment context for the priority-collapse. `scrollRef` lets
+                containment context for the @3xl Strategy-name pinning. `scrollRef` lets
                 the visible cue measure the real scroll box. */}
             <ResponsiveTable
               label="Strategies"
@@ -1113,11 +1152,23 @@ export function StrategyTable({
                       // It pins to the right of the rank column (and the star
                       // column when present) so the identity stays visible on
                       // horizontal scroll.
-                      // 2026-10-09 Phase 170.2 D-05: every pinned offset (and the
-                      // hairline) sits behind @3xl: so below the table's own
-                      // 48rem width nothing is pinned and Return %, CAGR and
-                      // Sharpe scroll into plain view instead of hiding behind
-                      // the name.
+                      // 2026-10-09 Phase 170.2 D-05: the RANK and STAR offsets sit
+                      // behind @3xl:, so below the table's own 48rem width those two
+                      // scroll away with the row.
+                      // 2026-10-14 Phase 170.6.1 D-09 (supersedes 170.6.1 D-03 and
+                      // reverses 170.2 D-05 for this one column): the Strategy
+                      // column is ALSO pinned below @3xl, at left-0 with its
+                      // hairline, so every row stays identifiable while the table
+                      // scrolls. D-01 put every column in the scrolling region, and
+                      // the old collapse was keyed to the container, so with the
+                      // sidebar open laptops up to about 1100 px show them all too;
+                      // without a pinned name the scroll end shows Simulate Impact
+                      // on a row whose name is off-screen (review WR-02). Rank and
+                      // star stay unpinned there: pinning them as well would spend
+                      // about 100 px of a 343 px phone region on an ordinal and a
+                      // star, and the name needs no offset from them because they
+                      // scroll out from under it (it is later in the DOM at the
+                      // same z-index).
                       const isFirstCol = i === 0;
                       // 2026-10-09 Phase 170.2 X-1 / P-1: the pinned Strategy header
                       // is z-30, level with the rank and star headers. At z-20 it
@@ -1127,7 +1178,7 @@ export function StrategyTable({
                       // not the star column shows: --pin-strategy-left already
                       // accounts for it. Every other header stays z-20.
                       const stickyLeft = isFirstCol
-                        ? "sticky @3xl:left-(--pin-strategy-left) top-0 z-30 bg-surface @3xl:border-r @3xl:border-border"
+                        ? "sticky left-0 @3xl:left-(--pin-strategy-left) top-0 z-30 bg-surface border-r border-border"
                         : "sticky top-0 z-20 bg-surface";
                       const sortedHere = tableSortKey === col.key;
                       return (
@@ -1144,7 +1195,7 @@ export function StrategyTable({
                                   : "descending"
                                 : "none"
                             }
-                            className={`${stickyLeft} px-4 py-3 ${col.align === "right" ? "text-right" : "text-left"} ${col.collapse ? "@max-3xl:hidden" : ""}`}
+                            className={`${stickyLeft} px-4 py-3 ${col.align === "right" ? "text-right" : "text-left"}`}
                           >
                             {/* The sort control is a real <button> so it is
                                 keyboard-operable (WCAG 2.1.1) \u2014 the prior click-only
@@ -1212,14 +1263,9 @@ export function StrategyTable({
                         </Fragment>
                       );
                     })}
-                    <th className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted @max-3xl:hidden`}>Return</th>
-                    <th className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted @max-3xl:hidden`}>Underwater</th>
-                    {/* Details disclosure column \u2014 surfaces the collapsed values
-                        at narrow widths; the header is a screen-reader label. */}
-                    <th scope="col" className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted @3xl:hidden`}>
-                      <span className="sr-only">Details</span>
-                    </th>
-                    <th className={`sticky top-0 z-20 bg-surface px-4 py-3 text-right ${HEADER_LABEL} text-text-muted`}>Actions</th>
+                    <th className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted`}>Return</th>
+                    <th className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted`}>Underwater</th>
+                    <th className={`sticky top-0 z-20 bg-surface pl-4 pr-8 py-3 text-right ${HEADER_LABEL} text-text-muted`}>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1228,9 +1274,8 @@ export function StrategyTable({
                     // order, continuous across pages (D-11). Re-derived with the
                     // sort, so it re-numbers when the sort flips.
                     const rank = rankOrdinals.get(s.id);
-                    // Compute each collapsible cell's value ONCE so the visible
-                    // cell and the relocated <details> render the IDENTICAL real
-                    // value via the honest-null formatters \u2014 never a fabricated
+                    // Compute each cell's value ONCE, as the single source of
+                    // what it renders, via the honest-null formatters \u2014 never a fabricated
                     // 0/\u2014/demo number (no-invented-data / STATE-02 / T-50-09).
                     const volatilityText = formatPercent(s.analytics.volatility);
                     const sixMonthText = formatPercent(s.analytics.six_month_return);
@@ -1373,7 +1418,7 @@ export function StrategyTable({
                             translucent hover:bg-page/50, so scrolled cells do not
                             bleed through (Pitfall 5). */}
                         <td
-                          className="sticky z-10 bg-surface px-4 py-3 @3xl:border-r @3xl:border-border @3xl:left-(--pin-strategy-left)"
+                          className="sticky left-0 z-10 max-w-[60cqw] bg-surface px-4 py-3 border-r border-border @3xl:left-(--pin-strategy-left) @3xl:max-w-none"
                         >
                           <div className="flex items-center gap-1.5">
                             <Link
@@ -1435,7 +1480,7 @@ export function StrategyTable({
                               <OwnershipTag mark={s.capital_ownership} />
                             )}
                           </div>
-                          <div className="flex items-center gap-2 mt-1">
+                          <div className="flex items-center @max-3xl:flex-wrap gap-2 mt-1">
                             <div className="flex flex-wrap gap-1">
                               {/* Phase 164.6.6.2.1 (D-05, D-12) — a native-unit
                                   (BTC) strategy says so, first in the badge row,
@@ -1579,64 +1624,29 @@ export function StrategyTable({
                           {formatPercent(s.analytics.max_drawdown)}
                           {pctSuffix(s, "max_drawdown")}
                         </td>
-                        <td className="px-4 py-3 text-right font-metric tabular-nums text-text-secondary group-hover:bg-page/50 transition-colors @max-3xl:hidden">
+                        <td className="px-4 py-3 text-right font-metric tabular-nums text-text-secondary group-hover:bg-page/50 transition-colors">
                           {volatilityText}
                           {pctSuffix(s, "volatility")}
                         </td>
-                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors @max-3xl:hidden ${signColor(s.analytics.six_month_return)}`}>
+                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors ${signColor(s.analytics.six_month_return)}`}>
                           {sixMonthText}
                         </td>
-                        <td className="px-4 py-3 text-right font-metric tabular-nums text-text-secondary group-hover:bg-page/50 transition-colors @max-3xl:hidden">
+                        <td className="px-4 py-3 text-right font-metric tabular-nums text-text-secondary group-hover:bg-page/50 transition-colors">
                           {aumText}
                         </td>
-                        <td className="px-4 py-3 group-hover:bg-page/50 transition-colors @max-3xl:hidden" data-testid="sparkline-cell-returns">
+                        <td className="px-4 py-3 group-hover:bg-page/50 transition-colors" data-testid="sparkline-cell-returns">
                           <Sparkline
                             data={s.analytics.sparkline_returns ?? []}
                             color={sparklineColor(s.analytics.sparkline_returns ?? [])}
                             data-testid="sparkline-returns"
                           />
                         </td>
-                        <td className="px-4 py-3 group-hover:bg-page/50 transition-colors @max-3xl:hidden" data-testid="sparkline-cell-drawdown">
+                        <td className="px-4 py-3 group-hover:bg-page/50 transition-colors" data-testid="sparkline-cell-drawdown">
                           <Sparkline
                             data={s.analytics.sparkline_drawdown ?? []}
                             color="var(--color-negative)"
                             fill
                           />
-                        </td>
-                        {/* Priority-collapse detail \u2014 only shown once the
-                            columns above collapse (@3xl:hidden = visible below
-                            the 3xl container width). Relocates the SAME real
-                            values (volatilityText/sixMonthText/aumText) computed
-                            once above; sparklines relocate too. */}
-                        <td className="px-4 py-3 align-top group-hover:bg-page/50 transition-colors @3xl:hidden">
-                          <details className="text-caption text-text-secondary">
-                            <summary className="cursor-pointer select-none text-text-muted hover:text-text-primary">
-                              More
-                            </summary>
-                            <dl className="mt-2 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
-                              <dt className="text-text-muted">Volatility</dt>
-                              <dd className="text-right font-metric tabular-nums">{volatilityText}</dd>
-                              <dt className="text-text-muted">6 Month</dt>
-                              <dd className={`text-right font-metric tabular-nums ${signColor(s.analytics.six_month_return)}`}>{sixMonthText}</dd>
-                              <dt className="text-text-muted">AUM</dt>
-                              <dd className="text-right font-metric tabular-nums">{aumText}</dd>
-                              <dt className="text-text-muted">Return</dt>
-                              <dd className="flex justify-end">
-                                <Sparkline
-                                  data={s.analytics.sparkline_returns ?? []}
-                                  color={sparklineColor(s.analytics.sparkline_returns ?? [])}
-                                />
-                              </dd>
-                              <dt className="text-text-muted">Underwater</dt>
-                              <dd className="flex justify-end">
-                                <Sparkline
-                                  data={s.analytics.sparkline_drawdown ?? []}
-                                  color="var(--color-negative)"
-                                  fill
-                                />
-                              </dd>
-                            </dl>
-                          </details>
                         </td>
                         {/* Phase 149 / NAV-01 — Simulate Impact is gated on the
                             row's publication status. VERIFIED
@@ -1649,7 +1659,7 @@ export function StrategyTable({
                             Behavior-invariant on /discovery and /browse, where
                             the visibility default already guarantees every row
                             is published. */}
-                        <td className="px-4 py-3 text-right group-hover:bg-page/50 transition-colors">
+                        <td className="pl-4 pr-8 py-3 text-right group-hover:bg-page/50 transition-colors">
                           {/* Phase 170.7 / D-01 — manager mode: Edit, then this
                               row's server-built slot, on ONE line (a wrapped
                               Actions cell doubles the row height and breaks
@@ -1757,7 +1767,7 @@ export function StrategyTable({
                           <td className="sticky @3xl:left-(--pin-star-left) z-10 w-11 bg-surface-subtle px-2 py-3 align-middle" />
                         )}
                         <td
-                          className="sticky z-10 bg-surface-subtle px-4 py-3 @3xl:border-r @3xl:border-border @3xl:left-(--pin-strategy-left)"
+                          className="sticky left-0 z-10 bg-surface-subtle px-4 py-3 border-r border-border @3xl:left-(--pin-strategy-left)"
                         >
                           <div className="flex items-center gap-1.5">
                             {/* No link: no strategy exists, so there is no
@@ -1802,19 +1812,18 @@ export function StrategyTable({
                         <td className="px-4 py-3 text-right font-metric tabular-nums">
                           <span className="text-text-muted">—</span>
                         </td>
-                        <td className="px-4 py-3 text-right font-metric tabular-nums @max-3xl:hidden">
+                        <td className="px-4 py-3 text-right font-metric tabular-nums">
                           <span className="text-text-muted">—</span>
                         </td>
-                        <td className="px-4 py-3 text-right font-metric tabular-nums @max-3xl:hidden">
+                        <td className="px-4 py-3 text-right font-metric tabular-nums">
                           <span className="text-text-muted">—</span>
                         </td>
-                        <td className="px-4 py-3 text-right font-metric tabular-nums @max-3xl:hidden">
+                        <td className="px-4 py-3 text-right font-metric tabular-nums">
                           <span className="text-text-muted">—</span>
                         </td>
-                        <td className="px-4 py-3 @max-3xl:hidden" />
-                        <td className="px-4 py-3 @max-3xl:hidden" />
-                        <td className="px-4 py-3 align-top @3xl:hidden" />
-                        <td className="px-4 py-3 text-right">
+                        <td className="px-4 py-3" />
+                        <td className="px-4 py-3" />
+                        <td className="pl-4 pr-8 py-3 text-right">
                           <button
                             type="button"
                             // 162-06 / HONEST-06 — THIS row's key id, read off
@@ -1836,12 +1845,13 @@ export function StrategyTable({
             </ResponsiveTable>
 
             {/* Visible scroll cue \u2014 a right-edge gradient fade + hint, shown ONLY
-                when the table overflows its scroll container. aria-hidden: it
+                while the table has more to scroll to the right. aria-hidden: it
                 pairs with (never replaces) the ResponsiveTable region aria-label,
                 so SR users are not double-announced (STATE-03 / 50-UI-SPEC). */}
-            {isOverflowing && (
+            {hasMoreToScroll && (
               <div
                 aria-hidden="true"
+                data-testid="strategy-table-scroll-cue"
                 className="pointer-events-none absolute inset-y-0 right-0 flex items-end justify-end rounded-r-sm bg-gradient-to-l from-surface to-transparent pb-3 pr-3 pl-12"
               >
                 <span className="whitespace-nowrap text-caption text-text-muted">

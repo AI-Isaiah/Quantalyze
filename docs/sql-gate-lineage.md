@@ -348,3 +348,17 @@ baseline / 68 restore legs, `unreachable: 27`, `lane-blocked: 0`, `per-arm lane 
 `scripts/baseline-content-drift-check.mjs` compares 128 functions (`COMPARED_FLOOR` 127 -> 128). It
 supersedes the 668 reading above as the latest dated one and is itself not a live constant: read
 `FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-14 (Phase 170.6.1 DISCOVERYPHONE, plan 03): the gate file
+`supabase/tests/test_get_published_trade_venues.sql` (migration 20261019120000: the published-only
+SECURITY DEFINER function `get_published_trade_venues(uuid[])` that names the venue a published
+strategy's trades come from) arrived with ten arms, each on a `sql` or `edit` step, none waived.
+A DATED reading of one full `node scripts/mutation-runner/run.mjs` on the tree merged with
+origin/main (v0.131.4.1), no file edited during it, exit 0, constants then at 68 / 673: `scope: FULL
+69/69 annotated files`, `coverage: files 69/96`, `arms: 683/683/0`, `biting: 683`,
+`lane-invocations: 683` plus 69 baseline / 69 restore legs, `unreachable: 27`, `lane-blocked: 0`,
+`per-arm lane time: mean 2.2s over 683 arm run(s)`, `No defects.`. The lint corpus reads `scanned 96
+file(s)` and `scripts/baseline-content-drift-check.mjs` compares 129 functions (`COMPARED_FLOOR` 128
+-> 129). The migration stamp was re-picked from 20261016120000 to 20261019120000 at release time
+because an in-flight branch held 20261018120000. It supersedes the 673 reading above as the latest
+dated one and is itself not a live constant: read `FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
