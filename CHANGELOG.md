@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.131.5.1] - 2026-10-14 — BASELINE: automated re-dump after the PROD apply of 9c982aaa
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38586289795`, after the PROD apply of merge `9c982aaa`: sha256 `a28e44f7…` → `2e32e2d7…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 128 → 129, distinct function names 126 → 127, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261019120000_get_published_trade_venues.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-14` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.131.5.0 → 0.131.5.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=299 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 129 — MATCH 126, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38586289795` succeeded, and this entry was composed by the `redump-pr` job. Run `38586289795` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.131.5.0] - 2026-10-14 — DISCOVERYPHONE (1/2): the shared strategy table keeps every column on a phone and pins the Strategy name while it scrolls, and a published strategy's trade venue becomes readable by anon through a published-only function
 
 Phase 170.6.1, first of two PRs (D-08), plans 01, 02 and 03, plus one review fix round. This PR adds the venue function with its gate and rollback, and rewrites the phone table. It adds NO reader of the function (the reader is PR-B, plan 04), so nothing on the deployed app calls it before PROD has it. Versioned as a minor bump because the table is user-visible, the way `0.131.3.0` (RECONMARKER (1/2)) versioned the first half of its split.

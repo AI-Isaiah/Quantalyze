@@ -6744,6 +6744,34 @@ COMMENT ON FUNCTION "public"."get_latest_portfolio_analytics_for_user"("p_user_i
 
 
 
+CREATE OR REPLACE FUNCTION "public"."get_published_trade_venues"("p_strategy_ids" "uuid"[]) RETURNS TABLE("strategy_id" "uuid", "exchange" "text")
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_temp'
+    AS $$
+  SELECT s.id,
+         lower(k.exchange)
+    FROM public.strategies s
+    JOIN public.api_keys k ON k.id = s.api_key_id
+   WHERE s.status = 'published'
+     AND s.id = ANY(p_strategy_ids)
+  UNION
+  SELECT s.id,
+         lower(k.exchange)
+    FROM public.strategies s
+    JOIN public.strategy_keys sk ON sk.strategy_id = s.id
+    JOIN public.api_keys k ON k.id = sk.api_key_id
+   WHERE s.status = 'published'
+     AND s.id = ANY(p_strategy_ids);
+$$;
+
+
+ALTER FUNCTION "public"."get_published_trade_venues"("p_strategy_ids" "uuid"[]) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."get_published_trade_venues"("p_strategy_ids" "uuid"[]) IS 'Phase 170.6.1 DISCOVERYPHONE (SC-2, D-04): the venue a PUBLISHED strategy''s trades come from — the distinct lowercased api_keys.exchange reached through strategies.api_key_id and strategy_keys. Correct-by-construction public exposure: SECURITY DEFINER + pinned search_path lets anon read WITHOUT widening api_keys or strategy_keys access. RETURNS TABLE (strategy_id, exchange) is the column allow-list: a key id, label or encrypted field is structurally unreachable. The status gate on strategies is the published-gate. Sole reader in app code: readPublishedTradeVenues (plan 04).';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."get_published_trust_signals"("p_strategy_ids" "uuid"[]) RETURNS TABLE("strategy_id" "uuid", "trust_tier" "text", "status" "text")
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_temp'
@@ -16658,6 +16686,13 @@ GRANT ALL ON TABLE "public"."portfolio_analytics" TO "service_role";
 REVOKE ALL ON FUNCTION "public"."get_latest_portfolio_analytics_for_user"("p_user_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."get_latest_portfolio_analytics_for_user"("p_user_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_latest_portfolio_analytics_for_user"("p_user_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."get_published_trade_venues"("p_strategy_ids" "uuid"[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."get_published_trade_venues"("p_strategy_ids" "uuid"[]) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_published_trade_venues"("p_strategy_ids" "uuid"[]) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_published_trade_venues"("p_strategy_ids" "uuid"[]) TO "service_role";
 
 
 
