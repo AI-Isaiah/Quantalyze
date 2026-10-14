@@ -1183,6 +1183,13 @@
 // leg(s)` (the two tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`,
 // `unreachable: 27`, `per-arm lane time: mean 3.2s over 673 arm run(s)`, `No defects. Every
 // annotated arm bit its own arm first.`. WAIVED_CEILING stays 0.
+// Phase 167.1.2.1 RECONMARKER plan 07, 2026-10-14: 68 -> 69, the NEW annotated gate file
+// supabase/tests/test_refresh_fanout_owed_key_reconstruct.sql (plan 04, 12 arms). MEASURED by ONE
+// full run of `node scripts/mutation-runner/run.mjs` with the tree frozen (committed, clean, exit
+// 0): `scope: FULL 69/69 annotated files`, `coverage: files 69/96`, `arms: 684/684/0`,
+// `biting: 684`, `lane-invocations: 684 ... plus 69 baseline / 69 restore leg(s)` (the two tallies
+// AGREE), `lane-blocked: 0`, `unreachable: 27`, `per-arm lane time: mean 2.8s over 684 arm run(s)`,
+// `No defects. Every annotated arm bit its own arm first.`. WAIVED_CEILING stays 0.
 // Phase 170.6.1 DISCOVERYPHONE plan 01 (released by plan 03), 2026-10-14: 68 -> 69, the NEW
 // annotated gate file supabase/tests/test_get_published_trade_venues.sql (ten arms: TV-secdef,
 // TV-searchpath, TV-shape, TV-anon-exec, TV-auth-exec, TV-1, TV-unpublished,
@@ -1221,7 +1228,12 @@
 // waived 0 / biting 14` and `test_get_published_trade_venues.sql: sections 10 / judged 10 /
 // annotated 10 / waived 0 / biting 10`. The stale-low direction was observed first: `RATCHET
 // STALE: 70 of 97 gate files are now annotated but FILES_FLOOR is still 69.` WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 70;
+// RAISED 70 -> 71 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): main's 70 already holds
+// DISCOVERYPHONE's and OUTAGEALERT's gate files; this branch adds the owed-key fan-out gate
+// (test_refresh_fanout_owed_key_reconstruct.sql), so 71 of 98 files. MEASURED by one full `node scripts/mutation-runner/run.mjs` on the COMMITTED merge of origin/main v0.131.7.0 into the RECONMARKER PR 2 branch, no file edited during it, exit 0: `scope: FULL 71/71 annotated files`, `lane-concurrency: 4`, `coverage: files 71/98`, `arms: 716/716/0`, `biting: 716`, `lane-invocations: 716 ... plus 71 baseline / 71 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `per-arm lane time: mean 1.4s over 716 arm run(s)`, `No defects.`
+// The stale-low direction was observed first: `RATCHET STALE: 71 of 98 gate files are now annotated but FILES_FLOOR is still 70.`
+// WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 71;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3086,6 +3098,29 @@ export const FILES_FLOOR = 70;
 // `test_api_keys_history_reconstruct_marker.sql: sections 30 / judged 30 / annotated 30 / waived 0 /
 // biting 30` and `test_strategy_analytics_computed_at_success_only.sql: sections 5 / judged 5 /
 // annotated 5 / waived 0 / biting 5`. WAIVED_CEILING stays 0 - no waiver was added.
+// Phase 167.1.2.1 RECONMARKER plan 07, 2026-10-14: 673 -> 684 (+11 net) from the same single full
+// run recorded under FILES_FLOOR above: +12 biting arms of the NEW owed-key fan-out gate
+// (`test_refresh_fanout_owed_key_reconstruct.sql: sections 11 / judged 12 / annotated 12 / waived 0
+// / biting 12`) and -1 for arm N5 of the repointed 167.1.2 gate, which asserted the inverse of
+// SC-2 and moved to O1 (`test_refresh_fanout_zero_snapshot_bootstrap.sql: sections 26 / judged 31 /
+// annotated 31 / waived 0 / biting 31`, was 27 / 32 / 32 / 0 / 32). `arms: 684/684/0`,
+// `biting: 684`, `lane-invocations: 684`. WAIVED_CEILING stays 0 - no waiver was added.
+// Phase 167.1.2.1 RECONMARKER PR 2 fix round (SFH F2 + F3), 2026-10-14: 684 -> 689 (+5 biting arms)
+// from ONE full run of `node scripts/mutation-runner/run.mjs` on the committed tree (exit 0): `scope:
+// FULL 69/69 annotated files`, `coverage: files 69/96`, `arms: 689/689/0`, `biting: 689`,
+// `lane-invocations: 689 ... plus 69 baseline / 69 restore leg(s)`, `lane-blocked: 0`,
+// `per-arm lane time: mean 2.1s over 689 arm run(s)`, `No defects`; the owed-key gate row moved to
+// `test_refresh_fanout_owed_key_reconstruct.sql: sections 13 / judged 17 / annotated 17 / waived 0 /
+// biting 17` (O11, O11i, O11g, O12, O12g); the 167.1.2 gate row is unchanged (26 / 31). FILES_FLOOR
+// stays 69. WAIVED_CEILING stays 0 - no waiver was added.
+// Phase 167.1.2.1 RECONMARKER PR 2 fix round 2 (SFH R2-1), 2026-10-14: 689 -> 692 (+3 biting arms) from
+// ONE full run of `node scripts/mutation-runner/run.mjs` on the committed tree (exit 0): `scope: FULL
+// 69/69 annotated files`, `coverage: files 69/96`, `arms: 692/692/0`, `biting: 692`,
+// `lane-invocations: 692 ... plus 69 baseline / 69 restore leg(s)`, `lane-blocked: 0`,
+// `per-arm lane time: mean 2.3s over 692 arm run(s)`, `No defects`; the owed-key gate row moved to
+// `test_refresh_fanout_owed_key_reconstruct.sql: sections 14 / judged 20 / annotated 20 / waived 0 /
+// biting 20` (O13, O13l, O13r); the 167.1.2 gate row is unchanged (26 / 31). FILES_FLOOR stays 69.
+// WAIVED_CEILING stays 0 - no waiver was added.
 // Phase 170.6.1 DISCOVERYPHONE plan 01 (released by plan 03), 2026-10-14: 673 -> 683 (+10 biting
 // arms), all from `test_get_published_trade_venues.sql: sections 10 / judged 10 / annotated 10 /
 // waived 0 / biting 10`, measured by the same single full run recorded under FILES_FLOOR above:
@@ -3102,7 +3137,12 @@ export const FILES_FLOOR = 70;
 // 697/697/0`, `biting: 697`, `lane-invocations: 697`. The stale-low direction was observed first:
 // `The corpus declares 697 twin(s) of which 0 are waivers, so a green run bites 697. ARMS_FLOOR is
 // 683.` WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 697;
+// RAISED 697 -> 716 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): +19 net = the owed-key gate's
+// 20 arms (`test_refresh_fanout_owed_key_reconstruct.sql: sections 14 / judged 20 / annotated 20 / waived 0 / biting 20`) less N5, moved out of
+// test_refresh_fanout_zero_snapshot_bootstrap.sql (now `sections 26 / judged 31 / annotated 31 / biting 31`). MEASURED by the same single run
+// recorded under FILES_FLOOR. The stale-low direction was observed first: `The corpus declares 716 twin(s) of which 0 are waivers, so a green run
+// bites 716. ARMS_FLOOR is 697.` WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 716;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql
+-- source migration: 20261021120000_refresh_fanout_owed_key_reconstruct.sql
 -- ⚠️ SCHEMA-QUALIFIED DELIBERATELY. An unqualified CREATE OR REPLACE resolves
 -- against the SESSION search_path and could create a second function in
 -- another schema, with default privileges.
@@ -25,8 +25,23 @@ DECLARE
   v_bootstrap_cap CONSTANT integer := 25;
   v_bootstrap_enqueued integer := 0;
   v_boot_key uuid;
+  -- Round-2 review SFH R2-1: TRUE only while the key v_boot_key is inside its own
+  -- enqueue section (the inner BEGIN ... END below). The per-book handler counts an
+  -- attempt only when it is TRUE, so an error raised anywhere else in the book
+  -- (the cursor advancing, for one) is not blamed on a key.
+  v_boot_in_enqueue boolean := FALSE;
   v_loop_state text;
   v_loop_msg   text;
+  -- Phase 167.1.2.1 D-09: a key is enqueued at most this many times while its
+  -- marker is still NULL. At the cap it stays owed, is not enqueued again and
+  -- leaves one public.cron_runs row per run (see the count below the bootstrap
+  -- sub-block). D-17: the fan-out counts, in the same inner block as the enqueue.
+  v_reconstruct_attempt_cap CONSTANT integer := 5;
+  v_capped integer;
+  -- Round-1 review SFH F2: the error a handler is about to trace, captured before
+  -- a nested block overwrites SQLSTATE and SQLERRM.
+  v_trace_state text;
+  v_trace_msg   text;
 BEGIN
   IF NOT pg_try_advisory_lock(hashtext('daily_equity_refresh')) THEN
     RAISE NOTICE 'enqueue_refresh_allocator_equity_for_all: another run holds the lock; skipping';
@@ -34,6 +49,10 @@ BEGIN
   END IF;
 
   BEGIN
+    -- Phase 167.1.2.1 D-06: the comments below that say "zero-snapshot" are
+    -- 20260928140000's text. The selection is now per OWED key (marker NULL,
+    -- attempts under the cap, no reconstruct in flight) on any book, with or
+    -- without snapshots; see the migration header.
     -- Phase 167.1.2 D-17: bootstrap a zero-snapshot book. Whole books, newest
     -- qualifying key first; never split a book across runs.
     -- ISOLATED (167.1.2-12 review SFH-02): this loop runs in its own
@@ -55,8 +74,9 @@ BEGIN
           AND lower(bq.exchange) <> 'deribit'
           AND NOT EXISTS (SELECT 1 FROM strategies bqs WHERE bqs.api_key_id = bq.id AND bqs.user_id = bq.user_id AND bqs.status <> 'archived')
           AND NOT EXISTS (SELECT 1 FROM strategy_keys bqsk JOIN strategies bqks ON bqks.id = bqsk.strategy_id WHERE bqsk.api_key_id = bq.id AND bqks.user_id = bq.user_id AND bqks.status <> 'archived')
-          AND NOT EXISTS (SELECT 1 FROM compute_jobs bqj WHERE bqj.api_key_id = bq.id AND bqj.kind = 'reconstruct_allocator_history' AND bqj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done'))
-          AND NOT EXISTS (SELECT 1 FROM allocator_equity_snapshots bqe WHERE bqe.allocator_id = bq.user_id)
+          AND bq.history_reconstructed_at IS NULL
+          AND bq.history_reconstruct_attempts < v_reconstruct_attempt_cap
+          AND NOT EXISTS (SELECT 1 FROM compute_jobs bqj WHERE bqj.api_key_id = bq.id AND bqj.kind = 'reconstruct_allocator_history' AND bqj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry'))
         GROUP BY bq.user_id
         ORDER BY max(bq.created_at) DESC, bq.user_id
       LOOP
@@ -68,6 +88,7 @@ BEGIN
         -- book has no in-flight-or-done reconstruct row, so the refresh loop
         -- still withholds its refresh, and the next run takes it again.
         v_boot_key := NULL;
+        v_boot_in_enqueue := FALSE;
         BEGIN
           FOR v_rkey IN
             SELECT rk.id AS api_key_id
@@ -80,10 +101,13 @@ BEGIN
               AND lower(rk.exchange) <> 'deribit'
               AND NOT EXISTS (SELECT 1 FROM strategies rks WHERE rks.api_key_id = rk.id AND rks.user_id = rk.user_id AND rks.status <> 'archived')
               AND NOT EXISTS (SELECT 1 FROM strategy_keys rksk JOIN strategies rkks ON rkks.id = rksk.strategy_id WHERE rksk.api_key_id = rk.id AND rkks.user_id = rk.user_id AND rkks.status <> 'archived')
-              AND NOT EXISTS (SELECT 1 FROM compute_jobs rkj WHERE rkj.api_key_id = rk.id AND rkj.kind = 'reconstruct_allocator_history' AND rkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done'))
+              AND rk.history_reconstructed_at IS NULL
+              AND rk.history_reconstruct_attempts < v_reconstruct_attempt_cap
+              AND NOT EXISTS (SELECT 1 FROM compute_jobs rkj WHERE rkj.api_key_id = rk.id AND rkj.kind = 'reconstruct_allocator_history' AND rkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry'))
             ORDER BY rk.created_at DESC, rk.id
           LOOP
             v_boot_key := v_rkey.api_key_id;
+            v_boot_in_enqueue := TRUE;
             BEGIN
               PERFORM enqueue_compute_job(
                 p_strategy_id     := NULL,
@@ -91,6 +115,11 @@ BEGIN
                 p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial',
                 p_api_key_id      := v_rkey.api_key_id
               );
+              -- Phase 167.1.2.1 D-17: count the try HERE, in the same inner block as
+              -- the enqueue. The handler below rolls this block back, so a lost
+              -- race burns no attempt. A book that is rolled back by the book-level
+              -- handler is counted there instead, once, on the key that failed.
+              UPDATE public.api_keys SET history_reconstruct_attempts = history_reconstruct_attempts + 1 WHERE id = v_rkey.api_key_id;
             -- serialization_failure is the enqueue helper's lost-race signal
             -- (the winner already left the in-flight statuses). unique_violation
             -- cannot fire today (the helper inserts ON CONFLICT DO NOTHING) and
@@ -98,6 +127,7 @@ BEGIN
             EXCEPTION WHEN unique_violation OR serialization_failure THEN
               RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: reconstruct enqueue skipped for api_key % (SQLSTATE %)', v_rkey.api_key_id, SQLSTATE;
             END;
+            v_boot_in_enqueue := FALSE;
             v_bootstrap_enqueued := v_bootstrap_enqueued + 1;
           END LOOP;
         EXCEPTION WHEN OTHERS THEN
@@ -120,6 +150,26 @@ BEGIN
                                      'api_key_id', v_boot_key,
                                      'sqlstate', SQLSTATE,
                                      'message', SQLERRM));
+          -- Phase 167.1.2.1 round-1 review SFH F3: the rollback above took the
+          -- book's attempt increments with it, so count the failed try HERE, once,
+          -- on the key that was being enqueued. Round-2 review SFH R2-1: only when
+          -- the error is that key's own. NOT counted: an error raised while the
+          -- cursor advances (v_boot_in_enqueue is FALSE there), and a transient
+          -- error that says nothing about the key: class 40 (deadlock_detected
+          -- 40P01, serialization_failure, transaction_rollback), class 53
+          -- (insufficient_resources) and lock_not_available 55P03. query_canceled
+          -- 57014 never reaches this handler (WHEN OTHERS does not match it), it
+          -- aborts the whole call, which counts nothing. Guarded: a count that
+          -- raises must not reach the loop-level handler (it would roll back every
+          -- other book's bootstrap); the skipped-book row above is then the trace.
+          BEGIN
+            IF v_boot_key IS NOT NULL AND v_boot_in_enqueue
+               AND SQLSTATE NOT LIKE '40%' AND SQLSTATE NOT LIKE '53%' AND SQLSTATE <> '55P03' THEN
+              UPDATE public.api_keys SET history_reconstruct_attempts = history_reconstruct_attempts + 1 WHERE id = v_boot_key;
+            END IF;
+          EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the failed bootstrap try of one book could not be counted (SQLSTATE %)', SQLSTATE;
+          END;
         END;
       END LOOP;
     EXCEPTION WHEN OTHERS THEN
@@ -139,6 +189,54 @@ BEGIN
                                    'message', v_loop_msg));
       EXCEPTION WHEN OTHERS THEN
         RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap failure row could not be written (SQLSTATE %)', SQLSTATE;
+      END;
+    END;
+
+    -- Phase 167.1.2.1 D-09: a key that still owes its history and has used its
+    -- attempts is never enqueued again, so it must not go quiet. One durable
+    -- public.cron_runs row per run, a COUNT only (no key or owner id), in the
+    -- ledger fan-outs' sink. Wrapped: this is the last step before the refresh
+    -- loop, and a sink or a read that refuses must not cancel the daily refresh
+    -- of every allocator.
+    BEGIN
+      SELECT count(*) INTO v_capped
+      FROM api_keys ck
+      WHERE ck.is_active = TRUE
+        AND ck.sync_status IS DISTINCT FROM 'revoked'
+        AND coalesce(ck.sync_status, '') NOT IN ('sign_in_failed', 'error')
+        AND ck.disconnected_at IS NULL
+        AND lower(ck.exchange) <> 'deribit'
+        AND NOT EXISTS (SELECT 1 FROM strategies cks WHERE cks.api_key_id = ck.id AND cks.user_id = ck.user_id AND cks.status <> 'archived')
+        AND NOT EXISTS (SELECT 1 FROM strategy_keys cksk JOIN strategies ckks ON ckks.id = cksk.strategy_id WHERE cksk.api_key_id = ck.id AND ckks.user_id = ck.user_id AND ckks.status <> 'archived')
+        AND ck.history_reconstructed_at IS NULL
+        AND ck.history_reconstruct_attempts >= v_reconstruct_attempt_cap;
+      IF v_capped > 0 THEN
+        INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+        VALUES ('equity_refresh_fanout', 'error', now(), 'history_reconstruct_capped',
+                jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',
+                                   'cause', 'history_reconstruct_capped',
+                                   'count', v_capped));
+      END IF;
+    EXCEPTION WHEN OTHERS THEN
+      v_trace_state := SQLSTATE;
+      v_trace_msg   := SQLERRM;
+      RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the capped-key count or its trace row failed; the refresh loop still runs (SQLSTATE %)', SQLSTATE;
+      -- Round-1 review SFH F2: a WARNING lives only in the server log and pg_cron
+      -- records the run as succeeded, so a count or a sink that fails every day
+      -- would lose the capped-key signal silently. Leave a durable row of its own
+      -- (a different error value, so a refused capped row does not refuse it),
+      -- nested and guarded like the bootstrap loop's: the WARNING above stays the
+      -- last resort, and a sink that refuses this row too must not cancel the
+      -- daily refresh of every allocator.
+      BEGIN
+        INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+        VALUES ('equity_refresh_fanout', 'error', now(), 'history_reconstruct_capped_trace_failed',
+                jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',
+                                   'cause', 'history_reconstruct_capped_trace_failed',
+                                   'sqlstate', v_trace_state,
+                                   'message', v_trace_msg));
+      EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the capped-key failure row could not be written (SQLSTATE %)', SQLSTATE;
       END;
     END;
 
@@ -172,7 +270,9 @@ BEGIN
                 AND lower(bk.exchange) <> 'deribit'
                 AND NOT EXISTS (SELECT 1 FROM strategies bks WHERE bks.api_key_id = bk.id AND bks.user_id = bk.user_id AND bks.status <> 'archived')
                 AND NOT EXISTS (SELECT 1 FROM strategy_keys bksk JOIN strategies bkks ON bkks.id = bksk.strategy_id WHERE bksk.api_key_id = bk.id AND bkks.user_id = bk.user_id AND bkks.status <> 'archived')
-                AND NOT EXISTS (SELECT 1 FROM compute_jobs bkj WHERE bkj.api_key_id = bk.id AND bkj.kind = 'reconstruct_allocator_history' AND bkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done'))
+                AND bk.history_reconstructed_at IS NULL
+                AND bk.history_reconstruct_attempts < v_reconstruct_attempt_cap
+                AND NOT EXISTS (SELECT 1 FROM compute_jobs bkj WHERE bkj.api_key_id = bk.id AND bkj.kind = 'reconstruct_allocator_history' AND bkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry'))
             )
           )
         )

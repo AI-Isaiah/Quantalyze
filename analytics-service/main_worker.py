@@ -112,7 +112,14 @@ import main_worker_healthz  # top-level module (not in services/); stdlib-only, 
 from sentry_init import init_sentry
 from services.db import db_execute, db_read_with_retry, get_supabase
 from services.encryption import validate_kek_on_startup
-from services.job_worker import DispatchOutcome, ErrorKind, JobStatus, Priority, dispatch
+from services.job_worker import (
+    DispatchOutcome,
+    ErrorKind,
+    JobStatus,
+    Priority,
+    dispatch,
+    report_orphaned_capped_reconstructs,
+)
 
 logger = logging.getLogger("quantalyze.analytics.worker")
 
@@ -1226,6 +1233,15 @@ async def watchdog_loop(interval: float = 60.0) -> None:
             await watchdog_tick()
         except Exception as exc:  # noqa: BLE001
             logger.error("watchdog_loop tick failed: %s", exc, exc_info=True)
+
+        # Phase 167.1.2.1 (silent-failure review F1): the D-09 capped-key event
+        # for a reconstruct job the pg_cron orphan sweep terminalized, which
+        # never returns through dispatch. Its own guard: it must not depend on
+        # the reclaim tick succeeding, and it must never stop the loop.
+        try:
+            await report_orphaned_capped_reconstructs()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("watchdog_loop orphan cap sweep failed: %s", exc, exc_info=True)
 
         try:
             await asyncio.wait_for(SHUTDOWN.wait(), timeout=interval)
