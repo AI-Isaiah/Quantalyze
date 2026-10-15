@@ -174,6 +174,7 @@ STOP_CLASSES: Final[frozenset[str]] = frozenset(
         "d03_zero_day_has_archive_pnl",
         "fingerprint_missing",
         "fingerprint_mismatch",
+        "nothing_to_apply",
         "rpc_refused",
     }
 )
@@ -1664,6 +1665,10 @@ class _TargetPlan:
     #: gap day with no row or a day inside a stored archive range. It equals the row date set
     #: before this target's RPC commits and after it, which is why the fingerprint hashes it.
     planned_dates: list[str]
+    #: True when ``planned_dates`` is non-empty and every planned day already lies inside a
+    #: stored archive-sourced ``reconstructed_ranges`` entry: the proof that THIS job applied
+    #: this target already (WR-05).
+    archive_covers_planned: bool
 
 
 def _plan_target(
@@ -1687,6 +1692,7 @@ def _plan_target(
     planned = sorted(
         day for day in eligible if day in finite and day in covered and day < rebuilt.live_first_day
     )
+    recorded = _expand(archive_ranges)
     return _TargetPlan(
         position=position,
         strategy_id=strategy_id,
@@ -1694,6 +1700,7 @@ def _plan_target(
         rows=rows_out,
         expected_after=expected_after,
         planned_dates=planned,
+        archive_covers_planned=bool(planned) and all(day in recorded for day in planned),
     )
 
 
@@ -2021,6 +2028,7 @@ async def _evaluate(
             "insert_days": len(plan.rows),
             "insert_ranges": days_to_ranges(r["date"] for r in plan.rows),
             "insert_returns": _returns_summary(plan.rows),
+            "apply_state": _target_state(plan),
             "gaps_before": plan.stored_gaps,
             "gaps_after": plan.expected_after,
             "rpc": None,
@@ -2041,10 +2049,25 @@ def _is_refusal(exc: BaseException) -> bool:
     return getattr(exc, "code", None) in ("22023", "P0001")
 
 
-def _already_complete(plan: _TargetPlan) -> bool:
-    """Resumability rule 3: nothing left to write and nothing left to narrow. The RPC refuses
-    an empty ``p_rows`` by contract, so such a target is never sent."""
-    return not plan.rows and plan.expected_after == plan.stored_gaps
+def _target_state(plan: _TargetPlan) -> str:
+    """What an apply does with one target (resumability rule 3, WR-05).
+
+    * ``insert``: there are rows to write; one RPC.
+    * ``already_applied``: nothing left to write and nothing left to narrow, AND the target's
+      stored archive ``reconstructed_ranges`` already cover every day this plan would have
+      planned. That is the only proof this job applied the target before.
+    * ``gap_delta``: nothing to write but the stored gaps would still change (a live row filled
+      a gap day since the read). The RPC refuses an empty ``p_rows`` by contract, so this
+      cannot be expressed through it.
+    * ``nothing_to_apply``: nothing to write and nothing recorded: a wrong strategy id, a
+      strategy with no stored gap, a gap wholly outside the ingested quarters, or one whose
+      every day the NaN guard left out. Calling that ``already_applied`` reported a successful
+      re-run that never happened."""
+    if plan.rows:
+        return "insert"
+    if plan.expected_after != plan.stored_gaps:
+        return "gap_delta"
+    return "already_applied" if plan.archive_covers_planned else "nothing_to_apply"
 
 
 async def _apply_targets(
@@ -2054,18 +2077,24 @@ async def _apply_targets(
     answer in ``strategies[i].rpc``. Everything evaluation can decide has been decided before
     this runs, so a stop here is the RPC's own refusal (``rpc_refused``, naming the position)
     or a transport failure, which writes the per-target record and re-raises for the worker to
-    retry (the re-claim resumes through ``_already_complete``)."""
+    retry (the re-claim resumes through ``_target_state``)."""
     strategies = result["strategies"]
 
     # A target the RPC cannot express (rows empty, gaps would still change: live rows filled
-    # gap days since the read) is decided here, before the FIRST call, and writes nothing.
+    # gap days since the read) and a target with nothing to apply at all are decided here,
+    # before the FIRST call, and write nothing.
     for plan in plans:
-        if not plan.rows and not _already_complete(plan):
+        if _target_state(plan) == "gap_delta":
             raise _refused(plan.position, "empty_rows_gap_delta")
+    idle = [plan.position for plan in plans if _target_state(plan) == "nothing_to_apply"]
+    if idle:
+        for position in idle:
+            strategies[position]["rpc"] = {"status": "nothing_to_apply", "error_class": None}
+        raise _Stop("nothing_to_apply", f"position={idle[0]}")
 
     for plan in plans:
         entry = strategies[plan.position]
-        if _already_complete(plan):
+        if _target_state(plan) == "already_applied":
             entry["insert_days"] = 0
             entry["insert_ranges"] = []
             entry["insert_returns"] = None

@@ -1693,24 +1693,66 @@ class TestApplyResume:
         assert world.result()["strategies"][0]["rpc"] is None
 
     @pytest.mark.asyncio
-    async def test_an_empty_target_with_nothing_to_narrow_is_never_sent_to_the_rpc(
+    async def test_a_target_with_nothing_to_write_is_a_named_stop_not_an_already_applied_success(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A rebuild target with no stored gap at all has nothing to write and nothing to
-        narrow: it is recorded `already_applied` without an RPC (the RPC refuses an empty
-        `p_rows`), and the other target is still written."""
+        """WR-05 / F6. A target with no stored gap has nothing to write and nothing to narrow.
+        That used to be recorded `already_applied` and the job ended DONE, so a wrong strategy
+        id, a strategy TRADESYNC never measured, or a gap lying wholly outside the ingested
+        quarters read as a successful re-run. It is its own status, and an apply that meets
+        one stops BEFORE the first RPC (the other target is not written either: the operator
+        listed a target that cannot be applied, and fixes the list)."""
         db = _db_with((STRATEGY_ID, GAP_A), (STRATEGY_2_ID, None))
         preview_world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=self.BOTH)
         await _run(_meta("calibrate", list(self.BOTH)))
-        fingerprint = preview_world.result()["fingerprint"]
+        preview = preview_world.result()
+        assert [s["apply_state"] for s in preview["strategies"]] == ["insert", "nothing_to_apply"]
         world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=self.BOTH)
 
-        outcome = await _run(_meta("apply", list(self.BOTH), approved_fingerprint=fingerprint))
+        outcome = await _run(_meta("apply", list(self.BOTH), approved_fingerprint=preview["fingerprint"]))
 
-        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
-        assert [c["p_strategy_id"] for c in _apply_calls(db)] == [STRATEGY_ID]
-        statuses = [s["rpc"]["status"] for s in world.result()["strategies"]]
-        assert statuses == ["applied", "already_applied"]
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == "okx_archive_rebuild: nothing_to_apply position=1"
+        assert db.apply_calls == 0, "not even the target that could be written is sent"
+        result = world.result()
+        assert result["stop_class"] == "nothing_to_apply"
+        assert result["strategies"][0]["rpc"] is None
+        assert result["strategies"][1]["rpc"] == {"status": "nothing_to_apply", "error_class": None}
+        assert db.table_writes == []
+
+    @pytest.mark.asyncio
+    async def test_a_gap_wholly_outside_the_ingested_quarters_is_nothing_to_apply(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        q2_gap = [{"from": "2026-06-20", "to": "2026-06-30", "recorded_at": "2026-10-10T00:00:00Z"}]
+        db = _db_with((STRATEGY_ID, q2_gap))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+        calibrate = await _run(_meta("calibrate", [STRATEGY_ID]))
+        assert calibrate.outcome == DispatchOutcome.DONE, calibrate.error_message
+        fingerprint = world.result()["fingerprint"]
+        assert world.result()["strategies"][0]["apply_state"] == "nothing_to_apply"
+        _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+
+        outcome = await _run(_meta("apply", [STRATEGY_ID], approved_fingerprint=fingerprint))
+
+        assert outcome.error_message == "okx_archive_rebuild: nothing_to_apply position=0"
+        assert db.apply_calls == 0
+
+    def test_the_four_states_of_a_target_are_decided_by_what_it_has_and_what_is_recorded(self) -> None:
+        plan = okx_archive_job._TargetPlan
+        gap = [{"from": "2026-07-10", "to": "2026-07-12"}]
+        row = {"date": "2026-07-10", "daily_return": 0.001}
+        state = okx_archive_job._target_state
+        # rows to write
+        assert state(plan(0, "s", gap, [row], [], ["2026-07-10"], False)) == "insert"
+        # nothing to write, planned days already inside the stored archive ranges
+        assert state(plan(0, "s", [], [], [], ["2026-07-10"], True)) == "already_applied"
+        # every gap day NaN-guarded: nothing planned, gaps unchanged
+        assert state(plan(0, "s", gap, [], gap, [], False)) == "nothing_to_apply"
+        # no stored gap and nothing recorded (a wrong strategy id)
+        assert state(plan(0, "s", [], [], [], [], False)) == "nothing_to_apply"
+        # nothing to write but the gaps WOULD change (a live row appeared): the RPC cannot say it
+        assert state(plan(0, "s", gap, [], [{"from": "2026-07-11", "to": "2026-07-12"}], [], False)) == "gap_delta"
 
 
 def _standard_bills() -> _Bills:
@@ -2094,7 +2136,8 @@ class TestResultShape:
         assert set(result["excluded"]) == {"excluded_by_month"}
         for entry in result["strategies"]:
             assert set(entry) == {"position", "insert_days", "insert_ranges", "insert_returns",
-                                  "gaps_before", "gaps_after", "rpc"}
+                                  "gaps_before", "gaps_after", "apply_state", "rpc"}
+            assert entry["apply_state"] in ("insert", "already_applied", "nothing_to_apply", "gap_delta")
             assert isinstance(entry["position"], int) and isinstance(entry["insert_days"], int)
             assert all(set(r) == {"from", "to"} for r in entry["insert_ranges"])
         assert isinstance(result["fingerprint"], str) and HEX64.fullmatch(result["fingerprint"])

@@ -1680,7 +1680,7 @@ class TestStopClassContract:
             "non_usd_ccy", "live_anchor_unusable", "live_fetch_failed", "identity_violation",
             "reconcile_miss",
             "d03_zero_day_has_archive_pnl", "fingerprint_missing", "fingerprint_mismatch",
-            "rpc_refused",
+            "nothing_to_apply", "rpc_refused",
         }
         assert okx_archive_job.TRANSIENT_STOP_CLASSES == {"link_expired", "live_fetch_failed"}
 
