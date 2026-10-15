@@ -371,7 +371,7 @@ export const CLASSIFICATION: Classification = {
   },
   "analytics-service/routers/match.py": {
     M4: {
-      count: 5,
+      count: 6,
       verdict: "merges-on-purpose",
       symbols: [
         "_load_holding_portfolio_context",
@@ -379,7 +379,7 @@ export const CLASSIFICATION: Classification = {
         "compute_holding_flags",
         "_score_one_allocator",
       ],
-      reason: "Every f-string builds the Bridge pseudo-strategy id from the COLLAPSED holdings: _load_holding_portfolio_context applies the account rule (one_key_per_account_day) and then SUMS the counted keys' values into one row per (venue, symbol, holding_type); the other four rebuild the same id from those rows (compute_holding_flags twice: its eligible loop and its withheld-spot loop). One pseudo-strategy per ref, carrying the total once, is the matcher's unit.",
+      reason: "Every f-string builds the Bridge pseudo-strategy id from the COLLAPSED holdings: _load_holding_portfolio_context applies the account rule (one_key_per_account_day) and then SUMS the counted keys' values into one row per (venue, symbol, holding_type); the other five rebuild the same id from those rows (compute_holding_flags three times: its eligible loop, its withheld-spot loop and its derivative loop). One pseudo-strategy per ref, carrying the total once, is the matcher's unit.",
     },
     M6: {
       count: 1,
