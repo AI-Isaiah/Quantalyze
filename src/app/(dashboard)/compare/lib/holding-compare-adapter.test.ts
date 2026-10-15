@@ -15,7 +15,6 @@ import {
   fetchHoldingCompareItem,
   analyzePriceSeries,
   dailyMarkPrices,
-  holdingCompareHistoryState,
   HOLDING_COMPARE_MIN_PRICED_DAYS,
   HOLDING_COMPARE_MAX_PAGES,
   HoldingCompareLoadError,
@@ -53,6 +52,8 @@ type HoldingFx = {
   value_usd: number;
   updated_at: string;
   api_key_id: string;
+  /** Read by the derivative rule only; a spot fixture omits it. */
+  side?: unknown;
 };
 
 type Recorded = {
@@ -299,7 +300,7 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
     expect(item!.analytics!.priced_days).toBe(31);
   });
 
-  it("reads allocator_holdings only, with exactly the four price columns and the holding's filters", async () => {
+  it("reads allocator_holdings only, with exactly the price columns plus side and the holding's filters", async () => {
     const rec = newRecorded();
     const rows = Array.from({ length: 31 }, (_, i) => row(i + 1, 100));
     await fetchHoldingCompareItem({
@@ -311,9 +312,12 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
     expect(rec.tables.every((t) => t === "allocator_holdings")).toBe(true);
     for (const s of rec.selects) {
       expect(new Set(s.split(",").map((c) => c.trim()))).toEqual(
-        new Set(["asof", "mark_price", "updated_at", "api_key_id"]),
+        new Set(["asof", "mark_price", "updated_at", "api_key_id", "side"]),
       );
     }
+    expect(rec.selects).toEqual(
+      Array(rec.selects.length).fill("asof, mark_price, updated_at, api_key_id, side"),
+    );
     expect(rec.eqs).toEqual(
       expect.arrayContaining([
         ["allocator_id", ALLOC],
@@ -596,19 +600,64 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
     });
   });
 
-  it("a derivative with rows is rebuilding and carries no analytics", async () => {
-    const rows = Array.from({ length: 40 }, (_, i) =>
-      row(i + 1, 100 + i, { holding_type: "derivative" }),
-    );
-    const item = await fetchHoldingCompareItem({
-      allocator_id: ALLOC,
-      holding_ref: "holding:binance:BTC:derivative",
-      supabase: fakeSupabase(rows),
+  // 167.1.1.1 / D-02, D-06. WHY: a short position gains when the price falls. Reading a
+  // short's marks as a long's would print a loss for a winning position. The oracles are
+  // typed from the price path (a 1% daily fall for 30 intervals), not computed by the
+  // code under test: a short compounds +1% thirty times (1.01^30 - 1) and a long -1%
+  // thirty times (0.99^30 - 1).
+  describe("D-02: a derivative is read as a signed return", () => {
+    const DREF = "holding:bybit:BTCUSDT:derivative";
+    const fallingRows = (side: string) =>
+      Array.from({ length: 31 }, (_, i) =>
+        row(i + 1, 100 * 0.99 ** i, {
+          venue: "bybit",
+          symbol: "BTCUSDT",
+          holding_type: "derivative",
+          side,
+        }),
+      );
+
+    it("a short over a falling price is ready with a positive cumulative return", async () => {
+      const item = await fetchHoldingCompareItem({
+        allocator_id: ALLOC, holding_ref: DREF, supabase: fakeSupabase(fallingRows("short")),
+      });
+      expect(item!.historyState).toBe("ready");
+      const a = item!.analytics!;
+      expect(a.priced_days).toBe(31);
+      expect(a.cumulative_return).toBeGreaterThan(0);
+      expect(a.cumulative_return).toBeCloseTo(1.347848915332906 - 1, 12);
+      expect(a.max_drawdown).toBe(0);
     });
-    expect(item!.historyState).toBe("rebuilding");
-    expect(item!.analytics).toBeNull();
-    expect(holdingCompareHistoryState("derivative")).toBe("rebuilding");
-    expect(holdingCompareHistoryState("spot")).toBe("ready");
+
+    it("the same price path held long is the negated per-interval figures, the spot level form", async () => {
+      const item = await fetchHoldingCompareItem({
+        allocator_id: ALLOC, holding_ref: DREF, supabase: fakeSupabase(fallingRows("long")),
+      });
+      expect(item!.historyState).toBe("ready");
+      expect(item!.analytics!.cumulative_return).toBeCloseTo(-0.2602996266117198, 12);
+      // The spot rule on the same marks lands on the same cumulative return.
+      const spot = await fetchHoldingCompareItem({
+        allocator_id: ALLOC,
+        holding_ref: REF,
+        supabase: fakeSupabase(
+          Array.from({ length: 31 }, (_, i) => row(i + 1, 100 * 0.99 ** i)),
+        ),
+      });
+      expect(item!.analytics!.cumulative_return).toBeCloseTo(spot!.analytics!.cumulative_return!, 12);
+    });
+
+    it("is annualized on the crypto clock (365)", async () => {
+      const marks = Array.from({ length: 31 }, (_, i) => (i % 2 === 0 ? 100 : 110));
+      const rows = marks.map((m, i) =>
+        row(i + 1, m, { venue: "bybit", symbol: "BTCUSDT", holding_type: "derivative", side: "long" }),
+      );
+      const item = await fetchHoldingCompareItem({
+        allocator_id: ALLOC, holding_ref: DREF, supabase: fakeSupabase(rows),
+      });
+      // Returns alternate +10% and 100/110 - 1 = -1/11; population sd = (0.1 + 1/11) / 2.
+      const sd = (0.1 + 1 / 11) / 2;
+      expect(item!.analytics!.vol).toBeCloseTo(sd * Math.sqrt(365), 10);
+    });
   });
 
   it("an unknown holding_type returns null, as do zero rows (D-15)", async () => {
@@ -995,6 +1044,7 @@ describe("shared fixture: holding_mark_returns_cases.json", () => {
       value_usd: r.value_usd,
       updated_at: r.updated_at,
       api_key_id: r.api_key_id,
+      side: r.side,
     }));
 
   it("the minimum priced days and the reason vocabulary are the fixture's", () => {
@@ -1042,8 +1092,22 @@ describe("shared fixture: holding_mark_returns_cases.json", () => {
     },
   );
 
-  // /compare reads spot only until plan 07 wires the derivative path.
-  it.each(MARK_FIXTURE.cases.filter((c) => c.holding_type === "spot").map((c) => [c.name, c] as const))(
+  // What /compare shows for a case. Spot cases carry it in the fixture (`ts`); a
+  // derivative case's is read off its hand-typed `expected`: a withheld reason that is not
+  // `too_few_priced_days` is a withheld card, anything else is a ready card, and the
+  // metrics are null below the minimum or when no signed return exists.
+  const WITHHELD_ON_COMPARE = new Set(["no_price", "no_direction", "option_premium"]);
+  const shown = (c: FixtureCase) => {
+    if (c.ts) return c.ts;
+    const w = c.expected!.withheld;
+    if (w !== null && WITHHELD_ON_COMPARE.has(w)) return { historyState: "withheld" as const };
+    return {
+      historyState: "ready" as const,
+      null_metrics: w === "too_few_priced_days" || c.expected!.returns.length === 0,
+    };
+  };
+
+  it.each(MARK_FIXTURE.cases.map((c) => [c.name, c] as const))(
     "fetchHoldingCompareItem maps %s onto what /compare shows",
     async (_name, c) => {
       vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1058,11 +1122,14 @@ describe("shared fixture: holding_mark_returns_cases.json", () => {
         return;
       }
       const item = await call;
-      expect(item!.historyState).toBe(c.ts!.historyState);
-      if (c.ts!.historyState === "ready") {
+      const want = shown(c);
+      expect(item!.historyState).toBe(want.historyState);
+      if (want.historyState === "ready") {
         const a = item!.analytics!;
         expect(a.priced_days).toBe(c.expected!.priced_days);
-        expect(a.cumulative_return === null).toBe(c.ts!.null_metrics);
+        expect(a.cumulative_return === null).toBe(want.null_metrics);
+      } else {
+        expect(item).toMatchObject({ withheld_reason: c.expected!.withheld });
       }
     },
   );

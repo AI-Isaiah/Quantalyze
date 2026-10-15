@@ -14,10 +14,16 @@
  * Phase 167.1.1 / D-03 (founder, 2026-10-15): the metrics are computed from the
  * holding's daily MARK PRICE (`allocator_holdings.mark_price`, one price per
  * `asof` day), never from its dollar value, so buying, selling or moving more
- * of an asset is not read as a gain or loss. They no longer mirror the
- * dollar-ratio `reconstruct_symbol_returns` in
- * analytics-service/services/equity_reconstruction.py (see
- * `holdingCompareHistoryState` for what stays deferred).
+ * of an asset is not read as a gain or loss.
+ *
+ * Phase 167.1.1.1 / D-02: a derivative reads the same daily mark price, signed by
+ * each day's long or short direction (`allocator_holdings.side`), so a price fall
+ * is a gain while the position was short; an option is withheld (its mark is a
+ * premium). Both holding types now reach the price rule, so no holding type is
+ * left waiting. The Bridge matcher reads the same marks through the Python twin
+ * in analytics-service/services/holding_marks.py, and one shared fixture pins the
+ * two runtimes, so a holding cannot read differently on /compare and in the
+ * matcher.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { annualizationPeriods, isCryptoExchange } from "@/lib/closed-sets";
@@ -92,7 +98,7 @@ export const HOLDING_COMPARE_PAGE_SIZE = 1000;
 export const HOLDING_COMPARE_MAX_PAGES = 50;
 
 /**
- * Why a spot holding that was FOUND (rows exist, the owner is known) carries no
+ * Why a holding that was FOUND (rows exist, the owner is known) carries no
  * metrics. One reason per cause, because each reads differently to the owner:
  * - `fixed_price`: its recorded price is a writer constant (`FIXED_MARK_SET`:
  *   a stablecoin symbol, sFOX).
@@ -102,16 +108,25 @@ export const HOLDING_COMPARE_MAX_PAGES = 50;
  * - `no_price` (M-R2-02): a crypto spot holding with rows but NO day carrying a
  *   valid price (the writer's `0.0` failed-ticker sentinel on every day, e.g. an
  *   asset with no `{asset}/USDT` market). Waiting will not fill it, so it is not
- *   the "so far" state.
+ *   the "so far" state. For a derivative the same cause is every mark `<= 0`.
+ * - `no_direction` (167.1.1.1 D-02): a derivative with positive marks but no day on
+ *   which its long or short direction is established (every row `flat`, or the
+ *   rows of each day disagree). A sign is never guessed.
+ * - `option_premium` (167.1.1.1 D-10): an option; its mark is a premium, not a
+ *   price, so no return is computed from it.
  */
-export type HoldingWithheldReason = "fixed_price" | "account_balance" | "no_price";
+export type HoldingWithheldReason =
+  | "fixed_price"
+  | "account_balance"
+  | "no_price"
+  | "no_direction"
+  | "option_premium";
 
 /**
  * Phase 167.1.1.1 / D-03, D-10, D-12: every reason the price rule can withhold a
- * holding by, the three above plus `too_few_priced_days` (priced, but fewer than
- * `HOLDING_COMPARE_MIN_PRICED_DAYS` days) and the two derivative reasons:
- * `no_direction` (positive marks exist but no day has an established long or short
- * direction) and `option_premium` (an option's mark is a premium, not a price). The
+ * holding by, the five above plus `too_few_priced_days` (priced, but fewer than
+ * `HOLDING_COMPARE_MIN_PRICED_DAYS` days; /compare renders it as a ready item with
+ * null metrics and the threshold sentence, never as a withheld note). The
  * Python twin is `PRICE_RULE_WITHHELD_REASONS` in
  * analytics-service/services/holding_marks.py; the shared fixture
  * holding_mark_returns_cases.json pins both lists.
@@ -139,7 +154,6 @@ export type HoldingCompareItem = {
   holding_type: string;
 } & (
   | { historyState: "ready"; analytics: HoldingCompareAnalytics }
-  | { historyState: "rebuilding"; analytics: null }
   | { historyState: "withheld"; analytics: null; withheld_reason: HoldingWithheldReason }
 );
 
@@ -201,39 +215,6 @@ export class HoldingCompareLoadError extends Error {
     super("holding compare load failed");
     this.name = "HoldingCompareLoadError";
   }
-}
-
-/**
- * Phase 167.1.1 / D-03: whether a holding type's metrics are shown ("ready")
- * or withheld ("rebuilding"). A pure function of the type; there is no global
- * switch and no test seam any more.
- *
- * - "spot" is "ready": its price is `allocator_holdings.mark_price`, one price
- *   per `asof` day (one key per day, see `dailyMarkPrices`), so purchases and
- *   sales do not move it. A mark that is not a finite number above 0 (the
- *   writer's `0.0` failed-ticker sentinel) is a gap, never a price; there is
- *   no zero-fill and no forward-fill. A daily return exists only between two
- *   ADJACENT calendar days that both carry a price, so no return spans a gap.
- *   Fewer than `HOLDING_COMPARE_MIN_PRICED_DAYS` priced days gives null metrics.
- *   A mark is a ticker `last` read at poll time, so the copy says "daily
- *   price", never close-to-close.
- * - Anything else (a derivative) stays "rebuilding" until a signed basis is
- *   defined (deferred, not booked as a phase).
- *
- * Orchestrator reading, flagged for the founder (NOT a founder decision): a
- * spot holding whose recorded price is not a market price
- * (`holdingMarkIsFixed`: MT5 `ACCOUNT-<hex>` rows, stablecoin symbols, sFOX)
- * gets no metrics, never a confident 0%. `fetchHoldingCompareItem` returns it as
- * a "withheld" item, not null, so the page keeps the card and names the cause.
- *
- * Deferred and not touched (SC 4): `reconstruct_symbol_returns` in
- * analytics-service/routers/match.py is the Python twin of the retired
- * dollar-ratio read, and the Bridge matcher still uses it.
- */
-export function holdingCompareHistoryState(
-  holding_type: string,
-): "ready" | "rebuilding" {
-  return holding_type === "spot" ? "ready" : "rebuilding";
 }
 
 type PriceRow = {
@@ -621,13 +602,21 @@ export function classifyDerivativeMarks(rows: readonly PriceRow[], symbol: strin
  * holding" — both return null with no additional error information. Null means
  * ONLY that: a holding that exists and is owned is never null (SFH-01).
  *
- * Per type: a derivative with rows is "rebuilding" with no analytics; a spot
- * holding whose recorded price is not a market price (`holdingMarkIsFixed`) is
- * "withheld" with reason "fixed_price" or "account_balance" (rows were found, so the owner is known
- * and no existence leaks); a crypto spot holding with rows but no priced day at all is "withheld"
- * with reason "no_price" and logged (M-R2-02); any other spot holding with rows is "ready" (four
- * null metrics below the minimum priced days, and
- * `annualizationPeriods("crypto")` annualization).
+ * Both types reach the price rule. A daily return exists only between two ADJACENT
+ * calendar days, so no return spans a gap (no zero-fill, no forward-fill). A mark is a
+ * ticker `last` read at poll time, so the copy says "daily price", never close-to-close.
+ *
+ * - Spot: a holding whose recorded price is not a market price (`holdingMarkIsFixed`) is
+ *   "withheld" with reason "fixed_price" or "account_balance" (rows were found, so the
+ *   owner is known and no existence leaks); a crypto holding with rows but no priced day
+ *   is "withheld" with "no_price" and logged (M-R2-02); any other is "ready", with four
+ *   null metrics below the minimum priced days and `annualizationPeriods("crypto")`
+ *   annualization.
+ * - Derivative (167.1.1.1 D-02): the read also takes `side`, and the marks go through
+ *   `classifyDerivativeMarks`. An option is "withheld" `option_premium`; no positive mark
+ *   is `no_price`; positive marks with no established direction is `no_direction`
+ *   (logged, counts only). Otherwise "ready", with the signed-return metrics at or above
+ *   the minimum usable days and null metrics below it.
  *
  * Throws `HoldingCompareLoadError` when the query itself fails or the read
  * exceeds the page ceiling (never a silent partial series), and when a stored
@@ -657,7 +646,7 @@ export async function fetchHoldingCompareItem(params: {
     const from = page * HOLDING_COMPARE_PAGE_SIZE;
     const { data, error } = await params.supabase
       .from("allocator_holdings")
-      .select("asof, mark_price, updated_at, api_key_id")
+      .select("asof, mark_price, updated_at, api_key_id, side")
       .eq("allocator_id", params.allocator_id)
       .eq("venue", parsed.venue)
       .eq("symbol", parsed.symbol)
@@ -699,23 +688,25 @@ export async function fetchHoldingCompareItem(params: {
   if (parsed.holding_type !== "spot" && parsed.holding_type !== "derivative") {
     return null;
   }
-  if (holdingCompareHistoryState(parsed.holding_type) === "rebuilding") {
-    return { ...base, historyState: "rebuilding", analytics: null };
-  }
+  const isDerivative = parsed.holding_type === "derivative";
   // Orchestrator reading, flagged for the founder (NOT a founder decision): a
   // price-based return over a writer constant would print a confident 0%
   // (CR-01). Rows were found above, so this is an owned holding: say why it has
-  // no metrics instead of collapsing it into the D-15 null (SFH-01). The marks
-  // are deliberately not read on that path, so a malformed one there is not a
-  // contract error (`classifySpotMarks` decides from venue and symbol first).
+  // no metrics instead of collapsing it into the D-15 null (SFH-01). A spot
+  // holding's marks are deliberately not read on that path, so a malformed one
+  // there is not a contract error (`classifySpotMarks` decides from venue and
+  // symbol first); an option's are not read either (`classifyDerivativeMarks`
+  // decides from the symbol first).
   let marks: HoldingMarks;
   try {
-    marks = classifySpotMarks(rows, parsed.venue, parsed.symbol);
+    marks = isDerivative
+      ? classifyDerivativeMarks(rows, parsed.symbol)
+      : classifySpotMarks(rows, parsed.venue, parsed.symbol);
   } catch (e) {
     if (e instanceof HoldingMarkContractError) {
       // Counts and the holding ref only; never a row value (SFH-03).
       console.error(
-        `[holding-compare-adapter.fetchHoldingCompareItem] read contract violated for ${params.holding_ref}: ${e.badMarks} row(s) with a non-numeric mark_price, ${e.badDays} row(s) with an asof that is not a real YYYY-MM-DD date`,
+        `[holding-compare-adapter.fetchHoldingCompareItem] read contract violated for ${params.holding_ref}: ${e.badMarks} row(s) with a non-numeric mark_price, ${e.badDays} row(s) with an asof that is not a real YYYY-MM-DD date, ${e.badSides} row(s) with a side outside long, short or flat`,
       );
       throw new HoldingCompareLoadError();
     }
@@ -728,32 +719,37 @@ export async function fetchHoldingCompareItem(params: {
     }
     throw e;
   }
-  if (marks.withheld_reason === "fixed_price" || marks.withheld_reason === "account_balance") {
-    return {
-      ...base,
-      historyState: "withheld",
-      analytics: null,
-      withheld_reason: marks.withheld_reason,
-    };
-  }
 
   // M-R2-02: rows exist (the owner is known) but not one day carries a valid
   // price. The writer marks an asset with no `{asset}/USDT` market at 0.0 on every
   // day, so "Only 0 priced days so far" would promise a history that never comes,
   // and silence would make it look like a newly connected holding. Withhold with a
   // named reason and log the ref and the row count (no ids, no values). One or more
-  // priced days stays "ready": there the history IS filling.
-  if (marks.withheld_reason === "no_price") {
-    console.warn(
-      `[holding-compare-adapter.fetchHoldingCompareItem] no priced day for ${params.holding_ref}: ${rows.length} row(s), none with a valid mark_price`,
-    );
-    return { ...base, historyState: "withheld", analytics: null, withheld_reason: "no_price" };
+  // priced days stays "ready": there the history IS filling. `no_direction` is the
+  // derivative twin: marks exist but no day has a long or short direction.
+  const reason = marks.withheld_reason;
+  if (reason !== null && reason !== "too_few_priced_days") {
+    if (reason === "no_price") {
+      console.warn(
+        `[holding-compare-adapter.fetchHoldingCompareItem] no priced day for ${params.holding_ref}: ${rows.length} row(s), none with a valid mark_price`,
+      );
+    } else if (reason === "no_direction") {
+      console.warn(
+        `[holding-compare-adapter.fetchHoldingCompareItem] no established direction for ${params.holding_ref}: ${rows.length} row(s), none on a day with a single long or short side`,
+      );
+    }
+    return { ...base, historyState: "withheld", analytics: null, withheld_reason: reason };
   }
 
-  const metrics =
-    marks.withheld_reason === null
-      ? analyzePriceSeries(marks.points, annualizationPeriods("crypto"))
-      : NULL_METRICS;
+  let metrics: PriceMetrics = NULL_METRICS;
+  if (reason === null) {
+    metrics = isDerivative
+      ? analyzeSignedReturns(
+          marks.returns.map(([, r]) => r),
+          annualizationPeriods("crypto"),
+        )
+      : analyzePriceSeries(marks.points, annualizationPeriods("crypto"));
+  }
   return {
     ...base,
     historyState: "ready",

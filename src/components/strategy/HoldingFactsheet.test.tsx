@@ -163,71 +163,104 @@ describe("HoldingFactsheet (finding g4)", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Phase 167.1.2 / D-13 ("Hide it until correct", extended to /compare).
-  //
-  // Why this matters: the four metrics are level ratios over
-  // allocator_equity_snapshots.breakdown, the store My Allocation now withholds
-  // because it can count one exchange account twice and reads a purchase as a
-  // gain. While the history is rebuilt the card shows an honest note and NO
-  // metric: not the numbers, not em-dash placeholders that read as "no data".
-  // SAMPLE ("ready", real numbers) above is the positive control.
+  // Phase 167.1.1.1 / D-02, UI-SPEC State RD (replaces State D). WHY it matters: a
+  // derivative's return is signed by its long or short direction, so the card must say
+  // that in words (a price rise is a gain while long and a loss while short) and must
+  // never describe it with the spot sentence, which is about buying and selling. The
+  // copy is typed as literals on purpose: it is the approved sentence.
   // -------------------------------------------------------------------------
-  const REBUILDING: HoldingCompareItem = {
+  const DERIVATIVE_READY: HoldingCompareItem = {
     kind: "holding",
-    holding_ref: "holding:deribit:BTC-PERP:derivative",
-    venue: "deribit",
-    symbol: "BTC-PERP",
+    holding_ref: "holding:bybit:BTCUSDT:derivative",
+    venue: "bybit",
+    symbol: "BTCUSDT",
     holding_type: "derivative",
-    historyState: "rebuilding",
-    analytics: null,
+    historyState: "ready",
+    analytics: {
+      cumulative_return: 0.2,
+      sharpe: 1.1,
+      max_drawdown: -0.08,
+      vol: 0.5,
+      priced_days: 31,
+    },
   };
+  const RD_CAPTION =
+    "Computed from 31 days of BTCUSDT's daily mark price. A price rise counts as a gain while the position was long and as a loss while it was short, so opening, closing or resizing the position does not count as a gain or loss.";
+  const GAP_SENTENCE = "A price move across a missing day is not counted.";
+  const SPOT_CAPTION_TAIL = "so buying, selling or moving more of it does not count as a gain or loss.";
 
-  it("State D: a derivative shows the corrected note and no metric label or value; the header stays", () => {
-    render(<HoldingFactsheet item={REBUILDING} />);
-    const note = screen.getByTestId("holding-factsheet-rebuilding");
-    expect(note.textContent).toBe(
-      "Return, Sharpe, max drawdown and volatility are not shown for derivative holdings yet. A price rise is a gain on a long position and a loss on a short one, and these figures wait until that direction is defined for each day.",
-    );
-    expect(note.textContent).not.toMatch(/rebuilt|double|twice/i);
-    expect(screen.queryByText("Sharpe")).toBeNull();
-    expect(screen.queryByTestId("holding-factsheet-price-basis")).toBeNull();
-    expect(screen.queryByText("Cumulative return")).toBeNull();
-    expect(screen.queryByText("Max drawdown")).toBeNull();
-    expect(screen.queryByText("Vol (annualized)")).toBeNull();
-    expect(screen.queryByText("—")).toBeNull();
-    expect(screen.getByText("BTC-PERP")).toBeInTheDocument();
+  it("State RD: a ready derivative shows the four-metric grid, then the derivative caption and the gap sentence in one paragraph", () => {
+    render(<HoldingFactsheet item={DERIVATIVE_READY} />);
+    const dds = Array.from(
+      screen.getByTestId("holding-factsheet").querySelectorAll("dd"),
+    ).map((d) => d.textContent);
+    expect(dds).toEqual(["20.00%", "1.10", "-8.00%", "50.00%"]);
+    const caption = screen.getByTestId("holding-factsheet-price-basis");
+    expect(caption.textContent).toBe(`${RD_CAPTION} ${GAP_SENTENCE}`);
+    expect(caption.tagName).toBe("P");
+    expect(caption.className).toBe("max-w-prose text-sm text-text-muted");
+    expect(screen.getByText("Cumulative return")).toBeInTheDocument();
+    expect(screen.getByText("Vol (annualized)")).toBeInTheDocument();
+    expect(screen.queryByTestId("holding-factsheet-rebuilding")).toBeNull();
   });
 
-  // The gate that keeps State D closed: a derivative item that somehow carries
-  // numbers under "rebuilding" must still show the note and no metric.
-  it("State D is fail-closed: a derivative with analytics attached under 'rebuilding' shows the note, not the numbers", () => {
-    // The union forbids this shape, so build it the way a stale item would arrive.
-    const item = {
-      ...REBUILDING,
-      analytics: {
-        cumulative_return: 0.42,
-        sharpe: 1.8,
-        max_drawdown: -0.15,
-        vol: 0.55,
-        priced_days: 40,
-      },
-    } as unknown as HoldingCompareItem;
+  it("State RD: the day count takes a thousands separator and '1 day' is singular", () => {
+    const many: HoldingCompareItem = {
+      ...DERIVATIVE_READY,
+      analytics: { ...DERIVATIVE_READY.analytics!, priced_days: 1234 },
+    };
+    const { rerender } = render(<HoldingFactsheet item={many} />);
+    expect(screen.getByTestId("holding-factsheet-price-basis").textContent).toMatch(
+      /^Computed from 1,234 days of BTCUSDT's daily mark price\. /,
+    );
+    // One priced day is below the minimum, so the threshold sentence names it instead.
+    rerender(
+      <HoldingFactsheet
+        item={{ ...DERIVATIVE_READY, analytics: { ...NULL_METRICS, priced_days: 1 } }}
+      />,
+    );
+    expect(screen.getByTestId("holding-factsheet-price-basis").textContent).toBe(
+      "Only 1 priced day of BTCUSDT so far. These four figures need at least 30 priced days.",
+    );
+  });
+
+  it("State RD: a negative derivative figure is neutral text, never coloured by sign", () => {
+    const item: HoldingCompareItem = {
+      ...DERIVATIVE_READY,
+      analytics: { ...DERIVATIVE_READY.analytics!, cumulative_return: -0.12, sharpe: -0.4 },
+    };
     render(<HoldingFactsheet item={item} />);
-    expect(
-      screen.getByTestId("holding-factsheet-rebuilding").textContent,
-    ).toMatch(/^Return, Sharpe, max drawdown and volatility are not shown for derivative holdings yet\./);
-    expect(screen.queryByText("42.00%")).toBeNull();
-    expect(screen.queryByText("Sharpe")).toBeNull();
-    expect(screen.queryByTestId("holding-factsheet-price-basis")).toBeNull();
+    const dds = Array.from(screen.getByTestId("holding-factsheet").querySelectorAll("dd"));
+    expect(dds).toHaveLength(4);
+    for (const dd of dds) expect(dd.className).toBe("font-mono text-lg text-text-primary");
+    expect(dds[0].textContent).toMatch(/12\.00%/);
+    expect(screen.getByTestId("holding-factsheet").innerHTML).not.toMatch(
+      /text-(red|green|danger|success|positive|negative|accent)/,
+    );
+  });
+
+  it("the spot caption never renders for a derivative, and the derivative caption never renders for spot", () => {
+    const { rerender } = render(<HoldingFactsheet item={DERIVATIVE_READY} />);
+    expect(screen.getByTestId("holding-factsheet").textContent).not.toContain(SPOT_CAPTION_TAIL);
+    expect(screen.getByTestId("holding-factsheet").textContent).not.toContain("daily price,");
+    rerender(<HoldingFactsheet item={SAMPLE} />);
+    const text = screen.getByTestId("holding-factsheet").textContent!;
+    expect(text).toContain(SPOT_CAPTION_TAIL);
+    expect(text).not.toContain("daily mark price");
+    expect(text).not.toContain("was long");
+    expect(text).not.toContain(GAP_SENTENCE);
   });
 
   it("State X: a holding_type that is neither spot nor derivative fails closed to the spot-only sentence", () => {
+    // Hand-built: the adapter returns null for any other type, so this shape never arrives.
     const item = {
-      ...REBUILDING,
+      kind: "holding",
       holding_ref: "holding:binance:BTC:margin",
       venue: "binance",
       symbol: "BTC",
       holding_type: "margin",
+      historyState: "ready",
+      analytics: null,
     } as unknown as HoldingCompareItem;
     render(<HoldingFactsheet item={item} />);
     const note = screen.getByTestId("holding-factsheet-rebuilding");
@@ -249,7 +282,7 @@ describe("HoldingFactsheet (finding g4)", () => {
   // Fail-closed: a stale or hand-built item that carries numbers under any
   // state but an explicit "ready" still shows the note, never the numbers.
   it.each([
-    ["rebuilding with numbers attached", "rebuilding"],
+    ["a stale 'rebuilding' (hand-built, no producer left) with numbers attached", "rebuilding"],
     ["an unrecognised state", "partial"],
     ["null", null],
   ])("historyState %s with analytics present → the note, not the numbers", (_label, state) => {
