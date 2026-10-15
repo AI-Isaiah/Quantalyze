@@ -38,7 +38,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { buildFactsheetPayload, deriveIngestSource, hasBuildableSeries, MIN_FACTSHEET_SERIES_POINTS } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
-import { parseUnrecoveredGaps } from "./trade-fetch-provenance";
+import { parseReconstructedRanges, parseUnrecoveredGaps } from "./trade-fetch-provenance";
 import { readFactsheetBenchmark } from "./benchmark-read";
 import { readBenchmarkPrices } from "./benchmark-source";
 import { convertNativeReturnsToUsd } from "./native-to-usd";
@@ -672,7 +672,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v18", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v19", id,
  * computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus]
  * (the middle two are 167.1.2.2.2 plan 10's trade-fact members, the last is
  * 166.3.1 D-05's), a `null` computedAt included and an absent status keyed on
@@ -882,6 +882,7 @@ async function buildFromResolved(
       : null;
   const tradesFetchedAt = analytics?.trades_fetched_at ?? null;
   const unrecoveredGaps = parseUnrecoveredGaps(analytics?.series_provenance);
+  const reconstructedRanges = parseReconstructedRanges(analytics?.series_provenance);
   // Factsheet is a "full identity" context per the strategy-display.ts
   // contract: prefer the real name, fall back to codename, then to the
   // synthetic Strategy#id. Without this, exploratory strategies with a
@@ -900,6 +901,7 @@ async function buildFromResolved(
     tradesFetchedAt,
     tradeFetchVenue,
     unrecoveredGaps,
+    reconstructedRanges,
     trustTier: null,
     // Composites route down the csv arm EXPLICITLY (suppresses the three
     // synthesized panels via the existing discriminated union — no new
