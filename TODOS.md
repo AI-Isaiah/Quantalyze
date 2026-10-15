@@ -9297,6 +9297,23 @@ Confidence 5, below the fix bar.
 number, with a test that fails first.
 ⛔ **Not a close:** inferring the unit from the symbol.
 
+### 164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED — an owner's private factsheet shows "Data source —" for their own key-backed strategy (booked 2026-10-15, Phase 164.6.6.2.1 UAT item 2)
+
+**Why it is open.** `src/app/factsheet/[id]/v2/page.tsx` reads the trust tier from
+`readPublicVerificationSignals`, which calls `get_published_trust_signals`, an RPC that answers only
+for PUBLISHED strategies. On a private strategy it returns nothing, so the Terms panel's "Data source"
+(`MandatePanels.tsx`) prints "—", even on the owner's own view of a strategy that is backed by an API
+key. Measured 2026-10-15 on PROD's only BTC-unit strategy (private): "—" in both the BTC and USD views.
+The two views agree, so the 164.6.6.2.1 CR-02 overlay is not at fault. User-facing, owner-only, and it
+withholds a true fact rather than showing a false one.
+
+**Owner:** unrouted; the next phase touching the factsheet trust tier or `get_published_trust_signals`.
+**Trigger:** an owner asks why their own factsheet does not say API-verified.
+**Gate (what closes it):** an owner viewing their own unpublished strategy sees its real tier,
+read through a path that also checks ownership. Anonymous and non-owner readers still get nothing for
+an unpublished strategy. A test fails first on the "—".
+⛔ **Not a close:** widening `get_published_trust_signals` to unpublished strategies for every caller.
+
 ### [167.1.2.2.2-CRON-TICK-RESIDUALS] — four MEDIUM residuals of `public.cron_sync_tick()` that the plan 01 review round recorded and did not fix (booked 2026-10-09, Phase 167.1.2.2.2 plan 01 Task 3)
 
 **Why it is open.** The three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter)
@@ -9785,6 +9802,8 @@ flush the SDK after a credited recovery before closing, or log a WARNING that th
 **Owner / Trigger:** fixed with `164.6.8-OPS-ALERT-EMAIL-UNCONFIGURED`; or a recovered event missing in Sentry.
 
 ### CI-CLASSIFY-SCRATCHREPO-ENOTEMPTY — `scratchRepo` cleanup can fail with ENOTEMPTY on a temp directory (booked 2026-10-14)
+
+✅ **CLOSED 2026-10-15 (v0.132.1.9).** Second occurrence: PR #1060's Contracts run `38809136016`, `rmdir '/tmp/gsd-classify-push-testread-*/.git'`. Root cause, measured: every `git commit` spawns `git maintenance run --auto` (GIT_TRACE2 shows the child), and since git 2.47 `maintenance.autoDetach` runs it in the background. The runner has git 2.55, so the child can still be writing into `.git` while cleanup removes it. A local git 2.39 runs it in the foreground, which is why it never reproduced locally. Fix: both scratch-repo helpers pass `-c maintenance.auto=false` (`SCRATCH_GIT_CONFIG`), so no child starts. A self-test row pins it, with a calibration arm showing an unpinned commit does start one; neutering the flag turns the row RED. No retry was added to the `rmSync`. The text below is kept as lineage.
 
 **Failure scenario.** A CI run of the changed-path classifier's self-test failed with
 `ENOTEMPTY: directory not empty, rmdir '/tmp/gsd-classify-subset-forced-*'`, from the `cleanup` closure that
@@ -10465,6 +10484,25 @@ were NOT, and all four are now pushed to `origin` so they are no longer local-on
   `ci.yml`). Cheap, useful, never merged. ⚠️ Check it against the `-p no:randomly`/VCR-cassette
   constraints before landing — parallel pytest plus cassettes is exactly where LIVE broker calls
   leak in.
+  ⭐ 2026-10-14 (Phase 164.9.8.1 PYXDIST) — what was measured:
+  - The `shared_test_db` xdist group never formed. The conftest grouping hook ran after xdist's own hook
+    had read the markers, so no nodeid received the group suffix until the hook got `tryfirst=True`
+    (gate: `analytics-service/tests/test_xdist_group_is_real.py`, seen RED without the decorator).
+  - The limiter-identity flake was `routers.*` module pollution: fixtures that evicted a module without
+    restoring it. Fixed in the polluters through `tests/limiter_stub.py` (`restoring` / `evicted`); the
+    victim test is byte-identical. Exhaustive bisect after the fix: 316 of 316 file-level and 452 of 452
+    node-level pairs GREEN (0 RED), against 17 RED nodes in one polluter file before it.
+  - The VCR concern is ruled out by reading: `tests/conftest_vcr.py` sets `record_mode="once"`, so
+    cassettes replay only and nothing re-records under parallel workers.
+  - Coverage is combined and enforced under xdist. On the same tree, serial TOTAL 93.57 percent and
+    `-n auto --dist loadgroup` TOTAL 93.57 percent (24238 statements both), a delta of 0.00 point; the
+    same parallel run with the floor raised to 99 exited 1 with `Coverage failure: total of 94 is less
+    than fail-under=99`. The floor of 80 is unchanged.
+  - The Phase-97 parallelization TODOS entry no longer exists: tracker consolidation `193afe818`
+    dropped it. The pointer in the old `ci.yml` comment was dangling, and the entry is NOT re-created.
+  - Parallel pytest reaches main through this phase, not by merging this branch, so this branch's own
+    disposition (land it or close it) is unchanged.
+  - ⛔ CORRECTED 2026-10-15: the soak and wall-time figures are NOT in the plan 04 SUMMARY. Founder decision D-14 moved both to PR #1054's CI, and the readings are in this phase's VERIFICATION ("Human items resolved"): 20 of 20 green on CI run `38776484715`, and the `python` job at 340 to 497 s against a 654.5 s threshold. Shipped as v0.132.1.6 (#1054).
 
 - [ ] **`wip/v1.16-phase140-fix-archive` — 91% divergent (4,046 of 4,441 added lines absent).**
   Highest divergence of any branch, but **no file it touches is missing from main**, so this reads

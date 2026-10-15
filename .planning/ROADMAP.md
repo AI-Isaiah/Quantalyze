@@ -112,7 +112,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — verified 2026-10-04 (completed 2026-10-04)
 - [x] **Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out** (INSERTED) — 8 plans, shipped v0.125.0.0 (#950); closed 2026-10-14 (records PR), live half of criterion 2 booked as MT5SCRUB-L3-JOBS-TERMINAL-READING-01
 - [x] **Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series** (INSERTED) — shipped v0.126.0.0 (#969, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
-- [ ] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — not yet planned (booked 2026-10-07 by 164.6.6.2 D-15)
+- [x] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — 17 plans, shipped v0.129.8.0 and v0.130.0.0; verified 2026-10-15 (completed 2026-10-15)
 - [x] **Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend** (INSERTED) — shipped v0.128.0.0 (#973, merged 2026-10-08); verification: passed (D-03 post-deploy reading 2026-10-08) (completed 2026-10-08)
 - [x] **Phase 164.6.6.2.3: FLOWTIMING — a deposit never breaks a return, and an account's first day is its inception, not a warning** (INSERTED 2026-10-08) — 12 plans, shipped v0.131.1.0 (#1018) (completed 2026-10-13)
 - [x] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
@@ -146,7 +146,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables** (INSERTED 2026-10-03) — shipped v0.129.2.0 (merged 2026-10-08); verification: passed (plan 04 PROD after-reading 2026-10-08) (completed 2026-10-08)
 - [x] **Phase 164.9.7.1: TRIGGERREVOKE — anon and authenticated no longer hold TRIGGER or MAINTAIN on public tables** (INSERTED 2026-10-08) — shipped v0.129.5.0 (merged 2026-10-09, #987; applied to TEST then PROD, PROD after-reading `0 0 0 0`); verification: passed 2026-10-09 (founder D-06, 164.9.7)
 - [x] **Phase 164.9.8: APTHANG — a CI job's apt step never hangs on a dead package mirror** (INSERTED 2026-10-07) — shipped v0.129.1.2 (merged 2026-10-08); verification: passed (D-04 runner measurement recorded) (completed 2026-10-08)
-- [ ] **Phase 164.9.8.1: PYXDIST — the python CI job runs pytest in parallel and finishes in about half its time** (INSERTED 2026-10-14) — started 2026-10-14 (founder override: runs now, outside the in-flight phase limit)
+- [x] **Phase 164.9.8.1: PYXDIST — the python CI job runs pytest in parallel and finishes in about half its time** (INSERTED 2026-10-14) — started 2026-10-14 (founder override: runs now, outside the in-flight phase limit) — shipped v0.132.1.6 (merged 2026-10-15, #1054); verification: passed (SC-3 soak 20/20 and SC-4 wall time read from CI) (completed 2026-10-15)
 - [x] **~~Phase 165~~: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"), as 165 ACTIONSDEPS: #643 (superseded by #916), #627, #626 and #612 landed green; deviations in `165-VERIFICATION.md`.
 - [x] **~~Phase 165.1~~: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"): the maintenance landings meet the criteria, C1 in substance and not to the letter (the pandas fix rode inside #898); deviations in `165.1-VERIFICATION.md`.
 - [x] **~~Phase 165.2~~: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -184,6 +184,8 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 169.5: BENCHCOMPARE — a factsheet's BTC comparator is read from the database through 169.2's reader, paired over the same interval as the strategy** (INSERTED) — verification: passed (completed 2026-10-04, PR #908)
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
 - [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
+- [ ] **Phase 170.1.1: TITLES — every page has its own tab title and a sentence-case heading** (INSERTED 2026-10-15) — not yet planned (split from 170.1 by founder decision; after 170.1)
+- [ ] **Phase 170.1.2: LABELS — every page shows names and readable labels instead of ids and internal values** (INSERTED 2026-10-15) — not yet planned (split from 170.1 by founder decision; after 170.1)
 - [x] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned — shipped v0.129.11.0 (#997); closed 2026-10-12 after the founder phone re-check (completed 2026-10-12)
 - [x] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 3 plans (completed 2026-10-11)
 - [x] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — 14 plans, two PRs (#1003, #1006) (completed 2026-10-11)
@@ -3295,10 +3297,26 @@ and `bridge_scoring.find_replacement_candidates` still correlate a BTC-unit seri
 `nativeAmount` (the BTC amount formatter) with its first caller.
 **Requirements**: TBD
 **Depends on:** Phase 164.6.6.2
-**Plans:** 0 plans
+**Plans:** 17/17 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 164.6.6.2.1-01-PLAN.md — Native-balance GRANT, close-date and holdings-unit columns
+- [x] 164.6.6.2.1-02-PLAN.md — Native levels and live balance to USD
+- [x] 164.6.6.2.1-03-PLAN.md — Compose spike for an unpriced BTC key
+- [x] 164.6.6.2.1-04-PLAN.md — Matchers compare in USD
+- [x] 164.6.6.2.1-05-PLAN.md — Shared USD-view helpers, payload types and compact unit chip
+- [x] 164.6.6.2.1-06-PLAN.md — Own-capital MTD in USD
+- [x] 164.6.6.2.1-07-PLAN.md — Dated USD balance of a BTC key
+- [x] 164.6.6.2.1-08-PLAN.md — Key-mode USD inputs for a BTC key
+- [x] 164.6.6.2.1-09-PLAN.md — BTC key in the USD allocator book
+- [x] 164.6.6.2.1-10-PLAN.md — Positions poll and history backfill price a BTC MT5 account
+- [x] 164.6.6.2.1-11-PLAN.md — Server-built USD view of a native factsheet
+- [x] 164.6.6.2.1-12-PLAN.md — Per-view benchmark-vs-BTC withholding reasons
+- [x] 164.6.6.2.1-13-PLAN.md — Units toggle, native masthead and USD disclosure
+- [x] 164.6.6.2.1-14-PLAN.md — Leverage and basis in the USD view
+- [x] 164.6.6.2.1-15-PLAN.md — Key card shows the native balance with its dated USD value
+- [x] 164.6.6.2.1-16-PLAN.md — Compact `in BTC` chip on StrategyTable
+- [x] 164.6.6.2.1-17-PLAN.md — Native Holdings row, D-20 unpriced-account note, departed copy
 
 ### Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out (INSERTED)
 
@@ -3901,10 +3919,13 @@ Plans:
 
 **Requirements**: SC-1..SC-4 above
 **Depends on:** Phase 164.9.8 (ordering only)
-**Plans:** 0 plans
+**Plans:** 4/4 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 164.9.8.1-01-PLAN.md — the `shared_test_db` xdist group made real (`tryfirst=True`), with a gate seen RED without it
+- [x] 164.9.8.1-02-PLAN.md — the limiter-identity flake fixed in the polluters (`tests/limiter_stub.py`), victim untouched
+- [x] 164.9.8.1-03-PLAN.md — `-n auto --dist loadgroup` in CI and the Makefile, byte-identical and pinned, coverage enforced combined
+- [x] 164.9.8.1-04-PLAN.md — soak and wall time, moved to the PR's CI by D-14: 20/20 green, `python` job 340 to 497 s against 654.5 s
 
 ### Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables (measured read-only on PROD 2026-10-03: anon 56 of 63 tables, authenticated 59, api_keys included; RLS never covers TRUNCATE). One migration revokes it and the default privilege; migration-reviewer + rls-policy-auditor + silent-failure-hunter before merge, since merges auto-apply to PROD. (INSERTED)
 
@@ -4884,6 +4905,7 @@ Measured at `e34605be`: `reconstruct_symbol_returns` in `analytics-service/route
 2. A holding the price rule cannot price (a fixed mark, an account balance, or too few adjacent priced days) is withheld from the matcher's per-holding signal by name. It is never zero-filled.
 3. The TypeScript and Python rules agree on one shared fixture.
 4. The effect on PROD's current Bridge outputs is read before and after deploy, read-only and with the marker query first.
+
 **Plans:** 0 plans
 
 Plans:
@@ -5987,6 +6009,49 @@ Plans:
 (a) With no benchmark selected, the scenario Returns chart subtitle reads "vs None". Root cause: `src/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload.ts` builds the `none` comparator with `inertComparatorBlock("None", "None")`, and `subtitleFor` in `src/app/factsheet/[id]/v2/TimeSeriesChart.tsx` prints `vs ${cmpName}` whenever the chart config has a `comparatorField`. Success: with no benchmark chosen the subtitle is empty or says "no benchmark".
 (b) The scenario KPI tiles show an unlabelled delta line (e.g. "+0.00") under each value. Success: the delta says what it is compared against (e.g. "vs current book").
 
+### Phase 170.1.1: TITLES — every page has its own tab title and a sentence-case heading (INSERTED)
+
+**Goal:** Every page names itself: a tab title of its own on every dashboard, admin and auth route, under one "%s — Quantalyze" template with "—" as the one separator, and sentence-case page headings per DESIGN.md. No placeholder page or internal label stays reachable from the navigation. Split from Phase 170.1 COPY on 2026-10-15 by founder decision ("Split into 3 phases"): this phase carries 170.1's titles topic (D-02, D-04, D-06, R-6), with the plans, decisions and approved design contract already made there. It is not re-discussed.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 170.1 (both edit `src/app/(dashboard)/strategies/page.tsx`; COPY ships first and this phase rebases on it)
+
+**Success Criteria** (what must be TRUE):
+
+1. A root `title.template` "%s — Quantalyze" applies, and every dashboard, admin and auth route renders its own tab title. No title doubles the brand or uses "|" (170.1 SC-3, D-06).
+2. Pages that shared a title are distinguished: the manager `/strategies` H1 reads "Strategies", while `/my-strategies` keeps "My Strategies". PageHeader titles and the `/allocations` heading are in sentence case ("My allocation", "Compare strategies"), and e2e anchors that key on a renamed title move in the same commit (D-06, R-6).
+3. `/referral` is gone: the page, its sidebar link and its route-contract manifest entry are removed in one commit. The `/strategy/[id]/v2` tab title no longer says "v2". No "Coming soon" default tooltip remains (170.1 SC-2, D-02, D-04).
+4. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom after deploy, by the orchestrator.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 170.1.1 to break down)
+
+---
+
+### Phase 170.1.2: LABELS — every page shows names and readable labels instead of ids and internal values (INSERTED)
+
+**Goal:** No page shows a short id where a name exists, or a raw internal value as a label. Roles, statuses, compute-job kinds, allocation event types, match decisions, breach reasons, venues and trust tiers read through shared label maps, and a failed name lookup reads "Unnamed strategy" or "Unknown allocator", never an id. Split from Phase 170.1 COPY on 2026-10-15 by founder decision ("Split into 3 phases"): this phase carries 170.1's labels topic (D-01, D-03, D-13), with the plans, decisions and approved design contract already made there. It is not re-discussed.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 170.1
+
+**Success Criteria** (what must be TRUE):
+
+1. Every page, admin included, shows labels instead of raw internal values for roles, statuses, compute-job kinds, allocation event types, match decisions, breach reasons, venues and trust tiers. Each label map covers every value its database CHECK constraint allows, and an unknown value reads the map's own fallback label (170.1 SC-1, D-01).
+2. No page shows a short or full id where a name exists. A lookup miss reads "Unnamed strategy" or "Unknown allocator" in visible text, `title` and `aria-label`. An exploratory-tier strategy whose real name is withheld keeps its `Strategy #<8-char id>` handle, and the factsheet's `QSF · <id8> · <date>` stamp stays (D-01, D-13, R-5).
+3. The OutcomeForm's disabled "Modified (coming soon)" option and its roadmap tooltip are removed (170.1 SC-2, D-03).
+4. The listed exchange matches the linked key's venue for every published strategy (TODOS `[170.1-LISTED-EXCHANGE-VS-KEY-VENUE]`), or the entry is re-routed by founder decision.
+5. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom after deploy, by the orchestrator.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 170.1.2 to break down)
+
+---
+
 ### Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity (INSERTED)
 
 **Goal:** Six user-facing items are fixed (the sixth, the Discovery page's phone overflow, routed 2026-10-08), four from Phase 170's post-deploy pass and one from Phase 166.3's recompute. The Allocations Holdings tab never scrolls sideways. The daily BTC benchmark refresh still lands a day when Binance fails. The /compare equity chart shows each strategy's real cumulative return. A CSV-ingested strategy's factsheet masthead states its venue as self-reported. Every benchmark-relative metric is measured over the strategy's full history wherever BTC prices exist.
@@ -6157,7 +6222,7 @@ kept verbatim.
 | 164.6.6 MT5TERMINALISOLATION | 9/9 | Complete    | 2026-10-04 |
 | 164.6.6.1 MT5SCRUB | 8/8 | Complete — L-3 NOT OBSERVED, booked (founder 2026-10-14) | 2026-10-14 |
 | 164.6.6.2 BTCNATIVE | 12/13 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
-| 164.6.6.2.1 BTCUSDVIEW | 0/? | Queued — booked 2026-10-07 by 164.6.6.2 D-15 | - |
+| 164.6.6.2.1 BTCUSDVIEW | 17/17 | Complete | v0.129.8.0, v0.130.0.0; closed 2026-10-15 |
 | 164.6.6.2.2 WEALTHRETURNS | 7/7 | Complete — verification passed after the D-03 post-deploy reading | 2026-10-08 · v0.128.0.0 · #973 |
 | 164.6.6.2.3 FLOWTIMING | 12/12 | Complete | 2026-10-13 |
 | 164.6.6.3 UATFIXES | 7/7 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
@@ -6191,7 +6256,7 @@ kept verbatim.
 | 164.9.7 TRUNCATEREVOKE | 4/4 | Complete — verification passed after the plan 04 PROD after-reading | 2026-10-08 · v0.129.2.0 · #980 |
 | 164.9.7.1 TRIGGERREVOKE | 5/5 | Complete — merged and applied, PROD after-reading `0 0 0 0`; verification passed | 2026-10-09 · v0.129.5.0 · #987 |
 | 164.9.8 APTHANG | 5/5 | Complete — verification passed after the D-04 runner measurement | 2026-10-08 · v0.129.1.2 · #979 |
-| 164.9.8.1 PYXDIST | 0/? | In progress — CI throughput, started 2026-10-14 outside the phase limit (founder) | - |
+| 164.9.8.1 PYXDIST | 4/4 | Complete — soak 20/20 and wall time MET, read from CI; verification passed | 2026-10-15 · v0.132.1.6 · #1054 |
 | 166. QSTATS-TRUTH | 10/10 | Complete    | 2026-10-04 |
 | 166.1 ENGINEFLOOR | 4/4 | Complete    | 2026-10-04 |
 | 166.1.1 DDSIGN | 3/3 | Complete | v0.129.6.0 · #988 · verification passed 2026-10-09 |
@@ -6226,6 +6291,8 @@ kept verbatim.
 | 169.5 BENCHCOMPARE (split from 169 2026-09-27) | 5/5 | Complete    | 2026-10-04 |
 | 170. LAYOUT | 20/20 | Complete | verification passed (ROADMAP phase list: completed 2026-10-01; this row read `In Progress` until 2026-10-04) |
 | 170.1 COPY | 0/? | Queued — feature, after 170 | - |
+| 170.1.1 TITLES | 0/? | Queued — split from 170.1 (founder 2026-10-15), after 170.1 | - |
+| 170.1.2 LABELS | 0/? | Queued — split from 170.1 (founder 2026-10-15), after 170.1 | - |
 | 170.2 PROBEFIXES | 11/11 | Complete | 2026-10-12 |
 | 170.3 OGPUBLIC | 3/3 | Complete | 2026-10-11 |
 | 170.4 ALLOCHOLDINGS | 14/14 | Complete | 2026-10-11 |

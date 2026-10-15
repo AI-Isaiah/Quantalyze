@@ -25,7 +25,6 @@ from __future__ import annotations
 import ast
 import inspect
 import logging
-import subprocess
 import sys
 import textwrap
 from concurrent.futures import ThreadPoolExecutor
@@ -43,6 +42,7 @@ from services import (
     ops_alert,
     ops_alert_open,
 )
+from tests.child_deadman import run_child
 from tests.test_mt5_relogin import (  # noqa: F401 - the two autouse fixtures are imported so they apply here
     _FAKE_LOGIN,
     _FAKE_SERVER,
@@ -1272,14 +1272,22 @@ def test_the_four_modules_import_in_every_order_in_a_fresh_interpreter() -> None
         code = "import importlib\n" + "".join(
             f"importlib.import_module({name!r})\n" for name in order
         )
-        done = subprocess.run(
+        # The verdict is the child's exit code, never how long it took;
+        # `run_child` carries only the shared DEADMAN, which names this test if the
+        # child hangs.
+        done = run_child(
+            f"the four MT5 modules import in the order {order} in a fresh interpreter",
             [sys.executable, "-c", code],
             cwd=_SERVICE_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=120,
         )
-        return order, ([] if done.returncode == 0 else done.stderr.strip().splitlines()[-1:])
+        # ⛔ The RETURN CODE is the verdict, not the stderr text: a child killed
+        # by the OOM killer (-9), a segfault or an `os._exit` exits non-zero with
+        # EMPTY stderr, and a verdict read off stderr would call that a pass.
+        if done.returncode == 0:
+            return order, []
+        stderr_lines = done.stderr.strip().splitlines()
+        last = stderr_lines[-1] if stderr_lines else "<empty stderr>"
+        return order, [f"rc={done.returncode}: {last}"]
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         failures = [

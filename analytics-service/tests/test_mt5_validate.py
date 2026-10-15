@@ -78,7 +78,8 @@ from services.mt5_client import (
 )
 from services import mt5_concurrency
 from services.mt5_validation import _IPC_TRANSPORT_CODES
-from tests.limiter_stub import evict_module, patch_shared_limiter
+from tests.budget_rendezvous import expire_module_budget_when_reached
+from tests.limiter_stub import build_shared_limiter_from_real_slowapi, evicted, patch_shared_limiter
 
 
 # Phase 164.6.6 D-02 — the validation terminal's endpoint as the fixtures set it.
@@ -142,6 +143,8 @@ def exchange_router(monkeypatch):
     slowapi_util_stub = MagicMock()
     slowapi_util_stub.get_remote_address = lambda *a, **k: "1.2.3.4"
 
+    # Build the shared limiter from the REAL slowapi before it is stubbed.
+    build_shared_limiter_from_real_slowapi()
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
 
@@ -162,12 +165,10 @@ def exchange_router(monkeypatch):
     monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", _VAL_HOST)
     monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", str(_VAL_PORT))
 
-    evict_module("routers.exchange")
-    from routers import exchange as exchange_router
+    with evicted("routers.exchange"):
+        from routers import exchange as exchange_router
 
-    yield exchange_router
-
-    evict_module("routers.exchange")
+        yield exchange_router
 
 
 def _make_client(
@@ -1519,6 +1520,40 @@ async def test_mt5_ipc_transport_fault_logs_scrubbed_code_no_credentials(
     rendered_events = repr(events)
     for secret in secrets:
         assert secret not in rendered_events
+def _login_parks_then_budget_counts(monkeypatch, router, client):
+    """Make `client.login` announce that it has PARKED, then hang until the
+    returned `threading.Event` is set, and count every budget `routers.exchange`
+    enforces from that moment. The caller MUST set the returned event in a
+    `finally` once the bound has fired.
+
+    ⛔ RENDEZVOUS, NOT A STOPWATCH. These cases lower a budget to 50 ms and let it
+    race the pool thread's start. On a starved worker the budget fired at the
+    CONNECT stage (or before the probe thread ran), `login` was never reached, and
+    the assertions made about the probe described a run that never got there. The
+    module's `asyncio` name is replaced by a stand-in that arms each `wait_for` at
+    the rendezvous (real `asyncio.timeout`, real cancellation); the lowered value
+    still decides how long after the park the bound bites.
+
+    ⛔ THE HANG ENDS ON AN EVENT, NOT A STOPWATCH EITHER. This parked on
+    `time.sleep(0.3)`: the bound bites only after the loop has run the
+    `call_soon_threadsafe` callback, the watcher and the timer, so a loop stall
+    longer than the sleep's margin let `login` return first and the probe
+    completed instead of timing out. The park is a deadman (5 s) that the test
+    releases once the bound has fired.
+    """
+    loop = asyncio.get_running_loop()
+    reached = asyncio.Event()
+    release = threading.Event()
+
+    def _park(*_a, **_k):
+        loop.call_soon_threadsafe(reached.set)
+        release.wait(5.0)  # deadman only; the caller releases it in `finally`
+
+    client.login = MagicMock(side_effect=_park)
+    expire_module_budget_when_reached(monkeypatch, router, reached)
+    return release
+
+
 
 
 async def test_mt5_probe_timeout_maps_to_network_detail_and_releases(
@@ -1543,12 +1578,15 @@ async def test_mt5_probe_timeout_maps_to_network_detail_and_releases(
     client = _make_client(account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK)
     # The probe hangs; the (mocked) construction does not, so the connect stage
     # passes under the same tiny ceiling and only the PROBE stage fires.
-    client.login = MagicMock(side_effect=lambda *a, **k: time.sleep(0.3))
+    release = _login_parks_then_budget_counts(monkeypatch, router, client)
     _install_mt5_client(router, client)
     monkeypatch.setattr(router, "_MT5_VALIDATE_STAGE_TIMEOUT_S", 0.05)
 
-    with pytest.raises(HTTPException) as ei:
-        await _call(router, _make_req())
+    try:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    finally:
+        release.set()
 
     # 424 = CALLER'S EXCHANGE (C3; see the account-mismatch case for the full
     # rationale). A hung upstream bridge is not a malformed caller request.
@@ -1578,12 +1616,15 @@ async def test_mt5_end_to_end_deadline_still_releases_the_session(
     """
     router = exchange_router
     client = _make_client(account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK)
-    client.login = MagicMock(side_effect=lambda *a, **k: time.sleep(0.3))
+    release = _login_parks_then_budget_counts(monkeypatch, router, client)
     _install_mt5_client(router, client)
     monkeypatch.setattr(router, "_MT5_VALIDATE_DEADLINE_S", 0.05)
 
-    with pytest.raises(HTTPException) as ei:
-        await _call(router, _make_req())
+    try:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    finally:
+        release.set()
 
     assert ei.value.status_code == 424
     assert ei.value.detail == NETWORK_ERROR_DETAIL
@@ -2550,13 +2591,16 @@ async def test_the_end_to_end_deadline_still_emits_its_terminal_outcome_event(
     """
     router = exchange_router
     client = _make_client(account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK)
-    client.login = MagicMock(side_effect=lambda *a, **k: time.sleep(0.3))
+    release = _login_parks_then_budget_counts(monkeypatch, router, client)
     _install_mt5_client(router, client)
     monkeypatch.setattr(router, "_MT5_VALIDATE_DEADLINE_S", 0.05)
 
-    with capture_logs() as captured:
-        with pytest.raises(HTTPException) as ei:
-            await _call(router, _make_req())
+    try:
+        with capture_logs() as captured:
+            with pytest.raises(HTTPException) as ei:
+                await _call(router, _make_req())
+    finally:
+        release.set()
 
     assert ei.value.status_code == 424
     validate = _mt5_events(captured, "validate")
@@ -2659,10 +2703,18 @@ async def test_a_connect_stage_timeout_leaves_no_rpyc_socket_open(
             # the attribute mt5linux 0.1.9 sets.
             self._MetaTrader5__conn = _CountedConn()
 
+    loop = asyncio.get_running_loop()
+    parked = asyncio.Event()
+
     def _blocking_connect(**_ignored):
-        # The gateway connect that outlives its bound. BOUNDED (0.25s), so a gate
-        # the test somehow fails to set reds this case rather than hanging CI.
-        gate.wait(0.25)
+        # The gateway connect that outlives its bound. BOUNDED (5 s deadman), so a
+        # gate the test somehow fails to set reds this case rather than hanging CI.
+        # It must dwarf any plausible stall of the loop: the stage bound is counted
+        # from the moment this parks (see `expire_module_budget_when_reached` below)
+        # and the loop has to get to run it while the zombie is still here. It used
+        # to be 0.25 s, which was a race, not a deadman.
+        loop.call_soon_threadsafe(parked.set)
+        gate.wait(5.0)
         transport = _CountedTransport()
         conns.append(transport)
         return transport
@@ -2686,6 +2738,11 @@ async def test_a_connect_stage_timeout_leaves_no_rpyc_socket_open(
     # patched on the module object the fixture yields. Patching it anywhere else is
     # a SILENT no-op (the E2 trap) and the real ceiling would stay in force.
     monkeypatch.setattr(router, "_MT5_VALIDATE_STAGE_TIMEOUT_S", 0.05)
+    # ⛔ RENDEZVOUS, NOT A STOPWATCH: the 50 ms stage bound starts before the pool
+    # thread is scheduled; a starved worker cancelled the queued construction before
+    # it ran, `finished` was never set and there was no zombie to fence. The bound is
+    # counted from the moment the connect parks.
+    expire_module_budget_when_reached(monkeypatch, router, parked)
 
     try:
         with pytest.raises(HTTPException) as ei:

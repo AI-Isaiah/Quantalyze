@@ -1,5 +1,145 @@
 # Changelog
 
+## [0.132.1.9] - 2026-10-15 — Test fix: the changed-path classifier's throwaway git repositories start no background maintenance, so their cleanup cannot race it
+
+### Root cause
+- `scripts/classify-changed-paths.mjs` self-test builds throwaway git repositories and removes them after each row. Every `git commit` spawns `git maintenance run --auto`, and since git 2.47 (`maintenance.autoDetach`, on by default) that child runs in the background. On the runner's git 2.55 it could still be writing into `.git` when the row's `rmSync` ran, which failed with `ENOTEMPTY`. Seen twice: once on 2026-10-14, and on PR #1060's Contracts run `38809136016`, where the mutated-classifier calibration crashed in cleanup before printing its banner.
+
+### Fixed
+- Both scratch-repo helpers now pass `-c maintenance.auto=false` (`SCRATCH_GIT_CONFIG`), so no maintenance child starts. The cause is removed rather than retried: the `rmSync` has no retry.
+
+### Tests
+- A new self-test row checks with `GIT_TRACE2_EVENT` that a scratch commit starts no `git maintenance` child. Its calibration arm shows an unpinned commit does start one. Neutering the flag turned the row RED; restored from a byte backup (`cmp` clean). The self-test now has 25 rows and passes, and `ci-docs-path-filter.contract.test.ts` passes 67/67.
+- TODOS `CI-CLASSIFY-SCRATCHREPO-ENOTEMPTY` is closed with the measurement.
+
+## [0.132.1.8] - 2026-10-15 — RECORDS: close PYXDIST 164.9.8.1 (soak 20/20 and wall time read from CI)
+
+Records only; no code changes. One commit on this branch.
+
+### Changed
+- **Phase 164.9.8.1 PYXDIST is closed.** Its planning artifacts (CONTEXT, RESEARCH, PATTERNS, VALIDATION, four PLANs and SUMMARYs, REVIEW rounds, REVIEW-FIX, SECURITY, VERIFICATION) land on `main`. The verification moves from human_needed to passed. Founder decision D-14 had moved its two human items to PR #1054's CI, and both are now read there:
+  - SC-3 soak: 20 of 20 consecutive green `python` job attempts on head `b14fc436`, CI run `38776484715`.
+  - SC-4 wall time: MET. The job ran 340 to 497 s and the pytest step 175 to 305 s, against a 654.5 s threshold (55% of the 1190 s median before).
+  - The heads after the soak each got one full CI run, not a new soak; the final head passed all 26 jobs of run `38806555287`.
+- ROADMAP and STATE record the close (v0.132.1.6, #1054). STATE's current position stays on 166.5 COMPUTEDATSTAMP, because several phases run in parallel.
+
+### Fixed
+- **TODOS pointed at the wrong place for the soak figures.** The PYXDIST note said they were in the plan 04 SUMMARY; after D-14 they are in the phase VERIFICATION. Corrected in place with a dated note.
+- **Five local home-path literals in the phase artifacts** (a grep pattern in the four PLANs and one phrase in SECURITY) are reworded, so the public-repo hygiene check passes.
+
+## [0.132.1.7] - 2026-10-15 — Test fix: five test files wait for async results to commit instead of reading them synchronously after an awaited step
+
+Main run 38785325178 (job 116595956122, merge `e34605be`) failed one `ContactForm` arm. It is the third instance today of the race v0.131.13.4 and v0.131.13.6 fixed in `ShareableLink.test.tsx`. This release fixes that arm, then sweeps the suite for the rest of the class. Two commits: the test fix, and this release commit.
+
+### Root cause
+- **The class: a wait that is satisfied before the async result it guards has committed, followed by a synchronous read or click.** The result is set after `await fetch` or another promise, so React does not render it in a sync lane. After every `findBy*` or `waitFor`, Testing Library drains one `setTimeout(0)`, and that drain usually covers React's pending Scheduler task. When the Scheduler yields first, for example on a slow render on a loaded CI runner, the next synchronous line reads the DOM from before the result.
+- **`ContactForm` (the CI failure).** The success heading is focused from a passive `useEffect([sent])`, and `setSent` runs after `await fetch`. `findByRole` resolves as soon as the heading is inserted, so the synchronous `toHaveFocus()` read `<body>`.
+- **This is not a product bug.** In a browser, React runs pending passive effects before it handles the next user event, so the heading has focus before anyone can act on the page. The same holds for every other arm below. In `AllocatorExchangeManager` the switch is disabled while the history loads, and that is intended.
+
+### Fixed
+- `src/components/contact/ContactForm.test.tsx`: the test now waits with `waitFor` until the success heading has focus.
+- `src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.test.tsx`: "submitting → failure transition moves focus to the error banner" now waits for the banner to have focus. It used to wait for the banner to exist and then read `activeElement` synchronously, but the focus is moved from a passive effect that runs after the banner appears.
+- `src/components/exchanges/AllocatorExchangeManager.departed-history.test.tsx`: a new `settledSwitch` helper waits for the history switch to be **enabled** and in the expected `aria-checked` state. Before, the tests waited for `aria-checked="false"` alone. That is already true while the days load and the switch is disabled, so a click could hit a disabled switch and make no RPC, or a read could run before the RPC result. Six waits use the helper now.
+- `src/app/factsheet/[id]/v2/FactsheetView.share-affordance.test.tsx`: the 200 and 404 revoke arms now wait until both the confirm sentence and "Revoke link" are gone. The inline confirm hides "Revoke link" by itself, so the old wait passed before the revoke request had answered.
+- `src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx`: the D-67 BTC toggle arm now waits for the toggle's state. `setBtc` ran during the earlier `waitFor`, which is outside `act`, so the `act` drain after it did not flush the update.
+
+### Tests
+- **Forced-yield harness.** A scratch setup file advances `performance.now` by 50 ms on every read, so React's Scheduler yields after every task. It is not committed. Each file ran 20 times before and after its fix:
+
+  | File | Red runs before | Red runs after |
+  |---|---|---|
+  | `ContactForm` | 13 of 20 | 0 of 20 |
+  | `ScenarioCommitDrawer` | 11 of 20 | 0 of 20 |
+  | `departed-history` | 20 of 20 (86 test failures) | 0 of 20 |
+  | `share-affordance` | 20 of 20 (36 test failures) | 0 of 20 |
+  | `ScenarioComposer` D-67 arm | 15 of 20 | 0 of 20 |
+
+  Without the harness, `ContactForm` was red in 0 of 20 runs locally, which matches the failure showing up only on CI.
+- **Sweep.** The whole jsdom suite ran 3 times under the harness. Runs 1 and 2, before the fixes, failed the same five files and nothing else in this class. Run 3, after the fixes, passed 17,225 tests. Its only failures were the 2 in `src/lib/factsheet/compute.conventions.test.ts`, and those also fail locally without the harness: the last digit of a `skew` float differs on macOS. They are unrelated and not touched here.
+- **Static audit.** About 100 `toHaveFocus()`, `document.activeElement` and `.open` reads across `src/**/*.test.tsx` were classified. All of them come after a synchronous action wrapped in `act` (render, `fireEvent`, user-event, or `act` around `advanceTimersByTimeAsync`), or are already inside `waitFor`. Every `<Modal open>` consumer was also checked. The only one that opens after an `await` is `ShareableLink`, which v0.131.13.4 and v0.131.13.6 already fixed. Those safe tests were left unchanged.
+- **The fixed waits can still fail.** Each one was seen RED with the product behaviour removed, then the source was restored from a byte backup and checked with `cmp`:
+  - removing the heading focus, the banner focus, or the `onShareLiveChange(false)` call on revoke;
+  - forcing the history switch disabled;
+  - making `setBtc` always store `null`.
+- **Unforced, after the fixes:** the five files together passed 548 of 548 tests in each of 3 runs.
+## [0.132.1.6] - 2026-10-15 — PYXDIST: the python CI job runs pytest in parallel, and the flakes that serial order hid are fixed at their root
+
+Phase 164.9.8.1. Since `origin/main` the branch carries 78 non-merge commits: 54 that touch paths outside `.planning` (this release commit among them) and 24 planning and records commits, and this entry maps them all. It also carries 11 merge commits: the per-plan and fixer worktrees merging back, and three merges of `origin/main` before the release. Grouped by theme below, each bullet ends with the hashes it covers. The version is a fourth-digit bump. It was re-picked from a freshly fetched `origin/main` at 0.132.1.5, after #1064 landed, and the open PR #1060 re-picks above it. This is a CI and test change; no production code changes.
+
+### Changed
+- **The `python` CI job and the Makefile `test:` target run `pytest -n auto --dist loadgroup --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80`.** Both carry the identical argument string. The coverage floor is still enforced on the combined result of all workers. Measured offline on the same tree, coverage was 93.57% serial and 93.57% parallel. A run with the floor raised to 99 under xdist exited 1. The SERIAL deferral comments in both files stay as lineage beside a dated PYXDIST note. That note also records that the comment's pointer to the "TODOS: v1.9.1 Phase-97 parallelization deferral" is dangling, because that entry was dropped in `193afe818`. (`c16a41633`)
+- **Founder decision D-15: coverage measures with the `sysmon` core.** `analytics-service/pyproject.toml` gains `[tool.coverage.run] core = "sysmon"`. The first CI soak run on this PR missed SC-4: the job took 942 s, against a 654.5 s threshold, with pytest at 727 s on 4 workers. Under coverage's default settrace core, the AST-heavy `test_qstats_gate.py` tests take 37 to 89 s each and form the parallel critical path. CI and the Makefile both run pytest from `analytics-service/`, so both read this table, and the pinned argument string is unchanged. Measured locally with the exact CI command: 10135 passed, coverage 93.61% (93.60% under settrace), in 81 s instead of 5m13s. `sysmon` gives no branch coverage before Python 3.14; this suite measures none. (`45d5fc2df`)
+- **CLAUDE.md cites the coverage floor's CI step by symbol.** It previously cited the line number `ci.yml:3819`, which had drifted to about line 5600. (this release commit)
+
+### Fixed
+- **The two new pins in `local-stack-lane-wiring.test.ts` check their lookup index.** The repo's narrowing-call scanner (`test-restore-workflow-wiring.test.ts`) went RED on CI: a raw `search()` and a raw `indexOf()` fed `slice()`, and a miss there returns -1, which counts from the end and turns the pin into a PASS. Both now throw on a miss. The final CI run on the previous head was red for this, in `frontend-test (2)`, twice. (`fbfc15a5a`)
+- **Root cause of the Phase 97 "global-claim fence tests flake under xdist ordering": the `shared_test_db` group never formed.** The conftest hook that marks live-DB modules with `xdist_group("shared_test_db")` ran after xdist's own worker hook had already turned markers into scheduling keys. So no nodeid ever carried the `@shared_test_db` suffix, and the live fence tests ran on different workers at once, claiming each other's rows. `@pytest.hookimpl(tryfirst=True)` makes the marker land first. On the lane, the group soak ran 20 of 20 consecutive green, twice (once before and once after the review fixes). Every run was on exactly one worker, with every result line suffixed. (`02e5120d5`, `4157db634`)
+- **Root cause of the limiter-identity flake: fixtures evicted `routers.*` modules and never restored them.** `limiter_stub.evict_module` deleted both the `sys.modules` entry and the `routers` package attribute, and ten test files called it in teardown without restoring anything. `test_limiter_identity.py` looks routers up by attribute at call time, so under `--dist loadgroup` it raised `AttributeError` whenever it ran right after a polluter on the same worker. New `restoring()` and `evicted()` helpers put back exactly what was there, and the polluters use them. The victim test is byte-identical. A pairwise bisect, running every test file and every polluter node before the victim, was green: 316 of 316 files and 452 of 452 nodes. (`794a59219`, `2658c886e`, `90d372f72`)
+- **Review round 1 fixes.**
+  - `restoring()` now restores exactly when the parent package was absent at entry (CR-01). That case had left a stubbed router mounted, so `test_rate_limit_contract.py` stopped throttling.
+  - Collection-time `sys.modules["ccxt"] = MagicMock()` stubs no longer leak into `test_cron_router.py` (WR-01).
+  - Nine slowapi-stubbing fixtures no longer build the process-wide limiter from a no-op. That was the same class of defect, and it was already present at the phase base.
+  - 317-file pairwise checks are now green before each victim. (`5efea4856`, `184e15332`, `275215a38`)
+- **Flakes the local lane soak reproduced, fixed at the root.**
+  - The claim-RPC fallback latch (`main_worker._FALLBACK_CLAIM_RPC` / `_FALLBACK_LATCHED_AT`) leaked from one test to the next. It is now saved and restored per test.
+  - About 18 tests used wall-clock budgets that a loaded box could miss, such as a 0.1 s `asyncio.wait_for` against thread-pool hops, `elapsed <` asserts, and fixed-sleep parks. They now expire their budget at a rendezvous (`tests/budget_rendezvous.py`) or assert the property structurally, with deadmen only for genuine hangs. Each old form was seen RED under a CPU-load or event-loop-stall perturbation, and each new form was seen RED with its fix neutered. (`ba044c09b`, `1e6efd9c3`, `ec62f4410`, `9b71845a1`, `0f1877fab`, `5c0dcedb5`, `8cebc5363`, `cbf2d6306`, `afdfbc81b`, `f3051680c`, `9e8ad22ad`, `153e55de8`, `172ac75e3`, `568d624db`, `3ca8080a3`, `579da84d2`, `c0d3b1915`, `e2edc4522`, `30537dea6`, `498996eb1`)
+- **Review round 2 fixes.**
+  - The remaining rendezvous parks end on a released Event instead of a fixed sleep.
+  - The rendezvous helpers fail closed when the aimed step is never reached.
+  - This also fixed a ceiling that had never fired: it was written `asyncio.timeout(loop.time() + 30)`, a delay rather than a deadline, and is now `asyncio.timeout_at`. (`04c94afd7`, `445f64d30`)
+- **Founder decision D-14: the lazy-import test is decided by the module set, not by the clock.** `test_feedback_engine.py::test_lazy_import_not_triggered_at_module_load` used to spawn a child under a 15 s `subprocess.run` timeout, and a cold import under a load average near 60 overran it. The verdict now comes only from whether `services.feedback_engine` is in the child's `sys.modules`. Neutering the lazy import turns it RED. The same sweep removed every other subprocess child timeout in `analytics-service/tests` and made the remaining `elapsed <` asserts on real work structural or deadmen. (`7f1d20558`, `cca16a6a2`, `39fe4912a`, `5bc77386f`, `fbc29d697`, `55425d821`, `9b562a366`, `abe8532e7`, `0d16fa35f`, `d10d023c5`, `25c93d982`, `8981b3b59`)
+
+- **Review round 4 fixes (the D-14 sweep).**
+  - Every child-process test runs through `tests/child_deadman.py`, which sets one 1800 s deadman. That is about 14 times the worst case observed. A hung child fails with the test's purpose named and its partial output attached, instead of ending in an unnamed CI cancellation. `pytest.ini` sets `faulthandler_timeout = 900`, which only dumps stacks. (`227587ac5`)
+  - The import-order test takes its verdict from the child's return code. A child that dies with empty stderr used to read as a pass. (`d371233af`)
+  - The restart-bounded test asserts that shutdown was actually called before it checks that shutdown did not complete. Without that check it passed when the restart never ran. (`e9340f212`)
+  - The lease-expiry test runs under a named 10 s deadman and checks a literal bar. Its comment no longer claims that an ignored wait falls back to a 20 s default; such a wait is unbounded. (`f2643527a`)
+  - The session-monitor tests assert that the heal's wait timeout equals the cadence, and that the shutdown loop waits on its event. Elapsed time is now only a deadman. (`ed680eaf3`)
+  - Each fix was seen RED with what it guards neutered.
+
+### Tests
+- `tests/test_xdist_group_is_real.py` runs a real distributed child and asserts three things: every grouped result line carries the `@shared_test_db` suffix, the group ran on one worker, and it ran in serial collection order. It was seen RED before the fix and again with `tryfirst` deleted. (`02e5120d5`)
+- `tests/test_limiter_stub_restore.py` covers the restore helpers and adds subprocess pair gates, polluter then victim, for the limiter, rate-limit-contract and cron victims. Each gate was seen RED with its fix neutered. (`794a59219`, `5efea4856`, `184e15332`, `275215a38`)
+- A vitest pin in `src/__tests__/local-stack-lane-wiring.test.ts` (D-07) requires four things:
+  - the CI `python` step and the Makefile `test:` carry the identical argument string, equal to the D-06 literal;
+  - exactly one `PYTEST = $(VENV)/bin/pytest`, one `test:` rule and one recipe command;
+  - exactly one live pytest invocation in the job;
+  - no `continue-on-error`, `if:` or `PYTEST_ADDOPTS` on the step or the job.
+
+  20 neuter drills each turned it RED. The D-04 row moved to the new command after the old substring was seen RED. (`2c1dae27e`, `f972a4a5f`)
+
+### Notes
+- **SC-3 soak and SC-4 timing move to CI (founder decision D-14, 2026-10-15).** The full soak, at least 20 consecutive green `python` job runs, runs on this PR's head. The local box is shared with other phase agents, at a load average of 50 to 63, so a local soak measures the laptop, not the change. Two local lane soaks stopped on a RED under D-04, and their flakes are the ones fixed above. Those stops are kept as lineage in plan 04's SUMMARY. The group soak passed locally, 20 of 20 twice.
+- **Wall time, before:** the `python` job took 19m50s, 20m27s and 18m12s (runs `38611627110`, `38615032784`, `38621574070`). The median is 1190 s, with the pytest step at about 15 to 17 minutes. **SC-4's threshold is 654.5 s, 55% of 1190 s.** The after figure is read from this PR's CI. Indicative only: on an idle box offline, serial took 166.8 s and `-n 4` took 62.3 s. `-n auto` gives 4 workers on the 4-vCPU runner; `psutil` is deliberately not installed, because it would switch xdist to physical cores.
+- **Subprocess children carry a deadman, not a stopwatch.** The D-14 sweep removed their tight timeouts. Review round 4 gave them the shared 1800 s deadman described above, so a hung child fails by name instead of running into the job's 90-minute timeout.
+- **SC-3 met: 20 consecutive green `python` runs** on PR head `b14fc436`, all carrying D-15. The runs were re-runs of the one job between 17:26 and 20:12 UTC on 2026-10-15, with 0 failures.
+- **SC-4 met:** across those 20 runs the `python` job took **340 to 497 s**, against the 654.5 s threshold and the 1190 s before-median, so 29% to 42% of before. The pytest step alone took 175 to 305 s, against about 15 to 17 minutes serial. The 942 s reading from before the sysmon switch is kept as lineage.
+- **Recorded deviation:** during review round 1 a fixer ran broad `pkill -f` patterns on the machine shared with other sessions. That could have stopped another session's matching process; none was reported. Every later brief forbade it.
+- **Planning and records:** TODOS `ci/pytest-xdist-parallel` now records what this phase measured (`192e38347`). The phase's planning, review and soak records are in `.planning` and do not ship on the PR branch (`f332031e4`, `d794f12fa`, `9ef11b9df`, `f1af82495`, `5aadd6cce`, `1f5f82500`, `efb5124b6`, `6e5c38b0c`, `9e7d1b7d1`, `e58003867`, `299f55c4f`, `ab33cb14e`, `2bc424316`, `a48d25427`, `5dca51cd1`, `d36de89d6`, `a6bded3f2`, `4458d4eae`, `eb97f9da3`, `2e9814697`, `d84bc2143`, `72dd0654c`, `5806c5c61`, `33ff9020e`).
+## [0.132.1.5] - 2026-10-15 — FANINGRAPH post-apply: delete the `_fan_in_lock_rows` snapshot ratchet row the re-dump cleared
+
+One commit plus this release commit.
+
+### Fixed
+- **Main's "SQL Function Snapshot — Drift Gate" was red after the baseline re-dump (#1061).** `scripts/dump-sql-functions.ts --check` failed with `ratchet-stale: _fan_in_lock_rows`. The FANINGRAPH row in `NAME_SET_RATCHET` (`snapshot-only`, captured 2026-10-15) recorded that the helper existed in the migration chain but not yet in the PROD baseline. The re-dump taken after `20261024120000` applied to PROD put it on both sides. A row that no longer describes a disagreement is a hard failure by design, so the row is deleted, replaced by a dated lineage comment in the same style as the 164.6.8 and 170.6.1 rows. This was the phase's own planned post-apply step. With the row gone, the gate reads `0 ratcheted disagreement(s)`, 129 functions on both sides, and `baseline-content-drift` reports 0 findings.
+
+## [0.132.1.2] - 2026-10-15 — RECORDS: close BTCUSDVIEW 164.6.6.2.1 (human verification 7/7) and book the owner trust-tier finding
+
+Records only: `.planning`, `TODOS.md`, and this release. One commit plus this release commit.
+
+### Notes
+- **BTCUSDVIEW is closed.** It shipped on 2026-10-09 and 2026-10-10 (v0.129.8.0, v0.130.0.0), but its verification stayed `human_needed` with seven open items. All seven are now resolved, and the readings are in `164.6.6.2.1-UAT.md`:
+  - The WR-01 decision was booked at ship.
+  - A real BTC MT5 account's USD toggle was checked on PROD in the founder's browser.
+  - PROD's dated USD balance and the account's place in the book were read, marker query first, read-only.
+  - The anonymous `native_unit` read was checked as the anon role, inside a rolled-back transaction.
+  - The 320 to 390 px layout and the USD-view print preview were measured on the private local stack.
+  - The verification moves to `passed`. The ROADMAP lists its 17 plans and the Progress row cites both releases. STATE keeps the parallel position that the `phase complete` handler overwrote.
+- **Limits recorded with the readings:**
+  - PROD's only BTC strategy is private, so no anonymous viewer can see a BTC value there today. The anon read itself works.
+  - That the BTC key is in the book is inferred: it is not omitted, it has a priced close for the latest day, and its holdings are valued. The payload does not list which keys are included.
+- **Booked:** `164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED`. An owner's private factsheet shows "Data source —" for their own key-backed strategy, because the trust tier is read through `get_published_trust_signals`, which answers only for published strategies. It is user-facing and owner-only, and it withholds a true fact rather than showing a false one.
+
 ## [0.132.1.1] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of d1852bc2
 
 ### Changed

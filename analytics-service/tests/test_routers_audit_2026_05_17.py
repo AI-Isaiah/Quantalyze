@@ -48,7 +48,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from tests._curve_fixtures import curve_from_returns
-from tests.limiter_stub import evict_module, patch_shared_limiter
+from tests.limiter_stub import (
+    evict_module,
+    patch_shared_limiter,
+    restoring,
+    stub_missing_modules,
+    unstub_modules,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +77,7 @@ class _NoopLimiter:
 
 
 _PATCHED_SLOWAPI: dict[str, object] = {}
+_INSTALLED_STUBS: dict[str, MagicMock] = {}
 
 
 def _install_router_stubs():
@@ -85,8 +92,11 @@ def _install_router_stubs():
       a Starlette Request — we want the @limiter.limit("…") decorators
       on the routers.portfolio endpoints to be passthroughs so we can
       `await` them directly.
-    * `ccxt` — leave alone if loaded; install a MagicMock only if
-      missing (matches the legacy `_install_stubs` pattern).
+    * `ccxt` — stubbed ONLY when it is neither loaded nor importable, and the
+      stub is removed again at module teardown. ccxt is a hard dependency, so in
+      practice nothing is installed; a MagicMock left in `sys.modules` turned
+      `ccxt.NetworkError` into a `TypeError` for `test_cron_router.py`
+      (Phase 164.9.8.1, WR-01).
 
     Notes on modules this helper deliberately does NOT touch:
     * `supabase` — left untouched. Sibling tests like
@@ -118,9 +128,7 @@ def _install_router_stubs():
     slowapi.Limiter = _NoopLimiter  # type: ignore[attr-defined,assignment]
     slowapi_util.get_remote_address = MagicMock()  # type: ignore[attr-defined,assignment]
 
-    for name in ("ccxt", "ccxt.async_support"):
-        if name not in sys.modules:
-            sys.modules[name] = MagicMock()
+    _INSTALLED_STUBS.update(stub_missing_modules("ccxt", "ccxt.async_support"))
 
 
 def _restore_slowapi():
@@ -171,10 +179,16 @@ def _restore_portfolio_after_test():
 
     slowapi attribute restoration is handled by
     `_restore_slowapi_at_module_teardown` below, NOT here.
+
+    2026-10-14 (Phase 164.9.8.1): eviction here left the `routers` package
+    without `portfolio` (and `cron`), and tests/test_limiter_identity.py turned
+    RED with `AttributeError` when xdist ran it next on the same worker. Teardown
+    now restores EXACTLY the pre-test module objects and package attributes via
+    `restoring`, so the reloaded no-op-limiter modules are replaced instead of
+    the attributes being left deleted.
     """
-    yield
-    evict_module("routers.portfolio")
-    evict_module("routers.cron")
+    with restoring("routers.portfolio", "routers.cron"):
+        yield
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -185,6 +199,7 @@ def _restore_slowapi_at_module_teardown():
     """
     yield
     _restore_slowapi()
+    unstub_modules(_INSTALLED_STUBS)
 
 
 # ---------------------------------------------------------------------------
