@@ -135,32 +135,19 @@ BEGIN
 END;
 $$;
 
--- source migration: 20260924230827_fanin_initial_status_10param.sql
+-- source migration: 20261024120000_fan_in_graph_and_decision_cascade.sql
 -- --------------------------------------------------------------------------
--- 10-param overload — verbatim from 20260826150000's ten-arg CREATE, with ONLY
--- the four initial-status edits listed in the header, edit (4) being the
--- parent FOR SHARE lock and its refusals (NULL element, missing parent,
--- failed_final parent).
---
--- ⚠️ GATE-TOKEN HYGIENE (T-163-16), carried forward from 20260826150000.
--- `pg_get_functiondef` returns a body's COMMENTS as well as its statements, so
--- every arm of the DO block below matches a COMMENT-STRIPPED copy, stripping
--- BOTH plpgsql comment syntaxes. The comments inside the body below say "the
--- strict re-read", never the statement form, and name the initial status in
--- prose only. ⛔ For the 7-PARAM overload the strip is the ONLY layer and it is
--- load-bearing on PROD alone: PROD's 7-param body quotes the strict construct
--- in a line comment (20260716090000's lost-race note), so regressing the strip
--- makes arm (c) match that comment and ABORT THE PROD DEPLOY, while on TEST
--- there is nothing to strip and CI stays GREEN. Do not "simplify" the strip on
--- the evidence of a green CI run.
---
--- ⚠️ SCHEMA-QUALIFIED DELIBERATELY, as in 20260826150000. An unqualified
--- CREATE OR REPLACE resolves against the SESSION search_path, so under a
--- search_path that does not put public first it CREATES a second function in
--- another schema — and a create arrives with default privileges, which on a
--- Supabase project is where the default-grant event trigger recorded in
--- 20260515130001 hands EXECUTE to anon and authenticated.
+-- (3) _enqueue_compute_job_internal (10 arguments): the parent lock goes through
+--     the helper (D-06)
 -- --------------------------------------------------------------------------
+-- The body is the LATEST definition (20260924230827, Phase 164.9.1), byte for
+-- byte, with ONE change: the statement that locked the parents FOR SHARE in
+-- job-id order is replaced by a call to public._fan_in_lock_rows. Schema-
+-- qualified deliberately, as in the source: an unqualified CREATE OR REPLACE
+-- resolves against the SESSION search_path and could create a second function in
+-- another schema. The 7-argument overload is uncallable and is not touched.
+-- Its COMMENT is re-issued right after its ACL below (the phrase the
+-- revert-discriminator gate reads stays in place).
 CREATE OR REPLACE FUNCTION public._enqueue_compute_job_internal(
   p_strategy_id     UUID,
   p_portfolio_id    UUID,
@@ -243,11 +230,11 @@ BEGIN
         USING ERRCODE = 'invalid_parameter_value';
     END IF;
 
-    PERFORM 1
-       FROM compute_jobs pj
-      WHERE pj.id = ANY(p_parent_job_ids)
-      ORDER BY pj.id
-      FOR SHARE;
+    -- Phase 164.9.3.1 D-06: the parents are locked through the ancestor-first
+    -- helper (key: depth, then id), not by job id alone. The paragraph above
+    -- that says "in id order" is the lineage this replaces: a pure id order
+    -- deadlocks against mark_compute_job_done on a diamond.
+    PERFORM public._fan_in_lock_rows(p_parent_job_ids, FALSE);
 
     SELECT count(*),
            count(*) FILTER (WHERE pj.status = 'failed_final'),
