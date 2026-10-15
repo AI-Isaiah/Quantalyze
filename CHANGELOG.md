@@ -12,6 +12,56 @@
 - A new self-test row checks with `GIT_TRACE2_EVENT` that a scratch commit starts no `git maintenance` child. Its calibration arm shows an unpinned commit does start one. Neutering the flag turned the row RED; restored from a byte backup (`cmp` clean). The self-test now has 25 rows and passes, and `ci-docs-path-filter.contract.test.ts` passes 67/67.
 - TODOS `CI-CLASSIFY-SCRATCHREPO-ENOTEMPTY` is closed with the measurement.
 
+## [0.132.1.8] - 2026-10-15 — RECORDS: close PYXDIST 164.9.8.1 (soak 20/20 and wall time read from CI)
+
+Records only; no code changes. One commit on this branch.
+
+### Changed
+- **Phase 164.9.8.1 PYXDIST is closed.** Its planning artifacts (CONTEXT, RESEARCH, PATTERNS, VALIDATION, four PLANs and SUMMARYs, REVIEW rounds, REVIEW-FIX, SECURITY, VERIFICATION) land on `main`. The verification moves from human_needed to passed. Founder decision D-14 had moved its two human items to PR #1054's CI, and both are now read there:
+  - SC-3 soak: 20 of 20 consecutive green `python` job attempts on head `b14fc436`, CI run `38776484715`.
+  - SC-4 wall time: MET. The job ran 340 to 497 s and the pytest step 175 to 305 s, against a 654.5 s threshold (55% of the 1190 s median before).
+  - The heads after the soak each got one full CI run, not a new soak; the final head passed all 26 jobs of run `38806555287`.
+- ROADMAP and STATE record the close (v0.132.1.6, #1054). STATE's current position stays on 166.5 COMPUTEDATSTAMP, because several phases run in parallel.
+
+### Fixed
+- **TODOS pointed at the wrong place for the soak figures.** The PYXDIST note said they were in the plan 04 SUMMARY; after D-14 they are in the phase VERIFICATION. Corrected in place with a dated note.
+- **Five local home-path literals in the phase artifacts** (a grep pattern in the four PLANs and one phrase in SECURITY) are reworded, so the public-repo hygiene check passes.
+
+## [0.132.1.7] - 2026-10-15 — Test fix: five test files wait for async results to commit instead of reading them synchronously after an awaited step
+
+Main run 38785325178 (job 116595956122, merge `e34605be`) failed one `ContactForm` arm. It is the third instance today of the race v0.131.13.4 and v0.131.13.6 fixed in `ShareableLink.test.tsx`. This release fixes that arm, then sweeps the suite for the rest of the class. Two commits: the test fix, and this release commit.
+
+### Root cause
+- **The class: a wait that is satisfied before the async result it guards has committed, followed by a synchronous read or click.** The result is set after `await fetch` or another promise, so React does not render it in a sync lane. After every `findBy*` or `waitFor`, Testing Library drains one `setTimeout(0)`, and that drain usually covers React's pending Scheduler task. When the Scheduler yields first, for example on a slow render on a loaded CI runner, the next synchronous line reads the DOM from before the result.
+- **`ContactForm` (the CI failure).** The success heading is focused from a passive `useEffect([sent])`, and `setSent` runs after `await fetch`. `findByRole` resolves as soon as the heading is inserted, so the synchronous `toHaveFocus()` read `<body>`.
+- **This is not a product bug.** In a browser, React runs pending passive effects before it handles the next user event, so the heading has focus before anyone can act on the page. The same holds for every other arm below. In `AllocatorExchangeManager` the switch is disabled while the history loads, and that is intended.
+
+### Fixed
+- `src/components/contact/ContactForm.test.tsx`: the test now waits with `waitFor` until the success heading has focus.
+- `src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.test.tsx`: "submitting → failure transition moves focus to the error banner" now waits for the banner to have focus. It used to wait for the banner to exist and then read `activeElement` synchronously, but the focus is moved from a passive effect that runs after the banner appears.
+- `src/components/exchanges/AllocatorExchangeManager.departed-history.test.tsx`: a new `settledSwitch` helper waits for the history switch to be **enabled** and in the expected `aria-checked` state. Before, the tests waited for `aria-checked="false"` alone. That is already true while the days load and the switch is disabled, so a click could hit a disabled switch and make no RPC, or a read could run before the RPC result. Six waits use the helper now.
+- `src/app/factsheet/[id]/v2/FactsheetView.share-affordance.test.tsx`: the 200 and 404 revoke arms now wait until both the confirm sentence and "Revoke link" are gone. The inline confirm hides "Revoke link" by itself, so the old wait passed before the revoke request had answered.
+- `src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx`: the D-67 BTC toggle arm now waits for the toggle's state. `setBtc` ran during the earlier `waitFor`, which is outside `act`, so the `act` drain after it did not flush the update.
+
+### Tests
+- **Forced-yield harness.** A scratch setup file advances `performance.now` by 50 ms on every read, so React's Scheduler yields after every task. It is not committed. Each file ran 20 times before and after its fix:
+
+  | File | Red runs before | Red runs after |
+  |---|---|---|
+  | `ContactForm` | 13 of 20 | 0 of 20 |
+  | `ScenarioCommitDrawer` | 11 of 20 | 0 of 20 |
+  | `departed-history` | 20 of 20 (86 test failures) | 0 of 20 |
+  | `share-affordance` | 20 of 20 (36 test failures) | 0 of 20 |
+  | `ScenarioComposer` D-67 arm | 15 of 20 | 0 of 20 |
+
+  Without the harness, `ContactForm` was red in 0 of 20 runs locally, which matches the failure showing up only on CI.
+- **Sweep.** The whole jsdom suite ran 3 times under the harness. Runs 1 and 2, before the fixes, failed the same five files and nothing else in this class. Run 3, after the fixes, passed 17,225 tests. Its only failures were the 2 in `src/lib/factsheet/compute.conventions.test.ts`, and those also fail locally without the harness: the last digit of a `skew` float differs on macOS. They are unrelated and not touched here.
+- **Static audit.** About 100 `toHaveFocus()`, `document.activeElement` and `.open` reads across `src/**/*.test.tsx` were classified. All of them come after a synchronous action wrapped in `act` (render, `fireEvent`, user-event, or `act` around `advanceTimersByTimeAsync`), or are already inside `waitFor`. Every `<Modal open>` consumer was also checked. The only one that opens after an `await` is `ShareableLink`, which v0.131.13.4 and v0.131.13.6 already fixed. Those safe tests were left unchanged.
+- **The fixed waits can still fail.** Each one was seen RED with the product behaviour removed, then the source was restored from a byte backup and checked with `cmp`:
+  - removing the heading focus, the banner focus, or the `onShareLiveChange(false)` call on revoke;
+  - forcing the history switch disabled;
+  - making `setBtc` always store `null`.
+- **Unforced, after the fixes:** the five files together passed 548 of 548 tests in each of 3 runs.
 ## [0.132.1.6] - 2026-10-15 — PYXDIST: the python CI job runs pytest in parallel, and the flakes that serial order hid are fixed at their root
 
 Phase 164.9.8.1. Since `origin/main` the branch carries 78 non-merge commits: 54 that touch paths outside `.planning` (this release commit among them) and 24 planning and records commits, and this entry maps them all. It also carries 11 merge commits: the per-plan and fixer worktrees merging back, and three merges of `origin/main` before the release. Grouped by theme below, each bullet ends with the hashes it covers. The version is a fourth-digit bump. It was re-picked from a freshly fetched `origin/main` at 0.132.1.5, after #1064 landed, and the open PR #1060 re-picks above it. This is a CI and test change; no production code changes.

@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "166.5"
 current_phase_name: COMPUTEDATSTAMP
 status: executing
-stopped_at: "164.6.6.2.1 BTCUSDVIEW closed; 166.5 post-merge plan 09 outstanding"
-last_updated: "2026-10-15T19:33:15.874Z"
+stopped_at: "164.9.8.1 PYXDIST closed; 166.5 post-merge plan 09 outstanding"
+last_updated: "2026-10-15T21:25:00.000Z"
 last_activity: 2026-10-15
-last_activity_desc: "164.6.6.2.1 BTCUSDVIEW closed (UAT 7/7); 164.9.3.1 FANINGRAPH merged (#1059)"
-state_head: d1852bc268ede1858c82bead344059238d71ce31
+last_activity_desc: "164.9.8.1 PYXDIST shipped (#1054, v0.132.1.6) and closed; soak 20/20 and wall time MET"
+state_head: 8dca598c54fc6ef56e28c9bae4f768323add3adc
 progress:
   total_phases: 116
-  completed_phases: 106
-  total_plans: 768
-  completed_plans: 760
-  percent: 91
+  completed_phases: 107
+  total_plans: 772
+  completed_plans: 764
+  percent: 92
 ---
 
 ## ⭐ STATE lineage
@@ -174,9 +174,9 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: 166.5 (COMPUTEDATSTAMP) — EXECUTING
 Plan: 9 of 9
-Status: Executing — several phases in parallel. 166.5 COMPUTEDATSTAMP is the current one: both PRs merged and applied on PROD (#1047, #1050); the post-merge plan 09 reading is outstanding. Also in flight: 164.9.3.1 FANINGRAPH (merged as #1059, migration applying, records pending), 167.1.2.2.2.1 OKXHISTORY, 167.1.1.1 BRIDGERETURNS, 164.6.6.3.6 MT5SERVERLEARN and 164.9.8.1 PYXDIST. 167.1.2.1 RECONMARKER is waiting on its day-1 reading.
-Last activity: 2026-10-15 — 164.6.6.2.1 BTCUSDVIEW closed (UAT 7/7, one finding booked)
-Progress: [█████████░] 91%
+Status: Executing — several phases in parallel. 166.5 COMPUTEDATSTAMP is the current one: both PRs merged and applied on PROD (#1047, #1050); the post-merge plan 09 reading is outstanding. Also in flight: 164.9.3.1 FANINGRAPH (merged as #1059, applied on PROD, ratchet follow-up #1064 merged, records pending), 167.1.2.2.2.1 OKXHISTORY (reviewed, ship next), 167.1.1.1 BRIDGERETURNS (planning), 170.1 COPY (planning) and 164.6.6.3.6 MT5SERVERLEARN (waiting on the founder's MT5 accounts). 164.9.8.1 PYXDIST closed 2026-10-15 (#1054). 167.1.2.1 RECONMARKER is waiting on its day-1 reading.
+Last activity: 2026-10-15 — 164.9.8.1 PYXDIST shipped (#1054, v0.132.1.6) and closed (verification passed)
+Progress: [█████████░] 92%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
