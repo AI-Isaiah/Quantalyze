@@ -392,24 +392,9 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  {
-    name: "_fan_in_lock_rows",
-    side: "snapshot-only",
-    capturedAt: "2026-10-15",
-    clearedBy:
-      "a regeneration of supabase/schema/baseline.sql taken AFTER " +
-      "20261024120000_fan_in_graph_and_decision_cascade.sql has applied to " +
-      "PROD (Phase 164.9.3.1 FANINGRAPH; the baseline re-dump is the phase's " +
-      "post-apply step, after the merge's automatic apply-test then PROD apply).",
-    reason:
-      "Phase 164.9.3.1 plan 04 ships the private ancestor-first lock helper " +
-      "public._fan_in_lock_rows in a forward migration. supabase/schema/" +
-      "baseline.sql is a dated PROD dump (see supabase/schema/BASELINE.md) " +
-      "that predates this migration, so the function exists in the " +
-      "migration-replay snapshot and not yet in the baseline until the next " +
-      "refresh (the Phase 164.6.8 ops_staleness_check, 167.1.2.2.2 " +
-      "cron_sync_tick and 164.1.1 precedent).",
-  },
+  // ⭐ 2026-10-15: the Phase 164.9.3.1 FANINGRAPH row (`_fan_in_lock_rows`,
+  // `snapshot-only`, captured 2026-10-15) was DELETED on the re-dump taken
+  // after 20261024120000 applied to PROD (#1061), its own clearing condition.
   // ⭐ 2026-10-14: the Phase 164.6.8 OUTAGEALERT row (`ops_staleness_check`,
   // `snapshot-only`, captured 2026-10-13) was DELETED on the re-dump taken
   // after 20261020120000 applied to PROD, its own clearing condition.
