@@ -1,0 +1,21 @@
+{
+  "_comment": "Phase 167.1.1.1 (BRIDGERETURNS) D-03, SC3. The cross-runtime oracle for the SPOT mark-price rule. Read by analytics-service/tests/test_holding_marks_fixture.py (classify_spot_marks) and src/app/(dashboard)/compare/lib/holding-compare-adapter.test.ts (classifySpotMarks, fetchHoldingCompareItem). HAND-TYPED: every expected figure was worked out by hand from the case's own marks (the arithmetic is in each case's why), never produced by either implementation. The rule: one mark per UTC day from the row with the latest updated_at instant, ties to the smallest LOWERCASE api_key_id; a finite mark at or below 0 is a gap skipped BEFORE that pick; a return exists only between two ADJACENT calendar days that both carry a mark, keyed by the LATER day; a spot holding needs min_priced_days priced days; the withheld ladder is account_balance, fixed_price (marks not read), then the read contract, then no_price, then too_few_priced_days. ts maps a case onto what /compare shows. Do not add a case here without both runtimes consuming it; the two suites read this file whole.",
+  "min_priced_days": 30,
+  "withheld_reasons": ["account_balance", "fixed_price", "no_price", "too_few_priced_days"],
+  "cases": [
+    {
+      "name": "purchase_at_constant_mark",
+      "why": "SC1: the mark never moves while the quantity and the dollar value do; the dollar-ratio read printed +100% and -75%, the price rule must print exactly 0.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 3, "returns": [["2026-01-02", 0.0], ["2026-01-03", 0.0]]},
+      "ts": {"historyState": "ready", "null_metrics": true},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 100, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 2},
+        {"asof": "2026-01-03", "mark_price": 100, "side": "flat", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 50, "quantity": 0.5}
+      ]
+    }
+  ]
+}

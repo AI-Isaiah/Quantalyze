@@ -106,6 +106,22 @@ export const HOLDING_COMPARE_MAX_PAGES = 50;
  */
 export type HoldingWithheldReason = "fixed_price" | "account_balance" | "no_price";
 
+/**
+ * Phase 167.1.1.1 / D-03: every reason the SPOT price rule can withhold a holding
+ * by, the three above plus `too_few_priced_days` (priced, but fewer than
+ * `HOLDING_COMPARE_MIN_PRICED_DAYS` days). The Python twin is
+ * `PRICE_RULE_WITHHELD_REASONS` in analytics-service/services/holding_marks.py; the
+ * shared fixture holding_mark_returns_cases.json pins both lists.
+ */
+export type HoldingMarkWithheldReason = HoldingWithheldReason | "too_few_priced_days";
+
+export const HOLDING_MARK_WITHHELD_REASONS: readonly HoldingMarkWithheldReason[] = [
+  "account_balance",
+  "fixed_price",
+  "no_price",
+  "too_few_priced_days",
+];
+
 export type HoldingCompareItem = {
   kind: "holding";
   holding_ref: string;
@@ -241,6 +257,18 @@ const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const MS_PER_DAY = 86_400_000;
 
 /**
+ * True for a `YYYY-MM-DD` string that is a REAL calendar date. The shape alone let
+ * 2026-02-30 through, and Python's `date.fromisoformat` rejects it, so the two
+ * runtimes would disagree (167.1.1.1 D-03). The round trip rejects what `Date`
+ * would roll over; an unparseable input gives NaN before `toISOString` can throw.
+ */
+function isRealIsoDay(asof: unknown): boolean {
+  if (typeof asof !== "string" || !ISO_DAY.test(asof)) return false;
+  const t = Date.parse(`${asof}T00:00:00Z`);
+  return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === asof;
+}
+
+/**
  * One price per calendar day, ascending by `asof`.
  *
  * Two classes of unusable row, kept apart (SFH-03):
@@ -263,7 +291,7 @@ export function dailyMarkPrices(rows: readonly PriceRow[]): DailyPrice[] {
   let badDays = 0;
   for (const r of rows) {
     if (typeof r.mark_price !== "number" || !Number.isFinite(r.mark_price)) badMarks += 1;
-    if (typeof r.asof !== "string" || !ISO_DAY.test(r.asof)) badDays += 1;
+    if (!isRealIsoDay(r.asof)) badDays += 1;
   }
   if (badMarks > 0 || badDays > 0) throw new HoldingMarkContractError(badMarks, badDays);
 
@@ -289,6 +317,21 @@ export function dailyMarkPrices(rows: readonly PriceRow[]): DailyPrice[] {
 /** True when `b` is exactly the UTC calendar day after `a` (both `YYYY-MM-DD`). */
 function isNextDay(a: string, b: string): boolean {
   return Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`) === MS_PER_DAY;
+}
+
+/**
+ * The one-day returns of a daily PRICE series (ascending by `asof`): `[later_asof,
+ * p[i] / p[i-1] - 1]` for each pair of consecutive points exactly one UTC calendar
+ * day apart. A missing day breaks the chain, so no return spans a gap. Twin of
+ * `adjacent_daily_returns` in analytics-service/services/holding_marks.py.
+ */
+export function adjacentDailyReturns(points: readonly DailyPrice[]): Array<[string, number]> {
+  const out: Array<[string, number]> = [];
+  for (let i = 1; i < points.length; i++) {
+    if (!isNextDay(points[i - 1].asof, points[i].asof)) continue;
+    out.push([points[i].asof, points[i].price / points[i - 1].price - 1]);
+  }
+  return out;
 }
 
 type PriceMetrics = Omit<HoldingCompareAnalytics, "priced_days">;
@@ -330,11 +373,7 @@ export function analyzePriceSeries(
     if (dd < maxDD) maxDD = dd;
   }
 
-  const returns: number[] = [];
-  for (let i = 1; i < points.length; i++) {
-    if (!isNextDay(points[i - 1].asof, points[i].asof)) continue;
-    returns.push(points[i].price / points[i - 1].price - 1);
-  }
+  const returns = adjacentDailyReturns(points).map(([, r]) => r);
   const vol =
     returns.length >= 2
       ? dispersion(returns, 0).sd * Math.sqrt(periodsPerYear)
@@ -346,6 +385,49 @@ export function analyzePriceSeries(
     sharpe: sharpe != null && Number.isFinite(sharpe) ? sharpe : null,
     max_drawdown: Number.isFinite(maxDD) ? maxDD : null,
     vol: vol != null && Number.isFinite(vol) ? vol : null,
+  };
+}
+
+/**
+ * What the SPOT price rule says about one holding (167.1.1.1 D-03). `withheld_reason`
+ * is null when the holding is priced well enough to use. `priced_days`, `returns` and
+ * `points` are filled whenever marks were read (the `too_few_priced_days` case
+ * included) and are 0 / empty when a venue or symbol gate withheld it first.
+ */
+export type HoldingMarks = {
+  withheld_reason: HoldingMarkWithheldReason | null;
+  priced_days: number;
+  returns: Array<[string, number]>;
+  points: DailyPrice[];
+};
+
+/**
+ * The spot withheld ladder, in this order (twin of `classify_spot_marks`):
+ * 1. `account_balance`, then `fixed_price` from `holdingWithheldReason`: venue and
+ *    symbol only, the marks are NOT read, so a malformed mark there is not a contract
+ *    error;
+ * 2. the read contract (`dailyMarkPrices` throws `HoldingMarkContractError`, or
+ *    `HoldingsUpdatedAtError` on an unusable `updated_at`);
+ * 3. `no_price`: no day carries a valid mark;
+ * 4. `too_few_priced_days`: fewer than `HOLDING_COMPARE_MIN_PRICED_DAYS` priced days;
+ * 5. otherwise null.
+ */
+export function classifySpotMarks(
+  rows: readonly PriceRow[],
+  venue: string,
+  symbol: string,
+): HoldingMarks {
+  const fixed = holdingWithheldReason(venue, symbol);
+  if (fixed !== null) return { withheld_reason: fixed, priced_days: 0, returns: [], points: [] };
+  const points = dailyMarkPrices(rows);
+  if (points.length === 0) {
+    return { withheld_reason: "no_price", priced_days: 0, returns: [], points };
+  }
+  return {
+    withheld_reason: points.length < HOLDING_COMPARE_MIN_PRICED_DAYS ? "too_few_priced_days" : null,
+    priced_days: points.length,
+    returns: adjacentDailyReturns(points),
+    points,
   };
 }
 
@@ -446,20 +528,16 @@ export async function fetchHoldingCompareItem(params: {
   // price-based return over a writer constant would print a confident 0%
   // (CR-01). Rows were found above, so this is an owned holding: say why it has
   // no metrics instead of collapsing it into the D-15 null (SFH-01). The marks
-  // are deliberately not read, so a malformed one here is not a contract error.
-  const fixedReason = holdingWithheldReason(parsed.venue, parsed.symbol);
-  if (fixedReason !== null) {
-    return { ...base, historyState: "withheld", analytics: null, withheld_reason: fixedReason };
-  }
-
-  let points: DailyPrice[];
+  // are deliberately not read on that path, so a malformed one there is not a
+  // contract error (`classifySpotMarks` decides from venue and symbol first).
+  let marks: HoldingMarks;
   try {
-    points = dailyMarkPrices(rows);
+    marks = classifySpotMarks(rows, parsed.venue, parsed.symbol);
   } catch (e) {
     if (e instanceof HoldingMarkContractError) {
       // Counts and the holding ref only; never a row value (SFH-03).
       console.error(
-        `[holding-compare-adapter.fetchHoldingCompareItem] read contract violated for ${params.holding_ref}: ${e.badMarks} row(s) with a non-numeric mark_price, ${e.badDays} row(s) with an asof that is not YYYY-MM-DD`,
+        `[holding-compare-adapter.fetchHoldingCompareItem] read contract violated for ${params.holding_ref}: ${e.badMarks} row(s) with a non-numeric mark_price, ${e.badDays} row(s) with an asof that is not a real YYYY-MM-DD date`,
       );
       throw new HoldingCompareLoadError();
     }
@@ -472,6 +550,14 @@ export async function fetchHoldingCompareItem(params: {
     }
     throw e;
   }
+  if (marks.withheld_reason === "fixed_price" || marks.withheld_reason === "account_balance") {
+    return {
+      ...base,
+      historyState: "withheld",
+      analytics: null,
+      withheld_reason: marks.withheld_reason,
+    };
+  }
 
   // M-R2-02: rows exist (the owner is known) but not one day carries a valid
   // price. The writer marks an asset with no `{asset}/USDT` market at 0.0 on every
@@ -479,7 +565,7 @@ export async function fetchHoldingCompareItem(params: {
   // and silence would make it look like a newly connected holding. Withhold with a
   // named reason and log the ref and the row count (no ids, no values). One or more
   // priced days stays "ready": there the history IS filling.
-  if (points.length === 0) {
+  if (marks.withheld_reason === "no_price") {
     console.warn(
       `[holding-compare-adapter.fetchHoldingCompareItem] no priced day for ${params.holding_ref}: ${rows.length} row(s), none with a valid mark_price`,
     );
@@ -487,12 +573,12 @@ export async function fetchHoldingCompareItem(params: {
   }
 
   const metrics =
-    points.length >= HOLDING_COMPARE_MIN_PRICED_DAYS
-      ? analyzePriceSeries(points, annualizationPeriods("crypto"))
+    marks.withheld_reason === null
+      ? analyzePriceSeries(marks.points, annualizationPeriods("crypto"))
       : NULL_METRICS;
   return {
     ...base,
     historyState: "ready",
-    analytics: { ...metrics, priced_days: points.length },
+    analytics: { ...metrics, priced_days: marks.priced_days },
   };
 }
