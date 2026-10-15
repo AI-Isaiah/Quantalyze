@@ -945,15 +945,17 @@ describe("the CLI contract", () => {
 
   it("R2-W05: the REAL marker in the tree satisfies the tightened rule", () => {
     // Non-vacuity for the arm above: the tightened rule must not have been
-    // satisfied by making it unsatisfiable. 164.3-07-DEFERRED.md is the one
-    // marker that exists, and it must still exempt.
+    // satisfied by making it unsatisfiable. The two markers that exist,
+    // 164.3-07-DEFERRED.md and 166.3.1-03-DEFERRED.md (added 2026-10-15,
+    // NAVBREACH D-07), must still exempt.
     const res = spawnSync("node", [VERIFIER, "--pending"], {
       cwd: REPO_ROOT,
       encoding: "utf8",
     });
     const out = `${res.stdout}${res.stderr}`;
-    expect(out).toMatch(/^deferred: 1 plan file\(s\) exempted by an explicit deferral marker$/m);
+    expect(out).toMatch(/^deferred: 2 plan file\(s\) exempted by an explicit deferral marker$/m);
     expect(out).toMatch(/^ {2}deferred: .+164\.3-07-PLAN\.md {2}\[164\.3-07-DEFERRED\.md\]$/m);
+    expect(out).toMatch(/^ {2}deferred: .+166\.3\.1-03-PLAN\.md {2}\[166\.3\.1-03-DEFERRED\.md\]$/m);
     expect(res.status).toBe(0);
   });
 
@@ -1012,7 +1014,7 @@ describe("the CLI contract", () => {
         "OK.",
       ].join("\n") + "\n";
 
-    it("PASSES on the real tree's current log (1 exemption, at the pinned ceiling)", () => {
+    it("PASSES on the real tree's current log (2 exemptions, at the pinned ceiling)", () => {
       const real = spawnSync("node", [VERIFIER, "--pending"], {
         cwd: REPO_ROOT,
         encoding: "utf8",
@@ -1022,7 +1024,7 @@ describe("the CLI contract", () => {
     });
 
     it("FAILS when the exempt set grows past the pinned ceiling", () => {
-      const r = drive(logFor(1, 70, ["a/1-PLAN.md", "b/2-PLAN.md"]));
+      const r = drive(logFor(1, 70, ["a/1-PLAN.md", "b/2-PLAN.md", "c/3-PLAN.md"]));
       expect(r.status).toBe(1);
       expect(r.out).toContain("DEFERRAL_CEILING regression");
     });

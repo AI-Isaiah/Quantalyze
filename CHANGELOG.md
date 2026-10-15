@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.131.11.2] - 2026-10-15 — NAVBREACH closed: both Deribit books read trustworthy on PROD, the recompute is deterministic within 1e-7, and the residues are booked
+
+Records and bookkeeping for Phase 166.3.1 NAVBREACH, whose code shipped in v0.131.2.0 (#1020). No product code changes; one CI constant moves.
+
+### Changed
+- **CI: `plan-anchor-verify`'s `DEFERRED_CEILING` raised from 1 to 2** in `.github/workflows/ci.yml`. This PR adds the second deferral marker, `166.3.1-03-DEFERRED.md`: plan 03 was absorbed into DERIBITWEDGE under D-07 and will never be executed, so it will never get a SUMMARY. The gate is meant to go red on a new exemption until the ceiling is raised by a reviewed edit, so it did, and this is that edit. The new reading is measured in the comment above the constant. `src/__tests__/verify-plan-anchors.test.ts` moves with it: the real-tree test now expects both markers, and the ceiling test drives three exemptions.
+- **TODOS.md: closed.** `167.1.2.2.1-DROPPED-KEY-NULL-ANCHOR` is closed by NAVBREACH (D-08 option A). Both allocator books read trustworthy on PROD: book 2 through the no-capital exit rule, and book 1 because FLOWTIMING (#1018) lowered the dust floor from 1000 to 100 USD.
+- **TODOS.md: declined and re-routed.** `164.6.6.2.3-COMPOSITE-DAYLEVEL-NOTE` was declined by NAVBREACH and now goes to the next phase that touches `run_stitch_composite_job` or the composite factsheet arm.
+
+### Notes
+- **Recorded, not fixed.** Each item is booked in `TODOS.md`:
+  - `166.3.1-M3-ANCHOR-OPTIONS-UPL-RESIDUE`: one member, which holds an open options book, differs between two quiet sessions by at most 5.5e-08. The founder accepted SC-3 at a 1e-7 tolerance (D-12).
+  - `166.3.1-STITCH-ATTEMPT1-STALL`: run 2's first attempt stalled about 25 minutes before the worker reclaimed it.
+  - `CI-LIVE-DB-LANE-GATEWAY-502`: one-off gateway error in the live-DB lane on main run 38711968694.
+- **Decisions.** SC-1 is satisfied by the D-07 absorption into DERIBITWEDGE (founder D-13). SC-9 stays with Phase 167.1.2.1.1 WRITERRESIDUALS.
+
 ## [0.131.11.1] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of c494c5e4
 
 ### Changed
