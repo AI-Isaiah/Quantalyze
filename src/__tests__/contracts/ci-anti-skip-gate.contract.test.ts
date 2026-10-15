@@ -300,13 +300,26 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
     // both LANE-ONLY), so the verified count sits two under the floor, not one.
     // ⭐ CURRENCY 2026-10-13 (Phase 164.6.8 OUTAGEALERT, plan 05): a THIRD, test_ops_staleness_check.sql
     // (LANE-ONLY on the same pg-net stand-in), so the verified count sits three under the floor.
-    expect(Number(verified)).toBe(sentinelFloor - 3);
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): a FOURTH,
+    // test_fan_in_lock_order_race.sql (LANE-ONLY: three dblink backends), declares `ALL 3 ARMS
+    // EXECUTED` and is declared here without being checked against a run, so the verified count
+    // sits four under the floor. MEASURED: this arm read `expected 16 to be 17` against the old
+    // offset once ci.yml carried SENTINEL_FLOOR=20.
+    expect(Number(verified)).toBe(sentinelFloor - 4);
     // Guard the guard: proves the excluded file's OWN sentinel was skipped
     // this run — not merely that the totals still add up. A different file,
     // test_sync_status_curated_sentence_survives.sql, shares the SAME "ALL 7
     // ARMS EXECUTED" text, so this counts occurrences rather than asserting
     // bare presence/absence, which could not tell the two apart.
     const okCount = (out.match(/completion sentinel OK: ALL 7 ARMS EXECUTED/g) ?? []).length;
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-1 fix WR-01): a SECOND checked file
+    // now shares the text, test_bridge_outcomes_decision_delete_cascade.sql (6 -> 7 arms, OD7).
+    // The excluded file's own sentinel is still never counted, so the expected count is the two
+    // checked sharers. MEASURED: this arm read `expected 2 to be 1` before it was edited.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-2 OD8): the delete-cascade gate now
+    // declares `ALL 8 ARMS EXECUTED`, so it no longer shares the "ALL 7" text; only
+    // test_sync_status_curated_sentence_survives.sql prints it. MEASURED: this arm read
+    // `expected 1 to be 2` once the gate gained its eighth arm.
     expect(okCount).toBe(1);
     expect(out).toContain(
       "completion sentinel DECLARED but not checked against a run — LANE-ONLY",
@@ -702,6 +715,19 @@ const LANE_ONLY_SITES: readonly { file: string; object: string; fixture: string;
       "made to run there would issue genuine outbound HTTP from shared CI infrastructure on every " +
       "run. Its arms execute and are mutation-checked twin-by-twin on the pg-lane under " +
       "sql-mutation (Phase 167.1.2.2.2).",
+  },
+  {
+    file: "test_fan_in_lock_order_race.sql",
+    object: "dblink",
+    fixture: "scripts/pg-lane/fixtures/36-fixture-dblink.sql",
+    why:
+      "Every arm drives two or three dblink backends back into the database it runs in (two " +
+      "marking backends, or a marking backend, an enqueueing backend and an advisory-lock " +
+      "blocker). That needs COMMITTED seed rows and a trust-auth superuser loopback connection, " +
+      "which the local Supabase stack behind sql-tests does not give without a password in a " +
+      "committed file, and the dblink extension is not in the schema of record. Its arms " +
+      "execute and are mutation-checked twin-by-twin on the pg-lane under sql-mutation " +
+      "(Phase 164.9.3.1).",
   },
   {
     file: "test_mark_rpc_bridge_advisory_lock.sql",

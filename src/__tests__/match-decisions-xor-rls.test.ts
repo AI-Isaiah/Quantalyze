@@ -20,17 +20,29 @@
  *   9. (c) Two outcomes with match_decision_id NULL and the same (allocator,
  *      strategy) — the second fails with 23505 AND the error names
  *      bridge_outcomes_legacy_per_strategy_holding_when_md_null
+ *  10. (d) Deleting two decisions whose outcomes share (allocator, strategy) cascades with no 23505 and keeps both outcomes (164.9.3.1 D-05)
+ *  11. (e) POST /api/bridge/outcome's upsert, sent through supabase-js as the
+ *      allocator with the route's own BRIDGE_OUTCOME_CONFLICT_TARGET, resolves
+ *      to bridge_outcomes_allocator_match_decision_unique: no 42P10, and a
+ *      second call for the same decision UPDATES the one row (164.9.3.1 D-09)
  *
- * THE WRITTEN ANSWER (D-13, recorded verbatim here, in the phase plan and in
- * migration 20260925071300_bridge_outcomes_invariant_comments.sql):
+ * THE WRITTEN ANSWER (D-13, recorded here, in the phase plan and in
+ * migration 20260925071300_bridge_outcomes_invariant_comments.sql; item (ii) is
+ * restated below as re-keyed by Phase 164.9.3.1 D-05, migration
+ * 20261024120000_fan_in_graph_and_decision_cascade.sql):
  *   the CURRENT bridge_outcomes uniqueness invariant is two-part —
  *   (i) bridge_outcomes_allocator_match_decision_unique
  *       UNIQUE (allocator_id, match_decision_id), one outcome per decision
  *       (migration 081);
  *   (ii) bridge_outcomes_legacy_per_strategy_holding_when_md_null, a PARTIAL
- *       unique on (allocator_id, strategy_id, COALESCE(original_holding_ref, ''))
- *       WHERE match_decision_id IS NULL (migration 083), restoring 072's
- *       per-strategy guarantee only for rows whose decision was nulled out.
+ *       unique on (allocator_id, strategy_id, COALESCE(original_holding_ref, ''),
+ *       COALESCE(former_match_decision_id, zero uuid))
+ *       WHERE match_decision_id IS NULL (migration 083, re-keyed by D-05), for
+ *       rows whose decision is gone. A row orphaned by the ON DELETE SET NULL
+ *       cascade keeps the decision it came from in former_match_decision_id
+ *       (trigger-owned, no foreign key), so orphans of different decisions never
+ *       collide (arm (d)); rows born with no decision have a NULL former id and
+ *       still keep one outcome per (allocator, strategy, holding) (arm (c)).
  *   Two strategy-sourced outcomes for the same (allocator, strategy) under two
  *   DIFFERENT decisions are ALLOWED by design; the old arm's 23505 expectation
  *   described migration 072's world.
@@ -65,12 +77,21 @@ import {
   createLiveAdminClient,
   createTestUser,
   advertiseLiveDbSkipReason,
+  signInAsTestUser,
 } from "@/lib/test-helpers/live-db";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { BRIDGE_OUTCOME_CONFLICT_TARGET } from "@/lib/bridge/outcome-conflict";
 
 // Stable synthetic UUIDs — test-only, deterministic for easier cleanup
 const STRATEGY_XOR_A = "00000000-0000-0000-0000-000000000720";
 const STRATEGY_XOR_B = "00000000-0000-0000-0000-000000000721";
+// Arm (d) deletes decisions, which leaves md-NULL outcome rows behind. A third
+// strategy keeps them off arm (c)'s STRATEGY_XOR_A, whose md-NULL expectation an
+// orphan row would break.
+const STRATEGY_XOR_C = "00000000-0000-0000-0000-000000000722";
+// Arm (e) upserts outcomes as a SECOND, signed-in allocator, on a strategy no other
+// arm touches, so its one-row-per-decision count cannot see another arm's rows.
+const STRATEGY_XOR_D = "00000000-0000-0000-0000-000000000723";
 
 describe("match_decisions XOR CHECK + bridge_outcomes uniqueness (live-DB)", () => {
   advertiseLiveDbSkipReason("match-decisions-xor-rls");
@@ -81,6 +102,7 @@ describe("match_decisions XOR CHECK + bridge_outcomes uniqueness (live-DB)", () 
   // Track all created IDs for cleanup
   const createdMatchDecisionIds: string[] = [];
   const createdBridgeOutcomeIds: string[] = [];
+  const createdExtraUserIds: string[] = [];
 
   beforeAll(async () => {
     if (!HAS_LIVE_DB) return;
@@ -100,6 +122,16 @@ describe("match_decisions XOR CHECK + bridge_outcomes uniqueness (live-DB)", () 
           user_id: allocatorId,
           name: "Phase9 XOR Test Strategy B (synthetic)",
         },
+        {
+          id: STRATEGY_XOR_C,
+          user_id: allocatorId,
+          name: "Phase9 XOR Test Strategy C (synthetic)",
+        },
+        {
+          id: STRATEGY_XOR_D,
+          user_id: allocatorId,
+          name: "Phase9 XOR Test Strategy D (synthetic)",
+        },
       ],
       { onConflict: "id" },
     );
@@ -110,7 +142,7 @@ describe("match_decisions XOR CHECK + bridge_outcomes uniqueness (live-DB)", () 
     }
 
     // Seed minimal strategy_analytics for both (bridge_outcomes FK requires it)
-    for (const stratId of [STRATEGY_XOR_A, STRATEGY_XOR_B]) {
+    for (const stratId of [STRATEGY_XOR_A, STRATEGY_XOR_B, STRATEGY_XOR_C, STRATEGY_XOR_D]) {
       await admin
         .from("strategy_analytics")
         .upsert({ strategy_id: stratId, returns_series: [] }, { onConflict: "strategy_id" });
@@ -129,9 +161,16 @@ describe("match_decisions XOR CHECK + bridge_outcomes uniqueness (live-DB)", () 
     }
     await admin.from("strategy_analytics").delete().eq("strategy_id", STRATEGY_XOR_A);
     await admin.from("strategy_analytics").delete().eq("strategy_id", STRATEGY_XOR_B);
+    await admin.from("strategy_analytics").delete().eq("strategy_id", STRATEGY_XOR_C);
+    await admin.from("strategy_analytics").delete().eq("strategy_id", STRATEGY_XOR_D);
     await admin.from("strategies").delete().eq("id", STRATEGY_XOR_A);
     await admin.from("strategies").delete().eq("id", STRATEGY_XOR_B);
+    await admin.from("strategies").delete().eq("id", STRATEGY_XOR_C);
+    await admin.from("strategies").delete().eq("id", STRATEGY_XOR_D);
     await admin.auth.admin.deleteUser(allocatorId);
+    for (const id of createdExtraUserIds) {
+      await admin.auth.admin.deleteUser(id);
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -556,6 +595,180 @@ describe("match_decisions XOR CHECK + bridge_outcomes uniqueness (live-DB)", () 
       expect(boErrN2?.message).toContain(
         "bridge_outcomes_legacy_per_strategy_holding_when_md_null",
       );
+    },
+    30_000,
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "bridge_outcomes uniqueness (d): deleting two decisions in one call whose outcomes share (allocator, strategy) cascades without 23505 and keeps both outcomes with their former decision ids",
+    async () => {
+      // The PROD-like shape: two holding-sourced bridge_recommended decisions on
+      // two holdings of one strategy, one outcome each. Deleting a decision makes
+      // ON DELETE SET NULL null its outcome's link; both orphans then share
+      // (allocator, strategy), the slot of the md-NULL partial unique index, and
+      // the second one used to raise 23505 (164.9.3.1 D-05). STRATEGY_XOR_C, not
+      // A, because this arm LEAVES md-NULL outcome rows behind.
+      const holdings = ["holding:binance:BTC:spot", "holding:binance:ETH:spot"];
+      const decisionIds: string[] = [];
+      const outcomeIds: string[] = [];
+      for (const holding of holdings) {
+        const { data: md, error: mdErr } = await admin
+          .from("match_decisions")
+          .insert({
+            allocator_id: allocatorId,
+            strategy_id: STRATEGY_XOR_C,
+            decision: "thumbs_up",
+            decided_by: allocatorId,
+            original_strategy_id: null,
+            original_holding_ref: holding,
+            kind: "bridge_recommended",
+          })
+          .select("id")
+          .single();
+        // Track before asserting, so a wrongly-built row is still cleaned up.
+        if (md?.id) {
+          createdMatchDecisionIds.push(md.id as string);
+          decisionIds.push(md.id as string);
+        }
+        expect(mdErr).toBeNull();
+
+        const { data: bo, error: boErr } = await admin
+          .from("bridge_outcomes")
+          .insert({
+            allocator_id: allocatorId,
+            strategy_id: STRATEGY_XOR_C,
+            match_decision_id: md!.id,
+            kind: "rejected",
+            rejection_reason: "other",
+          })
+          .select("id")
+          .single();
+        if (bo?.id) {
+          createdBridgeOutcomeIds.push(bo.id as string);
+          outcomeIds.push(bo.id as string);
+        }
+        expect(boErr).toBeNull();
+      }
+      expect(decisionIds).toHaveLength(2);
+      expect(outcomeIds).toHaveLength(2);
+
+      // ONE call, one multi-row DELETE: the statement shape the admin route's
+      // .match({ allocator_id, strategy_id, decision }) can produce.
+      const { error: delErr } = await admin
+        .from("match_decisions")
+        .delete()
+        .in("id", decisionIds);
+      expect(delErr).toBeNull();
+
+      // Both outcomes survive, unlinked, and each remembers its own decision.
+      // former_match_decision_id is read through an untyped record so this file
+      // typechecks whether or not database.types.ts carries the column yet.
+      const { data: rows, error: readErr } = await admin
+        .from("bridge_outcomes")
+        .select("id, match_decision_id, former_match_decision_id")
+        .in("id", outcomeIds);
+      expect(readErr).toBeNull();
+      const survivors = (rows ?? []) as unknown as Array<Record<string, unknown>>;
+      expect(survivors).toHaveLength(2);
+      for (let i = 0; i < outcomeIds.length; i++) {
+        const row = survivors.find((r) => r.id === outcomeIds[i]);
+        expect(row?.match_decision_id).toBeNull();
+        expect(row?.former_match_decision_id).toBe(decisionIds[i]);
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "bridge_outcomes uniqueness (e): the outcome route's upsert target resolves to the per-decision unique, and a second call for the same decision UPDATES the one row",
+    async () => {
+      // 164.9.3.1 D-09. POST /api/bridge/outcome upserts through the allocator's
+      // own session with onConflict: BRIDGE_OUTCOME_CONFLICT_TARGET. Against a
+      // target that matches no unique index PostgreSQL raises 42P10 and the route
+      // answers 500 for every request. This arm sends the SAME constant the route
+      // imports, as a signed-in allocator (the role the route runs as), so it
+      // fails on the string the route really sends.
+      const { client, userId } = await signInAsTestUser(
+        admin,
+        "phase9-outcome-upsert",
+        (id) => createdExtraUserIds.push(id),
+      );
+
+      // sent_as_intro is the decision the route's eligibility check requires.
+      const { data: md, error: mdErr } = await admin
+        .from("match_decisions")
+        .insert({
+          allocator_id: userId,
+          strategy_id: STRATEGY_XOR_D,
+          decision: "sent_as_intro",
+          decided_by: userId,
+          original_strategy_id: STRATEGY_XOR_D,
+          original_holding_ref: null,
+          kind: "bridge_recommended",
+        })
+        .select("id")
+        .single();
+      if (md?.id) createdMatchDecisionIds.push(md.id as string);
+      expect(mdErr).toBeNull();
+
+      // The payload mirrors the route's: every column it writes.
+      const today = new Date().toISOString().slice(0, 10);
+      const upsertOutcome = (
+        fields: Record<string, unknown>,
+      ) =>
+        client
+          .from("bridge_outcomes")
+          .upsert(
+            {
+              allocator_id: userId,
+              strategy_id: STRATEGY_XOR_D,
+              match_decision_id: md!.id,
+              percent_allocated: null,
+              allocated_at: null,
+              rejection_reason: null,
+              note: null,
+              needs_recompute: true,
+              ...fields,
+            },
+            { onConflict: BRIDGE_OUTCOME_CONFLICT_TARGET },
+          )
+          .select("id, kind")
+          .single();
+
+      const first = await upsertOutcome({
+        kind: "allocated",
+        percent_allocated: 10,
+        allocated_at: today,
+      });
+      if (first.data?.id) createdBridgeOutcomeIds.push(first.data.id as string);
+      // 42P10 = invalid_column_reference: "there is no unique or exclusion
+      // constraint matching the ON CONFLICT specification".
+      expect(first.error).toBeNull();
+      expect(first.data?.kind).toBe("allocated");
+
+      const second = await upsertOutcome({
+        kind: "rejected",
+        rejection_reason: "mandate_conflict",
+      });
+      if (second.data?.id) createdBridgeOutcomeIds.push(second.data.id as string);
+      expect(second.error).toBeNull();
+      expect(second.data?.kind).toBe("rejected");
+      // UPDATE, not a second INSERT: the same row id comes back.
+      expect(second.data?.id).toBe(first.data?.id);
+
+      // Exactly one row for (allocator, decision), carrying the second call's kind.
+      const { data: rows, error: readErr } = await admin
+        .from("bridge_outcomes")
+        .select("id, kind, rejection_reason, percent_allocated")
+        .eq("allocator_id", userId)
+        .eq("match_decision_id", md!.id);
+      expect(readErr).toBeNull();
+      expect(rows).toHaveLength(1);
+      expect(rows![0]).toMatchObject({
+        kind: "rejected",
+        rejection_reason: "mandate_conflict",
+        percent_allocated: null,
+      });
     },
     30_000,
   );

@@ -214,8 +214,19 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * taken after the apply). The ratchet test read `the real corpus now compares 130 function(s) but
  * COMPARED_FLOOR is pinned at 129` first. Raising this floor records the function joining the
  * corpus; it does NOT suppress that finding.
+ *
+ * MOVED 2026-10-15 (Phase 164.9.3.1 FANINGRAPH plan 10), 130 -> 131: one ADDITION, not a removal.
+ * `public._fan_in_lock_rows(uuid[], boolean)` enters the chain via forward migration
+ * 20261024120000_fan_in_graph_and_decision_cascade.sql (the ancestor-first lock helper). MEASURED by
+ * `node scripts/baseline-content-drift-check.mjs` on the committed phase tree: `functions compared
+ * 131 — MATCH 123, DRIFT 7, SNAPSHOT_MISSING 1`; the SNAPSHOT_MISSING finding is
+ * `_fan_in_lock_rows/2`, whose migration is not on PROD yet, so it clears with the re-dump taken
+ * after the apply. The ratchet test read `the real corpus now compares 131 function(s) but
+ * COMPARED_FLOOR is pinned at 130` first (found by the plan's final unit run; the plan's census
+ * list did not name this floor). Raising this floor records the function joining the corpus; it
+ * does NOT suppress any finding.
  */
-export const COMPARED_FLOOR = 130;
+export const COMPARED_FLOOR = 131;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */
