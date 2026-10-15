@@ -189,6 +189,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 170.5: FACTSHEETV2PANELS — /strategy/[id]/v2 panels render or say why** (INSERTED 2026-10-03) — 7 plans; closed 2026-10-14 (records PR) (verification passed, live readings 2026-10-14; two observations booked in TODOS)
 - [x] **Phase 170.6: DISPLAYPOLISH — no signed zeros or red positives; short overlaps read em-dash** (INSERTED 2026-10-03; NUMBERS only since 2026-10-13) — 14 plans, shipped in #1037 (completed 2026-10-15)
 - [x] **Phase 170.6.1: DISCOVERYPHONE — the Discovery table works on a phone and names the right venue** (INSERTED 2026-10-13) — 6 plans, shipped v0.131.5.0 (#1026), v0.131.6.0 (#1030) and the D-10 follow-up v0.131.10.0 (#1039) (completed 2026-10-15); verification passed 2/2, security secured 27/27
+- [x] **Phase 170.6.1.1: ANONKEYID — anonymous visitors can no longer read strategies.api_key_id** (INSERTED 2026-10-13) — 8 plans, two PRs (PR-A readers first, PR-B revoke after PR-A's Vercel deploy is READY; O-1) (founder, security) (completed 2026-10-15); shipped v0.131.4.2 (#1025) and v0.131.11.0 (#1040); verification passed, security secured 32/32
 - [x] **Phase 170.6.2: COPYPASS — copy fixes, the /browse example flash, the admin kind filter** (INSERTED 2026-10-13) — 4 plans, shipped v0.131.4.0 (#1023) (completed 2026-10-14); closed 2026-10-14 (records PR)
 - [x] **Phase 170.7: MYSTRATTABLE — My Strategies uses the ranking table, and the name opens the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 9 plans (completed 2026-10-11)
 
@@ -5692,6 +5693,33 @@ Plans:
 - [x] 170.6.1-05-PLAN.md — wave 4: PR-B release behind the PROD function, follow-ups booked, SC-2 confirmed on PROD as anon
 - [x] 170.6.1-06-PLAN.md — wave 1 (gap closure, D-10): an unavailable venue read shows a muted "Venue unavailable" on the Discovery table and grid, never the listed exchange; WR-01's one Sentry capture per call pinned and proven able to fail (SC-2)
 
+### Phase 170.6.1.1: ANONKEYID — anonymous visitors can no longer read strategies.api_key_id, and anon loses write grants it never needs on strategies (INSERTED)
+
+**Goal:** An anonymous visitor cannot read any published strategy's `api_key_id`, and the `anon` role holds no INSERT, UPDATE or DELETE grant on `strategies`, while every public page keeps working.
+**Requirements**: SC-1..SC-4
+**Depends on:** Phase 170 (independent of 170.6.1; DISCOVERYPHONE's venue function never returns a key id)
+Booked 2026-10-13 (founder, "Own phase, now"). Measured read-only on PROD by DISCOVERYPHONE's planner: `has_column_privilege('anon','public.strategies','api_key_id','SELECT')` is true, RLS lets anon read `status='published'` rows, and 3 of 3 published strategies expose a non-null `api_key_id` to anon. anon also holds table-level INSERT/UPDATE/DELETE on `strategies` (RLS-gated today, so a single layer). A key id is not a credential, but it is the handle needed to target a key (see 167.1.2.1 D-18 and its RLS findings). TODOS `[170.6.1-ANON-STRATEGIES-API-KEY-ID]`.
+
+**Success Criteria**:
+1. A live anon probe (`SET LOCAL ROLE anon` in a read-only transaction, marker query first) reads no `api_key_id` from any published strategy; a SQL gate arm fails on today's grants.
+2. anon holds no INSERT, UPDATE or DELETE on `strategies` (table or column level), asserted in the migration's catalogue-only verify and a gate arm.
+3. Every anon/public reader of `strategies` is censused before the revoke (a `select("*")` or an explicit `api_key_id` on an anon client would fail with 42501 under a column revoke) and keeps working: tests on each public route, plus a post-deploy anonymous pass of /browse, /discovery, a factsheet and its OG card.
+4. migration-reviewer and rls-policy-auditor are clean before merge (migrations auto-apply to PROD after TEST).
+
+**Plans:** 8 plans
+
+⭐ **O-1 (orchestrator, 2026-10-14), recorded in `170.6.1.1-CONTEXT.md`: two merges.** A migration applies to PROD on the merge push in parallel with the Vercel build, so one PR carrying both the narrowing and the revoke could leave PROD revoked while the old `select("*")` readers are still live (the P1 D-02 names). **PR-A** (plans 01-04, no migration) narrows the readers, moves the badge and ships first. **PR-B** (plans 05-08, the migration and its gate) is opened only after PR-A's Vercel production deployment is READY on the PR-A merge SHA. Each PR carries its own release commit.
+
+Plans:
+- [x] 170.6.1.1-01-PLAN.md — (wave 1, PR-A) `STRATEGY_PUBLIC_COLUMNS`, the three anonymous `*` readers and the landing count narrowed to it, the live probe's reader arms, and the readers run against a simulated revoke on the local stack
+- [x] 170.6.1.1-02-PLAN.md — (wave 1, PR-A) the Verified badge moved to the public trust signal, the PROD visitor-view counts measured, the stale e2e badge comments corrected
+- [x] 170.6.1.1-03-PLAN.md — (wave 2, PR-A) the static census pin, `Strategy.api_key_id` optional, the phase review and badge baseline, PR-A's release commit
+- [x] 170.6.1.1-04-PLAN.md — (wave 3, PR-A) PR-A's Vercel production deployment READY on the merge SHA, then the anonymous and signed-in /discovery post-deploy pass
+- [x] 170.6.1.1-05-PLAN.md — (wave 4, PR-B) the migration (anon loses table SELECT and INSERT/UPDATE/DELETE on strategies, keeps column SELECT on every column but api_key_id, catalogue-only self-check, default-deny header), the probe's refusal arm and write arms, each seen RED first
+- [x] 170.6.1.1-06-PLAN.md — (wave 5, PR-B) the SQL gate (seven arms with sql twins, RED on today's grants through fixture 10, the hidden-column exemption list) and the rollback proven on the local stack
+- [x] 170.6.1.1-07-PLAN.md — (wave 6, PR-B) every census the new gate file moves, each by measurement
+- [x] 170.6.1.1-08-PLAN.md — (wave 7, PR-B) migration-reviewer and rls-policy-auditor clean before merge, PR-B's release commit (CHANGELOG, VERSION, TODOS item closed), PR-A re-measured READY before opening, then after the PROD apply the live anon probe and the browser pass
+
 ### Phase 170.6.2: COPYPASS — copy fixes, the anonymous /browse example flash and the admin Compute Jobs kind filter (INSERTED)
 
 **Goal:** /recommendations with no mandate reads "Strategies from the daily match engine. Set your mandate to see yours." (D-01). The equity-history rebuilding panel says "One of your keys", names the key by `dataSourceLabel`, drops "yet", and gives each class its own heading, the same on Overview and Risk (D-02..D-05). Anonymous /browse starts with examples hidden, so its server HTML and first paint never show an example row that then vanishes; a `managerRows` mount keeps its own (D-06). The admin Compute Jobs Kind filter lists every kind that has jobs, from its own gated `?facets=kinds` query, and keeps the selected kind (D-07). No migration.
@@ -6075,6 +6103,7 @@ kept verbatim.
 | 170.5 FACTSHEETV2PANELS | 7/7 | Complete | 2026-10-14 |
 | 170.6 DISPLAYPOLISH | 14/14 | Complete | 2026-10-15 |
 | 170.6.1 DISCOVERYPHONE | 6/6 | Complete | 2026-10-15 |
+| 170.6.1.1 ANONKEYID | 8/8 | Complete | 2026-10-15 |
 | 170.6.2 COPYPASS | 4/4 | Complete | 2026-10-14 |
 | 170.7 MYSTRATTABLE | 9/9 | Complete | 2026-10-11 |
 
