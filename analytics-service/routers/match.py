@@ -37,7 +37,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Annotated, Any
 from uuid import UUID, uuid4
@@ -58,13 +58,17 @@ from services.db import (
     db_read_with_retry,
     get_supabase,
     one,
+    paginated_select,
     rows,
 )
+# Kept for now: sibling tests still patch this name. The matcher no longer calls it
+# (per-holding returns come from marks); the last of those patches go with it.
 from services.equity_reconstruction import reconstruct_symbol_returns
 # PYAPI-05 — every deliberate error in this file's seam-reachable arms goes
 # through service_error so the four status classes cannot drift apart
 # site-by-site. Contract: analytics-service/docs/STATUS_CONTRACT.md.
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
+from services.holding_marks import classify_spot_marks
 from services.match_engine import (
     ENGINE_VERSION,
     WEIGHTS_VERSION,
@@ -572,6 +576,22 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
 # src/lib/latest-holdings-per-key.ts, which fails loud the same way.
 _HOLDINGS_ROW_CAP = 1000
 
+# The per-holding mark history the matcher reads is bounded the way /compare's is
+# (HOLDING_COMPARE_WINDOW_DAYS and HOLDING_COMPARE_MAX_PAGES in
+# src/app/(dashboard)/compare/lib/holding-compare-adapter.ts): 730 days, and at most 50
+# pages of ``_HOLDINGS_ROW_CAP`` rows. A read that fills every page raises instead of
+# returning a partial series.
+_HOLDINGS_HISTORY_WINDOW_DAYS = 730
+_HOLDINGS_HISTORY_MAX_PAGES = 50
+
+
+def _holdings_history_window_start() -> str:
+    """The first ``asof`` (YYYY-MM-DD, UTC) the holdings history read asks for.
+
+    A function, not a constant, so a test with a fixed fixture calendar can pin it."""
+    start = datetime.now(timezone.utc).date() - timedelta(days=_HOLDINGS_HISTORY_WINDOW_DAYS)
+    return start.isoformat()
+
 
 class HoldingsReadTruncated(RuntimeError):
     """A holdings or key read reached ``_HOLDINGS_ROW_CAP`` rows, so it may be a
@@ -581,8 +601,9 @@ class HoldingsReadTruncated(RuntimeError):
 
 
 def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
-    """Phase 09 / D-01 + D-16. Load allocator_holdings and reconstruct per-symbol
-    returns from allocator_equity_snapshots.breakdown.
+    """Phase 09 / D-01 + D-16, rewritten by 167.1.1.1 (BRIDGERETURNS). Load
+    allocator_holdings and build each spot holding's return series from its daily MARK
+    PRICE.
 
     Phase 170.4 D-08 / D-10 (Phase 167.1.1 R-15-1, R-15-2): one API key is one
     strategy, so the AUM is the sum over EVERY live key's position, and keys that
@@ -598,22 +619,46 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
     commit (``oneKeyPerAccountDay``); both are replayed against one case table.
     Only service-written evidence enters: ``allocator_holdings`` rows and
     ``updated_at``, the native-unpriced markers and the owner's ``api_keys``
-    identity columns. No audit-log read is added. Applies the Phase 07 D-03 warm-up
-    gate: holdings whose per-symbol series has fewer than 30 daily returns are
-    excluded from portfolio math entirely (not flagged, not compared).
+    identity columns. No audit-log read is added.
+
+    Returns come from MARKS, not dollars (D-03, D-07): one tenant-filtered, capped
+    history read of the allocator's holdings (D-05), grouped per (venue, symbol,
+    holding_type) (D-08), then ``classify_spot_marks`` for each spot holding. The change
+    of a holding's dollar value is never read as a return, so a purchase, a sale or a
+    transfer is not a gain or a loss. A mark that breaks the read contract, or an
+    unusable ``updated_at``, raises (``HoldingMarkContractError``,
+    ``HoldingsUpdatedAtError``) and is deliberately not caught here: the scorer's
+    caller logs it under a correlation id.
+
+    What is in and out of the book (D-01, spot only in this function):
+
+    ===========================  ========  ==================  ==================
+    spot holding                 AUM       weights / max-wt    returns, eligible
+    ===========================  ========  ==================  ==================
+    priced (30+ priced days)     in        in                  in
+    withheld (account_balance,   in        in                  out (named)
+    fixed_price, no_price,
+    too_few_priced_days)
+    ===========================  ========  ==================  ==================
+
+    A derivative row is skipped entirely here (a later plan of the phase gives it its
+    P&L contribution to the AUM).
 
     This helper is SYNC (plain def) — called from _load_allocator_context which is
     itself sync and invoked via asyncio.to_thread. Per finding f1: MUST NOT be
     converted to async def.
 
     Returns dict with:
-      portfolio_strategies: list[dict]  (pseudo-strategy dicts, strategy_id = "holding:V:S:T")
-      portfolio_weights:    dict[str, float]  (value_usd / total_eligible_value, sums to 1.0)
-      portfolio_returns:    dict[str, pd.Series]  (one Series per eligible holding)
-      portfolio_aum:        float  (sum of eligible holding value_usd)
-      holdings_rows_eligible: list[dict]  (one row per pseudo-strategy that passed the warm-up
-                                           gate, ``value_usd`` summed over the counted keys,
-                                           for compute_holding_flags consumption in Task 3)
+      portfolio_strategies: list[dict]  (priced spot only; strategy_id = "holding:V:S:T")
+      portfolio_weights:    dict[str, float]  (value_usd / portfolio_aum for priced AND
+                                               withheld spot, sums to 1.0)
+      portfolio_returns:    dict[str, pd.Series]  (one Series per priced spot holding)
+      portfolio_aum:        float  (sum of spot value_usd, priced and withheld)
+      holdings_rows_eligible: list[dict]  (one row per priced spot pseudo-strategy,
+                                           ``value_usd`` summed over the counted keys,
+                                           for compute_holding_flags consumption)
+      holdings_rows_withheld: list[dict]  (one row per withheld spot holding, the same
+                                           shape plus ``withheld_reason``)
     """
     supabase = get_supabase()
 
@@ -757,61 +802,99 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
             "portfolio_returns": {},
             "portfolio_aum": 0.0,
             "holdings_rows_eligible": [],
+            "holdings_rows_withheld": [],
         }
 
-    # --- Step 3: fetch equity snapshots ordered ASC (needed for pct_change) ---
-    snapshots_result = (
-        supabase.table("allocator_equity_snapshots")
-        .select("asof, breakdown")
-        .eq("allocator_id", allocator_id)
-        .order("asof", desc=False)
-        .execute()
-    )
-    snapshots = rows(snapshots_result)
+    # --- Step 3: the holdings' mark history, one tenant-filtered, capped read ---
+    # The service role bypasses RLS, so ``.eq("allocator_id", ...)`` IS the tenant
+    # boundary (T-167.1.1.1-05). The read applies neither the account rule nor the
+    # native-unpriced marker: a price does not depend on whose account holds the asset
+    # (MT5 and sFOX holdings are withheld before any mark is read). It is bounded to the
+    # window and to ``_HOLDINGS_HISTORY_MAX_PAGES`` pages; a read that fills the ceiling
+    # raises, because a partial series would be reported as a complete one.
+    try:
+        history_rows = paginated_select(
+            supabase.table("allocator_holdings")
+            .select("asof, venue, symbol, holding_type, side, mark_price, updated_at, api_key_id")
+            .eq("allocator_id", allocator_id)
+            .gte("asof", _holdings_history_window_start()),
+            order_by=(("asof", False), ("id", False)),
+            page_size=_HOLDINGS_ROW_CAP,
+            hard_cap_pages=_HOLDINGS_HISTORY_MAX_PAGES,
+            truncation_hint="holdings history",
+        )
+    except PaginatedSelectTruncated as err:
+        raise HoldingsReadTruncated(
+            f"allocator_holdings history read reached the {_HOLDINGS_HISTORY_MAX_PAGES}-page "
+            f"ceiling for allocator {allocator_id}"
+        ) from err
 
-    # --- Step 4: reconstruct per-symbol returns + apply 30-day warm-up gate ---
+    # One list of rows per (venue, symbol, holding_type), only for the holdings that
+    # survived the account rule above (D-08: a venue's marks never feed another
+    # venue's series, and no read is keyed by bare symbol). Rows of different keys on
+    # one holding stay together on purpose: ``classify_spot_marks`` keeps ONE mark per
+    # day across them, so two keys holding an asset never double a day.
+    counted_refs = set(holdings_map)
+    marks_by_ref: dict[tuple[str, str, str], list[Row]] = {}
+    for hist in history_rows:
+        hist_ref = (hist["venue"], hist["symbol"], hist["holding_type"])
+        if hist_ref in counted_refs:
+            marks_by_ref.setdefault(hist_ref, []).append(hist)
+
+    # --- Step 4: each spot holding's returns from its marks (D-03, D-07) ---
     portfolio_strategies: list[dict[str, Any]] = []
     portfolio_returns: dict[str, pd.Series] = {}
     holdings_rows_eligible: list[Row] = []
-    raw_values: dict[str, float] = {}  # pseudo_id -> value_usd (for weight computation)
-    warm_up_dropped = 0  # NEW-C08-05: count excluded holdings for observability
+    holdings_rows_withheld: list[Row] = []
+    raw_values: dict[str, float] = {}  # pseudo_id -> value_usd (priced AND withheld spot)
+    withheld_counts: dict[str, int] = {}
 
     for row in collapsed:
         venue = row["venue"]
         symbol = row["symbol"]
         holding_type = row["holding_type"]
+        if holding_type != "spot":
+            continue
         pseudo_id = f"holding:{venue}:{symbol}:{holding_type}"
         value_usd = float(row.get("value_usd") or 0.0)
 
-        series = reconstruct_symbol_returns(snapshots, symbol)
-        if series is None or len(series) < 30:
-            # Warm-up gate: insufficient history — exclude entirely (Phase 07 D-03 analog).
-            # NEW-C08-05: count and log so the caller can distinguish empty-book
-            # from freshly-funded (portfolio_aum=0 with warm_up_dropped>0 means
-            # the allocator has holdings but they're all too new to score, not
-            # that there are genuinely no holdings).
-            warm_up_dropped += 1
+        marks = classify_spot_marks(
+            marks_by_ref.get((venue, symbol, holding_type), []), venue=venue, symbol=symbol
+        )
+        # D-01: priced or withheld, a spot holding keeps its dollars in the AUM and
+        # its weight. Only a priced one carries a return series.
+        raw_values[pseudo_id] = value_usd
+        if marks.withheld_reason is not None:
+            holdings_rows_withheld.append({**row, "withheld_reason": marks.withheld_reason})
+            withheld_counts[marks.withheld_reason] = (
+                withheld_counts.get(marks.withheld_reason, 0) + 1
+            )
             continue
 
         portfolio_strategies.append({"strategy_id": pseudo_id})
-        portfolio_returns[pseudo_id] = series
+        portfolio_returns[pseudo_id] = pd.Series(
+            [ret for _, ret in marks.returns],
+            index=[day for day, _ in marks.returns],
+            dtype=float,
+            name=pseudo_id,
+        )
         holdings_rows_eligible.append(row)
-        raw_values[pseudo_id] = value_usd
 
-    if warm_up_dropped > 0:
+    if withheld_counts:
+        # Counts per reason only: no symbol, value or key id (T-167.1.1.1-08).
         logger.info(
-            "match: holdings warm-up gate dropped %d/%d holding(s) for allocator %s "
-            "(< 30 reconstructable daily returns) — these are excluded from portfolio "
-            "math and flag computation",
-            warm_up_dropped, len(collapsed), allocator_id,
+            "match: %d spot holding(s) withheld from the return signal for allocator %s "
+            "(by reason: %s); they stay in the AUM and the weights",
+            len(holdings_rows_withheld), allocator_id,
+            ", ".join(f"{reason}={n}" for reason, n in sorted(withheld_counts.items())),
         )
 
-    # --- Step 5: compute weights (value_usd / total_eligible_value) ---
-    total_eligible_value = sum(raw_values.values())
+    # --- Step 5: weights (value_usd / AUM) over priced AND withheld spot ---
+    total_value = sum(raw_values.values())
     portfolio_weights: dict[str, float] = {}
-    if total_eligible_value > 0:
+    if total_value > 0:
         for pid, val in raw_values.items():
-            portfolio_weights[pid] = val / total_eligible_value
+            portfolio_weights[pid] = val / total_value
     else:
         # All values zero — equal weight as fallback
         for pid in raw_values:
@@ -821,8 +904,9 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
         "portfolio_strategies": portfolio_strategies,
         "portfolio_weights": portfolio_weights,
         "portfolio_returns": portfolio_returns,
-        "portfolio_aum": total_eligible_value,
+        "portfolio_aum": total_value,
         "holdings_rows_eligible": holdings_rows_eligible,
+        "holdings_rows_withheld": holdings_rows_withheld,
     }
 
 
@@ -988,6 +1072,9 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     holding_returns = holdings_ctx["portfolio_returns"]
     holding_aum = holdings_ctx["portfolio_aum"]
     holdings_rows_eligible = holdings_ctx["holdings_rows_eligible"]
+    # D-01: a withheld spot holding stays in the AUM and the weights; only its returns
+    # are left out of portfolio_returns (it is not in holding_strategies).
+    holdings_rows_withheld = holdings_ctx.get("holdings_rows_withheld", [])
 
     # Merge strategies + holdings into combined dicts
     portfolio_strategies.extend(holding_strategies)
@@ -1002,7 +1089,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     #   of the holdings total, but we need absolute values for combined renorm).
     # Reconstruct absolute values for holding side from their individual value_usd.
     holding_abs_values: dict[str, float] = {}
-    for row in holdings_rows_eligible:
+    for row in [*holdings_rows_eligible, *holdings_rows_withheld]:
         pseudo_id = f"holding:{row['venue']}:{row['symbol']}:{row['holding_type']}"
         holding_abs_values[pseudo_id] = float(row.get("value_usd") or 0.0)
 
@@ -1013,9 +1100,10 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         # Holdings side
         for pid, val in holding_abs_values.items():
             portfolio_weights[pid] = val / combined_aum
-    elif holding_strategies or portfolio_strategies:
+    elif holding_strategies or portfolio_strategies or holdings_rows_withheld:
         # Fall back: equal weights when no AUM data available
         all_ids = [ps["strategy_id"] for ps in portfolio_strategies]
+        all_ids.extend(sorted(set(holding_abs_values) - set(all_ids)))
         eq_w = 1.0 / len(all_ids) if all_ids else 0.0
         for pid in all_ids:
             portfolio_weights[pid] = eq_w
@@ -1040,6 +1128,8 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         "thumbs_down_ids": thumbs_down_ids,
         # Internal-use: passed to compute_holding_flags in _score_one_allocator (Task 3)
         "_holdings_rows_eligible": holdings_rows_eligible,
+        # D-01: spot held out of the return signal by name; plan 05 names them in holding_flags.
+        "_holdings_rows_withheld": holdings_rows_withheld,
     }
 
 
