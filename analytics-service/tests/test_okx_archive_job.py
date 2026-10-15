@@ -294,6 +294,15 @@ def _install(
     monkeypatch.setattr(okx_archive_job, "_utc_today", lambda: ENV["today"])
     monkeypatch.setattr(okx_archive_job, "_wall_ms", lambda: NOW_MS)
     monkeypatch.setattr(okx_archive_job, "download_archive_csv", world.download)
+
+    async def _skip_evaluation(*_args: Any, **_kwargs: Any) -> None:
+        # Plan 08's evaluation (live crawl, reconciliation, rebuild, apply) is exercised by
+        # tests/test_okx_archive_apply.py with its own live-side fakes. These tests protect
+        # the wait, the ingest and the refusals in front of it, so they stop where that
+        # layer begins and keep asserting the readings that layer must not disturb.
+        return None
+
+    monkeypatch.setattr(okx_archive_job, "_run_evaluation", _skip_evaluation)
     return world
 
 
