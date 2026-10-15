@@ -22,7 +22,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { useEffect } from "react";
-import { render, fireEvent, act } from "@testing-library/react";
+import { render, fireEvent, act, within } from "@testing-library/react";
 import {
   buildFactsheetPayload,
   deriveSeriesBundle,
@@ -36,6 +36,7 @@ import { FactsheetProvider, useXRange } from "./factsheet-context";
 import { BasisProvider, useBasis, type Basis } from "./basis-context";
 import { MetricsColumn, headlineCoverageNote, isHeadlineWithheld } from "./MetricsColumn";
 import { FactsheetBody } from "./FactsheetView";
+import { WHEEL_SETTLE_MS } from "./TimeSeriesChart";
 import { ownerStateLine } from "@/lib/status-surface-copy";
 
 // `composite-read-path` imports `server-only` (a Next.js RSC build guard).
@@ -877,6 +878,47 @@ describe("D-15 extended: Rail follows the strip", () => {
 });
 
 /**
+ * A Withheld row with a live mark-to-market bundle. The Withheld verdict describes the CASH
+ * headline only (`headlineCoverageNote` returns null off cash), so under MTM the rail's
+ * figures come from the MTM series and none of the 62 cells may dash. The scalars are NaN
+ * (the read path nulls them on a Withheld row) so the cash render is the redacted one.
+ */
+function withheldWithMtm(): FactsheetPayload {
+  const cash = withHeadlineNaN(payloadWithComparator(WITHHELD_DQ));
+  const slice = dense(400).slice(60);
+  const mtm = deriveSeriesBundle(slice, {
+    periodsPerYear: 365,
+    isArithmetic: false,
+    markets: [],
+    strategyName: "Headline Coverage Test",
+    benchmarkPrices: fixtureBenchmarkPrices([slice]),
+  });
+  return {
+    ...cash,
+    seriesByBasis: { mark_to_market: mtm },
+    metricsByBasis: {
+      mark_to_market: {
+        cumulative_return: 0.05,
+        cagr: 0.1,
+        volatility: 0.2,
+        sharpe: 0.5,
+        sortino: 0.7,
+        max_drawdown: -0.1,
+        calmar: 1,
+      },
+    },
+    mtmGate: { available: true },
+  } as unknown as FactsheetPayload;
+}
+function SetBasis({ basis }: { basis: Basis }) {
+  const { setBasis } = useBasis();
+  useEffect(() => {
+    setBasis(basis);
+  }, [basis, setBasis]);
+  return null;
+}
+
+/**
  * D-15 extended again (founder 2026-10-15, AskUserQuestion, "Dash all of them"; plan 15).
  * This SUPERSEDES plan 14's Alpha-only scope. Scope: a Withheld row at FULL history with no
  * what-if leverage, every rail figure computed over the whole record. Dates, sample counts and
@@ -962,7 +1004,7 @@ describe("D-15 extended again: Dash all of them", () => {
   ];
   /** A13 to A22: Best and Worst for Day, Week, Month, Quarter, Year. */
   const BEST_WORST_CASES = grid(13, "Best / Worst Period", ["Day", "Week", "Month", "Quarter", "Year"], [1, 2]);
-  /** A23 to A31: Rolling Metrics Avg, Min, Max ("Now", td 1, is the latest window only and stays). */
+  /** A23 to A31: Rolling Metrics Avg, Min, Max ("Now", td 1, is pinned by D5 below: it reads "—" too, plan 15 review WR-02). */
   const ROLLING_CASES = grid(23, "Rolling Metrics", ["Volatility", "Sharpe", "Sortino"], [2, 3, 4]);
   /** A32 to A37: Bootstrap Point (td 1) and 95% CI (td 2) for Sharpe, Sortino, Max Drawdown. */
   const BOOTSTRAP_CASES: Case[] = ["Sharpe", "Sortino", "Max Drawdown"].flatMap((row, i) => [
@@ -1034,6 +1076,44 @@ describe("D-15 extended again: Dash all of them", () => {
     expect(withheld.style).not.toContain("--color-positive");
     expect(withheld.style).not.toContain("--color-negative");
   }, SNAPSHOT_TIMEOUT_MS);
+
+  describe("WR-03 (plan 15 review): the gate's basis term, `railBasis`", () => {
+    function takeUnder(basis: Basis, payload: FactsheetPayload) {
+      const { container, unmount } = render(
+        <FactsheetProvider payload={payload} persist={false}>
+          <BasisProvider>
+            <SetBasis basis={basis} />
+            <MetricsColumn />
+          </BasisProvider>
+        </FactsheetProvider>,
+      );
+      const cells = new Map<string, Cell>();
+      for (const c of CASES) cells.set(c.id, readCell(container, c));
+      const text = container.textContent ?? "";
+      unmount();
+      return { cells, text };
+    }
+
+    it("under mark_to_market none of the 62 whole-record cells dashes on a Withheld row, and no Withheld note shows; under cash the same payload dashes every one", () => {
+      const payload = withheldWithMtm();
+      // Premise: the very same payload under cash IS the redacted render, so the MTM assertion
+      // below cannot pass by the cells never having been withheld in the first place.
+      const cash = takeUnder("cash_settlement", payload);
+      for (const c of CASES) {
+        const cell = cash.cells.get(c.id)!;
+        if ("error" in cell) throw new Error(`premise: cash read failed: ${cell.error}`);
+        expect(cell.text, `premise: cash ${c.id}`).toBe(c.ci ? "[—, —]" : "—");
+      }
+      expect(cash.text, "premise: the cash render shows the Withheld note").toContain("Headline figures withheld");
+      const mtm = takeUnder("mark_to_market", payload);
+      expect(mtm.text).not.toContain("Headline figures withheld");
+      for (const c of CASES) {
+        const cell = mtm.cells.get(c.id)!;
+        if ("error" in cell) throw new Error(`MTM read failed: ${cell.error}`);
+        expect(cell.text, `MTM ${c.id}: ${c.panel} / ${c.row} (td ${c.col}) keeps its figure`).toMatch(/\d/);
+      }
+    }, SNAPSHOT_TIMEOUT_MS);
+  });
 
   it("the case table covers A1 to A62 once each, except A38 (the sparklines, below)", () => {
     const ids = CASES.map((c) => c.id).sort((x, y) => Number(x.slice(1)) - Number(y.slice(1)));
@@ -1149,33 +1229,140 @@ describe("D-15 extended again: Dash all of them", () => {
       }
     });
 
-    it("D1: every EOY Returns year row keeps its strategy figure", () => {
+    it("D1: every EOY Returns year row EXCEPT the record's last keeps its strategy figure", () => {
+      // Flipped deliberately (plan 15 review WR-01, founder 2026-10-15 "fix the medium
+      // user-facing issues"): the last year is the Year-to-date figure, which the Returns panel
+      // dashes on a Withheld row. It reads "—" (pinned in the WR-01 test below). Every EARLIER
+      // year covers its own calendar year and keeps its figure.
       const { container } = render1();
       const rows = rowsOf(container, "EOY Returns");
-      expect(rows.length, "premise: the EOY panel renders year rows").toBeGreaterThan(0);
-      for (const tr of rows) {
+      expect(rows.length, "premise: the EOY panel renders year rows").toBeGreaterThan(1);
+      for (const tr of rows.slice(0, -1)) {
         const tds = tr.querySelectorAll("td");
         expect(tds[0].textContent).toMatch(/^\d{4}$/);
         expect(tds[1].textContent, `EOY ${tds[0].textContent}`).toMatch(/\d/);
       }
     });
 
-    it("D4: every Calmar by Year row keeps its Return figure", () => {
+    it("D4: every Calmar by Year row EXCEPT the record's last keeps its Return figure", () => {
+      // Flipped deliberately with D1 (plan 15 review WR-01): the last year's Return is the
+      // Year-to-date figure.
       const { container } = render1();
       const rows = rowsOf(container, "Calmar by Year");
-      expect(rows.length, "premise: the Calmar panel renders year rows").toBeGreaterThan(0);
-      for (const tr of rows) {
+      expect(rows.length, "premise: the Calmar panel renders year rows").toBeGreaterThan(1);
+      for (const tr of rows.slice(0, -1)) {
         const tds = tr.querySelectorAll("td");
         expect(tds[1].textContent, `Calmar ${tds[0].textContent}`).toMatch(/\d/);
       }
     });
 
-    it('D5: the three Rolling Metrics "Now" cells keep their figures', () => {
+    it("WR-01: the record's last calendar year IS the Year-to-date figure; on a Withheld row it reads the em-dash in EOY Returns and Calmar by Year, on a clean row it carries the same digits", () => {
+      const ytd = (c: HTMLElement) => {
+        const cell = readCell(c, { id: "ytd", panel: "Returns", row: "Year-to-date", col: 1 });
+        if ("error" in cell) throw new Error(cell.error);
+        return cell.text;
+      };
+      const lastRow = (c: HTMLElement, panel: string) => {
+        const rows = rowsOf(c, panel);
+        return [...rows[rows.length - 1].querySelectorAll("td")].map((td) => ({
+          text: (td.textContent ?? "").trim(),
+          cls: td.className,
+          style: td.getAttribute("style") ?? "",
+        }));
+      };
+      // Premise, the clean row: EOY's last strategy cell and Calmar's last Return cell repeat
+      // the Returns panel's Year-to-date figure digit for digit.
+      const clean = renderColumn(payloadWithComparator(CLEAN));
+      const cleanYtd = ytd(clean.container);
+      expect(cleanYtd, "premise: a clean row prints a YTD figure").toMatch(/\d/);
+      const cleanEoy = lastRow(clean.container, "EOY Returns");
+      const cleanCalmar = lastRow(clean.container, "Calmar by Year");
+      expect(cleanEoy[1].text, "premise: EOY's last year is the YTD figure").toBe(cleanYtd);
+      expect(cleanCalmar[1].text, "premise: Calmar's last Return is the YTD figure").toBe(cleanYtd);
+      expect(cleanEoy[2].text, "premise: the clean benchmark cell carries a digit").toMatch(/\d/);
+      expect(cleanEoy[3].text, "premise: the clean delta cell carries a digit").toMatch(/\d/);
+      expect(cleanCalmar[2].text, "premise: the clean Max DD cell carries a digit").toMatch(/\d/);
+      expect(cleanCalmar[3].text, "premise: the clean Calmar cell carries a digit").toMatch(/\d/);
+      clean.unmount();
+      // The verdict, the Withheld row: YTD reads "—", and so does every cell that repeats it,
+      // with no tone. The year label and the day count are not figures and stay.
+      // As the read path builds it: `withSuffixWindows` nulls the seven trailing windows too
+      // (`withHeadlineNaN` only does the seven stored scalars), so YTD is null.
+      const built = withHeadlineNaN(payloadWithComparator(WITHHELD_DQ));
+      const asBuilt = {
+        ...built,
+        strategyMetrics: { ...built.strategyMetrics, mtd: null, ytd: null, p3m: null, p6m: null, p1y: null, p3y: null, p5y: null },
+      } as FactsheetPayload;
+      const w = renderColumn(asBuilt);
+      expect(ytd(w.container), "premise: the Returns panel dashes YTD on a Withheld row").toBe("—");
+      const eoy = lastRow(w.container, "EOY Returns");
+      const calmar = lastRow(w.container, "Calmar by Year");
+      expect(eoy[0].text).toBe(cleanEoy[0].text);
+      for (const cell of [eoy[1], eoy[2], eoy[3], calmar[1], calmar[2], calmar[3]]) {
+        expect(cell.text).toBe("—");
+        expect(cell.style).not.toContain("--color-positive");
+        expect(cell.style).not.toContain("--color-negative");
+      }
+      expect(calmar[4].text, "the day count is not a figure").toMatch(/^\d+$/);
+      w.unmount();
+    });
+
+    it("R3-WR-01 (round-2 review): inside a zoom, the last EOY and Calmar year stay dashed on a Withheld row, because both panels show the full history", async () => {
+      // Plan 15 round 3, WR-01 (regression from 3194279bf): the two panels read the full-history
+      // view and say "Full history" inside a zoom, so the slice-aware gate (`!selected`) must not
+      // switch their dash off. The rail's own slice figures keep the slice-aware gate (D-78, the
+      // window exemption above). Built as the read path builds it (YTD and the windows nulled).
+      const built = withHeadlineNaN(payloadWithComparator(WITHHELD_DQ));
+      const asBuilt = {
+        ...built,
+        strategyMetrics: { ...built.strategyMetrics, mtd: null, ytd: null, p3m: null, p6m: null, p1y: null, p3y: null, p5y: null },
+      } as FactsheetPayload;
+      const lastRow = (c: HTMLElement, panel: string) => {
+        const rows = rowsOf(c, panel);
+        return [...rows[rows.length - 1].querySelectorAll("td")].map((td) => (td.textContent ?? "").trim());
+      };
+      // Premise A: a clean row inside the same zoom prints digits in every last-year cell, so the
+      // dash below is the Withheld verdict and not an artefact of the zoom.
+      const clean = await zoomedColumn(payloadWithComparator(CLEAN));
+      const cleanEoy = lastRow(clean.container, "EOY Returns");
+      const cleanCalmar = lastRow(clean.container, "Calmar by Year");
+      for (const t of [cleanEoy[1], cleanEoy[2], cleanEoy[3], cleanCalmar[1], cleanCalmar[2], cleanCalmar[3]]) {
+        expect(t, "premise: a clean zoomed last-year cell carries a digit").toMatch(/\d/);
+      }
+      clean.unmount();
+      // Premise B: the zoom is real on the Withheld row, the rail's Returns panel keeps its slice figure.
+      const w = await zoomedColumn(asBuilt);
+      const skew = readCell(w.container, { id: "A1", panel: "Main Metrics", row: "Skew", col: 1 });
+      if ("error" in skew) throw new Error(skew.error);
+      expect(skew.text, "premise: the zoom keeps the rail's slice figure (window exemption A1)").toMatch(/\d/);
+      const eoy = lastRow(w.container, "EOY Returns");
+      const calmar = lastRow(w.container, "Calmar by Year");
+      expect(eoy[0]).toBe(cleanEoy[0]);
+      for (const t of [eoy[1], eoy[2], eoy[3], calmar[1], calmar[2], calmar[3]]) expect(t).toBe("—");
+      // Earlier years keep their figures inside the zoom too (they cover their own calendar year).
+      for (const tr of rowsOf(w.container, "EOY Returns").slice(0, -1)) {
+        expect(tr.querySelectorAll("td")[1].textContent, "earlier EOY year").toMatch(/\d/);
+      }
+      w.unmount();
+    }, SNAPSHOT_TIMEOUT_MS);
+
+    it('D5: the three Rolling Metrics "Now" cells read the em-dash with no accent', () => {
+      // Flipped deliberately (plan 15 review WR-02, founder 2026-10-15): "Now" is the trailing
+      // 6-month window, the span whose 6 Month return the Returns panel dashes on a Withheld row
+      // (a trailing window can straddle the undated break). Premise: a clean row carries a digit.
+      const clean = renderColumn(payloadWithComparator(CLEAN));
+      for (const row of ["Volatility", "Sharpe", "Sortino"]) {
+        const cell = readCell(clean.container, { id: row, panel: "Rolling Metrics", row, col: 1 });
+        if ("error" in cell) throw new Error(cell.error);
+        expect(cell.text, `premise: clean Now ${row}`).toMatch(/\d/);
+      }
+      clean.unmount();
       const { container } = render1();
       for (const row of ["Volatility", "Sharpe", "Sortino"]) {
         const cell = readCell(container, { id: row, panel: "Rolling Metrics", row, col: 1 });
         if ("error" in cell) throw new Error(cell.error);
-        expect(cell.text, `Now: ${row}`).toMatch(/\d/);
+        expect(cell.text, `Now: ${row}`).toBe("—");
+        expect(cell.cls, `Now: ${row}`).not.toContain("text-accent");
       }
     });
 
@@ -1205,5 +1392,365 @@ describe("D-15 extended again: Dash all of them", () => {
         expect(cell.text, row).toBe("—");
       }
     });
+  });
+});
+
+/**
+ * Plan 15 round 3 (founder rule 2026-10-15: user-facing and data-integrity MEDIUMs are fixed,
+ * not booked; review R2 WR-02 to WR-04). The Year-to-date figure the Returns panel dashes on a
+ * Withheld row is also printed by four charts and tables outside the rail. On a Withheld row at
+ * FULL history (the rail's own gate, D-78) none of them may print it. Every case pairs a Dated or
+ * clean premise (the same surface prints it) with the Withheld verdict, so the dash is the
+ * verdict and the assertion cannot be vacuous. Not dashed: a Dated row, mark-to-market, and the
+ * rail's earlier years.
+ */
+describe("plan 15 round 3: the Year-to-date copies outside the rail", () => {
+  /** Whole-body renders are slow on a loaded machine; see the rail snapshots above. */
+  const SNAPSHOT_TIMEOUT_MS = 120_000;
+  /** The Withheld payload as the read path builds it: the seven scalars and the windows nulled. */
+  function asBuilt(dq: DQ, overrides?: (p: FactsheetPayload) => Partial<FactsheetPayload["strategyMetrics"]>): FactsheetPayload {
+    const built = withHeadlineNaN(payloadWithComparator(dq));
+    return {
+      ...built,
+      strategyMetrics: {
+        ...built.strategyMetrics,
+        mtd: null,
+        ytd: null,
+        p3m: null,
+        p6m: null,
+        p1y: null,
+        p3y: null,
+        p5y: null,
+        ...(overrides ? overrides(built) : {}),
+      },
+    } as FactsheetPayload;
+  }
+  const lastYearOf = (p: FactsheetPayload) => p.dates[p.dates.length - 1].slice(0, 4);
+  const WITHHELD = (overrides?: Parameters<typeof asBuilt>[1]) => asBuilt(WITHHELD_DQ, overrides);
+
+  /** Mounts the whole body and flushes the next/dynamic loaders (the Monthly Returns heatmap). */
+  async function mountBody(payload: FactsheetPayload, zoom?: [number, number]) {
+    function Zoom({ range }: { range: [number, number] }) {
+      const { setXRange } = useXRange();
+      return (
+        <button data-testid="zoom" onClick={() => setXRange(range)}>
+          zoom
+        </button>
+      );
+    }
+    const view = render(
+      <FactsheetProvider payload={payload} persist={false}>
+        {zoom && <Zoom range={zoom} />}
+        <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+      </FactsheetProvider>,
+    );
+    if (zoom) {
+      await act(async () => {
+        fireEvent.click(view.container.querySelector('[data-testid="zoom"]')!);
+      });
+    }
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    return view;
+  }
+  function figureTitled(container: HTMLElement, title: string): HTMLElement {
+    const hits = [...container.querySelectorAll<HTMLElement>("figure")].filter((f) =>
+      (f.querySelector("h3")?.textContent ?? "").trim().startsWith(title),
+    );
+    if (hits.length !== 1) throw new Error(`${hits.length} figures titled "${title}"`);
+    return hits[0];
+  }
+
+  describe("WR-02: the End-of-Year Returns bar chart", () => {
+    /** The row group of `year`: its texts (year label first) and how many bars it draws. */
+    function eoyRow(container: HTMLElement, year: string) {
+      const fig = figureTitled(container, "End-of-Year Returns");
+      const g = [...fig.querySelectorAll("g")].find((n) => n.querySelector(":scope > text")?.textContent === year);
+      if (!g) throw new Error(`no EOY chart row for ${year}`);
+      return {
+        texts: [...g.querySelectorAll("text")].map((t) => t.textContent ?? ""),
+        bars: g.querySelectorAll("rect").length,
+        caption: fig.querySelector("header p")?.textContent ?? "",
+      };
+    }
+    // The last year's return is set far above every other year so the scale caption encodes it
+    // whenever the chart still counts that year.
+    const HUGE = (p: FactsheetPayload) => ({ yearly: { ...p.strategyMetrics.yearly, [lastYearOf(p)]: 9 } });
+
+    it("a Withheld row at full history prints no last-year label, bar or scale for that year; earlier years keep theirs", async () => {
+      const clean = payloadWithComparator(CLEAN);
+      const year = lastYearOf(clean);
+      const cleanView = await mountBody({
+        ...clean,
+        strategyMetrics: { ...clean.strategyMetrics, yearly: { ...clean.strategyMetrics.yearly, [year]: 9 } },
+      } as FactsheetPayload);
+      const cleanRow = eoyRow(cleanView.container, year);
+      // Premise: the same surface prints the year's strategy and benchmark labels, a bar, and the scale.
+      expect(cleanRow.texts.length, "premise: year label plus strategy and benchmark labels").toBeGreaterThanOrEqual(3);
+      expect(cleanRow.bars, "premise: the year draws bars").toBeGreaterThan(0);
+      expect(cleanRow.caption, "premise: the scale caption encodes the huge last year").toContain("±900%");
+      const prevYear = String(Number(year) - 1);
+      const cleanPrev = eoyRow(cleanView.container, prevYear);
+      cleanView.unmount();
+
+      const w = await mountBody(WITHHELD(HUGE));
+      const row = eoyRow(w.container, year);
+      expect(row.texts, "only the year label remains").toEqual([year]);
+      expect(row.bars, "no bar encodes the withheld figure").toBe(0);
+      expect(row.caption, "the scale caption leaves that year out").not.toContain("±900%");
+      const prev = eoyRow(w.container, prevYear);
+      expect(prev.texts, "an earlier year keeps its labels").toEqual(cleanPrev.texts);
+      expect(prev.bars).toBeGreaterThan(0);
+      w.unmount();
+    }, SNAPSHOT_TIMEOUT_MS);
+
+    it("a Dated row keeps the last year's labels and bars", async () => {
+      const dated = await mountBody(asBuilt(DATED, HUGE));
+      const row = eoyRow(dated.container, lastYearOf(payloadWithComparator(DATED)));
+      expect(row.texts.length).toBeGreaterThanOrEqual(3);
+      expect(row.bars).toBeGreaterThan(0);
+      expect(row.caption).toContain("±900%");
+      dated.unmount();
+    }, SNAPSHOT_TIMEOUT_MS);
+  });
+  describe("WR-03: the Monthly Returns heatmap's YTD column", () => {
+    /** The last row of the heatmap, as extracted strings: its YTD cell and its month cells. */
+    function lastHeatmapRow(container: HTMLElement) {
+      const fig = figureTitled(container, "Monthly Returns");
+      const trs = [...fig.querySelectorAll<HTMLTableRowElement>("tbody tr")];
+      const tds = [...trs[trs.length - 1].querySelectorAll("td")];
+      const ytd = tds[tds.length - 1];
+      return {
+        year: (tds[0].textContent ?? "").trim(),
+        rows: trs.length,
+        ytd: (ytd.textContent ?? "").trim(),
+        ytdStyle: ytd.getAttribute("style") ?? "",
+        months: tds.slice(1, -1).map((td) => (td.textContent ?? "").trim()),
+        monthTitles: tds.slice(1, -1).map((td) => td.getAttribute("title") ?? ""),
+        monthStyles: tds.slice(1, -1).map((td) => td.getAttribute("style") ?? ""),
+      };
+    }
+
+    it("a Withheld row at full history dashes the last row's YTD cell and its last month cell with no tone; earlier rows and every earlier month cell keep their figures", async () => {
+      const clean = await mountBody(payloadWithComparator(CLEAN));
+      const c = lastHeatmapRow(clean.container);
+      // Premise: the same surface prints a toned YTD figure for the last year, on a clean row.
+      expect(c.ytd, "premise: a clean row prints the YTD figure").toMatch(/\d/);
+      expect(c.ytdStyle, "premise: the clean YTD cell carries a tone").toMatch(/--color-(positive|negative)/);
+      expect(c.rows, "premise: more than one year row").toBeGreaterThan(1);
+      // Premise: the last month cell (the last month that holds data) IS the Returns panel's
+      // Month-to-date figure, to 2 dp, so dashing the one dashes a copy of the other.
+      const lastIdx = c.months.map((t) => t !== "·").lastIndexOf(true);
+      expect(lastIdx, "premise: the last row has a month with data").toBeGreaterThanOrEqual(0);
+      expect(c.months[lastIdx], "premise: a clean row prints the last month's figure").toMatch(/\d/);
+      expect(c.monthStyles[lastIdx], "premise: the clean last month cell is tinted").toMatch(/background/);
+      const returnsPanels = [...clean.container.querySelectorAll<HTMLElement>("section")].filter(
+        (sec) => (sec.querySelector(":scope > header h3")?.textContent ?? "").trim() === "Returns",
+      );
+      expect(returnsPanels, "premise: exactly one Returns panel").toHaveLength(1);
+      const mtdRow = [...returnsPanels[0].querySelectorAll<HTMLTableRowElement>("tbody tr")].find((tr) =>
+        /^(Month-to-date|Last month|Final month)/.test((tr.querySelector("td")?.textContent ?? "").trim()),
+      );
+      expect(mtdRow, "premise: the Returns panel has a month row").toBeDefined();
+      const num = (t: string) => Number.parseFloat(t.replace("\u2212", "-").replace(/[^0-9.+-]/g, ""));
+      const titleFigure = num(c.monthTitles[lastIdx].split(": ")[1]);
+      expect(titleFigure, "premise: the cell's figure equals the Returns panel's Month-to-date to 2 dp").toBeCloseTo(
+        num(mtdRow!.querySelectorAll("td")[1].textContent ?? ""),
+        2,
+      );
+      const cleanEarlier = [...figureTitled(clean.container, "Monthly Returns").querySelectorAll("tbody tr")]
+        .slice(0, -1)
+        .map((tr) => (tr.querySelector("td:last-child")?.textContent ?? "").trim());
+      clean.unmount();
+
+      const w = await mountBody(WITHHELD());
+      const row = lastHeatmapRow(w.container);
+      expect(row.year).toBe(c.year);
+      expect(row.ytd).toBe("—");
+      expect(row.ytdStyle).not.toContain("--color-positive");
+      expect(row.ytdStyle).not.toContain("--color-negative");
+      // Flipped deliberately (round 4, MEDIUM 1, founder rule 2026-10-15): the last month cell IS
+      // the Month-to-date figure the Returns panel dashes, so it reads "—" with no tone and no
+      // figure in its title. Round 3 pinned every month cell as a per-period entry and stay; that
+      // held for the earlier months only. Earlier month cells in the row keep their figures.
+      expect(row.months[lastIdx], "the last month cell is the dashed Month-to-date figure").toBe("—");
+      expect(row.monthStyles[lastIdx]).not.toContain("--color-positive");
+      expect(row.monthStyles[lastIdx]).not.toContain("--color-negative");
+      expect(row.monthStyles[lastIdx], "no tint").not.toBe(c.monthStyles[lastIdx]);
+      expect(row.monthTitles[lastIdx], "the title carries no figure").not.toMatch(/\d%|\d\./);
+      expect(row.monthTitles[lastIdx]).toBe(`${c.monthTitles[lastIdx].split(": ")[0]}: withheld`);
+      expect(row.months.filter((_, i) => i !== lastIdx), "every earlier month cell keeps its figure").toEqual(
+        c.months.filter((_, i) => i !== lastIdx),
+      );
+      expect(row.monthTitles.filter((_, i) => i !== lastIdx)).toEqual(c.monthTitles.filter((_, i) => i !== lastIdx));
+      const earlier = [...figureTitled(w.container, "Monthly Returns").querySelectorAll("tbody tr")]
+        .slice(0, -1)
+        .map((tr) => (tr.querySelector("td:last-child")?.textContent ?? "").trim());
+      expect(earlier, "an earlier year keeps its total").toEqual(cleanEarlier);
+      w.unmount();
+    }, SNAPSHOT_TIMEOUT_MS);
+
+    it("a Dated row keeps the toned YTD figure", async () => {
+      const dated = await mountBody(asBuilt(DATED));
+      const row = lastHeatmapRow(dated.container);
+      expect(row.ytd).toMatch(/\d/);
+      expect(row.ytdStyle).toMatch(/--color-(positive|negative)/);
+      expect(row.months.filter((t) => t !== "·").every((t) => /\d/.test(t)), "a Dated row keeps its last month cell").toBe(true);
+      expect(row.monthTitles.every((t) => !t.endsWith(": withheld"))).toBe(true);
+      dated.unmount();
+    }, SNAPSHOT_TIMEOUT_MS);
+  });
+  describe("WR-04: the rolling charts' avg label", () => {
+    /** The "avg ..." labels the three rolling charts draw on the plot. */
+    const avgLabels = (container: HTMLElement) =>
+      [...container.querySelectorAll("svg text")].map((t) => (t.textContent ?? "").trim()).filter((t) => /^avg\s/.test(t));
+
+    it("a Withheld row at full history draws no avg label; a clean row draws one per rolling chart", async () => {
+      const clean = await mountBody(payloadWithComparator(CLEAN));
+      // Premise: the same charts print an avg label (vol, Sharpe, Sortino) on a clean row.
+      expect(avgLabels(clean.container), "premise: a clean row draws the avg labels").toHaveLength(3);
+      clean.unmount();
+      const w = await mountBody(WITHHELD());
+      expect(avgLabels(w.container)).toEqual([]);
+      w.unmount();
+    }, SNAPSHOT_TIMEOUT_MS);
+
+    it("a Dated row keeps the avg labels", async () => {
+      const dated = await mountBody(asBuilt(DATED));
+      expect(avgLabels(dated.container)).toHaveLength(3);
+      dated.unmount();
+    }, SNAPSHOT_TIMEOUT_MS);
+
+    it("inside a zoom a Withheld row keeps the avg labels: there each is the visible range's average, a slice figure (D-78)", async () => {
+      const w = await mountBody(WITHHELD(), [10, 300]);
+      expect(avgLabels(w.container)).toHaveLength(3);
+      w.unmount();
+    }, SNAPSHOT_TIMEOUT_MS);
+
+    it("R3-WR-02 (round-3 review): a zoom-out gesture that reaches the whole record draws no avg label while the gesture is held", async () => {
+      // The label averages the chart's LIVE range, and the held windowed view lags it: a wheel burst
+      // that expands a zoom to the full record keeps the rail on the start slice for
+      // WHEEL_SETTLE_MS (an x-gutter drag, for as long as the pointer is held). The gate must read
+      // the live range, or the whole-record average (the figure the rail dashes) prints meanwhile.
+      const rect = vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
+        left: 0, top: 0, right: 880, bottom: 280, width: 880, height: 280, x: 0, y: 0, toJSON: () => ({}),
+      } as DOMRect);
+      try {
+        const w = await mountBody(WITHHELD(), [10, 300]);
+        // Premise A: inside the zoom the three labels print and the rail is on the slice.
+        expect(avgLabels(w.container), "premise: the zoom keeps the labels").toHaveLength(3);
+        expect(w.container.querySelector('[data-testid="window-trailing-note"]'), "premise: the rail is on the slice").not.toBeNull();
+        const svg = [...w.container.querySelectorAll<SVGSVGElement>("svg")].find((n) =>
+          (n.getAttribute("aria-label") ?? "").startsWith("Rolling Volatility"),
+        );
+        expect(svg, "premise: the Rolling Volatility chart is mounted").toBeDefined();
+        // A single huge zoom-out tick reaches [0, n - 1] and holds the range it started on. The
+        // settle timer is faked so a slow runner cannot release the hold mid-assertion.
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        await act(async () => {
+          fireEvent.wheel(svg!, { deltaY: 100_000, clientX: 400, clientY: 100 });
+        });
+        // Premise B: the gesture is still held, so the windowed view (the rail) has NOT moved off the slice.
+        expect(
+          w.container.querySelector('[data-testid="window-trailing-note"]'),
+          "premise: the hold is in effect, the rail still shows the start slice",
+        ).not.toBeNull();
+        expect(avgLabels(w.container), "no whole-record avg while the gesture is held").toEqual([]);
+        // Settled at the whole record: the rail has left the slice, and the labels are still gone.
+        await act(async () => {
+          vi.advanceTimersByTime(WHEEL_SETTLE_MS + 10);
+        });
+        expect(w.container.querySelector('[data-testid="window-trailing-note"]'), "premise: the hold released").toBeNull();
+        expect(avgLabels(w.container)).toEqual([]);
+        w.unmount();
+      } finally {
+        vi.useRealTimers();
+        rect.mockRestore();
+      }
+    }, SNAPSHOT_TIMEOUT_MS);
+  });
+  describe("scope: the copies follow the rail's dash at full history only, never a Dated row or mark-to-market", () => {
+    /** Every surface that repeats the Year-to-date figure, reduced to strings. */
+    function readCopies(container: HTMLElement, year: string) {
+      const lastRailRow = (panel: string) => {
+        const hits = [...container.querySelectorAll<HTMLElement>("section")].filter((sec) =>
+          (sec.querySelector(":scope > header h3")?.textContent ?? "").trim().startsWith(panel),
+        );
+        if (hits.length !== 1) throw new Error(`${hits.length} panels titled "${panel}"`);
+        const trs = [...hits[0].querySelectorAll("tbody tr")];
+        return [...trs[trs.length - 1].querySelectorAll("td")].map((td) => (td.textContent ?? "").trim());
+      };
+      const fig = figureTitled(container, "End-of-Year Returns");
+      const barRow = [...fig.querySelectorAll("g")].find((n) => n.querySelector(":scope > text")?.textContent === year);
+      const heat = figureTitled(container, "Monthly Returns");
+      const heatTds = [...heat.querySelectorAll("tbody tr:last-child td")];
+      return {
+        eoy: lastRailRow("EOY Returns"),
+        calmar: lastRailRow("Calmar by Year"),
+        barTexts: [...(barRow?.querySelectorAll("text") ?? [])].map((t) => t.textContent ?? ""),
+        heatYtd: (heatTds[heatTds.length - 1].textContent ?? "").trim(),
+        avg: [...container.querySelectorAll("svg text")].map((t) => (t.textContent ?? "").trim()).filter((t) => /^avg\s/.test(t)),
+      };
+    }
+
+    it("under mark_to_market none of the copies dashes on a Withheld row; under cash the same payload dashes the four YTD copies and the rolling avg", async () => {
+      const payload = withheldWithMtm();
+      const year = lastYearOf(payload);
+      async function take(basis: Basis) {
+        const view = render(
+          <FactsheetProvider payload={payload} persist={false}>
+            <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+          </FactsheetProvider>,
+        );
+        // FactsheetBody mounts its own BasisProvider, so the basis is switched the way a reader does.
+        if (basis === "mark_to_market") {
+          await act(async () => {
+            fireEvent.click(within(view.container).getByText("Mark-to-market"));
+          });
+        }
+        await act(async () => {
+          await new Promise((r) => setTimeout(r, 50));
+        });
+        const copies = readCopies(view.container, year);
+        view.unmount();
+        return copies;
+      }
+      // Premise: the very same payload under cash IS the redacted render, so the MTM
+      // assertions below cannot pass by the copies never having been withheld.
+      const cash = await take("cash_settlement");
+      for (const t of [cash.eoy[1], cash.eoy[2], cash.eoy[3], cash.calmar[1], cash.calmar[2], cash.calmar[3], cash.heatYtd]) {
+        expect(t, "premise: cash dashes the copy").toBe("—");
+      }
+      expect(cash.barTexts, "premise: cash drops the chart labels").toEqual([year]);
+      expect(cash.avg, "premise: cash drops the avg labels").toEqual([]);
+      const mtm = await take("mark_to_market");
+      for (const t of [mtm.eoy[1], mtm.eoy[2], mtm.eoy[3], mtm.calmar[1], mtm.calmar[2], mtm.calmar[3], mtm.heatYtd]) {
+        expect(t, "MTM keeps the copy").toMatch(/\d/);
+      }
+      expect(mtm.barTexts.length, "MTM keeps the chart labels").toBeGreaterThanOrEqual(2);
+      expect(mtm.avg, "MTM keeps the avg labels").toHaveLength(3);
+    }, SNAPSHOT_TIMEOUT_MS);
+
+    it("inside a zoom the full-history copies stay dashed on a Withheld row (they show the whole record there too)", async () => {
+      const clean = payloadWithComparator(CLEAN);
+      const year = lastYearOf(clean);
+      const c = await mountBody(clean, [10, 300]);
+      const cleanCopies = readCopies(c.container, year);
+      expect(cleanCopies.heatYtd, "premise: a clean zoomed row prints the heatmap YTD").toMatch(/\d/);
+      expect(cleanCopies.barTexts.length, "premise: a clean zoomed row prints the chart labels").toBeGreaterThanOrEqual(3);
+      c.unmount();
+      const w = await mountBody(WITHHELD(), [10, 300]);
+      // Premise (round 4, LOW): the zoom took effect on the Withheld render. The rail's Returns
+      // panel is on the slice (its trailing-window note shows only for a selected range), and the
+      // rolling charts keep their avg labels, which a Withheld row drops at full history.
+      expect(w.container.querySelector('[data-testid="window-trailing-note"]'), "premise: the rail is on the zoomed slice").not.toBeNull();
+      const copies = readCopies(w.container, year);
+      expect(copies.avg, "premise: the rolling charts are zoomed (a full-history Withheld render draws none)").toHaveLength(3);
+      expect(copies.heatYtd).toBe("—");
+      expect(copies.barTexts).toEqual([year]);
+      expect(copies.eoy.slice(1, 4)).toEqual(["—", "—", "—"]);
+      w.unmount();
+    }, SNAPSHOT_TIMEOUT_MS);
   });
 });

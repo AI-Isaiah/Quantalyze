@@ -37,7 +37,7 @@ const MONTH_HEADERS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "
 
 /* -------------------- Monthly heatmap -------------------- */
 
-export function MonthlyReturnsHeatmap() {
+export function MonthlyReturnsHeatmap({ fullHistoryWithheld }: { fullHistoryWithheld: boolean }) {
   // Phase 103 (MTM-04): the monthly grid is a pure function of the strategy's own
   // daily series → follows the active basis. Cash view === payload (byte-identical).
   const view = useBasisSeriesView(usePayload());
@@ -45,6 +45,17 @@ export function MonthlyReturnsHeatmap() {
   const maxAbs = useMemo(() => percentileOfAbs(rows), [rows]);
   const palette = useHeatmapBase();
   if (rows.length === 0) return null;
+  // Plan 15 round 3 (WR-03, founder rule 2026-10-15): the last row's YTD cell IS the Year-to-date
+  // figure, which the Returns panel dashes on a Withheld row. The gate is decided once, in
+  // `MetricsColumn`, and passed in (this grid shows the full history, a zoom included). Under it
+  // that one cell reads "—" with no tone. Every earlier row's total stays.
+  // Round 4 (MEDIUM 1, same rule): the month cell holding the record's last date IS the
+  // Month-to-date figure the Returns panel dashes (same dates, same compounding), and in
+  // January also the Year-to-date figure. It goes with the YTD cell: "—", no tone, no figure in
+  // its title. Every earlier month cell is a closed per-period entry and stays.
+  const lastDate = view.dates.length > 0 ? view.dates[view.dates.length - 1] : null;
+  const lastYear = lastDate ? lastDate.slice(0, 4) : null;
+  const lastMonthIdx = lastDate ? Number.parseInt(lastDate.slice(5, 7), 10) - 1 : -1;
 
   return (
     <figure
@@ -93,7 +104,16 @@ export function MonthlyReturnsHeatmap() {
             </tr>
           </thead>
           <tbody>
-            {rows.map(r => <MonthlyRow key={r.year} row={r} maxAbs={maxAbs} palette={palette} />)}
+            {rows.map(r => (
+              <MonthlyRow
+                key={r.year}
+                row={r}
+                maxAbs={maxAbs}
+                palette={palette}
+                ytdWithheld={fullHistoryWithheld && r.year === lastYear}
+                withheldMonthIdx={fullHistoryWithheld && r.year === lastYear ? lastMonthIdx : -1}
+              />
+            ))}
           </tbody>
         </table>
       </div>
@@ -101,7 +121,20 @@ export function MonthlyReturnsHeatmap() {
   );
 }
 
-function MonthlyRow({ row, maxAbs, palette }: { row: MonthlyReturnsRow; maxAbs: number; palette: { base: string; accent: string; negative: string } }) {
+function MonthlyRow({
+  row,
+  maxAbs,
+  palette,
+  ytdWithheld,
+  withheldMonthIdx,
+}: {
+  row: MonthlyReturnsRow;
+  maxAbs: number;
+  palette: { base: string; accent: string; negative: string };
+  ytdWithheld: boolean;
+  /** Index (0-11) of the month cell that is the dashed Month-to-date figure; -1 when none. */
+  withheldMonthIdx: number;
+}) {
   return (
     <tr>
       <td className="text-left text-micro tabular-nums text-text-primary pr-1">{row.year}</td>
@@ -120,6 +153,23 @@ function MonthlyRow({ row, maxAbs, palette }: { row: MonthlyReturnsRow; maxAbs: 
               title={`${row.year}-${String(i + 1).padStart(2, "0")}: no data`}
             >
               ·
+            </td>
+          );
+        }
+        if (i === withheldMonthIdx) {
+          return (
+            <td
+              key={i}
+              className="text-center text-micro"
+              style={{
+                background: "var(--color-surface-subtle, #FBFCFD)",
+                color: "var(--color-text-muted)",
+                height: 22,
+                fontWeight: 500,
+              }}
+              title={`${row.year}-${String(i + 1).padStart(2, "0")}: withheld`}
+            >
+              —
             </td>
           );
         }
@@ -143,11 +193,11 @@ function MonthlyRow({ row, maxAbs, palette }: { row: MonthlyReturnsRow; maxAbs: 
       <td
         className="text-right text-micro tabular-nums pl-1 pr-1"
         style={{
-          ...toneStyle(row.ytd, 1),
+          ...(ytdWithheld ? {} : toneStyle(row.ytd, 1)),
           fontWeight: 600,
         }}
       >
-        {formatPct(row.ytd, 1)}
+        {ytdWithheld ? "—" : formatPct(row.ytd, 1)}
       </td>
     </tr>
   );

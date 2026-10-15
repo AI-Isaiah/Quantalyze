@@ -84,6 +84,21 @@ export function isHeadlineWithheld(dataQuality: FactsheetPayload["dataQuality"],
   return basis === "cash_settlement" && dataQuality?.twrChainBroken === true && dataQuality.headlineWithheld === true;
 }
 
+/**
+ * Plan 15 round 3 (WR-01): the Withheld verdict at FULL history, with no window term. The one
+ * place `isHeadlineWithheld` is combined with the what-if leverage term and the active basis, so
+ * the rail and every full-history panel outside it (EOY bars, Monthly Returns, the rolling
+ * charts) agree. The leverage term is provably false on a Withheld row (`leverageEligibleFor`
+ * excludes chain-broken rows); it is kept so a change to eligibility moves strip and rail
+ * together. The rail's slice-aware gate is `!selected && useFullHistoryWithheld()`.
+ */
+export function useFullHistoryWithheld(): boolean {
+  const payload = usePayload();
+  const basis = useBasisOrCash();
+  const leverageApplied = leverageApplies(payload, basis, useAppliedLeverage());
+  return !leverageApplied && isHeadlineWithheld(payload.dataQuality, basis);
+}
+
 export function headlineCoverageNote(
   dataQuality: FactsheetPayload["dataQuality"],
   basis: Basis,
@@ -262,8 +277,15 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // (`leverageEligibleFor` excludes chain-broken rows); it is kept so a change to eligibility
   // moves strip and rail together. Which rows it covers (and which cells are dates, sample
   // counts or per-period entries and stay) is the classification table in the plan 15 SUMMARY.
-  const railLeverageApplied = leverageApplies(payload, railBasis, useAppliedLeverage());
-  const wholeRecordWithheld = !selected && !railLeverageApplied && isHeadlineWithheld(payload.dataQuality, railBasis);
+  //
+  // Plan 15 round 3 (WR-01): the verdict has TWO scopes. `fullHistoryWithheld` is the verdict
+  // itself, with no window term: it governs every figure that always shows the FULL history,
+  // inside a zoom as well (EOY Returns, Calmar by Year, the EOY bars, the Monthly Returns YTD
+  // column, the rolling charts' "avg"). `wholeRecordWithheld` adds `!selected` (D-78), for the
+  // panels that read the windowed view and keep their slice figure inside a zoom. Both come
+  // from here, once, so no panel decides Withheld for itself.
+  const fullHistoryWithheld = useFullHistoryWithheld();
+  const wholeRecordWithheld = !selected && fullHistoryWithheld;
   const wr = (formatted: string) => dashIf(wholeRecordWithheld, formatted);
   // B19: the benchmark cells beside the headline rows (see headlineBenchSource).
   const hb = headlineBenchSource(payload.dataQuality, railBasis, selected, jointCmp);
@@ -400,7 +422,7 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
             <Row label="Profit Factor" value={wr(ratio(m.profit_factor))} bench={wr(ratio(b?.profit_factor))} />
           </Kpm>
         </Panel>
-        <EoyReturnsPanel scopeNote={selected ? FULL_HISTORY_NOTE : undefined} />
+        <EoyReturnsPanel scopeNote={selected ? FULL_HISTORY_NOTE : undefined} fullHistoryWithheld={fullHistoryWithheld} />
         <RollingMetricsPanel scope={scope} wholeRecordWithheld={wholeRecordWithheld} />
         {!selected && <CumulativeReturnsPanel />}
       </EditorialSection>
@@ -438,7 +460,7 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
             </tbody>
           </table>
         </Panel>
-        <CalmarByYearPanel />
+        <CalmarByYearPanel fullHistoryWithheld={fullHistoryWithheld} />
         <WorstDrawdownsTablePanel />
         <ExtendedMetricsPanel wholeRecordWithheld={wholeRecordWithheld} />
       </EditorialSection>
@@ -858,10 +880,13 @@ function RollingMetricsPanel({ scope, wholeRecordWithheld }: { scope: RangeScope
   const within = (arr: Array<number | null>) =>
     scope.kind === "selected" ? arr.slice(scope.startIdx, scope.endIdx + 1) : arr;
   // Plan 15 (D-15 extended again): Avg, Min and Max aggregate every warm window of the whole
-  // record, so on a Withheld row they read "—". "Now" is the latest 6-month window only and stays.
+  // record, so on a Withheld row they read "—". Plan 15 review WR-02 (founder 2026-10-15): "Now"
+  // is the trailing 6-month window, the span whose 6 Month return the Returns panel already
+  // dashes on a Withheld row (a trailing window can straddle the undated break), so it reads
+  // "—" too, with no accent (`RollingRow` accents only a figure).
   const stats = (arr: Array<number | null>) => {
     const r = rollingStats(within(arr));
-    return wholeRecordWithheld ? { ...r, avg: null, min: null, max: null } : r;
+    return wholeRecordWithheld ? { ...r, current: null, avg: null, min: null, max: null } : r;
   };
   const v = stats(view.strategyRollingVol);
   const sh = stats(view.strategyRollingSharpe);
@@ -1130,7 +1155,7 @@ function ymd(iso: string | undefined): string {
  * Comparator-reactive — picker swap re-renders the right two columns.
  * Falls back to a strategy-only single column when comparator = NONE.
  */
-function EoyReturnsPanel({ scopeNote }: { scopeNote?: string }) {
+function EoyReturnsPanel({ scopeNote, fullHistoryWithheld }: { scopeNote?: string; fullHistoryWithheld: boolean }) {
   // Phase 103 (MTM-04, root-cause flip): the EOY table follows the active basis to
   // match the rest of the rail (and the EOY bar chart in DistributionPanels). Both
   // the strategy per-year (`view.strategyMetrics.yearly`) and the comparator daily
@@ -1153,6 +1178,11 @@ function EoyReturnsPanel({ scopeNote }: { scopeNote?: string }) {
   }
   const hasBench = cmpKey !== "none";
   const years = Array.from(new Set([...Object.keys(stratYearly), ...Object.keys(benchYearly)])).sort();
+  // Plan 15 review WR-01 (founder 2026-10-15): the record's last calendar year is built by
+  // `compute()` from the same dates as the Year-to-date return, which the Returns panel dashes
+  // on a Withheld row (the benchmark's too). On that row the last year's strategy, benchmark and
+  // delta cells read "—" with no tone; every earlier year covers its own calendar year and stays.
+  const lastYear = view.dates.length > 0 ? view.dates[view.dates.length - 1].slice(0, 4) : null;
   // SFH-M-05 (keeps D-54): the year whose comparator cell covers part of it only.
   const partialYear = hasBench ? comparatorPartialYear(cmp.through, view.dates, COMPARATOR_CALENDARS[cmpKey]) : null;
   if (years.length === 0) return null;
@@ -1175,8 +1205,9 @@ function EoyReturnsPanel({ scopeNote }: { scopeNote?: string }) {
         </thead>
         <tbody>
           {years.map(year => {
-            const s = stratYearly[year];
-            const b = hasBench ? benchYearly[year] : undefined;
+            const dashed = fullHistoryWithheld && year === lastYear;
+            const s = dashed ? undefined : stratYearly[year];
+            const b = hasBench && !dashed ? benchYearly[year] : undefined;
             const delta = s != null && b != null ? s - b : null;
             return (
               <tr key={year} className="border-b border-border/30 last:border-0">

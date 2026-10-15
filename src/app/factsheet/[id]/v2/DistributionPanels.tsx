@@ -31,7 +31,7 @@ import { pctSigned, ratio, signed } from "./format";
 
 /* -------------------- EOY bars -------------------- */
 
-export function EndOfYearBarsPanel() {
+export function EndOfYearBarsPanel({ fullHistoryWithheld }: { fullHistoryWithheld: boolean }) {
   // Phase 103 (MTM-04, root-cause flip): EoY follows the active basis. Both the
   // strategy per-year (`view.strategyMetrics.yearly` — the bundle's compute() on
   // the MTM series under mark_to_market) and the comparator daily-return series
@@ -63,14 +63,26 @@ export function EndOfYearBarsPanel() {
     return out;
   }, [hasBench, vcmp.dailyReturns, view.dates]);
 
+  // Plan 15 round 3 (WR-02, founder rule 2026-10-15): the record's last calendar year IS the
+  // Year-to-date figure, which the Returns panel and the EOY table dash on a Withheld row (the
+  // gate is decided once, in `MetricsColumn`, and passed in; this chart always shows the full
+  // history, a zoom included). The chart prints it as a bar AND as a value label, so under the
+  // gate that year keeps its row label and loses its strategy and benchmark bars and labels.
+  // Dropping the bars (not only the labels) keeps the year out of `maxAbs`, so the
+  // `scale ±N%` caption does not encode it either. Every earlier year covers its own calendar
+  // year and stays.
+  const lastYear = view.dates.length > 0 ? view.dates[view.dates.length - 1].slice(0, 4) : null;
   const rows = useMemo(() => {
     const years = new Set<string>([...Object.keys(stratByYear), ...Object.keys(benchByYear)]);
-    return Array.from(years).sort().map(year => ({
-      year,
-      strat: stratByYear[year] ?? null,
-      bench: hasBench ? (benchByYear[year] ?? null) : null,
-    }));
-  }, [stratByYear, benchByYear, hasBench]);
+    return Array.from(years).sort().map(year => {
+      const withheld = fullHistoryWithheld && year === lastYear;
+      return {
+        year,
+        strat: withheld ? null : (stratByYear[year] ?? null),
+        bench: hasBench && !withheld ? (benchByYear[year] ?? null) : null,
+      };
+    });
+  }, [stratByYear, benchByYear, hasBench, fullHistoryWithheld, lastYear]);
 
   const maxAbs = useMemo(() => {
     let m = 0.01;

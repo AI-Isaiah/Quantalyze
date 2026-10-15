@@ -47,7 +47,7 @@ function renderWith(patch: (b: FactsheetPayload["bootstrapCI"]) => FactsheetPayl
   const payload = { ...base, bootstrapCI: patch(base.bootstrapCI) } as FactsheetPayload;
   const { container, unmount } = render(
     <FactsheetProvider payload={payload} persist={false}>
-      <BootstrapCIPanel />
+      <BootstrapCIPanel wholeRecordWithheld={false} />
     </FactsheetProvider>,
   );
   const text = container.textContent ?? "";

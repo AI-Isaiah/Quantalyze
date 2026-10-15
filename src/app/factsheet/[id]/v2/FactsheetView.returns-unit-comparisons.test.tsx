@@ -440,7 +440,7 @@ describe("A19 Stress Windows", () => {
  */
 describe("A23 surfaces the unit rule does not name keep their labels", () => {
   it("the End-of-Year Returns bars chart keeps its title for a BTC strategy", () => {
-    const { container } = renderIn(makePayload("BTC", "none"), <EndOfYearBarsPanel />);
+    const { container } = renderIn(makePayload("BTC", "none"), <EndOfYearBarsPanel fullHistoryWithheld={false} />);
     expect(container.querySelector("h3")!.textContent).toBe("End-of-Year Returns");
   });
 

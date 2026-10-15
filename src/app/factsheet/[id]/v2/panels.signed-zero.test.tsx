@@ -359,7 +359,7 @@ describe("BootstrapCIPanel: signed zero (D-02)", () => {
         max_dd: { ...b.max_dd, point: -0.00004, lo: -0.00004, hi: 0 },
       },
     };
-    const { container } = mount(payload, <BootstrapCIPanel />);
+    const { container } = mount(payload, <BootstrapCIPanel wholeRecordWithheld={false} />);
     expect(rowCells(container, "Sharpe").map(c => c.textContent)).toEqual(["Sharpe", "0.00", "[0.00, 0.00]"]);
     expect(rowCells(container, "Max Drawdown").map(c => c.textContent)).toEqual(["Max Drawdown", "0.00%", "[0.00%, 0.00%]"]);
     expect(container.textContent).not.toContain("-0.00");
@@ -372,7 +372,7 @@ describe("BootstrapCIPanel: signed zero (D-02)", () => {
       ...base,
       bootstrapCI: { ...b, sharpe: { ...b.sharpe, point: -0.42, lo: -0.9, hi: 0.05 } },
     };
-    const { container } = mount(payload, <BootstrapCIPanel />);
+    const { container } = mount(payload, <BootstrapCIPanel wholeRecordWithheld={false} />);
     expect(rowCells(container, "Sharpe").map(c => c.textContent)).toEqual(["Sharpe", "-0.42", "[-0.90, 0.05]"]);
   });
 });
@@ -384,7 +384,7 @@ describe("CalmarByYearPanel: signed zero (D-02)", () => {
       ...base,
       calmarByYear: [{ year: "2024", ret: -0.00004, max_dd: -0.00004, calmar: -0.004, days: 250 }],
     };
-    const { container } = mount(payload, <CalmarByYearPanel />);
+    const { container } = mount(payload, <CalmarByYearPanel fullHistoryWithheld={false} />);
     const cells = Array.from(container.querySelectorAll("tbody tr")[0].querySelectorAll("td")).map(c => c.textContent);
     expect(cells.slice(1, 4)).toEqual(["0.00%", "0.00%", "0.00"]);
   });
@@ -468,7 +468,7 @@ describe("EndOfYearBarsPanel: signed zero (D-02, D-06)", () => {
       ...base,
       strategyMetrics: { ...base.strategyMetrics, yearly: { "2024": -0.0004, "2025": 0.021, "2026": -0.034 } },
     };
-    const { container } = mount(payload, <EndOfYearBarsPanel />);
+    const { container } = mount(payload, <EndOfYearBarsPanel fullHistoryWithheld={false} />);
     const texts = Array.from(container.querySelectorAll("svg text")).map(t => t.textContent);
     expect(texts).toContain("0.0%");
     expect(texts).toContain("+2.1%");

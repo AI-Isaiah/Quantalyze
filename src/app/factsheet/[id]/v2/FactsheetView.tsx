@@ -36,7 +36,7 @@ import {
 import type { CapitalOwnership } from "@/lib/capital-ownership";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
 import { UnitViewProvider, useUnitView } from "./unit-view";
-import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSeriesView, useWindowedView, useAppliedLeverage, leverageApplies, leverageEligibleFor, mtmDisabledReasonCopy, mtmReasonTone, smoothedDisabledReasonCopy, type Basis } from "./basis-context";
+import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSeriesView, useWindowedView, resolveRangeScope, useAppliedLeverage, leverageApplies, leverageEligibleFor, mtmDisabledReasonCopy, mtmReasonTone, smoothedDisabledReasonCopy, type Basis } from "./basis-context";
 // Phase 90.5 (LEV-01, D1/D2) + Phase 107 (LEV-BB): ephemeral single-key leverage.
 // LeverageProvider wraps the body (transparent to GUARD-02); useLeverage drives the
 // ControlBar input AND the KpiStrip's levered-view gate. The KpiStrip now reads the
@@ -73,6 +73,7 @@ import {
   headlineNoteColor,
   headlineNoteGlyph,
   isHeadlineWithheld,
+  useFullHistoryWithheld,
   windowCoverageNote,
 } from "./MetricsColumn";
 import { AllocatorSection } from "./BatchDPanels";
@@ -495,7 +496,7 @@ export function FactsheetBody({
             >
               <HistogramChart />
               <QuantileBoxPlotPanel />
-              <EndOfYearBarsPanel />
+              <EndOfYearBars />
               <CorrelationStripPanel />
               <CorrelationsMatrixPanel />
             </CollapsibleSection>
@@ -506,7 +507,7 @@ export function FactsheetBody({
               defaultOpen
               onToggle={trackSectionToggle("factsheet-heatmaps")}
             >
-              <MonthlyReturnsHeatmap />
+              <MonthlyReturns />
               <DailyReturnsHeatmap />
             </CollapsibleSection>
             <CollapsibleSection
@@ -683,6 +684,22 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
  */
 const ROLLING_CHART_KEYS = new Set(["rollingVol", "rollingSharpe", "rollingSortino"]);
 
+/**
+ * Plan 15 round 3 (WR-02, WR-03, founder rule 2026-10-15): the full-history panels outside the
+ * rail read the Withheld verdict from `useFullHistoryWithheld`, the one hook the rail's own gate
+ * is built on, and take it as a required prop. A zoom does not switch it off: these panels show
+ * the whole record inside a zoom too.
+ */
+function EndOfYearBars() {
+  const fullHistoryWithheld = useFullHistoryWithheld();
+  return <EndOfYearBarsPanel fullHistoryWithheld={fullHistoryWithheld} />;
+}
+
+function MonthlyReturns() {
+  const fullHistoryWithheld = useFullHistoryWithheld();
+  return <MonthlyReturnsHeatmap fullHistoryWithheld={fullHistoryWithheld} />;
+}
+
 function PerformanceCharts() {
   const payload = usePayload();
   const { key: cmpKey } = useActiveComparator();
@@ -692,6 +709,21 @@ function PerformanceCharts() {
   // exactly what the charts render.
   const { basis } = useBasis();
   const view = useBasisSeriesView(payload);
+  // Plan 15 round 3 (WR-04, founder rule 2026-10-15): the rolling charts' "avg" label averages
+  // every warm window over the visible range. At full history that IS the rail's Rolling
+  // Metrics Avg, which a Withheld row dashes, so the label goes with it. This is the rail's own
+  // slice-aware gate (`wholeRecordWithheld`): a zoom keeps the label, because there it is the
+  // visible range's average, a slice figure (D-78). The crosshair tooltip on the last point is
+  // out of scope (hover, interactive; booked with the residue).
+  const fullHistoryWithheld = useFullHistoryWithheld();
+  // Round 4 (MEDIUM 2): "zoomed" is decided from the LIVE range, the one the chart computes its
+  // avg over (`TimeSeriesChart` follows the live `xRange`), not from `useWindowedView`, whose
+  // scope is the held (gesture start) or deferred range. During a zoom-out gesture that reaches
+  // the whole record the held range is still the slice, so reading it printed the whole-record
+  // avg the rail dashes. The `view` passed is the basis view `TimeSeriesChart` slices over.
+  const { xRange } = useXRange();
+  const zoomed = resolveRangeScope(xRange, payload.dates.length, view).kind === "selected";
+  const railAvgWithheld = fullHistoryWithheld && !zoomed;
   const composite = payload.dataQuality?.composite === true;
   // The MTM toggle renders for a composite OR any single-key options strategy in
   // the MTM basis story (mtmGate present) — the SAME predicate as the ControlBar
@@ -754,7 +786,7 @@ function PerformanceCharts() {
       .map(cfg => {
         if (ROLLING_CHART_KEYS.has(cfg.key)) {
           const title = cfg.title.replace(ROLL_LABEL_RE, `(${roll.label})`);
-          return { ...cfg, title, warmup: roll.window };
+          return { ...cfg, title, warmup: roll.window, ...(railAvgWithheld ? { showStratAverage: false } : {}) };
         }
         if (cfg.key === "rollingBeta") {
           const title = cfg.title.replace(ROLL_LABEL_RE, `(${beta.label})`);
@@ -764,7 +796,7 @@ function PerformanceCharts() {
         // `null` returns `cfg` itself, so a USD chart is the config it always was.
         return applyChartUnit(cfg, returnsUnit);
       });
-  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window, returnsUnit]);
+  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window, returnsUnit, railAvgWithheld]);
 
   return (
     <>

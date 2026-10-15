@@ -206,7 +206,7 @@ describe("[UIFIX-02] HeatmapPanels — clip-proof focus ring on the scroll regio
   it("the monthly-returns scroll region carries the inset ring tokens (WCAG 2.4.7)", () => {
     render(
       <FactsheetProvider payload={makeApiPayload()}>
-        <MonthlyReturnsHeatmap />
+        <MonthlyReturnsHeatmap fullHistoryWithheld={false} />
       </FactsheetProvider>,
     );
     const region = screen.getByRole("region", { name: /Monthly returns/i });

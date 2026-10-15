@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.131.12.1] - 2026-10-15 — FACTSHEETTRUTH follow-up: no full-history panel, chart label or heatmap cell repeats a figure a Withheld row hides
+
+Phase 164.6.6.3.3, four review rounds on plan 15 after v0.131.12.0. Under the founder's rule of 2026-10-15 ("fix also the medium user facing and data integrity issues"), every MEDIUM those rounds found was fixed here instead of booked. On a **Withheld** row (a chain-broken strategy with no post-break span yet), v0.131.12.0 dashed the rail's whole-record figures. Several other surfaces still printed the same hidden numbers, and a zoom brought some of them back. Every fix below was seen failing before it went in.
+
+### Fixed
+- **The last calendar year no longer repeats the hidden Year-to-date figure.** EOY Returns dashes the last year's strategy, benchmark and Δ cells, and Calmar by Year dashes that year's Return, Max DD and Calmar (Calmar too, because Return ÷ |Max DD| gives the Return back). Earlier years keep their figures (3194279bf).
+- **A zoom no longer brings them back.** Those two panels always draw the whole record, so they now use their own full-history flag, `useFullHistoryWithheld()`, which ignores the selected range. The rail's slice figures keep their numbers in a zoom, as decided in D-78 (b512f5c03).
+- **Rolling Metrics "Now"** (Volatility, Sharpe, Sortino) reads "—" with no accent at full history (3a0f2392c).
+- **The End-of-Year bar chart** drops the last year's bar and value labels, and keeps that year out of its `scale ±N%` caption. The year label stays (1eb83b4b6).
+- **The Monthly Returns heatmap** dashes its last row's YTD cell (6027c61c6), and the cell for the month that holds the record's last date, which is the hidden Month-to-date figure (514805e66). Both have no tint, and the month cell's tooltip says "withheld" with no number.
+- **The rolling charts' "avg" labels** are hidden at full history (c4682c358). They follow the chart's live range, so a held zoom-out gesture or a reset never prints the whole-record average (6add59aa7).
+
+### Changed
+- `BootstrapCIPanel`, `EoyReturnsPanel`, `CalmarByYearPanel`, `EndOfYearBarsPanel` and `MonthlyReturnsHeatmap` take their withheld flag as a required prop, so a caller that leaves it out fails `tsc` instead of printing the figure (da19bdeb9, with the caller updates in the commits above).
+
+### Tests
+- A render of a Withheld row under mark-to-market asserts every whole-record figure keeps its number. It is pinned by first showing the same data under cash dashes them (cbeb6b2da), and it was extended to the new cells (bcc47eee9).
+- A zoom test asserts the full-history copies stay dashed, and first checks that the zoom took effect (b97080820). A fake-timer test holds a zoom-out gesture and asserts no avg label shows.
+- Tests that pinned the old, narrower scope (D1, D4, D5, WR-03's per-month cells) were flipped on purpose, and each commit says so.
+
+### Notes
+- **TODOS.md `164.6.6.3.3-WITHHELD-RESIDUE`** records each fix with its commit (c9851f0ed, 198168c4d, d2a0b6d40). Still open by founder decision: Worst 10 Drawdowns, Style Drift and its KS line, and the EOY and Calmar rows for a break year that is not the last year. Also open: a hover note. The crosshair tooltip on a rolling chart's last point still shows "Now", and the point a day earlier shares 125 of 126 days with it, so a decision covers the whole line, not one point.
+- No migration, no data path change. Only private and draft rows were Withheld when this was measured.
+
 ## [0.131.12.0] - 2026-10-15 — FACTSHEETTRUTH close-out: nothing under a Withheld note shows a number
 
 Phase 164.6.6.3.3, closed out after its ship as #999 (v0.130.1.0) with three gap-closure plans (13, 14 and 15). A **Withheld** row is a chain-broken strategy whose stored headline has no post-break span yet. Its seven stored headline figures and its trailing windows already read "—" under the note "Headline figures withheld". Until this release, the KPI strip and the rail around that note still printed whole-record figures that compound across the very break the note names. Three founder decisions of 2026-10-15 (D-15 and its two extensions in the phase CONTEXT) make the page consistent: at full history with no what-if, every figure computed over the whole record now reads "—" with no tone. A selected zoom window keeps its own slice figures (D-78), and a Dated row is unchanged. Only private and draft rows were Withheld when this was measured, so no public page changes today.

@@ -280,7 +280,7 @@ export function ScopeNote({ text }: { text: string }) {
   );
 }
 
-export function CalmarByYearPanel() {
+export function CalmarByYearPanel({ fullHistoryWithheld }: { fullHistoryWithheld: boolean }) {
   // Phase 103 (MTM-04): per-year Calmar recomputes from the strategy's own daily
   // series → follows the active basis (cash view === payload).
   const payload = usePayload();
@@ -290,6 +290,11 @@ export function CalmarByYearPanel() {
   const selected = useWindowedView(payload).scope.kind === "selected";
   const rows = view.calmarByYear;
   if (rows.length === 0) return null;
+  // Plan 15 review WR-01 (founder 2026-10-15): the record's last calendar year is the Year-to-date
+  // figure, dashed in the Returns panel on a Withheld row, and Calmar is Return / |Max DD|. On that
+  // row the last year's Return, Max DD and Calmar read "—" (decided once in `MetricsColumn`, passed
+  // in). The year label and the day count are not figures and stay.
+  const lastYear = view.dates.length > 0 ? view.dates[view.dates.length - 1].slice(0, 4) : null;
   // Flag any partial-year row — < 200 trading days means Calmar is annualised
   // from a stub and shouldn't be treated as comparable to a full-year value.
   const hasPartial = rows.some(r => r.days < 200);
@@ -318,6 +323,7 @@ export function CalmarByYearPanel() {
         <tbody>
           {rows.map(r => {
             const partial = r.days < 200;
+            const dashed = fullHistoryWithheld && r.year === lastYear;
             return (
               <tr key={r.year} className="border-b border-border/30 last:border-0">
                 <td className="py-1 pr-2 font-mono text-text-2">
@@ -332,9 +338,9 @@ export function CalmarByYearPanel() {
                     </span>
                   )}
                 </td>
-                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{pctSigned(r.ret, 2)}</td>
-                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{pct(r.max_dd, 2)}</td>
-                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{ratio(r.calmar)}</td>
+                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{dashed ? "—" : pctSigned(r.ret, 2)}</td>
+                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{dashed ? "—" : pct(r.max_dd, 2)}</td>
+                <td className="py-1 px-2 text-right font-mono tabular-nums text-text-primary">{dashed ? "—" : ratio(r.calmar)}</td>
                 <td className="py-1 pl-2 text-right font-mono tabular-nums text-text-2">{r.days}</td>
               </tr>
             );
@@ -350,7 +356,7 @@ export function CalmarByYearPanel() {
   );
 }
 
-export function BootstrapCIPanel({ wholeRecordWithheld = false }: { wholeRecordWithheld?: boolean } = {}) {
+export function BootstrapCIPanel({ wholeRecordWithheld }: { wholeRecordWithheld: boolean }) {
   // Phase 103 (MTM-04, Finding #6): the bootstrap CIs resample the strategy's own
   // daily series → follow the active basis. The reliability (low-N) gate reads the
   // resample count OFF the bootstrap payload itself (`b.n`, the basis-selected

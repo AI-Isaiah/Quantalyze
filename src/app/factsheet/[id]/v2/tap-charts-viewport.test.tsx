@@ -108,7 +108,7 @@ describe("[CHART-01a/02/03] tap-reveal panels — both viewport branches", () =>
 
   const panels: Array<{ name: string; node: React.ReactElement }> = [
     { name: "StreakDistributionPanel", node: <StreakDistributionPanel /> },
-    { name: "BootstrapCIPanel", node: <BootstrapCIPanel /> },
+    { name: "BootstrapCIPanel", node: <BootstrapCIPanel wholeRecordWithheld={false} /> },
     { name: "DailyReturnsHeatmap", node: <DailyReturnsHeatmap /> },
   ];
 
@@ -138,7 +138,7 @@ describe("[CHART-01a/02/03] tap-reveal panels — both viewport branches", () =>
 
   it("BootstrapCI desktop svgs all use the literal viewBox 0 0 340 36", () => {
     setBreakpoint("desktop");
-    const { container } = renderPanel(<BootstrapCIPanel />);
+    const { container } = renderPanel(<BootstrapCIPanel wholeRecordWithheld={false} />);
     const vbs = viewBoxes(container);
     expect(vbs.length).toBeGreaterThan(0);
     for (const vb of vbs) expect(vb).toBe("0 0 340 36");
@@ -157,9 +157,9 @@ describe("[CHART-01a/02/03] tap-reveal panels — both viewport branches", () =>
 
   it("BootstrapCI mobile viewBox height differs from desktop", () => {
     setBreakpoint("desktop");
-    const dH = firstViewBoxHeight(renderPanel(<BootstrapCIPanel />).container);
+    const dH = firstViewBoxHeight(renderPanel(<BootstrapCIPanel wholeRecordWithheld={false} />).container);
     setBreakpoint("mobile");
-    const mH = firstViewBoxHeight(renderPanel(<BootstrapCIPanel />).container);
+    const mH = firstViewBoxHeight(renderPanel(<BootstrapCIPanel wholeRecordWithheld={false} />).container);
     expect(dH).toBe(36);
     expect(mH).toBeGreaterThan(dH);
   });
