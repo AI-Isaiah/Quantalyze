@@ -2,26 +2,53 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260421154029_match_decisions_original_holding_ref.sql
--- 5b. Sync trigger: bridge_outcomes_sync_holding_ref ------------------
--- BEFORE INSERT OR UPDATE OF match_decision_id so the denormalized column
--- is populated atomically before the widened UNIQUE index evaluates.
--- SECURITY DEFINER with locked search_path: reads match_decisions by PK only
--- (parameterized — no dynamic SQL). T-09-01-PRIV threat mitigated.
-CREATE OR REPLACE FUNCTION bridge_outcomes_sync_holding_ref()
+-- source migration: 20261024120000_fan_in_graph_and_decision_cascade.sql
+CREATE OR REPLACE FUNCTION public.bridge_outcomes_sync_holding_ref()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_catalog
 AS $$
+DECLARE
+  v_ref                TEXT;
+  v_decision_allocator UUID;
 BEGIN
   IF NEW.match_decision_id IS NOT NULL THEN
-    SELECT original_holding_ref
-      INTO NEW.original_holding_ref
+    SELECT original_holding_ref, allocator_id
+      INTO v_ref, v_decision_allocator
       FROM match_decisions
      WHERE id = NEW.match_decision_id;
+    -- Round-2 RLS audit. This function is SECURITY DEFINER and copies the
+    -- decision's original_holding_ref into the outcome row, which the row's owner
+    -- can read. Without this test an allocator who knows ANOTHER tenant's
+    -- decision id attaches it (INSERT, or UPDATE SET match_decision_id) and reads
+    -- that tenant's holding ref through its own row. A decision that does not
+    -- exist is left to the foreign key, as before. The message names no id.
+    IF FOUND AND v_decision_allocator IS DISTINCT FROM NEW.allocator_id THEN
+      RAISE EXCEPTION 'bridge_outcomes: match_decision_id names a decision that belongs to another allocator'
+        USING ERRCODE = '42501', HINT = 'cross_allocator_decision';
+    END IF;
+    NEW.original_holding_ref := v_ref;
+    NEW.former_match_decision_id := NULL;
   ELSE
     NEW.original_holding_ref := NULL;
+    IF TG_OP = 'INSERT' THEN
+      NEW.former_match_decision_id := NULL;
+    ELSIF OLD.match_decision_id IS NOT NULL THEN
+      -- Review WR-01. Only the ON DELETE SET NULL cascade may record the old
+      -- decision: its UPDATE runs after the decision row is deleted, so the row
+      -- is gone here. A decision that still exists means an owner detached the
+      -- link on purpose, which is a born-NULL row (no former id) that meets the
+      -- duplicate guard; recording the live id would let an owner attach any
+      -- decision id and detach it to escape that guard.
+      IF EXISTS (SELECT 1 FROM match_decisions WHERE id = OLD.match_decision_id) THEN
+        NEW.former_match_decision_id := NULL;
+      ELSE
+        NEW.former_match_decision_id := OLD.match_decision_id;
+      END IF;
+    ELSE
+      NEW.former_match_decision_id := OLD.former_match_decision_id;
+    END IF;
   END IF;
   RETURN NEW;
 END;
