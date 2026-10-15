@@ -72,6 +72,7 @@ Review rounds 1 to 3, each fix seen RED before it was applied:
   - A mark is sampled when the account is polled, not at a fixed close, so the copy says "daily price", never close-to-close.
 - **Pre-existing and not touched:** the `compute.conventions` inline snapshots B and C fail on the phase base under local Node 25, on a last-digit float difference.
 - **Phase records:** context, research, UI contract, validation strategy, patterns, five plans and their summaries, four review rounds with fix reports, the security register (0 open of 20), verification (human_needed) and tracking. (a330c0094 through cfe0668fd: every docs commit on this branch, including 75c3134da, 03238c759, 02d60d366, b0eb07ae3, 909590d48, 57e080fdb, ee1e6f259, 98b1e0db7, a9ac8ca60, 0530fa3e9, 83df3a54b, 7691f70fa, 15d6b2f87, a8df9d8ee, 415689a24, cebb3bf2b, c5c5cc5ea, fe6aa39a9, 6d9dfdd98, 8dea6d08d, 666f63ffb)
+
 ## [0.131.13.4] - 2026-10-15 — Test fix: the Private link dialog's focus assert waits for the focus move instead of racing it
 
 ### Root cause
