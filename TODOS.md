@@ -9295,6 +9295,23 @@ Confidence 5, below the fix bar.
 number, with a test that fails first.
 ⛔ **Not a close:** inferring the unit from the symbol.
 
+### 164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED — an owner's private factsheet shows "Data source —" for their own key-backed strategy (booked 2026-10-15, Phase 164.6.6.2.1 UAT item 2)
+
+**Why it is open.** `src/app/factsheet/[id]/v2/page.tsx` reads the trust tier from
+`readPublicVerificationSignals`, which calls `get_published_trust_signals`, an RPC that answers only
+for PUBLISHED strategies. On a private strategy it returns nothing, so the Terms panel's "Data source"
+(`MandatePanels.tsx`) prints "—", even on the owner's own view of a strategy that is backed by an API
+key. Measured 2026-10-15 on PROD's only BTC-unit strategy (private): "—" in both the BTC and USD views.
+The two views agree, so the 164.6.6.2.1 CR-02 overlay is not at fault. User-facing, owner-only, and it
+withholds a true fact rather than showing a false one.
+
+**Owner:** unrouted; the next phase touching the factsheet trust tier or `get_published_trust_signals`.
+**Trigger:** an owner asks why their own factsheet does not say API-verified.
+**Gate (what closes it):** an owner viewing their own unpublished strategy sees its real tier,
+read through a path that also checks ownership. Anonymous and non-owner readers still get nothing for
+an unpublished strategy. A test fails first on the "—".
+⛔ **Not a close:** widening `get_published_trust_signals` to unpublished strategies for every caller.
+
 ### [167.1.2.2.2-CRON-TICK-RESIDUALS] — four MEDIUM residuals of `public.cron_sync_tick()` that the plan 01 review round recorded and did not fix (booked 2026-10-09, Phase 167.1.2.2.2 plan 01 Task 3)
 
 **Why it is open.** The three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter)
