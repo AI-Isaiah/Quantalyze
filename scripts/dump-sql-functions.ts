@@ -395,28 +395,10 @@ export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
   // ⭐ 2026-10-15: the Phase 164.9.3.1 FANINGRAPH row (`_fan_in_lock_rows`,
   // `snapshot-only`, captured 2026-10-15) was DELETED on the re-dump taken
   // after 20261024120000 applied to PROD (#1061), its own clearing condition.
-  // ⭐ 2026-10-15: the Phase 167.1.2.2.2.1 OKXHISTORY row below is the ONE row
-  // this list holds. It carries its own clearing condition (a regeneration
-  // taken after the apply) and is DELETED by the re-dump, never earlier.
-  {
-    name: "apply_okx_archive_rebuild",
-    side: "snapshot-only",
-    capturedAt: "2026-10-15",
-    clearedBy:
-      "a regeneration of supabase/schema/baseline.sql taken AFTER " +
-      "20261026120000_okx_archive_rebuild.sql has applied to PROD (Phase " +
-      "167.1.2.2.2.1 OKXHISTORY ships the writer ahead of the baseline " +
-      "re-dump, which is plan 11 Task 3 of that phase). The function lands " +
-      "in PROD's catalogue at merge, via apply-test then the automatic PROD " +
-      "apply.",
-    reason:
-      "Phase 167.1.2.2.2.1 plan 01 ships public.apply_okx_archive_rebuild() " +
-      "in a forward migration. supabase/schema/baseline.sql is a dated PROD " +
-      "dump (see supabase/schema/BASELINE.md) that predates this migration, " +
-      "so the function exists in the migration-replay snapshot and not yet " +
-      "in the baseline until the next refresh (the Phase 164.6.8 " +
-      "ops_staleness_check and 167.1.2.2.2 cron_sync_tick precedent).",
-  },
+  // ⭐ 2026-10-15: the Phase 167.1.2.2.2.1 OKXHISTORY row (`apply_okx_archive_
+  // rebuild`, `snapshot-only`, captured 2026-10-15) was DELETED on the re-dump
+  // taken after 20261026120000 applied to PROD (#1067), its own clearing
+  // condition.
   // ⭐ 2026-10-14: the Phase 164.6.8 OUTAGEALERT row (`ops_staleness_check`,
   // `snapshot-only`, captured 2026-10-13) was DELETED on the re-dump taken
   // after 20261020120000 applied to PROD, its own clearing condition.
