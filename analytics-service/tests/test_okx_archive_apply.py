@@ -531,7 +531,15 @@ def _apply_calls(db: _Db) -> list[dict[str, Any]]:
 # on the other twenty covered days. (Rolling through the live PARTIAL 100 instead of 97.5
 # would give 9720.5 / 9730.5 / 9728.5: the old, skewed oracle.)
 
-LIVE_REALIZED = {"2026-08-02": 100.0, "2026-08-03": -50.0, "2026-09-15": 20.0}
+#: Four small days that net to ZERO (+0.02 -0.02 +0.03 -0.03), the same on both sides. They exist
+#: because the reconciliation needs evidence (F3: at least ``MIN_ACTIVE_DAYS`` days on which
+#: either side carries a value), and they do not move the hand roll above: a backward roll
+#: only sees the SUM of the P&L after a day, and these cancel.
+FILLER = {"2026-08-05": "0.02", "2026-08-06": "-0.02", "2026-08-07": "0.03", "2026-08-08": "-0.03"}
+LIVE_REALIZED = {
+    "2026-08-02": 100.0, "2026-08-03": -50.0, "2026-09-15": 20.0,
+    **{day: float(net) for day, net in FILLER.items()},
+}
 LIVE_FUNDING = {"2026-09-15": 1.5}
 GAP_DAY_COUNT = 23  # 2026-07-10 .. 2026-08-01 inclusive: 22 July days + 1 August day
 ORACLE = {
@@ -547,7 +555,7 @@ def _standard_live() -> _Live:
 
 def _standard_q3(**overrides: Any) -> bytes:
     realized = {"2026-07-10": "10", "2026-08-01": "200", "2026-08-02": "97.5",
-                "2026-08-03": "-50", "2026-09-15": "20"}
+                "2026-08-03": "-50", "2026-09-15": "20", **FILLER}
     realized.update(overrides.get("realized", {}))
     funding = {"2026-07-20": "-2", "2026-09-15": "1.5"}
     funding.update(overrides.get("funding", {}))
@@ -1023,6 +1031,85 @@ class TestLiveCrawlFlags:
 
         assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
         assert exchange_module.get_and_clear_last_dq_flags() == {}
+
+
+class TestInsufficientOverlap:
+    """F3. ``days_compared`` counted calendar days, so two empty series compared equal and a
+    window of three days or of nothing but zeros authenticated a file. Agreement only means
+    something when the window could have disagreed."""
+
+    def _at(self, monkeypatch: pytest.MonkeyPatch, now: datetime) -> None:
+        monkeypatch.setattr(okx_archive_job, "_utc_now", lambda: now)
+
+    @pytest.mark.asyncio
+    async def test_a_window_shorter_than_two_weeks_is_insufficient_overlap_not_a_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """2026-12-15 minus 88 days is 09-18, so the first full day is 09-19 and the Q3 window
+        is 09-19..09-30: twelve days, and the live reach ended its activity on 09-15. Both
+        sides are empty there, so they agree to the cent, and the old code reported DONE."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+        self._at(monkeypatch, datetime(2026, 12, 15, 12, 0, tzinfo=timezone.utc))
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == (
+            "okx_archive_rebuild: reconcile_miss cause=insufficient_overlap "
+            "window=2026-09-19..2026-09-30 days=12 active=0 need_days=14 need_active=5"
+        )
+        result = world.result()
+        assert result["stop_class"] == "reconcile_miss"
+        assert result["reconcile"]["realized"]["ok"] is True, "the numbers agree; that is the trap"
+        assert result["reconcile"]["realized"]["active_days"] == 0
+        assert result["fingerprint"] is None
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_a_long_window_with_too_few_active_days_is_insufficient_overlap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fifteen days (09-16..09-30) and still nothing on either side: long enough, empty."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+        self._at(monkeypatch, datetime(2026, 12, 12, 12, 0, tzinfo=timezone.utc))
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message == (
+            "okx_archive_rebuild: reconcile_miss cause=insufficient_overlap "
+            "window=2026-09-16..2026-09-30 days=15 active=0 need_days=14 need_active=5"
+        )
+        assert db.apply_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_the_standard_window_has_the_evidence_and_reports_its_active_days(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        # 59 days (08-03..09-30). Realized is active on 08-03, 08-05..08-08 and 09-15; funding
+        # on 09-15 only. A day counts when either side carries >= half a cent.
+        assert world.result()["reconcile"]["realized"]["active_days"] == 6
+        assert world.result()["reconcile"]["funding"]["active_days"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_miss_is_still_reported_as_a_miss_when_the_window_is_also_short(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Disagreement outranks thin evidence: the founder needs the dates of the miss."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        live.realized["2026-09-15"] = 20.011
+        world = _install(monkeypatch, db, live, q3=_standard_q3())
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+        assert outcome.error_message is not None and "offending=2026-09-15" in outcome.error_message
+        assert "insufficient_overlap" not in outcome.error_message
 
 
 class TestWindows:
@@ -1630,7 +1717,7 @@ def _standard_bills() -> _Bills:
     """The standard Q3 file as a ``_Bills`` object (so a test can drop a row from it)."""
     bills = _Bills()
     for day, net in sorted({"2026-07-10": "10", "2026-08-01": "200", "2026-08-02": "97.5",
-                            "2026-08-03": "-50", "2026-09-15": "20"}.items()):
+                            "2026-08-03": "-50", "2026-09-15": "20", **FILLER}.items()):
         bills.realized(day, net)
     for day, amount in sorted({"2026-07-20": "-2", "2026-09-15": "1.5"}.items()):
         bills.funding(day, amount)
@@ -1672,7 +1759,7 @@ class TestArchiveCompleteness:
         assert result["stop_class"] == "archive_incomplete"
         # The founder can read where the chain broke: counts and a date, never an amount.
         (reading,) = result["info"]["bal_chain"]
-        assert reading["ccys"]["USDT"] == {"checked": 5, "breaks": 1, "first_break_day": "2026-08-02"}
+        assert reading["ccys"]["USDT"] == {"checked": 9, "breaks": 1, "first_break_day": "2026-08-02"}
         assert result["fingerprint"] is None
         assert db.apply_calls == 0
         _no_writes_but_progress(world, db)
@@ -1689,9 +1776,10 @@ class TestArchiveCompleteness:
         assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
         (quarter,) = world.result()["quarters"]
         assert (quarter["ts_min_day"], quarter["ts_max_day"]) == ("2026-07-10", "2026-09-15")
-        # Bills fall on 07-10, 07-20, 08-01, 08-02, 08-03 and 09-15. The quarter is
-        # 07-01..09-30, so the longest quiet stretch is 08-04..09-14 = 42 days.
-        assert quarter["longest_billless_run"] == {"days": 42, "from": "2026-08-04", "to": "2026-09-14"}
+        # Bills fall on 07-10, 07-20, 08-01, 08-02, 08-03, 08-05..08-08 and 09-15. The quarter
+        # is 07-01..09-30, so the longest quiet stretch is 08-09..09-14 = 23 + 14 = 37 days
+        # (07-01..07-09 is 9, 07-21..07-31 is 11, 09-16..09-30 is 15).
+        assert quarter["longest_billless_run"] == {"days": 37, "from": "2026-08-09", "to": "2026-09-14"}
 
 
 class TestNonExternalPnlIsInTheLiveNumber:
@@ -1728,7 +1816,7 @@ class TestNonExternalPnlIsInTheLiveNumber:
         outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
 
         assert outcome.error_message == "okx_archive_rebuild: non_usd_ccy parse=non_usd_ccy"
-        assert world.result()["census"]["by_ccy"] == {"BTC": 1, "USDT": 7}
+        assert world.result()["census"]["by_ccy"] == {"BTC": 1, "USDT": 11}
         _no_writes_but_progress(world, db)
 
 
@@ -1917,6 +2005,8 @@ class TestInformationNeverGates:
             _Bills()
             .realized("2026-07-10", "10").realized("2026-08-01", "200").realized("2026-08-02", "97.5")
             .realized("2026-08-03", "-50").realized("2026-09-15", "20")
+            .realized("2026-08-05", "0.02").realized("2026-08-06", "-0.02")
+            .realized("2026-08-07", "0.03").realized("2026-08-08", "-0.03")
             .realized("2026-07-21", "7", inst="OPTION")
             .funding("2026-07-20", "-2").funding("2026-09-15", "1.5")
             .flow("2026-07-05", "1000").flow("2026-09-01", "250")
@@ -1969,8 +2059,8 @@ class TestResultShape:
     """Result shape v1 paths plans 12, 14 and 15 and the runbook read. A rename is a contract
     change in all of them, so each path and type is pinned here."""
 
-    LEG_KEYS = {"ok", "days_compared", "max_abs_diff", "window_total_diff", "days_over_half_cent",
-                "days_over_cent", "first_offending", "misses"}
+    LEG_KEYS = {"ok", "days_compared", "active_days", "max_abs_diff", "window_total_diff",
+                "days_over_half_cent", "days_over_cent", "first_offending", "misses"}
 
     def _check_evaluation_keys(self, result: dict[str, Any], *, mode: str) -> None:
         assert set(result) == {

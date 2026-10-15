@@ -129,7 +129,14 @@ from services.okx_archive_rebuild import (
     rows_for_strategy,
     subtract_ranges,
 )
-from services.okx_archive_reconcile import LegReading, overlap_window, reconcile_leg
+from services.okx_archive_reconcile import (
+    MIN_ACTIVE_DAYS,
+    MIN_COMPARED_DAYS,
+    LegReading,
+    overlap_evidence,
+    overlap_window,
+    reconcile_leg,
+)
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger(__name__)
@@ -1497,6 +1504,7 @@ def _leg_of(readings: list[LegReading]) -> dict[str, Any]:
     return {
         "ok": all(r.ok for r in readings),
         "days_compared": sum(r.days_compared for r in readings),
+        "active_days": sum(r.active_days for r in readings),
         "max_abs_diff": _dec(max((r.max_abs_diff for r in readings), default=Decimal(0))),
         "window_total_diff": _dec(sum((r.window_total_diff for r in readings), Decimal(0))),
         "days_over_half_cent": sum(r.days_over_half_cent for r in readings),
@@ -1550,6 +1558,17 @@ def _reconcile(
     reconcile["realized"] = _leg_of(realized_readings)
     reconcile["funding"] = _leg_of(funding_readings)
     if all(r.ok for r in realized_readings + funding_readings):
+        # F3: agreement only authenticates the file when the window could have disagreed. Two
+        # empty series agree however wrong the file is, so a short or quiet window is a stop of
+        # its own. Judged on the realized leg: that is the P&L being rebuilt.
+        days, active, enough = overlap_evidence(realized_readings)
+        if not enough:
+            raise _Stop(
+                "reconcile_miss",
+                f"cause=insufficient_overlap window={windows[0][0]}..{windows[-1][1]} "
+                f"days={days} active={active} need_days={MIN_COMPARED_DAYS} "
+                f"need_active={MIN_ACTIVE_DAYS}",
+            )
         return windows
     offending = sorted(
         {m[0] for r in realized_readings + funding_readings for m in r.misses}
