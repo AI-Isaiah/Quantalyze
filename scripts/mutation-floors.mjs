@@ -1241,7 +1241,17 @@
 // mean 2.4s over 723 arm run(s)`, `No defects. Every annotated arm bit its own arm first.` Per-file line: `test_strategies_anon_grants.sql:
 // sections 7 / judged 7 / annotated 7 / waived 0 / biting 7`. The stale-low direction was observed first: `RATCHET STALE: 72 of 99 gate
 // files are now annotated but FILES_FLOOR is still 71.` WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 72;
+// RAISED 72 -> 73 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP plan 07, merged tree at origin/main dff342b27): this branch adds one annotated
+// gate file, test_sync_status_computed_at_runner_only.sql (migration 20261023120000, under which the status bridge writes no computed_at
+// and the analytics runner is its only writer), so 73 of 100 files. MEASURED by ONE full `node scripts/mutation-runner/run.mjs` on the
+// COMMITTED tree, no file edited during it, exit 0: `scope: FULL 73/73 annotated files`, `lane-concurrency: 4`, `coverage: files 73/100`,
+// `arms: 732/732/0`, `biting: 732`, `lane-invocations: 732 ... plus 73 baseline / 73 restore leg(s)` (the two independent tallies AGREE),
+// `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `pending: 0`, `per-arm lane time: mean 2.3s over 732 arm run(s)`, `No defects. Every
+// annotated arm bit its own arm first.` Per-file lines: `test_sync_status_computed_at_runner_only.sql: sections 10 / judged 10 /
+// annotated 10 / waived 0 / biting 10` and `test_sync_status_analytics_scope.sql: sections 20 / judged 20 / annotated 20 / waived 0 /
+// biting 20` (arm D15 retired with the release clause it pinned; its scenario is arm N6 of the new gate). The stale-low direction was
+// observed first: `RATCHET STALE: 73 of 100 gate files are now annotated but FILES_FLOOR is still 72.` WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 73;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3155,7 +3165,13 @@ export const FILES_FLOOR = 72;
 // biting 7`). MEASURED by the same single run recorded under FILES_FLOOR: `arms: 723/723/0`, `biting: 723`, `lane-invocations: 723`. The
 // stale-low direction was observed first: `The corpus declares 723 twin(s) of which 0 are waivers, so a green run bites 723. ARMS_FLOOR is
 // 716.` WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 723;
+// RAISED 723 -> 732 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP plan 07, merged tree at origin/main dff342b27): the NEW gate
+// test_sync_status_computed_at_runner_only.sql adds 10 biting arms (`sections 10 / judged 10 / annotated 10 / waived 0 / biting 10`), and
+// test_sync_status_analytics_scope.sql loses 1 (arm D15 retired, 21 -> 20: `sections 20 / judged 20 / annotated 20 / waived 0 / biting 20`).
+// MEASURED by the same single run recorded under FILES_FLOOR, not by this addition:
+// `arms: 732/732/0`, `biting: 732`, `lane-invocations: 732`. The stale-low direction was observed first: `The corpus declares 732
+// twin(s) of which 0 are waivers, so a green run bites 732. ARMS_FLOOR is 723.` WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 732;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

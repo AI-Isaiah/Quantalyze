@@ -1,0 +1,1107 @@
+-- ============================================================================
+-- ROLLBACK for 20261023120000_sync_status_runner_stamps_computed_at.sql
+-- Phase 166.5 COMPUTEDATSTAMP, plan 08 (D-03, D-04, D-08, R-03, R-05, R-06).
+-- ============================================================================
+-- Manual, off the auto-apply path (supabase/migrations/down/ is never pushed). It
+-- undoes everything the migration did to the bridge:
+--   * sync_strategy_analytics_status(uuid, uuid DEFAULT NULL) is replaced by its
+--     20261009120000 definition: the block from the CREATE OR REPLACE through its
+--     closing delimiter, and the REVOKE and GRANT, are copied from
+--     supabase/migrations/20261009120000_sync_status_analytics_scope.sql byte for
+--     byte. The signature is the same TWO-argument one in both files, so no DROP
+--     is needed and the function's COMMENT and ACL carry across untouched.
+--   * the three database comments the migration corrected are put back to the
+--     text they carried (the computing_started_at column comment, and the comments
+--     on 166.3.1's hold-trigger function and trigger). Each is re-issued only when
+--     the object exists and still carries the text the migration wrote, exactly as
+--     the migration's own comment block guarded its re-issue.
+-- It does NOT re-create either mark RPC (the migration never touched them), and it
+-- issues no COMMENT ON FUNCTION for the bridge itself.
+--
+-- WHAT IT RESTORES. The bridge writes computed_at again: branch (c) stamps now()
+-- on an all-done mark unless a side-failure hold applies, branch (a) stamps on its
+-- failed-plus-warned arm, branch (b) stamps on a failure, and the D-09 release
+-- clause returns (a later side failure releases the hold when updated_at is newer
+-- than computed_at). A successful side job with a sibling in flight takes branch
+-- (a) again and blanks the sentence and markers, and a successful last-in-flight
+-- side job can again heal a failed row that carries a sentence (D-08 is undone)
+-- and insert a first row (R-06 is undone).
+--
+-- WHAT IT DOES NOT UNDO. The analytics runner keeps stamping computed_at from the
+-- database clock on its success writes (plan 01 lives in Python, not in this
+-- migration). After a rollback BOTH writers stamp, so a date can move twice per
+-- real recompute; nothing becomes wrong, the pre-166.5 inflation returns. 166.3.1's
+-- hold trigger stays in force and still keeps a stamp written on a failed or
+-- computing row from landing. The change that retired the date writes is not
+-- reversible by this file alone; revert the runner commit as well.
+--
+-- IN-R4-03. This file restores the TWO-argument 20261009120000 body, so it does not
+-- reintroduce the post-rollback 42883 that the one-argument rollback of that
+-- migration documents: the Python caller still finds a two-argument function.
+--
+-- NO DATA IS TOUCHED. Only a function body and three comments are replaced. The
+-- status of a strategy is a function of its jobs, so each strategy re-derives its
+-- status under the old rule at its next terminal compute-job mark. Nothing rewrites
+-- a row eagerly, and no computed_at value is changed.
+--
+-- THE MIGRATION LEDGER ROW IS LEFT IN PLACE. This file does not touch
+-- supabase_migrations.schema_migrations, so after it runs the ledger still records
+-- version 20261023120000 as applied while the function body no longer carries it.
+-- `supabase db push` will therefore NOT re-apply the migration. To re-apply it, mark
+-- the version reverted with `supabase migration repair --status reverted 20261023120000`,
+-- and only after the marker query in CLAUDE.md ("Which database am I on?") names the
+-- database you intend to repair. Until then VAC-08's ledger check reports the version
+-- as present, which is true of the ledger and false of the function.
+--
+-- The DO block at the top is a catalogue-only PRECONDITION: it RAISEs, before
+-- anything is replaced, unless the live two-argument bridge exists and its
+-- comment-stripped body carries the `v_side_trigger :=` assignment the migration
+-- added. CREATE OR REPLACE succeeds on any database, so without it this file run
+-- against a database that never had 20261023120000 would replace a body with an
+-- identical one and still report success.
+--
+-- The DO block at the end is catalogue-only: it RAISEs, and so aborts the whole
+-- rollback, if the old flags are not back, if the new flag survives, if the body
+-- does not name computed_at again, if more than one bridge overload exists, if the
+-- bridge lost its COMMENT, or if its ACL is not the one the migrations declare. It
+-- reads function bodies and the privilege catalogue and never a table.
+-- ============================================================================
+
+BEGIN;
+
+SET LOCAL search_path = public, pg_catalog;
+SET LOCAL lock_timeout = '3s';
+
+-- ───────────── precondition — CATALOGUE ONLY, reads no row
+DO $precondition$
+DECLARE
+  v_body TEXT;
+BEGIN
+  IF to_regprocedure('public.sync_strategy_analytics_status(uuid, uuid)') IS NULL THEN
+    RAISE EXCEPTION 'Rollback 20261023120000 refused: sync_strategy_analytics_status(uuid, uuid) does not exist. Nothing was replaced. Run the marker query in CLAUDE.md to see which database this is.';
+  END IF;
+  v_body := regexp_replace(
+              regexp_replace(
+                pg_get_functiondef('public.sync_strategy_analytics_status(uuid, uuid)'::regprocedure),
+                '/\*.*?\*/', '', 'gs'),
+              '--.*', '', 'gn');
+  IF v_body IS NULL THEN
+    RAISE EXCEPTION 'Rollback 20261023120000 refused: the body of sync_strategy_analytics_status could not be read. Nothing was replaced.';
+  END IF;
+  IF v_body !~ '\mv_side_trigger\s*:=' THEN
+    RAISE EXCEPTION 'Rollback 20261023120000 refused: the live body of sync_strategy_analytics_status carries no v_side_trigger flag, so this database does not carry 20261023120000. Nothing was replaced. Run the marker query in CLAUDE.md to see which database this is.';
+  END IF;
+END
+$precondition$;
+
+-- --------------------------------------------------------------------------
+-- the bridge, back to its 20261009120000 definition (byte for byte)
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION sync_strategy_analytics_status(
+  p_strategy_id    UUID,
+  p_trigger_job_id UUID DEFAULT NULL
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_catalog
+AS $$
+DECLARE
+  v_job_count          INTEGER;
+  v_nonterminal_count  INTEGER;
+  v_failed_count       INTEGER;
+  v_protected_count    INTEGER;
+  v_unresolved_count   INTEGER;
+  -- Phase 162 / HONEST-01: the STRUCTURED kind, not the free-text diagnostic.
+  -- This function no longer reads the operator column at all; the file header
+  -- carries the reasoning, because the self-verify block asserts the identifier
+  -- is absent from this body INCLUDING its comments.
+  v_latest_kind        TEXT;
+  v_protected_kind     TEXT;
+  -- Phase 164.2 / criterion 2: the IDENTITY of the failure each write branch is
+  -- resolving, alongside its kind. The provenance markers on
+  -- strategy_analytics are only honoured when they name THIS job, so the
+  -- decision needs the id and not just the kind. Same aggregate, same FILTERs,
+  -- same ordering as the two kinds above -- see the file header for why an id
+  -- match rather than a bare "the column is non-NULL" test is what makes cases
+  -- (ii) and (iii) of 20260826120000's owed-work paragraph decidable.
+  v_latest_job_id      UUID;
+  v_protected_job_id   UUID;
+  v_publish_healthy    BOOLEAN;
+  v_protect_hold       BOOLEAN;
+  v_unprotected_job_ids UUID[];
+  v_nonterminal_unmarked_count INTEGER;
+  v_refresh_keep       BOOLEAN;
+  -- D-09 (founder 2026-10-07), keyed on the TRIGGER: TRUE only when the job whose
+  -- terminal transition caused THIS call is a side-kind job that did not succeed.
+  v_side_failed_only   BOOLEAN;
+  -- WR-R3-01: the trigger is a side-kind job that has not finished done (failed,
+  -- or deferred back to pending). Read by the early return ahead of branch (a) only.
+  v_side_trigger_not_done BOOLEAN;
+  v_nonterminal_counting_count INTEGER;
+  -- D-05, the closed side-kind list, spelled ONCE. Every use below reads this
+  -- constant (the live_failures CTE, the trigger test, the in-flight count), so
+  -- the list cannot drift between them, and the verify block asserts it is the
+  -- four kinds D-05 names and that no other spelling of it exists.
+  v_side_kinds         CONSTANT TEXT[] := ARRAY['sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot'];
+BEGIN
+  IF p_strategy_id IS NULL THEN
+    RAISE EXCEPTION 'sync_strategy_analytics_status: p_strategy_id is required'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(p_strategy_id::text));
+
+  -- (d) no rows → preserve existing strategy_analytics row (unchanged).
+  SELECT count(*) INTO v_job_count
+    FROM compute_jobs
+   WHERE strategy_id = p_strategy_id;
+
+  IF v_job_count = 0 THEN
+    RETURN;
+  END IF;
+
+  -- ---- the NON-TERMINAL counts — FIRST of this function's two compute_jobs --
+  -- ---- reads, and the ORDER IS THE CORRECTNESS ------------------------------
+  -- One statement, one snapshot, three counts: every in-flight job, the in-flight
+  -- jobs that do NOT carry an in-scope refresh marker (the second feeds the keep
+  -- flag; see RETRY-PLAIN-COMPLETE in the file header), and the in-flight jobs
+  -- that are NOT side kinds (the third feeds the D-09 early return below).
+  -- Consumed by branch (a) far below. They are read HERE, and that placement is a
+  -- data-integrity fix (161.1 migration re-review, HIGH), not tidiness.
+  --
+  -- ⛔ WHY THE ORDER OF THE TWO compute_jobs READS IS LOAD-BEARING
+  -- This function reads compute_jobs twice for its verdict: the INCLUSIVE
+  -- non-terminal set (here) and the non-superseded failed_final partition (the
+  -- live_failures CTE below). Nothing runs them atomically. There is no
+  -- isolation override anywhere in this repo, so this executes at READ
+  -- COMMITTED, where every statement takes its OWN fresh snapshot and a
+  -- concurrent transaction can commit a job's status flip BETWEEN them.
+  --
+  -- The CALLERS of this function are serialized per strategy (Phase 164.5.2
+  -- for the two terminal mark RPCs, Phase 164.5.2.1 for this function itself).
+  -- Both mark RPCs take the two-integer, transaction-scoped advisory lock in the
+  -- mark_compute_job_bridge namespace, keyed on the strategy, before they call
+  -- this function, and this function takes that same lock as its first
+  -- statement after the NULL guard. A mark RPC re-enters the lock it already
+  -- holds; a direct caller (the Python DEFERRED path) waits behind any mark or
+  -- direct call in progress on the same strategy. So no other caller can COMMIT
+  -- a job transition on this strategy while this function is between its reads.
+  -- The NON-caller writers are NOT serialized: the claim RPCs,
+  -- reset_stalled_compute_jobs, the orphan terminalizer, the enqueue inserts,
+  -- the cross-strategy fan-in release and the refresh-marker retraction never
+  -- call this function and take no such lock. A job's status can therefore
+  -- still change between the two reads, and the read order below stays
+  -- load-bearing.
+  --
+  -- The saving property is that a job's status is MONOTONE TOWARD TERMINAL.
+  -- Every write that produces a non-terminal status is itself gated on a
+  -- non-terminal status -- the claim RPCs move pending/failed_retry to running,
+  -- defer_compute_job and reset_stalled_compute_jobs carry WHERE status =
+  -- 'running', the fan-in release carries WHERE status = 'done_pending_children'
+  -- -- and NOTHING in this schema moves a 'done' or 'failed_final' row back out
+  -- of terminal. (The dropped-enqueue sweep of 20260819130500 "readmits" by
+  -- INSERTING a fresh job, never by reviving the terminal one; the orphan
+  -- terminalizer of 20260817120000 only moves running -> failed_final.)
+  --
+  -- Given monotonicity, reading the INCLUSIVE set FIRST and the failure set LAST
+  -- is safe by construction: a job that crosses running -> failed_final between
+  -- the two reads is caught by the LATER read, so the worst case is that it is
+  -- counted twice -- which resolves to branch (a), or to the v_protect_hold
+  -- stand-down, and never to a publish.
+  --
+  -- INVERTED, the same window has NO safe side. The failure read would see the
+  -- job as still 'running' (not yet a failure) and this read would then see it
+  -- as terminal (no longer in flight), so the job is invisible to BOTH counters:
+  -- branch (a) is skipped (count 0), branch (b) is skipped (v_failed_count 0),
+  -- branch (b-prime) is skipped (v_protected_count 0), and branch (c) fires and
+  -- writes computation_status = 'complete', computation_error = NULL and
+  -- computed_at = now() OVER A LIVE NON-SUPERSEDED PERMANENT FAILURE. That is a
+  -- funded account published as healthy on top of a broken one -- the exact
+  -- outcome branch (b-prime)'s own placement note declares must never happen.
+  --
+  -- 20260802120000 STEP 4 -- the definition this file re-bases -- read the two
+  -- sets in this order, which is why it was never exposed. The first draft of
+  -- THIS file inverted them by accident: the idempotence hoist lifted the
+  -- partition above branch (a) and left this read below it. The self-verify
+  -- block at the foot of this migration now PINS the order, so a future re-base
+  -- cannot re-invert it silently.
+  --
+  -- ⚠️ WHAT THIS DOES NOT FIX, stated so the next reader does not over-trust it.
+  -- Ordering makes the window's OUTCOME fail-safe; it does not close the window.
+  -- A concurrent sibling can still leave a published row parked at 'computing'
+  -- (branch (a) firing on a snapshot in which the marked job had not yet
+  -- failed), which the 16-hour reaper of 20260802120000 then resolves. That is
+  -- an unpublish that self-heals and is visible, versus a publish-over-failure
+  -- that does neither. The callers' per-strategy lock (above) narrows the
+  -- window to the NON-caller writers named there. Closing it fully would need
+  -- those writers to take the same lock; they are other phases' functions (the
+  -- claim RPCs belong to Phase 164.9.3), so that is not attempted here.
+  SELECT count(*),
+         count(*) FILTER (WHERE NOT COALESCE(
+           (metadata ->> 'source') IN ('ledger-refresh', 'ledger-refresh-composite')
+           AND kind IN ('derive_broker_dailies',
+                        'compute_analytics_from_csv',
+                        'stitch_composite'),
+           FALSE)),
+         count(*) FILTER (WHERE NOT COALESCE(kind = ANY (v_side_kinds), FALSE))
+    INTO v_nonterminal_count, v_nonterminal_unmarked_count, v_nonterminal_counting_count
+    FROM compute_jobs
+   WHERE strategy_id = p_strategy_id
+     AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry');
+
+  -- ---- D-09: did a SIDE-KIND job's FAILURE cause this call? -----------------
+  -- The decision is keyed on the job that TRIGGERED the call, never on recency.
+  -- The mark RPCs pass the job they just terminalised and the Python DEFERRED
+  -- path the job it just deferred; every other caller (a status re-sync) passes
+  -- NULL and gets today's behaviour. TRUE only for a side-kind job that is failed_retry or
+  -- failed_final: a side job that succeeded, any counting job in any state, a
+  -- NULL id and a job of another strategy all read FALSE. (A recency key, "the
+  -- latest-created terminal job is a failed_final", froze computed_at after a
+  -- genuine counting success whenever a side job created later had failed fast.)
+  v_side_failed_only := COALESCE((SELECT t.status IN ('failed_retry', 'failed_final')
+                                         AND t.kind = ANY (v_side_kinds)
+                                    FROM compute_jobs t
+                                   WHERE t.id = p_trigger_job_id
+                                     AND t.strategy_id = p_strategy_id), FALSE);
+  -- ... and NOTHING ELSE moved the row since its last stamp (review round 3,
+  -- CR-R3-01; founder D-10). The trigger names the call, not everything the row
+  -- owes. Branch (a) HOLDS computed_at on a complete_with_warnings or warned row
+  -- by design and leaves the stamp to the terminal call; when that terminal call
+  -- is a side job's failure, a genuine recompute that finished done while the side
+  -- job was queued would otherwise never be stamped. So the hold stands only when
+  -- no COUNTING job reached `done` after the row's computed_at. updated_at is
+  -- trigger-stamped on every UPDATE and nothing moves a done row back out of
+  -- terminal, so on a done row it is the moment the job became done; a stamp
+  -- taken in that same transaction is equal, not later, and keeps the hold. No
+  -- row yet means nothing to compare, and the hold stands (branch (c) then writes
+  -- none).
+  v_side_failed_only := v_side_failed_only
+                        AND NOT EXISTS (SELECT 1
+                                          FROM compute_jobs d
+                                          JOIN strategy_analytics sa ON sa.strategy_id = d.strategy_id
+                                         WHERE d.strategy_id = p_strategy_id
+                                           AND d.status = 'done'
+                                           AND NOT COALESCE(d.kind = ANY (v_side_kinds), FALSE)
+                                           AND d.updated_at > sa.computed_at);
+  -- The EARLY RETURN below reads a wider trigger test (review round 3, WR-R3-01;
+  -- founder D-10). The Python DEFERRED path passes the job it just deferred (an
+  -- exchange circuit breaker puts it back to pending), and a deferral computes
+  -- nothing either: without this its call ran branch (a), which stamped
+  -- computed_at = now() and blanked the sentence, and the hold of the job's later
+  -- failure then kept that stamp. So any side-kind trigger of this strategy that
+  -- has not finished done counts here. Branch (c)'s holds stay on
+  -- v_side_failed_only: a call reaching (c) has nothing in flight.
+  v_side_trigger_not_done := COALESCE((SELECT t.status <> 'done' AND t.kind = ANY (v_side_kinds)
+                                         FROM compute_jobs t
+                                        WHERE t.id = p_trigger_job_id AND t.strategy_id = p_strategy_id), FALSE);
+
+  -- ---- Phase 161.1 / CR-01: is the published row still HEALTHY? -------------
+  -- Conjunct (ii) of the protection predicate — see this file's header. Read
+  -- ONCE, here, so branch (b)'s FILTER and branch (b-prime)'s FILTER cannot
+  -- disagree about it within a single call.
+  --
+  -- ⛔ HOISTED ABOVE BRANCH (a), and that placement is the IDEMPOTENCE fix
+  -- (161.1 migration re-review, MEDIUM). This read and the partition below used
+  -- to sit AFTER branch (a)'s early return, which made them unreachable on the
+  -- non-terminal path — and branch (a) writes 'computing' over exactly the
+  -- status this reads. The protection was therefore re-derived, on every call,
+  -- from a column this same function had transiently overwritten: grant the
+  -- protection on a plain-'complete' row, let ANY sibling job bounce it to
+  -- 'computing', and the NEXT bridge call read the row as unhealthy and routed
+  -- the SAME still-live failure to the loud branch. Reading both facts BEFORE
+  -- any write in this call makes the derivation a FIXED POINT instead: nothing
+  -- this function does can change the answer the next call computes.
+  --
+  -- The hoist is semantically inert for every pre-existing path. Both reads see
+  -- state this function has not yet WRITTEN (branch (a) was the only writer that
+  -- could precede them, and it returned), and neither writes anything itself.
+  -- The ONLY behaviour delta is the v_protect_hold guard on branch (a) below.
+  --
+  -- ⚠️ The hoist constrains this read and the partition to sit above branch
+  -- (a)'s WRITE; it says nothing about where the non-terminal count sits. That
+  -- is a SECOND, independent ordering constraint and it is satisfied above, not
+  -- here: the non-terminal count must precede the PARTITION (monotonicity), and
+  -- the health read must precede branch (a)'s write (idempotence). Both hold in
+  -- the order as written, and the self-verify block pins each one separately —
+  -- one assertion cannot stand in for the other.
+  --
+  -- ⛔ This is the whole fail-safe. It is a COHERENCE CHECK with the Python
+  -- guard, not a second opinion: if the Python guard declined to protect, it
+  -- has ALREADY written 'failed' + computation_warned = FALSE by the time this
+  -- runs, so this reads FALSE and the loud path is taken. Never invert it, and
+  -- never widen it to "a row exists" or to `OR computation_warned` — a row at
+  -- 'failed' or 'computing' is NOT a published factsheet, and exempting one
+  -- would launder a genuinely broken strategy into a published-looking one (or,
+  -- for 'computing', park it there until the 16-hour reaper).
+  --
+  -- The status pair is the SAME pair as
+  -- STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES in
+  -- analytics-service/services/job_worker.py and the same pair the staleness
+  -- view's success predicate uses (20260825120000, D-04). It is a PAIR: on the
+  -- production ledger cohort `complete` is 0 and `complete_with_warnings` is 5,
+  -- so a set narrowed to {'complete'} would protect NOTHING while still looking
+  -- like a guard in review.
+  SELECT EXISTS (
+    SELECT 1
+      FROM strategy_analytics sa
+     WHERE sa.strategy_id = p_strategy_id
+       AND sa.computation_status IN ('complete', 'complete_with_warnings')
+  ) INTO v_publish_healthy;
+
+  -- ---- the live-failure PARTITION (consumed by branches (b) and (b-prime)) ---
+  -- PER-(strategy,kind) created_at SUPERSESSION (F-3 / PUB-02 close, mig 20260710150000):
+  -- a failed_final poisons the strategy ONLY when it is NOT superseded by a
+  -- strictly-later 'done' job of the SAME (strategy_id, kind). A fresh ledger
+  -- generation (a re-enqueued job — enqueue dedup is in-flight-only, so a resubmit
+  -- inserts a fresh generation while the stale failed_final is RETAINED for audit)
+  -- clears the poison the moment it completes, WITHOUT deleting queue history.
+  -- PER-KIND (d.kind = f.kind): a later done of a DIFFERENT kind can NEVER mask a
+  -- real permanent failure (the cross-kind-blind defect that killed held PR
+  -- 229d80fa). Keyed on the IMMUTABLE created_at (updated_at is trigger-stamped
+  -- now() on every touch — non-deterministic generation ordering).
+  --
+  -- Phase 161.1 / CR-01: the non-superseded failures are PARTITIONED into
+  -- protected (a marked recurring refresh over a still-healthy published row)
+  -- and unprotected (everything else). See the header for why this is one
+  -- statement over a CTE rather than the original's two: the non-supersession
+  -- subquery is the most safety-critical predicate here and it is consulted
+  -- four ways, so it is spelled ONCE.
+  WITH live_failures AS (
+    SELECT
+      -- Phase 164.2 / criterion 2: the failing job's own id. Projected here so
+      -- the aggregate below can carry it into v_latest_job_id /
+      -- v_protected_job_id; the provenance decision on both write branches is
+      -- an EQUALITY against this value, never a presence test.
+      f.id,
+      f.error_kind,
+      f.created_at,
+      -- ⛔ The two marker literals are a CROSS-LANGUAGE CONTRACT with no
+      -- compiler between their ends: the other ends are
+      -- `jsonb_build_object('source', …)` in the two fan-out migrations
+      -- (20260825130000, 20260825140000) and the two inline comparisons in
+      -- analytics-service/services/job_worker.py. If they drift, everything
+      -- still compiles and the only symptom is a funded account going dark on
+      -- the next failed refresh. A python drift gate pins all of them.
+      --
+      -- ⛔ THE KIND SCOPE IS THE SECOND HALF OF THE CONTAINMENT, not decoration
+      -- (161.1 migration re-review, rls-policy-auditor MEDIUM). `metadata` is
+      -- NOT a closed namespace and `'source'` is NOT a private key: the
+      -- request-derived writers in analytics-service/routers/process_key.py put
+      -- the caller's `body.source` straight into `p_metadata`.
+      -- That value cannot collide with a refresh marker TODAY only because the
+      -- Pydantic `Source` Literal at
+      -- analytics-service/services/ingestion/adapter.py:59 admits venue names
+      -- alone (okx|binance|bybit|csv|deribit|sfox|mt5) — one enum widening from
+      -- a collision, in a file whose author has no reason to know this
+      -- predicate exists. The kind scope is what survives that widening: both
+      -- of those call sites enqueue kind 'process_key_long', which is not in
+      -- this list and can never be. The three kinds here are exactly the kinds
+      -- that can legitimately CARRY a marker — 'derive_broker_dailies'
+      -- (20260825130000), 'stitch_composite' (20260825140000), and
+      -- 'compute_analytics_from_csv', the JOB_CHAIN_FOLLOW_ON hop that
+      -- services/job_worker.py forwards the marker onto. It is a
+      -- hand-maintained list, so it is pinned against all three of those ends
+      -- by the drift gate in
+      -- analytics-service/tests/test_ledger_refresh_kind_scope_drift.py; add a
+      -- fan-out arm without adding its kind here and that gate goes RED.
+      --
+      -- ⚠️ CITE CORRECTED 2026-09-06 (prose only, nothing executable moved).
+      -- The `p_metadata` sentence above is inherited VERBATIM from migrations
+      -- 20260825150000 and 20260826120000, where it read "the single
+      -- request-derived writer, analytics-service/routers/process_key.py:766
+      -- and :1518". BOTH halves were stale at this date: :766 is a BLANK line,
+      -- and there are FOUR such sites rather than one -- `"source":
+      -- body.source` occurs at :810 (the `p_metadata` dict spans :806-812),
+      -- :1173, :1519 and :1597. The two earlier migrations are ALREADY APPLIED
+      -- and are deliberately NOT edited, so the same stale cite still lives in
+      -- both of them; this note is the correction of record. The containment
+      -- argument is UNCHANGED -- four request-derived sites widen the surface,
+      -- they do not remove the kind scope's need.
+      --
+      -- ⛔ It belongs to `is_protected`, NEVER to this CTE's WHERE clause.
+      -- Moved into the WHERE it would drop out-of-scope failures from the
+      -- source set entirely, so a REAL permanent failure of any other kind
+      -- would vanish from branch (b) as well and fall through to branch (c) as
+      -- a reported success. It narrows who may be PROTECTED; it must never
+      -- narrow who may FAIL.
+      --
+      -- ⛔ COALESCE(..., FALSE) IS LOAD-BEARING, and it was MEASURED, not
+      -- added defensively. `compute_jobs.metadata` is NULL on every job the
+      -- worker and the wizard enqueue, so `NULL ->> 'source'` is NULL and
+      -- `NULL IN (...)` is NULL — not FALSE. A NULL `is_protected` is excluded
+      -- by BOTH `FILTER (WHERE is_protected)` AND `FILTER (WHERE NOT
+      -- is_protected)`, so the failure would vanish from both classes and fall
+      -- through to branch (c): every UNMARKED permanent failure would be
+      -- silently reported as a successful computation. Arm C of
+      -- supabase/tests/test_sync_status_marked_refresh_protected.sql caught
+      -- exactly that and is RED without this COALESCE. The kind test is INSIDE
+      -- the same COALESCE for the same reason, so a NULL kind resolves FALSE
+      -- (unprotected → loud) rather than NULL (invisible to both classes).
+      -- `v_publish_healthy` comes from a `SELECT EXISTS`, which is never NULL,
+      -- so the COALESCE around the marker test is enough to make the whole
+      -- conjunction two-valued.
+      COALESCE(
+        (f.metadata ->> 'source') IN ('ledger-refresh', 'ledger-refresh-composite')
+        AND f.kind IN ('derive_broker_dailies',
+                       'compute_analytics_from_csv',
+                       'stitch_composite'),
+        FALSE
+      ) AND v_publish_healthy AS is_protected,
+      -- ⛔ 161.1 CR-01 FOLLOW-UP: "v_protect_hold leaks the refresh protection
+      -- onto unrelated jobs" (migration re-review). TRUE when a job that will
+      -- itself RESOLVE this failure is already in flight. The hold below stands
+      -- down only when EVERY protected failure has one — that is what scopes the
+      -- branch-(a) suppression to the jobs the protection is actually about,
+      -- instead of to every bridge call on the strategy until a superseding
+      -- 'done' lands.
+      --
+      -- ⛔ WHY SAME-KIND + LATER + UNMARKED, AND NOT "ANY IN-FLIGHT JOB".
+      -- Releasing the hold lets branch (a) write 'computing', and that write
+      -- DESTROYS the protection: conjunct (ii) is re-derived from the very
+      -- column branch (a) overwrites, so once the row is bounced this failure is
+      -- not protected on any later call. Releasing is therefore safe ONLY when
+      -- the in-flight job's terminal outcome DOMINATES the failure — decides it
+      -- correctly without the health read being consulted at all. Each conjunct
+      -- buys exactly one half of that:
+      --   * SAME KIND, strictly LATER — a 'done' SUPERSEDES this failure through
+      --     the F-3/PUB-02 subquery below, so branch (c) resolves the row
+      --     cleanly and the protection is never needed again.
+      --   * UNMARKED — a 'failed_final' is then a user-initiated permanent
+      --     failure, which is LOUD by design (arms C/D). Also a correct outcome.
+      --   A MARKED successor has NEITHER property, and admitting one would
+      --   reopen CR-01 through its own retry: the recurring arm re-attempting
+      --   against a still-wedged gateway would release the hold, bounce the row
+      --   to 'computing', fail again and take branch (b). Arm I4 pins that.
+      --
+      -- ⛔ MEASURED, not argued. Widen this to "any in-flight job" and a routine
+      -- UNMARKED 'sync_trades' poller — cron-enqueued on every live-API strategy
+      -- — walks a protected row from 'complete' to 'computing' to 'failed' in
+      -- three bridge calls, on a job the user never initiated. That is arm I's
+      -- scenario, and arm I is RED without this scoping.
+      --
+      -- ⚠️ The status list is spelled INCLUSIVELY (the same four branch (a)
+      -- counts) rather than as NOT IN ('done','failed_final'), so an unrecognised
+      -- future status is NOT a successor: it leaves the hold ON, i.e. at today's
+      -- behaviour. Suppression is the direction an unknown must resolve to HERE,
+      -- because here the unknown decides whether to give the protection UP.
+      --
+      -- ⚠️ This is the SECOND spelling of the marker literals in this body — the
+      -- one thing DEVIATION 1 avoided for the supersession subquery. It cannot
+      -- be folded into `is_protected`: that column is about the FAILURE, this one
+      -- is about a different row. The self-verify block therefore asserts every
+      -- marker list in the deployed body is spelled IDENTICALLY, so the two
+      -- copies cannot drift from each other.
+      EXISTS (
+        SELECT 1
+          FROM compute_jobs r
+         WHERE r.strategy_id = f.strategy_id
+           AND r.kind = f.kind
+           AND r.created_at > f.created_at
+           AND r.status IN ('pending', 'running',
+                            'done_pending_children', 'failed_retry')
+           AND NOT COALESCE(
+                 (r.metadata ->> 'source')
+                   IN ('ledger-refresh', 'ledger-refresh-composite'),
+                 FALSE)
+      ) AS has_live_successor
+      FROM compute_jobs f
+     WHERE f.strategy_id = p_strategy_id
+       AND f.status = 'failed_final'
+       AND NOT COALESCE(f.kind = ANY (v_side_kinds), FALSE)
+       AND NOT (
+         f.kind = 'process_key_long'
+         AND EXISTS (
+           SELECT 1
+             FROM compute_jobs c1
+            WHERE c1.strategy_id = f.strategy_id
+              AND c1.kind = 'derive_broker_dailies'
+              AND c1.status = 'done'
+              AND c1.created_at > f.created_at
+         )
+         AND EXISTS (
+           SELECT 1
+             FROM compute_jobs c2
+            WHERE c2.strategy_id = f.strategy_id
+              AND c2.kind = 'compute_analytics_from_csv'
+              AND c2.status = 'done'
+              AND c2.created_at > f.created_at
+         )
+       )
+       AND NOT EXISTS (
+         SELECT 1
+           FROM compute_jobs d
+          WHERE d.strategy_id = f.strategy_id
+            AND d.kind = f.kind
+            AND d.status = 'done'
+            AND d.created_at > f.created_at
+       )
+  )
+  SELECT
+    count(*) FILTER (WHERE NOT is_protected),
+    count(*) FILTER (WHERE is_protected),
+    -- Protected failures that NOTHING in flight will resolve. A strict SUBSET of
+    -- the protected class — it removes no row from either class, so the two-way
+    -- partition above is untouched and every live failure still lands in exactly
+    -- one of `is_protected` / `NOT is_protected`. Consumed ONLY by the
+    -- branch-(a) hold below.
+    count(*) FILTER (WHERE is_protected AND NOT has_live_successor),
+    -- Phase 162 / HONEST-01: the MOST RECENT failure's structured kind, per
+    -- class. Same ordering, same FILTERs, same partition as before — only the
+    -- column changed, from the operator diagnostic to the enum that decides
+    -- which curated sentence the user reads.
+    --
+    -- ⛔ THE ORDER IS TOTAL, and the trailing key is not tidiness. Four picks
+    -- below choose "the first row" from four independent aggregate states, and
+    -- the pairing this migration rests on -- that the kind and the id below
+    -- describe the SAME failure -- is a claim that all four agree on which row
+    -- that is. An ordering with ties leaves that to the executor. Ties are
+    -- REACHABLE: the timestamp key is transaction-scoped, so a fan-out inserting
+    -- several jobs in one statement stamps them identically. The primary key
+    -- breaks every tie and it is spelled on ALL FOUR picks -- a tie-break on two
+    -- of them would leave exactly the disagreement it was added to remove. The
+    -- self-verify below COUNTS the four rather than testing for presence.
+    (array_agg(error_kind ORDER BY created_at DESC, id DESC)
+       FILTER (WHERE NOT is_protected))[1],
+    (array_agg(error_kind ORDER BY created_at DESC, id DESC)
+       FILTER (WHERE is_protected))[1],
+    -- Phase 164.2 / criterion 2: the same two picks by IDENTITY. Same ordering,
+    -- same FILTERs, same partition -- so v_latest_job_id names exactly the job
+    -- whose kind became v_latest_kind, and v_protected_job_id exactly the job
+    -- whose kind became v_protected_kind. That pairing is what lets a write
+    -- branch ask "is the sentence already in the column the one THIS failure's
+    -- writer just wrote?" instead of the unanswerable "is this sentence
+    -- curated?" -- the distinction 20260826120000's header records as the
+    -- reason the debt could not be paid there. Both are non-NULL whenever the
+    -- branch that reads them fires: the branch's own guard is a count over the
+    -- same FILTER, and compute_jobs.id is the primary key.
+    (array_agg(id ORDER BY created_at DESC, id DESC)
+       FILTER (WHERE NOT is_protected))[1],
+    (array_agg(id ORDER BY created_at DESC, id DESC)
+       FILTER (WHERE is_protected))[1],
+    array_agg(id) FILTER (WHERE NOT is_protected)
+    INTO v_failed_count, v_protected_count, v_unresolved_count,
+         v_latest_kind, v_protected_kind,
+         v_latest_job_id, v_protected_job_id, v_unprotected_job_ids
+    FROM live_failures;
+
+  -- ---- the branch-(a) EXEMPTION (161.1 re-review MEDIUM: idempotence) -------
+  -- TRUE when branch (b-prime) is the outcome this call would reach if every job
+  -- were terminal — a protected failure and NO unprotected one — AND at least
+  -- one of those protected failures has nothing in flight that would resolve it.
+  -- Under that and only that condition branch (a) stands down, so the published
+  -- status it would have bounced to 'computing' stays put and the NEXT call
+  -- re-derives the SAME protection.
+  --
+  -- ⛔ THE THIRD CONJUNCT IS THE SCOPE, added by the 161.1 CR-01 follow-up
+  -- review ("v_protect_hold leaks the refresh protection onto unrelated,
+  -- user-initiated jobs"). The first two are per-STRATEGY: with them alone, one
+  -- live protected failed_final stood branch (a) down for EVERY later bridge
+  -- call on that strategy until a same-kind 'done' superseded it. MEASURED
+  -- consequence on a plain-'complete' row: a user-initiated resync never
+  -- advertised 'computing', so `useStrategySyncPoller` — whose terminal test is
+  -- `nextStatus === 'failed' || isComputedAnalytics(nextStatus)` — read a
+  -- TERMINAL SUCCESS while the job was still running and SyncPreviewStep
+  -- materialised the pre-resync factsheet. The third conjunct releases the hold
+  -- once every protected failure has a live successor that will decide it
+  -- (`has_live_successor` in the CTE above carries the whole safety argument for
+  -- why only a same-kind, strictly-later, UNMARKED job counts).
+  --
+  -- ⛔ COALESCE all three ways, and note the defaults DIFFER on purpose. A NULL
+  -- in any counter must resolve to NO HOLD, i.e. to today's behaviour, because
+  -- standing branch (a) down on an unknown state would drop through to branches
+  -- (b)/(c) with jobs still in flight — and branch (c) would report an
+  -- unfinished computation as a completed one. Suppression is never the
+  -- direction an unknown resolves to HERE. (Inside `has_live_successor` the
+  -- unknown decides whether to GIVE UP the protection, so it resolves the other
+  -- way; the invariant is "unknown ⇒ today's behaviour", not a fixed literal.)
+  -- `count(*)` cannot return NULL, so these are belt-and-braces; they are also
+  -- what keeps this predicate TWO-VALUED, which `IF ... AND NOT v_protect_hold`
+  -- requires (a NULL there reads as false and would skip branch (a) — the exact
+  -- inversion).
+  --
+  -- ⚠️ The third conjunct STRICTLY IMPLIES the first (an unresolved protected
+  -- failure is a protected failure). The first is kept anyway, unaltered,
+  -- because it is the half that states the tie to branch (b-prime) — delete it
+  -- and the next reader has to re-derive that tie from the CTE's FILTER list.
+  v_protect_hold := COALESCE(v_protected_count, 0) > 0
+                    AND COALESCE(v_failed_count, 1) = 0
+                    AND COALESCE(v_unresolved_count, 0) > 0;
+
+  v_refresh_keep := v_publish_healthy
+                    AND COALESCE(v_nonterminal_unmarked_count, 1) = 0
+                    AND COALESCE(v_failed_count, 1) = 0;
+
+  -- (a-hold) D-09: a side-kind job FAILED, or was DEFERRED (WR-R3-01), and
+  -- nothing that counts is in flight.
+  -- A transient side failure (a sync_funding timeout is the founder's example)
+  -- retries through failed_retry, and each retry mark reaches branch (a), which
+  -- stamps computed_at = now() and blanks the sentence while the side job is
+  -- merely in flight. A deferred side job (the Python DEFERRED path, which now
+  -- passes its job id) is in flight in the same way. Nothing that produces analytics is running, so the call has
+  -- nothing to say about a stored analytic: it leaves the row exactly as it is,
+  -- computation_status, computed_at, the sentence and both markers included, and
+  -- writes no row when none exists. The terminal hop (failed_final) reaches
+  -- branch (c) with nothing in flight and holds there. When a counting job IS in
+  -- flight, branch (a) below runs as it always did, because that job, not the
+  -- side failure, is why the row moves.
+  IF v_side_trigger_not_done
+     AND COALESCE(v_nonterminal_count, 0) > 0
+     AND COALESCE(v_nonterminal_counting_count, 1) = 0 THEN
+    RETURN;
+  END IF;
+
+  -- (a) any non-terminal row → 'computing', UNLESS the runner has already
+  -- written 'complete_with_warnings' OR set its runner-owned computation_warned
+  -- marker. That warning is a runner-owned terminal sub-state the compute_jobs
+  -- aggregate cannot see; this branch fires whenever ANY sibling job for the
+  -- strategy is still in flight (e.g. a poll_positions / sync_funding job claimed
+  -- in the same batch as the warned analytics job, or a pre-mark bridge call while
+  -- this job's own row is still 'running'). Writing a bare 'computing' here would
+  -- launder the warning, which branch (c) would then resolve to a plain 'complete'
+  -- — ordering-dependent, so it leaked on multi-job (live-API) strategies.
+  -- Preserve it. The analytics runner clears the warning, via its own
+  -- 'computing' entry-write + clean terminal write when it actually recomputes.
+  -- The bridge clears it in ONE case only, the membership arm FIRST in each
+  -- CASE below (D-04b, the file header): when the row's writer-provenance job
+  -- is among this call's unprotected live failures, the warning sits over a
+  -- failed run and is not a warning to preserve. A plain 'complete' row is
+  -- kept the same way by the refresh keep arm (D-05) when every in-flight job
+  -- carries an in-scope refresh marker (in any non-terminal status, not only
+  -- a retry) and no unprotected failure is live.
+  --
+  -- ⚠️ v_nonterminal_count is deliberately NOT read here. It is read at the TOP
+  -- of this function, BEFORE the failure partition — see the read-order note
+  -- there for why that is correctness and not tidiness. Moving the read back to
+  -- this spot, i.e. AFTER the partition, is the inversion that lets branch (c)
+  -- publish a live permanent failure as a clean success.
+  --
+  -- ⛔ `AND NOT v_protect_hold` is the CR-01 idempotence delta and the ONLY
+  -- change to this branch; its body below is byte-identical to
+  -- 20260802120000. When it stands down, control falls through to branch
+  -- (b-prime) — never to (b) (v_failed_count = 0 is half of the hold) and never
+  -- to (c) (v_protected_count > 0 is the other half), so the outcome is
+  -- deterministic: record the error, clear the reaper key, touch no publish
+  -- column. That is the same "a subscriber sees nothing change" contract the
+  -- protection already had, now extended across the in-flight window.
+  --
+  -- A published row therefore stops advertising 'computing' while a protected
+  -- failure is live AND NOTHING IN FLIGHT WOULD RESOLVE IT. That trailing
+  -- clause is the 161.1 CR-01 follow-up scope; without it the suppression was
+  -- per-strategy and swallowed the 'computing' advertisement of unrelated,
+  -- user-initiated work (see v_protect_hold above). What remains suppressed is
+  -- not a new shape for this branch: it ALREADY declines to show 'computing'
+  -- over a sticky terminal success (the complete_with_warnings /
+  -- computation_warned arm right below), which is the state of every strategy in
+  -- the production ledger cohort today.
+  --
+  -- Three arms of supabase/tests/test_sync_status_marked_refresh_protected.sql
+  -- pin this branch from three sides, and no one of them implies another:
+  --   I2 — the exemption is an exemption, not a disablement. With NO protected
+  --        failure live, an in-flight job must still read 'computing' and stamp.
+  --   I3 — the exemption is SCOPED. With a protected failure live AND a
+  --        same-kind unmarked successor in flight, the row must read 'computing'
+  --        again, and the successor's 'done' must then resolve it through
+  --        branch (c) — error cleared, computed_at advanced.
+  --   I4 — the scope does not admit a MARKED successor. The recurring arm
+  --        retrying against a still-wedged venue must NOT release the hold.
+  IF v_nonterminal_count > 0 AND NOT v_protect_hold THEN
+    -- JOB-01 (Phase 142): a FRESH INSERT at 'computing' IS the transition in, so
+    -- the VALUES arm stamps now() unconditionally. The ON CONFLICT arm must NOT.
+    INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
+    VALUES (p_strategy_id, 'computing', NULL, now(), NULL, NULL)
+    ON CONFLICT (strategy_id) DO UPDATE
+       SET computation_status = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN 'computing'
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR strategy_analytics.computation_warned
+             THEN 'complete_with_warnings'
+             WHEN v_refresh_keep AND strategy_analytics.computation_status = 'complete'
+             THEN 'complete'
+             ELSE 'computing'
+           END,
+           computation_warned = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids) THEN FALSE ELSE strategy_analytics.computation_warned END,
+           -- FOUNDER DECISION 2026-10-03 ("Hold the date for both"): on a KEEP
+           -- (the row already reads what this branch resolves it to, and the
+           -- membership arm does not fire) the sentence, both provenance markers
+           -- and computed_at are HELD, because nothing was computed. On every
+           -- other path they are written exactly as before. The four CASEs share
+           -- one predicate, so the markers still travel with the sentence.
+           computation_error = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN EXCLUDED.computation_error
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR (v_refresh_keep AND strategy_analytics.computation_status = 'complete' AND strategy_analytics.computation_warned IS NOT TRUE)
+             THEN strategy_analytics.computation_error
+             ELSE EXCLUDED.computation_error
+           END,
+           -- Phase 164.2 / criterion 2: when the sentence above is blanked, the
+           -- provenance that described it goes with it. A marker left standing
+           -- over a blanked sentence would make the NEXT generic write look like
+           -- a curated one and freeze it there. This branch is also the reason
+           -- the four TypeScript pre-enqueue writers need no marker at all: they
+           -- always write 'failed', so a job starting on their row is a
+           -- TRANSITION (never a keep), their sentence is stale by construction
+           -- and superseding it is the correct outcome. A held sentence keeps
+           -- its markers on the same predicate.
+           computation_error_source = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN NULL
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR (v_refresh_keep AND strategy_analytics.computation_status = 'complete' AND strategy_analytics.computation_warned IS NOT TRUE)
+             THEN strategy_analytics.computation_error_source
+             ELSE NULL
+           END,
+           computation_error_job_id = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN NULL
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR (v_refresh_keep AND strategy_analytics.computation_status = 'complete' AND strategy_analytics.computation_warned IS NOT TRUE)
+             THEN strategy_analytics.computation_error_job_id
+             ELSE NULL
+           END,
+           -- JOB-01 (Phase 142): stamp on the TRANSITION INTO computing only,
+           -- keyed off the RESOLVED status above — never off the branch. This
+           -- bridge is PERFORMed in-RPC on EVERY job transition, so an
+           -- unconditional now() here would reset the stamp on every hop of a
+           -- multi-hop chain and the reaper would never fire (the Phase 106
+           -- janitor bug, re-implemented in a new column).
+           computing_started_at = CASE
+             -- Membership arm (D-04b): the row is resolving to 'computing' over
+             -- a failed run. Stamp the transition in, keep an existing stamp.
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN CASE WHEN strategy_analytics.computation_status IS DISTINCT FROM 'computing' THEN now() ELSE strategy_analytics.computing_started_at END
+             -- Arm 1: this branch RESOLVED to complete_with_warnings, i.e. the
+             -- row is NOT computing. That is an exit — clear the stamp.
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR strategy_analytics.computation_warned
+             THEN NULL
+             -- Refresh keep arm (D-05): the row stays 'complete', i.e. NOT
+             -- computing. Same exit as Arm 1 — no stamp.
+             WHEN v_refresh_keep AND strategy_analytics.computation_status = 'complete'
+             THEN NULL
+             -- Arm 2: resolved to 'computing' from some OTHER prior status —
+             -- a genuine transition in. Stamp it.
+             WHEN strategy_analytics.computation_status IS DISTINCT FROM 'computing'
+             THEN now()
+             -- Arm 3: already 'computing' — KEEP the original stamp, so a second
+             -- bridge call cannot advance it and defer the reap indefinitely.
+             ELSE strategy_analytics.computing_started_at
+           END,
+           computed_at = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN now()
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR (v_refresh_keep AND strategy_analytics.computation_status = 'complete' AND strategy_analytics.computation_warned IS NOT TRUE)
+             THEN strategy_analytics.computed_at
+             ELSE now()
+           END;
+    RETURN;
+  END IF;
+
+  -- (b) all terminal, any NON-SUPERSEDED UNPROTECTED failed_final → 'failed'
+  -- with the CURATED sentence for the latest failure's kind (Phase 162 /
+  -- HONEST-01 — this used to write the job's own diagnostic text, which is how
+  -- a raw Python exception string became the thing a user read on a failed
+  -- sync). The supersession and partition rules that decide
+  -- v_failed_count are documented at the CTE above, which is now read before
+  -- branch (a) rather than here (the idempotence hoist). Reaching this
+  -- statement still means every job is terminal: branch (a) returns otherwise,
+  -- and its one stand-down condition requires v_failed_count = 0.
+  -- This write clears computation_warned in ONE case only: when the row's
+  -- writer-provenance job is among this call's unprotected live failures
+  -- (D-04b, the file header), because the warning then sits over a failed run.
+  -- Otherwise the runner-owned marker survives the 'failed' bounce in its own
+  -- column, so branch (c) can recover the warning after a sibling
+  -- failed_final→done recovery WITHOUT an analytics re-run (SI-02, closed by
+  -- mig 20260708120000); a sibling's failure carries no provenance for its id.
+  IF v_failed_count > 0 THEN
+    -- JOB-01 (Phase 142): SQL exit transition #1 — clear the stamp.
+    INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
+    VALUES (p_strategy_id, 'failed', computation_error_copy(v_latest_kind), NULL, NULL, NULL)
+    ON CONFLICT (strategy_id) DO UPDATE
+       SET computation_status = EXCLUDED.computation_status,
+           -- ⛔ Phase 164.2 / criterion 2 — THE CONDITIONAL. The generic
+           -- per-kind sentence in the VALUES tuple above is what a FRESH row
+           -- gets, always: there is no earlier writer sentence on a row that
+           -- did not exist. On CONFLICT the row may already carry one, and this
+           -- CASE is the only place that decides.
+           --
+           -- The predicate is an EQUALITY on the job, not a presence test on
+           -- the marker, and that is the whole design. 20260826120000's header
+           -- names three things a bare "the column is non-NULL" test cannot
+           -- tell apart: (i) the sentence THIS failure's writer just wrote,
+           -- (ii) a sentence left by an OLDER, still-unresolved failure, and
+           -- (iii) operator text written by the pre-migration form of the
+           -- protected branch. Keyed on the id of the job this branch itself
+           -- resolved, (i) matches and (ii)/(iii) do not.
+           --
+           -- ⚠️ Plain `=`, deliberately NOT `IS NOT DISTINCT FROM`. Both
+           -- markers are NULL on the ~103 legacy rows and on every row the
+           -- bridge itself last touched, and a NULL on either side makes the
+           -- WHEN neither true nor false, so control falls to ELSE and the
+           -- generic wins. That is exactly today's behaviour, which is what
+           -- "no backfill" is required to mean.
+           computation_error  = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error ELSE EXCLUDED.computation_error END,
+           -- The markers travel WITH the sentence they describe, on the same
+           -- predicate. Kept when the sentence is kept; cleared when the
+           -- generic overwrites it, so the next call cannot read this bridge's
+           -- own generic as a writer's curated sentence.
+           computation_error_source = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error_source ELSE NULL END,
+           computation_error_job_id = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error_job_id ELSE NULL END,
+           computation_warned = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids) THEN FALSE ELSE strategy_analytics.computation_warned END,
+           computing_started_at = NULL,
+           computed_at        = now();
+    RETURN;
+  END IF;
+
+  -- (b-prime) Phase 161.1 / CR-01 — every live failure is a PROTECTED marked
+  -- refresh over a still-healthy published row. Record the error; change
+  -- nothing that a subscriber can see.
+  --
+  -- ⛔ Placement is load-bearing: strictly AFTER branch (b). An unprotected
+  -- failure alongside a protected one must still poison the strategy, so the
+  -- protected class is only ever consulted once the unprotected class is empty.
+  --
+  -- ⛔ And this must NOT fall through to branch (c). Branch (c) is the
+  -- all-jobs-done success transition: it would clear computation_error to NULL
+  -- and stamp computed_at = now(), i.e. report a FAILED refresh as a fresh
+  -- successful computation. Reaching (c) with a live failed_final present is
+  -- precisely the laundering this branch exists to avoid.
+  IF v_protected_count > 0 THEN
+    UPDATE strategy_analytics
+       -- ⛔ ASSIGNED, and the COALESCE-over-the-existing-value that stood here
+       -- from 161.1 review round 4 is GONE ON PURPOSE (Phase 162 / HONEST-01).
+       -- ⚠️ TWO EARLIER DRAFTS OF THIS COMMENT DESCRIBED THAT COALESCE WRONGLY,
+       -- in opposite directions, and both are corrected here by measurement
+       -- (Phase 162 review F-4a/F-4b). What stood here was
+       -- `COALESCE(<the failing job's own free-text diagnostic>, <this column>)`.
+       -- Its LEFT arm is the OPERATOR column, and that column is non-NULL on
+       -- EVERY reachable failed_final row: the file header's writer census shows
+       -- exactly two writers of that status and both stamp it unconditionally
+       -- (the RPC assigns it straight from its argument, whose two callers pass
+       -- `kind or "unknown"`-style non-NULL strings; the reaper writes a fixed
+       -- audit literal). So the left arm ALWAYS won. This branch was writing
+       -- OPERATOR TEXT into a user-visible column on every protected failure,
+       -- and the right arm was unreachable in practice.
+       --
+       -- That settles what the removal does and does not cost:
+       --   * It does NOT cost the worker's curated per-failure sentence. An
+       --     earlier draft claimed it did. Measured, that sentence was ALREADY
+       --     being overwritten here — by the raw diagnostic, which is strictly
+       --     worse than the per-kind copy that replaces it. This branch is a
+       --     STRICT IMPROVEMENT over what it replaced, not a regression.
+       --   * It does NOT lose a NULL-erasure guard either, which is what the
+       --     other draft claimed. `computation_error_copy` is TOTAL — NULL in, a
+       --     sentence out — so the hazard round 4 guarded cannot occur, and a
+       --     COALESCE whose left arm is provably non-NULL is dead code that
+       --     teaches the next reader that NULL is reachable here.
+       --   * It DOES heal a row still carrying operator text written by the
+       --     pre-migration form of this very branch, the next time it is touched.
+       --
+       -- ✅ WHAT WAS STILL LOST HERE IS NOW PAID (Phase 164.2 / criterion 2).
+       -- 20260826120000 recorded, as OWED WORK rather than as an accepted
+       -- trade, that the worker writes a CURATED per-failure sentence into this
+       -- column moments before the RPC that runs this bridge and that this
+       -- statement then replaced it with the per-KIND sentence — the loss a
+       -- user reads on the portfolio stale warning. It also stated the exact
+       -- reason the fix could not be "prefer the value already present": with
+       -- no provenance, that cannot tell this failure's sentence from one left
+       -- by an older unresolved failure, and it would freeze the operator text
+       -- this branch heals.
+       --
+       -- The two marker columns are that provenance, and the CASE below is the
+       -- preference made DECIDABLE: the existing sentence is kept only when a
+       -- writer stamped it FOR THE JOB THIS BRANCH JUST RESOLVED. An older
+       -- unresolved failure's sentence has a different job id and loses; text
+       -- with no marker at all has no id and loses, so the healing property
+       -- 20260826120000 added is untouched; and the retry-positive 'orphaned'
+       -- copy still reaches the user, because the reaper stamps no marker.
+       -- ⚠️ THE PYTHON HALF IS A SEPARATE PLAN. Until the writers set the
+       -- markers, every row on this path has NULL markers, the CASE takes its
+       -- ELSE arm, and this branch behaves EXACTLY as it did before. That is
+       -- the intended deploy order, not an oversight.
+       SET computation_error   = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN strategy_analytics.computation_error ELSE computation_error_copy(v_protected_kind) END,
+           -- The markers travel WITH the sentence, on the same predicate: kept
+           -- when it is kept, cleared when the per-kind copy overwrites it.
+           computation_error_source = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN strategy_analytics.computation_error_source ELSE NULL END,
+           computation_error_job_id = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_protected_job_id THEN strategy_analytics.computation_error_job_id ELSE NULL END,
+           -- JOB-01: this is still an exit from computing. The publish columns
+           -- are untouched on purpose; see the header for the full list of what
+           -- is deliberately NOT written here (status, warned, computed_at).
+           computing_started_at = NULL
+     WHERE strategy_id = p_strategy_id;
+    RETURN;
+  END IF;
+
+  -- D-09 (Phase 164.6.6.3.4), branch (c) when v_side_failed_only is TRUE: this call
+  -- was caused by a side-kind job that failed, no counting failure is live,
+  -- nothing is in flight and no counting job reached done since the row's last
+  -- stamp (CR-R3-01). Nothing was computed and the bridge wrote none of the
+  -- sentence, so the branch HOLDS computed_at, computation_error and both
+  -- provenance markers; it still clears computing_started_at and still resolves
+  -- computing to complete (or complete_with_warnings for a warned row). Two more
+  -- holds, both for a row the call has no business improving:
+  --   * a `failed` row that carries a sentence stays `failed` (it would
+  --     otherwise read `complete` over a held failure sentence); a `failed` row
+  --     with no sentence is the stale Eclipse shape D-05 exists for and resolves
+  --     to complete as it always did;
+  --   * no strategy_analytics row is written when none exists (the held columns
+  --     have nothing to hold, and a row stamped now() would be the fresh-looking
+  --     analytics D-09 forbids).
+  IF v_side_failed_only
+     AND NOT EXISTS (SELECT 1 FROM strategy_analytics WHERE strategy_id = p_strategy_id) THEN
+    RETURN;
+  END IF;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
+  VALUES (p_strategy_id, 'complete', NULL, NULL, NULL, NULL)
+  ON CONFLICT (strategy_id) DO UPDATE
+     SET computation_status = CASE
+           WHEN v_side_failed_only
+                AND strategy_analytics.computation_status = 'failed'
+                AND strategy_analytics.computation_error IS NOT NULL
+           THEN 'failed'
+           WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                OR strategy_analytics.computation_warned
+           THEN 'complete_with_warnings'
+           ELSE 'complete'
+         END,
+         computation_error  = CASE WHEN v_side_failed_only THEN strategy_analytics.computation_error ELSE NULL END,
+         -- Phase 164.2 / criterion 2: the markers go with the sentence, exactly
+         -- like the blank on the line above and for the same reason. Every live
+         -- failure is gone; there is nothing left for a marker to describe, and
+         -- one left standing here would be read by the NEXT failure's write
+         -- branch as a writer's claim over a sentence that no longer exists.
+         -- D-09: a HELD sentence keeps its markers on the same predicate.
+         computation_error_source = CASE WHEN v_side_failed_only THEN strategy_analytics.computation_error_source ELSE NULL END,
+         computation_error_job_id = CASE WHEN v_side_failed_only THEN strategy_analytics.computation_error_job_id ELSE NULL END,
+         computing_started_at = NULL,
+         computed_at        = CASE WHEN v_side_failed_only THEN strategy_analytics.computed_at ELSE now() END;
+END;
+$$;
+
+-- ACL, re-issued as proof (CREATE OR REPLACE with an unchanged signature keeps it).
+REVOKE ALL ON FUNCTION sync_strategy_analytics_status FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_strategy_analytics_status(uuid, uuid) TO service_role;
+
+-- --------------------------------------------------------------------------
+-- the three database comments, back to the text they carried before the migration
+-- --------------------------------------------------------------------------
+-- The same guards as the migration's own comment block: built from the CURRENT
+-- catalogue text, re-issued only when the object exists and still carries the
+-- sentence the migration wrote, otherwise a NOTICE and on. A database without the
+-- 166.3.1 objects, or a comment already restored, must not fail this file.
+DO $comments$
+DECLARE
+  v_attnum  SMALLINT;
+  v_proc    REGPROCEDURE;
+  v_trg     OID;
+  v_cur     TEXT;
+  v_new     TEXT;
+  -- The text the migration wrote (v_*_new there), and the clause each comment carried before it.
+  v_col_now    CONSTANT TEXT := 'the date moves only when the analytics runner writes a finished result (Phase 166.5), so it says nothing about when the current computation started';
+  v_col_old    CONSTANT TEXT := 'the status bridge re-stamps computed_at = now() on every job transition (never reap) and the Python runner omits it on the computing entry-write so it holds the prior run''s value (reap instantly)';
+  v_since      CONSTANT TEXT := 'Since Phase 166.5 the bridge writes no date and the analytics runner stamps only on its success write; this trigger remains as defence in depth.';
+  v_fn_old     CONSTANT TEXT := 'Residue owned by Phase 166.5 COMPUTEDATSTAMP: branch (c) still stamps on an unrelated all-done mark, branch (a) stamps when it moves a failed+warned row to complete_with_warnings, and 166.5''s runner stamp must land on the success write because a stamp written while the row is computing is held here.';
+  v_trg_old    CONSTANT TEXT := 'Owner of the success-side residue: Phase 166.5.';
+BEGIN
+  -- (1) the computing_started_at column comment
+  SELECT a.attnum INTO v_attnum
+    FROM pg_attribute a
+   WHERE a.attrelid = to_regclass('public.strategy_analytics')
+     AND a.attname = 'computing_started_at'
+     AND NOT a.attisdropped;
+  IF v_attnum IS NULL THEN
+    RAISE NOTICE 'comment restore 1 skipped: public.strategy_analytics.computing_started_at is absent';
+  ELSE
+    v_cur := col_description('public.strategy_analytics'::regclass, v_attnum);
+    IF v_cur IS NULL OR position(v_col_now IN v_cur) = 0 THEN
+      RAISE NOTICE 'comment restore 1 skipped: the computing_started_at comment is absent or does not carry the corrected clause';
+    ELSE
+      v_new := replace(v_cur, v_col_now, v_col_old);
+      EXECUTE format('COMMENT ON COLUMN public.strategy_analytics.computing_started_at IS %L', v_new);
+    END IF;
+  END IF;
+
+  -- (2) 166.3.1's trigger function comment
+  v_proc := to_regprocedure('public.strategy_analytics_hold_computed_at_until_success()');
+  IF v_proc IS NULL THEN
+    RAISE NOTICE 'comment restore 2 skipped: public.strategy_analytics_hold_computed_at_until_success() is absent';
+  ELSE
+    v_cur := obj_description(v_proc::oid, 'pg_proc');
+    IF v_cur IS NULL OR position(v_since IN v_cur) = 0 THEN
+      RAISE NOTICE 'comment restore 2 skipped: the trigger function comment is absent or does not carry the corrected sentence';
+    ELSE
+      v_new := replace(v_cur, v_since, v_fn_old);
+      EXECUTE format('COMMENT ON FUNCTION public.strategy_analytics_hold_computed_at_until_success() IS %L', v_new);
+    END IF;
+  END IF;
+
+  -- (3) 166.3.1's trigger comment
+  SELECT t.oid INTO v_trg
+    FROM pg_trigger t
+   WHERE t.tgname = 'strategy_analytics_hold_computed_at_until_success_trigger'
+     AND t.tgrelid = to_regclass('public.strategy_analytics')
+     AND NOT t.tgisinternal;
+  IF v_trg IS NULL THEN
+    RAISE NOTICE 'comment restore 3 skipped: strategy_analytics_hold_computed_at_until_success_trigger is absent';
+  ELSE
+    v_cur := obj_description(v_trg, 'pg_trigger');
+    IF v_cur IS NULL OR position(v_since IN v_cur) = 0 THEN
+      RAISE NOTICE 'comment restore 3 skipped: the trigger comment is absent or does not carry the corrected sentence';
+    ELSE
+      v_new := replace(v_cur, v_since, v_trg_old);
+      EXECUTE format('COMMENT ON TRIGGER strategy_analytics_hold_computed_at_until_success_trigger ON public.strategy_analytics IS %L', v_new);
+    END IF;
+  END IF;
+END $comments$;
+
+-- ───────────── postcondition — CATALOGUE ONLY, reads no row
+DO $verify$
+DECLARE
+  v_body        TEXT;
+  v_overloads   INTEGER;
+  v_comment     TEXT;
+BEGIN
+  v_body := regexp_replace(
+              regexp_replace(
+                pg_get_functiondef('public.sync_strategy_analytics_status(uuid, uuid)'::regprocedure),
+                '/\*.*?\*/', '', 'gs'),
+              '--.*', '', 'gn');
+  IF v_body IS NULL THEN
+    RAISE EXCEPTION 'Rollback 20261023120000 failed: the replaced body could not be read';
+  END IF;
+  IF v_body !~ '\mv_side_failed_only\M' OR v_body !~ '\mv_side_trigger_not_done\M' THEN
+    RAISE EXCEPTION 'Rollback 20261023120000 failed: the 20261009120000 side-trigger flags (v_side_failed_only, v_side_trigger_not_done) are not back in sync_strategy_analytics_status';
+  END IF;
+  IF v_body ~ '\mv_side_trigger\M' THEN
+    RAISE EXCEPTION 'Rollback 20261023120000 failed: the Phase 166.5 v_side_trigger flag survives in sync_strategy_analytics_status';
+  END IF;
+  IF v_body !~* '\mcomputed_at\M' THEN
+    RAISE EXCEPTION 'Rollback 20261023120000 failed: the restored body does not write computed_at again';
+  END IF;
+  SELECT count(*) INTO v_overloads
+    FROM pg_proc p
+   WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'sync_strategy_analytics_status';
+  IF v_overloads <> 1 THEN
+    RAISE EXCEPTION 'Rollback 20261023120000 failed: % overload(s) of sync_strategy_analytics_status exist, not exactly the two-argument function', v_overloads;
+  END IF;
+  v_comment := obj_description('public.sync_strategy_analytics_status(uuid, uuid)'::regprocedure, 'pg_proc');
+  IF v_comment IS NULL THEN
+    RAISE EXCEPTION 'Rollback 20261023120000 failed: the bridge lost its COMMENT';
+  END IF;
+  IF NOT has_function_privilege('service_role', 'public.sync_strategy_analytics_status(uuid, uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'Rollback 20261023120000 failed: service_role cannot EXECUTE sync_strategy_analytics_status(uuid, uuid)';
+  END IF;
+  IF has_function_privilege('anon', 'public.sync_strategy_analytics_status(uuid, uuid)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.sync_strategy_analytics_status(uuid, uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'Rollback 20261023120000 failed: anon or authenticated can EXECUTE sync_strategy_analytics_status(uuid, uuid)';
+  END IF;
+
+  RAISE NOTICE 'Rollback 20261023120000: sync_strategy_analytics_status is the two-argument 20261009120000 body again (comment and ACL intact, no other overload), the bridge writes computed_at again, and the v_side_trigger flag is gone. The migration ledger row is left in place (see the header).';
+END
+$verify$;
+
+COMMIT;

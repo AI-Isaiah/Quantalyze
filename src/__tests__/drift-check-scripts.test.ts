@@ -4818,7 +4818,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=17 and ARMS_FLOOR=299 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=18 and ARMS_FLOOR=308 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -4971,9 +4971,16 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // but not checked against a run) and declares `ALL 14 ARMS EXECUTED`. MEASURED: this pin read
     // `expected 1 to be +0` against SENTINEL_FLOOR=16 first, and ci-anti-skip-gate.contract.test.ts
     // read 17 sentinel-bearing files against the table's 16.
+    //
+    // MOVED 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07), 17/299 -> 18/308. The NEW gate
+    // test_sync_status_computed_at_runner_only.sql JOINED and declares `ALL 10 ARMS EXECUTED`,
+    // and test_sync_status_analytics_scope.sql goes 21 -> 20 (arm D15 retired with the release
+    // clause it pinned). MEASURED: the sql-tests step run on the local stack on the merged tree
+    // printed `18 completion sentinel(s) ... covering 308 declared arms`, and
+    // ci-anti-skip-gate.contract.test.ts read 18 sentinel-bearing files against the table's 17.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=17", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=18", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -4984,7 +4991,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=299", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=308", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
