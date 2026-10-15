@@ -4886,7 +4886,7 @@ Measured at `e34605be`: `reconstruct_symbol_returns` in `analytics-service/route
 4. The effect on PROD's current Bridge outputs is read before and after deploy, read-only and with the marker query first.
 
 **Founder decision D-20 (2026-10-15, option A):** a spot holding with fewer than 30 adjacent one-day returns is withheld from the matcher's return join by name. It stays named in `holding_flags` with the distinct reason `too_few_adjacent_returns`, and it stays in AUM, weights and the max-weight test (D-01). `/compare` is unchanged. A test goes RED when the withholding is neutered: 30 priced days, none adjacent, must not empty the join.
-**Plans:** 5/9 plans executed
+**Plans:** 7/9 plans executed
 
 Plans:
 **Wave 1**
@@ -4899,8 +4899,8 @@ Plans:
 - [x] 167.1.1.1-06-PLAN.md — signed derivative rule, direction per day and option twin in both runtimes (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 167.1.1.1-05-PLAN.md — matcher AUM basis wired, withheld spot named in holding_flags, book-level join pinned (wave 3)
-- [ ] 167.1.1.1-07-PLAN.md — /compare derivatives move from rebuilding to the signed rule (wave 3)
+- [x] 167.1.1.1-05-PLAN.md — matcher AUM basis wired, withheld spot named in holding_flags, book-level join pinned (wave 3)
+- [x] 167.1.1.1-07-PLAN.md — /compare derivatives move from rebuilding to the signed rule (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 167.1.1.1-08-PLAN.md — derivatives named in holding_flags, ENGINE_VERSION v2.3.0 (wave 4)
