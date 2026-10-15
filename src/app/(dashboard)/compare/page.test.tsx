@@ -61,17 +61,21 @@ vi.mock("@/components/strategy/CompareCorrelationMatrix", () => ({
 // Supabase mock factory — returns different data based on what is queried
 // ---------------------------------------------------------------------------
 
-type MockSnapshot = {
+// Phase 167.1.1 / D-03: the holding read is `allocator_holdings` (the daily
+// mark price), not `allocator_equity_snapshots`.
+type MockHolding = {
   asof: string;
-  breakdown: Record<string, number> | null;
+  mark_price: number;
+  updated_at: string;
+  api_key_id: string;
 };
 
-// Controls for the mock: strategy data + snapshot data
+// Controls for the mock: strategy data + holding price rows
 let mockStrategyData: unknown[] = [];
-let mockSnapshotData: MockSnapshot[] = [];
+let mockHoldingData: MockHolding[] = [];
 // Phase 167.1.2 review round 2 (SFH-R2-02): per-table query errors.
 let mockStrategyError: { message: string } | null = null;
-let mockSnapshotError: { message: string } | null = null;
+let mockHoldingError: { message: string } | null = null;
 
 /**
  * Phase 159 (159-03 / RANK-02) — every `.select()` string issued against the
@@ -105,8 +109,12 @@ vi.mock("@/lib/supabase/server", () => ({
         }),
         in: vi.fn().mockReturnThis(),
         eq: vi.fn().mockReturnThis(),
+        gte: vi.fn().mockReturnThis(),
         order: vi.fn().mockReturnThis(),
-        // limit() is called as the terminal step for snapshot queries
+        // range() ends the paged allocator_holdings read (a short page, so one
+        // page); the builder is awaitable, so it resolves like the others.
+        range: vi.fn().mockReturnThis(),
+        // limit() is called as the terminal step for other queries
         limit: vi.fn(() => resolve()),
         // maybeSingle() is the terminal step for the Phase 109 requireRolePage
         // guard's `profiles.select("role").eq("id", …).maybeSingle()` lookup.
@@ -126,6 +134,8 @@ vi.mock("@/lib/supabase/server", () => ({
       // and mockReturnValue would discard it).
       (builder.in as ReturnType<typeof vi.fn>).mockReturnValue(builder);
       (builder.eq as ReturnType<typeof vi.fn>).mockReturnValue(builder);
+      (builder.gte as ReturnType<typeof vi.fn>).mockReturnValue(builder);
+      (builder.range as ReturnType<typeof vi.fn>).mockReturnValue(builder);
       (builder.order as ReturnType<typeof vi.fn>).mockReturnValue(builder);
       return builder;
     }
@@ -145,8 +155,8 @@ vi.mock("@/lib/supabase/server", () => ({
         if (table === "strategies") {
           return makeQueryBuilder(() => mockStrategyData, true, () => mockStrategyError);
         }
-        if (table === "allocator_equity_snapshots") {
-          return makeQueryBuilder(() => mockSnapshotData, false, () => mockSnapshotError);
+        if (table === "allocator_holdings") {
+          return makeQueryBuilder(() => mockHoldingData, false, () => mockHoldingError);
         }
         return makeQueryBuilder(() => []);
       }),
@@ -228,17 +238,21 @@ function makeSampleStrategy(id: string, name: string) {
   };
 }
 
-function makeSampleSnapshots(symbol: string, count: number): MockSnapshot[] {
-  const snaps: MockSnapshot[] = [];
+function makeSampleHoldings(symbol: string, count: number): MockHolding[] {
+  void symbol; // the stub ignores filters; the rows are this holding's own
+  const rows: MockHolding[] = [];
   const base = new Date("2025-01-01").getTime();
   for (let i = 0; i < count; i++) {
     const d = new Date(base + i * 86400 * 1000).toISOString().slice(0, 10);
-    snaps.push({
+    rows.push({
       asof: d,
-      breakdown: { [symbol]: 1000 + i * 10 },
+      // A gently varying mark so every metric computes (consecutive days).
+      mark_price: 100 + (i % 7) + i * 0.1,
+      updated_at: `${d}T10:00:00Z`,
+      api_key_id: "key-a",
     });
   }
-  return snaps;
+  return rows;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,7 +272,7 @@ describe("ComparePage — strategy-only regression (pre-Phase-09 path preserved)
         "Strategy Beta",
       ),
     ];
-    mockSnapshotData = [];
+    mockHoldingData = [];
   });
 
   it("renders the page header for a strategy-only compare", async () => {
@@ -288,9 +302,9 @@ describe("ComparePage — strategy-only regression (pre-Phase-09 path preserved)
 
 describe("ComparePage — holding-side branch (LIVE-03 + finding g4 render parity)", () => {
   beforeEach(() => {
-    // Default: A owns holding:binance:BTC:spot with 40 snapshot days
+    // Default: A owns holding:binance:BTC:spot with 40 consecutive priced days
     mockStrategyData = [];
-    mockSnapshotData = makeSampleSnapshots("BTC", 40);
+    mockHoldingData = makeSampleHoldings("BTC", 40);
   });
 
   it("renders HoldingFactsheet when ids contain holding: prefix and allocator owns it", async () => {
@@ -307,16 +321,23 @@ describe("ComparePage — holding-side branch (LIVE-03 + finding g4 render parit
     expect(screen.getByText("Holding")).toBeInTheDocument();
     // BTC symbol
     expect(screen.getByText("BTC")).toBeInTheDocument();
-    // Phase 167.1.2 / D-13: 40 snapshot days WOULD compute every metric, but
-    // while the equity history is rebuilt the page shows the note and no
-    // per-holding return, Sharpe, drawdown or vol.
-    expect(screen.getByTestId("holding-factsheet-rebuilding")).toBeInTheDocument();
-    expect(screen.queryByText("Sharpe")).toBeNull();
-    expect(screen.queryByText("Max drawdown")).toBeNull();
+    // Phase 167.1.1 / D-03: 40 consecutive priced days, so the spot holding is
+    // "ready" and the ready grid shows its four metrics, with no withheld note.
+    expect(screen.queryByTestId("holding-factsheet-rebuilding")).toBeNull();
+    expect(screen.getByText("Cumulative return")).toBeInTheDocument();
+    expect(screen.getByText("Sharpe")).toBeInTheDocument();
+    expect(screen.getByText("Max drawdown")).toBeInTheDocument();
+    expect(screen.getByText("Vol (annualized)")).toBeInTheDocument();
+    // State R: the card says where the four numbers come from, with the day count.
+    expect(
+      screen.getByTestId("holding-factsheet-price-basis").textContent,
+    ).toBe(
+      "Computed from 40 days of BTC's daily price, so buying, selling or moving more of it does not count as a gain or loss.",
+    );
   });
 
   it("shows 'not available' when holding fetch returns empty (RLS-gated or no data)", async () => {
-    mockSnapshotData = []; // no snapshots → fetchHoldingCompareItem returns null
+    mockHoldingData = []; // no holding rows → fetchHoldingCompareItem returns null
     const ComparePage = await getComparePage();
     const Page = await ComparePage({
       searchParams: Promise.resolve({
@@ -365,7 +386,7 @@ describe("ComparePage — finding g4 mixed render (HoldingFactsheet + StrategyFa
         "Strategy Beta",
       ),
     ];
-    mockSnapshotData = makeSampleSnapshots("BTC", 40);
+    mockHoldingData = makeSampleHoldings("BTC", 40);
   });
 
   it("/compare?ids=holding:binance:BTC:spot,<uuid> renders HoldingFactsheet side-by-side", async () => {
@@ -383,7 +404,7 @@ describe("ComparePage — finding g4 mixed render (HoldingFactsheet + StrategyFa
   });
 
   it("/compare?ids=<uuid>,<uuid> renders ZERO HoldingFactsheets (regression)", async () => {
-    mockSnapshotData = [];
+    mockHoldingData = [];
     const ComparePage = await getComparePage();
     const Page = await ComparePage({
       searchParams: Promise.resolve({
@@ -392,6 +413,57 @@ describe("ComparePage — finding g4 mixed render (HoldingFactsheet + StrategyFa
     });
     render(Page as React.ReactElement);
     expect(screen.queryByTestId("holding-factsheet")).not.toBeInTheDocument();
+  });
+});
+
+// CR-01 / SFH-01 (167.1.1 round 1): an owned holding whose recorded price is a
+// writer constant must neither print a confident 0.00% nor vanish from the page.
+describe("ComparePage — a holding whose recorded price is a fixed value (CR-01 / SFH-01)", () => {
+  const STABLE_ID = "holding:binance:USDT:spot";
+  const flatMarks = (): MockHolding[] =>
+    makeSampleHoldings("USDT", 40).map((r) => ({ ...r, mark_price: 1 }));
+
+  beforeEach(() => {
+    mockStrategyData = [];
+    mockHoldingData = flatMarks();
+  });
+
+  it("alone: the card stays with the named note, and no figure is printed", async () => {
+    const ComparePage = await getComparePage();
+    const Page = await ComparePage({ searchParams: Promise.resolve({ ids: STABLE_ID }) });
+    render(Page as React.ReactElement);
+    expect(screen.queryByText(/comparison isn't available/i)).toBeNull();
+    expect(screen.getByTestId("holding-factsheet")).toBeInTheDocument();
+    expect(screen.getByTestId("holding-factsheet-rebuilding").textContent).toBe(
+      "Return, Sharpe, max drawdown and volatility are not shown for USDT: its recorded price is a fixed value, not a market price.",
+    );
+    expect(screen.queryByText(/0\.00%/)).toBeNull();
+    expect(screen.queryByTestId("holding-factsheet-price-basis")).toBeNull();
+  });
+
+  it("mixed with a strategy: the holding card is not dropped from the comparison", async () => {
+    mockStrategyData = [
+      makeSampleStrategy("22222222-3333-4444-8555-666666666666", "Strategy Beta"),
+    ];
+    const ComparePage = await getComparePage();
+    const Page = await ComparePage({
+      searchParams: Promise.resolve({
+        ids: `${STABLE_ID},22222222-3333-4444-8555-666666666666`,
+      }),
+    });
+    render(Page as React.ReactElement);
+    expect(screen.getByTestId("holding-factsheet")).toBeInTheDocument();
+    expect(screen.getByTestId("holding-factsheet-rebuilding")).toBeInTheDocument();
+    expect(screen.getByText("Strategy Beta")).toBeInTheDocument();
+  });
+
+  it("an unowned stablecoin holding (zero rows) is still the generic 'not available' (D-15)", async () => {
+    mockHoldingData = [];
+    const ComparePage = await getComparePage();
+    const Page = await ComparePage({ searchParams: Promise.resolve({ ids: STABLE_ID }) });
+    render(Page as React.ReactElement);
+    expect(screen.getByText(/comparison isn't available/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("holding-factsheet")).toBeNull();
   });
 });
 
@@ -414,7 +486,7 @@ describe("ComparePage — RANK-02 explicit analytics projection", () => {
       makeSampleStrategy("11111111-2222-4333-8444-555555555555", "Strategy Alpha"),
       makeSampleStrategy("22222222-3333-4444-8555-666666666666", "Strategy Beta"),
     ];
-    mockSnapshotData = [];
+    mockHoldingData = [];
   });
 
   const capture = async () => {
@@ -481,7 +553,7 @@ describe("ComparePage — the chain-break flag is projected as a scalar alias (S
     mockStrategyData = [
       makeSampleStrategy("11111111-2222-4333-8444-555555555555", "Strategy Alpha"),
     ];
-    mockSnapshotData = [];
+    mockHoldingData = [];
   });
 
   it("projects twr_chain_broken as a one-scalar JSONB alias", async () => {
@@ -532,7 +604,7 @@ describe("ComparePage — covered-from read for chain-broken rows (SC-3, D-07)",
     adminReadIds.length = 0;
     adminAnswer = { kind: "payload", payload: BROKER_NAN_PAYLOAD };
     overlayItems = [];
-    mockSnapshotData = [];
+    mockHoldingData = [];
     mockStrategyError = null;
   });
 
@@ -629,13 +701,13 @@ describe("ComparePage — a failed load is surfaced, not reported as 'not availa
     mockStrategyData = [
       makeSampleStrategy("22222222-3333-4444-8555-666666666666", "Strategy Beta"),
     ];
-    mockSnapshotData = makeSampleSnapshots("BTC", 40);
+    mockHoldingData = makeSampleHoldings("BTC", 40);
     mockStrategyError = null;
-    mockSnapshotError = null;
+    mockHoldingError = null;
   });
   afterEach(() => {
     mockStrategyError = null;
-    mockSnapshotError = null;
+    mockHoldingError = null;
   });
 
   const run = async (ids: string) => {
@@ -660,12 +732,12 @@ describe("ComparePage — a failed load is surfaced, not reported as 'not availa
   });
 
   it("a holding query error throws to the error boundary, even beside a strategy that loaded", async () => {
-    mockSnapshotError = { message: "snapshots-boom" };
+    mockHoldingError = { message: "holdings-boom" };
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const p = run("holding:binance:BTC:spot,22222222-3333-4444-8555-666666666666");
       await expect(p).rejects.toThrow("holding compare load failed");
-      await expect(p).rejects.not.toThrow(/snapshots-boom/);
+      await expect(p).rejects.not.toThrow(/holdings-boom/);
     } finally {
       spy.mockRestore();
     }
@@ -692,9 +764,9 @@ const ONE_COMPARE =
 describe("ComparePage — zero, one and many ids (N-CMP)", () => {
   beforeEach(() => {
     mockStrategyData = [];
-    mockSnapshotData = [];
+    mockHoldingData = [];
     mockStrategyError = null;
-    mockSnapshotError = null;
+    mockHoldingError = null;
   });
 
   it("with no ids, keeps Compare Strategies and names the factsheet control", async () => {

@@ -161,7 +161,8 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 166.5: COMPUTEDATSTAMP — the analytics runner stamps computed_at on a real finish** (INSERTED 2026-10-03) — not yet planned
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [x] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed (completed 2026-10-04)
-- [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
+- [x] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — verified 2026-10-15 (completed 2026-10-15)
+- [ ] **Phase 167.1.1.1: BRIDGERETURNS — the Bridge matcher's per-holding returns come from each holding's daily mark price, so buying, selling or moving an asset never reads as a gain or loss** (INSERTED 2026-10-15) — not yet planned (data integrity; founder decision 167.1.1 D-06)
 - [x] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — verified 2026-10-11 (completed 2026-10-11)
 - [ ] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — not yet planned (data integrity; after 167.1.2 PR C)
 - [ ] **Phase 167.1.2.1.1: WRITERRESIDUALS — the allocator equity writer persists why a curve was refused and never dilutes or drops a key silently** (INSERTED) — not yet planned (data integrity; split from 167.1.2.1 by D-01, 2026-10-13)
@@ -4851,7 +4852,7 @@ Plans:
 **Requirements**: TBD
 **Depends on:** Phase 167.1
 ⚠️ **2026-09-24 correction (read-only root-cause trace at `96b5db4c`):** the collapse also lives in the analytics-side unique index `(allocator_id, venue, symbol, asof)` on `allocator_holdings`, and for ONE account behind several keys it merges CORRECTLY but attributes the row to whichever key polled last. Adding `api_key_id` to the key as framed above would triple-count that case. Phase 167.1.2 ACCOUNTTRUTH decides account identity first (founder: refuse a second key on the same account); re-scope this phase against it before planning.
-**Plans:** 0 plans
+**Plans:** 5/5 plans complete
 
 ⭐ **ROUTED IN 2026-09-27 (from the 167.1.2 PR C executor): three holdings readers still read allocator-wide instead of per key.**
 - **R-15-1:** the scenario commit route, `src/app/api/allocator/scenario/commit/route.ts` (its `allocator_holdings` lookup for the audit recompute).
@@ -4866,6 +4867,26 @@ After 167.1.2 PR C ships, Open Positions (per key, latest asof) and the exposure
 
 Plans:
 
+- [x] 167.1.1-01-PLAN.md — soft-disconnected keys are "keys needing attention"
+- [x] 167.1.1-02-PLAN.md — Holdings and Open Positions disclose a disconnected key
+- [x] 167.1.1-03-PLAN.md — /compare per-holding metrics from the daily mark price
+- [x] 167.1.1-04-PLAN.md — two keys on one venue holding one asset, proven and pinned
+- [x] 167.1.1-05-PLAN.md — the holding card states where its numbers come from
+
+### Phase 167.1.1.1: BRIDGERETURNS — the Bridge matcher's per-holding returns come from each holding's daily mark price, so buying, selling or moving an asset never reads as a gain or loss (INSERTED)
+
+**Goal:** The Bridge matcher's per-holding returns come from each holding's daily mark price, so buying, selling or moving an asset never reads as a gain or loss. Booked 2026-10-15 by founder decision 167.1.1 D-06 ("Book a follow-up phase"). Owns TODOS `[167.1.1-BRIDGE-DOLLAR-RATIO-RETURNS]`. Data integrity: the user-facing Bridge flags rest on it.
+**Requirements**: TBD
+**Depends on:** Phase 167.1.1
+Measured at `e34605be`: `reconstruct_symbol_returns` in `analytics-service/routers/match.py` builds each holding's daily return as a day-over-day ratio of dollar values from `allocator_equity_snapshots.breakdown`. It feeds the matcher's per-holding pseudo-strategy returns, which drive the correlation-ceiling holding flags and the portfolio context. Phase 167.1.1 retired the same dollar-ratio read on /compare (D-03). There, per-holding metrics come from the daily mark price, use adjacent calendar days only, never treat a gap as zero, and withhold fixed-mark and account-balance holdings (`src/app/(dashboard)/compare/lib/holding-compare-adapter.ts`).
+**Success Criteria** (what must be TRUE):
+1. The matcher's per-holding returns come from a source that removes purchases, sales and transfers: the same mark-price rule as `holding-compare-adapter.ts`, or a stated equivalent. A test goes RED on the dollar-ratio read.
+2. A holding the price rule cannot price (a fixed mark, an account balance, or too few adjacent priced days) is withheld from the matcher's per-holding signal by name. It is never zero-filled.
+3. The TypeScript and Python rules agree on one shared fixture.
+4. The effect on PROD's current Bridge outputs is read before and after deploy, read-only and with the marker query first.
+**Plans:** 0 plans
+
+Plans:
 - [ ] TBD — plans not listed yet
 
 ### Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports (INSERTED)
@@ -6158,7 +6179,8 @@ kept verbatim.
 | 166.5 COMPUTEDATSTAMP | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Complete    | 2026-10-04 |
-| 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
+| 167.1.1 HOLDINGKEYSCOPE | 5/5 | Complete | v0.132.0.0 · #1053; 375px follow-up v0.132.0.1 · #1056 |
+| 167.1.1.1 BRIDGERETURNS | 0/? | Queued — data integrity; founder decision 167.1.1 D-06 | - |
 | 167.1.2 ACCOUNTTRUTH | PR A, B, C1–C5 shipped | Complete | 2026-10-11 |
 | 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
 | 167.1.2.1.1 WRITERRESIDUALS | 0/? | Queued — data integrity; split from 167.1.2.1 (D-01), after it | - |

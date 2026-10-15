@@ -7,14 +7,21 @@
  * each of venue / symbol / holding_type matches /^[A-Za-z0-9_-]+$/ per
  * finding f6 — enforcing the Phase 08 D-08 scope_ref invariant that
  * notes + audit entity_id rely on. Holding-side access is RLS-gated on
- * allocator_equity_snapshots — unauthorized reads return zero rows which
- * we surface as a generic "not available" message with no existence leak.
+ * allocator_holdings (policy allocator_holdings_owner_select) — unauthorized
+ * reads return zero rows which we surface as a generic "not available"
+ * message with no existence leak.
  *
- * Metrics math mirrors analytics-service/services/equity_reconstruction.py
- * reconstruct_symbol_returns (Plan 09-02) — same dropna convention,
- * same cumulative-product semantics.
+ * Phase 167.1.1 / D-03 (founder, 2026-10-15): the metrics are computed from the
+ * holding's daily MARK PRICE (`allocator_holdings.mark_price`, one price per
+ * `asof` day), never from its dollar value, so buying, selling or moving more
+ * of an asset is not read as a gain or loss. They no longer mirror the
+ * dollar-ratio `reconstruct_symbol_returns` in
+ * analytics-service/services/equity_reconstruction.py (see
+ * `holdingCompareHistoryState` for what stays deferred).
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { annualizationPeriods, isCryptoExchange } from "@/lib/closed-sets";
+import { HoldingsUpdatedAtError, writtenAtMicros } from "@/lib/holdings-account-day";
 import { dispersion, sharpe as returnStatsSharpe } from "@/lib/return-stats";
 
 export type ParsedHoldingCompareId = {
@@ -56,34 +63,48 @@ export type HoldingCompareAnalytics = {
   sharpe: number | null;
   max_drawdown: number | null;
   vol: number | null;
+  /**
+   * Days that carry a valid price (the MIN unit). An item with four null
+   * metrics below the minimum still carries it.
+   */
+  priced_days: number;
 };
 
 /**
- * Phase 167.1.2 / D-13 ("Hide it until correct", extended to /compare,
- * 2026-09-25). The per-holding return, Sharpe, max drawdown and vol are level
- * ratios over `allocator_equity_snapshots.breakdown`, the same store D-02
- * withholds on My Allocation. That store can count one exchange account twice
- * when two keys read it (a +100% / -50% day inside one symbol's series), and a
- * $-level ratio reads buying or selling more of a symbol as a gain or loss.
- * Plan 11 (2026-09-29) DECIDED to keep this "rebuilding". My Allocation can
- * be ready off `payload.returns`, a book-level flow-neutral series; nothing
- * here reads it. These four numbers are still `value[i] / value[i-1] - 1`
- * over a symbol's `breakdown` dollars (`reconstructAndAnalyze`), so buying or
- * selling more of a symbol reads as a gain or loss. Plan 10 makes the refresh
- * write each account once from its merge on; it does not rewrite the rows
- * already stored, and it does not touch this ratio. No per-holding
- * flow-adjusted source exists, and no roadmap phase owns one (measured
- * 2026-09-29); 167.1.2-11-SUMMARY.md routes that. Flip only when this
- * computation reads such a source. The `historyState` test seam keeps the
- * ready branch pinned.
- *
- * Consumers are fail-closed: anything other than an explicit "ready" renders
- * the rebuilding note. Flipping this constant to "ready" restores the
- * pre-D-13 behaviour (the item carries the analytics computed from the
- * trustworthy rows, and availability is unchanged).
+ * Minimum number of PRICED days a holding needs before any metric is shown.
+ * The unit is the one the founder measured on 2026-10-15 ("26 of 36 spot
+ * holdings ... have at least 30 priced days"), so it counts days that carry a
+ * valid price, not returns. Below it all four metrics are null (never zero).
+ * Deliberately not reconciled with the Python warm-up gate, which counts returns.
  */
-export const HOLDING_COMPARE_HISTORY_STATE: "rebuilding" | "ready" =
-  "rebuilding";
+export const HOLDING_COMPARE_MIN_PRICED_DAYS = 30;
+
+/** Read window: the old snapshots window, and `fetchHoldings`' backfill cap. */
+export const HOLDING_COMPARE_WINDOW_DAYS = 730;
+
+/** Rows per page: PostgREST caps a response at `max_rows` (1000) and still answers HTTP 200. */
+export const HOLDING_COMPARE_PAGE_SIZE = 1000;
+
+/**
+ * Page ceiling: 50000 rows, far above one holding's 730 days times any real
+ * key count. Past it the read throws instead of returning a partial series.
+ */
+export const HOLDING_COMPARE_MAX_PAGES = 50;
+
+/**
+ * Why a spot holding that was FOUND (rows exist, the owner is known) carries no
+ * metrics. One reason per cause, because each reads differently to the owner:
+ * - `fixed_price`: its recorded price is a writer constant (`FIXED_MARK_SET`:
+ *   a stablecoin symbol, sFOX).
+ * - `account_balance` (M-R2-01): the row is an account balance on a venue that is
+ *   not a crypto exchange (MT5 `ACCOUNT-<hex>`), not a traded asset. Its mark can
+ *   be the unit's daily close and so varies, which is why it is NOT "fixed".
+ * - `no_price` (M-R2-02): a crypto spot holding with rows but NO day carrying a
+ *   valid price (the writer's `0.0` failed-ticker sentinel on every day, e.g. an
+ *   asset with no `{asset}/USDT` market). Waiting will not fill it, so it is not
+ *   the "so far" state.
+ */
+export type HoldingWithheldReason = "fixed_price" | "account_balance" | "no_price";
 
 export type HoldingCompareItem = {
   kind: "holding";
@@ -94,7 +115,56 @@ export type HoldingCompareItem = {
 } & (
   | { historyState: "ready"; analytics: HoldingCompareAnalytics }
   | { historyState: "rebuilding"; analytics: null }
+  | { historyState: "withheld"; analytics: null; withheld_reason: HoldingWithheldReason }
 );
+
+/**
+ * Holdings whose recorded `mark_price` is a constant the analytics writer
+ * stamps, not an observed market price (CR-01, 167.1.1 round 1). A price-based
+ * return over a constant 1.0 prints a confident 0.00% return, drawdown and vol,
+ * which is an invented number, so these holdings get no metrics.
+ *
+ * - `stablecoinSymbols` MIRRORS `STABLECOINS` in
+ *   analytics-service/services/closed_sets.py (`_fetch_spot_rows` sets
+ *   `mark_price = 1.0` for any asset in it, without a ticker call). A parity
+ *   test reads that Python literal and fails when the two drift.
+ * - `venues`: sFOX's balance builder (`_fetch_sfox_balance_rows`) writes
+ *   `"mark_price": 1.0` for every row it keeps. The same parity test pins that
+ *   premise in the Python source.
+ * - A venue `isCryptoExchange` rejects (MT5 `ACCOUNT-<hex>` rows: a mark of 1.0
+ *   or a native close) is not a fixed price but an account balance; see
+ *   `holdingWithheldReason`.
+ */
+export const FIXED_MARK_SET = {
+  stablecoinSymbols: new Set(["USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USD"]),
+  venues: new Set(["sfox"]),
+} as const;
+
+/**
+ * Why a holding's recorded price cannot be read as a market price, or null when
+ * it can. Venue and symbol are matched case-insensitively (the writer
+ * upper-cases the asset before its set test). A venue `isCryptoExchange`
+ * rejects is tested FIRST: such a row is an account balance whatever its
+ * symbol (M-R2-01), so it never reads as "fixed price".
+ */
+export function holdingWithheldReason(
+  venue: string,
+  symbol: string,
+): Extract<HoldingWithheldReason, "fixed_price" | "account_balance"> | null {
+  if (!isCryptoExchange(venue)) return "account_balance";
+  if (
+    FIXED_MARK_SET.venues.has(venue.toLowerCase()) ||
+    FIXED_MARK_SET.stablecoinSymbols.has(symbol.toUpperCase())
+  ) {
+    return "fixed_price";
+  }
+  return null;
+}
+
+/** True when a holding's recorded price is not a market price (any reason above). */
+export function holdingMarkIsFixed(venue: string, symbol: string): boolean {
+  return holdingWithheldReason(venue, symbol) !== null;
+}
 
 /**
  * The holding read failed (Phase 167.1.2 review round 2, SFH-R2-02). The
@@ -109,69 +179,173 @@ export class HoldingCompareLoadError extends Error {
 }
 
 /**
- * Reconstruct per-symbol daily returns from breakdown jsonb + compute institutional metrics.
- * Mirrors Python reconstruct_symbol_returns (analytics-service/services/equity_reconstruction.py):
- * - Drop absent/zero days (RESEARCH Pitfall 2 — no forward-fill)
- * - pct_change semantics: return[i] = value[i] / value[i-1] - 1
- * - cumulative_return = product(1 + r) - 1
- * - sharpe = `return-stats` `sharpe(returns, { periodsPerYear: 365, ddof: 0 })`
- *   [population std], the ONE TS Sharpe (Phase 166.1 D-17): null when the
- *   returns have no dispersion, including the float residue of a compounding
- *   constant yield, exactly as for a flat NAV (D-07)
- * - max_drawdown via cumulative-product running-peak
- * - vol = `return-stats` `dispersion(returns, 0).sd * sqrt(365)` (a residue sd
- *   reads as 0, the flat-NAV value)
- * Returns null metrics when fewer than 2 symbol-present data points exist.
+ * Phase 167.1.1 / D-03: whether a holding type's metrics are shown ("ready")
+ * or withheld ("rebuilding"). A pure function of the type; there is no global
+ * switch and no test seam any more.
  *
- * @internal Exported for unit testing only (Phase 167.1.2 / D-13): while the
- * item withholds its analytics, the math is pinned on this function directly
- * so those tests can still fail.
+ * - "spot" is "ready": its price is `allocator_holdings.mark_price`, one price
+ *   per `asof` day (one key per day, see `dailyMarkPrices`), so purchases and
+ *   sales do not move it. A mark that is not a finite number above 0 (the
+ *   writer's `0.0` failed-ticker sentinel) is a gap, never a price; there is
+ *   no zero-fill and no forward-fill. A daily return exists only between two
+ *   ADJACENT calendar days that both carry a price, so no return spans a gap.
+ *   Fewer than `HOLDING_COMPARE_MIN_PRICED_DAYS` priced days gives null metrics.
+ *   A mark is a ticker `last` read at poll time, so the copy says "daily
+ *   price", never close-to-close.
+ * - Anything else (a derivative) stays "rebuilding" until a signed basis is
+ *   defined (deferred, not booked as a phase).
+ *
+ * Orchestrator reading, flagged for the founder (NOT a founder decision): a
+ * spot holding whose recorded price is not a market price
+ * (`holdingMarkIsFixed`: MT5 `ACCOUNT-<hex>` rows, stablecoin symbols, sFOX)
+ * gets no metrics, never a confident 0%. `fetchHoldingCompareItem` returns it as
+ * a "withheld" item, not null, so the page keeps the card and names the cause.
+ *
+ * Deferred and not touched (SC 4): `reconstruct_symbol_returns` in
+ * analytics-service/routers/match.py is the Python twin of the retired
+ * dollar-ratio read, and the Bridge matcher still uses it.
  */
-export function reconstructAndAnalyze(
-  snapshots: Array<{ asof: string; breakdown: Record<string, number> | null }>,
-  symbol: string,
-): HoldingCompareAnalytics {
-  // Extract non-zero, finite values for the symbol
-  const values: number[] = [];
-  for (const s of snapshots) {
-    const v = s.breakdown?.[symbol];
-    if (v == null || typeof v !== "number" || !Number.isFinite(v) || v === 0) continue;
-    values.push(v);
-  }
-  if (values.length < 2) {
-    return { cumulative_return: null, sharpe: null, max_drawdown: null, vol: null };
-  }
+export function holdingCompareHistoryState(
+  holding_type: string,
+): "ready" | "rebuilding" {
+  return holding_type === "spot" ? "ready" : "rebuilding";
+}
 
-  // Compute daily returns: (value[i] / value[i-1]) - 1
-  const returns: number[] = [];
-  for (let i = 1; i < values.length; i++) {
-    returns.push(values[i] / values[i - 1] - 1);
+type PriceRow = {
+  asof: string;
+  mark_price: unknown;
+  updated_at: string;
+  api_key_id: string;
+};
+
+export type DailyPrice = { asof: string; price: number };
+
+/**
+ * A stored row broke the read contract (SFH-03, 167.1.1 round 1): `mark_price`
+ * is `numeric NOT NULL`, so a value that is not a finite number is a driver or
+ * schema change, and `asof` is a `date`, so anything but a `YYYY-MM-DD` string
+ * is the same. Carries counts only, never a row value.
+ */
+export class HoldingMarkContractError extends Error {
+  readonly badMarks: number;
+  readonly badDays: number;
+  constructor(badMarks: number, badDays: number) {
+    super(`holding rows broke the read contract (marks: ${badMarks}, days: ${badDays})`);
+    this.name = "HoldingMarkContractError";
+    this.badMarks = badMarks;
+    this.badDays = badDays;
   }
-  if (returns.length === 0) {
-    return { cumulative_return: null, sharpe: null, max_drawdown: null, vol: null };
+}
+
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const MS_PER_DAY = 86_400_000;
+
+/**
+ * One price per calendar day, ascending by `asof`.
+ *
+ * Two classes of unusable row, kept apart (SFH-03):
+ * - A FINITE number at or below 0 is a gap. It is the writer's documented `0.0`
+ *   failed-ticker sentinel (or a nonsense negative); it is skipped BEFORE the
+ *   per-day pick, so a later failed poll never eclipses a valid mark.
+ * - A mark that is not a finite number, or an `asof` that is not a `YYYY-MM-DD`
+ *   string, is a CONTRACT violation (`numeric NOT NULL`, `date`): every row is
+ *   checked first, and one offender throws `HoldingMarkContractError` with the
+ *   counts. It is never a gap, or a type change would read as "not enough days".
+ *
+ * Per `asof` the row with the greatest `writtenAtMicros(updated_at)` wins, ties
+ * to the smallest lowercase `api_key_id` (the `oneKeyPerAccountDay` tie-break),
+ * so two keys holding the asset on one venue never merge or double a day.
+ * Throws `HoldingsUpdatedAtError` on a bad `updated_at` of a row that reaches
+ * the pick.
+ */
+export function dailyMarkPrices(rows: readonly PriceRow[]): DailyPrice[] {
+  let badMarks = 0;
+  let badDays = 0;
+  for (const r of rows) {
+    if (typeof r.mark_price !== "number" || !Number.isFinite(r.mark_price)) badMarks += 1;
+    if (typeof r.asof !== "string" || !ISO_DAY.test(r.asof)) badDays += 1;
   }
+  if (badMarks > 0 || badDays > 0) throw new HoldingMarkContractError(badMarks, badDays);
 
-  const ANNUAL = 365;
+  const best = new Map<string, { price: number; at: number; keyId: string }>();
+  for (const r of rows) {
+    const m = r.mark_price as number;
+    if (!(m > 0)) continue;
+    const at = writtenAtMicros(r.updated_at);
+    const cur = best.get(r.asof);
+    if (
+      cur === undefined ||
+      at > cur.at ||
+      (at === cur.at && r.api_key_id.toLowerCase() < cur.keyId.toLowerCase())
+    ) {
+      best.set(r.asof, { price: m, at, keyId: r.api_key_id });
+    }
+  }
+  return Array.from(best, ([asof, v]) => ({ asof, price: v.price })).sort(
+    (a, b) => (a.asof < b.asof ? -1 : a.asof > b.asof ? 1 : 0),
+  );
+}
 
-  const cumulative_return = returns.reduce((acc, r) => acc * (1 + r), 1) - 1;
-  // Population sd (numpy ddof=0 default).
-  const vol = dispersion(returns, 0).sd * Math.sqrt(ANNUAL);
-  const sharpe = returnStatsSharpe(returns, { periodsPerYear: ANNUAL, ddof: 0 });
+/** True when `b` is exactly the UTC calendar day after `a` (both `YYYY-MM-DD`). */
+function isNextDay(a: string, b: string): boolean {
+  return Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`) === MS_PER_DAY;
+}
 
-  // Max drawdown via running peak on the raw value series
-  let peak = values[0];
+type PriceMetrics = Omit<HoldingCompareAnalytics, "priced_days">;
+
+const NULL_METRICS: PriceMetrics = {
+  cumulative_return: null,
+  sharpe: null,
+  max_drawdown: null,
+  vol: null,
+};
+
+/**
+ * The four metrics over a daily PRICE series (ascending by `asof`).
+ *
+ * - Cumulative return = last price / first price - 1, and max drawdown = the
+ *   most negative `(p - peak) / peak` over the running peak. Both read the
+ *   price LEVEL series over the priced days, which is not a return series and
+ *   needs no adjacency.
+ * - A daily return `p[i] / p[i-1] - 1` is taken ONLY when `asof[i]` is exactly
+ *   the calendar day after `asof[i-1]`. A missing day breaks the chain, so no
+ *   return spans a gap. Vol (`dispersion(returns, 0).sd * sqrt(periodsPerYear)`)
+ *   and Sharpe (the return-stats `sharpe`, population sd) are over those
+ *   one-day returns only, and are null with fewer than 2 of them.
+ * - Fewer than 2 points gives four nulls: uncomputable is null, never zero.
+ */
+export function analyzePriceSeries(
+  points: readonly DailyPrice[],
+  periodsPerYear: number,
+): PriceMetrics {
+  if (points.length < 2) return { ...NULL_METRICS };
+
+  const cumulative_return = points[points.length - 1].price / points[0].price - 1;
+
+  let peak = points[0].price;
   let maxDD = 0;
-  for (const v of values) {
-    if (v > peak) peak = v;
-    const dd = (v - peak) / peak;
+  for (const { price } of points) {
+    if (price > peak) peak = price;
+    const dd = (price - peak) / peak;
     if (dd < maxDD) maxDD = dd;
   }
+
+  const returns: number[] = [];
+  for (let i = 1; i < points.length; i++) {
+    if (!isNextDay(points[i - 1].asof, points[i].asof)) continue;
+    returns.push(points[i].price / points[i - 1].price - 1);
+  }
+  const vol =
+    returns.length >= 2
+      ? dispersion(returns, 0).sd * Math.sqrt(periodsPerYear)
+      : null;
+  const sharpe = returnStatsSharpe(returns, { periodsPerYear, ddof: 0 });
 
   return {
     cumulative_return: Number.isFinite(cumulative_return) ? cumulative_return : null,
     sharpe: sharpe != null && Number.isFinite(sharpe) ? sharpe : null,
     max_drawdown: Number.isFinite(maxDD) ? maxDD : null,
-    vol: Number.isFinite(vol) ? vol : null,
+    vol: vol != null && Number.isFinite(vol) ? vol : null,
   };
 }
 
@@ -180,16 +354,26 @@ export function reconstructAndAnalyze(
  *
  * Returns null when:
  * - parse fails (incl. charset rejection per finding f6)
- * - zero snapshot rows (RLS-blocked or no data — D-15 no existence leak)
- * - symbol absent from all breakdowns
- * - fewer than 2 data points (cannot compute any return)
+ * - zero `allocator_holdings` rows (RLS-blocked or no data, D-15 no existence leak)
+ * - the holding type is neither "spot" nor "derivative"
  *
  * Per D-15: caller cannot distinguish "unowned holding" from "nonexistent
- * holding" — both return null with no additional error information.
+ * holding" — both return null with no additional error information. Null means
+ * ONLY that: a holding that exists and is owned is never null (SFH-01).
  *
- * Throws `HoldingCompareLoadError` when the query itself fails (Phase 167.1.2
- * review round 2, SFH-R2-02). A failed read is not "not available": RLS hides
- * an unowned holding as ZERO rows, never as an error, so surfacing the failure
+ * Per type: a derivative with rows is "rebuilding" with no analytics; a spot
+ * holding whose recorded price is not a market price (`holdingMarkIsFixed`) is
+ * "withheld" with reason "fixed_price" or "account_balance" (rows were found, so the owner is known
+ * and no existence leaks); a crypto spot holding with rows but no priced day at all is "withheld"
+ * with reason "no_price" and logged (M-R2-02); any other spot holding with rows is "ready" (four
+ * null metrics below the minimum priced days, and
+ * `annualizationPeriods("crypto")` annualization).
+ *
+ * Throws `HoldingCompareLoadError` when the query itself fails or the read
+ * exceeds the page ceiling (never a silent partial series), and when a stored
+ * `updated_at` is unusable or a row breaks the read contract (a non-numeric
+ * mark, a non-ISO `asof`: SFH-03). A failed read is not "not available": RLS hides an
+ * unowned holding as ZERO rows, never as an error, so surfacing the failure
  * leaks nothing about ownership (D-15 unchanged) and gives the allocator a
  * retry instead of a false "this comparison isn't available".
  */
@@ -197,68 +381,52 @@ export async function fetchHoldingCompareItem(params: {
   allocator_id: string;
   holding_ref: string;
   supabase: SupabaseClient;
-  /**
-   * @internal Test seam (Phase 167.1.2 review round 2, WR-01). Production
-   * callers omit it and get HOLDING_COMPARE_HISTORY_STATE (D-13). It exists so
-   * the "ready" branch, which the constant makes unreachable today, stays
-   * pinned. Plan 11 kept the constant "rebuilding"; see its docblock.
-   */
-  historyState?: "rebuilding" | "ready";
 }): Promise<HoldingCompareItem | null> {
-  const state = params.historyState ?? HOLDING_COMPARE_HISTORY_STATE;
   const parsed = parseHoldingCompareId(params.holding_ref);
   if (!parsed) return null;
 
-  const { data, error } = await params.supabase
-    .from("allocator_equity_snapshots")
-    .select("asof, breakdown, pre_terminus_balance_unknown")
-    .eq("allocator_id", params.allocator_id)
-    .order("asof", { ascending: true })
-    .limit(730);
+  const windowStart = new Date(Date.now() - HOLDING_COMPARE_WINDOW_DAYS * MS_PER_DAY)
+    .toISOString()
+    .slice(0, 10);
 
-  if (error) {
-    // Phase 167.1.2 review round 1 (SFH INFO-02) logged this; round 2
-    // (SFH-R2-02) stops folding it into "not available". Log the message only
-    // (never the row payload), then throw so the page surfaces a failed load.
-    console.error(
-      "[holding-compare-adapter.fetchHoldingCompareItem] supabase error:",
-      error.message,
-    );
-    throw new HoldingCompareLoadError();
+  // Total order (asof, then the id PK) so `.range()` pages never skip or
+  // duplicate rows across a page boundary; rows are grouped only after every
+  // page is collected (a day can span two pages).
+  const rows: PriceRow[] = [];
+  for (let page = 0; ; page += 1) {
+    const from = page * HOLDING_COMPARE_PAGE_SIZE;
+    const { data, error } = await params.supabase
+      .from("allocator_holdings")
+      .select("asof, mark_price, updated_at, api_key_id")
+      .eq("allocator_id", params.allocator_id)
+      .eq("venue", parsed.venue)
+      .eq("symbol", parsed.symbol)
+      .eq("holding_type", parsed.holding_type)
+      .gte("asof", windowStart)
+      .order("asof", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, from + HOLDING_COMPARE_PAGE_SIZE - 1);
+
+    if (error) {
+      // Log the message only (never the row payload), then throw so the page
+      // surfaces a failed load (SFH-R2-02).
+      console.error(
+        "[holding-compare-adapter.fetchHoldingCompareItem] supabase error:",
+        error.message,
+      );
+      throw new HoldingCompareLoadError();
+    }
+    const batch = (data ?? []) as PriceRow[];
+    rows.push(...batch);
+    if (batch.length < HOLDING_COMPARE_PAGE_SIZE) break;
+    if (page + 1 >= HOLDING_COMPARE_MAX_PAGES) {
+      console.error(
+        `[holding-compare-adapter.fetchHoldingCompareItem] read exceeded ${HOLDING_COMPARE_MAX_PAGES} pages of ${HOLDING_COMPARE_PAGE_SIZE} rows`,
+      );
+      throw new HoldingCompareLoadError();
+    }
   }
-  if (!data || data.length === 0) return null;
-
-  // CL9 / NEW-C01-11: this is a SECOND read boundary on allocator_equity_snapshots
-  // (the allocator dashboard's getMyAllocationDashboard is the first). Rows whose
-  // absolute baseline is unknown (OKX 90-day terminus clamped the funding deposit
-  // out of the fetch window) carry a garbage per-symbol breakdown: positions
-  // opened pre-terminus ramp up from zero as in-window trades land, so even the
-  // pct_change return series is distorted — not just the absolute level. They MUST
-  // NOT feed reconstructAndAnalyze (return / Sharpe / drawdown / vol). Drop them
-  // here, mirroring the dashboard's partitionTrustworthyEquitySnapshots filter
-  // (kept inline rather than imported — @/lib/queries is server-only and the
-  // predicate is a one-liner). A fully terminus-clamped holding then has <2
-  // trustworthy points → null analytics → the caller surfaces "not available",
-  // the same honest degradation the dashboard shows.
-  const trustworthy = (
-    data as Array<{
-      asof: string;
-      breakdown: Record<string, number> | null;
-      pre_terminus_balance_unknown: boolean | null;
-    }>
-  ).filter((r) => !r.pre_terminus_balance_unknown);
-
-  const analytics = reconstructAndAnalyze(trustworthy, parsed.symbol);
-
-  // If all metrics are null the symbol had insufficient data — treat as not available
-  if (
-    analytics.cumulative_return === null &&
-    analytics.sharpe === null &&
-    analytics.max_drawdown === null &&
-    analytics.vol === null
-  ) {
-    return null;
-  }
+  if (rows.length === 0) return null;
 
   const base = {
     kind: "holding" as const,
@@ -268,12 +436,63 @@ export async function fetchHoldingCompareItem(params: {
     holding_type: parsed.holding_type,
   };
 
-  // Phase 167.1.2 / D-13: the analytics above decide AVAILABILITY only (the
-  // pre-D-13 "not available" rule, unchanged). While the history is rebuilt
-  // the numbers themselves are dropped here, on the server. Fail-closed:
-  // anything other than an explicit "ready" withholds them.
-  if (state !== "ready") {
+  if (parsed.holding_type !== "spot" && parsed.holding_type !== "derivative") {
+    return null;
+  }
+  if (holdingCompareHistoryState(parsed.holding_type) === "rebuilding") {
     return { ...base, historyState: "rebuilding", analytics: null };
   }
-  return { ...base, historyState: "ready", analytics };
+  // Orchestrator reading, flagged for the founder (NOT a founder decision): a
+  // price-based return over a writer constant would print a confident 0%
+  // (CR-01). Rows were found above, so this is an owned holding: say why it has
+  // no metrics instead of collapsing it into the D-15 null (SFH-01). The marks
+  // are deliberately not read, so a malformed one here is not a contract error.
+  const fixedReason = holdingWithheldReason(parsed.venue, parsed.symbol);
+  if (fixedReason !== null) {
+    return { ...base, historyState: "withheld", analytics: null, withheld_reason: fixedReason };
+  }
+
+  let points: DailyPrice[];
+  try {
+    points = dailyMarkPrices(rows);
+  } catch (e) {
+    if (e instanceof HoldingMarkContractError) {
+      // Counts and the holding ref only; never a row value (SFH-03).
+      console.error(
+        `[holding-compare-adapter.fetchHoldingCompareItem] read contract violated for ${params.holding_ref}: ${e.badMarks} row(s) with a non-numeric mark_price, ${e.badDays} row(s) with an asof that is not YYYY-MM-DD`,
+      );
+      throw new HoldingCompareLoadError();
+    }
+    if (e instanceof HoldingsUpdatedAtError) {
+      console.error(
+        "[holding-compare-adapter.fetchHoldingCompareItem] unusable updated_at:",
+        e.message,
+      );
+      throw new HoldingCompareLoadError();
+    }
+    throw e;
+  }
+
+  // M-R2-02: rows exist (the owner is known) but not one day carries a valid
+  // price. The writer marks an asset with no `{asset}/USDT` market at 0.0 on every
+  // day, so "Only 0 priced days so far" would promise a history that never comes,
+  // and silence would make it look like a newly connected holding. Withhold with a
+  // named reason and log the ref and the row count (no ids, no values). One or more
+  // priced days stays "ready": there the history IS filling.
+  if (points.length === 0) {
+    console.warn(
+      `[holding-compare-adapter.fetchHoldingCompareItem] no priced day for ${params.holding_ref}: ${rows.length} row(s), none with a valid mark_price`,
+    );
+    return { ...base, historyState: "withheld", analytics: null, withheld_reason: "no_price" };
+  }
+
+  const metrics =
+    points.length >= HOLDING_COMPARE_MIN_PRICED_DAYS
+      ? analyzePriceSeries(points, annualizationPeriods("crypto"))
+      : NULL_METRICS;
+  return {
+    ...base,
+    historyState: "ready",
+    analytics: { ...metrics, priced_days: points.length },
+  };
 }

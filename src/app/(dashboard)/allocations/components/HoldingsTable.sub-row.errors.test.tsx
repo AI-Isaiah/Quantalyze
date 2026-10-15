@@ -119,7 +119,7 @@ describe("HoldingsTable sub-row error paths — H-0094", () => {
       ok: false,
       error: "Couldn't record outcome — try again",
     });
-    render(<HoldingsTable rows={[makeRow()]} flaggedHoldingsByRef={FLAGGED_BY_REF} />);
+    render(<HoldingsTable disconnectedAtByHoldingId={{}} rows={[makeRow()]} flaggedHoldingsByRef={FLAGGED_BY_REF} />);
     expandAndOpenOutcomeTab();
 
     fireEvent.change(screen.getByLabelText("Percent allocated"), {
@@ -153,7 +153,7 @@ describe("HoldingsTable sub-row error paths — H-0094", () => {
       }),
     ) as unknown as typeof fetch;
 
-    render(<HoldingsTable rows={[makeRow()]} flaggedHoldingsByRef={FLAGGED_BY_REF} />);
+    render(<HoldingsTable disconnectedAtByHoldingId={{}} rows={[makeRow()]} flaggedHoldingsByRef={FLAGGED_BY_REF} />);
     fireEvent.click(screen.getByText("Test Strategy"));
     fireEvent.click(screen.getByRole("tab", { name: "Notes" }));
 
@@ -178,7 +178,7 @@ describe("HoldingsTable sub-row error paths — H-0094", () => {
   });
 
   it("(c) OutcomeForm validation reject (out-of-range percent) → inline error, NO postBridgeOutcome, row stays expanded", async () => {
-    render(<HoldingsTable rows={[makeRow()]} flaggedHoldingsByRef={FLAGGED_BY_REF} />);
+    render(<HoldingsTable disconnectedAtByHoldingId={{}} rows={[makeRow()]} flaggedHoldingsByRef={FLAGGED_BY_REF} />);
     expandAndOpenOutcomeTab();
 
     fireEvent.change(screen.getByLabelText("Percent allocated"), {

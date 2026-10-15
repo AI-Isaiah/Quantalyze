@@ -93,6 +93,7 @@ function makeHolding(over: Partial<HoldingRow> = {}): HoldingRow {
     unrealized_pnl_usd: 1_200,
     api_key_id: "key-1",
     source_key_sync_status: "complete",
+    source_key_disconnected_at: null,
     ...over,
   };
 }
@@ -131,6 +132,7 @@ function makePosition(over: Partial<OpenPositionRow> = {}): OpenPositionRow {
     unrealized_pnl_usd: 1_500,
     api_key_id: "key-1",
     source_key_sync_status: "complete",
+    source_key_disconnected_at: null,
     ...over,
   };
 }
@@ -208,6 +210,7 @@ describe("[D-16] DesignHoldingsTable — filter + counter + chip answer the pred
     const { container } = render(
       <HoldingsTable
         rows={[makeDesignRow({ id: "d-untrusted" })]}
+        disconnectedAtByHoldingId={{}}
         revokedStatusByHoldingId={{ "d-untrusted": status }}
         flaggedHoldingsByRef={{}}
         showRevoked={true}
@@ -230,6 +233,7 @@ describe("[D-16] DesignHoldingsTable — filter + counter + chip answer the pred
             makeDesignRow({ id: "d-untrusted", strategy: "Stalled Book" }),
           ]}
           revokedStatusByHoldingId={{ "d-untrusted": status }}
+          disconnectedAtByHoldingId={{}}
           flaggedHoldingsByRef={{}}
           showRevoked={false}
           onShowRevokedChange={() => {}}
@@ -245,6 +249,7 @@ describe("[D-16] DesignHoldingsTable — filter + counter + chip answer the pred
     const { container } = render(
       <HoldingsTable
         rows={[makeDesignRow({ id: "d-healthy" })]}
+        disconnectedAtByHoldingId={{}}
         revokedStatusByHoldingId={{ "d-healthy": "complete" }}
         flaggedHoldingsByRef={{}}
         showRevoked={false}
@@ -585,5 +590,322 @@ describe("[167.1 R2 WR-05] a holding whose key is missing from the key list", ()
     );
     expect(screen.queryByTestId("holding-key-status-unknown")).not.toBeInTheDocument();
     expect(screen.queryByTestId("open-positions-untrusted-note")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Phase 167.1.1 D-02 (founder 2026-10-15): a soft-disconnected key
+ * (`disconnected_at` set) is "keys needing attention" on the money surfaces,
+ * whatever its sync status, and "Key disconnected" wins the chip over the
+ * sync-status chips so a key that is both shows exactly ONE chip.
+ *
+ * ORACLE INDEPENDENCE: every chip string, clause and count is typed
+ * literally, never read from `closed-sets.ts`. The UI-SPEC table's rows:
+ *   disconnected + complete        -> "Key disconnected"
+ *   disconnected + revoked         -> "Key disconnected" (ONE chip)
+ *   disconnected + sign_in_failed  -> "Key disconnected" (ONE chip)
+ *   connected    + revoked         -> "Key revoked"       (unchanged)
+ *   connected    + complete        -> no chip             (control)
+ */
+const DISCONNECTED_AT = "2026-10-01T00:00:00Z";
+const DISCONNECTED_STATUSES = ["complete", "revoked", "sign_in_failed"] as const;
+const ALL_CHIP_TEXTS = ["Key disconnected", "Key revoked", "Sign-in failed"];
+
+/** How many of the three chip strings the root renders, summed. */
+function chipCount(root: HTMLElement): number {
+  return ALL_CHIP_TEXTS.reduce(
+    (n, t) => n + within(root).queryAllByText(t).length,
+    0,
+  );
+}
+
+describe("[167.1.1 D-02] LegacyHoldingsTable (K1) — a disconnected key needs attention", () => {
+  it.each(DISCONNECTED_STATUSES)(
+    "disconnected + %s: exactly one chip, and it reads Key disconnected; figures struck through",
+    (status) => {
+      const { container } = render(
+        <HoldingsTable
+          holdings={[
+            makeHolding({
+              source_key_sync_status: status,
+              source_key_disconnected_at: DISCONNECTED_AT,
+            }),
+          ]}
+          showRevoked={true}
+          onShowRevokedChange={() => {}}
+        />,
+      );
+      const tbody = container.querySelector("tbody")!;
+      expect(within(tbody).getAllByText("Key disconnected")).toHaveLength(1);
+      expect(chipCount(tbody)).toBe(1);
+      expect(tbody.querySelectorAll(".line-through").length).toBeGreaterThan(0);
+    },
+  );
+
+  it("connected + revoked keeps Key revoked (unchanged)", () => {
+    const { container } = render(
+      <HoldingsTable
+        holdings={[
+          makeHolding({
+            source_key_sync_status: "revoked",
+            source_key_disconnected_at: null,
+          }),
+        ]}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    const tbody = container.querySelector("tbody")!;
+    expect(within(tbody).getAllByText("Key revoked")).toHaveLength(1);
+    expect(chipCount(tbody)).toBe(1);
+  });
+
+  it("connected + complete is the control: no chip, no strike-through", () => {
+    const { container } = render(
+      <HoldingsTable
+        holdings={[
+          makeHolding({
+            source_key_sync_status: "complete",
+            source_key_disconnected_at: null,
+          }),
+        ]}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    expect(chipCount(container)).toBe(0);
+    expect(container.querySelector(".line-through")).toBeNull();
+  });
+
+  it.each([
+    [1, "1 holding hidden"],
+    [2, "2 holdings hidden"],
+  ])(
+    "toggle off with %i disconnected row(s): hidden from the table and counted (%s)",
+    (n, footer) => {
+      const holdings = [makeHolding({ id: "healthy", symbol: "BTC" })];
+      for (let i = 0; i < n; i += 1) {
+        holdings.push(
+          makeHolding({
+            id: `disc-${i}`,
+            symbol: "ETH",
+            api_key_id: `key-d${i}`,
+            source_key_sync_status: "complete",
+            source_key_disconnected_at: DISCONNECTED_AT,
+          }),
+        );
+      }
+      render(
+        <HoldingsTable
+          holdings={holdings}
+          showRevoked={false}
+          onShowRevokedChange={() => {}}
+        />,
+      );
+      expect(screen.queryByText(/ETH/)).not.toBeInTheDocument();
+      expect(screen.getByText(new RegExp(footer))).toBeInTheDocument();
+      expect(screen.getByText(/BTC/)).toBeInTheDocument();
+    },
+  );
+
+  it("a missing-key row with no disconnected_at keeps Sync status unknown and no amber chip", () => {
+    const { container } = render(
+      <HoldingsTable
+        holdings={[
+          makeHolding({
+            api_key_id: "key-missing",
+            source_key_sync_status: "unknown",
+            source_key_missing: true,
+          }),
+        ]}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("holding-key-status-unknown").textContent).toBe(
+      "Sync status unknown",
+    );
+    expect(chipCount(container)).toBe(0);
+  });
+});
+
+describe("[167.1.1 D-02] DesignHoldingsTable (K2) — a disconnected key needs attention", () => {
+  it.each(DISCONNECTED_STATUSES)(
+    "disconnected + %s: exactly one chip, and it reads Key disconnected; figures struck through",
+    (status) => {
+      const { container } = render(
+        <HoldingsTable
+          rows={[makeDesignRow({ id: "d-disc" })]}
+          revokedStatusByHoldingId={{ "d-disc": status }}
+          disconnectedAtByHoldingId={{ "d-disc": DISCONNECTED_AT }}
+          flaggedHoldingsByRef={{}}
+          showRevoked={true}
+          onShowRevokedChange={() => {}}
+        />,
+      );
+      const tbody = container.querySelector("tbody")!;
+      expect(within(tbody).getAllByText("Key disconnected")).toHaveLength(1);
+      expect(chipCount(tbody)).toBe(1);
+      expect(tbody.querySelectorAll(".line-through").length).toBeGreaterThan(0);
+    },
+  );
+
+  it("connected + revoked keeps Key revoked (unchanged)", () => {
+    const { container } = render(
+      <HoldingsTable
+        rows={[makeDesignRow({ id: "d-rev" })]}
+        revokedStatusByHoldingId={{ "d-rev": "revoked" }}
+        disconnectedAtByHoldingId={{ "d-rev": null }}
+        flaggedHoldingsByRef={{}}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    const tbody = container.querySelector("tbody")!;
+    expect(within(tbody).getAllByText("Key revoked")).toHaveLength(1);
+    expect(chipCount(tbody)).toBe(1);
+  });
+
+  it("connected + complete is the control: no chip, no strike-through", () => {
+    const { container } = render(
+      <HoldingsTable
+        rows={[makeDesignRow({ id: "d-ok" })]}
+        revokedStatusByHoldingId={{ "d-ok": "complete" }}
+        disconnectedAtByHoldingId={{ "d-ok": null }}
+        flaggedHoldingsByRef={{}}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    expect(chipCount(container)).toBe(0);
+    expect(container.querySelector(".line-through")).toBeNull();
+  });
+
+  it.each([
+    [1, "1 holding hidden"],
+    [2, "2 holdings hidden"],
+  ])(
+    "toggle off with %i disconnected row(s): hidden from the table and counted (%s)",
+    (n, footer) => {
+      const rows = [makeDesignRow({ id: "d-healthy", strategy: "Healthy Book" })];
+      const disconnected: Record<string, string | null> = {};
+      for (let i = 0; i < n; i += 1) {
+        rows.push(makeDesignRow({ id: `d-disc-${i}`, strategy: "Stalled Book" }));
+        disconnected[`d-disc-${i}`] = DISCONNECTED_AT;
+      }
+      render(
+        <HoldingsTable
+          rows={rows}
+          revokedStatusByHoldingId={{}}
+          disconnectedAtByHoldingId={disconnected}
+          flaggedHoldingsByRef={{}}
+          showRevoked={false}
+          onShowRevokedChange={() => {}}
+        />,
+      );
+      expect(screen.queryByText("Stalled Book")).not.toBeInTheDocument();
+      expect(screen.getByText(new RegExp(footer))).toBeInTheDocument();
+      expect(screen.getByText("Healthy Book")).toBeInTheDocument();
+    },
+  );
+});
+
+describe("[167.1.1 D-02] OpenPositionsTable (K3) — a disconnected key needs attention", () => {
+  it.each(DISCONNECTED_STATUSES)(
+    "disconnected + %s: exactly one chip, and it reads Key disconnected; figures struck through",
+    (status) => {
+      const { container } = render(
+        <OpenPositionsTable
+          rows={[
+            makePosition({
+              source_key_sync_status: status,
+              source_key_disconnected_at: DISCONNECTED_AT,
+            }),
+          ]}
+        />,
+      );
+      const tbody = container.querySelector("tbody")!;
+      expect(within(tbody).getAllByText("Key disconnected")).toHaveLength(1);
+      expect(chipCount(tbody)).toBe(1);
+      expect(tbody.querySelectorAll(".line-through").length).toBeGreaterThan(0);
+    },
+  );
+
+  it("connected + revoked keeps Key revoked (unchanged)", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({
+            source_key_sync_status: "revoked",
+            source_key_disconnected_at: null,
+          }),
+        ]}
+      />,
+    );
+    const tbody = container.querySelector("tbody")!;
+    expect(within(tbody).getAllByText("Key revoked")).toHaveLength(1);
+    expect(chipCount(tbody)).toBe(1);
+  });
+
+  it("connected + complete is the control: no chip, no strike-through, no note", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({
+            source_key_sync_status: "complete",
+            source_key_disconnected_at: null,
+          }),
+        ]}
+      />,
+    );
+    expect(chipCount(container)).toBe(0);
+    expect(container.querySelector("tbody .line-through")).toBeNull();
+    expect(
+      screen.queryByTestId("open-positions-untrusted-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("a disconnected key's P&L of -300 beside a trusted 1200 is named in the footer note, and the total keeps both", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({ id: "pos-trusted", unrealized_pnl_usd: 1_200 }),
+          makePosition({
+            id: "pos-disc",
+            unrealized_pnl_usd: -300,
+            api_key_id: "key-d",
+            source_key_sync_status: "complete",
+            source_key_disconnected_at: DISCONNECTED_AT,
+          }),
+        ]}
+      />,
+    );
+    // 1,200 - 300 = 900 (hand-summed; D-03 keeps the disconnected row in).
+    const cells = container
+      .querySelector("tfoot")!
+      .querySelectorAll("tr")[0]
+      .querySelectorAll("td");
+    expect(cells[cells.length - 1].textContent).toBe("+$900.00");
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes \u2212$300.00 from keys needing attention.",
+    );
+  });
+
+  it("a missing-key row with no disconnected_at keeps Sync status unknown and no amber chip", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({
+            api_key_id: "key-missing",
+            source_key_sync_status: "unknown",
+            source_key_missing: true,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("holding-key-status-unknown").textContent).toBe(
+      "Sync status unknown",
+    );
+    expect(chipCount(container)).toBe(0);
   });
 });

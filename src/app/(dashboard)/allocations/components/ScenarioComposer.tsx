@@ -163,6 +163,7 @@ import {
   capitalizeFirst,
   holdingEquityContributionLocal,
   holdingsByRef,
+  keyStateMapsOf,
   managerSideKeyIds,
   summarizeLiveHoldings,
   type LiveHoldingsSummary,
@@ -4412,13 +4413,12 @@ export function ScenarioComposer({
   // degrade-branch and E1 comments travelled with the loop. `liveHoldingsSum`
   // keeps its name and its value, so every reader below is untouched.
   //
-  // Two memos, not one (the `holdingsByScopeRef` precedent above): the key-status
-  // map changes only with the payload, the summary with every toggle.
-  const statusByKeyId = useMemo(
-    () =>
-      new Map<string, string | null>(
-        (payload.apiKeys ?? []).map((k) => [k.id, k.sync_status]),
-      ),
+  // Two memos, not one (the `holdingsByScopeRef` precedent above): the key-state
+  // maps (sync status AND, since 167.1.1 D-02, `disconnected_at`, built together
+  // by `keyStateMapsOf`) change only with the payload, the summary with every
+  // toggle.
+  const keyStates = useMemo(
+    () => keyStateMapsOf(payload.apiKeys),
     [payload.apiKeys],
   );
   // D-20: the keys the payload itself names as manager-side, derived by the
@@ -4440,7 +4440,8 @@ export function ScenarioComposer({
         holdingsByRef: holdingsByScopeRef,
         contributingApiKeyIds: payload.contributingApiKeyIds ?? [],
         managerSideApiKeyIds,
-        statusByKeyId,
+        statusByKeyId: keyStates.statusByKeyId,
+        disconnectedAtByKeyId: keyStates.disconnectedAtByKeyId,
         // Review C2 WR-03: the server-built eligible set, read raw (no
         // `?? []`): an absent one means "cannot tell", not "none eligible".
         eligibleApiKeyIds: payload.eligibleApiKeyIds,
@@ -4450,7 +4451,7 @@ export function ScenarioComposer({
       holdingsByScopeRef,
       payload.contributingApiKeyIds,
       managerSideApiKeyIds,
-      statusByKeyId,
+      keyStates,
       payload.eligibleApiKeyIds,
     ],
   );

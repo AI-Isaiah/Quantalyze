@@ -2,16 +2,15 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261009120000_sync_status_analytics_scope.sql
+-- source migration: 20261024120000_fan_in_graph_and_decision_cascade.sql
 -- --------------------------------------------------------------------------
--- the two mark RPCs: they pass the job they just terminalised (D-09)
+-- (4) mark_compute_job_done: lock the children, then release (D-07)
 -- --------------------------------------------------------------------------
--- Each body is the LATEST definition (20261001120000, Phase 164.9.3.2), byte for
--- byte, with ONE change: the bridge call passes p_job_id as the trigger. Their
--- signatures, COMMENTs and ACLs are unchanged (CREATE OR REPLACE keeps the
--- COMMENT; the REVOKE is restated exactly as 20261001120000 issued it). Before
--- this file the bridge called by them had one argument, so nothing could tell it
--- WHICH job's transition caused the call, and D-09 had to guess from recency.
+-- The body is the LATEST definition (20261009120000), byte for byte, with ONE
+-- change: the single set-based release UPDATE becomes a lock statement and a
+-- LATER release statement. Its signature, COMMENT and ACL are unchanged
+-- (CREATE OR REPLACE keeps the COMMENT; the REVOKE is restated exactly as
+-- 20261009120000 issued it).
 
 CREATE OR REPLACE FUNCTION mark_compute_job_done(
   p_job_id     UUID,
@@ -26,6 +25,7 @@ DECLARE
   v_strategy_id      UUID;
   v_current_status   TEXT;
   v_current_token    UUID;
+  v_kids             UUID[];
 BEGIN
   -- audit-2026-05-07 B5: token is now mandatory. NULL was a documented
   -- pre-mig-117 back-compat path; the only production caller (main_worker)
@@ -93,17 +93,36 @@ BEGIN
   -- enforces "all parents done" identically to check_fan_in_ready
   -- (count(parents WHERE status <> 'done') = 0). This form was live in prod
   -- 2026-05-16..2026-05-28 (mig 20260516131500) before the silent revert.
-  UPDATE compute_jobs c
-     SET status          = 'pending',
-         next_attempt_at = now()
+  -- Phase 164.9.3.1 D-07 (the routed 164.5.2 review item WR-02): the release is
+  -- now TWO statements. Under READ COMMITTED a single UPDATE evaluates its
+  -- NOT EXISTS on the statement-start snapshot, so two parents of one child
+  -- finishing in two transactions each saw the other still running and both
+  -- released nothing. The children are read first, locked in a statement of
+  -- their own (through the ancestor-first helper, D-06), and only then released
+  -- by a LATER statement: it starts after the lock wait, so it takes a fresh
+  -- snapshot that sees the other parent's commit. The GIN-supported `@>`
+  -- containment is kept on the read.
+  SELECT COALESCE(array_agg(c.id), '{}'::uuid[])
+    INTO v_kids
+    FROM compute_jobs c
    WHERE c.status = 'done_pending_children'
-     AND c.parent_job_ids @> ARRAY[p_job_id]::uuid[]
-     AND NOT EXISTS (
-       SELECT 1
-         FROM compute_jobs p
-        WHERE p.id = ANY(c.parent_job_ids)
-          AND p.status <> 'done'
-     );
+     AND c.parent_job_ids @> ARRAY[p_job_id]::uuid[];
+
+  IF cardinality(v_kids) > 0 THEN
+    PERFORM public._fan_in_lock_rows(v_kids, TRUE);
+
+    UPDATE compute_jobs c
+       SET status          = 'pending',
+           next_attempt_at = now()
+     WHERE c.id = ANY(v_kids)
+       AND c.status = 'done_pending_children'
+       AND NOT EXISTS (
+         SELECT 1
+           FROM compute_jobs p
+          WHERE p.id = ANY(c.parent_job_ids)
+            AND p.status <> 'done'
+       );
+  END IF;
 
   -- Phase 18: atomic UI bridge (preserved from mig 099).
   IF v_strategy_id IS NOT NULL THEN

@@ -15,7 +15,7 @@
  * the all-zero input and asserts the constant-yield output identical to it.
  */
 import { describe, it, expect } from "vitest";
-import { reconstructAndAnalyze } from "@/app/(dashboard)/compare/lib/holding-compare-adapter";
+import { analyzePriceSeries } from "@/app/(dashboard)/compare/lib/holding-compare-adapter";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
 import {
   buildDateMapCache,
@@ -99,39 +99,39 @@ function drOf(book: Record<string, number[]>): number | null {
   return diversificationRatio(weights, vols, Math.sqrt(portfolioVarianceFromCov(ids, weights, cov)));
 }
 
-/** Equity snapshots whose `symbol` breakdown walks through `levels`. */
-function snapshotsFromLevels(levels: number[], symbol = "USDC") {
+/** Consecutive-day daily PRICE points walking through `levels`. */
+function pricePointsFromLevels(levels: number[]) {
   const dates = isoDates(levels.length);
-  return levels.map((v, i) => ({ asof: dates[i], breakdown: { [symbol]: v } }));
+  return levels.map((v, i) => ({ asof: dates[i], price: v }));
 }
 
-describe("T1 reconstructAndAnalyze (holding Sharpe on /compare)", () => {
-  const FLAT = snapshotsFromLevels(new Array(367).fill(10_000));
+describe("T1 analyzePriceSeries (holding Sharpe on /compare, Phase 167.1.1 D-03 price kernel)", () => {
+  const FLAT = pricePointsFromLevels(new Array(367).fill(10_000));
 
-  it.each(YIELD_IDS)("%s: sharpe is identical to the flat-NAV holding's", (id) => {
-    const got = reconstructAndAnalyze(
-      snapshotsFromLevels(navLevelsConstantYield(CONSTANT_YIELDS[id])),
-      "USDC",
+  it.each(YIELD_IDS)("%s: sharpe is identical to the flat-price holding's", (id) => {
+    const got = analyzePriceSeries(
+      pricePointsFromLevels(navLevelsConstantYield(CONSTANT_YIELDS[id])),
+      365,
     );
-    const flat = reconstructAndAnalyze(FLAT, "USDC");
+    const flat = analyzePriceSeries(FLAT, 365);
     expect(Object.is(got.sharpe, flat.sharpe), `sharpe=${got.sharpe}`).toBe(true);
   });
 
   it("the cent-rounded 1% APY NAV keeps a finite sharpe", () => {
-    const a = reconstructAndAnalyze(
-      snapshotsFromLevels(navLevelsConstantYield(apyToDaily(0.01), 366, 10_000, true)),
-      "USDC",
+    const a = analyzePriceSeries(
+      pricePointsFromLevels(navLevelsConstantYield(apyToDaily(0.01), 366, 10_000, true)),
+      365,
     );
     expect(a.sharpe).not.toBeNull();
     expect(Number.isFinite(a.sharpe!)).toBe(true);
   });
 
-  it("cumulative_return, max_drawdown and vol keep today's formula on a noisy NAV, bitwise", () => {
+  it("vol and max_drawdown keep today's formula on a noisy price series, bitwise; cumulative_return is last over first", () => {
     const levels: number[] = [10_000];
     for (let i = 1; i < 200; i++) {
       levels.push(levels[i - 1] * (1 + 0.001 + 0.02 * Math.sin(i * 1.7 + 0.3)));
     }
-    const a = reconstructAndAnalyze(snapshotsFromLevels(levels), "USDC");
+    const a = analyzePriceSeries(pricePointsFromLevels(levels), 365);
     const returns = levels.slice(1).map((v, i) => v / levels[i] - 1);
     const n = returns.length;
     const m = returns.reduce((x, y) => x + y, 0) / n;
@@ -144,8 +144,11 @@ describe("T1 reconstructAndAnalyze (holding Sharpe on /compare)", () => {
       if (dd < maxDD) maxDD = dd;
     }
     expect(Object.is(a.vol, std * Math.sqrt(365))).toBe(true);
-    expect(Object.is(a.cumulative_return, returns.reduce((acc, r) => acc * (1 + r), 1) - 1)).toBe(true);
     expect(Object.is(a.max_drawdown, maxDD)).toBe(true);
+    // The price kernel reads the level ratio; it equals the compounded daily
+    // returns to rounding (an independent invariant, not the same expression).
+    expect(a.cumulative_return!).toBeCloseTo(returns.reduce((acc, r) => acc * (1 + r), 1) - 1, 10);
+    expect(Object.is(a.cumulative_return, levels[levels.length - 1] / levels[0] - 1)).toBe(true);
     // The Sharpe moves from (mean / std) * sqrt(365) to the factsheet order,
     // the same number to rounding.
     expect(a.sharpe!).toBeCloseTo((m / std) * Math.sqrt(365), 10);

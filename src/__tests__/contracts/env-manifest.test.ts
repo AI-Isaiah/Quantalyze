@@ -66,6 +66,12 @@ const TEST_ONLY_KEYS = new Set([
   // does not run. Test wiring, never app config — no src/ runtime path reads
   // it, which is why it belongs here and not in .env.example.
   "QZ_166_2_06_SCAN_ROOT",
+  // Added 2026-10-15 (Phase 167.1.1 round-1 fix). Read ONLY by
+  // src/__tests__/holding-scope-key-census.test.ts: set to "1" it prints the
+  // live census scan (the figures a classification pin is re-derived from);
+  // unset, it is silent. A test-only diagnostic switch, never app config — no
+  // src/ runtime path reads it, so it belongs here and not in .env.example.
+  "HOLDING_CENSUS_PRINT",
   "E2E_ADMIN_EMAIL",
   "E2E_ADMIN_PASSWORD",
   "SCENARIO_COMMIT_BASE_URL",

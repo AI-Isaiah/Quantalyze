@@ -441,11 +441,11 @@ BEGIN
         USING ERRCODE = 'invalid_parameter_value';
     END IF;
 
-    PERFORM 1
-       FROM compute_jobs pj
-      WHERE pj.id = ANY(p_parent_job_ids)
-      ORDER BY pj.id
-      FOR SHARE;
+    -- Phase 164.9.3.1 D-06: the parents are locked through the ancestor-first
+    -- helper (key: depth, then id), not by job id alone. The paragraph above
+    -- that says "in id order" is the lineage this replaces: a pure id order
+    -- deadlocks against mark_compute_job_done on a diamond.
+    PERFORM public._fan_in_lock_rows(p_parent_job_ids, FALSE);
 
     SELECT count(*),
            count(*) FILTER (WHERE pj.status = 'failed_final'),
@@ -617,7 +617,78 @@ $_$;
 ALTER FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "uuid", "p_portfolio_id" "uuid", "p_kind" "text", "p_idempotency_key" "text", "p_parent_job_ids" "uuid"[], "p_exchange" "text", "p_metadata" "jsonb", "p_allocator_id" "uuid", "p_api_key_id" "uuid", "p_run_at" timestamp with time zone) OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "uuid", "p_portfolio_id" "uuid", "p_kind" "text", "p_idempotency_key" "text", "p_parent_job_ids" "uuid"[], "p_exchange" "text", "p_metadata" "jsonb", "p_allocator_id" "uuid", "p_api_key_id" "uuid", "p_run_at" timestamp with time zone) IS 'Private shared implementation of the idempotent enqueue pattern. Handles all four target scopes (strategy / portfolio / allocator / api_key) via 4-way XOR on the four id parameters. Extended in migration 066 for api_key scope + scheduled run_at. ACL re-asserted by migration 118. Rejects the retired compute_analytics kind with invalid_parameter_value (Phase 106 D3). Race-loser re-read uses a plain SELECT INTO on all four arms; if the winner already advanced past the in-flight statuses, raises serialization_failure so the caller can retry vs. surfacing a 500 (Phase 163 OPS-08, parity with the 7-param overload''s mig 109 P3 fix). Computes the initial status and INSERTs it explicitly: done_pending_children while at least one listed parent is not yet done; a child whose parents are all done starts pending, as does a child with no parents (Phase 164.9.1). With parents, it locks and reads them first: a NULL element, a missing parent or a failed_final parent is refused with invalid_parameter_value, so no enqueue creates a child that no mark-done can release.';
+COMMENT ON FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "uuid", "p_portfolio_id" "uuid", "p_kind" "text", "p_idempotency_key" "text", "p_parent_job_ids" "uuid"[], "p_exchange" "text", "p_metadata" "jsonb", "p_allocator_id" "uuid", "p_api_key_id" "uuid", "p_run_at" timestamp with time zone) IS 'Private shared implementation of the idempotent enqueue pattern. Handles all four target scopes (strategy / portfolio / allocator / api_key) via 4-way XOR on the four id parameters. Extended in migration 066 for api_key scope + scheduled run_at. ACL re-asserted by migration 118. Rejects the retired compute_analytics kind with invalid_parameter_value (Phase 106 D3). Race-loser re-read uses a plain SELECT INTO on all four arms; if the winner already advanced past the in-flight statuses, raises serialization_failure so the caller can retry vs. surfacing a 500 (Phase 163 OPS-08, parity with the 7-param overload''s mig 109 P3 fix). Computes the initial status and INSERTs it explicitly: done_pending_children while at least one listed parent is not yet done; a child whose parents are all done starts pending, as does a child with no parents (Phase 164.9.1). With parents, it locks them first through public._fan_in_lock_rows in ancestor-first (depth, id) order (Phase 164.9.3.1 D-06) and reads them: a NULL element, a missing parent or a failed_final parent is refused with invalid_parameter_value, so no enqueue creates a child that no mark-done can release.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."_fan_in_lock_rows"("p_ids" "uuid"[], "p_for_update" boolean) RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+DECLARE
+  r record;
+BEGIN
+  IF p_ids IS NULL OR cardinality(p_ids) = 0 THEN
+    RETURN;
+  END IF;
+
+  IF p_for_update THEN
+    FOR r IN
+      WITH RECURSIVE walk(root, parents, lvl) AS (
+        SELECT j.id, j.parent_job_ids, 0
+          FROM compute_jobs j
+         WHERE j.id = ANY(p_ids)
+        UNION ALL
+        SELECT w.root, a.parent_job_ids, w.lvl + 1
+          FROM walk w
+          JOIN compute_jobs a ON a.id = ANY(w.parents)
+         WHERE w.lvl < 64
+      ), depth AS (
+        SELECT root AS id, max(lvl) AS d
+          FROM walk
+         GROUP BY root
+      )
+      SELECT j.id
+        FROM compute_jobs j
+        JOIN depth ON depth.id = j.id
+       ORDER BY depth.d, j.id
+         FOR UPDATE OF j
+    LOOP
+      NULL;
+    END LOOP;
+  ELSE
+    FOR r IN
+      WITH RECURSIVE walk(root, parents, lvl) AS (
+        SELECT j.id, j.parent_job_ids, 0
+          FROM compute_jobs j
+         WHERE j.id = ANY(p_ids)
+        UNION ALL
+        SELECT w.root, a.parent_job_ids, w.lvl + 1
+          FROM walk w
+          JOIN compute_jobs a ON a.id = ANY(w.parents)
+         WHERE w.lvl < 64
+      ), depth AS (
+        SELECT root AS id, max(lvl) AS d
+          FROM walk
+         GROUP BY root
+      )
+      SELECT j.id
+        FROM compute_jobs j
+        JOIN depth ON depth.id = j.id
+       ORDER BY depth.d, j.id
+         FOR SHARE OF j
+    LOOP
+      NULL;
+    END LOOP;
+  END IF;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_fan_in_lock_rows"("p_ids" "uuid"[], "p_for_update" boolean) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."_fan_in_lock_rows"("p_ids" "uuid"[], "p_for_update" boolean) IS 'Private lock helper for the compute_jobs fan-in graph (Phase 164.9.3.1 D-06). Locks the named rows in ascending (depth, id), depth being the longest chain of ancestors through parent_job_ids, so a parent always sorts before its child: FOR UPDATE OF j when p_for_update, FOR SHARE OF j otherwise. It is the only place a fan-in path takes fan-in row locks, so the order cannot drift. The ancestor walk stops at 64 levels; a deeper chain would tie-break by id. Private on purpose: a callable row-lock helper is a queue-wide denial-of-service lever, so EXECUTE is revoked from PUBLIC, anon and authenticated.';
 
 
 
@@ -1365,14 +1436,46 @@ CREATE OR REPLACE FUNCTION "public"."bridge_outcomes_sync_holding_ref"() RETURNS
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
     AS $$
+DECLARE
+  v_ref                TEXT;
+  v_decision_allocator UUID;
 BEGIN
   IF NEW.match_decision_id IS NOT NULL THEN
-    SELECT original_holding_ref
-      INTO NEW.original_holding_ref
+    SELECT original_holding_ref, allocator_id
+      INTO v_ref, v_decision_allocator
       FROM match_decisions
      WHERE id = NEW.match_decision_id;
+    -- Round-2 RLS audit. This function is SECURITY DEFINER and copies the
+    -- decision's original_holding_ref into the outcome row, which the row's owner
+    -- can read. Without this test an allocator who knows ANOTHER tenant's
+    -- decision id attaches it (INSERT, or UPDATE SET match_decision_id) and reads
+    -- that tenant's holding ref through its own row. A decision that does not
+    -- exist is left to the foreign key, as before. The message names no id.
+    IF FOUND AND v_decision_allocator IS DISTINCT FROM NEW.allocator_id THEN
+      RAISE EXCEPTION 'bridge_outcomes: match_decision_id names a decision that belongs to another allocator'
+        USING ERRCODE = '42501', HINT = 'cross_allocator_decision';
+    END IF;
+    NEW.original_holding_ref := v_ref;
+    NEW.former_match_decision_id := NULL;
   ELSE
     NEW.original_holding_ref := NULL;
+    IF TG_OP = 'INSERT' THEN
+      NEW.former_match_decision_id := NULL;
+    ELSIF OLD.match_decision_id IS NOT NULL THEN
+      -- Review WR-01. Only the ON DELETE SET NULL cascade may record the old
+      -- decision: its UPDATE runs after the decision row is deleted, so the row
+      -- is gone here. A decision that still exists means an owner detached the
+      -- link on purpose, which is a born-NULL row (no former id) that meets the
+      -- duplicate guard; recording the live id would let an owner attach any
+      -- decision id and detach it to escape that guard.
+      IF EXISTS (SELECT 1 FROM match_decisions WHERE id = OLD.match_decision_id) THEN
+        NEW.former_match_decision_id := NULL;
+      ELSE
+        NEW.former_match_decision_id := OLD.match_decision_id;
+      END IF;
+    ELSE
+      NEW.former_match_decision_id := OLD.former_match_decision_id;
+    END IF;
   END IF;
   RETURN NEW;
 END;
@@ -1382,7 +1485,7 @@ $$;
 ALTER FUNCTION "public"."bridge_outcomes_sync_holding_ref"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."bridge_outcomes_sync_holding_ref"() IS 'Phase 09 / finding f4. BEFORE INSERT OR UPDATE OF match_decision_id trigger function that denormalizes match_decisions.original_holding_ref into bridge_outcomes. SECURITY DEFINER + locked search_path; reads match_decisions by PK only (parameterized). Returns NEW with original_holding_ref populated or NULL when match_decision_id is NULL.';
+COMMENT ON FUNCTION "public"."bridge_outcomes_sync_holding_ref"() IS 'Phase 09 / finding f4, extended by Phase 164.9.3.1 D-05. BEFORE INSERT OR UPDATE OF match_decision_id, former_match_decision_id trigger function that denormalizes match_decisions.original_holding_ref into bridge_outcomes (NULL when match_decision_id IS NULL) and owns former_match_decision_id: NULL when a decision is attached or on INSERT, OLD.match_decision_id when an UPDATE removes the link and that decision row is already gone (the ON DELETE SET NULL cascade), NULL when an UPDATE removes the link of a decision that still exists (a voluntary detach, which is a born-NULL row), OLD.former_match_decision_id when an UPDATE leaves it NULL, so a client cannot forge it. It refuses (SQLSTATE 42501, hint cross_allocator_decision) a decision that belongs to another allocator than the outcome row, before any holding ref is copied. SECURITY DEFINER + locked search_path; reads match_decisions by PK only (parameterized).';
 
 
 
@@ -7631,6 +7734,7 @@ DECLARE
   v_strategy_id      UUID;
   v_current_status   TEXT;
   v_current_token    UUID;
+  v_kids             UUID[];
 BEGIN
   -- audit-2026-05-07 B5: token is now mandatory. NULL was a documented
   -- pre-mig-117 back-compat path; the only production caller (main_worker)
@@ -7698,17 +7802,36 @@ BEGIN
   -- enforces "all parents done" identically to check_fan_in_ready
   -- (count(parents WHERE status <> 'done') = 0). This form was live in prod
   -- 2026-05-16..2026-05-28 (mig 20260516131500) before the silent revert.
-  UPDATE compute_jobs c
-     SET status          = 'pending',
-         next_attempt_at = now()
+  -- Phase 164.9.3.1 D-07 (the routed 164.5.2 review item WR-02): the release is
+  -- now TWO statements. Under READ COMMITTED a single UPDATE evaluates its
+  -- NOT EXISTS on the statement-start snapshot, so two parents of one child
+  -- finishing in two transactions each saw the other still running and both
+  -- released nothing. The children are read first, locked in a statement of
+  -- their own (through the ancestor-first helper, D-06), and only then released
+  -- by a LATER statement: it starts after the lock wait, so it takes a fresh
+  -- snapshot that sees the other parent's commit. The GIN-supported `@>`
+  -- containment is kept on the read.
+  SELECT COALESCE(array_agg(c.id), '{}'::uuid[])
+    INTO v_kids
+    FROM compute_jobs c
    WHERE c.status = 'done_pending_children'
-     AND c.parent_job_ids @> ARRAY[p_job_id]::uuid[]
-     AND NOT EXISTS (
-       SELECT 1
-         FROM compute_jobs p
-        WHERE p.id = ANY(c.parent_job_ids)
-          AND p.status <> 'done'
-     );
+     AND c.parent_job_ids @> ARRAY[p_job_id]::uuid[];
+
+  IF cardinality(v_kids) > 0 THEN
+    PERFORM public._fan_in_lock_rows(v_kids, TRUE);
+
+    UPDATE compute_jobs c
+       SET status          = 'pending',
+           next_attempt_at = now()
+     WHERE c.id = ANY(v_kids)
+       AND c.status = 'done_pending_children'
+       AND NOT EXISTS (
+         SELECT 1
+           FROM compute_jobs p
+          WHERE p.id = ANY(c.parent_job_ids)
+            AND p.status <> 'done'
+       );
+  END IF;
 
   -- Phase 18: atomic UI bridge (preserved from mig 099).
   IF v_strategy_id IS NOT NULL THEN
@@ -7722,7 +7845,7 @@ $$;
 ALTER FUNCTION "public"."mark_compute_job_done"("p_job_id" "uuid", "p_claim_token" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."mark_compute_job_done"("p_job_id" "uuid", "p_claim_token" "uuid") IS 'Terminal success transition. Migration 117 P97 fence + B5 strict-token gate (20260528183100): p_claim_token MUST be non-NULL (NULL raises 22023); mismatch raises SQLSTATE 55006 (object_in_use), which PostgREST answers once. THIS migration (G23-187-mig-01/03): re-applies the GIN-supported set-based `parent_job_ids @> ARRAY[p_job_id]` fan-in advance (the strict-token rewrite had reverted it to a `= ANY(...)` FOR-loop). Preserves the mig 099 Phase-18 atomic UI status bridge.';
+COMMENT ON FUNCTION "public"."mark_compute_job_done"("p_job_id" "uuid", "p_claim_token" "uuid") IS 'Terminal success transition. Migration 117 P97 fence + B5 strict-token gate (20260528183100): p_claim_token MUST be non-NULL (NULL raises 22023); mismatch raises SQLSTATE 55006 (object_in_use), which PostgREST answers once. THIS migration (G23-187-mig-01/03): re-applies the GIN-supported set-based `parent_job_ids @> ARRAY[p_job_id]` fan-in advance (the strict-token rewrite had reverted it to a `= ANY(...)` FOR-loop). Preserves the mig 099 Phase-18 atomic UI status bridge. Phase 164.9.3.1 D-07: the waiting children are locked in one statement through public._fan_in_lock_rows and released in the next, so two parents of one child that finish concurrently release it exactly once.';
 
 
 
@@ -7738,6 +7861,16 @@ DECLARE
   v_strategy_id   UUID;
   v_current_token UUID;
   v_current_status TEXT;
+  -- Phase 164.9.3.1 D-01..D-03: the failure cascade's working set.
+  v_kids          UUID[];
+  v_held          UUID[];
+  v_frontier      UUID[];
+  v_fail_set      UUID[];
+  v_attempt       INTEGER;
+  v_retry         BOOLEAN;
+  v_casc_jobs     UUID[] := '{}';
+  v_casc_strats   UUID[] := '{}';
+  r_b             RECORD;
 BEGIN
   -- audit-2026-05-07 B5: token mandatory (see mark_compute_job_done above).
   IF p_claim_token IS NULL THEN
@@ -7808,11 +7941,165 @@ BEGIN
          next_attempt_at = v_next_attempt
    WHERE id = p_job_id;
 
-  -- Phase 18: atomic UI bridge (preserved from mig 099).
-  IF v_strategy_id IS NOT NULL THEN
-    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));
-    PERFORM sync_strategy_analytics_status(v_strategy_id, p_job_id);
+  -- Phase 164.9.3.1 D-01 to D-03: a parent that ENDS failed_final can never
+  -- release a waiting fan-in child (release needs every parent `done`), so the
+  -- child would hold its (target, kind) in-flight slot forever and its strategy
+  -- would read `computing`. Fail the descendant closure now, in this
+  -- transaction:
+  --   * ONE ascending lock pass (review CR-01). The whole waiting closure below
+  --     the failed job is READ first (a recursive CTE, no locks), then locked in
+  --     a single call to _fan_in_lock_rows, and only then written. A lock taken
+  --     once per level would hold a deep row (a direct child of the failed job
+  --     that also hangs under a longer chain) while it waited for a shallower
+  --     one, the opposite of the order every other fan-in path ascends, and that
+  --     deadlocks (40P01) against an enqueue or a second cascade. The CTE only
+  --     picks WHICH rows to lock; it never writes.
+  --   * RE-READ UNDER THE LOCKS (review round 2, WR-01). An enqueue that holds a
+  --     share lock on a closure row can commit a NEW child while this
+  --     transaction waits for that row. That child is visible to every
+  --     transaction from its commit on, so another cascade or an enqueue may
+  --     already hold it, and locking it on top of the rows held here would be
+  --     the hold-deep, wait-shallow order CR-01 removed (FL7 reproduces the
+  --     40P01). The earlier note that only the creator knows such a row was
+  --     wrong. So the lock phase is a block with an exception handler, which is
+  --     a subtransaction: after the helper call the closure is read AGAIN, and
+  --     if it holds a row the locked set does not (the first read has an empty
+  --     v_held, so the first pass always locks), the block raises the private
+  --     SQLSTATE FI001. The handler's rollback RELEASES every row lock the block
+  --     took, and the next attempt reads the grown closure afresh and locks all
+  --     of it in ONE ascending pass. The failed job's own row is taken before
+  --     the block and stays held: every closure row is a strict descendant of
+  --     it, so it sorts first. The loop ends when a re-read under the locks
+  --     finds nothing new. That read is complete: a child of a locked row can
+  --     only be created by an enqueue that first share-locks that row, and that
+  --     waits for this transaction; one committed before the lock was granted is
+  --     visible to the re-read, which starts after it. A row that LEFT the
+  --     closure meanwhile (failed by another cascade) only shrinks the re-read,
+  --     which is still contained in the locked set.
+  --   * the retry is bounded at 10 attempts and then fails loud, SQLSTATE 55P03
+  --     (never 55006, which the worker swallows as a watchdog preemption, and
+  --     never 40001 / 40P01). Each retry needs a concurrent enqueue to have
+  --     committed a new descendant inside the window, so the bound is a
+  --     tripwire, not a path. The RAISE aborts the whole RPC, so the job's own
+  --     row is untouched and stays `running`. The worker (main_worker.py,
+  --     dispatch_tick's FAILED branch) matches SQLSTATE 55P03, logs ONE ERROR
+  --     carrying the original error_kind and error, and does NOT re-mark the job:
+  --     its catch-all fallback would mark it error_kind='unknown' and lose a
+  --     permanent failure. The watchdog reclaims the stalled `running` row.
+  --   * the writes stay level by level, over the locked set (v_held), one
+  --     UPDATE ... RETURNING per level, so each child names its OWN failed parent
+  --     (D-03). The UPDATE re-checks `done_pending_children` after the lock, so a
+  --     child a concurrent mark_compute_job_done released meanwhile is left alone.
+  --   * the child inherits the NAMED parent's error_kind (the lowest-uuid parent
+  --     in the frontier, picked by ORDER BY ... LIMIT 1, not an aggregate) and
+  --     last_error names that parent inside the 60 characters the admin table
+  --     shows. last_error is the OPERATOR surface; the user's copy still derives
+  --     from error_kind alone.
+  --   * a failed_retry parent cascades nothing: it may still succeed.
+  --   * each level only touches done_pending_children rows and turns them
+  --     terminal, so a row is processed at most once and the level loop ends
+  --     when a level fails nothing.
+  IF v_new_status = 'failed_final' THEN
+    v_fail_set := ARRAY[p_job_id];
+    v_attempt  := 0;
+    LOOP
+      v_attempt := v_attempt + 1;
+      IF v_attempt > 10 THEN
+        RAISE EXCEPTION 'mark_compute_job_failed: the waiting closure of job % kept growing across % lock attempts, refusing to fail it half-locked', p_job_id, v_attempt - 1
+          USING ERRCODE = '55P03';
+      END IF;
+      v_held  := '{}'::uuid[];
+      v_retry := FALSE;
+      BEGIN
+        LOOP
+          WITH RECURSIVE clo(id) AS (
+            SELECT c.id
+              FROM compute_jobs c
+             WHERE c.status = 'done_pending_children'
+               AND c.parent_job_ids && v_fail_set
+               AND NOT (c.id = ANY(v_fail_set))
+            UNION
+            SELECT c.id
+              FROM compute_jobs c
+              JOIN clo ON c.parent_job_ids @> ARRAY[clo.id]
+             WHERE c.status = 'done_pending_children'
+          )
+          SELECT COALESCE(array_agg(clo.id), '{}'::uuid[])
+            INTO v_kids
+            FROM clo;
+          EXIT WHEN v_kids <@ v_held;
+          IF cardinality(v_held) > 0 THEN
+            RAISE EXCEPTION 'mark_compute_job_failed: the waiting closure of job % grew while its rows were being locked', p_job_id
+              USING ERRCODE = 'FI001';
+          END IF;
+          PERFORM public._fan_in_lock_rows(v_kids, TRUE);
+          v_held := v_kids;
+        END LOOP;
+      EXCEPTION WHEN SQLSTATE 'FI001' THEN
+        v_retry := TRUE;
+      END;
+      EXIT WHEN NOT v_retry;
+    END LOOP;
+
+    IF cardinality(v_held) <> 0 THEN
+      v_frontier := v_fail_set;
+      LOOP
+        WITH failed_kids AS (
+          UPDATE compute_jobs c
+             SET status          = 'failed_final',
+                 error_kind      = fp.error_kind,
+                 last_error      = 'fan_in_parent_failed: ' || fp.id::text
+                                   || ' ended failed_final; this job can never be released',
+                 next_attempt_at = now()
+            FROM compute_jobs fp
+           WHERE c.id = ANY(v_held)
+             AND c.status = 'done_pending_children'
+             AND c.parent_job_ids && v_frontier
+             AND fp.id = (SELECT x
+                            FROM unnest(c.parent_job_ids) AS x
+                           WHERE x = ANY(v_frontier)
+                           ORDER BY x
+                           LIMIT 1)
+          RETURNING c.id AS kid_id, c.strategy_id AS kid_strategy_id
+        )
+        SELECT COALESCE(array_agg(fk.kid_id), '{}'::uuid[]),
+               v_casc_jobs
+                 || COALESCE(array_agg(fk.kid_id) FILTER (WHERE fk.kid_strategy_id IS NOT NULL), '{}'::uuid[]),
+               v_casc_strats
+                 || COALESCE(array_agg(fk.kid_strategy_id) FILTER (WHERE fk.kid_strategy_id IS NOT NULL), '{}'::uuid[])
+          INTO v_frontier, v_casc_jobs, v_casc_strats
+          FROM failed_kids fk;
+        EXIT WHEN cardinality(v_frontier) = 0;
+      END LOOP;
+    END IF;
   END IF;
+
+  -- Phase 18: atomic UI bridge (preserved from mig 099).
+  -- Phase 164.9.3.1 D-01: the bridge now covers EVERY affected strategy, this
+  -- job's own and each failed descendant's, de-duplicated (one row per
+  -- strategy: the own job when the strategy is the job's own, else the lowest
+  -- failed job id on it, so the trigger job is deterministic). Without it the
+  -- child's strategy keeps reading `computing` although its job is terminal.
+  -- Lock order (rules, not preferences): every fan-in row lock above is already
+  -- held; the per-strategy advisory locks come AFTER them, taken in ONE sorted
+  -- order (hashtext of the strategy id, then the id) so two cascades that
+  -- bridge overlapping strategy sets cannot take them in opposite orders. Two
+  -- strategies whose hashes collide share one advisory key, which
+  -- pg_advisory_xact_lock re-enters in the same transaction (no self-deadlock).
+  FOR r_b IN
+    SELECT d.strategy_id, d.job_id
+      FROM (SELECT DISTINCT ON (u.strategy_id) u.strategy_id, u.job_id
+              FROM (SELECT v_strategy_id AS strategy_id, p_job_id AS job_id, 0 AS ord
+                    UNION ALL
+                    SELECT t.strategy_id, t.job_id, 1
+                      FROM unnest(v_casc_strats, v_casc_jobs) AS t(strategy_id, job_id)) u
+             WHERE u.strategy_id IS NOT NULL
+             ORDER BY u.strategy_id, u.ord, u.job_id) d
+     ORDER BY hashtext(d.strategy_id::text), d.strategy_id
+  LOOP
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(r_b.strategy_id::text));
+    PERFORM sync_strategy_analytics_status(r_b.strategy_id, r_b.job_id);
+  END LOOP;
 
   RETURN v_next_attempt;
 END;
@@ -7822,7 +8109,7 @@ $$;
 ALTER FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_error" "text", "p_error_kind" "text", "p_claim_token" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_error" "text", "p_error_kind" "text", "p_claim_token" "uuid") IS 'Terminal failure transition. Mig 117 / P97 fence + B5 strict-token follow-up: p_claim_token MUST be non-NULL (NULL raises 22023 invalid_parameter_value); mismatch raises SQLSTATE 55006 (object_in_use), which PostgREST answers once. Backoff schedule preserved verbatim from mig 109 P4. HOTFIX 20260529180000: writes error_kind (not the non-existent last_error_kind that mig 20260528183100 typo-introduced, which 42703-errored every failed mark).';
+COMMENT ON FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_error" "text", "p_error_kind" "text", "p_claim_token" "uuid") IS 'Terminal failure transition. Mig 117 / P97 fence + B5 strict-token follow-up: p_claim_token MUST be non-NULL (NULL raises 22023 invalid_parameter_value); mismatch raises SQLSTATE 55006 (object_in_use), which PostgREST answers once. Backoff schedule preserved verbatim from mig 109 P4. HOTFIX 20260529180000: writes error_kind (not the non-existent last_error_kind that mig 20260528183100 typo-introduced, which 42703-errored every failed mark). Phase 164.9.3.1 D-01 to D-03: when the job ends failed_final it locks its whole waiting closure in one ascending pass through public._fan_in_lock_rows and then fails the waiting descendants level by level in the same transaction, each naming its own failed parent in last_error and inheriting that parent''s error_kind, and bridges every affected strategy through sync_strategy_analytics_status. The closure is re-read under the locks: a child committed during the lock wait makes it release the locks it took and lock the grown closure again in one ascending pass (bounded, SQLSTATE 55P03 past ten attempts).';
 
 
 
@@ -12175,6 +12462,7 @@ CREATE TABLE IF NOT EXISTS "public"."bridge_outcomes" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "original_holding_ref" "text",
+    "former_match_decision_id" "uuid",
     CONSTRAINT "bridge_outcomes_allocated_at_check" CHECK ((("allocated_at" IS NULL) OR (("allocated_at" <= CURRENT_DATE) AND ("allocated_at" >= (CURRENT_DATE - '365 days'::interval))))),
     CONSTRAINT "bridge_outcomes_estimated_days_check" CHECK ((("estimated_days" IS NULL) OR (("estimated_days" >= 0) AND ("estimated_days" <= 180)))),
     CONSTRAINT "bridge_outcomes_kind_allocated" CHECK ((("kind" <> 'allocated'::"text") OR (("percent_allocated" IS NOT NULL) AND ("allocated_at" IS NOT NULL) AND ("rejection_reason" IS NULL) AND (("strategy_id" IS NOT NULL) OR ("match_decision_id" IS NOT NULL))))),
@@ -12189,7 +12477,7 @@ CREATE TABLE IF NOT EXISTS "public"."bridge_outcomes" (
 ALTER TABLE "public"."bridge_outcomes" OWNER TO "postgres";
 
 
-COMMENT ON TABLE "public"."bridge_outcomes" IS 'Allocator self-reported post-intro outcome for a Bridge-recommended strategy, or for a voluntary scenario decision (Phase 10). Uniqueness is two-part. (i) bridge_outcomes_allocator_match_decision_unique, UNIQUE (allocator_id, match_decision_id): one outcome per decision (migration 081). (ii) bridge_outcomes_legacy_per_strategy_holding_when_md_null, a partial UNIQUE on (allocator_id, strategy_id, COALESCE(original_holding_ref, '''')) WHERE match_decision_id IS NULL (migration 083), for rows whose decision was nulled out. The sync trigger writes NULL to original_holding_ref for every such row it touches, so that index is in effect one outcome per (allocator, strategy) among them. Two outcomes for the same (allocator, strategy) under two different decisions are allowed by design. Outcomes are editable by owner (D-17) and append-only from an audit perspective (no DELETE policy; corrective edits via UPSERT). Scope: D-08 through D-19, OUTCOME-01 through OUTCOME-08.';
+COMMENT ON TABLE "public"."bridge_outcomes" IS 'Allocator self-reported post-intro outcome for a Bridge-recommended strategy, or for a voluntary scenario decision (Phase 10). Uniqueness is two-part. (i) bridge_outcomes_allocator_match_decision_unique, UNIQUE (allocator_id, match_decision_id): one outcome per decision (migration 081). (ii) bridge_outcomes_legacy_per_strategy_holding_when_md_null, a partial UNIQUE on (allocator_id, strategy_id, COALESCE(original_holding_ref, ''''), COALESCE(former_match_decision_id, zero uuid)) WHERE match_decision_id IS NULL (migration 083, re-keyed by Phase 164.9.3.1 D-05), for rows whose decision is gone. A row orphaned by the ON DELETE SET NULL cascade keeps the decision it came from in former_match_decision_id (written by the sync trigger, never by a client, no foreign key), so orphans of different decisions never collide; a row born with no decision has a NULL former_match_decision_id, so those keep one outcome per (allocator, strategy, holding). The sync trigger writes NULL to original_holding_ref for every md-NULL row it touches, so the holding part of that key is empty for them. Two outcomes for the same (allocator, strategy) under two different decisions are allowed by design. Outcomes are editable by owner (D-17) and append-only from an audit perspective (no DELETE policy; corrective edits via UPSERT). Scope: D-08 through D-19, OUTCOME-01 through OUTCOME-08.';
 
 
 
@@ -12253,7 +12541,11 @@ COMMENT ON COLUMN "public"."bridge_outcomes"."needs_recompute" IS 'Flag set TRUE
 
 
 
-COMMENT ON COLUMN "public"."bridge_outcomes"."original_holding_ref" IS 'Phase 09 / finding f4. Denormalized mirror of match_decisions.original_holding_ref, populated by bridge_outcomes_sync_holding_ref_trigger on INSERT/UPDATE OF match_decision_id. NULL for strategy-sourced rows (original_strategy_id path). NULL when match_decision_id IS NULL (the trigger writes NULL for those rows). The md-NULL partial index bridge_outcomes_legacy_per_strategy_holding_when_md_null (migration 083) keys on COALESCE(original_holding_ref, ''''), but because the trigger nulls this column for md-NULL rows, that index is in effect per (allocator, strategy); a non-empty holding reaches it only through a direct UPDATE of this column that leaves match_decision_id unchanged. Rows with a decision are keyed by bridge_outcomes_allocator_match_decision_unique (migration 081), which does not read this column.';
+COMMENT ON COLUMN "public"."bridge_outcomes"."original_holding_ref" IS 'Phase 09 / finding f4. Denormalized mirror of match_decisions.original_holding_ref, populated by bridge_outcomes_sync_holding_ref_trigger on INSERT/UPDATE OF match_decision_id, only from a decision of the outcome row''s own allocator (another allocator''s decision is refused). NULL for strategy-sourced rows (original_strategy_id path). NULL when match_decision_id IS NULL (the trigger writes NULL for those rows). The md-NULL partial index bridge_outcomes_legacy_per_strategy_holding_when_md_null (migration 083) keys on COALESCE(original_holding_ref, ''''), then on COALESCE(former_match_decision_id, zero uuid) (Phase 164.9.3.1 D-05), but because the trigger nulls this column for md-NULL rows, that index is in effect per (allocator, strategy, former decision); a non-empty holding reaches it only through a direct UPDATE of this column that leaves match_decision_id unchanged. Rows with a decision are keyed by bridge_outcomes_allocator_match_decision_unique (migration 081), which does not read this column.';
+
+
+
+COMMENT ON COLUMN "public"."bridge_outcomes"."former_match_decision_id" IS 'Phase 164.9.3.1 D-05. The match_decisions row this outcome was recorded under, kept after that decision was deleted and the ON DELETE SET NULL cascade nulled match_decision_id. Written only by bridge_outcomes_sync_holding_ref_trigger: NULL whenever match_decision_id is set, NULL on INSERT, the old match_decision_id when an UPDATE removes the link and that decision row no longer exists (the cascade), NULL when an UPDATE removes the link of a decision that still exists (a voluntary detach), unchanged when an UPDATE leaves it NULL. No foreign key by design (the decision it names is deleted by the event that fills it). Keys the md-NULL partial unique index, so cascade orphans of different decisions never collide.';
 
 
 
@@ -14309,11 +14601,11 @@ CREATE INDEX "bridge_outcomes_allocator_recent" ON "public"."bridge_outcomes" US
 
 
 
-CREATE UNIQUE INDEX "bridge_outcomes_legacy_per_strategy_holding_when_md_null" ON "public"."bridge_outcomes" USING "btree" ("allocator_id", "strategy_id", COALESCE("original_holding_ref", ''::"text")) WHERE ("match_decision_id" IS NULL);
+CREATE UNIQUE INDEX "bridge_outcomes_legacy_per_strategy_holding_when_md_null" ON "public"."bridge_outcomes" USING "btree" ("allocator_id", "strategy_id", COALESCE("original_holding_ref", ''::"text"), COALESCE("former_match_decision_id", '00000000-0000-0000-0000-000000000000'::"uuid")) WHERE ("match_decision_id" IS NULL);
 
 
 
-COMMENT ON INDEX "public"."bridge_outcomes_legacy_per_strategy_holding_when_md_null" IS 'Phase 10 / migration 083 (P2). Partial UNIQUE that restores the migration-072 (allocator_id, strategy_id, original_holding_ref) per-strategy invariant for any bridge_outcomes row whose match_decision_id was nulled out (e.g., via the ON DELETE SET NULL cascade when a match_decision is deleted). Migration 081 replaced 072''s unconditional unique with (allocator_id, match_decision_id), which over Postgres''s NULL-distinct semantics no longer blocks duplicate legacy-shape rows. This partial index restores that block strictly for the NULL-md case; rows with a real match_decision_id continue to use the bridge_outcomes_allocator_match_decision_unique constraint.';
+COMMENT ON INDEX "public"."bridge_outcomes_legacy_per_strategy_holding_when_md_null" IS 'Phase 10 / migration 083 (P2), re-keyed by Phase 164.9.3.1 D-05. Partial UNIQUE on (allocator_id, strategy_id, COALESCE(original_holding_ref, ''''), COALESCE(former_match_decision_id, zero uuid)) WHERE match_decision_id IS NULL. Guards two populations of rows with no live decision. Rows born with no decision have a NULL former_match_decision_id and the sync trigger keeps original_holding_ref NULL, so they share one key per (allocator, strategy) and a second one raises 23505 (the owner-insert duplicate guard). Rows orphaned by the ON DELETE SET NULL cascade carry the decision they came from in former_match_decision_id, so orphans of different decisions never collide. Rows with a real match_decision_id use bridge_outcomes_allocator_match_decision_unique.';
 
 
 
@@ -14901,7 +15193,7 @@ CREATE OR REPLACE TRIGGER "bridge_outcomes_set_updated_at_trigger" BEFORE UPDATE
 
 
 
-CREATE OR REPLACE TRIGGER "bridge_outcomes_sync_holding_ref_trigger" BEFORE INSERT OR UPDATE OF "match_decision_id" ON "public"."bridge_outcomes" FOR EACH ROW EXECUTE FUNCTION "public"."bridge_outcomes_sync_holding_ref"();
+CREATE OR REPLACE TRIGGER "bridge_outcomes_sync_holding_ref_trigger" BEFORE INSERT OR UPDATE OF "match_decision_id", "former_match_decision_id" ON "public"."bridge_outcomes" FOR EACH ROW EXECUTE FUNCTION "public"."bridge_outcomes_sync_holding_ref"();
 
 
 
@@ -16669,6 +16961,11 @@ GRANT ALL ON FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "
 
 REVOKE ALL ON FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "uuid", "p_portfolio_id" "uuid", "p_kind" "text", "p_idempotency_key" "text", "p_parent_job_ids" "uuid"[], "p_exchange" "text", "p_metadata" "jsonb", "p_allocator_id" "uuid", "p_api_key_id" "uuid", "p_run_at" timestamp with time zone) FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "uuid", "p_portfolio_id" "uuid", "p_kind" "text", "p_idempotency_key" "text", "p_parent_job_ids" "uuid"[], "p_exchange" "text", "p_metadata" "jsonb", "p_allocator_id" "uuid", "p_api_key_id" "uuid", "p_run_at" timestamp with time zone) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fan_in_lock_rows"("p_ids" "uuid"[], "p_for_update" boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fan_in_lock_rows"("p_ids" "uuid"[], "p_for_update" boolean) TO "service_role";
 
 
 

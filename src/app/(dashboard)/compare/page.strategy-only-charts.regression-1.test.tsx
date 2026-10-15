@@ -47,11 +47,18 @@ vi.mock("@/components/strategy/CompareCorrelationMatrix", () => ({
   ),
 }));
 
-// Mock supabase/server — user is authed; strategies + snapshots stubbed.
-const BTC_SNAPSHOTS = Array.from({ length: 40 }, (_, i) => ({
-  asof: `2026-01-${String(i + 1).padStart(2, "0")}`,
-  breakdown: { BTC: 60000 + i * 200 },
-}));
+// Mock supabase/server — user is authed; strategies + holding price rows stubbed.
+// Phase 167.1.1 / D-03: the holding read is the paged allocator_holdings price
+// read (40 consecutive priced BTC days), not allocator_equity_snapshots.
+const BTC_HOLDINGS = Array.from({ length: 40 }, (_, i) => {
+  const asof = new Date(Date.UTC(2026, 0, i + 1)).toISOString().slice(0, 10);
+  return {
+    asof,
+    mark_price: 60000 + i * 200,
+    updated_at: `${asof}T10:00:00Z`,
+    api_key_id: "key-a",
+  };
+});
 const PUBLISHED_STRATEGY = {
   id: "22222222-3333-4444-8555-666666666666",
   name: "Strategy Beta",
@@ -114,16 +121,17 @@ vi.mock("@/lib/supabase/server", () => ({
           }),
         };
       }
-      if (table === "allocator_equity_snapshots") {
-        return {
-          select: () => ({
-            eq: () => ({
-              order: () => ({
-                limit: () => Promise.resolve({ data: BTC_SNAPSHOTS, error: null }),
-              }),
-            }),
-          }),
-        };
+      if (table === "allocator_holdings") {
+        // select -> eq x4 -> gte -> order x2 -> range, awaited (one short page).
+        const chain: Record<string, unknown> = {};
+        for (const m of ["select", "eq", "gte", "order", "range"]) {
+          chain[m] = () => chain;
+        }
+        chain.then = (
+          resolve: (v: unknown) => unknown,
+          reject?: (e: unknown) => unknown,
+        ) => Promise.resolve({ data: BTC_HOLDINGS, error: null }).then(resolve, reject);
+        return chain;
       }
       return { select: () => ({ in: () => ({ eq: () => Promise.resolve({ data: [], error: null }) }) }) };
     },

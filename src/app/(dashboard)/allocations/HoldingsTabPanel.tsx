@@ -347,6 +347,19 @@ export function HoldingsTabPanel(
     return m;
   }, [apiKeys]);
 
+  // ── Map api_key.id → disconnected_at (Phase 167.1.1 D-02). A sibling of
+  //    `keyStatusById`, not folded into it: that map's value is a status
+  //    string. A key MISSING from the list gets null here (via `?? null` at
+  //    the row) and keeps its `source_key_missing` path, never read as
+  //    connected-and-trusted by this field alone.
+  const disconnectedAtByKeyId = useMemo(() => {
+    const m = new Map<string, string | null>();
+    for (const k of apiKeys) {
+      m.set(k.id, k.disconnected_at ?? null);
+    }
+    return m;
+  }, [apiKeys]);
+
   // ── spot rows for the legacy holding-column table (Exchange Positions).
   //    source_key_sync_status drives the revoked-key chip.
   const spotHoldingRows = useMemo<HoldingRow[]>(
@@ -382,9 +395,11 @@ export function HoldingsTabPanel(
           api_key_id: h.api_key_id,
           source_key_sync_status: status,
           source_key_missing: !keyStatusById.has(h.api_key_id),
+          source_key_disconnected_at:
+            disconnectedAtByKeyId.get(h.api_key_id) ?? null,
         };
       }),
-    [spotHoldings, keyStatusById, keyLabels],
+    [spotHoldings, keyStatusById, disconnectedAtByKeyId, keyLabels],
   );
 
   const openPositionRows = useMemo<OpenPositionRow[]>(
@@ -413,9 +428,11 @@ export function HoldingsTabPanel(
           api_key_id: h.api_key_id,
           source_key_sync_status: status,
           source_key_missing: !keyStatusById.has(h.api_key_id),
+          source_key_disconnected_at:
+            disconnectedAtByKeyId.get(h.api_key_id) ?? null,
         };
       }),
-    [derivativeHoldings, keyStatusById, keyLabels],
+    [derivativeHoldings, keyStatusById, disconnectedAtByKeyId, keyLabels],
   );
 
   // SFH-R2-03: the UTC day the tab was opened, the absolute reference the

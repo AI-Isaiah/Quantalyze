@@ -1396,6 +1396,8 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- **[167.1.1-BRIDGE-DOLLAR-RATIO-RETURNS]** (logged 2026-10-15, HOLDINGKEYSCOPE, founder decision D-06; owner: the follow-up phase the orchestrator books via `/gsd-phase --insert`). `reconstruct_symbol_returns` in `analytics-service/routers/match.py` builds each holding's daily return as a day-over-day ratio of dollar values from `allocator_equity_snapshots.breakdown`, so buying, selling or moving more of an asset reads as a gain or loss. It feeds the Bridge matcher's per-holding pseudo-strategy returns: correlation-ceiling holding flags and portfolio context. Phase 167.1.1 retired the same dollar-ratio read on `/compare` (D-03: per-holding metrics from each holding's daily mark price, adjacent calendar days only, gaps never zero, fixed-mark and account-balance holdings withheld). SC 4 kept the analytics service out of scope there. Done when the matcher's per-holding returns come from a source that removes purchases, sales and transfers (e.g. the same mark-price rule as `holding-compare-adapter.ts`), with a test that goes RED on the dollar-ratio read. Trigger: the booked phase.
+
 - **[166.5-PDF-MIXED-VINTAGE-WINDOW]** (logged 2026-10-15, Phase 166.5 COMPUTEDATSTAMP plan 07, Pitfall 6; owner: a FOUNDER decision; trigger: a factsheet PDF that disagrees with its own lazy panels). The analytics runner now stamps `computed_at` in the same upsert as the metrics, and writes the sibling series (the rolling, drawdown, grid and log-return kinds the lazy panels read) AFTER it through `upsert_strategy_analytics_series_batch`. The factsheet payload cache (`unstable_cache`, keyed on `computed_at`) is NOT exposed: it builds only from the metrics row and the cash, MTM and smoothed-MTM series, all written BEFORE the stamp. The PDF route (`src/app/api/factsheet/[id]/pdf/route.ts`) IS exposed: it renders the page with puppeteer `networkidle0`, so the lazy panels fetch the sibling series, and a render that lands between the stamp and the sibling write shows NEW scalars beside the PREVIOUS run's lazy panels. That PDF carries ETag `id:computed_at` under the NEW date, `Cache-Control: public, s-maxage=3600, stale-while-revalidate=86400`, and answers `If-None-Match` with 304, so the CDN can serve it for up to 3600 s (stale up to 86400 s more) and a revalidating client keeps it 304-valid until the next real recompute moves `computed_at`. Before this phase the bridge stamped AFTER the siblings, so such a render carried the OLD date and was replaced on revalidation. **Window width, measured 2026-10-15 on the local stack:** one `upsert_strategy_analytics_series_batch` round trip through PostgREST as the service role, 12 kinds, 560 034 bytes (real `compute_all_metrics` output over 1 100 daily points plus two synthetic kinds), 5 calls: median 24.1 ms, max 41.6 ms. A LOWER BOUND for PROD (no network hop). Only a PDF requested inside that interval is affected, and the sibling write is skipped entirely for a strategy with no sibling kinds. **Closing option:** write the sibling series BEFORE the success write, as the cash series already is (`_persist_cash_series` before `_mark_complete`), folding a sibling failure into that write's flags (`sibling_kinds_failed`) instead of the current after-the-fact flag upsert. That moves the stamp to be the last write of a good compute again. **Closed when:** a test proves a sibling-series write never lands after the date moves (the order of the two writes is asserted in both the CSV runner and the composite stitch), or the founder accepts the window and this entry is struck with the width above recorded.
 
 - **[166.5-STALE01-PREMISE]** (logged 2026-10-15, Phase 166.5 COMPUTEDATSTAMP plan 07; owner: Phase 166.5 follow-up, a FOUNDER decision; trigger: a failed row now carries an honest last-good date). STALE-01 (`src/lib/queries.ts`, `isComputedAnalytics` and the `failed` / `pending` / `computing` arm below it) hides every figure on a ranked-list row whose analytics status is not a computed one. Its stated reason was that the date beside those figures dated the FAILURE, not the numbers (the status bridge re-stamped `computed_at` on every transition). Since Phase 166.5 the bridge writes no date and the analytics runner stamps it on its success write only, so a failed or computing row carries the date of its LAST GOOD compute, and the premise the gate rests on has changed. **Question for the founder:** should a failed or computing row now show its last good figures beside that honest date, instead of hiding them? **If yes:** the arm returns the stored figures (with the badge reading the last good date, and a visible "last run failed" cue so a dead figure is never presented as current), `isRankableAnalyticsRow` and the percentile cohort gate must be re-decided in the same change so the cell and the cohort cannot disagree (RANK-01), and the `computing` arm stops costing a published row its figures for the ~10-15 minutes a job runs. **If no:** the arm is kept as it is and only its comment changes; hiding stays the product rule. **Behaviour today:** unchanged by Phase 166.5. The comments in `queries.ts` were rewritten to the new truth and point here. **Closed when:** the founder answers, and either the arm changes with a test that fails on today's behaviour or this entry is struck with the decision recorded.
@@ -9883,6 +9885,76 @@ message (but not the `code` tag). The landing helper has the same shape.
 `failAnonRead` and in the landing helper.
 **Owner / Trigger:** fixed together with 170.6.1.1-LANDING-CAPTURE-THROTTLE; or the first Sentry event seen
 without its `code` tag.
+
+## Phase 164.9.3.1 (FANINGRAPH) — routed items (logged 2026-10-15)
+
+Found by the phase research on 2026-10-15 while reproducing the four fan-in defects. None of the four is fixed by
+Phase 164.9.3.1; each names an owner and a trigger, and the first is an open founder question.
+
+### 164.9.3.1-REAPER-STRAND — the hourly orphan reaper writes failed_final without mark_compute_job_failed, so a fan-in child of a reaped parent still strands (booked 2026-10-15, FANINGRAPH research, latent)
+
+**Failure scenario.** The inline pg_cron job `retention_compute_jobs_orphaned_running` (last registered by
+`supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql`) sets `status = 'failed_final'` directly on
+stale `running` rows. It never calls `mark_compute_job_failed`, so the failure cascade this phase adds does not run
+for it: a fan-in parent reaped that way leaves its `done_pending_children` child waiting forever, and the child's
+strategy reads computing. Latent today: no caller passes `parent_job_ids`, and the PROD census of 2026-10-15 found 0
+parented rows among 2292 jobs.
+**Fix.** Three options, none discussed with the founder. (i) Book it and leave it (this entry). (ii) Call the cascade
+from the cron body through a helper whose name and tokens leave the retention gate's counts alone. (iii) A status
+trigger on `compute_jobs` that covers every writer, which departs from D-02's "inside `mark_compute_job_failed`".
+Re-registering the cron job gives it a fresh PROD jobid and moves `supabase/tests/test_retention_orphaned_running.sql`
+(token counts in `cron.job.command`, and its twins), invariant 7 of
+`src/__tests__/retention-orphaned-running-terminalize.test.ts` with its `FIX_TS` constants, and
+`scripts/prod-prober/cron-manifest.json`.
+**FOUNDER DECISION 2026-10-15** ("Book it, latent"): option (i). The path stays out of Phase 164.9.3.1 and is kept here
+as booked, latent work. Recorded in CONTEXT ("Research clarifications") and in the ROADMAP phase section.
+**Owner / Trigger:** the first caller that enqueues with parents, or any PROD `compute_jobs` row with parents.
+
+### 164.9.3.1-OUTCOME-ROUTE-42P10 — POST /api/bridge/outcome upserts on a conflict target no unique index matches — USER-FACING (booked 2026-10-15, FANINGRAPH research) — ✅ CLOSED IN CODE 2026-10-15 by Phase 164.9.3.1 plan 11; ⚠️ NOT live until its PR merges and deploys
+
+**Failure scenario.** `src/app/api/bridge/outcome/route.ts` calls `.upsert(..., { onConflict: "allocator_id,strategy_id" })`.
+The unique objects the dump carries on `bridge_outcomes` are the primary key, `bridge_outcomes_allocator_match_decision_unique`
+and the partial expression index `bridge_outcomes_legacy_per_strategy_holding_when_md_null`; none of them is
+`(allocator_id, strategy_id)`. On the research lane stand-in `ON CONFLICT (allocator_id, strategy_id)` raised `42P10`
+("there is no unique or exclusion constraint matching the ON CONFLICT specification"). The PROD runtime was NOT
+exercised (research assumption A2), so this is a claim to measure first. If it holds, an allocator recording an
+outcome gets a 500.
+**Fix.** Measure on the local stack first, then target the per-decision constraint
+(`allocator_id, match_decision_id`) in the upsert. The sibling dismiss route targets a different table and is not
+affected.
+**Owner / Trigger:** route to a phase by founder decision; the trigger is now, because the symptom is user-facing.
+**CLOSED 2026-10-15 (Phase 164.9.3.1 plan 11, CONTEXT D-09).** The claim was measured read-only on PROD that day, after the
+marker query: `bridge_outcomes` has exactly three unique indexes (`bridge_outcomes_pkey`,
+`bridge_outcomes_allocator_match_decision_unique`, the md-NULL partial index) and `EXPLAIN INSERT ... ON CONFLICT
+(allocator_id, strategy_id)` raises `42P10`, so every `POST /api/bridge/outcome` returned 500. The upsert now targets
+`(allocator_id, match_decision_id)` through the one shared constant `BRIDGE_OUTCOME_CONFLICT_TARGET`
+(`src/lib/bridge/outcome-conflict.ts`). Evidence: live-DB arm (e) in `src/__tests__/match-decisions-xor-rls.test.ts`
+failed `42P10` on the local stack at `1e893524a` and passes at `afecce900` (two upserts as the signed-in allocator leave
+exactly one row, carrying the second call's `kind`); route test TC8 went RED to GREEN on the same pair. No migration, no
+RLS change, no new index (a unique on `(allocator_id, strategy_id)` would forbid two outcomes under two decisions, which
+the design allows). The dismiss route is unchanged. Becomes live when the PR merges and Vercel deploys.
+
+### 164.9.3.1-VOLUNTARY-REMOVE-23514 — deleting a voluntary_remove decision fails 23514 through the same ON DELETE SET NULL cascade (booked 2026-10-15, FANINGRAPH research)
+
+**Failure scenario.** The outcome of a `voluntary_remove` decision has `strategy_id IS NULL`. Deleting the decision
+makes the `ON DELETE SET NULL` foreign key null `match_decision_id`, which leaves `strategy_id IS NULL AND
+match_decision_id IS NULL` and violates `bridge_outcomes_kind_rejected` / `bridge_outcomes_kind_allocated`. Lane result:
+`23514`. The admin decisions route cannot reach it (it requires a strategy id), and the option this phase takes for
+the 23505 (re-keying the index on a preserved former decision id) does not change it.
+**Fix.** Decide what a voluntary-remove outcome should become when its decision is deleted (keep it with a former
+decision id, or refuse the delete with a named error), then make the CHECKs and the cascade agree.
+**Owner / Trigger:** the next phase that adds a delete path for voluntary decisions.
+
+### 164.9.3.1-HOLDING-REF-DIRECT-UPDATE — an owner can bypass the md-NULL duplicate guard by updating original_holding_ref directly (booked 2026-10-15, FANINGRAPH research, reasoned and not measured)
+
+**Failure scenario.** `bridge_outcomes_update_own` plus the table-level UPDATE grant let an allocator change
+`original_holding_ref` on its own `match_decision_id IS NULL` row. `bridge_outcomes_sync_holding_ref_trigger` fires on
+`INSERT OR UPDATE OF match_decision_id` only, so it does not run for that column, and a second born-NULL row with the
+same `(allocator, strategy)` then passes the partial unique index under a different holding key. Pre-existing. This
+phase makes the NEW column `former_match_decision_id` trigger-owned but leaves `original_holding_ref` as it is.
+**Fix.** Measure first. If it reproduces, extend the sync trigger to `UPDATE OF original_holding_ref` (or revoke the
+column UPDATE from `authenticated`).
+**Owner / Trigger:** the next phase touching the sync trigger.
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
