@@ -14,6 +14,7 @@ Supported kinds:
   reconcile_strategy     -> run_reconcile_strategy_job      (5-minute timeout)
   compute_intro_snapshot -> run_compute_intro_snapshot_job  (2-minute timeout)
   process_key_long       -> run_process_key_long_job        (30-minute timeout) [Phase 19 / BACKBONE-09]
+  okx_archive_rebuild    -> run_okx_archive_rebuild_job     (15-minute timeout) [Phase 167.1.2.2.2.1 / OKXHISTORY]
 
 Error classification table — drives mark_compute_job_failed's retry-vs-final
 decision:
@@ -672,6 +673,11 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "derive_broker_dailies": 15 * 60,  # full-history realized PnL + funding fetch (mirrors sync_trades envelope)
     "stitch_composite": 20 * 60,  # Phase 86 / COMP-02 — N-member fan-out (worst case 2× crawl per key when MTM open)
     "derive_allocator_equity": 5 * 60,  # Phase 115.1 / RD-3 Option B — pure DB + math, no exchange I/O (5 min < 10 min watchdog floor → no override needed)
+    # Phase 167.1.2.2.2.1 / OKXHISTORY (D-04) — ONE claim covers a preflight, a status read,
+    # a download-and-parse, or a live crawl-and-reconcile. The 2-3 h wait for OKX to
+    # generate a quarterly file is NOT this timeout: it is defer_compute_job, which returns
+    # the row to pending between claims.
+    "okx_archive_rebuild": 15 * 60,
 }
 
 # ---------------------------------------------------------------------------
@@ -13823,6 +13829,14 @@ async def dispatch(job: dict[str, Any]) -> DispatchResult:
         # don't want to load on workers that never see this kind.
         from services.ingestion.long_fetch import run_process_key_long_job
         handler = run_process_key_long_job
+    elif kind == "okx_archive_rebuild":
+        # Phase 167.1.2.2.2.1 / OKXHISTORY (D-04) — durable OKX quarterly-archive
+        # job. Lazy import for the same reason as the arms above: the module
+        # imports this one, and a worker that never sees the kind should not load
+        # the archive modules. NOT a BACKFILL kind (main_worker): it is claimed by
+        # the interactive loop, enqueues nothing, and is nobody's follow-on.
+        from services.okx_archive_job import run_okx_archive_rebuild_job
+        handler = run_okx_archive_rebuild_job
     else:
         handler = None
 
