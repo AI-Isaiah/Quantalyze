@@ -146,7 +146,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables** (INSERTED 2026-10-03) — shipped v0.129.2.0 (merged 2026-10-08); verification: passed (plan 04 PROD after-reading 2026-10-08) (completed 2026-10-08)
 - [x] **Phase 164.9.7.1: TRIGGERREVOKE — anon and authenticated no longer hold TRIGGER or MAINTAIN on public tables** (INSERTED 2026-10-08) — shipped v0.129.5.0 (merged 2026-10-09, #987; applied to TEST then PROD, PROD after-reading `0 0 0 0`); verification: passed 2026-10-09 (founder D-06, 164.9.7)
 - [x] **Phase 164.9.8: APTHANG — a CI job's apt step never hangs on a dead package mirror** (INSERTED 2026-10-07) — shipped v0.129.1.2 (merged 2026-10-08); verification: passed (D-04 runner measurement recorded) (completed 2026-10-08)
-- [ ] **Phase 164.9.8.1: PYXDIST — the python CI job runs pytest in parallel and finishes in about half its time** (INSERTED 2026-10-14) — started 2026-10-14 (founder override: runs now, outside the in-flight phase limit)
+- [x] **Phase 164.9.8.1: PYXDIST — the python CI job runs pytest in parallel and finishes in about half its time** (INSERTED 2026-10-14) — started 2026-10-14 (founder override: runs now, outside the in-flight phase limit) — shipped v0.132.1.6 (merged 2026-10-15, #1054); verification: passed (SC-3 soak 20/20 and SC-4 wall time read from CI) (completed 2026-10-15)
 - [x] **~~Phase 165~~: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"), as 165 ACTIONSDEPS: #643 (superseded by #916), #627, #626 and #612 landed green; deviations in `165-VERIFICATION.md`.
 - [x] **~~Phase 165.1~~: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"): the maintenance landings meet the criteria, C1 in substance and not to the letter (the pandas fix rode inside #898); deviations in `165.1-VERIFICATION.md`.
 - [x] **~~Phase 165.2~~: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -3917,10 +3917,13 @@ Plans:
 
 **Requirements**: SC-1..SC-4 above
 **Depends on:** Phase 164.9.8 (ordering only)
-**Plans:** 0 plans
+**Plans:** 4/4 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 164.9.8.1-01-PLAN.md — the `shared_test_db` xdist group made real (`tryfirst=True`), with a gate seen RED without it
+- [x] 164.9.8.1-02-PLAN.md — the limiter-identity flake fixed in the polluters (`tests/limiter_stub.py`), victim untouched
+- [x] 164.9.8.1-03-PLAN.md — `-n auto --dist loadgroup` in CI and the Makefile, byte-identical and pinned, coverage enforced combined
+- [x] 164.9.8.1-04-PLAN.md — soak and wall time, moved to the PR's CI by D-14: 20/20 green, `python` job 340 to 497 s against 654.5 s
 
 ### Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables (measured read-only on PROD 2026-10-03: anon 56 of 63 tables, authenticated 59, api_keys included; RLS never covers TRUNCATE). One migration revokes it and the default privilege; migration-reviewer + rls-policy-auditor + silent-failure-hunter before merge, since merges auto-apply to PROD. (INSERTED)
 
@@ -6184,7 +6187,7 @@ kept verbatim.
 | 164.9.7 TRUNCATEREVOKE | 4/4 | Complete — verification passed after the plan 04 PROD after-reading | 2026-10-08 · v0.129.2.0 · #980 |
 | 164.9.7.1 TRIGGERREVOKE | 5/5 | Complete — merged and applied, PROD after-reading `0 0 0 0`; verification passed | 2026-10-09 · v0.129.5.0 · #987 |
 | 164.9.8 APTHANG | 5/5 | Complete — verification passed after the D-04 runner measurement | 2026-10-08 · v0.129.1.2 · #979 |
-| 164.9.8.1 PYXDIST | 0/? | In progress — CI throughput, started 2026-10-14 outside the phase limit (founder) | - |
+| 164.9.8.1 PYXDIST | 4/4 | Complete — soak 20/20 and wall time MET, read from CI; verification passed | 2026-10-15 · v0.132.1.6 · #1054 |
 | 166. QSTATS-TRUTH | 10/10 | Complete    | 2026-10-04 |
 | 166.1 ENGINEFLOOR | 4/4 | Complete    | 2026-10-04 |
 | 166.1.1 DDSIGN | 3/3 | Complete | v0.129.6.0 · #988 · verification passed 2026-10-09 |

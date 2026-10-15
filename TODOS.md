@@ -10498,7 +10498,7 @@ were NOT, and all four are now pushed to `origin` so they are no longer local-on
     dropped it. The pointer in the old `ci.yml` comment was dangling, and the entry is NOT re-created.
   - Parallel pytest reaches main through this phase, not by merging this branch, so this branch's own
     disposition (land it or close it) is unchanged.
-  - The soak of at least 20 runs on the lane and the wall-time figures are in this phase's plan 04 SUMMARY.
+  - ⛔ CORRECTED 2026-10-15: the soak and wall-time figures are NOT in the plan 04 SUMMARY. Founder decision D-14 moved both to PR #1054's CI, and the readings are in this phase's VERIFICATION ("Human items resolved"): 20 of 20 green on CI run `38776484715`, and the `python` job at 340 to 497 s against a 654.5 s threshold. Shipped as v0.132.1.6 (#1054).
 
 - [ ] **`wip/v1.16-phase140-fix-archive` — 91% divergent (4,046 of 4,441 added lines absent).**
   Highest divergence of any branch, but **no file it touches is missing from main**, so this reads

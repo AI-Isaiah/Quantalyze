@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.132.1.8] - 2026-10-15 — RECORDS: close PYXDIST 164.9.8.1 (soak 20/20 and wall time read from CI)
+
+Records only; no code changes. One commit on this branch.
+
+### Changed
+- **Phase 164.9.8.1 PYXDIST is closed.** Its planning artifacts (CONTEXT, RESEARCH, PATTERNS, VALIDATION, four PLANs and SUMMARYs, REVIEW rounds, REVIEW-FIX, SECURITY, VERIFICATION) land on `main`. The verification moves from human_needed to passed. Founder decision D-14 had moved its two human items to PR #1054's CI, and both are now read there:
+  - SC-3 soak: 20 of 20 consecutive green `python` job attempts on head `b14fc436`, CI run `38776484715`.
+  - SC-4 wall time: MET. The job ran 340 to 497 s and the pytest step 175 to 305 s, against a 654.5 s threshold (55% of the 1190 s median before).
+  - The heads after the soak each got one full CI run, not a new soak; the final head passed all 26 jobs of run `38806555287`.
+- ROADMAP and STATE record the close (v0.132.1.6, #1054). STATE's current position stays on 166.5 COMPUTEDATSTAMP, because several phases run in parallel.
+
+### Fixed
+- **TODOS pointed at the wrong place for the soak figures.** The PYXDIST note said they were in the plan 04 SUMMARY; after D-14 they are in the phase VERIFICATION. Corrected in place with a dated note.
+- **Five local home-path literals in the phase artifacts** (a grep pattern in the four PLANs and one phrase in SECURITY) are reworded, so the public-repo hygiene check passes.
+
 ## [0.132.1.6] - 2026-10-15 — PYXDIST: the python CI job runs pytest in parallel, and the flakes that serial order hid are fixed at their root
 
 Phase 164.9.8.1. Since `origin/main` the branch carries 78 non-merge commits: 54 that touch paths outside `.planning` (this release commit among them) and 24 planning and records commits, and this entry maps them all. It also carries 11 merge commits: the per-plan and fixer worktrees merging back, and three merges of `origin/main` before the release. Grouped by theme below, each bullet ends with the hashes it covers. The version is a fourth-digit bump. It was re-picked from a freshly fetched `origin/main` at 0.132.1.5, after #1064 landed, and the open PR #1060 re-picks above it. This is a CI and test change; no production code changes.
