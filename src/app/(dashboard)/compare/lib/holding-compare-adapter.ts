@@ -107,18 +107,27 @@ export const HOLDING_COMPARE_MAX_PAGES = 50;
 export type HoldingWithheldReason = "fixed_price" | "account_balance" | "no_price";
 
 /**
- * Phase 167.1.1.1 / D-03: every reason the SPOT price rule can withhold a holding
- * by, the three above plus `too_few_priced_days` (priced, but fewer than
- * `HOLDING_COMPARE_MIN_PRICED_DAYS` days). The Python twin is
- * `PRICE_RULE_WITHHELD_REASONS` in analytics-service/services/holding_marks.py; the
- * shared fixture holding_mark_returns_cases.json pins both lists.
+ * Phase 167.1.1.1 / D-03, D-10, D-12: every reason the price rule can withhold a
+ * holding by, the three above plus `too_few_priced_days` (priced, but fewer than
+ * `HOLDING_COMPARE_MIN_PRICED_DAYS` days) and the two derivative reasons:
+ * `no_direction` (positive marks exist but no day has an established long or short
+ * direction) and `option_premium` (an option's mark is a premium, not a price). The
+ * Python twin is `PRICE_RULE_WITHHELD_REASONS` in
+ * analytics-service/services/holding_marks.py; the shared fixture
+ * holding_mark_returns_cases.json pins both lists.
  */
-export type HoldingMarkWithheldReason = HoldingWithheldReason | "too_few_priced_days";
+export type HoldingMarkWithheldReason =
+  | HoldingWithheldReason
+  | "too_few_priced_days"
+  | "no_direction"
+  | "option_premium";
 
 export const HOLDING_MARK_WITHHELD_REASONS: readonly HoldingMarkWithheldReason[] = [
   "account_balance",
   "fixed_price",
+  "no_direction",
   "no_price",
+  "option_premium",
   "too_few_priced_days",
 ];
 
@@ -232,24 +241,46 @@ type PriceRow = {
   mark_price: unknown;
   updated_at: string;
   api_key_id: string;
+  /** Read by the derivative rule only (long, short, flat); the spot rule ignores it. */
+  side?: unknown;
 };
 
 export type DailyPrice = { asof: string; price: number };
+
+/** One priced derivative day; `direction` is null when the day has no established one. */
+export type DirectedPrice = {
+  asof: string;
+  price: number;
+  direction: "long" | "short" | null;
+};
+
+/**
+ * D-12: a signed one-day return is floored at -100%. A short whose mark more than doubles
+ * loses more than the position, which a holder cannot, and an unfloored value would drive
+ * NAV below zero. Twin of `SIGNED_RETURN_FLOOR` in holding_marks.py.
+ */
+export const SIGNED_RETURN_FLOOR = -1;
+
+const DERIVATIVE_SIDES: ReadonlySet<unknown> = new Set(["long", "short", "flat"]);
 
 /**
  * A stored row broke the read contract (SFH-03, 167.1.1 round 1): `mark_price`
  * is `numeric NOT NULL`, so a value that is not a finite number is a driver or
  * schema change, and `asof` is a `date`, so anything but a `YYYY-MM-DD` string
- * is the same. Carries counts only, never a row value.
+ * is the same. A derivative's `side` must be long, short or flat (`badSides`, 167.1.1.1
+ * D-02). Carries counts only, never a row value.
  */
 export class HoldingMarkContractError extends Error {
   readonly badMarks: number;
   readonly badDays: number;
-  constructor(badMarks: number, badDays: number) {
-    super(`holding rows broke the read contract (marks: ${badMarks}, days: ${badDays})`);
+  readonly badSides: number;
+  constructor(badMarks: number, badDays: number, badSides = 0) {
+    const detail = `marks: ${badMarks}, days: ${badDays}${badSides > 0 ? `, sides: ${badSides}` : ""}`;
+    super(`holding rows broke the read contract (${detail})`);
     this.name = "HoldingMarkContractError";
     this.badMarks = badMarks;
     this.badDays = badDays;
+    this.badSides = badSides;
   }
 }
 
@@ -294,7 +325,15 @@ export function dailyMarkPrices(rows: readonly PriceRow[]): DailyPrice[] {
     if (!isRealIsoDay(r.asof)) badDays += 1;
   }
   if (badMarks > 0 || badDays > 0) throw new HoldingMarkContractError(badMarks, badDays);
+  return pickDailyMarks(rows);
+}
 
+/**
+ * The per-day pick shared by the spot and derivative rules. Rows must already have passed
+ * the read contract. Marks at or below 0 are skipped first; per `asof` the greatest
+ * `writtenAtMicros(updated_at)` wins, ties to the smallest lowercase `api_key_id`.
+ */
+function pickDailyMarks(rows: readonly PriceRow[]): DailyPrice[] {
   const best = new Map<string, { price: number; at: number; keyId: string }>();
   for (const r of rows) {
     const m = r.mark_price as number;
@@ -312,6 +351,42 @@ export function dailyMarkPrices(rows: readonly PriceRow[]): DailyPrice[] {
   return Array.from(best, ([asof, v]) => ({ asof, price: v.price })).sort(
     (a, b) => (a.asof < b.asof ? -1 : a.asof > b.asof ? 1 : 0),
   );
+}
+
+/**
+ * The derivative twin of `dailyMarkPrices` (167.1.1.1 D-02): one mark per day picked
+ * exactly as the spot rule picks it, plus the day's direction.
+ *
+ * The read contract adds `side` in {long, short, flat}: anything else (null and a missing
+ * value included) throws `HoldingMarkContractError` with a `badSides` count, never a gap.
+ * The direction comes from ALL rows of the day, every key and every row whose mark is a
+ * gap included: unanimous long or unanimous short gives that direction, anything else (a
+ * `flat` row, or both sides) gives null. A day with no positive mark is absent. Direction
+ * is read from `side` only, never from quantity or value. Twin of `daily_directed_marks`.
+ */
+export function dailyDirectedMarks(rows: readonly PriceRow[]): DirectedPrice[] {
+  let badMarks = 0;
+  let badDays = 0;
+  let badSides = 0;
+  for (const r of rows) {
+    if (typeof r.mark_price !== "number" || !Number.isFinite(r.mark_price)) badMarks += 1;
+    if (!isRealIsoDay(r.asof)) badDays += 1;
+    if (!DERIVATIVE_SIDES.has(r.side)) badSides += 1;
+  }
+  if (badMarks > 0 || badDays > 0 || badSides > 0) {
+    throw new HoldingMarkContractError(badMarks, badDays, badSides);
+  }
+  const sidesByDay = new Map<string, Set<string>>();
+  for (const r of rows) {
+    const set = sidesByDay.get(r.asof) ?? new Set<string>();
+    set.add(r.side as string);
+    sidesByDay.set(r.asof, set);
+  }
+  return pickDailyMarks(rows).map(({ asof, price }) => {
+    const sides = sidesByDay.get(asof)!;
+    const only = sides.size === 1 ? [...sides][0] : null;
+    return { asof, price, direction: only === "long" || only === "short" ? only : null };
+  });
 }
 
 /** True when `b` is exactly the UTC calendar day after `a` (both `YYYY-MM-DD`). */
@@ -332,6 +407,39 @@ export function adjacentDailyReturns(points: readonly DailyPrice[]): Array<[stri
     out.push([points[i].asof, points[i].price / points[i - 1].price - 1]);
   }
   return out;
+}
+
+/**
+ * The signed one-day returns of a derivative's directed days (ascending by `asof`):
+ * `[later_asof, r]` for each pair of consecutive days exactly one UTC calendar day apart
+ * where BOTH days carry a direction. `r = s(i-1) * (p[i] / p[i-1] - 1)`: the interval
+ * carries the direction of the EARLIER day (the position held over it), `s` is +1 long and
+ * -1 short, and `r` is floored at `SIGNED_RETURN_FLOOR` (D-12). Twin of
+ * `signed_adjacent_returns`.
+ */
+export function signedAdjacentReturns(days: readonly DirectedPrice[]): Array<[string, number]> {
+  const out: Array<[string, number]> = [];
+  for (let i = 1; i < days.length; i++) {
+    const earlier = days[i - 1];
+    const later = days[i];
+    if (earlier.direction === null || later.direction === null) continue;
+    if (!isNextDay(earlier.asof, later.asof)) continue;
+    const sign = earlier.direction === "long" ? 1 : -1;
+    out.push([later.asof, Math.max(sign * (later.price / earlier.price - 1), SIGNED_RETURN_FLOOR)]);
+  }
+  return out;
+}
+
+/**
+ * True for an option instrument (D-10): the upper-cased name ends `-C` or `-P`, which is
+ * what `classify_instrument` in analytics-service/services/deribit_txn.py tests first. A
+ * lowercase name and a linear-margin name (`ETH_USDC-27MAR26-50000-C`) are options; a
+ * perpetual or a dated future is not. The shared fixture pins both runtimes.
+ */
+export function isOptionSymbol(symbol: string): boolean {
+  if (typeof symbol !== "string") return false;
+  const name = symbol.toUpperCase();
+  return name.endsWith("-C") || name.endsWith("-P");
 }
 
 type PriceMetrics = Omit<HoldingCompareAnalytics, "priced_days">;
@@ -389,7 +497,46 @@ export function analyzePriceSeries(
 }
 
 /**
- * What the SPOT price rule says about one holding (167.1.1.1 D-03). `withheld_reason`
+ * The four metrics over a derivative's SIGNED one-day returns (167.1.1.1 D-12).
+ *
+ * NAV starts at 1 and compounds, `NAV_k = product of (1 + r_i)`. Cumulative return is
+ * `NAV_last - 1` and max drawdown the most negative `(NAV - peak) / peak`, the peak
+ * starting at NAV 1. Vol and Sharpe are over the same return list, exactly as
+ * `analyzePriceSeries` computes them (population sd). An EMPTY list gives null cumulative
+ * return and null drawdown: uncomputable is null, never a confident 0%. A long-only,
+ * gap-free derivative gives the same cumulative return and drawdown as the spot level form.
+ */
+export function analyzeSignedReturns(
+  returns: number[],
+  periodsPerYear: number,
+): PriceMetrics {
+  if (returns.length === 0) return { ...NULL_METRICS };
+
+  let nav = 1;
+  let peak = 1;
+  let maxDD = 0;
+  for (const r of returns) {
+    nav *= 1 + r;
+    if (nav > peak) peak = nav;
+    const dd = (nav - peak) / peak;
+    if (dd < maxDD) maxDD = dd;
+  }
+  const cumulative_return = nav - 1;
+
+  const vol =
+    returns.length >= 2 ? dispersion(returns, 0).sd * Math.sqrt(periodsPerYear) : null;
+  const sharpe = returnStatsSharpe(returns, { periodsPerYear, ddof: 0 });
+
+  return {
+    cumulative_return: Number.isFinite(cumulative_return) ? cumulative_return : null,
+    sharpe: sharpe != null && Number.isFinite(sharpe) ? sharpe : null,
+    max_drawdown: Number.isFinite(maxDD) ? maxDD : null,
+    vol: vol != null && Number.isFinite(vol) ? vol : null,
+  };
+}
+
+/**
+ * What the price rule says about one holding (167.1.1.1 D-03). `withheld_reason`
  * is null when the holding is priced well enough to use. `priced_days`, `returns` and
  * `points` are filled whenever marks were read (the `too_few_priced_days` case
  * included) and are 0 / empty when a venue or symbol gate withheld it first.
@@ -428,6 +575,37 @@ export function classifySpotMarks(
     priced_days: points.length,
     returns: adjacentDailyReturns(points),
     points,
+  };
+}
+
+/**
+ * The derivative withheld ladder, in this order (twin of `classify_derivative_marks`):
+ * 1. `option_premium`: decided from the symbol alone, the marks are NOT read;
+ * 2. the read contract (`dailyDirectedMarks` throws, `side` included);
+ * 3. `no_price`: no day carries a positive mark;
+ * 4. `no_direction`: positive marks exist but no day is usable;
+ * 5. `too_few_priced_days`: fewer than `HOLDING_COMPARE_MIN_PRICED_DAYS` USABLE days (a
+ *    positive mark AND an established direction), with `priced_days` and `returns` filled;
+ * 6. otherwise null.
+ * `points` carries the usable days' prices.
+ */
+export function classifyDerivativeMarks(rows: readonly PriceRow[], symbol: string): HoldingMarks {
+  if (isOptionSymbol(symbol)) {
+    return { withheld_reason: "option_premium", priced_days: 0, returns: [], points: [] };
+  }
+  const days = dailyDirectedMarks(rows);
+  if (days.length === 0) {
+    return { withheld_reason: "no_price", priced_days: 0, returns: [], points: [] };
+  }
+  const usable = days.filter((d) => d.direction !== null);
+  if (usable.length === 0) {
+    return { withheld_reason: "no_direction", priced_days: 0, returns: [], points: [] };
+  }
+  return {
+    withheld_reason: usable.length < HOLDING_COMPARE_MIN_PRICED_DAYS ? "too_few_priced_days" : null,
+    priced_days: usable.length,
+    returns: signedAdjacentReturns(days),
+    points: usable.map(({ asof, price }) => ({ asof, price })),
   };
 }
 

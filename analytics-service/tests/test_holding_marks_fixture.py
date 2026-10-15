@@ -1,7 +1,7 @@
-"""Phase 167.1.1.1 (BRIDGERETURNS) D-03, SC3: the Python half of the SPOT mark-price rule,
-replayed against the case table the TypeScript twin reads too
-(``tests/fixtures/holding_mark_returns_cases.json``;
-``classifySpotMarks`` in ``src/app/(dashboard)/compare/lib/holding-compare-adapter.ts``).
+"""Phase 167.1.1.1 (BRIDGERETURNS) D-02, D-03, SC3: the Python half of the mark-price rule
+(spot and signed derivative), replayed against the case table the TypeScript twin reads too
+(``tests/fixtures/holding_mark_returns_cases.json``; ``classifySpotMarks`` and
+``classifyDerivativeMarks`` in ``src/app/(dashboard)/compare/lib/holding-compare-adapter.ts``).
 
 Every expectation in that file is hand-typed. Nothing here derives an expectation from
 the code under test.
@@ -22,8 +22,12 @@ from services.holding_marks import (
     PRICE_RULE_WITHHELD_REASONS,
     DailyMark,
     HoldingMarkContractError,
+    DirectedMark,
     adjacent_daily_returns,
+    classify_holding_marks,
     classify_spot_marks,
+    is_option_symbol,
+    signed_adjacent_returns,
 )
 
 _SPEC = json.loads(
@@ -50,13 +54,14 @@ def test_venue_census_matches_the_shared_fixture() -> None:
 
 
 @pytest.mark.parametrize("case", _CASES, ids=lambda c: c["name"])
-def test_spot_case_matches_the_shared_table(case: dict[str, Any]) -> None:
-    assert case["holding_type"] == "spot"
+def test_case_matches_the_shared_table(case: dict[str, Any]) -> None:
+    assert case["holding_type"] in ("spot", "derivative")
+    args = {"venue": case["venue"], "symbol": case["symbol"], "holding_type": case["holding_type"]}
     if "expect_error" in case:
         with pytest.raises(_ERRORS[case["expect_error"]]):
-            classify_spot_marks(case["rows"], venue=case["venue"], symbol=case["symbol"])
+            classify_holding_marks(case["rows"], **args)
         return
-    got = classify_spot_marks(case["rows"], venue=case["venue"], symbol=case["symbol"])
+    got = classify_holding_marks(case["rows"], **args)
     want = case["expected"]
     assert got.withheld_reason == want["withheld"]
     assert got.priced_days == want["priced_days"]
@@ -116,3 +121,52 @@ def test_a_return_is_keyed_by_the_later_day() -> None:
     days = [day for day, _ in adjacent_daily_returns(points)]
     assert days == ["2026-01-02", "2026-01-03"]
     assert "2026-01-01" not in days
+
+
+# ---------------------------------------------------------------------------
+# Derivative invariants (D-02, D-12): properties that hold whatever the implementation does.
+# ---------------------------------------------------------------------------
+def _directed(prices: list[float], direction: str) -> list[DirectedMark]:
+    return [DirectedMark(f"2026-01-{i + 1:02d}", p, direction) for i, p in enumerate(prices)]
+
+
+def test_a_short_return_is_minus_the_long_return_for_the_same_prices() -> None:
+    """Holding the opposite side over the same interval earns exactly the opposite return
+    (where no floor applies): the signed rule is a sign flip, not a different measure."""
+    prices = [100.0, 110.0, 99.0, 104.0, 100.0]
+    long_r = signed_adjacent_returns(_directed(prices, "long"))
+    short_r = signed_adjacent_returns(_directed(prices, "short"))
+    assert [day for day, _ in short_r] == [day for day, _ in long_r]
+    assert [v for _, v in short_r] == pytest.approx([-v for _, v in long_r], rel=1e-12)
+
+
+def test_a_day_without_direction_never_signs_or_receives_a_return() -> None:
+    """No guessed sign: a direction-less day neither signs the interval after it nor
+    receives the interval before it."""
+    days = [
+        DirectedMark("2026-01-01", 100.0, "long"),
+        DirectedMark("2026-01-02", 110.0, None),
+        DirectedMark("2026-01-03", 121.0, "long"),
+    ]
+    assert signed_adjacent_returns(days) == []
+
+
+def test_a_signed_return_is_never_below_the_floor() -> None:
+    """A holder cannot lose more than the position: whatever the spike, r >= -1."""
+    for spike in (1.5, 2.0, 2.5, 10.0, 1000.0):
+        returns = signed_adjacent_returns(_directed([1.0, spike], "short"))
+        assert all(v >= -1.0 for _, v in returns)
+
+
+def test_the_option_classifier_is_the_instrument_classifier() -> None:
+    assert is_option_symbol("BTC-10OCT26-81000-P")
+    assert is_option_symbol("btc-10oct26-81000-c")
+    assert is_option_symbol("ETH_USDC-27MAR26-50000-C")
+    assert not is_option_symbol("BTC-PERPETUAL")
+    assert not is_option_symbol("BTC-27MAR26")
+    assert not is_option_symbol("1000PEPEUSDT")
+
+
+def test_an_unknown_holding_type_is_a_caller_bug() -> None:
+    with pytest.raises(ValueError):
+        classify_holding_marks([], venue="binance", symbol="BTC", holding_type="swap")

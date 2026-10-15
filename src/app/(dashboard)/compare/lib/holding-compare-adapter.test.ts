@@ -24,6 +24,12 @@ import {
   holdingMarkIsFixed,
   holdingWithheldReason,
   classifySpotMarks,
+  classifyDerivativeMarks,
+  analyzeSignedReturns,
+  signedAdjacentReturns,
+  isOptionSymbol,
+  SIGNED_RETURN_FLOOR,
+  type DirectedPrice,
   HOLDING_MARK_WITHHELD_REASONS,
 } from "./holding-compare-adapter";
 import { HoldingsUpdatedAtError } from "@/lib/holdings-account-day";
@@ -937,7 +943,7 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
 type FixtureRow = {
   asof: string;
   mark_price: unknown;
-  side: string;
+  side: unknown;
   updated_at: string;
   api_key_id: string;
   value_usd: number;
@@ -952,6 +958,8 @@ type FixtureCase = {
   expected?: { withheld: string | null; priced_days: number; returns: Array<[string, number]> };
   expect_error?: "HoldingMarkContractError" | "HoldingsUpdatedAtError";
   ts?: { historyState: "ready" | "withheld"; null_metrics?: boolean };
+  /** What `analyzeSignedReturns` must give over the case's returns (derivative cases). */
+  ts_nav?: { cumulative_return: number | null; max_drawdown: number | null };
 };
 const MARK_FIXTURE = JSON.parse(
   readFileSync(
@@ -1001,25 +1009,41 @@ describe("shared fixture: holding_mark_returns_cases.json", () => {
     expect(MARK_FIXTURE.cases.length).toBeGreaterThan(15);
   });
 
+  const classify = (c: FixtureCase) =>
+    c.holding_type === "derivative"
+      ? classifyDerivativeMarks(c.rows, c.symbol)
+      : classifySpotMarks(c.rows, c.venue, c.symbol);
+
   it.each(MARK_FIXTURE.cases.map((c) => [c.name, c] as const))(
-    "classifySpotMarks replays %s",
+    "the mark rule replays %s",
     (_name, c) => {
+      expect(["spot", "derivative"]).toContain(c.holding_type);
       if (c.expect_error) {
-        expect(() => classifySpotMarks(c.rows, c.venue, c.symbol)).toThrow(
-          ERROR_CLASSES[c.expect_error],
-        );
+        expect(() => classify(c)).toThrow(ERROR_CLASSES[c.expect_error]);
         return;
       }
-      const got = classifySpotMarks(c.rows, c.venue, c.symbol);
+      const got = classify(c);
       const want = c.expected!;
       expect(got.withheld_reason).toBe(want.withheld);
       expect(got.priced_days).toBe(want.priced_days);
       expect(got.returns.map(([day]) => day)).toEqual(want.returns.map(([day]) => day));
       got.returns.forEach(([, value], i) => expect(value).toBeCloseTo(want.returns[i][1], 12));
+      if (c.ts_nav) {
+        const nav = analyzeSignedReturns(
+          got.returns.map(([, value]) => value),
+          365,
+        );
+        for (const key of ["cumulative_return", "max_drawdown"] as const) {
+          const wantValue = c.ts_nav[key];
+          if (wantValue === null) expect(nav[key]).toBeNull();
+          else expect(nav[key]).toBeCloseTo(wantValue, 12);
+        }
+      }
     },
   );
 
-  it.each(MARK_FIXTURE.cases.map((c) => [c.name, c] as const))(
+  // /compare reads spot only until plan 07 wires the derivative path.
+  it.each(MARK_FIXTURE.cases.filter((c) => c.holding_type === "spot").map((c) => [c.name, c] as const))(
     "fetchHoldingCompareItem maps %s onto what /compare shows",
     async (_name, c) => {
       vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1042,4 +1066,84 @@ describe("shared fixture: holding_mark_returns_cases.json", () => {
       }
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.1.1 / D-02, D-12: independent invariants of the signed derivative rule.
+// They hold whatever the implementation does, so they are not copies of it.
+// ---------------------------------------------------------------------------
+describe("signed derivative rule: invariants", () => {
+  const directed = (prices: number[], direction: "long" | "short"): DirectedPrice[] =>
+    prices.map((price, i) => ({ asof: `2026-01-${String(i + 1).padStart(2, "0")}`, price, direction }));
+  const dayRows = (marks: number[], side: string) =>
+    marks.map((m, i) => ({
+      asof: `2026-01-${String(i + 1).padStart(2, "0")}`,
+      mark_price: m,
+      side,
+      updated_at: `2026-01-${String(i + 1).padStart(2, "0")}T10:00:00Z`,
+      api_key_id: "key-a",
+    }));
+
+  it("a short return is minus the long return for the same prices", () => {
+    const prices = [100, 110, 99, 104, 100];
+    const longR = signedAdjacentReturns(directed(prices, "long"));
+    const shortR = signedAdjacentReturns(directed(prices, "short"));
+    expect(shortR.map(([d]) => d)).toEqual(longR.map(([d]) => d));
+    shortR.forEach(([, v], i) => expect(v).toBeCloseTo(-longR[i][1], 12));
+  });
+
+  it("a long-only, gap-free derivative reads like the spot level form", () => {
+    const marks = [100, 120, 90, 135, 108, 110];
+    const got = classifyDerivativeMarks(dayRows(marks, "long"), "BTCUSDT");
+    const signed = analyzeSignedReturns(
+      got.returns.map(([, v]) => v),
+      365,
+    );
+    const spot = analyzePriceSeries(
+      marks.map((price, i) => ({ asof: `2026-01-${String(i + 1).padStart(2, "0")}`, price })),
+      365,
+    );
+    expect(signed.cumulative_return).toBeCloseTo(spot.cumulative_return!, 12);
+    expect(signed.max_drawdown).toBeCloseTo(spot.max_drawdown!, 12);
+    expect(signed.vol).toBeCloseTo(spot.vol!, 12);
+  });
+
+  it("the floor never lets NAV go below zero", () => {
+    for (const spike of [1.5, 2, 2.5, 10, 1000]) {
+      const r = signedAdjacentReturns(directed([1, spike, spike * 2], "short"));
+      expect(r.every(([, v]) => v >= SIGNED_RETURN_FLOOR)).toBe(true);
+      const m = analyzeSignedReturns(
+        r.map(([, v]) => v),
+        365,
+      );
+      expect(m.cumulative_return!).toBeGreaterThanOrEqual(-1);
+      expect(m.max_drawdown!).toBeGreaterThanOrEqual(-1);
+    }
+  });
+
+  it("a day without direction neither signs nor receives a return", () => {
+    const days: DirectedPrice[] = [
+      { asof: "2026-01-01", price: 100, direction: "long" },
+      { asof: "2026-01-02", price: 110, direction: null },
+      { asof: "2026-01-03", price: 121, direction: "long" },
+    ];
+    expect(signedAdjacentReturns(days)).toEqual([]);
+  });
+
+  it("an empty return list is null, never a confident 0%", () => {
+    const m = analyzeSignedReturns([], 365);
+    expect(m.cumulative_return).toBeNull();
+    expect(m.max_drawdown).toBeNull();
+    expect(m.vol).toBeNull();
+    expect(m.sharpe).toBeNull();
+  });
+
+  it("the option classifier matches the instrument classifier", () => {
+    for (const s of ["BTC-10OCT26-81000-P", "btc-10oct26-81000-c", "ETH_USDC-27MAR26-50000-C"]) {
+      expect(isOptionSymbol(s)).toBe(true);
+    }
+    for (const s of ["BTC-PERPETUAL", "BTC-27MAR26", "1000PEPEUSDT"]) {
+      expect(isOptionSymbol(s)).toBe(false);
+    }
+  });
 });
