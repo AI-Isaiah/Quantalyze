@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.132.1.5] - 2026-10-15 — FANINGRAPH post-apply: delete the `_fan_in_lock_rows` snapshot ratchet row the re-dump cleared
+
+One commit plus this release commit.
+
+### Fixed
+- **Main's "SQL Function Snapshot — Drift Gate" was red after the baseline re-dump (#1061).** `scripts/dump-sql-functions.ts --check` failed with `ratchet-stale: _fan_in_lock_rows`. The FANINGRAPH row in `NAME_SET_RATCHET` (`snapshot-only`, captured 2026-10-15) recorded that the helper existed in the migration chain but not yet in the PROD baseline. The re-dump taken after `20261024120000` applied to PROD put it on both sides. A row that no longer describes a disagreement is a hard failure by design, so the row is deleted, replaced by a dated lineage comment in the same style as the 164.6.8 and 170.6.1 rows. This was the phase's own planned post-apply step. With the row gone, the gate reads `0 ratcheted disagreement(s)`, 129 functions on both sides, and `baseline-content-drift` reports 0 findings.
+
 ## [0.132.1.2] - 2026-10-15 — RECORDS: close BTCUSDVIEW 164.6.6.2.1 (human verification 7/7) and book the owner trust-tier finding
 
 Records only: `.planning`, `TODOS.md`, and this release. One commit plus this release commit.
