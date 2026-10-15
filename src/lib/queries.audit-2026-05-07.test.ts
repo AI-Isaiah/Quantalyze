@@ -744,6 +744,60 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
       "Leaked Candidate Name",
     );
   });
+
+  // 167.1.1.1 D-04 / D-12: the matcher now persists an entry for every spot holding it
+  // withholds from the return signal (flagged false, no candidate, a withheld_reason).
+  // The dashboard reads only `flagged && top_candidate_strategy_id`, so the entry must not
+  // surface as a flagged holding, even when it records a max-weight breach.
+  it("flaggedHoldings ignores a withheld entry (flagged false, no candidate, withheld_reason)", async () => {
+    buildResult.byTable["match_batches"] = {
+      data: [
+        {
+          id: "batch-withheld",
+          holding_flags: [
+            {
+              holding_ref: "holding:binance:BTC:spot",
+              value_usd: 50000,
+              weight: 0.4,
+              breach_reasons: ["max_weight"],
+              top_candidate_strategy_id: "s-explor-cand",
+              top_candidate_composite: 80,
+              flagged: true,
+            },
+            {
+              holding_ref: "holding:binance:USDT:spot",
+              value_usd: 5000,
+              weight: 0.34,
+              breach_reasons: ["max_weight"],
+              top_candidate_strategy_id: null,
+              top_candidate_composite: null,
+              flagged: false,
+              withheld_reason: "fixed_price",
+            },
+          ],
+        },
+      ],
+      error: null,
+    };
+    buildResult.byTable["strategies"] = {
+      data: [
+        {
+          id: "s-explor-cand",
+          name: "Candidate",
+          codename: "Lyra",
+          disclosure_tier: "exploratory",
+        },
+      ],
+      error: null,
+    };
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const payload = await getMyAllocationDashboard("user-1");
+
+    expect(payload.flaggedHoldings.length).toBe(1);
+    expect(payload.flaggedHoldings[0].symbol).toBe("BTC");
+    expect(payload.flaggedHoldings.some((f) => f.symbol === "USDT")).toBe(false);
+  });
 });
 
 describe("getMyAllocationDashboard — audit-2026-05-07 H-0502 / C-0172 / H-0481 (auth backstop)", () => {

@@ -193,3 +193,122 @@ def test_holding_flags_warmup_gate():
     # Only BTC emits an entry; WARMUP_TOKEN is silently dropped
     assert len(flags) == 1
     assert flags[0]["holding_ref"] == "holding:binance:BTC:spot"
+
+
+# ---------------------------------------------------------------------------
+# 167.1.1.1 D-04 / D-12: withheld spot holdings are named, never flagged
+# ---------------------------------------------------------------------------
+
+def _mk_withheld(symbol: str = "USDT", value_usd: float = 5000.0, reason: str = "fixed_price") -> dict:
+    return {**_mk_holding(symbol=symbol, value_usd=value_usd), "withheld_reason": reason}
+
+
+def test_withheld_spot_entry_records_its_max_weight_breach_and_is_never_flagged():
+    """USDT 5000 of a 14700 AUM weighs 0.34 > max_weight 0.25: the breach is recorded, the
+    holding is not flagged (D-12), it has no candidate and no correlation test runs for it
+    even with a correlation_ceiling that every correlated pair would breach."""
+    holdings = [_mk_holding(symbol="BTC", value_usd=9700.0)]
+    portfolio_returns = {"holding:binance:BTC:spot": _mk_series()}
+    portfolio_weights = {"holding:binance:BTC:spot": 9700 / 14700}
+    strong_candidate = MagicMock()
+    strong_candidate.strategy_id = "uuid-strong-candidate"
+    strong_candidate.final_score = 90.0
+
+    flags = compute_holding_flags(
+        holdings_rows_eligible=holdings,
+        holdings_rows_withheld=[_mk_withheld()],
+        portfolio_returns=portfolio_returns,
+        portfolio_weights=portfolio_weights,
+        portfolio_aum=14700.0,
+        allocator_preferences={"max_weight": 0.25, "correlation_ceiling": -1.0},
+        scored_candidates_by_slot={
+            "holding:binance:BTC:spot": [strong_candidate],
+            "holding:binance:USDT:spot": [strong_candidate],
+        },
+    )
+
+    usdt = next(f for f in flags if f["holding_ref"] == "holding:binance:USDT:spot")
+    assert usdt == {
+        "holding_ref": "holding:binance:USDT:spot",
+        "value_usd": 5000.0,
+        "weight": 5000.0 / 14700.0,
+        "breach_reasons": ["max_weight"],
+        "top_candidate_strategy_id": None,
+        "top_candidate_composite": None,
+        "flagged": False,
+        "withheld_reason": "fixed_price",
+    }
+    # The eligible entry is untouched: it still gets its candidate and its flag.
+    btc = next(f for f in flags if f["holding_ref"] == "holding:binance:BTC:spot")
+    assert "withheld_reason" not in btc
+    assert btc["flagged"] is True
+
+
+def test_withheld_spot_without_a_breach_has_an_empty_breach_list():
+    flags = compute_holding_flags(
+        holdings_rows_eligible=[],
+        holdings_rows_withheld=[_mk_withheld(value_usd=100.0, reason="no_price")],
+        portfolio_returns={},
+        portfolio_weights={},
+        portfolio_aum=1000.0,
+        allocator_preferences={"max_weight": 0.25},
+        scored_candidates_by_slot={},
+    )
+
+    assert [f["breach_reasons"] for f in flags] == [[]]
+    assert flags[0]["withheld_reason"] == "no_price"
+    assert flags[0]["weight"] == 0.1
+
+
+def test_withheld_spot_weight_is_zero_when_there_is_no_aum():
+    flags = compute_holding_flags(
+        holdings_rows_eligible=[],
+        holdings_rows_withheld=[_mk_withheld()],
+        portfolio_returns={},
+        portfolio_weights={},
+        portfolio_aum=None,
+        allocator_preferences={"max_weight": 0.01},
+        scored_candidates_by_slot={},
+    )
+
+    assert flags[0]["weight"] == 0.0
+    assert flags[0]["breach_reasons"] == []
+
+
+def test_without_withheld_rows_the_result_is_what_it_was_before():
+    holdings = [_mk_holding(symbol="BTC", value_usd=600.0)]
+    kwargs = dict(
+        holdings_rows_eligible=holdings,
+        portfolio_returns={"holding:binance:BTC:spot": _mk_series()},
+        portfolio_weights={"holding:binance:BTC:spot": 1.0},
+        portfolio_aum=600.0,
+        allocator_preferences={"max_weight": 0.25},
+        scored_candidates_by_slot={},
+    )
+
+    assert compute_holding_flags(**kwargs) == compute_holding_flags(
+        **kwargs, holdings_rows_withheld=None
+    )
+    assert compute_holding_flags(**kwargs) == compute_holding_flags(
+        **kwargs, holdings_rows_withheld=[]
+    )
+    assert "withheld_reason" not in compute_holding_flags(**kwargs)[0]
+
+
+def test_a_spot_value_that_is_not_a_number_weighs_zero_in_the_flags_too():
+    """The collapsed row carries aum_contribution_usd (0.0 for a NaN value); the entry and
+    its weight use it, so no NaN reaches the persisted JSON."""
+    row = {**_mk_withheld(), "value_usd": float("nan"), "aum_contribution_usd": 0.0}
+
+    flags = compute_holding_flags(
+        holdings_rows_eligible=[],
+        holdings_rows_withheld=[row],
+        portfolio_returns={},
+        portfolio_weights={},
+        portfolio_aum=1000.0,
+        allocator_preferences={"max_weight": 0.25},
+        scored_candidates_by_slot={},
+    )
+
+    assert flags[0]["value_usd"] == 0.0
+    assert flags[0]["weight"] == 0.0

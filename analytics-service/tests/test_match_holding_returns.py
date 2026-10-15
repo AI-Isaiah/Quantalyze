@@ -385,3 +385,175 @@ def test_a_priced_series_is_a_float_series_named_by_its_pseudo_id(
     assert isinstance(series, pd.Series)
     assert series.dtype == float
     assert series.name == BTC
+
+
+# ---------------------------------------------------------------------------
+# 167.1.1.1 plan 05: the matcher's AUM is the allocator's AUM (D-15, D-16, D-18, D-19)
+# ---------------------------------------------------------------------------
+
+ETHUSDT = "holding:bybit:ETHUSDT:derivative"
+SOLUSDT = "holding:bybit:SOLUSDT:derivative"
+
+
+def _derivative(
+    key: str,
+    venue: str,
+    symbol: str,
+    notional: float,
+    pnl: float | None,
+    *,
+    side: str = "long",
+    end: str = END,
+) -> list[dict[str, Any]]:
+    """One derivative row on ``end``. ``notional`` is the contract value (``value_usd``);
+    ``pnl`` is the unrealized P&L, None for a writer that reported none."""
+    return [
+        {
+            "allocator_id": ALLOCATOR,
+            "api_key_id": key,
+            "venue": venue,
+            "symbol": symbol,
+            "holding_type": "derivative",
+            "side": side,
+            "value_usd": notional,
+            "unrealized_pnl_usd": pnl,
+            "mark_price": 2000.0,
+            "asof": end,
+            "updated_at": f"{end}T04:00:00+00:00",
+        }
+    ]
+
+
+def _holding_context(monkeypatch: pytest.MonkeyPatch, db: FakeDb) -> dict[str, Any]:
+    monkeypatch.setattr(match_mod, "get_supabase", lambda: db)
+    return match_mod._load_holding_portfolio_context(ALLOCATOR)
+
+
+def test_a_derivative_adds_its_pnl_to_the_aum_never_its_notional_and_never_the_weights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tracer for D-15, D-16, D-18, D-19. Spot BTC 10,000 and USDT 5,000; a bybit ETHUSDT
+    derivative with a 1,000,000 notional and P&L -300; a bybit SOLUSDT derivative with no
+    P&L. AUM = 10,000 + 5,000 - 300 = 14,700 exactly. Weights are over that AUM. Neither
+    derivative is in the weights, the returns or the strategies."""
+    db = _db(
+        _history("key-a", "binance", "BTC", BTC_MARKS, 10000.0)
+        + _history("key-a", "binance", "USDT", [1.0] * 31, 5000.0)
+        + _derivative("key-b", "bybit", "ETHUSDT", 1_000_000.0, -300.0)
+        + _derivative("key-b", "bybit", "SOLUSDT", 40_000.0, None),
+        keys=[_key("key-a"), _key("key-b", exchange="bybit")],
+    )
+
+    ctx = _context(monkeypatch, db)
+
+    assert ctx["portfolio_aum"] == pytest.approx(14700.0)
+    assert ctx["portfolio_weights"][BTC] == pytest.approx(10000 / 14700)
+    assert ctx["portfolio_weights"][USDT] == pytest.approx(5000 / 14700)
+    # The holdings-only context is checked too: the allocator context rebuilds its weights
+    # from the spot rows, so a derivative leaking into the holdings weights would otherwise
+    # be hidden by that rebuild.
+    holdings = _holding_context(monkeypatch, db)
+    assert holdings["portfolio_aum"] == pytest.approx(14700.0)
+    assert holdings["portfolio_weights"][BTC] == pytest.approx(10000 / 14700)
+    for derivative in (ETHUSDT, SOLUSDT):
+        for book in (ctx, holdings):
+            assert derivative not in book["portfolio_weights"], "D-19: no derivative weight"
+            assert derivative not in book["portfolio_returns"]
+            assert derivative not in [s["strategy_id"] for s in book["portfolio_strategies"]]
+        assert derivative not in [
+            f"holding:{r['venue']}:{r['symbol']}:{r['holding_type']}"
+            for r in holdings["holdings_rows_eligible"] + holdings["holdings_rows_withheld"]
+        ]
+
+
+def test_a_derivative_without_a_pnl_is_pnl_missing_and_contributes_none_not_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-18. SOLUSDT's only counted row has no P&L: the collapsed row says so with None
+    (asserted with ``is None``, so a computed 0.0 fails) and ``pnl_missing`` True; ETHUSDT
+    has a P&L and says so. This is the value plan 08 persists, so it must be null."""
+    db = _db(
+        _history("key-a", "binance", "BTC", BTC_MARKS, 10000.0)
+        + _derivative("key-b", "bybit", "ETHUSDT", 1_000_000.0, -300.0)
+        + _derivative("key-b", "bybit", "SOLUSDT", 40_000.0, None),
+        keys=[_key("key-a"), _key("key-b", exchange="bybit")],
+    )
+
+    holdings = _holding_context(monkeypatch, db)
+
+    by_symbol = {r["symbol"]: r for r in holdings["holdings_rows_derivative"]}
+    assert set(by_symbol) == {"ETHUSDT", "SOLUSDT"}
+    assert by_symbol["ETHUSDT"]["aum_contribution_usd"] == pytest.approx(-300.0)
+    assert by_symbol["ETHUSDT"]["pnl_missing"] is False
+    assert by_symbol["SOLUSDT"]["aum_contribution_usd"] is None
+    assert by_symbol["SOLUSDT"]["pnl_missing"] is True
+    assert holdings["portfolio_aum"] == pytest.approx(10000.0 - 300.0)
+
+
+def test_a_derivative_on_two_accounts_with_one_pnl_missing_counts_the_present_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-18 partial. One derivative held on two accounts: P&L 40 on one, none on the other.
+    The collapsed row carries 40.0 and pnl_missing True, and the AUM gains exactly 40."""
+    db = _db(
+        _history("key-a", "binance", "BTC", BTC_MARKS, 10000.0)
+        + _derivative("key-b", "bybit", "ETHUSDT", 500_000.0, 40.0)
+        + _derivative("key-c", "bybit", "ETHUSDT", 500_000.0, None),
+        keys=[_key("key-a"), _key("key-b", exchange="bybit"), _key("key-c", exchange="bybit")],
+    )
+
+    holdings = _holding_context(monkeypatch, db)
+
+    (row,) = holdings["holdings_rows_derivative"]
+    assert row["aum_contribution_usd"] == pytest.approx(40.0)
+    assert row["pnl_missing"] is True
+    assert holdings["portfolio_aum"] == pytest.approx(10040.0)
+
+
+def test_one_derivative_on_two_accounts_sums_both_pnls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rows are summed after the account rule: P&L 40 and 60 on two accounts count 100."""
+    db = _db(
+        _history("key-a", "binance", "BTC", BTC_MARKS, 10000.0)
+        + _derivative("key-b", "bybit", "ETHUSDT", 500_000.0, 40.0)
+        + _derivative("key-c", "bybit", "ETHUSDT", 500_000.0, 60.0),
+        keys=[_key("key-a"), _key("key-b", exchange="bybit"), _key("key-c", exchange="bybit")],
+    )
+
+    holdings = _holding_context(monkeypatch, db)
+
+    (row,) = holdings["holdings_rows_derivative"]
+    assert row["aum_contribution_usd"] == pytest.approx(100.0)
+    assert row["pnl_missing"] is False
+    assert holdings["portfolio_aum"] == pytest.approx(10100.0)
+
+
+def test_a_deribit_option_adds_its_pnl_to_the_aum(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-16. Deribit and options are in, exactly as on the dashboard."""
+    db = _db(
+        _history("key-a", "binance", "BTC", BTC_MARKS, 10000.0)
+        + _derivative("key-d", "deribit", "BTC-10OCT26-81000-P", 900_000.0, 75.0),
+        keys=[_key("key-a"), _key("key-d", exchange="deribit")],
+    )
+
+    ctx = _context(monkeypatch, db)
+
+    assert ctx["portfolio_aum"] == pytest.approx(10075.0)
+    assert "holding:deribit:BTC-10OCT26-81000-P:derivative" not in ctx["portfolio_weights"]
+
+
+def test_a_spot_holding_with_a_non_finite_value_counts_zero_and_has_weight_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper's rule (the dashboard's rule): a NaN value is not a number, so it
+    contributes 0 to the AUM and weighs 0, never NaN."""
+    eth = "holding:binance:ETH:spot"
+    db = _db(
+        _history("key-a", "binance", "BTC", BTC_MARKS, 10000.0)
+        + _history("key-a", "binance", "ETH", BTC_MARKS, float("nan"))
+    )
+
+    ctx = _context(monkeypatch, db)
+
+    assert ctx["portfolio_aum"] == pytest.approx(10000.0)
+    assert ctx["portfolio_weights"][eth] == 0.0
+    assert ctx["portfolio_weights"][BTC] == pytest.approx(1.0)
