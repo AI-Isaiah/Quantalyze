@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.131.13.2] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of 3742dfa5
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38758688220`, after the PROD apply of merge `3742dfa5`: sha256 `47d80c8c…` → `8e972fb8…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 130 → 130, distinct function names 128 → 128, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261023120000_sync_status_runner_stamps_computed_at.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-15` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.131.13.1 → 0.131.13.2.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=303 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 130 — MATCH 127, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38758688220` succeeded, and this entry was composed by the `redump-pr` job. Run `38758688220` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.131.13.1] - 2026-10-15 — COMPUTEDATSTAMP (2/2): the status bridge stops writing `strategy_analytics.computed_at`, so a side job can no longer make stale analytics look fresh
 
 Phase 166.5, PR 2 of 2 (CONTEXT D-09). This PR carries only the migration `20261023120000_sync_status_runner_stamps_computed_at.sql`, its manual rollback, its gate file, the regenerated function mirror and the census and floor moves that depend on them. PR 1 (#1047, v0.131.13.0) shipped the runner stamp and is live: Railway `/health` reports `d618c8088`, a descendant of PR 1's merge commit, which is the ordering D-09 requires before this merges. **On merge the migration applies to TEST and then PROD with no human stop** (`apply` needs only a green `apply-test`). It touches no data: it replaces one function body and three comments.
