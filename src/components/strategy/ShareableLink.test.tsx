@@ -713,7 +713,21 @@ describe("ShareableLink — a minted private link is never left invisible (170.6
     // Selectable AND ready to copy: the whole URL is already selected and the
     // field holds focus, so one Ctrl/Cmd-C finishes the job the clipboard API
     // refused.
-    expect(document.activeElement).toBe(field);
+    //
+    // AWAIT the focus; never assert it synchronously after findField. The
+    // field lands in the DOM in the commit, but `showModal` (Modal) and the
+    // focus+select (ShareableLink) both run from passive useEffects, by design:
+    // the field's effect must run after showModal, which moves focus to Close.
+    // This update starts after `await fetch`, so it is not a sync lane, and on a
+    // CPU-starved worker the Scheduler yields before the passive-effect task.
+    // findField resolves on the DOM insertion alone and the assert read <body>
+    // with the dialog not yet open (CI runs 38744823426, 38758942630). Same
+    // class as the close assert in the revoke test above. A component that
+    // never focuses the field still fails here, on the waitFor timeout.
+    await waitFor(() => {
+      expect(field.closest("dialog")?.open).toBe(true);
+      expect(document.activeElement).toBe(field);
+    });
     expect(field.selectionStart).toBe(0);
     expect(field.selectionEnd).toBe(MINTED_URL.length);
     // The row's own copy message is still honest, and now has a URL to point at.
@@ -797,8 +811,18 @@ describe("ShareableLink — a minted private link is never left invisible (170.6
     await findField();
 
     // Close through the native close (the v0.131.5.3 rule: await it).
+    //
+    // FIND the Close button; never get it synchronously after findField. The
+    // field is in the DOM at commit, but `showModal` runs from Modal's passive
+    // useEffect, and until it runs the <dialog> has no `open` attribute, so
+    // jsdom's default stylesheet hides it and every role inside it is
+    // inaccessible. This update starts after `await fetch`, so it is not a sync
+    // lane; on a CPU-starved worker the Scheduler yields before the
+    // passive-effect task and getByRole found no "Close" (CI run 38766733041).
+    // findByRole resolves once the dialog is open; a component that never
+    // opens it still fails, on the findByRole timeout.
     const closeSpy = vi.spyOn(HTMLDialogElement.prototype, "close");
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Close" }));
     await waitFor(() => expect(closeSpy).toHaveBeenCalledTimes(1));
     expect(screen.queryByLabelText(FIELD)).toBeNull();
 

@@ -1,8 +1,8 @@
 # Changelog
 
-## [0.131.13.5] - 2026-10-15 — PYXDIST: the python CI job runs pytest in parallel, and the flakes that serial order hid are fixed at their root
+## [0.131.13.7] - 2026-10-15 — PYXDIST: the python CI job runs pytest in parallel, and the flakes that serial order hid are fixed at their root
 
-Phase 164.9.8.1. Since `origin/main` the branch carries 77 non-merge commits: 53 that touch paths outside `.planning` (this release commit among them) and 24 planning and records commits, and this entry maps them all. It also carries 9 merge commits: the per-plan and fixer worktrees merging back, and one merge of `origin/main` before the release. Grouped by theme below, each bullet ends with the hashes it covers. The version is a fourth-digit bump. It was re-picked from a freshly fetched `origin/main` at 0.131.13.3, with 0.131.13.4 held by the open PR #1052. This is a CI and test change; no production code changes.
+Phase 164.9.8.1. Since `origin/main` the branch carries 77 non-merge commits: 53 that touch paths outside `.planning` (this release commit among them) and 24 planning and records commits, and this entry maps them all. It also carries 9 merge commits: the per-plan and fixer worktrees merging back, and one merge of `origin/main` before the release. Grouped by theme below, each bullet ends with the hashes it covers. The version is a fourth-digit bump. It was re-picked from a freshly fetched `origin/main` at 0.131.13.6, with 0.132.0.0 held by the open PR #1053. This is a CI and test change; no production code changes.
 
 ### Changed
 - **The `python` CI job and the Makefile `test:` target run `pytest -n auto --dist loadgroup --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80`.** Both carry the identical argument string. The coverage floor is still enforced on the combined result of all workers. Measured offline on the same tree, coverage was 93.57% serial and 93.57% parallel. A run with the floor raised to 99 under xdist exited 1. The SERIAL deferral comments in both files stay as lineage beside a dated PYXDIST note. That note also records that the comment's pointer to the "TODOS: v1.9.1 Phase-97 parallelization deferral" is dangling, because that entry was dropped in `193afe818`. (`c16a41633`)
@@ -52,6 +52,36 @@ Phase 164.9.8.1. Since `origin/main` the branch carries 77 non-merge commits: 53
 - **SC-4 after the sysmon switch:** the soak restarts from zero on the head carrying D-15, and the after figure is read from it. The 942 s reading from before the switch is kept as lineage.
 - **Recorded deviation:** during review round 1 a fixer ran broad `pkill -f` patterns on the machine shared with other sessions. That could have stopped another session's matching process; none was reported. Every later brief forbade it.
 - **Planning and records:** TODOS `ci/pytest-xdist-parallel` now records what this phase measured (`192e38347`). The phase's planning, review and soak records are in `.planning` and do not ship on the PR branch (`f332031e4`, `d794f12fa`, `9ef11b9df`, `f1af82495`, `5aadd6cce`, `1f5f82500`, `efb5124b6`, `6e5c38b0c`, `9e7d1b7d1`, `e58003867`, `299f55c4f`, `ab33cb14e`, `2bc424316`, `a48d25427`, `5dca51cd1`, `d36de89d6`, `a6bded3f2`, `4458d4eae`, `eb97f9da3`, `2e9814697`, `d84bc2143`, `72dd0654c`, `5806c5c61`, `33ff9020e`).
+
+## [0.131.13.6] - 2026-10-15 — Test fix: the Private link dialog's Close button is found once the dialog is open, not grabbed before it opens
+
+### Root cause
+- **A second arm in `src/components/strategy/ShareableLink.test.tsx` had the same race v0.131.13.4 fixed.** "the URL stays reachable through 'Manage private link' after the dialog is closed, and is gone once the link is revoked" found the URL field with `findByLabelText`, then grabbed the Close button with a synchronous `getByRole`. The field is in the DOM as soon as React commits. But `Modal` calls `showModal()` from a passive `useEffect`. Until that runs, the `<dialog>` has no `open` attribute, so jsdom's default stylesheet (`dialog:not([open])`) hides it and every role inside it is inaccessible. The update starts after `await fetch`, so it is not a sync lane. When React's Scheduler yields before the passive-effect task, `getByRole` finds no "Close". Main run 38766733041 (job 116532021011) failed exactly that way: the dump shows the Close button in the DOM, inside a `<dialog>` with no `open` attribute.
+- **This is not a product bug.** In a browser, React runs pending passive effects before it handles the next user event, so the dialog is open before anyone can reach its Close button.
+
+### Fixed
+- **The Close click goes through `findByRole`**, which resolves only once the dialog is open. The comment beside it records why.
+
+### Tests
+- **Forced-yield harness, re-run for this arm.** A scratch copy of the file moves `performance.now` 50 ms forward on every read, so React's Scheduler yields after every task. The copy is not committed. Before the fix, this arm failed 9 of 10 runs with the CI message. After it, the arm passed 20 of 20, and the whole file passed 30 of 30 tests in each of 10 runs.
+- **Unforced, after the fix:** the arm alone passed 12 of 12. The file, together with `FactsheetView.usd-toggle.test.tsx`, passed 64 of 64 tests in each of 3 runs.
+- **The fixed lookup can still fail.** With `showModal()` neutered in `Modal.tsx`, the arm goes RED on the `findByRole` timeout. The file was restored from a byte backup.
+- **Audit of every other synchronous read in the file.** The audit checked every read of state that a passive effect sets: focus, `dialog.open`, selection, and role visibility around `showModal()` and `close()`. No other instance races. Clicks through `fireEvent` run inside `act`, which flushes effects before it returns. The other post-`await fetch` arms already await `close` with a `waitFor`, or read state that the render sets, not an effect. The forced-yield run of the whole file confirms it.
+- **`FactsheetView.usd-toggle.test.tsx:208` is a different case.** That test is fully synchronous. It sets focus itself and clicks through `act`, and its `activeElement` check only proves the button was not remounted. It passed 34 of 34 tests in each of 5 forced-yield runs.
+
+## [0.131.13.4] - 2026-10-15 — Test fix: the Private link dialog's focus assert waits for the focus move instead of racing it
+
+### Root cause
+- **The test asserted focus before React had run the effect that moves it.** In `src/components/strategy/ShareableLink.test.tsx`, the arm "clipboard rejects and the fallback fails: the Private link dialog opens and shows the minted URL, selectable" found the URL field with `findByLabelText`, then checked `document.activeElement` straight away. The field is in the DOM as soon as React commits. But `Modal`'s `showModal()` and `ShareableLink`'s `focus()` + `select()` both run later, from passive `useEffect`s. That order is deliberate: `showModal` moves focus to the Close button, so the field has to take focus after it. The update starts after `await fetch`, so it is not a sync lane. When React's Scheduler yields between the commit and the passive-effect task, as it does when a render overruns its 5 ms slice on a loaded runner, the assert ran first. It read `<body>`, and the dialog was not open yet. Both CI failures on 2026-10-15 (runs 38744823426 and 38758942630, vitest shard 2) show exactly that DOM: the field is present and the `<dialog>` has no `open` attribute.
+- **This is not a product bug.** In a browser, React flushes pending passive effects before it handles the next user event, so the field always has focus before the user can press a key.
+
+### Fixed
+- **The assert now waits for the dialog to be open and the field to have focus** (`await waitFor`), and then checks the selection as before. This is the same fix the close assert in the revoke test of the same file already carries for the same reason (CI run 38587166468).
+
+### Tests
+- **RED before the fix, measured locally.** The unchanged arm, run alone 12 times, failed 3 times with the CI signature. A 10-copy variant that forces the Scheduler to yield after every task (it moves `performance.now` forward) failed 19 of 20, and every failure printed `dialogOpen=false active=BODY` just before the assert.
+- **GREEN after the fix.** The forced-yield variant passed 30 of 30. The unforced variant passed 30 of 30, the arm alone passed 12 of 12, and the whole file passed 30 of 30 tests in each of 3 runs. The variant was a scratch file and is not committed.
+- **The fixed assert can still fail.** With `urlFieldRef.current?.focus()` neutered in the component, the arm goes RED on the `waitFor` timeout. The component was restored from a byte backup afterwards.
 
 ## [0.131.13.3] - 2026-10-15 — GSDFORMAT: ROADMAP.md and STATE.md take a shape the gsd-tools handlers can edit without corrupting them
 
