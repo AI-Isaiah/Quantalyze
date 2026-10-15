@@ -1446,6 +1446,14 @@ no longer renders card skeletons.
 
 ### 164.6.6.3.3-WAVE5-RECOMPUTE — the guarded rows' headlines are withheld until the Wave 5 recompute writes headline_since (booked 2026-10-09, Phase 164.6.6.3.3)
 
+✅ **CLOSED 2026-10-15 (Wave 5 consolidated PROD recompute, run by the orchestrator, founder-authorized).**
+Counts only. The single-key MT5 CSV row was recomputed through `compute_analytics_from_csv` via
+`enqueue_compute_job` (done on attempt 1); it now carries `headline_since` 2026-08-11, and `twr_chain_broken`
+stays true by design. Quantum Drift was recomputed once through `stitch_composite` via `enqueue_compute_job`
+(done on attempt 1, about 18 minutes); it now reads `complete_with_warnings` with `headline_since` 2026-04-18,
+so it is Dated "Measured since Apr 18, 2026" (D-12). **Acceptance met:** rows with `twr_chain_broken: true` and
+no `headline_since` went 2 to 0, and 6 rows carry `headline_since`. The text below is kept as lineage.
+
 **Why it is open.** Phase 164.6.6.3.3 plan 01 changes the stored metrics of a guarded row (every
 headline stat on one post-break suffix, with `data_quality_flags.headline_since` stored). Plan 02
 withholds a legacy chain-broken row's headline ("—") until `headline_since` exists. Until a recompute
@@ -1469,6 +1477,29 @@ shows the 4 guard-only rows' stored scalars unchanged; Quantum Drift then reads 
 2026" (D-12).
 
 **Owner: the Wave 5 consolidated PROD recompute.**
+
+⛔ **2026-10-15 (phase close): NOT RUN, because the set no longer has the shape above.** Preconditions held
+(the #999 merge's main CI green; `/health` `git_sha` contains the merge). Re-measured read-only on PROD behind
+the marker query (counts only): **4** rows carry `twr_chain_broken: true` (all `private`, 2 composites and 2
+single keys; 2 already carry `headline_since`, written by recomputes on 2026-10-14), **0** guard-only rows,
+**union 4**, and 0 rows carry `headline_since` without the flag. The 2 rows still without `headline_since`
+(1 composite, which is Quantum Drift, and 1 single key) were last computed on 2026-09-27 and 2026-10-01,
+before the ship. The acceptance reading's "4 guard-only rows unchanged" therefore has no rows to read, so no
+dry-run diff was run and nothing was written to PROD. Later phases' derives moved the other rows. What is
+left is a recompute of those 2 rows through the product's own paths, with an acceptance reading restated on
+the current set (zero rows with the flag and no `headline_since`; Quantum Drift Dated "Measured since Apr 18,
+2026", D-12). If Quantum Drift is one of the two private composites `167.1.2.2.1-WAVE5-REBASELINE` recomputes
+through `stitch_composite` after NAVBREACH, run it once, inside that recompute; not measured here.
+
+⭐ **2026-10-15 (orchestrator routing): the target is restated as the 2 rows without `headline_since`.**
+- **Quantum Drift (composite):** recomputed inside `167.1.2.2.1-WAVE5-REBASELINE`'s consolidated Wave 5 run,
+  which the orchestrator runs after NAVBREACH plan 05's determinism verdict. Not recomputed separately.
+- **The single-key row:** recomputed by the orchestrator through the product's own path.
+- **Acceptance reading (restated):** zero rows with `twr_chain_broken: true` and no `headline_since`, and
+  Quantum Drift reads "Measured since Apr 18, 2026" (D-12). The "4 guard-only rows unchanged" clause is
+  retired: on 2026-10-15 no guard-only row exists.
+- **Closed by:** the Wave 5 consolidated run and the orchestrator's single-key recompute. Phase 164.6.6.3.3's
+  VERIFICATION keeps this as its one open human item until both have run. ✅ Both ran on 2026-10-15 (see the CLOSED note at the top of this entry).
 
 ### 164.6.6.3.3-COMPARE-SPAN-SOURCE — /compare names its "Measured since" span from the stored cash series, the factsheet from `headline_since` (booked 2026-10-10, Phase 164.6.6.3.3 release)
 
@@ -1494,6 +1525,66 @@ test that names one strategy on both surfaces fails first when they diverge. It 
 ⛔ **Not a close:** pinning the two helpers' current outputs, or copying the factsheet's date into the
 `/compare` payload by hand for one strategy. Deleting the helpers without moving `/compare` to the new
 source would turn every chain-broken `/compare` row "undatable".
+
+### 164.6.6.3.3-WITHHELD-RESIDUE — a Withheld factsheet still prints seven whole-record readings outside the rail's single figures (booked 2026-10-15, Phase 164.6.6.3.3 plan 15 close)
+
+**Why it is open.** D-15 and its two extensions (phase CONTEXT) make every whole-record rail figure read "—" on a Withheld row at full history with no what-if. Plan 15 left three items undashed as ambiguous, and the founder chose on 2026-10-15 to ship and book them ("Ship as is, book them"). The plan 15 review (`164.6.6.3.3-15-REVIEW.md`, no HIGH) and the silent-failure pass added four MEDIUMs, booked under the review rule.
+
+- **Founder-deferred, plan 15 SUMMARY class D6:** (1) Worst 10 Drawdowns: row #1 Depth is the same whole-record max drawdown the rail dashes. (2) EOY Returns and Calmar by Year for the year that contains the break: both compound across it. (3) Style Drift and its Kolmogorov-Smirnov line: the statistic uses every day.
+- **WR-01 (MEDIUM):** the last EOY Returns row is the dashed Year-to-date figure. `compute.ts` builds `yearly[lastYear]` and `ytd` from the same dates and accumulator, so they are identical whenever `ytd` is non-null; Calmar by Year repeats it. Test D1 pins it as kept.
+- **WR-02 (MEDIUM):** Rolling Metrics "Now" prints an accented trailing 6-month Sharpe, Sortino and Vol while the same window's 6 Month return is dashed. Test D5 pins it as kept.
+- **WR-03 (MEDIUM):** no test renders the rail on a Withheld row under mark-to-market; the gate's `railBasis` term has only a predicate test, so a regression dashing 62 valid MTM figures would stay green.
+- **SFH-2 (MEDIUM):** `BootstrapCIPanel` takes `wholeRecordWithheld = false` (AnalyticalPanels.tsx), so a new caller that omits it prints the Max DD interval on a Withheld row. The sibling panels take a required boolean.
+
+**Owner: none routed.** The next phase that edits `src/app/factsheet/[id]/v2/MetricsColumn.tsx` or its panels; book with `/gsd-phase --insert` when picked up.
+**Trigger:** that phase, OR a public strategy turning Withheld (today only private and draft rows are), whichever is first.
+**Gate (what closes it):** a founder call on items 1-3; WR-01 and WR-02 resolved by dashing or by a recorded decision; a Withheld-under-MTM render test seen RED with `railBasis` neutered and restored from a byte backup; the bootstrap prop made required so `tsc` fails on an omitting caller.
+⛔ **Not a close:** flipping tests D1 or D5 without a decision, or adding a footnote in place of a dash.
+
+### 164.6.6.3.3-REVIEW-LOW-INFO — six LOW/INFO review findings, recorded, not booked as work (2026-10-15, Phase 164.6.6.3.3 close)
+
+**Why this entry exists.** The phase VERIFICATION listed these as open and never booked. None is MEDIUM or
+above (the review rated three LOW and three INFO), so per the repo's review rule none is a work item. They
+are recorded here, each with its fix and the trigger that should pick it up, so a later phase touching the
+same code finds them. WR-04, the seventh open finding, was fixed by founder decision D-15 (2026-10-15).
+Full text: `164.6.6.3.3-REVIEW.md`.
+
+- **WR-03 (LOW), single-key flag and date from two computations.** *What:* `analytics_runner.py` carries
+  `twr_chain_broken` from the broker derive's pre-stamp but takes `headline_since` from this run's
+  `compute_all_metrics`, over different inputs; nothing pins that they agree. *Why:* a flag without a date
+  is Withheld forever and no recompute heals it; a date without the flag shows suffix scalars with no note.
+  *Fix:* in `run_csv_strategy_analytics`, after the guard loop and before `csv_status`, set or pop
+  `twr_chain_broken` from `metrics_result.headline_since` as the composite arm does (D-13), with a runner
+  test on a broker series with a guard NaN. *Owner/trigger:* the next phase that edits the runner's guard
+  loop, OR a PROD reading of a chain-broken row computed after 2026-10-10 with no `headline_since`.
+  2026-10-15 reading: 0 rows carry a date without the flag; the 2 flagged rows without a date were last
+  computed before the 2026-10-10 ship, so they are legacy rows, not this defect.
+- **WR-05 (LOW), analytics-failed copy fires on any terminal `failed`.** *What:* `analyticsFailed` is
+  `computation_status === "failed"`, so a transient infrastructure failure the runner's generic `except`
+  stamps reads "Analytics couldn't be computed from this data", and the remedy says retrying will not help.
+  *Why:* D-09 meant this copy for genuine data failures only. *Fix:* narrow the flag to data-caused
+  failures, for example a closed `computation_error_kind` written by the writers, else keep the generic
+  finished line. *Owner/trigger:* the next phase that edits `status-surface-copy.ts` or the runner's
+  failure stamps, OR an owner report of the line on a transient failure.
+- **IN-02 (INFO), rolling beta draws 0 on a flat leg.** *What:* `rollingBetaOverPaired` uses `beta()`,
+  which returns 0 on a flat strategy leg, beside section IV's Beta "—". *Why:* a dispersion-based figure
+  D-04 covers is still drawn. *Fix:* gap the rolling beta window on a no-dispersion slice with the same
+  `dispersion(...).sd === 0` floor. *Owner/trigger:* the next phase that edits the rolling panels (UI-SPEC
+  declared it out of scope here; T17 pins the current line).
+- **IN-04 (INFO), 365 vs 365.25 year length in one rail row.** *What:* stored strategy CAGR uses 365 days
+  (`metrics.py`), `summarySince.cagr` uses 365.25 (`compute.ts`), now side by side on a Dated row. *Why:*
+  on a short suffix the convention gap is visible. *Fix:* one calendar year length for both. *Owner/
+  trigger:* whichever phase owns the 365 versus 365.25 question.
+- **IN-05 (INFO), OG card URL unversioned.** *What:* the card's CDN entry (`s-maxage=86400`,
+  `stale-while-revalidate=604800`) carries only `?u=`, so a card rendered under old rules can be served
+  after a rule change. *Why:* a window where card and page disagree (D-06). *Fix:* a `&v=` parameter bumped
+  with the factsheet payload cache key. *Owner/trigger:* the next change to the card's figures or the
+  payload cache key.
+- **R2-02 (LOW), unconditional `console.warn` in `composite-read-path.ts`.** *What:* the SFH-01 warn fires
+  on every resolve of a not-rankable row (`computing`, `pending`, `failed`), probes included, and doubles
+  the two genuine defect logs. *Why:* log noise that trains readers to ignore real defect lines. *Fix:* drop
+  it, or emit only when `captureDefects` and the row is rankable. *Owner/trigger:* the next phase that
+  edits `readSingleKeyBasisOpts`.
 
 ### CONTACT-SUPPORT-POINTERS-01 — fifteen user-facing strings tell a user to "contact support" without saying how (booked 2026-10-07, Phase 164.6.6.3.5)
 
@@ -8937,6 +9028,17 @@ Three return-bearing keys carry a NULL capital anchor: an emptied Deribit accoun
 CLOSED 2026-10-15 by Phase 166.3.1 NAVBREACH (D-08 option A): both books read trustworthy on PROD after the first compose on the deployed code (`166.3.1-SC5-PROD-READINGS.md`, founder-confirmed). Book 2 is trustworthy through the exit rule (its MT5 nonpositive key exits on its last return day); book 1 is trustworthy because FLOWTIMING (#1018) moved the dust floor from 1000 to 100 USD, which un-nulled both of its dust keys, so the exit rule did nothing for it. `d08-expected: differ` accepted. Phase 167.1.2.1.1 WRITERRESIDUALS keeps SC-9 (the MT5 inception residual), which was not re-measured.
 
 ### 167.1.2.2.1-WAVE5-REBASELINE — the two private composites are recomputed once, in the Wave 5 consolidated run, after NAVBREACH (booked 2026-10-10, Phase 167.1.2.2.1 plan 07, D-18)
+
+✅ **CLOSED 2026-10-15 (Wave 5 consolidated run, orchestrator, founder-authorized).** Quantum Drift was
+recomputed once through `stitch_composite` (done on attempt 1); it now reads `complete_with_warnings` with
+`headline_since` 2026-04-18. The other private composite was not recomputed again: it had already been
+recomputed after NAVBREACH (`headline_since` 2026-04-18), so no row was recomputed twice. The
+`composite-cap` reading before the recompute was `strands` on the MTM-estimate arm only (cash arm 0
+non-dust, stored breach ratios 0); the founder accepted it ("Recompute Quantum Drift only"), and the cap
+was not changed. AFTER readings: `r1-fingerprint` unchanged (no key rewritten); `r2-verdict` unchanged
+(allocators 2 and 3 trustworthy, 0 `failed_final`); `r3-sibling-diff` shows one difference, account 2
+key 3 (263 of 1199 days, largest 1.28e-3), attributed to an unequal `ledger_digest` (that key has 4 more,
+newer ledger rows), which the runbook's acceptance allows. The text below is kept as lineage.
 
 **Why it is open.** The daily 05:30 UTC derive re-derives every connected Deribit key with the
 deployed code, so PR-2's merge and deploy IS the keys' re-baseline (plan 08 brackets it). What is

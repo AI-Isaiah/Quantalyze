@@ -1,7 +1,7 @@
 "use client";
 
 import { usePayload } from "./factsheet-context";
-import { useBasisSeriesView, useWindowedView } from "./basis-context";
+import { useBasisSeriesView, useWindowedView, withheldBootstrapCI } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { useTapPin } from "@/hooks/useTapPin";
@@ -350,7 +350,7 @@ export function CalmarByYearPanel() {
   );
 }
 
-export function BootstrapCIPanel() {
+export function BootstrapCIPanel({ wholeRecordWithheld = false }: { wholeRecordWithheld?: boolean } = {}) {
   // Phase 103 (MTM-04, Finding #6): the bootstrap CIs resample the strategy's own
   // daily series → follow the active basis. The reliability (low-N) gate reads the
   // resample count OFF the bootstrap payload itself (`b.n`, the basis-selected
@@ -362,8 +362,12 @@ export function BootstrapCIPanel() {
   // NaN figures and no resamples: the figures read "—" and neither the low-N
   // warning nor the resample footer is shown, since no bootstrap ran.
   const { view } = useWindowedView(usePayload());
-  const b = view.bootstrapCI;
-  const withheld = view.withheld != null;
+  // Plan 15 (D-15 extended again): on a Withheld full-history row the resamples are drawn from the
+  // whole record, which compounds across the break the rail's Withheld note names, so the panel
+  // renders the SAME form a withheld window does. The gate is decided once in `MetricsColumn` and
+  // passed in: this panel never decides "Withheld" for itself.
+  const b = wholeRecordWithheld ? withheldBootstrapCI(view.bootstrapCI.n) : view.bootstrapCI;
+  const withheld = wholeRecordWithheld || view.withheld != null;
   const lowN = !withheld && b.n < 252;
   // A resample with no Sharpe (no dispersion) or no Sortino (no losing day) is
   // dropped, not counted as 0 (founder decision D7). Say how many were used

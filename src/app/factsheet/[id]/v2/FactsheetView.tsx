@@ -72,6 +72,7 @@ import {
   headlineCoverageNote,
   headlineNoteColor,
   headlineNoteGlyph,
+  isHeadlineWithheld,
   windowCoverageNote,
 } from "./MetricsColumn";
 import { AllocatorSection } from "./BatchDPanels";
@@ -1747,6 +1748,14 @@ function KpiStrip() {
   const suppressRelative =
     (basis === "mark_to_market" && !mtmBundlePresent) ||
     (basis === "smoothed_mtm" && !smoothedBundlePresent);
+  // Phase 164.6.6.3.3 plan 13 (D-15, review WR-04): on a Withheld row at full history the
+  // note under the strip says the headline figures are withheld, and α and IR are the
+  // whole-record joint, which compounds across the very break that note names, so they
+  // read "—" too. Same discriminator as the note (`isHeadlineWithheld`) and the same
+  // scope as the note's slot: not inside a selected window (D-78: there the note is
+  // `windowCoverageNote`'s and the cells are the slice's own joint) and not under a
+  // what-if (a chain-broken row is not leverage-eligible, so this mirrors `spanNote`).
+  const relativeWithheld = !selected && !leverageApplied && isHeadlineWithheld(payload.dataQuality, basis);
   if ((j || jointWithheld || keepRelativeSlots) && cmpKey !== "none") {
     // F5 (phase 103) + Phase 107 (LEV-BB): α / β / IR FOLLOW the active basis AND
     // leverage via the view's joint (above), matching §IV. At L≠1 the view re-derives
@@ -1761,7 +1770,7 @@ function KpiStrip() {
     // bundle is absent — a bundle-absent read yields the CASH joint, and showing it
     // under a non-cash story mislabels cash (the F4 rail-eyebrow discipline). Cash is
     // never suppressed. Each basis consults ITS OWN bundle-present flag.
-    const shown = suppressRelative ? null : j;
+    const shown = suppressRelative || relativeWithheld ? null : j;
     items.push({
       label: `α vs ${cn}`,
       value: shown ? formatSignedPercent(shown.alpha, 1) : "—",
@@ -1806,8 +1815,10 @@ function KpiStrip() {
   // only while the α/IR cells show the joint. Precedence, first match: the native-unit arm
   // (no comparator, so no α/IR cells), then the paired floor (the joint is null, so
   // `j` fails), then this. The floor line and this one therefore can never co-render.
+  // D-15: a Withheld full-history strip dashes those cells (`relativeWithheld`), so the line
+  // is silent there too and the Withheld note stays the one stated cause.
   const flatLegLine =
-    j != null && !suppressRelative && items.length > 7 && cmpKey !== "none" && wv.comparators[cmpKey].flatLeg === true
+    j != null && !suppressRelative && !relativeWithheld && items.length > 7 && cmpKey !== "none" && wv.comparators[cmpKey].flatLeg === true
       ? flatLegReason(selected ? "range" : "record")
       : null;
   // Phase 52-06 / TYPE-04 — the strip reflows on ITS OWN width via `@container`

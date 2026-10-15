@@ -23,13 +23,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { useEffect } from "react";
 import { render, fireEvent, act } from "@testing-library/react";
-import { buildFactsheetPayload, deriveSeriesBundle, fixtureBenchmarkPrices } from "@/lib/factsheet/build-payload";
-import type { FactsheetPayload } from "@/lib/factsheet/types";
+import {
+  buildFactsheetPayload,
+  deriveSeriesBundle,
+  fixtureBenchmarkPrices,
+  type BenchmarkPricesOpt,
+} from "@/lib/factsheet/build-payload";
+import type { DailyPrice, DailyReturn, FactsheetPayload } from "@/lib/factsheet/types";
 
 import { applyHeadlineBasis } from "@/lib/factsheet/composite-read-path";
 import { FactsheetProvider, useXRange } from "./factsheet-context";
 import { BasisProvider, useBasis, type Basis } from "./basis-context";
-import { MetricsColumn, headlineCoverageNote } from "./MetricsColumn";
+import { MetricsColumn, headlineCoverageNote, isHeadlineWithheld } from "./MetricsColumn";
 import { FactsheetBody } from "./FactsheetView";
 import { ownerStateLine } from "@/lib/status-surface-copy";
 
@@ -606,5 +611,599 @@ describe("D-14 — the Withheld note names the cause (R2-03)", () => {
   it("CONTROL: a Dated row and a clean row are unchanged", () => {
     expect(headlineCoverageNote(DATED, "cash_settlement", "strip")?.text).toBe(S1);
     expect(headlineCoverageNote(CLEAN, "cash_settlement", "strip")).toBeNull();
+  });
+});
+
+/**
+ * D-15 (founder 2026-10-15, review WR-04, "Withhold them too"). The Withheld note says
+ * the headline figures are withheld. The strip's alpha and IR cells are the whole-record
+ * joint with the comparator, which compounds across the very break that note names, so a
+ * number in those two cells under that note contradicts it. At full history, on the cash
+ * basis, on a Withheld row, all nine cells therefore read "—" with no tone, in every
+ * cause. The Dated contrast proves the gate is the verdict and not a blanket dash.
+ */
+const FLAT_DAY = 86_400_000;
+const FLAT_START = "2026-04-27";
+const addDays = (d: string, n: number) => new Date(Date.parse(`${d}T00:00:00Z`) + n * FLAT_DAY).toISOString().slice(0, 10);
+/**
+ * A record of zero returns against a BTC series that moves every day, as FactsheetBody.flat-leg.test
+ * builds it. File scope since plan 15: Test F (the strip) and the rail's flat-leg test both use it.
+ */
+function flatPayload(dq: DQ): FactsheetPayload {
+  const rows: DailyReturn[] = Array.from({ length: 30 }, (_, i) => ({ date: addDays(FLAT_START, i), value: 0 }));
+  const btc: DailyPrice[] = Array.from({ length: 31 }, (_, i) => ({
+    date: addDays(FLAT_START, i - 1),
+    close: 90000 + ((i * 37) % 11) * 250 + i * 3,
+  }));
+  const opt: BenchmarkPricesOpt = { prices: btc, through: btc[btc.length - 1].date, dropped: [] };
+  const built = buildFactsheetPayload(
+    { ...META, id: "headline-coverage-flat-leg", ingestSource: "api" as const },
+    rows,
+    { benchmarkPrices: opt },
+  );
+  if (!built) throw new Error("fixture must build a payload");
+  return { ...built, dataQuality: dq, activeComparator: "btc" } as FactsheetPayload;
+}
+
+describe("D-15 — a Withheld strip shows no alpha or IR figure (review WR-04)", () => {
+  const NEUTRAL = "var(--color-text-primary)";
+
+  function kpiCells(container: HTMLElement) {
+    const labels = [...container.querySelectorAll('[data-testid="factsheet-kpi-label"]')].map((e) => e.textContent ?? "");
+    const values = [...container.querySelectorAll<HTMLElement>('[data-testid="factsheet-kpi-value"]')];
+    return { labels, values };
+  }
+
+  it("Test A: a Withheld row with a comparator reads nine em-dashes, alpha and IR with no tone, under the unchanged note", () => {
+    const { container } = renderBody(withHeadlineNaN(payloadWithComparator(WITHHELD_DQ)));
+    const { labels, values } = kpiCells(container);
+    expect(values, "the cell count stays 9").toHaveLength(9);
+    const alphaIdx = labels.findIndex((l) => l.startsWith("α vs"));
+    const irIdx = labels.findIndex((l) => l.startsWith("IR vs"));
+    expect(alphaIdx, "premise: the alpha cell is shown").toBeGreaterThanOrEqual(0);
+    expect(irIdx, "premise: the IR cell is shown").toBeGreaterThanOrEqual(0);
+    expect(values.map((v) => v.textContent)).toEqual(Array(9).fill("—"));
+    expect(values[alphaIdx].getAttribute("style") ?? "").toContain(NEUTRAL);
+    expect(values[irIdx].getAttribute("style") ?? "").toContain(NEUTRAL);
+    const found = stripNotes(container).filter((p) => (p.textContent ?? "").trim() === `⚠ ${WITHHELD}`);
+    expect(found, "exactly one strip note, the Withheld sentence").toHaveLength(1);
+    expect(stripNotes(container)).toHaveLength(1);
+  });
+
+  it("Test B (contrast): a Dated row with the same comparator still shows numeric alpha and IR", () => {
+    const { container } = renderBody(payloadWithComparator(DATED));
+    const { labels, values } = kpiCells(container);
+    expect(values).toHaveLength(9);
+    for (const prefix of ["α vs", "IR vs"]) {
+      const i = labels.findIndex((l) => l.startsWith(prefix));
+      expect(i, `premise: the ${prefix} cell is shown`).toBeGreaterThanOrEqual(0);
+      expect(values[i].textContent).not.toBe("—");
+      expect(values[i].textContent).toMatch(/\d/);
+    }
+  });
+
+  it("Test C (one discriminator): the strip and the note decide Withheld through isHeadlineWithheld", () => {
+    expect(isHeadlineWithheld(WITHHELD_DQ, "cash_settlement")).toBe(true);
+    expect(isHeadlineWithheld(DATED, "cash_settlement")).toBe(false);
+    expect(isHeadlineWithheld(CLEAN, "cash_settlement")).toBe(false);
+    expect(isHeadlineWithheld(WITHHELD_DQ, "mark_to_market")).toBe(false);
+    expect(isHeadlineWithheld(WITHHELD_DQ, "smoothed_mtm")).toBe(false);
+    expect(isHeadlineWithheld(undefined, "cash_settlement")).toBe(false);
+    expect(isHeadlineWithheld({ ...WITHHELD_DQ, twrChainBroken: false }, "cash_settlement")).toBe(false);
+  });
+
+  const RECOMPUTING_NOTE = "Headline figures are being recomputed.";
+  const ALL_DASH = Array(9).fill("—");
+
+  it("Test D (D-15 with D-14): recomputing and failed Withheld rows dash all nine cells too", () => {
+    for (const cause of ["recomputing", "failed"] as const) {
+      const dq: DQ = { ...WITHHELD_DQ, headlineWithheldCause: cause };
+      const { container, unmount } = renderBody(withHeadlineNaN(payloadWithComparator(dq)));
+      const { labels, values } = kpiCells(container);
+      expect(values.map((v) => v.textContent), cause).toEqual(ALL_DASH);
+      for (const prefix of ["α vs", "IR vs"]) {
+        const i = labels.findIndex((l) => l.startsWith(prefix));
+        expect(i, `${cause}: premise: the ${prefix} cell is shown`).toBeGreaterThanOrEqual(0);
+        expect(values[i].getAttribute("style") ?? "", cause).toContain(NEUTRAL);
+      }
+      if (cause === "recomputing") {
+        const text = stripNotes(container).map((p) => (p.textContent ?? "").trim());
+        expect(text).toEqual([`⚠ ${RECOMPUTING_NOTE}`]);
+      } else {
+        expect(container.textContent).not.toContain("Headline figures");
+      }
+      unmount();
+    }
+  });
+
+  it("Test E (D-78): inside a selected window on a Withheld row alpha and IR keep the slice's own joint", async () => {
+    function Zoom({ range }: { range: [number, number] }) {
+      const { setXRange } = useXRange();
+      return <button data-testid="zoom" onClick={() => setXRange(range)}>zoom</button>;
+    }
+    async function zoomed(payload: FactsheetPayload) {
+      const view = render(
+        <FactsheetProvider payload={payload} persist={false}>
+          <Zoom range={[10, 300]} />
+          <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+        </FactsheetProvider>,
+      );
+      await act(async () => {
+        fireEvent.click(view.container.querySelector('[data-testid="zoom"]')!);
+      });
+      return view;
+    }
+    function relativeValues(container: HTMLElement): string[] {
+      const { labels, values } = kpiCells(container);
+      return ["α vs", "IR vs"].map((prefix) => values[labels.findIndex((l) => l.startsWith(prefix))].textContent ?? "");
+    }
+    // Premise on the Dated payload: the same range yields a numeric slice joint, so a
+    // too-short slice cannot make the Withheld assertion vacuous.
+    const dated = await zoomed(payloadWithComparator(DATED));
+    for (const v of relativeValues(dated.container)) expect(v, "premise: the Dated slice joint is numeric").toMatch(/\d/);
+    dated.unmount();
+    const withheld = await zoomed(withHeadlineNaN(payloadWithComparator(WITHHELD_DQ)));
+    for (const v of relativeValues(withheld.container)) expect(v, "the window keeps the slice joint").toMatch(/\d/);
+    expect(withheld.container.textContent, "the window shows the range sentence, not the Withheld one").not.toContain(
+      "Headline figures withheld",
+    );
+  });
+
+  describe("Test F (UI-SPEC section 2): the flat-leg line speaks only while alpha and IR show the joint", () => {
+    function stripFlatLegLines(container: HTMLElement): HTMLElement[] {
+      return [...container.querySelectorAll("section")]
+        .filter((s) => [...s.querySelectorAll("p")].some((p) => (p.textContent ?? "").trim() === "Cum. Return"))
+        .flatMap((s) => [...s.querySelectorAll<HTMLElement>('[data-testid="joint-flat-leg-reason"]')]);
+    }
+
+    it("a Dated row shows the line under the strip (premise)", () => {
+      const { container } = renderBody(flatPayload(DATED));
+      expect(stripFlatLegLines(container)).toHaveLength(1);
+    });
+
+    it("a Withheld row shows no line and dashes alpha and IR: the Withheld note is the one stated cause", () => {
+      const { container } = renderBody(withHeadlineNaN(flatPayload(WITHHELD_DQ)));
+      expect(stripFlatLegLines(container)).toHaveLength(0);
+      const { labels, values } = kpiCells(container);
+      for (const prefix of ["α vs", "IR vs"]) {
+        const i = labels.findIndex((l) => l.startsWith(prefix));
+        expect(i, `premise: the ${prefix} cell is shown`).toBeGreaterThanOrEqual(0);
+        expect(values[i].textContent).toBe("—");
+      }
+      // The 30-day fixture also carries the unrelated short-track caveat; the cause is stated once.
+      const notesText = stripNotes(container).map((p) => (p.textContent ?? "").trim());
+      expect(notesText.filter((t) => t === `⚠ ${WITHHELD}`)).toHaveLength(1);
+    });
+  });
+
+  it("Test G (copy): no strip sentence claims alpha or IR are shown on a Withheld row", () => {
+    const { container } = renderBody(withHeadlineNaN(payloadWithComparator(WITHHELD_DQ)));
+    const sentences = stripNotes(container).map((p) => p.textContent ?? "");
+    expect(sentences.length, "premise: the Withheld note is there").toBe(1);
+    for (const t of sentences) {
+      expect(t).not.toContain("α");
+      expect(t).not.toContain("IR cover");
+      expect(t).not.toContain("IR ");
+    }
+  });
+});
+
+/**
+ * D-15 extended (founder 2026-10-15, "Rail follows the strip"; plan 14). Plan 13 made the
+ * KPI strip's alpha read "—" on a Withheld row. The rail's section IV "Alpha (ann)" row is
+ * the same whole-record joint figure, so under the rail's own Withheld note ("headline
+ * figures withheld") it contradicted both the note and the strip beside it: the whole-record
+ * alpha compounds across the very break that note names. Scope is stated narrowly: full
+ * history (no selected window, D-78), no what-if leverage, cash basis, and the Alpha (ann)
+ * row ONLY. The Dated contrast proves the gate is the verdict and not a blanket dash.
+ * SCOPE SUPERSEDED by plan 15 ("D-15 extended again: Dash all of them", below): the same gate now
+ * dashes every whole-record rail figure, and R5 was flipped to match.
+ */
+describe("D-15 extended: Rail follows the strip", () => {
+  const rows = (container: HTMLElement, label: string): HTMLTableRowElement[] =>
+    [...container.querySelectorAll<HTMLTableRowElement>("tr")].filter(
+      (tr) => (tr.querySelector("td")?.textContent ?? "").trim() === label,
+    );
+
+  /** The value cell (second td) of the one rail row whose first cell reads exactly `label`. */
+  function railValueCell(container: HTMLElement, label = "Alpha (ann)"): HTMLElement {
+    const found = rows(container, label);
+    expect(found, `premise: exactly one rail row reads "${label}"`).toHaveLength(1);
+    return found[0].querySelectorAll<HTMLElement>("td")[1];
+  }
+
+  it("R1: a Withheld full-history row dashes the rail Alpha (ann) and drops its accent", () => {
+    const { container } = renderColumn(withHeadlineNaN(payloadWithComparator(WITHHELD_DQ)));
+    const cell = railValueCell(container);
+    expect(cell.textContent).toBe("—");
+    expect(cell.className).not.toContain("text-accent");
+  });
+
+  it("R2 (contrast): a Dated row with the same comparator keeps a numeric, accented rail Alpha (ann)", () => {
+    const { container } = renderColumn(payloadWithComparator(DATED));
+    const cell = railValueCell(container);
+    expect(cell.textContent).toMatch(/\d/);
+    expect(cell.className).toContain("text-accent");
+  });
+
+  it("R3 (with D-14): recomputing and failed Withheld rows dash the rail Alpha (ann) too", () => {
+    for (const cause of ["recomputing", "failed"] as const) {
+      const dq: DQ = { ...WITHHELD_DQ, headlineWithheldCause: cause };
+      const { container, unmount } = renderColumn(withHeadlineNaN(payloadWithComparator(dq)));
+      const cell = railValueCell(container);
+      expect(cell.textContent, cause).toBe("—");
+      expect(cell.className, cause).not.toContain("text-accent");
+      unmount();
+    }
+  });
+
+  it("R4 (D-78): inside a selected window the rail Alpha (ann) keeps the slice's own joint", async () => {
+    function Zoom({ range }: { range: [number, number] }) {
+      const { setXRange } = useXRange();
+      return <button data-testid="zoom" onClick={() => setXRange(range)}>zoom</button>;
+    }
+    async function zoomed(payload: FactsheetPayload) {
+      const view = render(
+        <FactsheetProvider payload={payload} persist={false}>
+          <Zoom range={[10, 300]} />
+          <MetricsColumn />
+        </FactsheetProvider>,
+      );
+      await act(async () => {
+        fireEvent.click(view.container.querySelector('[data-testid="zoom"]')!);
+      });
+      return view;
+    }
+    // Premise on the Dated payload: the same range yields a numeric slice joint, so a
+    // too-short slice cannot make the Withheld assertion vacuous.
+    const dated = await zoomed(payloadWithComparator(DATED));
+    expect(railValueCell(dated.container).textContent, "premise: the Dated slice joint is numeric").toMatch(/\d/);
+    dated.unmount();
+    const withheld = await zoomed(withHeadlineNaN(payloadWithComparator(WITHHELD_DQ)));
+    expect(railValueCell(withheld.container).textContent, "the window keeps the slice joint").toMatch(/\d/);
+  });
+
+  it("R5 (flipped by plan 15): on a Withheld full-history row Beta and Information Ratio read the em-dash (D-15 extended again, 'Dash all of them', supersedes the Alpha-only pin)", () => {
+    // Plan 14 pinned Beta and Information Ratio as numeric because D-15 extended named only
+    // Alpha (ann). The founder extended the scope on 2026-10-15 ("Dash all of them"): every
+    // whole-record rail figure dashes on a Withheld row. This flip is deliberate, not drift.
+    const { container } = renderColumn(withHeadlineNaN(payloadWithComparator(WITHHELD_DQ)));
+    for (const label of ["Beta", "Information Ratio"]) {
+      const cell = railValueCell(container, label);
+      expect(cell.textContent, label).toBe("—");
+      expect(cell.className, label).not.toContain("text-accent");
+    }
+  });
+});
+
+/**
+ * D-15 extended again (founder 2026-10-15, AskUserQuestion, "Dash all of them"; plan 15).
+ * This SUPERSEDES plan 14's Alpha-only scope. Scope: a Withheld row at FULL history with no
+ * what-if leverage, every rail figure computed over the whole record. Dates, sample counts and
+ * per-period entries are not figures to dash, and a zoom window keeps its slice figures (D-78).
+ * WHY: each such figure compounds across the break the rail's own Withheld note names, so a
+ * number under that note contradicts it (the same reasoning that dashed the strip's alpha / IR
+ * in plan 13 and the rail's Alpha (ann) in plan 14).
+ *
+ * One reported test per cell. Row labels repeat across panels (Skew, VaR 95%, CVaR 95%, Profit
+ * Factor, Sharpe, Sortino, Max Drawdown), so cells are read panel-scoped, never by a
+ * container-wide label lookup. Every case pairs a Dated premise (the same cell carries a digit
+ * under the same comparator) with the Withheld assertion, so the dash is the verdict and not a
+ * blanket dash, and so the assertion cannot be vacuous.
+ */
+describe("D-15 extended again: Dash all of them", () => {
+  type Case = {
+    id: string;
+    /** Panel title (the `h3` text starts with it). */
+    panel: string;
+    /** Exact text of the row's first cell. */
+    row: string;
+    /** Zero-based td index inside the row. */
+    col: number;
+    /** A bootstrap CI cell: its Withheld form is "[—, —]". */
+    ci?: true;
+  };
+  /** A cell reduced to extracted strings: RTL cleanup empties containers, so nodes are never stored. */
+  type Cell = { text: string; cls: string; style: string } | { error: string };
+
+  function panelSection(container: HTMLElement, title: string): HTMLElement | string {
+    const hits = [...container.querySelectorAll<HTMLElement>("section")].filter((s) =>
+      (s.querySelector(":scope > header h3")?.textContent ?? "").trim().startsWith(title),
+    );
+    return hits.length === 1 ? hits[0] : `${hits.length} panels titled "${title}"`;
+  }
+
+  function readCell(container: HTMLElement, c: Case): Cell {
+    const section = panelSection(container, c.panel);
+    if (typeof section === "string") return { error: section };
+    const trs = [...section.querySelectorAll<HTMLTableRowElement>("tr")].filter(
+      (tr) => (tr.querySelector("td")?.textContent ?? "").trim() === c.row,
+    );
+    if (trs.length !== 1) return { error: `${trs.length} rows "${c.row}" in "${c.panel}"` };
+    const td = trs[0].querySelectorAll<HTMLElement>("td")[c.col];
+    if (!td) return { error: `no td ${c.col} in "${c.row}"` };
+    return { text: (td.textContent ?? "").trim(), cls: td.className, style: td.getAttribute("style") ?? "" };
+  }
+
+  /** Section IV, all nine joint rows (A54 to A62), strategy column. */
+  const JOINT_ROWS = [
+    "Alpha (ann)",
+    "Beta",
+    "Correlation",
+    "R²",
+    "Information Ratio",
+    "Treynor",
+    "Tracking Error",
+    "Up Capture",
+    "Down Capture",
+  ] as const;
+  const JOINT_CASES: Case[] = JOINT_ROWS.map((row, i) => ({ id: `A${54 + i}`, panel: "Joint Metrics", row, col: 1 }));
+
+  /**
+   * The first test to call a memoised snapshot renders two whole rails (and, for the window
+   * cases, two zooms). RTL's automatic cleanup runs when a test ends, and would empty the
+   * containers under a snapshot still being read if that test timed out first, which turned a
+   * slow machine into 62 spurious "0 panels" failures. So those tests get a generous timeout.
+   */
+  const SNAPSHOT_TIMEOUT_MS = 120_000;
+
+  /** Cases for (panel, rows): one per (row, col), ids numbered from `from`, row-major. */
+  const grid = (from: number, panel: string, rows: readonly string[], cols: readonly number[]): Case[] =>
+    rows.flatMap((row, i) => cols.map((col, j) => ({ id: `A${from + i * cols.length + j}`, panel, row, col })));
+
+  /** A1 to A2: Main Metrics Skew and Kurtosis (strategy). */
+  const MAIN_CASES = grid(1, "Main Metrics", ["Skew", "Kurtosis"], [1]);
+  /** A3 to A6: Returns Win Rate and Profit Factor, strategy then benchmark. */
+  const RETURNS_CASES = grid(3, "Returns", ["Win Rate (days)", "Profit Factor"], [1, 2]);
+  /** A7 to A8: Longest DD (days), strategy then benchmark. A9 to A12: VaR, CVaR, Avg Win, Avg Loss (strategy). */
+  const MAXDD_CASES = [
+    ...grid(7, "Max Drawdown", ["Longest DD (days)"], [1, 2]),
+    ...grid(9, "Max Drawdown", ["VaR 95%", "CVaR 95%", "Avg Win", "Avg Loss"], [1]),
+  ];
+  /** A13 to A22: Best and Worst for Day, Week, Month, Quarter, Year. */
+  const BEST_WORST_CASES = grid(13, "Best / Worst Period", ["Day", "Week", "Month", "Quarter", "Year"], [1, 2]);
+  /** A23 to A31: Rolling Metrics Avg, Min, Max ("Now", td 1, is the latest window only and stays). */
+  const ROLLING_CASES = grid(23, "Rolling Metrics", ["Volatility", "Sharpe", "Sortino"], [2, 3, 4]);
+  /** A32 to A37: Bootstrap Point (td 1) and 95% CI (td 2) for Sharpe, Sortino, Max Drawdown. */
+  const BOOTSTRAP_CASES: Case[] = ["Sharpe", "Sortino", "Max Drawdown"].flatMap((row, i) => [
+    { id: `A${32 + i * 2}`, panel: "Bootstrap 95% Confidence", row, col: 1 },
+    { id: `A${33 + i * 2}`, panel: "Bootstrap 95% Confidence", row, col: 2, ci: true as const },
+  ]);
+  /** A39 to A53: all fifteen Extended Metrics rows (strategy). */
+  const EXTENDED_CASES = grid(
+    39,
+    "Extended Metrics",
+    [
+      "Skew",
+      "Kurtosis (excess)",
+      "VaR 95%",
+      "CVaR 95%",
+      "P5 (daily)",
+      "P95 (daily)",
+      "Median (daily)",
+      "Profit Factor",
+      "Omega (θ=0)",
+      "Tail Ratio (P95/|P5|)",
+      "Common-sense Ratio",
+      "Recovery Factor",
+      "Pain Index",
+      "Ulcer Index",
+      "Avg Win / Avg Loss",
+    ],
+    [1],
+  );
+
+  const CASES: Case[] = [
+    ...MAIN_CASES,
+    ...RETURNS_CASES,
+    ...MAXDD_CASES,
+    ...BEST_WORST_CASES,
+    ...ROLLING_CASES,
+    ...BOOTSTRAP_CASES,
+    ...EXTENDED_CASES,
+    ...JOINT_CASES,
+  ];
+
+  /** Both renders, once, first called from inside a test so the file's localStorage stub is in place. */
+  let snapshot: { dated: Map<string, Cell>; withheld: Map<string, Cell> } | null = null;
+  function snapshots() {
+    if (!snapshot) {
+      const take = (p: FactsheetPayload) => {
+        const { container, unmount } = renderColumn(p);
+        const cells = new Map<string, Cell>();
+        for (const c of CASES) cells.set(c.id, readCell(container, c));
+        unmount();
+        return cells;
+      };
+      snapshot = {
+        dated: take(payloadWithComparator(DATED)),
+        withheld: take(withHeadlineNaN(payloadWithComparator(WITHHELD_DQ))),
+      };
+    }
+    return snapshot;
+  }
+
+  it.each(CASES)("$id: $panel / $row (td $col) reads the em-dash with no tone on a Withheld row; a Dated row keeps a digit", (c) => {
+    const dated = snapshots().dated.get(c.id)!;
+    const withheld = snapshots().withheld.get(c.id)!;
+    if ("error" in dated) throw new Error(`premise: Dated read failed: ${dated.error}`);
+    if ("error" in withheld) throw new Error(`Withheld read failed: ${withheld.error}`);
+    expect(dated.text, "premise: the Dated cell carries a digit").toMatch(/\d/);
+    expect(withheld.text).toBe(c.ci ? "[—, —]" : "—");
+    expect(withheld.cls).not.toContain("text-accent");
+    expect(withheld.style).not.toContain("--color-positive");
+    expect(withheld.style).not.toContain("--color-negative");
+  }, SNAPSHOT_TIMEOUT_MS);
+
+  it("the case table covers A1 to A62 once each, except A38 (the sparklines, below)", () => {
+    const ids = CASES.map((c) => c.id).sort((x, y) => Number(x.slice(1)) - Number(y.slice(1)));
+    const expected = Array.from({ length: 62 }, (_, i) => `A${i + 1}`).filter((id) => id !== "A38");
+    expect(ids).toEqual(expected);
+  });
+
+  it("A38: the Withheld bootstrap panel prints no figure in its table body or its three sparkline readouts; a Dated panel does", () => {
+    // Everything after the panel's `table` is the three `BootHist` blocks and the resample
+    // footer. The `h3` and the `thead` (its unchanged "95% CI" header) are not figures.
+    function figures(p: FactsheetPayload): { body: string; after: string } {
+      const { container, unmount } = renderColumn(p);
+      const section = panelSection(container, "Bootstrap 95% Confidence");
+      if (typeof section === "string") throw new Error(section);
+      const table = section.querySelector("table")!;
+      const body = table.querySelector("tbody")!.textContent ?? "";
+      let after = "";
+      for (let n = table.nextElementSibling; n; n = n.nextElementSibling) after += n.textContent ?? "";
+      unmount();
+      return { body, after };
+    }
+    const dated = figures(payloadWithComparator(DATED));
+    expect(dated.body, "premise: the Dated table body carries a digit").toMatch(/\d/);
+    expect(dated.after, "premise: the Dated sparkline readouts carry a digit").toMatch(/\d/);
+    const withheld = figures(withHeadlineNaN(payloadWithComparator(WITHHELD_DQ)));
+    expect(withheld.body).not.toMatch(/\d/);
+    expect(withheld.after).not.toMatch(/\d/);
+  });
+
+  /** The same two renders inside a selected window (D-78), memoised like `snapshots`. */
+  let zoomedSnapshot: Promise<{ dated: Map<string, Cell>; withheld: Map<string, Cell> }> | null = null;
+  function Zoom({ range }: { range: [number, number] }) {
+    const { setXRange } = useXRange();
+    return (
+      <button data-testid="zoom" onClick={() => setXRange(range)}>
+        zoom
+      </button>
+    );
+  }
+  async function zoomedColumn(payload: FactsheetPayload) {
+    const view = render(
+      <FactsheetProvider payload={payload} persist={false}>
+        <Zoom range={[10, 300]} />
+        <MetricsColumn />
+      </FactsheetProvider>,
+    );
+    await act(async () => {
+      fireEvent.click(view.container.querySelector('[data-testid="zoom"]')!);
+    });
+    return view;
+  }
+  function zoomedSnapshots() {
+    zoomedSnapshot ??= (async () => {
+      const take = async (p: FactsheetPayload) => {
+        const { container, unmount } = await zoomedColumn(p);
+        const cells = new Map<string, Cell>();
+        for (const c of CASES) cells.set(c.id, readCell(container, c));
+        unmount();
+        return cells;
+      };
+      return {
+        dated: await take(payloadWithComparator(DATED)),
+        withheld: await take(withHeadlineNaN(payloadWithComparator(WITHHELD_DQ))),
+      };
+    })();
+    return zoomedSnapshot;
+  }
+
+  it.each(CASES)("window exemption (D-78) $id: $panel / $row (td $col) keeps its slice figure inside a selected range on a Withheld row", async (c) => {
+    const { dated, withheld } = await zoomedSnapshots();
+    const d = dated.get(c.id)!;
+    const w = withheld.get(c.id)!;
+    if ("error" in d) throw new Error(`premise: Dated zoomed read failed: ${d.error}`);
+    if ("error" in w) throw new Error(`Withheld zoomed read failed: ${w.error}`);
+    expect(d.text, "premise: the Dated slice cell carries a digit, so the assertion below cannot be vacuous").toMatch(/\d/);
+    expect(w.text, "the window keeps the slice figure").toMatch(/\d/);
+  }, SNAPSHOT_TIMEOUT_MS);
+
+  it("window exemption (D-78) A38: the bootstrap table body and sparkline readouts keep their figures inside a selected range", async () => {
+    async function figures(p: FactsheetPayload): Promise<{ body: string; after: string }> {
+      const { container, unmount } = await zoomedColumn(p);
+      const section = panelSection(container, "Bootstrap 95% Confidence");
+      if (typeof section === "string") throw new Error(section);
+      const table = section.querySelector("table")!;
+      const body = table.querySelector("tbody")!.textContent ?? "";
+      let after = "";
+      for (let n = table.nextElementSibling; n; n = n.nextElementSibling) after += n.textContent ?? "";
+      unmount();
+      return { body, after };
+    }
+    const dated = await figures(payloadWithComparator(DATED));
+    expect(dated.body, "premise: the Dated slice table body carries a digit").toMatch(/\d/);
+    expect(dated.after, "premise: the Dated slice readouts carry a digit").toMatch(/\d/);
+    const withheld = await figures(withHeadlineNaN(payloadWithComparator(WITHHELD_DQ)));
+    expect(withheld.body).toMatch(/\d/);
+    expect(withheld.after).toMatch(/\d/);
+  }, SNAPSHOT_TIMEOUT_MS);
+
+  describe("kept cells (over-dash guard): dates, record length and per-period entries keep their digits on a Withheld full-history row", () => {
+    const rowsOf = (container: HTMLElement, panel: string): HTMLTableRowElement[] => {
+      const section = panelSection(container, panel);
+      if (typeof section === "string") throw new Error(`premise: ${section}`);
+      return [...section.querySelectorAll<HTMLTableRowElement>("tbody tr")];
+    };
+    const render1 = () => renderColumn(withHeadlineNaN(payloadWithComparator(WITHHELD_DQ)));
+
+    it("C2 to C4: Start Date, End Date and Years Observed", () => {
+      const { container } = render1();
+      for (const row of ["Start Date", "End Date", "Years Observed"]) {
+        const cell = readCell(container, { id: row, panel: "Compound Performance", row, col: 1 });
+        if ("error" in cell) throw new Error(cell.error);
+        expect(cell.text, row).toMatch(/\d/);
+      }
+    });
+
+    it("D1: every EOY Returns year row keeps its strategy figure", () => {
+      const { container } = render1();
+      const rows = rowsOf(container, "EOY Returns");
+      expect(rows.length, "premise: the EOY panel renders year rows").toBeGreaterThan(0);
+      for (const tr of rows) {
+        const tds = tr.querySelectorAll("td");
+        expect(tds[0].textContent).toMatch(/^\d{4}$/);
+        expect(tds[1].textContent, `EOY ${tds[0].textContent}`).toMatch(/\d/);
+      }
+    });
+
+    it("D4: every Calmar by Year row keeps its Return figure", () => {
+      const { container } = render1();
+      const rows = rowsOf(container, "Calmar by Year");
+      expect(rows.length, "premise: the Calmar panel renders year rows").toBeGreaterThan(0);
+      for (const tr of rows) {
+        const tds = tr.querySelectorAll("td");
+        expect(tds[1].textContent, `Calmar ${tds[0].textContent}`).toMatch(/\d/);
+      }
+    });
+
+    it('D5: the three Rolling Metrics "Now" cells keep their figures', () => {
+      const { container } = render1();
+      for (const row of ["Volatility", "Sharpe", "Sortino"]) {
+        const cell = readCell(container, { id: row, panel: "Rolling Metrics", row, col: 1 });
+        if ("error" in cell) throw new Error(cell.error);
+        expect(cell.text, `Now: ${row}`).toMatch(/\d/);
+      }
+    });
+
+    it("D6: the Worst 10 Drawdowns table keeps at least one Depth figure", () => {
+      const { container } = render1();
+      const rows = rowsOf(container, "Worst 10 Drawdowns");
+      expect(rows.length, "premise: the Worst 10 table renders rows").toBeGreaterThan(0);
+      expect(rows.some((tr) => /\d/.test(tr.querySelectorAll("td")[4]?.textContent ?? ""))).toBe(true);
+    });
+  });
+
+  describe("the rail states one cause: the flat-leg line", () => {
+    const railFlatLegLines = (container: HTMLElement) =>
+      container.querySelectorAll('[data-testid="joint-flat-leg-reason"]');
+
+    it("a Dated flat-leg rail shows the one reason line (premise)", () => {
+      const { container } = renderColumn(flatPayload(DATED));
+      expect(railFlatLegLines(container)).toHaveLength(1);
+    });
+
+    it("a Withheld flat-leg rail shows no second cause beside the Withheld note, and its nine joint rows read the em-dash", () => {
+      const { container } = renderColumn(withHeadlineNaN(flatPayload(WITHHELD_DQ)));
+      expect(railFlatLegLines(container)).toHaveLength(0);
+      for (const row of JOINT_ROWS) {
+        const cell = readCell(container, { id: row, panel: "Joint Metrics", row, col: 1 });
+        if ("error" in cell) throw new Error(cell.error);
+        expect(cell.text, row).toBe("—");
+      }
+    });
   });
 });

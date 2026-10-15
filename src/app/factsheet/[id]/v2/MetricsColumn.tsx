@@ -13,7 +13,7 @@ import { benchmarkWithheldReason, nativeUnitReason, withUnit } from "@/lib/facts
 import { drawdownTone, signTone } from "@/lib/factsheet/display-sign";
 import { pct, pctSigned, ppDelta, ratio, signed } from "./format";
 import { usePayload, useActiveComparator } from "./factsheet-context";
-import { useBasisOrCash, useBasisSeriesView, useWindowedView, type Basis, type RangeScope } from "./basis-context";
+import { useBasisOrCash, useBasisSeriesView, useWindowedView, useAppliedLeverage, leverageApplies, type Basis, type RangeScope } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel, FULL_HISTORY_NOTE, ScopeNote } from "./AnalyticalPanels";
 import { StyleDriftPanel, PeerPercentilePanel, OwnBookDeltaPanel } from "./BatchDPanels";
 import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentMandatePanel } from "./MandatePanels";
@@ -73,6 +73,17 @@ function coveredFromDate(dataQuality: NonNullable<FactsheetPayload["dataQuality"
   return date === "—" ? null : date;
 }
 
+/**
+ * Phase 164.6.6.3.3 plan 13 (D-15, review WR-04) — the ONE test for "this row's headline is
+ * Withheld": the cash basis, a chain-broken row, and the stored headline withheld (any
+ * cause: unmeasured, recomputing, failed). {@link headlineCoverageNote} chooses its Withheld
+ * sentence through it and the KPI strip dashes its α and IR cells through it, so the note and
+ * the cells can never disagree about which rows are Withheld.
+ */
+export function isHeadlineWithheld(dataQuality: FactsheetPayload["dataQuality"], basis: Basis): boolean {
+  return basis === "cash_settlement" && dataQuality?.twrChainBroken === true && dataQuality.headlineWithheld === true;
+}
+
 export function headlineCoverageNote(
   dataQuality: FactsheetPayload["dataQuality"],
   basis: Basis,
@@ -82,7 +93,7 @@ export function headlineCoverageNote(
   if (basis !== "cash_settlement") return null;
   if (dataQuality?.twrChainBroken !== true) return null;
   const reasons = joinGuardPhrases(dataQuality.headlineGuardReasons ?? []);
-  if (dataQuality.headlineWithheld === true) {
+  if (isHeadlineWithheld(dataQuality, basis)) {
     if (slot !== "strip" && slot !== "stripRelative" && slot !== "main") return null;
     // D-14 (R2-03): the cause picks the sentence. A recompute says so and names no
     // span or reason; a failed row says nothing, because the page already states
@@ -241,6 +252,19 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   const m = view.strategyMetrics;
   const b = jointCmp.summary;
   const railBasis = useBasisOrCash();
+  // Plan 15 (D-15 extended again, founder 2026-10-15, "Dash all of them", superseding plan 14's
+  // Alpha-only line): on a Withheld row every rail figure computed over the WHOLE record
+  // compounds across the break the Withheld note names, so it reads "—" with no tone. This is
+  // the ONE rail gate: it is computed here once and passed to every panel that dashes, and no
+  // panel decides Withheld for itself. The scope mirrors `KpiStrip`'s `relativeWithheld`: full
+  // history (D-78: a selected window keeps its slice figures), no what-if leverage, and the
+  // shared isHeadlineWithheld verdict. The leverage term is provably false on a Withheld row
+  // (`leverageEligibleFor` excludes chain-broken rows); it is kept so a change to eligibility
+  // moves strip and rail together. Which rows it covers (and which cells are dates, sample
+  // counts or per-period entries and stay) is the classification table in the plan 15 SUMMARY.
+  const railLeverageApplied = leverageApplies(payload, railBasis, useAppliedLeverage());
+  const wholeRecordWithheld = !selected && !railLeverageApplied && isHeadlineWithheld(payload.dataQuality, railBasis);
+  const wr = (formatted: string) => dashIf(wholeRecordWithheld, formatted);
   // B19: the benchmark cells beside the headline rows (see headlineBenchSource).
   const hb = headlineBenchSource(payload.dataQuality, railBasis, selected, jointCmp);
   // UI-SPEC 1.6 (B20): 6 Month / 1 Year row presence follows the record's length (the
@@ -342,8 +366,8 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
             <Row label="Sharpe" value={ratio(m.sharpe)} bench={ratio(hb?.sharpe)} accent />
             <Row label="Sortino" value={ratio(m.sortino)} bench={ratio(hb?.sortino)} />
             <Row label="Calmar" value={ratio(m.calmar)} bench={ratio(hb?.calmar)} />
-            <Row label="Skew" value={signed(m.skew)} bench="" />
-            <Row label="Kurtosis" value={ratio(m.kurt)} bench="" />
+            <Row label="Skew" value={wr(signed(m.skew))} bench="" />
+            <Row label="Kurtosis" value={wr(ratio(m.kurt))} bench="" />
           </Kpm>
         </Panel>
         <Panel title="Returns" benchHeader={bnDated}>
@@ -372,12 +396,12 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
                 {(m.p1y != null || covers1y) && <Row windowKey="p1y" label="1 Year" value={pctSigned(m.p1y, 2)} bench={pctSigned(hb?.p1y, 2)} />}
               </>
             )}
-            <Row label="Win Rate (days)" value={pct(m.win_rate, 2)} bench={pct(b?.win_rate, 2)} />
-            <Row label="Profit Factor" value={ratio(m.profit_factor)} bench={ratio(b?.profit_factor)} />
+            <Row label="Win Rate (days)" value={wr(pct(m.win_rate, 2))} bench={wr(pct(b?.win_rate, 2))} />
+            <Row label="Profit Factor" value={wr(ratio(m.profit_factor))} bench={wr(ratio(b?.profit_factor))} />
           </Kpm>
         </Panel>
         <EoyReturnsPanel scopeNote={selected ? FULL_HISTORY_NOTE : undefined} />
-        <RollingMetricsPanel scope={scope} />
+        <RollingMetricsPanel scope={scope} wholeRecordWithheld={wholeRecordWithheld} />
         {!selected && <CumulativeReturnsPanel />}
       </EditorialSection>
 
@@ -388,14 +412,14 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
           {maxDdSpan && <p className="mb-2 text-fixed-10 italic text-text-muted">{maxDdSpan.text}</p>}
           <Kpm>
             <Row label="Max Drawdown" value={pct(m.max_dd, 2)} bench={pct(hb?.max_dd, 2)} accent />
-            <Row label="Longest DD (days)" value={count(m.longest_dd)} bench={count(b?.longest_dd)} />
-            <Row label="VaR 95%" value={pctSigned(m.var95, 2)} bench="" />
-            <Row label="CVaR 95%" value={pctSigned(m.cvar95, 2)} bench="" />
-            <Row label="Avg Win" value={pctSigned(m.avg_win, 2)} bench="" />
-            <Row label="Avg Loss" value={pctSigned(m.avg_loss, 2)} bench="" />
+            <Row label="Longest DD (days)" value={wr(count(m.longest_dd))} bench={wr(count(b?.longest_dd))} />
+            <Row label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
+            <Row label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
+            <Row label="Avg Win" value={wr(pctSigned(m.avg_win, 2))} bench="" />
+            <Row label="Avg Loss" value={wr(pctSigned(m.avg_loss, 2))} bench="" />
           </Kpm>
         </Panel>
-        <BootstrapCIPanel />
+        <BootstrapCIPanel wholeRecordWithheld={wholeRecordWithheld} />
         <Panel title="Best / Worst Period">
           <table className="w-full text-fixed-11">
             <thead>
@@ -406,17 +430,17 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
               </tr>
             </thead>
             <tbody>
-              <BwRow scale="Day" best={m.best_day} worst={m.worst_day} />
-              <BwRow scale="Week" best={m.best_week} worst={m.worst_week} />
-              <BwRow scale="Month" best={m.best_month} worst={m.worst_month} />
-              <BwRow scale="Quarter" best={m.best_quarter} worst={m.worst_quarter} />
-              <BwRow scale="Year" best={m.best_year} worst={m.worst_year} />
+              <BwRow scale="Day" best={m.best_day} worst={m.worst_day} dash={wholeRecordWithheld} />
+              <BwRow scale="Week" best={m.best_week} worst={m.worst_week} dash={wholeRecordWithheld} />
+              <BwRow scale="Month" best={m.best_month} worst={m.worst_month} dash={wholeRecordWithheld} />
+              <BwRow scale="Quarter" best={m.best_quarter} worst={m.worst_quarter} dash={wholeRecordWithheld} />
+              <BwRow scale="Year" best={m.best_year} worst={m.worst_year} dash={wholeRecordWithheld} />
             </tbody>
           </table>
         </Panel>
         <CalmarByYearPanel />
         <WorstDrawdownsTablePanel />
-        <ExtendedMetricsPanel />
+        <ExtendedMetricsPanel wholeRecordWithheld={wholeRecordWithheld} />
       </EditorialSection>
 
       <EditorialSection label="III" name="Style" scopeNote={selected ? FULL_HISTORY_NOTE : undefined}>
@@ -476,8 +500,8 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
               alpha, beta, IR and the captures ("—") and the block's `flatLeg` marker picks the
               one muted reason line. The marker, never the NaN values, selects it. */}
           <BenchmarkMetricsBody
-            joint={jointCmp.joint}
-            withheldReason={jointCmp.flatLeg ? flatLegReason(selected ? "range" : "record") : undefined}
+            joint={wholeRecordWithheld ? null : jointCmp.joint}
+            withheldReason={jointCmp.flatLeg && !wholeRecordWithheld ? flatLegReason(selected ? "range" : "record") : undefined}
             reasonTestId="joint-flat-leg-reason"
           />
         </EditorialSection>
@@ -549,7 +573,12 @@ function BenchmarkMetricsBody({
   return (
     <Panel title="Joint Metrics" hideHeaderRule>
       <Kpm>
-        <Row label="Alpha (ann)" value={v(j => pctSigned(j.alpha, 2))} bench="" accent={joint != null} />
+        <Row
+          label="Alpha (ann)"
+          value={v(j => pctSigned(j.alpha, 2))}
+          bench=""
+          accent={joint != null}
+        />
         <Row label="Beta" value={v(j => ratio(j.beta))} bench="" />
         <Row label="Correlation" value={v(j => ratio(j.corr))} bench="" />
         <Row label="R²" value={v(j => ratio(j.r2))} bench="" />
@@ -659,7 +688,18 @@ function toneStyle(tone: "positive" | "negative" | undefined) {
   return tone ? { color: `var(--color-${tone})` } : undefined;
 }
 
-function BwRow({ scale, best, worst }: { scale: string; best: number; worst: number }) {
+function BwRow({ scale, best, worst, dash = false }: { scale: string; best: number; worst: number; dash?: boolean }) {
+  // Plan 15: a Withheld row's best / worst period is an extreme over the whole record, printed
+  // with no date, so both cells read "—" with no tone (D-15 extended again).
+  if (dash) {
+    return (
+      <tr className="border-b border-border/30 last:border-0">
+        <td className="py-1 pr-2 font-mono text-fixed-10 uppercase tracking-[0.14em] text-text-muted">{scale}</td>
+        <td className="py-1 px-2 text-right font-mono tabular-nums">—</td>
+        <td className="py-1 pl-2 text-right font-mono tabular-nums">—</td>
+      </tr>
+    );
+  }
   return (
     <tr className="border-b border-border/30 last:border-0">
       <td className="py-1 pr-2 font-mono text-fixed-10 uppercase tracking-[0.14em] text-text-muted">
@@ -784,6 +824,14 @@ export function isoToMonthDay(iso: string): string {
   return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
 }
 
+/**
+ * Plan 15 (D-15 extended again): the em-dash in place of a whole-record figure when the rail
+ * gate (`wholeRecordWithheld`, computed once in `MetricsColumn`) is on, else the formatted figure.
+ */
+function dashIf(gate: boolean, formatted: string): string {
+  return gate ? "—" : formatted;
+}
+
 /** A day count; "—" when absent or withheld (a withheld window's NaN, D-27 W1). */
 function count(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return "—";
@@ -795,7 +843,7 @@ function count(v: number | null | undefined): string {
  * current value (the latest window, "—" when it has none), min, max, average. Lets a reader judge
  * how stable each rolling stat has been over the strategy's life.
  */
-function RollingMetricsPanel({ scope }: { scope: RangeScope }) {
+function RollingMetricsPanel({ scope, wholeRecordWithheld }: { scope: RangeScope; wholeRecordWithheld: boolean }) {
   // Phase 103 (MTM-04 follow-through, Finding B): read the rolling arrays from the
   // basis view — the paired rolling CHARTS already render `view.strategyRolling*`
   // (MTM under the toggle), and the bundle carries the MTM arrays, so the summary
@@ -809,9 +857,15 @@ function RollingMetricsPanel({ scope }: { scope: RangeScope }) {
   // at the window's last index).
   const within = (arr: Array<number | null>) =>
     scope.kind === "selected" ? arr.slice(scope.startIdx, scope.endIdx + 1) : arr;
-  const v = rollingStats(within(view.strategyRollingVol));
-  const sh = rollingStats(within(view.strategyRollingSharpe));
-  const so = rollingStats(within(view.strategyRollingSortino));
+  // Plan 15 (D-15 extended again): Avg, Min and Max aggregate every warm window of the whole
+  // record, so on a Withheld row they read "—". "Now" is the latest 6-month window only and stays.
+  const stats = (arr: Array<number | null>) => {
+    const r = rollingStats(within(arr));
+    return wholeRecordWithheld ? { ...r, avg: null, min: null, max: null } : r;
+  };
+  const v = stats(view.strategyRollingVol);
+  const sh = stats(view.strategyRollingSharpe);
+  const so = stats(view.strategyRollingSortino);
   return (
     <Panel title={`Rolling Metrics (${view.rollingWindow?.label ?? "6mo"})`}>
       <table className="w-full text-fixed-12">
@@ -910,7 +964,7 @@ function CumulativeReturnsPanel() {
  * scattered across the headline panels so a reader can scan tail behaviour in
  * one place: skew, kurtosis, VaR/CVaR, win/loss asymmetry, profit factor.
  */
-function ExtendedMetricsPanel() {
+function ExtendedMetricsPanel({ wholeRecordWithheld }: { wholeRecordWithheld: boolean }) {
   // Phase 103 (MTM-04 follow-through, Finding A): the quantile rows (P5/P95/Median)
   // AND the extended distribution scalars (skew/kurtosis/VaR/CVaR/omega/profit-
   // factor/pain/ulcer/…) are pure functions of the daily series, so they all follow
@@ -929,24 +983,27 @@ function ExtendedMetricsPanel() {
   // consistent under both bases.
   const tailRatio = q.p05 < 0 ? Math.abs(q.p95 / q.p05) : null;
   const commonSenseRatio = tailRatio != null ? tailRatio * m.profit_factor : null;
+  // Plan 15 (D-15 extended again): every row here is a distribution or drawdown scalar over the
+  // whole record, so a Withheld row prints "—" for all fifteen. `Row` drops the accent on a dash.
+  const wr = (formatted: string) => dashIf(wholeRecordWithheld, formatted);
   return (
     <Panel title="Extended Metrics">
       <Kpm>
-        <Row label="Skew" value={signed(m.skew)} bench="" />
-        <Row label="Kurtosis (excess)" value={ratio(m.kurt)} bench="" accent={m.kurt > 6} />
-        <Row label="VaR 95%" value={pctSigned(m.var95, 2)} bench="" />
-        <Row label="CVaR 95%" value={pctSigned(m.cvar95, 2)} bench="" />
-        <Row label="P5 (daily)" value={pctSigned(q.p05, 2)} bench="" />
-        <Row label="P95 (daily)" value={pctSigned(q.p95, 2)} bench="" />
-        <Row label="Median (daily)" value={pctSigned(q.p50, 2)} bench="" />
-        <Row label="Profit Factor" value={ratio(m.profit_factor)} bench="" />
-        <Row label="Omega (θ=0)" value={ratio(m.omega_ratio)} bench="" />
-        <Row label="Tail Ratio (P95/|P5|)" value={ratio(tailRatio)} bench="" />
-        <Row label="Common-sense Ratio" value={ratio(commonSenseRatio)} bench="" />
-        <Row label="Recovery Factor" value={ratio(m.recovery_factor)} bench="" accent={m.recovery_factor != null && m.recovery_factor >= 3} />
-        <Row label="Pain Index" value={pct(m.pain_index, 2)} bench="" />
-        <Row label="Ulcer Index" value={pct(m.ulcer_index, 2)} bench="" />
-        <Row label="Avg Win / Avg Loss" value={ratioStr(m.avg_win, m.avg_loss)} bench="" />
+        <Row label="Skew" value={wr(signed(m.skew))} bench="" />
+        <Row label="Kurtosis (excess)" value={wr(ratio(m.kurt))} bench="" accent={m.kurt > 6} />
+        <Row label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
+        <Row label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
+        <Row label="P5 (daily)" value={wr(pctSigned(q.p05, 2))} bench="" />
+        <Row label="P95 (daily)" value={wr(pctSigned(q.p95, 2))} bench="" />
+        <Row label="Median (daily)" value={wr(pctSigned(q.p50, 2))} bench="" />
+        <Row label="Profit Factor" value={wr(ratio(m.profit_factor))} bench="" />
+        <Row label="Omega (θ=0)" value={wr(ratio(m.omega_ratio))} bench="" />
+        <Row label="Tail Ratio (P95/|P5|)" value={wr(ratio(tailRatio))} bench="" />
+        <Row label="Common-sense Ratio" value={wr(ratio(commonSenseRatio))} bench="" />
+        <Row label="Recovery Factor" value={wr(ratio(m.recovery_factor))} bench="" accent={m.recovery_factor != null && m.recovery_factor >= 3} />
+        <Row label="Pain Index" value={wr(pct(m.pain_index, 2))} bench="" />
+        <Row label="Ulcer Index" value={wr(pct(m.ulcer_index, 2))} bench="" />
+        <Row label="Avg Win / Avg Loss" value={wr(ratioStr(m.avg_win, m.avg_loss))} bench="" />
       </Kpm>
     </Panel>
   );

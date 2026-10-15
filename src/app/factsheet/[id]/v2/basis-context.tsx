@@ -561,6 +561,23 @@ export function resolveRangeScope(
 const EMPTY_BOOT = { point: NaN, lo: NaN, hi: NaN, hist: { lo: NaN, hi: NaN, bins: [] as number[] } };
 
 /**
+ * The ONE NaN-valued bootstrap form: no point, no interval, no histogram, no resamples, with
+ * `n` the observation count it stands in for. A withheld window (`withheldWindowView`, W1) and a
+ * Withheld full-history row (plan 15, D-15 extended again, `BootstrapCIPanel`) both render it,
+ * so the two cannot drift apart.
+ */
+export function withheldBootstrapCI(n: number): FactsheetPayload["bootstrapCI"] {
+  return {
+    sharpe: { ...EMPTY_BOOT, hist: { ...EMPTY_BOOT.hist, bins: [] }, n_valid: 0 },
+    sortino: { ...EMPTY_BOOT, hist: { ...EMPTY_BOOT.hist, bins: [] }, n_valid: 0 },
+    max_dd: { ...EMPTY_BOOT, hist: { ...EMPTY_BOOT.hist, bins: [] } },
+    n_resamples: 0,
+    block_len: 0,
+    n,
+  };
+}
+
+/**
  * Plan-check round 1 W1 (2026-09-30) — the withheld form REPLACES every follow-list
  * field, so no field keeps a full-history value under a "Selected range" eyebrow.
  * dates / returns are the window's own (they need no annualization); every figure
@@ -587,14 +604,7 @@ function withheldWindowView(
   strategyMetrics.end = dates[n - 1];
   strategyMetrics.yearly = {};
   const quantiles = Object.fromEntries(Object.keys(view.quantiles).map((k) => [k, NaN])) as FactsheetPayload["quantiles"];
-  const bootstrapCI: FactsheetPayload["bootstrapCI"] = {
-    sharpe: { ...EMPTY_BOOT, hist: { ...EMPTY_BOOT.hist, bins: [] }, n_valid: 0 },
-    sortino: { ...EMPTY_BOOT, hist: { ...EMPTY_BOOT.hist, bins: [] }, n_valid: 0 },
-    max_dd: { ...EMPTY_BOOT, hist: { ...EMPTY_BOOT.hist, bins: [] } },
-    n_resamples: 0,
-    block_len: 0,
-    n,
-  };
+  const bootstrapCI = withheldBootstrapCI(n);
   const blank = (b: ComparatorBlock): ComparatorBlock => ({ ...b, summary: null, joint: null, jointWithheld: null });
   const fields = {
     dates,
