@@ -49,6 +49,7 @@ from services.closed_sets import (
 from services.exchange import AUTH_FAILED_DETAIL
 from services.ingestion import IngestionAdapter
 from services.ingestion.adapter import KeySubmissionRequest, MetricsSnapshot
+from services.ingestion import mt5 as ingestion_mt5
 from services.ingestion.mt5 import Mt5Adapter
 from services.mt5_client import Mt5Client, Mt5ClientError
 from services.mt5_probe import (
@@ -56,6 +57,7 @@ from services.mt5_probe import (
     Mt5GatewayMisconfigured,
 )
 from services.mt5_validation import classify_mt5_login_error
+from tests.budget_rendezvous import expire_module_budget_when_reached
 
 
 # Phase 164.6.6 D-02 — the validation terminal's endpoint as these tests set it.
@@ -577,16 +579,23 @@ def test_validate_probe_hang_bounded_by_wait_for_ceiling(monkeypatch) -> None:
     ``_MT5_PROBE_TIMEOUT_S`` ceiling: the probe runs to completion (no
     TimeoutError, disposition wrong) — the exact WEDGE-01 divergence this closes.
     """
-    import time
+    reached = asyncio.Event()
+    release = threading.Event()
+    holder: dict[str, asyncio.AbstractEventLoop] = {}
 
     class _BlockingClient:
         def __init__(self) -> None:
             self.shutdown_calls = 0
 
         def login(self, *a, **k):
-            # Block LONGER than the (monkeypatched-tiny) ceiling so wait_for fires
-            # first. This stands in for a hang outside a bounded rpyc round-trip.
-            time.sleep(1.0)
+            # Block LONGER than the ceiling so wait_for fires first. This stands in
+            # for a hang outside a bounded rpyc round-trip. The ceiling is counted
+            # from the moment this parks (see the rendezvous note below). It parks on
+            # an Event the test releases once the bound has fired, NOT on a sleep: a
+            # loop stall longer than a sleep's margin would let `login` return first
+            # and the probe complete instead of timing out. 5 s is a deadman only.
+            holder["loop"].call_soon_threadsafe(reached.set)
+            release.wait(5.0)
 
         def account_info(self):
             return {"trade_allowed": False}
@@ -601,15 +610,42 @@ def test_validate_probe_hang_bounded_by_wait_for_ceiling(monkeypatch) -> None:
     monkeypatch.setattr(
         "services.ingestion.mt5._build_client", lambda host, port: client
     )
-    # Shrink the last-resort ceiling so the test does not wait the real ~35s.
-    monkeypatch.setattr("services.ingestion.mt5._MT5_PROBE_TIMEOUT_S", 0.1)
+    # ⛔ RENDEZVOUS, NOT A STOPWATCH. This shrank the last-resort ceiling to 0.1 s so
+    # the test would not wait the real ~35 s. That constant also bounds the `close()`
+    # in the `finally`, and both waits started before their pool thread was
+    # scheduled: a starved worker could cut the `close()` thread off before it ran
+    # (`shutdown_calls == 0`, "the terminal session leaked"), or the probe before it
+    # parked. The constant keeps its real value; only the PROBE's wait is bitten,
+    # immediately after `login` has parked, via a stand-in for the `asyncio` name
+    # inside `services.ingestion.mt5` (real `asyncio.timeout`, real cancellation).
+    expire_module_budget_when_reached(
+        monkeypatch,
+        ingestion_mt5,
+        reached,
+        only=lambda aw: getattr(
+            getattr(getattr(aw, "cr_frame", None), "f_locals", {}).get("func"),
+            "__name__",
+            "",
+        )
+        == "_probe",
+        after=0.0,
+    )
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
     monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", _VAL_HOST)
     monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", str(_VAL_PORT))
 
+    async def _drive() -> None:
+        holder["loop"] = asyncio.get_running_loop()
+        try:
+            await Mt5Adapter().validate(_req())
+        finally:
+            # Released INSIDE the loop: `asyncio.run` joins the default executor on
+            # exit, so a release after it would wait out the whole deadman.
+            release.set()
+
     with pytest.raises(asyncio.TimeoutError):
-        asyncio.run(Mt5Adapter().validate(_req()))
+        asyncio.run(_drive())
     assert client.shutdown_calls == 1  # close() ran even though the probe was cut off
 
 
@@ -909,10 +945,25 @@ async def test_a_connect_stage_timeout_leaves_no_rpyc_socket_open(monkeypatch) -
     conns: list = []
     outcomes: list[BaseException] = []
 
+    # ⛔ RENDEZVOUS, NOT A STOPWATCH. The adapter's connect-stage
+    # `wait_for(to_thread(...), timeout=0.05)` starts its clock before the pool thread
+    # has been scheduled, so on a CPU-starved worker the bound could fire before the
+    # connect began: queued `to_thread` work that is cancelled never runs, `finished`
+    # is never set and the zombie this case is about does not exist. The bound is
+    # therefore counted from the moment the connect announces it is parked, via a
+    # stand-in for the `asyncio` name inside `services.ingestion.mt5` only.
+    loop = asyncio.get_running_loop()
+    reached = asyncio.Event()
+    expire_module_budget_when_reached(monkeypatch, ingestion_mt5, reached)
+
     def _blocking_connect(*, host, port, timeout):
-        # BOUNDED — a gate the test somehow fails to set reds this case rather than
-        # stalling the suite for the 300s THREAD_JOIN_TIMEOUT.
-        gate.wait(0.25)
+        loop.call_soon_threadsafe(reached.set)
+        # BOUNDED (5 s) — a gate the test somehow fails to set reds this case rather
+        # than stalling the suite for the 300s THREAD_JOIN_TIMEOUT. It must outlast
+        # the bound by a wide margin on a loaded box: the bound is counted from the
+        # moment this parks, and the loop has to get to run it while the zombie is
+        # still here.
+        gate.wait(5.0)
         fake = _FakeMt5({})
         conns.append(fake)
         return fake

@@ -5651,7 +5651,13 @@ jobs:
       # shared-test-db mutex acquired in the step below still prevents two runs
       # from contending. Keep byte-identical with Makefile `test:`.
       # (2026-09-26, Phase 164.9.4 CIOFFMUTEX: this job no longer reaches the shared TEST project or takes the shared-test-db key; pytest runs against the local-stack lane private to this runner. The text above is lineage.)
-      - run: pytest --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
+      # (2026-10-14, Phase 164.9.8.1 PYXDIST: pytest now runs in parallel, `-n auto --dist loadgroup`. The SERIAL deferral above misread the cause: the
+      # `shared_test_db` group never formed, because the conftest grouping hook ran after xdist's own hook had already read the markers, so each live DB
+      # test was its own work unit; `tryfirst=True` on that hook makes the group real, proven by `tests/test_xdist_group_is_real.py`. The limiter-identity
+      # flake was `routers.*` module pollution from fixtures that evicted without restoring, fixed in the polluters through `tests/limiter_stub.py`.
+      # The pointer "(TODOS: v1.9.1 Phase-97 parallelization deferral)" is dangling: that TODOS entry was dropped by tracker consolidation `193afe818`.
+      # Byte-identity with Makefile `test:` is now pinned in `src/__tests__/local-stack-lane-wiring.test.ts`. The text above is lineage.)
+      - run: pytest -n auto --dist loadgroup --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
         env:
           # D-05 / D-08 (Phase 164.9.4): `CI` is 'true' unconditionally now,
           # because the lane is always present. That keeps `_need_supabase()`'s

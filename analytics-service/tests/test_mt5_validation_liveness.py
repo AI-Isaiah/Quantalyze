@@ -55,6 +55,7 @@ from services.mt5_client import (
     mt5_terminal_holder,
 )
 from services.mt5_handover import SITE_VALIDATION_LIVENESS
+from tests.budget_rendezvous import expire_budget_when_reached
 from tests.test_mt5_relogin import (  # noqa: F401 - _reset_state is an autouse fixture
     _FakeMt5,
     _heal_guard_defects,
@@ -769,15 +770,22 @@ async def test_a_reader_cancelled_while_waiting_on_the_recovered_notice_marks_th
     scrub_sink.newest = _row("r1", "relaunch_unverified")
     await _read()
     pending: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+    reached = asyncio.Event()
 
     async def _unsettled(*_a: Any, **_k: Any) -> Any:
+        reached.set()
         return pending
 
     monkeypatch.setattr(mt5_outage_alert.ops_alert, "page", _unsettled)
     scrub_sink.newest = _row("r2", "scrubbed", _T1)
 
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(_read(), timeout=0.05)
+    # ⛔ RENDEZVOUS, NOT A STOPWATCH. This used `wait_for(_read(), timeout=0.05)`,
+    # but before the reader reaches the notice it makes a thread-pool read of the
+    # newest row, and on a loaded box that hop alone could outlast 50 ms: the
+    # cancellation then landed BEFORE `_close_after_recovered` and the row was
+    # never marked stale, which is a failure of the harness, not of the reader.
+    # The budget now expires only once the notice's outcome is being awaited.
+    await expire_budget_when_reached(_read(), reached)
 
     assert _SCRUB_SOURCE in ops_alert_open_store.pages
     assert ops_alert_open_store.stale == {_SCRUB_SOURCE}

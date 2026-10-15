@@ -59,6 +59,7 @@ from services.mt5_client import (
     mt5_terminal_key,
 )
 from services.mt5_handover import SITE_VALIDATE_WIZARD, SITE_VALIDATE_WORKER
+from tests.budget_rendezvous import expire_module_budget_when_reached
 from tests.test_mt5_relogin import (
     _FAKE_LOGIN,
     _FAKE_PASSWORD,
@@ -528,21 +529,36 @@ async def test_TERMINAL_SCRUB_a_scrub_past_its_budget_is_ABANDONED_and_returns(
 ) -> None:
     """The scrub crossing itself wedges past the budget: the task ends
     normally with `abandoned`, the mark stays, and the alert fires."""
-    import time as _time
-
     finished = threading.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    wedged = asyncio.Event()
 
     def _wedge() -> None:
-        _time.sleep(0.6)
+        loop.call_soon_threadsafe(wedged.set)
+        # NOT A STOPWATCH: this slept 0.6 s against the 0.2 s budget, so a loop stall
+        # longer than the 0.4 s margin let the crossing return before the bound fired
+        # and the scrub completed instead of being abandoned. It parks on an Event
+        # the test releases once the bound has fired; 5 s is a deadman only.
+        release.wait(5.0)
         finished.set()
 
     _install_scrub_client(monkeypatch, {**_VERIFIED, "after_recycle_crossed": _wedge})
     monkeypatch.setattr(mt5_terminal_scrub, "_VALIDATION_SCRUB_BUDGET_S", 0.2)
-    with caplog.at_level(logging.INFO):
-        await _schedule_and_drain(_set_event())
-    assert mt5_scrub_owed(_VAL_KEY)
-    assert _the_one_scrub_row(sink)["kind"] == "abandoned"
-    _assert_one_alert(caplog, captures, "abandoned")
+    # ⛔ RENDEZVOUS, NOT A STOPWATCH. The 0.2 s budget starts before the scrub's pool
+    # thread is scheduled, so a starved worker could cut the scrub off before the
+    # crossing ever ran (`finished` never set). The budget is counted from the moment
+    # the crossing wedges, through a stand-in for the `asyncio` name inside
+    # `mt5_terminal_scrub` only (real `asyncio.timeout`, real cancellation).
+    expire_module_budget_when_reached(monkeypatch, mt5_terminal_scrub, wedged)
+    try:
+        with caplog.at_level(logging.INFO):
+            await _schedule_and_drain(_set_event())
+        assert mt5_scrub_owed(_VAL_KEY)
+        assert _the_one_scrub_row(sink)["kind"] == "abandoned"
+        _assert_one_alert(caplog, captures, "abandoned")
+    finally:
+        release.set()
     # Let the abandoned thread finish before teardown resets the registries.
     assert await asyncio.to_thread(finished.wait, 5.0)
     await asyncio.sleep(0.05)

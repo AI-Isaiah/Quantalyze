@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from tests.child_deadman import run_child
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 # Phase 3 D-17 precedent: optional live-DB integration gate.
@@ -1703,8 +1705,6 @@ def test_lazy_import_not_triggered_at_module_load():
     references held by the test file itself (it imports compute_adjusted_weights
     at collection time), which in turn breaks subsequent tests' monkeypatches.
     """
-    import subprocess
-
     script = (
         "import sys\n"
         "import routers.match\n"
@@ -1712,12 +1712,17 @@ def test_lazy_import_not_triggered_at_module_load():
         "# Exit code 0 = pass, 1 = fail (feedback_engine imported at module load).\n"
         "sys.exit(1 if leaked else 0)\n"
     )
-    result = subprocess.run(
+    # ⛔ The verdict is the module set the child reports (is
+    # `services.feedback_engine` in `sys.modules` after `import routers.match`),
+    # never how long the import took. A cold import of the whole router graph is
+    # CPU-bound and took 14-18 s on a starved runner, which broke a 15 s bound in
+    # the lane soak. `run_child` carries only the shared DEADMAN (1800 s), which
+    # turns a genuine hang into a failure that names this test; it is not a bound
+    # on import speed.
+    result = run_child(
+        "routers.match imports without loading services.feedback_engine (D6 lazy import)",
         [sys.executable, "-c", script],
         cwd=Path(__file__).parent.parent,  # analytics-service/
-        capture_output=True,
-        text=True,
-        timeout=15,
     )
     assert result.returncode == 0, (
         "services.feedback_engine was imported at module load — import must be "
