@@ -818,7 +818,15 @@ async def _quarter_step(
 
     Apply (idempotent), read the state, then ready / wait / stop. Nothing is remembered:
     the same inputs on a different worker give the same answer, which is what makes a
-    restart harmless."""
+    restart harmless. The request ``ts`` is read from OKX on every claim, so the 8 h bound
+    survives restarts and cannot be reset by one.
+
+    * ``finished`` with a link: ready.
+    * ``ongoing``: wait (give up at ``GIVE_UP_AFTER_S`` from ``ts``).
+    * ``failed``, or ``finished`` WITHOUT a link (a job that took that for success would
+      report DONE with the data missing): re-apply ``MAX_REAPPLIES`` times and read again;
+      a request that is still ``failed`` afterwards is a permanent stop, and one still
+      linkless waits."""
     year, label = entry["year"], entry["quarter"]
     tag = _quarter_tag(year, label)
     answer = await pacer.apply(key_row, year, label)
@@ -830,16 +838,44 @@ async def _quarter_step(
         if age is not None and age < FIRST_STATUS_READ_AFTER_S:
             return _QuarterStep(wait_s=FIRST_STATUS_READ_AFTER_S - age)
 
-    reading = await _read_quarter_status(exchange, year, label)
-    entry["state"] = reading.state
-    if reading.state == "finished" and reading.href is not None:
-        return _record_ready(entry, reading.href)
-    age = _age_s(reading.ts_ms if reading.ts_ms is not None else answer.ts_ms)
-    if reading.state == "ongoing" and age is not None:
-        if age >= GIVE_UP_AFTER_S:
-            raise _Stop("archive_give_up", f"quarter={tag} age_h={int(age // 3600)}")
-        return _QuarterStep(wait_s=STATUS_POLL_INTERVAL_S)
-    raise _Stop("archive_request_failed", f"quarter={tag}")
+    ts_ms = answer.ts_ms
+    reapplies = 0
+    while True:
+        reading = await _read_quarter_status(exchange, year, label)
+        entry["state"] = reading.state
+        if reading.state is None:
+            # The state vocabulary is closed; anything else is contract drift, and waiting
+            # eight hours to discover it would hide it.
+            raise _Stop("archive_request_failed", f"quarter={tag}")
+        if reading.state == "finished" and reading.href is not None:
+            return _record_ready(entry, reading.href)
+
+        if reading.ts_ms is not None:
+            ts_ms = reading.ts_ms
+        age = _age_s(ts_ms)
+        if age is None:
+            # Without OKX's ts there is no bound on the wait: refuse to wait unboundedly.
+            raise _Stop("archive_request_failed", f"quarter={tag}")
+        too_old = age >= GIVE_UP_AFTER_S
+        if reading.state == "ongoing":
+            if too_old:
+                raise _Stop("archive_give_up", f"quarter={tag} age_h={int(age // 3600)}")
+            return _QuarterStep(wait_s=STATUS_POLL_INTERVAL_S)
+
+        # ``failed``, or ``finished`` with no link.
+        linkless = reading.state == "finished"
+        if too_old:
+            if linkless:
+                raise _Stop("archive_give_up", f"quarter={tag} age_h={int(age // 3600)}")
+            raise _Stop("archive_request_failed", f"quarter={tag}")
+        if reapplies >= MAX_REAPPLIES:
+            if linkless:
+                return _QuarterStep(wait_s=STATUS_POLL_INTERVAL_S)
+            raise _Stop("archive_request_failed", f"quarter={tag}")
+        reapplies += 1
+        renewed = await pacer.apply(key_row, year, label)
+        if renewed.ts_ms is not None:
+            ts_ms = renewed.ts_ms
 
 
 # ---------------------------------------------------------------------------
@@ -1031,6 +1067,18 @@ async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
                 await _ingest_all(quarters, steps, live_types, result)
         except _Stop as stop:
             return await _finish_stop(supabase, job, result, stop)
+        except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as exc:
+            # A venue rate limit is a reason to wait, not to fail, and it is NEVER stamped
+            # onto the key: ``stamp_api_key_429`` opens the exchange-wide breaker and pauses
+            # every normal OKX sync for a quota this job alone spent.
+            logger.warning(
+                "okx_archive_rebuild: venue rate limit (%s); deferring %ds",
+                type(exc).__name__,
+                RATE_LIMIT_DEFER_S,
+            )
+            return await _defer_job(
+                supabase, job, RATE_LIMIT_DEFER_S, f"{KIND}: waiting rate_limited"
+            )
         # DONE is only honest once the result is stored: a failed write propagates and the
         # dispatcher retries the whole (idempotent) claim.
         json.dumps(result)  # the object must be plain JSON: no Decimal, no datetime

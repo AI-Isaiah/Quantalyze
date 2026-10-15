@@ -566,6 +566,20 @@ def _assert_refused(
     return result
 
 
+def _assert_stopped(
+    world: _World, outcome: job_worker.DispatchResult, stop_class: str, *, detail: str = ""
+) -> dict[str, Any]:
+    """A stop AFTER the archive was requested: permanent, class + counts only in `last_error`,
+    and the result block was written before the FAILED return."""
+    assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+    expected = f"okx_archive_rebuild: {stop_class}" + (f" {detail}" if detail else "")
+    assert outcome.error_message == expected
+    result = world.result()
+    assert result["stop_class"] == stop_class
+    assert world.timeline[-1] == ("rpc", "set_compute_job_progress")
+    return result
+
+
 class TestRefusals:
     @pytest.mark.asyncio
     async def test_a_non_okx_job_key_is_refused_with_zero_okx_calls(
@@ -797,24 +811,6 @@ class TestRefusals:
         assert result["quarters"][0]["state"] is None
         assert all(i.closed for i in world.instances)
 
-    @pytest.mark.asyncio
-    async def test_an_apply_rate_limit_is_transient_and_never_stamps_the_key(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A venue 429 on the apply is retried by the dispatcher; stamping the key's 429
-        would open the exchange-wide breaker and pause normal OKX syncs (RESEARCH Section 5).
-        The defer-and-wait for it belongs to plan 16."""
-        world = _happy(monkeypatch)
-
-        def _limited(_inst: Any, _params: dict[str, str]) -> Any:
-            raise ccxt.RateLimitExceeded('okx {"code":"50011","msg":"Too Many Requests"}')
-
-        world.answers[APPLY] = _limited
-        outcome = await dispatch(_job())
-        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "transient"
-        assert "stamp_api_key_429" not in [n for n, _ in world.supabase.rpcs]  # type: ignore[union-attr]
-        assert all(i.closed for i in world.instances)
-
 
 class TestApplyPacing:
     @pytest.mark.asyncio
@@ -844,6 +840,429 @@ class TestApplyPacing:
         ]
         result = world.result()
         assert [(q["year"], q["quarter"]) for q in result["quarters"]] == [(2026, "Q2"), (2026, "Q3")]
+
+
+# ---------------------------------------------------------------------------
+# Plan 16 Task 2: the wait survives restarts, never burns a retry, never wedges
+# ---------------------------------------------------------------------------
+
+H = 3600 * 1000  # one hour in ms, the scale of OKX's request ts
+MARK = "mark_compute_job_done", "mark_compute_job_failed"
+
+
+class _Clock:
+    """A fake monotonic clock whose ``sleep`` advances it, so spacing is a measurement."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.slept: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def _use_clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    clock = _Clock()
+    monkeypatch.setattr(okx_archive_job, "_monotonic", clock)
+    monkeypatch.setattr(okx_archive_job, "_sleep", clock.sleep)
+    return clock
+
+
+def _defers(world: _World) -> list[dict[str, Any]]:
+    return [p for n, p in world.supabase.rpcs if n == "defer_compute_job"]  # type: ignore[union-attr]
+
+
+def _rpc_names(world: _World) -> list[str]:
+    return [n for n, _ in world.supabase.rpcs]  # type: ignore[union-attr]
+
+
+def _applies(world: _World) -> int:
+    return world.all_calls.count(APPLY)
+
+
+def _sequence(*answers: Any) -> Callable[[Any, dict[str, str]], Any]:
+    """An answer that gives each successive call its own response (the last one repeats)."""
+    calls = {"n": 0}
+
+    def _answer(_inst: Any, _params: dict[str, str]) -> Any:
+        value = answers[min(calls["n"], len(answers) - 1)]
+        calls["n"] += 1
+        return value
+
+    return _answer
+
+
+class _PgError(Exception):
+    """What PostgREST surfaces for a fenced defer: the SQLSTATE rides in ``code``."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class TestRateLimitedApply:
+    @pytest.mark.asyncio
+    async def test_every_apply_is_the_last_call_on_its_own_instance_and_spaced_by_the_clock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T-RL-1. ccxt prices the apply POST at 72000, so the next call on the same instance
+        blocks about two hours; and OKX documents one apply per 10 s. Both are properties of
+        the SEQUENCE of calls, so they are asserted on the recorded timeline against a fake
+        clock, across two quarters."""
+        world = _happy(monkeypatch)
+        clock = _use_clock(monkeypatch)
+        apply_times: list[float] = []
+
+        def _apply(_inst: Any, _params: dict[str, str]) -> Any:
+            apply_times.append(clock.now)
+            return _apply_answer("true")
+
+        world.answers[APPLY] = _apply
+        outcome = await dispatch(_calibrate({"quarters": [
+            {"year": 2026, "quarter": "Q2"}, {"year": 2026, "quarter": "Q3"}]}))
+
+        assert outcome.outcome == DispatchOutcome.DONE
+        apply_instances = [i for i in world.instances if APPLY in i.calls]
+        assert len(apply_instances) == 2 and apply_instances[0] is not apply_instances[1]
+        for inst in apply_instances:
+            assert inst.calls == [APPLY], "the POST is the ONLY (hence last) call on its instance"
+            assert inst.closed
+        assert APPLY not in world.instances[0].calls, "the preflight instance never POSTs"
+        assert len(apply_times) == 2 and apply_times[1] - apply_times[0] >= 11
+
+    @pytest.mark.asyncio
+    async def test_a_rate_limited_apply_defers_at_least_fifteen_minutes_and_never_stamps_the_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A venue 429 on the apply is a reason to wait, not to fail: stamping the key's 429
+        would open the exchange-wide breaker and pause every normal OKX sync for a quota
+        this job alone burned (RESEARCH Section 5). It defers, as a deferral (attempts
+        untouched), for at least the 15 minutes OKX's per-account window needs."""
+        world = _happy(monkeypatch)
+        stamped: list[object] = []
+
+        async def _spy(*a: object, **k: object) -> None:
+            stamped.append(a)
+
+        monkeypatch.setattr(job_worker, "_stamp_429", _spy)
+
+        def _limited(_inst: Any, _params: dict[str, str]) -> Any:
+            raise ccxt.RateLimitExceeded('okx {"code":"50011","msg":"Too Many Requests"}')
+
+        world.answers[APPLY] = _limited
+        outcome = await dispatch(_calibrate())
+
+        assert outcome.outcome == DispatchOutcome.DEFERRED
+        (defer,) = _defers(world)
+        assert 900 <= defer["p_defer_seconds"] <= 3600 and defer["p_claim_token"] == "tok-1"
+        assert stamped == [] and "stamp_api_key_429" not in _rpc_names(world)
+        assert not [n for n in _rpc_names(world) if n.startswith("mark_")]
+        assert all(i.closed for i in world.instances), "the apply instance is closed on the way out"
+
+    @pytest.mark.parametrize("exc", [ccxt.RateLimitExceeded, ccxt.DDoSProtection])
+    @pytest.mark.asyncio
+    async def test_a_rate_limited_status_read_defers_too(
+        self, monkeypatch: pytest.MonkeyPatch, exc: type[Exception]
+    ) -> None:
+        """The status read goes through the retrying helper; a 429 that survives its retries
+        must end as the same defer, not as a failed attempt and not as a key stamp."""
+        from services import exchange as exchange_module
+
+        monkeypatch.setattr(exchange_module, "OKX_BILLS_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr(exchange_module.random, "uniform", lambda _a, _b: 0.0)
+        world = _happy(monkeypatch)
+
+        def _limited(_inst: Any, _params: dict[str, str]) -> Any:
+            raise exc("okx 429")
+
+        world.answers[STATUS] = _limited
+        outcome = await dispatch(_calibrate())
+
+        assert outcome.outcome == DispatchOutcome.DEFERRED
+        assert _defers(world)[0]["p_defer_seconds"] >= 900
+        assert "stamp_api_key_429" not in _rpc_names(world)
+
+
+class TestWaitIsADeferNeverAFailure:
+    @pytest.mark.asyncio
+    async def test_a_fresh_request_waits_for_the_first_read_without_asking_okx_yet(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OKX needs 2-3 h to generate a file, so asking sooner only burns rate limit. The
+        remaining ~2 h exceeds the one-hour cap `defer_compute_job` enforces in SQL, so the
+        wait is clamped to it: an unclamped call would RAISE in the database and fail a job
+        that should simply wait. (T-LINK-5: p_defer_seconds <= 3600.)"""
+        world = _happy(monkeypatch)
+        world.answers[APPLY] = _apply_answer("false", ts=NOW_MS - 60_000)  # requested 1 min ago
+        outcome = await dispatch(_calibrate())
+
+        assert outcome.outcome == DispatchOutcome.DEFERRED
+        (defer,) = _defers(world)
+        assert defer["p_defer_seconds"] == 3600, "clamped to the SQL cap, never above it"
+        assert defer["p_claim_token"] == "tok-1" and defer["p_job_id"] == "job-1"
+        assert STATUS not in world.all_calls, "no status read before the 2 h first-read rule"
+        assert _rpc_names(world) == ["defer_compute_job"], "no result block, no mark_*"
+
+    @pytest.mark.asyncio
+    async def test_an_ongoing_request_defers_fifteen_minutes_with_a_short_reason(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """T-LINK-5. `last_error` receives the defer reason: a class and counts, never the
+        request `ts` or the link, because `last_error` is shown to operators."""
+        caplog.set_level(logging.DEBUG)
+        world = _happy(monkeypatch)
+        world.answers[APPLY] = _apply_answer("false", ts=NOW_MS - 3 * H)
+        world.answers[STATUS] = _status("ongoing", ts=NOW_MS - 3 * H)
+        outcome = await dispatch(_calibrate())
+
+        assert outcome.outcome == DispatchOutcome.DEFERRED and outcome.error_message is None
+        (defer,) = _defers(world)
+        assert defer["p_defer_seconds"] == 900
+        assert defer["p_reason"] == "okx_archive_rebuild: waiting quarters_ready=0/1"
+        assert str(NOW_MS - 3 * H) not in json.dumps(world.supabase.rpcs) + caplog.text  # type: ignore[union-attr]
+        assert not [n for n in _rpc_names(world) if n.startswith("mark_")]
+        assert world.downloads == []
+
+    @pytest.mark.parametrize(
+        ("age_ms", "expect_give_up"),
+        [(8 * H - 1000, False), (8 * H, True), (9 * H, True)],
+        ids=["one-second-short", "exactly-eight-hours", "nine-hours"],
+    )
+    @pytest.mark.asyncio
+    async def test_the_give_up_bound_comes_from_okx_ts_at_eight_hours(
+        self, monkeypatch: pytest.MonkeyPatch, age_ms: int, expect_give_up: bool
+    ) -> None:
+        """A request OKX never finishes must end, and the bound is the REQUEST's age from
+        OKX's own `ts` (a counter would reset with every restart and so never fire)."""
+        world = _happy(monkeypatch)
+        world.answers[APPLY] = _apply_answer("false", ts=NOW_MS - age_ms)
+        world.answers[STATUS] = _status("ongoing", ts=NOW_MS - age_ms)
+        outcome = await dispatch(_calibrate())
+
+        if expect_give_up:
+            result = _assert_stopped(
+                world, outcome, "archive_give_up", detail=f"quarter=2026-Q3 age_h={age_ms // H}"
+            )
+            assert result["quarters"][0]["state"] == "ongoing"
+            assert world.instances[0].calls == [CONFIG, SUBTYPES, STATUS] and _applies(world) == 1
+        else:
+            assert outcome.outcome == DispatchOutcome.DEFERRED
+
+    @pytest.mark.asyncio
+    async def test_a_failed_request_is_reapplied_exactly_once_then_the_job_waits(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OKX can fail a generation. One re-apply while the request is young is the
+        remedy; a second POST must also respect the 10 s rule and use a fresh instance."""
+        world = _happy(monkeypatch)
+        clock = _use_clock(monkeypatch)
+        world.answers[APPLY] = _apply_answer("false", ts=NOW_MS - 3 * H)
+        world.answers[STATUS] = _sequence(
+            _status("failed", ts=NOW_MS - 3 * H), _status("ongoing", ts=NOW_MS - 10 * 1000)
+        )
+        outcome = await dispatch(_calibrate())
+
+        assert outcome.outcome == DispatchOutcome.DEFERRED
+        assert _applies(world) == 2, "one apply per claim plus exactly ONE re-apply"
+        assert _defers(world)[0]["p_defer_seconds"] == 900
+        assert clock.slept and clock.slept[0] >= 11, "the re-apply waited out the 10 s rule"
+        apply_instances = [i for i in world.instances if APPLY in i.calls]
+        assert all(i.calls == [APPLY] for i in apply_instances) and len(apply_instances) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_second_failure_is_a_permanent_stop_not_a_third_apply(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A request that fails again after the re-apply will not heal: loop on it and the
+        job waits for ever on a file that will never exist."""
+        world = _happy(monkeypatch)
+        _use_clock(monkeypatch)
+        world.answers[APPLY] = _apply_answer("false", ts=NOW_MS - 3 * H)
+        world.answers[STATUS] = _status("failed", ts=NOW_MS - 3 * H)
+        outcome = await dispatch(_calibrate())
+
+        result = _assert_stopped(world, outcome, "archive_request_failed", detail="quarter=2026-Q3")
+        assert world.instances[0].calls == [CONFIG, SUBTYPES, STATUS, STATUS]
+        assert _applies(world) == 2 and result["quarters"][0]["state"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_an_old_failed_request_is_permanent_without_a_reapply(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = _happy(monkeypatch)
+        world.answers[APPLY] = _apply_answer("false", ts=NOW_MS - 9 * H)
+        world.answers[STATUS] = _status("failed", ts=NOW_MS - 9 * H)
+        outcome = await dispatch(_calibrate())
+
+        _assert_stopped(world, outcome, "archive_request_failed", detail="quarter=2026-Q3")
+        assert world.instances[0].calls == [CONFIG, SUBTYPES, STATUS] and _applies(world) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_reapply_that_heals_the_request_carries_on_to_the_ingest(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = _happy(monkeypatch)
+        _use_clock(monkeypatch)
+        world.answers[APPLY] = _apply_answer("false", ts=NOW_MS - 3 * H)
+        world.answers[STATUS] = _sequence(
+            _status("failed", ts=NOW_MS - 3 * H), _finished("2026", "Q3", ts=NOW_MS - 3 * H)
+        )
+        outcome = await dispatch(_calibrate())
+
+        assert outcome.outcome == DispatchOutcome.DONE
+        assert world.downloads == [_link("2026", "Q3")] and _applies(world) == 2
+
+    @pytest.mark.parametrize("mode", ["calibrate", "preflight"])
+    @pytest.mark.asyncio
+    async def test_finished_with_an_empty_link_never_reaches_done(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        """T-LINK-4. `finished` with no `fileHref` is the lost-link bug in its purest form:
+        a job that took it for success would report DONE with the data missing. It re-applies
+        once (a fresh link is what a new request produces) and waits."""
+        world = _happy(monkeypatch)
+        _use_clock(monkeypatch)
+        world.answers[STATUS] = _status("finished", href="")
+        outcome = await dispatch(_calibrate({"mode": mode}))
+
+        assert outcome.outcome == DispatchOutcome.DEFERRED
+        assert _applies(world) == 2 and world.downloads == []
+        assert _rpc_names(world) == ["defer_compute_job"], "no result block claims `finished`"
+        assert _defers(world)[0]["p_defer_seconds"] == 900
+
+    @pytest.mark.asyncio
+    async def test_an_empty_link_that_the_reapply_replaces_is_ingested(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = _happy(monkeypatch)
+        _use_clock(monkeypatch)
+        world.answers[STATUS] = _sequence(
+            _status("finished", href=""), _finished("2026", "Q3")
+        )
+        outcome = await dispatch(_calibrate())
+
+        assert outcome.outcome == DispatchOutcome.DONE
+        assert world.downloads == [_link("2026", "Q3")]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_link_on_an_old_request_gives_up(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = _happy(monkeypatch)
+        world.answers[STATUS] = _status("finished", href="", ts=NOW_MS - 9 * H)
+        outcome = await dispatch(_calibrate())
+
+        _assert_stopped(world, outcome, "archive_give_up", detail="quarter=2026-Q3 age_h=9")
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_state_is_a_loud_stop_not_a_wait(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OKX's state vocabulary is closed. Something else is contract drift, and waiting
+        eight hours to find out would hide it."""
+        world = _happy(monkeypatch)
+        world.answers[STATUS] = {"code": "0", "data": [{"state": "paused", "ts": str(REQUEST_TS_MS)}]}
+        outcome = await dispatch(_calibrate())
+
+        _assert_stopped(world, outcome, "archive_request_failed", detail="quarter=2026-Q3")
+
+    @pytest.mark.asyncio
+    async def test_a_lost_claim_while_deferring_yields_without_raising(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A watchdog reclaim hands the row to another worker; our fenced defer then raises
+        SQLSTATE 55006. The other worker owns the wait, so this one just steps aside."""
+        world = _happy(monkeypatch)
+        world.answers[STATUS] = _status("ongoing", ts=NOW_MS - 3 * H)
+        world.answers[APPLY] = _apply_answer("false", ts=NOW_MS - 3 * H)
+        world.supabase.rpc_errors["defer_compute_job"] = _PgError(  # type: ignore[union-attr]
+            "55006", "defer_compute_job: job preempted by watchdog reclaim"
+        )
+        outcome = await dispatch(_calibrate())
+
+        assert outcome.outcome == DispatchOutcome.DEFERRED
+        assert len(_defers(world)) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_genuine_defer_failure_is_not_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A database outage on the defer is not "someone else owns it": it must surface so
+        the dispatcher can classify it, not report a wait that was never recorded."""
+        world = _happy(monkeypatch)
+        world.answers[STATUS] = _status("ongoing", ts=NOW_MS - 3 * H)
+        world.answers[APPLY] = _apply_answer("false", ts=NOW_MS - 3 * H)
+        world.supabase.rpc_errors["defer_compute_job"] = RuntimeError("database unavailable")  # type: ignore[union-attr]
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            await okx_archive_job.run_okx_archive_rebuild_job(_calibrate())
+
+
+class TestPreflightSharesWait:
+    """Plan 12's founder step reads a PREFLIGHT result and needs both quarters `finished`
+    in it. OKX takes 2-3 h to generate a file, so a preflight that did not wait could only
+    ever report `ongoing`, and the founder's unified-account question would never be
+    answered. Preflight therefore goes through the SAME stateless step as calibrate and
+    differs only after every quarter is `finished`: it records the host and stops."""
+
+    QUARTERS = [{"year": 2026, "quarter": "Q2"}, {"year": 2026, "quarter": "Q3"}]
+
+    def _claim(self, monkeypatch: pytest.MonkeyPatch, q2: dict[str, Any], q3: dict[str, Any]) -> _World:
+        world = _happy(monkeypatch)
+        _use_clock(monkeypatch)
+        world.answers[APPLY] = _apply_answer("false", ts=NOW_MS - 3 * H)
+        world.answers[STATUS] = lambda _i, params: q2 if params["quarter"] == "Q2" else q3
+        return world
+
+    @pytest.mark.asyncio
+    async def test_preflight_waits_until_both_quarters_are_finished_and_never_downloads(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ongoing = _status("ongoing", ts=NOW_MS - 3 * H)
+        downloads: list[str] = []
+
+        # Claim 1: both ongoing.
+        w1 = self._claim(monkeypatch, ongoing, ongoing)
+        o1 = await dispatch(_job({"quarters": self.QUARTERS}))
+        assert o1.outcome == DispatchOutcome.DEFERRED
+        assert _defers(w1)[0]["p_claim_token"] == "tok-1"
+        assert "set_compute_job_progress" not in _rpc_names(w1), "no block may claim `finished`"
+        downloads += w1.downloads
+
+        # Claim 2 (fresh fakes, nothing carried over): Q2 finished, Q3 still ongoing.
+        w2 = self._claim(
+            monkeypatch, _finished("2026", "Q2", ts=NOW_MS - 3 * H), ongoing
+        )
+        o2 = await dispatch(_job({"quarters": self.QUARTERS}))
+        assert o2.outcome == DispatchOutcome.DEFERRED
+        assert _defers(w2)[0]["p_reason"] == "okx_archive_rebuild: waiting quarters_ready=1/2"
+        assert "set_compute_job_progress" not in _rpc_names(w2)
+        downloads += w2.downloads
+
+        # Claim 3: both finished with a link -> ONE v1 block, DONE.
+        w3 = self._claim(
+            monkeypatch,
+            _finished("2026", "Q2", ts=NOW_MS - 3 * H),
+            _finished("2026", "Q3", ts=NOW_MS - 3 * H),
+        )
+        o3 = await dispatch(_job({"quarters": self.QUARTERS}))
+        assert o3.outcome == DispatchOutcome.DONE
+        result = w3.result()
+        assert result["mode"] == "preflight" and result["stop_class"] is None
+        assert [(q["year"], q["quarter"], q["state"]) for q in result["quarters"]] == [
+            (2026, "Q2", "finished"), (2026, "Q3", "finished")]
+        for q in result["quarters"]:
+            assert q["href_scheme"] == "https" and q["href_host"] == "archive.example.test"
+            assert all(q[k] is None for k in INGEST_KEYS), "preflight never ingests"
+        assert result["census"] is None
+        downloads += w3.downloads
+
+        assert downloads == [], "preflight never calls the downloader, on any claim"
+        for world in (w1, w2, w3):
+            assert set(_rpc_names(world)) <= {"defer_compute_job", "set_compute_job_progress"}
 
 
 # ---------------------------------------------------------------------------
