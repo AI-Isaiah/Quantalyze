@@ -5945,6 +5945,8 @@ Plans:
 4. The wizard's post-Submit copy says "submitted" on success, not "already submitted".
 5. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom in the logged-in browser after deploy, by the orchestrator *(was "at 320 px and 200% zoom"; edited 2026-09-27 by `/gsd-phase --edit` on the founder decision of 2026-09-27: the narrowest supported viewport is 390 px plus desktop 200% zoom, recorded in full under Phase 170 LAYOUT)*.
 
+**Founder decisions, 2026-10-15 (recorded in `170.1-CONTEXT.md`):** the CSV wizard's "Check the file format you selected" hint shows when every required column of the chosen format other than `date` is missing (R-2, option 1; `date` is required in every format, so the literal reading could never fire). The factsheet's `QSF · <id8> · <date>` document stamp stays as it is (R-5, option 1; a document reference, not a label standing in for a name). An exploratory-tier strategy whose real name is withheld keeps its `Strategy #<8-char id>` handle (D-13).
+
 **Plans:** 0 plans
 
 Plans:
