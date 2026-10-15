@@ -22,7 +22,10 @@ through ``apply_okx_archive_rebuild``, the only write path.
 is idempotent), re-reads the request state, and then does exactly one of: defer
 (``defer_compute_job``, attempts untouched, at most one hour, claim-token fenced), re-apply
 once, ingest, or give up. The give-up bound comes from OKX's own request ``ts`` (8 h), never
-from a counter. Nothing about a download link or a ``ts`` is stored between claims: not in
+from a counter; because that ``ts`` is unverified, EVERY defer also passes a backstop of
+``BACKSTOP_AFTER_S`` (24 h) from the job's own ``created_at`` (F7). One claim as a whole has a
+budget (``CLAIM_BUDGET_S``, the handler timeout less a reserve) that every live crawl and the
+download are bounded by; running out is the named transient ``claim_budget_exceeded`` (WR-06). Nothing about a download link or a ``ts`` is stored between claims: not in
 the job metadata, not in the result, not in a log or an error text (the link is a bearer
 token; only its scheme and host are ever described). A restart, an expired link or an empty
 link therefore costs a fresh read, never a gap.
