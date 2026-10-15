@@ -8,6 +8,10 @@
  * OKX. `tradeVenues` is the key's venue; it changes the visible LABEL and the
  * TOOLTIP and nothing else.
  *
+ * D-10 (founder 2026-10-14): when the venue read is unavailable the label slot
+ * shows a muted "Venue unavailable" placeholder, never the listed exchange and
+ * never a blank.
+ *
  * Two groups of cases, because the change has two opposite duties:
  *   - D-05 (names the venue): label order, mismatch rule, no-key fallback,
  *     display names through `EXCHANGE_DISPLAY`;
@@ -17,7 +21,8 @@
  *     into `resolveTradeFetch` turns it into "No trade fetch recorded yet".
  *
  * `visibleText` strips the screen-reader-only separator, as the sibling files
- * do. The label is the `font-medium` span.
+ * do. The label is the `font-medium` span; the D-10 placeholder is the
+ * `[data-venue-unavailable]` span.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "@testing-library/react";
@@ -48,12 +53,18 @@ function visibleText(container: HTMLElement): string {
 /** The sentence alone: the visible text with the venue label removed. */
 function sentenceOf(container: HTMLElement): string {
   const clone = container.cloneNode(true) as HTMLElement;
-  clone.querySelectorAll(".sr-only, span.font-medium").forEach((el) => el.remove());
+  clone
+    .querySelectorAll(".sr-only, span.font-medium, [data-venue-unavailable]")
+    .forEach((el) => el.remove());
   return (clone.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
 function labelOf(container: HTMLElement): string | null {
   return container.querySelector("span.font-medium")?.textContent ?? null;
+}
+
+function placeholderOf(container: HTMLElement): HTMLElement | null {
+  return container.querySelector<HTMLElement>("[data-venue-unavailable]");
 }
 
 function titleOf(container: HTMLElement): string {
@@ -329,16 +340,22 @@ describe("SyncBadge - D-07: badge STATES do not change with tradeVenues", () => 
   });
 });
 
-describe("SyncBadge - an UNAVAILABLE venue names nothing (review WR-01, SFH-2)", () => {
+describe("SyncBadge - an UNAVAILABLE venue shows a muted 'Venue unavailable', never the listed exchange (D-10, review WR-01, SFH-2)", () => {
   const UNKNOWN = {
     tradeVenuesUnavailable: true,
     listedExchanges: ["bybit"],
     exchange: "bybit",
   } as const;
 
-  it("renders no label and no venue claim in a fresh tooltip, not the listed Bybit", () => {
+  /** How many times `needle` occurs in `haystack`. */
+  const occurrences = (haystack: string, needle: string) =>
+    haystack.split(needle).length - 1;
+
+  it("fresh state: the label slot reads 'Venue unavailable', not the listed Bybit, and the tooltip names no venue", () => {
     const { container } = render(<SyncBadge {...CURRENT} {...UNKNOWN} />);
+    // The placeholder is its own span, never the real label's font-medium span.
     expect(labelOf(container)).toBeNull();
+    expect(placeholderOf(container)?.firstChild?.textContent).toBe("Venue unavailable");
     expect(visibleText(container)).not.toContain("Bybit");
     expect(titleOf(container)).toContain("Trades last fetched 2h ago");
     expect(titleOf(container)).not.toContain("from the exchange");
@@ -346,15 +363,66 @@ describe("SyncBadge - an UNAVAILABLE venue names nothing (review WR-01, SFH-2)",
     expect(titleOf(container)).not.toContain("Listed as");
   });
 
-  it("the stale tooltip drops the venue clause too", () => {
+  it("the stale tooltip drops the venue clause too, and the placeholder still renders", () => {
     const { container } = render(
       <SyncBadge {...CURRENT} tradesFetchedAt={ago(9 * DAY)} {...UNKNOWN} />,
     );
     expect(labelOf(container)).toBeNull();
+    expect(placeholderOf(container)?.firstChild?.textContent).toBe("Venue unavailable");
     expect(titleOf(container)).toMatch(
       new RegExp(`^No trades fetched in more than ${TRADE_FETCH_STALE_DAYS} days\\.`),
     );
     expect(titleOf(container)).not.toContain("the exchange");
+  });
+
+  it("in EVERY rendered state the text reads 'Venue unavailable' exactly once and never Bybit", () => {
+    let rendered = 0;
+    for (const stamp of [null, ago(2 * HOUR), ago(9 * DAY), ahead(2 * DAY)]) {
+      for (const seriesEnd of [null, ago(20 * DAY)]) {
+        const { container, unmount } = render(
+          <SyncBadge
+            computedAt={ago(1 * HOUR)}
+            seriesEnd={seriesEnd}
+            tradesFetchedAt={stamp}
+            tradeFetchVenue={null}
+            {...UNKNOWN}
+          />,
+        );
+        if (container.firstChild !== null) {
+          rendered += 1;
+          const text = visibleText(container);
+          expect(occurrences(text, "Venue unavailable")).toBe(1);
+          expect(text).not.toContain("Bybit");
+          expect(titleOf(container)).not.toContain("Bybit");
+        }
+        unmount();
+      }
+    }
+    // Guard against a vacuous loop: most of the grid renders a badge.
+    expect(rendered).toBeGreaterThanOrEqual(6);
+  });
+
+  it("the placeholder is muted: text-text-muted, and none of the real label's or a failure colour's classes", () => {
+    const { container } = render(<SyncBadge {...CURRENT} {...UNKNOWN} />);
+    const classes = Array.from(placeholderOf(container)?.classList ?? []);
+    expect(classes).toContain("text-text-muted");
+    for (const forbidden of [
+      "font-medium",
+      "text-text-secondary",
+      "text-negative",
+      "text-warning",
+    ]) {
+      expect(classes).not.toContain(forbidden);
+    }
+  });
+
+  it("an empty venue list with the flag is just as unknown as an absent one", () => {
+    const { container } = render(
+      <SyncBadge {...CURRENT} {...UNKNOWN} tradeVenues={[]} />,
+    );
+    expect(placeholderOf(container)?.firstChild?.textContent).toBe("Venue unavailable");
+    expect(labelOf(container)).toBeNull();
+    expect(visibleText(container)).not.toContain("Bybit");
   });
 
   it("a key venue that IS known still wins over a stray unavailable flag", () => {
@@ -362,9 +430,27 @@ describe("SyncBadge - an UNAVAILABLE venue names nothing (review WR-01, SFH-2)",
       <SyncBadge {...CURRENT} {...UNKNOWN} tradeVenues={["okx"]} />,
     );
     expect(labelOf(container)).toBe("OKX");
+    expect(placeholderOf(container)).toBeNull();
+    expect(visibleText(container)).not.toContain("Venue unavailable");
   });
 
-  it("D-07: the dot, the sentence and the render gate are unchanged by the flag", () => {
+  it("control: without the flag and without venues the listed exchange is the label and there is no placeholder (D-05)", () => {
+    for (const flag of [undefined, false] as const) {
+      const { container, unmount } = render(
+        <SyncBadge
+          {...CURRENT}
+          listedExchanges={["bybit"]}
+          exchange="bybit"
+          tradeVenuesUnavailable={flag}
+        />,
+      );
+      expect(labelOf(container)).toBe("Bybit");
+      expect(placeholderOf(container)).toBeNull();
+      unmount();
+    }
+  });
+
+  it("D-07: the dot, the sentence and the render gate are unchanged by the flag, and the placeholder never renders without the badge", () => {
     for (const stamp of [null, ago(2 * HOUR), ago(9 * DAY), ahead(2 * DAY)]) {
       for (const seriesEnd of [null, ago(20 * DAY)]) {
         const props = {
@@ -381,6 +467,13 @@ describe("SyncBadge - an UNAVAILABLE venue names nothing (review WR-01, SFH-2)",
         if (without.container.firstChild !== null) {
           expect(dotClass(flagged.container)).toBe(dotClass(without.container));
           expect(sentenceOf(flagged.container)).toBe(sentenceOf(without.container));
+          // Rendered implies exactly one placeholder.
+          expect(
+            flagged.container.querySelectorAll("[data-venue-unavailable]"),
+          ).toHaveLength(1);
+        } else {
+          // Not rendered implies no placeholder.
+          expect(placeholderOf(flagged.container)).toBeNull();
         }
         without.unmount();
         flagged.unmount();
@@ -389,3 +482,122 @@ describe("SyncBadge - an UNAVAILABLE venue names nothing (review WR-01, SFH-2)",
   });
 });
 
+/**
+ * Review WR-01 (plan 06 round 1): the placeholder is two words in the same muted
+ * colour as the sentence after it, so with nothing between them the badge read
+ * "Venue unavailable Trades fetched 9d ago" on screen and was announced as one
+ * noun phrase ("venue unavailable trades"). A real label is a one-word proper
+ * noun in `font-medium`, which is why it never needed a boundary. The placeholder
+ * borrows the badge's own `Separator`: a visible " · " and a screen-reader comma.
+ */
+describe("SyncBadge - the 'Venue unavailable' placeholder is set apart from the sentence (review WR-01, round 2)", () => {
+  const UNKNOWN = {
+    tradeVenuesUnavailable: true,
+    listedExchanges: ["bybit"],
+    exchange: "bybit",
+  } as const;
+
+  /** What a screen reader announces: aria-hidden nodes dropped, sr-only kept. */
+  function accessibleText(container: HTMLElement): string {
+    const clone = container.cloneNode(true) as HTMLElement;
+    clone.querySelectorAll('[aria-hidden="true"]').forEach((el) => el.remove());
+    return (clone.textContent ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  // A null stamp only reads "No trade fetch recorded yet" for a fetched venue,
+  // so the `never` case hands the badge a key venue (it still names no label).
+  const STATES: ReadonlyArray<readonly [string, string, string | null, string | null]> = [
+    ["current", "Venue unavailable · Trades fetched 2h ago", ago(2 * HOUR), null],
+    ["stale", "Venue unavailable · Trades fetched 9d ago · stale", ago(9 * DAY), null],
+    ["never", "Venue unavailable · No trade fetch recorded yet", null, null],
+    ["series-bound", "Venue unavailable · Track record ends 20d ago", ago(2 * HOUR), ago(20 * DAY)],
+  ];
+
+  for (const [state, visible, stamp, seriesEnd] of STATES) {
+    it(`${state}: the visible text puts a ' · ' between the placeholder and the sentence`, () => {
+      const { container } = render(
+        <SyncBadge
+          computedAt={null}
+          seriesEnd={seriesEnd}
+          tradesFetchedAt={stamp}
+          tradeFetchVenue={state === "never" ? "okx" : null}
+          {...UNKNOWN}
+        />,
+      );
+      expect(visibleText(container)).toBe(visible);
+    });
+
+    it(`${state}: a screen reader hears 'Venue unavailable,' and then the sentence, not one noun phrase`, () => {
+      const { container } = render(
+        <SyncBadge
+          computedAt={null}
+          seriesEnd={seriesEnd}
+          tradesFetchedAt={stamp}
+          tradeFetchVenue={state === "never" ? "okx" : null}
+          {...UNKNOWN}
+        />,
+      );
+      const heard = accessibleText(container);
+      expect(heard.startsWith("Venue unavailable, ")).toBe(true);
+      expect(heard).not.toMatch(/Venue unavailable [A-Z]/);
+    });
+  }
+
+  it("a known venue label is NOT given the boundary (D-05 stays as it was)", () => {
+    const { container } = render(
+      <SyncBadge {...CURRENT} tradeVenues={["okx"]} listedExchanges={["okx"]} exchange="okx" />,
+    );
+    expect(visibleText(container)).toBe("OKXTrades fetched 2h ago");
+    expect(accessibleText(container)).not.toContain("OKX,");
+  });
+});
+
+/**
+ * Review WR-02 (plan 06 round 1, measured in round 2): on a phone the placeholder
+ * sits in the pinned Strategy name cell, a ~106 px column below `@3xl` (D-09).
+ * Measured in Chromium at V360, V375 and V390 against the real compiled CSS and
+ * the real table markup: without a no-wrap guard it broke inside itself ("Venue"
+ * over "unavailable"), and the flagged short-name row stood 15.5 px taller than
+ * the same row with a known venue (140.1 px against 124.6 px). jsdom has no
+ * layout, so this pins the two class decisions that produced the measurement:
+ * the placeholder is no-wrap, and the badge root is NOT `flex-wrap`. That second
+ * half is the trap: `flex-wrap` also keeps the label on one line, but it drops
+ * the badge's min-content to its widest item, the table's auto layout then
+ * shrinks the whole name column (138 -> 120 px measured) and the dot is stranded
+ * on a line of its own.
+ */
+describe("SyncBadge - the 'Venue unavailable' placeholder never breaks inside itself (review WR-02, round 2)", () => {
+  const UNKNOWN = {
+    tradeVenuesUnavailable: true,
+    listedExchanges: ["bybit"],
+    exchange: "bybit",
+  } as const;
+
+  it("the placeholder is whitespace-nowrap, so it can only move as a unit", () => {
+    const { container } = render(<SyncBadge {...CURRENT} {...UNKNOWN} />);
+    expect(Array.from(placeholderOf(container)?.classList ?? [])).toContain(
+      "whitespace-nowrap",
+    );
+  });
+
+  it("the badge root is not flex-wrap in any state: that would shrink the pinned name column", () => {
+    for (const stamp of [ago(2 * HOUR), ago(9 * DAY)]) {
+      const { container, unmount } = render(
+        <SyncBadge {...CURRENT} tradesFetchedAt={stamp} {...UNKNOWN} />,
+      );
+      const root = container.firstElementChild as HTMLElement;
+      expect(root.className).not.toContain("flex-wrap");
+      unmount();
+    }
+  });
+
+  it("the real label keeps its own markup: no no-wrap class added to a known venue (D-05 byte-identical)", () => {
+    const { container } = render(
+      <SyncBadge {...CURRENT} tradeVenues={["okx"]} listedExchanges={["okx"]} exchange="okx" />,
+    );
+    expect(container.querySelector("span.font-medium")?.className).toBe(
+      "font-medium text-text-secondary",
+    );
+    expect(container.innerHTML).not.toContain("whitespace-nowrap");
+  });
+});

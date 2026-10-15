@@ -169,8 +169,9 @@ export type RankedStrategyRow = StrategyWithAnalytics & {
    * Phase 170.6.1 / D-05 (review WR-01, SFH-1, SFH-2) — true when the venue
    * read FAILED or came back malformed, so `tradeVenues` is absent because the
    * venue is UNKNOWN, not because the strategy has no key. The badge then
-   * renders no venue label at all: falling back to the listed exchange would
-   * put the very wrong label SC-2 removes back on the row as a confident claim.
+   * renders a muted "Venue unavailable" placeholder in the label slot (D-10),
+   * never a venue name: falling back to the listed exchange would put the very
+   * wrong label SC-2 removes back on the row as a confident claim.
    * Absent on a row whose venues were read (including read-and-empty, the
    * CSV/demo no-key case, which keeps its listed exchange). Set ONLY by
    * `getStrategiesByCategory`; display only, never a badge state (D-07).
@@ -499,8 +500,8 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Ran
   // trust-signal read inside the shaper, so the two round-trips overlap. D-06:
   // here and not in `shapeRankingRows`, so `getMyStrategies` is untouched. The
   // reader never throws: on failure it returns null and every row is marked
-  // `tradeVenuesUnavailable`, so the badge shows NO venue label rather than
-  // the listed exchange (WR-01). A map that merely lacks a row is the no-key
+  // `tradeVenuesUnavailable`, so the badge shows a muted "Venue unavailable"
+  // placeholder (D-10) rather than the listed exchange (WR-01). A map that merely lacks a row is the no-key
   // case and keeps the listed exchange (D-05).
   const [shaped, venues] = await Promise.all([
     shapeRankingRows(listRows),
@@ -1327,8 +1328,8 @@ export async function readPublicVerificationSignals(
  * and UNAVAILABLE is a distinct answer from EMPTY (review WR-01, SFH-2): a
  * failure (the function renamed, anon EXECUTE revoked, the migration rolled
  * back, a payload that is not the expected row list) returns `null`, which the
- * caller turns into `tradeVenuesUnavailable` on every row so the badge shows NO
- * venue label. An empty map means "read fine, these strategies have no key"
+ * caller turns into `tradeVenuesUnavailable` on every row so the badge shows a
+ * muted "Venue unavailable" placeholder (D-10). An empty map means "read fine, these strategies have no key"
  * (CSV or demo), which keeps the listed exchange (D-05). The page still
  * renders either way (a display label does not earn an error boundary). The
  * console is written FIRST (`captureToSentry` swallows transport failures) and

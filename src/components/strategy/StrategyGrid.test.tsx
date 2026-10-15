@@ -210,10 +210,11 @@ describe("StrategyGrid - the card names the key's venue (Phase 170.6.1 DISCOVERY
     );
     const badge = badgeOf(container);
     expect(badge.querySelector("span.font-medium")?.textContent).toBe("Bybit");
+    expect(badge.querySelector("[data-venue-unavailable]")).toBeNull();
     expect(badge.getAttribute("title")).not.toContain("Listed as");
   });
 
-  it("a card marked tradeVenuesUnavailable shows NO venue label, not its listed Bybit, and no venue claim (review WR-01)", () => {
+  it("a card marked tradeVenuesUnavailable shows a muted 'Venue unavailable', never its listed Bybit, and no venue claim (D-10, review WR-01)", () => {
     const { container } = render(
       <StrategyGrid
         strategies={[venueCard(["bybit"], undefined, true)]}
@@ -221,6 +222,10 @@ describe("StrategyGrid - the card names the key's venue (Phase 170.6.1 DISCOVERY
       />,
     );
     const badge = badgeOf(container);
+    const placeholder = badge.querySelector("[data-venue-unavailable]");
+    expect(placeholder?.firstChild?.textContent).toBe("Venue unavailable");
+    expect(badge.textContent?.split("Venue unavailable").length).toBe(2);
+    // The placeholder is not the real label's font-medium span.
     expect(badge.querySelector("span.font-medium")).toBeNull();
     expect(badge.textContent).not.toContain("Bybit");
     const title = badge.getAttribute("title") ?? "";

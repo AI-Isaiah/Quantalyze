@@ -204,6 +204,31 @@ describe("getStrategiesByCategory - a failed or malformed venue read is UNAVAILA
     expect(venueSentry()[0].err).toBe(boom);
   });
 
+  it("D-10 keeps WR-01: each failed call captures to Sentry exactly ONCE, so two calls capture twice and never once per row", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const rpcError = { code: "42883", message: "function does not exist" };
+    rec.venueResponse = { data: null, error: rpcError };
+
+    // Each call returns TWO rows. A per-row capture would make 2 + 2 = 4; a
+    // dropped capture would make 0; a cross-call dedupe would make 1.
+    const first = await getStrategiesByCategory("crypto-sma");
+    expect(first).toHaveLength(2);
+    expect(venueSentry()).toHaveLength(1);
+    const second = await getStrategiesByCategory("crypto-sma");
+    expect(second).toHaveLength(2);
+
+    for (const r of [...first, ...second]) {
+      expect(r.tradeVenues).toBeUndefined();
+      expect(r.tradeVenuesUnavailable).toBe(true);
+    }
+    expect(venueSentry()).toHaveLength(2);
+    for (const s of venueSentry()) {
+      expect((s.opts as { level?: string }).level).toBe("error");
+      expect(s.err).toBe(rpcError);
+    }
+    expect(venueLogs(consoleError)).toHaveLength(2);
+  });
+
   it("a non-array payload is captured ONCE and marks every row unavailable", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     rec.venueResponse = { data: { strategy_id: ID_A, exchange: "okx" }, error: null };
