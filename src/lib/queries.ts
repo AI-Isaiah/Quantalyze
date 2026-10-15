@@ -565,16 +565,23 @@ async function shapeRankingRows(
  * every anonymous visitor to /browse/[slug] and /discovery/[slug] was shown
  * dead figures stamped "Synced <date>" and ordered `#1`…`#18` by them.
  *
- * ⚠️ THE DATE IS NOT MERELY OLD — IT IS THE WRONG EVENT, and this is what
- * makes the badge a false CLAIM rather than a stale one. The SQL status bridge
- * `sync_strategy_analytics_status` re-stamps `computed_at = now()` on EVERY
- * transition it writes, INCLUDING the `failed` branch (migration
- * 20260710150000_sync_status_supersede_failed_per_kind.sql:179, and the
- * `computing` branch at :125). So on a failed row `computed_at` dates the
- * FAILURE while the KPIs beside it date some earlier, unrecorded success. The
- * SyncBadge then renders that pair as "Synced <failure time>". There is no
- * timestamp anywhere on the row that honestly describes the numbers it holds —
- * which is precisely why the numbers cannot be shown.
+ * ⚠️ THE DATE WAS NOT MERELY OLD — IT WAS THE WRONG EVENT, and this is what
+ * made the badge a false CLAIM rather than a stale one. When this gate was
+ * written, the SQL status bridge `sync_strategy_analytics_status` re-stamped
+ * `computed_at = now()` on EVERY transition it wrote, INCLUDING the `failed`
+ * branch (migration 20260710150000_sync_status_supersede_failed_per_kind.sql:179,
+ * and the `computing` branch at :125). So on a failed row `computed_at` dated
+ * the FAILURE while the KPIs beside it dated some earlier, unrecorded success.
+ * The SyncBadge then rendered that pair as "Synced <failure time>". There was
+ * no timestamp anywhere on the row that honestly described the numbers it
+ * held — which is precisely why the numbers could not be shown.
+ *
+ * SINCE PHASE 166.5 (COMPUTEDATSTAMP) THAT PREMISE HAS CHANGED: the bridge
+ * writes no date at all and the analytics runner stamps `computed_at` on its
+ * success write only, so a failed or computing row now carries the date of its
+ * last good compute. THE BEHAVIOUR BELOW IS KEPT UNCHANGED; whether a failed
+ * or computing row should now show its last good figures beside that honest
+ * date is a founder decision, booked as `[166.5-STALE01-PREMISE]` in TODOS.md.
  *
  * Phase 159 / RANK-01 already drew exactly this line ONCE, for the percentile
  * cohort (`isRankableAnalyticsRow`, closed-sets.ts) — its docblock cites this
@@ -700,10 +707,14 @@ export function shapeRowAnalytics(
   // cost: a published row under recompute loses its figures for the ~10-15 min
   // the job runs, rather than showing the previous run's. Three reasons it is
   // still the right arm, in order of weight:
-  //   1. The bridge stamps `computed_at = now()` on the `computing` branch too
-  //      (migration :125), so keeping the values would render "Synced just
-  //      now" over numbers from the PREVIOUS run — the identical false pairing,
-  //      merely shorter-lived. There is no honest date to show them under.
+  //   1. When this arm was written the bridge stamped `computed_at = now()` on
+  //      the `computing` branch too (migration :125), so keeping the values
+  //      would have rendered "Synced just now" over numbers from the PREVIOUS
+  //      run — the identical false pairing, merely shorter-lived. Since Phase
+  //      166.5 the analytics runner stamps `computed_at` on its success write
+  //      only, so a computing row carries the date of the last good compute and
+  //      that pairing is no longer false; the arm is kept as it was and its
+  //      premise is under review (see the STALE-01 block above).
   //   2. `isRankableAnalyticsRow` is the ONE gate Phase 159 / RANK-01 already
   //      drew for this exact question, and it already excludes `computing`
   //      from every percentile cohort. Splitting the arms here would mean a

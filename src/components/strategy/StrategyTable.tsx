@@ -1526,14 +1526,18 @@ export function StrategyTable({
                                 the honesty rule W-B states applied to exactly
                                 the audience least able to check it. Dropping
                                 that disjunct removes a false claim; it does not
-                                add UI. And the claim is false, not merely
-                                stale: the SQL status bridge re-stamps
+                                add UI. And the claim was false, not merely
+                                stale: the SQL status bridge then re-stamped
                                 `computed_at = now()` on the `failed` and
                                 `computing` branches (migration
                                 20260710150000:179 / :125), so on a failed row
-                                that date marks the FAILURE while the figures
-                                beside it come from an earlier run — "Synced
-                                <the moment we failed to sync>".
+                                that date marked the FAILURE while the figures
+                                beside it came from an earlier run — "Synced
+                                <the moment we failed to sync>". (Since Phase
+                                166.5 the bridge writes no date and the
+                                analytics runner stamps it on its success write
+                                only, so that pairing no longer arises; the gate
+                                stays as written.)
 
                                 Belt-and-braces with `shapeRowAnalytics`
                                 (lib/queries.ts), which already blanks

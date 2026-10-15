@@ -155,6 +155,62 @@ async def test_csv_analytics_happy_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mark_complete_stamps_computed_at_with_db_clock_literal() -> None:
+    """Phase 166.5 (D-01, D-02, R-01) - the runner's success write names
+    ``computed_at`` with the literal ``"now"``, and no other write of the run does.
+
+    WHY the key must be present: once the status bridge stops stamping the date
+    (plan 02), a success payload that omits it leaves ``computed_at`` at the last
+    compute forever, so every freshness reader (chip, factsheet cache key, PDF
+    ETag) would report a finished recompute as stale.
+
+    WHY the value must be the string ``"now"`` and nothing else: Postgres reads
+    that special timestamptz input as the transaction start on the DATABASE
+    clock, which is what the bridge's cross-transaction comparisons use. A Python
+    ``datetime`` or isoformat string is the Python clock D-02 forbids.
+
+    WHY no other write may carry it: the ``computing`` entry write (and any
+    flag/failure write) is not a finished compute; a stamp there would look fresh
+    over a failure, and 166.3.1's hold trigger would silently discard it anyway.
+    """
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+        {"date": "2024-01-03", "daily_return": 0.008},
+    ] * 5  # 15 rows
+    sb = _make_supabase_mock(rows)
+
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(pd.Series([0.001] * 15), False))), \
+         patch("services.basis_series.compute_all_metrics",
+               return_value=_make_metrics_result()):
+        await run_csv_strategy_analytics("test-strategy-uuid")
+
+    payloads = [c.args[0] for c in sb.table.return_value.upsert.call_args_list]
+    finishes = [
+        p for p in payloads
+        if p.get("computation_status") in ("complete", "complete_with_warnings")
+    ]
+    assert len(finishes) == 1, (
+        f"expected exactly one terminal-success strategy_analytics write, got {len(finishes)}"
+    )
+    assert finishes[0].get("computed_at") == "now", (
+        "the success write must carry computed_at == 'now' (the database clock, D-02); "
+        f"got {finishes[0].get('computed_at', '<missing>')!r}"
+    )
+    others = [p for p in payloads if p is not finishes[0]]
+    assert others, "the run produced no entry write; the exclusivity half of this test is vacuous"
+    stamped = [p for p in others if "computed_at" in p]
+    assert not stamped, (
+        "only the terminal-success write may name computed_at (D-01); "
+        f"these did too: {[p.get('computation_status') for p in stamped]}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_csv_analytics_insufficient_history() -> None:
     """Test 2 — 1 row → HTTPException(400) AND a final upsert sets
     computation_status='failed' with 'Insufficient CSV history' in the

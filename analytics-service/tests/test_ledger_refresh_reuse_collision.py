@@ -115,6 +115,10 @@ class _Queue:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
         self._next = 0
+        # One-shot callback fired right AFTER the next compute_jobs select is
+        # served: models a job finishing (or vanishing) in the window between
+        # the helper's read and its write.
+        self.after_next_read: Any = None
 
     def seed(
         self, *, kind: str, metadata: dict[str, Any] | None, status: str = "pending"
@@ -170,7 +174,11 @@ def _queue_supabase(queue: _Queue, capture: dict[str, Any]) -> MagicMock:
 
             def _execute() -> MagicMock:
                 row = queue.rows.get(str(state.get("id")))
-                return MagicMock(data=copy.deepcopy(row))
+                served = MagicMock(data=copy.deepcopy(row))
+                hook, queue.after_next_read = queue.after_next_read, None
+                if hook is not None:
+                    hook(queue)
+                return served
 
             chain.eq.side_effect = _eq
             chain.maybe_single.return_value = chain
@@ -180,19 +188,35 @@ def _queue_supabase(queue: _Queue, capture: dict[str, Any]) -> MagicMock:
         def _update(payload: dict[str, Any], **_kw: object) -> MagicMock:
             chain = MagicMock()
             state: dict[str, Any] = {}
+            neq_filters: list[tuple[str, object]] = []
 
             def _eq(col: str, val: object) -> MagicMock:
                 state[col] = val
                 return chain
 
+            def _neq(col: str, val: object) -> MagicMock:
+                neq_filters.append((col, val))
+                return chain
+
             def _execute() -> MagicMock:
                 job_id = str(state.get("id"))
+                row = queue.rows.get(job_id)
+                # PostgREST: an UPDATE whose filters match no row succeeds with
+                # zero rows. A row failing any `.neq` is exactly that, and the
+                # write is NOT captured, so an unguarded update is what the
+                # tests see and a guarded one of a `done` row is invisible.
+                if row is not None and any(row.get(c) == v for c, v in neq_filters):
+                    return MagicMock(data=[])
+                if row is None:
+                    return MagicMock(data=[])
                 capture["job_updates"].append((job_id, copy.deepcopy(payload)))
-                if job_id in queue.rows:
-                    queue.rows[job_id].update(copy.deepcopy(payload))
-                return MagicMock(data=[])
+                row.update(copy.deepcopy(payload))
+                # PostgREST `return=representation` (the postgrest-py default
+                # for update): the matched rows come back in `.data`.
+                return MagicMock(data=[{"id": job_id}])
 
             chain.eq.side_effect = _eq
+            chain.neq.side_effect = _neq
             chain.execute.side_effect = _execute
             return chain
 
@@ -816,6 +840,162 @@ class TestRetractionHelper:
     def test_no_metadata_at_all_is_left_alone(self) -> None:
         _queue, capture, _job_id = self._run(None)
         assert not capture["job_updates"]
+
+    @staticmethod
+    def _run_with_status(
+        status: str,
+    ) -> tuple[_Queue, dict[str, Any], str]:
+        queue = _Queue()
+        job_id = queue.seed(
+            kind=_DERIVE_KIND,
+            metadata={"source": _MARKER, "enqueued_at": "t"},
+            status=status,
+        )
+        capture: dict[str, Any] = {"rpc_calls": [], "job_updates": []}
+        sb = _queue_supabase(queue, capture)
+        _retract_refresh_marker_on_reuse(sb, job_id, correlation_id="cid-1")
+        return queue, capture, job_id
+
+    def test_done_job_with_marker_is_not_rewritten(self) -> None:
+        """D-07 (STATUSBRIDGE review IN-R4-01): a FINISHED job's protection was
+        decided when it ran, so retracting its marker changes nothing a reader
+        acts on, while the ``compute_jobs_set_updated_at`` BEFORE UPDATE trigger
+        would bump its ``updated_at`` and falsify the finish time every reader
+        of a job trusts. The write must therefore be filtered on status."""
+        queue, capture, job_id = self._run_with_status("done")
+        assert not [u for u in capture["job_updates"] if u[0] == job_id], (
+            "the retraction rewrote a `done` job; the trigger would bump its "
+            "updated_at. The update must carry .neq('status', 'done')."
+        )
+        assert queue.source_of(job_id) == _MARKER, "a done job's marker is untouched"
+
+    def test_running_job_with_marker_is_still_retracted(self) -> None:
+        """Control for the case above: the status guard must not turn the
+        retraction into a no-op for the in-flight job it exists for, or the
+        `done` case would pass against a helper that never writes."""
+        queue, capture, job_id = self._run_with_status("running")
+        assert [u for u in capture["job_updates"] if u[0] == job_id]
+        assert queue.source_of(job_id) is None
+        assert queue.rows[job_id]["metadata"]["refresh_marker_retracted"] == _MARKER
+
+
+class TestRetractionAuditTrailTellsTheTruth:
+    """Phase 166.5 SFH-1 — ``process_key_long.refresh_marker_retracted`` is the
+    audit line an operator greps to learn a user's resync stood the refresh
+    protection down. It may be emitted ONLY when the UPDATE matched a row.
+
+    Before this fix the helper logged it unconditionally after an UPDATE whose
+    ``.neq("status", "done")`` filter can match zero rows (PostgREST reports
+    success for zero rows), so a job finishing between the read and the write
+    produced a "retracted" line over a marker that was never touched. The
+    contract mirrors the TypeScript twin ``retractInheritedRefreshMarker``
+    (``src/lib/ledger-refresh-marker.ts``): zero rows, re-read the status once;
+    ``done`` is a quiet skip, anything else is loud.
+
+    Neuter to redden: put back the unconditional ``log.warning`` after the
+    update; the skipped and no-row cases go RED on the retracted line.
+    """
+
+    @staticmethod
+    def _run(after_read: Any = None) -> tuple[_Queue, str, MagicMock]:
+        queue = _Queue()
+        job_id = queue.seed(
+            kind=_DERIVE_KIND,
+            metadata={"source": _MARKER, "enqueued_at": "t"},
+            status="running",
+        )
+        queue.after_next_read = after_read
+        capture: dict[str, Any] = {"rpc_calls": [], "job_updates": []}
+        sb = _queue_supabase(queue, capture)
+        with patch("services.ingestion.long_fetch.log") as log:
+            _retract_refresh_marker_on_reuse(sb, job_id, correlation_id="cid-1")
+        return queue, job_id, log
+
+    @staticmethod
+    def _events(method: MagicMock) -> list[str]:
+        return [str(c.args[0]) for c in method.call_args_list if c.args]
+
+    def test_a_landed_retraction_is_logged_as_retracted(self) -> None:
+        """Control: the line still fires when the write matched a row, or the
+        two cases below would pass against a helper that never logs."""
+        queue, job_id, log = self._run()
+        assert queue.source_of(job_id) is None
+        assert "process_key_long.refresh_marker_retracted" in self._events(log.warning)
+        assert log.error.call_count == 0
+
+    def test_a_job_that_finishes_between_read_and_write_is_not_called_retracted(
+        self,
+    ) -> None:
+        def _finish(q: _Queue) -> None:
+            for row in q.rows.values():
+                row["status"] = "done"
+
+        queue, job_id, log = self._run(after_read=_finish)
+        assert queue.source_of(job_id) == _MARKER, "a done job's marker is untouched"
+        assert "process_key_long.refresh_marker_retracted" not in (
+            self._events(log.warning) + self._events(log.info) + self._events(log.error)
+        ), "the audit line claims a retraction that never happened"
+        assert "process_key_long.refresh_marker_retraction_skipped_done" in (
+            self._events(log.info) + self._events(log.warning)
+        )
+        assert log.error.call_count == 0, "a done job is the designed quiet skip"
+
+    def test_a_row_that_vanishes_between_read_and_write_is_an_error(self) -> None:
+        def _vanish(q: _Queue) -> None:
+            q.rows.clear()
+
+        queue, job_id, log = self._run(after_read=_vanish)
+        assert "process_key_long.refresh_marker_retracted" not in (
+            self._events(log.warning) + self._events(log.info)
+        )
+        assert "process_key_long.refresh_marker_retraction_matched_no_row" in (
+            self._events(log.error)
+        ), "an unretracted marker on a not-done job must be loud"
+
+    def test_a_vanished_row_also_raises_an_operator_signal(self) -> None:
+        """Round-2 SFH: ``log.error`` alone is a log line nobody greps until a
+        user complains. This service's other operator signals pair the log with
+        one tagged Sentry capture (static message, no PII). The helper must
+        still NOT raise: its caller would mislabel a successful enqueue as
+        ``enqueue_tail_failed``."""
+
+        def _vanish(q: _Queue) -> None:
+            q.rows.clear()
+
+        with patch("services.ingestion.long_fetch.sentry_sdk") as sentry:
+            queue, job_id, log = self._run(after_read=_vanish)
+        assert sentry.capture_message.call_count == 1
+        args, kwargs = sentry.capture_message.call_args
+        assert "refresh_marker_retraction_matched_no_row" in args[0]
+        assert kwargs.get("level") == "error"
+        scope = sentry.new_scope.return_value.__enter__.return_value
+        tags = {c.args[0]: c.args[1] for c in scope.set_tag.call_args_list}
+        assert tags.get("compute_job_id") == str(job_id)
+        assert tags.get("refresh_marker") == _MARKER
+        assert str(job_id) not in args[0], "the id is a tag, never the grouped message"
+
+    def test_a_sentry_transport_failure_never_masks_the_helper(self) -> None:
+        """Telemetry must not fail the work it observes (main.py's rule)."""
+
+        def _vanish(q: _Queue) -> None:
+            q.rows.clear()
+
+        with patch("services.ingestion.long_fetch.sentry_sdk") as sentry:
+            sentry.capture_message.side_effect = RuntimeError("transport down")
+            _queue, _job_id, log = self._run(after_read=_vanish)
+        assert "process_key_long.refresh_marker_retraction_matched_no_row" in (
+            self._events(log.error)
+        )
+
+    def test_the_designed_quiet_and_landed_paths_raise_no_signal(self) -> None:
+        def _finish(q: _Queue) -> None:
+            for row in q.rows.values():
+                row["status"] = "done"
+
+        with patch("services.ingestion.long_fetch.sentry_sdk") as sentry:
+            self._run()
+            self._run(after_read=_finish)
+        assert sentry.capture_message.call_count == 0
 
 
 # ---------------------------------------------------------------------------

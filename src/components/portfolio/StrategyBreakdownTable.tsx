@@ -116,8 +116,10 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
       // timestamp, so no separate render gate is needed. That badge is the
       // sharper half: B14 added it so a mixed-freshness portfolio could not
       // present stale per-strategy metrics as current, but `computed_at` on a
-      // failed row is re-stamped to the FAILURE time by the SQL status bridge,
-      // so it was reading "just synced" at the moment the sync failed.
+      // failed row was then re-stamped to the FAILURE time by the SQL status
+      // bridge, so it read "just synced" at the moment the sync failed. (Since
+      // Phase 166.5 the bridge writes no date; the analytics runner stamps it on
+      // its success write only. The gate is kept as written.)
       //
       // Weight and contribution survive: neither comes from the strategy's own
       // analytics job (weight is the portfolio's, contribution is the persisted

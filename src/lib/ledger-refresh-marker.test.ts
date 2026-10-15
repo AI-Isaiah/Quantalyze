@@ -108,34 +108,62 @@ const SYNC_STATUS_PATH = resolve(
 );
 const SYNC_STATUS_SQL = readFileSync(SYNC_STATUS_PATH, "utf8");
 
-/** A fake admin client exposing only the two compute_jobs chains the helper uses. */
+/**
+ * A fake admin client exposing only the compute_jobs chains the helper uses.
+ *
+ * `reread` is what a SECOND `select(...).eq("id", ..).maybeSingle()` returns (the
+ * status re-read after a zero-row UPDATE, D-07); it defaults to `read`, so a
+ * case that never supplies one sees an unchanged row. `readCalls` counts the
+ * selects, so a case can prove the re-read happened exactly once.
+ *
+ * The UPDATE chain is `.eq(..)` then `.neq(..)` then `.select(..)`, as the helper
+ * issues it. `.eq(..)` ALSO exposes `.select` so that dropping the `.neq` guard
+ * surfaces as the `updateNeq` assertion failing, not as an unrelated TypeError.
+ */
 function fakeAdmin(
   read: { data: unknown; error: unknown },
   updateError: unknown = null,
   updatedRows: unknown = [{ id: "the-updated-row" }],
+  reread: { data: unknown; error: unknown } = read,
 ) {
   const readEq = vi.fn();
+  const readSelect = vi.fn();
   const update = vi.fn();
   const updateEq = vi.fn();
+  const updateNeq = vi.fn();
+  let readCalls = 0;
   const from = vi.fn((table: string) => {
     if (table !== "compute_jobs") throw new Error(`unexpected from(${table})`);
     return {
-      select: (_cols: string) => ({
-        eq: (col: string, val: unknown) => {
-          readEq(col, val);
-          return { maybeSingle: () => Promise.resolve(read) };
-        },
-      }),
+      select: (cols: string) => {
+        readSelect(cols);
+        return {
+          eq: (col: string, val: unknown) => {
+            readEq(col, val);
+            return {
+              maybeSingle: () => {
+                readCalls += 1;
+                return Promise.resolve(readCalls === 1 ? read : reread);
+              },
+            };
+          },
+        };
+      },
       update: (patch: Record<string, unknown>) => {
         update(patch);
+        // LOW-1: the helper asks PostgREST for the updated rows, so a
+        // zero-row UPDATE is visible instead of reading as success.
+        const select = (_cols: string) =>
+          Promise.resolve({ data: updateError ? null : updatedRows, error: updateError });
         return {
           eq: (col: string, val: unknown) => {
             updateEq(col, val);
-            // LOW-1: the helper asks PostgREST for the updated rows, so a
-            // zero-row UPDATE is visible instead of reading as success.
             return {
-              select: (_cols: string) =>
-                Promise.resolve({ data: updateError ? null : updatedRows, error: updateError }),
+              select,
+              neq: (ncol: string, nval: unknown) => {
+                updateNeq(ncol, nval);
+                return { select };
+              },
             };
           },
         };
@@ -146,8 +174,11 @@ function fakeAdmin(
     admin: { from } as unknown as SupabaseClient,
     from,
     readEq,
+    readSelect,
+    readCalls: () => readCalls,
     update,
     updateEq,
+    updateNeq,
   };
 }
 
@@ -268,6 +299,92 @@ describe("[161.1-D13] retractInheritedRefreshMarker", () => {
     expect(result).toEqual({ retracted: false });
     expect(f.readEq).toHaveBeenCalledWith("id", JOB_ID);
     expect(f.update).not.toHaveBeenCalled();
+  });
+
+  // D-07 (STATUSBRIDGE review IN-R4-01): a FINISHED job's protection was decided
+  // when it ran. Retracting its marker changes nothing a reader acts on, while
+  // the compute_jobs_set_updated_at BEFORE UPDATE trigger would bump its
+  // `updated_at`, falsifying the finish time every reader of a job trusts.
+  it("never rewrites a job that is already done, and does not even issue the UPDATE", async () => {
+    const f = fakeAdmin({
+      data: { metadata: { source: "ledger-refresh" }, status: "done" },
+      error: null,
+    });
+
+    const result = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID);
+
+    expect(result).toEqual({ retracted: false });
+    expect(f.readSelect).toHaveBeenCalledWith("metadata, status");
+    expect(f.update).not.toHaveBeenCalled();
+  });
+
+  // The control for the case above, and the half that closes the race: even a
+  // job read as `running` may finish before the write lands, so the UPDATE
+  // itself carries the status filter.
+  it("guards the UPDATE of a running job with .neq(status, done)", async () => {
+    const f = fakeAdmin({
+      data: { metadata: { source: "ledger-refresh" }, status: "running" },
+      error: null,
+    });
+
+    const result = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID);
+
+    expect(result).toEqual({ retracted: true, marker: "ledger-refresh" });
+    expect(f.update).toHaveBeenCalledTimes(1);
+    expect(f.updateNeq).toHaveBeenCalledWith("status", "done");
+  });
+
+  // The race the guard creates: read `running`, job finishes, the filtered
+  // UPDATE matches zero rows. That is a quiet no-op, not a failure the caller
+  // would send to Sentry as if a marker were still stuck on a live job.
+  it("treats a zero-row UPDATE as a no-op when the re-read shows the job finished", async () => {
+    const f = fakeAdmin(
+      { data: { metadata: { source: "ledger-refresh" }, status: "running" }, error: null },
+      null,
+      [],
+      { data: { status: "done" }, error: null },
+    );
+
+    const result = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID);
+
+    expect(result).toEqual({ retracted: false });
+    expect(f.readCalls()).toBe(2);
+    expect(f.readSelect).toHaveBeenLastCalledWith("status");
+  });
+
+  // The other half: a zero-row UPDATE with the job NOT done is still the LOW-1
+  // anomaly (a lost row), and must stay loud.
+  it("still throws when a zero-row UPDATE is followed by a re-read that is not done", async () => {
+    const f = fakeAdmin(
+      { data: { metadata: { source: "ledger-refresh" }, status: "running" }, error: null },
+      null,
+      [],
+      { data: { status: "running" }, error: null },
+    );
+
+    const err = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID).catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/matched no row/);
+  });
+
+  it("throws, carrying the PostgREST error as cause, when the status re-read fails", async () => {
+    const rereadErr = { message: "read denied", code: "42501" };
+    const f = fakeAdmin(
+      { data: { metadata: { source: "ledger-refresh" }, status: "running" }, error: null },
+      null,
+      [],
+      { data: null, error: rereadErr },
+    );
+
+    const err = await retractInheritedRefreshMarker(f.admin, JOB_ID, CORRELATION_ID).catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).cause).toBe(rereadErr);
   });
 
   it.each([null, undefined, ""])("does not touch the database without a job id (%s)", async (jobId) => {

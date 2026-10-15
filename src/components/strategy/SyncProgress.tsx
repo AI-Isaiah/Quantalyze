@@ -433,10 +433,12 @@ export function SyncProgress({
         //
         // Phase 167.2 / KCS-18 — THE JOB-STATE CHECK (RESEARCH P1). The SQL
         // status bridge keeps a `complete_with_warnings` row at that status while
-        // the chain's jobs run, and re-stamps `computed_at` on every hop that
-        // writes a success status (D-05 holds it only on a write to `failed` and
-        // on entry into `computing`), so evidence (b) above also accepts a warned
-        // row re-stamped MID-CHAIN. The
+        // the chain's jobs run. Since Phase 166.5 the bridge writes NO date at
+        // all: `computed_at` moves only when the analytics runner writes metrics
+        // (its single success upsert), so a mid-chain hop no longer moves it. The
+        // check is kept anyway, because the runner's stamp lands one statement
+        // BEFORE its own job is marked `done`, so evidence (b) can be true while a
+        // chain job is still in flight. The
         // analytics row cannot tell that from the finished run; the job queue is
         // the authority on whether the chain is done. So a success is forwarded
         // only after one read of the sync-progress projection finds no

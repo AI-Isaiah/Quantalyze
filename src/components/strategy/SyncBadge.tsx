@@ -14,9 +14,10 @@ interface SyncBadgeProps {
   /**
    * Phase 167.1.2.2.2 / D-07 — when the analytics job last RAN. It no longer
    * drives the dot, the sentence or the render gate: it survives only inside
-   * the tooltip, labelled "Analytics last computed …". The status bridge
-   * re-stamps `computed_at` on every job transition, so it says nothing about
-   * whether the venue's records are in.
+   * the tooltip, labelled "Analytics last computed …". Since Phase 166.5 the
+   * analytics runner stamps `computed_at` on its success write only (the status
+   * bridge writes no date), so it dates the last real compute. It still says
+   * nothing about whether the venue's records are in.
    */
   computedAt: string | null;
   /**
@@ -170,9 +171,11 @@ type SeriesVerdict = keyof typeof SERIES_RANK;
  * (`strategy_analytics.trades_fetched_at`, written only by the daily
  * `/cron-sync` tick), never `computed_at`. Measured on PROD, five strategies
  * whose newest trade was 15-156 days old read as freshly synced within the day, because
- * the status bridge re-stamps `computed_at` on every job transition. That word
- * was a claim about the JOB that every reader took as a claim about the
- * STRATEGY, so it is retired here (D-14).
+ * the status bridge then re-stamped `computed_at` on every job transition.
+ * (Since Phase 166.5 only the analytics runner moves it, on its success write,
+ * so it now dates a real compute; it still dates a JOB, not the venue's records.)
+ * That word was a claim about the JOB that every reader took as a claim about
+ * the STRATEGY, so it is retired here (D-14).
  *
  * TWO FACTS ARE JUDGED, EACH ON ITS OWN LADDER: the trade fetch through
  * `resolveTradeFetch` (the one classifier; 2 days, D-05) and the series end

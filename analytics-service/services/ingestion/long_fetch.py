@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast, get_args
 
+import sentry_sdk
 import structlog
 
 from services.closed_sets import MT5_DISABLED_DETAIL, mt5_enabled_server
@@ -129,14 +130,77 @@ def _retract_refresh_marker_on_reuse(
     retracted = {key: value for key, value in metadata.items() if key != "source"}
     retracted["refresh_marker_retracted"] = marker
     retracted["correlation_id"] = correlation_id
-    supabase.table("compute_jobs").update({"metadata": retracted}).eq(
-        "id", job_id
-    ).execute()
-    log.warning(
-        "process_key_long.refresh_marker_retracted",
+    # D-07: never rewrite a FINISHED job. Its protection was decided when it ran,
+    # and the compute_jobs_set_updated_at BEFORE UPDATE trigger would bump its
+    # updated_at, falsifying the finish time every reader of a job trusts. The
+    # filter (not a read-then-skip) also closes the race where the job finishes
+    # between the read above and this write: PostgREST reports zero rows.
+    #
+    # SFH-1 (166.5): the audit line below may only claim a retraction the UPDATE
+    # actually made. postgrest-py's update returns the matched rows
+    # (``return=representation``), so ``.data`` is empty exactly when the filter
+    # matched nothing. That mirrors the TypeScript twin
+    # (``retractInheritedRefreshMarker``): zero rows -> re-read the status once;
+    # ``done`` is a quiet skip, anything else leaves the marker in place under a
+    # job somebody is watching, which is loud.
+    res = (
+        supabase.table("compute_jobs")
+        .update({"metadata": retracted})
+        .eq("id", job_id)
+        .neq("status", "done")
+        .execute()
+    )
+    updated = getattr(res, "data", None)
+    if isinstance(updated, list) and updated:
+        log.warning(
+            "process_key_long.refresh_marker_retracted",
+            job_id=str(job_id),
+            marker=marker,
+        )
+        return
+
+    after = (
+        supabase.table("compute_jobs")
+        .select("status")
+        .eq("id", job_id)
+        .maybe_single()
+        .execute()
+    )
+    after_row = getattr(after, "data", None)
+    status = after_row.get("status") if isinstance(after_row, dict) else None
+    if status == "done":
+        log.info(
+            "process_key_long.refresh_marker_retraction_skipped_done",
+            job_id=str(job_id),
+            marker=marker,
+        )
+        return
+    log.error(
+        "process_key_long.refresh_marker_retraction_matched_no_row",
         job_id=str(job_id),
         marker=marker,
+        status=status,
     )
+    # Round-2 SFH: a log line alone is not an operator signal. Pair it with one
+    # tagged capture, the shape ``services/job_worker.py`` uses
+    # (``new_scope`` + static message, ids as tags, no PII). Wrapped because
+    # telemetry must never fail the work it observes, and this helper must not
+    # raise at all: its caller would mislabel a successful enqueue as
+    # ``enqueue_tail_failed``.
+    try:
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("compute_job_id", str(job_id))
+            scope.set_tag("refresh_marker", str(marker))
+            sentry_sdk.capture_message(
+                "process_key_long.refresh_marker_retraction_matched_no_row: "
+                "the job vanished before the marker could be retracted",
+                level="error",
+            )
+    except Exception as sentry_exc:  # noqa: BLE001 — never mask the enqueue
+        log.warning(
+            "process_key_long.refresh_marker_retraction_sentry_failed",
+            error_type=type(sentry_exc).__name__,
+        )
 
 
 async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":

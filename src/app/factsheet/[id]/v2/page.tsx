@@ -141,7 +141,10 @@ function buildFactsheetPayloadCached(
   //     transition it resolved, so the key moved when a compute started AND
   //     when it ended. That is no longer true: since the D-05 trigger on
   //     `strategy_analytics` (plan 166.3.1-02) holds `computed_at` on entry
-  //     into `computing` and on a write to `failed`.
+  //     into `computing` and on a write to `failed`, and since Phase 166.5 the
+  //     bridge writes no date at all: the analytics runner stamps it on its
+  //     success write only, so a failed or computing row carries the date of
+  //     its last good compute.
   //   - `computation_status` (D-05, founder 2026-10-07, "Add status to cache
   //     key") moves it on entry into `computing` and on a failure, which
   //     `computed_at` no longer does. Without it, a complete payload cached at

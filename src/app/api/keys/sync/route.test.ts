@@ -291,13 +291,13 @@ vi.mock("@/lib/supabase/admin", () => ({
             eq: (col: string, val: unknown) => {
               mockComputeJobsUpdate(patch, col, val);
               // LOW-1: the helper asks for the updated rows back.
-              return {
-                select: (_cols: string) =>
-                  Promise.resolve({
-                    data: computeJobsUpdateResult.error ? null : [{ id: val }],
-                    error: computeJobsUpdateResult.error,
-                  }),
-              };
+              const select = (_cols: string) =>
+                Promise.resolve({
+                  data: computeJobsUpdateResult.error ? null : [{ id: val }],
+                  error: computeJobsUpdateResult.error,
+                });
+              // 166.5 D-07: the helper filters `.neq("status", "done")`.
+              return { select, neq: (_c: string, _v: unknown) => ({ select }) };
             },
           }),
         };

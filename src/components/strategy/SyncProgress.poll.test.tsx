@@ -637,9 +637,11 @@ describe("SyncProgress — evidence (c): a changed status or error job id admits
 // Phase 167.2 / KCS-18 — the job-state check before a terminal SUCCESS.
 //
 // RESEARCH P1: the SQL status bridge keeps a `complete_with_warnings` row at
-// that status while the chain's jobs run, and still moves `computed_at` on
-// every hop. So a warned strategy's resync reads `complete_with_warnings` with
-// a NEW computed_at (KCS-02 evidence b) while the next hop is still `pending`.
+// that status while the chain's jobs run. When this was written the bridge also
+// moved `computed_at` on every hop; since Phase 166.5 only the runner's success
+// upsert does, one statement BEFORE its own job is marked `done`. Either way a
+// warned strategy's resync can read `complete_with_warnings` with a NEW
+// computed_at (KCS-02 evidence b) while a chain job is still `pending`/`running`.
 // The analytics row cannot tell that apart from the finished run; the job
 // queue can. A success is forwarded only on a readable "nothing in flight".
 // ===========================================================================
@@ -648,7 +650,8 @@ describe("SyncProgress — a terminal success waits for the job queue (Phase 167
 
   it("WARNED-ROW-MID-CHAIN: a warned row re-stamped mid-chain is not forwarded while the chain job is pending, then forwarded once it is done", async () => {
     // Baseline: the previous run ended complete_with_warnings at T0. The poll
-    // reads the same status at T1 (evidence b holds) with the job still pending.
+    // reads the same status at T1 (evidence b holds: the runner's stamp has
+    // landed) with the chain job still pending.
     mockState.analyticsResult = analyticsRow("complete_with_warnings", T1);
     mockState.jobAnswers = [jobState("pending"), jobState("done")];
     const { onStatusChange } = renderPoller("computing", baselineOf(T0, "complete_with_warnings"));
@@ -1064,5 +1067,72 @@ describe("SyncProgress — the give-up asks the job queue once before it says \"
     expect(onStatusChange.mock.calls.at(-1)).toEqual(["no_result", { stopReason: "poll_cap" }]);
     // One give-up read, however many ticks fire while it is out.
     expect(mockState.jobReadCount).toBe(1);
+  });
+});
+
+// ===========================================================================
+// Phase 166.5 / SFH-4 — the panel's terminal evidence after the bridge stopped
+// writing `computed_at`.
+//
+// THE PREMISE THESE PIN. Before 166.5 the status bridge re-stamped
+// `computed_at` on a chain's last hop, which supplied evidence (b) for a Sync-now
+// whose panel never read `computing`. Since 166.5 only the analytics runner
+// moves the column, in the SAME upsert as the terminal status
+// (`analytics_runner.py` `_mark_complete`, composite `headline_payload` in
+// `job_worker.py`). A real finish of THIS sync therefore still carries (b):
+//   * it is STATE, not an edge. The stamp stays on the row, so a finish that
+//     lands between two 3 s polls is seen by the next one. Nothing here needs the
+//     panel to have caught `computing`.
+//   * a chain that reaches a terminal `complete` WITHOUT the runner's write (the
+//     process_key_long tail enqueue blip, a side-only finish) is exactly a chain
+//     that did not recompute; the panel must not call it "Up to date", and the
+//     cap ends it as `no_result`.
+// No replacement signal is needed, and none was added. Neuter to redden the
+// first case: drop the `computed_at` comparison from `changed` in
+// SyncProgress.tsx.
+// ===========================================================================
+describe("SyncProgress — the runner's computed_at stamp is the evidence of a real finish (Phase 166.5 / SFH-4)", () => {
+  const T0 = "2026-04-19T11:58:00.000000+00:00";
+
+  it("FINISH-BETWEEN-POLLS: a warned row whose status never changes is admitted by the runner's moved computed_at, with no computing read ever", async () => {
+    // Poll 1 reads the previous run's row (nothing changed yet). The chain then
+    // finishes between polls: the runner's single upsert moves computed_at and
+    // leaves the status at complete_with_warnings. Poll 2 must forward it.
+    mockState.analyticsResult = analyticsRow("complete_with_warnings", T0);
+    const { onStatusChange } = renderPoller(
+      "computing",
+      baselineOf(T0, "complete_with_warnings"),
+    );
+    await tick(0);
+
+    await tick(POLL_MS);
+    expect(mockState.analyticsSelectCount).toBe(1);
+    expect(onStatusChange).not.toHaveBeenCalled();
+    expect(mockState.jobReadCount).toBe(0);
+
+    mockState.analyticsResult = analyticsRow("complete_with_warnings", T1);
+    await tick(POLL_MS);
+    await tick(0);
+    expect(mockState.analyticsSelectCount).toBe(2);
+    expect(onStatusChange.mock.calls).toEqual([["complete_with_warnings"]]);
+  });
+
+  it("NO-RUNNER-WRITE-NO-TERMINAL: a complete row with an UNMOVED computed_at is never called this sync's result, even with the queue settled; the cap ends it as no_result", async () => {
+    // The shape of a chain that ended without a recompute (e.g. a tail enqueue
+    // that failed after process_key_long, or a side-only finish): the bridge may
+    // resolve the row to `complete`, but no runner wrote metrics, so the date is
+    // the previous run's. "Up to date" would be a claim nothing earned.
+    mockState.analyticsResult = analyticsRow("complete", T0);
+    const { onStatusChange } = renderPoller("computing", baselineOf(T0, "complete"));
+    await tick(0);
+
+    await tick(POLL_MS * 40);
+    expect(mockState.analyticsSelectCount).toBe(40);
+    expect(onStatusChange).not.toHaveBeenCalled();
+    expect(mockState.jobReadCount, "no evidence, so the queue is never even asked").toBe(0);
+
+    await tick(POLL_MS);
+    await tick(0);
+    expect(onStatusChange.mock.calls).toEqual([["no_result", { stopReason: "poll_cap" }]]);
   });
 });

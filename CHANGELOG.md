@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.131.13.0] - 2026-10-15 — COMPUTEDATSTAMP (1/2): the analytics runner stamps `strategy_analytics.computed_at` when it really finishes a recompute
+
+Phase 166.5, PR 1 of 2 (CONTEXT D-09). This PR ships the runner stamp and every code and test change, and **no migration**. PR 2 carries `20261023120000_sync_status_runner_stamps_computed_at.sql`, which stops the status bridge `sync_strategy_analytics_status` from writing the date. PR 2 merges only after Railway `/health` reports this PR's merge commit or a descendant, so the runner's stamp is live before the bridge stops writing. Until PR 2 applies, both the runner and the bridge stamp the date. A real recompute therefore always moves it, and nothing users see changes yet.
+
+Why: `computed_at` is meant to say when the metrics were really computed. The bridge was its only writer, and it stamped `now()` when a nightly funding sync, position poll, reconcile or snapshot finished, none of which recompute anything. The freshness chip, the factsheet cache key, the tearsheet badge and the PDF ETag all read it. On PROD on 2026-10-15, 13 of 42 rows had been stamped in the last 24 hours, 4 of them with no runner finish in that window.
+
+### Changed
+- **The runner stamps the date in the same write that stores the metrics, from the database clock (D-01, D-02, R-01).** The CSV path's `_mark_complete` (`analytics-service/services/analytics_runner.py`) and the composite path's `headline_payload` (`analytics-service/services/job_worker.py`) add `"computed_at": "now"` to the success upsert. Postgres resolves the input `now` to the transaction start, so no Python clock is involved. Failure writes, the `computing` entry write and the pre-stamp name no date.
+- **Both refresh-marker retractions leave a finished compute job alone (D-07).** `_retract_refresh_marker_on_reuse` (`analytics-service/services/ingestion/long_fetch.py`) filters its update on `status != done`. `retractInheritedRefreshMarker` (`src/lib/ledger-refresh-marker.ts`) first reads the status and returns `{ retracted: false }` for a `done` job, then filters the write and re-reads once on a zero-row update. A retraction on a finished job used to move that job's `updated_at`.
+- **Reader comments describe the new truth; behaviour is unchanged.** `src/lib/queries.ts`, `fetch-and-build-payload.ts`, the factsheet `page.tsx`, the PDF route's ETag comment, `SyncBadge`, `SyncProgress`, `StrategyTable`, `StrategyBreakdownTable` and `src/lib/types.ts` no longer say the bridge re-stamps on every transition. They describe the state after PR 2, which this PR prepares; the comment skew is accepted and bounded in D-09.
+
+### Fixed
+- **The Python retraction no longer logs a retraction that did not happen (review SFH-1).** On a zero-row update it re-reads the status once. A `done` job logs `refresh_marker_retraction_skipped_done`. Anything else logs `refresh_marker_retraction_matched_no_row` at error level and sends a tagged Sentry message. The job id and marker go in tags only, so the message carries no identifiers. It does not raise, because the caller would mislabel a successful enqueue as a failed one.
+- **The admin review card no longer says "Computed just now" for a strategy that never held figures (SFH-3a).** It names a compute time only for a row that finished successfully or still carries figures. The factsheet chip, the tearsheet badge, the ranked lists and the wizard already gate on `computation_status`.
+
+### Tests
+- **An AST census, `test_computed_at_stamp_census.py`,** fails if any other `strategy_analytics` payload names the column, or if either stamp changes shape. Its synthetic defects (a failure status, a missing status, a non-`now` value) bite.
+- **A live PostgREST probe, `test_computed_at_now_literal_live.py`,** runs on loopback only. It proves the `now` literal moves a 30-day-old date to the database clock, and that an omitted key leaves the date alone.
+- **Runner and composite stamp tests** were RED before the stamp. The retraction cases on both the Python and TypeScript side were each RED without their guard.
+- **The SyncProgress poll tests pin that a real finish is still seen.** One covers a finish between two polls; the other covers a chain with no runner write, which ends as `no_result`. **The AdminTabs never-computed cases** were RED before the fix.
+
+### Notes
+- **Booked in `TODOS.md`:**
+  - `[166.5-PDF-MIXED-VINTAGE-WINDOW]`: for about 24-42 ms the PDF can pair the new scalars with the previous run's lazy panels under the new ETag.
+  - `[166.5-STALE01-PREMISE]`: STALE-01's reason for hiding figures on a failed row no longer holds once PR 2 lands.
+  - `166.5-COMPUTED-AT-NEVER-COMPUTED-DEFAULT`: the column default gives a never-computed row a date. PROD on 2026-10-15 had 12 such rows, none of them a portfolio constituent. Fixing it reverses R-04, so it needs a founder decision.
+- **What PR 2 adds:** the bridge migration and its manual rollback, the new ten-arm SQL gate, the three re-specified stamp gates, the regenerated function mirror, and the census and floor moves they need. `[164.5.2.1-COMPUTED-AT-RUNNER-STAMP]` closes with PR 2.
+- **Reviews:** gsd-code-reviewer found no MEDIUM or above in two rounds. silent-failure-hunter's MEDIUMs were fixed in two fixer rounds. migration-reviewer and rls-policy-auditor found the migration clean (it ships in PR 2). The security audit is SECURED with 36 of 36 threats closed. Verification is `human_needed`: only post-merge items remain.
+
 ## [0.131.12.1] - 2026-10-15 — FACTSHEETTRUTH follow-up: no full-history panel, chart label or heatmap cell repeats a figure a Withheld row hides
 
 Phase 164.6.6.3.3, four review rounds on plan 15 after v0.131.12.0. Under the founder's rule of 2026-10-15 ("fix also the medium user facing and data integrity issues"), every MEDIUM those rounds found was fixed here instead of booked. On a **Withheld** row (a chain-broken strategy with no post-break span yet), v0.131.12.0 dashed the rail's whole-record figures. Several other surfaces still printed the same hidden numbers, and a zoom brought some of them back. Every fix below was seen failing before it went in.

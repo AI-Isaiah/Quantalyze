@@ -306,3 +306,69 @@ describe("AdminTabs — owner line and intro-made count (170-06)", () => {
     expect(screen.getByText("1 pending")).toBeTruthy();
   });
 });
+
+/**
+ * Phase 166.5 / SFH-3(a) — "Computed <recency>" is a claim about a real compute.
+ *
+ * A strategy's FIRST `strategy_analytics` row can be inserted by the status
+ * bridge while a counting job is in flight (status `computing`, no metrics), and
+ * it takes the column default `computed_at = now()`. Read raw, that date made
+ * the review card say "Computed just now" for a strategy nothing had computed.
+ * The runner stamps the date on its success write only, so a row that has never
+ * held figures has no honest compute time to name.
+ *
+ * Neuter to redden: render `formatRecency(analytics?.computed_at ?? null)`
+ * unconditionally (the pre-fix line in `StrategyReviewTab`).
+ */
+describe("AdminTabs — a never-computed row is not 'Computed <just now>' (166.5 SFH-3a)", () => {
+  async function ownerLineFor(analytics: PendingStrategyRow["strategy_analytics"]) {
+    const user = userEvent.setup();
+    render(
+      <AdminTabs
+        introRequests={[]}
+        pendingStrategies={[
+          {
+            ...STRAT,
+            profiles: { display_name: "Quant Bob", email: "owner-bob@example.test" },
+            strategy_analytics: analytics,
+          },
+        ]}
+        pendingAllocators={[]}
+        pendingManagers={[]}
+      />,
+    );
+    await user.click(screen.getByRole("tab", { name: /Strategy Review/ }));
+    return screen.getByText(/^by Quant Bob/).textContent ?? "";
+  }
+
+  const JUST_NOW = new Date().toISOString();
+
+  it("first-ever computing row with the default date and no figures names no compute time", async () => {
+    const line = await ownerLineFor([
+      { cagr: null, sharpe: null, max_drawdown: null, computation_status: "computing", computed_at: JUST_NOW },
+    ]);
+    expect(line).toMatch(/· Computed —$/);
+  });
+
+  it("a failed first-ever row with no figures names no compute time either", async () => {
+    const line = await ownerLineFor([
+      { cagr: null, sharpe: null, max_drawdown: null, computation_status: "failed", computed_at: JUST_NOW },
+    ]);
+    expect(line).toMatch(/· Computed —$/);
+  });
+
+  it("CONTROL: a terminal-success row still names its compute time", async () => {
+    const line = await ownerLineFor([
+      { cagr: 0.2, sharpe: 1.5, max_drawdown: -0.1, computation_status: "complete", computed_at: JUST_NOW },
+    ]);
+    expect(line).not.toMatch(/Computed —$/);
+    expect(line).toMatch(/Computed /);
+  });
+
+  it("CONTROL: a row recomputing over real figures keeps the date of its last good compute", async () => {
+    const line = await ownerLineFor([
+      { cagr: 0.2, sharpe: 1.5, max_drawdown: -0.1, computation_status: "computing", computed_at: "2025-01-02T00:00:00Z" },
+    ]);
+    expect(line).not.toMatch(/Computed —$/);
+  });
+});
