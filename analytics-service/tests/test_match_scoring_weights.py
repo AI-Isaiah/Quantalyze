@@ -287,3 +287,45 @@ def test_a_zero_value_scored_set_takes_the_equal_weight_fallback_by_name(
 
     assert ctx["portfolio_weights"] == {BTC: pytest.approx(1.0)}
     assert "scoring_weights_equal_fallback" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# D-21: a tiny positive AUM is accepted as it stands
+# ---------------------------------------------------------------------------
+
+
+def test_a_tiny_positive_aum_flags_every_spot_holding_with_a_real_weight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-21 (founder): the max-weight denominator stays the D-16 AUM even when derivative
+    losses leave it tiny but positive, and every holding being flagged is accepted. BTC
+    10,000 (priced) and USDT 500 (withheld) beside a perp with P&L -10,400: the AUM is $100.
+    Each spot weight is a real number over 1 (100.0 and 5.0, never null), each breaches
+    max_weight, and the priced BTC is flagged when a candidate scores 50 or more. A withheld
+    entry carries the breach and is never flagged (D-12)."""
+    rows = _rows("BTC", _adjacent_days(BOOK_DAYS), _btc_mark, 10000.0)
+    ctx = _context(monkeypatch, rows + _usdt_rows(500.0) + _perp_row(-10400.0))
+    assert ctx["portfolio_aum"] == pytest.approx(100.0)
+
+    entries = match_mod.compute_holding_flags(
+        holdings_rows_eligible=ctx["_holdings_rows_eligible"],
+        holdings_rows_withheld=ctx["_holdings_rows_withheld"],
+        holdings_rows_derivative=ctx["_holdings_rows_derivative"],
+        portfolio_returns=ctx["portfolio_returns"],
+        portfolio_weights=ctx["portfolio_weights"],
+        portfolio_aum=ctx["portfolio_aum"],
+        allocator_preferences={"max_weight": 0.25},
+        scored_candidates_by_slot={BTC: [match_mod._ScoredProxy("cand-1", 80.0)]},
+    )
+    flags = {e["holding_ref"]: e for e in entries}
+
+    assert flags[BTC]["weight"] == pytest.approx(100.0)
+    assert flags[BTC]["breach_reasons"] == ["max_weight"]
+    assert flags[BTC]["flagged"] is True
+    assert flags[BTC]["top_candidate_strategy_id"] == "cand-1"
+    assert "breach_skipped" not in flags[BTC], "the test ran; nothing was skipped"
+    assert flags[USDT]["weight"] == pytest.approx(5.0)
+    assert flags[USDT]["breach_reasons"] == ["max_weight"]
+    assert flags[USDT]["flagged"] is False
+    # The scoring weights are still the joined series' own, summing to 1.
+    assert ctx["portfolio_weights"] == {BTC: pytest.approx(1.0)}
