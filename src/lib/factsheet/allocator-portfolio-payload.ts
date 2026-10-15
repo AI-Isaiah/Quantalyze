@@ -84,6 +84,7 @@ export function buildAllocatorPortfolioFactsheetPayload(
       tradesFetchedAt: null,
       tradeFetchVenue: null,
       unrecoveredGaps: [],
+      reconstructedRanges: [],
       trustTier: null,
       // FINDING-6 (b06-silentfailure): Allocator portfolio blends are always
       // derived from live API equity curves — not CSV uploads. Explicitly pass

@@ -38,7 +38,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { buildFactsheetPayload, deriveIngestSource, hasBuildableSeries, MIN_FACTSHEET_SERIES_POINTS } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
-import { parseUnrecoveredGaps } from "./trade-fetch-provenance";
+import { parseReconstructedRanges, parseUnrecoveredGaps } from "./trade-fetch-provenance";
 import { readFactsheetBenchmark } from "./benchmark-read";
 import { readBenchmarkPrices } from "./benchmark-source";
 import { convertNativeReturnsToUsd } from "./native-to-usd";
@@ -882,6 +882,7 @@ async function buildFromResolved(
       : null;
   const tradesFetchedAt = analytics?.trades_fetched_at ?? null;
   const unrecoveredGaps = parseUnrecoveredGaps(analytics?.series_provenance);
+  const reconstructedRanges = parseReconstructedRanges(analytics?.series_provenance);
   // Factsheet is a "full identity" context per the strategy-display.ts
   // contract: prefer the real name, fall back to codename, then to the
   // synthetic Strategy#id. Without this, exploratory strategies with a
@@ -900,6 +901,7 @@ async function buildFromResolved(
     tradesFetchedAt,
     tradeFetchVenue,
     unrecoveredGaps,
+    reconstructedRanges,
     trustTier: null,
     // Composites route down the csv arm EXPLICITLY (suppresses the three
     // synthesized panels via the existing discriminated union — no new

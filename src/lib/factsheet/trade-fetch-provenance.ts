@@ -7,6 +7,13 @@
  * is the ONLY reader of that record: the UI renders server truth only and never
  * infers a gap from holes in `payload.dates`. `legacy_ranges`, the sibling key,
  * is storage provenance and is deliberately not surfaced.
+ *
+ * Phase 167.1.2.2.2.1 (OKXHISTORY), D-05: the same object also holds the
+ * optional `reconstructed_ranges` array, spans of days rebuilt from the venue's
+ * bills archive. This module is the ONLY reader of BOTH keys
+ * (`unrecovered_gaps` and `reconstructed_ranges`); neither the column set nor
+ * any per-row marker changed, so a rebuilt day is told apart from a live one
+ * only through this server-truth record, never inferred client-side.
  */
 
 export interface UnrecoveredGap {
@@ -26,6 +33,13 @@ function isIsoCalendarDate(value: unknown): value is string {
 function warnMalformed(reason: string): [] {
   console.warn(
     `[trade-fetch-provenance] series_provenance.unrecovered_gaps is malformed (${reason}); naming no gap`,
+  );
+  return [];
+}
+
+function warnMalformedReconstructed(reason: string): [] {
+  console.warn(
+    `[trade-fetch-provenance] series_provenance.reconstructed_ranges is malformed (${reason}); naming no range`,
   );
   return [];
 }
@@ -65,5 +79,61 @@ export function parseUnrecoveredGaps(seriesProvenance: unknown): UnrecoveredGap[
     return gaps.sort((a, b) => (a.to < b.to ? 1 : a.to > b.to ? -1 : 0));
   } catch {
     return warnMalformed("provenance could not be read");
+  }
+}
+
+/**
+ * The only `source` the rebuild RPC writes into `reconstructed_ranges`. The RPC
+ * is the sole writer, so any other value is a defect and is never rendered.
+ */
+export const RECONSTRUCTED_SOURCE = "okx_bills_history_archive" as const;
+
+export interface ReconstructedRange {
+  from: string;
+  to: string;
+  source: typeof RECONSTRUCTED_SOURCE;
+}
+
+/**
+ * Parse the validated reconstructed-range list out of a `series_provenance`
+ * value (Phase 167.1.2.2.2.1, D-05), in the posture of `parseUnrecoveredGaps`.
+ *
+ * Pure and total. Absent provenance, an absent key or an empty list yields `[]`
+ * silently. Any malformed shape (non-object provenance, non-array list, a
+ * non-object entry, a date that is not a real `YYYY-MM-DD`, `to` before `from`,
+ * a `source` other than `RECONSTRUCTED_SOURCE`) yields `[]` and one
+ * `console.warn`: one bad entry voids the whole record rather than rendering a
+ * partial public claim. Output is `{from, to, source}` only (`recorded_at` and
+ * any other stored field are dropped), newest `to` first.
+ */
+export function parseReconstructedRanges(seriesProvenance: unknown): ReconstructedRange[] {
+  try {
+    if (seriesProvenance == null) return [];
+    if (typeof seriesProvenance !== "object" || Array.isArray(seriesProvenance)) {
+      return warnMalformedReconstructed("provenance is not an object");
+    }
+    const raw = (seriesProvenance as Record<string, unknown>).reconstructed_ranges;
+    if (raw == null) return [];
+    if (!Array.isArray(raw)) return warnMalformedReconstructed("reconstructed_ranges is not an array");
+
+    const ranges: ReconstructedRange[] = [];
+    for (const entry of raw) {
+      if (entry == null || typeof entry !== "object" || Array.isArray(entry)) {
+        return warnMalformedReconstructed("an entry is not an object");
+      }
+      const { from, to, source } = entry as Record<string, unknown>;
+      if (!isIsoCalendarDate(from) || !isIsoCalendarDate(to)) {
+        return warnMalformedReconstructed("an entry date is not a YYYY-MM-DD calendar date");
+      }
+      // ISO dates order lexicographically.
+      if (to < from) return warnMalformedReconstructed("an entry ends before it starts");
+      if (source !== RECONSTRUCTED_SOURCE) {
+        return warnMalformedReconstructed("an entry carries an unknown source");
+      }
+      ranges.push({ from, to, source: RECONSTRUCTED_SOURCE });
+    }
+    return ranges.sort((a, b) => (a.to < b.to ? 1 : a.to > b.to ? -1 : 0));
+  } catch {
+    return warnMalformedReconstructed("provenance could not be read");
   }
 }

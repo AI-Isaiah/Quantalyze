@@ -1016,6 +1016,32 @@ describe("167.1.2.2.2 plan 10 - tradesFetchedAt, tradeFetchVenue and unrecovered
     ]);
   });
 
+  it("167.1.2.2.2.1 plan 05: series_provenance.reconstructed_ranges reaches the payload beside the gap, without recorded_at", async () => {
+    seed(
+      withKey(
+        {
+          series_provenance: {
+            reconstructed_ranges: [
+              {
+                from: "2026-07-01",
+                to: "2026-08-01",
+                source: "okx_bills_history_archive",
+                recorded_at: "2026-10-20T10:00:00Z",
+              },
+            ],
+            unrecovered_gaps: [{ from: "2026-05-24", to: "2026-06-30" }],
+          },
+        },
+        { api_keys: { exchange: "okx" } },
+      ),
+    );
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.reconstructedRanges).toEqual([
+      { from: "2026-07-01", to: "2026-08-01", source: "okx_bills_history_archive" },
+    ]);
+    expect(payload?.unrecoveredGaps).toEqual([{ from: "2026-05-24", to: "2026-06-30" }]);
+  });
+
   it("a malformed provenance names no gap", async () => {
     seed(withKey({ series_provenance: { unrecovered_gaps: [{ from: "2026-07-08", to: "2026-05-07" }] } }, {}));
     const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
