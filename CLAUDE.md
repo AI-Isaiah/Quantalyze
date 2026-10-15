@@ -575,3 +575,24 @@ use a handler, `git diff` the result and revert every collateral change before c
 Note `state.add-roadmap-evolution` also recomputes the `progress:` block from local disk as an
 undocumented side effect — that count under-reports phases whose `.planning/phases/` artifacts the
 `-pr` filter stripped from `main`.
+⛔ **CORRECTED 2026-10-15 (founder decision "Fix our format + report upstream") — the handlers
+are safe on the reshaped files; the paragraph above is kept as lineage.** The corruption came from
+our file shape meeting four tool assumptions, and the shape is fixed: no heading between a
+`### Phase N` heading and its `Plans:` list (`**Success Criteria** (what must be TRUE):` is the
+in-phase form), no unchecked bullet naming another phase as `Phase N`, no
+`- [ ] TBD (run /gsd-plan-phase N …)` stub, one line per field in STATE.md's `## Current Position`
+(history goes to `STATE-LINEAGE.md`), both files already in the tool's own normal form, and
+`.planning/milestone.lock` untracked. `scripts/check-planning-hygiene.ts` rules 6d, 6e and 7 fail
+`npm run lint` if any of these comes back. Measured on the reshaped files in a throwaway worktree:
+`roadmap.update-plan-progress 159` is a no-op, `170` and `164.4.2.1` write only their `**Plans:**`
+count and real plan ticks, `state.advance-plan` moves `Plan: 8 of 9` to `9 of 9` and nothing else,
+and `state.add-roadmap-evolution` appends its entry and re-derives `progress:`. Run handlers
+normally, and still `git diff` after every run, because three behaviours remain:
+- `phase complete` overwrites a Progress-table Status cell's prose with `Complete` (upstream bug,
+  `phase.cjs`). Restore the prose by hand.
+- `phase complete` moves STATE to the next phase in roadmap order, which is wrong when several phases
+  run in parallel. Correct `## Current Position` by hand.
+- Most handlers rewrite `.planning/state.json` and re-derive the `progress:` block from local disk.
+⚠️ `/gsd-phase --insert` still writes the `- [ ] TBD (run /gsd-plan-phase N …)` stub, so lint is red
+until that line becomes `- [ ] TBD — plans not listed yet` or the plan rows. Drafted upstream issues:
+`.planning/research/gsd-tools-upstream-bugs.md`.
