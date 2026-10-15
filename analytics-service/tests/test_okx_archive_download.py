@@ -12,10 +12,13 @@ module-level transport factory ``_transport``.
 
 from __future__ import annotations
 
+import ast
 import gzip
 import io
 import logging
 import os
+import random
+import tempfile
 import zipfile
 import zlib
 from pathlib import Path
@@ -410,3 +413,243 @@ class TestNoLinkInLogs:
             assert "priv/okx" not in text
         # Scheme and host are the only description of the link that is allowed.
         assert any(f"https://{HOST}" in r.getMessage() for r in caplog.records)
+
+
+class _Chunks(httpx.AsyncByteStream):
+    """A body served chunk by chunk that counts how many chunks were pulled."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+        self.sent = 0
+
+    async def __aiter__(self):  # type: ignore[override]
+        for chunk in self.chunks:
+            self.sent += 1
+            yield chunk
+
+
+def _incompressible(n: int) -> bytes:
+    """Deterministic bytes that deflate to about their own size (ratio ~1)."""
+    return random.Random(20261015).randbytes(n)
+
+
+def _encrypted_zip(payload: bytes) -> bytes:
+    """A real zip whose single member carries the 'encrypted' general-purpose flag."""
+    raw = bytearray(_zip({"bills.csv": payload}))
+    raw[6] |= 0x01  # local file header, general purpose bit flag
+    central = raw.index(b"PK\x01\x02")
+    raw[central + 8] |= 0x01  # central directory entry, general purpose bit flag
+    return bytes(raw)
+
+
+class TestSizeCaps:
+    async def test_compressed_cap_stops_the_stream_without_buffering_the_rest(
+        self, rig: _Rig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(mod, "MAX_COMPRESSED_BYTES", 1000)
+        stream = _Chunks([_gzip(CSV)[:4] + b"x" * 400] * 50)
+        rig.respond = lambda request: httpx.Response(200, stream=stream)
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(URL)
+        assert caught.value.reason == "too_large"
+        assert stream.sent <= 4, "the cap must stop the read, not fire after the body"
+
+    async def test_a_declared_length_over_the_cap_is_refused_before_any_byte(
+        self, rig: _Rig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(mod, "MAX_COMPRESSED_BYTES", 1000)
+        stream = _Chunks([_gzip(CSV)])
+        rig.respond = lambda request: httpx.Response(
+            200, headers={"Content-Length": "5000"}, stream=stream
+        )
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(URL)
+        assert caught.value.reason == "too_large"
+        assert stream.sent == 0
+
+    async def test_a_body_exactly_at_the_compressed_cap_is_accepted(
+        self, rig: _Rig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = _gzip(CSV)
+        monkeypatch.setattr(mod, "MAX_COMPRESSED_BYTES", len(body))
+        rig.serve(status_code=200, content=body)
+        csv_bytes, _, compressed = await mod.download_archive_csv(URL)
+        assert csv_bytes == CSV and compressed == len(body)
+
+    async def test_decompressed_cap_gzip(
+        self, rig: _Rig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Incompressible data: the RATIO is ~1, so only the absolute cap can refuse it.
+        monkeypatch.setattr(mod, "MAX_DECOMPRESSED_BYTES", 50_000)
+        rig.serve(status_code=200, content=_gzip(_incompressible(200_000)))
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(URL)
+        assert caught.value.reason == "too_large"
+
+    async def test_decompressed_cap_zip(
+        self, rig: _Rig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(mod, "MAX_DECOMPRESSED_BYTES", 50_000)
+        rig.serve(status_code=200, content=_zip({"b.csv": _incompressible(200_000)}))
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(URL)
+        assert caught.value.reason == "too_large"
+
+    async def test_decompressed_cap_at_the_limit_is_accepted(
+        self, rig: _Rig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        data = _incompressible(30_000)
+        monkeypatch.setattr(mod, "MAX_DECOMPRESSED_BYTES", len(data))
+        rig.serve(status_code=200, content=_gzip(data))
+        csv_bytes, _, _ = await mod.download_archive_csv(URL)
+        assert csv_bytes == data
+
+    async def test_a_bomb_is_stopped_one_chunk_past_the_cap_not_inflated_whole(
+        self, rig: _Rig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        produced = {"bytes": 0}
+        real = zlib.decompressobj
+
+        class Spy:
+            def __init__(self, wbits: int) -> None:
+                self._inner = real(wbits)
+
+            def decompress(self, data: bytes, max_length: int = 0) -> bytes:
+                out = self._inner.decompress(data, max_length)
+                produced["bytes"] += len(out)
+                return out
+
+            def __getattr__(self, name: str):
+                return getattr(self._inner, name)
+
+        monkeypatch.setattr(zlib, "decompressobj", Spy)
+        monkeypatch.setattr(mod, "_CHUNK_BYTES", 64 * 1024)
+        monkeypatch.setattr(mod, "MAX_DECOMPRESSED_BYTES", 128 * 1024)
+        monkeypatch.setattr(mod, "MAX_RATIO", 10**9)  # isolate the absolute cap
+        rig.serve(status_code=200, content=_gzip(b"0" * 20_000_000))
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(URL)
+        assert caught.value.reason == "too_large"
+        assert produced["bytes"] <= 128 * 1024 + 64 * 1024
+
+    @pytest.mark.parametrize("container", ["gzip", "zip"])
+    async def test_ratio_cap(self, rig: _Rig, container: str) -> None:
+        zeros = b"0" * 5_000_000  # ~5 KB compressed: a ratio of ~1000 against 100
+        body = _gzip(zeros) if container == "gzip" else _zip({"b.csv": zeros})
+        rig.serve(status_code=200, content=body)
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(URL)
+        assert caught.value.reason == "ratio"
+
+    async def test_the_same_payload_is_accepted_when_only_the_ratio_cap_is_lifted(
+        self, rig: _Rig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The control: it is the ratio cap, not the format, that refuses the bomb.
+        zeros = b"0" * 5_000_000
+        monkeypatch.setattr(mod, "MAX_RATIO", 10**9)
+        rig.serve(status_code=200, content=_gzip(zeros))
+        csv_bytes, _, _ = await mod.download_archive_csv(URL)
+        assert csv_bytes == zeros
+
+
+class TestContainerRefusals:
+    async def test_a_zip_with_two_members_is_refused(self, rig: _Rig) -> None:
+        rig.serve(status_code=200, content=_zip({"a.csv": CSV, "b.csv": CSV}))
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(URL)
+        assert caught.value.reason == "zip_members"
+
+    async def test_an_encrypted_member_is_refused(self, rig: _Rig) -> None:
+        rig.serve(status_code=200, content=_encrypted_zip(CSV))
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(URL)
+        assert caught.value.reason == "zip_encrypted"
+
+    async def test_a_traversal_member_name_is_never_used_as_a_path(
+        self, rig: _Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workdir = tmp_path / "cwd"
+        scratch = tmp_path / "tmp"
+        workdir.mkdir()
+        scratch.mkdir()
+        monkeypatch.chdir(workdir)
+        monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+        rig.serve(status_code=200, content=_zip({"../../etc/x": CSV}))
+        csv_bytes, container, _ = await mod.download_archive_csv(URL)
+        assert (csv_bytes, container) == (CSV, "zip")
+        assert list(workdir.iterdir()) == [], "nothing may be written to the cwd"
+        assert list(scratch.iterdir()) == [], "nothing may be written to the temp dir"
+        assert not (tmp_path / "etc").exists() and not (tmp_path.parent / "etc").exists()
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b"%PDF-1.4 not an archive",
+            b"<html>sign in</html>",
+            b"PK",  # too short to be a local file header
+            b"\x1f",  # too short for the gzip magic
+            b"",
+            b"PK\x05\x06" + b"\x00" * 18,  # a valid but EMPTY zip has no local header
+        ],
+    )
+    async def test_unknown_magic_bytes_are_refused(self, rig: _Rig, body: bytes) -> None:
+        rig.serve(status_code=200, content=body)
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(URL)
+        assert caught.value.reason == "container_unknown"
+
+    async def test_unknown_magic_stops_the_read_at_the_first_chunk(
+        self, rig: _Rig
+    ) -> None:
+        stream = _Chunks([b"<html>"] + [b"x" * 1000] * 100)
+        rig.respond = lambda request: httpx.Response(200, stream=stream)
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(URL)
+        assert caught.value.reason == "container_unknown"
+        assert stream.sent == 1
+
+    @pytest.mark.parametrize(
+        "make",
+        [
+            lambda: _gzip(CSV)[:-8],  # truncated: no trailer
+            lambda: _gzip(CSV) + _gzip(CSV),  # a second gzip member
+            lambda: _gzip(CSV) + b"trailing garbage",
+            lambda: _gzip(CSV)[:12] + b"\xff" * 12,  # corrupt deflate stream
+            lambda: _zip({"b.csv": CSV})[:-30],  # zip with its central directory cut
+        ],
+        ids=["gzip_truncated", "gzip_two_members", "gzip_trailing", "gzip_corrupt", "zip_cut"],
+    )
+    async def test_a_damaged_container_is_refused_not_returned_partial(
+        self, rig: _Rig, make
+    ) -> None:
+        rig.serve(status_code=200, content=make())
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(URL)
+        assert caught.value.reason == "container_unknown"
+
+
+class TestNothingTouchesDisk:
+    def test_the_module_never_extracts_or_writes_or_uses_a_temp_file(self) -> None:
+        tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
+        imported = {
+            alias.name.split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        } | {
+            (node.module or "").split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+        }
+        assert imported.isdisjoint({"tempfile", "shutil", "pathlib", "os"}), imported
+        forbidden_attrs = {
+            "extract", "extractall", "write_bytes", "write_text", "mkstemp",
+            "mkdtemp", "NamedTemporaryFile", "TemporaryFile", "SpooledTemporaryFile",
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                if isinstance(fn, ast.Attribute):
+                    assert fn.attr not in forbidden_attrs, fn.attr
+                if isinstance(fn, ast.Name):
+                    assert fn.id != "open", "builtin open() is not allowed here"
