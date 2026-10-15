@@ -105,6 +105,7 @@ from services.okx_archive_classify import (
     ArchiveAggregate,
     Bucket,
     aggregate_archive,
+    verify_bal_chain,
 )
 from services.okx_archive_download import (
     DownloadRefused,
@@ -115,6 +116,7 @@ from services.okx_archive_download import (
 from services.okx_archive_files import (
     ArchiveFile,
     ArchiveParseError,
+    longest_billless_run,
     parse_archive_csv,
     quarter_bounds,
 )
@@ -150,6 +152,7 @@ STOP_CLASSES: Final[frozenset[str]] = frozenset(
         "download_refused",
         "link_expired",
         "container_unknown",
+        "archive_incomplete",
         "header_drift",
         "quarter_range_mismatch",
         "duplicate_bill_conflict",
@@ -257,6 +260,9 @@ class _Stop(Exception):
         #: classification stops the founder must see the per-currency / per-subType counts
         #: of (``non_usd_ccy``, ``unknown_subtype_nonzero``). Counts only, never an amount.
         self.census: dict[str, Any] | None = None
+        #: The Result shape v1 ``info`` of a stop that carries evidence beside its class
+        #: (``archive_incomplete``: where the running ``bal`` chain broke). Counts and dates only.
+        self.info: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +284,9 @@ def _blank_quarter(year: int, quarter: str) -> dict[str, Any]:
         "ts_min_day": None,
         "ts_max_day": None,
         "row_count": None,
+        #: ``{days, from, to}``: the longest run of covered days with no bill at all. Beside
+        #: ``ts_min_day`` / ``ts_max_day`` it is how a file with a missing head or tail shows.
+        "longest_billless_run": None,
     }
 
 
@@ -357,6 +366,8 @@ async def _finish_stop(
     result["stop_class"] = stop.stop_class
     if stop.census is not None:
         result["census"] = stop.census
+    if stop.info is not None:
+        result["info"] = stop.info
     logger.warning("%s", _error_text(stop.stop_class, stop.detail))
     try:
         await _write_result(supabase, job, result)
@@ -1022,6 +1033,8 @@ _PARSE_STOP_CLASS: Final[Mapping[str, str]] = {
     "empty_file": "quarter_range_mismatch",
     # Without a billId neither dedup nor conflict detection is possible:
     "missing_bill_id": "duplicate_bill_conflict",
+    # The running ``bal`` does not chain: the file is missing rows (verify_bal_chain):
+    "archive_incomplete": "archive_incomplete",
 }
 
 
@@ -1097,6 +1110,7 @@ async def _ingest_quarter(
     entry["ts_min_day"] = parsed.ts_min_day
     entry["ts_max_day"] = parsed.ts_max_day
     entry["row_count"] = parsed.row_count
+    entry["longest_billless_run"] = longest_billless_run(parsed)
     return parsed
 
 
@@ -1133,6 +1147,31 @@ def _stop_census(files: list[ArchiveFile]) -> dict[str, Any]:
     }
 
 
+def _bal_chain_info(detail: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """``archive_incomplete`` evidence for the Result: per file the ts range and, per ccy,
+    pairs checked, breaks and the day of the first break. Counts and dates only; a ccy label
+    that is not a short plain token is merged into ``(malformed)`` as everywhere else."""
+    out: list[dict[str, Any]] = []
+    for file in detail.get("files", []):
+        ccys: dict[str, dict[str, Any]] = {}
+        for ccy, reading in file["ccys"].items():
+            safe = _malformed_or(ccy)
+            kept = ccys.get(safe)
+            if kept is None:
+                ccys[safe] = dict(reading)
+                continue
+            kept["checked"] += reading["checked"]
+            kept["breaks"] += reading["breaks"]
+            kept["first_break_day"] = min(
+                (d for d in (kept["first_break_day"], reading["first_break_day"]) if d is not None),
+                default=None,
+            )
+        out.append(
+            {"ts_min_day": file["ts_min_day"], "ts_max_day": file["ts_max_day"], "ccys": ccys}
+        )
+    return out
+
+
 #: Classification stops whose result block carries the file's census (see ``_stop_census``).
 _CENSUS_ON_STOP: Final[frozenset[str]] = frozenset({"non_usd_ccy", "unknown_subtype_nonzero"})
 
@@ -1144,10 +1183,15 @@ async def _census_of(
     (counts only, never an amount) together with the aggregate the evaluation reads."""
     try:
         aggregate = await asyncio.to_thread(aggregate_archive, files, live_types)
+        # F1: only after the rows classify, prove each file is whole. Interior completeness
+        # is what lets a bill-less covered day stand as a real zero.
+        await asyncio.to_thread(verify_bal_chain, files)
     except ArchiveParseError as exc:
         stop = _parse_stop(exc)
         if exc.stop_class in _CENSUS_ON_STOP:
             stop.census = _stop_census(files)
+        if exc.stop_class == "archive_incomplete":
+            stop.info = {"bal_chain": _bal_chain_info(exc.detail)}
         raise stop from None
     census = aggregate.census
     return (

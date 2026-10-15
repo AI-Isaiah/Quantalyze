@@ -487,6 +487,9 @@ class TestTracerCalibrateIngest:
             "has_type_column": False,
             "ts_min_day": Q3_EXPECTED["ts_min_day"], "ts_max_day": Q3_EXPECTED["ts_max_day"],
             "row_count": Q3_EXPECTED["row_count"],
+            # Worked from the fixture's ts column with date arithmetic: its bills fall on 13
+            # days and the longest quiet stretch of the quarter is 09-16..09-29.
+            "longest_billless_run": {"days": 14, "from": "2026-09-16", "to": "2026-09-29"},
         }
         assert result["census"] == Q3_CENSUS
         for not_yet in ("reconcile", "excluded", "info", "d03", "strategies", "fingerprint"):
@@ -1553,6 +1556,7 @@ QUARTER_KEYS = {
     "year", "quarter", "state", "applied_existing", "href_scheme", "href_host", "container",
     "compressed_bytes", "decompressed_bytes", "has_type_column", "ts_min_day", "ts_max_day",
     "row_count",
+    "longest_billless_run",
 }
 INGEST_KEYS = QUARTER_KEYS - {"year", "quarter", "state", "applied_existing", "href_scheme", "href_host"}
 
@@ -1671,7 +1675,7 @@ class TestStopClassContract:
             "invalid_input", "key_not_okx", "key_disconnected", "target_key_disconnected",
             "account_mismatch", "perm_not_read_only", "subtype_map_drift",
             "archive_request_failed", "archive_give_up", "download_refused", "link_expired",
-            "container_unknown", "header_drift", "quarter_range_mismatch",
+            "container_unknown", "archive_incomplete", "header_drift", "quarter_range_mismatch",
             "duplicate_bill_conflict", "unparseable_amount", "unknown_subtype_nonzero",
             "non_usd_ccy", "live_anchor_unusable", "identity_violation", "reconcile_miss",
             "d03_zero_day_has_archive_pnl", "fingerprint_missing", "fingerprint_mismatch",

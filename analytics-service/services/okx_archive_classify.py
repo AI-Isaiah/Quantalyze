@@ -27,7 +27,8 @@ census extends the table. Do not encode a number from memory here.
 
 Stop classes raised here (all ``okx_archive_files.ArchiveParseError``):
 ``subtype_map_drift``, ``unknown_subtype_nonzero``, ``non_usd_ccy``,
-``duplicate_bill_conflict``. Details hold counts, months and subtype labels only.
+``duplicate_bill_conflict``, and (``verify_bal_chain``) ``archive_incomplete``. Details hold
+counts, months, dates and subtype labels only.
 """
 from __future__ import annotations
 
@@ -133,6 +134,61 @@ def _bal_continuity(rows: Sequence[ArchiveRow]) -> dict[str, dict[str, int]]:
                 entry["mismatches"] += 1
         previous[row.ccy] = row.bal
     return dict(sorted(out.items()))
+
+
+def _chain_file(file: ArchiveFile) -> dict[str, dict[str, Any]]:
+    """Per ccy of ONE file: pairs checked, pairs that break ``bal == previous bal + balChg``
+    in billId order, and the UTC day of the first break. Raises ``archive_incomplete`` when a
+    row cannot be placed in a chain (no ccy, or a billId that is not an integer), because a
+    chain that cannot be evaluated must never be assumed to hold."""
+    unchainable = sum(1 for row in file.rows if not row.ccy or not row.bill_id.isdigit())
+    if unchainable:
+        raise ArchiveParseError(
+            "archive_incomplete", {"reason": "unchainable_row", "rows": unchainable}
+        )
+    previous: dict[str, Decimal] = {}
+    out: dict[str, dict[str, Any]] = {}
+    for row in sorted(file.rows, key=_bill_order_key):
+        entry = out.setdefault(row.ccy, {"checked": 0, "breaks": 0, "first_break_day": None})
+        prior = previous.get(row.ccy)
+        if prior is not None:
+            entry["checked"] += 1
+            if row.bal != prior + row.bal_chg:
+                entry["breaks"] += 1
+                if entry["first_break_day"] is None:
+                    entry["first_break_day"] = row.day
+        previous[row.ccy] = row.bal
+    return dict(sorted(out.items()))
+
+
+def verify_bal_chain(files: Sequence[ArchiveFile]) -> None:
+    """F1: prove each quarter file is the COMPLETE ledger of its quarter, or stop.
+
+    The job reads a quarter file as complete: a covered day with no bill becomes an explicit
+    zero-P&L day, and the RPC then removes that day from ``unrecovered_gaps``. Nothing else
+    authenticates the interior of the file (Q2 has no live overlap; Q3's July is never
+    compared). OKX's ``bal`` is the balance after each bill, so per ccy and in billId order
+    each ``bal`` must equal the previous ``bal`` plus its ``balChg``; a row missing from the
+    file breaks the chain at the next bill of that ccy. Every file is chained on its own, and
+    any break is a permanent ``archive_incomplete`` carrying counts and dates only.
+
+    What this proves is INTERIOR completeness. A file missing its first or last bills still
+    chains; ``ts_min_day``, ``ts_max_day`` and the longest bill-less run per quarter are
+    reported beside it for that reason. RESEARCH A7 (``bal`` chains exactly on a real file)
+    was unmeasured when this became a gate: the first real calibrate is its measurement, and
+    a false stop here is a fail-closed stop, never a published figure."""
+    readings = [_chain_file(file) for file in files]
+    if any(entry["breaks"] for reading in readings for entry in reading.values()):
+        raise ArchiveParseError(
+            "archive_incomplete",
+            {
+                "reason": "bal_chain_break",
+                "files": [
+                    {"ts_min_day": file.ts_min_day, "ts_max_day": file.ts_max_day, "ccys": reading}
+                    for file, reading in zip(files, readings)
+                ],
+            },
+        )
 
 
 def _sorted_counts(counter: Mapping[str, int]) -> dict[str, int]:

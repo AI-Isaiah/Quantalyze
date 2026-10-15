@@ -81,16 +81,30 @@ class _Bills:
     def __init__(self) -> None:
         self._lines: list[str] = []
         self._n = 800_000_000
+        #: The running balance per ccy, in billId (= insertion) order. OKX's ``bal`` is the
+        #: balance AFTER each bill, so a file built here chains (``bal == previous bal +
+        #: balChg``) exactly as a complete real file does; ``without()`` then removes a row to
+        #: model an incomplete one.
+        self._bal: dict[str, Decimal] = {}
 
     def _row(
         self, inst: str, sub: str, day: str, bal_chg: str, ccy: str, pnl: str, fee: str,
     ) -> "_Bills":
         self._n += 1
+        bal = self._bal.get(ccy, Decimal(5000)) + Decimal(bal_chg)
+        self._bal[ccy] = bal
         self._lines.append(
-            f"{inst},{self._n},{sub},{_noon_ms(day)},{bal_chg},0,5000,0,,,{ccy},{pnl},{fee},"
+            f"{inst},{self._n},{sub},{_noon_ms(day)},{bal_chg},0,{_fmt(bal)},0,,,{ccy},{pnl},{fee},"
             "cross,BTC-USDT-SWAP,,,,,,,,,,,,,"
         )
         return self
+
+    def without(self, position: int) -> "_Bills":
+        """A copy of this file with the ``position``-th data row (0-based) removed."""
+        out = _Bills()
+        out._lines = [ln for i, ln in enumerate(self._lines) if i != position]
+        out._n, out._bal = self._n, dict(self._bal)
+        return out
 
     def realized(self, day: str, net: str | float, *, inst: str = "SWAP", ccy: str = "USDT") -> "_Bills":
         fee = Decimal("-0.25")
@@ -1328,6 +1342,74 @@ class TestApplyResume:
         assert statuses == ["applied", "already_applied"]
 
 
+def _standard_bills() -> _Bills:
+    """The standard Q3 file as a ``_Bills`` object (so a test can drop a row from it)."""
+    bills = _Bills()
+    for day, net in sorted({"2026-07-10": "10", "2026-08-01": "200", "2026-08-02": "97.5",
+                            "2026-08-03": "-50", "2026-09-15": "20"}.items()):
+        bills.realized(day, net)
+    for day, amount in sorted({"2026-07-20": "-2", "2026-09-15": "1.5"}.items()):
+        bills.funding(day, amount)
+    return bills
+
+
+class TestArchiveCompleteness:
+    """F1 (silent-failure-hunter, HIGH). A quarter file is read as the COMPLETE ledger of its
+    quarter, so every covered day without a bill becomes an explicit 0.0 return that the RPC
+    then removes from ``unrecovered_gaps``. A file with rows missing (a truncated export)
+    passed every gate: Q2 has no live overlap and Q3's July is never compared. The running
+    ``bal`` is the one thing inside the file that proves it is whole."""
+
+    def test_the_helper_file_chains_before_a_row_is_dropped(self) -> None:
+        # Guard the guard: the file the tests below mutilate is itself a valid chaining file.
+        from services.okx_archive_classify import verify_bal_chain
+        from services.okx_archive_files import parse_archive_csv
+
+        verify_bal_chain([parse_archive_csv(_standard_bills().bytes(), year=2026, quarter="Q3")])
+
+    @pytest.mark.parametrize("mode", ["calibrate", "apply"])
+    @pytest.mark.asyncio
+    async def test_an_interior_row_missing_from_the_file_is_archive_incomplete_and_writes_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        # Position 1 is the 08-01 +200 realized bill: with it gone the file still parses, still
+        # reconciles (08-01 is before the live window) and would publish 08-01 as a quiet 0.0.
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_bills().without(1).bytes())
+        extra = {"approved_fingerprint": "d" * 64} if mode == "apply" else {}
+
+        outcome = await _run(_meta(mode, [STRATEGY_ID], **extra))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == (
+            "okx_archive_rebuild: archive_incomplete parse=archive_incomplete"
+        )
+        result = world.result()
+        assert result["stop_class"] == "archive_incomplete"
+        # The founder can read where the chain broke: counts and a date, never an amount.
+        (reading,) = result["info"]["bal_chain"]
+        assert reading["ccys"]["USDT"] == {"checked": 5, "breaks": 1, "first_break_day": "2026-08-02"}
+        assert result["fingerprint"] is None
+        assert db.apply_calls == 0
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_each_quarter_reports_ts_range_and_its_longest_bill_less_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        (quarter,) = world.result()["quarters"]
+        assert (quarter["ts_min_day"], quarter["ts_max_day"]) == ("2026-07-10", "2026-09-15")
+        # Bills fall on 07-10, 07-20, 08-01, 08-02, 08-03 and 09-15. The quarter is
+        # 07-01..09-30, so the longest quiet stretch is 08-04..09-14 = 42 days.
+        assert quarter["longest_billless_run"] == {"days": 42, "from": "2026-08-04", "to": "2026-09-14"}
+
+
 class TestEvaluationStops:
     @pytest.mark.parametrize(
         ("mutate", "stop_class"),
@@ -1505,8 +1587,9 @@ class TestInformationNeverGates:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """D-09: excluded-class totals, archive-vs-live flow totals and `bal` continuity are
-        information. An OPTION row's P&L, a flow the live side does not have and a broken
-        balance chain must not stop the run, and must be visible."""
+        information. An OPTION row's P&L and a flow the live side does not have must not stop
+        the run, and must be visible. (The ``bal`` chain WAS information here; F1 made a break
+        a gate, ``TestArchiveCompleteness``, and the reading stays in ``info`` beside it.)"""
         db = _db_with((STRATEGY_ID, GAP_A))
         bills = (
             _Bills()
@@ -1548,12 +1631,14 @@ class TestInformationNeverGates:
         assert info["first_live_day_differs"] in (True, False)
         assert info["archive_days_prepended"] == GAP_DAY_COUNT
         nav = info["realized_balance_vs_rolled_nav"]
-        # nav_end(08-01) by the hand roll above is 9928.5; the archive balance is a fixture
-        # constant (5000 on every row), so the two differ by exactly 4928.5.
+        # nav_end(08-01) by the hand roll above is 9928.5. The archive balance is the file's
+        # running ``bal`` after its last bill on or before 08-01: 5000 + 10 (07-10) + 200
+        # (08-01) = 5210, the 08-01 bill being the later one by ts. The two differ by exactly
+        # 4718.5.
         assert nav["day"] == "2026-08-01"
         assert nav["rolled_nav"] == "9928.5"
-        assert nav["archive_balance_usd_family"] == "5000"
-        assert nav["diff"] == "-4928.5"
+        assert nav["archive_balance_usd_family"] == "5210"
+        assert nav["diff"] == "-4718.5"
 
 
 class TestResultShape:
