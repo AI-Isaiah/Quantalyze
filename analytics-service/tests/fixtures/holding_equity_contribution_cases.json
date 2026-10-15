@@ -1,0 +1,13 @@
+{
+  "_comment": "Phase 167.1.1.1 plan 02 (D-15, D-16, D-18). Shared oracle for the matcher's AUM basis. Both runners read this whole file: vitest (src/lib/holding-equity-contribution.parity.test.ts) replays it against holdingEquityContribution AND holdingEquityContributionLocal; pytest (analytics-service/tests/test_holding_equity_contribution.py) replays it against holding_equity_contribution. Every figure is hand-typed; nothing is derived from the code under test. expected_ts is what BOTH TypeScript functions return; expected_py is what the Python helper returns. They differ ONLY on the D-18 case (a derivative whose unrealized_pnl_usd is null: TypeScript counts 0, Python returns null so the caller withholds it as pnl_missing). JSON cannot carry NaN or Infinity, so a field holding one is written {\"nonfinite\": \"NaN\" | \"Infinity\" | \"-Infinity\"} and decoded identically by both runners.",
+  "cases": [
+    {
+      "name": "derivative_counts_pnl_not_notional",
+      "holding_type": "derivative",
+      "value_usd": 5000000,
+      "unrealized_pnl_usd": 500,
+      "expected_ts": 500,
+      "expected_py": 500
+    }
+  ]
+}
