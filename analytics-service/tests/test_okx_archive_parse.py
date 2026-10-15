@@ -1,0 +1,570 @@
+"""OKX archive file parsing and classification stops (Phase 167.1.2.2.2.1, plan 02).
+
+WHY these tests matter (Rule 9): the quarterly archive has no checksum and its rows
+become dollars in a public track record. Every way a file can be misread - a drifted
+header, a file for the wrong quarter, a subtype nobody classified, a coin that is not a
+dollar, an instType the live path never summed - must stop the run LOUD with a class
+name and never with data. Each test below fails if its stop is removed, so a regression
+cannot turn a misread file into a plausible-looking figure.
+
+Variant inputs are built here from the committed synthetic fixture text with small
+edits; the modules under test never build a test's input. All amounts are invented.
+"""
+from __future__ import annotations
+
+import ast
+import csv
+import io
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from services.okx_archive_classify import (
+    ARCHIVE_USD_FAMILY,
+    LIVE_REALIZED_INST_TYPES,
+    SUBTYPE_BUCKETS,
+    Bucket,
+    aggregate_archive,
+)
+from services.okx_archive_files import (
+    ARCHIVE_HEADER,
+    ArchiveParseError,
+    parse_archive_csv,
+    quarter_bounds,
+)
+
+FIXTURES = Path(__file__).parent / "fixtures" / "okx_archive"
+EXCHANGE_SOURCE = Path(__file__).resolve().parents[1] / "services" / "exchange.py"
+
+
+# --------------------------------------------------------------------------- helpers
+def _read_fixture(name: str) -> tuple[list[str], list[list[str]]]:
+    text = (FIXTURES / name).read_text(encoding="utf-8")
+    assert text, f"guard-the-guard: fixture {name} must not be empty"
+    rows = list(csv.reader(io.StringIO(text, newline="")))
+    return rows[0], rows[1:]
+
+
+def _emit(header: list[str], rows: list[list[str]]) -> bytes:
+    out = io.StringIO(newline="")
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(header)
+    writer.writerows(rows)
+    return out.getvalue().encode("utf-8")
+
+
+def _ms(stamp: str) -> str:
+    dt = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    return str(int(dt.timestamp()) * 1000)
+
+
+def _new_row(header: list[str], **cells: str) -> list[str]:
+    row = {name: "" for name in header}
+    row.update(cells)
+    return [row[name] for name in header]
+
+
+def _q3_with(*extra_rows: dict[str, str]) -> bytes:
+    """The Q3 fixture plus extra synthetic rows (all inside the quarter)."""
+    header, rows = _read_fixture("q3_like.csv")
+    rows = rows + [_new_row(header, **extra) for extra in extra_rows]
+    return _emit(header, rows)
+
+
+def _aggregate_q3(data: bytes, subtype_types=None):
+    return aggregate_archive([parse_archive_csv(data, year=2026, quarter="Q3")], subtype_types)
+
+
+def _stop(callable_, *args, **kwargs) -> ArchiveParseError:
+    with pytest.raises(ArchiveParseError) as info:
+        callable_(*args, **kwargs)
+    return info.value
+
+
+def _row_kwargs(bill_id: str, sub: str, when: str, **overrides: str) -> dict[str, str]:
+    base = {
+        "instType": "SWAP",
+        "billId": bill_id,
+        "subType": sub,
+        "ts": _ms(when),
+        "balChg": "0",
+        "bal": "1",
+        "ccy": "USDT",
+        "pnl": "0",
+        "fee": "0",
+    }
+    base.update(overrides)
+    return base
+
+
+def _detail_text(err: ArchiveParseError) -> str:
+    return repr(err.detail) + str(err)
+
+
+# ---------------------------------------------------------------------- the quarter
+class TestQuarterBounds:
+    """The plain calendar reading is the one asserted against every file."""
+
+    @pytest.mark.parametrize(
+        ("quarter", "start", "end"),
+        [
+            ("Q1", "2026-01-01", "2026-04-01"),
+            ("Q2", "2026-04-01", "2026-07-01"),
+            ("Q3", "2026-07-01", "2026-10-01"),
+            ("Q4", "2026-10-01", "2027-01-01"),
+        ],
+    )
+    def test_quarter_bounds_are_the_plain_calendar_half_open_range(self, quarter, start, end):
+        got = quarter_bounds(2026, quarter)
+        assert (got[0].isoformat(), got[1].isoformat()) == (start, end)
+
+    def test_unknown_quarter_label_is_refused(self):
+        with pytest.raises(ValueError):
+            quarter_bounds(2026, "Q5")
+
+
+class TestQuarterRangeAssertion:
+    """A file for the wrong quarter must stop, never be remapped.
+
+    OKX's own doc example labels 2024 Q2 as a July-September range; if the assertion
+    were missing, a mislabelled file would write another quarter's P&L onto the wrong days.
+    """
+
+    def test_quarter_q3_file_parsed_as_q2_is_a_named_stop_with_requested_and_observed_dates(self):
+        err = _stop(parse_archive_csv, (FIXTURES / "q3_like.csv").read_bytes(), year=2026, quarter="Q2")
+        assert err.stop_class == "quarter_range_mismatch"
+        assert err.detail["requested"] == "2026 Q2"
+        assert err.detail["observed_min_day"] == "2026-07-01"
+        assert err.detail["observed_max_day"] == "2026-09-30"
+
+    def test_quarter_q2_file_parsed_as_q3_is_a_named_stop(self):
+        err = _stop(parse_archive_csv, (FIXTURES / "q2_like.csv").read_bytes(), year=2026, quarter="Q3")
+        assert err.stop_class == "quarter_range_mismatch"
+        assert err.detail["requested"] == "2026 Q3"
+
+    def test_quarter_row_one_millisecond_before_the_start_is_a_stop(self):
+        header, rows = _read_fixture("q3_like.csv")
+        before = int(_ms("2026-07-01 00:00:00")) - 1
+        rows[0][header.index("ts")] = str(before)
+        err = _stop(parse_archive_csv, _emit(header, rows), year=2026, quarter="Q3")
+        assert err.stop_class == "quarter_range_mismatch"
+        assert err.detail["observed_min_day"] == "2026-06-30"
+        assert err.detail["rows_outside"] == 1
+
+    def test_quarter_row_at_the_exclusive_end_is_a_stop(self):
+        header, rows = _read_fixture("q3_like.csv")
+        rows[-1][header.index("ts")] = _ms("2026-10-01 00:00:00")
+        err = _stop(parse_archive_csv, _emit(header, rows), year=2026, quarter="Q3")
+        assert err.stop_class == "quarter_range_mismatch"
+        assert err.detail["observed_max_day"] == "2026-10-01"
+
+    def test_quarter_first_and_last_millisecond_are_inside(self):
+        # q3_like.csv carries a row at 00:00:00.000 on 07-01 and one at 23:59:59.999 on 09-30.
+        parsed = parse_archive_csv((FIXTURES / "q3_like.csv").read_bytes(), year=2026, quarter="Q3")
+        assert (parsed.ts_min_day, parsed.ts_max_day) == ("2026-07-01", "2026-09-30")
+
+    def test_quarter_q2_fixture_verifies_ninety_one_days(self):
+        parsed = parse_archive_csv((FIXTURES / "q2_like.csv").read_bytes(), year=2026, quarter="Q2")
+        assert (parsed.row_count, len(parsed.covered_days)) == (14, 91)
+        assert (parsed.ts_min_day, parsed.ts_max_day) == ("2026-04-01", "2026-06-30")
+
+    def test_quarter_detail_carries_dates_and_counts_only(self):
+        err = _stop(parse_archive_csv, (FIXTURES / "q3_like.csv").read_bytes(), year=2026, quarter="Q2")
+        assert all(isinstance(v, (str, int)) for v in err.detail.values())
+
+
+# ----------------------------------------------------------------------- the header
+class TestHeaderPin:
+    """T-PARSE-HDR: any header but the pinned 28 columns is a permanent stop.
+
+    The reconciliation is only meaningful if column N means what the parser thinks it
+    means; a silently reordered or renamed column would sum the wrong field as dollars.
+    """
+
+    def test_header_pinned_constant_has_the_28_documented_columns_in_order(self):
+        assert len(ARCHIVE_HEADER) == 28
+        assert ARCHIVE_HEADER[:4] == ("instType", "billId", "subType", "ts")
+        assert ARCHIVE_HEADER[-1] == "fillFwdPx"
+
+    def test_header_missing_column_is_header_drift(self):
+        header, rows = _read_fixture("q3_like.csv")
+        drop = header.index("fee")
+        data = _emit(header[:drop] + header[drop + 1 :], [r[:drop] + r[drop + 1 :] for r in rows])
+        err = _stop(parse_archive_csv, data, year=2026, quarter="Q3")
+        assert err.stop_class == "header_drift"
+        assert err.detail["missing"] == ["fee"]
+
+    def test_header_extra_unknown_column_is_header_drift(self):
+        header, rows = _read_fixture("q3_like.csv")
+        data = _emit(header + ["surprise"], [r + ["x"] for r in rows])
+        err = _stop(parse_archive_csv, data, year=2026, quarter="Q3")
+        assert err.stop_class == "header_drift"
+        assert err.detail["unexpected"] == ["surprise"]
+
+    def test_header_reordered_columns_are_header_drift(self):
+        header, rows = _read_fixture("q3_like.csv")
+        i, j = header.index("pnl"), header.index("fee")
+        swapped = list(header)
+        swapped[i], swapped[j] = swapped[j], swapped[i]
+        data = _emit(swapped, rows)  # values stay put, so the labels now lie
+        err = _stop(parse_archive_csv, data, year=2026, quarter="Q3")
+        assert err.stop_class == "header_drift"
+        assert err.detail["order_changed"] is True
+
+    def test_header_empty_file_is_header_drift(self):
+        assert _stop(parse_archive_csv, b"", year=2026, quarter="Q3").stop_class == "header_drift"
+
+    def test_header_with_added_type_column_parses_and_is_flagged(self):
+        header, rows = _read_fixture("q3_like.csv")
+        pos = header.index("billId") + 1
+        data = _emit(
+            header[:pos] + ["type"] + header[pos:],
+            [r[:pos] + ["T" + r[header.index("subType")]] + r[pos:] for r in rows],
+        )
+        parsed = parse_archive_csv(data, year=2026, quarter="Q3")
+        assert parsed.has_type_column is True
+        assert parsed.rows[0].type_raw == "T2"
+        assert parsed.row_count == 20
+
+    def test_header_type_column_disagreeing_with_the_live_subtype_map_is_a_stop(self):
+        header, rows = _read_fixture("q3_like.csv")
+        pos = header.index("billId") + 1
+        sub_idx = header.index("subType")
+        type_rows = [r[:pos] + ["T" + r[sub_idx]] + r[pos:] for r in rows]
+        type_header = header[:pos] + ["type"] + header[pos:]
+        subtype_map = {r[sub_idx]: "T" + r[sub_idx] for r in rows}
+
+        # consistent map: no stop
+        ok = parse_archive_csv(_emit(type_header, type_rows), year=2026, quarter="Q3")
+        assert aggregate_archive([ok], subtype_map).census["rows"] == 20
+
+        # one row's type contradicts the live map for its subType
+        type_rows[1][pos] = "WRONG"
+        bad = parse_archive_csv(_emit(type_header, type_rows), year=2026, quarter="Q3")
+        err = _stop(aggregate_archive, [bad], subtype_map)
+        assert err.stop_class == "subtype_map_drift"
+        assert err.detail["sub_types"] == {"1": 1}
+
+    def test_header_without_type_column_skips_the_cross_check(self):
+        agg = _aggregate_q3((FIXTURES / "q3_like.csv").read_bytes(), {"1": "totally-different"})
+        assert agg.census["rows"] == 20
+
+
+# --------------------------------------------------------------------- amounts, rows
+class TestUnparseableAmounts:
+    """Money is parsed with Decimal from plain decimal strings; anything else stops."""
+
+    @pytest.mark.parametrize("bad", ["NaN", "Infinity", "-inf", "abc", "", "1,5", "1e999", "0x10", "1_0", " 7"])
+    @pytest.mark.parametrize("field", ["pnl", "fee", "balChg", "bal"])
+    def test_non_finite_or_non_numeric_money_is_unparseable_amount(self, field, bad):
+        header, rows = _read_fixture("q3_like.csv")
+        rows[3][header.index(field)] = bad
+        err = _stop(parse_archive_csv, _emit(header, rows), year=2026, quarter="Q3")
+        assert err.stop_class == "unparseable_amount"
+        assert err.detail["field"] == field
+        assert bad not in _detail_text(err) or bad == ""  # the raw cell is never echoed
+
+    def test_ordinary_decimal_strings_parse_exactly(self):
+        header, rows = _read_fixture("q3_like.csv")
+        rows[0][header.index("pnl")] = "0.1"
+        rows[0][header.index("fee")] = "-1E-8"
+        parsed = parse_archive_csv(_emit(header, rows), year=2026, quarter="Q3")
+        assert parsed.rows[0].pnl == Decimal("0.1")
+        assert parsed.rows[0].fee == Decimal("-0.00000001")
+        assert isinstance(parsed.rows[0].pnl, Decimal)
+
+    def test_non_digit_ts_is_unparseable_ts(self):
+        header, rows = _read_fixture("q3_like.csv")
+        rows[2][header.index("ts")] = "2026-07-02T08:00:00Z"
+        assert _stop(parse_archive_csv, _emit(header, rows), year=2026, quarter="Q3").stop_class == "unparseable_ts"
+
+    def test_short_row_is_malformed_row(self):
+        header, rows = _read_fixture("q3_like.csv")
+        rows[4] = rows[4][:-3]
+        err = _stop(parse_archive_csv, _emit(header, rows), year=2026, quarter="Q3")
+        assert err.stop_class == "malformed_row"
+
+    def test_header_only_file_is_empty_file_because_no_row_can_verify_the_quarter(self):
+        header, _ = _read_fixture("q3_like.csv")
+        assert _stop(parse_archive_csv, _emit(header, []), year=2026, quarter="Q3").stop_class == "empty_file"
+
+    def test_bytes_that_are_not_utf8_are_undecodable(self):
+        assert _stop(parse_archive_csv, b"\xff\xfe\xfa", year=2026, quarter="Q3").stop_class == "undecodable_file"
+
+    def test_a_utf8_byte_order_mark_is_tolerated(self):
+        data = b"\xef\xbb\xbf" + (FIXTURES / "q3_like.csv").read_bytes()
+        assert parse_archive_csv(data, year=2026, quarter="Q3").row_count == 20
+
+
+class TestDuplicateBills:
+    """A repeated billId is either the same bill (dropped) or a conflict (stop)."""
+
+    def test_identical_duplicate_bill_is_counted_once(self):
+        header, rows = _read_fixture("q3_like.csv")
+        parsed = parse_archive_csv(_emit(header, rows + [list(rows[1])]), year=2026, quarter="Q3")
+        assert parsed.row_count == 20
+        assert parsed.duplicate_rows_dropped == 1
+
+    def test_same_bill_id_with_different_content_is_duplicate_bill_conflict(self):
+        header, rows = _read_fixture("q3_like.csv")
+        clone = list(rows[1])
+        clone[header.index("pnl")] = "-4.21"
+        err = _stop(parse_archive_csv, _emit(header, rows + [clone]), year=2026, quarter="Q3")
+        assert err.stop_class == "duplicate_bill_conflict"
+        assert "-4.21" not in _detail_text(err)
+
+    def test_blank_bill_id_is_a_stop_because_dedup_is_impossible(self):
+        header, rows = _read_fixture("q3_like.csv")
+        rows[5][header.index("billId")] = ""
+        assert _stop(parse_archive_csv, _emit(header, rows), year=2026, quarter="Q3").stop_class == "missing_bill_id"
+
+    def test_conflicting_bill_across_two_files_is_duplicate_bill_conflict(self):
+        data = (FIXTURES / "q3_like.csv").read_bytes()
+        first = parse_archive_csv(data, year=2026, quarter="Q3")
+        header, rows = _read_fixture("q3_like.csv")
+        rows[1][header.index("pnl")] = "-4.21"
+        second = parse_archive_csv(_emit(header, rows), year=2026, quarter="Q3")
+        assert _stop(aggregate_archive, [first, second], None).stop_class == "duplicate_bill_conflict"
+        # the very same file twice is not a conflict, and is not double counted
+        twice = aggregate_archive([first, first], None)
+        assert twice.realized_by_day["2026-07-01"] == Decimal("5.90")
+
+
+# ----------------------------------------------------------------- classification D-08
+class TestUnknownSubtypeClassification:
+    """T-CLASS-1: a subType the table does not list can never be silently bucketed.
+
+    A new OKX subtype with a nonzero effect is money the model does not understand;
+    folding it into P&L or ignoring it would misstate the track record either way.
+    """
+
+    def test_unknown_subtype_with_nonzero_pnl_is_a_stop_naming_the_subtype(self):
+        data = _q3_with(_row_kwargs("799999001", "999", "2026-07-12 12:00:00", pnl="123.45"))
+        err = _stop(_aggregate_q3, data)
+        assert err.stop_class == "unknown_subtype_nonzero"
+        assert err.detail["sub_types"] == {"999": 1}
+        assert "999" in str(err)
+        assert "123.45" not in _detail_text(err)
+
+    @pytest.mark.parametrize("field", ["pnl", "fee", "balChg"])
+    def test_unknown_subtype_with_any_nonzero_effect_field_is_a_stop(self, field):
+        data = _q3_with(_row_kwargs("799999002", "998", "2026-07-12 12:00:00", **{field: "0.5"}))
+        assert _stop(_aggregate_q3, data).stop_class == "unknown_subtype_nonzero"
+
+    def test_unknown_subtype_with_zero_effect_is_counted_and_does_not_raise(self):
+        data = _q3_with(_row_kwargs("799999003", "999", "2026-07-12 12:00:00"))
+        agg = _aggregate_q3(data)
+        assert agg.unknown_zero_effect == 1
+        assert agg.census["by_sub_type"]["999"] == 1
+
+    def test_unknown_subtype_adl_and_clawback_are_not_guessed(self):
+        # RESEARCH Section 3 quotes no ADL or clawback subtype number, so none is encoded.
+        assert all(SUBTYPE_BUCKETS.get(s) is None for s in ("9", "10", "13", "14", "15"))
+
+
+class TestFlowAndFundingClassification:
+    """D-08: transfers 11/12 are external flows, 110/111 are not, funding is its own stream."""
+
+    def test_liquidation_transfers_are_non_external_never_flows(self):
+        agg = _aggregate_q3(
+            _q3_with(_row_kwargs("799999004", "111", "2026-07-12 12:00:00", balChg="-7.5"))
+        )
+        assert agg.non_external_by_day["2026-07-12"] == Decimal("-7.5")
+        assert "2026-07-12" not in agg.flows_by_day
+        assert agg.flows_by_day == {"2026-07-05": Decimal("1000.00"), "2026-08-10": Decimal("-250.00")}
+        assert SUBTYPE_BUCKETS["110"] is Bucket.NON_EXTERNAL
+        assert SUBTYPE_BUCKETS["111"] is Bucket.NON_EXTERNAL
+
+    def test_transfer_in_and_out_are_flows_signed_by_balance_change(self):
+        agg = _aggregate_q3(
+            _q3_with(
+                _row_kwargs("799999005", "11", "2026-07-12 12:00:00", instType="", balChg="40.25"),
+                _row_kwargs("799999006", "12", "2026-07-12 13:00:00", instType="", balChg="-15.75"),
+            )
+        )
+        assert agg.flows_by_day["2026-07-12"] == Decimal("24.50")
+        assert agg.flows_by_day["2026-07-05"] == Decimal("1000.00")
+        assert "2026-07-12" not in agg.realized_by_day
+
+    def test_funding_is_its_own_stream_regardless_of_inst_type(self):
+        agg = _aggregate_q3(
+            _q3_with(
+                _row_kwargs("799999007", "173", "2026-07-12 08:00:00", instType="", pnl="-0.40"),
+                _row_kwargs("799999008", "174", "2026-07-12 16:00:00", instType="OPTION", pnl="0.90"),
+            )
+        )
+        assert agg.funding_by_day["2026-07-12"] == Decimal("0.50")
+        assert "2026-07-12" not in agg.realized_by_day
+        assert agg.excluded_by_month.get("2026-07") == {"OPTION": Decimal("2.90")}
+
+    def test_every_listed_subtype_sits_in_exactly_one_bucket(self):
+        assert SUBTYPE_BUCKETS["173"] is Bucket.FUNDING and SUBTYPE_BUCKETS["174"] is Bucket.FUNDING
+        assert SUBTYPE_BUCKETS["11"] is Bucket.FLOW and SUBTYPE_BUCKETS["12"] is Bucket.FLOW
+        assert all(isinstance(b, Bucket) and b is not Bucket.UNKNOWN for b in SUBTYPE_BUCKETS.values())
+
+
+class TestCurrencyStop:
+    """Founder must-settle (currency): nothing is converted; a non-dollar counted row stops.
+
+    The live path sums pnl+fee across every ccy with no conversion. If a BTC-denominated
+    fee were summed as dollars the reconciliation could pass or fail for the wrong reason
+    and a rebuilt day would carry a coin amount labelled as dollars.
+    """
+
+    def test_currency_realized_row_in_btc_is_a_stop_with_a_count_and_month_census(self):
+        data = _q3_with(
+            _row_kwargs("799999009", "2", "2026-07-12 12:00:00", ccy="BTC", pnl="0.5"),
+            _row_kwargs("799999010", "2", "2026-08-12 12:00:00", ccy="BTC", fee="-0.01"),
+        )
+        err = _stop(_aggregate_q3, data)
+        assert err.stop_class == "non_usd_ccy"
+        assert err.detail["ccys"] == {"BTC": {"rows": 2, "months": ["2026-07", "2026-08"]}}
+        assert "0.5" not in _detail_text(err) and "-0.01" not in _detail_text(err)
+
+    def test_currency_funding_and_flow_rows_in_a_coin_are_also_stops(self):
+        funding = _q3_with(_row_kwargs("799999011", "173", "2026-07-12 08:00:00", ccy="ETH", pnl="-0.2"))
+        flow = _q3_with(_row_kwargs("799999012", "11", "2026-07-12 08:00:00", instType="", ccy="BTC", balChg="1"))
+        assert _stop(_aggregate_q3, funding).stop_class == "non_usd_ccy"
+        assert _stop(_aggregate_q3, flow).stop_class == "non_usd_ccy"
+
+    def test_currency_non_external_row_in_btc_does_not_raise_and_is_counted_in_the_census(self):
+        agg = _aggregate_q3(
+            _q3_with(_row_kwargs("799999013", "110", "2026-07-12 12:00:00", ccy="BTC", balChg="0.3"))
+        )
+        assert agg.census["by_ccy"]["BTC"] == 1
+        assert "2026-07-12" not in agg.non_external_by_day  # a coin amount is never summed as dollars
+        assert agg.non_external_by_day == {"2026-07-15": Decimal("30.00")}
+
+    def test_currency_zero_effect_coin_row_does_not_raise(self):
+        agg = _aggregate_q3(_q3_with(_row_kwargs("799999014", "2", "2026-07-12 12:00:00", ccy="BTC")))
+        assert agg.census["by_ccy"]["BTC"] == 1
+        assert "2026-07-12" not in agg.realized_by_day
+
+    def test_currency_usd_family_is_exactly_usdt_usdc_usd(self):
+        assert ARCHIVE_USD_FAMILY == frozenset({"USDT", "USDC", "USD"})
+
+    def test_currency_usdc_and_usd_rows_are_summed_as_dollars(self):
+        agg = _aggregate_q3(
+            _q3_with(
+                _row_kwargs("799999015", "2", "2026-07-12 12:00:00", ccy="USDC", pnl="1.25"),
+                _row_kwargs("799999016", "2", "2026-07-12 13:00:00", ccy="USD", pnl="2.00", fee="-0.25"),
+            )
+        )
+        assert agg.realized_by_day["2026-07-12"] == Decimal("3.00")
+
+    def test_currency_blank_ccy_with_a_nonzero_effect_is_a_stop(self):
+        data = _q3_with(_row_kwargs("799999017", "2", "2026-07-12 12:00:00", ccy="", pnl="1"))
+        err = _stop(_aggregate_q3, data)
+        assert err.stop_class == "non_usd_ccy"
+        assert "(blank)" in err.detail["ccys"]
+
+
+class TestExcludedInstTypeClasses:
+    """T-RECON-3: realized rows the live path never sees are reported, never summed in."""
+
+    def test_option_events_and_blank_inst_type_realized_rows_are_excluded_per_month(self):
+        agg = _aggregate_q3(
+            _q3_with(
+                _row_kwargs("799999018", "2", "2026-07-12 12:00:00", instType="OPTION", pnl="1.00", fee="-0.10"),
+                _row_kwargs("799999019", "2", "2026-08-12 12:00:00", instType="EVENTS", pnl="-4.00"),
+                _row_kwargs("799999020", "2", "2026-08-13 12:00:00", instType="", pnl="0.25"),
+            )
+        )
+        assert agg.excluded_by_month == {
+            "2026-07": {"OPTION": Decimal("3.80")},  # the fixture's own OPTION row 2.90 plus 0.90
+            "2026-08": {"EVENTS": Decimal("-4.00"), "BLANK": Decimal("0.25")},
+        }
+        # nothing excluded leaks into the realized leg
+        assert "2026-07-12" not in agg.realized_by_day
+        assert "2026-08-13" not in agg.realized_by_day
+        assert agg.realized_by_day["2026-08-12"] == Decimal("-0.05")
+
+    def test_option_rows_in_a_coin_are_not_summed_as_dollars(self):
+        agg = _aggregate_q3(
+            _q3_with(_row_kwargs("799999021", "2", "2026-09-12 12:00:00", instType="OPTION", ccy="BTC", pnl="0.1"))
+        )
+        assert "2026-09" not in agg.excluded_by_month
+        assert agg.census["excluded_non_usd_rows"] == 1
+
+
+class TestLiveInstTypePin:
+    """D-09: the archive's realized leg uses the same instType set as the live path.
+
+    If fetch_daily_pnl ever widened or narrowed its instType loop, the archive leg would
+    reconcile against a different set of rows than the live leg and a cent-level miss
+    would be a classification artifact. The read is of the source text, and it must find
+    at least one list so that a refactor hiding the list cannot pass vacuously.
+    """
+
+    @staticmethod
+    def _find_inst_type_lists(source: str) -> list[tuple[str, ...]]:
+        tree = ast.parse(source)
+        fn = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "fetch_daily_pnl"
+        )
+        found: list[tuple[str, ...]] = []
+        for node in ast.walk(fn):
+            if (
+                isinstance(node, ast.For)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "inst_type"
+                and isinstance(node.iter, (ast.List, ast.Tuple))
+                and all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.iter.elts)
+            ):
+                found.append(tuple(e.value for e in node.iter.elts))
+        return found
+
+    @staticmethod
+    def _drifted_positions(found: list[tuple[str, ...]], expected: tuple[str, ...]) -> list[int]:
+        if not found:
+            raise AssertionError("no instType list literal found in fetch_daily_pnl; the pin would be vacuous")
+        return [i + 1 for i, lst in enumerate(found) if lst != expected]
+
+    def test_live_realized_inst_types_equal_every_list_in_fetch_daily_pnl(self):
+        found = self._find_inst_type_lists(EXCHANGE_SOURCE.read_text(encoding="utf-8"))
+        assert len(found) >= 1
+        drifted = self._drifted_positions(found, LIVE_REALIZED_INST_TYPES)
+        assert drifted == [], f"instType list(s) number {drifted} of {len(found)} differ from LIVE_REALIZED_INST_TYPES"
+
+    def test_pin_guard_fails_when_no_list_is_found(self):
+        src = "async def fetch_daily_pnl(x):\n    for inst_type in INST_TYPES:\n        pass\n"
+        found = self._find_inst_type_lists(src)
+        assert found == []
+        with pytest.raises(AssertionError, match="vacuous"):
+            self._drifted_positions(found, LIVE_REALIZED_INST_TYPES)
+
+    def test_pin_guard_names_the_drifted_list_by_position(self):
+        src = (
+            "async def fetch_daily_pnl(x):\n"
+            "    for inst_type in ['SWAP', 'FUTURES', 'SPOT', 'MARGIN']:\n        pass\n"
+            "    for inst_type in ['SWAP', 'FUTURES', 'SPOT']:\n        pass\n"
+        )
+        found = self._find_inst_type_lists(src)
+        assert self._drifted_positions(found, LIVE_REALIZED_INST_TYPES) == [2]
+
+    def test_pin_guard_catches_a_reordered_list(self):
+        src = "async def fetch_daily_pnl(x):\n    for inst_type in ['SPOT', 'SWAP', 'FUTURES', 'MARGIN']:\n        pass\n"
+        assert self._drifted_positions(self._find_inst_type_lists(src), LIVE_REALIZED_INST_TYPES) == [1]
+
+    def test_realized_leg_applies_the_filter_to_a_margin_row(self):
+        agg = _aggregate_q3(_q3_with(_row_kwargs("799999022", "1", "2026-07-12 12:00:00", instType="MARGIN", pnl="2.5")))
+        assert agg.realized_by_day["2026-07-12"] == Decimal("2.5")
+
+
+class TestBalanceContinuityReading:
+    """Information only: bal continuity is reported, never a gate (RESEARCH Section 4)."""
+
+    def test_continuity_holds_on_the_fixture_and_counts_pairs_per_ccy(self):
+        agg = _aggregate_q3((FIXTURES / "q3_like.csv").read_bytes())
+        assert agg.bal_continuity["USDT"] == {"checked": 18, "mismatches": 0}
+        assert agg.bal_continuity["USDC"] == {"checked": 0, "mismatches": 0}
+
+    def test_a_broken_balance_is_counted_and_does_not_raise(self):
+        header, rows = _read_fixture("q3_like.csv")
+        rows[-1][header.index("bal")] = "1.00"  # the last USDT bill no longer follows its predecessor
+        agg = _aggregate_q3(_emit(header, rows))
+        assert agg.bal_continuity["USDT"] == {"checked": 18, "mismatches": 1}
