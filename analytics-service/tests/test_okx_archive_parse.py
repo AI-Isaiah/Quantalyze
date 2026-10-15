@@ -228,7 +228,7 @@ class TestHeaderPin:
         parsed = parse_archive_csv(data, year=2026, quarter="Q3")
         assert parsed.has_type_column is True
         assert parsed.rows[0].type_raw == "T2"
-        assert parsed.row_count == 20
+        assert parsed.row_count == 22
 
     def test_header_type_column_disagreeing_with_the_live_subtype_map_is_a_stop(self):
         header, rows = _read_fixture("q3_like.csv")
@@ -240,7 +240,7 @@ class TestHeaderPin:
 
         # consistent map: no stop
         ok = parse_archive_csv(_emit(type_header, type_rows), year=2026, quarter="Q3")
-        assert aggregate_archive([ok], subtype_map).census["rows"] == 20
+        assert aggregate_archive([ok], subtype_map).census["rows"] == 22
 
         # one row's type contradicts the live map for its subType
         type_rows[1][pos] = "WRONG"
@@ -251,7 +251,7 @@ class TestHeaderPin:
 
     def test_header_without_type_column_skips_the_cross_check(self):
         agg = _aggregate_q3((FIXTURES / "q3_like.csv").read_bytes(), {"1": "totally-different"})
-        assert agg.census["rows"] == 20
+        assert agg.census["rows"] == 22
 
 
 # --------------------------------------------------------------------- amounts, rows
@@ -297,7 +297,7 @@ class TestUnparseableAmounts:
 
     def test_a_utf8_byte_order_mark_is_tolerated(self):
         data = b"\xef\xbb\xbf" + (FIXTURES / "q3_like.csv").read_bytes()
-        assert parse_archive_csv(data, year=2026, quarter="Q3").row_count == 20
+        assert parse_archive_csv(data, year=2026, quarter="Q3").row_count == 22
 
 
 class TestDuplicateBills:
@@ -306,7 +306,7 @@ class TestDuplicateBills:
     def test_identical_duplicate_bill_is_counted_once(self):
         header, rows = _read_fixture("q3_like.csv")
         parsed = parse_archive_csv(_emit(header, rows + [list(rows[1])]), year=2026, quarter="Q3")
-        assert parsed.row_count == 20
+        assert parsed.row_count == 22
         assert parsed.duplicate_rows_dropped == 1
 
     def test_same_bill_id_with_different_content_is_duplicate_bill_conflict(self):
@@ -624,11 +624,12 @@ class TestBalanceContinuityReading:
     def test_continuity_holds_on_the_fixture_and_counts_pairs_per_ccy(self):
         agg = _aggregate_q3((FIXTURES / "q3_like.csv").read_bytes())
         assert agg.bal_continuity["USDT"] == {"checked": 18, "mismatches": 0}
-        assert agg.bal_continuity["USDC"] == {"checked": 0, "mismatches": 0}
+        assert agg.bal_continuity["USDC"] == {"checked": 2, "mismatches": 0}
 
     def test_a_broken_balance_is_counted_and_does_not_raise(self):
         header, rows = _read_fixture("q3_like.csv")
-        rows[-1][header.index("bal")] = "1.00"  # the last USDT bill no longer follows its predecessor
+        last_usdt = next(r for r in rows if r[header.index("billId")] == "700000020")
+        last_usdt[header.index("bal")] = "1.00"  # the last USDT bill no longer follows its predecessor
         agg = _aggregate_q3(_emit(header, rows))
         assert agg.bal_continuity["USDT"] == {"checked": 18, "mismatches": 1}
 
@@ -664,7 +665,7 @@ class TestBalChainCompleteness:
     def test_the_stop_carries_counts_and_dates_never_an_amount(self):
         err = _stop(verify_bal_chain, [self._file(drop={"700000007"})])
         text = _detail_text(err)
-        for amount in ("5487", "5514", "7.47", "27.00", "5517"):
+        for amount in ("3915.45", "3942.45", "7.47", "27.00", "3945.45"):
             assert amount not in text, f"an amount leaked into the stop detail: {amount}"
 
     def test_dropping_the_last_row_of_a_ccy_cannot_be_seen_and_is_the_documented_residual(self):
