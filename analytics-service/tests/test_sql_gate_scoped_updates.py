@@ -137,6 +137,11 @@ _SCOPED_RE = re.compile(
 #     the next paragraph). Recorded so the next reader does not repeat the
 #     "missed key" search that TRADESYNC's plan sent a census planner on.
 #
+#   * Phase 167.1.2.2.2.1 (OKXHISTORY) added supabase/tests/test_okx_archive_rebuild.sql
+#     with ONE seed-scoped UPDATE (computed_at on the arm's own strategy_id); its census
+#     plan missed this key and the wave-2 post-merge gate found the pin red
+#                                                  -> (absent) -> 1
+#
 # ⚠️ A count of ZERO is expressed by ABSENCE, not by an explicit `: 0` entry.
 # `actual` below is built with a truthiness filter, so a file with no matches
 # never appears in it and an explicit `: 0` here would fail the comparison. The
@@ -147,6 +152,7 @@ _EXPECTED_MATCH_COUNTS: dict[str, int] = {
     "test_get_verified_cohort_rank_gate.sql": 1,
     "test_ledger_refresh_staleness.sql": 2,
     "test_metrics_by_basis_write.sql": 4,
+    "test_okx_archive_rebuild.sql": 1,
     "test_strategy_analytics_stuck_computing_reaper.sql": 3,
     "test_strategy_analytics_trade_fetch_provenance.sql": 6,
     "test_sync_status_bridge_residues.sql": 5,
