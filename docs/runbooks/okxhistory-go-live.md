@@ -9,11 +9,13 @@ radius" and "What this runbook does not cover" before the pre-flight.
 
 **Two dates and one rule to read first.**
 
-- **The Q3 overlap expires about 2026-12-30.** The reconciliation compares the archive file with
-  the live-derived days both cover. For Q3 2026 that overlap is 2026-08-02 to 2026-09-30, and OKX
-  serves live bills only about 90 days back, so the overlap shrinks day by day and is gone about
-  2026-12-30. After that, `calibrate` has nothing to compare for Q3 and the D-10 measurement cannot
-  be repeated. Do the calibration before then, or re-decide the tolerance with the founder.
+- **The Q3 overlap closes about 2026-12-14.** The reconciliation compares the archive file with
+  the live-derived days both cover. The job takes the live reach as the run date minus
+  `LIVE_REACH_ASSUMED_DAYS` (88), opens the window the day after that boundary, and needs at least
+  `MIN_COMPARED_DAYS` (14) compared days with `MIN_ACTIVE_DAYS` (5) active ones (review round 1, CR-01
+  and F3). Q3 2026 ends 2026-09-30, so a Q3 window of 14 days is last possible about 2026-12-14; after
+  that `calibrate` stops `reconcile_miss cause=insufficient_overlap` and the D-10 measurement cannot be
+  repeated. Do the calibration before then, or re-decide with the founder.
 - **Deploy order.** The analytics worker carrying `run_okx_archive_rebuild_job` must be live, and the
   `compute_jobs` kind migration (`supabase/migrations/20261026120000_okx_archive_rebuild.sql`) must
   have applied, BEFORE any enqueue form is run. An old worker fails an unknown kind straight to
@@ -578,7 +580,8 @@ node "$TS_SP/form.mjs" enqueue-calibrate RUN=20261020T1100 > "$TS_SP/s2.sql" && 
 
 - `quarters[]`: `state` `finished` for both, `container`, `has_type_column`, `ts_min_day` / `ts_max_day`
   matching the quarter (a mismatch is the STOP `quarter_range_mismatch`).
-  Also in the result, per quarter: `quarters[].longest_billless_run_days`. Step 3 reads all three.
+  Also in the result, per quarter: `quarters[].longest_billless_run` (`{days, from, to}`), and
+  `info.bal_chain` (the per-currency balance-chain proof). Step 3 reads them.
 - `census`: `by_ccy` all USDT, `by_sub_type` with no unclassified type, `unknown_zero_effect` 0. A
   non-USD currency is the STOP `non_usd_ccy`, and it is the measurement that settles
   `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`.
@@ -604,14 +607,14 @@ No form runs here; the founder reads and decides, with the orchestrator's summar
 2. **The archive file is complete, not merely in range (review round 1, F1).** A bill-less day is rebuilt
    as an explicit 0.0 return, so a file that silently lost weeks would publish zeros for days that were
    real. Read, per quarter, `quarters[].ts_min_day`, `quarters[].ts_max_day` and
-   `quarters[].longest_billless_run_days`. `ts_min_day` and `ts_max_day` must sit at the quarter's first
+   `quarters[].longest_billless_run.days` (with its `from` / `to`). The job already proves the file's
+   interior is complete (each currency's running balance chains bill to bill, else the STOP
+   `archive_incomplete`); the chain cannot see a missing head or tail, which is what this item checks. `ts_min_day` and `ts_max_day` must sit at the quarter's first
    and last days (a file that stops short of an edge is missing days, not quiet ones), and the longest
    bill-less run must be a length the account's real activity can explain (an account that traded weekly
    does not have a 40-day silence). A short edge or an unexplained long run is a no-go to return to the
-   founder, never a figure to approve. These three key names are as the analytics job's result block
-   was specified in this round; the orchestrator reconciles the exact names against the shipped
-   `okx_archive_job.py`, so read the names off the real `member_progress` and correct this item if they
-   differ.
+   founder, never a figure to approve. The key names match the shipped `okx_archive_job.py`
+   (reconciled by the orchestrator after review round 1).
 3. The download host named by `quarters[].href_host` is in the code allow-list of `okx_archive_download`
    (a host that is not there stops the job as `download_refused`; adding one is a reviewed code change).
 4. The `excluded` totals by month and class, and the `info` readings, are as expected (information, not
@@ -707,7 +710,9 @@ node "$TS_SP/form.mjs" enqueue-apply RUN=20261020T1500 FP=<the-approved-64-hex> 
 ```
 
 **4c. `job-result`.** Read until `done`. `strategies[].rpc.status` is `applied` (or `already_applied` on
-a repeat, which writes nothing), `strategies[].insert_days` and `insert_ranges` name what was written,
+a repeat, which writes nothing and is reported only when the stored archive `reconstructed_ranges`
+already cover every planned day; a target with nothing to write is never a success, it is the STOP
+`nothing_to_apply` before any write), `strategies[].insert_days` and `insert_ranges` name what was written,
 and `gaps_after` is what remains unrecovered. A stop here (`fingerprint_missing`,
 `fingerprint_mismatch`, `reconcile_miss`, `rpc_refused`, ...) wrote nothing for the strategy that
 stopped (D-11, and the RPC's own rollback), and returns to the founder.
