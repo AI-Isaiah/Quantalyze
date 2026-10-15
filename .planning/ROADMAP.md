@@ -5114,22 +5114,22 @@ Plans:
 **Plans:** 16 plans (PR-A: 01-11 and 16; PR-B calibration inputs: 13; operator, post-deploy: 12, 14, 15; plan 16 split from 07 at plan-check iteration 1)
 
 Plans:
-- [ ] 167.1.2.2.2.1-01-PLAN.md — migration: kind `okx_archive_rebuild` (registry + both CHECKs, api_key-only) and the atomic `apply_okx_archive_rebuild` RPC (INVOKER, service_role), 15-arm gate, rollback
-- [ ] 167.1.2.2.2.1-02-PLAN.md — archive CSV parse, subType classification (D-08), ccy stop, one-cent reconciliation (D-09/D-10)
-- [ ] 167.1.2.2.2.1-03-PLAN.md — SSRF-safe archive download: empty exact-host allow-list, private-address refusal, size/ratio caps
-- [ ] 167.1.2.2.2.1-04-PLAN.md — rebuild through the live core with the identity assertion, gap narrowing (SC-4), derive-survival and compute-inclusion pins
-- [ ] 167.1.2.2.2.1-05-PLAN.md — `parseReconstructedRanges` reader, payload field, cache-key bump
-- [ ] 167.1.2.2.2.1-06-PLAN.md — the D-06 public line on the factsheet and tear sheet
-- [ ] 167.1.2.2.2.1-07-PLAN.md — the durable job: worker wiring, key/account/perm/subtype refusals (D-02, D-08) with zero archive calls, preflight, result shape v1 (SC-1)
-- [ ] 167.1.2.2.2.1-08-PLAN.md — calibrate evaluation (D-03, D-09..D-11), fingerprint, apply through the RPC
-- [ ] 167.1.2.2.2.1-09-PLAN.md — censuses, restore allowlist, baseline gates, SQL/TS literal pin
-- [ ] 167.1.2.2.2.1-10-PLAN.md — operator runbook `okxhistory-go-live.md`; TODOS: Wave 5 hand-off, truncation and mixed-ccy measurements
+- [x] 167.1.2.2.2.1-01-PLAN.md — migration: kind `okx_archive_rebuild` (registry + both CHECKs, api_key-only) and the atomic `apply_okx_archive_rebuild` RPC (INVOKER, service_role), 15-arm gate, rollback
+- [x] 167.1.2.2.2.1-02-PLAN.md — archive CSV parse, subType classification (D-08), ccy stop, one-cent reconciliation (D-09/D-10)
+- [x] 167.1.2.2.2.1-03-PLAN.md — SSRF-safe archive download: empty exact-host allow-list, private-address refusal, size/ratio caps
+- [x] 167.1.2.2.2.1-04-PLAN.md — rebuild through the live core with the identity assertion, gap narrowing (SC-4), derive-survival and compute-inclusion pins
+- [x] 167.1.2.2.2.1-05-PLAN.md — `parseReconstructedRanges` reader, payload field, cache-key bump
+- [x] 167.1.2.2.2.1-06-PLAN.md — the D-06 public line on the factsheet and tear sheet
+- [x] 167.1.2.2.2.1-07-PLAN.md — the durable job: worker wiring, key/account/perm/subtype refusals (D-02, D-08) with zero archive calls, preflight, result shape v1 (SC-1)
+- [x] 167.1.2.2.2.1-08-PLAN.md — calibrate evaluation (D-03, D-09..D-11), fingerprint, apply through the RPC
+- [x] 167.1.2.2.2.1-09-PLAN.md — censuses, restore allowlist, baseline gates, SQL/TS literal pin
+- [x] 167.1.2.2.2.1-10-PLAN.md — operator runbook `okxhistory-go-live.md`; TODOS: Wave 5 hand-off, truncation and mixed-ccy measurements
 - [ ] 167.1.2.2.2.1-11-PLAN.md — ship PR-A, PROD catalogue read (marker first), deploy check, baseline re-dump
 - [ ] 167.1.2.2.2.1-12-PLAN.md — founder step: preflight on the real account (acctLv, read_only, uid, subtypes, link host)
 - [ ] 167.1.2.2.2.1-13-PLAN.md — founder decision on host and transfer classes; ship PR-B
 - [ ] 167.1.2.2.2.1-14-PLAN.md — founder step: calibrate on the real Q2/Q3 files; any day above one cent STOPS (D-10)
 - [ ] 167.1.2.2.2.1-15-PLAN.md — founder decision on apply timing; PROD apply with before/after; survival after the next tick; Wave 5 hand-off
-- [ ] 167.1.2.2.2.1-16-PLAN.md — the durable job's stateless wait on OKX and the ingest (download, parse, per-quarter readings); a lost link never yields a partial result (SC-1)
+- [x] 167.1.2.2.2.1-16-PLAN.md — the durable job's stateless wait on OKX and the ingest (download, parse, per-quarter readings); a lost link never yields a partial result (SC-1)
 
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
