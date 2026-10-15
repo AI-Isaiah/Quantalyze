@@ -9801,6 +9801,8 @@ flush the SDK after a credited recovery before closing, or log a WARNING that th
 
 ### CI-CLASSIFY-SCRATCHREPO-ENOTEMPTY — `scratchRepo` cleanup can fail with ENOTEMPTY on a temp directory (booked 2026-10-14)
 
+✅ **CLOSED 2026-10-15 (v0.132.1.9).** Second occurrence: PR #1060's Contracts run `38809136016`, `rmdir '/tmp/gsd-classify-push-testread-*/.git'`. Root cause, measured: every `git commit` spawns `git maintenance run --auto` (GIT_TRACE2 shows the child), and since git 2.47 `maintenance.autoDetach` runs it in the background. The runner has git 2.55, so the child can still be writing into `.git` while cleanup removes it. A local git 2.39 runs it in the foreground, which is why it never reproduced locally. Fix: both scratch-repo helpers pass `-c maintenance.auto=false` (`SCRATCH_GIT_CONFIG`), so no child starts. A self-test row pins it, with a calibration arm showing an unpinned commit does start one; neutering the flag turns the row RED. No retry was added to the `rmSync`. The text below is kept as lineage.
+
 **Failure scenario.** A CI run of the changed-path classifier's self-test failed with
 `ENOTEMPTY: directory not empty, rmdir '/tmp/gsd-classify-subset-forced-*'`, from the `cleanup` closure that
 `scratchRepo` in `scripts/classify-changed-paths.mjs` returns (`rmSync(dir, { recursive: true, force: true })`, no
