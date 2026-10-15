@@ -618,3 +618,1069 @@ class TestTracerCalibrate:
         assert first == second
         assert edited != first
         assert HEX64.fullmatch(edited)
+
+
+# ---------------------------------------------------------------------------
+# Task 2
+# ---------------------------------------------------------------------------
+
+class TestAbortOnReconcileMiss:
+    @pytest.mark.parametrize("mode", ["calibrate", "apply"])
+    @pytest.mark.asyncio
+    async def test_T_ABORT_1_a_realized_day_off_by_0_011_aborts_every_target_and_writes_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        """D-11. Both targets share one ledger, so a day on which the archive and the live
+        side disagree by MORE than a cent (0.011 here) means the archive cannot be trusted
+        for either of them. Nothing may be written for ANY target, no RPC may be called,
+        and the stop must name the dates and counts but never an amount (an account-size
+        leak into last_error)."""
+        both = (STRATEGY_ID, STRATEGY_2_ID)
+        # A VALID approval, taken on a clean world: the archive aggregate does not depend on
+        # the live side, so it matches here too. With a fake one the apply would stop at the
+        # fingerprint and this test could not tell whether the reconciliation guard bites.
+        approved = await _calibrate_fingerprint_for(
+            monkeypatch, db_factory=lambda: _db_with((STRATEGY_ID, GAP_A), (STRATEGY_2_ID, GAP_B)),
+            targets=both,
+        )
+        db = _db_with((STRATEGY_ID, GAP_A), (STRATEGY_2_ID, GAP_B))
+        live = _standard_live()
+        live.realized["2026-09-15"] = 20.011  # archive says 20
+        world = _install(monkeypatch, db, live, q3=_standard_q3(), targets=both)
+        extra = {"approved_fingerprint": approved} if mode == "apply" else {}
+
+        outcome = await _run(_meta(mode, [STRATEGY_ID, STRATEGY_2_ID], **extra))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == (
+            "okx_archive_rebuild: reconcile_miss window=2026-08-03..2026-09-30 "
+            "realized_days_over_cent=1 funding_days_over_cent=0 offending=2026-09-15..2026-09-15"
+        )
+        for amount in ("20.011", "0.011"):
+            assert amount not in (outcome.error_message or "")
+        assert re.search(r"\d+\.\d+", outcome.error_message or "") is None, "no decimal amount"
+        result = world.result()
+        assert result["stop_class"] == "reconcile_miss"
+        assert result["reconcile"]["realized"]["ok"] is False
+        assert result["reconcile"]["realized"]["misses"] == [
+            {"date": "2026-09-15", "archive": "20", "live": "20.011"}
+        ]
+        assert db.apply_calls == 0
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_a_miss_on_the_window_total_alone_is_still_a_miss(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The founder's bound is a cent per day AND the same bound on the window total.
+        Two days each off by exactly a cent pass the per-day test and fail the total."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        live.realized["2026-08-10"] = 0.01
+        live.realized["2026-08-11"] = 0.01
+        world = _install(monkeypatch, db, live, q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message is not None
+        assert outcome.error_message.endswith("cause=window_total")
+        assert world.result()["reconcile"]["realized"]["window_total_diff"] == "-0.02"
+
+    @pytest.mark.asyncio
+    async def test_no_overlap_window_means_calibration_cannot_be_taken(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RESEARCH Pitfall 9: once the live reach no longer touches the verified quarter
+        there is nothing to authenticate the file against. That is a stop with a null
+        window, not a silent skip of the reconciliation."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        live.realized = {"2026-12-01": 5.0}  # the live reach starts after the quarter ended
+        world = _install(monkeypatch, db, live, q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message == "okx_archive_rebuild: reconcile_miss window=none"
+        result = world.result()
+        assert result["reconcile"]["window"] is None
+        assert result["reconcile"]["realized"] is None and result["fingerprint"] is None
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_an_archive_only_day_in_the_live_reach_is_a_miss_and_is_named_as_the_truncation_signal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the live crawl was truncated, the archive shows P&L on a day inside the live
+        reach that the live side lacks. Compared against zero it is a miss, and the info
+        block names the date (information for the founder, on top of the gate)."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        world = _install(
+            monkeypatch, db, live, q3=_standard_q3(realized={"2026-08-20": "5"})
+        )
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message is not None and "offending=2026-08-20..2026-08-20" in outcome.error_message
+        assert world.result()["reconcile"]["realized"]["misses"] == [
+            {"date": "2026-08-20", "archive": "5", "live": "0"}
+        ]
+
+
+class TestWindows:
+    """The overlap windows are where the archive is authenticated, so their arithmetic is
+    pinned with independent calendar literals."""
+
+    def test_adjacent_quarter_windows_merge_into_one_comparison(self) -> None:
+        """Live reach starting 06-28 touches the tail of Q2 and all of Q3 until 09-30: one
+        contiguous run, so the window-total bound is applied to the run, not to a seam."""
+        windows = okx_archive_job._windows(
+            [(2026, "Q2"), (2026, "Q3")], date(2026, 6, 29), date(2026, 10, 15)
+        )
+        assert windows == [("2026-06-29", "2026-09-30")]
+
+    def test_non_adjacent_quarters_stay_separate_windows(self) -> None:
+        windows = okx_archive_job._windows(
+            [(2026, "Q1"), (2026, "Q3")], date(2026, 2, 1), date(2026, 10, 15)
+        )
+        assert windows == [("2026-02-01", "2026-03-31"), ("2026-07-01", "2026-09-30")]
+
+    def test_a_quarter_the_live_reach_never_touches_has_no_window(self) -> None:
+        assert okx_archive_job._windows([(2026, "Q2")], date(2026, 7, 2), date(2026, 10, 15)) == []
+
+    def test_today_is_excluded_because_its_live_day_is_still_open(self) -> None:
+        assert okx_archive_job._windows([(2026, "Q3")], date(2026, 8, 3), date(2026, 9, 10)) == [
+            ("2026-08-03", "2026-09-09")
+        ]
+
+
+class TestLiveFlows:
+    @pytest.mark.asyncio
+    async def test_a_live_deposit_is_valued_by_the_derives_flow_valuer_and_reported_not_gated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The live side is crawled with the SAME flow functions the derive uses. A 300 USDT
+        deposit on 08-10 shows up in the live flow total of the window (information), the
+        archive has no such flow, and that disagreement does not stop the run (D-09)."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        live.transfers = [{"type": "deposit", "currency": "USDT", "amount": 300, "id": "d1",
+                           "timestamp": _noon_ms("2026-08-10")}]
+        world = _install(monkeypatch, db, live, q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        assert world.result()["info"]["flow_totals_overlap"] == {"archive": "0", "live": "300"}
+        # OKX keeps 90 days of deposit history: the crawl starts at midnight(2026-10-15) - 90 d.
+        floor_ms = int(datetime(2026, 7, 17, tzinfo=timezone.utc).timestamp() * 1000)
+        assert ("deposits", floor_ms) in live.calls and ("withdrawals", floor_ms) in live.calls
+
+    @pytest.mark.asyncio
+    async def test_a_coin_flow_with_no_price_makes_the_live_anchor_unusable_not_a_guess(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A BTC deposit with no same-day price cannot be valued; the live derive fails loud
+        on it and so does this job. The error text of the valuer can carry a raw amount, so
+        only the class and a fixed reason reach last_error."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        live.transfers = [{"type": "deposit", "currency": "BTC", "amount": 1.2345, "id": "d9",
+                           "timestamp": _noon_ms("2026-08-10")}]
+        world = _install(monkeypatch, db, live, q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message == "okx_archive_rebuild: live_anchor_unusable live_flows=unvaluable"
+        assert "1.2345" not in json.dumps(world.progress_writes()) + (outcome.error_message or "")
+        _no_writes_but_progress(world, db)
+
+
+class TestD03:
+    def _scenario(
+        self, monkeypatch: pytest.MonkeyPatch, archive_on_0715: str | None, *, funding: str | None = None
+    ) -> tuple[_World, _Db]:
+        db = _db_with(
+            (STRATEGY_ID, GAP_A), (STRATEGY_2_ID, None),
+            csv=[
+                _csv_row(STRATEGY_2_ID, "2026-07-14", 0.0007),
+                _csv_row(STRATEGY_2_ID, "2026-07-15", 0.0),
+                _csv_row(STRATEGY_2_ID, "2026-06-15", 0.0),  # Q2: no file was ingested
+            ],
+        )
+        realized = {} if archive_on_0715 is None else {"2026-07-15": archive_on_0715}
+        world = _install(
+            monkeypatch, db, _standard_live(),
+            q3=_standard_q3(realized=realized, funding={"2026-07-15": funding} if funding else {}),
+            targets=(STRATEGY_ID, STRATEGY_2_ID),
+        )
+        return world, db
+
+    @pytest.mark.asyncio
+    async def test_T_D03_1_a_stored_zero_day_with_archive_pnl_fails_loud_with_both_figures_and_writes_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-03. Strategy 4's stored 0.0 days are checked against the archive, read-only.
+        If the archive shows realized P&L on a day stored as 0.0, the stored series is
+        wrong (or the day was misclassified) and the founder must see the date and BOTH
+        figures. Nothing is rewritten: any fix is a separate founder decision."""
+        world, db = self._scenario(monkeypatch, "2.5")
+
+        outcome = await _run(_meta(
+            "calibrate", [STRATEGY_ID], zero_check_strategy_ids=[STRATEGY_2_ID]
+        ))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == (
+            "okx_archive_rebuild: d03_zero_day_has_archive_pnl hits=1 first=2026-07-15 last=2026-07-15"
+        )
+        assert "2.5" not in (outcome.error_message or "")
+        result = world.result()
+        assert result["stop_class"] == "d03_zero_day_has_archive_pnl"
+        assert result["d03"] == {
+            "checked_days": 1,
+            "hits": [{"date": "2026-07-15", "stored_return": 0.0,
+                      "archive_realized": "2.5", "archive_funding": "0"}],
+        }
+        assert result["fingerprint"] is None, "a failed calibrate offers nothing to approve"
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.parametrize(
+        ("archive_sum", "funding", "hit"),
+        [("0.004", None, False), ("0.005", None, True), ("-0.005", None, True),
+         (None, "0.004", False), (None, "0.006", True), (None, "-3", True)],
+        ids=["realized-rounds-to-zero", "realized-half-cent", "realized-negative-half-cent",
+             "funding-rounds-to-zero", "funding-over-half-cent", "funding-only"],
+    )
+    @pytest.mark.asyncio
+    async def test_the_threshold_is_the_cent_on_realized_and_on_funding(
+        self, monkeypatch: pytest.MonkeyPatch, archive_sum: str | None, funding: str | None, hit: bool
+    ) -> None:
+        """A stored 0.0 is a hit when the archive's realized OR funding sum for that day,
+        rounded to the cent (half up), is not zero. Sub-half-cent dust is not a finding;
+        anything a cent of rounding could show is."""
+        world, db = self._scenario(monkeypatch, archive_sum, funding=funding)
+        # The edited day sits outside the overlap window, so reconciliation stays clean.
+        outcome = await _run(_meta(
+            "calibrate", [STRATEGY_ID], zero_check_strategy_ids=[STRATEGY_2_ID]
+        ))
+
+        assert (outcome.outcome == DispatchOutcome.FAILED) is hit, outcome.error_message
+        assert (world.result()["stop_class"] == "d03_zero_day_has_archive_pnl") is hit
+
+    @pytest.mark.asyncio
+    async def test_a_clean_check_counts_only_zero_days_inside_a_verified_quarter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`checked_days` is the evidence the check looked: the stored 0.0 day inside Q3
+        counts; the 0.0 day in a quarter that was not ingested (no archive to compare) and
+        the non-zero day do not."""
+        world, db = self._scenario(monkeypatch, None)
+
+        outcome = await _run(_meta(
+            "calibrate", [STRATEGY_ID], zero_check_strategy_ids=[STRATEGY_2_ID]
+        ))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        assert world.result()["d03"] == {"checked_days": 1, "hits": []}
+
+    @pytest.mark.asyncio
+    async def test_apply_refuses_zero_check_strategy_ids_as_invalid_input(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-03 is a calibrate check. An apply carrying the key (even an empty list) means
+        the operator mixed up the modes, and an apply must never carry a read-only strategy
+        into a write path. Refused before any OKX call."""
+        for ids in ([STRATEGY_2_ID], []):
+            world, db = self._scenario(monkeypatch, None)
+            outcome = await _run(_meta(
+                "apply", [STRATEGY_ID], zero_check_strategy_ids=ids, approved_fingerprint="b" * 64
+            ))
+            assert outcome.error_message == "okx_archive_rebuild: invalid_input"
+            assert world.all_calls == [] and db.apply_calls == 0
+            assert world.result()["d03"] is None
+
+
+class TestFingerprint:
+    @pytest.mark.asyncio
+    async def test_apply_without_a_fingerprint_is_fingerprint_missing_before_any_okx_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing is written that the founder has not approved, and an apply that cannot
+        say WHAT was approved must not even wait hours for a file."""
+        world, db, _ = _standard(monkeypatch)
+
+        outcome = await _run(_meta("apply", [STRATEGY_ID]))
+
+        assert outcome.error_message == "okx_archive_rebuild: fingerprint_missing"
+        assert outcome.error_kind == "permanent"
+        assert world.result()["stop_class"] == "fingerprint_missing"
+        assert world.all_calls == [] and db.apply_calls == 0
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_apply_with_a_different_fingerprint_is_fingerprint_mismatch_and_writes_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The approval is of THIS file and THESE days. If the archive or the planned days
+        moved since the calibrate, the old approval must not be honoured."""
+        approved = await _calibrate_fingerprint(monkeypatch)
+        world, db, _ = _standard(monkeypatch)
+        # The file changed after the approval, on a day outside the overlap window.
+        world = _install(
+            monkeypatch, db, _standard_live(),
+            q3=_standard_q3(realized={"2026-07-10": "10.01"}),
+        )
+
+        outcome = await _run(_meta("apply", [STRATEGY_ID], approved_fingerprint=approved))
+
+        assert outcome.error_message == "okx_archive_rebuild: fingerprint_mismatch"
+        assert outcome.error_kind == "permanent"
+        assert world.result()["stop_class"] == "fingerprint_mismatch"
+        assert db.apply_calls == 0
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_the_fingerprint_does_not_depend_on_the_live_anchor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rebuilt returns are anchored to today's equity, which moves between a calibrate
+        and an apply. The fingerprint hashes the archive and the days, never those returns,
+        so a legitimate equity move cannot invalidate an approval."""
+        first = await _calibrate_fingerprint(monkeypatch)
+        richer = _standard_live()
+        richer.equity = 12345.67
+        second = await _calibrate_fingerprint(monkeypatch, live=richer)
+
+        assert first == second
+
+    @pytest.mark.asyncio
+    async def test_the_fingerprint_covers_the_planned_dates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A different stored gap (so a different planned date set) is a different review."""
+        first = await _calibrate_fingerprint(monkeypatch)
+        narrower = _db_with((STRATEGY_ID, [{"from": "2026-07-12", "to": "2026-08-01"}]))
+        second = await _calibrate_fingerprint(monkeypatch, db=narrower)
+
+        assert first != second
+
+
+class TestApplyRpcContract:
+    @pytest.mark.asyncio
+    async def test_apply_sends_exactly_the_preview_to_the_rpc_once_per_target_and_records_the_status(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SC-2 / D-05. The rows the RPC receives are the days the founder approved (and
+        their values are the NAV-rolled returns worked by hand above), the gaps it is told to
+        expect are the stored ones it must compare-and-set against, and the narrowed gaps
+        are the Python computation the RPC will check against its own."""
+        fingerprint = await _calibrate_fingerprint(monkeypatch)
+        world, db, _ = _standard(monkeypatch)
+
+        outcome = await _run(_meta("apply", [STRATEGY_ID], approved_fingerprint=fingerprint))
+
+        assert outcome.outcome == DispatchOutcome.DONE and outcome.error_message is None
+        (call,) = _apply_calls(db)
+        assert call["p_strategy_id"] == STRATEGY_ID
+        assert [r["date"] for r in call["p_rows"]] == _daterange("2026-07-10", "2026-08-01")
+        for row in call["p_rows"]:
+            assert row["daily_return"] == pytest.approx(ORACLE.get(row["date"], 0.0), abs=1e-12)
+        assert call["p_expected_gaps"] == [{"from": "2026-07-10", "to": "2026-08-01"}]
+        assert call["p_expected_gaps_after"] == []
+        result = world.result()
+        assert result["stop_class"] is None and result["mode"] == "apply"
+        assert result["strategies"][0]["rpc"] == {"status": "applied", "error_class": None}
+        assert result["strategies"][0]["insert_days"] == GAP_DAY_COUNT
+        assert result["fingerprint"] == fingerprint
+        assert result["d03"] is None
+        # The model database now holds the rows, the narrowed gaps and the reconstructed range.
+        assert set(db.csv_days(STRATEGY_ID)) == set(_daterange("2026-07-10", "2026-08-01"))
+        provenance = db.provenance(STRATEGY_ID)
+        assert provenance["unrecovered_gaps"] == []
+        assert [(r["from"], r["to"], r["source"]) for r in provenance["reconstructed_ranges"]] == [
+            ("2026-07-10", "2026-08-01", SRC)
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_day_a_quarter_does_not_cover_stays_named_and_is_never_a_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SC-4 / TRADESYNC D-02. A stored gap that reaches into a quarter that was not
+        ingested keeps its uncovered days in `gaps_after` and never gets a zero row."""
+        wide = [{"from": "2026-06-20", "to": "2026-08-01", "recorded_at": "2026-10-10T00:00:00Z"}]
+        db = _db_with((STRATEGY_ID, wide))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        (strategy,) = world.result()["strategies"]
+        # The Q3 file covers 07-01 onwards: 31 July days + 1 August day. 06-20..06-30 is Q2.
+        assert strategy["insert_days"] == 32
+        assert strategy["insert_ranges"] == [{"from": "2026-07-01", "to": "2026-08-01"}]
+        assert strategy["gaps_after"] == [{"from": "2026-06-20", "to": "2026-06-30"}]
+        assert strategy["gaps_before"] == [{"from": "2026-06-20", "to": "2026-08-01"}]
+
+    @pytest.mark.asyncio
+    async def test_an_archive_flow_inside_the_gap_moves_the_nav_the_returns_are_rolled_from(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-08: beyond OKX's 90-day deposit retention a transfer bill is an EXTERNAL FLOW,
+        never P&L. A +500 deposit on 07-15 must lift every NAV before it by 500, so the
+        07-10 return is 10 over 9220.5 and not over 9720.5. By hand: nav_end(07-15) = 9730.5,
+        nav_end(07-14) = 9730.5 - 500 = 9230.5, nav_end(07-09) = 9230.5 - 10 = 9220.5. The
+        deposit day itself carries no P&L, so its return is zero (flow is not performance)."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(flows={"2026-07-15": "500"}))
+        preview = await _run(_meta("calibrate", [STRATEGY_ID]))
+        assert preview.outcome == DispatchOutcome.DONE, preview.error_message
+        fingerprint = world.result()["fingerprint"]
+        _install(monkeypatch, db, _standard_live(), q3=_standard_q3(flows={"2026-07-15": "500"}))
+
+        outcome = await _run(_meta("apply", [STRATEGY_ID], approved_fingerprint=fingerprint))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        (call,) = _apply_calls(db)
+        values = {r["date"]: r["daily_return"] for r in call["p_rows"]}
+        assert values["2026-07-10"] == pytest.approx(10 / 9220.5, abs=1e-12)
+        assert values["2026-07-15"] == pytest.approx(0.0, abs=1e-12)
+        assert values["2026-08-01"] == pytest.approx(200 / 9728.5, abs=1e-12)
+
+    @pytest.mark.asyncio
+    async def test_a_live_row_inside_the_gap_is_never_rewritten_and_splits_the_reconstructed_range(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-12: live-derived days always win. A live row already sitting on 07-15 is not in
+        `p_rows`, keeps its stored value byte for byte, and the reconstructed ranges name
+        only the days the archive really supplied (two islands, not one claim over a day it
+        did not write)."""
+        db = _db_with((STRATEGY_ID, GAP_A), csv=[_csv_row(STRATEGY_ID, "2026-07-15", 0.02468)])
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+        preview = await _run(_meta("calibrate", [STRATEGY_ID]))
+        assert preview.outcome == DispatchOutcome.DONE, preview.error_message
+        fingerprint = world.result()["fingerprint"]
+        assert world.result()["strategies"][0]["insert_days"] == GAP_DAY_COUNT - 1
+        _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+
+        outcome = await _run(_meta("apply", [STRATEGY_ID], approved_fingerprint=fingerprint))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        (call,) = _apply_calls(db)
+        assert "2026-07-15" not in [r["date"] for r in call["p_rows"]]
+        assert db.csv_days(STRATEGY_ID)["2026-07-15"] == 0.02468
+        provenance = db.provenance(STRATEGY_ID)
+        assert provenance["unrecovered_gaps"] == []
+        assert [(r["from"], r["to"]) for r in provenance["reconstructed_ranges"]] == [
+            ("2026-07-10", "2026-07-14"), ("2026-07-16", "2026-08-01"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_rpc_refusal_is_rpc_refused_naming_the_position_and_later_targets_are_not_called(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-11. The RPC rolls its own call back on any refusal. The job must say WHICH
+        target was refused (by input position, never a strategy id) and must not carry on
+        to the next target as if nothing happened."""
+        for code in ("P0001", "22023"):
+            db = _db_with((STRATEGY_ID, GAP_A), (STRATEGY_2_ID, GAP_B))
+            both = (STRATEGY_ID, STRATEGY_2_ID)
+            fingerprint = await _calibrate_fingerprint_for(monkeypatch, db_factory=lambda: _db_with(
+                (STRATEGY_ID, GAP_A), (STRATEGY_2_ID, GAP_B)), targets=both)
+            world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=both)
+            db.apply_faults[1] = ("before", _PgError(code, "apply_okx_archive_rebuild: gaps_changed"))
+
+            outcome = await _run(_meta("apply", list(both), approved_fingerprint=fingerprint))
+
+            assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+            assert outcome.error_message == "okx_archive_rebuild: rpc_refused position=0 applied=0"
+            assert db.apply_calls == 1, "the second target must not be called after a refusal"
+            result = world.result()
+            assert result["strategies"][0]["rpc"] == {"status": None, "error_class": "rpc_refused"}
+            assert result["strategies"][1]["rpc"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_after_a_committed_target_reports_the_committed_one_as_applied(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The honest record when target 0 committed and target 1 was refused: position 0 is
+        `applied` in the block and the stop says how many were written, so nobody reads
+        "failed" as "nothing was written"."""
+        both = (STRATEGY_ID, STRATEGY_2_ID)
+        fingerprint = await _calibrate_fingerprint_for(monkeypatch, db_factory=lambda: _db_with(
+            (STRATEGY_ID, GAP_A), (STRATEGY_2_ID, GAP_B)), targets=both)
+        db = _db_with((STRATEGY_ID, GAP_A), (STRATEGY_2_ID, GAP_B))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=both)
+        db.apply_faults[2] = ("before", _PgError("P0001", "apply_okx_archive_rebuild: gaps_changed"))
+
+        outcome = await _run(_meta("apply", list(both), approved_fingerprint=fingerprint))
+
+        assert outcome.error_message == "okx_archive_rebuild: rpc_refused position=1 applied=1"
+        result = world.result()
+        assert result["strategies"][0]["rpc"] == {"status": "applied", "error_class": None}
+        assert result["strategies"][1]["rpc"] == {"status": None, "error_class": "rpc_refused"}
+        assert set(db.csv_days(STRATEGY_ID)) == set(_daterange("2026-07-10", "2026-08-01"))
+        assert db.csv_days(STRATEGY_2_ID) == {}
+
+    @pytest.mark.asyncio
+    async def test_an_already_applied_answer_is_a_no_op_never_a_miss(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A retry of a lost response is answered `already_applied` by the RPC. That is
+        success with nothing written, and it is recorded as that, distinct from `applied`."""
+        fingerprint = await _calibrate_fingerprint(monkeypatch)
+        world, db, _ = _standard(monkeypatch)
+        db.apply_answers[1] = {"status": "already_applied", "inserted": 0, "ranges_added": 0,
+                               "gaps_before": [], "gaps_after": []}
+
+        outcome = await _run(_meta("apply", [STRATEGY_ID], approved_fingerprint=fingerprint))
+
+        assert outcome.outcome == DispatchOutcome.DONE
+        entry = world.result()["strategies"][0]
+        assert entry["rpc"] == {"status": "already_applied", "error_class": None}
+        assert entry["insert_days"] == 0
+
+
+async def _calibrate_fingerprint_for(
+    monkeypatch: pytest.MonkeyPatch, *, db_factory: Callable[[], _Db], targets: tuple[str, ...],
+) -> str:
+    db = db_factory()
+    world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=targets)
+    outcome = await _run(_meta("calibrate", list(targets)))
+    assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+    fingerprint: str = world.result()["fingerprint"]
+    return fingerprint
+
+
+class TestApplyResume:
+    """Per-target RPCs commit independently, so a failure after the first commit must neither
+    block the remaining target nor be reported as "nothing written" (D-11 / D-12)."""
+
+    BOTH = (STRATEGY_ID, STRATEGY_2_ID)
+
+    def _state(self) -> _Db:
+        return _db_with((STRATEGY_ID, GAP_A), (STRATEGY_2_ID, GAP_B))
+
+    async def _preview(self, monkeypatch: pytest.MonkeyPatch, db: _Db) -> dict[str, Any]:
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=self.BOTH)
+        outcome = await _run(_meta("calibrate", list(self.BOTH)))
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        result: dict[str, Any] = world.result()
+        return result
+
+    @pytest.mark.asyncio
+    async def test_a_failure_after_the_first_commit_is_resumed_by_the_same_fingerprint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = self._state()
+        preview = await self._preview(monkeypatch, db)
+        fingerprint = preview["fingerprint"]
+        assert [s["insert_days"] for s in preview["strategies"]] == [23, 14]
+        metadata = _meta("apply", list(self.BOTH), approved_fingerprint=fingerprint)
+
+        # Run 1: target 0 commits; target 1's call fails with a timeout, nothing committed.
+        world1 = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=self.BOTH)
+        db.apply_faults[2] = ("before", httpx.ReadTimeout("timed out"))
+        with pytest.raises(httpx.ReadTimeout):
+            await okx_archive_job.run_okx_archive_rebuild_job(_job(metadata))
+        block = world1.result()
+        assert block["strategies"][0]["rpc"] == {"status": "applied", "error_class": None}
+        assert block["strategies"][1]["rpc"] == {"status": None, "error_class": "rpc_transport"}
+        assert block["stop_class"] is None, "a transport failure is not a stop class"
+        run1_rows = [c["p_rows"] for c in _apply_calls(db)]
+        assert len(run1_rows) == 2
+        assert set(db.csv_days(STRATEGY_ID)) == set(_daterange("2026-07-10", "2026-08-01"))
+        assert db.csv_days(STRATEGY_2_ID) == {}
+
+        # Run 2: same metadata, same fingerprint, fresh fakes over the persisted state.
+        world2 = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=self.BOTH)
+        outcome = await _run(metadata)
+
+        assert outcome.outcome == DispatchOutcome.DONE and outcome.error_message is None
+        result2 = world2.result()
+        assert result2["fingerprint"] == fingerprint, "the planned set is stable across the commit"
+        assert result2["strategies"][0]["rpc"] == {"status": "already_applied", "error_class": None}
+        assert result2["strategies"][0]["insert_days"] == 0
+        assert result2["strategies"][1]["rpc"] == {"status": "applied", "error_class": None}
+        calls = _apply_calls(db)
+        assert [c["p_strategy_id"] for c in calls] == [STRATEGY_2_ID], "target 0 makes NO RPC call"
+        assert calls[0]["p_rows"] == run1_rows[1], "the resumed rows equal the preview's (dates and values)"
+        assert set(db.csv_days(STRATEGY_2_ID)) == set(_daterange("2026-07-12", "2026-07-25"))
+
+        # Run 3 over the completed state: zero RPC calls, DONE.
+        world3 = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=self.BOTH)
+        outcome3 = await _run(metadata)
+        assert outcome3.outcome == DispatchOutcome.DONE
+        assert _apply_calls(db) == []
+        statuses = [s["rpc"]["status"] for s in world3.result()["strategies"]]
+        assert statuses == ["already_applied", "already_applied"]
+
+    @pytest.mark.asyncio
+    async def test_the_dispatcher_classifies_a_transport_failure_as_retryable_never_permanent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The re-raise is what makes the worker retry the job (the re-claim then resumes).
+        A permanent classification would strand the second target for good."""
+        db = self._state()
+        fingerprint = (await self._preview(monkeypatch, db))["fingerprint"]
+        _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=self.BOTH)
+        db.apply_faults[2] = ("before", httpx.ReadTimeout("timed out"))
+
+        outcome = await _run(_meta("apply", list(self.BOTH), approved_fingerprint=fingerprint))
+
+        assert outcome.outcome == DispatchOutcome.FAILED
+        assert outcome.error_kind in ("transient", "unknown")
+
+    @pytest.mark.asyncio
+    async def test_a_calibrate_over_the_partially_applied_state_has_the_same_fingerprint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The planned date set is the same before and after a target commits, which is what
+        lets a re-run after a partial apply match the approval."""
+        db = self._state()
+        original = (await self._preview(monkeypatch, db))["fingerprint"]
+        _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=self.BOTH)
+        db.apply_faults[2] = ("before", httpx.ReadTimeout("timed out"))
+        with pytest.raises(httpx.ReadTimeout):
+            await okx_archive_job.run_okx_archive_rebuild_job(
+                _job(_meta("apply", list(self.BOTH), approved_fingerprint=original))
+            )
+        assert db.csv_days(STRATEGY_ID) != {}
+
+        again = await self._preview(monkeypatch, db)
+
+        assert again["fingerprint"] == original
+        assert [s["insert_days"] for s in again["strategies"]] == [0, 14]
+
+    @pytest.mark.asyncio
+    async def test_a_commit_whose_response_was_lost_is_resumed_without_a_second_write(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The nastiest case: the RPC COMMITTED and the response never arrived (a 5xx or a
+        reset after the commit). The failed call is recorded as a transport failure, and the
+        re-run must find that target already complete instead of sending it again."""
+        db = self._state()
+        fingerprint = (await self._preview(monkeypatch, db))["fingerprint"]
+        metadata = _meta("apply", list(self.BOTH), approved_fingerprint=fingerprint)
+        world1 = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=self.BOTH)
+        db.apply_faults[1] = ("after", httpx.ReadTimeout("response lost"))
+        with pytest.raises(httpx.ReadTimeout):
+            await okx_archive_job.run_okx_archive_rebuild_job(_job(metadata))
+        assert world1.result()["strategies"][0]["rpc"] == {"status": None, "error_class": "rpc_transport"}
+        assert db.csv_days(STRATEGY_ID) != {}, "the commit happened"
+
+        world2 = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=self.BOTH)
+        outcome = await _run(metadata)
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        statuses = [s["rpc"]["status"] for s in world2.result()["strategies"]]
+        assert statuses == ["already_applied", "applied"]
+        assert [c["p_strategy_id"] for c in _apply_calls(db)] == [STRATEGY_2_ID]
+
+    @pytest.mark.asyncio
+    async def test_empty_rows_with_a_changed_gap_delta_stops_rpc_refused_before_any_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Target 1's stored gap lies in a quarter that was not ingested (so its fresh row
+        set is empty) and a LIVE row already sits inside it: its narrowed gaps differ from
+        the stored ones. The RPC refuses an empty `p_rows` by contract, so this cannot be
+        expressed through it. It is decided before the FIRST call and stops the whole apply
+        naming the position, even though target 0 could have been written (D-11)."""
+        q2_gap = [{"from": "2026-06-20", "to": "2026-06-30", "recorded_at": "2026-10-10T00:00:00Z"}]
+        db = _db_with(
+            (STRATEGY_ID, GAP_A), (STRATEGY_2_ID, q2_gap), csv=[_csv_row(STRATEGY_2_ID, "2026-06-25", 0.001)]
+        )
+        preview_world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=self.BOTH)
+        calibrate = await _run(_meta("calibrate", list(self.BOTH)))
+        assert calibrate.outcome == DispatchOutcome.DONE, calibrate.error_message
+        preview = preview_world.result()
+        assert preview["strategies"][1]["insert_days"] == 0
+        assert preview["strategies"][1]["gaps_after"] != preview["strategies"][1]["gaps_before"]
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=self.BOTH)
+
+        outcome = await _run(_meta(
+            "apply", list(self.BOTH), approved_fingerprint=preview["fingerprint"]
+        ))
+
+        assert outcome.error_message == "okx_archive_rebuild: rpc_refused position=1 reason=empty_rows_gap_delta"
+        assert db.apply_calls == 0, "not even target 0 is written"
+        assert db.table_writes == []
+        assert world.result()["strategies"][0]["rpc"] is None
+
+    @pytest.mark.asyncio
+    async def test_an_empty_target_with_nothing_to_narrow_is_never_sent_to_the_rpc(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rebuild target with no stored gap at all has nothing to write and nothing to
+        narrow: it is recorded `already_applied` without an RPC (the RPC refuses an empty
+        `p_rows`), and the other target is still written."""
+        db = _db_with((STRATEGY_ID, GAP_A), (STRATEGY_2_ID, None))
+        preview_world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=self.BOTH)
+        await _run(_meta("calibrate", list(self.BOTH)))
+        fingerprint = preview_world.result()["fingerprint"]
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=self.BOTH)
+
+        outcome = await _run(_meta("apply", list(self.BOTH), approved_fingerprint=fingerprint))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        assert [c["p_strategy_id"] for c in _apply_calls(db)] == [STRATEGY_ID]
+        statuses = [s["rpc"]["status"] for s in world.result()["strategies"]]
+        assert statuses == ["applied", "already_applied"]
+
+
+class TestEvaluationStops:
+    @pytest.mark.parametrize(
+        ("mutate", "stop_class"),
+        [
+            (lambda live: setattr(live, "equity", None), "live_anchor_unusable"),
+            (lambda live: setattr(live, "balance_error", True), "live_anchor_unusable"),
+            (lambda live: setattr(live, "equity", 0.0), "live_anchor_unusable"),
+            (lambda live: setattr(live, "upnl_unreadable", True), "live_anchor_unusable"),
+        ],
+        ids=["no-equity", "balance-error", "dust-equity", "unreadable-upnl"],
+    )
+    @pytest.mark.asyncio
+    async def test_an_unusable_live_anchor_ends_failed_with_zero_writes(
+        self, monkeypatch: pytest.MonkeyPatch, mutate: Callable[[_Live], None], stop_class: str
+    ) -> None:
+        """A rebuild rolls the NAV BACKWARD from today's equity. A heuristic base (a failed
+        balance read, dust, a garbled uPnL) would put a wrong level under every rebuilt
+        day, and the day would look fine. Refused, not guessed."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        mutate(live)
+        world = _install(monkeypatch, db, live, q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message is not None and outcome.error_message.startswith(
+            f"okx_archive_rebuild: {stop_class}"
+        )
+        assert world.result()["stop_class"] == stop_class
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_an_identity_violation_from_the_rebuild_ends_failed_with_zero_writes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-12: prepending archive days must not move a live day. If the core ever
+        disagrees the job stops; here the module's refusal is injected at the seam."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+
+        def _violate(**_kwargs: Any) -> Any:
+            raise okx_archive_job.RebuildRefused("identity_violation")
+
+        monkeypatch.setattr(okx_archive_job, "rebuild_union", _violate)
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message == "okx_archive_rebuild: identity_violation"
+        assert world.result()["stop_class"] == "identity_violation"
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_a_non_usd_ccy_stop_carries_the_per_ccy_census_and_writes_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Founder must-settle: a currency the live path would sum as dollars. The stop must
+        hand the founder the per-currency counts in the result (the runbook reads
+        `census.by_ccy`), never the amount."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        bills = _Bills().realized("2026-07-10", "10").realized("2026-07-11", "3", ccy="BTC")
+        world = _install(monkeypatch, db, _standard_live(), q3=bills.bytes())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message == "okx_archive_rebuild: non_usd_ccy parse=non_usd_ccy"
+        census = world.result()["census"]
+        assert census is not None
+        assert census["by_ccy"] == {"BTC": 1, "USDT": 1}
+        assert census["by_sub_type"] == {"2": 2}
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_subtype_stop_carries_the_per_subtype_census(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        bills = _Bills().realized("2026-07-10", "10").raw(
+            lambda n: f"SWAP,{n},9999,{_noon_ms('2026-07-11')},4,0,5000,0,,,USDT,4,0,cross,BTC-USDT-SWAP,,,,,,,,,,,,,"
+        )
+        world = _install(monkeypatch, db, _standard_live(), q3=bills.bytes())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message == "okx_archive_rebuild: unknown_subtype_nonzero parse=unknown_subtype_nonzero"
+        census = world.result()["census"]
+        assert census["by_sub_type"] == {"2": 1, "9999": 1}
+        assert census["by_ccy"] == {"USDT": 2}
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_a_target_with_no_analytics_row_is_refused_before_anything_is_written(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(
+            monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=(STRATEGY_ID, STRATEGY_2_ID)
+        )
+        fingerprint = "c" * 64
+
+        outcome = await _run(_meta("apply", [STRATEGY_ID, STRATEGY_2_ID], approved_fingerprint=fingerprint))
+
+        assert outcome.error_message == "okx_archive_rebuild: rpc_refused position=1 reason=no_analytics_row"
+        assert db.apply_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_a_malformed_stored_provenance_is_refused_not_guessed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        db.tables["strategy_analytics"][0]["series_provenance"]["unrecovered_gaps"] = [
+            {"from": "2026-07-10", "to": "not-a-date"}
+        ]
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message == (
+            "okx_archive_rebuild: rpc_refused position=0 reason=unrecovered_gaps_malformed"
+        )
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            {"rebuild_strategy_ids": [STRATEGY_ID, STRATEGY_ID]},
+            {"zero_check_strategy_ids": [STRATEGY_ID]},
+        ],
+        ids=["duplicate-rebuild-target", "target-also-zero-checked"],
+    )
+    @pytest.mark.asyncio
+    async def test_contradictory_target_lists_are_invalid_input(
+        self, monkeypatch: pytest.MonkeyPatch, metadata: dict[str, Any]
+    ) -> None:
+        """A strategy listed twice would be rebuilt twice, and one that is both rebuilt and
+        zero-checked contradicts D-03 (read-only on a strategy that is NOT rebuilt)."""
+        world, db, _ = _standard(monkeypatch)
+        outcome = await _run({"mode": "calibrate", "rebuild_strategy_ids": [STRATEGY_ID], **metadata})
+        assert outcome.error_message == "okx_archive_rebuild: invalid_input"
+        assert world.all_calls == []
+
+
+class TestInformationNeverGates:
+    @pytest.mark.asyncio
+    async def test_stored_vs_core_disagreement_is_reported_and_changes_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`info.stored_vs_core` tells the founder whether the stored live series still
+        matches what the derive would write today. A disagreement is information: the
+        outcome, the rows and the fingerprint must be identical to a run with no disagreement."""
+        agreeing = _db_with((STRATEGY_ID, GAP_A), csv=[
+            _csv_row(STRATEGY_ID, "2026-08-02", 0.5),  # the first live day is never compared
+            _csv_row(STRATEGY_ID, "2026-08-03", -50 / 10028.5),
+            _csv_row(STRATEGY_ID, "2026-09-15", 21.5 / 9978.5),
+        ])
+        disagreeing = _db_with((STRATEGY_ID, GAP_A), csv=[
+            _csv_row(STRATEGY_ID, "2026-08-03", -50 / 10028.5),
+            _csv_row(STRATEGY_ID, "2026-09-15", 0.0301),  # 0.0021545... expected
+        ])
+        out: list[dict[str, Any]] = []
+        for db in (agreeing, disagreeing):
+            world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+            outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+            assert outcome.outcome == DispatchOutcome.DONE
+            out.append(world.result())
+
+        assert out[0]["info"]["stored_vs_core"] == {"days_compared": 2, "days_over_cent": 0, "first_offending": []}
+        assert out[1]["info"]["stored_vs_core"] == {
+            "days_compared": 2, "days_over_cent": 1, "first_offending": ["2026-09-15"]
+        }
+        assert out[0]["fingerprint"] == out[1]["fingerprint"]
+        assert out[0]["strategies"] == out[1]["strategies"]
+
+    @pytest.mark.asyncio
+    async def test_excluded_classes_flows_and_bal_continuity_are_reported_never_gated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-09: excluded-class totals, archive-vs-live flow totals and `bal` continuity are
+        information. An OPTION row's P&L, a flow the live side does not have and a broken
+        balance chain must not stop the run, and must be visible."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        bills = (
+            _Bills()
+            .realized("2026-07-10", "10").realized("2026-08-01", "200").realized("2026-08-02", "97.5")
+            .realized("2026-08-03", "-50").realized("2026-09-15", "20")
+            .realized("2026-07-21", "7", inst="OPTION")
+            .funding("2026-07-20", "-2").funding("2026-09-15", "1.5")
+            .flow("2026-07-05", "1000").flow("2026-09-01", "250")
+        )
+        world = _install(monkeypatch, db, _standard_live(), q3=bills.bytes())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        result = world.result()
+        assert result["excluded"] == {"excluded_by_month": {"2026-07": {"OPTION": "7"}}}
+        info = result["info"]
+        # One archive flow (09-01, +250) lies in the window; the live side has none.
+        assert info["flow_totals_overlap"] == {"archive": "250", "live": "0"}
+        assert set(info["bal_continuity"]) == {"USDT"}
+        assert info["bal_continuity"]["USDT"]["checked"] > 0
+        # Gap days with archive activity: 07-10 (realized), 07-20 (funding), 08-01 (realized).
+        # The 07-05 flow is before the gap and the OPTION row is an excluded class, so of the
+        # 23 gap days 3 are active and 20 are real quiet zeros.
+        assert info["gap_days_active"] == 3 and info["gap_days_quiet"] == 20
+        assert info["archive_only_in_live_reach"] == []
+
+    @pytest.mark.asyncio
+    async def test_archive_realized_balance_vs_rolled_nav_is_reported_with_a_diff(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE
+        info = world.result()["info"]
+        assert info["first_live_day_differs"] in (True, False)
+        assert info["archive_days_prepended"] == GAP_DAY_COUNT
+        nav = info["realized_balance_vs_rolled_nav"]
+        # nav_end(08-01) by the hand roll above is 9928.5; the archive balance is a fixture
+        # constant (5000 on every row), so the two differ by exactly 4928.5.
+        assert nav["day"] == "2026-08-01"
+        assert nav["rolled_nav"] == "9928.5"
+        assert nav["archive_balance_usd_family"] == "5000"
+        assert nav["diff"] == "-4928.5"
+
+
+class TestResultShape:
+    """Result shape v1 paths plans 12, 14 and 15 and the runbook read. A rename is a contract
+    change in all of them, so each path and type is pinned here."""
+
+    LEG_KEYS = {"ok", "days_compared", "max_abs_diff", "window_total_diff", "days_over_half_cent",
+                "days_over_cent", "first_offending", "misses"}
+
+    def _check_evaluation_keys(self, result: dict[str, Any], *, mode: str) -> None:
+        assert set(result) == {
+            "result_version", "mode", "stop_class", "account", "subtypes", "quarters", "census",
+            "reconcile", "excluded", "info", "d03", "strategies", "fingerprint",
+        }
+        assert result["result_version"] == 1 and result["mode"] == mode
+        reconcile = result["reconcile"]
+        assert set(reconcile) == {"window", "excluded_boundary_day", "realized", "funding"}
+        assert set(reconcile["window"]) == {"from", "to"}
+        for leg in ("realized", "funding"):
+            assert set(reconcile[leg]) == self.LEG_KEYS
+            assert isinstance(reconcile[leg]["ok"], bool)
+            assert isinstance(reconcile[leg]["days_compared"], int)
+            assert isinstance(reconcile[leg]["days_over_half_cent"], int)
+            assert isinstance(reconcile[leg]["days_over_cent"], int)
+            assert isinstance(reconcile[leg]["max_abs_diff"], str)
+            assert isinstance(reconcile[leg]["window_total_diff"], str)
+            assert isinstance(reconcile[leg]["first_offending"], list)
+        info = result["info"]
+        assert set(info) == {
+            "bal_continuity", "flow_totals_overlap", "realized_balance_vs_rolled_nav",
+            "first_live_day_differs", "archive_days_prepended", "gap_days_active",
+            "gap_days_quiet", "archive_only_in_live_reach", "stored_vs_core",
+        }
+        assert isinstance(info["gap_days_active"], int) and isinstance(info["gap_days_quiet"], int)
+        assert isinstance(info["archive_only_in_live_reach"], list)
+        assert set(info["stored_vs_core"]) == {"days_compared", "days_over_cent", "first_offending"}
+        assert set(info["flow_totals_overlap"]) == {"archive", "live"}
+        assert isinstance(info["first_live_day_differs"], bool)
+        assert set(result["excluded"]) == {"excluded_by_month"}
+        for entry in result["strategies"]:
+            assert set(entry) == {"position", "insert_days", "insert_ranges", "gaps_before",
+                                  "gaps_after", "rpc"}
+            assert isinstance(entry["position"], int) and isinstance(entry["insert_days"], int)
+            assert all(set(r) == {"from", "to"} for r in entry["insert_ranges"])
+        assert isinstance(result["fingerprint"], str) and HEX64.fullmatch(result["fingerprint"])
+        json.dumps(result)  # plain JSON: no Decimal, no datetime
+
+    @pytest.mark.asyncio
+    async def test_a_clean_calibrate_result_carries_every_evaluation_path_with_its_type(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A), (STRATEGY_2_ID, None), csv=[_csv_row(STRATEGY_2_ID, "2026-07-15", 0.0)])
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=(STRATEGY_ID, STRATEGY_2_ID))
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID], zero_check_strategy_ids=[STRATEGY_2_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE
+        result = world.result()
+        self._check_evaluation_keys(result, mode="calibrate")
+        assert result["d03"] == {"checked_days": 1, "hits": []}
+        assert all(s["rpc"] is None for s in result["strategies"])
+
+    @pytest.mark.asyncio
+    async def test_a_clean_apply_result_carries_every_path_and_a_status_per_target(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fingerprint = await _calibrate_fingerprint(monkeypatch)
+        world, db, _ = _standard(monkeypatch)
+
+        outcome = await _run(_meta("apply", [STRATEGY_ID], approved_fingerprint=fingerprint))
+
+        assert outcome.outcome == DispatchOutcome.DONE
+        result = world.result()
+        self._check_evaluation_keys(result, mode="apply")
+        assert result["d03"] is None
+        assert [s["rpc"]["status"] for s in result["strategies"]] in (["applied"], ["already_applied"])
+        assert all(set(s["rpc"]) == {"status", "error_class"} for s in result["strategies"])
+
+    @pytest.mark.asyncio
+    async def test_a_d03_hit_carries_the_hit_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A), (STRATEGY_2_ID, None), csv=[_csv_row(STRATEGY_2_ID, "2026-07-15", 0.0)])
+        world = _install(
+            monkeypatch, db, _standard_live(), q3=_standard_q3(realized={"2026-07-15": "2.5"}),
+            targets=(STRATEGY_ID, STRATEGY_2_ID),
+        )
+        await _run(_meta("calibrate", [STRATEGY_ID], zero_check_strategy_ids=[STRATEGY_2_ID]))
+        (hit,) = world.result()["d03"]["hits"]
+        assert set(hit) == {"date", "stored_return", "archive_realized", "archive_funding"}
+        assert isinstance(hit["stored_return"], float) and isinstance(hit["archive_realized"], str)
+
+
+class TestNeverEnqueuesAndNeverLeaks:
+    def test_the_job_never_calls_enqueue_compute_job(self) -> None:
+        """D-07: the rebuilt rows join the next derive-then-compute chain or the Wave 5
+        consolidated recompute. A worker that enqueued analytics itself would publish a
+        changed headline at a moment the founder did not choose."""
+        with open(okx_archive_job.__file__, encoding="utf-8") as handle:
+            code = [ln for ln in handle.read().splitlines() if not ln.lstrip().startswith("#")]
+        assert [ln for ln in code if "enqueue_compute_job" in ln] == []
+
+    @pytest.mark.asyncio
+    async def test_a_whole_calibrate_and_apply_never_enqueue_anything(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Behavioural twin of the source check: across a calibrate and an apply the only
+        RPCs ever called are the progress write and the one apply RPC."""
+        fingerprint = await _calibrate_fingerprint(monkeypatch)
+        world, db, _ = _standard(monkeypatch)
+        await _run(_meta("apply", [STRATEGY_ID], approved_fingerprint=fingerprint))
+        assert {n for n, _ in db.rpcs} == {PROGRESS, APPLY_RPC}
+
+    @pytest.mark.asyncio
+    async def test_no_amount_reaches_a_log_or_last_error_on_any_path(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """T-167.1.2.2.2.1-22: amounts live only in the database result object. Run the
+        miss path (which knows exactly which amounts disagree) and read everything that
+        left the job."""
+        caplog.set_level(logging.DEBUG)
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        live.realized["2026-09-15"] = 20.011
+        world = _install(monkeypatch, db, live, q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        leaked = caplog.text + (outcome.error_message or "")
+        for amount in ("20.011", "0.011", "97.5", "9728.5", "10000"):
+            assert amount not in leaked, f"{amount} leaked"
+        assert world.result()["stop_class"] == "reconcile_miss"

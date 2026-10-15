@@ -204,8 +204,8 @@ def _utc_today() -> date:
 
 
 MODES: Final[tuple[str, ...]] = ("preflight", "calibrate", "apply")
-#: Modes accepted so far. Plan 16 added ``calibrate``; ``apply`` is the second task of plan 08.
-ACCEPTED_MODES: Final[tuple[str, ...]] = ("preflight", "calibrate")
+#: Every mode is accepted: plan 16 added ``calibrate``, plan 08 adds ``apply``.
+ACCEPTED_MODES: Final[tuple[str, ...]] = MODES
 _QUARTER_LABELS: Final[tuple[str, ...]] = ("Q1", "Q2", "Q3", "Q4")
 _MAX_QUARTERS: Final[int] = 4
 _FINGERPRINT_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
@@ -253,6 +253,10 @@ class _Stop(Exception):
         super().__init__(stop_class)
         self.stop_class = stop_class
         self.detail = detail
+        #: The Result shape v1 ``census`` of the file that caused this stop, for the two
+        #: classification stops the founder must see the per-currency / per-subType counts
+        #: of (``non_usd_ccy``, ``unknown_subtype_nonzero``). Counts only, never an amount.
+        self.census: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +355,8 @@ async def _finish_stop(
     A failed result write is logged and swallowed on this path: the stop class already
     rides in ``last_error``, and retrying a refusal would only repeat it."""
     result["stop_class"] = stop.stop_class
+    if stop.census is not None:
+        result["census"] = stop.census
     logger.warning("%s", _error_text(stop.stop_class, stop.detail))
     try:
         await _write_result(supabase, job, result)
@@ -464,7 +470,7 @@ def _read_job_input(job: Mapping[str, Any]) -> _JobInput:
     ):
         raise _invalid("approved_fingerprint_shape")
 
-    if mode == "calibrate":
+    if mode in ("calibrate", "apply"):
         # Contract per-mode rules: the strategies to rebuild are required (a calibration of
         # nothing proves nothing). A strategy listed twice would be rebuilt twice, and a
         # strategy both rebuilt and zero-checked contradicts D-03 (read-only on a strategy
@@ -479,6 +485,16 @@ def _read_job_input(job: Mapping[str, Any]) -> _JobInput:
         # The fingerprint belongs to ``apply`` only.
         if fingerprint is not None:
             raise _invalid("approved_fingerprint_not_for_mode")
+    if mode == "apply":
+        # D-03 is a calibrate check; an apply carrying the key means the operator mixed up
+        # the modes (present at all, even empty, is refused).
+        if metadata.get("zero_check_strategy_ids") is not None:
+            raise _invalid("zero_check_not_for_mode")
+        if fingerprint is None:
+            # Raised here, before any key or exchange work: an apply that cannot name what
+            # the founder approved must not wait hours for a file first.
+            raise _Stop("fingerprint_missing")
+
     targets = tuple(dict.fromkeys([*rebuild, *zero_check]))
     return _JobInput(
         mode=mode,
@@ -1084,6 +1100,43 @@ async def _ingest_quarter(
     return parsed
 
 
+def _stop_census(files: list[ArchiveFile]) -> dict[str, Any]:
+    """The Result shape v1 ``census`` of files that stopped in classification.
+
+    ``aggregate_archive`` raises BEFORE it returns a census, and its stop detail is
+    deliberately not echoed (file-derived labels). The two stops where the founder must see
+    the per-currency / per-subType picture to decide (``non_usd_ccy``,
+    ``unknown_subtype_nonzero``) therefore get the same counts the clean census carries,
+    computed here from the same de-duplicated rows. Counts only, never an amount; a label
+    that is not a short plain token is merged into ``(malformed)`` as everywhere else."""
+    unique: dict[str, Any] = {}
+    for file in files:
+        for row in file.rows:
+            unique.setdefault(row.bill_id, row)
+    by_ccy: Counter[str] = Counter()
+    by_inst: Counter[str] = Counter()
+    by_sub: Counter[str] = Counter()
+    unknown_zero = 0
+    for row in unique.values():
+        by_ccy[row.ccy or _BLANK_LABEL] += 1
+        by_inst[row.inst_type or _BLANK_LABEL] += 1
+        by_sub[row.sub_type or _BLANK_LABEL] += 1
+        if SUBTYPE_BUCKETS.get(row.sub_type, Bucket.UNKNOWN) is Bucket.UNKNOWN and not (
+            row.pnl != 0 or row.fee != 0 or row.bal_chg != 0
+        ):
+            unknown_zero += 1
+    return {
+        "by_ccy": _safe_counts(by_ccy),
+        "by_inst_type": _safe_counts(by_inst),
+        "by_sub_type": _safe_counts(by_sub),
+        "unknown_zero_effect": unknown_zero,
+    }
+
+
+#: Classification stops whose result block carries the file's census (see ``_stop_census``).
+_CENSUS_ON_STOP: Final[frozenset[str]] = frozenset({"non_usd_ccy", "unknown_subtype_nonzero"})
+
+
 async def _census_of(
     files: list[ArchiveFile], live_types: Mapping[str, str]
 ) -> tuple[dict[str, Any], ArchiveAggregate]:
@@ -1092,7 +1145,10 @@ async def _census_of(
     try:
         aggregate = await asyncio.to_thread(aggregate_archive, files, live_types)
     except ArchiveParseError as exc:
-        raise _parse_stop(exc) from None
+        stop = _parse_stop(exc)
+        if exc.stop_class in _CENSUS_ON_STOP:
+            stop.census = _stop_census(files)
+        raise stop from None
     census = aggregate.census
     return (
         {
@@ -1530,6 +1586,39 @@ def _plan_target(
     )
 
 
+# ----- D-03 --------------------------------------------------------------------------------
+
+async def _d03_check(
+    supabase: Any, zero_check_ids: tuple[str, ...], aggregate: ArchiveAggregate
+) -> dict[str, Any]:
+    """D-03, read-only: every stored 0.0-return day of each zero-check strategy that lies
+    inside a verified quarter is compared with the archive. A day whose archive realized or
+    funding sum is nonzero at the cent is a hit. Nothing is ever rewritten."""
+    covered = aggregate.covered_days
+    first, last = min(covered), max(covered)
+    checked = 0
+    hits: list[dict[str, Any]] = []
+    for strategy_id in zero_check_ids:
+        for row in await _read_daily_returns(supabase, strategy_id, first, last):
+            day, value = str(row["date"]), row.get("daily_return")
+            if day not in covered or value is None or float(value) != 0.0:
+                continue
+            checked += 1
+            realized = aggregate.realized_by_day.get(day, Decimal(0))
+            funding = aggregate.funding_by_day.get(day, Decimal(0))
+            if _cent_nonzero(realized) or _cent_nonzero(funding):
+                hits.append(
+                    {
+                        "date": day,
+                        "stored_return": float(value),
+                        "archive_realized": _dec(realized),
+                        "archive_funding": _dec(funding),
+                    }
+                )
+    hits.sort(key=lambda h: h["date"])
+    return {"checked_days": checked, "hits": hits}
+
+
 # ----- information readings (never gates) -------------------------------------------------
 
 def _balance_vs_nav(
@@ -1684,6 +1773,16 @@ async def _evaluate(
     live = await _live_reference(exchange, supabase, api_key_id)
     windows = _reconcile(result, aggregate, live, quarters)
 
+    if inp.mode == "calibrate":
+        # D-03 is a calibrate check; apply refuses the key at input.
+        result["d03"] = await _d03_check(supabase, inp.zero_check_strategy_ids, aggregate)
+        if result["d03"]["hits"]:
+            dates = [h["date"] for h in result["d03"]["hits"]]
+            raise _Stop(
+                "d03_zero_day_has_archive_pnl",
+                f"hits={len(dates)} first={dates[0]} last={dates[-1]}",
+            )
+
     if live.upnl_unreadable and not (
         live.balance_error
         or live.equity is None
@@ -1795,6 +1894,108 @@ async def _evaluate(
     return _Evaluation(fingerprint=fingerprint, plans=plans)
 
 
+# ----- apply: the only write path (D-05, D-11, D-12) ----------------------------------------
+
+def _is_refusal(exc: BaseException) -> bool:
+    """The RPC's own refusals: 22023 (malformed input, row outside every stored gap, a missing
+    ``strategy_analytics`` row) and P0001 (``gaps_changed``, ``gaps_after_mismatch``). By the
+    SQLSTATE the driver surfaces, never by message."""
+    return getattr(exc, "code", None) in ("22023", "P0001")
+
+
+def _already_complete(plan: _TargetPlan) -> bool:
+    """Resumability rule 3: nothing left to write and nothing left to narrow. The RPC refuses
+    an empty ``p_rows`` by contract, so such a target is never sent."""
+    return not plan.rows and plan.expected_after == plan.stored_gaps
+
+
+async def _apply_targets(
+    supabase: Any, job: Mapping[str, Any], plans: list[_TargetPlan], result: dict[str, Any]
+) -> None:
+    """Call ``apply_okx_archive_rebuild`` once per target, in input order, recording each
+    answer in ``strategies[i].rpc``. Everything evaluation can decide has been decided before
+    this runs, so a stop here is the RPC's own refusal (``rpc_refused``, naming the position)
+    or a transport failure, which writes the per-target record and re-raises for the worker to
+    retry (the re-claim resumes through ``_already_complete``)."""
+    strategies = result["strategies"]
+
+    # A target the RPC cannot express (rows empty, gaps would still change: live rows filled
+    # gap days since the read) is decided here, before the FIRST call, and writes nothing.
+    for plan in plans:
+        if not plan.rows and not _already_complete(plan):
+            raise _refused(plan.position, "empty_rows_gap_delta")
+
+    for plan in plans:
+        entry = strategies[plan.position]
+        if _already_complete(plan):
+            entry["insert_days"] = 0
+            entry["insert_ranges"] = []
+            entry["rpc"] = {"status": "already_applied", "error_class": None}
+            continue
+
+        def _rpc(p: _TargetPlan = plan) -> Any:
+            return supabase.rpc(
+                "apply_okx_archive_rebuild",
+                {
+                    "p_strategy_id": p.strategy_id,
+                    "p_rows": p.rows,
+                    "p_expected_gaps": p.stored_gaps,
+                    "p_expected_gaps_after": p.expected_after,
+                },
+            ).execute()
+
+        try:
+            response = await db_execute(_rpc)
+            answer = response.data
+            status = answer.get("status") if isinstance(answer, Mapping) else None
+            if status not in ("applied", "already_applied"):
+                raise RuntimeError("apply_okx_archive_rebuild: unreadable answer")
+        except asyncio.CancelledError:
+            raise  # never swallow cancellation
+        except Exception as exc:  # noqa: BLE001
+            if _is_refusal(exc):
+                logger.warning(
+                    "okx_archive_rebuild: apply_okx_archive_rebuild refused position %d (%s): %s",
+                    plan.position,
+                    getattr(exc, "code", None),
+                    scrub_freeform_string(str(exc))[:200],
+                )
+                entry["rpc"] = {"status": None, "error_class": "rpc_refused"}
+                applied = sum(1 for s in strategies if (s["rpc"] or {}).get("status") == "applied")
+                raise _Stop("rpc_refused", f"position={plan.position} applied={applied}") from None
+            # Not a stop class: a timeout, a connection error or a 5xx may have arrived after
+            # the commit. Record where each target stands, then let the worker's own error
+            # classification retry; the re-claim resumes through rule 3.
+            entry["rpc"] = {"status": None, "error_class": "rpc_transport"}
+            logger.error(
+                "okx_archive_rebuild: apply_okx_archive_rebuild transport failure at position %d (%s)",
+                plan.position,
+                type(exc).__name__,
+            )
+            try:
+                await _write_result(supabase, job, result)
+            except asyncio.CancelledError:
+                raise
+            except Exception as write_exc:  # noqa: BLE001
+                logger.error(
+                    "okx_archive_rebuild: the per-target record could not be written (%s)",
+                    type(write_exc).__name__,
+                )
+            raise
+        entry["rpc"] = {"status": status, "error_class": None}
+        if status == "already_applied":
+            entry["insert_days"] = 0
+            entry["insert_ranges"] = []
+        elif answer.get("inserted") != len(plan.rows):
+            # D-12 at work: a live day appeared since the read and kept its row. Counts only.
+            logger.warning(
+                "okx_archive_rebuild: position %d inserted %s of %d planned rows",
+                plan.position,
+                answer.get("inserted"),
+                len(plan.rows),
+            )
+
+
 async def _run_evaluation(
     supabase: Any,
     job: Mapping[str, Any],
@@ -1804,10 +2005,16 @@ async def _run_evaluation(
     quarter_entries: list[dict[str, Any]],
     result: dict[str, Any],
 ) -> None:
-    """Calibrate: evaluate and report. Nothing is written but the result (the caller)."""
-    await _evaluate(
+    """Calibrate and apply: evaluate, then (apply only) gate on the approved fingerprint and
+    write. The fingerprint comparison, like every evaluation stop, precedes the first RPC."""
+    evaluation = await _evaluate(
         supabase, exchange, str(job.get("api_key_id")), inp, ingested, quarter_entries, result
     )
+    if inp.mode != "apply":
+        return
+    if inp.approved_fingerprint != evaluation.fingerprint:
+        raise _Stop("fingerprint_mismatch")
+    await _apply_targets(supabase, job, evaluation.plans, result)
 
 
 # ---------------------------------------------------------------------------
@@ -1853,7 +2060,7 @@ async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
                     supabase, job, min(waits),
                     f"{KIND}: waiting quarters_ready={ready}/{len(steps)}",
                 )
-            if inp.mode == "calibrate":
+            if inp.mode in ("calibrate", "apply"):
                 ingested = await _ingest_all(exchange, quarters, steps, live_types, result)
                 await _run_evaluation(
                     supabase, job, exchange, inp, ingested, quarters, result
