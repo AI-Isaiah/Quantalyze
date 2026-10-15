@@ -9,6 +9,8 @@
 - `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-15` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.132.2.0 → 0.132.2.1.
 - The gates on the composed tree, verbatim: `baseline-currency: carried=305 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 132 — MATCH 129, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
 
+- The `apply_okx_archive_rebuild` `snapshot-only` row in `NAME_SET_RATCHET` (`scripts/dump-sql-functions.ts`) is DELETED on this re-dump, its own clearing condition. With the row gone, `tsx scripts/dump-sql-functions.ts --check` reads `baseline 130 name(s) vs migration-replay 130 name(s) — agree, with 0 ratcheted disagreement(s) carried`, and `baseline-content-drift` reads `findings 0`. Deleting it in the same PR keeps the snapshot ratchet from turning `main` red, which happened after the previous re-dump (#1061, fixed by #1064).
+
 ### Notes
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38817173974` succeeded, and this entry was composed by the `redump-pr` job. Run `38817173974` is the provenance anchor.
 - The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
