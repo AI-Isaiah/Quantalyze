@@ -80,13 +80,15 @@ interface SyncBadgeProps {
    */
   listedExchanges?: readonly string[] | null;
   /**
-   * Phase 170.6.1 / D-05 (review WR-01) — true when the venue read FAILED or
-   * came back malformed, so the venue is UNKNOWN (distinct from `tradeVenues`
-   * being absent because the strategy has no key). The badge then names NO
-   * venue: no label, no "from the exchange" wording in the tooltip, and no
-   * mismatch cue, instead of falling back to the listed exchange, which is the
-   * wrong label SC-2 removes. Ignored when `tradeVenues` is non-empty. Display
-   * only: it never reaches `resolveTradeFetch` (D-07).
+   * Phase 170.6.1 / D-05, D-10 (review WR-01) — true when the venue read
+   * FAILED or came back malformed, so the venue is UNKNOWN (distinct from
+   * `tradeVenues` being absent because the strategy has no key). The label slot
+   * then renders a muted "Venue unavailable" placeholder (D-10), never the
+   * listed exchange, which is the wrong label SC-2 removes. The tooltip still
+   * names no venue (no "from the exchange" wording, no mismatch cue). Ignored
+   * when `tradeVenues` is non-empty. Display only: it never reaches
+   * `resolveTradeFetch`, so the dot, the sentence and the render gate are
+   * identical with and without it (D-07).
    */
   tradeVenuesUnavailable?: boolean;
   className?: string;
@@ -258,8 +260,9 @@ export function SyncBadge({
   // alone, so none of it can move a state (D-07).
   const venueLabels = venueLabelsOf(tradeVenues);
   const venueNames = venueLabels.length > 0 ? venueLabels.join(", ") : null;
-  // A failed or malformed venue read (WR-01) is an UNKNOWN venue: name nothing,
-  // not the listed exchange and not the generic "the exchange".
+  // A failed or malformed venue read (WR-01) is an UNKNOWN venue: the tooltip
+  // names nothing (not the listed exchange, not the generic "the exchange") and
+  // the label slot shows a muted "Venue unavailable" placeholder (D-10).
   const venueUnknown = !venueNames && tradeVenuesUnavailable === true;
   const exchangeLabel = venueUnknown
     ? null
@@ -357,6 +360,25 @@ export function SyncBadge({
       />
       {exchangeLabel ? (
         <span className="font-medium text-text-secondary">{exchangeLabel}</span>
+      ) : venueUnknown ? (
+        // D-10: muted = honest-empty (DESIGN.md). Not red (permanent failure),
+        // not amber (recoverable), and not the real label's font-medium.
+        // Review WR-01 (round 2): it is two words in the sentence's own colour,
+        // so it carries the badge's `Separator` (visible " · ", sr-only comma).
+        // Without it the badge read "Venue unavailable Trades fetched ..." and a
+        // screen reader heard one noun phrase. A real label is a one-word proper
+        // noun in `font-medium` and needs no boundary, so it is left untouched.
+        // Review WR-02 (round 2): `whitespace-nowrap`, because it is the one label
+        // that is two words. In the ~106 px badge column of the pinned name cell it
+        // broke inside itself ("Venue" over "unavailable"; measured at V360, V375
+        // and V390). It breaks only as a unit now. ⛔ Not `flex-wrap` on the root:
+        // that drops the badge's min-content to its widest item, and the table's
+        // auto layout then shrinks the whole name column (measured 138 -> 120 px)
+        // and leaves the dot stranded on its own line.
+        <span data-venue-unavailable="" className="whitespace-nowrap text-text-muted">
+          Venue unavailable
+          <Separator />
+        </span>
       ) : null}
       {sentence}
     </span>

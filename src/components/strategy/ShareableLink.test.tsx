@@ -29,6 +29,7 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -394,13 +395,13 @@ describe("ShareableLink — size (170-05)", () => {
       <ShareableLink strategyId={STRATEGY_ID} published={false} size="sm" />,
     );
     fireEvent.click(screen.getByRole("button"));
-    await waitFor(() =>
-      expect(screen.getByRole("button").textContent).toMatch(
-        /Copy failed — copy the URL manually/,
-      ),
-    );
-    expectSm(screen.getByRole("button"));
-    expect(iconClass(screen.getByRole("button"))).toContain("text-negative");
+    // The Private link dialog now opens beside the row button (it shows the
+    // minted URL), so the row button is named rather than the only button.
+    const rowButton = await screen.findByRole("button", {
+      name: /Copy failed — copy the URL manually/,
+    });
+    expectSm(rowButton);
+    expect(iconClass(rowButton)).toContain("text-negative");
     vi.unstubAllGlobals();
   });
 
@@ -637,4 +638,199 @@ describe("ShareableLink — Manage private link (164.6.6.3.1 D-05)", () => {
     );
     expect(screen.queryByRole("button", { name: MANAGE })).toBeNull();
   }, 10_000);
+});
+
+/**
+ * Phase 170.6.1 plan 06 round 2 — a successful private-link mint must leave a
+ * VISIBLE outcome, whatever the clipboard does.
+ *
+ * THE DEFECT: the mint (the part that creates a live capability URL) succeeded
+ * and the only thing told to the user was a 2-second clipboard flash. If
+ * `writeText` rejected, or never settled (a pending permission prompt), the
+ * button simply went back to "Get private link" / "Manage private link": no
+ * message, and no URL anywhere. The unpublished lane's "Copy failed — copy the
+ * URL manually" pointed at a URL that was never shown, and the Private link
+ * dialog (the published-style "Manage" panel) only offers a second Copy button
+ * and Revoke: it prints no URL.
+ *
+ * THE FIX UNDER TEST: when the copy did not land, the Private link dialog opens
+ * with the URL in a read-only, pre-selected field, and the clipboard wait is
+ * bounded so a hung `writeText` cannot hold the UI silent. A clean copy keeps
+ * today's flash and opens nothing.
+ */
+describe("ShareableLink — a minted private link is never left invisible (170.6.1-06 round 2)", () => {
+  const MINTED_URL = "https://quantalyze.xyz/factsheet-share/tok-en-visible";
+  const FIELD = "Private link URL";
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeAll(async () => {
+    // The dialog mounts the panel through `next/dynamic`; warm the module once
+    // so no test pays the cold import inside a waitFor budget.
+    await import("@/app/factsheet/[id]/v2/FactsheetView");
+  }, 30_000);
+
+  beforeEach(() => {
+    fetchMock = vi.fn(async (input: unknown) => {
+      const url = String(input);
+      if (url.endsWith("/share/revoke")) {
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => ({ url: MINTED_URL }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  function mount() {
+    return render(<ShareableLink strategyId={STRATEGY_ID} published={false} size="sm" />);
+  }
+
+  function clickGet() {
+    fireEvent.click(screen.getByRole("button", { name: "Get private link" }));
+  }
+
+  /** The URL field, read-only, as a screen reader finds it. */
+  async function findField(): Promise<HTMLInputElement> {
+    return (await screen.findByLabelText(FIELD)) as HTMLInputElement;
+  }
+
+  it("clipboard rejects and the fallback fails: the Private link dialog opens and shows the minted URL, selectable", async () => {
+    setClipboard({ writeText: vi.fn().mockRejectedValue(new Error("blocked")) });
+    setExecCommand(vi.fn().mockReturnValue(false));
+    mount();
+
+    clickGet();
+
+    const field = await findField();
+    expect(field.value).toBe(MINTED_URL);
+    expect(field.readOnly).toBe(true);
+    expect(screen.getByText("Private link")).toBeTruthy();
+    // Selectable AND ready to copy: the whole URL is already selected and the
+    // field holds focus, so one Ctrl/Cmd-C finishes the job the clipboard API
+    // refused.
+    expect(document.activeElement).toBe(field);
+    expect(field.selectionStart).toBe(0);
+    expect(field.selectionEnd).toBe(MINTED_URL.length);
+    // The row's own copy message is still honest, and now has a URL to point at.
+    expect(
+      screen.getByRole("button", { name: /Copy failed — copy the URL manually/ }),
+    ).toBeTruthy();
+  });
+
+  it("clipboard NEVER settles: after the bound the dialog opens with the URL instead of leaving the UI silent", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    setClipboard({ writeText: vi.fn().mockReturnValue(new Promise<void>(() => {})) });
+    setExecCommand(vi.fn().mockReturnValue(false));
+    mount();
+
+    clickGet();
+    // The mint resolves; the clipboard is now hanging. Nothing is shown yet,
+    // and nothing may claim a copy that has not happened.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(screen.queryByLabelText(FIELD)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Link copied!/ })).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect((await findField()).value).toBe(MINTED_URL);
+    expect(screen.queryByRole("button", { name: /Link copied!/ })).toBeNull();
+  });
+
+  it("clipboard hangs but the synchronous fallback copies: 'Link copied!' and no dialog", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    setClipboard({ writeText: vi.fn().mockReturnValue(new Promise<void>(() => {})) });
+    setExecCommand(vi.fn().mockReturnValue(true));
+    mount();
+
+    clickGet();
+    // Just past the 3 s bound, inside the 2 s "Link copied!" flash.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3500);
+    });
+
+    expect(screen.getByRole("button", { name: /Link copied!/ })).toBeTruthy();
+    expect(screen.queryByLabelText(FIELD)).toBeNull();
+  });
+
+  it("a clean copy keeps today's flash and opens nothing", async () => {
+    setClipboard({ writeText: vi.fn().mockResolvedValue(undefined) });
+    mount();
+
+    clickGet();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).toMatch(/Link copied!/),
+    );
+    expect(screen.queryByLabelText(FIELD)).toBeNull();
+    expect(document.querySelector("dialog")).toBeNull();
+  });
+
+  it("a failed mint opens no dialog: there is no URL to show", async () => {
+    setClipboard({ writeText: vi.fn().mockResolvedValue(undefined) });
+    fetchMock.mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
+    mount();
+
+    clickGet();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).toMatch(
+        /Couldn't create the link — try again/,
+      ),
+    );
+    expect(screen.queryByLabelText(FIELD)).toBeNull();
+    expect(document.querySelector("dialog")).toBeNull();
+  });
+
+  it("the URL stays reachable through 'Manage private link' after the dialog is closed, and is gone once the link is revoked", async () => {
+    setClipboard({ writeText: vi.fn().mockRejectedValue(new Error("blocked")) });
+    setExecCommand(vi.fn().mockReturnValue(false));
+    mount();
+    clickGet();
+    await findField();
+
+    // Close through the native close (the v0.131.5.3 rule: await it).
+    const closeSpy = vi.spyOn(HTMLDialogElement.prototype, "close");
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(closeSpy).toHaveBeenCalledTimes(1));
+    expect(screen.queryByLabelText(FIELD)).toBeNull();
+
+    // The row now reads Manage (the mint confirmed a live link) and reopens the
+    // dialog with the same URL.
+    await waitFor(
+      () => expect(screen.getByRole("button", { name: "Manage private link" })).toBeTruthy(),
+      { timeout: 6000 },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Manage private link" }));
+    expect((await findField()).value).toBe(MINTED_URL);
+
+    // Revoke it: the link is dead, so the URL must not survive in the row.
+    fireEvent.click(await screen.findByRole("button", { name: "Revoke link" }));
+    fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Get private link" })).toBeTruthy(),
+    );
+    await waitFor(() => expect(closeSpy).toHaveBeenCalledTimes(2));
+
+    // A later mint that copies cleanly must not resurrect the revoked URL.
+    setClipboard({ writeText: vi.fn().mockResolvedValue(undefined) });
+    clickGet();
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).toMatch(/Link copied!/),
+    );
+    await waitFor(
+      () => expect(screen.getByRole("button", { name: "Manage private link" })).toBeTruthy(),
+      { timeout: 4000 },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Manage private link" }));
+    await screen.findByRole("button", { name: "Revoke link" });
+    expect(screen.queryByLabelText(FIELD)).toBeNull();
+  }, 20_000);
 });

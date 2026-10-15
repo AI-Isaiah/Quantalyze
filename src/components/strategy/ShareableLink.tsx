@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import dynamic from "next/dynamic";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
+import { Input } from "@/components/ui/Input";
 
 /**
  * Phase 164 (SHARE-04) — THE ONE SHARE PREDICATE, and its two consequences.
@@ -95,6 +96,37 @@ export async function mintShareUrl(strategyId: string): Promise<string> {
 }
 
 /**
+ * Phase 170.6.1 plan 06 round 2 — how long the async clipboard API gets before
+ * this component stops waiting for it.
+ *
+ * `navigator.clipboard.writeText` can stay pending forever (a permission prompt
+ * nobody answers, a focus-gated browser). Awaited bare, that left the UI
+ * exactly as silent as a click that did nothing, with a live private link
+ * already minted. A timeout is treated as a rejection: the synchronous
+ * `execCommand` fallback gets its turn, and if that fails too the URL is shown.
+ * Three seconds is long enough for a prompt to be read and short enough that
+ * the user is not left wondering whether the click registered.
+ */
+const CLIPBOARD_WAIT_MS = 3000;
+
+async function writeClipboardBounded(text: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("clipboard write timed out")),
+        CLIPBOARD_WAIT_MS,
+      );
+    });
+    // `navigator.clipboard` may be absent: the TypeError is thrown inside this
+    // async function, so the caller sees a rejection like any other refusal.
+    await Promise.race([navigator.clipboard.writeText(text), timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * ⛔ THERE IS DELIBERATELY NO `resolveShareUrl(published, …)` HELPER.
  *
  * An async "give me the URL for either lane" wrapper is the obvious shape and it
@@ -155,6 +187,25 @@ export function ShareableLink({
   // that and drop focus to the body.
   const [modalMounted, setModalMounted] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
+  // Phase 170.6.1 plan 06 round 2 — the freshly minted private URL, held ONLY
+  // when the copy did not land, so the Private link dialog can show it. The
+  // dialog otherwise prints no URL (its own Copy button re-mints and copies), so
+  // without this a failed copy left a live link nobody could read. Cleared when
+  // the link is revoked: the URL is dead then, and a later clean mint must not
+  // resurrect it. Never set for a published strategy (its URL is the public id
+  // URL and has no dialog).
+  const [mintedUrl, setMintedUrl] = useState<string | null>(null);
+  const urlFieldRef = useRef<HTMLInputElement>(null);
+  // Modal's `open` effect (showModal) runs before this one in the same commit,
+  // because a child's effects run first; showModal moves focus to the Close
+  // button, so the field takes focus and selects the URL AFTER it, ready for one
+  // Ctrl/Cmd-C.
+  useEffect(() => {
+    if (panelOpen && mintedUrl) {
+      urlFieldRef.current?.focus();
+      urlFieldRef.current?.select();
+    }
+  }, [panelOpen, mintedUrl]);
   const managing = !published && shareLive;
 
   const [copyFailed, setCopyFailed] = useState(false);
@@ -197,7 +248,7 @@ export function ShareableLink({
       setMinting(false);
     }
     try {
-      await navigator.clipboard.writeText(url);
+      await writeClipboardBounded(url);
       setCopied(true);
       setCopyFailed(false);
       setTimeout(() => setCopied(false), 2000);
@@ -227,6 +278,13 @@ export function ShareableLink({
       // user can copy the URL manually.
       setCopyFailed(true);
       setTimeout(() => setCopyFailed(false), 4000);
+      // Phase 170.6.1 plan 06 round 2 — "copy the URL manually" needs a URL on
+      // screen. The mint succeeded, so open the Private link dialog with it.
+      if (shareAffordanceMode(published) === "mint-token") {
+        setMintedUrl(url);
+        setModalMounted(true);
+        setPanelOpen(true);
+      }
     }
   }, [strategyId, published]);
 
@@ -303,6 +361,22 @@ export function ShareableLink({
         onClose={() => setPanelOpen(false)}
         title="Private link"
       >
+        {panelOpen && mintedUrl && (
+          <div className="mb-4 flex flex-col gap-2">
+            <p className="text-caption text-text-muted">
+              Your private link is live, but this browser would not copy it for
+              you. Select the link below and copy it yourself.
+            </p>
+            <Input
+              ref={urlFieldRef}
+              label="Private link URL"
+              readOnly
+              value={mintedUrl}
+              onFocus={(e) => e.currentTarget.select()}
+              className="font-mono text-caption"
+            />
+          </div>
+        )}
         {panelOpen && (
           <OwnerUnpublishedPanel
             strategyId={strategyId}
@@ -315,7 +389,10 @@ export function ShareableLink({
             // back, so closing in the same tick sets no state after unmount.
             onShareLiveChange={(live) => {
               setShareLive(live);
-              if (!live) setPanelOpen(false);
+              if (!live) {
+                setPanelOpen(false);
+                setMintedUrl(null);
+              }
             }}
           />
         )}

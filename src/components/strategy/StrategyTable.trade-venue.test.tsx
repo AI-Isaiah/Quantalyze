@@ -183,8 +183,8 @@ describe("StrategyTable - the badge names the key's venue (SC-2, D-05)", () => {
   });
 });
 
-describe("StrategyTable - a failed venue read never renders a confident wrong label (review WR-01, SFH-2)", () => {
-  it("a row marked tradeVenuesUnavailable shows NO venue label, not its listed Bybit, and no venue claim in the tooltip", () => {
+describe("StrategyTable - a failed venue read shows a muted 'Venue unavailable', never the listed exchange (D-10, review WR-01, SFH-2)", () => {
+  it("a row marked tradeVenuesUnavailable reads 'Venue unavailable' in the label slot, never its listed Bybit, and names no venue in the tooltip (D-10)", () => {
     render(
       <StrategyTable
         strategies={[
@@ -198,6 +198,13 @@ describe("StrategyTable - a failed venue read never renders a confident wrong la
     );
 
     const badge = badgeOf("Outage Row");
+    // D-10: the label slot holds the muted placeholder, not a blank and not the
+    // listed exchange.
+    const placeholder = badge.querySelector("[data-venue-unavailable]");
+    expect(placeholder).not.toBeNull();
+    expect(placeholder?.firstChild?.textContent).toBe("Venue unavailable");
+    expect(badge.textContent?.split("Venue unavailable").length).toBe(2);
+    // The placeholder must not reuse the real label's font-medium span.
     expect(labelOf(badge)).toBeNull();
     expect(badge.textContent).not.toContain("Bybit");
     const title = badge.getAttribute("title") ?? "";
@@ -220,6 +227,8 @@ describe("StrategyTable - a failed venue read never renders a confident wrong la
         categorySlug="crypto-sma"
       />,
     );
-    expect(labelOf(badgeOf("No Key Row"))).toBe("Bybit");
+    const badge = badgeOf("No Key Row");
+    expect(labelOf(badge)).toBe("Bybit");
+    expect(badge.querySelector("[data-venue-unavailable]")).toBeNull();
   });
 });
