@@ -1407,7 +1407,9 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
       `the ci.yml python job carries ${invocations.length} live pytest invocation(s) (${JSON.stringify(invocations.map((l) => l.t))}); exactly one is allowed (D-07)`,
     ).toBe(1);
     const inv = invocations[0];
-    const ciArgs = inv.t.slice(inv.t.search(INVOCATION) + inv.t.match(INVOCATION)![0].length).trim();
+    const invMatch = INVOCATION.exec(inv.t);
+    if (invMatch === null) throw new Error(`the pytest invocation no longer matches its own filter: ${inv.t}`);
+    const ciArgs = inv.t.slice(invMatch.index + invMatch[0].length).trim();
 
     expect(
       ciArgs,
@@ -1448,7 +1450,9 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
     // (b) PYTEST_ADDOPTS is appended to every pytest command line and a LATER flag wins
     // (`-p no:xdist`, `--cov-fail-under=0`), so it must not be set at workflow, job or step level,
     // nor exported from a run body into $GITHUB_ENV.
-    const header = CI.slice(0, CI.indexOf("\njobs:"));
+    const jobsAt = CI.indexOf("\njobs:");
+    if (jobsAt < 0) throw new Error("ci.yml has no top-level `jobs:` key, so the workflow-level header cannot be isolated");
+    const header = CI.slice(0, jobsAt);
     const addopts = liveLines(`${header}\n${pyBlock}`).filter((l) => l.includes("PYTEST_ADDOPTS"));
     expect(
       addopts,
