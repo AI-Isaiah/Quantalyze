@@ -244,7 +244,10 @@ def _probe() -> dict[str, Any]:
             cwd=str(pathlib.Path(__file__).resolve().parents[1]),
             capture_output=True,
             text=True,
-            timeout=180,
+            # NO `timeout=`, ON PURPOSE: the verdict is the child's exit code and
+            # output, never how long it took. The child is CPU-bound (a child pytest
+            # session took 50-130 s under heavy load), so any clock bound is a bet on
+            # CPU speed. A child that genuinely hangs is stopped by the CI job timeout.
         )
         assert proc.returncode == 0, (
             "the clean-interpreter probe failed to import the app. This is a "

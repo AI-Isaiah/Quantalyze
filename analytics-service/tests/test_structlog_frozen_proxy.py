@@ -158,8 +158,6 @@ _HMAC_URL = (
     "&timestamp=1700000000&signature=" + _LEAK_TOKEN
 )
 
-_SUBPROCESS_TIMEOUT_S = 300
-
 
 def _run_probe(code: str) -> subprocess.CompletedProcess[str]:
     """Run `code` in a FRESH interpreter rooted at analytics-service/.
@@ -175,7 +173,10 @@ def _run_probe(code: str) -> subprocess.CompletedProcess[str]:
         cwd=str(_ANALYTICS_ROOT),
         capture_output=True,
         text=True,
-        timeout=_SUBPROCESS_TIMEOUT_S,
+        # NO `timeout=`, ON PURPOSE: the verdict is the child's exit code and
+        # output, never how long it took. The child is CPU-bound (a child pytest
+        # session took 50-130 s under heavy load), so any clock bound is a bet on
+        # CPU speed. A child that genuinely hangs is stopped by the CI job timeout.
         check=False,
     )
 

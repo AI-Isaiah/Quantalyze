@@ -208,7 +208,7 @@ enforces the thresholds on full-suite numbers. The `frontend` aggregator gates o
 ⛔ **Read the live thresholds from `vitest.config.ts`, never from a number restated here.** They
 are a RATCHET, set a few points under measured actual so a real regression fails CI but noise
 does not. When actual climbs durably, raise them to match. Target is 80%, matching the
-`--cov-fail-under=80` the `analytics-service/` Python suite enforces (`.github/workflows/ci.yml:3819`).
+`--cov-fail-under=80` the `analytics-service/` Python suite enforces (the `python` job's pytest step in `.github/workflows/ci.yml`, cited by symbol: `grep -n 'cov-fail-under' .github/workflows/ci.yml`; the line number this sentence carried until 2026-10-15, `:3819`, had drifted to about `:5600`).
 
 ## SQL gate integrity jobs (v0.77.0.0, Phase 164.3)
 

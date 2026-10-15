@@ -1277,7 +1277,10 @@ def test_the_four_modules_import_in_every_order_in_a_fresh_interpreter() -> None
             cwd=_SERVICE_ROOT,
             capture_output=True,
             text=True,
-            timeout=120,
+            # NO `timeout=`, ON PURPOSE: the verdict is the child's exit code and
+            # output, never how long it took. The child is CPU-bound (a child pytest
+            # session took 50-130 s under heavy load), so any clock bound is a bet on
+            # CPU speed. A child that genuinely hangs is stopped by the CI job timeout.
         )
         return order, ([] if done.returncode == 0 else done.stderr.strip().splitlines()[-1:])
 

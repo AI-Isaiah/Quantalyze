@@ -30,7 +30,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from services.mt5_validation import parse_mt5_credentials
-from tests.limiter_stub import evict_module, patch_shared_limiter
+from tests.limiter_stub import build_shared_limiter_from_real_slowapi, evicted, patch_shared_limiter
 
 _PADDED_LOGIN = " 5550001 "
 _PADDED_PASSWORD = " Inv Pw 7 "  # noqa: S105 (fabricated test fixture, not a secret)
@@ -75,6 +75,8 @@ def exchange_router(monkeypatch):
     slowapi_util_stub = MagicMock()
     slowapi_util_stub.get_remote_address = lambda *a, **k: "1.2.3.4"
 
+    # Build the shared limiter from the REAL slowapi before it is stubbed.
+    build_shared_limiter_from_real_slowapi()
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
     # PYAPI-03: the router imports the limiter SINGLETON, so stub the instance
@@ -83,12 +85,10 @@ def exchange_router(monkeypatch):
 
     monkeypatch.setenv("MT5_ENABLED", "true")
 
-    evict_module("routers.exchange")
-    from routers import exchange as router
+    with evicted("routers.exchange"):
+        from routers import exchange as router
 
-    yield router
-
-    evict_module("routers.exchange")
+        yield router
 
 
 async def test_encrypt_key_d08_stores_a_space_bearing_mt5_password_verbatim(

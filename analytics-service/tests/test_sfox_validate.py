@@ -39,7 +39,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
-from tests.limiter_stub import evict_module, patch_shared_limiter
+from tests.limiter_stub import build_shared_limiter_from_real_slowapi, evicted, patch_shared_limiter
 
 # The EXACT string the TS classifyKeyValidationError matches on
 # (lower.includes("authentication failed")) — byte-identical to
@@ -69,6 +69,8 @@ def exchange_router(monkeypatch):
     slowapi_util_stub = MagicMock()
     slowapi_util_stub.get_remote_address = lambda *a, **k: "1.2.3.4"
 
+    # Build the shared limiter from the REAL slowapi before it is stubbed.
+    build_shared_limiter_from_real_slowapi()
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
 
@@ -84,12 +86,10 @@ def exchange_router(monkeypatch):
     # dedicated fail-closed test below (which delenv's it after this setup).
     monkeypatch.setenv("SFOX_ENABLED", "true")
 
-    evict_module("routers.exchange")
-    from routers import exchange as exchange_router
+    with evicted("routers.exchange"):
+        from routers import exchange as exchange_router
 
-    yield exchange_router
-
-    evict_module("routers.exchange")
+        yield exchange_router
 
 
 def _make_client(get_balances_side_effect=None):

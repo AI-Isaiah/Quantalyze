@@ -55,6 +55,7 @@ from services.mt5_client import Mt5Client
 # is what rots. `tests/` is a package and `pytest.ini` sets `pythonpath = .`, so
 # this import is a plain one — MEASURED to work before it was written.
 from tests.test_mt5_relogin import _HEAL_GUARD_MUTANTS, _heal_guard_defects
+from tests.budget_rendezvous import expire_module_budget_when_reached
 
 # The obviously-fake register, matching `tests/test_mt5_relogin.py` byte for byte.
 _FAKE_LOGIN = "4242424"
@@ -244,6 +245,31 @@ def fast_cadence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(monitor.MT5_SESSION_POLL_INTERVAL_ENV, str(_TEST_CADENCE_S))
 
 
+def _tick_deadline_never_bites(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Take the tick's OWN outer deadline out of the race for one test.
+
+    The tick wraps the heal in `wait_for(heal(...), timeout=interval)` and the
+    cadence doubles as `interval`, so under `fast_cadence` that deadline is 10 ms.
+    The heal's first pool-thread hop on a starved worker can outlast that, the tick
+    is cut before its transition row is written, and (the terminal then being
+    healed) no later tick writes it either: a permanent miss, not a retry. A test
+    about what a COMPLETED tick does must not depend on how fast the pool is.
+
+    Only the heal's `wait_for` is exempted (by coroutine name); the loop's pacing
+    `wait_for(SHUTDOWN.wait(), timeout=interval)` keeps its real timeout. The tick
+    DEADLINE itself is exercised by the tests that name it
+    (`test_a_tick_that_outruns_its_own_cadence_is_BOUNDED_and_logged_distinctly`).
+    """
+    expire_module_budget_when_reached(
+        monkeypatch,
+        monitor,
+        asyncio.Event(),  # never set: the deadline never arms
+        only=lambda aw: getattr(
+            getattr(aw, "cr_code", None), "co_name", ""
+        ) == "heal_mt5_terminal_session",
+    )
+
+
 @pytest.fixture
 def shutdown(monkeypatch: pytest.MonkeyPatch) -> asyncio.Event:
     """A PER-TEST `SHUTDOWN`, never the shared module-level one.
@@ -293,6 +319,7 @@ async def test_CRITERION_2_a_dark_reading_drives_the_heal_with_no_human_and_no_r
     — and wave 5 measured no analytics deployment at all on the day the session
     lapsed, so nothing in the system was able to notice or act for ≥2h34m.
     """
+    _tick_deadline_never_bites(monkeypatch)
     _set_full_env(monkeypatch)
     fake = _install_client(
         monkeypatch,
@@ -304,7 +331,19 @@ async def test_CRITERION_2_a_dark_reading_drives_the_heal_with_no_human_and_no_r
         },
     )
 
-    await _run_until(lambda: "initialize_credentialed" in fake.call_order, shutdown)
+    # ⛔ Wait for the END STATE the assertions read, not for the first sign of it.
+    # `initialize_credentialed` lands in the heal's pool thread, and the `dark` row
+    # is written by a LATER pool-thread hop in the same tick; stopping the loop at
+    # the first one cancelled the tick before the second on a starved worker and
+    # `sink.rows` was empty.
+    await _run_until(
+        lambda: "initialize_credentialed" in fake.call_order
+        and any(
+            r["metadata"]["state"] == mt5_session_episodes.STATE_DARK
+            for r in sink.rows
+        ),
+        shutdown,
+    )
 
     assert "initialize_credentialed" in fake.call_order, (
         "the monitor observed a `-6` and never drove the credentialed heal — the "
@@ -335,10 +374,16 @@ async def test_CRITERION_3_an_already_authorized_terminal_is_never_sent_a_creden
     `_raise_last` exposure — on a schedule, forever. The measurement is the FAKE's
     own record: across many ticks, not ONE call carried a `login` kwarg.
     """
+    _tick_deadline_never_bites(monkeypatch)
     _set_full_env(monkeypatch)
     fake = _install_client(monkeypatch, {"initialize": True})
 
-    await _run_until(lambda: len(fake.call_order) >= 3, shutdown)
+    # Wait for the transition row as well as the third reading: the row is written
+    # by a later pool-thread hop than the reading itself, and `sink.rows` is
+    # asserted below.
+    await _run_until(
+        lambda: len(fake.call_order) >= 3 and len(sink.rows) >= 1, shutdown
+    )
 
     assert fake.call_order, "the loop never touched the terminal at all"
     assert all(c == "initialize" for c in fake.call_order), fake.call_order
@@ -632,8 +677,16 @@ async def test_a_tick_that_outruns_its_own_cadence_is_BOUNDED_and_logged_distinc
 
     started = asyncio.get_running_loop().time()
 
+    park_s = 100.0
+    cut_short = False
+
     async def _never_finishes(*, source: str, poll_interval_s: float | None) -> None:
-        await asyncio.sleep(100.0)
+        nonlocal cut_short
+        try:
+            await asyncio.sleep(park_s)
+        except asyncio.CancelledError:
+            cut_short = True
+            raise
 
     monkeypatch.setattr(monitor, "heal_mt5_terminal_session", _never_finishes)
 
@@ -641,8 +694,13 @@ async def test_a_tick_that_outruns_its_own_cadence_is_BOUNDED_and_logged_distinc
         await monitor.run_mt5_session_monitor_tick()
 
     elapsed = asyncio.get_running_loop().time() - started
-    assert elapsed < 2.0, (
-        f"the tick took {elapsed:.2f}s against a {cadence_s}s cadence — an "
+    # ⛔ A RECORD plus a DEADMAN, not a stopwatch. The heal parks for `park_s`; an
+    # UNBOUNDED call runs it to completion (never cancelled, elapsed >= park_s), a
+    # bounded one is CANCELLED by the tick's own deadline. A tight elapsed bound (this
+    # was 2.0 s) raced a starved runner's scheduling while the deadline was working.
+    assert cut_short and elapsed < park_s / 2, (
+        f"the tick took {elapsed:.2f}s against a {cadence_s}s cadence "
+        f"(heal cancelled by the deadline: {cut_short}) — an "
         "UNBOUNDED heal call is exactly the silent cadence stretch WR-06 exists "
         "to bound"
     )
@@ -685,7 +743,10 @@ async def test_the_loop_exits_on_SHUTDOWN_well_inside_the_ten_second_gather(
     shutdown.set()
     await asyncio.wait_for(task, timeout=_LIFESPAN_GATHER_BUDGET_S)
     elapsed = asyncio.get_running_loop().time() - started
-    assert elapsed < 1.0, (
+    # "Well inside" the gather, as a DEADMAN at half its budget: the wait_for above
+    # already RAISES past the full budget, and a loop that sleeps through the 600 s
+    # cadence cannot make either. A 1 s bar raced a starved runner's scheduling.
+    assert elapsed < _LIFESPAN_GATHER_BUDGET_S / 2, (
         f"the loop took {elapsed:.2f}s to notice SHUTDOWN against a 600s cadence "
         f"— it is not sleeping on the event, so every deploy force-cancels it"
     )

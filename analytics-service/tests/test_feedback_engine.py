@@ -1717,7 +1717,14 @@ def test_lazy_import_not_triggered_at_module_load():
         cwd=Path(__file__).parent.parent,  # analytics-service/
         capture_output=True,
         text=True,
-        timeout=15,
+        # ⛔ NO `timeout=`, ON PURPOSE. The verdict is the module set the child reports
+        # (is `services.feedback_engine` in `sys.modules` after `import routers.match`),
+        # never how long the import took. A cold import of the whole router graph is
+        # CPU-bound and took 14-18 s on a starved runner, which broke a 15 s bound in
+        # the lane soak and would break any other number: every clock bound on this
+        # child is a bet on CPU speed. Without one, CPU starvation cannot reach this
+        # test at all; a child that genuinely hangs is stopped by the CI job's own
+        # timeout, not by a clock this test owns.
     )
     assert result.returncode == 0, (
         "services.feedback_engine was imported at module load — import must be "

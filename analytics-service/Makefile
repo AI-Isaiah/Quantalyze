@@ -74,6 +74,9 @@ typecheck:
 test:
 	# SERIAL (v1.9.1 Phase 97): `-n auto --dist loadgroup` deferred — the global-claim
 	# fence tests flake under xdist ordering (see .github/workflows/ci.yml python step).
-	$(PYTEST) --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
+	# (2026-10-14, Phase 164.9.8.1 PYXDIST: parallel now. The deferral above misread the cause: the `shared_test_db` group never formed until the
+	# conftest hook got `tryfirst=True`, and the limiter flake was module pollution fixed in the polluters. The text above is lineage. The argument
+	# string is pinned byte-identical with the ci.yml python step in src/__tests__/local-stack-lane-wiring.test.ts.)
+	$(PYTEST) -n auto --dist loadgroup --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
 
 ci: typecheck test

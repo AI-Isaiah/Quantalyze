@@ -34,6 +34,17 @@ from pathlib import Path
 # fixture) still executes RPCs against the shared TEST project through the
 # wrapped client, so it must still land on the single serialized worker — the
 # same hazard the other four sentinels above exist to catch, one layer up.
+#
+# Phase 164.9.8.1 PYXDIST (2026-10-14): the group above never formed before this
+# phase. The hook below ran AFTER xdist's own worker hook had already turned
+# markers into scheduling keys, so no nodeid carried the `@shared_test_db` suffix
+# and the live fence tests ran concurrently on different workers (the Phase 97
+# flake). `tryfirst=True` makes this marker land first, and
+# `tests/test_xdist_group_is_real.py` proves it on a real distributed run. Two
+# claims in the paragraphs above are lineage: the suite ran serially in CI and
+# `make test` until this phase, and since Phase 164.9.4 the python job reaches a
+# local-stack lane private to its runner, not the shared remote project and not a
+# repo-wide concurrency group.
 _DB_MODULE_SENTINELS = (
     "SUPABASE_TEST_URL",
     "SUPABASE_TEST_SERVICE_KEY",
@@ -54,6 +65,7 @@ def _is_shared_db_module(path: str) -> bool:
     return any(sentinel in source for sentinel in _DB_MODULE_SENTINELS)
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     for item in items:
         if _is_shared_db_module(str(item.fspath)):

@@ -166,7 +166,10 @@ def test_qstats_gate_census_is_printed_on_a_real_run() -> None:
         cwd=SERVICE_ROOT,
         capture_output=True,
         text=True,
-        timeout=300,
+        # NO `timeout=`, ON PURPOSE: the verdict is the child's exit code and
+        # output, never how long it took. The child is CPU-bound (a child pytest
+        # session took 50-130 s under heavy load), so any clock bound is a bet on
+        # CPU speed. A child that genuinely hangs is stopped by the CI job timeout.
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     out_lines = proc.stdout.splitlines()

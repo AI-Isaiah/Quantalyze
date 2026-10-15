@@ -83,11 +83,18 @@ from tests.test_mt5_client_contract import _FakeMt5, _FakeNamedTuple
 #: Nothing is patched, so nothing can be mis-aimed.
 _ABANDON_BOUND_S = 0.05
 
-#: The zombie's bounded park. 5x the abandonment bound, so the sequence
-#: "bound fires → lease releases → marker → gate set" completes with a wide margin
-#: — and if the test ever failed to release the barrier, the worker proceeds on
-#: its own after this and the run REDS instead of hanging.
-_BARRIER_BOUND_S = 0.25
+#: The zombie's DEADMAN park. It is not what orders the scenario (the gate Event
+#: is: the test releases it only after the lease has released and the marker is
+#: logged); it exists so a barrier the test somehow never releases REDS instead of
+#: hanging. ⛔ It used to be 0.25 s, 5x the abandonment bound, which made it a race:
+#: the sequence "bound fires → lease releases → marker → gate set" needs the EVENT
+#: LOOP to run, and a CPU-starved worker that did not get to run it inside 200 ms
+#: after the zombie parked saw the park time out first (`gate_releases == [False]`,
+#: or the bound never firing because the worker had already returned). A deadman
+#: has to dwarf any plausible stall of the loop; 5 s matches the other abandoned-
+#: thread cases in this suite. The cost is that the REJECTED-design regression (a
+#: release that joins the zombie) now reds after this long instead of 0.25 s.
+_BARRIER_BOUND_S = 5.0
 
 #: Bounded wait for the worker to reach the barrier, and for the zombie to finish.
 #: ⭐ The arrival wait removes the ONLY genuine nondeterminism in this test —
@@ -174,7 +181,7 @@ class _SpyMt5(_FakeMt5):
         # scheduled rather than raced.
         #
         # `.wait(timeout)`, never `.wait()`: a test that failed to release this
-        # must RED in a quarter of a second, not stall the shard for the 300s the
+        # must RED at the deadman bound, not stall the shard for the 300s the
         # default executor is joined for. `gate_releases` records WHICH of the two
         # happened, so a timeout-driven proceed is reported as a broken test rather
         # than silently reinterpreted as a product verdict.

@@ -18,7 +18,7 @@ import sys
 from unittest.mock import MagicMock
 
 import pytest
-from tests.limiter_stub import evict_module, patch_shared_limiter
+from tests.limiter_stub import build_shared_limiter_from_real_slowapi, evicted, patch_shared_limiter
 
 
 @pytest.fixture()
@@ -42,6 +42,8 @@ def stubbed_exchange_router(monkeypatch):
     slowapi_util_stub = MagicMock()
     slowapi_util_stub.get_remote_address = lambda *a, **k: "1.2.3.4"
 
+    # Build the shared limiter from the REAL slowapi before it is stubbed.
+    build_shared_limiter_from_real_slowapi()
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
 
@@ -52,13 +54,13 @@ def stubbed_exchange_router(monkeypatch):
     # before the router is re-imported below. See tests/limiter_stub.py.
     patch_shared_limiter(monkeypatch)
 
-    # Reload so the module picks up our stubs
-    evict_module("routers.exchange")
-    from routers import exchange as exchange_router
+    # Reload so the module picks up our stubs. `evicted` puts the pre-test
+    # module object and `routers` package attribute back on exit (164.9.8.1:
+    # leaving them deleted broke tests/test_limiter_identity.py under xdist).
+    with evicted("routers.exchange"):
+        from routers import exchange as exchange_router
 
-    yield exchange_router
-
-    evict_module("routers.exchange")
+        yield exchange_router
 
 
 class TestC0202_DeactivatedKeyRejected:

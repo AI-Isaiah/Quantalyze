@@ -407,10 +407,15 @@ class TestReaperOffWorkerLoopBehavior:
         assert all(r["computation_status"] == "computing" for r in stranded)
 
         started = asyncio.Event()
+        release = asyncio.Event()
 
         async def _slow_dispatch(job: dict[str, Any]) -> DispatchResult:
+            # Yielding, and held open until the test has probed it. ⛔ RENDEZVOUS,
+            # NOT A STOPWATCH: this used to `asyncio.sleep(0.3)` and assert the
+            # dispatch was still running after `sleep(0.05)` + a TCP round trip,
+            # which a loop starved for ~250 ms lost.
             started.set()
-            await asyncio.sleep(0.3)  # ~15 heartbeat intervals, all yielding
+            await release.wait()
             return DispatchResult(outcome=DispatchOutcome.DONE)
 
         _saved_tick = main_worker_healthz.LAST_TICK_AT
@@ -422,13 +427,22 @@ class TestReaperOffWorkerLoopBehavior:
                 "main_worker.get_supabase", return_value=mock_supabase
             ), patch("main_worker.dispatch", new=_slow_dispatch):
                 dt = asyncio.create_task(dispatch_tick("worker-job07-backlog"))
-                await started.wait()
-                start_stamp = main_worker_healthz.LAST_TICK_AT
-                await asyncio.sleep(0.05)
-                mid_dispatch_resp = await _probe_healthz(port)
-                assert not dt.done(), (
-                    "probe must be captured WHILE the dispatch is in flight"
-                )
+                try:
+                    await started.wait()
+                    start_stamp = main_worker_healthz.LAST_TICK_AT
+                    deadline = time.monotonic() + 5.0
+                    while main_worker_healthz.LAST_TICK_AT <= start_stamp:
+                        assert time.monotonic() < deadline, (
+                            "no heartbeat refreshed LAST_TICK_AT while the dispatch "
+                            "was in flight"
+                        )
+                        await asyncio.sleep(0.005)
+                    mid_dispatch_resp = await _probe_healthz(port)
+                    assert not dt.done(), (
+                        "probe must be captured WHILE the dispatch is in flight"
+                    )
+                finally:
+                    release.set()
                 await dt
 
             assert b"200 OK" in mid_dispatch_resp, mid_dispatch_resp[:120]

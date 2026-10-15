@@ -102,7 +102,7 @@ def exchange_router(monkeypatch):
     directly. Cloned from ``tests/test_status_contract_exchange_internal.py``
     (Rule 11 — match the existing idiom rather than inventing a second one).
     """
-    from tests.limiter_stub import evict_module, patch_shared_limiter
+    from tests.limiter_stub import build_shared_limiter_from_real_slowapi, evicted, patch_shared_limiter
 
     class _NoopLimiter:
         def __init__(self, *args, **kwargs):
@@ -119,16 +119,16 @@ def exchange_router(monkeypatch):
     slowapi_util_stub = MagicMock()
     slowapi_util_stub.get_remote_address = lambda *a, **k: "1.2.3.4"
 
+    # Build the shared limiter from the REAL slowapi before it is stubbed.
+    build_shared_limiter_from_real_slowapi()
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
     patch_shared_limiter(monkeypatch)
 
-    evict_module("routers.exchange")
-    from routers import exchange as exchange_router
+    with evicted("routers.exchange"):
+        from routers import exchange as exchange_router
 
-    yield exchange_router
-
-    evict_module("routers.exchange")
+        yield exchange_router
 
 
 def _validate_req(exchange: str = "binance"):
@@ -337,7 +337,7 @@ def test_the_three_members_answer_with_one_code_and_one_copy(monkeypatch):
     B1 is pinned in ``tests/test_status_contract_exchange_internal.py`` against
     the SAME literals typed there; B2 and B3 are driven here.
     """
-    from tests.limiter_stub import evict_module, patch_shared_limiter
+    from tests.limiter_stub import build_shared_limiter_from_real_slowapi, evicted, patch_shared_limiter
 
     bodies = []
 
@@ -358,17 +358,18 @@ def test_the_three_members_answer_with_one_code_and_one_copy(monkeypatch):
     slowapi_stub.Limiter = _NoopLimiter
     slowapi_util_stub = MagicMock()
     slowapi_util_stub.get_remote_address = lambda *a, **k: "1.2.3.4"
+    # Build the shared limiter from the REAL slowapi before it is stubbed.
+    build_shared_limiter_from_real_slowapi()
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
     patch_shared_limiter(monkeypatch)
-    evict_module("routers.exchange")
-    from routers import exchange as exchange_mod
+    with evicted("routers.exchange"):
+        from routers import exchange as exchange_mod
 
-    exchange_mod.create_exchange = MagicMock(side_effect=TypeError("adapter ctor blew up"))
-    with pytest.raises(HTTPException) as ei:
-        asyncio.run(exchange_mod.validate_key(MagicMock(name="request"), _validate_req()))
-    bodies.append(ei.value.detail)
-    evict_module("routers.exchange")
+        exchange_mod.create_exchange = MagicMock(side_effect=TypeError("adapter ctor blew up"))
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(exchange_mod.validate_key(MagicMock(name="request"), _validate_req()))
+        bodies.append(ei.value.detail)
 
     assert len(bodies) == 2
     for body in bodies:

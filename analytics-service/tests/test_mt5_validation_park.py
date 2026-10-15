@@ -46,6 +46,7 @@ import pytest
 from fastapi import HTTPException
 
 from services import mt5_client, mt5_concurrency, mt5_probe, mt5_terminal_scrub
+from services.ingestion import mt5 as ingestion_mt5
 from services.closed_sets import MT5_MASTER_PASSWORD_DETAIL
 from services.mt5_client import (
     Mt5ClientError,
@@ -59,6 +60,7 @@ from services.mt5_client import (
 # wave). The two autouse fixtures and `exchange_router` register here because
 # their names are bound in this module. Both harness files define autouse
 # fixtures with the SAME names, so they are imported from ONE module only.
+from tests.budget_rendezvous import expire_module_budget_when_reached
 from tests.test_mt5_validate import (  # noqa: F401 — fixtures register by name
     _VAL_HOST,
     _VAL_PORT,
@@ -224,6 +226,9 @@ class _RecordingMt5(_FakeMt5):
         self._house_raises = house_login_raises
         self.client_login_returned = threading.Event()
         self.house_login_returned = threading.Event()
+        #: Called from the worker thread the moment a BLOCKED login parks, so a
+        #: test can count its budget from the thread's arrival.
+        self.on_blocked: Any = None
 
     @staticmethod
     def _lease_held() -> bool:
@@ -244,6 +249,8 @@ class _RecordingMt5(_FakeMt5):
         if login == _HOUSE_LOGIN:
             try:
                 if self._block_house is not None:
+                    if self.on_blocked is not None:
+                        self.on_blocked()
                     self._block_house.wait(timeout=10)
                 if self._house_raises is not None:
                     raise self._house_raises
@@ -252,6 +259,8 @@ class _RecordingMt5(_FakeMt5):
                 self.house_login_returned.set()
         try:
             if self._block_client is not None:
+                if self.on_blocked is not None:
+                    self.on_blocked()
                 self._block_client.wait(timeout=10)
             return super().login(login, **kwargs)
         finally:
@@ -262,6 +271,28 @@ class _RecordingMt5(_FakeMt5):
 
     def house_logins(self) -> list[tuple[Any, ...]]:
         return [e for e in self.logins() if e[1] == _HOUSE_LOGIN]
+
+
+def _bite_budgets_from_arrival(
+    monkeypatch: pytest.MonkeyPatch, module: Any, transport: _RecordingMt5
+) -> None:
+    """Count the budget a test lowered (`_MT5_VALIDATE_STAGE_TIMEOUT_S`, the
+    deadline, `_MT5_PARK_MIN_BUDGET_S`, `_MT5_PROBE_TIMEOUT_S`) from the moment the
+    blocked login PARKS, not from the call.
+
+    ⛔ RENDEZVOUS, NOT A STOPWATCH. These cases lower a budget to 0.2 s and let it
+    race the pool thread's start. On a starved worker the budget fired at the
+    CONNECT stage (or cut the park thread off before it ran), the probe was never
+    in flight, and every assertion about 'the probe is still in flight' was made
+    about a run that never reached it. The module's `asyncio` name is replaced by a
+    stand-in that arms each `wait_for` at the rendezvous (real `asyncio.timeout`,
+    real cancellation); the lowered value still decides how long after the park
+    the bound bites.
+    """
+    loop = asyncio.get_running_loop()
+    reached = asyncio.Event()
+    transport.on_blocked = lambda: loop.call_soon_threadsafe(reached.set)
+    expire_module_budget_when_reached(monkeypatch, module, reached)
 
 
 def _scenario(account: Any = _INVESTOR_ACCOUNT, **extra: Any) -> dict[str, Any]:
@@ -454,6 +485,7 @@ async def test_no_park_while_the_probe_is_in_flight_after_a_stage_timeout(
     blocker = threading.Event()
     transport = _RecordingMt5(_scenario(), block_client_login=blocker)
     _install_real_mt5_client(router, transport)
+    _bite_budgets_from_arrival(monkeypatch, router, transport)
     monkeypatch.setattr(router, "_MT5_VALIDATE_STAGE_TIMEOUT_S", 0.2)
     try:
         with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
@@ -480,6 +512,7 @@ async def test_no_park_while_the_probe_is_in_flight_after_the_deadline(
     blocker = threading.Event()
     transport = _RecordingMt5(_scenario(), block_client_login=blocker)
     _install_real_mt5_client(router, transport)
+    _bite_budgets_from_arrival(monkeypatch, router, transport)
     monkeypatch.setattr(router, "_MT5_VALIDATE_DEADLINE_S", 0.2)
     try:
         with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
@@ -875,6 +908,7 @@ async def test_a_park_whose_ceiling_fires_alerts_and_only_the_release_follows(
     blocker = threading.Event()
     transport = _RecordingMt5(_scenario(), block_house_login=blocker)
     _install_real_mt5_client(router, transport)
+    _bite_budgets_from_arrival(monkeypatch, router, transport)
     monkeypatch.setattr(router, "_MT5_PARK_MIN_BUDGET_S", 0.2)
     try:
         with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
@@ -1174,6 +1208,7 @@ async def test_the_worker_does_not_park_while_the_probe_is_in_flight(
     blocker = threading.Event()
     transport = _RecordingMt5(_scenario(), block_client_login=blocker)
     _install_worker_transport(monkeypatch, transport)
+    _bite_budgets_from_arrival(monkeypatch, ingestion_mt5, transport)
     monkeypatch.setattr("services.ingestion.mt5._MT5_PROBE_TIMEOUT_S", 0.2)
     try:
         with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
@@ -1623,6 +1658,7 @@ async def test_scrub_W1_wizard_stage_timeout_sends_no_scrub_while_the_probe_is_i
     _install_real_mt5_client(router, transport)
     _install_scrub_double(monkeypatch, transport.events)
     sink = _install_scrub_sink(monkeypatch)
+    _bite_budgets_from_arrival(monkeypatch, router, transport)
     monkeypatch.setattr(router, "_MT5_VALIDATE_STAGE_TIMEOUT_S", 0.2)
     monkeypatch.setattr(mt5_terminal_scrub, "_SCRUB_PROBE_WAIT_S", 0.3)
     try:
@@ -1645,6 +1681,7 @@ async def test_scrub_W1_wizard_deadline_exit_sends_no_scrub_while_the_probe_is_i
     _install_real_mt5_client(router, transport)
     _install_scrub_double(monkeypatch, transport.events)
     sink = _install_scrub_sink(monkeypatch)
+    _bite_budgets_from_arrival(monkeypatch, router, transport)
     monkeypatch.setattr(router, "_MT5_VALIDATE_DEADLINE_S", 0.2)
     monkeypatch.setattr(mt5_terminal_scrub, "_SCRUB_PROBE_WAIT_S", 0.3)
     try:
@@ -1667,6 +1704,7 @@ async def test_scrub_W1_worker_probe_timeout_sends_no_scrub_while_the_probe_is_i
     _install_worker_transport(monkeypatch, transport)
     _install_scrub_double(monkeypatch, transport.events)
     sink = _install_scrub_sink(monkeypatch)
+    _bite_budgets_from_arrival(monkeypatch, ingestion_mt5, transport)
     monkeypatch.setattr("services.ingestion.mt5._MT5_PROBE_TIMEOUT_S", 0.2)
     monkeypatch.setattr(mt5_terminal_scrub, "_SCRUB_PROBE_WAIT_S", 0.3)
     try:

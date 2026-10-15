@@ -1501,9 +1501,34 @@ class TestCronResponseShape:
 
         scored: list[str] = []
 
+        # ⛔ A CLOCK THE TEST OWNS, NOT A STOPWATCH. This used a real
+        # `asyncio.sleep(0.15)` per allocator against a real 0.25 s budget and
+        # asserted EXACTLY two were scored. On a CPU-starved worker the first
+        # allocator alone could take past 0.25 s, the loop stopped after one, and
+        # the count was wrong for a reason unrelated to the budget. The route reads
+        # `time.monotonic()` through its module-level `time`, so a virtual monotonic
+        # clock that advances only when an allocator is scored makes the arithmetic
+        # exact on any box. The property is unchanged: the budget is measured against
+        # a clock that elapses, and the allocator that crosses it is the last one
+        # started.
+        class _VirtualClock:
+            now = 1_000.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+            def __getattr__(self, name):
+                import time as _real_time
+
+                return getattr(_real_time, name)
+
+        clock = _VirtualClock()
+        monkeypatch.setattr(match_mod, "time", clock)
+
         async def _slow_score(allocator_id, universe):
             scored.append(allocator_id)
-            await asyncio.sleep(0.15)
+            clock.now += 0.15
+            await asyncio.sleep(0)
             return {}
 
         monkeypatch.setattr(match_mod, "_score_one_allocator", _slow_score)
@@ -1512,8 +1537,8 @@ class TestCronResponseShape:
 
         # 0.25s budget / 0.15s per allocator: the second allocator is the
         # one that crosses it, so the loop stops after 2 and never starts a
-        # third. The observed duration confirms the clock is real elapsed
-        # time, not a constant.
+        # third. The observed duration confirms the clock is a clock that
+        # elapses, not a constant.
         assert body["status"] == "partial"
         assert len(scored) == 2, (
             f"expected the budget to stop the loop after 2 allocators, scored {scored}"
@@ -4739,11 +4764,24 @@ class TestRecomputeSerializationLock:
         async def fake_skip(allocator_id, force):
             return False
 
+        both_in = asyncio.Event()
+
         async def fake_score(allocator_id, universe):
             score_calls.append(allocator_id)
             in_flight["n"] += 1
             in_flight["max"] = max(in_flight["max"], in_flight["n"])
-            await asyncio.sleep(0.05)
+            if in_flight["n"] == 2:
+                both_in.set()
+            # ⛔ RENDEZVOUS, NOT A STOPWATCH. This used to hold the slot for
+            # `sleep(0.05)` and rely on the second allocator arriving inside that
+            # window, which a starved worker missed (peak 1). Each scorer now waits
+            # until BOTH are inside. If the lock serialized them the second never
+            # arrives; the 5 s ceiling is only the deadman that turns that into the
+            # assertion below instead of a hang.
+            try:
+                await asyncio.wait_for(both_in.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                pass
             in_flight["n"] -= 1
             return {"batch_id": f"b-{allocator_id}", "candidate_count": 0}
 
