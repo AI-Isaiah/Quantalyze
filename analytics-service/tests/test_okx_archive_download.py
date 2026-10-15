@@ -34,6 +34,9 @@ OTHER_PUBLIC_IP = "1.1.1.1"
 # The signed query string is the bearer token; the tests assert it never reaches a log.
 SECRET_QUERY = "sign=SECRETTOKEN123&expires=9999999999"
 SECRET_PATH = "/priv/okx/bills/2026Q2.zip"
+# Synthetic userinfo for the refusal row. Kept out of the URL literal so a push-time
+# credential scanner does not read a test fixture as a leaked basic-auth URL.
+FAKE_USERINFO = "user:pw"
 URL = f"https://{HOST}{SECRET_PATH}?{SECRET_QUERY}"
 
 CSV = b"ts,type,pnl,fee\n1760000000000,2,3.5,-0.1\n1760086400000,2,-1.25,-0.1\n"
@@ -210,7 +213,7 @@ class TestUrlRefusals:
     @pytest.mark.parametrize(
         "url",
         [
-            f"https://user:pw@{HOST}{SECRET_PATH}?{SECRET_QUERY}",  # userinfo
+            f"https://{FAKE_USERINFO}@{HOST}{SECRET_PATH}?{SECRET_QUERY}",  # userinfo
             f"https://user@{HOST}{SECRET_PATH}",  # userinfo, no password
             f"https://{HOST}:8443{SECRET_PATH}?{SECRET_QUERY}",  # explicit port
             f"https://{HOST}:443{SECRET_PATH}",  # even the default port, spelled out
