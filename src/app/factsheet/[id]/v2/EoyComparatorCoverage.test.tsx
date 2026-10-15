@@ -95,7 +95,7 @@ function tableBtc(payload: FactsheetPayload, year: string): string {
 function barsRow(payload: FactsheetPayload, year: string): { labels: string[]; bars: number } {
   const { container, unmount } = render(
     <FactsheetProvider payload={payload}>
-      <EndOfYearBarsPanel />
+      <EndOfYearBarsPanel fullHistoryWithheld={false} />
     </FactsheetProvider>,
   );
   const g = [...container.querySelectorAll("g")].find(el => el.querySelector("text")?.textContent === year);

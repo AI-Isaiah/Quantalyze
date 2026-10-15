@@ -413,7 +413,7 @@ describe("HeatmapPanels printed text and tone (D-02, D-03, D-06)", () => {
     const payload = { ...basePayload(), monthlyReturns: rows } as unknown as FactsheetPayload;
     return render(
       <FactsheetProvider payload={payload} persist={false}>
-        <MonthlyReturnsHeatmap />
+        <MonthlyReturnsHeatmap fullHistoryWithheld={false} />
       </FactsheetProvider>,
     );
   }

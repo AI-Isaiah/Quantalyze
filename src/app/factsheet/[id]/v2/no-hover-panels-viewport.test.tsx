@@ -123,7 +123,7 @@ describe("[CHART-02/03] no-hover panels — both viewport branches", () => {
   // ---- Render-without-throwing in BOTH branches (covers each isMobile arm) ----
 
   const panels: Array<{ name: string; node: React.ReactElement }> = [
-    { name: "EndOfYearBarsPanel", node: <EndOfYearBarsPanel /> },
+    { name: "EndOfYearBarsPanel", node: <EndOfYearBarsPanel fullHistoryWithheld={false} /> },
     { name: "QuantileBoxPlotPanel", node: <QuantileBoxPlotPanel /> },
     { name: "CorrelationStripPanel", node: <CorrelationStripPanel /> },
     { name: "CorrelationsMatrixPanel", node: <CorrelationsMatrixPanel /> },
@@ -185,7 +185,7 @@ describe("[CHART-02/03] no-hover panels — both viewport branches", () => {
 
   it("EndOfYearBarsPanel desktop viewBox is 880-wide (width literal unchanged)", () => {
     setBreakpoint("desktop");
-    const { container } = renderPanel(<EndOfYearBarsPanel />);
+    const { container } = renderPanel(<EndOfYearBarsPanel fullHistoryWithheld={false} />);
     expect(viewBoxes(container)[0]).toMatch(/^0 0 880 \d+$/);
   });
 
@@ -239,9 +239,9 @@ describe("[CHART-02/03] no-hover panels — both viewport branches", () => {
 
   it("EndOfYearBars mobile viewBox height differs from desktop", () => {
     setBreakpoint("desktop");
-    const dH = firstViewBoxHeight(renderPanel(<EndOfYearBarsPanel />).container);
+    const dH = firstViewBoxHeight(renderPanel(<EndOfYearBarsPanel fullHistoryWithheld={false} />).container);
     setBreakpoint("mobile");
-    const mH = firstViewBoxHeight(renderPanel(<EndOfYearBarsPanel />).container);
+    const mH = firstViewBoxHeight(renderPanel(<EndOfYearBarsPanel fullHistoryWithheld={false} />).container);
     expect(mH).toBeGreaterThan(dH);
   });
 

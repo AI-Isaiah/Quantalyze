@@ -83,7 +83,7 @@ function renderRail(payload: FactsheetPayload) {
 function barsSubtitle(payload: FactsheetPayload): string {
   const { container, unmount } = render(
     <FactsheetProvider payload={payload} persist={false}>
-      <EndOfYearBarsPanel />
+      <EndOfYearBarsPanel fullHistoryWithheld={false} />
     </FactsheetProvider>,
   );
   const out = container.querySelector("figure header p")?.textContent ?? "";
