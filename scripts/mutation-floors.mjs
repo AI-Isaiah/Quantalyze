@@ -1233,7 +1233,15 @@
 // (test_refresh_fanout_owed_key_reconstruct.sql), so 71 of 98 files. MEASURED by one full `node scripts/mutation-runner/run.mjs` on the COMMITTED merge of origin/main v0.131.7.0 into the RECONMARKER PR 2 branch, no file edited during it, exit 0: `scope: FULL 71/71 annotated files`, `lane-concurrency: 4`, `coverage: files 71/98`, `arms: 716/716/0`, `biting: 716`, `lane-invocations: 716 ... plus 71 baseline / 71 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `per-arm lane time: mean 1.4s over 716 arm run(s)`, `No defects.`
 // The stale-low direction was observed first: `RATCHET STALE: 71 of 98 gate files are now annotated but FILES_FLOOR is still 70.`
 // WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 71;
+// RAISED 71 -> 72 2026-10-15 (Phase 170.6.1.1 ANONKEYID plan 07, PR-B part 3, merge of origin/main 1cde77edf): this branch adds one
+// annotated gate file, test_strategies_anon_grants.sql (migration 20261022120000), so 72 of 99 files. MEASURED by ONE full
+// `node scripts/mutation-runner/run.mjs` on the COMMITTED merge, no file edited during it, exit 0: `scope: FULL 72/72 annotated files`,
+// `lane-concurrency: 4`, `coverage: files 72/99`, `arms: 723/723/0`, `biting: 723`, `lane-invocations: 723 ... plus 72 baseline / 72 restore
+// leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane time:
+// mean 2.4s over 723 arm run(s)`, `No defects. Every annotated arm bit its own arm first.` Per-file line: `test_strategies_anon_grants.sql:
+// sections 7 / judged 7 / annotated 7 / waived 0 / biting 7`. The stale-low direction was observed first: `RATCHET STALE: 72 of 99 gate
+// files are now annotated but FILES_FLOOR is still 71.` WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 72;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3142,7 +3150,12 @@ export const FILES_FLOOR = 71;
 // test_refresh_fanout_zero_snapshot_bootstrap.sql (now `sections 26 / judged 31 / annotated 31 / biting 31`). MEASURED by the same single run
 // recorded under FILES_FLOOR. The stale-low direction was observed first: `The corpus declares 716 twin(s) of which 0 are waivers, so a green run
 // bites 716. ARMS_FLOOR is 697.` WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 716;
+// RAISED 716 -> 723 2026-10-15 (Phase 170.6.1.1 ANONKEYID plan 07, PR-B part 3, merge of origin/main 1cde77edf): +7 biting arms, the
+// anon grants gate's GRANT 1-4, WRITE 1-2 and KEEP 1 (`test_strategies_anon_grants.sql: sections 7 / judged 7 / annotated 7 / waived 0 /
+// biting 7`). MEASURED by the same single run recorded under FILES_FLOOR: `arms: 723/723/0`, `biting: 723`, `lane-invocations: 723`. The
+// stale-low direction was observed first: `The corpus declares 723 twin(s) of which 0 are waivers, so a green run bites 723. ARMS_FLOOR is
+// 716.` WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 723;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

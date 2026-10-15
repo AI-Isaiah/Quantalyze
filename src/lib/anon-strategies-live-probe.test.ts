@@ -412,6 +412,88 @@ describe("anon strategies live probe - the real public readers as a signed-out v
     },
   );
 
+  // ---- PR-B (plan 05): the refusal arm. The migration revokes table-level SELECT
+  // from anon and grants column SELECT on every column but api_key_id. ----------
+
+  it.skipIf(!HAS_ANON_PROBE)(
+    "(a) anon selecting api_key_id is refused by the GRANT layer (42501, permission denied for table strategies)",
+    async () => {
+      const { data, error } = await anonClient()
+        .from("strategies")
+        .select("api_key_id")
+        .eq("id", seeded.strategyId!);
+      expect(error, "anon must be refused api_key_id outright; data was returned").not.toBeNull();
+      expect(error!.code).toBe("42501");
+      expect(error!.message).toMatch(/permission denied for table strategies/);
+      expect(data).toBeNull();
+    },
+  );
+
+  // ---- D-04 / SC-2: anon holds no write privilege on strategies. -------------
+  // RLS also refuses an anon write (a policy mismatch is SQLSTATE 42501 too), so
+  // each arm must tell the GRANT refusal from the RLS refusal by message, and must
+  // fail on a no-error result: an UPDATE or DELETE that RLS filters to zero rows
+  // answers success with no error at all. The arms were seen RED under a temporary
+  // `GRANT INSERT, UPDATE, DELETE ... TO anon` (RLS left as the only refusal) before
+  // being seen green, so a pass here means the grant layer refused, not RLS.
+
+  /** The refusal the GRANT layer gives, as opposed to the one RLS gives. */
+  function expectGrantRefusal(error: { code?: string; message?: string } | null) {
+    expect(error, "anon write must be refused; the call returned no error").not.toBeNull();
+    expect(error!.code).toBe("42501");
+    expect(error!.message, "refused by RLS rather than by the grant").not.toMatch(/row-level security/i);
+    expect(error!.message).toMatch(/permission denied for table strategies/);
+  }
+
+  it.skipIf(!HAS_ANON_PROBE)(
+    "(n) anon INSERT on strategies is refused by the GRANT layer, not by RLS",
+    async () => {
+      const { error } = await anonClient()
+        .from("strategies")
+        .insert({ user_id: seeded.userId!, name: `AnonKeyId Write ${stamp}`, status: "draft" });
+      expectGrantRefusal(error);
+    },
+  );
+
+  it.skipIf(!HAS_ANON_PROBE)(
+    "(o) anon UPDATE on strategies is refused by the GRANT layer, not filtered to zero rows by RLS",
+    async () => {
+      const { error } = await anonClient()
+        .from("strategies")
+        .update({ name: `AnonKeyId Tampered ${stamp}` })
+        .eq("id", seeded.strategyId!);
+      expectGrantRefusal(error);
+    },
+  );
+
+  it.skipIf(!HAS_ANON_PROBE)(
+    "(p) anon DELETE on strategies is refused by the GRANT layer, not filtered to zero rows by RLS",
+    async () => {
+      const { error } = await anonClient().from("strategies").delete().eq("id", seeded.strategyId!);
+      expectGrantRefusal(error);
+    },
+  );
+
+  it.skipIf(!HAS_ANON_PROBE)(
+    "(q) after the write arms the seeded strategy is unchanged and no anon row was inserted",
+    async () => {
+      const admin = createLiveAdminClient();
+      const { data, error } = await admin
+        .from("strategies")
+        .select("id, name, status")
+        .eq("id", seeded.strategyId!)
+        .single();
+      expect(error, `admin re-read errored: ${error?.message}`).toBeNull();
+      expect(data).toEqual({ id: seeded.strategyId, name: strategyName, status: "published" });
+      const { count, error: countErr } = await admin
+        .from("strategies")
+        .select("id", { count: "exact", head: true })
+        .eq("name", `AnonKeyId Write ${stamp}`);
+      expect(countErr).toBeNull();
+      expect(count, "the anon INSERT arm must not have created a row").toBe(0);
+    },
+  );
+
   it("advertises the live-DB skip reason", () => {
     advertiseLiveDbSkipReason("anon-strategies-live-probe");
     if (!HAS_LIVE_DB) return;

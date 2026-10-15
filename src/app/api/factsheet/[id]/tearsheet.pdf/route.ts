@@ -220,10 +220,15 @@ export async function GET(
     page.setDefaultTimeout(15_000);
     await page.setViewport({ width: 816, height: 1056 }); // 8.5 × 11 @ 96 DPI
 
-    await page.goto(`${targetOrigin}/factsheet/${id}/tearsheet`, {
+    const response = await page.goto(`${targetOrigin}/factsheet/${id}/tearsheet`, {
       waitUntil: "networkidle0",
       timeout: 25000,
     });
+    // 170.6.1.1-TEARSHEET-PDF-STATUS: never print an error page as a cached 200
+    // PDF. Throwing lands in the catch below (500 JSON plus a Sentry capture).
+    if (!response || response.status() >= 400) {
+      throw new Error(`tearsheet page answered ${response ? response.status() : "no response"}`);
+    }
 
     const pdfBuffer = await page.pdf({
       format: "Letter",

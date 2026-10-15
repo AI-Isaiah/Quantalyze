@@ -26,6 +26,21 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+- [x] **`[170.6.1-ANON-STRATEGIES-API-KEY-ID]` anon could read `strategies.api_key_id` on published rows, and held write grants on `strategies` it never uses.**
+   MEASURED read-only on PROD 2026-10-13 (marker query first) by DISCOVERYPHONE's planner: anon held the table-level
+   privileges SELECT, INSERT, UPDATE, DELETE and REFERENCES on `public.strategies`, could SELECT all 32 columns, and
+   3 of 3 published strategies were exposed with a non-null `api_key_id`. A key id is the handle that targets an
+   exchange key, and row-level security filters rows, never columns, so the grant layer was the only column control.
+   ✅ **CLOSED 2026-10-15 by Phase 170.6.1.1 ANONKEYID** (founder, "Own phase, now", 2026-10-13), in two PRs (O-1).
+   PR-A (`0.131.4.2`, no migration) narrowed every anonymous reader to `STRATEGY_PUBLIC_COLUMNS` and was the live
+   production deploy first. PR-B (`0.131.11.0`) carries migration
+   `20261022120000_strategies_anon_api_key_id_revoke.sql`: anon loses table-level SELECT, INSERT, UPDATE and DELETE,
+   and gets column SELECT on the 31 other columns (derived from the catalogue). The SQL gate
+   `supabase/tests/test_strategies_anon_grants.sql` (7 arms, each with a biting twin) holds the shape, and the manual
+   rollback is `supabase/migrations/down/20261022120000-rollback.sql`. REFERENCES stays with anon; authenticated users
+   still read `api_key_id` (unchanged by design). The post-apply PROD probe is recorded in
+   `170.6.1.1-08-SUMMARY.md`; if it fails, the merge is reverted and this entry reopens.
+
 0.005. **`[SHARE-HOST-01]` Every private share link a user copies points at the UNBRANDED host.**
    MEASURED on production 2026-08-28 while discharging Phase 164's browser UAT. Standing on
    `https://quantalyze.xyz/strategies`, signed in, `POST /api/strategies/<id>/share` returned
@@ -9677,6 +9692,34 @@ blindness. The route's own catch and Sentry capture never fire.
 **Fix.** After `goto`, throw into the existing catch when the response is absent or its status is 400 or above.
 **Owner / Trigger:** PR-B of this phase (the failure mode only becomes reachable with the revoke); otherwise
 the next phase touching the tearsheet routes.
+✅ **CLOSED 2026-10-15 in PR-B (plan 08 Task 1).** The route now throws into its existing catch when `page.goto`
+returns no response or a status of 400 or above, so an error page answers 500 JSON with a Sentry capture instead
+of a cached 200 PDF. The new describe in `src/app/api/factsheet/[id]/tearsheet.pdf/route.test.ts` (500, 404, 400
+and a null response, plus a 200 control) was seen RED, 4 failed and the control passing, before the fix.
+
+### 170.6.1.1-GATE-HIDDEN-EXEMPTIONS-UNENFORCED — the gate's hidden-column exemption list is not asserted hidden (booked 2026-10-15, PR-B review WR-01, MEDIUM, confidence 7)
+
+**Why it is open.** `supabase/tests/test_strategies_anon_grants.sql`'s `HIDDEN_COLUMN_EXEMPTIONS` only removes
+columns from GRANT 3's "every other column is anon-readable" sweep. No arm checks that an exempted column is
+actually denied to anon, because GRANT 1 and GRANT 4 hardcode `api_key_id`. Latent: the list is empty today.
+Failure: a future column is added to the list to clear GRANT 3, someone runs the rollback and re-applies the
+migration (as its header says to), and the migration re-derives "every column except `api_key_id`" from
+`pg_attribute`, so the hidden column is granted to anon while the gate stays green. The migration's self-check
+would then require that grant, so the two disagree as soon as the list is non-empty.
+**Fix.** Add a GRANT 5 arm that fails when an exempt entry is anon-readable or no longer exists, with a biting
+RED-UNDER twin, and move the census by one arm.
+**Owner / Trigger:** the first change that adds an entry to `HIDDEN_COLUMN_EXEMPTIONS`.
+
+### 170.6.1.1-TEARSHEET-200-ERROR-BODY — the tearsheet page renders "Strategy not found." as a 200, which the PDF route still prints (booked 2026-10-15, tearsheet-fix review MEDIUM 1, confidence 5)
+
+**Why it is open.** The PDF route now refuses a non-2xx tearsheet page, but `src/app/factsheet/[id]/tearsheet/page.tsx`
+renders `Strategy not found.` as a normal 200 when `getFactsheetDetail` returns null. The route pre-checks
+"published and analytics complete", so the window is a race (a strategy unpublished, or its analytics row rewritten,
+between the pre-check and the puppeteer render) or any predicate difference between the two reads. In that window
+the route serves a "Strategy not found." PDF as 200 with `public, s-maxage=300`.
+**Fix.** Make the page call `notFound()` so it answers 404 (the route's status check then catches it), or check a
+sentinel element before `page.pdf()`.
+**Owner / Trigger:** the next phase touching the tearsheet page or its PDF route.
 
 ### 170.6.1.1-LANDING-CAPTURE-THROTTLE — the landing social-proof read errors capture up to 3 events per page view (booked 2026-10-14, SFH-R2 R2-2, MEDIUM, confidence 6)
 
