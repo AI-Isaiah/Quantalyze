@@ -52,7 +52,11 @@ SRC = "okx_bills_history_archive"
 APPLY_RPC = "apply_okx_archive_rebuild"
 PROGRESS = "set_compute_job_progress"
 HEX64 = re.compile(r"[0-9a-f]{64}")
-NOW = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
+#: The job's clock. The live bills-archive reach is ASSUMED to be ``LIVE_REACH_ASSUMED_DAYS`` (88)
+#: days: 2026-10-29 minus 88 days is 2026-08-02, so 08-02 is the reach BOUNDARY day (partial by
+#: construction, owned by the archive) and 08-03 is the first full live day. The standard
+#: scenario below is built around exactly that shape.
+NOW = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
 
 CSV_HEADER = (
     "instType,billId,subType,ts,balChg,posBalChg,bal,posBal,sz,px,ccy,pnl,fee,mgnMode,"
@@ -500,28 +504,31 @@ def _apply_calls(db: _Db) -> list[dict[str, Any]]:
 # The standard scenario: a Q3 file that agrees with the live side to the cent
 # ---------------------------------------------------------------------------
 #
-# Live: 08-02 +100 (the reach boundary day), 08-03 -50, 09-15 +20 and funding +1.5 that day.
-# Equity 10000, no open uPnL, no flows. Archive (Q3, all 92 days covered):
+# Live: 08-02 +100 (the reach BOUNDARY day, partial: the crawl caught only part of it),
+# 08-03 -50, 09-15 +20 and funding +1.5 that day. Equity 10000, no open uPnL, no flows.
+# Archive (Q3, all 92 days covered):
 #   gap period: 07-10 +10, 07-20 funding -2, 08-01 +200 (the rest are real quiet zeros)
-#   08-02 +97.5 (differs from live 100 on purpose: the boundary day is partial and is NOT
-#   compared), and 08-03 / 09-15 equal to live.
+#   08-02 +97.5: the WHOLE day. It differs from the live partial 100 on purpose. The boundary
+#   day is not compared, and (CR-01) the archive owns it: the NAV roll must use 97.5, not 100.
+#   08-03 / 09-15 equal to live.
 #
-# NAV roll worked by hand, nav_end(t-1) = nav_end(t) - pnl(t):
+# NAV roll worked by hand, nav_end(t-1) = nav_end(t) - pnl(t), the archive's 97.5 on 08-02:
 #   nav_end(09-15) = 10000;  nav_end(09-14) = 10000 - 21.5 = 9978.5   (= nav_end(08-03))
-#   nav_end(08-02) = 9978.5 + 50  = 10028.5;  nav_end(08-01) = 10028.5 - 100 = 9928.5
-#   nav_end(07-31) = 9928.5 - 200 = 9728.5     (= nav_end(07-20))
-#   nav_end(07-19) = 9728.5 + 2   = 9730.5     (= nav_end(07-10))
-#   nav_end(07-09) = 9730.5 - 10  = 9720.5
-# so the rebuilt returns are 07-10: 10/9720.5, 07-20: -2/9730.5, 08-01: 200/9728.5, and 0.0
-# on the other twenty covered days.
+#   nav_end(08-02) = 9978.5 + 50  = 10028.5;  nav_end(08-01) = 10028.5 - 97.5 = 9931.0
+#   nav_end(07-31) = 9931.0 - 200 = 9731.0     (= nav_end(07-20))
+#   nav_end(07-19) = 9731.0 + 2   = 9733.0     (= nav_end(07-10))
+#   nav_end(07-09) = 9733.0 - 10  = 9723.0
+# so the rebuilt returns are 07-10: 10/9723.0, 07-20: -2/9733.0, 08-01: 200/9731.0, and 0.0
+# on the other twenty covered days. (Rolling through the live PARTIAL 100 instead of 97.5
+# would give 9720.5 / 9730.5 / 9728.5: the old, skewed oracle.)
 
 LIVE_REALIZED = {"2026-08-02": 100.0, "2026-08-03": -50.0, "2026-09-15": 20.0}
 LIVE_FUNDING = {"2026-09-15": 1.5}
 GAP_DAY_COUNT = 23  # 2026-07-10 .. 2026-08-01 inclusive: 22 July days + 1 August day
 ORACLE = {
-    "2026-07-10": 10 / 9720.5,
-    "2026-07-20": -2 / 9730.5,
-    "2026-08-01": 200 / 9728.5,
+    "2026-07-10": 10 / 9723.0,
+    "2026-07-20": -2 / 9733.0,
+    "2026-08-01": 200 / 9731.0,
 }
 
 
@@ -706,17 +713,21 @@ class TestAbortOnReconcileMiss:
     ) -> None:
         """RESEARCH Pitfall 9: once the live reach no longer touches the verified quarter
         there is nothing to authenticate the file against. That is a stop with a null
-        window, not a silent skip of the reconciliation."""
+        window, not a silent skip of the reconciliation. The reach boundary comes from the
+        clock (CR-01): three months on, the live reach starts after Q3 ended."""
         db = _db_with((STRATEGY_ID, GAP_A))
-        live = _standard_live()
-        live.realized = {"2026-12-01": 5.0}  # the live reach starts after the quarter ended
-        world = _install(monkeypatch, db, live, q3=_standard_q3())
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+        # 2027-01-15 minus 88 days is 2026-10-19: the first full live day is 10-20, after Q3.
+        monkeypatch.setattr(
+            okx_archive_job, "_utc_now", lambda: datetime(2027, 1, 15, 12, 0, tzinfo=timezone.utc)
+        )
 
         outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
 
         assert outcome.error_message == "okx_archive_rebuild: reconcile_miss window=none"
         result = world.result()
         assert result["reconcile"]["window"] is None
+        assert result["reconcile"]["excluded_boundary_day"] == "2026-10-19"
         assert result["reconcile"]["realized"] is None and result["fingerprint"] is None
         _no_writes_but_progress(world, db)
 
@@ -739,6 +750,194 @@ class TestAbortOnReconcileMiss:
         assert world.result()["reconcile"]["realized"]["misses"] == [
             {"date": "2026-08-20", "archive": "5", "live": "0"}
         ]
+
+
+class TestReachBoundaryComesFromTheFetchWindow:
+    """CR-01. The job used ``min(realized_by_day)``, the first RECORD the crawl returned, as
+    the live reach boundary. A quiet stretch (or a crawl cut by the page cap) moves the first
+    record, not the reach: the window and the truncation detector then both started after the
+    days they exist to check, and the NAV roll was anchored on whatever partial day came first.
+    The boundary is now the clock's: the assumed reach is ``LIVE_REACH_ASSUMED_DAYS`` back."""
+
+    @pytest.mark.asyncio
+    async def test_a_quiet_stretch_at_the_start_of_the_live_reach_is_still_inside_the_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Live has its first record on 08-20 (08-03..08-19 are quiet or, in the bad case, were
+        silently dropped by a truncated crawl). The archive shows P&L on 08-10. Under the old
+        code the window started the day after the FIRST RECORD (08-21), so 08-10 was never
+        compared and the run reported DONE; now the window opens on the first full day of the
+        assumed reach (08-03) and 08-10 is an archive-only day, a miss."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _Live(realized={"2026-08-20": 20.0, "2026-09-15": 20.0})
+        q3 = _Bills().realized("2026-07-10", "10").realized("2026-08-10", "5").realized(
+            "2026-08-20", "20").realized("2026-09-15", "20").bytes()
+        world = _install(monkeypatch, db, live, q3=q3)
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message is not None
+        assert outcome.error_message.startswith(
+            "okx_archive_rebuild: reconcile_miss window=2026-08-03..2026-09-30"
+        )
+        assert "offending=2026-08-10..2026-08-10" in outcome.error_message
+        result = world.result()
+        assert result["reconcile"]["excluded_boundary_day"] == "2026-08-02"
+        assert result["reconcile"]["realized"]["misses"] == [
+            {"date": "2026-08-10", "archive": "5", "live": "0"}
+        ]
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_the_rebuilt_returns_do_not_depend_on_the_value_of_the_partial_boundary_day(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The live record for the boundary day (08-02) is a PARTIAL day. Whatever it holds,
+        every rebuilt return must be the one the archive's WHOLE day gives. Here the live
+        crawl caught only +40 of a day the archive says was +97.5; the oracle is the hand roll
+        in the standard-scenario comment (nav_end(08-01) = 9931.0), which uses 97.5."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        live.realized["2026-08-02"] = 40.0
+        world = _install(monkeypatch, db, live, q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        fingerprint = world.result()["fingerprint"]
+        _install(monkeypatch, db, live, q3=_standard_q3())
+        applied = await _run(_meta("apply", [STRATEGY_ID], approved_fingerprint=fingerprint))
+
+        assert applied.outcome == DispatchOutcome.DONE, applied.error_message
+        (call,) = _apply_calls(db)
+        for row in call["p_rows"]:
+            assert row["daily_return"] == pytest.approx(ORACLE.get(row["date"], 0.0), abs=1e-12), row["date"]
+
+    @pytest.mark.asyncio
+    async def test_the_boundary_day_is_never_compared_but_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+
+        await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        reconcile = world.result()["reconcile"]
+        assert reconcile["excluded_boundary_day"] == "2026-08-02"
+        assert reconcile["window"]["from"] == "2026-08-03"
+        assert world.result()["info"]["live_from"] == {"pnl": "2026-08-03", "flows": "2026-07-31"}
+
+
+class TestInsertReturnsPreview:
+    """F4: the fingerprint deliberately excludes every live-anchored return value, so the
+    founder needs another way to see what the rows say before approving. The preview carries
+    their min, max and compounded total."""
+
+    @pytest.mark.asyncio
+    async def test_the_preview_carries_min_max_and_the_compounded_return_of_the_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        (strategy,) = world.result()["strategies"]
+        # The 23 rows are ORACLE's three nonzero days and twenty zeros (hand roll above).
+        summary = strategy["insert_returns"]
+        assert set(summary) == {"min", "max", "cumulative"}
+        assert summary["min"] == pytest.approx(-2 / 9733.0, abs=1e-12)
+        assert summary["max"] == pytest.approx(200 / 9731.0, abs=1e-12)
+        compounded = (1 + 10 / 9723.0) * (1 - 2 / 9733.0) * (1 + 200 / 9731.0) - 1
+        assert summary["cumulative"] == pytest.approx(compounded, abs=1e-12)
+
+    @pytest.mark.asyncio
+    async def test_a_target_with_no_rows_has_no_summary_and_is_not_invented(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A), (STRATEGY_2_ID, None))
+        world = _install(
+            monkeypatch, db, _standard_live(), q3=_standard_q3(), targets=(STRATEGY_ID, STRATEGY_2_ID)
+        )
+        await _run(_meta("calibrate", [STRATEGY_ID, STRATEGY_2_ID]))
+        assert world.result()["strategies"][1]["insert_returns"] is None
+
+    def test_a_return_at_or_below_minus_one_makes_the_compounded_total_null(self) -> None:
+        summary = okx_archive_job._returns_summary(
+            [{"date": "2026-07-10", "daily_return": -1.0}, {"date": "2026-07-11", "daily_return": 0.5}]
+        )
+        assert summary is not None and summary["cumulative"] is None
+        assert summary["min"] == -1.0 and summary["max"] == 0.5
+
+
+class TestFlowSeamsReachTheJob:
+    """F4, job side: archive transfer bills before the live deposit window, live from it on."""
+
+    @pytest.mark.asyncio
+    async def test_a_movement_in_both_sources_inside_the_live_window_counts_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A +300 movement sits in the archive (a transfer bill) and in the live ccxt deposits
+        on 07-31, the first day of the live window (midnight(10-29) - 90 d). It must lower the
+        NAV of every day BEFORE it by 300, ONCE. Against the standard roll (nav_end(07-19) =
+        9733.0, nav_end(07-09) = 9723.0) the rebuilt returns are 10 over 9423.0 and -2 over
+        9433.0. Counting it twice would put 600 under them. (The live deposit makes 07-31 the
+        first live day, so the gap days from 07-31 on are live-owned and not rows.)"""
+        live = _standard_live()
+        live.transfers = [{"type": "deposit", "currency": "USDT", "amount": 300, "id": "d1",
+                           "timestamp": _noon_ms("2026-07-31")}]
+        both = _standard_bills().flow("2026-07-31", "300").bytes()
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, live, q3=both)
+        preview = await _run(_meta("calibrate", [STRATEGY_ID]))
+        assert preview.outcome == DispatchOutcome.DONE, preview.error_message
+        fingerprint = world.result()["fingerprint"]
+        _install(monkeypatch, db, live, q3=both)
+
+        applied = await _run(_meta("apply", [STRATEGY_ID], approved_fingerprint=fingerprint))
+
+        assert applied.outcome == DispatchOutcome.DONE, applied.error_message
+        (call,) = _apply_calls(db)
+        values = {r["date"]: r["daily_return"] for r in call["p_rows"]}
+        # One 300 deposit on 07-31 lowers every NAV BEFORE it by 300.
+        assert values["2026-07-10"] == pytest.approx(10 / (9723.0 - 300.0), abs=1e-12)
+        assert values["2026-07-20"] == pytest.approx(-2 / (9733.0 - 300.0), abs=1e-12)
+
+    @pytest.mark.asyncio
+    async def test_an_archive_transfer_before_the_live_window_is_used_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        live = _standard_live()
+        both = _standard_bills().flow("2026-07-15", "500").bytes()
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, live, q3=both)
+        await _run(_meta("calibrate", [STRATEGY_ID]))
+        fingerprint = world.result()["fingerprint"]
+        _install(monkeypatch, db, live, q3=both)
+        await _run(_meta("apply", [STRATEGY_ID], approved_fingerprint=fingerprint))
+        (call,) = _apply_calls(db)
+        values = {r["date"]: r["daily_return"] for r in call["p_rows"]}
+        assert values["2026-07-10"] == pytest.approx(10 / (9723.0 - 500.0), abs=1e-12)
+
+    @pytest.mark.asyncio
+    async def test_an_archive_transfer_inside_the_live_window_is_reported_not_added(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A transfer bill the live deposit endpoints do not list (an internal move) inside
+        the live window is NOT added to the roll; ``flow_totals_overlap`` shows the founder
+        both sources' totals over the reconciliation window so the disagreement is visible."""
+        both = _standard_bills().flow("2026-09-01", "250").bytes()
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=both)
+        preview = await _run(_meta("calibrate", [STRATEGY_ID]))
+        assert preview.outcome == DispatchOutcome.DONE, preview.error_message
+        assert world.result()["info"]["flow_totals_overlap"] == {"archive": "250", "live": "0"}
+        fingerprint = world.result()["fingerprint"]
+        _install(monkeypatch, db, _standard_live(), q3=both)
+        await _run(_meta("apply", [STRATEGY_ID], approved_fingerprint=fingerprint))
+        (call,) = _apply_calls(db)
+        values = {r["date"]: r["daily_return"] for r in call["p_rows"]}
+        assert values["2026-07-10"] == pytest.approx(ORACLE["2026-07-10"], abs=1e-12)
 
 
 class TestWindows:
@@ -786,8 +985,8 @@ class TestLiveFlows:
 
         assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
         assert world.result()["info"]["flow_totals_overlap"] == {"archive": "0", "live": "300"}
-        # OKX keeps 90 days of deposit history: the crawl starts at midnight(2026-10-15) - 90 d.
-        floor_ms = int(datetime(2026, 7, 17, tzinfo=timezone.utc).timestamp() * 1000)
+        # OKX keeps 90 days of deposit history: the crawl starts at midnight(2026-10-29) - 90 d.
+        floor_ms = int(datetime(2026, 7, 31, tzinfo=timezone.utc).timestamp() * 1000)
         assert ("deposits", floor_ms) in live.calls and ("withdrawals", floor_ms) in live.calls
 
     @pytest.mark.asyncio
@@ -1057,9 +1256,9 @@ class TestApplyRpcContract:
         assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
         (call,) = _apply_calls(db)
         values = {r["date"]: r["daily_return"] for r in call["p_rows"]}
-        assert values["2026-07-10"] == pytest.approx(10 / 9220.5, abs=1e-12)
+        assert values["2026-07-10"] == pytest.approx(10 / 9223.0, abs=1e-12)
         assert values["2026-07-15"] == pytest.approx(0.0, abs=1e-12)
-        assert values["2026-08-01"] == pytest.approx(200 / 9728.5, abs=1e-12)
+        assert values["2026-08-01"] == pytest.approx(200 / 9731.0, abs=1e-12)
 
     @pytest.mark.asyncio
     async def test_a_live_row_inside_the_gap_is_never_rewritten_and_splits_the_reconstructed_range(
@@ -1667,16 +1866,18 @@ class TestInformationNeverGates:
         assert outcome.outcome == DispatchOutcome.DONE
         info = world.result()["info"]
         assert info["first_live_day_differs"] in (True, False)
-        assert info["archive_days_prepended"] == GAP_DAY_COUNT
+        # The archive supplies the 23 gap days and the reach boundary day (08-02, owned by it).
+        assert info["archive_days_prepended"] == GAP_DAY_COUNT + 1
         nav = info["realized_balance_vs_rolled_nav"]
-        # nav_end(08-01) by the hand roll above is 9928.5. The archive balance is the file's
-        # running ``bal`` after its last bill on or before 08-01: 5000 + 10 (07-10) + 200
-        # (08-01) = 5210, the 08-01 bill being the later one by ts. The two differ by exactly
-        # 4718.5.
-        assert nav["day"] == "2026-08-01"
-        assert nav["rolled_nav"] == "9928.5"
-        assert nav["archive_balance_usd_family"] == "5210"
-        assert nav["diff"] == "-4718.5"
+        # The reading sits at the end of the reach boundary day, 08-02, the last archive-owned
+        # day. nav_end(08-02) by the hand roll above is 10028.5 (10000 less the live days 08-03
+        # -50, 09-15 +20 and funding +1.5). The archive balance is the file's running ``bal``
+        # after its last bill on or before 08-02: 5000 + 10 (07-10) + 200 (08-01) + 97.5 (08-02)
+        # = 5307.5, the 08-02 bill being the latest by ts. The two differ by exactly 4721.0.
+        assert nav["day"] == "2026-08-02"
+        assert nav["rolled_nav"] == "10028.5"
+        assert nav["archive_balance_usd_family"] == "5307.5"
+        assert nav["diff"] == "-4721"
 
 
 class TestResultShape:
@@ -1706,7 +1907,7 @@ class TestResultShape:
             assert isinstance(reconcile[leg]["first_offending"], list)
         info = result["info"]
         assert set(info) == {
-            "bal_continuity", "flow_totals_overlap", "realized_balance_vs_rolled_nav",
+            "bal_continuity", "flow_totals_overlap", "realized_balance_vs_rolled_nav", "live_from",
             "first_live_day_differs", "archive_days_prepended", "gap_days_active",
             "gap_days_quiet", "archive_only_in_live_reach", "stored_vs_core",
         }
@@ -1717,8 +1918,8 @@ class TestResultShape:
         assert isinstance(info["first_live_day_differs"], bool)
         assert set(result["excluded"]) == {"excluded_by_month"}
         for entry in result["strategies"]:
-            assert set(entry) == {"position", "insert_days", "insert_ranges", "gaps_before",
-                                  "gaps_after", "rpc"}
+            assert set(entry) == {"position", "insert_days", "insert_ranges", "insert_returns",
+                                  "gaps_before", "gaps_after", "rpc"}
             assert isinstance(entry["position"], int) and isinstance(entry["insert_days"], int)
             assert all(set(r) == {"from", "to"} for r in entry["insert_ranges"])
         assert isinstance(result["fingerprint"], str) and HEX64.fullmatch(result["fingerprint"])

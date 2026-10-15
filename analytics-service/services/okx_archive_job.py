@@ -192,6 +192,17 @@ MIN_DEFER_S: Final[int] = 60
 #: stamps the key's 429 (that opens the exchange-wide breaker and pauses normal OKX syncs).
 RATE_LIMIT_DEFER_S: Final[int] = 15 * 60
 
+#: How far back the live ``bills-archive`` walk is ASSUMED to reach, in days (CR-01). OKX
+#: documents "the last 3 months"; a calendar three months is 89..92 days and
+#: ``exchange.fetch_daily_pnl`` itself approximates it as 90. The reach starts at an arbitrary
+#: instant, so its first day is PARTIAL, and the job must name that day from the fetch window,
+#: never from the first record the crawl happened to return (a quiet stretch or a page-cap cut
+#: moves the first record, not the reach). The assumed reach is deliberately the shortest the
+#: venue can serve (89) less a day of margin: assuming a SHORTER reach than the venue gives only
+#: hands one more whole day to the archive, while assuming a longer one would treat a partial
+#: live day as whole, which skews every rebuilt NAV.
+LIVE_REACH_ASSUMED_DAYS: Final[int] = 88
+
 # Seams for tests (a fake clock and a recorded sleep); production uses the real ones.
 _monotonic = time.monotonic
 _sleep = asyncio.sleep
@@ -1310,9 +1321,16 @@ class _LiveReference:
     full_history: bool
     realized_by_day: dict[str, Decimal]
     funding_by_day: dict[str, Decimal]
-    #: The first day the live realized reach carries a record: the reach boundary day, which
-    #: is partial (OKX cut the reach mid-day), so it is never compared.
-    first_realized_day: str | None
+    #: The live realized reach's boundary day, derived from the FETCH WINDOW (never from the
+    #: first record): OKX cut the reach at an arbitrary instant that day, so it is partial,
+    #: never compared, and owned by the archive (CR-01).
+    reach_boundary_day: str
+    #: The first day the live realized P&L owns: the day after the boundary day.
+    first_full_day: str
+    #: The first day of the live deposit/withdrawal window (``flow_retention_floor``), or None
+    #: for a venue with no retention cap. The archive's transfer bills are used before it,
+    #: the live flows from it (F4).
+    flow_window_first_day: str | None
 
 
 def _record_day(timestamp: object) -> str:
@@ -1403,6 +1421,7 @@ async def _live_reference(
         open_unrealized = 0.0
 
     realized_by_day = _live_realized_by_day(realized)
+    reach_boundary = (now_utc - timedelta(days=LIVE_REACH_ASSUMED_DAYS)).date()
     return _LiveReference(
         equity=equity,
         balance_error=balance_error,
@@ -1415,7 +1434,9 @@ async def _live_reference(
         full_history=_ccxt_full_history_verdict("okx", realized, funding, now_utc),
         realized_by_day=realized_by_day,
         funding_by_day=_live_funding_by_day(list(funding)),
-        first_realized_day=min(realized_by_day) if realized_by_day else None,
+        reach_boundary_day=reach_boundary.isoformat(),
+        first_full_day=(reach_boundary + timedelta(days=1)).isoformat(),
+        flow_window_first_day=None if floor is None else floor.date().isoformat(),
     )
 
 
@@ -1466,13 +1487,14 @@ def _reconcile(
 ) -> list[tuple[str, str]]:
     """D-09 / D-10: the realized leg and the funding leg per day and on the window total over
     the overlap window, with ``TOLERANCE_USD`` only (``reconcile_leg`` carries it, with no
-    parameter). The excluded classes, flow totals and ``bal`` continuity are reported, never
-    gated. A miss, or no window at all, is the permanent ``reconcile_miss`` (D-11). Returns
-    the windows."""
-    boundary = live.first_realized_day
+    parameter). The excluded classes and flow totals are reported, never gated. The window
+    opens the day after the reach boundary day, which comes from the fetch window (CR-01): a
+    day the crawl missed inside it is then an archive-only day and a miss, not an unexamined
+    one. A miss, or no window at all, is the permanent ``reconcile_miss`` (D-11). Returns the
+    windows."""
     reconcile: dict[str, Any] = {
         "window": None,
-        "excluded_boundary_day": boundary,
+        "excluded_boundary_day": live.reach_boundary_day,
         "realized": None,
         "funding": None,
     }
@@ -1483,14 +1505,10 @@ def _reconcile(
             for month, by_class in sorted(aggregate.excluded_by_month.items())
         }
     }
-    windows = (
-        _windows(quarters, date.fromisoformat(boundary) + timedelta(days=1), _utc_today())
-        if boundary is not None
-        else []
-    )
+    windows = _windows(quarters, date.fromisoformat(live.first_full_day), _utc_today())
     if not windows:
         # Calibration cannot be taken: the live reach no longer touches the verified quarters
-        # (RESEARCH Pitfall 9) or there is no live record at all. The runbook names the date.
+        # (RESEARCH Pitfall 9). The runbook names the date.
         raise _Stop("reconcile_miss", "window=none")
     reconcile["window"] = {"from": windows[0][0], "to": windows[-1][1]}
     realized_readings = [
@@ -1665,12 +1683,14 @@ async def _d03_check(
 
 # ----- information readings (never gates) -------------------------------------------------
 
-def _balance_vs_nav(
-    files: list[ArchiveFile], live: _LiveReference, live_first_day: str
-) -> dict[str, Any]:
-    """The archive's USD-family balance after its last bill on or before the day before the
-    live first day, against the NAV the live roll puts at the end of that day."""
-    prev = (date.fromisoformat(live_first_day) - timedelta(days=1)).isoformat()
+def _balance_vs_nav(files: list[ArchiveFile], live: _LiveReference) -> dict[str, Any]:
+    """The archive's USD-family balance after its last bill on or before the reach boundary
+    day (the last day the archive owns), against the NAV the live roll puts at the end of that
+    day: today's equity less the open-uPnL wedge less every live P&L, funding and flow dated
+    from the first full live day on. The union rolls its archive days from exactly this NAV,
+    so a large ``diff`` is the one reading that checks the anchor itself (CR-01)."""
+    prev = live.reach_boundary_day
+    owned = live.first_full_day
     latest: dict[str, Any] = {}
     for file in files:
         for row in file.rows:
@@ -1684,10 +1704,10 @@ def _balance_vs_nav(
     rolled: Decimal | None = None
     if live.equity is not None and math.isfinite(live.equity):
         after = sum(
-            (v for d, v in live.realized_by_day.items() if d >= live_first_day), Decimal(0)
-        ) + sum((v for d, v in live.funding_by_day.items() if d >= live_first_day), Decimal(0))
+            (v for d, v in live.realized_by_day.items() if d >= owned), Decimal(0)
+        ) + sum((v for d, v in live.funding_by_day.items() if d >= owned), Decimal(0))
         after += sum(
-            (Decimal(repr(float(f.usd_signed))) for f in live.flows if f.utc_day_iso >= live_first_day),
+            (Decimal(repr(float(f.usd_signed))) for f in live.flows if f.utc_day_iso >= owned),
             Decimal(0),
         )
         rolled = Decimal(repr(live.equity)) - Decimal(repr(live.open_unrealized_usd)) - after
@@ -1727,6 +1747,27 @@ async def _stored_vs_core(
         "days_compared": compared,
         "days_over_cent": len(offending),
         "first_offending": offending[:10],
+    }
+
+
+def _returns_summary(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The founder's preview of the VALUES a target's rows carry (F4): the smallest and the
+    largest daily return and the compounded return of the whole stretch, as plain floats
+    (a return is a ratio, not an amount). ``None`` when there is no row. ``cumulative`` is
+    ``None`` when a day's return would make the compounding meaningless (<= -100%): an
+    uncomputable value is null, never a guess.
+
+    These are anchored on today's equity, so they are NOT in the fingerprint (a legitimate
+    equity move between calibrate and apply must not void the approval); they are what the
+    founder reads to judge the numbers the fingerprint deliberately does not pin."""
+    if not rows:
+        return None
+    values = [float(r["daily_return"]) for r in rows]
+    factors = [1.0 + v for v in values]
+    return {
+        "min": min(values),
+        "max": max(values),
+        "cumulative": math.prod(factors) - 1.0 if all(f > 0.0 for f in factors) else None,
     }
 
 
@@ -1868,6 +1909,8 @@ async def _evaluate(
             archive_flows_by_day=aggregate.flows_by_day,
             covered_days=aggregate.covered_days,
             from_day=from_day,
+            live_pnl_from_day=live.first_full_day,
+            live_flows_from_day=live.flow_window_first_day,
         )
     except RebuildRefused as refusal:
         raise _Stop(refusal.stop_class) from None
@@ -1914,7 +1957,8 @@ async def _evaluate(
                 )
             ),
         },
-        "realized_balance_vs_rolled_nav": _balance_vs_nav(ingested.files, live, rebuilt.live_first_day),
+        "realized_balance_vs_rolled_nav": _balance_vs_nav(ingested.files, live),
+        "live_from": {"pnl": live.first_full_day, "flows": live.flow_window_first_day},
         "first_live_day_differs": rebuilt.first_live_day_differs,
         "archive_days_prepended": rebuilt.archive_days_prepended,
         "gap_days_active": len(active),
@@ -1927,6 +1971,7 @@ async def _evaluate(
             "position": plan.position,
             "insert_days": len(plan.rows),
             "insert_ranges": days_to_ranges(r["date"] for r in plan.rows),
+            "insert_returns": _returns_summary(plan.rows),
             "gaps_before": plan.stored_gaps,
             "gaps_after": plan.expected_after,
             "rpc": None,
@@ -1974,6 +2019,7 @@ async def _apply_targets(
         if _already_complete(plan):
             entry["insert_days"] = 0
             entry["insert_ranges"] = []
+            entry["insert_returns"] = None
             entry["rpc"] = {"status": "already_applied", "error_class": None}
             continue
 
@@ -2030,6 +2076,7 @@ async def _apply_targets(
         if status == "already_applied":
             entry["insert_days"] = 0
             entry["insert_ranges"] = []
+            entry["insert_returns"] = None
         elif answer.get("inserted") != len(plan.rows):
             # D-12 at work: a live day appeared since the read and kept its row. Counts only.
             logger.warning(

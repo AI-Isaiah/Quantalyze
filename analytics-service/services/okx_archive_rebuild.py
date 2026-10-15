@@ -15,6 +15,19 @@ imports none of the archive-ingest modules. Its three jobs:
    the union and the live-only call must agree on every live day after the first,
    to 1e-9. Any other difference is a permanent ``identity_violation``.
 
+   **Who owns which day (CR-01, F4).** The live realized fetch reaches back about three
+   months from an arbitrary instant, so its first day is partial, and a partial day used as
+   the anchor of the backward roll skews EVERY rebuilt day's NAV. The caller therefore names
+   the first day the live P&L OWNS (``live_pnl_from_day``, the first FULL live day, derived
+   from the fetch window and never from the first record): the archive owns every earlier
+   day, the partial boundary day included, and live realized and funding records dated before
+   it are not used. Flows have their own seam (``live_flows_from_day``, the start of the live
+   deposit/withdrawal window): archive transfer bills are used strictly before it and live
+   deposits/withdrawals from it on, so no day is ever described by both sources. A movement
+   whose two legs straddle that seam (a trading-to-funding transfer on one side and the
+   on-chain withdrawal on the other) is the one case construction cannot settle; the job
+   reports the totals of both sources over their overlap for the founder to read.
+
 2. ``rows_for_strategy`` (D-01, D-12). Slice the union to the days that may
    become ``csv_daily_returns`` rows: covered by a verified archive quarter,
    inside one of the strategy's stored ``unrecovered_gaps``, finite, not already
@@ -77,9 +90,11 @@ class RebuildRefused(Exception):
 class RebuildResult:
     """``returns`` is the UNION series (archive days prepended, the live core's own
     gap-fill and guards applied). ``live_first_day`` is the first day of the
-    LIVE-ONLY core's index. ``first_live_day_differs`` records, rather than fails,
-    the single exempt day (the first live day may be guarded differently when it is
-    no longer day 0). ``archive_days_prepended`` counts the covered days handed to
+    derive-equivalent LIVE-ONLY core's index (every live record, as the derive sees them):
+    the first day a stored live row can exist, so no row is ever written on or after it.
+    ``first_live_day_differs`` records, rather than fails, the single exempt day (the first
+    live day may be guarded differently when it is no longer day 0, and it is only compared
+    when the live P&L owns it). ``archive_days_prepended`` counts the covered days handed to
     the core."""
 
     returns: pd.Series
@@ -180,7 +195,18 @@ def _pnl_record(day: str, pnl: float) -> dict[str, Any]:
 
 
 def _day_iso(ts: pd.Timestamp) -> str:
-    return ts.date().isoformat()
+    return str(ts.date().isoformat())
+
+
+def _stamp_day(stamp: object) -> str:
+    """UTC calendar day (``YYYY-MM-DD``) of a live record's timestamp: a datetime, or an ISO
+    string whose first ten characters are the day. Anything else fails loud."""
+    if isinstance(stamp, datetime):
+        aware = stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=timezone.utc)
+        return str(aware.astimezone(timezone.utc).date().isoformat())
+    if isinstance(stamp, str):
+        return _parse_day(stamp[:10]).isoformat()
+    raise ValueError("a live record carries no readable timestamp")
 
 
 def rebuild_union(
@@ -197,6 +223,8 @@ def rebuild_union(
     archive_flows_by_day: Mapping[str, Decimal],
     covered_days: AbstractSet[str],
     from_day: str,
+    live_pnl_from_day: str,
+    live_flows_from_day: str | None,
 ) -> RebuildResult:
     """Run the live core twice, live-only and with archive days prepended, and
     return the union once the identity on the live days is proven.
@@ -206,11 +234,21 @@ def rebuild_union(
     keyword arguments the derive passes at its ``combine_realized_and_funding`` call
     site, so the only difference between them is the prepended archive days.
 
+    ``live_pnl_from_day`` is the first FULL day of the live realized reach (an ISO day the
+    caller derives from the fetch window, never from the first record). The archive owns every
+    earlier day: live realized and funding records dated before it are dropped from the union
+    (they describe a partial day) and the archive's full-day values are used instead, so the
+    NAV roll is anchored on whole days. ``live_flows_from_day`` is the first day of the live
+    deposit/withdrawal window (``None``: the venue has no retention cap, so live flows cover
+    all history and the archive's transfer bills are never used). Archive flows are used
+    strictly before it, live flows from it on.
+
     Sign conventions: archive realized and funding amounts are signed income
     (positive earns); archive flows are signed USD (deposit positive, withdrawal
     negative), the ``ExternalFlow`` convention. Archive days handed to the core are
-    the covered days in ``[from_day, live_first_day)``: earlier days cannot change a
-    gap day under a backward roll and only risk a guard tripping on old history.
+    the covered days in ``[from_day, p0)`` where ``p0`` is the first day the live P&L owns a
+    record: earlier days cannot change a gap day under a backward roll and only risk a guard
+    tripping on old history.
     """
     # A heuristic base is not acceptable for a rebuild: refuse BEFORE any core call.
     if (
@@ -220,6 +258,9 @@ def rebuild_union(
         or abs(equity) <= DUST_NAV_FLOOR
     ):
         raise RebuildRefused(STOP_LIVE_ANCHOR_UNUSABLE)
+
+    pnl_from = _parse_day(live_pnl_from_day).isoformat()
+    flows_from = None if live_flows_from_day is None else _parse_day(live_flows_from_day).isoformat()
 
     # NEVER ``apply_flow_coverage_terminus`` here. That step NaNs returns before the
     # venue's 90-day deposit-history retention, because capital moves older than it are
@@ -233,10 +274,15 @@ def rebuild_union(
         "full_history": full_history,
     }
 
+    # Live flows exist only from the start of the live window; defend the seam anyway.
+    flows_live = [f for f in live_flows if flows_from is None or f.utc_day_iso >= flows_from]
+
+    # The derive-equivalent call: every live record, as the derive sees them. Its first day
+    # is the first day a stored live row can exist (D-12), whatever the archive owns.
     live_returns, _ = combine_realized_and_funding(
         list(live_realized),
         list(live_funding),
-        external_flows=list(live_flows),
+        external_flows=list(flows_live),
         **core_kwargs,
     )
     if live_returns.empty:
@@ -244,8 +290,21 @@ def rebuild_union(
         raise RebuildRefused(STOP_LIVE_ANCHOR_UNUSABLE)
     live_first_day = _day_iso(live_returns.index[0])
 
+    # CR-01: the live P&L the union may use starts at the first FULL day.
+    own_realized = [r for r in live_realized if _stamp_day(r["timestamp"]) >= pnl_from]
+    own_funding: list[Any] = [
+        f for f in live_funding if _stamp_day(f["timestamp"]) >= pnl_from
+    ]
+    own_days = [_stamp_day(r["timestamp"]) for r in own_realized] + [
+        _stamp_day(f["timestamp"]) for f in own_funding
+    ]
+    if not own_days:
+        # Every live P&L record is a partial boundary day: no whole live day to roll from.
+        raise RebuildRefused(STOP_LIVE_ANCHOR_UNUSABLE)
+    live_p0 = min(own_days)
+
     first = _parse_day(from_day).isoformat()
-    covered_in = sorted(d for d in covered_days if first <= _parse_day(d).isoformat() < live_first_day)
+    covered_in = sorted(d for d in covered_days if first <= _parse_day(d).isoformat() < live_p0)
 
     # A bill on a day the verified quarters do not cover is a caller inconsistency, not
     # data to use: fail loud rather than let an unverified day shape the NAV roll.
@@ -257,7 +316,7 @@ def rebuild_union(
     ):
         stray = [
             d for d in by_day
-            if first <= _parse_day(d).isoformat() < live_first_day and d not in covered_set
+            if first <= _parse_day(d).isoformat() < live_p0 and d not in covered_set
         ]
         if stray:
             raise ValueError(
@@ -279,36 +338,48 @@ def rebuild_union(
                 {"timestamp": datetime(y, m, d, tzinfo=timezone.utc), "amount": funding}
             )
         flow = _finite_float(archive_flows_by_day.get(day, Decimal(0)), what="flow")
-        if flow != 0.0:
+        # F4: an archive transfer bill is used only BEFORE the live flow window opens. From
+        # that day the live deposits and withdrawals describe the same capital, and a day
+        # described by both would count one movement twice.
+        if flow != 0.0 and flows_from is not None and day < flows_from:
             archive_flows.append(ExternalFlow(day, flow, currency="USD", quantity=None))
 
     union_returns, _ = combine_realized_and_funding(
-        archive_realized + list(live_realized),
-        list(live_funding) + archive_funding,
-        external_flows=archive_flows + list(live_flows),
+        archive_realized + own_realized,
+        own_funding + archive_funding,
+        external_flows=archive_flows + list(flows_live),
         **core_kwargs,
     )
 
-    # T-IDENT-1: every live day after the first must be reproduced by the union.
+    # T-IDENT-1: every live day the union is anchored on must be reproduced by it. The live
+    # days the archive owns (before ``pnl_from``) are not compared: they are replaced on
+    # purpose, and a stored row there is protected by D-12, not by this identity.
     live_idx = live_returns.index
     if not live_idx.isin(union_returns.index).all():
         raise RebuildRefused(STOP_IDENTITY_VIOLATION)
     union_live = union_returns.reindex(live_idx).to_numpy(dtype=float)
     live_vals = live_returns.to_numpy(dtype=float)
-    if len(live_vals) > 1 and not np.allclose(
-        union_live[1:], live_vals[1:], rtol=0.0, atol=IDENTITY_ATOL, equal_nan=True
+    owned = np.array([_day_iso(ts) >= pnl_from for ts in live_idx], dtype=bool)
+    # The first live day is exempt (it is no longer day 0 in the union, so a day-0 rule or
+    # guard can read it differently): recorded, not failed. When the archive owns it the
+    # exemption is moot: it is not compared at all.
+    compared = owned.copy()
+    compared[0] = False
+    if compared.any() and not np.allclose(
+        union_live[compared], live_vals[compared], rtol=0.0, atol=IDENTITY_ATOL, equal_nan=True
     ):
         raise RebuildRefused(STOP_IDENTITY_VIOLATION)
-    # The first live day may legitimately differ (it is no longer day 0, so a day-0
-    # inception rule or guard can read it differently): recorded, not failed.
-    first_live_day_differs = not np.allclose(
-        union_live[:1], live_vals[:1], rtol=0.0, atol=IDENTITY_ATOL, equal_nan=True
+    first_live_day_differs = bool(
+        owned[0]
+        and not np.allclose(
+            union_live[:1], live_vals[:1], rtol=0.0, atol=IDENTITY_ATOL, equal_nan=True
+        )
     )
 
     return RebuildResult(
         returns=union_returns,
         live_first_day=live_first_day,
-        first_live_day_differs=bool(first_live_day_differs),
+        first_live_day_differs=first_live_day_differs,
         archive_days_prepended=len(covered_in),
     )
 
