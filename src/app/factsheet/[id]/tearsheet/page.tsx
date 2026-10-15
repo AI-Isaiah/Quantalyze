@@ -16,9 +16,15 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { withPublishedOnly } from "@/lib/visibility";
 import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
 import { parseReturnsUnit, withUnit } from "@/lib/factsheet/returns-unit";
-import { parseUnrecoveredGaps, type UnrecoveredGap } from "@/lib/factsheet/trade-fetch-provenance";
+import {
+  parseUnrecoveredGaps,
+  readReconstructedRanges,
+  type ReconstructedRange,
+  type UnrecoveredGap,
+} from "@/lib/factsheet/trade-fetch-provenance";
 import { captureToSentry } from "@/lib/sentry-capture";
 import {
+  ReconstructedRangeLines,
   TradeFetchLineView,
   TradeFetchUnavailableLine,
   UnrecoveredGapLines,
@@ -123,6 +129,11 @@ async function readReturnsUnit(
  *     "No trade fetch recorded yet", a false statement on a printable page. The
  *     fetch line is replaced by the unavailable line; the gap record is a
  *     separate column and its lines are unaffected.
+ *   - `readable: true, reconstructedRangesUnavailable: true` - the
+ *     `reconstructed_ranges` record is present but malformed (review round 1,
+ *     F5 / IN-01). The rebuild RPC already took those days out of
+ *     `unrecovered_gaps`, so printing nothing would present rebuilt days as
+ *     live; the page says the record of rebuilt days is unavailable.
  *
  * Every one of these is reported to Sentry through `captureToSentry`, the helper
  * the factsheet resolver uses: `console.*` does not reach Sentry in this repo,
@@ -138,11 +149,15 @@ type TradeFactsRead =
       tradesFetchedAt: string | null;
       tradeFetchVenue: string | null;
       unrecoveredGaps: UnrecoveredGap[];
+      /** Phase 167.1.2.2.2.1 D-06: ranges rebuilt from OKX's quarterly statement. */
+      reconstructedRanges: ReconstructedRange[];
+      /** F5 / IN-01: the stored record was malformed; say so instead of printing nothing. */
+      reconstructedRangesUnavailable: boolean;
     };
 
 function reportTradeFactsFailure(
   strategyId: string,
-  reason: "read_error" | "read_threw" | "no_row" | "malformed_field",
+  reason: "read_error" | "read_threw" | "no_row" | "malformed_field" | "reconstructed_ranges_malformed",
   detail: string,
 ): void {
   captureToSentry(new Error(`tearsheet: trade facts ${reason}`), {
@@ -201,6 +216,12 @@ async function readTradeFacts(strategyId: string): Promise<TradeFactsRead> {
         }${exchangeMalformed ? `api_keys.exchange is ${typeof rawExchange}` : ""}`,
       );
     }
+    // F5 / IN-01: a malformed reconstructed_ranges record is reported and
+    // disclosed, never rendered as "nothing was rebuilt".
+    const reconstructed = readReconstructedRanges(analytics?.series_provenance);
+    if (reconstructed.malformed !== null) {
+      reportTradeFactsFailure(strategyId, "reconstructed_ranges_malformed", reconstructed.malformed);
+    }
     return {
       readable: true,
       fetchKnown,
@@ -208,6 +229,8 @@ async function readTradeFacts(strategyId: string): Promise<TradeFactsRead> {
       tradeFetchVenue:
         typeof rawExchange === "string" && rawExchange.length > 0 ? rawExchange.toLowerCase() : null,
       unrecoveredGaps: parseUnrecoveredGaps(analytics?.series_provenance),
+      reconstructedRanges: reconstructed.ranges,
+      reconstructedRangesUnavailable: reconstructed.malformed !== null,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -449,7 +472,16 @@ export default async function TearSheetPage({
                 <TradeFetchUnavailableLine size="fixed-10" />
               )}
               {tradeRead.readable && (
-                <UnrecoveredGapLines gaps={tradeRead.unrecoveredGaps} size="fixed-10" />
+                <>
+                  <UnrecoveredGapLines gaps={tradeRead.unrecoveredGaps} size="fixed-10" />
+                  {/* D-06: the rebuilt ranges, directly after the gap lines,
+                      same words as the factsheet header (SC-4). */}
+                  <ReconstructedRangeLines
+                    ranges={tradeRead.reconstructedRanges}
+                    unavailable={tradeRead.reconstructedRangesUnavailable}
+                    size="fixed-10"
+                  />
+                </>
               )}
             </div>
           )}

@@ -1163,7 +1163,9 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): 99 -> 100, the runner-only date gate file (test_sync_status_computed_at_runner_only.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 100 file(s); 0…' to match /scanned 99 file/` first, and `node scripts/lint-sql-gates.mjs` printed `scanned 100 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): 99 -> 102, the THREE fan-in gate files (test_fan_in_failure_cascade.sql, test_fan_in_lock_order_race.sql, test_bridge_outcomes_decision_delete_cascade.sql). MEASURED: `node scripts/lint-sql-gates.mjs` printed `scanned 102 file(s); 0 finding(s)`, and this pin read `expected 'lint-sql-gates: scanned 102 file(s); …' to match /scanned 99 file/`.
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): MEASURED on the merged tree, `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 103 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`.
-    expect(res.out).toMatch(/scanned 103 file/);
+    // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 99 -> 100, the okx archive rebuild gate file (test_okx_archive_rebuild.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 100 file(s); 0…' to match /scanned 99 file/`, and `node scripts/lint-sql-gates.mjs` printed `scanned 100 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
+    // ⭐ CURRENCY MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): MEASURED on the merged tree, `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 104 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).` (main's 103 plus test_okx_archive_rebuild.sql).
+    expect(res.out).toMatch(/scanned 104 file/);
     expect(res.status, res.out).toBe(0);
   });
 

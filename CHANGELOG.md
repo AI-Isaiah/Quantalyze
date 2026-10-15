@@ -1,5 +1,97 @@
 # Changelog
 
+## [0.132.2.0] - 2026-10-15 — OKXHISTORY: an OKX strategy's days older than the 3-month bills window can be rebuilt from OKX's quarterly bills archive (PR-A, code only)
+
+Phase 167.1.2.2.2.1, PR-A (plans 01-10 and 16). The branch has 74 non-merge commits since `origin/main` plus 17 merge commits (per-plan worktree merges and three merges of `origin/main`). 51 of the 73 touch paths outside `.planning`, and this entry maps every one of them. The other 23 are planning and records commits: CONTEXT with founder decisions D-01..D-13, research, the pattern map, 16 plans, SUMMARYs, three review rounds, verification and the security audit. Those are not shipped here. **Nothing is rebuilt on PROD by this release.** The allow-list for the archive download host ships empty on purpose, so every real download is refused until PR-B (plan 13) adds the host measured by the founder's preflight (plan 12). Calibrate (plan 14) and the PROD apply (plan 15) are founder steps that come after it.
+
+### Added
+- **Migration `20261026120000_okx_archive_rebuild.sql`.**
+  - It registers the compute_jobs kind `okx_archive_rebuild`. The kind is api_key-scoped only, and both kind CHECKs are re-based byte-identical to their prior definitions plus one new arm.
+  - It adds the atomic RPC `public.apply_okx_archive_rebuild(uuid, jsonb, jsonb, jsonb)`: SECURITY INVOKER, `service_role` only, with a pinned search_path.
+  - The RPC is a compare-and-set on the strategy's stored gaps. It refuses a row outside every gap (`row_outside_gap`), a changed gap list (`gaps_changed`) and a recomputed gap list that disagrees (`gaps_after_mismatch`).
+  - It inserts with `ON CONFLICT DO NOTHING`, so a live-derived day always wins (D-12).
+  - In the same call it records `series_provenance.reconstructed_ranges` with source `okx_bills_history_archive` (D-05).
+  - The migration carries an in-migration `$verify$` block, and a manual rollback lives in `supabase/migrations/down/`.
+- **Archive parse, classify and reconcile** (`okx_archive_files.py`, `okx_archive_classify.py`, `okx_archive_reconcile.py`).
+  - Parsing: the 28-column header is pinned. The file must fall inside its quarter. Duplicate, missing and unparseable bills stop the job.
+  - Classification: a committed subType table covers realized, funding, flow and non-external bills. Transfers are external flows (D-08). An unknown subtype with a nonzero effect fails loud, and so does a non-USD currency.
+  - Completeness: one balance chain runs across adjacent quarters, with a pairs floor.
+  - Reconciliation: archive versus live-derived on the overlap days, at `TOLERANCE_USD = Decimal("0.01")` per day and over the window total. The tolerance is a fixed module constant (D-09/D-10).
+- **Safe archive downloader** (`okx_archive_download.py`).
+  - Request: https only, an exact-host allow-list held in a code constant, no userinfo, port or fragment.
+  - Address checks: every DNS answer is vetted (private and non-global addresses are refused), and the connection dials the vetted IP with SNI.
+  - Transport: no proxy, cookies or redirects.
+  - Size: 64 MiB compressed, 512 MiB decompressed and a 100:1 ratio, checked per chunk. Inflation happens in memory only, from a zip with exactly one member or a single gzip member.
+  - Logs: only the link's scheme and host are logged.
+- **Rebuild core** (`okx_archive_rebuild.py`).
+  - Archive days go through the live P&L core, with the identity asserted on every run.
+  - A row is emitted only for a covered day inside a stored gap, before the first full live day.
+  - A day in an uningested quarter stays missing and named (SC-4).
+- **The durable job**, wired in `job_worker.py` and `main_worker.py`.
+  - Modes: preflight, calibrate and apply.
+  - Before any archive call it refuses: a disconnected, revoked, non-OKX or inactive key; a uid mismatch; a key without the read-only permission; and subtype drift (D-02).
+  - It writes a v1 result shape, with readings that are information only.
+  - Calibrate fingerprints what it evaluated, and apply writes only a fingerprint the founder approved. Every stop is raised before the first RPC, so a miss writes nothing (D-10). Apply resumes per target.
+- **Stateless wait on the OKX archive** (plan 16).
+  - Each claim re-applies and re-reads status, and waits through `defer_compute_job` for at most 3600 s. It gives up 8 h after OKX's own `ts`, and a 24 h backstop counts from the job's `created_at`.
+  - A 403 or 410 gets one fresh status read and one retry, then ends as the transient `link_expired`.
+  - A lost link never yields a partial result (SC-1).
+- **Factsheet and tear sheet line (D-06).**
+  - `parseReconstructedRanges`/`readReconstructedRanges` put `reconstructedRanges` on the payload.
+  - Each range prints "{from} – {to}: rebuilt from OKX's quarterly account statement, not the live feed." on both surfaces.
+  - A malformed record goes to Sentry, and the page says the record is unavailable.
+  - Rebuilt days count in Sharpe, CAGR and drawdown (D-07).
+- **Operator runbook `docs/runbooks/okxhistory-go-live.md`.**
+  - It has guarded SQL forms for enqueue, readback, before/after, survival and rollback.
+  - The marker is read from the cron manifest, and every write form refuses on a NULL or mismatched marker.
+  - The DRY render strips every write.
+  - Strategies are named by ordinal only.
+
+### Changed
+- The factsheet payload cache key is bumped `factsheet-v2-payload-v18` to `v19` for the new `reconstructedRanges` field.
+
+### Fixed (review rounds 1-3, before this release)
+- The archive realized leg is pnl + fee of every bill the live aggregator sums (WR-01).
+- The archive owns every day before the first FULL live day, and the archive and live flow sources never overlap (CR-01, F4).
+- A quarter file must prove it is whole before a day with no bills counts as a quiet 0.0 (F1). One gated balance chain now spans adjacent quarters, with a pairs floor and a positive proof in the result.
+- Agreement over a short or quiet overlap window no longer authenticates the archive (F3).
+- A failed or capped live crawl is a stop or a deferral, never an empty series (F2/WR-03).
+- A target with nothing to apply is a named stop, not an `already_applied` success (F6/WR-05).
+- Every wait ends at 24 h from the job's own `created_at` (F7/WR-04). One claim fits its handler timeout, and an overlong claim ends in the named transient `claim_budget_exceeded` (WR-06).
+- The flow readings are measured around the real flow seam.
+- A malformed `reconstructed_ranges` reaches Sentry and the page says so (F5/IN-01).
+- The runbook's after and rollback forms refuse when an ordinal no longer names the described strategy (F8). The runbook reads the shipped result keys and names every transient class, the give-up stop and the readings Step 3 reads.
+- The module docstrings now say what they cover: the job's names the 24 h backstop and the claim budget, and `okx_archive_files`'s names what `archive_incomplete` covers.
+
+### Tests
+- New suites:
+  - Python: `test_okx_archive_{download,parse,reconcile,rebuild,apply,job,derive_survival}.py`.
+  - SQL: the fifteen-arm gate `supabase/tests/test_okx_archive_rebuild.sql`, all 15 arms annotated and biting under the mutation runner.
+  - TS: the provenance reader, both D-06 surfaces and a SQL/TS literal pin of the source string.
+- Census moves, re-measured on the tree merged with `origin/main` and never added by hand:
+  - sql-tests `SENTINEL_FLOOR` 22 and `ARMS_FLOOR` 347.
+  - Mutation `FILES_FLOOR` 77 and `ARMS_FLOOR` 771, from one full runner run: `coverage: files 77/104`, `arms: 771/771/0`, `No defects`.
+  - Baseline `COMPARED_FLOOR` 132; `lint-sql-gates` scans 104 files; the annotation-parser pins read 771 arms and 887 needles.
+  - The restore refdata allowlist gains the `compute_job_kinds` row, and the restore script's INSERT-entry pin follows `ENTRY_COUNT` 22 -> 23. The D-05 scoped-update pin counts the gate's one scoped UPDATE.
+- Pins over existing code: the live derive's reach (its delete is bounded to its own span, so rebuilt rows survive it) and the analytics runner's inclusion of rebuilt rows. Covered-quiet zeros and an uncovered quarter are pinned too.
+- The no-link-in-logs capture is pinned to the emitting loggers. It had been order-dependent, and it was seen RED, then GREEN.
+- The q3 fixture now chains from q2's last balance.
+- A comment in `okx_archive_job.py` is reworded so that gitleaks' `generic-api-key` rule does not read the identifier `stamp_api_key_429` as a secret. A scan of this branch's range with `--log-opts` found it, and the push-to-main scan would have found it too. The identifier itself is unchanged.
+- Full python suite on the merged tree: 10669 passed, 93.73% coverage.
+
+- **The userinfo refusal fixture in `test_okx_archive_download.py` is no longer a URL literal.** The push-time credential scanner read the synthetic `user:pw` fixture as a basic-auth leak and refused the push. The row now builds the same URL from `FAKE_USERINFO`, and the file passes 108/108. (`f91580d66`)
+
+### Security
+- 33 of 33 threats in plans 01-10 and 16 are closed (24 mitigated, 9 accepted). The SSRF, bomb, link-leak, grant and wrong-database threats are mitigated as listed under Added.
+
+### Notes
+- **Known limits, recorded rather than fixed here:**
+  - The download allow-list is empty until PR-B.
+  - `baseline-content-drift` reports one expected `SNAPSHOT_MISSING apply_okx_archive_rebuild/4` until plan 11's post-apply re-dump deletes its ratchet row.
+  - The review-round-3 survivors (TODOS `[167.1.2.2.2.1-REVIEW-R3-SURVIVORS]`, WR-01..WR-04) are owned by plan 13 Task 2b and must land before the founder reads plan 14's calibrate. WR-01 is the `MIN_CHAINED_PAIRS` floor, which also counts currencies the rebuild never sums.
+  - The two pre-existing `compute.conventions.test.ts` snapshot failures (fixtures B and C) are not from this phase.
+- **Founder decision D-13 ("Decide after calibrate"):** `info.realized_balance_vs_rolled_nav.diff` and `info.flow_seam.diff` stay readings, not gates. The founder sets any limit at plan 15's checkpoint.
+- Booked in TODOS: `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`. Live `fetch_daily_pnl` sums every bill currency at face value. Calibrate's `census.by_ccy` is the measurement, and a non-USD row is a founder stop. Also booked: the Wave 5 recompute hand-off.
 ## [0.132.1.9] - 2026-10-15 — Test fix: the changed-path classifier's throwaway git repositories start no background maintenance, so their cleanup cannot race it
 
 ### Root cause

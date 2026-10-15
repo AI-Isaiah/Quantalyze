@@ -15,7 +15,12 @@ import {
   SERIES_STALE_DAYS,
   SERIES_END_FUTURE_ALLOWANCE_DAYS,
 } from "@/lib/freshness";
-import { TradeFetchLineView, UnrecoveredGapLines, formatIsoDate } from "../trade-fetch-lines";
+import {
+  ReconstructedRangeLines,
+  TradeFetchLineView,
+  UnrecoveredGapLines,
+  formatIsoDate,
+} from "../trade-fetch-lines";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
@@ -1313,6 +1318,14 @@ function FactsheetHeader({
                 so it sits in the header (what survives printing), not in the
                 chart seam. Server truth only (`payload.unrecoveredGaps`). */}
             <UnrecoveredGapLines gaps={payload.unrecoveredGaps} />
+            {/* D-06: each range rebuilt from OKX's quarterly statement, directly
+                after the gap lines so a partly rebuilt gap shows both (SC-4).
+                Shown to every viewer; server truth only
+                (`payload.reconstructedRanges`). */}
+            <ReconstructedRangeLines
+              ranges={payload.reconstructedRanges}
+              unavailable={payload.reconstructedRangesUnavailable}
+            />
           </div>
           {payload.aum != null && (
             <CapacityChip
