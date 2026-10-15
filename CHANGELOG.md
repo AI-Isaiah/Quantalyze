@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.131.11.1] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of c494c5e4
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38707977330`, after the PROD apply of merge `c494c5e4`: sha256 `84b15efe…` → `47d80c8c…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 130 → 130, distinct function names 128 → 128, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261022120000_strategies_anon_api_key_id_revoke.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-15` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.131.11.0 → 0.131.11.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=302 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 130 — MATCH 127, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38707977330` succeeded, and this entry was composed by the `redump-pr` job. Run `38707977330` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.131.11.0] - 2026-10-15 — ANONKEYID (2 of 2): anonymous visitors can no longer read a strategy's api_key_id, and anon holds no write grant on strategies
 
 Phase 170.6.1.1, second of two PRs (O-1), plans 05 to 08. **This release carries a migration, `20261022120000_strategies_anon_api_key_id_revoke.sql`, and it applies to TEST and then PROD on the merge push with no human stop.** A key id is the handle that targets an exchange key. Row-level security decides which strategies a visitor sees, never which columns, so the grant layer was the only column control, and it was open: measured read-only on PROD on 2026-10-13 (marker query first), anon held the table-level privileges SELECT, INSERT, UPDATE, DELETE and REFERENCES on `public.strategies`, could read all 32 columns, and the 3 published strategies all carried a non-null `api_key_id`. The first release (`0.131.4.2`, PR-A) narrowed every reader a signed-out visitor can reach to a key-free column list and was the live production deploy before this PR was opened; that ordering is the whole reason there are two PRs (a migration applies to PROD in parallel with the Vercel build, so a reader still on the wildcard would have answered 42501 on `/browse`, `/strategy/[id]`, the tearsheet and `/`).
