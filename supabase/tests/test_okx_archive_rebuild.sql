@@ -44,8 +44,8 @@
 -- applies to PRODUCTION with no human stop, so nothing in the merge path would
 -- make a missing object appear. Do not add a presence skip.
 --
--- SENTINEL. This gate ends with `RAISE NOTICE 'ALL 15 ARMS EXECUTED (...)'`
--- before ROLLBACK, so it joins ci.yml's `sql-tests` sentinel census
+-- SENTINEL. The final `ALL 15 ARMS EXECUTED (…)` notice at the foot of this file,
+-- before ROLLBACK, joins ci.yml's `sql-tests` sentinel census
 -- (SENTINEL_FLOOR +1, ARMS_FLOOR +15). That census is moved by plan 09 of this
 -- phase, not here.
 --
