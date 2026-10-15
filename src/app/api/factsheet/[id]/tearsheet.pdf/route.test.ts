@@ -11,6 +11,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest, NextResponse } from "next/server";
 
 vi.mock("server-only", () => ({}));
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+import { captureToSentry } from "@/lib/sentry-capture";
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: vi.fn(),
@@ -147,7 +149,7 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — SSRF + UUID validation (C-00
     vi.mocked(puppeteer.acquirePdfSlot).mockReset();
     vi.mocked(puppeteer.launchBrowser).mockReset();
     vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
-    goto = vi.fn().mockResolvedValue(undefined);
+    goto = vi.fn().mockResolvedValue({ status: () => 200 });
     const newPage = vi.fn().mockResolvedValue({
       goto,
       setDefaultNavigationTimeout: vi.fn(),
@@ -333,7 +335,7 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — Cache-Control + Vary (C-0093
     vi.mocked(puppeteer.acquirePdfSlot).mockReset();
     vi.mocked(puppeteer.launchBrowser).mockReset();
     vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
-    goto = vi.fn().mockResolvedValue(undefined);
+    goto = vi.fn().mockResolvedValue({ status: () => 200 });
     const newPage = vi.fn().mockResolvedValue({
       goto,
       setDefaultNavigationTimeout: vi.fn(),
@@ -417,5 +419,79 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — Cache-Control + Vary (C-0093
       .split(",")
       .map((t) => t.trim().toLowerCase());
     expect(tokens).toContain("host");
+  });
+});
+
+describe("GET /api/factsheet/[id]/tearsheet.pdf — an error page is never printed as a PDF (170.6.1.1-TEARSHEET-PDF-STATUS)", () => {
+  // Why: the route drives puppeteer to the anonymous tearsheet page. If that page
+  // answers an error (after PR-B's column revoke, a reader asking for a revoked
+  // column answers 42501 and the page errors), page.pdf() would print the error
+  // page and the route would serve it as a 200 application/pdf, cached publicly
+  // for 5 minutes, with no Sentry capture. The route must fail loud instead.
+  let goto: ReturnType<typeof vi.fn>;
+  let pdf: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.mocked(checkLimit).mockReset();
+    vi.mocked(checkLimit).mockResolvedValue({ success: true, retryAfter: 0 } as never);
+    vi.mocked(createAdminClient).mockReset();
+    singlePublishedComplete();
+    const puppeteer = await import("@/lib/puppeteer");
+    vi.mocked(puppeteer.acquirePdfSlot).mockReset();
+    vi.mocked(puppeteer.launchBrowser).mockReset();
+    vi.mocked(puppeteer.acquirePdfSlot).mockResolvedValue(() => {});
+    goto = vi.fn();
+    pdf = vi.fn().mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    const newPage = vi.fn().mockResolvedValue({
+      goto,
+      setDefaultNavigationTimeout: vi.fn(),
+      setDefaultTimeout: vi.fn(),
+      setViewport: vi.fn().mockResolvedValue(undefined),
+      pdf,
+    });
+    vi.mocked(puppeteer.launchBrowser).mockResolvedValue({
+      newPage,
+      close: vi.fn().mockResolvedValue(undefined),
+    } as never);
+  });
+
+  async function get() {
+    const { GET } = await import("./route");
+    const req = new NextRequest(
+      `https://quantalyze.example.com/api/factsheet/${STRATEGY_ID}/tearsheet.pdf`,
+      { method: "GET" },
+    );
+    return GET(req, mkParams());
+  }
+
+  it.each([500, 404, 400])("a %i tearsheet page answers 500 JSON, not a cached PDF", async (code) => {
+    goto.mockResolvedValue({ status: () => code });
+    vi.mocked(captureToSentry).mockClear();
+    const res = await get();
+    expect(res.status).toBe(500);
+    // Fail loud, not just fail: the status must reach Sentry through the route's catch.
+    expect(captureToSentry).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining(String(code)) }),
+      expect.anything(),
+    );
+    expect(res.headers.get("content-type")).not.toContain("application/pdf");
+    expect(res.headers.get("cache-control") ?? "").not.toContain("s-maxage");
+    expect(pdf).not.toHaveBeenCalled();
+  });
+
+  it("a navigation with no response answers 500, not a PDF", async () => {
+    goto.mockResolvedValue(null);
+    const res = await get();
+    expect(res.status).toBe(500);
+    expect(pdf).not.toHaveBeenCalled();
+  });
+
+  it.each([200, 399])("a %i tearsheet page still prints the PDF (control and threshold)", async (code) => {
+    goto.mockResolvedValue({ status: () => code });
+    const res = await get();
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/pdf");
+    expect(pdf).toHaveBeenCalledTimes(1);
   });
 });

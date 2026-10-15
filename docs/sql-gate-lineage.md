@@ -504,3 +504,26 @@ the allowlisted ones. M2's stamp `20261021120000` sorts above
 OUTAGEALERT's `20261020120000`, the highest on `origin/main`. It supersedes the 702 reading above as
 the latest dated one and is itself not a live constant: read `FILES_FLOOR`, `ARMS_FLOOR` and
 `COMPARED_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07, PR-B part 3, merge of origin/main
+1cde77edf): one gate file arrived, `supabase/tests/test_strategies_anon_grants.sql` (migration
+`20261022120000_strategies_anon_api_key_id_revoke.sql`: anon loses its table-level SELECT, INSERT,
+UPDATE and DELETE on `public.strategies` and keeps column SELECT on every column but `api_key_id`;
+seven arms, GRANT 1-4, WRITE 1-2 and KEEP 1, every twin a `sql` grant change, none waived). A DATED
+reading of one full `node scripts/mutation-runner/run.mjs` on the COMMITTED merge, no file edited
+during it, run with main's constants (71 / 716) in place, exit 0: `scope: FULL 72/72 annotated
+files`, `lane-concurrency: 4`, `coverage: files 72/99`, `arms: 723/723/0`, `biting: 723`,
+`lane-invocations: 723` plus 72 baseline / 72 restore legs, `unreachable: 27`, `lane-blocked: 0`,
+`lane-probe: pg_cron AVAILABLE`, `per-arm lane time: mean 2.4s over 723 arm run(s)`,
+`No defects.`. Per-file row: `test_strategies_anon_grants.sql: sections 7 / judged 7 / annotated 7 /
+waived 0 / biting 7`. `FILES_FLOOR` 71 -> 72 and `ARMS_FLOOR` 716 -> 723; `WAIVED_CEILING` stays 0.
+Every dependent pin was seen RED at main's value first (the ratchet read `RATCHET STALE: 72 of 99
+gate files are now annotated but FILES_FLOOR is still 71`; the floors file read `expected 723 to be
+716`; the parser file read `expected 723 to be 716`, `99 to be 98` and `72 to be 71`; the lint
+corpus pin read `scanned 99` against 98). `stepsSeen` stays 809: the gate's twins are `sql` steps,
+not file steps. `lint-sql-gates` scans 99 files; `COMPARED_FLOOR` stays 130 and `CORPUS_FLOOR` stays
+48 (the migration redefines no function and adds no file to the live-DB lane corpus, which reads 51 files; the tests that pin them passed unmoved);
+`NAME_SET_RATCHET` is untouched. The baseline-content-drift check reads `MATCH 127, DRIFT 3`, the
+three allowlisted rows, findings 0. The stamp `20261022120000` sorts above `origin/main`'s highest,
+`20261021120000`. It supersedes the 716 reading above as the latest dated one and is itself not a
+live constant: read `FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
