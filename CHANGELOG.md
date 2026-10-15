@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.132.1.2] - 2026-10-15 — RECORDS: close BTCUSDVIEW 164.6.6.2.1 (human verification 7/7) and book the owner trust-tier finding
+
+Records only: `.planning`, `TODOS.md`, and this release. One commit plus this release commit.
+
+### Notes
+- **BTCUSDVIEW is closed.** It shipped on 2026-10-09 and 2026-10-10 (v0.129.8.0, v0.130.0.0), but its verification stayed `human_needed` with seven open items. All seven are now resolved, and the readings are in `164.6.6.2.1-UAT.md`:
+  - The WR-01 decision was booked at ship.
+  - A real BTC MT5 account's USD toggle was checked on PROD in the founder's browser.
+  - PROD's dated USD balance and the account's place in the book were read, marker query first, read-only.
+  - The anonymous `native_unit` read was checked as the anon role, inside a rolled-back transaction.
+  - The 320 to 390 px layout and the USD-view print preview were measured on the private local stack.
+  - The verification moves to `passed`. The ROADMAP lists its 17 plans and the Progress row cites both releases. STATE keeps the parallel position that the `phase complete` handler overwrote.
+- **Limits recorded with the readings:**
+  - PROD's only BTC strategy is private, so no anonymous viewer can see a BTC value there today. The anon read itself works.
+  - That the BTC key is in the book is inferred: it is not omitted, it has a priced close for the latest day, and its holdings are valued. The payload does not list which keys are included.
+- **Booked:** `164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED`. An owner's private factsheet shows "Data source —" for their own key-backed strategy, because the trust tier is read through `get_published_trust_signals`, which answers only for published strategies. It is user-facing and owner-only, and it withholds a true fact rather than showing a false one.
+
 ## [0.132.1.0] - 2026-10-15 — FANINGRAPH: a fan-in child never strands when its parent fails, a decision delete no longer raises 23505, a diamond cannot deadlock, and POST /api/bridge/outcome stops returning 500
 
 Phase 164.9.3.1 FANINGRAPH. The compute-job fan-in graph and the bridge's decision cascade had four defects found by the phase research, plus two more found in review. This release fixes all six in one forward migration (`20261024120000_fan_in_graph_and_decision_cascade.sql`), one route change and one worker change. 82 branch commits: 68 non-merge (43 touching code or tests, 25 planning-only) and 14 merges. ⛔ **The migration auto-applies to PROD once `apply-test` succeeds. There is no human reviewer gate between the merge and the PROD apply** (removed 2026-09-23), so every review the migration needed happened before this merge: migration-reviewer, rls-policy-auditor and four code-review rounds, listed below.
