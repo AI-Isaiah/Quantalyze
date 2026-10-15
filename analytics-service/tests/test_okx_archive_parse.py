@@ -24,7 +24,9 @@ import pytest
 from services.okx_archive_classify import (
     ARCHIVE_USD_FAMILY,
     LIVE_REALIZED_INST_TYPES,
+    MIN_CHAINED_PAIRS,
     SUBTYPE_BUCKETS,
+    ArchiveAggregate,
     Bucket,
     aggregate_archive,
     verify_bal_chain,
@@ -618,20 +620,14 @@ class TestLiveInstTypePin:
         assert agg.realized_by_day["2026-07-12"] == Decimal("2.5")
 
 
-class TestBalanceContinuityReading:
-    """Information only: bal continuity is reported, never a gate (RESEARCH Section 4)."""
+class TestOneChainNotTwo:
+    """There is ONE bal reading and it is the gated chain. An ungated second reading
+    (``bal_continuity``) could disagree with the gate and leave the founder two numbers for the
+    same fact, so the aggregate no longer carries it."""
 
-    def test_continuity_holds_on_the_fixture_and_counts_pairs_per_ccy(self):
-        agg = _aggregate_q3((FIXTURES / "q3_like.csv").read_bytes())
-        assert agg.bal_continuity["USDT"] == {"checked": 18, "mismatches": 0}
-        assert agg.bal_continuity["USDC"] == {"checked": 2, "mismatches": 0}
-
-    def test_a_broken_balance_is_counted_and_does_not_raise(self):
-        header, rows = _read_fixture("q3_like.csv")
-        last_usdt = next(r for r in rows if r[header.index("billId")] == "700000020")
-        last_usdt[header.index("bal")] = "1.00"  # the last USDT bill no longer follows its predecessor
-        agg = _aggregate_q3(_emit(header, rows))
-        assert agg.bal_continuity["USDT"] == {"checked": 18, "mismatches": 1}
+    def test_the_aggregate_carries_no_second_ungated_continuity_reading(self):
+        assert "bal_continuity" not in ArchiveAggregate.__dataclass_fields__
+        assert not hasattr(_aggregate_q3((FIXTURES / "q3_like.csv").read_bytes()), "bal_continuity")
 
 
 class TestBalChainCompleteness:
@@ -649,18 +645,31 @@ class TestBalChainCompleteness:
             edit(header, rows)
         return parse_archive_csv(_emit(header, rows), year=2026, quarter=quarter)
 
-    @pytest.mark.parametrize(("name", "quarter"), [("q3_like.csv", "Q3"), ("q2_like.csv", "Q2")])
-    def test_a_chaining_file_passes(self, name, quarter):
-        verify_bal_chain([self._file(name, quarter=quarter)])  # must not raise
+    def test_a_chaining_file_passes_and_returns_its_reading(self):
+        reading = verify_bal_chain([self._file("q2_like.csv", quarter="Q2")])
+        # q2_like.csv carries 14 USDT bills: 13 consecutive pairs, first bill 04-01, last 06-30.
+        assert reading == {
+            "ccys": {"USDT": {"pairs_checked": 13, "first_day": "2026-04-01", "last_day": "2026-06-30"}},
+            "total_pairs": 13,
+        }
+
+    def test_the_q3_fixture_chains_with_the_floor_met_by_each_of_its_ccys(self):
+        reading = verify_bal_chain([self._file()])
+        # 19 USDT bills -> 18 pairs; 3 USDC bills -> 2 pairs, exactly the floor.
+        assert reading["ccys"]["USDT"]["pairs_checked"] == 18
+        assert reading["ccys"]["USDC"]["pairs_checked"] == MIN_CHAINED_PAIRS == 2
+        assert reading["total_pairs"] == 20
 
     def test_an_interior_row_dropped_from_the_file_is_archive_incomplete(self):
         # 700000007 (a 7.47 trade) is removed: the next bill's bal no longer follows.
         err = _stop(verify_bal_chain, [self._file(drop={"700000007"})])
         assert err.stop_class == "archive_incomplete"
-        usdt = err.detail["files"][0]["ccys"]["USDT"]
+        assert err.detail["reason"] == "bal_chain_break"
+        usdt = err.detail["ccys"]["USDT"]
         assert usdt["breaks"] == 1
         # The first row AFTER the gap is 700000008 on 2026-07-15 (ts 1784106000000).
         assert usdt["first_break_day"] == "2026-07-15"
+        assert usdt["seam_breaks"] == 0
 
     def test_the_stop_carries_counts_and_dates_never_an_amount(self):
         err = _stop(verify_bal_chain, [self._file(drop={"700000007"})])
@@ -670,7 +679,8 @@ class TestBalChainCompleteness:
 
     def test_dropping_the_last_row_of_a_ccy_cannot_be_seen_and_is_the_documented_residual(self):
         # A tail loss leaves the surviving prefix intact: the chain proves INTERIOR
-        # completeness only. The head and tail are what ts_min_day / ts_max_day and the
+        # completeness only (plus the seam between adjacent quarters). The head of the
+        # earliest file and the tail of the latest are what ts_min_day / ts_max_day and the
         # longest bill-less run are for; this test records the limit instead of hiding it.
         verify_bal_chain([self._file(drop={"700000020"})])
 
@@ -690,16 +700,149 @@ class TestBalChainCompleteness:
         assert err.stop_class == "archive_incomplete"
         assert err.detail["reason"] == "unchainable_row"
 
-    def test_each_file_is_chained_on_its_own(self):
-        # Q2 and Q3 are separate ledgers of separate quarters: the seam between them is
-        # not asserted, but a break inside either one is.
-        good = self._file("q2_like.csv", quarter="Q2")
-        broken = self._file(drop={"700000007"})
-        err = _stop(verify_bal_chain, [good, broken])
+
+def _ledger(quarter, bills, *, opening, first_id, ccy="USDT"):
+    """One chaining quarter file built from ``(when, balChg)`` pairs: ``bal`` is the running
+    balance after each bill, so the file chains exactly as a complete real one does. Returns
+    the typed header and rows (so a test can drop some) and the closing balance."""
+    header, _ = _read_fixture("q3_like.csv")
+    bal, rows = Decimal(opening), []
+    for i, (when, chg) in enumerate(bills):
+        bal += Decimal(chg)
+        rows.append(
+            _new_row(
+                header, instType="SWAP", billId=str(first_id + i), subType="2", ts=_ms(when),
+                balChg=chg, bal=str(bal), ccy=ccy, pnl=chg, fee="0",
+            )
+        )
+    return header, rows, bal
+
+
+def _parsed(header, rows, quarter):
+    return parse_archive_csv(_emit(header, rows), year=2026, quarter=quarter)
+
+
+Q2_BILLS = [("2026-04-02 10:00:00", "10"), ("2026-05-10 10:00:00", "20"),
+            ("2026-06-20 10:00:00", "5"), ("2026-06-29 10:00:00", "7")]
+Q3_BILLS = [("2026-07-02 10:00:00", "3"), ("2026-07-15 10:00:00", "4"),
+            ("2026-08-10 10:00:00", "6"), ("2026-09-01 10:00:00", "8")]
+
+
+def _q2_q3_ledgers():
+    """Two adjacent quarters of ONE account: Q3 opens on Q2's closing balance (1042)."""
+    h2, r2, closing = _ledger("Q2", Q2_BILLS, opening="1000", first_id=100)
+    h3, r3, _ = _ledger("Q3", Q3_BILLS, opening=closing, first_id=200)
+    return (h2, r2), (h3, r3)
+
+
+class TestBalChainCrossesTheQuarterSeam:
+    """WR-01 / N2. Chaining each file on its own never checks the Q2 tail -> Q3 head seam, and
+    a truncated tail or head there is published as 0.0 days inside the gaps, outside the
+    reconcile window and D-03. The chain runs per currency across the deduplicated rows of
+    every ADJACENT requested quarter, in billId order."""
+
+    def test_two_adjacent_quarters_that_chain_across_the_seam_pass(self):
+        (h2, r2), (h3, r3) = _q2_q3_ledgers()
+        reading = verify_bal_chain([_parsed(h2, r2, "Q2"), _parsed(h3, r3, "Q3")])
+        # 8 bills in one USDT chain: 7 pairs, one of them the seam pair (06-29 -> 07-02).
+        assert reading == {
+            "ccys": {"USDT": {"pairs_checked": 7, "first_day": "2026-04-02", "last_day": "2026-09-01"}},
+            "total_pairs": 7,
+        }
+
+    def test_a_q2_file_missing_its_last_rows_stops_at_the_seam(self):
+        (h2, r2), (h3, r3) = _q2_q3_ledgers()
+        truncated = r2[:3]  # the 06-29 bill is gone; Q2 still chains on its own (2 pairs)
+        verify_bal_chain([_parsed(h2, truncated, "Q2")])
+        err = _stop(verify_bal_chain, [_parsed(h2, truncated, "Q2"), _parsed(h3, r3, "Q3")])
+        assert err.stop_class == "archive_incomplete" and err.detail["reason"] == "bal_chain_break"
+        usdt = err.detail["ccys"]["USDT"]
+        assert (usdt["breaks"], usdt["seam_breaks"], usdt["first_break_day"]) == (1, 1, "2026-07-02")
+
+    def test_a_q3_file_missing_its_first_rows_stops_at_the_seam(self):
+        (h2, r2), (h3, r3) = _q2_q3_ledgers()
+        truncated = r3[1:]  # the 07-02 bill is gone; Q3 still chains on its own (2 pairs)
+        verify_bal_chain([_parsed(h3, truncated, "Q3")])
+        err = _stop(verify_bal_chain, [_parsed(h2, r2, "Q2"), _parsed(h3, truncated, "Q3")])
         assert err.stop_class == "archive_incomplete"
-        assert len(err.detail["files"]) == 2
-        assert err.detail["files"][0]["ccys"]["USDT"]["breaks"] == 0
-        assert err.detail["files"][1]["ccys"]["USDT"]["breaks"] == 1
+        usdt = err.detail["ccys"]["USDT"]
+        assert (usdt["breaks"], usdt["seam_breaks"], usdt["first_break_day"]) == (1, 1, "2026-07-15")
+
+    def test_the_order_the_files_are_passed_in_does_not_matter(self):
+        (h2, r2), (h3, r3) = _q2_q3_ledgers()
+        err = _stop(verify_bal_chain, [_parsed(h3, r3[1:], "Q3"), _parsed(h2, r2, "Q2")])
+        assert err.detail["ccys"]["USDT"]["seam_breaks"] == 1
+
+    def test_quarters_that_are_not_adjacent_are_never_chained_to_each_other(self):
+        # Q2 and Q4 of the same account: Q3 is missing, so the balances legitimately differ.
+        # Chaining across the hole would be a false stop on a complete pair of files.
+        h2, r2, _ = _ledger("Q2", Q2_BILLS, opening="1000", first_id=100)
+        h4, r4, _ = _ledger(
+            "Q4", [("2026-10-05 10:00:00", "2"), ("2026-11-05 10:00:00", "3"), ("2026-12-05 10:00:00", "4")],
+            opening="9000", first_id=300,
+        )
+        reading = verify_bal_chain([_parsed(h2, r2, "Q2"), _parsed(h4, r4, "Q4")])
+        assert reading["ccys"]["USDT"]["pairs_checked"] == 3 + 2
+
+    def test_a_break_inside_one_file_is_still_found_and_not_called_a_seam_break(self):
+        (h2, r2), (h3, r3) = _q2_q3_ledgers()
+        err = _stop(verify_bal_chain, [_parsed(h2, r2, "Q2"), _parsed(h3, r3[:1] + r3[2:], "Q3")])
+        usdt = err.detail["ccys"]["USDT"]
+        assert (usdt["breaks"], usdt["seam_breaks"], usdt["first_break_day"]) == (1, 0, "2026-08-10")
+
+    def test_the_stop_names_each_file_range_for_the_founder(self):
+        (h2, r2), (h3, r3) = _q2_q3_ledgers()
+        err = _stop(verify_bal_chain, [_parsed(h2, r2[:2], "Q2"), _parsed(h3, r3, "Q3")])
+        assert err.detail["files"] == [
+            {"ts_min_day": "2026-04-02", "ts_max_day": "2026-05-10"},
+            {"ts_min_day": "2026-07-02", "ts_max_day": "2026-09-01"},
+        ]
+
+
+class TestBalChainFloor:
+    """N1. A chain that checked 0 or 1 pairs for a currency that carries money proves
+    nothing: a single link between two bills cannot tell a complete ledger from a truncated one.
+    ``MIN_CHAINED_PAIRS`` (2: at least three bills, so the chain has an interior bill that is
+    both a successor and a predecessor) is the floor; below it the currency is unprovable and
+    the file stops as ``archive_incomplete`` rather than passing unexamined."""
+
+    def test_the_floor_is_two_pairs(self):
+        assert MIN_CHAINED_PAIRS == 2
+
+    def _with_usdc(self, *, keep):
+        header, rows = _read_fixture("q3_like.csv")
+        rows = [r for r in rows if r[header.index("ccy")] != "USDC" or r[header.index("billId")] in keep]
+        return parse_archive_csv(_emit(header, rows), year=2026, quarter="Q3")
+
+    def test_one_pair_for_a_ccy_with_money_on_it_is_too_few(self):
+        # 700000010 (3.33 pnl) and 700000021: two bills, ONE pair.
+        err = _stop(verify_bal_chain, [self._with_usdc(keep={"700000010", "700000021"})])
+        assert err.stop_class == "archive_incomplete" and err.detail["reason"] == "too_few_pairs"
+        assert err.detail["starved"] == ["USDC"]
+        assert err.detail["ccys"]["USDC"]["pairs_checked"] == 1
+
+    def test_a_lone_row_with_money_on_it_has_no_pair_at_all(self):
+        err = _stop(verify_bal_chain, [self._with_usdc(keep={"700000010"})])
+        assert err.detail["reason"] == "too_few_pairs" and err.detail["starved"] == ["USDC"]
+
+    def test_exactly_two_pairs_meets_the_floor(self):
+        verify_bal_chain([self._with_usdc(keep={"700000010", "700000021", "700000022"})])
+
+    def test_a_ccy_whose_every_bill_is_zero_effect_needs_no_proof(self):
+        header, rows = _read_fixture("q3_like.csv")
+        rows = [r for r in rows if r[header.index("ccy")] != "USDC"]
+        rows.append(
+            _new_row(header, instType="SWAP", billId="700000030", subType="2", ts=_ms("2026-08-03 10:00:00"),
+                     balChg="0", bal="50", ccy="USD", pnl="0", fee="0")
+        )
+        reading = verify_bal_chain([parse_archive_csv(_emit(header, rows), year=2026, quarter="Q3")])
+        assert reading["ccys"]["USD"]["pairs_checked"] == 0
+
+    def test_a_chain_break_is_reported_before_the_floor(self):
+        header, rows = _read_fixture("q3_like.csv")
+        rows = [r for r in rows if r[header.index("billId")] not in {"700000007", "700000021", "700000022"}]
+        err = _stop(verify_bal_chain, [parse_archive_csv(_emit(header, rows), year=2026, quarter="Q3")])
+        assert err.detail["reason"] == "bal_chain_break"
 
 
 class TestLongestBilllessRun:

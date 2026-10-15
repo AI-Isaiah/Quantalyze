@@ -29,13 +29,15 @@ census extends the table. Do not encode a number from memory here.
 
 Stop classes raised here (all ``okx_archive_files.ArchiveParseError``):
 ``subtype_map_drift``, ``unknown_subtype_nonzero``, ``non_usd_ccy``,
-``duplicate_bill_conflict``, and (``verify_bal_chain``) ``archive_incomplete``. Details hold
-counts, months, dates and subtype labels only.
+``duplicate_bill_conflict``, and (``verify_bal_chain``) ``archive_incomplete`` with the reasons
+``bal_chain_break``, ``too_few_pairs`` and ``unchainable_row``. Details hold counts, months,
+dates and subtype labels only.
 """
 from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import date, timedelta
 from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
@@ -63,6 +65,17 @@ LIVE_REALIZED_INST_TYPES: Final[tuple[str, ...]] = ("SWAP", "FUTURES", "SPOT", "
 # Currencies summed as dollars with no conversion. Anything else with a nonzero effect
 # on a counted row is a permanent stop (founder must-settle: currency).
 ARCHIVE_USD_FAMILY: Final[frozenset[str]] = frozenset({"USDT", "USDC", "USD"})
+
+# The completeness floor of ``verify_bal_chain``: a currency that carries money (a nonzero
+# pnl, fee or balChg on any bill) must have at least this many chained pairs, i.e. at least
+# three bills whose running ``bal`` agrees with their ``balChg``. One pair is a single link
+# between two neighbouring bills: it says nothing about whether the weeks around them are
+# present, and zero pairs (a lone bill) was never evaluated at all, so a chain that "passed"
+# on 0 or 1 pair was indistinguishable from a real proof (silent-failure round 2, N1). Two is
+# the smallest number that includes a bill that is both a successor and a predecessor. It is
+# a floor on evidence, not a statistical bound: how far the pairs reach is reported beside it
+# (``first_day`` / ``last_day`` per currency) for the founder's go/no-go.
+MIN_CHAINED_PAIRS: Final[int] = 2
 
 _REALIZED_SUBTYPES: Final[tuple[str, ...]] = (
     # trade
@@ -113,84 +126,132 @@ class ArchiveAggregate:
     census: dict[str, Any]
     unknown_zero_effect: int
     covered_days: frozenset[str]
-    bal_continuity: dict[str, dict[str, int]]
 
 
 def _bill_order_key(row: ArchiveRow) -> tuple[bool, int, str]:
     return (not row.bill_id.isdigit(), int(row.bill_id) if row.bill_id.isdigit() else 0, row.bill_id)
 
 
-def _bal_continuity(rows: Sequence[ArchiveRow]) -> dict[str, dict[str, int]]:
-    """Per ccy: how many consecutive-bill pairs break ``bal == previous bal + balChg``.
+def _adjacent_runs(files: Sequence[ArchiveFile]) -> list[list[int]]:
+    """Indices of ``files`` grouped into runs of ADJACENT quarters, each run in time order.
 
-    An information reading in billId order; never a gate (RESEARCH Section 4).
-    """
-    previous: dict[str, Decimal] = {}
-    out: dict[str, dict[str, int]] = {}
-    for row in sorted(rows, key=_bill_order_key):
-        entry = out.setdefault(row.ccy or _BLANK, {"checked": 0, "mismatches": 0})
-        prior = previous.get(row.ccy)
-        if prior is not None:
-            entry["checked"] += 1
-            if row.bal != prior + row.bal_chg:
-                entry["mismatches"] += 1
-        previous[row.ccy] = row.bal
-    return dict(sorted(out.items()))
-
-
-def _chain_file(file: ArchiveFile) -> dict[str, dict[str, Any]]:
-    """Per ccy of ONE file: pairs checked, pairs that break ``bal == previous bal + balChg``
-    in billId order, and the UTC day of the first break. Raises ``archive_incomplete`` when a
-    row cannot be placed in a chain (no ccy, or a billId that is not an integer), because a
-    chain that cannot be evaluated must never be assumed to hold."""
-    unchainable = sum(1 for row in file.rows if not row.ccy or not row.bill_id.isdigit())
-    if unchainable:
-        raise ArchiveParseError(
-            "archive_incomplete", {"reason": "unchainable_row", "rows": unchainable}
-        )
-    previous: dict[str, Decimal] = {}
-    out: dict[str, dict[str, Any]] = {}
-    for row in sorted(file.rows, key=_bill_order_key):
-        entry = out.setdefault(row.ccy, {"checked": 0, "breaks": 0, "first_break_day": None})
-        prior = previous.get(row.ccy)
-        if prior is not None:
-            entry["checked"] += 1
-            if row.bal != prior + row.bal_chg:
-                entry["breaks"] += 1
-                if entry["first_break_day"] is None:
-                    entry["first_break_day"] = row.day
-        previous[row.ccy] = row.bal
-    return dict(sorted(out.items()))
+    Two files are adjacent when the second's first covered day is the day after the first's
+    last. Only adjacent quarters share a balance history that must chain: Q2 and Q4 without
+    Q3 legitimately differ, and chaining across that hole would stop a complete pair of files."""
+    order = sorted(range(len(files)), key=lambda i: min(files[i].covered_days, default=""))
+    runs: list[list[int]] = []
+    for i in order:
+        covered = files[i].covered_days
+        if runs and covered and files[runs[-1][-1]].covered_days:
+            previous_last = date.fromisoformat(max(files[runs[-1][-1]].covered_days))
+            if date.fromisoformat(min(covered)) == previous_last + timedelta(days=1):
+                runs[-1].append(i)
+                continue
+        runs.append([i])
+    return runs
 
 
-def verify_bal_chain(files: Sequence[ArchiveFile]) -> None:
-    """F1: prove each quarter file is the COMPLETE ledger of its quarter, or stop.
+def verify_bal_chain(files: Sequence[ArchiveFile]) -> dict[str, Any]:
+    """F1 / WR-01: prove the requested quarter files are the COMPLETE ledger, or stop.
 
     The job reads a quarter file as complete: a covered day with no bill becomes an explicit
     zero-P&L day, and the RPC then removes that day from ``unrecovered_gaps``. Nothing else
     authenticates the interior of the file (Q2 has no live overlap; Q3's July is never
-    compared). OKX's ``bal`` is the balance after each bill, so per ccy and in billId order
-    each ``bal`` must equal the previous ``bal`` plus its ``balChg``; a row missing from the
-    file breaks the chain at the next bill of that ccy. Every file is chained on its own, and
-    any break is a permanent ``archive_incomplete`` carrying counts and dates only.
+    compared; D-03 reads one strategy). OKX's ``bal`` is the balance after each bill, so per
+    ccy and in billId order each ``bal`` must equal the previous ``bal`` plus its ``balChg``;
+    a row missing from the file breaks the chain at the next bill of that ccy.
 
-    What this proves is INTERIOR completeness. A file missing its first or last bills still
-    chains; ``ts_min_day``, ``ts_max_day`` and the longest bill-less run per quarter are
-    reported beside it for that reason. RESEARCH A7 (``bal`` chains exactly on a real file)
-    was unmeasured when this became a gate: the first real calibrate is its measurement, and
-    a false stop here is a fail-closed stop, never a published figure."""
-    readings = [_chain_file(file) for file in files]
-    if any(entry["breaks"] for reading in readings for entry in reading.values()):
+    This is the ONE gated chain. It runs per currency over the deduplicated rows of every run
+    of ADJACENT requested quarters together, so the Q2 tail -> Q3 head seam is checked too:
+    a truncated end of one file or start of the next breaks it there (a per-file chain left
+    that seam unchecked). Two stops, both ``archive_incomplete`` and both writing nothing:
+
+    * ``bal_chain_break``: any pair breaks anywhere. The detail names, per ccy, the breaks,
+      how many of them sit on a pair that crosses two files (``seam_breaks``) and the day of
+      the first, and each file's ts range.
+    * ``too_few_pairs``: a ccy that carries money has fewer than ``MIN_CHAINED_PAIRS`` pairs,
+      so its completeness cannot be proven. A break is reported before this.
+
+    On success it returns the reading the job records in ``info.bal_chain``:
+    ``{"ccys": {ccy: {pairs_checked, first_day, last_day}}, "total_pairs": n}``.
+
+    What the chain proves is INTERIOR completeness plus the seam between adjacent quarters.
+    It cannot prove the HEAD of the earliest file or the TAIL of the latest: a file missing
+    its first or last bills still chains. ``ts_min_day``, ``ts_max_day`` and the longest
+    bill-less run per quarter are reported for that reason, and only a gap day inside that
+    unprovable head or tail needs the founder's judgment. RESEARCH A7 (``bal`` chains exactly
+    on a real file) was unmeasured when this became a gate: the first real calibrate is its
+    measurement, and a false stop here is a fail-closed stop, never a published figure."""
+    unchainable = sum(
+        1 for file in files for row in file.rows if not row.ccy or not row.bill_id.isdigit()
+    )
+    if unchainable:
+        raise ArchiveParseError(
+            "archive_incomplete", {"reason": "unchainable_row", "rows": unchainable}
+        )
+    runs = _adjacent_runs(files)
+    ccys: dict[str, dict[str, Any]] = {}
+    carries_money: set[str] = set()
+    for run in runs:
+        unique: dict[str, tuple[ArchiveRow, int]] = {}
+        for index in run:
+            for row in files[index].rows:
+                kept = unique.get(row.bill_id)
+                if kept is None:
+                    unique[row.bill_id] = (row, index)
+                elif kept[0] != row:
+                    raise ArchiveParseError("duplicate_bill_conflict", {"across_files": len(files)})
+        previous: dict[str, tuple[ArchiveRow, int]] = {}
+        for row, index in sorted(unique.values(), key=lambda pair: _bill_order_key(pair[0])):
+            entry = ccys.setdefault(
+                row.ccy,
+                {"pairs_checked": 0, "first_day": row.day, "last_day": row.day,
+                 "breaks": 0, "first_break_day": None, "seam_breaks": 0},
+            )
+            entry["first_day"] = min(entry["first_day"], row.day)
+            entry["last_day"] = max(entry["last_day"], row.day)
+            if row.pnl != 0 or row.fee != 0 or row.bal_chg != 0:
+                carries_money.add(row.ccy)
+            prior = previous.get(row.ccy)
+            if prior is not None:
+                entry["pairs_checked"] += 1
+                if row.bal != prior[0].bal + row.bal_chg:
+                    entry["breaks"] += 1
+                    if prior[1] != index:
+                        entry["seam_breaks"] += 1
+                    if entry["first_break_day"] is None or row.day < entry["first_break_day"]:
+                        entry["first_break_day"] = row.day
+            previous[row.ccy] = (row, index)
+    ccys = dict(sorted(ccys.items()))
+    total_pairs = sum(entry["pairs_checked"] for entry in ccys.values())
+    starved = sorted(
+        ccy for ccy in carries_money if ccys[ccy]["pairs_checked"] < MIN_CHAINED_PAIRS
+    )
+    broken = any(entry["breaks"] for entry in ccys.values())
+    if broken or starved:
         raise ArchiveParseError(
             "archive_incomplete",
             {
-                "reason": "bal_chain_break",
+                "reason": "bal_chain_break" if broken else "too_few_pairs",
+                "ccys": ccys,
+                "total_pairs": total_pairs,
+                "starved": starved,
                 "files": [
-                    {"ts_min_day": file.ts_min_day, "ts_max_day": file.ts_max_day, "ccys": reading}
-                    for file, reading in zip(files, readings)
+                    {"ts_min_day": file.ts_min_day, "ts_max_day": file.ts_max_day} for file in files
                 ],
             },
         )
+    return {
+        "ccys": {
+            ccy: {
+                "pairs_checked": entry["pairs_checked"],
+                "first_day": entry["first_day"],
+                "last_day": entry["last_day"],
+            }
+            for ccy, entry in ccys.items()
+        },
+        "total_pairs": total_pairs,
+    }
 
 
 def _sorted_counts(counter: Mapping[str, int]) -> dict[str, int]:
@@ -338,5 +399,4 @@ def aggregate_archive(
         census=census,
         unknown_zero_effect=unknown_zero,
         covered_days=frozenset().union(*(f.covered_days for f in files)),
-        bal_continuity=_bal_continuity(rows),
     )
