@@ -884,10 +884,12 @@ class TestDispatchStatusBridge:
     async def test_deferred_side_job_names_itself_as_the_bridge_trigger(self) -> None:
         """Review 164.6.6.3.4 round 3, WR-R3-01 (founder D-09/D-10). A side-kind
         job that hits the exchange circuit breaker is DEFERRED. The bridge can
-        only tell that this call computed nothing, and hold computed_at, when it
-        is told which job caused the call. Without the trigger id its in-flight
-        branch stamped computed_at = now() over stale analytics, and the hold of
-        the job's later failure then kept that stamp.
+        only tell that this call computed nothing when it is told which job
+        caused the call. Without the trigger id its in-flight branch took the
+        "something was computed" path: before Phase 166.5 that stamped
+        computed_at = now() over stale analytics (and the hold of the job's
+        later failure then kept that stamp). Since Phase 166.5 the bridge never
+        writes computed_at at all; only a runner finish stamps it.
 
         Neuter to redden: drop ``trigger_job_id=job.get("id")`` from the
         DEFERRED call in services/job_worker.py ``dispatch``."""
@@ -1400,7 +1402,7 @@ class TestDeriveBrokerDailies:
         # DONE here routed the job to mark_compute_job_done, whose
         # sync_strategy_analytics_status then took the all-done success branch
         # and rewrote this very 'failed' stamp to 'complete' with a NULL error
-        # and a fresh computed_at.
+        # (before Phase 166.5 also a fresh computed_at; the runner stamps it now).
         assert result.outcome == DispatchOutcome.FAILED
         assert result.error_kind == "permanent"
         assert len(analytics_upserts) == 1, (

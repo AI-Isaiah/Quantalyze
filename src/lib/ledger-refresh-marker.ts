@@ -61,14 +61,21 @@ const MARKER_SET: ReadonlySet<string> = new Set(LEDGER_REFRESH_JOB_SOURCES);
  * the enqueue already succeeded. `retractionFailureCode` reads the SQLSTATE
  * back out of that `cause` for the caller's log line.
  *
+ * ⛔ A job that is already `done` is NOT retracted and is NOT an error (D-07,
+ * 166.5): the result is `{ retracted: false }` and no UPDATE is issued. The
+ * UPDATE also filters out `done` rows, so a job that finishes between
+ * the read and the write matches no row; the function then re-reads the status
+ * once, and `done` is the same quiet `{ retracted: false }`. A re-read that
+ * itself errors throws, with the PostgREST error as `cause`.
+ *
  * ⛔ Two outcomes that would otherwise read as "nothing to retract" THROW too
  * (164.6 review fix, LOW-1):
  *   * NO ROW for the id. `enqueue_compute_job` returned that id a moment ago,
  *     so an unreadable row is an anomaly, not an unmarked job. A job carrying
  *     `metadata: null` is still an ordinary "no marker".
- *   * an UPDATE that matched NO row. Without `.select`, PostgREST reports
- *     success for zero rows, and the marker would stay in place under a
- *     `retracted: true` result.
+ *   * an UPDATE that matched NO row while the job is still not `done`. Without
+ *     `.select`, PostgREST reports success for zero rows, and the marker would
+ *     stay in place under a `retracted: true` result.
  */
 export async function retractInheritedRefreshMarker(
   admin: SupabaseClient,
@@ -79,7 +86,7 @@ export async function retractInheritedRefreshMarker(
 
   const { data: row, error: readErr } = await admin
     .from("compute_jobs")
-    .select("metadata")
+    .select("metadata, status")
     .eq("id", jobId)
     .maybeSingle();
   if (readErr) {
@@ -90,6 +97,11 @@ export async function retractInheritedRefreshMarker(
       "compute_jobs row not readable for the job enqueue_compute_job just returned; an inherited marker may still be in place",
     );
   }
+
+  // D-07 (STATUSBRIDGE review IN-R4-01): a FINISHED job's protection was decided
+  // when it ran; an update would only bump its `updated_at` via the
+  // compute_jobs_set_updated_at trigger.
+  if (row.status === "done") return { retracted: false };
 
   const metadata: unknown = row?.metadata;
   if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
@@ -112,11 +124,24 @@ export async function retractInheritedRefreshMarker(
       },
     })
     .eq("id", jobId)
+    .neq("status", "done")
     .select("id");
   if (updateErr) {
     throw new Error("compute_jobs metadata update failed", { cause: updateErr });
   }
   if (!Array.isArray(updated) || updated.length === 0) {
+    // D-07: the `.neq` guard makes "the job finished between the read and the
+    // write" a zero-row UPDATE too. Re-read the status once to tell that quiet
+    // no-op from a genuinely lost row, which still throws below.
+    const { data: after, error: afterErr } = await admin
+      .from("compute_jobs")
+      .select("status")
+      .eq("id", jobId)
+      .maybeSingle();
+    if (afterErr) {
+      throw new Error("compute_jobs status re-read failed", { cause: afterErr });
+    }
+    if (after?.status === "done") return { retracted: false };
     throw new Error(
       `compute_jobs metadata update matched no row; the inherited ${source} marker was NOT retracted`,
     );

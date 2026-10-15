@@ -36,9 +36,12 @@ async def sync_strategy_analytics_status(
     ``trigger_job_id`` names the job whose transition caused this call, the same
     ``p_trigger_job_id`` the mark RPCs pass (migration 20261009120000, founder
     D-09/D-10). The DEFERRED path passes the job it just deferred: without it the
-    bridge cannot tell that a deferred side-kind job computed nothing, runs its
-    in-flight branch and stamps ``computed_at`` (review round 3, WR-R3-01). When
-    it is None the key is omitted and the RPC's NULL default applies.
+    bridge cannot tell that a deferred side-kind job computed nothing and runs its
+    in-flight branch over the unchanged analytics (review round 3, WR-R3-01; before
+    Phase 166.5 that branch also stamped ``computed_at``). Since Phase 166.5 the
+    bridge never writes ``computed_at``: the analytics runner stamps it from the
+    database clock on a real recompute finish. When ``trigger_job_id`` is None the
+    key is omitted and the RPC's NULL default applies.
 
     Raises no exceptions for "normal" outcomes (row absent, status unchanged,
     etc.). Lets Supabase-layer exceptions bubble so the caller can log them

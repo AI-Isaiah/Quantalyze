@@ -432,12 +432,12 @@ vi.mock("@/lib/supabase/admin", () => ({
             eq: (col: string, val: unknown) => {
               STATE.computeJobsUpdates.push({ patch, eq: [col, val] });
               // LOW-1: the helper asks for the updated rows back.
-              return {
-                select: async () => ({
-                  data: STATE.computeJobsUpdateError ? null : [{ id: val }],
-                  error: STATE.computeJobsUpdateError,
-                }),
-              };
+              const select = async () => ({
+                data: STATE.computeJobsUpdateError ? null : [{ id: val }],
+                error: STATE.computeJobsUpdateError,
+              });
+              // 166.5 D-07: the helper filters `.neq("status", "done")`.
+              return { select, neq: () => ({ select }) };
             },
           }),
         };

@@ -15,6 +15,7 @@ import {
   formatNumber,
   formatRelativeTime,
 } from "@/lib/utils";
+import { isComputedAnalytics } from "@/lib/closed-sets";
 import { displayStrategyName, type DisplayableStrategy } from "@/lib/strategy-display";
 import { isStrategySource, type StrategySource } from "@/lib/strategy-sources";
 import { ComputeJobsTable } from "./ComputeJobsTable";
@@ -377,6 +378,37 @@ function formatRecency(iso: string | null | undefined): string {
   return formatRelativeTime(iso, Date.now());
 }
 
+/**
+ * Phase 166.5 / SFH-3(a): "Computed <recency>" names the last real compute, so a
+ * row that has never held figures has nothing to name. The status bridge can
+ * insert a strategy's FIRST `strategy_analytics` row while a counting job is in
+ * flight (status `computing`, no metrics), and that insert takes the column
+ * default `computed_at = now()`. Read raw, it said "Computed just now" for a
+ * strategy nothing had computed. A terminal-success row, or a row that still
+ * carries figures from an earlier compute (a recompute or a failure over real
+ * results; the hold trigger keeps its date at that compute), keeps its date.
+ */
+function computeRecency(
+  analytics:
+    | {
+        computation_status?: string | null;
+        computed_at?: string | null;
+        cagr?: number | null;
+        sharpe?: number | null;
+        max_drawdown?: number | null;
+      }
+    | null
+    | undefined,
+): string {
+  if (!analytics) return "—";
+  const everComputed =
+    isComputedAnalytics(analytics.computation_status) ||
+    analytics.cagr != null ||
+    analytics.sharpe != null ||
+    analytics.max_drawdown != null;
+  return everComputed ? formatRecency(analytics.computed_at) : "—";
+}
+
 function sourceBadgeLabel(source: string | undefined): string {
   return isStrategySource(source) ? SOURCE_BADGE_LABEL[source] : "legacy";
 }
@@ -493,7 +525,7 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
                   </div>
                   <StrategyOwnerLine
                     profile={profile}
-                    recency={formatRecency(analytics?.computed_at ?? null)}
+                    recency={computeRecency(analytics)}
                   />
 
                   <div className="mt-3 grid grid-cols-3 gap-3 border-t border-border pt-3">

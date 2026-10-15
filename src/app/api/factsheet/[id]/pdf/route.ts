@@ -269,15 +269,17 @@ export async function GET(
   // write, so the job-start and failure stamps this ETag never depended on are
   // held. They cannot reach it: this route refuses every non-computed status
   // with a 400 above, before this line, so a `computing` or `failed` row never
-  // gets an ETag at all. A change between the two computed statuses stamps
-  // `computed_at` through the status bridge (branch (a) when it moves a warned
-  // `complete` row, branch (c) at completion). The analytics runner's own
-  // terminal write names no `computed_at`, so between that write and the
-  // bridge's branch (c) at `mark_compute_job_done` the ETag still carries the
-  // previous value; that window is booked for Phase 166.5 COMPUTEDATSTAMP
-  // (the runner's stamp must land on the success write). The factsheet payload
-  // cache is the one that needed the status as a key part
-  // (`buildFactsheetPayloadCached`).
+  // gets an ETag at all. Since Phase 166.5 COMPUTEDATSTAMP the status bridge
+  // writes no date: the analytics runner stamps `computed_at` from the
+  // database clock in the same upsert as its metrics, on its success write
+  // only. The factsheet payload cache is the one that needed the status as a
+  // key part (`buildFactsheetPayloadCached`).
+  //
+  // Known window, booked as `[166.5-PDF-MIXED-VINTAGE-WINDOW]` (TODOS.md): the
+  // runner writes the sibling series (the lazy panels read them) AFTER that
+  // stamp, so a render inside the gap between the two writes can show the new
+  // scalars beside the previous run's lazy panels and then stays 304-valid
+  // under the new date until the next real recompute moves `computed_at`.
   //
   // ETag is quoted strong-validator per RFC 7232. Format: id:computed_at
   // — id alone is not enough (different strategies could share computed_at

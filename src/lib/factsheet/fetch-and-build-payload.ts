@@ -551,10 +551,12 @@ async function resolveFactsheetInputs(
   // The F-4 `computation_status`-DONE gate was documented as riding a
   // computed_at-bearing cache key; until 167.2.1-REVIEW WR-02 it did not (the
   // effective key was id-only). It does now: `computed_at` is a keyParts
-  // member (see the header comment of `fetchAndBuildPayload`). The status bridge
-  // stamps a fresh computed_at on every job transition it resolves, at job
-  // start and at its end (167.2.1-REVIEW-R2 IN-01), so a status change always
-  // moves the key; nothing waits on the TTL. Status is public-safe on a
+  // member (see the header comment of `fetchAndBuildPayload`). When that was
+  // written the status bridge stamped a fresh computed_at on every job
+  // transition it resolved (167.2.1-REVIEW-R2 IN-01). Since Phase 166.5 the
+  // analytics runner stamps it on its success write only, so a status change
+  // moves the key through the `computation_status` keyPart instead (166.3.1
+  // D-05); nothing waits on the TTL. Status is public-safe on a
   // published row (unchanged RLS boundary — the outer request-scoped signature
   // probe stays the auth gate).
   //
@@ -685,7 +687,10 @@ async function resolveFactsheetInputs(
  * longer true: since 166.3.1 a BEFORE UPDATE trigger on `strategy_analytics`
  * holds `computed_at` on entry into `computing` and on a write to `failed`, so
  * `computed_at` moves ONLY on a successful write (`complete`,
- * `complete_with_warnings`). The status keyPart is what now moves the key on
+ * `complete_with_warnings`). Since Phase 166.5 the bridge writes no date at all
+ * and the analytics runner stamps it from the database clock on that success
+ * write (the trigger remains as defence in depth), so a failed or computing
+ * row carries the date of its last good compute. The status keyPart is what now moves the key on
  * entry into `computing` and on a failure, `computed_at` moves it on a
  * successful compute, and the trade-fact members move it on a daily tick or a
  * provenance write (neither moves `computed_at`). Branch (b-prime), the

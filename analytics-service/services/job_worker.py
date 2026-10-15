@@ -10362,6 +10362,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         "computation_warned": member_warned,
         # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
         "computing_started_at": None,
+        # Phase 166.5 D-01/D-02: the DATABASE clock. Postgres reads the special
+        # timestamptz input "now" as the transaction start, in the same write as the metrics.
+        "computed_at": "now",
         "computation_error": None,
         # Phase 164.2 / criterion 2: a success blanks the sentence, so it blanks
         # the provenance in the SAME statement. A marker left standing over a

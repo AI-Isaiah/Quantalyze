@@ -4723,6 +4723,76 @@ async def test_composite_failure_stamp_omits_the_verdict_column() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_headline_payload_stamps_computed_at_with_db_clock_literal() -> None:
+    """Phase 166.5 (D-01, D-02, R-01) - the composite success write names
+    ``computed_at`` with the literal ``"now"``; no other write of the job does.
+
+    WHY the key must be present: once the status bridge stops stamping the date
+    (plan 02), a composite recompute that omits it leaves ``computed_at`` at the
+    last compute, so the freshness chip, factsheet cache key and PDF ETag would
+    treat a finished recompute as stale.
+
+    WHY ``"now"`` and nothing else: Postgres reads that special timestamptz input
+    as the transaction start on the DATABASE clock (D-02). A Python datetime or
+    isoformat string is the Python clock D-02 forbids.
+
+    WHY no failure/error-only/pre-stamp write may carry it: those are not a
+    finished compute. A stamp there would present a failure as fresh, and
+    166.3.1's hold trigger would silently discard it while the row is
+    ``failed`` or ``computing``.
+
+    Neuter: drop the key from ``headline_payload`` -> the success half reddens;
+    add it to any failure writer -> the exclusivity half reddens."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.DONE
+    payloads = _sa_upserts(fake)
+    finishes = [
+        p for p in payloads
+        if p.get("computation_status") in ("complete", "complete_with_warnings")
+    ]
+    assert len(finishes) == 1, (
+        f"expected exactly one terminal-success strategy_analytics write, got {len(finishes)}"
+    )
+    assert finishes[0].get("computed_at") == "now", (
+        "the composite success write must carry computed_at == 'now' (the database "
+        f"clock, D-02); got {finishes[0].get('computed_at', '<missing>')!r}"
+    )
+    stamped = [p for p in payloads if p is not finishes[0] and "computed_at" in p]
+    assert not stamped, (
+        "only the terminal-success write may name computed_at (D-01); "
+        f"these did too: {[p.get('computation_status') for p in stamped]}"
+    )
+
+    # The failure run: a degenerate one-day composite stamps a terminal failed row.
+    # Nothing in it may name the column (a failure leaves the date at the last good
+    # compute, D-04).
+    failed_fake = _FakeSupabase(members=[_member(1, "2024-01-01", None)])
+    f1 = _returns([("2024-01-01", 0.05)])
+    with _apply(_deribit_patches(
+        failed_fake, combine_returns=[(f1, {})], has_option_activity=True,
+    )):
+        failed = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert failed.outcome == DispatchOutcome.FAILED
+    failed_payloads = _sa_upserts(failed_fake)
+    assert any(p.get("computation_status") == "failed" for p in failed_payloads), (
+        "the degenerate composite must stamp a failed row, else the exclusivity half is vacuous"
+    )
+    assert not [p for p in failed_payloads if "computed_at" in p], (
+        "a failed composite run must not name computed_at on any write (D-04)"
+    )
+
+
 # ── 142.2 code review FIX 2 — COMPOSITE LAUNDERING ──────────────────────────
 #
 # The stamp above was a BARE LITERAL: it never consulted `member_metas`, even
