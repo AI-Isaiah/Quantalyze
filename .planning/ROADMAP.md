@@ -4886,6 +4886,7 @@ Measured at `e34605be`: `reconstruct_symbol_returns` in `analytics-service/route
 4. The effect on PROD's current Bridge outputs is read before and after deploy, read-only and with the marker query first.
 
 **Founder decision D-20 (2026-10-15, option A):** a spot holding with fewer than 30 adjacent one-day returns is withheld from the matcher's return join by name. It stays named in `holding_flags` with the distinct reason `too_few_adjacent_returns`, and it stays in AUM, weights and the max-weight test (D-01). `/compare` is unchanged. A test goes RED when the withholding is neutered: 30 priced days, none adjacent, must not empty the join.
+**Founder decisions D-21 and D-22 (2026-10-15, review round 1):** the max-weight denominator stays the D-16 AUM, so a tiny positive AUM flags every holding (accepted). An AUM at or below zero persists a null weight and names the skipped test `aum_not_positive`. A book-level shared-days join under 30 days withholds no holding: it logs a named WARNING and records a `book_join_too_short` marker with the shared-day count on the batch.
 **Plans:** 9/9 plans executed
 
 Plans:
