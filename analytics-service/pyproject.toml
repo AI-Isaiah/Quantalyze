@@ -40,3 +40,14 @@ follow_imports = "skip"
 [[tool.mypy.overrides]]
 module = ["pandera.*"]
 follow_imports = "skip"
+
+[tool.coverage.run]
+# Phase 164.9.8.1 PYXDIST, founder decision 2026-10-15: measure with coverage's
+# sys.monitoring core instead of the default sys.settrace one. Both the ci.yml
+# python step and the Makefile `test:` recipe run pytest with
+# cwd=analytics-service, so they read this table and the pinned pytest argument
+# string stays byte-identical. Measured: the AST-heavy test_qstats_gate tests
+# took 37-89 s each under settrace and 2-5 s under sysmon, with identical totals
+# (93.57%). sysmon gives no branch coverage before Python 3.14; this suite
+# measures none.
+core = "sysmon"

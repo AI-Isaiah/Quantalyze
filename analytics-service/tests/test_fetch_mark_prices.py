@@ -2,14 +2,13 @@
 must run per-symbol calls concurrently via asyncio.gather, not sequentially.
 
 The naive serial implementation took N * RTT for N open perps; under
-asyncio.gather it takes ~max(RTT). We assert this by patching
-public_get_public_mark_price with a delay and timing the gather call —
-serial would be N*delay, parallel ≈ delay.
+asyncio.gather it takes ~max(RTT). We assert this structurally, by patching
+public_get_public_mark_price and recording how many calls are in flight at
+once — serial peaks at 1, parallel at N. No wall-clock is read.
 """
 from __future__ import annotations
 
 import asyncio
-import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -19,24 +18,35 @@ from services import exchange as exchange_service
 
 @pytest.mark.asyncio
 async def test_fetch_mark_prices_okx_runs_in_parallel(monkeypatch):
-    """N parallel per-symbol calls take ~one RTT, not N RTTs.
+    """N per-symbol calls are in flight TOGETHER, not one after another.
 
-    Pre-fix the OKX branch ran ``for sym in to_fetch: await ...`` so 5
-    symbols at 50ms each → ~250ms wall time. Post-fix, asyncio.gather
-    runs them concurrently → ~50ms wall time. We allow generous slack
-    (0.5x serial) so a slow CI box doesn't false-fail, but the timing
-    gap between serial and parallel for 5 * 50ms is wide enough to be
-    unambiguous.
+    Pre-fix the OKX branch ran ``for sym in to_fetch: await ...``, so the
+    calls were strictly serial. Post-fix ``asyncio.gather`` starts them all
+    before any one completes.
+
+    ⛔ STRUCTURE, NOT A STOPWATCH. This used to time the batch against 0.6x the
+    serial duration (5 calls x 50 ms), which left a 100 ms margin that a
+    CPU-starved xdist worker could burn through while the batch was perfectly
+    parallel. The property is exact and needs no clock: the peak number of calls
+    in flight. Every ``gather`` child runs its first step in the same event-loop
+    pass, before any of them can resume, so a parallel implementation reaches N
+    and a serial one never exceeds 1, however slow the box is.
     """
     exchange_service._reset_mark_price_cache_for_tests()
 
-    delay_s = 0.05
     call_count = 0
+    in_flight = 0
+    peak_in_flight = 0
 
     async def fake_call(params):
-        nonlocal call_count
+        nonlocal call_count, in_flight, peak_in_flight
         call_count += 1
-        await asyncio.sleep(delay_s)
+        in_flight += 1
+        peak_in_flight = max(peak_in_flight, in_flight)
+        try:
+            await asyncio.sleep(0)  # yield: a serial caller would not have started the next
+        finally:
+            in_flight -= 1
         return {"data": [{"markPx": "100.0"}]}
 
     fake_exchange = MagicMock()
@@ -45,18 +55,13 @@ async def test_fetch_mark_prices_okx_runs_in_parallel(monkeypatch):
 
     syms = ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "XRP-USDT-SWAP", "DOGE-USDT-SWAP"]
 
-    started = time.monotonic()
     out = await exchange_service.fetch_mark_prices(fake_exchange, syms)
-    elapsed = time.monotonic() - started
 
     assert call_count == len(syms), "Each symbol must be fetched once"
     assert len(out) == len(syms), "All symbols must have a price returned"
-    # Serial-fix would be ~5 * 0.05 = 0.25s. Parallel target ≈ 0.05s.
-    # Choose half-serial as the boundary; if we ever regress to serial it
-    # would clearly cross.
-    assert elapsed < (delay_s * len(syms) * 0.6), (
-        f"CR-perf-1: fetch_mark_prices OKX must run in parallel; "
-        f"elapsed={elapsed:.3f}s, expected < {delay_s * len(syms) * 0.6:.3f}s"
+    assert peak_in_flight == len(syms), (
+        f"CR-perf-1: fetch_mark_prices OKX must run in parallel; at most "
+        f"{peak_in_flight} of {len(syms)} calls were ever in flight together"
     )
 
 

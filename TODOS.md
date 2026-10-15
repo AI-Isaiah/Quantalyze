@@ -10480,6 +10480,25 @@ were NOT, and all four are now pushed to `origin` so they are no longer local-on
   `ci.yml`). Cheap, useful, never merged. ⚠️ Check it against the `-p no:randomly`/VCR-cassette
   constraints before landing — parallel pytest plus cassettes is exactly where LIVE broker calls
   leak in.
+  ⭐ 2026-10-14 (Phase 164.9.8.1 PYXDIST) — what was measured:
+  - The `shared_test_db` xdist group never formed. The conftest grouping hook ran after xdist's own hook
+    had read the markers, so no nodeid received the group suffix until the hook got `tryfirst=True`
+    (gate: `analytics-service/tests/test_xdist_group_is_real.py`, seen RED without the decorator).
+  - The limiter-identity flake was `routers.*` module pollution: fixtures that evicted a module without
+    restoring it. Fixed in the polluters through `tests/limiter_stub.py` (`restoring` / `evicted`); the
+    victim test is byte-identical. Exhaustive bisect after the fix: 316 of 316 file-level and 452 of 452
+    node-level pairs GREEN (0 RED), against 17 RED nodes in one polluter file before it.
+  - The VCR concern is ruled out by reading: `tests/conftest_vcr.py` sets `record_mode="once"`, so
+    cassettes replay only and nothing re-records under parallel workers.
+  - Coverage is combined and enforced under xdist. On the same tree, serial TOTAL 93.57 percent and
+    `-n auto --dist loadgroup` TOTAL 93.57 percent (24238 statements both), a delta of 0.00 point; the
+    same parallel run with the floor raised to 99 exited 1 with `Coverage failure: total of 94 is less
+    than fail-under=99`. The floor of 80 is unchanged.
+  - The Phase-97 parallelization TODOS entry no longer exists: tracker consolidation `193afe818`
+    dropped it. The pointer in the old `ci.yml` comment was dangling, and the entry is NOT re-created.
+  - Parallel pytest reaches main through this phase, not by merging this branch, so this branch's own
+    disposition (land it or close it) is unchanged.
+  - The soak of at least 20 runs on the lane and the wall-time figures are in this phase's plan 04 SUMMARY.
 
 - [ ] **`wip/v1.16-phase140-fix-archive` — 91% divergent (4,046 of 4,441 added lines absent).**
   Highest divergence of any branch, but **no file it touches is missing from main**, so this reads
