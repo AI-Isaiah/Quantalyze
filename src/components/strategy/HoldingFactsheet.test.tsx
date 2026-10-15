@@ -450,4 +450,16 @@ describe("HoldingFactsheet (finding g4)", () => {
     render(<HoldingFactsheet item={SAMPLE} />);
     expect(screen.queryByTestId("holding-factsheet-adjacency-note")).toBeNull();
   });
+
+  it("lets an unbroken symbol wrap inside the card instead of pushing past it at 375px", () => {
+    // Measured 2026-10-15 at 375x812 on the local stack: an MT5 `ACCOUNT-<48 hex>`
+    // heading ran 160 px past its card. jsdom cannot measure layout, so this pins
+    // the two properties the fix rests on: the card wraps anywhere (inherited by
+    // the heading and every note) and neither flex level can grow past its track.
+    render(<HoldingFactsheet item={{ ...SAMPLE, symbol: `ACCOUNT-${"a".repeat(48)}` }} />);
+    const card = screen.getByTestId("holding-factsheet");
+    expect(card.className).toContain("[overflow-wrap:anywhere]");
+    expect(card.className).toContain("min-w-0");
+    expect(screen.getByRole("heading", { level: 3 }).parentElement?.className).toContain("min-w-0");
+  });
 });
