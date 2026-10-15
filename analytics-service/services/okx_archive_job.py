@@ -2436,7 +2436,7 @@ async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
             return await _finish_stop(supabase, job, result, stop)
         except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as exc:
             # A venue rate limit is a reason to wait, not to fail, and it is NEVER stamped
-            # onto the key: ``stamp_api_key_429`` opens the exchange-wide breaker and pauses
+            # onto the key, because ``stamp_api_key_429`` opens the exchange-wide breaker and pauses
             # every normal OKX sync for a quota this job alone spent.
             logger.warning(
                 "okx_archive_rebuild: venue rate limit (%s); deferring %ds",
