@@ -88,7 +88,9 @@ const RESTORE_WF = join(REPO_ROOT, ".github", "workflows", "test-restore-from-ba
  * `decline:<n>`) are pinned separately by C5_ENTRY_COUNT below, so a C5 line
  * can never be mistaken for, or net out against, an INSERT line.
  */
-export const ENTRY_COUNT = 22;
+// ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 22 -> 23, one INSERT line for
+// 20261026120000_okx_archive_rebuild.sql (public.compute_job_kinds, the compute_jobs.kind FK).
+export const ENTRY_COUNT = 23;
 
 /**
  * PINNED C5 LINE COUNT (Phase 164.9.2): 4 `update:` + 2 `decline:` lines. Same

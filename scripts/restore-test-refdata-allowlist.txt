@@ -8,6 +8,11 @@
 # ⛔ W3 — DERIVE THE FILE COUNT, NEVER RESTATE IT:
 #       grep -vE '^[[:space:]]*(#|$)' scripts/restore-test-refdata-allowlist.txt \
 #         | cut -f1 | sort -u | wc -l
+# ⭐ UPDATED 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): the sentence
+#    below was true on 2026-09-09; 20261026120000_okx_archive_rebuild.sql added ONE
+#    entry in ONE new file, so the INSERT class now reads 23 ENTRIES over 20 FILES
+#    over 8 TABLES, summing to 24 STATEMENTS, and the file count recipe answers 20.
+#    Measured by `--audit` and the recipes below, not by arithmetic on this prose.
 #    22 ENTRIES over 19 FILES over 8 TABLES, and the pinned counts sum to 23
 #    STATEMENTS. All four numbers differ, and the gaps RECONCILE EXACTLY:
 #      entries - files = 3, from the two multi-entry migrations —
@@ -338,6 +343,13 @@
 #    line out would silently normalise the hazard into "TEST just lacks a row".
 #
 # ── DATED READING, 2026-09-09 (a measurement, not a constant) ──────────────
+# ⭐ UPDATED 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 20261026120000
+# adds the 16th statement, so the reading below is now 16 statements yielding 17
+# DISTINCT kind names, and the LATEST `compute_jobs_kind_check` declaration
+# (20261026120000_okx_archive_rebuild.sql:98) admits exactly those 17. The shipped
+# baseline.sql:1334 still carries the 16 until the post-apply baseline re-dump, so
+# this dated reading is about the MIGRATIONS the replay applies, not the dump.
+# The 2026-09-09 reading, kept as lineage:
 # The 15 `public.compute_job_kinds` statements below yield 16 DISTINCT kind
 # names, and `compute_jobs_kind_check` (supabase/schema/baseline.sql:1334) admits
 # exactly those same 16. The two lists were compared this session and are EQUAL.
@@ -389,6 +401,7 @@
 20260717233529_allocator_equity_derived_surface.sql	public.compute_job_kinds	1	# :134-135 derive_allocator_equity. The :47 mention is a COMMENT (C1). Consumer: the compute_jobs.kind FK.
 20260907120000_analytics_service_settings_and_vault_tick.sql	public.system_settings	1	# :294-296 analytics_service_url. Consumer: match_engine_cron_tick() at :301+ of this same file. ⚠️ See the L-03 block above before touching this line.
 20260907130000_ledger_refresh_switch_to_system_flags.sql	public.system_flags	1	# :188-190 ledger_refresh_enabled=FALSE. Consumer: the fan-out function in this same file.
+20261026120000_okx_archive_rebuild.sql	public.compute_job_kinds	1	# :91-92 okx_archive_rebuild. Consumer: the compute_jobs.kind FK.
 
 # ── C5 LINES (Phase 164.9.2) — top-level literal UPDATEs on a replayed public table ──
 # Deliberately BELOW every INSERT line: the emit orders by (migration filename,
