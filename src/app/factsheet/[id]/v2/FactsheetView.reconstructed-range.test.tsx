@@ -241,4 +241,56 @@ describe("FactsheetView - ReconstructedRangeLines (D-06, D-07)", () => {
     expect(rebuilt.map((p) => p.textContent)).toEqual([SENTENCE_JUL_AUG]);
     expect(gaps[0].nextElementSibling).toBe(rebuilt[0]);
   });
+
+  // Review round 1, F5 / IN-01: a malformed `reconstructed_ranges` record is
+  // absence of KNOWLEDGE, not absence of a rebuild. The RPC already removed the
+  // rebuilt days from `unrecovered_gaps`, so a silent render would present them
+  // as live. The header says the record is unavailable (muted, never red or
+  // amber: the page admits it does not know, as TradeFetchUnavailableLine does).
+  describe("malformed record (F5 / IN-01)", () => {
+    const UNAVAILABLE =
+      "Record of rebuilt days unavailable. Some days may come from a quarterly statement, not the live feed.";
+
+    function unavailableLines(container: HTMLElement): HTMLElement[] {
+      const header = container.querySelector("header");
+      return Array.from(header?.querySelectorAll("p") ?? []).filter((p) =>
+        /^Record of rebuilt days unavailable/.test(p.textContent ?? ""),
+      ) as HTMLElement[];
+    }
+
+    it("renders the unavailable sentence, muted-secondary, once, when the payload flags it", () => {
+      const { container } = renderFactsheet({
+        ...withRanges([]),
+        reconstructedRangesUnavailable: true,
+      });
+      const lines = unavailableLines(container);
+      expect(lines).toHaveLength(1);
+      expect(lines[0].textContent).toBe(UNAVAILABLE);
+      expect(lines[0].className).toContain("mt-1");
+      expect(lines[0].className).toContain("text-caption");
+      expect(lines[0].className).toContain("text-text-secondary");
+      expect(lines[0].className).not.toMatch(/text-negative|text-warning|text-amber/);
+      // The D-06 sentence is not printed for a record we could not read.
+      expect(rebuiltLines(container)).toHaveLength(0);
+    });
+
+    it("a healthy payload (flag false or absent) prints no unavailable line", () => {
+      for (const flag of [false, undefined]) {
+        const { container, unmount } = renderFactsheet({
+          ...withRanges([]),
+          reconstructedRangesUnavailable: flag,
+        });
+        expect(unavailableLines(container)).toHaveLength(0);
+        unmount();
+      }
+    });
+
+    it("the D-06 sentence stays byte-identical beside a flagged payload that also carries ranges", () => {
+      const { container } = renderFactsheet({
+        ...withRanges([{ from: "2026-07-01", to: "2026-08-01", source: SOURCE }]),
+        reconstructedRangesUnavailable: false,
+      });
+      expect(rebuiltLines(container).map((p) => p.textContent)).toEqual([SENTENCE_JUL_AUG]);
+    });
+  });
 });

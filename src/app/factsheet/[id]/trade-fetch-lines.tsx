@@ -209,6 +209,19 @@ export function UnrecoveredGapLines({
 const RECONSTRUCTED_SENTENCE = "rebuilt from OKX's quarterly account statement, not the live feed.";
 
 /**
+ * Review round 1, F5 / IN-01: the line for a `reconstructed_ranges` record that
+ * was present but malformed. NOT the D-06 sentence (that names a range we could
+ * not read) and NOT silence: the rebuild RPC already removed the rebuilt days
+ * from `unrecovered_gaps`, so printing nothing would present them as live days.
+ * It states the limit, in DESIGN.md's declarative sentence-case voice, and
+ * deliberately avoids the D-06 wording ("quarterly account statement") so no
+ * reader or test can mistake it for a stored range. Muted-secondary like its
+ * sibling lines: the page admits it does not know, it makes no finding.
+ */
+const RECONSTRUCTED_UNAVAILABLE_SENTENCE =
+  "Record of rebuilt days unavailable. Some days may come from a quarterly statement, not the live feed.";
+
+/**
  * Reconstructed range - Phase 167.1.2.2.2.1 (OKXHISTORY), D-06 and D-07.
  *
  * WHY THIS LINE EXISTS. Rebuilt days COUNT in the headline metrics (D-07), so
@@ -229,16 +242,24 @@ const RECONSTRUCTED_SENTENCE = "rebuilt from OKX's quarterly account statement, 
  * Muted-secondary caption, plain wrapping text, no glyph (DESIGN.md: declarative
  * sentence-case captions). `undefined` is a payload cached before the field
  * existed: render nothing rather than throw on `.length`.
+ *
+ * `unavailable` (review round 1, F5 / IN-01) is the parser's verdict that the
+ * stored record was malformed: `ranges` is then `[]` and this prints the
+ * unavailable sentence instead of nothing. Absent on a payload cached before the
+ * flag existed, which reads as false (the prior behaviour, no new claim).
  */
 export function ReconstructedRangeLines({
   ranges,
+  unavailable = false,
   size = "caption",
 }: {
   ranges: ReconstructedRange[] | undefined;
+  unavailable?: boolean;
   size?: TradeLineSize;
 }) {
-  if (!ranges || ranges.length === 0) return null;
   const className = `mt-1 ${SIZE_CLASS[size]} text-text-secondary`;
+  if (unavailable) return <p className={className}>{RECONSTRUCTED_UNAVAILABLE_SENTENCE}</p>;
+  if (!ranges || ranges.length === 0) return null;
   const named = ranges.slice(0, MAX_NAMED_GAPS);
   const more = ranges.length - named.length;
   return (

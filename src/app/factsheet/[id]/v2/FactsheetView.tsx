@@ -1322,7 +1322,10 @@ function FactsheetHeader({
                 after the gap lines so a partly rebuilt gap shows both (SC-4).
                 Shown to every viewer; server truth only
                 (`payload.reconstructedRanges`). */}
-            <ReconstructedRangeLines ranges={payload.reconstructedRanges} />
+            <ReconstructedRangeLines
+              ranges={payload.reconstructedRanges}
+              unavailable={payload.reconstructedRangesUnavailable}
+            />
           </div>
           {payload.aum != null && (
             <CapacityChip

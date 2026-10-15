@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { parseReconstructedRanges, parseUnrecoveredGaps } from "./trade-fetch-provenance";
+import {
+  parseReconstructedRanges,
+  parseUnrecoveredGaps,
+  readReconstructedRanges,
+} from "./trade-fetch-provenance";
 
 // Typed-literal oracles throughout: the expected spans are written out, never
 // derived from the parser, so a parser that drops or reorders fields fails.
@@ -200,5 +204,86 @@ describe("parseReconstructedRanges", () => {
     };
     expect(parseUnrecoveredGaps(both)).toEqual([{ from: "2026-05-24", to: "2026-06-30" }]);
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+// Phase 167.1.2.2.2.1 review round 1, F5 / IN-01: a malformed record must be
+// told apart from an absent one. `parseReconstructedRanges` returns [] for both,
+// which let a public page present rebuilt days as live with no disclosure and
+// no Sentry event. `readReconstructedRanges` carries the verdict the callers
+// report and render.
+describe("readReconstructedRanges", () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  const SRC = "okx_bills_history_archive";
+
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["empty object (key absent)", {}],
+    ["empty list", { reconstructed_ranges: [] }],
+    ["null key", { reconstructed_ranges: null }],
+  ])("%s is absent, not malformed", (_name, input) => {
+    expect(readReconstructedRanges(input)).toEqual({ ranges: [], malformed: null });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("a valid record carries its ranges and no malformed reason", () => {
+    expect(
+      readReconstructedRanges({
+        reconstructed_ranges: [{ from: "2026-07-01", to: "2026-08-01", source: SRC, recorded_at: "x" }],
+      }),
+    ).toEqual({
+      ranges: [{ from: "2026-07-01", to: "2026-08-01", source: SRC }],
+      malformed: null,
+    });
+  });
+
+  it.each([
+    ["non-object provenance", "reconstructed_ranges", "provenance is not an object"],
+    ["non-array list", { reconstructed_ranges: "2026-07-01" }, "reconstructed_ranges is not an array"],
+    ["non-object entry", { reconstructed_ranges: [null] }, "an entry is not an object"],
+    [
+      "calendar-impossible date",
+      { reconstructed_ranges: [{ from: "2026-02-30", to: "2026-03-02", source: SRC }] },
+      "an entry date is not a YYYY-MM-DD calendar date",
+    ],
+    [
+      "to before from",
+      { reconstructed_ranges: [{ from: "2026-08-01", to: "2026-07-01", source: SRC }] },
+      "an entry ends before it starts",
+    ],
+    [
+      "foreign source",
+      { reconstructed_ranges: [{ from: "2026-07-01", to: "2026-07-09", source: "manual" }] },
+      "an entry carries an unknown source",
+    ],
+  ])("%s is malformed with a named reason, ranges empty", (_name, input, reason) => {
+    expect(readReconstructedRanges(input)).toEqual({ ranges: [], malformed: reason });
+  });
+
+  it("one bad entry voids the record but still reports it malformed (never a silent [])", () => {
+    const out = readReconstructedRanges({
+      reconstructed_ranges: [
+        { from: "2026-07-01", to: "2026-08-01", source: SRC },
+        { from: "2026-09-01", to: "2026-09-05", source: "manual" },
+      ],
+    });
+    expect(out.ranges).toEqual([]);
+    expect(out.malformed).toBe("an entry carries an unknown source");
+  });
+
+  it("a hostile provenance is malformed, not a throw", () => {
+    const hostile = { get reconstructed_ranges(): unknown { throw new Error("boom"); } };
+    expect(readReconstructedRanges(hostile)).toEqual({
+      ranges: [],
+      malformed: "provenance could not be read",
+    });
   });
 });
