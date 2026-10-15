@@ -9930,6 +9930,24 @@ without its `code` tag.
   Step 2). A non-USD row is the stop class `non_usd_ccy` and a founder STOP; the fix owner is routed by founder
   decision then.
 
+- **[167.1.2.2.2.1-REVIEW-R3-SURVIVORS]** (logged 2026-10-15, review round 3, after three fixer rounds; owner:
+  Phase 167.1.2.2.2.1 plan 13 (PR-B), which MUST land them before plan 14's calibrate is read by the founder).
+  Four MEDIUMs on founder-facing readings and one false-stop risk survived round 3
+  (`.planning/phases/167.1.2.2.2.1-okxhistory-an-okx-strategy-s-days-older-than-the-3-month-bil/167.1.2.2.2.1-REVIEW.md`
+  round 3 plus the silent-failure hunt):
+  (1) the `MIN_CHAINED_PAIRS` floor applies to every currency with any nonzero pnl/fee/balChg, including excluded
+  classes the aggregate never sums (one coin-margined OKX option bill stops the job `too_few_pairs`); scope it to
+  currencies whose money the aggregate sums, keep the break check on all;
+  (2) `flow_totals_overlap` opens 7 days before the flow seam where the live side is always empty, so a double
+  count reads as agreement; start it at the seam and correct the runbook sentence;
+  (3) the runbook's `flow_seam` no-go rule "both sides nonzero" fires on any active account; make `diff` the
+  signal;
+  (4) the `flow_seam` after-window is not clamped to the last covered archive day, so a late re-run reports a
+  spurious `diff`; clamp it, or report the reading unmeasurable with a reason.
+  **Trigger:** plan 13 execution. **Done when** each has a test that goes RED on today's code and the runbook
+  Step 3 reads the corrected signals. Also open for the founder (not a defect): whether to bound
+  `info.realized_balance_vs_rolled_nav.diff` and `info.flow_seam.diff` (readings only today).
+
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
 - **"Do NOT implement" landmines (keep documented, do not touch):** bridge-scoring precompute;
