@@ -2,7 +2,16 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261009120000_sync_status_analytics_scope.sql
+-- source migration: 20261024120000_fan_in_graph_and_decision_cascade.sql
+-- --------------------------------------------------------------------------
+-- (1) mark_compute_job_failed: the failure cascade (D-01 to D-03)
+-- --------------------------------------------------------------------------
+-- The body is the LATEST definition (20261009120000, sync_status_analytics_scope;
+-- re-grepped on this tree and on origin/main, no later CREATE or ALTER of it),
+-- byte for byte, with ONLY the declarations and the cascade block added (and, in
+-- the same file, the multi-strategy bridge that replaces the single-strategy one;
+-- see the bridge comment in the body). The fences stay SQLSTATE 55006; the
+-- cascade raises nothing.
 CREATE OR REPLACE FUNCTION mark_compute_job_failed(
   p_job_id      UUID,
   p_error       TEXT,
@@ -22,6 +31,16 @@ DECLARE
   v_strategy_id   UUID;
   v_current_token UUID;
   v_current_status TEXT;
+  -- Phase 164.9.3.1 D-01..D-03: the failure cascade's working set.
+  v_kids          UUID[];
+  v_held          UUID[];
+  v_frontier      UUID[];
+  v_fail_set      UUID[];
+  v_attempt       INTEGER;
+  v_retry         BOOLEAN;
+  v_casc_jobs     UUID[] := '{}';
+  v_casc_strats   UUID[] := '{}';
+  r_b             RECORD;
 BEGIN
   -- audit-2026-05-07 B5: token mandatory (see mark_compute_job_done above).
   IF p_claim_token IS NULL THEN
@@ -92,11 +111,165 @@ BEGIN
          next_attempt_at = v_next_attempt
    WHERE id = p_job_id;
 
-  -- Phase 18: atomic UI bridge (preserved from mig 099).
-  IF v_strategy_id IS NOT NULL THEN
-    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));
-    PERFORM sync_strategy_analytics_status(v_strategy_id, p_job_id);
+  -- Phase 164.9.3.1 D-01 to D-03: a parent that ENDS failed_final can never
+  -- release a waiting fan-in child (release needs every parent `done`), so the
+  -- child would hold its (target, kind) in-flight slot forever and its strategy
+  -- would read `computing`. Fail the descendant closure now, in this
+  -- transaction:
+  --   * ONE ascending lock pass (review CR-01). The whole waiting closure below
+  --     the failed job is READ first (a recursive CTE, no locks), then locked in
+  --     a single call to _fan_in_lock_rows, and only then written. A lock taken
+  --     once per level would hold a deep row (a direct child of the failed job
+  --     that also hangs under a longer chain) while it waited for a shallower
+  --     one, the opposite of the order every other fan-in path ascends, and that
+  --     deadlocks (40P01) against an enqueue or a second cascade. The CTE only
+  --     picks WHICH rows to lock; it never writes.
+  --   * RE-READ UNDER THE LOCKS (review round 2, WR-01). An enqueue that holds a
+  --     share lock on a closure row can commit a NEW child while this
+  --     transaction waits for that row. That child is visible to every
+  --     transaction from its commit on, so another cascade or an enqueue may
+  --     already hold it, and locking it on top of the rows held here would be
+  --     the hold-deep, wait-shallow order CR-01 removed (FL7 reproduces the
+  --     40P01). The earlier note that only the creator knows such a row was
+  --     wrong. So the lock phase is a block with an exception handler, which is
+  --     a subtransaction: after the helper call the closure is read AGAIN, and
+  --     if it holds a row the locked set does not (the first read has an empty
+  --     v_held, so the first pass always locks), the block raises the private
+  --     SQLSTATE FI001. The handler's rollback RELEASES every row lock the block
+  --     took, and the next attempt reads the grown closure afresh and locks all
+  --     of it in ONE ascending pass. The failed job's own row is taken before
+  --     the block and stays held: every closure row is a strict descendant of
+  --     it, so it sorts first. The loop ends when a re-read under the locks
+  --     finds nothing new. That read is complete: a child of a locked row can
+  --     only be created by an enqueue that first share-locks that row, and that
+  --     waits for this transaction; one committed before the lock was granted is
+  --     visible to the re-read, which starts after it. A row that LEFT the
+  --     closure meanwhile (failed by another cascade) only shrinks the re-read,
+  --     which is still contained in the locked set.
+  --   * the retry is bounded at 10 attempts and then fails loud, SQLSTATE 55P03
+  --     (never 55006, which the worker swallows as a watchdog preemption, and
+  --     never 40001 / 40P01). Each retry needs a concurrent enqueue to have
+  --     committed a new descendant inside the window, so the bound is a
+  --     tripwire, not a path. The RAISE aborts the whole RPC, so the job's own
+  --     row is untouched and stays `running`. The worker (main_worker.py,
+  --     dispatch_tick's FAILED branch) matches SQLSTATE 55P03, logs ONE ERROR
+  --     carrying the original error_kind and error, and does NOT re-mark the job:
+  --     its catch-all fallback would mark it error_kind='unknown' and lose a
+  --     permanent failure. The watchdog reclaims the stalled `running` row.
+  --   * the writes stay level by level, over the locked set (v_held), one
+  --     UPDATE ... RETURNING per level, so each child names its OWN failed parent
+  --     (D-03). The UPDATE re-checks `done_pending_children` after the lock, so a
+  --     child a concurrent mark_compute_job_done released meanwhile is left alone.
+  --   * the child inherits the NAMED parent's error_kind (the lowest-uuid parent
+  --     in the frontier, picked by ORDER BY ... LIMIT 1, not an aggregate) and
+  --     last_error names that parent inside the 60 characters the admin table
+  --     shows. last_error is the OPERATOR surface; the user's copy still derives
+  --     from error_kind alone.
+  --   * a failed_retry parent cascades nothing: it may still succeed.
+  --   * each level only touches done_pending_children rows and turns them
+  --     terminal, so a row is processed at most once and the level loop ends
+  --     when a level fails nothing.
+  IF v_new_status = 'failed_final' THEN
+    v_fail_set := ARRAY[p_job_id];
+    v_attempt  := 0;
+    LOOP
+      v_attempt := v_attempt + 1;
+      IF v_attempt > 10 THEN
+        RAISE EXCEPTION 'mark_compute_job_failed: the waiting closure of job % kept growing across % lock attempts, refusing to fail it half-locked', p_job_id, v_attempt - 1
+          USING ERRCODE = '55P03';
+      END IF;
+      v_held  := '{}'::uuid[];
+      v_retry := FALSE;
+      BEGIN
+        LOOP
+          WITH RECURSIVE clo(id) AS (
+            SELECT c.id
+              FROM compute_jobs c
+             WHERE c.status = 'done_pending_children'
+               AND c.parent_job_ids && v_fail_set
+               AND NOT (c.id = ANY(v_fail_set))
+            UNION
+            SELECT c.id
+              FROM compute_jobs c
+              JOIN clo ON c.parent_job_ids @> ARRAY[clo.id]
+             WHERE c.status = 'done_pending_children'
+          )
+          SELECT COALESCE(array_agg(clo.id), '{}'::uuid[])
+            INTO v_kids
+            FROM clo;
+          EXIT WHEN v_kids <@ v_held;
+          IF cardinality(v_held) > 0 THEN
+            RAISE EXCEPTION 'mark_compute_job_failed: the waiting closure of job % grew while its rows were being locked', p_job_id
+              USING ERRCODE = 'FI001';
+          END IF;
+          PERFORM public._fan_in_lock_rows(v_kids, TRUE);
+          v_held := v_kids;
+        END LOOP;
+      EXCEPTION WHEN SQLSTATE 'FI001' THEN
+        v_retry := TRUE;
+      END;
+      EXIT WHEN NOT v_retry;
+    END LOOP;
+
+    IF cardinality(v_held) <> 0 THEN
+      v_frontier := v_fail_set;
+      LOOP
+        WITH failed_kids AS (
+          UPDATE compute_jobs c
+             SET status          = 'failed_final',
+                 error_kind      = fp.error_kind,
+                 last_error      = 'fan_in_parent_failed: ' || fp.id::text
+                                   || ' ended failed_final; this job can never be released',
+                 next_attempt_at = now()
+            FROM compute_jobs fp
+           WHERE c.id = ANY(v_held)
+             AND c.status = 'done_pending_children'
+             AND c.parent_job_ids && v_frontier
+             AND fp.id = (SELECT x
+                            FROM unnest(c.parent_job_ids) AS x
+                           WHERE x = ANY(v_frontier)
+                           ORDER BY x
+                           LIMIT 1)
+          RETURNING c.id AS kid_id, c.strategy_id AS kid_strategy_id
+        )
+        SELECT COALESCE(array_agg(fk.kid_id), '{}'::uuid[]),
+               v_casc_jobs
+                 || COALESCE(array_agg(fk.kid_id) FILTER (WHERE fk.kid_strategy_id IS NOT NULL), '{}'::uuid[]),
+               v_casc_strats
+                 || COALESCE(array_agg(fk.kid_strategy_id) FILTER (WHERE fk.kid_strategy_id IS NOT NULL), '{}'::uuid[])
+          INTO v_frontier, v_casc_jobs, v_casc_strats
+          FROM failed_kids fk;
+        EXIT WHEN cardinality(v_frontier) = 0;
+      END LOOP;
+    END IF;
   END IF;
+
+  -- Phase 18: atomic UI bridge (preserved from mig 099).
+  -- Phase 164.9.3.1 D-01: the bridge now covers EVERY affected strategy, this
+  -- job's own and each failed descendant's, de-duplicated (one row per
+  -- strategy: the own job when the strategy is the job's own, else the lowest
+  -- failed job id on it, so the trigger job is deterministic). Without it the
+  -- child's strategy keeps reading `computing` although its job is terminal.
+  -- Lock order (rules, not preferences): every fan-in row lock above is already
+  -- held; the per-strategy advisory locks come AFTER them, taken in ONE sorted
+  -- order (hashtext of the strategy id, then the id) so two cascades that
+  -- bridge overlapping strategy sets cannot take them in opposite orders. Two
+  -- strategies whose hashes collide share one advisory key, which
+  -- pg_advisory_xact_lock re-enters in the same transaction (no self-deadlock).
+  FOR r_b IN
+    SELECT d.strategy_id, d.job_id
+      FROM (SELECT DISTINCT ON (u.strategy_id) u.strategy_id, u.job_id
+              FROM (SELECT v_strategy_id AS strategy_id, p_job_id AS job_id, 0 AS ord
+                    UNION ALL
+                    SELECT t.strategy_id, t.job_id, 1
+                      FROM unnest(v_casc_strats, v_casc_jobs) AS t(strategy_id, job_id)) u
+             WHERE u.strategy_id IS NOT NULL
+             ORDER BY u.strategy_id, u.ord, u.job_id) d
+     ORDER BY hashtext(d.strategy_id::text), d.strategy_id
+  LOOP
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(r_b.strategy_id::text));
+    PERFORM sync_strategy_analytics_status(r_b.strategy_id, r_b.job_id);
+  END LOOP;
 
   RETURN v_next_attempt;
 END;

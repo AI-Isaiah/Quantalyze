@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-import time
 from typing import Any
 
 import pytest
@@ -61,6 +60,7 @@ from services.mt5_handover import (
     SITE_HEAL,
     normalize_mt5_holder,
 )
+from tests.budget_rendezvous import expire_budget_when_reached
 from tests.test_mt5_client_contract import (
     _TERMINAL_HOST,
     _TERMINAL_PORT,
@@ -141,7 +141,18 @@ class _InsertRaisingSink(_HandoverSink):
 
 
 class _SlowSink(_HandoverSink):
-    """A sink whose INSERT outlives the recorder's bound."""
+    """A sink whose INSERT outlives the recorder's bound.
+
+    The INSERT parks on ``release`` (a 5 s deadman, so a regression that WAITS on
+    it reds instead of hanging) and sets ``finished`` only once it has been let
+    go. ``finished`` is therefore a structural witness: it is unset exactly when
+    nobody has waited for the INSERT to complete.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = threading.Event()
+        self.finished = threading.Event()
 
     def table(self, name: str) -> Any:
         query = super().table(name)
@@ -149,7 +160,8 @@ class _SlowSink(_HandoverSink):
 
         def _execute() -> Any:
             if query._op == "insert":
-                time.sleep(0.5)
+                self.release.wait(5.0)
+                self.finished.set()
             return original()
 
         query.execute = _execute  # type: ignore[method-assign]
@@ -324,9 +336,12 @@ async def test_abandoned_session_late_login_stamps_nothing(
     """
     release = threading.Event()
     done = threading.Event()
+    loop = asyncio.get_running_loop()
+    parked = asyncio.Event()
 
     def _zombie_login() -> None:
         try:
+            loop.call_soon_threadsafe(parked.set)
             release.wait(timeout=5)
             mt5_client._note_terminal_holder(_KEY, stage="login")
         finally:
@@ -336,8 +351,12 @@ async def test_abandoned_session_late_login_stamps_nothing(
 
     epoch_at_a = _mt5_epoch_for(_KEY)
     async with mt5_terminal_lease(_KEY, holder=_KEY_A, site=SITE_DERIVE):
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(asyncio.to_thread(_zombie_login), timeout=0.05)
+        # ⛔ RENDEZVOUS, NOT A STOPWATCH. `wait_for(..., timeout=0.05)` started its
+        # clock before the pool thread was scheduled, so on a CPU-starved worker the
+        # bound could fire first: queued `to_thread` work that is cancelled never
+        # runs, and there was then no zombie for the rest of the case to outlive its
+        # lease. The bound is expired once the login is parked.
+        await expire_budget_when_reached(asyncio.to_thread(_zombie_login), parked)
 
     caplog.set_level(logging.WARNING, logger=_CLIENT_LOGGER)
     async with mt5_terminal_lease(_KEY, holder=_KEY_B, site=SITE_DERIVE):
@@ -540,10 +559,23 @@ async def test_a_slow_sink_is_cut_off_at_the_bound(
     monkeypatch.setattr(mt5_handover, "_HANDOVER_RECORD_TIMEOUT_S", 0.05)
     caplog.set_level(logging.WARNING, logger=_HANDOVER_LOGGER)
 
-    started = time.monotonic()
-    await _lease_and_login(_KEY_A)
+    try:
+        await _lease_and_login(_KEY_A)
 
-    assert time.monotonic() - started < 0.4
+        # ⛔ STRUCTURE, NOT A STOPWATCH. This used to assert the call took < 0.4 s
+        # against a sink that slept 0.5 s: a 350 ms margin that a CPU-starved
+        # worker could burn while the bound was working perfectly. The sink now
+        # parks until the test lets it go, so the call can only have returned by
+        # cutting the sink off. A recorder that waited for the INSERT would
+        # return only after the deadman released it, with `finished` set.
+        assert not fake.finished.is_set(), (
+            "the lease's caller waited for the slow INSERT to complete instead "
+            "of being cut off at the bound"
+        )
+    finally:
+        # Let the parked pool thread go: the loop's teardown joins the executor.
+        fake.release.set()
+
     warnings = [r for r in caplog.records if r.name == _HANDOVER_LOGGER]
     assert [w.args for w in warnings] == [("TimeoutError",)]
 

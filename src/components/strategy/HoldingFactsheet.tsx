@@ -9,13 +9,24 @@
  * Missing metrics render "—" (em-dash) per institutional convention —
  * explicit-missing, never zero.
  *
- * Phase 167.1.2 / D-13: while the equity history is rebuilt the item carries
- * no analytics, and the card shows a short note in place of the four metrics.
+ * Phase 167.1.1 / D-03 replaces 167.1.2 / D-13's withholding for spot: the four
+ * metrics are computed from the daily mark price, so a spot item is "ready"
+ * and the card says where the numbers come from (State R) or, with fewer than
+ * HOLDING_COMPARE_MIN_PRICED_DAYS priced days (`priced_days < MIN`, not "all
+ * four null"), shows em-dashes and the threshold (State R0). At or above the
+ * minimum, a null vol adds one muted sentence naming why (State R2, SFH-02).
+ * Derivatives stay withheld until a signed basis is defined (State D); a spot holding whose recorded price is a writer constant
+ * (stablecoin, MT5 account, sFOX) is withheld with a named note (State F); any
+ * other holding_type fails closed (State X).
  * Fail-closed: only an explicit `historyState === "ready"` with analytics
  * present renders numbers.
  */
-import type { HoldingCompareItem } from "@/app/(dashboard)/compare/lib/holding-compare-adapter";
+import {
+  HOLDING_COMPARE_MIN_PRICED_DAYS,
+  type HoldingCompareItem,
+} from "@/app/(dashboard)/compare/lib/holding-compare-adapter";
 import { formatRatio, formatUnsignedPercent } from "@/lib/factsheet/display-sign";
+import { formatNumber } from "@/lib/utils";
 
 function fmtPct(v: number | null): string {
   if (v === null || !Number.isFinite(v)) return "—";
@@ -27,19 +38,71 @@ function fmtNum(v: number | null): string {
   return formatRatio(v, 2);
 }
 
+function dayCount(n: number): string {
+  return n === 1 ? "1 day" : `${formatNumber(n, 0)} days`;
+}
+
+function pricedDayCount(n: number): string {
+  return n === 1 ? "1 priced day" : `${formatNumber(n, 0)} priced days`;
+}
+
+const DERIVATIVE_NOTE =
+  "Return, Sharpe, max drawdown and volatility are not shown for derivative holdings yet. A price rise is a gain on a long position and a loss on a short one, and these figures wait until that direction is defined for each day.";
+
+// CR-01 / SFH-01 (167.1.1 round 1) and M-R2-01 (round 2): a spot holding whose
+// recorded price is not a market price has rows and an owner but no metric, so it
+// shows a named note (State F). One sentence per cause, because the false cause is
+// the defect: an MT5 account balance must never read "a fixed value".
+function withheldNote(
+  symbol: string,
+  reason: Extract<HoldingCompareItem, { historyState: "withheld" }>["withheld_reason"],
+): string {
+  const lead = `Return, Sharpe, max drawdown and volatility are not shown for ${symbol}:`;
+  switch (reason) {
+    case "account_balance":
+      return `${lead} it is an account balance, not a traded asset.`;
+    case "fixed_price":
+      return `${lead} its recorded price is a fixed value, not a market price.`;
+    case "no_price":
+      return `${lead} no market price has been recorded for it.`;
+  }
+}
+
+// SFH-02: vol and Sharpe are over one-day returns, taken only between two
+// ADJACENT priced calendar days, so they are null with fewer than two such pairs
+// even when return and drawdown (level metrics) are numbers.
+const ADJACENCY_NOTE =
+  "Volatility and Sharpe need at least two pairs of consecutive priced days.";
+
+const NOT_SPOT_NOTE =
+  "Return, Sharpe, max drawdown and volatility are computed for spot holdings only, and this holding is not recorded as spot.";
+
 export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
   const { venue, symbol, holding_type } = item;
   const analytics =
     item.historyState === "ready" && item.analytics != null
       ? item.analytics
       : null;
+  // SFH-02: the adapter's own rule is the single source of truth (not "all four
+  // metrics null", which disagrees the moment a partial null shows up).
+  const tooFewPricedDays =
+    analytics !== null &&
+    analytics.priced_days < HOLDING_COMPARE_MIN_PRICED_DAYS;
+  // At or above the minimum, vol and Sharpe still need two adjacent-day returns:
+  // priced days with gaps between them give a numeric return and drawdown but
+  // null vol, and the card must say why instead of printing two bare em-dashes.
+  const needsAdjacentDays =
+    analytics !== null && !tooFewPricedDays && analytics.vol === null;
   return (
     <div
       data-testid="holding-factsheet"
-      className="rounded-lg border border-border bg-surface p-6 flex flex-col gap-4"
+      // An unbroken symbol (an MT5 `ACCOUNT-<hex>` row, a long contract name)
+      // must wrap inside the card at 375px instead of pushing past it.
+      // `overflow-wrap` inherits, so it covers the heading and every note.
+      className="min-w-0 [overflow-wrap:anywhere] rounded-lg border border-border bg-surface p-6 flex flex-col gap-4"
     >
       <div className="flex items-start justify-between">
-        <div>
+        <div className="min-w-0">
           <span className="inline-block text-fixed-10 uppercase tracking-wider text-text-muted font-medium px-2 py-0.5 rounded-sm bg-page mb-2">
             Holding
           </span>
@@ -55,47 +118,65 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
           data-testid="holding-factsheet-rebuilding"
           className="max-w-prose text-sm text-text-secondary"
         >
-          Return, Sharpe, max drawdown and volatility for this holding are
-          hidden while your equity history is rebuilt. The history they are
-          computed from could count one exchange account twice when more than
-          one key reads it, and it reads buying or selling more of the holding
-          as a gain or loss.
+          {item.historyState === "withheld"
+            ? withheldNote(symbol, item.withheld_reason)
+            : holding_type === "derivative"
+              ? DERIVATIVE_NOTE
+              : NOT_SPOT_NOTE}
         </p>
       ) : (
-        <dl className="grid grid-cols-2 gap-4">
-          <div>
-            <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
-              Cumulative return
-            </dt>
-            <dd className="font-mono text-lg text-text-primary">
-              {fmtPct(analytics.cumulative_return)}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
-              Sharpe
-            </dt>
-            <dd className="font-mono text-lg text-text-primary">
-              {fmtNum(analytics.sharpe)}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
-              Max drawdown
-            </dt>
-            <dd className="font-mono text-lg text-text-primary">
-              {fmtPct(analytics.max_drawdown)}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
-              Vol (annualized)
-            </dt>
-            <dd className="font-mono text-lg text-text-primary">
-              {fmtPct(analytics.vol)}
-            </dd>
-          </div>
-        </dl>
+        <>
+          <dl className="grid grid-cols-2 gap-4">
+            <div>
+              <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
+                Cumulative return
+              </dt>
+              <dd className="font-mono text-lg text-text-primary">
+                {fmtPct(analytics.cumulative_return)}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
+                Sharpe
+              </dt>
+              <dd className="font-mono text-lg text-text-primary">
+                {fmtNum(analytics.sharpe)}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
+                Max drawdown
+              </dt>
+              <dd className="font-mono text-lg text-text-primary">
+                {fmtPct(analytics.max_drawdown)}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-fixed-10 uppercase tracking-wider text-text-muted">
+                Vol (annualized)
+              </dt>
+              <dd className="font-mono text-lg text-text-primary">
+                {fmtPct(analytics.vol)}
+              </dd>
+            </div>
+          </dl>
+          <p
+            data-testid="holding-factsheet-price-basis"
+            className="max-w-prose text-sm text-text-muted"
+          >
+            {tooFewPricedDays
+              ? `Only ${pricedDayCount(analytics.priced_days)} of ${symbol} so far. These four figures need at least ${HOLDING_COMPARE_MIN_PRICED_DAYS} priced days.`
+              : `Computed from ${dayCount(analytics.priced_days)} of ${symbol}'s daily price, so buying, selling or moving more of it does not count as a gain or loss.`}
+          </p>
+          {needsAdjacentDays && (
+            <p
+              data-testid="holding-factsheet-adjacency-note"
+              className="max-w-prose text-sm text-text-muted"
+            >
+              {ADJACENCY_NOTE}
+            </p>
+          )}
+        </>
       )}
     </div>
   );

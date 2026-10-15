@@ -41,9 +41,9 @@
 --                               non-superseded failed_final of another kind
 --                               still flips to 'failed'. Pins branch ordering.
 --   G  no fall-through to (c) — a protected failure must NOT reach branch (c),
---                               which would clear computation_error and stamp
---                               computed_at = now(), reporting a FAILED refresh
---                               as a fresh successful computation.
+--                               which would clear computation_error (and, before
+--                               Phase 166.5, stamp computed_at = now()), reporting
+--                               a FAILED refresh as a fresh successful computation.
 --   H  supersession retained  — a protected failed_final SUPERSEDED by a later
 --                               same-kind 'done' resolves through branch (c) to
 --                               complete_with_warnings (F-3 / PUB-02 intact).
@@ -73,7 +73,9 @@
 --                               read 'computing' again — and when that resync
 --                               SUCCEEDS it must supersede the protected failure
 --                               and resolve through branch (c), clearing the
---                               error and ADVANCING computed_at.
+--                               error. computed_at HOLDS at its pre-resync value
+--                               (Phase 166.5: only the analytics runner stamps it,
+--                               on its own success write; the bridge writes none).
 --   I4 marked retry still held — the safety half of I3, and its discriminator in
 --                               the other direction. A MARKED same-kind
 --                               successor is the recurring arm re-attempting
@@ -153,7 +155,7 @@
 -- [REDUNDER-SAVEPOINT] migrations and aborts any lane. Nothing is lost —
 -- 20260510175507 is the repair migration and registers `process_key_long` on
 -- its own.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260906120000_computation_error_provenance.sql","supabase/migrations/20261003120000_sync_status_bridge_residues.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","scripts/pg-lane/fixtures/37-fixture-side-compute-job-kinds.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260906120000_computation_error_provenance.sql","supabase/migrations/20261003120000_sync_status_bridge_residues.sql","supabase/migrations/20261009120000_sync_status_analytics_scope.sql","supabase/migrations/20261023120000_sync_status_runner_stamps_computed_at.sql"]}
 
 BEGIN;
 
@@ -717,15 +719,23 @@ BEGIN
   -- strategy at 'failed' after a resync that WORKED.
   --
   -- ⛔ WHAT THESE THREE ASSERTIONS DO AND DO NOT PIN, measured rather than
-  -- assumed. They pin the LANDING — a clean success, no stale error, no frozen
-  -- vintage — and they redden on an unsound release. They do NOT pin branch (c)
-  -- itself: branch (a) already wrote computation_error = NULL and computed_at =
-  -- now() at call 2, and `now()` is the TRANSACTION timestamp, so inside one
-  -- transaction a later branch-(c) stamp is indistinguishable from branch (a)'s.
-  -- MEASURED: delete `computed_at = now()` from branch (c) and this arm stays
-  -- GREEN. Branch (c)'s own stamp and error-clear are pinned by arm H, which
-  -- reaches (c) without ever passing through (a). Recorded here so the next
-  -- reader does not mistake these three for a second, independent pin on it.
+  -- assumed. They pin the LANDING — a clean success, no stale error, and a date
+  -- the bridge left alone — and they redden on an unsound release. They do NOT
+  -- pin branch (c) itself: branch (a) already wrote computation_error = NULL at
+  -- call 2, so a later branch-(c) clear is indistinguishable from branch (a)'s.
+  -- Branch (c)'s own error-clear is pinned by arm H, which reaches (c) without
+  -- ever passing through (a). Recorded here so the next reader does not mistake
+  -- these three for a second, independent pin on it.
+  --
+  -- ⭐ THE DATE, Phase 166.5 (R-03, D-06). This arm used to assert that
+  -- computed_at ADVANCED past the pre-resync value, because the bridge stamped
+  -- `now()` on every transition and a value frozen here rendered the factsheet
+  -- FreshnessChip as permanently stale. The analytics runner now stamps the date
+  -- itself, in the same write as the metrics it wrote, and the bridge writes none
+  -- (the migration's verify block refuses an apply whose body names the column).
+  -- So after a SUCCESSFUL resync driven through the bridge alone, the date is
+  -- exactly the pre-resync value: a move here would be the bridge making stale
+  -- analytics look freshly updated. The assertion is inverted, not dropped.
   UPDATE compute_jobs SET status = 'done' WHERE id = j_sib;
   PERFORM sync_strategy_analytics_status(s_i3);
 
@@ -738,8 +748,8 @@ BEGIN
   IF v_error IS NOT NULL THEN
     RAISE EXCEPTION 'ARM I3 FAILED: the row still carries % after a superseding success. A resync that WORKED must not keep advertising the refresh failure it replaced.', v_error;
   END IF;
-  IF v_computed <= v_before THEN
-    RAISE EXCEPTION 'ARM I3 FAILED: computed_at is still the pre-resync % after a SUCCESSFUL resync. Nothing outside this bridge writes strategy_analytics.computed_at — the analytics runner never touches that column — so a value frozen here renders the factsheet FreshnessChip and the portfolio PDF vintage as permanently stale on a strategy that was just recomputed.', v_before;
+  IF v_computed IS DISTINCT FROM v_before THEN
+    RAISE EXCEPTION 'ARM I3 FAILED: computed_at moved from % to % after a SUCCESSFUL resync driven through the bridge alone. Only the analytics runner stamps strategy_analytics.computed_at, in the same write as the metrics it wrote (Phase 166.5, R-03, D-06); a bridge call that moves it makes analytics that were not recomputed read freshly updated.', v_before, v_computed;
   END IF;
 
   -- ===== ARM I4 — a MARKED successor must NOT release the hold =============

@@ -31,13 +31,13 @@ asserted: the gate is only meaningful while it is looking at the calls.
 from __future__ import annotations
 
 import ast
-import subprocess
 import sys
 import textwrap
 from pathlib import Path
 
 import pytest
 
+from tests.child_deadman import run_child
 from tests.qstats_gate import (
     COVERED_MODULES,
     EXEMPT,
@@ -153,7 +153,11 @@ def test_qstats_gate_census_is_printed_on_a_real_run() -> None:
     Run a real pytest session in a subprocess and read its stdout, so the proof
     is the terminal output a CI reader actually sees, not the helper's return.
     """
-    proc = subprocess.run(
+    # The verdict is the child's exit code and output, never how long it took
+    # (a child pytest session took 50-130 s under heavy load); `run_child` carries
+    # only the shared DEADMAN, which names this test if the child hangs.
+    proc = run_child(
+        "the qstats-gate census is printed on a real pytest run",
         [
             sys.executable,
             "-m",
@@ -164,9 +168,6 @@ def test_qstats_gate_census_is_printed_on_a_real_run() -> None:
             "no:cacheprovider",
         ],
         cwd=SERVICE_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=300,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     out_lines = proc.stdout.splitlines()

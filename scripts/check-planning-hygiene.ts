@@ -51,6 +51,13 @@
  *      a phase whose VERIFICATION.md says `status: passed` must have its bullet
  *      ticked. See `checkRoadmapStructure` for the exact reading (it mirrors the
  *      GSD tooling's own) and the reason this is a gate and not a one-off repair.
+ *      Arms 6d and 6e (2026-10-15) keep the roadmap in the shape the gsd-tools
+ *      handlers can edit without corrupting it: no heading between a phase
+ *      heading and its `Plans:` list, and no unchecked bullet the completion
+ *      regex would tick for the wrong phase.
+ *   7. STATE-POSITION — `.planning/STATE.md`'s `## Current Position` carries at
+ *      most one line per field the STATE handlers edit (`Phase:`, `Plan:`,
+ *      `Status:`, `Last activity:`, `Progress:`). See `checkStatePosition`.
  *
  * Two blind spots this gate is built to avoid
  * -------------------------------------------
@@ -774,6 +781,33 @@ function findNulViolations(rel: string, contents: string): string[] {
  *               Status, Completed, a row whose FIRST cell matches `^N\.?(\s|$)`.
  *               (`2` matches `2.` and `2 Alpha`, never `2.5 Extra`.)
  *
+ * Two more arms (founder decision 2026-10-15, "Fix our format + report
+ * upstream") keep the roadmap editable by the handlers that write it. Both read
+ * RAW lines, fences included, because the regexes they guard against are
+ * fence-blind too.
+ *   (d) a `#{1,4}` heading between a phase heading and that phase's first
+ *       `Plans:` line. `roadmap.cjs` (planSectionPattern, insertRowsPatternA/B)
+ *       and `withPhaseSection` end a phase section at ANY such heading, so a
+ *       `## Success Criteria` above the list hid it: update-plan-progress then
+ *       inserted duplicate plan rows beside the bold `**Plans:**` line and never
+ *       ticked the real ones. Use the template's bold field form
+ *       (`**Success Criteria** (what must be TRUE):`) inside a phase.
+ *   (e) an unchecked bullet that names a phase as `Phase N` anywhere except as
+ *       its own leading `**Phase N` label. The completion regex in
+ *       `roadmap.cjs` is unanchored and case-insensitive: it ticks the FIRST
+ *       unchecked line in the milestone containing `Phase N`, so a plan bullet
+ *       whose prose says "Phase 159" was ticked when 159 closed, and the
+ *       `- [ ] TBD (run /gsd-plan-phase N …)` stub that `phase insert` writes
+ *       matches its own phase ("-phase N"). Name the other phase without the
+ *       word ("closure spec for 159").
+ *       ONE ALLOWED FORM: the tool's own stub, sitting in phase N's own
+ *       section, while phase N's overview bullet is still `[ ]` and the section
+ *       lists no plan rows. The overview bullet comes first in the milestone, so
+ *       the regex ticks that bullet, not the stub. The stub becomes a target
+ *       only once the bullet is `[x]` or plan rows exist, and that is when this
+ *       arm fails. A fresh `/gsd-phase --insert` therefore stays green. Replace
+ *       the stub with the plan rows or `- [ ] TBD — plans not listed yet`.
+ *
  * ONE DELIBERATE EXEMPTION, by form and not by name: a bullet written
  * `**~~Phase N~~:` marks a phase the founder RETIRED (Phases 165, 165.1, 165.2,
  * 2026-09-27). It satisfies (a), must be ticked, and satisfies (b), because the
@@ -895,7 +929,93 @@ export function checkRoadmapStructure(
     }
   }
 
+  violations.push(...findPhaseSectionViolations(lines, headingRe));
+
   return { headings: headings.length, bullets: bulletCount, rows: rowCount, violations };
+}
+
+/**
+ * Arms 6d and 6e, over RAW lines (fences included — the gsd-tools regexes they
+ * guard against do not know about fences either). See the Rule 6 doc above.
+ */
+function findPhaseSectionViolations(lines: string[], headingRe: RegExp): string[] {
+  const violations: string[] = [];
+
+  // (d) — a heading the tool would stop at, before the phase's `Plans:` list.
+  const starts: Array<{ phase: string; i: number }> = [];
+  lines.forEach((text, i) => {
+    const m = text.match(headingRe);
+    if (m) starts.push({ phase: m[1], i });
+  });
+  starts.forEach((start, k) => {
+    const end = k + 1 < starts.length ? starts[k + 1].i : lines.length;
+    let plansAt = -1;
+    for (let i = start.i + 1; i < end; i += 1) {
+      if (/^Plans:/.test(lines[i])) {
+        plansAt = i;
+        break;
+      }
+    }
+    if (plansAt === -1) return;
+    for (let i = start.i + 1; i < plansAt; i += 1) {
+      if (/^#{1,4}\s/.test(lines[i])) {
+        violations.push(
+          `ROADMAP-STRUCTURE (rule 6d): ROADMAP.md:${i + 1} (Phase ${start.phase}) has the heading "${lines[i].trim()}" between the phase heading and its \`Plans:\` list at line ${plansAt + 1}. gsd-tools ends a phase section at ANY \`#{1,4}\` heading, so update-plan-progress cannot see the list and inserts duplicate rows elsewhere. Write it as a bold field instead, e.g. \`**Success Criteria** (what must be TRUE):\`.`,
+        );
+      }
+    }
+  });
+
+  // (e) — an unchecked bullet the unanchored completion regex would tick for a
+  // phase it does not belong to.
+  const mentionRe = new RegExp(`Phase\\s+(${ROADMAP_PHASE_TOKEN})`, "gi");
+  const stubRe = new RegExp(
+    `^[ \\t]*-\\s*\\[ \\]\\s*TBD \\(run /gsd-plan-phase (${ROADMAP_PHASE_TOKEN}) to break down\\)\\s*$`,
+  );
+  // The tool's own stub is harmless while its phase is fresh: the overview
+  // bullet is unchecked (so the regex ticks that first) and no plan rows exist.
+  const freshStub = (text: string, i: number): boolean => {
+    const m = text.match(stubRe);
+    if (!m) return false;
+    const n = m[1];
+    const section = starts.filter((s) => s.i < i).pop();
+    if (!section || section.phase !== n) return false;
+    const k = starts.indexOf(section);
+    const end = k + 1 < starts.length ? starts[k + 1].i : lines.length;
+    const nEsc = escapeForRegex(n);
+    const rowRe = new RegExp(`^[ \\t]*-\\s*\\[.\\]\\s*(?:\\*\\*)?${nEsc}-[0-9]`);
+    for (let j = section.i + 1; j < end; j += 1) if (rowRe.test(lines[j])) return false;
+    const bulletRe = new RegExp(
+      `^[ \\t]*-\\s*\\[(.)\\]\\s*(?:\\*\\*)?\\s*(?:~~)?Phase\\s+${nEsc}(?:~~)?${ROADMAP_TAG}[:\\s]`,
+      "i",
+    );
+    for (const l of lines) {
+      const b = l.match(bulletRe);
+      if (b) return b[1] === " ";
+    }
+    return false;
+  };
+  lines.forEach((text, i) => {
+    if (freshStub(text, i)) return;
+    const box = text.match(/-\s*\[ \](.*)$/);
+    if (!box) return;
+    const rest = box[1];
+    const own = text.match(
+      new RegExp(`^[ \\t]*-\\s*\\[ \\]\\s*(?:\\*\\*)?\\s*(?:~~)?Phase\\s+${ROADMAP_PHASE_TOKEN}`, "i"),
+    );
+    const mentions = [...rest.matchAll(mentionRe)];
+    const foreign = own ? mentions.slice(1) : mentions;
+    if (foreign.length === 0) return;
+    const named = foreign.map((m) => m[1]).join(", ");
+    const stub = /TBD \(run \/gsd-plan-phase/.test(rest);
+    violations.push(
+      stub
+        ? `ROADMAP-STRUCTURE (rule 6e): ROADMAP.md:${i + 1} is the \`- [ ] TBD (run /gsd-plan-phase ${named} …)\` stub, and its phase already has plan rows or a ticked overview bullet (or the stub sits outside that phase's section). The completion regex reads "-phase ${named}" as a checklist bullet, so the next update-plan-progress ticks this stub. Replace it with the plan rows, or with \`- [ ] TBD — plans not listed yet\`.`
+        : `ROADMAP-STRUCTURE (rule 6e): ROADMAP.md:${i + 1} is an unchecked bullet that names Phase ${named}. The completion regex in gsd-tools is unanchored, so closing that phase ticks THIS line (and can stamp "(completed …)" onto the next). Name the phase without the word "Phase" (e.g. "closure spec for 159"), or tick the bullet.`,
+    );
+  });
+
+  return violations;
 }
 
 /** Read `status:` from a VERIFICATION.md's frontmatter; null when absent/unreadable. */
@@ -941,10 +1061,68 @@ export function runRoadmapCheck(rootDir: string): RoadmapStructureReport | null 
   return checkRoadmapStructure(roadmap, lookup);
 }
 
+/**
+ * RULE 7 — STATE-POSITION (founder decision 2026-10-15, "Fix our format +
+ * report upstream").
+ *
+ * WHY THIS IS A GATE. The gsd-tools STATE handlers edit a body field by
+ * replacing the FIRST line that carries its label (`stateReplaceField` in
+ * `gsd-core/bin/lib/state-document.cjs`, case-insensitive, line-start), and
+ * `state.advance-plan` refuses outright when `## Current Position` holds more
+ * than one `Phase:` line. MEASURED 2026-10-15: the section was an ~840-line
+ * append-only log with 28 `Phase:` candidates and RETAINED blocks carrying old
+ * `Status:`/`Last activity:`/`Progress:` lines; history now lives in
+ * `STATE-LINEAGE.md`, which no handler writes.
+ *
+ * It fails when `## Current Position` (heading level 2 or 3, bounded by the
+ * next heading at or above its level, as `stateCurrentPositionSlice` reads it)
+ * carries more than one line starting with any of the five labels below.
+ * A file without the section is not judged.
+ */
+export const STATE_POSITION_FIELDS = ["Phase", "Plan", "Status", "Last activity", "Progress"];
+
+export function checkStatePosition(state: string): string[] {
+  const lines = state.split("\n");
+  const start = lines.findIndex((l) => /^#{2,3}\s+Current Position\s*$/i.test(l));
+  if (start === -1) return [];
+  const level = lines[start].match(/^#+/)![0].length;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const h = lines[i].match(/^(#{1,6})\s/);
+    if (h && h[1].length <= level) {
+      end = i;
+      break;
+    }
+  }
+  const violations: string[] = [];
+  for (const field of STATE_POSITION_FIELDS) {
+    const re = new RegExp(`^${escapeForRegex(field)}:`, "i");
+    const at: number[] = [];
+    for (let i = start + 1; i < end; i += 1) if (re.test(lines[i])) at.push(i + 1);
+    if (at.length > 1) {
+      violations.push(
+        `STATE-POSITION (rule 7): STATE.md \`## Current Position\` has ${at.length} \`${field}:\` lines (lines ${at.join(", ")}). The STATE handlers edit only the first one${field === "Phase" ? ", and `state.advance-plan` refuses outright" : ""}. Keep one line per field and move history to STATE-LINEAGE.md.`,
+      );
+    }
+  }
+  return violations;
+}
+
+/** Disk-backed entry for Rule 7; `null` when the checkout has no STATE.md. */
+export function runStateCheck(rootDir: string): string[] | null {
+  try {
+    return checkStatePosition(readFileSync(resolve(rootDir, ".planning", "STATE.md"), "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
 function main(): void {
   const { violations, filesScanned, usernameRule } = runCheck(REPO_ROOT);
   const roadmap = runRoadmapCheck(REPO_ROOT);
   if (roadmap) violations.push(...roadmap.violations);
+  const statePosition = runStateCheck(REPO_ROOT);
+  if (statePosition) violations.push(...statePosition);
 
   // Loud BEFORE the verdict: a rule that did not run must never be discoverable
   // only by reading the source (Phase 163 WR-01 — the success line must not
@@ -986,6 +1164,11 @@ function main(): void {
     roadmap
       ? `[check-planning-hygiene] ROADMAP-STRUCTURE (rule 6) OK — ${roadmap.headings} phase headings, ${roadmap.bullets} checklist bullets, ${roadmap.rows} Progress rows (retired phases carry a struck-through bullet and no row by design).`
       : `[check-planning-hygiene] ROADMAP-STRUCTURE (rule 6) was NOT checked: no .planning/ROADMAP.md in this checkout.`,
+  );
+  console.log(
+    statePosition
+      ? `[check-planning-hygiene] STATE-POSITION (rule 7) OK — STATE.md's Current Position carries at most one each of ${STATE_POSITION_FIELDS.map((f) => `${f}:`).join(" ")}`
+      : `[check-planning-hygiene] STATE-POSITION (rule 7) was NOT checked: no .planning/STATE.md in this checkout.`,
   );
 }
 

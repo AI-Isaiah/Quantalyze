@@ -1,5 +1,329 @@
 # Changelog
 
+## [0.132.1.6] - 2026-10-15 — PYXDIST: the python CI job runs pytest in parallel, and the flakes that serial order hid are fixed at their root
+
+Phase 164.9.8.1. Since `origin/main` the branch carries 78 non-merge commits: 54 that touch paths outside `.planning` (this release commit among them) and 24 planning and records commits, and this entry maps them all. It also carries 11 merge commits: the per-plan and fixer worktrees merging back, and three merges of `origin/main` before the release. Grouped by theme below, each bullet ends with the hashes it covers. The version is a fourth-digit bump. It was re-picked from a freshly fetched `origin/main` at 0.132.1.5, after #1064 landed, and the open PR #1060 re-picks above it. This is a CI and test change; no production code changes.
+
+### Changed
+- **The `python` CI job and the Makefile `test:` target run `pytest -n auto --dist loadgroup --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80`.** Both carry the identical argument string. The coverage floor is still enforced on the combined result of all workers. Measured offline on the same tree, coverage was 93.57% serial and 93.57% parallel. A run with the floor raised to 99 under xdist exited 1. The SERIAL deferral comments in both files stay as lineage beside a dated PYXDIST note. That note also records that the comment's pointer to the "TODOS: v1.9.1 Phase-97 parallelization deferral" is dangling, because that entry was dropped in `193afe818`. (`c16a41633`)
+- **Founder decision D-15: coverage measures with the `sysmon` core.** `analytics-service/pyproject.toml` gains `[tool.coverage.run] core = "sysmon"`. The first CI soak run on this PR missed SC-4: the job took 942 s, against a 654.5 s threshold, with pytest at 727 s on 4 workers. Under coverage's default settrace core, the AST-heavy `test_qstats_gate.py` tests take 37 to 89 s each and form the parallel critical path. CI and the Makefile both run pytest from `analytics-service/`, so both read this table, and the pinned argument string is unchanged. Measured locally with the exact CI command: 10135 passed, coverage 93.61% (93.60% under settrace), in 81 s instead of 5m13s. `sysmon` gives no branch coverage before Python 3.14; this suite measures none. (`45d5fc2df`)
+- **CLAUDE.md cites the coverage floor's CI step by symbol.** It previously cited the line number `ci.yml:3819`, which had drifted to about line 5600. (this release commit)
+
+### Fixed
+- **The two new pins in `local-stack-lane-wiring.test.ts` check their lookup index.** The repo's narrowing-call scanner (`test-restore-workflow-wiring.test.ts`) went RED on CI: a raw `search()` and a raw `indexOf()` fed `slice()`, and a miss there returns -1, which counts from the end and turns the pin into a PASS. Both now throw on a miss. The final CI run on the previous head was red for this, in `frontend-test (2)`, twice. (`fbfc15a5a`)
+- **Root cause of the Phase 97 "global-claim fence tests flake under xdist ordering": the `shared_test_db` group never formed.** The conftest hook that marks live-DB modules with `xdist_group("shared_test_db")` ran after xdist's own worker hook had already turned markers into scheduling keys. So no nodeid ever carried the `@shared_test_db` suffix, and the live fence tests ran on different workers at once, claiming each other's rows. `@pytest.hookimpl(tryfirst=True)` makes the marker land first. On the lane, the group soak ran 20 of 20 consecutive green, twice (once before and once after the review fixes). Every run was on exactly one worker, with every result line suffixed. (`02e5120d5`, `4157db634`)
+- **Root cause of the limiter-identity flake: fixtures evicted `routers.*` modules and never restored them.** `limiter_stub.evict_module` deleted both the `sys.modules` entry and the `routers` package attribute, and ten test files called it in teardown without restoring anything. `test_limiter_identity.py` looks routers up by attribute at call time, so under `--dist loadgroup` it raised `AttributeError` whenever it ran right after a polluter on the same worker. New `restoring()` and `evicted()` helpers put back exactly what was there, and the polluters use them. The victim test is byte-identical. A pairwise bisect, running every test file and every polluter node before the victim, was green: 316 of 316 files and 452 of 452 nodes. (`794a59219`, `2658c886e`, `90d372f72`)
+- **Review round 1 fixes.**
+  - `restoring()` now restores exactly when the parent package was absent at entry (CR-01). That case had left a stubbed router mounted, so `test_rate_limit_contract.py` stopped throttling.
+  - Collection-time `sys.modules["ccxt"] = MagicMock()` stubs no longer leak into `test_cron_router.py` (WR-01).
+  - Nine slowapi-stubbing fixtures no longer build the process-wide limiter from a no-op. That was the same class of defect, and it was already present at the phase base.
+  - 317-file pairwise checks are now green before each victim. (`5efea4856`, `184e15332`, `275215a38`)
+- **Flakes the local lane soak reproduced, fixed at the root.**
+  - The claim-RPC fallback latch (`main_worker._FALLBACK_CLAIM_RPC` / `_FALLBACK_LATCHED_AT`) leaked from one test to the next. It is now saved and restored per test.
+  - About 18 tests used wall-clock budgets that a loaded box could miss, such as a 0.1 s `asyncio.wait_for` against thread-pool hops, `elapsed <` asserts, and fixed-sleep parks. They now expire their budget at a rendezvous (`tests/budget_rendezvous.py`) or assert the property structurally, with deadmen only for genuine hangs. Each old form was seen RED under a CPU-load or event-loop-stall perturbation, and each new form was seen RED with its fix neutered. (`ba044c09b`, `1e6efd9c3`, `ec62f4410`, `9b71845a1`, `0f1877fab`, `5c0dcedb5`, `8cebc5363`, `cbf2d6306`, `afdfbc81b`, `f3051680c`, `9e8ad22ad`, `153e55de8`, `172ac75e3`, `568d624db`, `3ca8080a3`, `579da84d2`, `c0d3b1915`, `e2edc4522`, `30537dea6`, `498996eb1`)
+- **Review round 2 fixes.**
+  - The remaining rendezvous parks end on a released Event instead of a fixed sleep.
+  - The rendezvous helpers fail closed when the aimed step is never reached.
+  - This also fixed a ceiling that had never fired: it was written `asyncio.timeout(loop.time() + 30)`, a delay rather than a deadline, and is now `asyncio.timeout_at`. (`04c94afd7`, `445f64d30`)
+- **Founder decision D-14: the lazy-import test is decided by the module set, not by the clock.** `test_feedback_engine.py::test_lazy_import_not_triggered_at_module_load` used to spawn a child under a 15 s `subprocess.run` timeout, and a cold import under a load average near 60 overran it. The verdict now comes only from whether `services.feedback_engine` is in the child's `sys.modules`. Neutering the lazy import turns it RED. The same sweep removed every other subprocess child timeout in `analytics-service/tests` and made the remaining `elapsed <` asserts on real work structural or deadmen. (`7f1d20558`, `cca16a6a2`, `39fe4912a`, `5bc77386f`, `fbc29d697`, `55425d821`, `9b562a366`, `abe8532e7`, `0d16fa35f`, `d10d023c5`, `25c93d982`, `8981b3b59`)
+
+- **Review round 4 fixes (the D-14 sweep).**
+  - Every child-process test runs through `tests/child_deadman.py`, which sets one 1800 s deadman. That is about 14 times the worst case observed. A hung child fails with the test's purpose named and its partial output attached, instead of ending in an unnamed CI cancellation. `pytest.ini` sets `faulthandler_timeout = 900`, which only dumps stacks. (`227587ac5`)
+  - The import-order test takes its verdict from the child's return code. A child that dies with empty stderr used to read as a pass. (`d371233af`)
+  - The restart-bounded test asserts that shutdown was actually called before it checks that shutdown did not complete. Without that check it passed when the restart never ran. (`e9340f212`)
+  - The lease-expiry test runs under a named 10 s deadman and checks a literal bar. Its comment no longer claims that an ignored wait falls back to a 20 s default; such a wait is unbounded. (`f2643527a`)
+  - The session-monitor tests assert that the heal's wait timeout equals the cadence, and that the shutdown loop waits on its event. Elapsed time is now only a deadman. (`ed680eaf3`)
+  - Each fix was seen RED with what it guards neutered.
+
+### Tests
+- `tests/test_xdist_group_is_real.py` runs a real distributed child and asserts three things: every grouped result line carries the `@shared_test_db` suffix, the group ran on one worker, and it ran in serial collection order. It was seen RED before the fix and again with `tryfirst` deleted. (`02e5120d5`)
+- `tests/test_limiter_stub_restore.py` covers the restore helpers and adds subprocess pair gates, polluter then victim, for the limiter, rate-limit-contract and cron victims. Each gate was seen RED with its fix neutered. (`794a59219`, `5efea4856`, `184e15332`, `275215a38`)
+- A vitest pin in `src/__tests__/local-stack-lane-wiring.test.ts` (D-07) requires four things:
+  - the CI `python` step and the Makefile `test:` carry the identical argument string, equal to the D-06 literal;
+  - exactly one `PYTEST = $(VENV)/bin/pytest`, one `test:` rule and one recipe command;
+  - exactly one live pytest invocation in the job;
+  - no `continue-on-error`, `if:` or `PYTEST_ADDOPTS` on the step or the job.
+
+  20 neuter drills each turned it RED. The D-04 row moved to the new command after the old substring was seen RED. (`2c1dae27e`, `f972a4a5f`)
+
+### Notes
+- **SC-3 soak and SC-4 timing move to CI (founder decision D-14, 2026-10-15).** The full soak, at least 20 consecutive green `python` job runs, runs on this PR's head. The local box is shared with other phase agents, at a load average of 50 to 63, so a local soak measures the laptop, not the change. Two local lane soaks stopped on a RED under D-04, and their flakes are the ones fixed above. Those stops are kept as lineage in plan 04's SUMMARY. The group soak passed locally, 20 of 20 twice.
+- **Wall time, before:** the `python` job took 19m50s, 20m27s and 18m12s (runs `38611627110`, `38615032784`, `38621574070`). The median is 1190 s, with the pytest step at about 15 to 17 minutes. **SC-4's threshold is 654.5 s, 55% of 1190 s.** The after figure is read from this PR's CI. Indicative only: on an idle box offline, serial took 166.8 s and `-n 4` took 62.3 s. `-n auto` gives 4 workers on the 4-vCPU runner; `psutil` is deliberately not installed, because it would switch xdist to physical cores.
+- **Subprocess children carry a deadman, not a stopwatch.** The D-14 sweep removed their tight timeouts. Review round 4 gave them the shared 1800 s deadman described above, so a hung child fails by name instead of running into the job's 90-minute timeout.
+- **SC-3 met: 20 consecutive green `python` runs** on PR head `b14fc436`, all carrying D-15. The runs were re-runs of the one job between 17:26 and 20:12 UTC on 2026-10-15, with 0 failures.
+- **SC-4 met:** across those 20 runs the `python` job took **340 to 497 s**, against the 654.5 s threshold and the 1190 s before-median, so 29% to 42% of before. The pytest step alone took 175 to 305 s, against about 15 to 17 minutes serial. The 942 s reading from before the sysmon switch is kept as lineage.
+- **Recorded deviation:** during review round 1 a fixer ran broad `pkill -f` patterns on the machine shared with other sessions. That could have stopped another session's matching process; none was reported. Every later brief forbade it.
+- **Planning and records:** TODOS `ci/pytest-xdist-parallel` now records what this phase measured (`192e38347`). The phase's planning, review and soak records are in `.planning` and do not ship on the PR branch (`f332031e4`, `d794f12fa`, `9ef11b9df`, `f1af82495`, `5aadd6cce`, `1f5f82500`, `efb5124b6`, `6e5c38b0c`, `9e7d1b7d1`, `e58003867`, `299f55c4f`, `ab33cb14e`, `2bc424316`, `a48d25427`, `5dca51cd1`, `d36de89d6`, `a6bded3f2`, `4458d4eae`, `eb97f9da3`, `2e9814697`, `d84bc2143`, `72dd0654c`, `5806c5c61`, `33ff9020e`).
+## [0.132.1.5] - 2026-10-15 — FANINGRAPH post-apply: delete the `_fan_in_lock_rows` snapshot ratchet row the re-dump cleared
+
+One commit plus this release commit.
+
+### Fixed
+- **Main's "SQL Function Snapshot — Drift Gate" was red after the baseline re-dump (#1061).** `scripts/dump-sql-functions.ts --check` failed with `ratchet-stale: _fan_in_lock_rows`. The FANINGRAPH row in `NAME_SET_RATCHET` (`snapshot-only`, captured 2026-10-15) recorded that the helper existed in the migration chain but not yet in the PROD baseline. The re-dump taken after `20261024120000` applied to PROD put it on both sides. A row that no longer describes a disagreement is a hard failure by design, so the row is deleted, replaced by a dated lineage comment in the same style as the 164.6.8 and 170.6.1 rows. This was the phase's own planned post-apply step. With the row gone, the gate reads `0 ratcheted disagreement(s)`, 129 functions on both sides, and `baseline-content-drift` reports 0 findings.
+
+## [0.132.1.2] - 2026-10-15 — RECORDS: close BTCUSDVIEW 164.6.6.2.1 (human verification 7/7) and book the owner trust-tier finding
+
+Records only: `.planning`, `TODOS.md`, and this release. One commit plus this release commit.
+
+### Notes
+- **BTCUSDVIEW is closed.** It shipped on 2026-10-09 and 2026-10-10 (v0.129.8.0, v0.130.0.0), but its verification stayed `human_needed` with seven open items. All seven are now resolved, and the readings are in `164.6.6.2.1-UAT.md`:
+  - The WR-01 decision was booked at ship.
+  - A real BTC MT5 account's USD toggle was checked on PROD in the founder's browser.
+  - PROD's dated USD balance and the account's place in the book were read, marker query first, read-only.
+  - The anonymous `native_unit` read was checked as the anon role, inside a rolled-back transaction.
+  - The 320 to 390 px layout and the USD-view print preview were measured on the private local stack.
+  - The verification moves to `passed`. The ROADMAP lists its 17 plans and the Progress row cites both releases. STATE keeps the parallel position that the `phase complete` handler overwrote.
+- **Limits recorded with the readings:**
+  - PROD's only BTC strategy is private, so no anonymous viewer can see a BTC value there today. The anon read itself works.
+  - That the BTC key is in the book is inferred: it is not omitted, it has a priced close for the latest day, and its holdings are valued. The payload does not list which keys are included.
+- **Booked:** `164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED`. An owner's private factsheet shows "Data source —" for their own key-backed strategy, because the trust tier is read through `get_published_trust_signals`, which answers only for published strategies. It is user-facing and owner-only, and it withholds a true fact rather than showing a false one.
+
+## [0.132.1.1] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of d1852bc2
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38793480096`, after the PROD apply of merge `d1852bc2`: sha256 `8e972fb8…` → `19cedd5e…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 130 → 131, distinct function names 128 → 129, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261024120000_fan_in_graph_and_decision_cascade.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-15` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.132.1.0 → 0.132.1.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=304 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 131 — MATCH 128, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38793480096` succeeded, and this entry was composed by the `redump-pr` job. Run `38793480096` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.132.1.0] - 2026-10-15 — FANINGRAPH: a fan-in child never strands when its parent fails, a decision delete no longer raises 23505, a diamond cannot deadlock, and POST /api/bridge/outcome stops returning 500
+
+Phase 164.9.3.1 FANINGRAPH. The compute-job fan-in graph and the bridge's decision cascade had four defects found by the phase research, plus two more found in review. This release fixes all six in one forward migration (`20261024120000_fan_in_graph_and_decision_cascade.sql`), one route change and one worker change. 82 branch commits: 68 non-merge (43 touching code or tests, 25 planning-only) and 14 merges. ⛔ **The migration auto-applies to PROD once `apply-test` succeeds. There is no human reviewer gate between the merge and the PROD apply** (removed 2026-09-23), so every review the migration needed happened before this merge: migration-reviewer, rls-policy-auditor and four code-review rounds, listed below.
+
+### Fixed
+- **A fan-in child whose parent fails is no longer stranded (SC-1, D-01 to D-03).** When a parent reached `failed_final`, its `done_pending_children` child waited forever and its strategy read "computing". `mark_compute_job_failed` now cascades: it fails every waiting descendant, each naming its own failed parent and inheriting the parent's `error_kind`. It then bridges every strategy the cascade touched, in one sorted advisory-lock order. (52210c054, 6217b91e4)
+- **Deleting a `match_decisions` row no longer raises 23505 (SC-2, D-05 option Y).** The `ON DELETE SET NULL` cascade made two outcomes of one allocator, strategy and holding collide on `bridge_outcomes_legacy_per_strategy_holding_when_md_null`. `bridge_outcomes` gains `former_match_decision_id`, owned by the sync trigger (a client cannot write it), and the index is re-keyed on `COALESCE(former_match_decision_id, zero uuid)` as a fourth key. The index was neither dropped nor narrowed, and no outcome row is deleted or merged. (40c2aa268, a2a7fa371)
+- **A diamond in the fan-in graph cannot deadlock (SC-3, routed 164.5.2 WR-02).** New helper `public._fan_in_lock_rows(uuid[], boolean)` locks rows in ascending (longest-ancestor depth, id) order, and every fan-in path now goes through it: the enqueue's parent lock, `mark_compute_job_done` and the failure cascade. The deadlock is removed, not retried. `mark_compute_job_done` now locks its children in a statement of its own and releases them in a later one, so two parents finishing concurrently release a shared child exactly once (before: 0 times). (d37177d01, ab5d23d73)
+- **Every `POST /api/bridge/outcome` returned 500 (D-09).** The route upserted on `allocator_id,strategy_id`, a conflict target no unique index matches, so PostgreSQL raised 42P10 on each request. Measured read-only on PROD that day after the marker query: `bridge_outcomes` has exactly three unique indexes, and `EXPLAIN INSERT ... ON CONFLICT (allocator_id, strategy_id)` raised 42P10. The route now targets `allocator_id,match_decision_id`, the existing `bridge_outcomes_allocator_match_decision_unique`, through one shared constant (`BRIDGE_OUTCOME_CONFLICT_TARGET` in `src/lib/bridge/outcome-conflict.ts`). No migration, no new index: a unique on `(allocator_id, strategy_id)` would forbid two outcomes under two decisions, which the design allows. This part is live when the PR deploys. (1e893524a, afecce900, 24cffc122)
+- **A deep cascade could still deadlock (review round 1, CR-01, HIGH).** The first cascade locked level by level, so a deeper graph, or two cascades over one graph, hit 40P01. It now reads the whole waiting closure without locks, locks it with ONE helper call, then fails it level by level restricted to the locked set. (51f1df169, c61e2c25e)
+- **A voluntary detach could forge `former_match_decision_id` (round 1, WR-01).** Attaching a decision and detaching it while the decision still existed let a client write the trigger-owned column. The trigger now records the old id only when the decision row is gone, so a voluntary detach is a born-NULL row and meets the duplicate guard. (76b1d3c33, 023000835)
+- **The outcome route turned a failed eligibility lookup into a silent 403 (round 1, silent-failure-hunter).** A lookup error is now a logged 500 `Failed to record outcome`. An honest empty answer is still the 403. (e6713ae02, 4ffb7415b)
+- **A grown closure was locked out of order (round 2, WR-01 and WR-02, MEDIUM).** Rows born while the cascade waited for its locks were locked after the first pass's rows. The cascade now re-reads under its locks and, when the closure grew, re-locks the whole closure in one ascending pass inside a subtransaction, bounded to 10 attempts. Past the bound it fails loud with SQLSTATE 55P03 (never 55006, which the worker swallows) rather than failing the closure half-locked. The late-born-child case has its own gate arm, FL6. (25798ad78, 83a4cf29e)
+- **Cross-allocator holding-ref leak closed (round 2 RLS audit, pre-existing, user-facing).** `bridge_outcomes_sync_holding_ref` is SECURITY DEFINER. An allocator who knew another allocator's `match_decisions` id could write an outcome naming it and read that tenant's holding ref back through the copied `original_holding_ref`. The trigger now reads the decision's `allocator_id` with the holding ref in the same primary-key select and, when it differs from the row's, raises SQLSTATE 42501 with hint `cross_allocator_decision` BEFORE copying anything. The route answers that case with the fixed 403 body `NOT_ELIGIBLE` / "Decision does not belong to this allocator", with no database message, hint or id in it. The PROD census found 0 rows already attached across allocators, so there is no data to repair. (0b7cc6b88, edf7232db)
+- **The worker no longer re-marks a 55P03 as `unknown` (round 3, WR-01, MEDIUM).** When the cascade's lock bound tripped, the worker's catch-all re-ran `mark_compute_job_failed` with `error_kind = 'unknown'`, discarding the real permanent failure and its user-facing error kind. `main_worker.py` now leaves the job `running` for the watchdog and logs at ERROR with the original error kind and message. (a7656d4ed)
+- **The route logs a refusal it should never reach (round 3, SFH-M1).** The cross-allocator 42501 can only reach the route if its own eligibility check is bypassed, so it is now logged as well as answered. (edf7232db)
+
+### Added
+- **Three SQL gates, proven RED on the pre-fix tree and GREEN on the final bytes.**
+  - `test_fan_in_failure_cascade.sql` (FC1 to FC8): naming and kind inheritance, retry exhaustion, guard arms for a `failed_retry` parent and an already-moved child, multi-level and multi-strategy cascade, the computation error written for the strategy. (6f1a62b39, f1b555477)
+  - `test_fan_in_lock_order_race.sql` (FL1 to FL8, LANE-ONLY): one real dblink backend per participant, so the lost release (FL1), the diamond (FL2), the transitive cascade (FL3), a deep cascade against an enqueue (FL4) and against a second cascade (FL5), the late-born child of a locked closure row (FL6), a late-born shallow child under a deeper cascade (FL7) and the retry bound's 55P03 refusal (FL8) are genuine concurrent sessions. (4ef330c1f, c807cfc30, 51f1df169, 83a4cf29e, 5e24bbe98)
+  - `test_bridge_outcomes_decision_delete_cascade.sql` (OD1 to OD8): the option Y contract including the trigger-owned column, the voluntary detach (OD7) and the cross-allocator refusal (OD8). (597427125, 36f775b85, 76b1d3c33, 0b7cc6b88)
+  - A live-DB vitest arm (d) in `match-decisions-xor-rls.test.ts` (a multi-row decision delete cascades without 23505) and arm (e) (two upserts leave one row). (3b371e75e, 1e893524a)
+- **Layered mutation twins for every arm** (`RED-UNDER-M`), one distinct mutation per arm, because the runner scores a twin by the file's first failing arm. (02f624438, 740ac897b, 63b935be0, e53e06e02)
+- **Manual rollback** `supabase/migrations/down/20261024120000-rollback.sql` restoring the four prior function bodies, the old trigger list and the old index key; compute-job `COMMENT`s and four VAC-04 prod-body acks. (ad5465463, 7a6f0f83b)
+- **Fixture 40 stand-in** (`scripts/pg-lane/fixtures/40-fixture-match-decisions-bridge-outcomes.sql`) so the decision-delete gate runs on the pg-lane. (597427125)
+
+### Changed
+- `mark_compute_job_failed`, `mark_compute_job_done`, `_enqueue_compute_job_internal` and `bridge_outcomes_sync_holding_ref` are rewritten in the migration, and their schema snapshots in `supabase/schema/functions/` follow. `_fan_in_lock_rows` is a new snapshot-only function. `database.types.ts`, the `bridge_outcomes` catalog and the vitest header describe the re-keyed index. (a2a7fa371)
+- The migration was re-pinned from its first timestamp to `20261024120000` so it sorts after Phase 166.5's `20261023120000`. (18cafcd48)
+
+### Tests
+- **Census moves, each seen RED before it was moved.** Read the live values by symbol: `FILES_FLOOR`, `ARMS_FLOOR` and `WAIVED_CEILING` in `scripts/mutation-floors.mjs` (this release leaves them at 76, 756 and 0, `WAIVED_CEILING` unchanged); `SENTINEL_FLOOR` and `ARMS_FLOOR` in the `sql-tests` anti-skip step of `ci.yml` (21 and 332, with its derivation table); `COMPARED_FLOOR` in `scripts/baseline-content-drift-check.mjs` (130 to 131, one function added); plus the dump list, `drift-check-scripts`, `gate-family-meta`, `mutation-annotation-parser`, `mutation-runner-floors` and the anti-skip contract test. Moves, in order: 3 gates joined (mutation 72/723 to 75/740, anti-skip 17/299 to 20/316); round 1 +3 arms (743 and 319); round 2 +3 arms (755 and 331); FL8 +1 arm (756 and 332). The merge with Phase 166.5 re-derived the anti-skip table from a single run rather than adding the two moves. (7e9b32696, 153253d97, 579b48e7d, 8d84f679a, f588f3514)
+- Route tests TC8 (conflict target) and TC9 (logged 500 on a failed lookup) and a worker test in `test_compute_jobs_fencing.py` for the 55P03 handling, each seen RED first.
+
+### Security
+- Closes the cross-allocator holding-ref disclosure above (42501 plus a fixed 403). Phase SECURITY audit: all 27 registered threats closed (SECURED). The migration adds no policy and no RLS change; the new column falls under the existing owner policies.
+
+### Root cause
+- The strand, the deadlock and the 23505 share one cause: the fan-in graph had one writer per transition and each took its row locks in its own order, with no function owning the order and no statement owning the cascade. The cure is one ordering helper and one cascade, not retries (the migration contains no 40P01 or 40001 retry). The 42P10 was a conflict target written against an index that was never there, and no test hit the real table.
+
+### Notes
+- **PROD reads, all read-only and after the marker query.** The D-04 census found 0 compute_jobs rows with parents and 0 `done_pending_children` of 2297 jobs before the apply (the phase CONTEXT records the earlier 2026-10-15 reading as 0 and 0 of 2292), so the migration carries no data-reading block and owes no one-time release. The 42P10 claim was measured as above. Phase 166.5's `20261023120000` is applied, which this migration needs: it self-verifies a literal in `mark_compute_job_failed` that this migration rewrites.
+- **Booked, not fixed.**
+  - `164.9.3.1-REAPER-STRAND`: the hourly orphan reaper writes `failed_final` without `mark_compute_job_failed`, so a fan-in child of a reaped parent still strands. Latent: no caller passes parents and PROD holds none. Founder decision 2026-10-15, "Book it, latent".
+  - FL8's seam restore on a persistent database: FL8 renames the helper and restores it in a `DO` block, so an error before the restore would leave the wrapper installed. The file is LANE-ONLY and every lane is a throwaway cluster. Round-4 MEDIUM, accepted as booked.
+  - `164.9.3.1-VOLUNTARY-REMOVE-23514`: deleting a `voluntary_remove` decision fails 23514 through the same cascade.
+  - `164.9.3.1-HOLDING-REF-DIRECT-UPDATE`: an owner can bypass the born-NULL duplicate guard by updating `original_holding_ref` directly. Reasoned, not measured.
+  - 55P03 recovery latency: by design a tripwire, so the job stays `running` until the watchdog reclaims it (10 minutes by default). It needs an enqueue to commit a new descendant inside the lock window on 10 consecutive attempts.
+- **After the merge.** VAC-08 and `baseline-content-drift` go RED on the PR by construction until apply-on-merge (`_fan_in_lock_rows` is `SNAPSHOT_MISSING` until the re-dump), then the baseline is re-dumped with its carried-migrations marker in one commit.
+- **Review record.** Round 1 (CR-01 HIGH, WR-01 MEDIUM, one silent-failure finding), round 2 (0 HIGH, 2 MEDIUM, plus the RLS audit), round 3 (1 MEDIUM) and round 4 (clean at MEDIUM and above); verification passed 8 of 8; security audit SECURED.
+- **Planning-only commits (25, no shipped file):** 58b9033e4, b0fe8d4fd, ace76120f, f49920d2c, 794f4d692, dd91f36a2, 6b76fda00, 255f0301a, 46d1a254f, 739c4f466, cb72dbfc4, e0d1f51cc, 90c076997, b33d41a85, feb8b53e6, cc41963b0, f29418eb5, 7016d9e8f, cce12deaa, 2560a9d38, 8a253af9c, 9a2114576, 79f7ad468, b58eabcd8, 1d31de793. They carry the research, plans, summaries, review rounds, verification and security records. Three code-adjacent docs commits are mapped above: ab108e1dc (books the four routed TODOS entries), 4df1d63fa (the reaper decision) and e141053bd (the migration header).
+- **Merges (14):** 8f8e560f8, 2e4e0c9f9, 26709fb57, 9870057fc, 1f2a361a2, ab3b197c2, 4f6f1ce9d, 395f2deac, b4f4a29b8, 232ab1da0, 01b4b211b, 0e124c2be and 356a94f4e fold the per-plan worktree branches and origin/main into the phase branch; 73ee74f60 merges origin/main 4ca0931b1 and re-measures the gate censuses.
+
+## [0.132.0.1] - 2026-10-15 — HOLDINGKEYSCOPE follow-up: a holding with a long symbol wraps inside its /compare card on a phone
+
+Found by HOLDINGKEYSCOPE's post-ship 375px check. Two commits: the fix with its test, and this release commit.
+
+### Fixed
+- **A holding card on /compare no longer pushes an unbroken symbol past its edge at 375px.** Measured at 375x812 on the local stack, an MT5 `ACCOUNT-<48 hex>` holding's heading ran to x 519 against a card edge of 359. Its withheld note and the venue line overflowed the same way. A 57-character spot symbol overflowed its price-basis caption too. The card now sets `overflow-wrap: anywhere`, which the heading and every note inherit, and `min-w-0` on both flex levels, so neither can grow past its column. Normal tickers such as ETH and USDT were already wrapping and are unchanged.
+
+### Tests
+- `HoldingFactsheet.test.tsx` pins the wrap and `min-w-0` properties on a 56-character `ACCOUNT-` symbol. jsdom cannot measure layout, so the pin covers the properties the fix rests on. It was seen RED with the classes removed.
+
+### Notes
+- The same check confirmed the "Key disconnected" chip on Holdings and Open positions: it sits 8 px clear of the symbol, and all overflow scrolls inside the table. That half of HOLDINGKEYSCOPE's 375px UAT passed with no change.
+
+## [0.132.0.0] - 2026-10-15 — HOLDINGKEYSCOPE: a disconnected key's holdings say so, and /compare shows a spot holding's metrics again, computed from its daily price
+
+Phase 167.1.1 HOLDINGKEYSCOPE, re-scoped on 2026-10-15 as a close-out. Phase 170.4 had already stopped two keys holding one asset on one venue from merging into one holding, and had closed the routed readers R-15-1, R-15-2 and R-15-3. This release proves that with a test, pins every consumer of the holding scope key, discloses soft-disconnected keys, and brings back `/compare`'s per-holding metrics from a source that buying or selling cannot distort. Founder decisions D-01 to D-06 are recorded in the phase CONTEXT and the ROADMAP.
+
+### Added
+- **"Key disconnected" chip on Holdings and Open Positions (D-02).** A soft-disconnected key's holdings stay in those totals. Each row now carries an amber "Key disconnected" chip and struck-through figures, the same treatment a revoked key's row gets, and it is hidden when "Show holdings from keys needing attention" is off. The toggle still starts on. A key that is both disconnected and revoked shows exactly one chip, "Key disconnected". The money surfaces share one predicate, `keyNeedsAttention`, and one chip source, `keyAttentionChipLabel` (`src/lib/closed-sets.ts`). Key management (`ApiKeyManager`) and the `/strategies` key pill keep asking only the sync status, on purpose. (0acb588ed, e0a3dbf36, 873edb684)
+- **`/compare` per-holding return, Sharpe, max drawdown and volatility for crypto spot holdings (D-03).**
+  - The figures come from each holding's daily mark price in `allocator_holdings`, never from its dollar value, so buying more of an asset no longer reads as a gain.
+  - A return is taken only between two adjacent calendar days that both carry a price. A missing day breaks the chain and is never filled with a zero.
+  - With fewer than 30 priced days all four figures are "—" and the card says how many priced days there are.
+  - Annualisation is 365.
+  - The read is paged, and it fails with a load error if it goes past its page ceiling, so it never returns a partial history.
+  - A caption under the figures says they come from the daily price. (6ae6cd55d, 7578aefe3, 21f425ec3, 41cb002a6)
+- **Named notes instead of numbers on `/compare` (D-05).**
+  - A derivative holding: "not shown for derivative holdings yet" (it waits for a signed basis).
+  - A stablecoin or sFOX holding: its recorded price is a fixed value.
+  - An MT5 account: it is an account balance.
+  - An asset that has rows but no priced day: no market price has been recorded for it.
+
+  An unowned or nonexistent holding still returns the same null as before (D-15). (b516f60a8, 7dec3cfd8, fac6ac550, 3f072b4b8)
+
+### Changed
+- **Composer AUM note (D-02, D-04).** In book mode a soft-disconnected key's dollars stay out of the modelled AUM. They were named "keys that are not connected" and are now named "Excludes $Y from keys needing attention". No total moves. (0acb588ed, 9e81af0b4)
+- **The `/compare` adapter no longer reads `allocator_equity_snapshots.breakdown`.**
+  - The global `HOLDING_COMPARE_HISTORY_STATE` switch and its test seam are gone. Whether metrics show is now decided per holding type and per price source.
+  - The old note blaming "a rebuild" and a double count is gone from every card state. (6ae6cd55d, 41cb002a6)
+- **Stricter inputs.** `summarizeLiveHoldings` now requires `disconnectedAtByKeyId`, and `source_key_disconnected_at` is a required field on Holdings and Open Positions rows. A row builder that leaves either out is now a type error instead of a key silently read as connected. (0acb588ed, bf330f592)
+
+### Fixed
+Review rounds 1 to 3, each fix seen RED before it was applied:
+- **CR-01 (HIGH):** a stablecoin or sFOX holding would have shown an invented 0% return and volatility. The writer stamps a fixed mark of 1.0 on them, and a parity test now pins the stablecoin set against the Python one. (b516f60a8)
+- **SFH-01:** such a holding no longer vanishes from a mixed comparison as if it were unowned. (b516f60a8)
+- **SFH-02:** "too few priced days" is decided by the priced-day count. A null volatility and Sharpe next to real return figures now says why. (f313fa714)
+- **SFH-03:** a non-numeric mark or a malformed day is a load error, not a silent missing day. (ce2072f57)
+- **M-R2-01:** an MT5 account was described as having "a fixed value". (7dec3cfd8)
+- **M-R2-02:** an asset with no priced day read "Only 0 priced days so far" forever. (fac6ac550)
+- **M-R3-01:** that note's "yet" promised history that will not come. (3f072b4b8)
+- **The `env-manifest` contract test:** it went red on the census test's `HOLDING_CENSUS_PRINT` switch, which is now registered as test-only. (9c61d5f63)
+- **`/compare` strategy-only-charts regression test:** after the read moved, its mock no longer matched the query and its dates were impossible. The harness is fixed and no assertion changed. (7da769137)
+
+### Tests
+- **SC 1, two keys on one venue and asset (`HoldingsTabPanel.exposure-agreement.test.tsx`).** Both positions survive in Holdings, Open Positions and the 167.1 marker, in both composer branches, against hand-typed figures:
+  - Holdings 65,000; Open Positions notional 150,000.
+  - Marker total 65,900; book-mode AUM 41,200, with 24,700 excluded across 2 rows.
+
+  The test was seen RED with the key the phase was booked against (`holdingScopeKey` alone), then GREEN after the byte-for-byte restore. (0f574679e, d9b84a664, 261f04f47)
+- **SC 2: `holding-scope-key-census.test.ts`.**
+  - It finds every consumer of the holding scope key shape in `src` and `analytics-service`.
+  - Matchers M1 to M11 cover templates, f-strings, regex parsers, Python tuples, `.join` and destructured templates.
+  - Each hit is pinned by count, with a verdict (rekeyed, merges-on-purpose, key-free-by-design, parse-only, display-only) and a reason.
+  - A new unclassified consumer fails it, which was seen with a probe file. (8bbf33b96, 1cb926f30)
+- **D-02 truth table and summariser branches** with hand-typed figures. Neutering the predicate turned 12 tests RED and neutering the chip helper turned 14 RED, while the controls stayed green. (b6e7c4068, e0a3dbf36, 873edb684)
+- **D-03 adapter.** Each of these was neutered and went RED:
+  - the dollar-ratio read (+100% instead of 0% on a purchase at a constant price);
+  - the rule that a mark of zero or below is a missing day;
+  - the adjacency rule (volatility 1.80 instead of 1.9105);
+  - the per-day tie-break.
+
+  On the card, the fail-closed gate and the too-few-days branch were neutered and went RED. (7578aefe3, 3a896c31a)
+- **The live `/compare` RLS proof** (`compare-holding-rls.test.ts`) is reseeded on `allocator_holdings`. (4cabf2e26)
+
+### Notes
+- **Still open (UAT, `167.1.1-UAT.md`):**
+  - The live RLS proof skips locally and must pass in CI's `frontend-live-db-lane` on this PR.
+  - The "Key disconnected" chip at 375px on Holdings and Open Positions, checked after deploy.
+  - The `/compare` caption and notes at 375px, checked after deploy.
+- **No analytics-service, migration or dependency change (SC 4).** The Bridge matcher's `reconstruct_symbol_returns` still builds per-holding returns as dollar ratios. By founder decision D-06 it goes to a follow-up phase, tracked as TODOS `167.1.1-BRIDGE-DOLLAR-RATIO-RETURNS`.
+- **Known limits:**
+  - `DesignHoldingsTable` and `toDesignHoldings` have no production caller. Whoever wires them must key rows by ref and `api_key_id`, and pass the disconnected-key map.
+  - A mark is sampled when the account is polled, not at a fixed close, so the copy says "daily price", never close-to-close.
+- **Pre-existing and not touched:** the `compute.conventions` inline snapshots B and C fail on the phase base under local Node 25, on a last-digit float difference.
+- **Phase records:** context, research, UI contract, validation strategy, patterns, five plans and their summaries, four review rounds with fix reports, the security register (0 open of 20), verification (human_needed) and tracking. (a330c0094 through cfe0668fd: every docs commit on this branch, including 75c3134da, 03238c759, 02d60d366, b0eb07ae3, 909590d48, 57e080fdb, ee1e6f259, 98b1e0db7, a9ac8ca60, 0530fa3e9, 83df3a54b, 7691f70fa, 15d6b2f87, a8df9d8ee, 415689a24, cebb3bf2b, c5c5cc5ea, fe6aa39a9, 6d9dfdd98, 8dea6d08d, 666f63ffb)
+
+## [0.131.13.6] - 2026-10-15 — Test fix: the Private link dialog's Close button is found once the dialog is open, not grabbed before it opens
+
+### Root cause
+- **A second arm in `src/components/strategy/ShareableLink.test.tsx` had the same race v0.131.13.4 fixed.** "the URL stays reachable through 'Manage private link' after the dialog is closed, and is gone once the link is revoked" found the URL field with `findByLabelText`, then grabbed the Close button with a synchronous `getByRole`. The field is in the DOM as soon as React commits. But `Modal` calls `showModal()` from a passive `useEffect`. Until that runs, the `<dialog>` has no `open` attribute, so jsdom's default stylesheet (`dialog:not([open])`) hides it and every role inside it is inaccessible. The update starts after `await fetch`, so it is not a sync lane. When React's Scheduler yields before the passive-effect task, `getByRole` finds no "Close". Main run 38766733041 (job 116532021011) failed exactly that way: the dump shows the Close button in the DOM, inside a `<dialog>` with no `open` attribute.
+- **This is not a product bug.** In a browser, React runs pending passive effects before it handles the next user event, so the dialog is open before anyone can reach its Close button.
+
+### Fixed
+- **The Close click goes through `findByRole`**, which resolves only once the dialog is open. The comment beside it records why.
+
+### Tests
+- **Forced-yield harness, re-run for this arm.** A scratch copy of the file moves `performance.now` 50 ms forward on every read, so React's Scheduler yields after every task. The copy is not committed. Before the fix, this arm failed 9 of 10 runs with the CI message. After it, the arm passed 20 of 20, and the whole file passed 30 of 30 tests in each of 10 runs.
+- **Unforced, after the fix:** the arm alone passed 12 of 12. The file, together with `FactsheetView.usd-toggle.test.tsx`, passed 64 of 64 tests in each of 3 runs.
+- **The fixed lookup can still fail.** With `showModal()` neutered in `Modal.tsx`, the arm goes RED on the `findByRole` timeout. The file was restored from a byte backup.
+- **Audit of every other synchronous read in the file.** The audit checked every read of state that a passive effect sets: focus, `dialog.open`, selection, and role visibility around `showModal()` and `close()`. No other instance races. Clicks through `fireEvent` run inside `act`, which flushes effects before it returns. The other post-`await fetch` arms already await `close` with a `waitFor`, or read state that the render sets, not an effect. The forced-yield run of the whole file confirms it.
+- **`FactsheetView.usd-toggle.test.tsx:208` is a different case.** That test is fully synchronous. It sets focus itself and clicks through `act`, and its `activeElement` check only proves the button was not remounted. It passed 34 of 34 tests in each of 5 forced-yield runs.
+
+## [0.131.13.4] - 2026-10-15 — Test fix: the Private link dialog's focus assert waits for the focus move instead of racing it
+
+### Root cause
+- **The test asserted focus before React had run the effect that moves it.** In `src/components/strategy/ShareableLink.test.tsx`, the arm "clipboard rejects and the fallback fails: the Private link dialog opens and shows the minted URL, selectable" found the URL field with `findByLabelText`, then checked `document.activeElement` straight away. The field is in the DOM as soon as React commits. But `Modal`'s `showModal()` and `ShareableLink`'s `focus()` + `select()` both run later, from passive `useEffect`s. That order is deliberate: `showModal` moves focus to the Close button, so the field has to take focus after it. The update starts after `await fetch`, so it is not a sync lane. When React's Scheduler yields between the commit and the passive-effect task, as it does when a render overruns its 5 ms slice on a loaded runner, the assert ran first. It read `<body>`, and the dialog was not open yet. Both CI failures on 2026-10-15 (runs 38744823426 and 38758942630, vitest shard 2) show exactly that DOM: the field is present and the `<dialog>` has no `open` attribute.
+- **This is not a product bug.** In a browser, React flushes pending passive effects before it handles the next user event, so the field always has focus before the user can press a key.
+
+### Fixed
+- **The assert now waits for the dialog to be open and the field to have focus** (`await waitFor`), and then checks the selection as before. This is the same fix the close assert in the revoke test of the same file already carries for the same reason (CI run 38587166468).
+
+### Tests
+- **RED before the fix, measured locally.** The unchanged arm, run alone 12 times, failed 3 times with the CI signature. A 10-copy variant that forces the Scheduler to yield after every task (it moves `performance.now` forward) failed 19 of 20, and every failure printed `dialogOpen=false active=BODY` just before the assert.
+- **GREEN after the fix.** The forced-yield variant passed 30 of 30. The unforced variant passed 30 of 30, the arm alone passed 12 of 12, and the whole file passed 30 of 30 tests in each of 3 runs. The variant was a scratch file and is not committed.
+- **The fixed assert can still fail.** With `urlFieldRef.current?.focus()` neutered in the component, the arm goes RED on the `waitFor` timeout. The component was restored from a byte backup afterwards.
+
+## [0.131.13.3] - 2026-10-15 — GSDFORMAT: ROADMAP.md and STATE.md take a shape the gsd-tools handlers can edit without corrupting them
+
+Founder decision 2026-10-15, "Fix our format + report upstream". This repo's own rule had been "prefer hand-editing ROADMAP.md and STATE.md". It existed because the gsd-tools handlers corrupted both files. A debugger run traced that to four tool assumptions our file shape broke. This release fixes the shape, adds a lint that keeps it fixed, and drafts the tool bugs as upstream issues. Measured in a throwaway worktree after the reshape: `roadmap.update-plan-progress 159` is a no-op (before, it ticked another phase's plan). `170` changes only its `**Plans:**` count and the plan ticks its SUMMARYs earn (before, it also ticked 169.4-07 and stamped "(completed …)" onto 169.4-08). `164.4.2.1` changes one count line (before: duplicate rows above the wrong heading, plus a ticked TBD stub). `state.advance-plan` moves `Plan: 8 of 9` to `9 of 9` (before, it refused on 28 `Phase:` candidates).
+
+### Fixed
+- **ROADMAP.md: 40 in-phase headings in 35 phase sections become bold fields.** gsd-tools ends a phase section at any `#{1,4}` heading, so a `## Success Criteria` above the `Plans:` list hid the list. `## Success Criteria` is now the template's `**Success Criteria** (what must be TRUE):`, and the other in-phase headings are bold lines. No word of content changed (505bfa489).
+- **ROADMAP.md: no unchecked bullet names another phase as "Phase N".** The completion regex is unanchored, so it ticked the first such line. The 14 `- [ ] TBD (run /gsd-plan-phase N …)` stubs are gone. 164.4.2.1, 164.9.2 and 167.1.2 are complete with every plan summarised, so their stubs became the plan rows the tool itself writes. The other 11 read `- [ ] TBD — plans not listed yet`. 164.3-07 now reads "closure spec for 159" and 169.4-07 reads "after 170 LAYOUT" (e2d5d8165).
+- **STATE.md: `## Current Position` holds one line per field.** The handlers edit the first line carrying each label. The section had been an ~840-line log with 28 `Phase:` candidates. It now names 166.5 COMPUTEDATSTAMP (8 of 9) as current and says several phases run in parallel. The 840 lines of log, RETAINED blocks and close-out history moved verbatim to `STATE-LINEAGE.md` under "2026-10-15". A line-multiset check found nothing lost. The five frontmatter values that changed have their old values recorded there too (a0bca2100).
+
+### Changed
+- **ROADMAP.md is committed in the tool's own normal form.** `_normalizeMd` reflows the whole file on every write, and normalising today moved 11 blank lines and no text. With that committed on its own, a later handler diff shows only what the handler meant to write. STATE.md was already normal (a77dcb2e9).
+- **`.planning/milestone.lock` is no longer tracked.** It is a runtime lock (phase, session, pid, timestamp) that `phase complete` rewrites or deletes. It is now gitignored next to `.planning/active-workstream`. The file stays on disk, but a checkout that pulls this commit loses its copy, and the tool recreates it on the next run (cb56652f1).
+- **CLAUDE.md's GSD orchestration rules say the handlers are safe on the reshaped files.** The old "prefer hand-editing" paragraph stays as dated lineage. Three behaviours still need a `git diff` after a handler run: `phase complete` overwrites a Progress-table Status cell's prose, it moves STATE to the next phase in roadmap order, and most handlers rewrite `state.json` and re-derive `progress:` (0070c84ee). The note on the insert stub was corrected with the 6e narrowing (9472666a5).
+
+### Added
+- **`scripts/check-planning-hygiene.ts` rules 6d, 6e and 7.** 6d fails on a heading between a phase heading and its `Plans:` list. 6e fails on an unchecked bullet naming a phase as `Phase N` other than as its own leading label. 7 (STATE-POSITION) fails on a second `Phase:`, `Plan:`, `Status:`, `Last activity:` or `Progress:` line in `## Current Position`. They run in `npm run lint` (ecfcb51a3).
+- **Rule 6e allows a fresh insert's TBD stub (coordinator review).** The tool's own `- [ ] TBD (run /gsd-plan-phase N to break down)` passes while it sits in phase N's section, N's overview bullet is `[ ]` and the section lists no plan rows: the completion regex ticks the overview bullet first. It fails once the phase has plan rows or a ticked bullet, or when the stub names another phase. So `/gsd-phase --insert` no longer turns lint red. On the pre-reshape files the three rules report 40, 6 and 2 violations (6e: four stubs in completed or retired phases plus the two cross-phase bullets); on HEAD, none (9472666a5).
+- **`.planning/research/gsd-tools-upstream-bugs.md`: seven upstream issue drafts, none filed.** Each has a source line, a repro measured here and a proposed fix: the error path that still writes (`state-transition.cjs:1411`), the unanchored and non-idempotent completion regex (`roadmap.cjs:1351`), a section ending at any heading (`roadmap.cjs:1238/1425/1426`), Status prose overwritten by `phase complete` (`phase.cjs:3539`), whole-file normalisation, missing rows inserted at the top of the list, and the TBD stub template (1fa0fd54a).
+
+### Tests
+- **`src/__tests__/check-planning-hygiene.test.ts` gains 15 cases:** three for 6d, seven for 6e and five for rule 7. Each rule was neutered once: 2, 3 and 3 cases went red. The narrowed 6e was neutered twice more: treating every stub as fresh reds 3 cases, and dropping the allowance reds the fresh-insert case. Each neuter was restored from a byte backup and cmp-checked. The live-file tests prove the real ROADMAP.md and STATE.md pass.
+
+### Notes
+- **`/gsd-phase --insert` still writes the TBD stub.** Lint allows it until the phase gets plan rows or its overview bullet is ticked; then replace it with the plan rows or `- [ ] TBD — plans not listed yet`. The stub template is upstream draft 7.
+- **The `progress:` block still reads 632/621 plans.** The next handler run re-derives it from disk as 746/738. The phase figures, 104 of 115, already match the ROADMAP checklist once the three retired 165-family phases are excluded. The milestone's plan rows are 582 ticked of 746, against 738 SUMMARYs on disk. Each phase's next `update-plan-progress` ticks the rows its SUMMARYs earn (170 did in the proof run); this release does not.
+- **Recorded, not fixed:** every gsd-tools defect in the research file. This release only changes our file shape.
+
+## [0.131.13.2] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of 3742dfa5
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38758688220`, after the PROD apply of merge `3742dfa5`: sha256 `47d80c8c…` → `8e972fb8…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 130 → 130, distinct function names 128 → 128, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261023120000_sync_status_runner_stamps_computed_at.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-15` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.131.13.1 → 0.131.13.2.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=303 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 130 — MATCH 127, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38758688220` succeeded, and this entry was composed by the `redump-pr` job. Run `38758688220` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.131.13.1] - 2026-10-15 — COMPUTEDATSTAMP (2/2): the status bridge stops writing `strategy_analytics.computed_at`, so a side job can no longer make stale analytics look fresh
+
+Phase 166.5, PR 2 of 2 (CONTEXT D-09). This PR carries only the migration `20261023120000_sync_status_runner_stamps_computed_at.sql`, its manual rollback, its gate file, the regenerated function mirror and the census and floor moves that depend on them. PR 1 (#1047, v0.131.13.0) shipped the runner stamp and is live: Railway `/health` reports `d618c8088`, a descendant of PR 1's merge commit, which is the ordering D-09 requires before this merges. **On merge the migration applies to TEST and then PROD with no human stop** (`apply` needs only a green `apply-test`). It touches no data: it replaces one function body and three comments.
+
+### Changed
+- **The bridge writes no date on any branch (D-03, D-04, R-03).** `sync_strategy_analytics_status` is re-based on `20261009120000` with the `computed_at` assignments of branches (a), (a)'s membership arm, (b) and (c) removed. From this apply on, the analytics runner's success write (PR 1) is the date's only writer, so a nightly funding sync, position poll, reconcile or intro snapshot can no longer move it, and a failed recompute leaves the last good date and shows only through `computation_status` and its sentence. The D-09 release clause is deleted, because with the runner stamping first it would defeat the hold. A new verify anchor, `v_no_date_write_ok`, refuses any later apply whose comment-stripped body names `computed_at` again.
+- **One side-trigger flag, `v_side_trigger`, keys the early return and every hold (D-08, R-05, R-06).** A successful side job with a sibling side job still in flight leaves status, sentence, markers and date as they were. A successful side job as the last in flight no longer heals a `failed` row that carries a curated sentence, and no longer inserts a first `complete` row for a strategy that has none.
+- **Three database comments that stopped being true are corrected,** each re-issue guarded by a catalogue check: the `computing_started_at` column comment, and 166.3.1's hold-trigger function and trigger comments. `supabase/schema/functions/sync_strategy_analytics_status.sql` is regenerated (`npm run schema:functions:check`: current, 128 functions).
+
+### Fixed
+- **`[164.5.2.1-COMPUTED-AT-RUNNER-STAMP]` is ticked closed in `TODOS.md`** with its evidence: clause 1 by the runner stamp (PR 1) and gate arm N10, clause 2 by this migration and arms N2 and N5.
+
+### Tests
+- **A new ten-arm SQL gate, `supabase/tests/test_sync_status_computed_at_runner_only.sql`.** N1 to N10 each carry a biting `RED-UNDER` twin. On the pg-lane: `sections 10 / judged 10 / annotated 10 / waived 0 / biting 10`.
+- **Three older stamp gates re-specified to the body that ships.** The scope gate (D10 and D12 assert the date HELD, D15 retired into N6, 21 to 20 arms, biting 20 of 20), the marked-refresh gate (I3 asserts the date equals its pre-resync value, biting 1 of 1 annotated) and 166.3.1's success-only gate (C1 controls with a runner-shaped write, biting 5 of 5).
+- **Censuses re-measured on this tree (origin/main `d618c8088` plus this PR), not copied from the phase branch.** One full `node scripts/mutation-runner/run.mjs`, exit 0: `scope: FULL 73/73`, `coverage: files 73/100`, `arms: 732/732/0`, `biting: 732`, `lane-invocations: 732`, `No defects`. So `FILES_FLOOR` 72 to 73 and `ARMS_FLOOR` 723 to 732; `WAIVED_CEILING` stays 0. The `sql-tests` step run as `ci.yml` runs it, on the local-stack lane with this migration replayed and ledgered: `95 of 100 SQL self-tests passed`, `5 excluded (LANE-ONLY)`, `15 of 18 completion sentinel(s) verified`, `covering 308 declared arms`. So the roster's `SENTINEL_FLOOR` 17 to 18 and `ARMS_FLOOR` 299 to 308. The corpus pins in `drift-check-scripts`, `gate-family-meta`, `lint-sql-gates`, `mutation-annotation-parser` and `mutation-runner-floors` move with them. Each floor was shown failing in both directions (one above the measured value, and stale-low), then restored byte for byte.
+
+### Notes
+- **Reviews:** `migration-reviewer`, `rls-policy-auditor`, `gsd-code-reviewer` and `silent-failure-hunter` were clean on this migration before merge. That matters because nothing stops the PROD apply after the merge.
+- **What users will see move, and when.** Nothing moves at the apply. Rows keep their current dates until the forced recompute of every strategy (D-05, in the consolidated PROD recompute). Then each date becomes the real compute time, so a strategy whose date side jobs had inflated reads older.
+- **Expected reds after merge, not regressions.** VAC-08 in `test-db-drift` and the gates that probe shared TEST's applied-ness see the migration only after apply-on-merge. After the PROD apply, `baseline-content-drift` goes red on the bridge body until the automated re-dump PR merges.
+- **Known limits carried from PR 1's entry:** R-04 (a first-ever row keeps the column default `now()`, booked as `166.5-COMPUTED-AT-NEVER-COMPUTED-DEFAULT`), `[166.5-PDF-MIXED-VINTAGE-WINDOW]` and `[166.5-STALE01-PREMISE]`. IN-R4-03 (a 42883 on the Python call after a rollback) stays recorded only; the rollback here restores the two-argument body, so it does not reintroduce it.
+
 ## [0.131.13.0] - 2026-10-15 — COMPUTEDATSTAMP (1/2): the analytics runner stamps `strategy_analytics.computed_at` when it really finishes a recompute
 
 Phase 166.5, PR 1 of 2 (CONTEXT D-09). This PR ships the runner stamp and every code and test change, and **no migration**. PR 2 carries `20261023120000_sync_status_runner_stamps_computed_at.sql`, which stops the status bridge `sync_strategy_analytics_status` from writing the date. PR 2 merges only after Railway `/health` reports this PR's merge commit or a descendant, so the runner's stamp is live before the bridge stops writing. Until PR 2 applies, both the runner and the bridge stamp the date. A real recompute therefore always moves it, and nothing users see changes yet.

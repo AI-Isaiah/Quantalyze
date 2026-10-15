@@ -70,6 +70,7 @@ from services.mt5_client import (
 # from the one the heal's own suite exercises, and the criterion-4 test would
 # then be measuring a harness rather than the shipped path. `tests.` imports are
 # this suite's established idiom (a dozen modules already do it).
+from tests.budget_rendezvous import expire_module_budget_when_reached
 from tests.test_mt5_relogin import (  # noqa: PLC2701 — deliberate, see above
     _FAKE_HOST,
     _FAKE_PORT,
@@ -395,12 +396,31 @@ async def test_lease_bound_expiry_raises_busy_and_never_acquires() -> None:
     await lock.acquire()  # somebody else holds the terminal
     started = time.monotonic()
 
-    with pytest.raises(mt5_concurrency.Mt5TerminalBusyError):
+    async def _attempt() -> None:
         async with mt5_concurrency.mt5_terminal_lease("h:1", wait_s=0.05):
             pytest.fail("the body must never run when the terminal was never acquired")
 
+    try:
+        with pytest.raises(mt5_concurrency.Mt5TerminalBusyError):
+            # DEADMAN, not a stopwatch. `wait_s=None` means UNBOUNDED, so a
+            # regression that drops or mis-threads the bound waits FOREVER on the
+            # lock nothing will release; this converts that hang into a named
+            # failure instead of an anonymous CI cancellation.
+            await asyncio.wait_for(_attempt(), timeout=10.0)
+    except asyncio.TimeoutError:
+        pytest.fail(
+            "the bounded wait never fired: the lease waited on the held lock as "
+            "if wait_s were None (unbounded)"
+        )
+
     elapsed = time.monotonic() - started
-    assert elapsed < 1.0, "the bounded wait did not fire at its bound"
+    # A LITERAL bar, not `_MT5_LEASE_WAIT_S / 2`: that value is read from the
+    # `MT5_LEASE_WAIT_S` environment variable, so an env below 0.1 would put the bar
+    # under the 0.05 s bound under test and redden it falsely. Once the deadman
+    # above has not fired this is belt and braces, 100x the bound under test.
+    assert elapsed < 5.0, (
+        "the bounded wait did not fire at its bound"
+    )
     assert lock.locked(), (
         "the timed-out waiter released a lock it never acquired — the real holder's "
         "terminal is now leasable by a third caller mid-IPC"
@@ -531,7 +551,8 @@ async def test_the_lease_bumps_the_terminal_epoch_when_the_holder_is_cancelled()
             await asyncio.sleep(3600)
 
     task = asyncio.create_task(_holder())
-    await asyncio.wait_for(entered.wait(), timeout=1.0)
+    # DEADMAN for the holder's arrival (a pure rendezvous), not a stopwatch on it.
+    await asyncio.wait_for(entered.wait(), timeout=10.0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -612,12 +633,13 @@ async def test_to_thread_work_carries_a_frozen_copy_of_the_occupancy_stamp() -> 
         async with mt5_concurrency.mt5_terminal_lease("h:1"):
             # Spawned INSIDE the hold — this is the work that will outlive it.
             worker = asyncio.create_task(asyncio.to_thread(_abandoned_worker))
-            await asyncio.wait_for(started.wait(), timeout=1.0)
+            # DEADMAN for the pool thread's arrival and unwind, not a stopwatch on it.
+            await asyncio.wait_for(started.wait(), timeout=10.0)
 
         # ...the lease has now released in the CALLER's context.
         assert mt5_client._MT5_LEASE_OCCUPANCY.get() is None
         gate.set()
-        await asyncio.wait_for(worker, timeout=1.0)
+        await asyncio.wait_for(worker, timeout=10.0)
     finally:
         gate.set()
 
@@ -2262,14 +2284,32 @@ async def test_a_tick_abandoned_at_its_budget_bumps_the_epoch_and_fences_the_zom
     entered = threading.Event()
     finished = threading.Event()
 
+    # ⛔ RENDEZVOUS, NOT A STOPWATCH. The heal's `asyncio.wait_for(to_thread(body),
+    # timeout=0.05)` starts its clock BEFORE the pool thread has been scheduled, so
+    # on a CPU-starved worker the 50 ms budget could expire before the round-trip
+    # ever began: `to_thread` work cancelled while still queued never runs, `entered`
+    # is never set and the zombie this test aims at does not exist. (Measured:
+    # delaying each `to_thread` hop by 150 ms reds this test with "the round-trip
+    # never started".) The budget the module enforces is therefore expired when the
+    # thread announces it is parked in `initialize`, via a namespace-scoped stand-in
+    # for `mt5_relogin.asyncio`. The real `asyncio.timeout` still delivers the real
+    # cancellation, so the abandonment path under test is unchanged.
+    loop = asyncio.get_running_loop()
+    reached = asyncio.Event()
+    expire_module_budget_when_reached(monkeypatch, mt5_relogin, reached)
+
     real_initialize = fake.initialize
+    # The zombie's park. A tick that JOINED the thread returns only after this
+    # expires, so it is also the deadman for the tick's own return below.
+    park_s = 5.0
 
     def _hanging_initialize(**kwargs):
         entered.set()
-        # BOUNDED (5 s): a tick that JOINED the thread must RED at this bound, not
+        loop.call_soon_threadsafe(reached.set)
+        # BOUNDED: a tick that JOINED the thread must RED at this bound, not
         # hang the suite. `asyncio.run` joins the default executor for 300 s, so an
         # unbounded park here would stall the whole run instead of failing.
-        gate.wait(5.0)
+        gate.wait(park_s)
         return real_initialize(**kwargs)
 
     fake.initialize = _hanging_initialize
@@ -2294,13 +2334,16 @@ async def test_a_tick_abandoned_at_its_budget_bumps_the_epoch_and_fences_the_zom
     elapsed = time.monotonic() - started
 
     # ---- THE TICK DID NOT JOIN THE THREAD ----------------------------------
-    assert entered.wait(1.0), "harness: the round-trip never started"
+    assert entered.wait(park_s), "harness: the round-trip never started"
     assert not finished.is_set(), (
         "the tick waited for the abandoned thread. ⛔ Joining it holds the lease "
         "for exactly as long as the hang — the WEDGE-01 class D-25 forbids, and "
         "on a CADENCE it is a periodic wedge of the ONE shared terminal."
     )
-    assert elapsed < 2.0, (
+    # DEADMAN, not a stopwatch: a tick that joined the parked thread cannot return
+    # before `park_s`, so anything strictly inside it proves the abandonment (this
+    # was 2.0 s, which raced scheduling on a starved runner).
+    assert elapsed < park_s, (
         f"the tick took {elapsed:.3f}s to return against a 0.05s budget — it did "
         f"not abandon at its bound."
     )

@@ -35,6 +35,8 @@ import {
   UNTRUSTED_KEY_SET_NOUN,
   UNTRUSTED_KEY_SYNC_STATUSES,
   isUntrustedKeySyncStatus,
+  keyAttentionChipLabel,
+  keyNeedsAttention,
   untrustedKeyChipLabel,
 } from "./closed-sets";
 
@@ -142,5 +144,113 @@ describe("[D-16] untrusted-key sync_status closed set", () => {
     expect(isUntrustedKeySyncStatus("")).toBe(false);
     expect(untrustedKeyChipLabel(null)).toBeNull();
     expect(untrustedKeyChipLabel(undefined)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.1 D-02 — a third cause of "needing attention"
+// ---------------------------------------------------------------------------
+//
+// Founder decision 2026-10-15: a soft-disconnected key (`disconnected_at` set)
+// needs attention whatever its `sync_status`. Every expected boolean and string
+// below is TYPED here (ORACLE INDEPENDENCE above): `DISCONNECTED_KEY_CHIP_LABEL`
+// and `UNTRUSTED_KEY_STATUS_CHIP_LABEL` are deliberately not imported as the
+// expectation, so a reworded chip fails here rather than agreeing with itself.
+describe("[167.1.1 D-02] keyNeedsAttention / keyAttentionChipLabel", () => {
+  const DISCONNECTED = "2026-10-01T00:00:00Z";
+
+  const TRUTH_TABLE: ReadonlyArray<{
+    name: string;
+    key: { sync_status?: string | null; disconnected_at?: string | null };
+    needsAttention: boolean;
+    chip: string | null;
+  }> = [
+    {
+      name: "disconnected + complete",
+      key: { sync_status: "complete", disconnected_at: DISCONNECTED },
+      needsAttention: true,
+      chip: "Key disconnected",
+    },
+    {
+      // Disconnected wins the chip: `disconnected_at` is the owner's later act.
+      name: "disconnected + revoked",
+      key: { sync_status: "revoked", disconnected_at: DISCONNECTED },
+      needsAttention: true,
+      chip: "Key disconnected",
+    },
+    {
+      name: "disconnected + null status",
+      key: { sync_status: null, disconnected_at: DISCONNECTED },
+      needsAttention: true,
+      chip: "Key disconnected",
+    },
+    {
+      name: "connected (null) + revoked",
+      key: { sync_status: "revoked", disconnected_at: null },
+      needsAttention: true,
+      chip: "Key revoked",
+    },
+    {
+      name: "connected + sign_in_failed",
+      key: { sync_status: "sign_in_failed", disconnected_at: null },
+      needsAttention: true,
+      chip: "Sign-in failed",
+    },
+    {
+      name: "connected + complete",
+      key: { sync_status: "complete", disconnected_at: null },
+      needsAttention: false,
+      chip: null,
+    },
+    {
+      // `error` is a status the real untrusted set calls trusted.
+      name: "connected + error",
+      key: { sync_status: "error", disconnected_at: null },
+      needsAttention: false,
+      chip: null,
+    },
+    {
+      name: "connected + null status",
+      key: { sync_status: null, disconnected_at: null },
+      needsAttention: false,
+      chip: null,
+    },
+    {
+      name: "disconnected_at absent + complete",
+      key: { sync_status: "complete" },
+      needsAttention: false,
+      chip: null,
+    },
+  ];
+
+  it("the table holds both a true and a false row — anti-vacuity first", () => {
+    expect(TRUTH_TABLE.some((r) => r.needsAttention)).toBe(true);
+    expect(TRUTH_TABLE.some((r) => !r.needsAttention)).toBe(true);
+  });
+
+  for (const row of TRUTH_TABLE) {
+    it(`keyNeedsAttention: ${row.name} -> ${row.needsAttention}`, () => {
+      expect(keyNeedsAttention(row.key)).toBe(row.needsAttention);
+    });
+    it(`keyAttentionChipLabel: ${row.name} -> ${row.chip === null ? "null" : `"${row.chip}"`}`, () => {
+      expect(keyAttentionChipLabel(row.key)).toBe(row.chip);
+    });
+  }
+
+  it("a chip exists exactly when the key needs attention — the two functions cannot disagree", () => {
+    for (const row of TRUTH_TABLE) {
+      expect(keyAttentionChipLabel(row.key) !== null).toBe(
+        keyNeedsAttention(row.key),
+      );
+    }
+  });
+
+  it("a status added to the untrusted set flows through: the predicate asks isUntrustedKeySyncStatus, it does not restate the list", () => {
+    // Every member of the real set needs attention when connected.
+    for (const status of UNTRUSTED_KEY_SYNC_STATUSES) {
+      expect(keyNeedsAttention({ sync_status: status, disconnected_at: null })).toBe(
+        true,
+      );
+    }
   });
 });

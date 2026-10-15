@@ -85,6 +85,7 @@ function makeLegacyHolding(over: Partial<HoldingRow> = {}): HoldingRow {
     unrealized_pnl_usd: 1_200,
     api_key_id: "key-1",
     source_key_sync_status: "complete",
+    source_key_disconnected_at: null,
     ...over,
   };
 }
@@ -189,6 +190,7 @@ describe("HoldingsTable all-columns guard — DesignHoldingsTable (DESIGN_TOTAL_
     return render(
       <HoldingsTable
         rows={[makeDesignRow()]}
+        disconnectedAtByHoldingId={{}}
         revokedStatusByHoldingId={{}}
         flaggedHoldingsByRef={{}}
         showRevoked={true}

@@ -208,7 +208,7 @@ enforces the thresholds on full-suite numbers. The `frontend` aggregator gates o
 ⛔ **Read the live thresholds from `vitest.config.ts`, never from a number restated here.** They
 are a RATCHET, set a few points under measured actual so a real regression fails CI but noise
 does not. When actual climbs durably, raise them to match. Target is 80%, matching the
-`--cov-fail-under=80` the `analytics-service/` Python suite enforces (`.github/workflows/ci.yml:3819`).
+`--cov-fail-under=80` the `analytics-service/` Python suite enforces (the `python` job's pytest step in `.github/workflows/ci.yml`, cited by symbol: `grep -n 'cov-fail-under' .github/workflows/ci.yml`; the line number this sentence carried until 2026-10-15, `:3819`, had drifted to about `:5600`).
 
 ## SQL gate integrity jobs (v0.77.0.0, Phase 164.3)
 
@@ -575,3 +575,27 @@ use a handler, `git diff` the result and revert every collateral change before c
 Note `state.add-roadmap-evolution` also recomputes the `progress:` block from local disk as an
 undocumented side effect — that count under-reports phases whose `.planning/phases/` artifacts the
 `-pr` filter stripped from `main`.
+⛔ **CORRECTED 2026-10-15 (founder decision "Fix our format + report upstream") — the handlers
+are safe on the reshaped files; the paragraph above is kept as lineage.** The corruption came from
+our file shape meeting four tool assumptions, and the shape is fixed: no heading between a
+`### Phase N` heading and its `Plans:` list (`**Success Criteria** (what must be TRUE):` is the
+in-phase form), no unchecked bullet naming another phase as `Phase N`, no
+`- [ ] TBD (run /gsd-plan-phase N …)` stub, one line per field in STATE.md's `## Current Position`
+(history goes to `STATE-LINEAGE.md`), both files already in the tool's own normal form, and
+`.planning/milestone.lock` untracked. `scripts/check-planning-hygiene.ts` rules 6d, 6e and 7 fail
+`npm run lint` if any of these comes back. Measured on the reshaped files in a throwaway worktree:
+`roadmap.update-plan-progress 159` is a no-op, `170` and `164.4.2.1` write only their `**Plans:**`
+count and real plan ticks, `state.advance-plan` moves `Plan: 8 of 9` to `9 of 9` and nothing else,
+and `state.add-roadmap-evolution` appends its entry and re-derives `progress:`. Run handlers
+normally, and still `git diff` after every run, because three behaviours remain:
+- `phase complete` overwrites a Progress-table Status cell's prose with `Complete` (upstream bug,
+  `phase.cjs`). Restore the prose by hand.
+- `phase complete` moves STATE to the next phase in roadmap order, which is wrong when several phases
+  run in parallel. Correct `## Current Position` by hand.
+- Most handlers rewrite `.planning/state.json` and re-derive the `progress:` block from local disk.
+⚠️ `/gsd-phase --insert` still writes the `- [ ] TBD (run /gsd-plan-phase N …)` stub. Rule 6e
+ALLOWS it while the phase's overview bullet is `[ ]` and its section lists no plan rows, because the
+completion regex ticks the overview bullet first. Lint goes red once the phase gets plan rows or its
+bullet is ticked. At that point the stub becomes a target, so replace it with the plan rows or
+`- [ ] TBD — plans not listed yet`. Drafted upstream issues:
+`.planning/research/gsd-tools-upstream-bugs.md`.

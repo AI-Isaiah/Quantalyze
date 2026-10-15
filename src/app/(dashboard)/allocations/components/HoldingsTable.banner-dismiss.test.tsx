@@ -98,7 +98,7 @@ describe("HoldingsTable banner dismiss — router.refresh loud-fail (H-1220)", (
     });
 
     render(
-      <HoldingsTable rows={[makeRow()]} flaggedHoldingsByRef={FLAGGED_BY_REF} />,
+      <HoldingsTable disconnectedAtByHoldingId={{}} rows={[makeRow()]} flaggedHoldingsByRef={FLAGGED_BY_REF} />,
     );
 
     // Dismissing must not throw out of the handler — the failure is caught.
@@ -119,7 +119,7 @@ describe("HoldingsTable banner dismiss — router.refresh loud-fail (H-1220)", (
 
   it("happy path: successful dismiss calls router.refresh once and does not log an error", () => {
     render(
-      <HoldingsTable rows={[makeRow()]} flaggedHoldingsByRef={FLAGGED_BY_REF} />,
+      <HoldingsTable disconnectedAtByHoldingId={{}} rows={[makeRow()]} flaggedHoldingsByRef={FLAGGED_BY_REF} />,
     );
 
     fireEvent.click(screen.getByTestId("mock-dismiss"));

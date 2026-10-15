@@ -3,9 +3,10 @@
  * part of it that comes from keys needing attention, summed in ONE pass.
  *
  * WHY THIS MODULE EXISTS. The composer's PORTFOLIO AUM field (book mode) is
- * seeded from the live-holdings total, and a holding whose source key's sync is
- * untrusted (`isUntrustedKeySyncStatus`: `revoked`, `sign_in_failed`) is summed
- * into it. The founder's decision (2026-09-22) is to KEEP THE TOTAL AND FLAG
+ * seeded from the live-holdings total, and a holding whose source key needs
+ * attention (`keyNeedsAttention`: a `revoked` or `sign_in_failed` sync status,
+ * or, since 167.1.1 D-02, a soft-disconnected key whatever its sync status) is
+ * summed into it. The founder's decision (2026-09-22) is to KEEP THE TOTAL AND FLAG
  * IT: the figure does not change, and a disclosure beside it names the untrusted
  * dollars. That disclosure is only honest if it is a strict subset of the total
  * it qualifies, so the total and its untrusted subset come from the SAME
@@ -14,7 +15,7 @@
  *
  * It is a plain module rather than code inside the composer for a second
  * reason: its unit test doubles `@/lib/closed-sets` to prove the membership
- * test is the shared predicate (D-15 pin 5). That double must not be hoisted
+ * test is the shared predicate `keyNeedsAttention` (D-15 pin 5). That double must not be hoisted
  * into the composer's own suite, where it would apply to every test.
  *
  * Client-safe: `@/lib/queries` is `server-only`, so it is imported for its
@@ -24,12 +25,44 @@
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { buildHoldingRef } from "./holding-outcome-adapter";
 import {
-  isUntrustedKeySyncStatus,
+  keyNeedsAttention,
   UNKNOWN_KEY_STATUS_SET_NOUN,
   UNTRUSTED_KEY_SET_NOUN,
 } from "@/lib/closed-sets";
 
 type DashboardHolding = MyAllocationDashboardPayload["holdingsSummary"][number];
+
+/**
+ * Phase 167.1.1 D-02 — the two key-state maps `summarizeLiveHoldings` reads,
+ * built from ONE pass over the payload's key list so they can never describe
+ * different key sets. `statusByKeyId` keeps the WR-05 `.has` semantics (a key
+ * absent from the list is UNKNOWN, a key present with a null status is
+ * trusted); `disconnectedAtByKeyId` carries the soft-disconnect timestamp.
+ *
+ * Exported so the composer and the phase's end-to-end test derive the maps the
+ * same way production does. A missing key list yields two empty maps.
+ */
+export function keyStateMapsOf(
+  apiKeys:
+    | ReadonlyArray<{
+        id: string;
+        sync_status: string | null;
+        disconnected_at: string | null;
+      }>
+    | null
+    | undefined,
+): {
+  statusByKeyId: Map<string, string | null>;
+  disconnectedAtByKeyId: Map<string, string | null>;
+} {
+  const statusByKeyId = new Map<string, string | null>();
+  const disconnectedAtByKeyId = new Map<string, string | null>();
+  for (const k of apiKeys ?? []) {
+    statusByKeyId.set(k.id, k.sync_status);
+    disconnectedAtByKeyId.set(k.id, k.disconnected_at);
+  }
+  return { statusByKeyId, disconnectedAtByKeyId };
+}
 
 /**
  * 170.4 D-08 ("One Key is One Strategy") — group the payload's holdings by the
@@ -118,7 +151,20 @@ export interface LiveHoldingsSummary {
   /** The live-holdings total. Byte-identical to the composer's pre-167.1
    *  `liveHoldingsSum`: same walk, same filters, same accumulation order. */
   total: number;
-  /** The part of `total` from holdings whose key is untrusted. `count` gates
+  /** The part of `total` from holdings whose key needs attention
+   *  (`keyNeedsAttention`: an untrusted sync status, or since 167.1.1 D-02 a
+   *  soft-disconnected key whatever its status).
+   *
+   *  ⚠️ Which keys reach this part depends on the BRANCH (round-1 WR-03). In
+   *  the degrade branch (empty contributing set) every needing-attention key's
+   *  dollars are summed into `total` and counted here. In the narrowed (book)
+   *  branch, the only one production runs, a soft-disconnected key is never
+   *  contributing (`disconnected_at` is non-null, so it is not eligible), so
+   *  its dollars are NOT in `total`: they land in `excludedUntrusted`, which
+   *  the composer names "Excludes $Y from keys needing attention". "Stay IN
+   *  the total" (CONTEXT D-02) therefore holds on Holdings and Open Positions
+   *  and in the degrade branch, not in the composer's book-mode AUM.
+   *  `count` gates
    *  the disclosure, never `amount`: a derivative's contribution can be zero
    *  or negative and is still sourced from a key whose numbers are not current
    *  (D-07). Because of that, `amount <= total` is NOT an invariant. */
@@ -133,7 +179,8 @@ export interface LiveHoldingsSummary {
    *  subset of the `apiKeys` ids), but a disclosure must not fail open. */
   unknownStatus: LiveHoldingsPart;
   /** CONTEXT D-20's `$Y`: holdings the contributing-set narrowing dropped from
-   *  `total` whose key is untrusted, MINUS the keys the payload names as
+   *  `total` whose key needs attention (167.1.1 D-02: a soft-disconnected key
+   *  is named here, no longer in `excludedNotConnected`; no number moves), MINUS the keys the payload names as
    *  manager-side (`managerSideApiKeyIds`). A manager-side key's holdings are
    *  not the allocator's book, so one the payload names is left out. An
    *  allocator-eligible untrusted key that has no return series yet IS
@@ -187,9 +234,11 @@ export interface LiveHoldingsSummary {
    *  subtracted from, `total` (D-03). */
   excludedTrusted: LiveHoldingsPart;
   /** Review C2 WR-03. Holdings the narrowing dropped whose key is in the
-   *  status map with a status that is not untrusted, but is NOT in the
-   *  payload's `eligibleApiKeyIds`: a soft-disconnected or inactive key whose
-   *  last holdings still arrive (`holdingsSummary` is not filtered by key
+   *  status map, does not need attention, but is NOT in the payload's
+   *  `eligibleApiKeyIds`: an INACTIVE key (its `disconnected_at` is null) whose
+   *  last holdings still arrive. Since 167.1.1 D-02 a soft-disconnected key is
+   *  not here: it needs attention and is named in `excludedUntrusted`.
+   *  Its holdings still arrive (`holdingsSummary` is not filtered by key
    *  eligibility). Until this part they landed in `excludedTrusted` and were
    *  called "connected keys with no return history yet", both halves false.
    *  The composer names them "keys that are not connected". Empty when the
@@ -249,6 +298,12 @@ export function summarizeLiveHoldings(args: {
    *  as a manager. Read only to narrow `excludedUntrusted` to D-20's `$Y`. */
   managerSideApiKeyIds: readonly string[];
   statusByKeyId: ReadonlyMap<string, string | null>;
+  /** Phase 167.1.1 D-02: each key's `disconnected_at`, from `keyStateMapsOf`.
+   *  REQUIRED, so a caller cannot omit it and silently read a soft-disconnected
+   *  key as connected (a fail-open). A key absent from the map reads as
+   *  connected here; the WR-05 unknown-status rule still keys off
+   *  `statusByKeyId.has`. */
+  disconnectedAtByKeyId: ReadonlyMap<string, string | null>;
   /** The payload's `eligibleApiKeyIds` (server-built by
    *  `isPerKeyDailiesEligibleKey`; never re-derived here). Read only to split
    *  `excludedNotConnected` out of `excludedTrusted` (review C2 WR-03).
@@ -280,7 +335,8 @@ export function summarizeLiveHoldings(args: {
   // both honestly non-derivable and still agree.
   //
   // Phase 167.1: in that degrade branch a `revoked` key's holdings ARE summed,
-  // and so they ARE flagged below. The predicate is tested on every summed
+  // and so they ARE flagged below (167.1.1 D-02: so are a soft-disconnected
+  // key's). The predicate is tested on every summed
   // holding, whichever branch put it there (D-05).
   const narrowToModelledBook = contributing.size > 0;
   const out: LiveHoldingsSummary = {
@@ -311,7 +367,11 @@ export function summarizeLiveHoldings(args: {
       const equity = holdingEquityContributionLocal(h);
       // ⛔ The shared predicate is the ONLY membership test (167 D-16). A local
       // equality on the status column is the defect that rule exists to prevent.
-      const untrusted = isUntrustedKeySyncStatus(args.statusByKeyId.get(h.api_key_id));
+      // 167.1.1 D-02: it also covers a soft-disconnected key, whatever its status.
+      const untrusted = keyNeedsAttention({
+        sync_status: args.statusByKeyId.get(h.api_key_id),
+        disconnected_at: args.disconnectedAtByKeyId.get(h.api_key_id) ?? null,
+      });
       if (narrowToModelledBook && !contributing.has(h.api_key_id)) {
         // D-20: a manager-side key the payload identifies is not the allocator's
         // book, so its holdings are not part of what the narrowing excluded from

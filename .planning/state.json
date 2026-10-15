@@ -39,9 +39,39 @@
       "status": "pending"
     },
     {
+      "number": "153.1",
+      "name": "WIZFORM-CODES (INSERTED)",
+      "status": "complete"
+    },
+    {
+      "number": "153.2",
+      "name": "WIZFORM-FIELD (INSERTED)",
+      "status": "complete"
+    },
+    {
+      "number": "153.3",
+      "name": "WIZFORM-GW (INSERTED)",
+      "status": "complete"
+    },
+    {
+      "number": "153.4",
+      "name": "WIZFORM-BUDGET (INSERTED)",
+      "status": "complete"
+    },
+    {
+      "number": "153.5",
+      "name": "WIZFORM-ABANDON",
+      "status": "complete"
+    },
+    {
+      "number": "153.6",
+      "name": "PARITY (INSERTED)",
+      "status": "complete"
+    },
+    {
       "number": "153.7",
       "name": "WIZFORM-02-CLASS (INSERTED)",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "154",
@@ -56,13 +86,13 @@
     {
       "number": "156",
       "name": "CONNECT-REFACTOR",
-      "status": "pending"
+      "status": "complete"
     }
   ],
   "next": {
     "command": "/gsd:progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 164.6.6.1 of 94 · 74% · executing"
+    "label": "Advance to the next step (plan phase 164.6.6.3.6)",
+    "reason": "Phase 164.6.6.3.6 of 116 — needs a plan"
   },
-  "updated_at": "2026-10-04T18:35:34.574Z"
+  "updated_at": "2026-10-15T19:33:15.908Z"
 }

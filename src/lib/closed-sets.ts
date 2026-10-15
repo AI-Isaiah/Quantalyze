@@ -1056,6 +1056,68 @@ export function untrustedKeyChipLabel(
     : null;
 }
 
+// --- Phase 167.1.1 D-02 — a third cause of "needing attention" -------------
+//
+// Founder decision 2026-10-15 (D-02): a soft-disconnected key's holdings stay
+// IN the total and are disclosed as "keys needing attention", the same way an
+// untrusted key's are. (Round-1 WR-03: "stay IN the total" holds on the
+// Holdings and Open Positions totals and in the composer's degrade branch. The
+// composer's book-mode AUM never sums a soft-disconnected key, so there the
+// same dollars are EXCLUDED and named "Excludes $Y from keys needing attention".) The money surfaces' "needing attention" set therefore
+// has a THIRD cause beside `revoked` and `sign_in_failed`: `disconnected_at`
+// is set, whatever the key's `sync_status`. A disconnected key runs no sync,
+// so its status is frozen at whatever it last was (13 such keys on PROD read
+// `complete`), and a surface that asked only the status would call their
+// dollars current.
+//
+// `UNTRUSTED_KEY_SET_NOUN` is cause-neutral and unchanged: it already names a
+// set that hides more than one cause, so a third cause needs no new noun.
+//
+// ⛔ SCOPE. The money surfaces (the composer's live-holdings summary, the
+// Holdings and Open Positions tables) ask THIS predicate. The key-management
+// flows (`ApiKeyManager`'s rotate and retire success checks, the `/strategies`
+// key pill) deliberately keep `isUntrustedKeySyncStatus`: their question is the
+// key's sync status, not whether its dollars need attention. Do not "unify"
+// them; the two questions only look alike.
+//
+// Both functions CALL the existing predicate; neither restates the status
+// list, so a status added to `UNTRUSTED_KEY_SYNC_STATUSES` flows through.
+
+/** The chip copy for a soft-disconnected key. Beside, not inside,
+ *  `UNTRUSTED_KEY_STATUS_CHIP_LABEL`: it is keyed by a timestamp, not a status,
+ *  and putting it in that `Record<UntrustedKeySyncStatus, string>` would
+ *  invent a sync status the CHECK constraint does not admit. */
+export const DISCONNECTED_KEY_CHIP_LABEL = "Key disconnected";
+
+/** The two columns that decide whether a key's dollars need attention. Both are
+ *  optional so a caller holding only one of them (or a row from before the
+ *  column was selected) reads as "connected / no status", never as a throw. */
+export interface KeyAttentionInput {
+  sync_status?: string | null;
+  disconnected_at?: string | null;
+}
+
+/**
+ * Whether a key's numbers need attention on a money surface: it is
+ * soft-disconnected (`disconnected_at` set, whatever its sync status), or its
+ * sync status is untrusted. `null` / absent `disconnected_at` means connected.
+ */
+export function keyNeedsAttention(k: KeyAttentionInput): boolean {
+  return k.disconnected_at != null || isUntrustedKeySyncStatus(k.sync_status);
+}
+
+/**
+ * The chip copy for a key needing attention, or `null` when its numbers may be
+ * rendered as current. `Key disconnected` wins over `Key revoked` /
+ * `Sign-in failed` for a key that is both: `disconnected_at` is the owner's
+ * LATER act, and a disconnected key runs no sync that could still be failing.
+ */
+export function keyAttentionChipLabel(k: KeyAttentionInput): string | null {
+  return k.disconnected_at != null
+    ? DISCONNECTED_KEY_CHIP_LABEL
+    : untrustedKeyChipLabel(k.sync_status);
+}
+
 // --- Signup roles (SECURITY BOUNDARY) --------------------------------------
 // SECURITY BOUNDARY (NEW-C15-05): the AUTHORITATIVE allowlist for the role a
 // new user receives is the SQL trigger handle_new_user

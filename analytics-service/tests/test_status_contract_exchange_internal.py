@@ -42,7 +42,7 @@ from unittest.mock import AsyncMock, MagicMock
 import ccxt
 import pytest
 from fastapi import HTTPException
-from tests.limiter_stub import evict_module, patch_shared_limiter
+from tests.limiter_stub import build_shared_limiter_from_real_slowapi, evicted, patch_shared_limiter
 
 
 pytestmark = pytest.mark.asyncio
@@ -78,6 +78,8 @@ def exchange_router(monkeypatch):
     slowapi_util_stub = MagicMock()
     slowapi_util_stub.get_remote_address = lambda *a, **k: "1.2.3.4"
 
+    # Build the shared limiter from the REAL slowapi before it is stubbed.
+    build_shared_limiter_from_real_slowapi()
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
 
@@ -98,12 +100,10 @@ def exchange_router(monkeypatch):
     monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", "mt5-validate-gw.internal")
     monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "18813")
 
-    evict_module("routers.exchange")
-    from routers import exchange as exchange_router
+    with evicted("routers.exchange"):
+        from routers import exchange as exchange_router
 
-    yield exchange_router
-
-    evict_module("routers.exchange")
+        yield exchange_router
 
 
 def _validate_req(router, **overrides):

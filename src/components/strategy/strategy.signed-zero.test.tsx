@@ -67,7 +67,7 @@ describe("HoldingFactsheet prints no signed zero (D-02)", () => {
   it("a cumulative return of -0.00004 prints 0.00%, a Sharpe of -0.004 prints 0.00", () => {
     const { container } = render(
       <HoldingFactsheet
-        item={holding({ cumulative_return: -0.00004, sharpe: -0.004, max_drawdown: -0.15, vol: 0.55 })}
+        item={holding({ cumulative_return: -0.00004, sharpe: -0.004, max_drawdown: -0.15, vol: 0.55, priced_days: 40 })}
       />,
     );
     const text = container.textContent ?? "";
@@ -80,7 +80,7 @@ describe("HoldingFactsheet prints no signed zero (D-02)", () => {
   it("non-zero figures keep their sign and digits", () => {
     render(
       <HoldingFactsheet
-        item={holding({ cumulative_return: -0.0342, sharpe: -1.236, max_drawdown: -0.15, vol: 0.55 })}
+        item={holding({ cumulative_return: -0.0342, sharpe: -1.236, max_drawdown: -0.15, vol: 0.55, priced_days: 40 })}
       />,
     );
     expect(screen.getByText("-3.42%")).toBeInTheDocument();
@@ -91,7 +91,7 @@ describe("HoldingFactsheet prints no signed zero (D-02)", () => {
   it("a drawdown of -0.00004 prints 0.00%", () => {
     const { container } = render(
       <HoldingFactsheet
-        item={holding({ cumulative_return: 0.42, sharpe: 1.8, max_drawdown: -0.00004, vol: 0.55 })}
+        item={holding({ cumulative_return: 0.42, sharpe: 1.8, max_drawdown: -0.00004, vol: 0.55, priced_days: 40 })}
       />,
     );
     expect(container.textContent).not.toContain("-0.00");

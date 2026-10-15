@@ -1083,8 +1083,15 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round 2, SFH R2-1): `armsSeen` 689 -> 692: +3 arms (O13, O13l, O13r) in test_refresh_fanout_owed_key_reconstruct.sql. MEASURED: this file's run read `expected 692 to be 689`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): `armsSeen` 697 -> 716: the owed-key gate's 20 arms less N5 moved out of the 167.1.2 gate (+19 net) join main's 697. MEASURED: this file's run read `expected 716 to be 697`, and the full lane run printed `arms: 716/716/0`, `biting: 716`.
     // ⭐ CURRENCY 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): `armsSeen` 716 -> 723 on the tree merged with origin/main (1cde77edf): the NEW gate test_strategies_anon_grants.sql (7 arms: GRANT 1-4, WRITE 1-2, KEEP 1). MEASURED: this file's run read `expected 723 to be 716`, and ONE full lane run on the committed merge printed `arms: 723/723/0`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): `armsSeen` 723 -> 732: +10 arms of the NEW gate test_sync_status_computed_at_runner_only.sql (N1 to N10), -1 for arm D15 retired from test_sync_status_analytics_scope.sql. MEASURED: this file's run read `expected 732 to be 723`, and ONE full runner run on the merged tree printed `arms: 732/732/0`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): `armsSeen` 723 -> 740: the THREE NEW gates test_fan_in_failure_cascade.sql (8 arms), test_fan_in_lock_order_race.sql (3) and test_bridge_outcomes_decision_delete_cascade.sql (6). MEASURED: this file's run read `expected 740 to be 723`, and the full lane run printed `arms: 740/740/0`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-1 fixes CR-01 and WR-01): `armsSeen` 740 -> 743, +3 biting arms (FL4 and FL5 in test_fan_in_lock_order_race.sql, OD7 in test_bridge_outcomes_decision_delete_cascade.sql). MEASURED: this file's run read `expected 743 to be 740`.
+    // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-2 fixes WR-01/WR-02 and the RLS audit): `armsSeen` 752 -> 755, +3 biting arms (FL6 and FL7 in test_fan_in_lock_order_race.sql, OD8 in test_bridge_outcomes_decision_delete_cascade.sql). MEASURED: this file's run read `expected 755 to be 752`, and ONE full runner run read `arms: 755/755/0`, `biting: 755`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-3 fix SFH M2): `armsSeen` 755 -> 756, +1 biting arm (FL8 in test_fan_in_lock_order_race.sql, the retry bound). MEASURED: this file's run read `expected 756 to be 755`.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): `armsSeen` 723 -> 738: the NEW gate test_okx_archive_rebuild.sql (15 arms, 0-14). MEASURED: the full runner run printed `arms: 738/738/0`.
-    expect(armsSeen).toBe(738);
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 756 -> 771, MEASURED: this pin read `expected 771 to be 756` on the merged tree (main's corpus plus test_okx_archive_rebuild.sql's 15 arms).
+    expect(armsSeen).toBe(771);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1103,8 +1110,15 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round 2, SFH R2-1): `stepsSeen` 784 -> 787: one file step for each of the three new twins (O13, O13l, O13r). MEASURED: the needle test read `expected 787 to be 784`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): `stepsSeen` 788 -> 809: +21 file steps from the owed-key gate (15 at plan 04, +5 at the first fix round, +3 at the second, -1 for N5's edit step, -1 for N4d's second copy). MEASURED: the needle test read `expected 809 to be 788`.
     // ⭐ NOTE 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): `stepsSeen` stays 809 with the anon grants gate in the corpus: all 7 of its twins are one `sql` step each, which this count does not include. MEASURED: this file's run read 809 with the gate present.
+    // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): `stepsSeen` 809 -> 828: +19 file steps across the NEW gate test_sync_status_computed_at_runner_only.sql and the scope gate's re-pointed twins (D15's retired); the split is not decomposed here. MEASURED: this file's run read `expected 828 to be 809`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): `stepsSeen` 809 -> 840: +31 file steps across the THREE new gates' 17 twins (gate A 8 arms, gate B 3, gate C 6). MEASURED: this file's run read `expected 840 to be 809`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-1 fixes CR-01 and WR-01): `stepsSeen` 840 -> 847: +6 file steps across the three new twins (FL4 2, FL5 2, OD7 2) and +1 for the FC5 twin, which now stands both loop exits down. MEASURED: this file's run read `expected 847 to be 840`.
+    // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base 809 (-> 847 FANINGRAPH, -> 828 166.5). MEASURED on the merged tree, never summed: this file's run read `expected 866 to be 847`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-2 fixes WR-01/WR-02 and the RLS audit): `stepsSeen` 866 -> 873, the net of the file steps across the five touched twins (FL4, FL5, FC5, FC6 re-pointed, FL6, FL7, OD8 new). MEASURED, not summed: the needle test read `expected 873 to be 866`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-3 fix SFH M2): `stepsSeen` 873 -> 875, the two file steps of the FL8 twin. MEASURED: this file's run read `expected 875 to be 873`.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): `stepsSeen` 809 -> 821: +12 file steps from the NEW gate test_okx_archive_rebuild.sql (its 15 arms carry 12 non-`sql` steps, MEASURED not derived). MEASURED: this file's run read `expected 821 to be 809`.
-    expect(stepsSeen).toBe(821);
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 875 -> 887, MEASURED: re-read on the merged tree by this pin, never by adding the two branches' moves.
+    expect(stepsSeen).toBe(887);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2039,8 +2053,15 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round): the needle count 779 -> 784, moving WITH `stepsSeen`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round 2, SFH R2-1): the needle count 784 -> 787, moving WITH `stepsSeen`. MEASURED: this file's run read `expected 787 to be 784`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): the needle count 788 -> 809, moving WITH `stepsSeen`. MEASURED: this file's run read `expected 809 to be 788`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): the needle count 809 -> 828, moving WITH `stepsSeen`. MEASURED: this file's run read `expected 828 to be 809`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): the needle count 809 -> 840, the `find`-bearing file steps of the three new gates. MEASURED: this file's run read `expected 840 to be 809`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-1 fixes CR-01 and WR-01): the needle count 840 -> 847, the same seven added `find`-bearing file steps. MEASURED: this file's run read `expected 847 to be 840`.
+    // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base 809 (-> 847 FANINGRAPH, -> 828 166.5). MEASURED on the merged tree, never summed: this file's run read `expected 866 to be 847`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-2 fixes WR-01/WR-02 and the RLS audit): the needle count 866 -> 873, moving WITH `stepsSeen`. MEASURED: this file's run read `expected 873 to be 866`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-3 fix SFH M2): the needle count 873 -> 875, moving WITH `stepsSeen`. MEASURED: this file's run read `expected 875 to be 873`.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 809 -> 821, the same +12 steps as `stepsSeen` above (the okx archive rebuild gate). MEASURED: this pin read `expected 821 to be 809`.
-    expect(needles.length).toBe(821);
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 875 -> 887, MEASURED: this pin read `expected 887 to be 875` on the merged tree.
+    expect(needles.length).toBe(887);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2635,8 +2656,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): 95 -> 96, the owed-key fan-out gate file. MEASURED: this file's run read `expected 96 to be 95`, and the full lane run printed `coverage: files 69/96`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): 97 -> 98, the owed-key fan-out gate on top of main's 97. MEASURED: this file's run read `expected 98 to be 97`, and the full lane run printed `coverage: files 71/98`.
     // ⭐ CURRENCY 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): 98 -> 99, the anon grants gate file. MEASURED: this file's run read `expected 99 to be 98`, and the full lane run printed `coverage: files 72/99`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): 99 -> 100, the runner-only date gate file. MEASURED: this file's run read `expected 100 to be 99`, and the full lane run printed `coverage: files 73/100`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): 99 -> 102, the three FANINGRAPH gate files. MEASURED: this file's run read `expected 102 to be 99`, and the full lane run printed `coverage: files 75/102`.
+    // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 99 -> 100, the okx archive rebuild gate file. MEASURED: this file's run read `expected 100 to be 99`, and the full lane run printed `coverage: files 73/100`.
-    expect(corpus.filesTotal).toBe(100);
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 103 -> 104, MEASURED: this pin read `expected 104 to be 103` on the merged tree.
+    expect(corpus.filesTotal).toBe(104);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2713,8 +2738,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): 68 -> 69, the owed-key fan-out gate file (test_refresh_fanout_owed_key_reconstruct.sql), with the denominator above and the by-name list below.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): 70 -> 71, moving WITH `filesTotal`; the by-name list below holds the owed-key gate and both main gates.
     // ⭐ CURRENCY 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): 71 -> 72, moving WITH `filesTotal`; the by-name list below gained test_strategies_anon_grants.sql. MEASURED: this file's run read `expected 72 to be 71`, and the full lane run printed `scope: FULL 72/72 annotated files`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): 72 -> 73, moving WITH `filesTotal`; the by-name list below gained test_sync_status_computed_at_runner_only.sql. MEASURED: this file's run read `expected 73 to be 72`, and the full lane run printed `scope: FULL 73/73 annotated files`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): 72 -> 75, moving WITH `filesTotal`; the by-name list below gained the three FANINGRAPH gates. MEASURED: this file's run read `expected 75 to be 72`.
+    // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 72 -> 73, moving WITH `filesTotal`; the by-name list below gained test_okx_archive_rebuild.sql.
-    expect(corpus.filesAnnotated).toBe(73);
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 76 -> 77, the okx archive rebuild gate joins main's 76 annotated files; MEASURED on the merged tree by this pin.
+    expect(corpus.filesAnnotated).toBe(77);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2745,6 +2774,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       // 'complete_with_warnings' (3).
       "test_api_keys_sync_status_sign_in_failed.sql",
       "test_api_keys_venue_identity_uniq.sql",
+      // ⭐ ADDED 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): the bridge-outcomes decision-delete cascade gate C (6 arms).
+      "test_bridge_outcomes_decision_delete_cascade.sql",
       // ⭐ CURRENCY 2026-10-10 (Phase 164.6.6.2.1 BTCUSDVIEW, plan 01): the native-owner GRANT gate (5 arms) for migration 20261010120000.
       "test_btcusdview_native_balance.sql",
       "test_capital_ownership_allocation_guard.sql",
@@ -2771,6 +2802,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_derive_allocator_keys_fanout.sql",
       "test_enqueue_compute_job_dedupe_non_terminal.sql",
       "test_enqueue_race_loss_40001.sql",
+      // ⭐ ADDED 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): the fan-in failure-cascade gate A (8 arms) and the lock-order race gate B (3 arms, LANE-ONLY: dblink).
+      "test_fan_in_failure_cascade.sql",
+      "test_fan_in_lock_order_race.sql",
       // ⭐ ADDED 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03) — the FIFTY-NINTH annotated file: a contact message is never deduplicated, two request_call rows still collide (4 arms).
       "test_for_quants_leads_contact_dedupe.sql",
       "test_funding_fees_rls.sql",
@@ -2837,6 +2871,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_sync_status_analytics_scope.sql",
       "test_sync_status_bridge_lock.sql",
       "test_sync_status_bridge_residues.sql",
+      // ⭐ ADDED 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): the runner-only date gate (10 arms, N1 to N10) for migration 20261023120000.
+      "test_sync_status_computed_at_runner_only.sql",
       "test_sync_status_curated_sentence_survives.sql",
       "test_sync_status_marked_refresh_protected.sql",
       "test_truncate_revoke_anon_authenticated.sql",
@@ -3256,8 +3292,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): 95 -> 96, the owed-key fan-out gate file. MEASURED: this file's run read `expected 96 to be 95`, and the full lane run printed `coverage: files 69/96`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): 97 -> 98, the owed-key fan-out gate on top of main's 97. MEASURED: this file's run read `expected 98 to be 97`, and the full lane run printed `coverage: files 71/98`.
     // ⭐ CURRENCY 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): 98 -> 99, the anon grants gate file. MEASURED: this file's run read `expected 99 to be 98`, and the full lane run printed `coverage: files 72/99`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): 99 -> 100, the runner-only date gate file. MEASURED: this file's run read `expected 100 to be 99`, and the full lane run printed `coverage: files 73/100`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): 99 -> 102, the three FANINGRAPH gate files. MEASURED: this file's run read `expected 102 to be 99`, and the full lane run printed `coverage: files 75/102`.
+    // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 99 -> 100, the okx archive rebuild gate file (test_okx_archive_rebuild.sql). MEASURED: this file's run read `expected 100 to be 99`, and the full lane run printed `coverage: files 73/100`.
-    expect(corpus.filesTotal).toBe(100);
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 103 -> 104, MEASURED: this pin read `expected 104 to be 103` on the merged tree.
+    expect(corpus.filesTotal).toBe(104);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3290,8 +3330,12 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): 68 -> 69, moving WITH `filesAnnotated`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): 70 -> 71, moving WITH `filesAnnotated`.
     // ⭐ CURRENCY 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): 71 -> 72, moving WITH `filesAnnotated`. MEASURED: this file's run read `expected [ …(72) ] to have a length of 71 but got 72`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): 72 -> 73, moving WITH `filesAnnotated`. MEASURED: this file's run read `expected [ …(73) ] to have a length of 72 but got 73`.
+    // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): 72 -> 75, moving WITH `filesAnnotated`. MEASURED: this file's run read `expected [ …(75) ] to have a length of 72 but got 75`.
+    // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 72 -> 73, moving WITH `filesAnnotated`.
-    expect(corpus.annotatedFiles).toHaveLength(73);
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 76 -> 77, MEASURED on the merged tree by this pin.
+    expect(corpus.annotatedFiles).toHaveLength(77);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

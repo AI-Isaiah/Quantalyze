@@ -4818,7 +4818,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=18 and ARMS_FLOOR=314 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=22 and ARMS_FLOOR=347 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -4972,14 +4972,54 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // `expected 1 to be +0` against SENTINEL_FLOOR=16 first, and ci-anti-skip-gate.contract.test.ts
     // read 17 sentinel-bearing files against the table's 16.
     //
+    // MOVED 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07), 17/299 -> 18/308. The NEW gate
+    // test_sync_status_computed_at_runner_only.sql JOINED and declares `ALL 10 ARMS EXECUTED`,
+    // and test_sync_status_analytics_scope.sql goes 21 -> 20 (arm D15 retired with the release
+    // clause it pinned). MEASURED: the sql-tests step run on the local stack on the merged tree
+    // printed `18 completion sentinel(s) ... covering 308 declared arms`, and
+    // ci-anti-skip-gate.contract.test.ts read 18 sentinel-bearing files against the table's 17.
+    //
+    // RAISED 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10), 17/299 -> 20/316.
+    // THREE files JOINED: test_bridge_outcomes_decision_delete_cascade.sql (`ALL 6 ARMS EXECUTED`),
+    // test_fan_in_failure_cascade.sql (`ALL 8`) and test_fan_in_lock_order_race.sql (`ALL 3`; a
+    // LANE-ONLY gate that needs dblink, declared but not checked against a run). MEASURED: this pin
+    // read `expected 1 to be +0` against SENTINEL_FLOOR=17 once ci.yml carried 20 and 316, and
+    // ci-anti-skip-gate.contract.test.ts read 20 sentinel-bearing files against the table's 17.
+    //
+    // RAISED 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-1 fixes CR-01 and WR-01), 20/316 -> 20/319.
+    // NO file joined; three arms did: test_fan_in_lock_order_race.sql now declares `ALL 5 ARMS
+    // EXECUTED` (FL4, FL5) and test_bridge_outcomes_decision_delete_cascade.sql `ALL 7` (OD7).
+    // MEASURED: ci-anti-skip-gate.contract.test.ts read the sum 319 against ci.yml's 316 before
+    // ci.yml was edited, and the row `test_bridge_outcomes_decision_delete_cascade.sql` as 7 against 6.
+    //
+    // RAISED 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-3 fix SFH M2), 21/331 -> 21/332.
+    // NO file joined; one arm did: test_fan_in_lock_order_race.sql now declares `ALL 8 ARMS
+    // EXECUTED` (FL8, the retry bound). MEASURED: ci-anti-skip-gate.contract.test.ts read the sum 332
+    // against ci.yml's 331 and the race row as 8 against 7 before ci.yml was edited; this test read
+    // `expected 1 to be +0` once ci.yml carried 332.
+    //
+    // RAISED 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-2 fixes WR-01/WR-02 and the RLS audit), 21/328 -> 21/331.
+    // NO file joined; three arms did: test_fan_in_lock_order_race.sql now declares `ALL 7 ARMS
+    // EXECUTED` (FL6, FL7) and test_bridge_outcomes_decision_delete_cascade.sql `ALL 8` (OD8).
+    // MEASURED: ci-anti-skip-gate.contract.test.ts read the sum 331 against ci.yml's 328 and the
+    // delete-cascade row as 8 against 7 before ci.yml was edited.
+    //
+    // MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP), 20 (FANINGRAPH) / 18 (166.5) -> 21 files and
+    // 319 (FANINGRAPH) / 308 (166.5) -> 328 arms. Both phases moved these from the same base (17/299). MEASURED, not
+    // summed: the sql-tests step run on the local stack on the merged tree printed
+    // `97 of 103 SQL self-tests passed — no whole-file skips; 6 excluded (LANE-ONLY, still counted in the static accounting above); 17 of 21 completion sentinel(s) verified against THIS run, covering 328 declared arms.`, and ci-anti-skip-gate.contract.test.ts re-derived the same table.
     // RAISED 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09), 17/299 -> 18/314.
     // test_okx_archive_rebuild.sql JOINED (an ordinary sql-tests gate, not LANE-ONLY: it posts
     // nothing) and declares `ALL 15 ARMS EXECUTED`. MEASURED: ci-anti-skip-gate.contract.test.ts
     // read 18 sentinel-bearing files against the table's 17 (`expected [ ...(18) ] to deeply
     // equal [ ...(17) ]`).
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): both the
+    // OKXHISTORY move (17/299 -> 18/314) and main's (-> 21/332) started from 17/299. The merged ci.yml
+    // table carries every row, so 22/347, re-derived by ci-anti-skip-gate.contract.test.ts on the
+    // merged tree, never by adding the moves.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=18", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=22", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -4990,7 +5030,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=314", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=347", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

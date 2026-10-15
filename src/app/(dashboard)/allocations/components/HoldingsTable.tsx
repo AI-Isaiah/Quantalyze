@@ -60,8 +60,8 @@ import {
 // equality SHAPE is the defect, and a second literal pasted beside the first
 // reproduces it for the next status.
 import {
-  isUntrustedKeySyncStatus,
-  untrustedKeyChipLabel,
+  keyNeedsAttention,
+  keyAttentionChipLabel,
   UNTRUSTED_KEY_SET_NOUN,
   UNKNOWN_KEY_STATUS_ROW_LABEL,
 } from "@/lib/closed-sets";
@@ -154,6 +154,11 @@ export interface HoldingRow {
    *  the key list, so the status is unknown rather than trusted. A key that is
    *  present with a null status leaves this unset and stays trusted. */
   source_key_missing?: boolean;
+  /** Phase 167.1.1 D-02. The key's `disconnected_at`, joined by the dashboard
+   *  layer. REQUIRED (round-1 SFH-04): `null` is the explicit "connected", so a
+   *  builder that omits the field is a type error instead of silently reading a
+   *  soft-disconnected key as connected. */
+  source_key_disconnected_at: string | null;
 }
 
 // ──────────────────────────────────────────────────────────────── new-mode types
@@ -167,7 +172,7 @@ export type SortKey =
   | "dd"
   | "age";
 
-export interface HoldingsTableProps {
+interface HoldingsTableCommonProps {
   /**
    * F4b strategy-row mode — one row per onboarded portfolio strategy. When
    * present this takes precedence over `rows`/`holdings`; the table renders
@@ -218,8 +223,8 @@ export interface HoldingsTableProps {
     string,
     { content: string; updated_at: string } | undefined
   >;
-  // ── New-mode props (Plan 08) — selecting these enables the design table.
-  rows?: DesignHoldingRow[];
+  // ── New-mode props (Plan 08) — `rows` selects the design table (see the
+  //    `HoldingsTableProps` union below, which ties it to the disconnected map).
   /** ref → sync_status (e.g. "revoked") for the row's source api_key. */
   revokedStatusByHoldingId?: Record<string, string | null | undefined>;
   /**
@@ -231,6 +236,24 @@ export interface HoldingsTableProps {
     { top_candidate_strategy_id: string | null }
   >;
 }
+
+/**
+ * Phase 167.1.1 round-1 SFH-04. Design mode (`rows`) REQUIRES the
+ * disconnected-key map, so a caller that omits it is a type error and not a
+ * silent read of a soft-disconnected key as connected. The other modes do not
+ * read the map and may not pass it.
+ */
+export type HoldingsTableProps = HoldingsTableCommonProps &
+  (
+    | {
+        rows: DesignHoldingRow[];
+        /** ref → the source api_key's `disconnected_at` (Phase 167.1.1 D-02).
+         *  A sibling of the status map because that map's value is a status
+         *  string. `null` per ref means connected; the map itself is required. */
+        disconnectedAtByHoldingId: Record<string, string | null | undefined>;
+      }
+    | { rows?: undefined; disconnectedAtByHoldingId?: undefined }
+  );
 
 export function HoldingsTable(props: HoldingsTableProps) {
   if (props.strategyRows) {
@@ -249,6 +272,7 @@ export function HoldingsTable(props: HoldingsTableProps) {
       <DesignHoldingsTable
         rows={props.rows}
         revokedStatusByHoldingId={props.revokedStatusByHoldingId ?? {}}
+        disconnectedAtByHoldingId={props.disconnectedAtByHoldingId}
         flaggedHoldingsByRef={props.flaggedHoldingsByRef ?? {}}
         showRevoked={props.showRevoked ?? true}
         onShowRevokedChange={props.onShowRevokedChange}
@@ -594,12 +618,22 @@ function LegacyHoldingsTable({
   // from the surface with no footer telling the reader it was dropped.
   const visibleHoldings = showRevoked
     ? holdings
-    : holdings.filter((h) => !isUntrustedKeySyncStatus(h.source_key_sync_status));
+    : holdings.filter(
+        (h) =>
+          !keyNeedsAttention({
+            sync_status: h.source_key_sync_status,
+            disconnected_at: h.source_key_disconnected_at,
+          }),
+      );
 
   const hiddenCount = showRevoked
     ? 0
-    : holdings.filter((h) => isUntrustedKeySyncStatus(h.source_key_sync_status))
-        .length;
+    : holdings.filter((h) =>
+        keyNeedsAttention({
+          sync_status: h.source_key_sync_status,
+          disconnected_at: h.source_key_disconnected_at,
+        }),
+      ).length;
 
   const [expandedNoteRowId, setExpandedNoteRowId] = useState<string | null>(
     null,
@@ -663,9 +697,10 @@ function LegacyHoldingsTable({
               // the rejection, `sign_in_failed` means we could not sign in and
               // cannot say why, and a chip naming a cause it cannot support is
               // the same false blame this phase exists to remove.
-              const untrustedLabel = untrustedKeyChipLabel(
-                h.source_key_sync_status,
-              );
+              const untrustedLabel = keyAttentionChipLabel({
+                sync_status: h.source_key_sync_status,
+                disconnected_at: h.source_key_disconnected_at,
+              });
               const isUntrusted = untrustedLabel !== null;
               const numericCell = isUntrusted
                 ? "px-4 py-2 font-metric tabular-nums text-right line-through text-text-muted"
@@ -807,6 +842,11 @@ function LegacyHoldingsTable({
 interface DesignProps {
   rows: DesignHoldingRow[];
   revokedStatusByHoldingId: Record<string, string | null | undefined>;
+  /** Phase 167.1.1 D-02. A sibling of `revokedStatusByHoldingId`, not folded
+   *  into it: that map's value is a status STRING, and a disconnected key keeps
+   *  whatever status it last had. REQUIRED (round-1 SFH-04): an omitted map is
+   *  a type error, never a silent "everything is connected". */
+  disconnectedAtByHoldingId: Record<string, string | null | undefined>;
   flaggedHoldingsByRef: Record<
     string,
     { top_candidate_strategy_id: string | null }
@@ -847,6 +887,7 @@ const DESIGN_TOTAL_COLUMNS = 9;
 function DesignHoldingsTable({
   rows,
   revokedStatusByHoldingId,
+  disconnectedAtByHoldingId,
   flaggedHoldingsByRef,
   showRevoked,
   onShowRevokedChange,
@@ -864,16 +905,23 @@ function DesignHoldingsTable({
   const visibleRows = useMemo(() => {
     if (showRevoked) return rows;
     return rows.filter(
-      (r) => !isUntrustedKeySyncStatus(revokedStatusByHoldingId[r.id]),
+      (r) =>
+        !keyNeedsAttention({
+          sync_status: revokedStatusByHoldingId[r.id],
+          disconnected_at: disconnectedAtByHoldingId[r.id],
+        }),
     );
-  }, [rows, revokedStatusByHoldingId, showRevoked]);
+  }, [rows, revokedStatusByHoldingId, disconnectedAtByHoldingId, showRevoked]);
 
   const hiddenCount = useMemo(() => {
     if (showRevoked) return 0;
     return rows.filter((r) =>
-      isUntrustedKeySyncStatus(revokedStatusByHoldingId[r.id]),
+      keyNeedsAttention({
+        sync_status: revokedStatusByHoldingId[r.id],
+        disconnected_at: disconnectedAtByHoldingId[r.id],
+      }),
     ).length;
-  }, [rows, revokedStatusByHoldingId, showRevoked]);
+  }, [rows, revokedStatusByHoldingId, disconnectedAtByHoldingId, showRevoked]);
 
   const sortedRows = useMemo(() => {
     // Tie-break on row id so equal sort values produce a deterministic order
@@ -975,9 +1023,10 @@ function DesignHoldingsTable({
             {sortedRows.map((row) => {
               const isExpanded = expandedRowId === row.id;
               // D-16 site 6 — the design-mode per-row flag + chip copy.
-              const untrustedLabel = untrustedKeyChipLabel(
-                revokedStatusByHoldingId[row.id],
-              );
+              const untrustedLabel = keyAttentionChipLabel({
+                sync_status: revokedStatusByHoldingId[row.id],
+                disconnected_at: disconnectedAtByHoldingId[row.id],
+              });
               const numericCell =
                 untrustedLabel !== null
                   ? "px-4 py-2 font-metric tabular-nums text-right line-through text-text-muted"

@@ -14,6 +14,8 @@ import {
   checkRoadmapStructure,
   readVerificationStatus,
   runRoadmapCheck,
+  checkStatePosition,
+  runStateCheck,
 } from "../../scripts/check-planning-hygiene";
 
 /**
@@ -729,5 +731,174 @@ describe("Rule 6 ROADMAP-STRUCTURE — a phase heading must be closable by phase
     expect(r, "no .planning/ROADMAP.md in this checkout").not.toBeNull();
     expect(r!.headings).toBeGreaterThan(100);
     expect(r!.violations).toEqual([]);
+  });
+});
+
+/**
+ * Rule 6 arms (d) and (e), and Rule 7 — the shapes that let the gsd-tools
+ * handlers corrupt ROADMAP.md and STATE.md (founder decision 2026-10-15). Each
+ * test below builds the exact shape that corrupted the real file, so a rule
+ * that stops firing on it fails here, and the live-file tests prove the
+ * reshaped files carry none of it.
+ */
+describe("Rule 6d — no heading between a phase heading and its Plans: list", () => {
+  const TABLE = [
+    "| Phase | Plans Complete | Status | Completed |",
+    "|-------|----------------|--------|-----------|",
+    "| 7 ALPHA | 0/1 | Queued | - |",
+  ];
+  const doc = (body: string[]) =>
+    ["## Current Milestone: v9.9", "", "- [ ] **Phase 7: ALPHA**", "", "### Phase 7: ALPHA", "", ...body, "", ...TABLE, ""].join("\n");
+
+  it("is RED on `## Success Criteria` above the list, because update-plan-progress would stop there and insert duplicate rows", () => {
+    const r = checkRoadmapStructure(
+      doc(["**Plans:** 1 plan", "", "## Success Criteria", "", "1. it works", "", "Plans:", "", "- [ ] 7-01-PLAN.md"]),
+    );
+    const d = r.violations.filter((v) => v.includes("rule 6d"));
+    expect(d).toHaveLength(1);
+    expect(d[0]).toContain("ROADMAP.md:9 (Phase 7)");
+    expect(d[0]).toContain("## Success Criteria");
+  });
+
+  it("is RED on a fenced `# comment` too, because the tool's regex is fence-blind", () => {
+    const r = checkRoadmapStructure(doc(["```bash", "# a comment", "```", "Plans:", "- [ ] 7-01-PLAN.md"]));
+    expect(r.violations.filter((v) => v.includes("rule 6d"))).toHaveLength(1);
+  });
+
+  it("is GREEN on the template's bold field form, and on headings after the list", () => {
+    const r = checkRoadmapStructure(
+      doc([
+        "**Success Criteria** (what must be TRUE):",
+        "1. it works",
+        "",
+        "Plans:",
+        "- [ ] 7-01-PLAN.md",
+        "",
+        "#### Notes written after the list",
+      ]),
+    );
+    expect(r.violations).toEqual([]);
+  });
+});
+
+describe("Rule 6e — no unchecked bullet the completion regex would tick for the wrong phase", () => {
+  const TABLE = [
+    "| Phase | Plans Complete | Status | Completed |",
+    "|-------|----------------|--------|-----------|",
+    "| 7 ALPHA | 0/1 | Queued | - |",
+    "| 8 BETA | 0/1 | Queued | - |",
+  ];
+  const doc = (plans: string[]) =>
+    [
+      "## Current Milestone: v9.9",
+      "",
+      "- [ ] **Phase 7: ALPHA** — not yet verified",
+      "- [ ] **Phase 8: BETA** — not yet verified",
+      "",
+      "### Phase 7: ALPHA",
+      "",
+      "Plans:",
+      ...plans,
+      "",
+      "### Phase 8: BETA",
+      "",
+      "Plans:",
+      "- [ ] 8-01-PLAN.md",
+      "",
+      ...TABLE,
+      "",
+    ].join("\n");
+
+  const STUB7 = "- [ ] TBD (run /gsd-plan-phase 7 to break down)";
+
+  it("is GREEN on a fresh insert's stub: the overview bullet is unchecked and comes first, so the regex ticks that", () => {
+    expect(checkRoadmapStructure(doc([STUB7])).violations).toEqual([]);
+  });
+
+  it("is RED on the stub once the phase lists plan rows (164.4.2.1's stub was ticked this way)", () => {
+    const e = checkRoadmapStructure(doc(["- [ ] 7-01-PLAN.md", STUB7])).violations.filter((v) =>
+      v.includes("rule 6e"),
+    );
+    expect(e).toHaveLength(1);
+    expect(e[0]).toContain("TBD (run /gsd-plan-phase 7");
+  });
+
+  it("is RED on the stub once the phase's overview bullet is ticked: the stub is now the first unchecked match", () => {
+    const ticked = doc([STUB7]).replace("- [ ] **Phase 7: ALPHA**", "- [x] **Phase 7: ALPHA**");
+    const e = checkRoadmapStructure(ticked).violations.filter((v) => v.includes("rule 6e"));
+    expect(e).toHaveLength(1);
+    expect(e[0]).toContain("TBD (run /gsd-plan-phase 7");
+  });
+
+  it("is RED on a stub naming a DIFFERENT phase than the section it sits in", () => {
+    const e = checkRoadmapStructure(doc(["- [ ] TBD (run /gsd-plan-phase 8 to break down)"])).violations.filter(
+      (v) => v.includes("rule 6e"),
+    );
+    expect(e).toHaveLength(1);
+  });
+
+  it("is RED on a plan bullet whose prose names another phase (164.3-07 was ticked when 159 closed)", () => {
+    const r = checkRoadmapStructure(doc(["- [ ] 7-01-PLAN.md — re-check after Phase 8 ships"]));
+    const e = r.violations.filter((v) => v.includes("rule 6e"));
+    expect(e).toHaveLength(1);
+    expect(e[0]).toContain("names Phase 8");
+  });
+
+  it("is GREEN when the phase is named without the word, the stub is rephrased, or the bullet is ticked", () => {
+    expect(
+      checkRoadmapStructure(
+        doc([
+          "- [ ] 7-01-PLAN.md — re-check after 8 BETA ships",
+          "- [ ] TBD — plans not listed yet",
+          "- [x] 7-02-PLAN.md — after Phase 8",
+        ]),
+      ).violations,
+    ).toEqual([]);
+  });
+
+  it("a milestone bullet's own leading **Phase N label is the line the tool is meant to tick, so it is GREEN", () => {
+    const r = checkRoadmapStructure(doc(["- [ ] 7-01-PLAN.md"]));
+    expect(r.violations).toEqual([]);
+    // ...but a second phase named later on that same bullet is still RED.
+    const twice = doc(["- [ ] 7-01-PLAN.md"]).replace(
+      "- [ ] **Phase 7: ALPHA** — not yet verified",
+      "- [ ] **Phase 7: ALPHA** — waits on Phase 8",
+    );
+    expect(checkRoadmapStructure(twice).violations.filter((v) => v.includes("rule 6e"))).toHaveLength(1);
+  });
+});
+
+describe("Rule 7 STATE-POSITION — Current Position holds one line per field the STATE handlers edit", () => {
+  const state = (position: string[], after: string[] = []) =>
+    ['---', 'gsd_state_version: "1.0"', "status: executing", "---", "", "## Current Position", "", ...position, "", "## Session", "", ...after, ""].join(
+      "\n",
+    );
+  const ONE = ["Phase: 7 (ALPHA) — EXECUTING", "Plan: 1 of 2", "Status: Executing", "Last activity: 2026-10-15 — x", "Progress: [█░] 50%"];
+
+  it("is RED on a second `Phase:` line, the shape state.advance-plan refused on", () => {
+    const v = checkStatePosition(state([...ONE, "", "Phase: 6 (OLD) — COMPLETE"]));
+    expect(v).toHaveLength(1);
+    expect(v[0]).toContain("2 `Phase:` lines");
+    expect(v[0]).toContain("refuses outright");
+  });
+
+  it("is RED on a second `Status:` or `Last activity:` line, which a handler would edit instead of the live one", () => {
+    const v = checkStatePosition(state(["Status: retained old value", ...ONE, "last activity: 2026-01-01"]));
+    expect(v.map((x) => x.match(/`([A-Za-z ]+):`/)?.[1])).toEqual(["Status", "Last activity"]);
+  });
+
+  it("is GREEN on one line per field; an indented line and lines outside the section do not count", () => {
+    expect(checkStatePosition(state([...ONE, "      Phase: indented lineage"], ["Phase: in another section"]))).toEqual([]);
+  });
+
+  it("an `### …` subsection stays inside the section, as stateCurrentPositionSlice reads it", () => {
+    expect(checkStatePosition(state([...ONE, "", "### Retained block", "Plan: 3 of 3"]))).toHaveLength(1);
+  });
+
+  it("the live STATE.md passes, and runStateCheck is silent when there is no STATE.md", () => {
+    expect(runStateCheck(fixtureRoot)).toBeNull();
+    const live = runStateCheck(process.cwd());
+    expect(live, "no .planning/STATE.md in this checkout").not.toBeNull();
+    expect(live).toEqual([]);
   });
 });

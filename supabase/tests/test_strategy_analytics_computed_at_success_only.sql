@@ -21,12 +21,18 @@
 --   0   applied-ness   the trigger is in the catalog, enabled, BEFORE UPDATE ROW
 --                      only, calls the function, and the function is not
 --                      executable by anon or authenticated.
---   C1  success control a `complete` row with a 30-day-old computed_at and one
---                      running stitch_composite job, resolved by
---                      mark_compute_job_done: computed_at MOVES. Without C1 a
---                      trigger that holds on EVERY update passes every arm below.
---                      C1 passes on a tree without the migration BY DESIGN (it
---                      asserts behaviour that must not change); its RED is its twin.
+--   C1  success control a `complete` row with a 30-day-old computed_at and a
+--                      RUNNER-SHAPED success write (INSERT ... ON CONFLICT DO UPDATE
+--                      with computed_at = the database clock and status complete,
+--                      the statement the analytics runner emits since Phase 166.5):
+--                      computed_at MOVES. Without C1 a trigger that holds on EVERY
+--                      update passes every arm below. C1 passes on a tree without the
+--                      migration BY DESIGN (it asserts behaviour that must not change);
+--                      its RED is its twin. It used to drive mark_compute_job_done,
+--                      back when the bridge stamped the date; the bridge writes none now
+--                      (a write and its author look the same inside one transaction,
+--                      where now() is constant, so C1 proves "a success write moves the
+--                      date", never "who wrote it").
 --   F1  D-04 headline  a complete_with_warnings row, same fixture, resolved by
 --                      mark_compute_job_failed(..., 'permanent', ...) through
 --                      branch (b): the row reads failed and computed_at equals
@@ -71,6 +77,17 @@
 -- otherwise RAISE at apply time, the gate would never run, and no arm could be
 -- the first failure. The apply list ends with the new migration, so a twin's edit
 -- lands on a definition nothing later replaces.
+-- ⭐ THE LIST DELIBERATELY STOPS AT 20261013120000 (Phase 166.5, plan 06; a deviation from
+-- the pattern map, which proposed appending 20261023120000_sync_status_runner_stamps_computed_at.sql).
+-- With that migration last, no bridge write names computed_at, so the F1, A1 and A2 twins
+-- (which weaken THIS trigger) no longer change any outcome: the bridge never asked the trigger
+-- to hold a date, and a twin that cannot change an outcome stops biting, a defect the runner
+-- exits 1 on. Keeping the list means the mutation lane still exercises the trigger against a
+-- bridge that writes the date, which is the layer this gate guards. The `sql-tests` lane
+-- replays EVERY migration, so there the bridge writes no date and the trigger is
+-- defence in depth: F1, A1 and A2 hold for two reasons at once. Only C1 changed. The bridge
+-- layer's own date arms live in test_sync_status_computed_at_runner_only.sql, which leaves the
+-- trigger out for the mirror-image reason.
 -- RE-BASED 2026-10-13 (merge with origin/main): the migration moved from 20261009140000 to
 -- 20261013120000 (past PROD's tip), so it now applies AFTER Phase 164.6.6.3.4 STATUSBRIDGE's
 -- 20261009120000_sync_status_analytics_scope.sql, the latest definition of
@@ -149,18 +166,28 @@ BEGIN
   INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, computed_at)
   VALUES (s_c, 'complete', FALSE, v_seed);
 
-  tok := gen_random_uuid();
-  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
-  VALUES (s_c, 'stitch_composite', 'running', tok, 1, 3)
-  RETURNING id INTO j;
+  -- Phase 166.5 (COMPUTEDATSTAMP, R-02, D-03): the control is a RUNNER-SHAPED write now,
+  -- not a mark RPC. The bridge writes no date any more (a finished job's mark leaves
+  -- computed_at where it was), so driving mark_compute_job_done would assert a move that
+  -- no longer happens. The analytics runner stamps the date itself, in the same write as
+  -- the metrics: an upsert of the status and computed_at = the database clock ('now',
+  -- the statement PostgREST emits for the runner's write: INSERT ... ON CONFLICT
+  -- (strategy_id) DO UPDATE SET computation_status, computed_at from EXCLUDED). It
+  -- reaches the row as an UPDATE, so the BEFORE UPDATE trigger under test sees it. No
+  -- UPDATE statement appears in this file: the conflict arm is the runner's own path.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, computed_at)
+  SELECT strategy_id, computation_status, computation_warned, computed_at
+    FROM json_populate_record(NULL::strategy_analytics,
+           json_build_object('strategy_id', s_c, 'computation_status', 'complete',
+                             'computation_warned', FALSE, 'computed_at', 'now'))
+  ON CONFLICT (strategy_id) DO UPDATE
+     SET computation_status = EXCLUDED.computation_status,
+         computed_at        = EXCLUDED.computed_at;
 
-  PERFORM mark_compute_job_done(j, tok);
-
-  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j;
   SELECT computation_status, computed_at INTO v_status, v_at
     FROM strategy_analytics WHERE strategy_id = s_c;
-  IF v_jobstat IS DISTINCT FROM 'done' OR v_status IS DISTINCT FROM 'complete' THEN
-    RAISE EXCEPTION 'TEST FAILED (C1-SETUP): the job reads % and the row reads %, not done and complete, so branch (c) of the bridge was never asked to stamp and the assertion below would pass or fail for the wrong reason. Either the claim token was rejected (the fence needs status = running and a matching token) or an RPC signature moved.', COALESCE(v_jobstat, 'NULL'), COALESCE(v_status, 'NULL');
+  IF v_status IS DISTINCT FROM 'complete' THEN
+    RAISE EXCEPTION 'TEST FAILED (C1-SETUP): the row reads %, not complete, so the runner-shaped success write did not reach the row and the assertion below would pass or fail for the wrong reason.', COALESCE(v_status, 'NULL');
   END IF;
 
   -- RED-UNDER: make the trigger's predicate unconditional (`IF TRUE THEN`), i.e.

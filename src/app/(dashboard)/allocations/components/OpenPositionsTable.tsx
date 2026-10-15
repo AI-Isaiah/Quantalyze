@@ -26,8 +26,8 @@ import { ResponsiveTable } from "@/components/ResponsiveTable";
 // local equality on `sync_status` here.
 import {
   UNKNOWN_KEY_STATUS_ROW_LABEL,
-  isUntrustedKeySyncStatus,
-  untrustedKeyChipLabel,
+  keyNeedsAttention,
+  keyAttentionChipLabel,
 } from "@/lib/closed-sets";
 // Phase 167.1 review round 2 WR-05 — the footer qualifier's wording comes from
 // the ONE clause builder the composer's AUM marker uses, so both surfaces name
@@ -78,6 +78,11 @@ export interface OpenPositionRow {
    *  the key list, so the status is unknown rather than trusted. A key that is
    *  present with a null status leaves this unset and stays trusted. */
   source_key_missing?: boolean;
+  /** Phase 167.1.1 D-02. The key's `disconnected_at`, joined by the dashboard
+   *  layer. REQUIRED (round-1 SFH-04): `null` is the explicit "connected", so a
+   *  builder that omits the field is a type error instead of silently reading a
+   *  soft-disconnected key as connected. */
+  source_key_disconnected_at: string | null;
 }
 
 interface OpenPositionsTableProps {
@@ -155,7 +160,10 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
     const pnl = known ? (r.unrealized_pnl_usd as number) : 0;
     totalUnrealized += pnl;
     if (known) reported += 1;
-    const part = isUntrustedKeySyncStatus(r.source_key_sync_status)
+    const part = keyNeedsAttention({
+      sync_status: r.source_key_sync_status,
+      disconnected_at: r.source_key_disconnected_at,
+    })
       ? untrusted
       : r.source_key_missing === true
         ? unknownStatus
@@ -207,9 +215,10 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
               // D-16 site 7. The chip is per-status copy, not one shared
               // sentence — `revoked` names a cause a sign-in failure does not
               // have, and vice versa.
-              const untrustedLabel = untrustedKeyChipLabel(
-                r.source_key_sync_status,
-              );
+              const untrustedLabel = keyAttentionChipLabel({
+                sync_status: r.source_key_sync_status,
+                disconnected_at: r.source_key_disconnected_at,
+              });
               const isUntrusted = untrustedLabel !== null;
               const numericCell = isUntrusted
                 ? "px-4 py-2 font-metric tabular-nums text-right line-through text-text-muted"

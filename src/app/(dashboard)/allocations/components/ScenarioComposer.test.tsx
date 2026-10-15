@@ -16547,6 +16547,9 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     /** Defaults true. False drops the key from BOTH eligibility sets (and
      *  therefore from the contributing set too). */
     eligible?: boolean;
+    /** Phase 167.1.1 D-02. Defaults null (connected). A timestamp makes the
+     *  key soft-disconnected, whatever its `status`. */
+    disconnectedAt?: string | null;
   }
 
   /** A book built from `AtKeySpec`s. Every spec carries its OWN
@@ -16558,7 +16561,11 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
       .filter((s) => s.eligible !== false && s.contributing !== false)
       .map((s) => s.id);
     return makePayload({
-      apiKeys: specs.map((s) => ({ ...winApiKey(s.id), sync_status: s.status })),
+      apiKeys: specs.map((s) => ({
+        ...winApiKey(s.id),
+        sync_status: s.status,
+        disconnected_at: s.disconnectedAt ?? null,
+      })),
       holdingsSummary: specs.map((s) =>
         s.derivPnlUsd !== undefined
           ? {
@@ -17761,6 +17768,53 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     expect(markers[0].textContent).toBe(
       "Excludes $3,300 from keys that are not connected.",
     );
+  });
+
+  // Phase 167.1.1 D-02 (founder, 2026-10-15): a soft-disconnected key's holdings
+  // are disclosed as "keys needing attention", the same noun an untrusted key's
+  // use, whatever the key's `sync_status`. On this path (the narrowed book
+  // branch, the one production runs) a soft-disconnected key is never
+  // contributing, so its dollars are NOT in the AUM: they were excluded before
+  // D-02 and still are, so the field does not move. Only the NAME of the
+  // excluded part changes, from "keys that are not connected" (C2 WR-03) to
+  // "keys needing attention". They are in the total only in the degrade branch
+  // (round-1 WR-03).
+  it("167.1.1 D-02: a soft-disconnected key (sync_status complete) is named 'Excludes $3,300 from keys needing attention.', not 'keys that are not connected' — and the field is unchanged", () => {
+    const AT_KEY_SOFT_DISCONNECTED = "aumtrust-key-soft";
+    const payload = atBook([
+      {
+        id: AT_KEY_TRUSTED,
+        status: null,
+        venue: "binance",
+        symbol: "AUMTRUST-A",
+        spotUsd: AT_B_TRUSTED_USD,
+      },
+      {
+        id: AT_KEY_SOFT_DISCONNECTED,
+        status: "complete",
+        venue: "okx",
+        symbol: "AUMTRUST-SOFT",
+        spotUsd: 3_300,
+        eligible: false,
+        disconnectedAt: "2026-10-01T00:00:00Z",
+      },
+    ]);
+    expectDistinctTriples(payload);
+    // Fixture self-proof: the key is in the key list, carries a trusted sync
+    // status AND a disconnect timestamp, and is in no eligible set.
+    const softKey = payload.apiKeys.find((k) => k.id === AT_KEY_SOFT_DISCONNECTED);
+    expect(softKey?.sync_status).toBe("complete");
+    expect(softKey?.disconnected_at).toBe("2026-10-01T00:00:00Z");
+    expect(payload.eligibleApiKeyIds).not.toContain(AT_KEY_SOFT_DISCONNECTED);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_TRUSTED_USD));
+    const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].textContent).toBe(
+      "Excludes $3,300 from keys needing attention.",
+    );
+    expect(markers[0].textContent).not.toContain("keys that are not connected");
   });
 
   it("167.1.2 SC-4: beside includes and excluded untrusted parts, the trusted exclusion is still named, never swallowed by the shared-noun form", () => {

@@ -38,6 +38,7 @@ function spotRow(overrides: Partial<HoldingRow> = {}): HoldingRow {
     unrealized_pnl_usd: null,
     api_key_id: "key-a",
     source_key_sync_status: "complete",
+    source_key_disconnected_at: null,
     ...overrides,
   };
 }

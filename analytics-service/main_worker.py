@@ -421,6 +421,21 @@ def _is_serialization_failure(exc: BaseException) -> bool:
     return _PREEMPTED_MESSAGE_LITERAL in msg
 
 
+# Phase 164.9.3.1 (review round 3, WR-01): `mark_compute_job_failed` retries its
+# fan-in closure lock pass at most 10 times and then raises SQLSTATE 55P03
+# (lock_not_available). The whole RPC rolled back, so the job is still `running`
+# and the watchdog owns it. That error must NOT reach dispatch_tick's catch-all:
+# the catch-all re-marks the job through `_mark_failed_fallback` with
+# error_kind='unknown', which turns a permanent failure into failed_retry (its
+# waiting children stay stranded) or makes every descendant inherit 'unknown'.
+# Matched on the structured SQLSTATE only, the way 55006 is, never on text.
+_SQLSTATE_LOCK_NOT_AVAILABLE = "55P03"
+
+
+def _is_lock_bound_failure(exc: BaseException) -> bool:
+    return getattr(exc, "code", None) == _SQLSTATE_LOCK_NOT_AVAILABLE
+
+
 # ---------------------------------------------------------------------------
 # Missing-RPC fallback (audit-2026-05-07 C-0190)
 # ---------------------------------------------------------------------------
@@ -994,19 +1009,46 @@ async def dispatch_tick(worker_id: str) -> None:
                         },
                     ).execute()
 
-                await _safe_mark(
-                    _mark_failed,
-                    job_id=job["id"],
-                    claim_token=claim_token,
-                    worker_id=worker_id,
-                    label="mark_failed",
-                )
-                logger.warning(
-                    "Job %s failed (%s): %s",
-                    job["id"],
-                    result.error_kind,
-                    result.error_message,
-                )
+                try:
+                    await _safe_mark(
+                        _mark_failed,
+                        job_id=job["id"],
+                        claim_token=claim_token,
+                        worker_id=worker_id,
+                        label="mark_failed",
+                    )
+                except Exception as lock_exc:  # noqa: BLE001
+                    if not _is_lock_bound_failure(lock_exc):
+                        raise
+                    # The cascade's lock-retry bound tripped (55P03). The RPC
+                    # rolled back whole, so the job is still `running` and the
+                    # watchdog reclaims it. Do NOT fall into the generic
+                    # fallback below: it would re-mark the job as 'unknown'.
+                    # The original error kind and message are logged here so
+                    # the real failure is not lost.
+                    logger.error(
+                        "MARK_FAILED_LOCK_BOUND: job %s: mark_compute_job_failed "
+                        "hit the fan-in closure lock-retry bound (SQLSTATE 55P03: %s). "
+                        "The job stays running for the watchdog. Original failure "
+                        "(%s): %s",
+                        job["id"],
+                        lock_exc,
+                        result.error_kind,
+                        result.error_message,
+                        extra={
+                            "event_type": "mark_failed_lock_bound",
+                            "job_id": job["id"],
+                            "error_kind": result.error_kind,
+                            "worker_id": worker_id,
+                        },
+                    )
+                else:
+                    logger.warning(
+                        "Job %s failed (%s): %s",
+                        job["id"],
+                        result.error_kind,
+                        result.error_message,
+                    )
 
             elif result.outcome == DispatchOutcome.DEFERRED:
                 logger.info("Job %s deferred (handler already called defer_compute_job)", job["id"])

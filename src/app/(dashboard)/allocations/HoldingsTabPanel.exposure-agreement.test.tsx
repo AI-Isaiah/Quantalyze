@@ -39,6 +39,11 @@ import { HoldingsTabPanel } from "./HoldingsTabPanel";
 import { EMPTY_EXPOSURE } from "./lib/exposure-props";
 import { fetchLatestHoldingsPerKey } from "@/lib/latest-holdings-per-key";
 import { derivePhase07Fields } from "@/lib/queries";
+import {
+  holdingsByRef,
+  keyStateMapsOf,
+  summarizeLiveHoldings,
+} from "./lib/live-holdings-summary";
 import { formatCurrency } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -59,6 +64,9 @@ type KeyFx = {
   account_share_kind: string | null;
   account_shared_with_api_key_id: string | null;
   disconnected_at: string | null;
+  /** 167.1.1 SC-1: the key's sync status as the payload carries it. Absent
+   *  means "complete", which every describe before SC-1 relies on. */
+  sync_status?: string;
 };
 
 type HoldingFx = {
@@ -281,7 +289,7 @@ async function readBook(world: World) {
       is_active: true,
       exchange: k.exchange,
       label: k.label,
-      sync_status: "complete",
+      sync_status: k.sync_status ?? "complete",
       last_sync_at: "2026-10-04T04:00:00+00:00",
       disconnected_at: k.disconnected_at,
       venue_account_id: k.venue_account_id,
@@ -725,5 +733,125 @@ describe("one key is one strategy: two live keys on one symbol are two rows ever
     // 30000 + 25000. Counting the account twice would read 95000.
     expect(s.holdingsTotal).toBe(55000);
     expect(s.gross?.value).toBe(55000);
+  });
+});
+
+describe("167.1.1 SC-1: two keys, one venue and asset, in the AUM, Open Positions and the marker", () => {
+  // key-a is healthy; key-b is revoked. Different accounts, so D-08 (one row
+  // per key) applies, not D-10 (one key per account per day).
+  const KEY_A = key("key-a", "binance", "Alpha", { venue_account_id: "acct-A1" });
+  const KEY_B = key("key-b", "binance", "Beta", {
+    venue_account_id: "acct-B1",
+    sync_status: "revoked",
+  });
+
+  // key-b's rows carry the OLDER asof on purpose: the derive keeps the first
+  // row of an equal-asof tie, and input order is not guaranteed, so only a
+  // strictly older day makes the booked key (scope key alone) deterministically
+  // drop key-b. Nothing here is a tie.
+  const world = (): World => ({
+    keys: [KEY_A, KEY_B],
+    holdings: [
+      spot("key-a", "binance", "2026-10-03", "2026-10-03T04:00:00+00:00", "BTC", 40000),
+      spot("key-b", "binance", "2026-10-02", "2026-10-02T04:00:00+00:00", "BTC", 25000),
+      deriv("key-a", "binance", "2026-10-03", "2026-10-03T04:00:00+00:00", "BTC-USDT-SWAP", "long", 100000, {
+        unrealized_pnl_usd: 1200,
+      }),
+      deriv("key-b", "binance", "2026-10-02", "2026-10-02T04:00:00+00:00", "BTC-USDT-SWAP", "short", 50000, {
+        unrealized_pnl_usd: -300,
+      }),
+    ],
+  });
+
+  const SPOT_REF = "holding:binance:BTC:spot";
+  const SWAP_REF = "holding:binance:BTC-USDT-SWAP:derivative";
+
+  /** The summarizer's arguments the way the composer builds them: the payload's
+   *  key list through `keyStateMapsOf`, the derive's rows through `holdingsByRef`. */
+  function markerArgs(
+    book: Awaited<ReturnType<typeof readBook>>,
+    contributingApiKeyIds: string[],
+  ): Parameters<typeof summarizeLiveHoldings>[0] {
+    const { statusByKeyId, disconnectedAtByKeyId } = keyStateMapsOf(book.apiKeys);
+    return {
+      toggleByScopeRef: { [SPOT_REF]: true, [SWAP_REF]: true },
+      holdingsByRef: holdingsByRef(book.phase07.holdingsSummary),
+      contributingApiKeyIds,
+      managerSideApiKeyIds: [],
+      statusByKeyId,
+      disconnectedAtByKeyId,
+      eligibleApiKeyIds: undefined,
+    };
+  }
+
+  it("Holdings: both keys' BTC spot rows survive and total 65000", async () => {
+    const book = await readBook(world());
+    renderPanel(book);
+    const s = readSurfaces();
+
+    expect(s.holdings).toEqual([
+      "Binance — Alpha|binance|BTC|spot",
+      "Binance — Beta|binance|BTC|spot",
+    ]);
+    // 40000 + 25000.
+    expect(s.holdingsTotal).toBe(65000);
+  });
+
+  it("Open Positions: both keys' swap rows survive, and the revoked key's part is disclosed", async () => {
+    const book = await readBook(world());
+    renderPanel(book);
+    const s = readSurfaces();
+
+    expect(s.positions).toEqual([
+      "Binance — Alpha|binance|BTC-USDT-SWAP|derivative",
+      "Binance — Beta|binance|BTC-USDT-SWAP|derivative",
+    ]);
+    // 100000 + 50000.
+    expect(s.positionsTotal).toBe(150000);
+    expect(
+      within(section("Open Positions")).getByTestId("open-positions-untrusted-note"),
+    ).toBeTruthy();
+  });
+
+  it("the 167.1 marker, degrade branch: key-b's part is 24700 over 2 rows inside a total of 65900", async () => {
+    const book = await readBook(world());
+    const byRef = holdingsByRef(book.phase07.holdingsSummary);
+    // Two rows under each ref: one per key.
+    expect(byRef.get(SPOT_REF)?.length).toBe(2);
+    expect(byRef.get(SWAP_REF)?.length).toBe(2);
+
+    const m = summarizeLiveHoldings(markerArgs(book, []));
+    // Spot 40000 + 25000, swap equity 1200 + -300.
+    expect(m.total).toBe(65900);
+    // key-b: 25000 + -300.
+    expect(m.untrusted.amount).toBe(24700);
+    expect(m.untrusted.count).toBe(2);
+  });
+
+  it("the 167.1 marker, narrowed branch (what production runs): key-a is the total, key-b is excluded and named", async () => {
+    // Round-1 WR-02. In production `contributingApiKeyIds` is a subset of the
+    // eligible keys, and eligibility excludes a revoked key, so key-b is NEVER
+    // contributing here. Passing ["key-a", "key-b"] asserted a state the payload
+    // cannot produce. The narrowed branch leaves key-b's rows out of `total`
+    // and puts them in `excludedUntrusted`, which is what this arm pins.
+    const book = await readBook(world());
+    const m = summarizeLiveHoldings({
+      ...markerArgs(book, ["key-a"]),
+      eligibleApiKeyIds: ["key-a"],
+    });
+
+    // Hand-typed oracle, never read back from the code under test.
+    // total = key-a only: spot 40000 + swap equity 1200 (the derivative counts
+    // its unrealized P&L, not the 100000 notional) = 41200.
+    expect(m.total).toBe(41200);
+    // excludedUntrusted = key-b only: spot 25000 + swap equity -300 = 24700,
+    // over 2 rows (one spot, one swap).
+    expect(m.excludedUntrusted.amount).toBe(24700);
+    expect(m.excludedUntrusted.count).toBe(2);
+    // Nothing of key-b is in the total, so the includes-side part is empty.
+    expect(m.untrusted.count).toBe(0);
+    expect(m.untrusted.amount).toBe(0);
+    // Under the booked key (scope key without api_key_id) key-b's older rows
+    // are dropped by the derive, so the count above falls 2 -> 0.
   });
 });

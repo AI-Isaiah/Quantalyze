@@ -1288,8 +1288,9 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
   // boot, then the seam, then the first line naming `GITHUB_ENV`, then the first
   // DB-touching step. One `expect` per condition, so a failure names which broke.
   it("each CI job that exports the lane handoff asserts loopback first: boot, then --assert-local-handoff, then the first GITHUB_ENV write, then the first DB-touching step (Phase 164.9.4 D-04)", () => {
+    // Phase 164.9.8.1 PYXDIST (2026-10-14): the python row's first DB step moved from "pytest --cov=services" to the parallel command (D-07); the old substring was seen RED against the new ci.yml.
     const rows = [
-      ["python", "test-db-drift", "pytest --cov=services"],
+      ["python", "test-db-drift", "pytest -n auto --dist loadgroup --cov=services"],
       ["e2e-seeded", "lighthouse-mobile", "SEED_CONFIRM_STAGING=true npx tsx scripts/seed-demo-data.ts"],
     ] as const;
     // Anti-vacuity: a shortened row list would pass every check below for the
@@ -1338,6 +1339,125 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
         `${job} carries the '*@127.0.0.1:*' glob, which accepts ?host=/hostaddr= overrides (D-04, WR-08)`,
       ).toBe(false);
     }
+  });
+
+  // Phase 164.9.8.1 D-07 (2026-10-14). The "Keep byte-identical with Makefile `test:`"
+  // comment in ci.yml was a comment ONLY until this pin: nothing failed when the two
+  // drifted, so a local `make test` could quietly stop being the CI gate (serial,
+  // a dropped floor, or `PYTEST = true`). The CI python job and the Makefile `test:`
+  // recipe must carry the same argument string after the executable, it must run
+  // parallel (`-n auto --dist loadgroup`) and it must still enforce the 80 floor.
+  // `$(PYTEST)` is the venv path, which is why only the argument string can be shared.
+  it("the CI python job and Makefile `test:` run byte-identical pytest arguments, in parallel and with the 80 floor (Phase 164.9.8.1 D-07)", () => {
+    // Makefile side: the TAB-prefixed recipe lines under `test:`.
+    const mk = read("analytics-service/Makefile").split("\n");
+    const at = mk.indexOf("test:");
+    expect(at, "analytics-service/Makefile has no `test:` target (D-07)").toBeGreaterThan(-1);
+    const recipe: string[] = [];
+    for (let i = at + 1; i < mk.length && mk[i].startsWith("\t"); i++) recipe.push(mk[i]);
+    const commands = recipe.filter((l) => !l.startsWith("\t#"));
+    const pytestLines = commands.filter((l) => l.startsWith("\t$(PYTEST) "));
+    expect(
+      commands.length,
+      `the Makefile \`test:\` recipe runs ${commands.length} command(s) (${JSON.stringify(commands)}); exactly one \`$(PYTEST) ...\` line is allowed, a second command can swallow or replace the gate (D-07)`,
+    ).toBe(1);
+    expect(pytestLines.length, "the Makefile `test:` recipe has no TAB + `$(PYTEST) ` line (D-07)").toBe(1);
+    const makeArgs = pytestLines[0].slice("\t$(PYTEST) ".length);
+    expect(makeArgs.trim(), "AIM: the Makefile `test:` argument string is empty (D-07)").not.toBe("");
+
+    // Binary and rule guards (adapted from ci-mypy-strict-surface's makefileBinaryProblems):
+    // `PYTEST = true` or a second `test:` rule leaves the recipe line intact and runs nothing.
+    const nonRecipe = mk.filter((l) => !l.startsWith("\t"));
+    const assignments = nonRecipe.filter((l) =>
+      /^\s*(?:(?:override|export|private)\s+)*(?:define\s+PYTEST\b|PYTEST\s*(?::::?=|::=|[:?+!]?=))/.test(l),
+    );
+    expect(
+      assignments.length === 1 && /^PYTEST\s*=\s*\$\(VENV\)\/bin\/pytest\s*$/.test(assignments[0]),
+      `the Makefile \`PYTEST\` variable is assigned by ${JSON.stringify(assignments)}; exactly one \`PYTEST = $(VENV)/bin/pytest\` is allowed (D-07)`,
+    ).toBe(true);
+    const rules = nonRecipe.filter((l) => {
+      const head = l.replace(/#.*/, "");
+      const colon = head.indexOf(":");
+      if (colon === -1 || head.startsWith(".")) return false;
+      return head.slice(0, colon).trim().split(/\s+/).includes("test");
+    });
+    expect(
+      rules.length,
+      `${rules.length} Makefile rule line(s) name \`test\` as a target (${JSON.stringify(rules)}); exactly one is allowed, GNU make runs the LATER recipe (D-07)`,
+    ).toBe(1);
+
+    // CI side: the python job block, live lines only, exactly one pytest invocation.
+    const start = CI.indexOf("\n  python:\n");
+    expect(start, "the python job is gone from ci.yml (D-07)").toBeGreaterThan(-1);
+    const end = CI.indexOf("\n  test-db-drift:\n", start);
+    expect(end, "could not find the end of the python block (next job test-db-drift) (D-07)").toBeGreaterThan(start);
+    const pyBlock = CI.slice(start, end);
+    const rawLines = pyBlock.split("\n");
+    // An invocation is pytest in COMMAND position: first word after an optional `- run:` / `run:`
+    // prefix or a shell separator (`&&`, `||`, `;`, `|`), allowing env assignments, `python -m`
+    // and a path prefix. Prose that merely mentions pytest (an `echo "...pytest's..."`) is not one.
+    const INVOCATION =
+      /(?:^|&&|\|\||;|\|)\s*(?:-\s+)?(?:run:\s*)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:(?:\S*\/)?python3?\s+-m\s+)?(?:\S*\/)?pytest(?=\s|$)/;
+    const live = rawLines
+      .map((text, idx) => ({ text, idx, t: text.trim() }))
+      .filter((l) => l.t !== "" && !l.t.startsWith("#"));
+    const invocations = live.filter((l) => INVOCATION.test(l.t));
+    expect(
+      invocations.length,
+      `the ci.yml python job carries ${invocations.length} live pytest invocation(s) (${JSON.stringify(invocations.map((l) => l.t))}); exactly one is allowed (D-07)`,
+    ).toBe(1);
+    const inv = invocations[0];
+    const invMatch = INVOCATION.exec(inv.t);
+    if (invMatch === null) throw new Error(`the pytest invocation no longer matches its own filter: ${inv.t}`);
+    const ciArgs = inv.t.slice(invMatch.index + invMatch[0].length).trim();
+
+    expect(
+      ciArgs,
+      "the ci.yml python pytest arguments differ from the Makefile `test:` arguments, so `make test` is no longer the CI gate (D-07)",
+    ).toBe(makeArgs);
+    expect(ciArgs, "the python gate dropped `-n auto --dist loadgroup` (D-07)").toContain("-n auto --dist loadgroup");
+    expect(ciArgs, "the python gate dropped `--cov-fail-under=80`, so the coverage floor is no longer enforced (D-07)").toContain(
+      "--cov-fail-under=80",
+    );
+    // (c) EQUALS the D-06 literal. The checks above cannot see `--cov-fail-under=0` or `|| true`
+    // appended to BOTH sides: equality moves with the edit and `toContain` still finds the 80 earlier.
+    // Both sides are already equal here, so one comparison covers ci.yml and the Makefile.
+    const D06_ARGS =
+      "-n auto --dist loadgroup --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80";
+    expect(
+      ciArgs,
+      "the python pytest arguments (ci.yml and Makefile `test:`) are not exactly the D-06 command: a suffix such as `--cov-fail-under=0` or `|| true`, a reordered or an extra flag can neutralise the gate (D-07)",
+    ).toBe(D06_ARGS);
+
+    // (a) the STEP that runs the gate must be unconditional and blocking. A step is the lines from its
+    // `      - ` line to the next one. Step-level keys sit at indent 8 or inline after the dash.
+    let stepStart = inv.idx;
+    while (stepStart > 0 && !/^ {6}- /.test(rawLines[stepStart])) stepStart--;
+    let stepEnd = inv.idx + 1;
+    while (stepEnd < rawLines.length && !/^ {6}- /.test(rawLines[stepEnd])) stepEnd++;
+    const stepKeys = rawLines
+      .slice(stepStart, stepEnd)
+      .filter((l) => /^ {6}(?:- | {2})(?:continue-on-error|if)\s*:/.test(l));
+    expect(
+      stepKeys,
+      `the ci.yml python pytest step carries ${JSON.stringify(stepKeys.map((l) => l.trim()))}; a gate step with \`continue-on-error:\` or \`if:\` can fail or be skipped without failing the job (D-07)`,
+    ).toEqual([]);
+    expect(
+      /^ {4}continue-on-error\s*:/m.test(pyBlock),
+      "the ci.yml python job carries a JOB-level continue-on-error, so a red pytest no longer fails the job the `frontend` aggregator reads (D-07)",
+    ).toBe(false);
+
+    // (b) PYTEST_ADDOPTS is appended to every pytest command line and a LATER flag wins
+    // (`-p no:xdist`, `--cov-fail-under=0`), so it must not be set at workflow, job or step level,
+    // nor exported from a run body into $GITHUB_ENV.
+    const jobsAt = CI.indexOf("\njobs:");
+    if (jobsAt < 0) throw new Error("ci.yml has no top-level `jobs:` key, so the workflow-level header cannot be isolated");
+    const header = CI.slice(0, jobsAt);
+    const addopts = liveLines(`${header}\n${pyBlock}`).filter((l) => l.includes("PYTEST_ADDOPTS"));
+    expect(
+      addopts,
+      `ci.yml sets PYTEST_ADDOPTS for the python job (${JSON.stringify(addopts)}); it overrides the D-06 flags that the byte-identity check above compares (D-07)`,
+    ).toEqual([]);
   });
 });
 
