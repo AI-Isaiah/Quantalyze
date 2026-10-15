@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -32,10 +33,35 @@ KEY_ID = "11111111-1111-4111-8111-111111111111"
 OTHER_KEY_ID = "22222222-2222-4222-8222-222222222222"
 STRATEGY_ID = "33333333-3333-4333-8333-333333333333"
 STRATEGY_2_ID = "44444444-4444-4444-8444-444444444444"
-LINK = "https://archive.example.test/dl/SECRET-PATH-3f9a/q3.zip?sig=SECRET-QUERY-77c1"
-LINK_SECRETS = ("SECRET-PATH-3f9a", "SECRET-QUERY-77c1", "q3.zip", "sig=")
+LINK_SECRETS = ("SECRET-PATH-3f9a", "SECRET-QUERY-77c1", "2026Q3.zip", "2026Q2.zip", "sig=")
+FIXTURES = Path(__file__).parent / "fixtures" / "okx_archive"
 
 ENV = {"today": date(2026, 10, 15)}
+
+#: OKX's request ``ts`` for every default answer, and the fake wall clock three hours later:
+#: past the 2 h first-read rule and short of the 8 h give-up bound.
+REQUEST_TS_MS = 1790000000000
+NOW_MS = REQUEST_TS_MS + 3 * 3600 * 1000
+
+
+def _link(year: str, quarter: str, version: str = "") -> str:
+    """A signed-looking link: its path and query are the bearer secrets the job must never
+    let out of memory (only the scheme and host may be described)."""
+    return f"https://archive.example.test/dl/SECRET-PATH-3f9a/{year}{quarter}{version}.zip?sig=SECRET-QUERY-77c1"
+
+
+def _finished(year: str, quarter: str, version: str = "", ts: int = REQUEST_TS_MS) -> dict[str, Any]:
+    return {"code": "0", "data": [
+        {"fileHref": _link(year, quarter, version), "state": "finished", "ts": str(ts)}
+    ]}
+
+
+def _status(state: str, *, href: str = "", ts: int = REQUEST_TS_MS) -> dict[str, Any]:
+    return {"code": "0", "data": [{"fileHref": href, "state": state, "ts": str(ts)}]}
+
+
+def _apply_answer(result: str, ts: int = REQUEST_TS_MS) -> dict[str, Any]:
+    return {"code": "0", "data": [{"result": result, "ts": str(ts)}]}
 
 CONFIG = "private_get_account_config"
 SUBTYPES = "private_get_account_subtypes"
@@ -92,10 +118,8 @@ def _default_answers() -> dict[str, Any]:
             }],
         },
         SUBTYPES: _subtypes_answer(),
-        APPLY: {"code": "0", "data": [{"result": "true", "ts": "1790000000000"}]},
-        STATUS: {"code": "0", "data": [
-            {"fileHref": LINK, "state": "finished", "ts": "1790000000000"}
-        ]},
+        APPLY: _apply_answer("true"),
+        STATUS: lambda _inst, params: _finished(params["year"], params["quarter"]),
     }
 
 
@@ -169,6 +193,8 @@ class _FakeSupabase:
         self.rpcs: list[tuple[str, dict[str, Any]]] = []
         self._world = world
         self.progress_returns: bool = True
+        #: rpc name -> exception raised when it is executed (the call is still recorded).
+        self.rpc_errors: dict[str, Exception] = {}
 
     def table(self, name: str) -> _Query:
         return _Query(self, name)
@@ -177,7 +203,13 @@ class _FakeSupabase:
         self.rpcs.append((name, params))
         self._world.timeline.append(("rpc", name))
         data: Any = self.progress_returns if name == "set_compute_job_progress" else None
-        return SimpleNamespace(execute=lambda: SimpleNamespace(data=data))
+
+        def _execute() -> Any:
+            if name in self.rpc_errors:
+                raise self.rpc_errors[name]
+            return SimpleNamespace(data=data)
+
+        return SimpleNamespace(execute=_execute)
 
 
 class _World:
@@ -188,6 +220,20 @@ class _World:
         self.decrypts = 0
         self.constructions = 0
         self.supabase: _FakeSupabase | None = None
+        #: Every link handed to the downloader, in order.
+        self.downloads: list[str] = []
+        #: Queue of exceptions the downloader raises (consumed one per call), then it serves.
+        self.download_errors: list[Exception] = []
+
+    async def download(self, url: str) -> tuple[bytes, str, int]:
+        """Stands in for ``okx_archive_download.download_archive_csv``: serves the committed
+        quarter fixture the link names, with fixed independent compressed sizes."""
+        self.downloads.append(url)
+        if self.download_errors:
+            raise self.download_errors.pop(0)
+        if "2026Q2" in url:
+            return (FIXTURES / "q2_like.csv").read_bytes(), "zip", 987
+        return (FIXTURES / "q3_like.csv").read_bytes(), "zip", 1234
 
     def make(self, exchange_name: str, api_key: str, api_secret: str, passphrase: Any) -> _FakeExchange:
         self.constructions += 1
@@ -240,6 +286,8 @@ def _install(
         monkeypatch.setattr(module, "decrypt_credentials", world.decrypt)
         monkeypatch.setattr(module, "_make_exchange_client", world.make)
     monkeypatch.setattr(okx_archive_job, "_utc_today", lambda: ENV["today"])
+    monkeypatch.setattr(okx_archive_job, "_wall_ms", lambda: NOW_MS)
+    monkeypatch.setattr(okx_archive_job, "download_archive_csv", world.download)
     return world
 
 
@@ -350,6 +398,147 @@ class TestTracerPreflight:
         outcome = await dispatch(_job())
 
         assert outcome.outcome == DispatchOutcome.DONE and seen == ["job-1"]
+
+
+# ---------------------------------------------------------------------------
+# Plan 16 Task 1: the calibrate tracer (wait across a restart, then ingest)
+# ---------------------------------------------------------------------------
+
+#: Independent literals for the committed ``q3_like.csv`` fixture, counted from the file
+#: itself with ``cut``/``sort``/``uniq`` (not from the parser): 20 distinct bills, UTC days
+#: 2026-07-01 .. 2026-09-30, one USDC row among nineteen USDT.
+Q3_EXPECTED = {
+    "row_count": 20,
+    "ts_min_day": "2026-07-01",
+    "ts_max_day": "2026-09-30",
+    "compressed_bytes": 1234,  # what the fake downloader reports, passed through unchanged
+}
+Q3_CENSUS = {
+    "by_ccy": {"USDC": 1, "USDT": 19},
+    "by_inst_type": {"(blank)": 2, "FUTURES": 1, "OPTION": 1, "SPOT": 1, "SWAP": 15},
+    "by_sub_type": {
+        "1": 4, "100": 1, "104": 1, "11": 1, "110": 1, "12": 1,
+        "173": 3, "174": 2, "2": 4, "3": 1, "5": 1,
+    },
+    "unknown_zero_effect": 0,
+}
+
+
+def _calibrate(extra: dict[str, Any] | None = None, **kw: Any) -> dict[str, Any]:
+    return _job({"mode": "calibrate", **(extra or {})}, **kw)
+
+
+class TestTracerCalibrateIngest:
+    @pytest.mark.asyncio
+    async def test_a_calibrate_job_defers_then_a_restarted_claim_ingests_the_quarter(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """SC-1 in one scenario. OKX takes hours to generate a quarterly file, so the first
+        claim finds the request still `ongoing` and must park the job (attempts untouched),
+        not fail it. The worker then restarts: the next claim has NO memory of the first,
+        yet re-reads OKX, gets a fresh link, downloads and reads the file. The link is a
+        bearer token and appears in no RPC parameter, log record or error text."""
+        caplog.set_level(logging.DEBUG)
+
+        first = _happy(monkeypatch)
+        first.answers[APPLY] = _apply_answer("false")
+        first.answers[STATUS] = _status("ongoing")
+        waiting = await dispatch(_calibrate())
+
+        assert waiting.outcome == DispatchOutcome.DEFERRED
+        assert [n for n, _ in first.supabase.rpcs] == ["defer_compute_job"]  # type: ignore[union-attr]
+        (_, defer), = first.supabase.rpcs  # type: ignore[union-attr]
+        assert defer["p_job_id"] == "job-1" and defer["p_claim_token"] == "tok-1"
+        assert 0 < defer["p_defer_seconds"] <= 3600
+        assert defer["p_reason"].startswith("okx_archive_rebuild: waiting")
+        assert first.downloads == [], "nothing is downloaded while the request is ongoing"
+
+        # Restart: a brand-new world (new exchange instances, new database fake). Nothing
+        # from the first claim can reach it except through OKX.
+        second = _happy(monkeypatch)
+        outcome = await dispatch(_calibrate())
+
+        assert outcome.outcome == DispatchOutcome.DONE and outcome.error_message is None
+        assert second.downloads == [_link("2026", "Q3")]
+        result = second.result()
+        assert result["mode"] == "calibrate" and result["stop_class"] is None
+        (quarter,) = result["quarters"]
+        assert quarter == {
+            "year": 2026, "quarter": "Q3", "state": "finished", "applied_existing": True,
+            "href_scheme": "https", "href_host": "archive.example.test",
+            "container": "zip",
+            "compressed_bytes": Q3_EXPECTED["compressed_bytes"],
+            "decompressed_bytes": len((FIXTURES / "q3_like.csv").read_bytes()),
+            "has_type_column": False,
+            "ts_min_day": Q3_EXPECTED["ts_min_day"], "ts_max_day": Q3_EXPECTED["ts_max_day"],
+            "row_count": Q3_EXPECTED["row_count"],
+        }
+        assert result["census"] == Q3_CENSUS
+        for not_yet in ("reconcile", "excluded", "info", "d03", "strategies", "fingerprint"):
+            assert result[not_yet] is None, f"{not_yet} belongs to plan 08"
+
+        everything = (
+            json.dumps([first.supabase.rpcs, second.supabase.rpcs], default=str)  # type: ignore[union-attr]
+            + caplog.text + repr(waiting) + repr(outcome)
+        )
+        for secret in LINK_SECRETS:
+            assert secret not in everything, f"the link leaked: {secret!r}"
+        names = [n for n, _ in second.supabase.rpcs]  # type: ignore[union-attr]
+        assert names == ["set_compute_job_progress"], "no table write, no mark_*, no defer"
+
+    @pytest.mark.asyncio
+    async def test_two_quarters_are_ingested_in_input_order_into_one_census(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Calibrate reads every requested quarter, in the order asked, and the census is the
+        union (the same bill in two files would be a conflict, which the aggregator owns)."""
+        world = _happy(monkeypatch)
+
+        async def _no_sleep(_s: float) -> None:
+            return None
+
+        monkeypatch.setattr(okx_archive_job, "_sleep", _no_sleep)
+        outcome = await dispatch(_calibrate({"quarters": [
+            {"year": 2026, "quarter": "Q2"}, {"year": 2026, "quarter": "Q3"}]}))
+
+        assert outcome.outcome == DispatchOutcome.DONE
+        assert world.downloads == [_link("2026", "Q2"), _link("2026", "Q3")]
+        result = world.result()
+        q2, q3 = result["quarters"]
+        assert (q2["quarter"], q2["row_count"], q2["compressed_bytes"]) == ("Q2", 14, 987)
+        assert (q3["quarter"], q3["row_count"], q3["compressed_bytes"]) == ("Q3", 20, 1234)
+        assert sum(result["census"]["by_ccy"].values()) == 14 + 20
+
+    @pytest.mark.asyncio
+    async def test_the_module_keeps_no_mutable_state_between_claims(self) -> None:
+        """Statelessness is the property that makes a restart harmless. A module-level dict,
+        list or set is exactly where a link, a `ts` or a "second failure" counter would hide,
+        so a new one must be a conscious, reviewed addition to this allow-list."""
+        constants = {"_EXPECTED_LIVE_TYPE", "_FORBIDDEN_LIVE_TYPES", "_PARSE_STOP_CLASS"}
+        mutable = {
+            name for name, value in vars(okx_archive_job).items()
+            if isinstance(value, (dict, list, set, bytearray)) and not name.startswith("__")
+        }
+        assert mutable <= constants, f"module-level mutable state: {sorted(mutable - constants)}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            {"rebuild_strategy_ids": []},
+            {"rebuild_strategy_ids": None},
+            {"approved_fingerprint": "a" * 64},  # apply-only key
+        ],
+        ids=["empty-rebuild-list", "missing-rebuild-list", "fingerprint-on-calibrate"],
+    )
+    async def test_calibrate_input_rules_follow_the_contract(
+        self, monkeypatch: pytest.MonkeyPatch, metadata: dict[str, Any]
+    ) -> None:
+        """A calibration of no strategy proves nothing, and `approved_fingerprint` belongs to
+        apply only: a calibrate carrying one means the operator mixed up the modes."""
+        world = _happy(monkeypatch)
+        outcome = await dispatch(_calibrate(metadata))
+        _assert_refused(world, outcome, "invalid_input", okx_calls=[])
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +738,6 @@ class TestRefusals:
     @pytest.mark.parametrize(
         "metadata",
         [
-            {"mode": "calibrate"},
             {"mode": "apply"},
             {"mode": "nonsense"},
             {"mode": None},
