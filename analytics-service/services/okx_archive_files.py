@@ -27,8 +27,10 @@ Stop classes raised here (``ArchiveParseError.stop_class``):
 * ``duplicate_bill_conflict``- one ``billId`` carried with different content
 * ``unparseable_amount``     - a money field that is not a finite plain decimal
 
-(``okx_archive_classify.verify_bal_chain`` adds ``archive_incomplete``: a file whose running
-``bal`` does not chain is missing rows. It lives there because it reads the typed rows.)
+(``okx_archive_classify.verify_bal_chain`` adds ``archive_incomplete``: files whose running
+``bal`` does not chain, within a file or across the seam of adjacent quarters, are missing rows,
+and a currency with money on it but too few chained pairs cannot be proven complete. It lives
+there because it reads the typed rows.)
 
 ``ArchiveParseError.detail`` carries dates, labels, counts and line numbers ONLY.
 Never an amount, a billId or a raw cell value (the account-size leak class).

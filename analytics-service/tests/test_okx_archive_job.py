@@ -433,20 +433,21 @@ class TestTracerPreflight:
 # ---------------------------------------------------------------------------
 
 #: Independent literals for the committed ``q3_like.csv`` fixture, counted from the file
-#: itself with ``cut``/``sort``/``uniq`` (not from the parser): 20 distinct bills, UTC days
-#: 2026-07-01 .. 2026-09-30, one USDC row among nineteen USDT.
+#: itself with ``cut``/``sort``/``uniq`` (not from the parser): 22 distinct bills, UTC days
+#: 2026-07-01 .. 2026-09-30, three USDC rows (one with P&L, two zero-effect, so the USDC chain
+#: has the two pairs the completeness floor needs) among nineteen USDT.
 Q3_EXPECTED = {
-    "row_count": 20,
+    "row_count": 22,
     "ts_min_day": "2026-07-01",
     "ts_max_day": "2026-09-30",
     "compressed_bytes": 1234,  # what the fake downloader reports, passed through unchanged
 }
 Q3_CENSUS = {
-    "by_ccy": {"USDC": 1, "USDT": 19},
-    "by_inst_type": {"(blank)": 2, "FUTURES": 1, "OPTION": 1, "SPOT": 1, "SWAP": 15},
+    "by_ccy": {"USDC": 3, "USDT": 19},
+    "by_inst_type": {"(blank)": 2, "FUTURES": 1, "OPTION": 1, "SPOT": 1, "SWAP": 17},
     "by_sub_type": {
         "1": 4, "100": 1, "104": 1, "11": 1, "110": 1, "12": 1,
-        "173": 3, "174": 2, "2": 4, "3": 1, "5": 1,
+        "173": 3, "174": 2, "2": 6, "3": 1, "5": 1,
     },
     "unknown_zero_effect": 0,
 }
@@ -537,8 +538,8 @@ class TestTracerCalibrateIngest:
         result = world.result()
         q2, q3 = result["quarters"]
         assert (q2["quarter"], q2["row_count"], q2["compressed_bytes"]) == ("Q2", 14, 987)
-        assert (q3["quarter"], q3["row_count"], q3["compressed_bytes"]) == ("Q3", 20, 1234)
-        assert sum(result["census"]["by_ccy"].values()) == 14 + 20
+        assert (q3["quarter"], q3["row_count"], q3["compressed_bytes"]) == ("Q3", 22, 1234)
+        assert sum(result["census"]["by_ccy"].values()) == 14 + 22
 
     @pytest.mark.asyncio
     async def test_the_module_keeps_no_mutable_state_between_claims(self) -> None:
@@ -1460,7 +1461,7 @@ class TestLostOrExpiredLink:
         assert world.downloads == [_link("2026", "Q3", "v1"), _link("2026", "Q3", "v2")]
         assert world.instances[0].calls == [CONFIG, SUBTYPES, STATUS, STATUS], "exactly one fresh read"
         assert _applies(world) == 1, "the refresh is a read; it does not re-apply"
-        assert world.result()["quarters"][0]["row_count"] == 20
+        assert world.result()["quarters"][0]["row_count"] == 22
 
     @pytest.mark.asyncio
     async def test_a_second_403_is_transient_link_expired_not_a_third_try(
@@ -1511,7 +1512,7 @@ class TestLostOrExpiredLink:
         assert done.outcome == DispatchOutcome.DONE
         assert second.downloads == [_link("2026", "Q3", "fresh")], "no link from the lost claim"
         assert STATUS in second.instances[0].calls, "the new claim re-read OKX"
-        assert second.result()["quarters"][0]["row_count"] == 20
+        assert second.result()["quarters"][0]["row_count"] == 22
 
 
 class TestDownloadRefusals:
@@ -1586,11 +1587,11 @@ PARSE_CASES: list[tuple[str, Callable[[], bytes], str, str]] = [
 CENSUS_ON_STOP = {
     "non_usd_ccy": {
         **Q3_CENSUS,
-        "by_ccy": {"BTC": 1, "USDC": 1, "USDT": 18},
+        "by_ccy": {"BTC": 1, "USDC": 3, "USDT": 18},
     },
     "unknown_subtype_nonzero": {
         **Q3_CENSUS,
-        "by_sub_type": {**Q3_CENSUS["by_sub_type"], "2": 3, "99999": 1},
+        "by_sub_type": {**Q3_CENSUS["by_sub_type"], "2": 5, "99999": 1},
     },
 }
 

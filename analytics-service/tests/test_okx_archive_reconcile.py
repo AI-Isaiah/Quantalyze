@@ -72,7 +72,7 @@ class TestTracerQ3:
 
     def test_parse_reads_every_row_and_verifies_the_quarter(self):
         parsed = parse_archive_csv(_q3_bytes(), year=2026, quarter="Q3")
-        assert parsed.row_count == 20
+        assert parsed.row_count == 22
         assert parsed.ts_min_day == "2026-07-01"
         assert parsed.ts_max_day == "2026-09-30"
         assert len(parsed.covered_days) == 92

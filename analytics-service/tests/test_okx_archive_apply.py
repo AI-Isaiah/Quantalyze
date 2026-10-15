@@ -84,9 +84,10 @@ class _Bills:
     """One archive CSV. ``realized`` rows carry a quarter-dollar fee so a day's net is
     ``pnl + fee`` (the live aggregation), funding rows are subType 173/174, flows 11/12."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, opening: str | Decimal = "5000", first_id: int = 800_000_000) -> None:
         self._lines: list[str] = []
-        self._n = 800_000_000
+        self._n = first_id
+        self._opening = Decimal(str(opening))
         #: The running balance per ccy, in billId (= insertion) order. OKX's ``bal`` is the
         #: balance AFTER each bill, so a file built here chains (``bal == previous bal +
         #: balChg``) exactly as a complete real file does; ``without()`` then removes a row to
@@ -97,7 +98,7 @@ class _Bills:
         self, inst: str, sub: str, day: str, bal_chg: str, ccy: str, pnl: str, fee: str,
     ) -> "_Bills":
         self._n += 1
-        bal = self._bal.get(ccy, Decimal(5000)) + Decimal(bal_chg)
+        bal = self._bal.get(ccy, self._opening) + Decimal(bal_chg)
         self._bal[ccy] = bal
         self._lines.append(
             f"{inst},{self._n},{sub},{_noon_ms(day)},{bal_chg},0,{_fmt(bal)},0,,,{ccy},{pnl},{fee},"
@@ -107,10 +108,14 @@ class _Bills:
 
     def without(self, position: int) -> "_Bills":
         """A copy of this file with the ``position``-th data row (0-based) removed."""
-        out = _Bills()
+        out = _Bills(opening=self._opening)
         out._lines = [ln for i, ln in enumerate(self._lines) if i != position]
         out._n, out._bal = self._n, dict(self._bal)
         return out
+
+    def closing(self, ccy: str = "USDT") -> Decimal:
+        """The balance after this file's last bill: the next quarter's opening."""
+        return self._bal.get(ccy, self._opening)
 
     def realized(self, day: str, net: str | float, *, inst: str = "SWAP", ccy: str = "USDT") -> "_Bills":
         fee = Decimal("-0.25")
@@ -956,6 +961,96 @@ class TestFlowSeamsReachTheJob:
         (call,) = _apply_calls(db)
         values = {r["date"]: r["daily_return"] for r in call["p_rows"]}
         assert values["2026-07-10"] == pytest.approx(ORACLE["2026-07-10"], abs=1e-12)
+
+
+class TestFlowSeamReading:
+    """WR-03 / N-flow. The archive's transfer bills are used before ``live_flows_from_day`` (the
+    start of the live deposit window, midnight(run) - 90 d = 2026-07-31 in these scenarios) and
+    the live flows from it. A movement can straddle that seam in either direction, and the only
+    flow reading was summed over the RECONCILE window (opens run-87 d = 08-03), so it never
+    looked at the seam at all. The reading below is measured around the real seam. It is a
+    reading, not a gate: whether to bound it is a founder decision."""
+
+    SEAM = "2026-07-31"
+
+    @pytest.mark.asyncio
+    async def test_a_deposit_that_predates_the_live_window_but_whose_transfer_lands_after_the_seam_shows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On-chain deposit 07-29 (outside the live window, so no live flow) whose
+        funding-to-trading transfer bill is on 08-02 (after the seam, so the rebuild discards
+        the archive bill): the +400 is in NEITHER source the roll reads, and every rebuilt NAV
+        before 08-02 is 400 too high. The reading must make that visible."""
+        both = _standard_bills().flow("2026-08-02", "400").bytes()
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=both)
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        info = world.result()["info"]
+        # Window: 7 days before the seam (07-24) to 6 days after it (08-06).
+        assert info["flow_seam"] == {
+            "seam_day": self.SEAM,
+            "margin_days": 7,
+            "window": {"from": "2026-07-24", "to": "2026-08-06"},
+            "archive_before_seam_used": "0",
+            "archive_from_seam_discarded": "400",
+            "live_from_seam_used": "0",
+            "diff": "400",
+        }
+        # The overlap totals open at the seam window too, so the 08-02 transfer is inside them
+        # (the reconcile window opens 08-03 and never saw it).
+        assert info["flow_totals_overlap"] == {"archive": "400", "live": "0"}
+
+    @pytest.mark.asyncio
+    async def test_a_withdrawal_counted_by_both_sources_across_the_seam_shows_both_sides(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Trading-to-funding transfer on 07-30 (before the seam, so the archive bill is
+        used) followed by the on-chain withdrawal on 07-31 (the live window's first day, so the
+        live flow is used): the same 200 leaves the roll twice. Both halves must be readable."""
+        live = _standard_live()
+        live.transfers = [{"type": "withdrawal", "currency": "USDT", "amount": 200, "id": "w1",
+                           "timestamp": _noon_ms("2026-07-31")}]
+        both = _standard_bills().flow("2026-07-30", "-200").bytes()
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, live, q3=both)
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        seam = world.result()["info"]["flow_seam"]
+        assert seam["archive_before_seam_used"] == "-200"
+        assert seam["live_from_seam_used"] == "-200"
+        assert seam["archive_from_seam_discarded"] == "0"
+        assert seam["diff"] == "200"
+
+    @pytest.mark.asyncio
+    async def test_a_quiet_seam_reads_all_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        world = _install(monkeypatch, _db_with((STRATEGY_ID, GAP_A)), _standard_live(), q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        seam = world.result()["info"]["flow_seam"]
+        assert (seam["archive_before_seam_used"], seam["archive_from_seam_discarded"],
+                seam["live_from_seam_used"], seam["diff"]) == ("0", "0", "0", "0")
+
+    @pytest.mark.asyncio
+    async def test_the_seam_reading_is_a_reading_and_never_a_gate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A large straddle must not stop the run: the gate is a founder decision (D-10 binds
+        only the P&L legs)."""
+        both = _standard_bills().flow("2026-08-02", "400000").bytes()
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=both)
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        assert world.result()["info"]["flow_seam"]["diff"] == "400000"
 
 
 class TestLiveCrawlFlags:
@@ -1877,9 +1972,9 @@ class TestApplyResume:
         assert state(plan(0, "s", gap, [], [{"from": "2026-07-11", "to": "2026-07-12"}], [], False)) == "gap_delta"
 
 
-def _standard_bills() -> _Bills:
+def _standard_bills(*, opening: str | Decimal = "5000", first_id: int = 800_000_000) -> _Bills:
     """The standard Q3 file as a ``_Bills`` object (so a test can drop a row from it)."""
-    bills = _Bills()
+    bills = _Bills(opening=opening, first_id=first_id)
     for day, net in sorted({"2026-07-10": "10", "2026-08-01": "200", "2026-08-02": "97.5",
                             "2026-08-03": "-50", "2026-09-15": "20", **FILLER}.items()):
         bills.realized(day, net)
@@ -1917,16 +2012,146 @@ class TestArchiveCompleteness:
 
         assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
         assert outcome.error_message == (
-            "okx_archive_rebuild: archive_incomplete parse=archive_incomplete"
+            "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=bal_chain_break"
         )
         result = world.result()
         assert result["stop_class"] == "archive_incomplete"
-        # The founder can read where the chain broke: counts and a date, never an amount.
-        (reading,) = result["info"]["bal_chain"]
-        assert reading["ccys"]["USDT"] == {"checked": 9, "breaks": 1, "first_break_day": "2026-08-02"}
+        # The founder can read where the chain broke: counts and a date, never an amount. The
+        # file has 11 bills (9 realized, 2 funding); with one removed, 10 bills make 9 pairs.
+        assert result["info"] == {
+            "bal_chain": {
+                "reason": "bal_chain_break",
+                "ccys": {"USDT": {
+                    "pairs_checked": 9, "first_day": "2026-07-10", "last_day": "2026-09-15",
+                    "breaks": 1, "first_break_day": "2026-08-02", "seam_breaks": 0,
+                }},
+                "total_pairs": 9,
+                "starved": [],
+                "files": [{"ts_min_day": "2026-07-10", "ts_max_day": "2026-09-15"}],
+                "floor": 2,
+            }
+        }
         assert result["fingerprint"] is None
         assert db.apply_calls == 0
         _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_a_passing_calibrate_records_the_chain_it_proved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """N1. ``result["info"]`` is rebuilt wholesale by the evaluation, so a chain proof that
+        only a stop carried left a clean calibrate with nothing to read: a chain that checked
+        0 or 3 pairs looked like a chain that checked 3000. The positive reading is the
+        evidence the founder's go/no-go needs."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        # 9 realized + 2 funding bills in one USDT chain: 11 bills, 10 pairs, 07-10 .. 09-15.
+        assert world.result()["info"]["bal_chain"] == {
+            "ccys": {"USDT": {"pairs_checked": 10, "first_day": "2026-07-10", "last_day": "2026-09-15"}},
+            "total_pairs": 10,
+            "floor": 2,
+        }
+
+    @pytest.mark.parametrize("mode", ["calibrate", "apply"])
+    @pytest.mark.asyncio
+    async def test_a_currency_with_money_on_it_and_too_few_pairs_is_archive_incomplete(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        """N1. One lone USDC bill with P&L chains zero pairs: its completeness cannot be
+        proven, and USDC is summed as dollars, so it stops instead of passing unexamined."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        bills = _standard_bills().realized("2026-09-20", "5", ccy="USDC")
+        world = _install(monkeypatch, db, _standard_live(), q3=bills.bytes())
+        extra = {"approved_fingerprint": "d" * 64} if mode == "apply" else {}
+
+        outcome = await _run(_meta(mode, [STRATEGY_ID], **extra))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == (
+            "okx_archive_rebuild: archive_incomplete parse=archive_incomplete cause=too_few_pairs"
+        )
+        info = world.result()["info"]["bal_chain"]
+        assert info["reason"] == "too_few_pairs" and info["starved"] == ["USDC"]
+        assert info["ccys"]["USDC"]["pairs_checked"] == 0
+        assert info["floor"] == 2
+        assert db.apply_calls == 0
+        _no_writes_but_progress(world, db)
+
+    QUARTERS_Q2_Q3 = [{"year": 2026, "quarter": "Q2"}, {"year": 2026, "quarter": "Q3"}]
+
+    @staticmethod
+    def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Two quarters are two OKX applies, MIN_APPLY_GAP_S apart; the gap is not under test."""
+
+        async def _skip(_seconds: float) -> None:
+            return None
+
+        monkeypatch.setattr(okx_archive_job, "_sleep", _skip)
+
+    def _q2(self) -> _Bills:
+        bills = _Bills(first_id=700_000_000)
+        for day, net in (("2026-04-02", "10"), ("2026-05-10", "20"), ("2026-06-20", "5"), ("2026-06-29", "7")):
+            bills.realized(day, net)
+        return bills
+
+    @pytest.mark.parametrize("mode", ["calibrate", "apply"])
+    @pytest.mark.parametrize(
+        ("label", "q2_drop", "q3_drop"),
+        [("q2-tail-missing", (3,), ()), ("q3-head-missing", (), (0,))],
+    )
+    @pytest.mark.asyncio
+    async def test_a_truncation_at_the_q2_q3_seam_is_archive_incomplete_and_writes_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str, label: str,
+        q2_drop: tuple[int, ...], q3_drop: tuple[int, ...],
+    ) -> None:
+        """WR-01 / N2. Each file chains on its own, so a Q2 file missing its last weeks or a Q3
+        file missing its first weeks passed, and the missing days were published as 0.0 inside
+        the gaps, outside the reconcile window and outside D-03. The seam is checked now."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        q2_full = self._q2()
+        q3_full = _standard_bills(opening=q2_full.closing(), first_id=800_000_000)
+        q2, q3 = q2_full, q3_full
+        for position in q2_drop:
+            q2 = q2.without(position)
+        for position in q3_drop:
+            q3 = q3.without(position)
+        world = _install(monkeypatch, db, _standard_live(), q2=q2.bytes(), q3=q3.bytes())
+        self._no_sleep(monkeypatch)
+        extra = {"approved_fingerprint": "d" * 64} if mode == "apply" else {}
+
+        outcome = await _run(_meta(mode, [STRATEGY_ID], quarters=self.QUARTERS_Q2_Q3, **extra))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent", label
+        result = world.result()
+        assert result["stop_class"] == "archive_incomplete"
+        usdt = result["info"]["bal_chain"]["ccys"]["USDT"]
+        assert (usdt["breaks"], usdt["seam_breaks"]) == (1, 1)
+        assert result["fingerprint"] is None and db.apply_calls == 0
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_two_chaining_quarters_pass_and_the_proof_spans_both(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        q2 = self._q2()
+        q3 = _standard_bills(opening=q2.closing(), first_id=800_000_000)
+        world = _install(monkeypatch, db, _standard_live(), q2=q2.bytes(), q3=q3.bytes())
+        self._no_sleep(monkeypatch)
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID], quarters=self.QUARTERS_Q2_Q3))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        # 4 Q2 bills + 11 Q3 bills = 15 bills in one chain = 14 pairs, 04-02 .. 09-15.
+        assert world.result()["info"]["bal_chain"] == {
+            "ccys": {"USDT": {"pairs_checked": 14, "first_day": "2026-04-02", "last_day": "2026-09-15"}},
+            "total_pairs": 14,
+            "floor": 2,
+        }
 
     @pytest.mark.asyncio
     async def test_each_quarter_reports_ts_range_and_its_longest_bill_less_run(
@@ -2157,13 +2382,14 @@ class TestInformationNeverGates:
         assert out[0]["strategies"] == out[1]["strategies"]
 
     @pytest.mark.asyncio
-    async def test_excluded_classes_flows_and_bal_continuity_are_reported_never_gated(
+    async def test_excluded_classes_flows_and_bal_chain_are_reported_never_gated(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """D-09: excluded-class totals, archive-vs-live flow totals and `bal` continuity are
         information. An OPTION row's P&L and a flow the live side does not have must not stop
         the run, and must be visible. (The ``bal`` chain WAS information here; F1 made a break
-        a gate, ``TestArchiveCompleteness``, and the reading stays in ``info`` beside it.)"""
+        a gate, ``TestArchiveCompleteness``, and the gated chain's reading is the only one in
+        ``info``.)"""
         db = _db_with((STRATEGY_ID, GAP_A))
         bills = (
             _Bills()
@@ -2185,8 +2411,8 @@ class TestInformationNeverGates:
         info = result["info"]
         # One archive flow (09-01, +250) lies in the window; the live side has none.
         assert info["flow_totals_overlap"] == {"archive": "250", "live": "0"}
-        assert set(info["bal_continuity"]) == {"USDT"}
-        assert info["bal_continuity"]["USDT"]["checked"] > 0
+        assert set(info["bal_chain"]["ccys"]) == {"USDT"}
+        assert info["bal_chain"]["ccys"]["USDT"]["pairs_checked"] > 0
         # Gap days with archive activity: 07-10 (realized), 07-20 (funding), 08-01 (realized).
         # The 07-05 flow is before the gap and the OPTION row is an excluded class, so of the
         # 23 gap days 3 are active and 20 are real quiet zeros.
@@ -2246,7 +2472,7 @@ class TestResultShape:
             assert isinstance(reconcile[leg]["first_offending"], list)
         info = result["info"]
         assert set(info) == {
-            "bal_continuity", "flow_totals_overlap", "realized_balance_vs_rolled_nav", "live_from",
+            "bal_chain", "flow_totals_overlap", "flow_seam", "realized_balance_vs_rolled_nav", "live_from",
             "first_live_day_differs", "archive_days_prepended", "gap_days_active",
             "gap_days_quiet", "archive_only_in_live_reach", "stored_vs_core",
         }

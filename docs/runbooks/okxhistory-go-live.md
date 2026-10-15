@@ -73,7 +73,8 @@ this section states no number.**
   the stored `venue_account_id` of the job key and of every target key (NULL never matches). Plan 07's
   `TestRefusals` pins each refusal with a neuter proof.
 - **The closed stop set.** `STOP_CLASSES` (module constant). A stop writes the result block first, then
-  returns FAILED; `link_expired` is the one transient class.
+  returns FAILED; the transient classes are the members of `TRANSIENT_STOP_CLASSES` (`link_expired`,
+  `live_fetch_failed`, `claim_budget_exceeded`), and the job retries those itself.
 - **The download surface.** `okx_archive_download` (allow-listed hosts in code, never by env; redirects
   refused; size and decompression caps). The link appears in no RPC parameter, log record or error text.
 - **The write.** `apply_okx_archive_rebuild` (`supabase/schema/functions/apply_okx_archive_rebuild.sql`):
@@ -511,10 +512,24 @@ node "$TS_SP/form.mjs" job-result DRY=1 > "$TS_SP/jr.sql" && q "$TS_SP/jr.sql" >
 ```
 
 A job that is `pending` or `running` is waiting or working: the archive wait is hours and the job defers
-itself, so there is nothing to do but read again later. `failed_retry` with `error_class` `link_expired`
-is the one transient class and the job retries itself. Any other `error_class` is permanent
-(`failed_final`): it is a STOP, read the class and the dates and counts in `last_error`, and return to
-the founder. Never re-enqueue to get past a stop.
+itself, so there is nothing to do but read again later. A venue rate limit (on an archive call or on the
+live crawl) is a defer too, not a failure: the job returns to `pending` with a later `next_attempt_at`
+(at least 15 minutes) and no attempt is used, so read again after that time.
+
+**Transient classes: wait, do not escalate.** `failed_retry` with `error_class` `link_expired`,
+`live_fetch_failed` or `claim_budget_exceeded` (the members of `TRANSIENT_STOP_CLASSES` in
+`okx_archive_job.py`, read the symbol at execution time) is a retry in progress: the job retries itself
+and the next claim re-reads OKX from scratch. Nothing is lost between claims. It stays a wait for as long
+as `attempts` is below `max_attempts`; if it ends `failed_final` instead, it is a STOP like any other.
+
+**STOP: `archive_give_up`.** A permanent `error_class` `archive_give_up` means the job stopped waiting
+for OKX: either the 8 h bound from OKX's request time (`last_error` ends `quarter=... age_h=N`) or the 24 h
+backstop from the job's own `created_at` (`last_error` ends `backstop age_h=N`, or `backstop age=unreadable`
+when the job's age could not be read, which fails closed). Nothing was written. Return to the founder with
+the quarter and the age; do not re-enqueue to get past it.
+
+Any other `error_class` is permanent (`failed_final`): it is a STOP, read the class and the dates and
+counts in `last_error`, and return to the founder. Never re-enqueue to get past a stop.
 
 **Preflight reading, from `member_progress`:** `account.uid_match` true, `account.read_only` true,
 `subtypes.drift` empty, `quarters[].state` per quarter (`finished`, `ongoing`, `failed` or null) and
@@ -580,8 +595,17 @@ node "$TS_SP/form.mjs" enqueue-calibrate RUN=20261020T1100 > "$TS_SP/s2.sql" && 
 
 - `quarters[]`: `state` `finished` for both, `container`, `has_type_column`, `ts_min_day` / `ts_max_day`
   matching the quarter (a mismatch is the STOP `quarter_range_mismatch`).
-  Also in the result, per quarter: `quarters[].longest_billless_run` (`{days, from, to}`), and
-  `info.bal_chain` (the per-currency balance-chain proof). Step 3 reads them.
+  Also in the result, per quarter: `quarters[].longest_billless_run` (`{days, from, to}`). Step 3 reads it
+  with `info.bal_chain`, the one balance-chain proof.
+- `info.bal_chain`: on a clean calibrate, `ccys.<ccy>` with `pairs_checked`, `first_day` and `last_day`
+  (the days the chain reaches), the `total_pairs` over all currencies and the `floor` (2 pairs; a currency
+  that carries money with fewer cannot prove completeness). The chain runs per currency across the
+  deduplicated bills of every ADJACENT requested quarter in billId order, so the Q2 to Q3 seam is inside
+  it. A clean calibrate proves the chain by the absence of the `archive_incomplete` stop and shows the
+  numbers above. The stop's own `info.bal_chain` adds `reason` (`bal_chain_break`, `too_few_pairs` or
+  `unchainable_row`; `last_error` ends `cause=<reason>`), per currency `breaks`, `seam_breaks` (breaks
+  on a pair that crosses two files) and `first_break_day`, `starved` (the currencies under the floor) and
+  `files[]` (each file's `ts_min_day` / `ts_max_day`).
 - `census`: `by_ccy` all USDT, `by_sub_type` with no unclassified type, `unknown_zero_effect` 0. A
   non-USD currency is the STOP `non_usd_ccy`, and it is the measurement that settles
   `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`.
@@ -604,21 +628,55 @@ there is nothing to clean up after a stop here.
 No form runs here; the founder reads and decides, with the orchestrator's summary of counts and dates:
 
 1. The calibration readings above are clean (no STOP class, `days_over_cent` 0 in both legs).
-2. **The archive file is complete, not merely in range (review round 1, F1).** A bill-less day is rebuilt
-   as an explicit 0.0 return, so a file that silently lost weeks would publish zeros for days that were
-   real. Read, per quarter, `quarters[].ts_min_day`, `quarters[].ts_max_day` and
-   `quarters[].longest_billless_run.days` (with its `from` / `to`). The job already proves the file's
-   interior is complete (each currency's running balance chains bill to bill, else the STOP
-   `archive_incomplete`); the chain cannot see a missing head or tail, which is what this item checks. `ts_min_day` and `ts_max_day` must sit at the quarter's first
-   and last days (a file that stops short of an edge is missing days, not quiet ones), and the longest
-   bill-less run must be a length the account's real activity can explain (an account that traded weekly
-   does not have a 40-day silence). A short edge or an unexplained long run is a no-go to return to the
-   founder, never a figure to approve. The key names match the shipped `okx_archive_job.py`
-   (reconciled by the orchestrator after review round 1).
+2. **The archive files are complete, not merely in range (review round 1 F1, round 2 WR-01).** A bill-less
+   day is rebuilt as an explicit 0.0 return, so a file that silently lost weeks would publish zeros for
+   days that were real. Read `info.bal_chain` beside `quarters[].ts_min_day`, `quarters[].ts_max_day` and
+   `quarters[].longest_billless_run.days` (with its `from` / `to`).
+   - **What the chain proves:** the interior of every file and the Q2 to Q3 seam. Each currency's running
+     balance chains bill to bill across both files, else the STOP `archive_incomplete`; a clean calibrate
+     shows `pairs_checked` per currency. Every bill after a currency's first adds one pair, so
+     `total_pairs` equals the sum of `quarters[].row_count` less one per currency; a total far below that
+     is not a mystery to approve past.
+   - **What it cannot prove:** the HEAD of the earliest file (Q2) and the TAIL of the latest (Q3). A file
+     missing its first or last bills still chains. `info.bal_chain.ccys.<ccy>.first_day` and `last_day`
+     say how far the proven chain reaches for each currency.
+   - **When that needs the founder's judgment:** only for a gap day inside the unprovable head or tail,
+     that is, an entry of `strategies[].gaps_before` earlier than the P&L currency's `first_day` or later
+     than its `last_day`. `ts_min_day` / `ts_max_day` sitting short of the quarter's first / last day is
+     NOT a no-go by itself (an account with no bill on 04-01 or 09-30 is complete and quiet). The
+     bill-less run is read the same way: a long run is a no-go only if the account's real activity cannot
+     explain it AND it overlaps the unprovable head or tail; an interior long run is already covered by
+     the chain, because a missing bill would have broken it.
+   A gap day in the unprovable head or tail, or a `first_day` / `last_day` the founder cannot reconcile
+   with how the account traded, is a no-go to return to the founder, never a figure to approve. The key
+   names match the shipped `okx_archive_job.py` (reconciled after review round 2).
 3. The download host named by `quarters[].href_host` is in the code allow-list of `okx_archive_download`
    (a host that is not there stops the job as `download_refused`; adding one is a reviewed code change).
-4. The `excluded` totals by month and class, and the `info` readings, are as expected (information, not
-   gates).
+4. The `excluded` totals by month and class are as expected (information, not gates).
+   **The readings that stand in for the money gates the founder has not decided.** None of these stops
+   the job, no numeric bound is wired in code, and whether to bound one is the founder's decision. Each
+   is read here, and a no-go is returned to the founder rather than approved:
+   - `strategies[].insert_returns` (`{min, max, cumulative}`, the daily returns `apply` would write; they
+     are anchored on today's equity and are deliberately NOT in the fingerprint). No-go: a `min` or `max`
+     the account's real trading cannot explain, or `cumulative` null (a written day would be at or below
+     -100%, so the compounded total is uncomputable).
+   - `info.realized_balance_vs_rolled_nav` (`{day, archive_balance_usd_family, rolled_nav, diff}`). The
+     one reading that checks the live anchor and the flow model together: the archive's balance at the
+     end of the boundary day against today's equity rolled back to it. No-go: a `diff` the founder cannot
+     explain by assets held outside the dollar family, or any of the three values null.
+   - `info.flow_seam` and `info.flow_totals_overlap`, both measured around the real flow seam
+     (`live_from.flows`, midnight of the run date minus 90 days), not around the P&L reconcile window.
+     `flow_seam` gives, within a week either side, the archive transfers the roll uses
+     (`archive_before_seam_used`), the ones it discards (`archive_from_seam_discarded`) and the live flows
+     it uses (`live_from_seam_used`), and `diff` (discarded minus used). All zero is a quiet seam. No-go:
+     a nonzero `diff` (a movement missing from both sources, or counted by one that the other disagrees
+     with) or `archive_before_seam_used` and `live_from_seam_used` both nonzero (a movement possibly
+     counted twice). Every rebuilt day before the seam shifts by that amount in the NAV denominator.
+     `flow_totals_overlap` (`{archive, live}`) is the same two sources from a week before the seam to the
+     end of the archive; a disagreement there is an internal transfer the live endpoints do not list.
+   - `info.live_from` (`{pnl, flows}`): the first day each live source owns. `pnl` must be the day after
+     `reconcile.excluded_boundary_day`, and `flows` must equal `flow_seam.seam_day`. No-go: either
+     disagrees, or `flows` is null.
 5. The headline change for ordinal 2 (published) and ordinal 1 (`pending_review`): `strategies[]`
    `insert_ranges` is what each factsheet will name, and each headline start moves earlier.
 6. **Timing.** The 04:30Z tick recomputes anyway (Blast radius, item 4), so the moment of `apply` is the
