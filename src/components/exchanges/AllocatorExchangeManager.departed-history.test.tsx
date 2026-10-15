@@ -154,6 +154,21 @@ function historySwitch(keyId: string): HTMLElement {
   });
 }
 
+// Wait for the switch to be SETTLED: enabled AND in the expected state.
+// `aria-checked` alone is not enough. While the days load, and while an RPC is
+// in flight, the switch is disabled and reads "false" (or the optimistic
+// "true"), so an aria-checked-only wait can pass before the load or the RPC
+// result has committed. Both land after an `await`, so they are not a sync lane,
+// and when the Scheduler yields the next click hit a DISABLED switch (no RPC)
+// or the next sync read saw the pre-result DOM. Enabled means the load is in
+// and no RPC is pending, which is the state the next step depends on.
+async function settledSwitch(keyId: string, checked: "true" | "false") {
+  await waitFor(() => {
+    expect(historySwitch(keyId)).toBeEnabled();
+    expect(historySwitch(keyId).getAttribute("aria-checked")).toBe(checked);
+  });
+}
+
 describe("AllocatorExchangeManager — departed-account history overview", () => {
   it("a disconnected key on its own account shows it counts until its disconnect day, switch on", async () => {
     RETURNS_DAYS = { "key-live": ["2026-06-01", "2026-06-30"], "key-dep": ["2026-06-01", "2026-06-12"] };
@@ -200,9 +215,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
     ANCHORED = new Set(["key-dep"]);
     rpcMock.mockResolvedValue({ data: true, error: null });
     render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[LIVE, departed()]} />);
-    await waitFor(() =>
-      expect(historySwitch("key-dep").getAttribute("aria-checked")).toBe("false"),
-    );
+    await settledSwitch("key-dep", "false");
     fireEvent.click(historySwitch("key-dep"));
     await waitFor(() =>
       expect(rpcMock).toHaveBeenCalledWith("set_departed_key_history_inclusion", {
@@ -210,9 +223,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
         p_inclusion: "include",
       }),
     );
-    await waitFor(() =>
-      expect(historySwitch("key-dep").getAttribute("aria-checked")).toBe("true"),
-    );
+    await settledSwitch("key-dep", "true");
     expect(historyBlock("key-dep").textContent).toContain("History included until 2026-06-10.");
     expect(historyBlock("key-dep").textContent).toContain(
       "Your equity history is recomputed with this change within a few minutes.",
@@ -226,9 +237,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
         p_inclusion: "exclude",
       }),
     );
-    await waitFor(() =>
-      expect(historySwitch("key-dep").getAttribute("aria-checked")).toBe("false"),
-    );
+    await settledSwitch("key-dep", "false");
     expect(historyBlock("key-dep").textContent).toContain("History not included: you excluded it.");
   });
 
@@ -240,9 +249,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
       error: { code: "42501", message: "not_authenticated", details: null, hint: null },
     });
     render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[LIVE, departed()]} />);
-    await waitFor(() =>
-      expect(historySwitch("key-dep").getAttribute("aria-checked")).toBe("false"),
-    );
+    await settledSwitch("key-dep", "false");
     fireEvent.click(historySwitch("key-dep"));
     const alert = await within(historyBlock("key-dep")).findByRole("alert");
     expect(alert.textContent).toBe(
@@ -267,9 +274,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
       },
     });
     render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[LIVE, departed()]} />);
-    await waitFor(() =>
-      expect(historySwitch("key-dep").getAttribute("aria-checked")).toBe("false"),
-    );
+    await settledSwitch("key-dep", "false");
     fireEvent.click(historySwitch("key-dep"));
     const alert = await within(historyBlock("key-dep")).findByRole("alert");
     expect(alert.textContent).toBe(
@@ -286,9 +291,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
       error: { code: "55006", message: "HISTORY_RECOMPOSE_IN_PROGRESS", details: null, hint: null },
     });
     render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[LIVE, departed()]} />);
-    await waitFor(() =>
-      expect(historySwitch("key-dep").getAttribute("aria-checked")).toBe("false"),
-    );
+    await settledSwitch("key-dep", "false");
     fireEvent.click(historySwitch("key-dep"));
     const alert = await within(historyBlock("key-dep")).findByRole("alert");
     expect(alert.textContent).toBe(
@@ -304,9 +307,7 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
       error: { code: "55000", message: "anything at all", details: null, hint: null },
     });
     render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[LIVE, departed()]} />);
-    await waitFor(() =>
-      expect(historySwitch("key-dep").getAttribute("aria-checked")).toBe("false"),
-    );
+    await settledSwitch("key-dep", "false");
     fireEvent.click(historySwitch("key-dep"));
     const alert = await within(historyBlock("key-dep")).findByRole("alert");
     expect(alert.textContent).toBe(
