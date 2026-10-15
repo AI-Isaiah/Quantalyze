@@ -260,7 +260,9 @@ def test_withheld_spot_without_a_breach_has_an_empty_breach_list():
     assert flags[0]["weight"] == 0.1
 
 
-def test_withheld_spot_weight_is_zero_when_there_is_no_aum():
+def test_withheld_spot_weight_is_null_when_there_is_no_aum():
+    """SFH-01: no positive AUM means no AUM share. The weight is null, never 0.0, and the
+    skipped max-weight test is named in ``breach_skipped``."""
     flags = compute_holding_flags(
         holdings_rows_eligible=[],
         holdings_rows_withheld=[_mk_withheld()],
@@ -271,8 +273,9 @@ def test_withheld_spot_weight_is_zero_when_there_is_no_aum():
         scored_candidates_by_slot={},
     )
 
-    assert flags[0]["weight"] == 0.0
+    assert flags[0]["weight"] is None
     assert flags[0]["breach_reasons"] == []
+    assert flags[0]["breach_skipped"] == ["aum_not_positive"]
 
 
 def test_without_withheld_rows_the_result_is_what_it_was_before():

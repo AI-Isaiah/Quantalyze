@@ -1,4 +1,4 @@
-"""167.1.1.1 (BRIDGERETURNS) review round 1: CR-01.
+"""167.1.1.1 (BRIDGERETURNS) review round 1: CR-01 and SFH-01 / WR-01.
 
 Two weight notions live in the matcher and must stay apart:
 
@@ -11,6 +11,10 @@ Two weight notions live in the matcher and must stay apart:
 CR-01: when the withheld dollars sat in the scoring denominator the candidate's add_weight ``a``
 became ``a / (S * (1 - a) + a)`` with ``S`` the priced fraction, so a book with a stablecoin
 scored a different ``sharpe_lift`` than the same book without it.
+
+SFH-01: derivative losses can push the matcher AUM to zero or below. No AUM share exists then:
+the flags persist ``weight`` null (never 0.0) and name the skipped max-weight test in
+``breach_skipped``; the scoring weights do not depend on the AUM's sign.
 
 Every dollar figure below is typed by hand. The fit values are read off the real
 ``_compute_portfolio_fit_components`` through the spy, never recomputed here.
@@ -39,6 +43,7 @@ from tests.test_match_book_join_overlap import (
 
 BTC = "holding:binance:BTC:spot"
 USDT = "holding:binance:USDT:spot"
+PERP = "holding:binance:ETHUSDT:derivative"
 
 FIT_KEYS = ("sharpe_lift", "dd_improvement", "corr_reduction", "corr_with_portfolio")
 
@@ -201,8 +206,74 @@ def test_a_derivative_pnl_leaves_the_scoring_weights_and_the_fit_values_alone(
 
 
 # ---------------------------------------------------------------------------
-# The equal-weight fallback is named
+# SFH-01 / WR-01 part 1: a non-positive matcher AUM never becomes a weight
 # ---------------------------------------------------------------------------
+
+
+def test_a_non_positive_aum_persists_a_null_weight_and_names_the_skipped_test(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Spot 1,000 plus a perp with P&L -1,500: the AUM is -500. The flags carry weight null
+    (not 0.0) and ``breach_skipped`` names the max-weight test that could not run; the scoring
+    weights are the book's own and no equal weight is invented."""
+    rows = _rows("BTC", _adjacent_days(BOOK_DAYS), _btc_mark, 1000.0)
+    plain = _context(monkeypatch, rows)
+    with caplog.at_level(logging.WARNING, logger=match_mod.logger.name):
+        ctx = _context(monkeypatch, rows + _perp_row(-1500.0))
+
+    assert ctx["portfolio_aum"] is None, "the AUM is -500: not positive"
+    # Scoring weights unchanged by the AUM's sign, and not an equal-weight fallback.
+    assert ctx["portfolio_weights"] == plain["portfolio_weights"] == {BTC: pytest.approx(1.0)}
+    assert "scoring_weights_equal_fallback" not in caplog.text
+    # The non-positive AUM is named, with the allocator, not mislabelled "no AUM data".
+    assert "aum_not_positive" in caplog.text and ALLOCATOR in caplog.text
+
+    flags = _flags(ctx, {"max_weight": 0.25})
+    assert flags[BTC]["weight"] is None, "never 0.0 for an uncomputable share"
+    assert flags[BTC]["breach_reasons"] == []
+    assert flags[BTC]["breach_skipped"] == ["aum_not_positive"]
+    assert flags[BTC]["value_usd"] == pytest.approx(1000.0)
+    # A derivative entry is unchanged: no weight, no test, nothing skipped by name.
+    assert flags[PERP]["weight"] is None
+    assert "breach_skipped" not in flags[PERP]
+    assert flags[PERP]["aum_contribution_usd"] == pytest.approx(-1500.0)
+
+    # The fit values are those of the book without the perp.
+    fit_plain = _fit(plain, monkeypatch)
+    fit_ctx = _fit(ctx, monkeypatch)
+    for name in FIT_KEYS:
+        assert fit_ctx[name] == pytest.approx(fit_plain[name], abs=1e-12), name
+
+
+def test_a_non_positive_aum_names_nothing_skipped_when_no_max_weight_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``breach_skipped`` records a test that WOULD have run: with no max_weight preference
+    nothing was skipped, so the key is absent; the weight is still null."""
+    rows = _rows("BTC", _adjacent_days(BOOK_DAYS), _btc_mark, 1000.0)
+    ctx = _context(monkeypatch, rows + _perp_row(-1500.0))
+
+    flags = _flags(ctx, {})
+
+    assert flags[BTC]["weight"] is None
+    assert "breach_skipped" not in flags[BTC]
+
+
+def test_a_withheld_spot_entry_carries_the_skipped_test_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A withheld stablecoin of 1,000 beside a perp with P&L -1,500 (AUM -500): the withheld
+    entry has weight null and names the skipped max-weight test, like a priced one."""
+    rows = _btc_only() + _usdt_rows(1000.0)
+    ctx = _context(monkeypatch, rows + _perp_row(-3500.0))
+
+    assert ctx["portfolio_aum"] is None  # 2,000 + 1,000 - 3,500 = -500
+    flags = _flags(ctx, {"max_weight": 0.25})
+
+    assert flags[USDT]["weight"] is None
+    assert flags[USDT]["breach_reasons"] == []
+    assert flags[USDT]["breach_skipped"] == ["aum_not_positive"]
+    assert flags[USDT]["withheld_reason"] == "fixed_price"
 
 
 def test_a_zero_value_scored_set_takes_the_equal_weight_fallback_by_name(

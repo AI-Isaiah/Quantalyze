@@ -1257,6 +1257,17 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         for pid in all_ids:
             portfolio_weights[pid] = eq_w
 
+    if combined_aum <= 0 and (holdings_rows_eligible or holdings_rows_withheld or holdings_rows_derivative):
+        # SFH-01: a non-positive matcher AUM is real (derivative losses can exceed spot), not
+        # "no AUM data". It leaves the scoring weights alone; the AUM share and the max-weight
+        # test cannot be computed, so holding_flags names that (weight None, breach_skipped).
+        logger.warning(
+            "match: aum_not_positive: the matcher AUM of allocator %s is not positive "
+            "(derivative P&L exceeds the spot and strategy value), so holding weights are "
+            "persisted as null and the max-weight test is skipped; scoring weights are unaffected",
+            allocator_id,
+        )
+
     # Thumbs-down history
     td_result = (
         supabase.table("match_decisions")
@@ -1323,12 +1334,25 @@ def compute_holding_flags(
         {
             "holding_ref":              "holding:{venue}:{symbol}:{holding_type}",
             "value_usd":                float,
-            "weight":                   float,       # value_usd / portfolio_aum
+            "weight":                   float | None, # the AUM SHARE: value_usd / portfolio_aum,
+                                                      # over the full matcher AUM (D-01, D-16),
+                                                      # NOT the scoring weight; None (JSON null)
+                                                      # when the AUM is not positive (SFH-01)
             "breach_reasons":           list[str],   # "max_weight" | "correlation_ceiling"
             "top_candidate_strategy_id": str | None,
             "top_candidate_composite":  float | None,
             "flagged":                  bool,        # True iff breach + candidate_composite >= 50
+            "breach_skipped":           ["aum_not_positive"],  # ONLY present when the matcher
+                                                      # AUM is not positive and the allocator set
+                                                      # a max_weight: the max-weight test could
+                                                      # not run (weight is null). Absent
+                                                      # otherwise; never in ``breach_reasons``.
         }
+
+    The weight persisted here is the AUM share, a different notion from the scoring weights
+    ``match_engine`` blends the joined series with (``portfolio_weights``, which sum to 1
+    over the joined series only). A non-positive ``portfolio_aum`` (derivative losses can
+    exceed the spot value) never produces a weight: it is null, never 0.0 (SFH-01).
 
     A withheld spot holding (its price is not a market price, or its series is too thin to
     join the book's returns) gets the same shape plus ``withheld_reason``, one of
@@ -1369,7 +1393,11 @@ def compute_holding_flags(
 
     max_weight_pref = allocator_preferences.get("max_weight")
     corr_ceiling = allocator_preferences.get("correlation_ceiling")
+    # The AUM share's denominator. None means "not positive" (the context returns None
+    # for a non-positive matcher AUM): no share can be computed, so every spot entry gets
+    # weight None and the max-weight test is skipped BY NAME, never as a silent 0.0.
     aum = float(portfolio_aum) if portfolio_aum and float(portfolio_aum) > 0 else None
+    max_weight_skipped = max_weight_pref is not None and aum is None
 
     flags: list[dict[str, Any]] = []
 
@@ -1382,11 +1410,11 @@ def compute_holding_flags(
             continue
 
         value = _flag_value_usd(row)
-        weight = value / aum if aum else 0.0
+        aum_share = value / aum if aum is not None else None
         breaches: list[str] = []
 
         # D-05 max_weight breach
-        if max_weight_pref is not None and aum is not None and weight > float(max_weight_pref):
+        if max_weight_pref is not None and aum_share is not None and aum_share > float(max_weight_pref):
             breaches.append("max_weight")
 
         # D-05 correlation_ceiling breach via _compute_corr_with_portfolio
@@ -1430,34 +1458,40 @@ def compute_holding_flags(
 
         flagged = bool(breaches) and top_id is not None
 
-        flags.append({
+        entry: dict[str, Any] = {
             "holding_ref": pseudo_id,
             "value_usd": value,
-            "weight": weight,
+            "weight": aum_share,
             "breach_reasons": breaches,
             "top_candidate_strategy_id": top_id,
             "top_candidate_composite": top_composite,
             "flagged": flagged,
-        })
+        }
+        if max_weight_skipped:
+            entry["breach_skipped"] = ["aum_not_positive"]
+        flags.append(entry)
 
     # 167.1.1.1 D-04, D-12: a withheld SPOT holding is named, with its max-weight breach
     # (D-01: it is in the AUM and the weights) and never flagged.
     for row in holdings_rows_withheld or []:
         value = _flag_value_usd(row)
-        weight = value / aum if aum else 0.0
+        aum_share = value / aum if aum is not None else None
         withheld_breaches: list[str] = []
-        if max_weight_pref is not None and aum is not None and weight > float(max_weight_pref):
+        if max_weight_pref is not None and aum_share is not None and aum_share > float(max_weight_pref):
             withheld_breaches.append("max_weight")
-        flags.append({
+        withheld_entry: dict[str, Any] = {
             "holding_ref": f"holding:{row['venue']}:{row['symbol']}:{row['holding_type']}",
             "value_usd": value,
-            "weight": weight,
+            "weight": aum_share,
             "breach_reasons": withheld_breaches,
             "top_candidate_strategy_id": None,
             "top_candidate_composite": None,
             "flagged": False,
             "withheld_reason": row["withheld_reason"],
-        })
+        }
+        if max_weight_skipped:
+            withheld_entry["breach_skipped"] = ["aum_not_positive"]
+        flags.append(withheld_entry)
 
     # 167.1.1.1 D-02, D-19: every derivative is named, with its P&L contribution to the AUM
     # (D-16) and the reason it is out of the book. No max-weight test (it has no weight:
