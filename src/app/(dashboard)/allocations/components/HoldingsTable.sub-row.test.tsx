@@ -131,7 +131,7 @@ beforeEach(() => {
 describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
   it("1: row click opens HoldingDetail with Metrics tab default", () => {
     const row = makeRow();
-    render(<HoldingsTable rows={[row]} />);
+    render(<HoldingsTable disconnectedAtByHoldingId={{}} rows={[row]} />);
     fireEvent.click(screen.getByText("Test Strategy"));
     const region = screen.getByRole("region", {
       name: /Holding detail for BTC/,
@@ -142,7 +142,7 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
 
   it("2: clicking 'Record outcome' tab switches the visible sub-tab", () => {
     const row = makeRow();
-    render(<HoldingsTable rows={[row]} />);
+    render(<HoldingsTable disconnectedAtByHoldingId={{}} rows={[row]} />);
     fireEvent.click(screen.getByText("Test Strategy"));
     const region = screen.getByRole("region", {
       name: /Holding detail for BTC/,
@@ -156,7 +156,7 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
 
   it("3: clicking 'Notes' tab switches to notes", () => {
     const row = makeRow();
-    render(<HoldingsTable rows={[row]} />);
+    render(<HoldingsTable disconnectedAtByHoldingId={{}} rows={[row]} />);
     fireEvent.click(screen.getByText("Test Strategy"));
     const region = screen.getByRole("region", {
       name: /Holding detail for BTC/,
@@ -173,7 +173,7 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
       symbol: "ETH",
       strategy: "Beta",
     });
-    render(<HoldingsTable rows={[a, b]} />);
+    render(<HoldingsTable disconnectedAtByHoldingId={{}} rows={[a, b]} />);
     fireEvent.click(screen.getByText("Alpha"));
     expect(
       screen.queryByRole("region", { name: /Holding detail for BTC/ }),
@@ -207,7 +207,7 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
       symbol: "SOL",
       strategy: "Gamma",
     });
-    render(<HoldingsTable rows={[a, b, c]} />);
+    render(<HoldingsTable disconnectedAtByHoldingId={{}} rows={[a, b, c]} />);
 
     fireEvent.click(screen.getByText("Alpha"));
     fireEvent.click(screen.getByText("Beta"));
@@ -231,7 +231,7 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
 
   it("M-0076b: rapid toggle of the same row twice ends collapsed", () => {
     const a = makeRow({ id: "holding:binance:BTC:spot", strategy: "Alpha" });
-    render(<HoldingsTable rows={[a]} />);
+    render(<HoldingsTable disconnectedAtByHoldingId={{}} rows={[a]} />);
     fireEvent.click(screen.getByText("Alpha"));
     fireEvent.click(screen.getByText("Alpha"));
     expect(
@@ -241,7 +241,7 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
 
   it("5: clicking the same row again collapses it (toggle)", () => {
     const row = makeRow();
-    render(<HoldingsTable rows={[row]} />);
+    render(<HoldingsTable disconnectedAtByHoldingId={{}} rows={[row]} />);
     fireEvent.click(screen.getByText("Test Strategy"));
     expect(
       screen.queryByRole("region", { name: /Holding detail for BTC/ }),
@@ -254,7 +254,7 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
 
   it("6: bridgeCandidate=false → Record-outcome tab shows no-candidate copy", () => {
     const row = makeRow({ bridgeCandidate: false });
-    render(<HoldingsTable rows={[row]} />);
+    render(<HoldingsTable disconnectedAtByHoldingId={{}} rows={[row]} />);
     fireEvent.click(screen.getByText("Test Strategy"));
     fireEvent.click(screen.getByRole("tab", { name: "Record outcome" }));
     expect(
@@ -275,6 +275,7 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
     render(
       <HoldingsTable
         rows={[row]}
+        disconnectedAtByHoldingId={{}}
         flaggedHoldingsByRef={flaggedHoldingsByRef}
       />,
     );
@@ -296,6 +297,7 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
     render(
       <HoldingsTable
         rows={[row]}
+        disconnectedAtByHoldingId={{}}
         flaggedHoldingsByRef={flaggedHoldingsByRef}
       />,
     );
@@ -309,7 +311,7 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
 
   it("9: D-14 banner absence — bridgeCandidate=false row does NOT render BridgeOutcomeBanner", () => {
     const row = makeRow({ bridgeCandidate: false });
-    render(<HoldingsTable rows={[row]} />);
+    render(<HoldingsTable disconnectedAtByHoldingId={{}} rows={[row]} />);
     expect(
       screen.queryByTestId("bridge-outcome-banner"),
     ).not.toBeInTheDocument();
@@ -328,6 +330,7 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
     render(
       <HoldingsTable
         rows={[row]}
+        disconnectedAtByHoldingId={{}}
         flaggedHoldingsByRef={flaggedHoldingsByRef}
       />,
     );

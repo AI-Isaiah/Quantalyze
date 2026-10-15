@@ -47,6 +47,7 @@ function makeRow(over: Partial<OpenPositionRow> = {}): OpenPositionRow {
     unrealized_pnl_usd: 1_500,
     api_key_id: "key-1",
     source_key_sync_status: "complete",
+    source_key_disconnected_at: null,
     ...over,
   };
 }

@@ -162,7 +162,10 @@ function makeStrategyFormatRow(
 describe("formatPercent call-site signed-flag contract (H-1208)", () => {
   it("HoldingsTable Weight cell is unsigned ('18.50%', no leading +); MTD is '+2.17%'; Max DD is '-9.10%'", () => {
     const row = makeFormatRow();
-    render(React.createElement(HoldingsTable, { rows: [row] }));
+    render(React.createElement(HoldingsTable, {
+        rows: [row],
+        disconnectedAtByHoldingId: {},
+      }));
 
     // Weight: unsigned domain. MUST NOT carry a leading '+'.
     expect(screen.getByText("18.50%")).toBeInTheDocument();

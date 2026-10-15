@@ -1,5 +1,78 @@
 # Changelog
 
+## [0.132.0.0] - 2026-10-15 — HOLDINGKEYSCOPE: a disconnected key's holdings say so, and /compare shows a spot holding's metrics again, computed from its daily price
+
+Phase 167.1.1 HOLDINGKEYSCOPE, re-scoped on 2026-10-15 as a close-out. Phase 170.4 had already stopped two keys holding one asset on one venue from merging into one holding, and had closed the routed readers R-15-1, R-15-2 and R-15-3. This release proves that with a test, pins every consumer of the holding scope key, discloses soft-disconnected keys, and brings back `/compare`'s per-holding metrics from a source that buying or selling cannot distort. Founder decisions D-01 to D-06 are recorded in the phase CONTEXT and the ROADMAP.
+
+### Added
+- **"Key disconnected" chip on Holdings and Open Positions (D-02).** A soft-disconnected key's holdings stay in those totals. Each row now carries an amber "Key disconnected" chip and struck-through figures, the same treatment a revoked key's row gets, and it is hidden when "Show holdings from keys needing attention" is off. The toggle still starts on. A key that is both disconnected and revoked shows exactly one chip, "Key disconnected". The money surfaces share one predicate, `keyNeedsAttention`, and one chip source, `keyAttentionChipLabel` (`src/lib/closed-sets.ts`). Key management (`ApiKeyManager`) and the `/strategies` key pill keep asking only the sync status, on purpose. (0acb588ed, e0a3dbf36, 873edb684)
+- **`/compare` per-holding return, Sharpe, max drawdown and volatility for crypto spot holdings (D-03).**
+  - The figures come from each holding's daily mark price in `allocator_holdings`, never from its dollar value, so buying more of an asset no longer reads as a gain.
+  - A return is taken only between two adjacent calendar days that both carry a price. A missing day breaks the chain and is never filled with a zero.
+  - With fewer than 30 priced days all four figures are "—" and the card says how many priced days there are.
+  - Annualisation is 365.
+  - The read is paged, and it fails with a load error if it goes past its page ceiling, so it never returns a partial history.
+  - A caption under the figures says they come from the daily price. (6ae6cd55d, 7578aefe3, 21f425ec3, 41cb002a6)
+- **Named notes instead of numbers on `/compare` (D-05).**
+  - A derivative holding: "not shown for derivative holdings yet" (it waits for a signed basis).
+  - A stablecoin or sFOX holding: its recorded price is a fixed value.
+  - An MT5 account: it is an account balance.
+  - An asset that has rows but no priced day: no market price has been recorded for it.
+
+  An unowned or nonexistent holding still returns the same null as before (D-15). (b516f60a8, 7dec3cfd8, fac6ac550, 3f072b4b8)
+
+### Changed
+- **Composer AUM note (D-02, D-04).** In book mode a soft-disconnected key's dollars stay out of the modelled AUM. They were named "keys that are not connected" and are now named "Excludes $Y from keys needing attention". No total moves. (0acb588ed, 9e81af0b4)
+- **The `/compare` adapter no longer reads `allocator_equity_snapshots.breakdown`.**
+  - The global `HOLDING_COMPARE_HISTORY_STATE` switch and its test seam are gone. Whether metrics show is now decided per holding type and per price source.
+  - The old note blaming "a rebuild" and a double count is gone from every card state. (6ae6cd55d, 41cb002a6)
+- **Stricter inputs.** `summarizeLiveHoldings` now requires `disconnectedAtByKeyId`, and `source_key_disconnected_at` is a required field on Holdings and Open Positions rows. A row builder that leaves either out is now a type error instead of a key silently read as connected. (0acb588ed, bf330f592)
+
+### Fixed
+Review rounds 1 to 3, each fix seen RED before it was applied:
+- **CR-01 (HIGH):** a stablecoin or sFOX holding would have shown an invented 0% return and volatility. The writer stamps a fixed mark of 1.0 on them, and a parity test now pins the stablecoin set against the Python one. (b516f60a8)
+- **SFH-01:** such a holding no longer vanishes from a mixed comparison as if it were unowned. (b516f60a8)
+- **SFH-02:** "too few priced days" is decided by the priced-day count. A null volatility and Sharpe next to real return figures now says why. (f313fa714)
+- **SFH-03:** a non-numeric mark or a malformed day is a load error, not a silent missing day. (ce2072f57)
+- **M-R2-01:** an MT5 account was described as having "a fixed value". (7dec3cfd8)
+- **M-R2-02:** an asset with no priced day read "Only 0 priced days so far" forever. (fac6ac550)
+- **M-R3-01:** that note's "yet" promised history that will not come. (3f072b4b8)
+- **The `env-manifest` contract test:** it went red on the census test's `HOLDING_CENSUS_PRINT` switch, which is now registered as test-only. (9c61d5f63)
+- **`/compare` strategy-only-charts regression test:** after the read moved, its mock no longer matched the query and its dates were impossible. The harness is fixed and no assertion changed. (7da769137)
+
+### Tests
+- **SC 1, two keys on one venue and asset (`HoldingsTabPanel.exposure-agreement.test.tsx`).** Both positions survive in Holdings, Open Positions and the 167.1 marker, in both composer branches, against hand-typed figures:
+  - Holdings 65,000; Open Positions notional 150,000.
+  - Marker total 65,900; book-mode AUM 41,200, with 24,700 excluded across 2 rows.
+
+  The test was seen RED with the key the phase was booked against (`holdingScopeKey` alone), then GREEN after the byte-for-byte restore. (0f574679e, d9b84a664, 261f04f47)
+- **SC 2: `holding-scope-key-census.test.ts`.**
+  - It finds every consumer of the holding scope key shape in `src` and `analytics-service`.
+  - Matchers M1 to M11 cover templates, f-strings, regex parsers, Python tuples, `.join` and destructured templates.
+  - Each hit is pinned by count, with a verdict (rekeyed, merges-on-purpose, key-free-by-design, parse-only, display-only) and a reason.
+  - A new unclassified consumer fails it, which was seen with a probe file. (8bbf33b96, 1cb926f30)
+- **D-02 truth table and summariser branches** with hand-typed figures. Neutering the predicate turned 12 tests RED and neutering the chip helper turned 14 RED, while the controls stayed green. (b6e7c4068, e0a3dbf36, 873edb684)
+- **D-03 adapter.** Each of these was neutered and went RED:
+  - the dollar-ratio read (+100% instead of 0% on a purchase at a constant price);
+  - the rule that a mark of zero or below is a missing day;
+  - the adjacency rule (volatility 1.80 instead of 1.9105);
+  - the per-day tie-break.
+
+  On the card, the fail-closed gate and the too-few-days branch were neutered and went RED. (7578aefe3, 3a896c31a)
+- **The live `/compare` RLS proof** (`compare-holding-rls.test.ts`) is reseeded on `allocator_holdings`. (4cabf2e26)
+
+### Notes
+- **Still open (UAT, `167.1.1-UAT.md`):**
+  - The live RLS proof skips locally and must pass in CI's `frontend-live-db-lane` on this PR.
+  - The "Key disconnected" chip at 375px on Holdings and Open Positions, checked after deploy.
+  - The `/compare` caption and notes at 375px, checked after deploy.
+- **No analytics-service, migration or dependency change (SC 4).** The Bridge matcher's `reconstruct_symbol_returns` still builds per-holding returns as dollar ratios. By founder decision D-06 it goes to a follow-up phase, tracked as TODOS `167.1.1-BRIDGE-DOLLAR-RATIO-RETURNS`.
+- **Known limits:**
+  - `DesignHoldingsTable` and `toDesignHoldings` have no production caller. Whoever wires them must key rows by ref and `api_key_id`, and pass the disconnected-key map.
+  - A mark is sampled when the account is polled, not at a fixed close, so the copy says "daily price", never close-to-close.
+- **Pre-existing and not touched:** the `compute.conventions` inline snapshots B and C fail on the phase base under local Node 25, on a last-digit float difference.
+- **Phase records:** context, research, UI contract, validation strategy, patterns, five plans and their summaries, four review rounds with fix reports, the security register (0 open of 20), verification (human_needed) and tracking. (a330c0094 through cfe0668fd: every docs commit on this branch, including 75c3134da, 03238c759, 02d60d366, b0eb07ae3, 909590d48, 57e080fdb, ee1e6f259, 98b1e0db7, a9ac8ca60, 0530fa3e9, 83df3a54b, 7691f70fa, 15d6b2f87, a8df9d8ee, 415689a24, cebb3bf2b, c5c5cc5ea, fe6aa39a9, 6d9dfdd98, 8dea6d08d, 666f63ffb)
+
 ## [0.131.13.3] - 2026-10-15 — GSDFORMAT: ROADMAP.md and STATE.md take a shape the gsd-tools handlers can edit without corrupting them
 
 Founder decision 2026-10-15, "Fix our format + report upstream". This repo's own rule had been "prefer hand-editing ROADMAP.md and STATE.md". It existed because the gsd-tools handlers corrupted both files. A debugger run traced that to four tool assumptions our file shape broke. This release fixes the shape, adds a lint that keeps it fixed, and drafts the tool bugs as upstream issues. Measured in a throwaway worktree after the reshape: `roadmap.update-plan-progress 159` is a no-op (before, it ticked another phase's plan). `170` changes only its `**Plans:**` count and the plan ticks its SUMMARYs earn (before, it also ticked 169.4-07 and stamped "(completed …)" onto 169.4-08). `164.4.2.1` changes one count line (before: duplicate rows above the wrong heading, plus a ticked TBD stub). `state.advance-plan` moves `Plan: 8 of 9` to `9 of 9` (before, it refused on 28 `Phase:` candidates).

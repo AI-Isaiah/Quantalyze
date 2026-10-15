@@ -190,4 +190,53 @@ describe("HoldingsTabPanel, each key's position is its own named row (D-08)", ()
     expect(screen.queryAllByTestId("holding-key-label")).toHaveLength(0);
     expect(document.body.textContent).not.toContain("key-gone");
   });
+  // 167.1.1 D-02 (K1). A soft-disconnected key's dollars are disclosed exactly
+  // like an untrusted key's: one chip, struck-through figures, filtered and
+  // counted by the toggle. Fixture is hand-typed; key-a is disconnected, key-b
+  // is a connected "complete" control in the same render.
+  describe("167.1.1 D-02: a soft-disconnected key on the Holdings tab", () => {
+    const DISCONNECTED_KEYS = [
+      {
+        id: "key-a",
+        sync_status: "complete",
+        exchange: "binance",
+        label: "Main",
+        disconnected_at: "2026-10-01T00:00:00Z",
+      },
+      {
+        id: "key-b",
+        sync_status: "complete",
+        exchange: "binance",
+        label: "Hedge",
+        disconnected_at: null,
+      },
+    ];
+    const BOOK = [spot("key-a", 40_000), spot("key-b", 25_000)];
+
+    it("chips the disconnected key's row once and strikes its figures; the connected row has neither", () => {
+      renderPanel(BOOK, DISCONNECTED_KEYS);
+      const [disconnectedRow, connectedRow] = bodyRows(section("Holdings"));
+      expect(within(disconnectedRow).getAllByText("Key disconnected")).toHaveLength(1);
+      expect(within(disconnectedRow).getByText("$40,000").className).toContain(
+        "line-through",
+      );
+      expect(within(connectedRow).queryByText("Key disconnected")).toBeNull();
+      expect(within(connectedRow).getByText("$25,000").className).not.toContain(
+        "line-through",
+      );
+    });
+
+    it("hides the disconnected row with the toggle off and counts it in the footer (singular)", () => {
+      renderPanel(BOOK, DISCONNECTED_KEYS);
+      fireEvent.click(
+        screen.getByLabelText("Show holdings from keys needing attention"),
+      );
+      expect(bodyRows(section("Holdings"))).toHaveLength(1);
+      expect(
+        within(section("Holdings")).getByText(
+          /1 holding hidden from keys needing attention/,
+        ),
+      ).toBeTruthy();
+    });
+  });
 });
