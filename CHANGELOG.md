@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.132.2.1] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of f5dc21b3
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38817173974`, after the PROD apply of merge `f5dc21b3`: sha256 `19cedd5e…` → `8d428d8a…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 131 → 132, distinct function names 129 → 130, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261026120000_okx_archive_rebuild.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-15` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.132.2.0 → 0.132.2.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=305 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 132 — MATCH 129, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38817173974` succeeded, and this entry was composed by the `redump-pr` job. Run `38817173974` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.132.2.0] - 2026-10-15 — OKXHISTORY: an OKX strategy's days older than the 3-month bills window can be rebuilt from OKX's quarterly bills archive (PR-A, code only)
 
 Phase 167.1.2.2.2.1, PR-A (plans 01-10 and 16). The branch has 74 non-merge commits since `origin/main` plus 17 merge commits (per-plan worktree merges and three merges of `origin/main`). 51 of the 73 touch paths outside `.planning`, and this entry maps every one of them. The other 23 are planning and records commits: CONTEXT with founder decisions D-01..D-13, research, the pattern map, 16 plans, SUMMARYs, three review rounds, verification and the security audit. Those are not shipped here. **Nothing is rebuilt on PROD by this release.** The allow-list for the archive download host ships empty on purpose, so every real download is refused until PR-B (plan 13) adds the host measured by the founder's preflight (plan 12). Calibrate (plan 14) and the PROD apply (plan 15) are founder steps that come after it.

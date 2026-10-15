@@ -1290,6 +1290,346 @@ COMMENT ON FUNCTION "public"."api_key_cooldown_remaining"("p_api_key_id" "uuid",
 
 
 
+CREATE OR REPLACE FUNCTION "public"."apply_okx_archive_rebuild"("p_strategy_id" "uuid", "p_rows" "jsonb", "p_expected_gaps" "jsonb", "p_expected_gaps_after" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $_$
+DECLARE
+  -- The pinned provenance source (D-05). A literal, never a parameter.
+  c_source       CONSTANT text := 'okx_bills_history_archive';
+  -- A calendar date string: 1900..2999, ISO, fixed width. Calendar validity (a
+  -- day that exists in its month) is checked separately, without casting, because
+  -- a cast of 2026-02-30 raises 22008 and a refusal must name the input, not a
+  -- datetime error.
+  c_date_re      CONSTANT text := '^(19|2[0-9])[0-9]{2}-(0[1-9]|1[0-2])-[0-9]{2}$';
+  v_n            integer;
+  v_bad          integer;
+  v_src          text;
+  v_sp           jsonb;     -- stored series_provenance
+  v_rtype        text;
+  v_stored_raw   jsonb;     -- stored unrecovered_gaps entries (with recorded_at)
+  v_stored       jsonb;     -- ... normalised to sorted [{from, to}]
+  v_expected     jsonb;     -- p_expected_gaps, normalised
+  v_expected_aft jsonb;     -- p_expected_gaps_after, normalised
+  v_new_gaps     jsonb;     -- the narrowed gaps in stored form (recorded_at kept)
+  v_new_norm     jsonb;     -- ... normalised to sorted [{from, to}]
+  v_old_ranges   jsonb;
+  v_new_ranges   jsonb;
+  v_ranges_added integer;
+  v_ins_dates    date[];
+  v_ins_n        integer;
+  v_now          text := to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"');
+BEGIN
+  -- ===== 1. NULL and type guards. Every guard is NULL-explicit: a three-valued
+  --          comparison against a NULL argument is NULL, plpgsql takes the ELSE
+  --          branch on a NULL condition, and the guard would silently pass.
+  IF p_strategy_id IS NULL THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_strategy_id is required (got NULL)'
+      USING ERRCODE = '22023';
+  END IF;
+  IF p_rows IS NULL OR p_expected_gaps IS NULL OR p_expected_gaps_after IS NULL THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_rows, p_expected_gaps and p_expected_gaps_after are all required (got NULL)'
+      USING ERRCODE = '22023';
+  END IF;
+  IF jsonb_typeof(p_rows) <> 'array' THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_rows must be a JSONB array, got %', jsonb_typeof(p_rows)
+      USING ERRCODE = '22023';
+  END IF;
+  IF jsonb_typeof(p_expected_gaps) <> 'array' THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_expected_gaps must be a JSONB array, got %', jsonb_typeof(p_expected_gaps)
+      USING ERRCODE = '22023';
+  END IF;
+  IF jsonb_typeof(p_expected_gaps_after) <> 'array' THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_expected_gaps_after must be a JSONB array, got %', jsonb_typeof(p_expected_gaps_after)
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 2. Size guards. At least one row (an empty call cannot be expressed
+  --          through this function by contract), at most 1000.
+  v_n := jsonb_array_length(p_rows);
+  IF v_n < 1 OR v_n > 1000 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_rows must carry 1..1000 rows (got %)', v_n
+      USING ERRCODE = '22023';
+  END IF;
+  IF jsonb_array_length(p_expected_gaps) > 1000 OR jsonb_array_length(p_expected_gaps_after) > 1000 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_expected_gaps and p_expected_gaps_after may carry at most 1000 entries each (got % and %)',
+      jsonb_array_length(p_expected_gaps), jsonb_array_length(p_expected_gaps_after)
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 3. Date validity of every row date and every caller gap bound. One
+  --          query over the union so a refusal names the FIRST argument at fault.
+  --          CASE keeps the evaluation order: the calendar check runs only for a
+  --          string that already matched the shape.
+  SELECT count(*), min(d.src) INTO v_bad, v_src
+    FROM (
+      SELECT 'p_rows' AS src,
+             CASE WHEN jsonb_typeof(e) = 'object' AND jsonb_typeof(e -> 'date') = 'string' THEN e ->> 'date' END AS s
+        FROM jsonb_array_elements(p_rows) e
+      UNION ALL
+      SELECT 'p_expected_gaps',
+             CASE WHEN jsonb_typeof(e) = 'object' AND jsonb_typeof(e -> 'from') = 'string' THEN e ->> 'from' END
+        FROM jsonb_array_elements(p_expected_gaps) e
+      UNION ALL
+      SELECT 'p_expected_gaps',
+             CASE WHEN jsonb_typeof(e) = 'object' AND jsonb_typeof(e -> 'to') = 'string' THEN e ->> 'to' END
+        FROM jsonb_array_elements(p_expected_gaps) e
+      UNION ALL
+      SELECT 'p_expected_gaps_after',
+             CASE WHEN jsonb_typeof(e) = 'object' AND jsonb_typeof(e -> 'from') = 'string' THEN e ->> 'from' END
+        FROM jsonb_array_elements(p_expected_gaps_after) e
+      UNION ALL
+      SELECT 'p_expected_gaps_after',
+             CASE WHEN jsonb_typeof(e) = 'object' AND jsonb_typeof(e -> 'to') = 'string' THEN e ->> 'to' END
+        FROM jsonb_array_elements(p_expected_gaps_after) e
+    ) d
+   WHERE NOT COALESCE(
+           CASE WHEN d.s ~ c_date_re THEN
+                  substr(d.s, 9, 2)::integer BETWEEN 1 AND
+                    extract(day FROM (make_date(substr(d.s, 1, 4)::integer, substr(d.s, 6, 2)::integer, 1)
+                                      + interval '1 month' - interval '1 day'))::integer
+                ELSE false
+           END, false);
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: % entries are not calendar dates in YYYY-MM-DD form or lack a date field (first argument at fault: %)', v_bad, v_src
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 4. daily_return: a JSON number inside the +/-10 fence that the CSV
+  --          finalize path also applies to this table. A JSON number is always
+  --          finite (jsonb cannot hold NaN or Infinity); the fence keeps an
+  --          out-of-range value from surfacing later as a float cast error.
+  SELECT count(*) INTO v_bad
+    FROM jsonb_array_elements(p_rows) e
+   WHERE NOT COALESCE(
+           CASE WHEN jsonb_typeof(e -> 'daily_return') = 'number'
+                THEN abs((e ->> 'daily_return')::numeric) <= 10
+                ELSE false
+           END, false);
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: % rows carry a daily_return that is not a finite number within +/-10', v_bad
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 5. No duplicate date inside one payload (it would raise 23505 on the
+  --          unique index, a code that looks like a double submit).
+  SELECT count(*) - count(DISTINCT e ->> 'date') INTO v_bad FROM jsonb_array_elements(p_rows) e;
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_rows repeats a date (% duplicate rows)', v_bad
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 6. A caller gap must end on or after its start.
+  SELECT count(*) INTO v_bad
+    FROM (SELECT e FROM jsonb_array_elements(p_expected_gaps) e
+          UNION ALL SELECT e FROM jsonb_array_elements(p_expected_gaps_after) e) g
+   WHERE (g.e ->> 'from')::date > (g.e ->> 'to')::date;
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: % caller gaps end before they start', v_bad
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 7. Lock the strategy_analytics row. Two concurrent calls for one
+  --          strategy then run one after the other, and the second reads the gaps
+  --          the first left (or loses the compare-and-set below).
+  SELECT sa.series_provenance INTO v_sp
+    FROM public.strategy_analytics sa
+   WHERE sa.strategy_id = p_strategy_id
+     FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: no strategy_analytics row exists for the given strategy'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- The stored unrecovered_gaps. A non-array or absent value reads as empty, as
+  -- the public reader does. A malformed ENTRY is refused: it cannot be reasoned
+  -- about, and guessing would write over a record nobody can read.
+  v_stored_raw := CASE WHEN jsonb_typeof(v_sp -> 'unrecovered_gaps') = 'array'
+                       THEN v_sp -> 'unrecovered_gaps' ELSE '[]'::jsonb END;
+  SELECT count(*) INTO v_bad
+    FROM (
+      SELECT CASE WHEN jsonb_typeof(e) = 'object' AND jsonb_typeof(e -> 'from') = 'string' THEN e ->> 'from' END AS s
+        FROM jsonb_array_elements(v_stored_raw) e
+      UNION ALL
+      SELECT CASE WHEN jsonb_typeof(e) = 'object' AND jsonb_typeof(e -> 'to') = 'string' THEN e ->> 'to' END
+        FROM jsonb_array_elements(v_stored_raw) e
+    ) d
+   WHERE NOT COALESCE(
+           CASE WHEN d.s ~ c_date_re THEN
+                  substr(d.s, 9, 2)::integer BETWEEN 1 AND
+                    extract(day FROM (make_date(substr(d.s, 1, 4)::integer, substr(d.s, 6, 2)::integer, 1)
+                                      + interval '1 month' - interval '1 day'))::integer
+                ELSE false
+           END, false);
+  IF v_bad = 0 THEN
+    SELECT count(*) INTO v_bad
+      FROM jsonb_array_elements(v_stored_raw) e
+     WHERE (e ->> 'from')::date > (e ->> 'to')::date;
+  END IF;
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: stored_gaps_malformed - % stored unrecovered_gaps entries are not valid ranges', v_bad
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- A reconstructed_ranges value that is present but not an array is refused, not
+  -- overwritten: appending would destroy a record the reader may still need.
+  v_rtype := jsonb_typeof(v_sp -> 'reconstructed_ranges');
+  IF v_rtype IS NOT NULL AND v_rtype NOT IN ('array', 'null') THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: stored reconstructed_ranges is a JSON %, not an array', v_rtype
+      USING ERRCODE = '22023';
+  END IF;
+  v_old_ranges := CASE WHEN v_rtype = 'array' THEN v_sp -> 'reconstructed_ranges' ELSE '[]'::jsonb END;
+
+  -- Normalise the three gap lists to sorted [{from, to}] so the comparisons below
+  -- are order-insensitive and ignore recorded_at.
+  v_stored := COALESCE((
+    SELECT jsonb_agg(jsonb_build_object('from', e ->> 'from', 'to', e ->> 'to')
+                     ORDER BY (e ->> 'from') COLLATE "C", (e ->> 'to') COLLATE "C")
+      FROM jsonb_array_elements(v_stored_raw) e), '[]'::jsonb);
+  v_expected := COALESCE((
+    SELECT jsonb_agg(jsonb_build_object('from', e ->> 'from', 'to', e ->> 'to')
+                     ORDER BY (e ->> 'from') COLLATE "C", (e ->> 'to') COLLATE "C")
+      FROM jsonb_array_elements(p_expected_gaps) e), '[]'::jsonb);
+  v_expected_aft := COALESCE((
+    SELECT jsonb_agg(jsonb_build_object('from', e ->> 'from', 'to', e ->> 'to')
+                     ORDER BY (e ->> 'from') COLLATE "C", (e ->> 'to') COLLATE "C")
+      FROM jsonb_array_elements(p_expected_gaps_after) e), '[]'::jsonb);
+
+  -- ===== 8. Already applied: every row date already has a csv_daily_returns row
+  --          AND lies inside a stored reconstructed_ranges entry carrying THIS
+  --          source. A re-run after success writes nothing and says so, with a
+  --          status that cannot be mistaken for a refusal. Checked BEFORE the
+  --          compare-and-set, because after a success the stored gaps have moved.
+  --          Range bounds compare as text (fixed-width ISO sorts chronologically,
+  --          COLLATE "C" removes any locale effect), so a malformed stored range
+  --          is skipped rather than raising.
+  SELECT count(*) INTO v_n
+    FROM jsonb_array_elements(p_rows) e
+   WHERE EXISTS (SELECT 1 FROM public.csv_daily_returns c
+                  WHERE c.strategy_id = p_strategy_id AND c.date = (e ->> 'date')::date)
+     AND EXISTS (SELECT 1 FROM jsonb_array_elements(v_old_ranges) r
+                  WHERE r ->> 'source' = c_source
+                    AND (r ->> 'from') ~ c_date_re
+                    AND (r ->> 'to') ~ c_date_re
+                    AND (e ->> 'date') >= (r ->> 'from') COLLATE "C"
+                    AND (e ->> 'date') <= (r ->> 'to') COLLATE "C");
+  IF v_n = jsonb_array_length(p_rows) THEN
+    RETURN jsonb_build_object('status', 'already_applied', 'inserted', 0, 'ranges_added', 0,
+                              'gaps_before', v_stored, 'gaps_after', v_stored);
+  END IF;
+
+  -- ===== 9. Compare-and-set: the stored gaps must be the ones the caller read.
+  IF v_stored IS DISTINCT FROM v_expected THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: gaps_changed - the stored unrecovered_gaps (% ranges) differ from p_expected_gaps (% ranges); nothing was written',
+      jsonb_array_length(v_stored), jsonb_array_length(v_expected)
+      USING ERRCODE = 'P0001';
+  END IF;
+
+  -- ===== 10. Containment (D-01): every row date lies inside a stored gap. One
+  --           row outside rolls the whole call back; the function can only fill
+  --           days TRADESYNC named.
+  SELECT count(*), min(e ->> 'date') INTO v_bad, v_src
+    FROM jsonb_array_elements(p_rows) e
+   WHERE NOT EXISTS (SELECT 1 FROM jsonb_array_elements(v_stored) g
+                      WHERE (e ->> 'date')::date BETWEEN (g ->> 'from')::date AND (g ->> 'to')::date);
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: row_outside_gap - % rows lie outside every stored gap (earliest: %); nothing was written', v_bad, v_src
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 11. The rows. D-12: a day that already has a row keeps it untouched.
+  --           RETURNING date is the ONLY source of the reconstructed ranges.
+  WITH ins AS (
+    INSERT INTO public.csv_daily_returns (strategy_id, date, daily_return)
+    SELECT p_strategy_id, (e ->> 'date')::date, (e ->> 'daily_return')::double precision
+      FROM jsonb_array_elements(p_rows) e
+    ON CONFLICT (strategy_id, date) DO NOTHING
+    RETURNING date
+  )
+  SELECT array_agg(ins.date ORDER BY ins.date), count(*) INTO v_ins_dates, v_ins_n FROM ins;
+
+  -- ===== 12. The narrowed gaps: for each stored gap, the days that still have no
+  --           row, collapsed into inclusive islands. recorded_at of the stored
+  --           gap rides along. A day nothing covered stays named.
+  WITH g AS (
+    SELECT gx.gi,
+           (gx.x ->> 'from')::date AS f,
+           (gx.x ->> 'to')::date   AS t,
+           gx.x -> 'recorded_at'   AS ra
+      FROM jsonb_array_elements(v_stored_raw) WITH ORDINALITY AS gx(x, gi)
+  ), days AS (
+    SELECT g.gi, g.ra, g.f + s.n AS d
+      FROM g CROSS JOIN LATERAL generate_series(0, g.t - g.f) AS s(n)
+     WHERE NOT EXISTS (SELECT 1 FROM public.csv_daily_returns c
+                        WHERE c.strategy_id = p_strategy_id AND c.date = g.f + s.n)
+  ), isl AS (
+    SELECT days.gi, days.ra, days.d,
+           days.d - (row_number() OVER (PARTITION BY days.gi ORDER BY days.d))::integer AS grp
+      FROM days
+  ), spans AS (
+    SELECT isl.gi, isl.ra, min(isl.d) AS f, max(isl.d) AS t FROM isl GROUP BY isl.gi, isl.ra, isl.grp
+  )
+  SELECT COALESCE(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+                   'from', to_char(spans.f, 'YYYY-MM-DD'),
+                   'to', to_char(spans.t, 'YYYY-MM-DD'),
+                   'recorded_at', spans.ra)) ORDER BY spans.f, spans.t), '[]'::jsonb)
+    INTO v_new_gaps
+    FROM spans;
+  v_new_norm := COALESCE((
+    SELECT jsonb_agg(jsonb_build_object('from', e ->> 'from', 'to', e ->> 'to')
+                     ORDER BY (e ->> 'from') COLLATE "C", (e ->> 'to') COLLATE "C")
+      FROM jsonb_array_elements(v_new_gaps) e), '[]'::jsonb);
+
+  -- The caller computed the same thing on its own side. A difference means the
+  -- two disagree about which days are covered, and the INSERT above rolls back
+  -- with this raise (D-11).
+  IF v_new_norm IS DISTINCT FROM v_expected_aft THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: gaps_after_mismatch - the narrowed gaps (% ranges) differ from p_expected_gaps_after (% ranges); nothing was written',
+      jsonb_array_length(v_new_norm), jsonb_array_length(v_expected_aft)
+      USING ERRCODE = 'P0001';
+  END IF;
+
+  -- ===== 13. The reconstructed ranges: one per island of the days the INSERT
+  --           returned. Nothing inserted, nothing appended.
+  WITH ins AS (
+    SELECT u.d, u.d - (row_number() OVER (ORDER BY u.d))::integer AS grp
+      FROM unnest(COALESCE(v_ins_dates, ARRAY[]::date[])) AS u(d)
+  ), spans AS (
+    SELECT min(ins.d) AS f, max(ins.d) AS t FROM ins GROUP BY ins.grp
+  )
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                   'from', to_char(spans.f, 'YYYY-MM-DD'),
+                   'to', to_char(spans.t, 'YYYY-MM-DD'),
+                   'source', c_source,
+                   'recorded_at', v_now) ORDER BY spans.f), '[]'::jsonb),
+         count(*)
+    INTO v_new_ranges, v_ranges_added
+    FROM spans;
+
+  -- ===== 14. The ONE provenance write. jsonb_set touches only the keys named,
+  --           so legacy_ranges and every other key survive; a NULL column starts
+  --           from an empty object (the table CHECK wants an object or NULL).
+  v_sp := jsonb_set(COALESCE(v_sp, '{}'::jsonb), '{unrecovered_gaps}', v_new_gaps, true);
+  IF v_ranges_added > 0 THEN
+    v_sp := jsonb_set(v_sp, '{reconstructed_ranges}', v_old_ranges || v_new_ranges, true);
+  END IF;
+  UPDATE public.strategy_analytics
+     SET series_provenance = v_sp
+   WHERE strategy_id = p_strategy_id;
+
+  RETURN jsonb_build_object('status', 'applied', 'inserted', v_ins_n, 'ranges_added', v_ranges_added,
+                            'gaps_before', v_stored, 'gaps_after', v_new_norm);
+END;
+$_$;
+
+
+ALTER FUNCTION "public"."apply_okx_archive_rebuild"("p_strategy_id" "uuid", "p_rows" "jsonb", "p_expected_gaps" "jsonb", "p_expected_gaps_after" "jsonb") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."apply_okx_archive_rebuild"("p_strategy_id" "uuid", "p_rows" "jsonb", "p_expected_gaps" "jsonb", "p_expected_gaps_after" "jsonb") IS 'Phase 167.1.2.2.2.1 OKXHISTORY. The one atomic write of the OKX quarterly-archive rebuild: inserts the rebuilt csv_daily_returns rows (ON CONFLICT (strategy_id, date) DO NOTHING, so a live day always wins), narrows strategy_analytics.series_provenance.unrecovered_gaps to the gap days that still have no row, and appends reconstructed_ranges entries {from, to, source okx_bills_history_archive, recorded_at} derived from the rows the INSERT returned, in ONE transaction. Compare-and-set on the stored gaps (p_expected_gaps) and on the caller''s own narrowed gaps (p_expected_gaps_after). Returns {status applied|already_applied, inserted, ranges_added, gaps_before, gaps_after}. ERRCODE map: 22023 = malformed input, missing strategy_analytics row, a row outside every stored gap (row_outside_gap), malformed stored gaps (stored_gaps_malformed); P0001 = gaps_changed (compare-and-set) or gaps_after_mismatch. Never 40001 (PostgREST re-runs it without bound). Messages carry dates and counts only. SECURITY INVOKER; EXECUTE for service_role only.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."backfill_api_keys_history_reconstructed_at"() RETURNS integer
     LANGUAGE "sql"
     SET "search_path" TO 'public', 'pg_catalog'
@@ -1617,8 +1957,8 @@ CREATE TABLE IF NOT EXISTS "public"."compute_jobs" (
     CONSTRAINT "compute_jobs_error_kind_check" CHECK (("error_kind" = ANY (ARRAY['transient'::"text", 'permanent'::"text", 'unknown'::"text", 'orphaned'::"text"]))),
     CONSTRAINT "compute_jobs_exchange_check" CHECK ((("exchange" IS NULL) OR ("exchange" = ANY (ARRAY['binance'::"text", 'okx'::"text", 'bybit'::"text", 'deribit'::"text", 'sfox'::"text", 'mt5'::"text"])))),
     CONSTRAINT "compute_jobs_idempotency_key_safe" CHECK ((("idempotency_key" IS NULL) OR (("length"("idempotency_key") <= 128) AND ("idempotency_key" ~ '^[A-Za-z0-9_:.-]+$'::"text")))),
-    CONSTRAINT "compute_jobs_kind_check" CHECK (("kind" = ANY (ARRAY['sync_trades'::"text", 'compute_analytics'::"text", 'compute_portfolio'::"text", 'poll_positions'::"text", 'sync_funding'::"text", 'reconcile_strategy'::"text", 'compute_intro_snapshot'::"text", 'rescore_allocator'::"text", 'poll_allocator_positions'::"text", 'reconstruct_allocator_history'::"text", 'refresh_allocator_equity_daily'::"text", 'process_key_long'::"text", 'compute_analytics_from_csv'::"text", 'derive_broker_dailies'::"text", 'stitch_composite'::"text", 'derive_allocator_equity'::"text"]))),
-    CONSTRAINT "compute_jobs_kind_target_coherence" CHECK (((("kind" = 'compute_portfolio'::"text") AND ("portfolio_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'rescore_allocator'::"text") AND ("allocator_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL)) OR (("kind" = ANY (ARRAY['sync_trades'::"text", 'compute_analytics'::"text", 'poll_positions'::"text", 'sync_funding'::"text", 'reconcile_strategy'::"text", 'compute_intro_snapshot'::"text", 'compute_analytics_from_csv'::"text", 'derive_broker_dailies'::"text", 'stitch_composite'::"text"])) AND ("strategy_id" IS NOT NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'poll_allocator_positions'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'reconstruct_allocator_history'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'refresh_allocator_equity_daily'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'derive_broker_dailies'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'process_key_long'::"text") AND ("strategy_id" IS NOT NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL) AND ("api_key_id" IS NULL)) OR (("kind" = 'derive_allocator_equity'::"text") AND ("allocator_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("api_key_id" IS NULL)))),
+    CONSTRAINT "compute_jobs_kind_check" CHECK (("kind" = ANY (ARRAY['sync_trades'::"text", 'compute_analytics'::"text", 'compute_portfolio'::"text", 'poll_positions'::"text", 'sync_funding'::"text", 'reconcile_strategy'::"text", 'compute_intro_snapshot'::"text", 'rescore_allocator'::"text", 'poll_allocator_positions'::"text", 'reconstruct_allocator_history'::"text", 'refresh_allocator_equity_daily'::"text", 'process_key_long'::"text", 'compute_analytics_from_csv'::"text", 'derive_broker_dailies'::"text", 'stitch_composite'::"text", 'derive_allocator_equity'::"text", 'okx_archive_rebuild'::"text"]))),
+    CONSTRAINT "compute_jobs_kind_target_coherence" CHECK (((("kind" = 'compute_portfolio'::"text") AND ("portfolio_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'rescore_allocator'::"text") AND ("allocator_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL)) OR (("kind" = ANY (ARRAY['sync_trades'::"text", 'compute_analytics'::"text", 'poll_positions'::"text", 'sync_funding'::"text", 'reconcile_strategy'::"text", 'compute_intro_snapshot'::"text", 'compute_analytics_from_csv'::"text", 'derive_broker_dailies'::"text", 'stitch_composite'::"text"])) AND ("strategy_id" IS NOT NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'poll_allocator_positions'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'reconstruct_allocator_history'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'refresh_allocator_equity_daily'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'derive_broker_dailies'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'process_key_long'::"text") AND ("strategy_id" IS NOT NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL) AND ("api_key_id" IS NULL)) OR (("kind" = 'derive_allocator_equity'::"text") AND ("allocator_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("api_key_id" IS NULL)) OR (("kind" = 'okx_archive_rebuild'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)))),
     CONSTRAINT "compute_jobs_max_attempts_positive" CHECK (("max_attempts" > 0)),
     CONSTRAINT "compute_jobs_metadata_size_bounded" CHECK ((("metadata" IS NULL) OR ("octet_length"(("metadata")::"text") <= 8192))),
     CONSTRAINT "compute_jobs_priority_check" CHECK (("priority" = ANY (ARRAY['low'::"text", 'normal'::"text", 'high'::"text"]))),
@@ -1681,11 +2021,11 @@ COMMENT ON CONSTRAINT "compute_jobs_claimed_by_safe" ON "public"."compute_jobs" 
 
 
 
-COMMENT ON CONSTRAINT "compute_jobs_kind_check" ON "public"."compute_jobs" IS 'Simple list-form kind admission check. 2026-07-18: extended with derive_allocator_equity (allocator-scoped compose of the P115 derivation core onto allocator_equity_derived). Re-based on 20260710130000.';
+COMMENT ON CONSTRAINT "compute_jobs_kind_check" ON "public"."compute_jobs" IS 'Simple list-form kind admission check. 2026-10-26: extended with okx_archive_rebuild (Phase 167.1.2.2.2.1 OKXHISTORY, the OKX quarterly bills-history-archive rebuild; api_key-scoped). Re-based on 20260717233529.';
 
 
 
-COMMENT ON CONSTRAINT "compute_jobs_kind_target_coherence" ON "public"."compute_jobs" IS 'Kind<->target-type coherence. 2026-07-18: derive_allocator_equity added to a new allocator-scoped arm (allocator_id NOT NULL). Preserves the 20260624120100/20260710130000 dual-target derive_broker_dailies api_key arm — copying an older def would silently drop it and break key-mode allocator derives.';
+COMMENT ON CONSTRAINT "compute_jobs_kind_target_coherence" ON "public"."compute_jobs" IS 'Kind<->target-type coherence. 2026-10-26: okx_archive_rebuild added as an api_key-scoped arm (api_key_id NOT NULL, every other target NULL), so the archive wait never flips a published strategy to computing. Preserves the derive_broker_dailies api_key arm and the derive_allocator_equity allocator arm from 20260717233529 - copying an older def would silently drop them.';
 
 
 
@@ -17005,6 +17345,11 @@ GRANT ALL ON FUNCTION "public"."advance_sync_cursor"("p_api_key_id" "uuid", "p_j
 
 REVOKE ALL ON FUNCTION "public"."api_key_cooldown_remaining"("p_api_key_id" "uuid", "p_cooldown_seconds" integer) FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."api_key_cooldown_remaining"("p_api_key_id" "uuid", "p_cooldown_seconds" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."apply_okx_archive_rebuild"("p_strategy_id" "uuid", "p_rows" "jsonb", "p_expected_gaps" "jsonb", "p_expected_gaps_after" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."apply_okx_archive_rebuild"("p_strategy_id" "uuid", "p_rows" "jsonb", "p_expected_gaps" "jsonb", "p_expected_gaps_after" "jsonb") TO "service_role";
 
 
 
