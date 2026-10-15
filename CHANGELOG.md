@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.132.1.1] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of d1852bc2
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38793480096`, after the PROD apply of merge `d1852bc2`: sha256 `8e972fb8…` → `19cedd5e…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 130 → 131, distinct function names 128 → 129, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261024120000_fan_in_graph_and_decision_cascade.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-15` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.132.1.0 → 0.132.1.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=304 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 131 — MATCH 128, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38793480096` succeeded, and this entry was composed by the `redump-pr` job. Run `38793480096` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.132.1.0] - 2026-10-15 — FANINGRAPH: a fan-in child never strands when its parent fails, a decision delete no longer raises 23505, a diamond cannot deadlock, and POST /api/bridge/outcome stops returning 500
 
 Phase 164.9.3.1 FANINGRAPH. The compute-job fan-in graph and the bridge's decision cascade had four defects found by the phase research, plus two more found in review. This release fixes all six in one forward migration (`20261024120000_fan_in_graph_and_decision_cascade.sql`), one route change and one worker change. 82 branch commits: 68 non-merge (43 touching code or tests, 25 planning-only) and 14 merges. ⛔ **The migration auto-applies to PROD once `apply-test` succeeds. There is no human reviewer gate between the merge and the PROD apply** (removed 2026-09-23), so every review the migration needed happened before this merge: migration-reviewer, rls-policy-auditor and four code-review rounds, listed below.
