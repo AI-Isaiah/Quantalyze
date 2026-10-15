@@ -155,7 +155,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — verification: passed (PR #988, v0.129.6.0, post-merge items measured 2026-10-09)
 - [x] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
 - [x] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — complete with routed residuals 2026-10-01 (halted 2026-09-27, resumed after 166.4); verification passed 2026-10-12, residuals owned by 166.3.1 NAVBREACH and 170.2 item 5 (completed 2026-10-12)
-- [ ] **Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds** (INSERTED) — not planned; inserted 2026-10-01 (founder); 166.3's R5 recompute waits on it
+- [x] **Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds** (INSERTED) — 10 plans (plan 03 absorbed into DERIBITWEDGE, D-07), shipped in #1020 with re-dump #1021 (completed 2026-10-15); verification passed (D-13 closes SC-1)
 - [x] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [x] **Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly** (INSERTED) — 4 plans; closed 2026-10-14 (records PR) (verification passed, PROD glance taken 2026-10-14)
 - [ ] **Phase 166.5: COMPUTEDATSTAMP — the analytics runner stamps computed_at on a real finish** (INSERTED 2026-10-03) — not yet planned
@@ -4605,7 +4605,7 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy
 **Goal:** The private three-key Deribit composite (Phase 166.3's R5) recomputes through the normal `stitch_composite` job path, because the root cause of its `native_nav` inception reconciliation breach is found and fixed on the real member ledger, without weakening the gate.
 **Requirements**: success criteria below
 **Depends on:** nothing. Phase 166.3's R5 recompute waits on this phase. **Priority:** data integrity.
-**Plans:** 0 plans
+**Plans:** 10 plans (7 planned 2026-10-07 in 4 waves; plans 08-10 added 2026-10-13 for SC-5: 08 → 09 → ship → 04 → 10 ‖ 05; plan 10 is wave 4 beside 05; plan 03 absorbed by D-07, plan 04 now depends on 09). Decisions in `166.3.1-CONTEXT.md`: D-01..D-03 (ROADMAP), D-04 (founder, computed_at fixed here). Orchestrator: OQ-1 live probe as wave 1 (H3 stops for the founder), OQ-2 explicit summary terms, OQ-3 D-04 as a BEFORE UPDATE trigger (migration 20261009140000), OQ-4 C2/C3 history out of scope (booked), OQ-5 declined. Founder 2026-10-07 (D-05, "Add status to cache key"): computed_at moves only on a successful write (the trigger also holds on entry into computing), and computation_status joins the factsheet cache key (plan 06). Founder 2026-10-07 ("Adapt the panel", plan-check round 2): the D-05 survey missed the key-card Sync panel (167.2 KCS-02), so the panel gains evidence (c), a change of computation_status or computation_error_job_id against the pre-enqueue baseline (plan 07, same PR). OQ-3 is superseded by D-05.
 
 **Evidence (orchestrator, measured on PROD read-only, 2026-10-01; counts and error classes only):**
 - Phase 166.3 enqueued `stitch_composite` for the composite at 2026-10-01 11:38 UTC. It ended `failed_final` after one attempt, error class `run_stitch_composite_job: member ledger unrecoverable — native_nav inception reconciliation breached venue=deribit currencies=[BTC]`.
@@ -4623,8 +4623,22 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy
 4. A failed stitch no longer re-stamps `computed_at` as if the row were current, or that is recorded as a separate defect with an owner.
 5. The two Deribit allocator books that compose but read `is_trustworthy` false on `dropped_key` read trustworthy, or the reason they cannot is recorded. Three return-bearing keys carry a NULL capital anchor (an emptied Deribit account anchored `dust` with 649 return days, and two MT5 keys anchored `nonpositive` and `dust`); NAVBREACH decides how such a key composes, for example as zero capital like an emptied stretch per DERIBITWEDGE D-01. *(Routed 2026-10-12 from 167.1.2.2.1 DERIBITWEDGE SC-4; founder: "Close, route to NAVBREACH"; TODOS `167.1.2.2.1-DROPPED-KEY-NULL-ANCHOR`.)*
 
+⭐ **Orchestrator 2026-10-13 (D-10, CONTEXT):** the no-capital exit (D-08 A3) applies only to dust-sized consumed amounts. A candidate keeps `dropped_key` when anything is dated after its realized terminal day P, when |ΣP&L over (L, P]| exceeds `DUST_NAV_FLOOR`, or when a day in (L, P] has no stored P&L.
+⚠️ **Founder 2026-10-13 (D-11, CONTEXT) — DEVIATION from the worst-MEDIUM-no-fixer rule:** review round 2's WR-03 (an empty (L, P] window passed vacuously) is fixed before ship; WR-04 booked.
+⭐ **Founder 2026-10-15 (D-12, CONTEXT):** SC-3's determinism half is accepted at |run 1 - run 2| <= 1e-7 absolute (plan 05 measured a largest 5.5e-08 on m3, 0 on m1 and m2, 0 one-run-only dates, against 1.4 to 3.4 percentage points before the fix); verdict `DETERMINISTIC-WITHIN-1e-7-BOTH-QUIET`, weak evidence (both sessions quiet). The 1e-9 literal threshold read NOT DETERMINISTIC (64 of 143 m3 days) and that line stays in the record. Causes booked in TODOS: `166.3.1-M3-ANCHOR-OPTIONS-UPL-RESIDUE`, `166.3.1-STITCH-ATTEMPT1-STALL`.
+⭐ **Founder 2026-10-15 (D-13, CONTEXT):** SC-1 is satisfied by the D-07 absorption into DERIBITWEDGE (root cause found, fixed and tested there; the composite recompute now ends `done` on PROD twice). Verification passed.
+
 Plans:
-- [ ] TBD (run /gsd-plan-phase 166.3.1 to break down)
+- [x] 166.3.1-01-PLAN.md — wave 1: read-only worker probe of the member anchors; recorded verdict picks H1 vs H3 (checkpoint; H3 stops for the founder)
+- [x] 166.3.1-02-PLAN.md — wave 1: D-04/D-05 trigger holding computed_at on writes to failed and on entry into computing, annotated SQL gate, censuses
+- [x] 166.3.1-03-PLAN.md — ABSORBED into 167.1.2.2.1 DERIBITWEDGE (D-07) — never executed (`166.3.1-03-DEFERRED.md`)
+- [x] 166.3.1-04-PLAN.md — wave 3: post-deploy PROD recompute through enqueue_compute_job, counts-only before/after
+- [x] 166.3.1-05-PLAN.md — wave 4: second recompute in a later session, determinism count (member-3 differing days must be 0)
+- [x] 166.3.1-06-PLAN.md — wave 1: factsheet cache key carries computation_status (D-05), shown RED on today's key
+- [x] 166.3.1-07-PLAN.md — wave 1: Sync panel evidence (c) for D-05 (status or error job id changed against the baseline), fast-fail Retry tests RED first
+- [x] 166.3.1-08-PLAN.md — wave 1 (SC-5, added 2026-10-13): read-only measurement of the three NULL-anchor keys, then a founder checkpoint:decision on how a dust- or nonpositive-anchored key with real history composes (D-08; option A recommended: compose through its stored realized terminal, then exit); tracer for the Deribit dust key, RED first
+- [x] 166.3.1-09-PLAN.md — wave 2 (SC-5, pre-ship): MT5 nonpositive tracer, and guards (a refusing or blocking candidate falls back to today's dropped_key; read failures stay dropped; nothing booked after the exit), neuter-proved
+- [x] 166.3.1-10-PLAN.md — wave 4 (SC-5, post-ship, after 04): PROD BEFORE/AFTER of the two books around the first compose on the deployed code, `navbreach-sc5-verdict-prod:`, TODOS outcome; FLOWTIMING's COMPOSITE-DAYLEVEL-NOTE gets a dated DECLINED line (CONTEXT SC-5 planning note)
 
 ### Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric (INSERTED)
 
@@ -6069,7 +6083,7 @@ kept verbatim.
 | 166.1.1 DDSIGN | 3/3 | Complete | v0.129.6.0 · #988 · verification passed 2026-10-09 |
 | 166.2 COMPUTEONCE | 7/7 | Complete    | 2026-10-04 |
 | 166.3 RECOMPUTE | 1/1 | Complete (residuals routed) | 2026-10-12 |
-| 166.3.1 NAVBREACH | 0/? | Queued | - |
+| 166.3.1 NAVBREACH | 10/10 | Complete | 2026-10-15 |
 | 166.4 BENCHALIGN | 4/4 | Complete | v0.108.0.0 · #892 · (verification passed 7/7) |
 | 166.4.1 PORTFOLIOANALYTICS | 4/4 | Complete | 2026-10-14 |
 | 166.5 COMPUTEDATSTAMP | 0/? | Queued — user-facing, booked 2026-10-03 | - |
