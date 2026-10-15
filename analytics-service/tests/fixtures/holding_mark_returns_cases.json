@@ -363,6 +363,335 @@
         {"asof": "2026-01-02", "mark_price": 110, "side": "short", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 110, "quantity": 1},
         {"asof": "2026-01-03", "mark_price": 100, "side": "short", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1}
       ]
+    },
+    {
+      "name": "flip_day_before_governs",
+      "why": "D-12 interval rule: marks 100, 110, 121 with sides long, short, short. The return INTO day 2 carries day 1 direction (long): +0.1. The return into day 3 carries day 2 direction (short): -(121/110-1) = -0.1. Signing by the later day would give -0.1 and -0.1. NAV 1.1 then 1.1*0.9 = 0.99: cumulative -0.01, max drawdown (0.99-1.1)/1.1 = -0.1.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 3, "returns": [["2026-01-02", 0.1], ["2026-01-03", -0.1]]},
+      "ts_nav": {"cumulative_return": -0.01, "max_drawdown": -0.1},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 110, "side": "short", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 121, "side": "short", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "flat_day_is_a_gap",
+      "why": "D-02/D-12: day 2 is flat, so it has no direction and is a gap, never a guessed sign. Neither interval touching day 2 exists, and days 1 and 3 are not adjacent: 2 usable days, no return.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 2, "returns": []},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 110, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 121, "side": "long", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "flat_day_does_not_kill_later_chain",
+      "why": "D-12: a flat day 2 removes the intervals 1-2 and 2-3 only. Day 3 (121, long) to day 4 (133.1, long) is adjacent with both days usable: 133.1/121 - 1 = 0.1. 3 usable days.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 3, "returns": [["2026-01-04", 0.1]]},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 110, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 121, "side": "long", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-04", "mark_price": 133.1, "side": "long", "updated_at": "2026-01-04T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "mixed_sides_day_is_a_gap",
+      "why": "D-02: on day 2 key-a is long and key-b is short, so the day has no direction (never the majority, never the latest). Days 1 and 3 are usable but not adjacent: 2 usable days, no return.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 2, "returns": []},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 105, "side": "long", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 105, "side": "short", "updated_at": "2026-01-02T09:00:00Z", "api_key_id": "key-b", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 110, "side": "long", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "gap_mark_row_still_votes",
+      "why": "D-02: the direction comes from ALL rows of the day, including a row whose mark is a gap. Day 2: key-a mark 0 (gap) side long, key-b mark 105 side short, so the sides are mixed and day 2 is unusable. Were the gap row ignored, day 2 would read short and two returns would exist. 2 usable days, no return.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 2, "returns": []},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 0, "side": "long", "updated_at": "2026-01-02T11:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 105, "side": "short", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-b", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 110, "side": "long", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "two_keys_agree_pick_latest",
+      "why": "D-02: two keys both short on day 2 give a short day; the mark is the latest updated_at (key-b 91 beats key-a 90), as the spot pick does. Returns: day 2 -(91/100-1) = +0.09; day 3 -(100/91-1) = -9/91 = -0.0989010989010989.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 3, "returns": [["2026-01-02", 0.09], ["2026-01-03", -0.0989010989010989]]},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "short", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 90, "side": "short", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 91, "side": "short", "updated_at": "2026-01-02T11:00:00Z", "api_key_id": "key-b", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 100, "side": "short", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "all_flat_with_prices",
+      "why": "D-03 ladder: positive marks exist but every day is flat, so no day is usable: no_direction (not no_price, not too_few_priced_days).",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": "no_direction", "priced_days": 0, "returns": []},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 110, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 121, "side": "flat", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "all_marks_non_positive",
+      "why": "D-03 ladder: every mark is a gap (0, -1, 0), so no day carries a price: no_price, whatever the sides.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": "no_price", "priced_days": 0, "returns": []},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 0, "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": -1, "side": "long", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 0, "side": "long", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "option_put_deribit",
+      "why": "D-10: a Deribit name ending -P is an option, withheld as option_premium. The marks are NOT read (one is a string, which would be a contract error on any other holding).",
+      "venue": "deribit",
+      "symbol": "BTC-10OCT26-81000-P",
+      "holding_type": "derivative",
+      "expected": {"withheld": "option_premium", "priced_days": 0, "returns": []},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": "0.0123", "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": "0.0150", "side": "long", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "option_lowercase",
+      "why": "D-10: the name is matched case-insensitively, so a lowercase -c is an option.",
+      "venue": "deribit",
+      "symbol": "btc-10oct26-81000-c",
+      "holding_type": "derivative",
+      "expected": {"withheld": "option_premium", "priced_days": 0, "returns": []},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": "0.0123", "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": "0.0150", "side": "long", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "option_linear",
+      "why": "D-10: a linear-margin option name (ETH_USDC-27MAR26-50000-C) is an option too; the underscore margin marker does not make it spot.",
+      "venue": "deribit",
+      "symbol": "ETH_USDC-27MAR26-50000-C",
+      "holding_type": "derivative",
+      "expected": {"withheld": "option_premium", "priced_days": 0, "returns": []},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": "0.0123", "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": "0.0150", "side": "long", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "not_option_perp",
+      "why": "D-10: BTC-PERPETUAL is not an option. Classified by marks 100, 110, 121 all long: returns +0.1 and 121/110-1 = +0.1.",
+      "venue": "deribit",
+      "symbol": "BTC-PERPETUAL",
+      "holding_type": "derivative",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 3, "returns": [["2026-01-02", 0.1], ["2026-01-03", 0.1]]},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 110, "side": "long", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 121, "side": "long", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "not_option_linear_perp",
+      "why": "D-10: 1000PEPEUSDT is a linear perpetual, not an option. All short, marks 100, 90, 99: day 2 -(90/100-1) = +0.1; day 3 -(99/90-1) = -0.1.",
+      "venue": "bybit",
+      "symbol": "1000PEPEUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 3, "returns": [["2026-01-02", 0.1], ["2026-01-03", -0.1]]},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "short", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 90, "side": "short", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 99, "side": "short", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "short_over_150pct_spike",
+      "why": "D-12 / OQ-5: a short whose mark goes 1.0 to 2.5 is -(2.5/1.0-1) = -1.5 unfloored; the floor makes it -1.0 (a holder cannot lose more than the position). NAV 0: cumulative -1.0, max drawdown (0-1)/1 = -1.0.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 2, "returns": [["2026-01-02", -1.0]]},
+      "ts_nav": {"cumulative_return": -1.0, "max_drawdown": -1.0},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 1.0, "side": "short", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 2.5, "side": "short", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "twenty_nine_usable_days",
+      "why": "SC2 boundary for derivatives: 30 days carry a positive mark but day 30 is flat, so only 29 are USABLE: too_few_priced_days with priced_days 29 (usable days, not priced days). 28 returns (none touches day 30): marks alternate 100 / 125, long, even days 125/100-1 = 0.25, odd days 100/125-1 = -0.2.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 29, "returns": [["2026-01-02", 0.25], ["2026-01-03", -0.2], ["2026-01-04", 0.25], ["2026-01-05", -0.2], ["2026-01-06", 0.25], ["2026-01-07", -0.2], ["2026-01-08", 0.25], ["2026-01-09", -0.2], ["2026-01-10", 0.25], ["2026-01-11", -0.2], ["2026-01-12", 0.25], ["2026-01-13", -0.2], ["2026-01-14", 0.25], ["2026-01-15", -0.2], ["2026-01-16", 0.25], ["2026-01-17", -0.2], ["2026-01-18", 0.25], ["2026-01-19", -0.2], ["2026-01-20", 0.25], ["2026-01-21", -0.2], ["2026-01-22", 0.25], ["2026-01-23", -0.2], ["2026-01-24", 0.25], ["2026-01-25", -0.2], ["2026-01-26", 0.25], ["2026-01-27", -0.2], ["2026-01-28", 0.25], ["2026-01-29", -0.2]]},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 125, "side": "long", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 100, "side": "long", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-04", "mark_price": 125, "side": "long", "updated_at": "2026-01-04T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-05", "mark_price": 100, "side": "long", "updated_at": "2026-01-05T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-06", "mark_price": 125, "side": "long", "updated_at": "2026-01-06T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-07", "mark_price": 100, "side": "long", "updated_at": "2026-01-07T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-08", "mark_price": 125, "side": "long", "updated_at": "2026-01-08T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-09", "mark_price": 100, "side": "long", "updated_at": "2026-01-09T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-10", "mark_price": 125, "side": "long", "updated_at": "2026-01-10T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-11", "mark_price": 100, "side": "long", "updated_at": "2026-01-11T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-12", "mark_price": 125, "side": "long", "updated_at": "2026-01-12T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-13", "mark_price": 100, "side": "long", "updated_at": "2026-01-13T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-14", "mark_price": 125, "side": "long", "updated_at": "2026-01-14T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-15", "mark_price": 100, "side": "long", "updated_at": "2026-01-15T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-16", "mark_price": 125, "side": "long", "updated_at": "2026-01-16T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-17", "mark_price": 100, "side": "long", "updated_at": "2026-01-17T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-18", "mark_price": 125, "side": "long", "updated_at": "2026-01-18T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-19", "mark_price": 100, "side": "long", "updated_at": "2026-01-19T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-20", "mark_price": 125, "side": "long", "updated_at": "2026-01-20T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-21", "mark_price": 100, "side": "long", "updated_at": "2026-01-21T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-22", "mark_price": 125, "side": "long", "updated_at": "2026-01-22T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-23", "mark_price": 100, "side": "long", "updated_at": "2026-01-23T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-24", "mark_price": 125, "side": "long", "updated_at": "2026-01-24T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-25", "mark_price": 100, "side": "long", "updated_at": "2026-01-25T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-26", "mark_price": 125, "side": "long", "updated_at": "2026-01-26T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-27", "mark_price": 100, "side": "long", "updated_at": "2026-01-27T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-28", "mark_price": 125, "side": "long", "updated_at": "2026-01-28T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-29", "mark_price": 100, "side": "long", "updated_at": "2026-01-29T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-30", "mark_price": 125, "side": "flat", "updated_at": "2026-01-30T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "thirty_usable_days",
+      "why": "SC2 boundary for derivatives: 30 usable short days, marks alternate 100 / 125: eligible (withheld null), priced_days 30, 29 returns. Short negates: even days -(125/100-1) = -0.25, odd days -(100/125-1) = +0.2.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": null, "priced_days": 30, "returns": [["2026-01-02", -0.25], ["2026-01-03", 0.2], ["2026-01-04", -0.25], ["2026-01-05", 0.2], ["2026-01-06", -0.25], ["2026-01-07", 0.2], ["2026-01-08", -0.25], ["2026-01-09", 0.2], ["2026-01-10", -0.25], ["2026-01-11", 0.2], ["2026-01-12", -0.25], ["2026-01-13", 0.2], ["2026-01-14", -0.25], ["2026-01-15", 0.2], ["2026-01-16", -0.25], ["2026-01-17", 0.2], ["2026-01-18", -0.25], ["2026-01-19", 0.2], ["2026-01-20", -0.25], ["2026-01-21", 0.2], ["2026-01-22", -0.25], ["2026-01-23", 0.2], ["2026-01-24", -0.25], ["2026-01-25", 0.2], ["2026-01-26", -0.25], ["2026-01-27", 0.2], ["2026-01-28", -0.25], ["2026-01-29", 0.2], ["2026-01-30", -0.25]]},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "short", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 125, "side": "short", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 100, "side": "short", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-04", "mark_price": 125, "side": "short", "updated_at": "2026-01-04T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-05", "mark_price": 100, "side": "short", "updated_at": "2026-01-05T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-06", "mark_price": 125, "side": "short", "updated_at": "2026-01-06T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-07", "mark_price": 100, "side": "short", "updated_at": "2026-01-07T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-08", "mark_price": 125, "side": "short", "updated_at": "2026-01-08T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-09", "mark_price": 100, "side": "short", "updated_at": "2026-01-09T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-10", "mark_price": 125, "side": "short", "updated_at": "2026-01-10T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-11", "mark_price": 100, "side": "short", "updated_at": "2026-01-11T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-12", "mark_price": 125, "side": "short", "updated_at": "2026-01-12T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-13", "mark_price": 100, "side": "short", "updated_at": "2026-01-13T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-14", "mark_price": 125, "side": "short", "updated_at": "2026-01-14T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-15", "mark_price": 100, "side": "short", "updated_at": "2026-01-15T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-16", "mark_price": 125, "side": "short", "updated_at": "2026-01-16T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-17", "mark_price": 100, "side": "short", "updated_at": "2026-01-17T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-18", "mark_price": 125, "side": "short", "updated_at": "2026-01-18T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-19", "mark_price": 100, "side": "short", "updated_at": "2026-01-19T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-20", "mark_price": 125, "side": "short", "updated_at": "2026-01-20T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-21", "mark_price": 100, "side": "short", "updated_at": "2026-01-21T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-22", "mark_price": 125, "side": "short", "updated_at": "2026-01-22T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-23", "mark_price": 100, "side": "short", "updated_at": "2026-01-23T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-24", "mark_price": 125, "side": "short", "updated_at": "2026-01-24T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-25", "mark_price": 100, "side": "short", "updated_at": "2026-01-25T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-26", "mark_price": 125, "side": "short", "updated_at": "2026-01-26T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-27", "mark_price": 100, "side": "short", "updated_at": "2026-01-27T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-28", "mark_price": 125, "side": "short", "updated_at": "2026-01-28T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-29", "mark_price": 100, "side": "short", "updated_at": "2026-01-29T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-30", "mark_price": 125, "side": "short", "updated_at": "2026-01-30T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "empty_signed_returns",
+      "why": "30 usable long days every second day (Jan 1, 3, ... 31, Feb 2, 4, ... 28): eligible with priced_days 30 but NO two days are adjacent, so there are no returns. The NAV metrics of an empty list are null, never a confident 0%.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": null, "priced_days": 30, "returns": []},
+      "ts_nav": {"cumulative_return": null, "max_drawdown": null},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 100, "side": "long", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-05", "mark_price": 100, "side": "long", "updated_at": "2026-01-05T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-07", "mark_price": 100, "side": "long", "updated_at": "2026-01-07T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-09", "mark_price": 100, "side": "long", "updated_at": "2026-01-09T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-11", "mark_price": 100, "side": "long", "updated_at": "2026-01-11T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-13", "mark_price": 100, "side": "long", "updated_at": "2026-01-13T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-15", "mark_price": 100, "side": "long", "updated_at": "2026-01-15T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-17", "mark_price": 100, "side": "long", "updated_at": "2026-01-17T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-19", "mark_price": 100, "side": "long", "updated_at": "2026-01-19T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-21", "mark_price": 100, "side": "long", "updated_at": "2026-01-21T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-23", "mark_price": 100, "side": "long", "updated_at": "2026-01-23T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-25", "mark_price": 100, "side": "long", "updated_at": "2026-01-25T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-27", "mark_price": 100, "side": "long", "updated_at": "2026-01-27T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-29", "mark_price": 100, "side": "long", "updated_at": "2026-01-29T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-31", "mark_price": 100, "side": "long", "updated_at": "2026-01-31T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-02-02", "mark_price": 100, "side": "long", "updated_at": "2026-02-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-02-04", "mark_price": 100, "side": "long", "updated_at": "2026-02-04T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-02-06", "mark_price": 100, "side": "long", "updated_at": "2026-02-06T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-02-08", "mark_price": 100, "side": "long", "updated_at": "2026-02-08T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-02-10", "mark_price": 100, "side": "long", "updated_at": "2026-02-10T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-02-12", "mark_price": 100, "side": "long", "updated_at": "2026-02-12T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-02-14", "mark_price": 100, "side": "long", "updated_at": "2026-02-14T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-02-16", "mark_price": 100, "side": "long", "updated_at": "2026-02-16T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-02-18", "mark_price": 100, "side": "long", "updated_at": "2026-02-18T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-02-20", "mark_price": 100, "side": "long", "updated_at": "2026-02-20T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-02-22", "mark_price": 100, "side": "long", "updated_at": "2026-02-22T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-02-24", "mark_price": 100, "side": "long", "updated_at": "2026-02-24T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-02-26", "mark_price": 100, "side": "long", "updated_at": "2026-02-26T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-02-28", "mark_price": 100, "side": "long", "updated_at": "2026-02-28T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "bad_side",
+      "why": "Read contract: a side outside long, short, flat is a violation (bad_sides), never a gap.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expect_error": "HoldingMarkContractError",
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 110, "side": "sideways", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "null_side",
+      "why": "Read contract: a null side on a derivative row is a violation, never a gap.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expect_error": "HoldingMarkContractError",
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 110, "side": null, "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
     }
   ]
 }
