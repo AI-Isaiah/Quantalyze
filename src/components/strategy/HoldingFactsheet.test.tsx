@@ -484,6 +484,109 @@ describe("HoldingFactsheet (finding g4)", () => {
     expect(screen.queryByTestId("holding-factsheet-adjacency-note")).toBeNull();
   });
 
+  // -------------------------------------------------------------------------
+  // 167.1.1.1 / D-02, D-10: the derivative states beside RD. Each sentence is the
+  // approved UI-SPEC copy, typed as a literal.
+  // -------------------------------------------------------------------------
+  const derivativeWithheld = (
+    symbol: string,
+    reason: "no_direction" | "option_premium" | "no_price",
+  ): HoldingCompareItem => ({
+    kind: "holding",
+    holding_ref: `holding:deribit:${symbol}:derivative`,
+    venue: "deribit",
+    symbol,
+    holding_type: "derivative",
+    historyState: "withheld",
+    analytics: null,
+    withheld_reason: reason,
+  });
+
+  it("State OP: an option names itself and says its figures are not computed from premiums, with no metric, em-dash or basis line", () => {
+    render(<HoldingFactsheet item={derivativeWithheld("BTC-10OCT26-81000-P", "option_premium")} />);
+    const note = screen.getByTestId("holding-factsheet-rebuilding");
+    expect(note.textContent).toBe(
+      "Return, Sharpe, max drawdown and volatility are not shown for BTC-10OCT26-81000-P: it is an option, and these figures are not computed from option premiums.",
+    );
+    expect(note.tagName).toBe("P");
+    expect(note.className).toBe("max-w-prose text-sm text-text-secondary");
+    expect(screen.queryByText("Sharpe")).toBeNull();
+    expect(screen.queryByText("Cumulative return")).toBeNull();
+    expect(screen.queryByText("—")).toBeNull();
+    expect(screen.queryByTestId("holding-factsheet-price-basis")).toBeNull();
+    expect(screen.getByText("BTC-10OCT26-81000-P")).toBeInTheDocument();
+  });
+
+  it("State ND: a derivative with prices and no established direction says so and never guesses a sign", () => {
+    render(<HoldingFactsheet item={derivativeWithheld("ETHUSDT", "no_direction")} />);
+    const note = screen.getByTestId("holding-factsheet-rebuilding");
+    expect(note.textContent).toBe(
+      "Return, Sharpe, max drawdown and volatility are not shown for ETHUSDT: its long or short direction could not be established from the recorded positions.",
+    );
+    expect(note.className).toBe("max-w-prose text-sm text-text-secondary");
+    expect(note.textContent).not.toMatch(/\byet\b|so far/);
+    expect(screen.queryByText("Sharpe")).toBeNull();
+    expect(screen.queryByText("—")).toBeNull();
+    expect(screen.queryByTestId("holding-factsheet-price-basis")).toBeNull();
+  });
+
+  it("State N reaches a derivative with the unchanged sentence", () => {
+    render(<HoldingFactsheet item={derivativeWithheld("BTC-PERPETUAL", "no_price")} />);
+    expect(screen.getByTestId("holding-factsheet-rebuilding").textContent).toBe(
+      "Return, Sharpe, max drawdown and volatility are not shown for BTC-PERPETUAL: no market price has been recorded for it.",
+    );
+  });
+
+  it("State RD0: a derivative with 12 usable days shows four em-dashes and the unchanged threshold sentence, no derivative caption", () => {
+    const item: HoldingCompareItem = {
+      ...DERIVATIVE_READY,
+      analytics: { ...NULL_METRICS, priced_days: 12 },
+    };
+    render(<HoldingFactsheet item={item} />);
+    const dds = Array.from(
+      screen.getByTestId("holding-factsheet").querySelectorAll("dd"),
+    ).map((d) => d.textContent);
+    expect(dds).toEqual(["—", "—", "—", "—"]);
+    expect(screen.getByTestId("holding-factsheet-price-basis").textContent).toBe(
+      "Only 12 priced days of BTCUSDT so far. These four figures need at least 30 priced days.",
+    );
+    expect(screen.getByTestId("holding-factsheet").textContent).not.toContain(GAP_SENTENCE);
+    expect(screen.getByTestId("holding-factsheet").textContent).not.toContain("daily mark price");
+    expect(screen.queryByTestId("holding-factsheet-adjacency-note")).toBeNull();
+  });
+
+  it("State RD2: a derivative at the minimum with null vol shows the caption and gap sentence, then the adjacency note", () => {
+    const item: HoldingCompareItem = {
+      ...DERIVATIVE_READY,
+      analytics: { cumulative_return: 0.1, sharpe: null, max_drawdown: -0.02, vol: null, priced_days: 30 },
+    };
+    render(<HoldingFactsheet item={item} />);
+    const basis = screen.getByTestId("holding-factsheet-price-basis");
+    expect(basis.textContent).toMatch(/^Computed from 30 days of BTCUSDT's daily mark price\. /);
+    expect(basis.textContent).toMatch(/A price move across a missing day is not counted\.$/);
+    const note = screen.getByTestId("holding-factsheet-adjacency-note");
+    expect(note.textContent).toBe(ADJACENCY_NOTE);
+    // The note follows the caption in the document.
+    expect(basis.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("State D is gone: no derivative item of any state renders 'not shown for derivative holdings yet'", () => {
+    const states: HoldingCompareItem[] = [
+      DERIVATIVE_READY,
+      { ...DERIVATIVE_READY, analytics: { ...NULL_METRICS, priced_days: 12 } },
+      derivativeWithheld("BTC-10OCT26-81000-P", "option_premium"),
+      derivativeWithheld("ETHUSDT", "no_direction"),
+      derivativeWithheld("BTC-PERPETUAL", "no_price"),
+      // A stale shape that no producer builds any more still must not revive State D.
+      { ...DERIVATIVE_READY, historyState: "rebuilding", analytics: null } as unknown as HoldingCompareItem,
+    ];
+    for (const item of states) {
+      const { unmount } = render(<HoldingFactsheet item={item} />);
+      expect(screen.queryByText(/not shown for derivative holdings yet/)).toBeNull();
+      unmount();
+    }
+  });
+
   it("lets an unbroken symbol wrap inside the card instead of pushing past it at 375px", () => {
     // Measured 2026-10-15 at 375x812 on the local stack: an MT5 `ACCOUNT-<48 hex>`
     // heading ran 160 px past its card. jsdom cannot measure layout, so this pins

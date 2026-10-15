@@ -646,6 +646,123 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
       expect(item!.analytics!.cumulative_return).toBeCloseTo(spot!.analytics!.cumulative_return!, 12);
     });
 
+    const derivRow = (n: number, mark: unknown, extra: Partial<HoldingFx> = {}) =>
+      row(n, mark, {
+        venue: "bybit",
+        symbol: "BTCUSDT",
+        holding_type: "derivative",
+        side: "long",
+        ...extra,
+      });
+
+    it("an option is withheld option_premium without its marks being read", async () => {
+      const oref = "holding:deribit:BTC-10OCT26-81000-P:derivative";
+      // A string mark would be a contract error if the marks were read.
+      const rows = Array.from({ length: 35 }, (_, i) =>
+        derivRow(i + 1, "not-a-number", { venue: "deribit", symbol: "BTC-10OCT26-81000-P" }),
+      );
+      const item = await fetchHoldingCompareItem({
+        allocator_id: ALLOC, holding_ref: oref, supabase: fakeSupabase(rows),
+      });
+      expect(item!.historyState).toBe("withheld");
+      expect(item!.analytics).toBeNull();
+      expect(item).toMatchObject({ withheld_reason: "option_premium" });
+    });
+
+    it("positive marks on days that are all flat are withheld no_direction, logged with counts only", async () => {
+      const rows = Array.from({ length: 35 }, (_, i) =>
+        derivRow(i + 1, 100 + i, { side: "flat", api_key_id: "key-secret-id" }),
+      );
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const item = await fetchHoldingCompareItem({
+          allocator_id: ALLOC, holding_ref: DREF, supabase: fakeSupabase(rows),
+        });
+        expect(item!.historyState).toBe("withheld");
+        expect(item).toMatchObject({ withheld_reason: "no_direction", analytics: null });
+        expect(warn).toHaveBeenCalledTimes(1);
+        const logged = warn.mock.calls[0].join(" ");
+        expect(logged).toContain(DREF);
+        expect(logged).toContain("35");
+        expect(logged).not.toContain("key-secret-id");
+        expect(logged).not.toContain(ALLOC);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("a derivative whose every mark is non-positive is withheld no_price", async () => {
+      const rows = Array.from({ length: 5 }, (_, i) => derivRow(i + 1, 0));
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const item = await fetchHoldingCompareItem({
+          allocator_id: ALLOC, holding_ref: DREF, supabase: fakeSupabase(rows),
+        });
+        expect(item).toMatchObject({ historyState: "withheld", withheld_reason: "no_price" });
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("a side outside long, short and flat throws HoldingCompareLoadError and logs the count, never the value", async () => {
+      const rows = Array.from({ length: 35 }, (_, i) => derivRow(i + 1, 100 + i));
+      rows[3] = { ...rows[3], side: "sideways-secret" };
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await expect(
+          fetchHoldingCompareItem({
+            allocator_id: ALLOC, holding_ref: DREF, supabase: fakeSupabase(rows),
+          }),
+        ).rejects.toBeInstanceOf(HoldingCompareLoadError);
+        expect(spy).toHaveBeenCalledTimes(1);
+        const logged = spy.mock.calls[0].join(" ");
+        expect(logged).toContain(DREF);
+        expect(logged).toMatch(/1 row\(s\) with a side/);
+        expect(logged).not.toContain("sideways-secret");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("a missing side on a derivative row is the same contract violation (never a guessed sign)", async () => {
+      const rows = Array.from({ length: 35 }, (_, i) => derivRow(i + 1, 100 + i, { side: undefined }));
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await expect(
+          fetchHoldingCompareItem({
+            allocator_id: ALLOC, holding_ref: DREF, supabase: fakeSupabase(rows),
+          }),
+        ).rejects.toBeInstanceOf(HoldingCompareLoadError);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("zero derivative rows is still null (D-15: an unowned holding leaks nothing)", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        expect(
+          await fetchHoldingCompareItem({
+            allocator_id: ALLOC, holding_ref: DREF, supabase: fakeSupabase([]),
+          }),
+        ).toBeNull();
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("12 usable derivative days is ready with four null metrics and priced_days 12", async () => {
+      const rows = Array.from({ length: 12 }, (_, i) => derivRow(i + 1, 100 + i));
+      const item = await fetchHoldingCompareItem({
+        allocator_id: ALLOC, holding_ref: DREF, supabase: fakeSupabase(rows),
+      });
+      expect(item!.historyState).toBe("ready");
+      expect(item!.analytics).toEqual({
+        cumulative_return: null, sharpe: null, max_drawdown: null, vol: null, priced_days: 12,
+      });
+    });
+
     it("is annualized on the crypto clock (365)", async () => {
       const marks = Array.from({ length: 31 }, (_, i) => (i % 2 === 0 ? 100 : 110));
       const rows = marks.map((m, i) =>
