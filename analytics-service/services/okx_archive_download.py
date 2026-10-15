@@ -20,10 +20,10 @@ What the fetch does, in order:
 3. Connect to the FIRST vetted address with the original hostname carried as the
    ``Host`` header and as TLS SNI / certificate-verification name, so a second DNS
    lookup (a rebind) can never swap the address after it was vetted.
-4. ``follow_redirects=False`` (a 3xx is a refusal, the ``Location`` is never
-   requested), ``trust_env=False`` (a ``HTTPS_PROXY`` in the environment would route
-   around the pin), no cookies and no OKX auth headers (a plain client), a connect
-   timeout and a TOTAL deadline.
+4. One request on a bare transport, not a client: a 3xx is a refusal and the
+   ``Location`` is never requested, no environment proxy (a ``HTTPS_PROXY`` would route
+   around the pin), no cookies, no OKX auth headers, a connect timeout and a TOTAL
+   deadline. A client would also log the signed URL at INFO (see ``_fetch_body``).
 5. Stream the raw body with a running byte counter, classify the container from its
    magic bytes, decompress IN MEMORY ONLY with running decompressed and ratio caps.
    Nothing is written to disk and no archive member name is ever used as a path.
@@ -260,28 +260,40 @@ def _container_of(head: bytes) -> str | None:
 
 
 async def _fetch_body(scheme_host: str, ip: str, host: str, path_and_query: str) -> bytes:
-    """Stream the raw (still compressed) body under the compressed cap."""
+    """Stream the raw (still compressed) body under the compressed cap.
+
+    ⛔ Deliberately NOT ``httpx.AsyncClient``: the client logs ``HTTP Request: GET
+    <full url>`` at INFO on the ``httpx`` logger, and that URL carries the signed query
+    string (a bearer token). Measured by ``TestNoLinkInLogs``. Driving the transport
+    directly sends the one request this module means to send and nothing else: no
+    redirect handling, no cookie jar, no environment proxy (a ``HTTPS_PROXY`` would route
+    around the address pin), no default auth, and no request log.
+    """
     host_literal = f"[{ip}]" if ":" in ip else ip
-    target = httpx.URL(f"https://{host_literal}{path_and_query or '/'}")
-    timeout = httpx.Timeout(
-        TOTAL_TIMEOUT_S, connect=CONNECT_TIMEOUT_S, pool=CONNECT_TIMEOUT_S
+    request = httpx.Request(
+        "GET",
+        httpx.URL(f"https://{host_literal}{path_and_query or '/'}"),
+        # The connect target is the vetted IP; the hostname rides as Host and as the
+        # SNI / certificate-verification name. ``identity``: the bytes as stored, so
+        # the magic check sees the container.
+        headers={"Host": host, "Accept-Encoding": "identity"},
+        extensions={
+            "sni_hostname": host,
+            "timeout": {
+                "connect": CONNECT_TIMEOUT_S,
+                "read": TOTAL_TIMEOUT_S,
+                "write": CONNECT_TIMEOUT_S,
+                "pool": CONNECT_TIMEOUT_S,
+            },
+        },
     )
     buf = bytearray()
     container_checked = False
-    async with httpx.AsyncClient(
-        timeout=timeout,
-        follow_redirects=False,
-        trust_env=False,
-        transport=_transport(),
-    ) as client:
-        async with client.stream(
-            "GET",
-            target,
-            # The connect target is the vetted IP; the hostname rides as Host and as
-            # SNI / certificate-verification name.
-            headers={"Host": host},
-            extensions={"sni_hostname": host},
-        ) as response:
+    transport = _transport() or httpx.AsyncHTTPTransport(trust_env=False)
+    async with transport:
+        response = await transport.handle_async_request(request)
+        try:
+            response.request = request
             status = response.status_code
             if 300 <= status < 400:
                 raise DownloadRefused("redirect")
@@ -291,7 +303,7 @@ async def _fetch_body(scheme_host: str, ip: str, host: str, path_and_query: str)
                 # NOT raise_for_status(): its message embeds the signed URL.
                 raise httpx.HTTPStatusError(
                     f"archive host answered HTTP {status} ({scheme_host})",
-                    request=response.request,
+                    request=request,
                     response=response,
                 )
             if not 200 <= status < 300:
@@ -300,8 +312,6 @@ async def _fetch_body(scheme_host: str, ip: str, host: str, path_and_query: str)
             if declared is not None and declared.isdigit():
                 if int(declared) > MAX_COMPRESSED_BYTES:
                     raise DownloadRefused("too_large")
-            # aiter_raw: the bytes as sent, so the magic check sees the container and
-            # a transfer-level Content-Encoding is not silently undone.
             async for chunk in response.aiter_raw():
                 if len(buf) + len(chunk) > MAX_COMPRESSED_BYTES:
                     raise DownloadRefused("too_large")
@@ -310,6 +320,8 @@ async def _fetch_body(scheme_host: str, ip: str, host: str, path_and_query: str)
                     container_checked = True
                     if _container_of(bytes(buf[:4])) is None:
                         raise DownloadRefused("container_unknown")
+        finally:
+            await response.aclose()
     return bytes(buf)
 
 
@@ -410,6 +422,15 @@ async def download_archive_csv(url: str) -> tuple[bytes, str, int]:
         raise
     except LinkExpired:
         logger.warning("okx_archive_download: link expired for %s", scheme_host)
+        raise
+    except (httpx.HTTPError, TimeoutError) as exc:
+        # Transient (network, timeout, 5xx/408/429): the caller retries. The class
+        # name only; an httpx message can embed the request URL.
+        logger.warning(
+            "okx_archive_download: transient failure (exc_class=%s) for %s",
+            type(exc).__name__,
+            scheme_host,
+        )
         raise
     logger.info(
         "okx_archive_download: fetched %s container=%s compressed_bytes=%d "

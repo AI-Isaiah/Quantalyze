@@ -166,3 +166,247 @@ class TestTracerDownload:
         assert "ARCHIVE_ALLOWED_HOSTS: Final" in source
         assert "= frozenset()" in source
         assert "os.environ" not in source and "getenv(" not in source
+
+
+async def _refused(rig: _Rig, url: str, reason: str) -> None:
+    """The URL is refused with ``reason`` and NOT ONE request reached the transport."""
+    with pytest.raises(mod.DownloadRefused) as caught:
+        await mod.download_archive_csv(url)
+    assert caught.value.reason == reason
+    assert reason in mod.REFUSAL_REASONS
+    assert rig.requests == [], "a refusal must happen before any request is made"
+    assert "SECRETTOKEN123" not in str(caught.value)
+
+
+class TestUrlRefusals:
+    async def test_host_not_allowed_with_the_shipped_empty_allow_list(
+        self, unallowed_rig: _Rig
+    ) -> None:
+        assert mod.ARCHIVE_ALLOWED_HOSTS == frozenset()
+        await _refused(unallowed_rig, URL, "host_not_allowed")
+        assert unallowed_rig.resolver_calls == [], "nothing is resolved either"
+
+    async def test_http_scheme_is_refused(self, rig: _Rig) -> None:
+        await _refused(rig, f"http://{HOST}{SECRET_PATH}?{SECRET_QUERY}", "scheme")
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            f"{HOST}.evil",  # suffix extension of an allowed name
+            f"x.{HOST}",  # a subdomain is not the allowed host
+            f"evil{HOST}",  # prefix glued on
+            f"{HOST}.",  # trailing dot is a different spelling, not the entry
+            "other.example.test",
+        ],
+    )
+    async def test_host_not_allowed_unless_it_matches_the_entry_exactly(
+        self, rig: _Rig, host: str
+    ) -> None:
+        await _refused(rig, f"https://{host}{SECRET_PATH}?{SECRET_QUERY}", "host_not_allowed")
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            f"https://user:pw@{HOST}{SECRET_PATH}?{SECRET_QUERY}",  # userinfo
+            f"https://user@{HOST}{SECRET_PATH}",  # userinfo, no password
+            f"https://{HOST}:8443{SECRET_PATH}?{SECRET_QUERY}",  # explicit port
+            f"https://{HOST}:443{SECRET_PATH}",  # even the default port, spelled out
+            f"https://{HOST}{SECRET_PATH}?{SECRET_QUERY}#frag",  # fragment
+            f"https://{HOST}{SECRET_PATH} x?{SECRET_QUERY}",  # whitespace
+            f"https://{HOST}{SECRET_PATH}\r\nX-Evil: 1",  # header-splitting attempt
+            f"https://{HOST}/café?{SECRET_QUERY}",  # non-ASCII
+        ],
+    )
+    async def test_url_shape_is_refused(self, rig: _Rig, url: str) -> None:
+        await _refused(rig, url, "url_shape")
+
+    async def test_host_not_allowed_when_userinfo_smuggles_a_second_host(self, rig: _Rig) -> None:
+        # urlsplit reads the host AFTER the "@": that host is not allow-listed.
+        await _refused(
+            rig, f"https://{HOST}@evil.example/{SECRET_PATH}", "host_not_allowed"
+        )
+
+
+PRIVATE_ANSWERS = [
+    "127.0.0.1",
+    "10.0.0.5",
+    "172.16.0.1",
+    "192.168.1.1",
+    "169.254.169.254",  # cloud metadata
+    "100.64.0.1",  # CGNAT
+    "0.0.0.0",
+    "224.0.0.1",  # multicast
+    "::1",
+    "::",
+    "fe80::1",
+    "fe80::1%eth0",  # zone id on a link-local answer
+    "fc00::1",
+    "ff02::1",
+    "::ffff:10.0.0.1",  # IPv4-mapped private
+    "::ffff:127.0.0.1",
+    "::ffff:169.254.169.254",
+]
+
+
+class TestAddressRefusals:
+    @pytest.mark.parametrize("answer", PRIVATE_ANSWERS)
+    async def test_private_address_resolution_is_refused(self, rig: _Rig, answer: str) -> None:
+        rig.addresses = [[answer]]
+        await _refused(rig, URL, "private_address")
+
+    @pytest.mark.parametrize("private", ["10.0.0.5", "169.254.169.254", "::1"])
+    @pytest.mark.parametrize("order", ["public_first", "private_first"])
+    async def test_private_address_in_a_mixed_answer_is_refused(
+        self, rig: _Rig, private: str, order: str
+    ) -> None:
+        rig.addresses = [
+            [PUBLIC_IP, private] if order == "public_first" else [private, PUBLIC_IP]
+        ]
+        await _refused(rig, URL, "private_address")
+
+    @pytest.mark.parametrize(
+        "numeric_host",
+        [
+            "2130706433",  # 127.0.0.1 as one decimal
+            "0x7f000001",  # 127.0.0.1 as hex
+            "127.1",  # 127.0.0.1 as a short form
+            "167772165",  # 10.0.0.5 as one decimal
+            "2852039166",  # 169.254.169.254 as one decimal
+            "127.0.0.1",
+        ],
+    )
+    async def test_private_address_numeric_host_forms_are_judged_as_the_address_they_dial(
+        self, rig: _Rig, monkeypatch: pytest.MonkeyPatch, numeric_host: str
+    ) -> None:
+        # Even a (mistaken) allow-list entry cannot make a private literal dialable.
+        monkeypatch.setattr(mod, "ARCHIVE_ALLOWED_HOSTS", frozenset({numeric_host.strip("[]")}))
+        await _refused(rig, f"https://{numeric_host}{SECRET_PATH}?{SECRET_QUERY}", "private_address")
+
+    async def test_a_bracketed_ipv6_literal_host_is_refused_by_shape(
+        self, rig: _Rig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A named allow-listed host is the only legitimate shape; an IPv6 literal is
+        # refused whatever it says (the netloc is not the bare hostname).
+        monkeypatch.setattr(mod, "ARCHIVE_ALLOWED_HOSTS", frozenset({"::1"}))
+        await _refused(rig, f"https://[::1]{SECRET_PATH}?{SECRET_QUERY}", "url_shape")
+
+    async def test_a_resolver_failure_is_a_permanent_refusal(self, rig: _Rig) -> None:
+        async def boom(host: str) -> list[str]:
+            raise OSError("no such host")
+
+        mod_resolver = boom
+        import pytest as _pytest  # noqa: PLC0415 - local, to patch inside the test
+
+        with _pytest.MonkeyPatch.context() as mp:
+            mp.setattr(mod, "_resolve_host", mod_resolver)
+            await _refused(rig, URL, "resolve_failed")
+
+    async def test_an_empty_resolution_is_refused(self, rig: _Rig) -> None:
+        rig.addresses = [[]]
+        await _refused(rig, URL, "resolve_failed")
+
+    async def test_a_public_answer_is_accepted(self, rig: _Rig) -> None:
+        # The control for the refusals above: the same flow with a public answer works.
+        rig.addresses = [["93.184.216.34"]]
+        csv_bytes, _, _ = await mod.download_archive_csv(URL)
+        assert csv_bytes == CSV
+
+
+class TestStatusHandling:
+    async def test_a_redirect_is_refused_and_its_location_is_not_requested(
+        self, rig: _Rig
+    ) -> None:
+        rig.serve(
+            status_code=302, headers={"Location": "https://evil.example/steal"}
+        )
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(URL)
+        assert caught.value.reason == "redirect"
+        assert len(rig.requests) == 1, "the Location must never be requested"
+        assert rig.requests[0].url.host == PUBLIC_IP
+
+    @pytest.mark.parametrize("status", [301, 303, 307, 308])
+    async def test_every_3xx_is_refused(self, rig: _Rig, status: int) -> None:
+        rig.serve(status_code=status, headers={"Location": f"https://{HOST}/elsewhere"})
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(URL)
+        assert caught.value.reason == "redirect"
+        assert len(rig.requests) == 1
+
+    @pytest.mark.parametrize("status", [403, 410])
+    async def test_an_expired_link_is_its_own_outcome(
+        self, rig: _Rig, status: int
+    ) -> None:
+        rig.serve(status_code=status)
+        with pytest.raises(mod.LinkExpired) as caught:
+            await mod.download_archive_csv(URL)
+        assert not isinstance(caught.value, mod.DownloadRefused)
+        assert "SECRETTOKEN123" not in str(caught.value)
+
+    @pytest.mark.parametrize("status", [400, 401, 404, 451])
+    async def test_other_client_errors_are_a_permanent_refusal(
+        self, rig: _Rig, status: int
+    ) -> None:
+        rig.serve(status_code=status)
+        with pytest.raises(mod.DownloadRefused) as caught:
+            await mod.download_archive_csv(URL)
+        assert caught.value.reason == "http_status"
+
+    @pytest.mark.parametrize("status", [500, 502, 503, 504, 408, 429])
+    async def test_a_server_side_status_is_transient_and_leaks_nothing(
+        self, rig: _Rig, status: int
+    ) -> None:
+        rig.serve(status_code=status)
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            await mod.download_archive_csv(URL)
+        assert not isinstance(caught.value, mod.DownloadRefused)
+        # httpx's own raise_for_status() message embeds the full request URL.
+        text = f"{caught.value} {caught.value!r}"
+        assert "SECRETTOKEN123" not in text and "sign=" not in text
+        assert SECRET_PATH not in text
+
+    async def test_a_network_error_propagates_as_transient(self, rig: _Rig) -> None:
+        def refuse_connection(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        rig.respond = refuse_connection
+        with pytest.raises(httpx.ConnectError):
+            await mod.download_archive_csv(URL)
+
+
+class TestNoLinkInLogs:
+    """The signed query string is a bearer token: no log record may carry it."""
+
+    @pytest.mark.parametrize(
+        "scenario",
+        ["ok", "redirect", "expired", "not_found", "server_error", "bad_container", "private"],
+    )
+    async def test_no_record_carries_the_path_or_query(
+        self, rig: _Rig, caplog: pytest.LogCaptureFixture, scenario: str
+    ) -> None:
+        caplog.set_level(logging.DEBUG)
+        if scenario == "redirect":
+            rig.serve(status_code=302, headers={"Location": f"https://{HOST}/x"})
+        elif scenario == "expired":
+            rig.serve(status_code=410)
+        elif scenario == "not_found":
+            rig.serve(status_code=404)
+        elif scenario == "server_error":
+            rig.serve(status_code=503)
+        elif scenario == "bad_container":
+            rig.serve(status_code=200, content=b"not an archive at all")
+        elif scenario == "private":
+            rig.addresses = [["10.0.0.5"]]
+        try:
+            await mod.download_archive_csv(URL)
+        except (mod.DownloadRefused, mod.LinkExpired, httpx.HTTPError):
+            pass
+        assert caplog.records, "the fetch must leave at least one record to inspect"
+        for record in caplog.records:
+            text = record.getMessage()
+            assert "SECRETTOKEN123" not in text
+            assert "sign=" not in text
+            assert SECRET_PATH not in text
+            assert "priv/okx" not in text
+        # Scheme and host are the only description of the link that is allowed.
+        assert any(f"https://{HOST}" in r.getMessage() for r in caplog.records)
