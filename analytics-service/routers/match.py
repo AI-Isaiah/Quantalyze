@@ -594,6 +594,12 @@ _HOLDINGS_HISTORY_MAX_PAGES = 50
 # the defect class this repo avoids.
 _MATCHER_MIN_ADJACENT_RETURNS: Final[int] = 30
 
+# D-22 (founder, 167.1.1.1): the fewest days the book's shared-days join must span for the
+# portfolio-fit axis to compute. It equals ``min_overlap_days`` in
+# ``match_engine._compute_portfolio_fit_components`` (a module-local literal there); a book
+# whose join is shorter is NAMED with ``book_join_marker`` and no holding is withheld to fit it.
+_BOOK_JOIN_MIN_DAYS: Final[int] = 30
+
 
 def _holdings_history_window_start() -> str:
     """The first ``asof`` (YYYY-MM-DD, UTC) the holdings history read asks for.
@@ -1514,6 +1520,54 @@ def compute_holding_flags(
     return flags
 
 
+def book_join_marker(
+    portfolio_returns: dict[str, pd.Series], *, allocator_id: str
+) -> dict[str, Any] | None:
+    """D-22 (WR-02). A book-level entry for ``match_batches.holding_flags`` when the shared-days
+    join of the series actually passed to scoring (the ``.dropna()`` window) spans fewer than
+    ``_BOOK_JOIN_MIN_DAYS`` days, else None.
+
+    No holding is withheld to fit the overlap: every holding stays named in its own entry. The
+    portfolio-fit axis and the correlation-ceiling tests do go null for such a book, and this
+    marker is how that is named instead of silent. A WARNING with the allocator id and the
+    count is logged as well.
+
+    No series at all returns None: an empty book has no join to be too short (the engine
+    scores it in cold-start mode and ``holding_flags`` is empty).
+
+    Shape (distinguishable from a holding entry by ``kind`` and a null ``holding_ref``; the
+    dashboard reader keeps only ``flagged`` entries with a candidate, so it ignores this one)::
+
+        {
+            "kind":                "book",
+            "holding_ref":         None,
+            "book_join_too_short": True,
+            "shared_days":         int,   # days on which EVERY series carries a return
+            "min_days":            30,    # the engine's min_overlap_days
+            "flagged":             False,
+        }
+    """
+    if not portfolio_returns:
+        return None
+    shared_days = len(pd.DataFrame(portfolio_returns).dropna())
+    if shared_days >= _BOOK_JOIN_MIN_DAYS:
+        return None
+    logger.warning(
+        "match: book_join_too_short: the %d series scored for allocator %s share %d day(s) "
+        "(< %d), so the portfolio-fit axis and the correlation-ceiling tests cannot compute; "
+        "no holding is withheld for it",
+        len(portfolio_returns), allocator_id, shared_days, _BOOK_JOIN_MIN_DAYS,
+    )
+    return {
+        "kind": "book",
+        "holding_ref": None,
+        "book_join_too_short": True,
+        "shared_days": shared_days,
+        "min_days": _BOOK_JOIN_MIN_DAYS,
+        "flagged": False,
+    }
+
+
 class _ScoredProxy:
     """Attribute-access view over a scored candidate dict.
 
@@ -1665,6 +1719,10 @@ async def _score_one_allocator(
             allocator_preferences=ctx["preferences"] or {},
             scored_candidates_by_slot=scored_by_slot,
         )
+        # D-22: name a book whose shared-days join is too short (no holding is withheld for it).
+        book_marker = book_join_marker(portfolio_returns, allocator_id=allocator_id)
+        if book_marker is not None:
+            holding_flags_list.append(book_marker)
 
         # Persist: one match_batches row, N match_candidates rows.
         supabase = get_supabase()

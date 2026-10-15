@@ -798,6 +798,57 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
     expect(payload.flaggedHoldings[0].symbol).toBe("BTC");
     expect(payload.flaggedHoldings.some((f) => f.symbol === "USDT")).toBe(false);
   });
+
+  // 167.1.1.1 D-22: a book whose shared-days join is too short persists ONE book-level entry
+  // in holding_flags (kind "book", holding_ref null, flagged false). The reader keeps only
+  // `flagged && top_candidate_strategy_id`, so it must neither surface nor throw on it
+  // (its null holding_ref is never split).
+  it("flaggedHoldings ignores the book-level book_join_too_short entry (holding_ref null, flagged false)", async () => {
+    buildResult.byTable["match_batches"] = {
+      data: [
+        {
+          id: "batch-book-marker",
+          holding_flags: [
+            {
+              holding_ref: "holding:binance:BTC:spot",
+              value_usd: 50000,
+              weight: 0.4,
+              breach_reasons: ["max_weight"],
+              top_candidate_strategy_id: "s-explor-cand",
+              top_candidate_composite: 80,
+              flagged: true,
+            },
+            {
+              kind: "book",
+              holding_ref: null,
+              book_join_too_short: true,
+              shared_days: 0,
+              min_days: 30,
+              flagged: false,
+            },
+          ],
+        },
+      ],
+      error: null,
+    };
+    buildResult.byTable["strategies"] = {
+      data: [
+        {
+          id: "s-explor-cand",
+          name: "Candidate",
+          codename: "Lyra",
+          disclosure_tier: "exploratory",
+        },
+      ],
+      error: null,
+    };
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const payload = await getMyAllocationDashboard("user-1");
+
+    expect(payload.flaggedHoldings.length).toBe(1);
+    expect(payload.flaggedHoldings[0].symbol).toBe("BTC");
+  });
 });
 
 describe("getMyAllocationDashboard — audit-2026-05-07 H-0502 / C-0172 / H-0481 (auth backstop)", () => {
