@@ -2,7 +2,7 @@
 
 ## [0.132.2.0] - 2026-10-15 — OKXHISTORY: an OKX strategy's days older than the 3-month bills window can be rebuilt from OKX's quarterly bills archive (PR-A, code only)
 
-Phase 167.1.2.2.2.1, PR-A (plans 01-10 and 16). The branch has 73 non-merge commits since `origin/main` plus 17 merge commits (per-plan worktree merges and three merges of `origin/main`). 50 of the 73 touch paths outside `.planning`, and this entry maps every one of them. The other 23 are planning and records commits: CONTEXT with founder decisions D-01..D-13, research, the pattern map, 16 plans, SUMMARYs, three review rounds, verification and the security audit. Those are not shipped here. **Nothing is rebuilt on PROD by this release.** The allow-list for the archive download host ships empty on purpose, so every real download is refused until PR-B (plan 13) adds the host measured by the founder's preflight (plan 12). Calibrate (plan 14) and the PROD apply (plan 15) are founder steps that come after it.
+Phase 167.1.2.2.2.1, PR-A (plans 01-10 and 16). The branch has 74 non-merge commits since `origin/main` plus 17 merge commits (per-plan worktree merges and three merges of `origin/main`). 51 of the 73 touch paths outside `.planning`, and this entry maps every one of them. The other 23 are planning and records commits: CONTEXT with founder decisions D-01..D-13, research, the pattern map, 16 plans, SUMMARYs, three review rounds, verification and the security audit. Those are not shipped here. **Nothing is rebuilt on PROD by this release.** The allow-list for the archive download host ships empty on purpose, so every real download is refused until PR-B (plan 13) adds the host measured by the founder's preflight (plan 12). Calibrate (plan 14) and the PROD apply (plan 15) are founder steps that come after it.
 
 ### Added
 - **Migration `20261026120000_okx_archive_rebuild.sql`.**
@@ -78,6 +78,8 @@ Phase 167.1.2.2.2.1, PR-A (plans 01-10 and 16). The branch has 73 non-merge comm
 - The q3 fixture now chains from q2's last balance.
 - A comment in `okx_archive_job.py` is reworded so that gitleaks' `generic-api-key` rule does not read the identifier `stamp_api_key_429` as a secret. A scan of this branch's range with `--log-opts` found it, and the push-to-main scan would have found it too. The identifier itself is unchanged.
 - Full python suite on the merged tree: 10669 passed, 93.73% coverage.
+
+- **The userinfo refusal fixture in `test_okx_archive_download.py` is no longer a URL literal.** The push-time credential scanner read the synthetic `user:pw` fixture as a basic-auth leak and refused the push. The row now builds the same URL from `FAKE_USERINFO`, and the file passes 108/108. (`f91580d66`)
 
 ### Security
 - 33 of 33 threats in plans 01-10 and 16 are closed (24 mitigated, 9 accepted). The SSRF, bomb, link-leak, grant and wrong-database threats are mitigated as listed under Added.
