@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.131.13.3] - 2026-10-15 — GSDFORMAT: ROADMAP.md and STATE.md take a shape the gsd-tools handlers can edit without corrupting them
+
+Founder decision 2026-10-15, "Fix our format + report upstream". This repo's own rule had been "prefer hand-editing ROADMAP.md and STATE.md". It existed because the gsd-tools handlers corrupted both files. A debugger run traced that to four tool assumptions our file shape broke. This release fixes the shape, adds a lint that keeps it fixed, and drafts the tool bugs as upstream issues. Measured in a throwaway worktree after the reshape: `roadmap.update-plan-progress 159` is a no-op (before, it ticked another phase's plan). `170` changes only its `**Plans:**` count and the plan ticks its SUMMARYs earn (before, it also ticked 169.4-07 and stamped "(completed …)" onto 169.4-08). `164.4.2.1` changes one count line (before: duplicate rows above the wrong heading, plus a ticked TBD stub). `state.advance-plan` moves `Plan: 8 of 9` to `9 of 9` (before, it refused on 28 `Phase:` candidates).
+
+### Fixed
+- **ROADMAP.md: 40 in-phase headings in 35 phase sections become bold fields.** gsd-tools ends a phase section at any `#{1,4}` heading, so a `## Success Criteria` above the `Plans:` list hid the list. `## Success Criteria` is now the template's `**Success Criteria** (what must be TRUE):`, and the other in-phase headings are bold lines. No word of content changed (505bfa489).
+- **ROADMAP.md: no unchecked bullet names another phase as "Phase N".** The completion regex is unanchored, so it ticked the first such line. The 14 `- [ ] TBD (run /gsd-plan-phase N …)` stubs are gone. 164.4.2.1, 164.9.2 and 167.1.2 are complete with every plan summarised, so their stubs became the plan rows the tool itself writes. The other 11 read `- [ ] TBD — plans not listed yet`. 164.3-07 now reads "closure spec for 159" and 169.4-07 reads "after 170 LAYOUT" (e2d5d8165).
+- **STATE.md: `## Current Position` holds one line per field.** The handlers edit the first line carrying each label. The section had been an ~840-line log with 28 `Phase:` candidates. It now names 166.5 COMPUTEDATSTAMP (8 of 9) as current and says several phases run in parallel. The 840 lines of log, RETAINED blocks and close-out history moved verbatim to `STATE-LINEAGE.md` under "2026-10-15". A line-multiset check found nothing lost. The five frontmatter values that changed have their old values recorded there too (a0bca2100).
+
+### Changed
+- **ROADMAP.md is committed in the tool's own normal form.** `_normalizeMd` reflows the whole file on every write, and normalising today moved 11 blank lines and no text. With that committed on its own, a later handler diff shows only what the handler meant to write. STATE.md was already normal (a77dcb2e9).
+- **`.planning/milestone.lock` is no longer tracked.** It is a runtime lock (phase, session, pid, timestamp) that `phase complete` rewrites or deletes. It is now gitignored next to `.planning/active-workstream`. The file stays on disk, but a checkout that pulls this commit loses its copy, and the tool recreates it on the next run (cb56652f1).
+- **CLAUDE.md's GSD orchestration rules say the handlers are safe on the reshaped files.** The old "prefer hand-editing" paragraph stays as dated lineage. Three behaviours still need a `git diff` after a handler run: `phase complete` overwrites a Progress-table Status cell's prose, it moves STATE to the next phase in roadmap order, and most handlers rewrite `state.json` and re-derive `progress:` (0070c84ee). The note on the insert stub was corrected with the 6e narrowing (9472666a5).
+
+### Added
+- **`scripts/check-planning-hygiene.ts` rules 6d, 6e and 7.** 6d fails on a heading between a phase heading and its `Plans:` list. 6e fails on an unchecked bullet naming a phase as `Phase N` other than as its own leading label. 7 (STATE-POSITION) fails on a second `Phase:`, `Plan:`, `Status:`, `Last activity:` or `Progress:` line in `## Current Position`. They run in `npm run lint` (ecfcb51a3).
+- **Rule 6e allows a fresh insert's TBD stub (coordinator review).** The tool's own `- [ ] TBD (run /gsd-plan-phase N to break down)` passes while it sits in phase N's section, N's overview bullet is `[ ]` and the section lists no plan rows: the completion regex ticks the overview bullet first. It fails once the phase has plan rows or a ticked bullet, or when the stub names another phase. So `/gsd-phase --insert` no longer turns lint red. On the pre-reshape files the three rules report 40, 6 and 2 violations (6e: four stubs in completed or retired phases plus the two cross-phase bullets); on HEAD, none (9472666a5).
+- **`.planning/research/gsd-tools-upstream-bugs.md`: seven upstream issue drafts, none filed.** Each has a source line, a repro measured here and a proposed fix: the error path that still writes (`state-transition.cjs:1411`), the unanchored and non-idempotent completion regex (`roadmap.cjs:1351`), a section ending at any heading (`roadmap.cjs:1238/1425/1426`), Status prose overwritten by `phase complete` (`phase.cjs:3539`), whole-file normalisation, missing rows inserted at the top of the list, and the TBD stub template (1fa0fd54a).
+
+### Tests
+- **`src/__tests__/check-planning-hygiene.test.ts` gains 15 cases:** three for 6d, seven for 6e and five for rule 7. Each rule was neutered once: 2, 3 and 3 cases went red. The narrowed 6e was neutered twice more: treating every stub as fresh reds 3 cases, and dropping the allowance reds the fresh-insert case. Each neuter was restored from a byte backup and cmp-checked. The live-file tests prove the real ROADMAP.md and STATE.md pass.
+
+### Notes
+- **`/gsd-phase --insert` still writes the TBD stub.** Lint allows it until the phase gets plan rows or its overview bullet is ticked; then replace it with the plan rows or `- [ ] TBD — plans not listed yet`. The stub template is upstream draft 7.
+- **The `progress:` block still reads 632/621 plans.** The next handler run re-derives it from disk as 746/738. The phase figures, 104 of 115, already match the ROADMAP checklist once the three retired 165-family phases are excluded. The milestone's plan rows are 582 ticked of 746, against 738 SUMMARYs on disk. Each phase's next `update-plan-progress` ticks the rows its SUMMARYs earn (170 did in the proof run); this release does not.
+- **Recorded, not fixed:** every gsd-tools defect in the research file. This release only changes our file shape.
+
 ## [0.131.13.2] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of 3742dfa5
 
 ### Changed
