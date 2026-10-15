@@ -198,6 +198,11 @@ MIN_APPLY_GAP_S: Final[int] = 11
 MAX_DEFER_S: Final[int] = 3600
 #: A wait shorter than this is a tight loop, not a wait.
 MIN_DEFER_S: Final[int] = 60
+#: A backstop on WAITING that does not depend on anything OKX says (F7 / WR-04): a job older
+#: than this, measured from its own ``compute_jobs.created_at``, is not deferred again. The
+#: 8 h bound above reads OKX's request ``ts``, whose meaning is unverified; if it tracks the
+#: LATEST apply it never ages and nothing else ends the wait (a defer does not use an attempt).
+BACKSTOP_AFTER_S: Final[int] = 24 * 60 * 60
 #: A venue rate limit on an archive call defers at least this long (15 minutes), and never
 #: stamps the key's 429 (that opens the exchange-wide breaker and pauses normal OKX syncs).
 RATE_LIMIT_DEFER_S: Final[int] = 15 * 60
@@ -940,6 +945,16 @@ async def _quarter_step(
     tag = _quarter_tag(year, label)
     answer = await pacer.apply(key_row, year, label)
     entry["applied_existing"] = answer.existing
+    # RESEARCH leaves the meaning of ``ts`` open (the apply time, or the first request's). Its
+    # age class on every claim is how the first real run measures it: a request that ages
+    # across claims has a stable ts, one that keeps reading young does not. Hours only.
+    _ts_age = _age_s(answer.ts_ms)
+    logger.info(
+        "okx_archive_rebuild: %s apply existing=%s ts_age_h=%s",
+        tag,
+        answer.existing,
+        "unreadable" if _ts_age is None else int(_ts_age // 3600),
+    )
 
     if not answer.existing:
         # OKX takes 2-3 h to generate a file: no point asking before then.
@@ -991,6 +1006,28 @@ async def _quarter_step(
 # Waiting: defer_compute_job
 # ---------------------------------------------------------------------------
 
+def _check_backstop(job: Mapping[str, Any]) -> None:
+    """Raise ``archive_give_up`` when this job is too old to wait any longer. Called by every
+    path that would defer. A ``created_at`` that cannot be read is treated as too old to wait:
+    a bound that cannot be evaluated must not become no bound at all."""
+    raw = job.get("created_at")
+    created_ms: int | None = None
+    if isinstance(raw, str) and raw.strip():
+        try:
+            created = datetime.fromisoformat(raw.strip())
+        except ValueError:
+            created = None
+        if created is not None:
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            created_ms = int(created.timestamp() * 1000)
+    if created_ms is None:
+        raise _Stop("archive_give_up", "backstop age=unreadable")
+    age = max(0.0, (_wall_ms() - created_ms) / 1000.0)
+    if age >= BACKSTOP_AFTER_S:
+        raise _Stop("archive_give_up", f"backstop age_h={int(age // 3600)}")
+
+
 async def _defer_job(
     supabase: Any, job: Mapping[str, Any], seconds: float, reason: str
 ) -> DispatchResult:
@@ -998,7 +1035,11 @@ async def _defer_job(
     decrements ``attempts`` (waiting never burns a retry) and is fenced on the claim token.
 
     The SQL raises above 3600 s, so the wait is clamped here; ``reason`` becomes
-    ``last_error`` and must hold a short class and counts only (no ``ts``, no link)."""
+    ``last_error`` and must hold a short class and counts only (no ``ts``, no link).
+
+    Every wait passes the backstop first (``_check_backstop``): a job past ``BACKSTOP_AFTER_S``
+    ends in the named ``archive_give_up`` instead of parking again."""
+    _check_backstop(job)
     defer_seconds = int(min(max(seconds, MIN_DEFER_S), MAX_DEFER_S))
 
     def _defer() -> None:
@@ -2245,9 +2286,12 @@ async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
                 type(exc).__name__,
                 RATE_LIMIT_DEFER_S,
             )
-            return await _defer_job(
-                supabase, job, RATE_LIMIT_DEFER_S, f"{KIND}: waiting rate_limited"
-            )
+            try:
+                return await _defer_job(
+                    supabase, job, RATE_LIMIT_DEFER_S, f"{KIND}: waiting rate_limited"
+                )
+            except _Stop as stop:
+                return await _finish_stop(supabase, job, result, stop)
         # DONE is only honest once the result is stored: a failed write propagates and the
         # dispatcher retries the whole (idempotent) claim.
         json.dumps(result)  # the object must be plain JSON: no Decimal, no datetime

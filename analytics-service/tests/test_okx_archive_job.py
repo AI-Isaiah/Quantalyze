@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -306,7 +306,19 @@ def _install(
     return world
 
 
-def _job(metadata: dict[str, Any] | None = None, *, api_key_id: str | None = KEY_ID) -> dict[str, Any]:
+def _created_at(ms: int) -> str:
+    """The ISO string PostgREST returns for ``compute_jobs.created_at``."""
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+
+
+def _job(
+    metadata: dict[str, Any] | None = None,
+    *,
+    api_key_id: str | None = KEY_ID,
+    created_at: Any = ...,
+) -> dict[str, Any]:
+    """A claimed row. ``created_at`` defaults to the time of OKX's request (three hours
+    before the fake clock), a job well inside every bound."""
     base: dict[str, Any] = {
         "mode": "preflight",
         "quarters": [{"year": 2026, "quarter": "Q3"}],
@@ -322,6 +334,7 @@ def _job(metadata: dict[str, Any] | None = None, *, api_key_id: str | None = KEY
         "metadata": base,
         "attempts": 1,
         "max_attempts": 3,
+        "created_at": _created_at(REQUEST_TS_MS) if created_at is ... else created_at,
     }
 
 
@@ -1217,6 +1230,103 @@ class TestWaitIsADeferNeverAFailure:
         world.supabase.rpc_errors["defer_compute_job"] = RuntimeError("database unavailable")  # type: ignore[union-attr]
         with pytest.raises(RuntimeError, match="database unavailable"):
             await okx_archive_job.run_okx_archive_rebuild_job(_calibrate())
+
+
+class TestBackstopDeadline:
+    """F7 / WR-04. The 8 h give-up bound is computed from OKX's request ``ts``, whose meaning
+    is unverified (RESEARCH marks it both "the apply time" and "the first-request time"). If
+    OKX returns the time of the LATEST apply, every claim sees an age near zero, re-applies and
+    defers, and the job parks in ``pending`` for ever without a word. Deferral does not use up
+    an attempt, so nothing else ends it. The backstop does not depend on the venue: the job's
+    own ``created_at`` plus 24 h, for every path that would defer."""
+
+    @pytest.mark.asyncio
+    async def test_a_request_whose_ts_never_ages_is_given_up_on_by_the_jobs_own_age(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = _happy(monkeypatch)
+        # OKX answers every apply with a brand-new ts (one minute old): the wait never ends.
+        world.answers[APPLY] = _apply_answer("false", ts=NOW_MS - 60_000)
+        job = _calibrate(created_at=_created_at(NOW_MS - 25 * H))
+
+        outcome = await dispatch(job)
+
+        result = _assert_stopped(world, outcome, "archive_give_up", detail="backstop age_h=25")
+        assert _defers(world) == [], "no defer was recorded"
+        assert result["stop_class"] == "archive_give_up"
+
+    @pytest.mark.asyncio
+    async def test_an_ongoing_request_on_an_old_job_is_given_up_on_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = _happy(monkeypatch)
+        world.answers[APPLY] = _apply_answer("false", ts=NOW_MS - 3 * H)
+        world.answers[STATUS] = _status("ongoing", ts=NOW_MS - 3 * H)
+
+        outcome = await dispatch(_calibrate(created_at=_created_at(NOW_MS - 30 * H)))
+
+        _assert_stopped(world, outcome, "archive_give_up", detail="backstop age_h=30")
+
+    @pytest.mark.asyncio
+    async def test_a_rate_limit_defer_has_the_same_backstop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 429 that never lifts must not park the job for ever either."""
+        world = _happy(monkeypatch)
+
+        def _limited(_inst: Any, _params: dict[str, str]) -> Any:
+            raise ccxt.RateLimitExceeded("okx 429")
+
+        world.answers[APPLY] = _limited
+        outcome = await dispatch(_calibrate(created_at=_created_at(NOW_MS - 26 * H)))
+
+        _assert_stopped(world, outcome, "archive_give_up", detail="backstop age_h=26")
+        assert _defers(world) == []
+
+    @pytest.mark.parametrize(
+        ("age_ms", "gives_up"),
+        [(24 * H - 1000, False), (24 * H, True)],
+        ids=["one-second-short", "exactly-twenty-four-hours"],
+    )
+    @pytest.mark.asyncio
+    async def test_the_bound_is_twenty_four_hours(
+        self, monkeypatch: pytest.MonkeyPatch, age_ms: int, gives_up: bool
+    ) -> None:
+        world = _happy(monkeypatch)
+        world.answers[APPLY] = _apply_answer("false", ts=NOW_MS - 3 * H)
+        world.answers[STATUS] = _status("ongoing", ts=NOW_MS - 3 * H)
+
+        outcome = await dispatch(_calibrate(created_at=_created_at(NOW_MS - age_ms)))
+
+        if gives_up:
+            _assert_stopped(world, outcome, "archive_give_up", detail="backstop age_h=24")
+        else:
+            assert outcome.outcome == DispatchOutcome.DEFERRED
+
+    @pytest.mark.parametrize("created_at", [None, "", "not-a-timestamp", 12345])
+    @pytest.mark.asyncio
+    async def test_a_job_whose_age_cannot_be_read_is_not_allowed_to_wait(
+        self, monkeypatch: pytest.MonkeyPatch, created_at: Any
+    ) -> None:
+        """A bound that cannot be evaluated must not become no bound at all."""
+        world = _happy(monkeypatch)
+        world.answers[APPLY] = _apply_answer("false", ts=NOW_MS - 60_000)
+
+        outcome = await dispatch(_calibrate(created_at=created_at))
+
+        _assert_stopped(world, outcome, "archive_give_up", detail="backstop age=unreadable")
+
+    @pytest.mark.asyncio
+    async def test_a_job_that_is_ready_to_ingest_is_never_stopped_by_its_age(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The backstop ends WAITING, not work: a file that is ready is read at any age."""
+        world = _happy(monkeypatch)
+
+        outcome = await dispatch(_calibrate(created_at=_created_at(NOW_MS - 100 * H)))
+
+        assert outcome.outcome == DispatchOutcome.DONE
+        assert world.downloads == [_link("2026", "Q3")]
 
 
 class TestPreflightSharesWait:
