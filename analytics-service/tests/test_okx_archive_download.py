@@ -387,7 +387,13 @@ class TestNoLinkInLogs:
     async def test_no_record_carries_the_path_or_query(
         self, rig: _Rig, caplog: pytest.LogCaptureFixture, scenario: str
     ) -> None:
+        # Pin the level on the emitting loggers themselves, not only the root:
+        # an earlier test in the same session can leave a parent logger's level
+        # raised, which silently drops these records and made the vacuity
+        # assert below fail only when test_exchange.py ran first.
         caplog.set_level(logging.DEBUG)
+        caplog.set_level(logging.DEBUG, logger=mod.logger.name)
+        caplog.set_level(logging.DEBUG, logger="httpx")
         if scenario == "redirect":
             rig.serve(status_code=302, headers={"Location": f"https://{HOST}/x"})
         elif scenario == "expired":
