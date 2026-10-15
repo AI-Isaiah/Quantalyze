@@ -249,7 +249,10 @@ def test_gappy_priced_days_is_withheld_and_does_not_empty_the_join(
     assert SOL not in [s["strategy_id"] for s in ctx["portfolio_strategies"]]
     assert sorted(ctx["portfolio_returns"]) == [BTC, ETH]
     assert ctx["portfolio_aum"] == pytest.approx(10500.0), "D-01: SOL's 500 stays in the AUM"
-    assert ctx["portfolio_weights"][SOL] == pytest.approx(500 / 10500)
+    # CR-01: SOL has no series, so it has no SCORING weight; the weights cover the joined
+    # series and sum to 1. Its AUM share (500 / 10500) is what the flags carry (below).
+    assert SOL not in ctx["portfolio_weights"]
+    assert sum(ctx["portfolio_weights"].values()) == pytest.approx(1.0)
     assert _shared_days(ctx) == 119, "the join is not emptied"
 
     result, fit = _score(ctx, monkeypatch)
@@ -261,6 +264,7 @@ def test_gappy_priced_days_is_withheld_and_does_not_empty_the_join(
     weight = _flags(ctx, {"max_weight": 0.01})
     for ref in (BTC, ETH, SOL):
         assert "max_weight" in weight[ref]["breach_reasons"], ref
+    assert weight[SOL]["weight"] == pytest.approx(500 / 10500), "D-01: the AUM share"
     assert weight[SOL]["flagged"] is False
     assert weight[SOL]["withheld_reason"] == "too_few_adjacent_returns"
     assert weight[SOL]["top_candidate_strategy_id"] is None
@@ -277,7 +281,8 @@ def test_thirty_adjacent_priced_days_is_withheld(monkeypatch: pytest.MonkeyPatch
     }
     assert SOL not in ctx["portfolio_returns"]
     assert ctx["portfolio_aum"] == pytest.approx(10500.0)
-    assert ctx["portfolio_weights"][SOL] == pytest.approx(500 / 10500)
+    assert SOL not in ctx["portfolio_weights"], "CR-01: no series, no scoring weight"
+    assert _flags(ctx, {})[SOL]["weight"] == pytest.approx(500 / 10500), "D-01: AUM share"
     assert _shared_days(ctx) == 119
 
     result, fit = _score(ctx, monkeypatch)

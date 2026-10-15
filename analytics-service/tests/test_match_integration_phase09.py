@@ -22,7 +22,7 @@ import pytest
 # Tests MUST be plain `def` (NOT `async def`) and call without `await`. Adding
 # @pytest.mark.asyncio + await on a sync function raises
 # `TypeError: object dict can't be used in 'await' expression`.
-from routers.match import _load_allocator_context, FLAG_COMPOSITE_THRESHOLD
+from routers.match import _load_allocator_context, FLAG_COMPOSITE_THRESHOLD, compute_holding_flags
 from tests._curve_fixtures import curve_from_returns
 from tests.fake_postgrest import FakeDb
 
@@ -247,9 +247,24 @@ def test_warmup_gate_under_30d(monkeypatch):
 
     # D-01: the short-history holding keeps its dollars in the AUM and its weight.
     assert result["portfolio_aum"] == pytest.approx(80000.0)
-    assert result["portfolio_weights"]["holding:binance:BTC:spot"] == pytest.approx(50000.0 / 80000.0)
-    assert result["portfolio_weights"]["holding:binance:ETH:spot"] == pytest.approx(30000.0 / 80000.0)
-    assert abs(sum(result["portfolio_weights"].values()) - 1.0) < 1e-9
+    # CR-01: the SCORING weights cover the joined series only (ETH), so they sum to 1; the
+    # withheld BTC has no series and no scoring weight. Its AUM share is what the flags carry.
+    assert "holding:binance:BTC:spot" not in result["portfolio_weights"]
+    assert result["portfolio_weights"] == {"holding:binance:ETH:spot": pytest.approx(1.0)}
+    flags = {
+        f["holding_ref"]: f
+        for f in compute_holding_flags(
+            holdings_rows_eligible=result["_holdings_rows_eligible"],
+            holdings_rows_withheld=result["_holdings_rows_withheld"],
+            portfolio_returns=result["portfolio_returns"],
+            portfolio_weights=result["portfolio_weights"],
+            portfolio_aum=result["portfolio_aum"],
+            allocator_preferences={},
+            scored_candidates_by_slot={},
+        )
+    }
+    assert flags["holding:binance:BTC:spot"]["weight"] == pytest.approx(50000.0 / 80000.0)
+    assert flags["holding:binance:ETH:spot"]["weight"] == pytest.approx(30000.0 / 80000.0)
 
 
 def test_flag_composite_threshold_equals_50():

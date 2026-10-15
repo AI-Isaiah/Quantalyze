@@ -642,16 +642,24 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
 
     What is in and out of the book (D-01, spot only in this function):
 
-    ===========================  ========  ==================  ==================
-    spot holding                 AUM       weights / max-wt    returns, eligible
-    ===========================  ========  ==================  ==================
-    priced (30+ priced days and  in        in                  in
+    ===========================  ========  ==================  ==================  ==================
+    spot holding                 AUM       AUM share, max-wt   scoring weights     returns, eligible
+    ===========================  ========  ==================  ==================  ==================
+    priced (30+ priced days and  in        in                  in                  in
     30+ adjacent returns)
-    withheld (account_balance,   in        in                  out (named)
+    withheld (account_balance,   in        in                  out (no series)     out (named)
     fixed_price, no_price,
     too_few_priced_days,
     too_few_adjacent_returns)
-    ===========================  ========  ==================  ==================
+    ===========================  ========  ==================  ==================  ==================
+
+    Two weight notions, kept apart on purpose (review CR-01). The AUM share
+    (``aum_contribution_usd`` over the full matcher AUM, withheld spot and derivative P&L
+    included) is what ``holding_flags`` persists and what the max-weight test reads (D-01,
+    D-16); ``compute_holding_flags`` derives it from ``portfolio_aum``. The SCORING weights
+    (``portfolio_weights``) are what ``match_engine`` blends the joined series with, so they
+    cover exactly the series it joins and sum to 1: a withheld holding has no series and
+    must not sit in their denominator, or the candidate's add_weight is inflated.
 
     ``too_few_adjacent_returns`` (D-20) is a matcher-only reason: a holding with 30 or more
     priced days whose marks give fewer than ``_MATCHER_MIN_ADJACENT_RETURNS`` adjacent
@@ -672,10 +680,11 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
 
     Returns dict with:
       portfolio_strategies: list[dict]  (priced spot only; strategy_id = "holding:V:S:T")
-      portfolio_weights:    dict[str, float]  (aum_contribution_usd / portfolio_aum for
-                                               priced AND withheld spot; derivatives have
-                                               no weight, so with a nonzero derivative P&L
-                                               they do not sum to 1.0)
+      portfolio_weights:    dict[str, float]  (SCORING weights: aum_contribution_usd over
+                                               the sum of the PRICED spot holdings only, so
+                                               they sum to 1.0 over the series
+                                               match_engine joins; withheld spot and
+                                               derivatives are not in them)
       portfolio_returns:    dict[str, pd.Series]  (one Series per priced spot holding)
       portfolio_aum:        float  (sum of aum_contribution_usd over every collapsed
                                     holding: spot priced, spot withheld, derivative)
@@ -996,26 +1005,36 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
             ", ".join(f"{reason}={n}" for reason, n in sorted(derivative_counts.items())),
         )
 
-    # --- Step 5: weights (aum_contribution_usd / AUM) over priced AND withheld spot ---
-    # The denominator is the FULL AUM including derivative P&L (the AUM the allocator sees),
-    # so with a nonzero derivative P&L the weights do not sum to 1; match_engine normalises
-    # the weights over the series it joins, so the score is unaffected. An AUM that is not
-    # positive falls back to equal weights over the spot holdings.
-    total_value = total_aum
+    # --- Step 5: SCORING weights over the series match_engine will join (CR-01) ---
+    # The denominator is the sum of the PRICED spot holdings only. A withheld holding has
+    # no series, and a derivative's P&L is never a weight, so neither may sit in the
+    # denominator: match_engine blends exactly the joined series, and a denominator that
+    # includes dollars with no series would make the candidate's add_weight a/(S(1-a)+a)
+    # with S < 1 instead of a. The AUM share that D-01 and D-16 keep over the full AUM
+    # (withheld spot and derivative P&L included) is not built here; compute_holding_flags
+    # derives it from ``portfolio_aum``.
+    scoring_values = {pid: raw_values[pid] for pid in portfolio_returns}
+    scoring_total = sum(scoring_values.values())
     portfolio_weights: dict[str, float] = {}
-    if total_value > 0:
-        for pid, val in raw_values.items():
-            portfolio_weights[pid] = val / total_value
-    else:
-        # All values zero — equal weight as fallback
-        for pid in raw_values:
-            portfolio_weights[pid] = 1.0 / len(raw_values) if raw_values else 0.0
+    if scoring_total > 0:
+        for pid, val in scoring_values.items():
+            portfolio_weights[pid] = val / scoring_total
+    elif scoring_values:
+        # Every priced holding has a zero value: equal weights over the priced set, the
+        # fallback that predates this phase. Named, never silent.
+        logger.warning(
+            "match: scoring_weights_equal_fallback: the %d priced spot holding(s) of "
+            "allocator %s sum to a non-positive value, so they are scored at equal weights",
+            len(scoring_values), allocator_id,
+        )
+        for pid in scoring_values:
+            portfolio_weights[pid] = 1.0 / len(scoring_values)
 
     return {
         "portfolio_strategies": portfolio_strategies,
         "portfolio_weights": portfolio_weights,
         "portfolio_returns": portfolio_returns,
-        "portfolio_aum": total_value,
+        "portfolio_aum": total_aum,
         "holdings_rows_eligible": holdings_rows_eligible,
         "holdings_rows_withheld": holdings_rows_withheld,
         "holdings_rows_derivative": holdings_rows_derivative,
@@ -1193,37 +1212,48 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     portfolio_strategies.extend(holding_strategies)
     portfolio_returns.update(holding_returns)
 
-    # Combined AUM
+    # Matcher AUM: the allocator's own figure (D-15, D-16), strategy allocations plus every
+    # holding's contribution (withheld spot and derivative P&L included). It sizes the
+    # ticket (add_weight) and is the denominator of the AUM share that holding_flags
+    # persists and the max-weight test reads (D-01). It is NOT the scoring denominator.
     combined_aum = strategy_aum + holding_aum
 
-    # Renormalize weights across the combined set so they sum to 1.0 (D-16).
+    # SCORING weights (CR-01): normalised over the series match_engine joins, that is the
+    # book's strategies (allocated_amount) and the priced holdings, nothing else. A
+    # withheld holding has no series and a derivative's P&L is not a weight, so neither
+    # is in this denominator, exactly as before this phase. Keep this notion apart from
+    # the AUM share above: put withheld dollars back in here and the candidate's
+    # add_weight a becomes a/(S(1-a)+a) with S < 1, inflating sharpe_lift and
+    # dd_improvement.
     # Strategy side: use allocated_amount as the value basis.
-    # Holdings side: use value_usd (already in holdings_ctx["portfolio_weights"] as fractions
-    #   of the holdings total, but we need absolute values for combined renorm).
-    # Reconstruct absolute values for holding side from their individual value_usd.
+    # Holdings side: the priced holdings' aum_contribution_usd (their finite value).
     holding_abs_values: dict[str, float] = {}
-    # D-16: a spot holding's weight basis is its aum_contribution_usd (its finite value),
-    # the same figure holdings_aum was built from; a derivative has no weight (D-19).
-    for row in [*holdings_rows_eligible, *holdings_rows_withheld]:
+    for row in holdings_rows_eligible:
         pseudo_id = f"holding:{row['venue']}:{row['symbol']}:{row['holding_type']}"
         spot_contribution = row["aum_contribution_usd"]
         # A spot row's contribution is never None (only a derivative with no P&L is).
         holding_abs_values[pseudo_id] = (
             float(spot_contribution) if spot_contribution is not None else 0.0
         )
+    scoring_denominator = sum(strategy_raw_values.values()) + sum(holding_abs_values.values())
 
-    if combined_aum > 0:
+    if scoring_denominator > 0:
         # Strategies side
         for sid, val in strategy_raw_values.items():
-            portfolio_weights[sid] = val / combined_aum
+            portfolio_weights[sid] = val / scoring_denominator
         # Holdings side
         for pid, val in holding_abs_values.items():
-            portfolio_weights[pid] = val / combined_aum
-    elif holding_strategies or portfolio_strategies or holdings_rows_withheld:
-        # Fall back: equal weights when no AUM data available
+            portfolio_weights[pid] = val / scoring_denominator
+    elif holding_strategies or portfolio_strategies:
+        # Fall back: equal weights over the scored set when its values sum to nothing
+        # (predates 167.1.1.1; the sign of the matcher AUM plays no part in it). Named.
         all_ids = [ps["strategy_id"] for ps in portfolio_strategies]
-        all_ids.extend(sorted(set(holding_abs_values) - set(all_ids)))
         eq_w = 1.0 / len(all_ids) if all_ids else 0.0
+        logger.warning(
+            "match: scoring_weights_equal_fallback: the %d scored series of allocator %s "
+            "carry no positive value, so they are scored at equal weights",
+            len(all_ids), allocator_id,
+        )
         for pid in all_ids:
             portfolio_weights[pid] = eq_w
 

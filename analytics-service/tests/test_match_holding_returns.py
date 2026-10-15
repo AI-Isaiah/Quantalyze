@@ -146,8 +146,12 @@ def test_a_priced_holding_carries_its_mark_returns_and_a_stablecoin_stays_in_the
     assert list(series.to_numpy()) == pytest.approx(_returns(BTC_MARKS))
     assert [s["strategy_id"] for s in ctx["portfolio_strategies"]] == [BTC]
     assert ctx["portfolio_aum"] == pytest.approx(15000.0)
-    assert ctx["portfolio_weights"][BTC] == pytest.approx(10000 / 15000)
-    assert ctx["portfolio_weights"][USDT] == pytest.approx(5000 / 15000)
+    # CR-01: the SCORING weights cover the joined series only; the withheld USDT has no
+    # series and no scoring weight. Its AUM share (D-01) is what the flags carry.
+    assert ctx["portfolio_weights"] == {BTC: pytest.approx(1.0)}
+    flags = _flag_entries(ctx)
+    assert flags[BTC]["weight"] == pytest.approx(10000 / 15000)
+    assert flags[USDT]["weight"] == pytest.approx(5000 / 15000)
     assert [r["symbol"] for r in ctx["_holdings_rows_eligible"]] == ["BTC"]
     assert [(r["symbol"], r["withheld_reason"]) for r in ctx["_holdings_rows_withheld"]] == [
         ("USDT", "fixed_price")
@@ -262,15 +266,18 @@ def test_withheld_spot_holdings_stay_in_the_aum_and_weights_and_leave_the_return
     assert list(ctx["portfolio_returns"]) == [BTC]
     assert [s["strategy_id"] for s in ctx["portfolio_strategies"]] == [BTC]
     assert ctx["portfolio_aum"] == pytest.approx(10000.0)
-    expected_weights = {
+    # CR-01: scoring weights cover the one joined series; the AUM shares (D-01) are the flags'.
+    assert ctx["portfolio_weights"] == {BTC: pytest.approx(1.0)}
+    expected_aum_shares = {
         BTC: 0.6,
         USDT: 0.1,
         "holding:binance:SOL:spot": 0.05,
         "holding:binance:AVAX:spot": 0.04,
         "holding:mt5:EURUSD:spot": 0.21,
     }
-    assert ctx["portfolio_weights"] == pytest.approx(expected_weights)
-    assert sum(ctx["portfolio_weights"].values()) == pytest.approx(1.0)
+    flags = _flag_entries(ctx)
+    assert {ref: e["weight"] for ref, e in flags.items()} == pytest.approx(expected_aum_shares)
+    assert sum(e["weight"] for e in flags.values()) == pytest.approx(1.0)
     reasons = {r["symbol"]: r["withheld_reason"] for r in ctx["_holdings_rows_withheld"]}
     assert reasons == {
         "USDT": "fixed_price",
@@ -449,14 +456,17 @@ def test_a_derivative_adds_its_pnl_to_the_aum_never_its_notional_and_never_the_w
     ctx = _context(monkeypatch, db)
 
     assert ctx["portfolio_aum"] == pytest.approx(14700.0)
-    assert ctx["portfolio_weights"][BTC] == pytest.approx(10000 / 14700)
-    assert ctx["portfolio_weights"][USDT] == pytest.approx(5000 / 14700)
+    # CR-01: the scoring weights cover the joined series (BTC) and sum to 1 whatever the
+    # derivative P&L; the AUM shares (the flags') are over the 14,700 AUM and do not.
+    assert ctx["portfolio_weights"] == {BTC: pytest.approx(1.0)}
+    shares = {ref: e["weight"] for ref, e in _flag_entries(ctx).items() if e["weight"] is not None}
+    assert shares == {BTC: pytest.approx(10000 / 14700), USDT: pytest.approx(5000 / 14700)}
     # The holdings-only context is checked too: the allocator context rebuilds its weights
     # from the spot rows, so a derivative leaking into the holdings weights would otherwise
     # be hidden by that rebuild.
     holdings = _holding_context(monkeypatch, db)
     assert holdings["portfolio_aum"] == pytest.approx(14700.0)
-    assert holdings["portfolio_weights"][BTC] == pytest.approx(10000 / 14700)
+    assert holdings["portfolio_weights"] == {BTC: pytest.approx(1.0)}
     for derivative in (ETHUSDT, SOLUSDT):
         for book in (ctx, holdings):
             assert derivative not in book["portfolio_weights"], "D-19: no derivative weight"

@@ -78,8 +78,13 @@ def test_a_marker_dated_after_the_priced_row_removes_the_account_from_aum_and_we
     assert ctx["portfolio_aum"] == pytest.approx(OKX_USD), (
         "the unpriced account was summed at its older close-priced row"
     )
-    assert list(ctx["portfolio_weights"]) == ["holding:okx:USDT:spot"]
-    assert ctx["portfolio_weights"]["holding:okx:USDT:spot"] == pytest.approx(1.0)
+    # The one remaining holding is USDT, a withheld stablecoin (no series): it is in the AUM
+    # (above) and has no SCORING weight (CR-01). The unpriced MT5 BTC is in neither.
+    assert ctx["portfolio_weights"] == {}
+    assert [f"holding:{r['venue']}:{r['symbol']}:{r['holding_type']}" for r in ctx["holdings_rows_withheld"]] == [
+        "holding:okx:USDT:spot"
+    ]
+    assert ctx["holdings_rows_eligible"] == []
 
 
 @pytest.mark.parametrize(
