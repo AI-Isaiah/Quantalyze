@@ -12,6 +12,7 @@ Every dollar figure is hand-typed.
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
@@ -36,6 +37,14 @@ def _key(key_id: str, **over: Any) -> dict[str, Any]:
     }
 
 
+# A holding's priced history is the fixture's business, not an assertion's: every row
+# stands for 41 adjacent calendar days ending on its own ``asof`` (30 priced days for the
+# D-03 rule and 30 adjacent returns for plan 05's D-20, with room to spare), each at
+# mark 100.0 with the row's own value, side, key and updated_at. ``history_days=1`` opts a
+# bulk row out.
+HISTORY_DAYS = 41
+
+
 def _holding(
     key: str,
     symbol: str,
@@ -43,8 +52,10 @@ def _holding(
     asof: str,
     updated_at: str | None,
     venue: str = "binance",
+    history_days: int = HISTORY_DAYS,
 ) -> dict[str, Any]:
     return {
+        "_history_days": history_days,
         "allocator_id": ALLOCATOR,
         "api_key_id": key,
         "venue": venue,
@@ -66,8 +77,25 @@ def _warm_series(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(match_mod, "reconstruct_symbol_returns", lambda _s, _sym: series)
 
 
+def _with_history(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Expand each holding row into its adjacent-day history (see HISTORY_DAYS)."""
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        days = row.get("_history_days", 1)
+        base = {k: v for k, v in row.items() if k != "_history_days"}
+        out.append(base)
+        end = date.fromisoformat(str(base["asof"]))
+        out.extend(
+            {**base, "asof": (end - timedelta(days=back)).isoformat()}
+            for back in range(1, days)
+        )
+    return out
+
+
 def _ctx(monkeypatch: pytest.MonkeyPatch, db: FakeDb) -> dict[str, Any]:
+    db.tables["allocator_holdings"] = _with_history(db.tables["allocator_holdings"])
     monkeypatch.setattr(match_mod, "get_supabase", lambda: db)
+    monkeypatch.setattr(match_mod, "_holdings_history_window_start", lambda: "2026-01-01")
     return match_mod._load_holding_portfolio_context(ALLOCATOR)
 
 
@@ -273,7 +301,7 @@ def test_a_quiet_accounts_newest_day_is_read_although_the_history_exceeds_the_se
     = 1200 rows, each worth 1.0, so its newest day is 400.0. key-q last polled
     on 10-01 with one BTC row of 9000. Both count: 400 + 9000 = 9400."""
     key_a_rows = [
-        _holding("key-a", f"S{n:03d}", 1.0, day, f"{day}T04:00:00+00:00")
+        _holding("key-a", f"S{n:03d}", 1.0, day, f"{day}T04:00:00+00:00", history_days=1)
         for day in ("2026-10-09", "2026-10-10", "2026-10-11")
         for n in range(400)
     ]
@@ -305,7 +333,10 @@ def test_a_capped_day_read_fails_instead_of_scoring_a_partial_book(
         {
             "api_keys": [_key("key-a")],
             "allocator_holdings": [
-                _holding("key-a", f"S{n:04d}", 1.0, "2026-10-11", "2026-10-11T04:00:00+00:00")
+                _holding(
+                    "key-a", f"S{n:04d}", 1.0, "2026-10-11", "2026-10-11T04:00:00+00:00",
+                    history_days=1,
+                )
                 for n in range(1005)
             ],
             "allocator_equity_snapshots": [],
@@ -352,7 +383,14 @@ def test_every_holdings_read_is_owner_filtered_and_scoped_to_one_key(
     )
     ctx = _ctx(monkeypatch, db)
 
-    holdings_reads = [eqs for name, eqs in db.reads if name == "allocator_holdings"]
-    assert holdings_reads and all(("allocator_id", ALLOCATOR) in eqs for eqs in holdings_reads)
-    assert all(any(col == "api_key_id" for col, _ in eqs) for eqs in holdings_reads)
+    # Every allocator_holdings read, every page, carries the tenant filter. The per-key
+    # reads are also scoped to one api_key_id; the history read is the one read that is
+    # not (a mark does not depend on whose key holds the asset) and it is bounded by a
+    # ``gte`` on asof instead.
+    holdings_reads = [r for r in db.read_log if r.table == "allocator_holdings"]
+    assert holdings_reads and all(("allocator_id", ALLOCATOR) in r.eq for r in holdings_reads)
+    unbounded = [r for r in holdings_reads if not any(col == "asof" for col, _ in r.gte)]
+    assert unbounded and all(any(col == "api_key_id" for col, _ in r.eq) for r in unbounded)
+    history = [r for r in holdings_reads if any(col == "asof" for col, _ in r.gte)]
+    assert history, "the history read must be bounded by a window start"
     assert ctx["portfolio_aum"] == pytest.approx(40000.0)
