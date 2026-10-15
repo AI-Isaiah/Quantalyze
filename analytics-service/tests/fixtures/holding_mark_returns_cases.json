@@ -1,0 +1,340 @@
+{
+  "_comment": "Phase 167.1.1.1 (BRIDGERETURNS) D-03, SC3. The cross-runtime oracle for the SPOT mark-price rule. Read by analytics-service/tests/test_holding_marks_fixture.py (classify_spot_marks) and src/app/(dashboard)/compare/lib/holding-compare-adapter.test.ts (classifySpotMarks, fetchHoldingCompareItem). HAND-TYPED: every expected figure was worked out by hand from the case's own marks (the arithmetic is in each case's why), never produced by either implementation. The rule: one mark per UTC day from the row with the latest updated_at instant, ties to the smallest LOWERCASE api_key_id; a finite mark at or below 0 is a gap skipped BEFORE that pick; a return exists only between two ADJACENT calendar days that both carry a mark, keyed by the LATER day; a spot holding needs min_priced_days priced days; the withheld ladder is account_balance, fixed_price (marks not read), then the read contract, then no_price, then too_few_priced_days. ts maps a case onto what /compare shows. Do not add a case here without both runtimes consuming it; the two suites read this file whole.",
+  "min_priced_days": 30,
+  "withheld_reasons": ["account_balance", "fixed_price", "no_price", "too_few_priced_days"],
+  "crypto_venues": ["binance", "bybit", "deribit", "okx", "sfox"],
+  "cases": [
+    {
+      "name": "purchase_at_constant_mark",
+      "why": "SC1: the mark never moves while the quantity and the dollar value do; the dollar-ratio read printed +100% and -75%, the price rule must print exactly 0.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 3, "returns": [["2026-01-02", 0.0], ["2026-01-03", 0.0]]},
+      "ts": {"historyState": "ready", "null_metrics": true},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 100, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 2},
+        {"asof": "2026-01-03", "mark_price": 100, "side": "flat", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 50, "quantity": 0.5}
+      ]
+    },
+    {
+      "name": "latest_updated_at_wins",
+      "why": "D-03: three keys on day 2; the row with the latest updated_at instant (key-b, 11:00Z, mark 102) wins. It sits in the MIDDLE of the input so neither first-row-wins nor last-row-wins passes. Return = 102/100 - 1 = 0.02.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 2, "returns": [["2026-01-02", 0.02]]},
+      "ts": {"historyState": "ready", "null_metrics": true},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 101, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 101, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 102, "side": "flat", "updated_at": "2026-01-02T11:00:00Z", "api_key_id": "key-b", "value_usd": 102, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 103, "side": "flat", "updated_at": "2026-01-02T09:00:00Z", "api_key_id": "key-c", "value_usd": 103, "quantity": 1}
+      ]
+    },
+    {
+      "name": "tie_to_smallest_lowercase_key",
+      "why": "D-03: the same instant written two ways (Z and +00:00 with a six-digit fraction). Tie goes to the smallest LOWERCASE api_key_id: key-a (mark 104) beats Key-B (mark 103), although a raw compare would put the capital K first. Return = 104/100 - 1 = 0.04.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 2, "returns": [["2026-01-02", 0.04]]},
+      "ts": {"historyState": "ready", "null_metrics": true},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 103, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "Key-B", "value_usd": 103, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 104, "side": "flat", "updated_at": "2026-01-02T10:00:00.000000+00:00", "api_key_id": "key-a", "value_usd": 104, "quantity": 1}
+      ]
+    },
+    {
+      "name": "zero_mark_never_eclipses",
+      "why": "D-03: a LATER row with mark 0 (the failed-ticker sentinel) is a gap skipped BEFORE the pick, so the earlier valid 105 stands. Return = 105/100 - 1 = 0.05.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 2, "returns": [["2026-01-02", 0.05]]},
+      "ts": {"historyState": "ready", "null_metrics": true},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 105, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 105, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 0, "side": "flat", "updated_at": "2026-01-02T11:00:00Z", "api_key_id": "key-b", "value_usd": 0, "quantity": 1}
+      ]
+    },
+    {
+      "name": "negative_mark_is_a_gap",
+      "why": "D-03: a negative mark is a gap (day 2 unpriced), so days 1 and 3 are priced but not adjacent: 2 priced days, no return.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 2, "returns": []},
+      "ts": {"historyState": "ready", "null_metrics": true},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": -5, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": -5, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 110, "side": "flat", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 110, "quantity": 1}
+      ]
+    },
+    {
+      "name": "missing_day_breaks_chain",
+      "why": "D-03: days 1, 2 and 4. Only day 2 follows an adjacent priced day; day 4 follows a gap and carries no return. Return day 2 = 110/100 - 1 = 0.1.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 3, "returns": [["2026-01-02", 0.1]]},
+      "ts": {"historyState": "ready", "null_metrics": true},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 110, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 110, "quantity": 1},
+        {"asof": "2026-01-04", "mark_price": 121, "side": "flat", "updated_at": "2026-01-04T10:00:00Z", "api_key_id": "key-a", "value_usd": 121, "quantity": 1}
+      ]
+    },
+    {
+      "name": "real_path",
+      "why": "D-03: marks 100, 110, 99 on adjacent days. Returns 110/100 - 1 = 0.1 (keyed day 2) and 99/110 - 1 = -0.1 (keyed day 3).",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 3, "returns": [["2026-01-02", 0.1], ["2026-01-03", -0.1]]},
+      "ts": {"historyState": "ready", "null_metrics": true},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 110, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 110, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 99, "side": "flat", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 99, "quantity": 1}
+      ]
+    },
+    {
+      "name": "spot_flat_side_is_not_a_gap",
+      "why": "Spot rows carry side flat (PROD: every spot row). The spot rule never reads side, so flat is not a gap. Marks 50, 55, 60.5: returns 0.1 and 0.1.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 3, "returns": [["2026-01-02", 0.1], ["2026-01-03", 0.1]]},
+      "ts": {"historyState": "ready", "null_metrics": true},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 50, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 50, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 55, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 55, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 60.5, "side": "flat", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 60.5, "quantity": 1}
+      ]
+    },
+    {
+      "name": "twenty_nine_priced_days",
+      "why": "SC2 boundary: 29 adjacent priced days is one short. Withheld too_few_priced_days; priced_days 29 and all 28 returns still reported. Marks alternate 100 / 200: even days return 1.0, odd days -0.5.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 29, "returns": [["2026-01-02", 1.0], ["2026-01-03", -0.5], ["2026-01-04", 1.0], ["2026-01-05", -0.5], ["2026-01-06", 1.0], ["2026-01-07", -0.5], ["2026-01-08", 1.0], ["2026-01-09", -0.5], ["2026-01-10", 1.0], ["2026-01-11", -0.5], ["2026-01-12", 1.0], ["2026-01-13", -0.5], ["2026-01-14", 1.0], ["2026-01-15", -0.5], ["2026-01-16", 1.0], ["2026-01-17", -0.5], ["2026-01-18", 1.0], ["2026-01-19", -0.5], ["2026-01-20", 1.0], ["2026-01-21", -0.5], ["2026-01-22", 1.0], ["2026-01-23", -0.5], ["2026-01-24", 1.0], ["2026-01-25", -0.5], ["2026-01-26", 1.0], ["2026-01-27", -0.5], ["2026-01-28", 1.0], ["2026-01-29", -0.5]]},
+      "ts": {"historyState": "ready", "null_metrics": true},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 200, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 100, "side": "flat", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-04", "mark_price": 200, "side": "flat", "updated_at": "2026-01-04T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-05", "mark_price": 100, "side": "flat", "updated_at": "2026-01-05T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-06", "mark_price": 200, "side": "flat", "updated_at": "2026-01-06T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-07", "mark_price": 100, "side": "flat", "updated_at": "2026-01-07T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-08", "mark_price": 200, "side": "flat", "updated_at": "2026-01-08T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-09", "mark_price": 100, "side": "flat", "updated_at": "2026-01-09T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-10", "mark_price": 200, "side": "flat", "updated_at": "2026-01-10T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-11", "mark_price": 100, "side": "flat", "updated_at": "2026-01-11T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-12", "mark_price": 200, "side": "flat", "updated_at": "2026-01-12T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-13", "mark_price": 100, "side": "flat", "updated_at": "2026-01-13T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-14", "mark_price": 200, "side": "flat", "updated_at": "2026-01-14T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-15", "mark_price": 100, "side": "flat", "updated_at": "2026-01-15T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-16", "mark_price": 200, "side": "flat", "updated_at": "2026-01-16T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-17", "mark_price": 100, "side": "flat", "updated_at": "2026-01-17T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-18", "mark_price": 200, "side": "flat", "updated_at": "2026-01-18T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-19", "mark_price": 100, "side": "flat", "updated_at": "2026-01-19T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-20", "mark_price": 200, "side": "flat", "updated_at": "2026-01-20T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-21", "mark_price": 100, "side": "flat", "updated_at": "2026-01-21T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-22", "mark_price": 200, "side": "flat", "updated_at": "2026-01-22T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-23", "mark_price": 100, "side": "flat", "updated_at": "2026-01-23T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-24", "mark_price": 200, "side": "flat", "updated_at": "2026-01-24T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-25", "mark_price": 100, "side": "flat", "updated_at": "2026-01-25T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-26", "mark_price": 200, "side": "flat", "updated_at": "2026-01-26T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-27", "mark_price": 100, "side": "flat", "updated_at": "2026-01-27T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-28", "mark_price": 200, "side": "flat", "updated_at": "2026-01-28T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-29", "mark_price": 100, "side": "flat", "updated_at": "2026-01-29T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1}
+      ]
+    },
+    {
+      "name": "thirty_priced_days",
+      "why": "SC2 boundary: 30 priced days is enough. Withheld null; priced_days 30 and 29 returns.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expected": {"withheld": null, "priced_days": 30, "returns": [["2026-01-02", 1.0], ["2026-01-03", -0.5], ["2026-01-04", 1.0], ["2026-01-05", -0.5], ["2026-01-06", 1.0], ["2026-01-07", -0.5], ["2026-01-08", 1.0], ["2026-01-09", -0.5], ["2026-01-10", 1.0], ["2026-01-11", -0.5], ["2026-01-12", 1.0], ["2026-01-13", -0.5], ["2026-01-14", 1.0], ["2026-01-15", -0.5], ["2026-01-16", 1.0], ["2026-01-17", -0.5], ["2026-01-18", 1.0], ["2026-01-19", -0.5], ["2026-01-20", 1.0], ["2026-01-21", -0.5], ["2026-01-22", 1.0], ["2026-01-23", -0.5], ["2026-01-24", 1.0], ["2026-01-25", -0.5], ["2026-01-26", 1.0], ["2026-01-27", -0.5], ["2026-01-28", 1.0], ["2026-01-29", -0.5], ["2026-01-30", 1.0]]},
+      "ts": {"historyState": "ready", "null_metrics": false},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 200, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 100, "side": "flat", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-04", "mark_price": 200, "side": "flat", "updated_at": "2026-01-04T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-05", "mark_price": 100, "side": "flat", "updated_at": "2026-01-05T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-06", "mark_price": 200, "side": "flat", "updated_at": "2026-01-06T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-07", "mark_price": 100, "side": "flat", "updated_at": "2026-01-07T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-08", "mark_price": 200, "side": "flat", "updated_at": "2026-01-08T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-09", "mark_price": 100, "side": "flat", "updated_at": "2026-01-09T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-10", "mark_price": 200, "side": "flat", "updated_at": "2026-01-10T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-11", "mark_price": 100, "side": "flat", "updated_at": "2026-01-11T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-12", "mark_price": 200, "side": "flat", "updated_at": "2026-01-12T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-13", "mark_price": 100, "side": "flat", "updated_at": "2026-01-13T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-14", "mark_price": 200, "side": "flat", "updated_at": "2026-01-14T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-15", "mark_price": 100, "side": "flat", "updated_at": "2026-01-15T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-16", "mark_price": 200, "side": "flat", "updated_at": "2026-01-16T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-17", "mark_price": 100, "side": "flat", "updated_at": "2026-01-17T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-18", "mark_price": 200, "side": "flat", "updated_at": "2026-01-18T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-19", "mark_price": 100, "side": "flat", "updated_at": "2026-01-19T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-20", "mark_price": 200, "side": "flat", "updated_at": "2026-01-20T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-21", "mark_price": 100, "side": "flat", "updated_at": "2026-01-21T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-22", "mark_price": 200, "side": "flat", "updated_at": "2026-01-22T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-23", "mark_price": 100, "side": "flat", "updated_at": "2026-01-23T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-24", "mark_price": 200, "side": "flat", "updated_at": "2026-01-24T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-25", "mark_price": 100, "side": "flat", "updated_at": "2026-01-25T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-26", "mark_price": 200, "side": "flat", "updated_at": "2026-01-26T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-27", "mark_price": 100, "side": "flat", "updated_at": "2026-01-27T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-28", "mark_price": 200, "side": "flat", "updated_at": "2026-01-28T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1},
+        {"asof": "2026-01-29", "mark_price": 100, "side": "flat", "updated_at": "2026-01-29T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-30", "mark_price": 200, "side": "flat", "updated_at": "2026-01-30T10:00:00Z", "api_key_id": "key-a", "value_usd": 200, "quantity": 1}
+      ]
+    },
+    {
+      "name": "stablecoin_usdt",
+      "why": "SC2: a stablecoin symbol is a writer constant: fixed_price. The marks are not read (one is a string).",
+      "venue": "binance",
+      "symbol": "USDT",
+      "holding_type": "spot",
+      "expected": {"withheld": "fixed_price", "priced_days": 0, "returns": []},
+      "ts": {"historyState": "withheld"},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 1, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": "1", "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 0, "quantity": 1}
+      ]
+    },
+    {
+      "name": "lowercase_usdc",
+      "why": "SC2: symbol match is case-insensitive.",
+      "venue": "binance",
+      "symbol": "usdc",
+      "holding_type": "spot",
+      "expected": {"withheld": "fixed_price", "priced_days": 0, "returns": []},
+      "ts": {"historyState": "withheld"},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 1, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 1, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "sfox_any_symbol",
+      "why": "SC2: sFOX writes mark_price 1.0 for every row it keeps, so any symbol on sfox is fixed_price; the venue match is case-insensitive.",
+      "venue": "SFOX",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expected": {"withheld": "fixed_price", "priced_days": 0, "returns": []},
+      "ts": {"historyState": "withheld"},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 1, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 1, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "mt5_account",
+      "why": "SC2: a venue that is not a crypto exchange is an account balance whatever the symbol, tested BEFORE fixed_price (a USDT symbol on mt5 is account_balance, not fixed_price).",
+      "venue": "mt5",
+      "symbol": "USDT",
+      "holding_type": "spot",
+      "expected": {"withheld": "account_balance", "priced_days": 0, "returns": []},
+      "ts": {"historyState": "withheld"},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 1, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 1, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 1, "quantity": 1}
+      ]
+    },
+    {
+      "name": "all_zero_marks",
+      "why": "SC2: rows exist but no day carries a valid mark (the 0.0 sentinel on every day): no_price, not too_few_priced_days.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expected": {"withheld": "no_price", "priced_days": 0, "returns": []},
+      "ts": {"historyState": "withheld"},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 0, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 0, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 0, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 0, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 0, "side": "flat", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 0, "quantity": 1}
+      ]
+    },
+    {
+      "name": "contract_mark_string",
+      "why": "Read contract: a string mark is a violation, never a gap.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expect_error": "HoldingMarkContractError",
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": "100", "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 0, "quantity": 1}
+      ]
+    },
+    {
+      "name": "contract_mark_bool",
+      "why": "Read contract: a boolean mark is a violation (a bool is an int in Python).",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expect_error": "HoldingMarkContractError",
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": true, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 0, "quantity": 1}
+      ]
+    },
+    {
+      "name": "contract_mark_null",
+      "why": "Read contract: a null mark is a violation.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expect_error": "HoldingMarkContractError",
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": null, "side": "flat", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 0, "quantity": 1}
+      ]
+    },
+    {
+      "name": "contract_asof_not_padded",
+      "why": "Read contract: an asof that is not zero-padded YYYY-MM-DD is a violation.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expect_error": "HoldingMarkContractError",
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-1-5", "mark_price": 100, "side": "flat", "updated_at": "2026-1-5T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1}
+      ]
+    },
+    {
+      "name": "contract_asof_impossible_date",
+      "why": "Read contract: 2026-02-30 matches the shape but is not a real date; Python and JavaScript would otherwise disagree on it.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expect_error": "HoldingMarkContractError",
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-02-30", "mark_price": 100, "side": "flat", "updated_at": "2026-02-30T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1}
+      ]
+    },
+    {
+      "name": "updated_at_unparseable",
+      "why": "A positive-mark row with an unusable updated_at cannot be ordered: HoldingsUpdatedAtError, not a silent pick.",
+      "venue": "binance",
+      "symbol": "BTC",
+      "holding_type": "spot",
+      "expect_error": "HoldingsUpdatedAtError",
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 100, "side": "flat", "updated_at": "not-a-time", "api_key_id": "key-a", "value_usd": 100, "quantity": 1}
+      ]
+    }
+  ]
+}

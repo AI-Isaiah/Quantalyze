@@ -23,7 +23,11 @@ import {
   FIXED_MARK_SET,
   holdingMarkIsFixed,
   holdingWithheldReason,
+  classifySpotMarks,
+  HOLDING_MARK_WITHHELD_REASONS,
 } from "./holding-compare-adapter";
+import { HoldingsUpdatedAtError } from "@/lib/holdings-account-day";
+import { CRYPTO_EXCHANGES, isCryptoExchange } from "@/lib/closed-sets";
 
 // ---------------------------------------------------------------------------
 // A filter-honouring Supabase stub for the paged `allocator_holdings` read.
@@ -921,4 +925,121 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
     expect(a.vol).toBeNull();
     expect(a.sharpe).toBeNull();
   });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.1.1 / D-03, SC3: the SPOT mark-price rule is ONE hand-typed table,
+// replayed here by `classifySpotMarks` and by pytest through `classify_spot_marks`
+// (analytics-service/tests/test_holding_marks_fixture.py). WHY it matters: the Bridge
+// matcher and /compare must agree on which days are priced and which returns exist,
+// or the same holding reads differently on the two surfaces.
+// ---------------------------------------------------------------------------
+type FixtureRow = {
+  asof: string;
+  mark_price: unknown;
+  side: string;
+  updated_at: string;
+  api_key_id: string;
+  value_usd: number;
+  quantity: number;
+};
+type FixtureCase = {
+  name: string;
+  venue: string;
+  symbol: string;
+  holding_type: string;
+  rows: FixtureRow[];
+  expected?: { withheld: string | null; priced_days: number; returns: Array<[string, number]> };
+  expect_error?: "HoldingMarkContractError" | "HoldingsUpdatedAtError";
+  ts?: { historyState: "ready" | "withheld"; null_metrics?: boolean };
+};
+const MARK_FIXTURE = JSON.parse(
+  readFileSync(
+    join(process.cwd(), "analytics-service", "tests", "fixtures", "holding_mark_returns_cases.json"),
+    "utf8",
+  ),
+) as {
+  min_priced_days: number;
+  withheld_reasons: string[];
+  crypto_venues: string[];
+  cases: FixtureCase[];
+};
+const ERROR_CLASSES = { HoldingMarkContractError, HoldingsUpdatedAtError } as const;
+
+describe("shared fixture: holding_mark_returns_cases.json", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-01T12:00:00Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const asFx = (c: FixtureCase): HoldingFx[] =>
+    c.rows.map((r) => ({
+      allocator_id: ALLOC,
+      venue: c.venue,
+      symbol: c.symbol,
+      holding_type: c.holding_type,
+      asof: r.asof,
+      mark_price: r.mark_price,
+      value_usd: r.value_usd,
+      updated_at: r.updated_at,
+      api_key_id: r.api_key_id,
+    }));
+
+  it("the minimum priced days and the reason vocabulary are the fixture's", () => {
+    expect(MARK_FIXTURE.min_priced_days).toBe(HOLDING_COMPARE_MIN_PRICED_DAYS);
+    expect([...HOLDING_MARK_WITHHELD_REASONS].sort()).toEqual(MARK_FIXTURE.withheld_reasons);
+  });
+
+  it("venue_census: the crypto venues behind account_balance are the fixture's hand-typed list", () => {
+    expect([...CRYPTO_EXCHANGES].sort()).toEqual(MARK_FIXTURE.crypto_venues);
+    for (const v of MARK_FIXTURE.crypto_venues) expect(isCryptoExchange(v)).toBe(true);
+    expect(isCryptoExchange("mt5")).toBe(false);
+    expect(MARK_FIXTURE.cases.length).toBeGreaterThan(15);
+  });
+
+  it.each(MARK_FIXTURE.cases.map((c) => [c.name, c] as const))(
+    "classifySpotMarks replays %s",
+    (_name, c) => {
+      if (c.expect_error) {
+        expect(() => classifySpotMarks(c.rows, c.venue, c.symbol)).toThrow(
+          ERROR_CLASSES[c.expect_error],
+        );
+        return;
+      }
+      const got = classifySpotMarks(c.rows, c.venue, c.symbol);
+      const want = c.expected!;
+      expect(got.withheld_reason).toBe(want.withheld);
+      expect(got.priced_days).toBe(want.priced_days);
+      expect(got.returns.map(([day]) => day)).toEqual(want.returns.map(([day]) => day));
+      got.returns.forEach(([, value], i) => expect(value).toBeCloseTo(want.returns[i][1], 12));
+    },
+  );
+
+  it.each(MARK_FIXTURE.cases.map((c) => [c.name, c] as const))(
+    "fetchHoldingCompareItem maps %s onto what /compare shows",
+    async (_name, c) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const call = fetchHoldingCompareItem({
+        allocator_id: ALLOC,
+        holding_ref: `holding:${c.venue}:${c.symbol}:${c.holding_type}`,
+        supabase: fakeSupabase(asFx(c)),
+      });
+      if (c.expect_error) {
+        await expect(call).rejects.toBeInstanceOf(HoldingCompareLoadError);
+        return;
+      }
+      const item = await call;
+      expect(item!.historyState).toBe(c.ts!.historyState);
+      if (c.ts!.historyState === "ready") {
+        const a = item!.analytics!;
+        expect(a.priced_days).toBe(c.expected!.priced_days);
+        expect(a.cumulative_return === null).toBe(c.ts!.null_metrics);
+      }
+    },
+  );
 });
