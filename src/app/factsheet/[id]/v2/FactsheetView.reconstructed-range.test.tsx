@@ -222,4 +222,23 @@ describe("FactsheetView - ReconstructedRangeLines (D-06, D-07)", () => {
       }
     }
   });
+
+  it("SC-4: a partly rebuilt gap shows the remaining gap line AND the reconstructed line, each once, gap first", () => {
+    const payload: FactsheetPayload = {
+      ...withRanges([{ from: "2026-07-01", to: "2026-08-01", source: SOURCE }]),
+      unrecoveredGaps: [{ from: "2026-05-24", to: "2026-06-30" }],
+    };
+    const { container } = renderFactsheet(payload);
+    const header = container.querySelector("header");
+    const gaps = Array.from(header?.querySelectorAll("p") ?? []).filter((p) =>
+      /^No trade data /.test(p.textContent ?? ""),
+    );
+    const rebuilt = rebuiltLines(container);
+    // 2026-05-24..2026-06-30: 8 days of May (24..31) + 30 of June = 38, worked by hand.
+    expect(gaps.map((p) => p.textContent)).toEqual([
+      "No trade data May 24, 2026 – Jun 30, 2026 (38 days). These days are not recovered; they are left out of the record, not counted as zero.",
+    ]);
+    expect(rebuilt.map((p) => p.textContent)).toEqual([SENTENCE_JUL_AUG]);
+    expect(gaps[0].nextElementSibling).toBe(rebuilt[0]);
+  });
 });

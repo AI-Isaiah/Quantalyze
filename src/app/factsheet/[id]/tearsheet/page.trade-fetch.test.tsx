@@ -233,6 +233,13 @@ function gapLines(container: HTMLElement): HTMLElement[] {
   ) as HTMLElement[];
 }
 
+function rebuiltLines(container: HTMLElement): HTMLElement[] {
+  const header = container.querySelector("header");
+  return Array.from(header?.querySelectorAll("p") ?? []).filter((p) =>
+    /rebuilt from OKX's quarterly account statement/.test(p.textContent ?? ""),
+  ) as HTMLElement[];
+}
+
 const GAP_63 =
   "No trade data May 7, 2026 – Jul 8, 2026 (63 days). These days are not recovered; they are left out of the record, not counted as zero.";
 
@@ -511,5 +518,64 @@ describe("TearSheet page - trade-fetch line and named gaps (D-06, D-10, D-02, F1
       expect(el.closest(".print\\:hidden")).toBeNull();
       expect(el.className).not.toMatch(/print:hidden|\bhidden\b/);
     }
+  });
+
+  // Phase 167.1.2.2.2.1 (OKXHISTORY, plan 06) - D-06: the printed tear sheet
+  // carries the same founder sentence as the factsheet, at the print size, so a
+  // forwarded one-pager that counts rebuilt days in its headline says so.
+  it("D-06: a stored reconstructed range prints the founder's sentence at text-fixed-10, muted-secondary", async () => {
+    stubAdmin(
+      factRead({
+        exchange: "okx",
+        tradesFetchedAt: "2026-10-09T07:00:00Z",
+        seriesProvenance: {
+          reconstructed_ranges: [
+            { from: "2026-07-01", to: "2026-08-01", source: "okx_bills_history_archive" },
+          ],
+        },
+      }),
+    );
+    const { container } = await renderPage();
+    const lines = rebuiltLines(container);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].textContent).toBe(
+      "Jul 1, 2026 – Aug 1, 2026: rebuilt from OKX's quarterly account statement, not the live feed.",
+    );
+    expect(lines[0].className).toContain("text-fixed-10");
+    expect(lines[0].className).toContain("text-text-secondary");
+    expect(lines[0].className).not.toMatch(/text-caption|text-negative|text-warning/);
+    expect(lines[0].closest(".print\\:hidden")).toBeNull();
+  });
+
+  it("D-06: no reconstructed_ranges key renders zero matching nodes", async () => {
+    stubAdmin(factRead({ exchange: "okx", tradesFetchedAt: "2026-10-09T07:00:00Z", seriesProvenance: {} }));
+    const { container } = await renderPage();
+    expect(rebuiltLines(container)).toHaveLength(0);
+    expect(container.textContent).not.toContain("quarterly account statement");
+  });
+
+  it("SC-4: a partly rebuilt gap prints the remaining gap line AND the reconstructed line, each once, gap first", async () => {
+    stubAdmin(
+      factRead({
+        exchange: "okx",
+        tradesFetchedAt: "2026-10-09T07:00:00Z",
+        seriesProvenance: {
+          unrecovered_gaps: [{ from: "2026-05-24", to: "2026-06-30" }],
+          reconstructed_ranges: [
+            { from: "2026-07-01", to: "2026-08-01", source: "okx_bills_history_archive" },
+          ],
+        },
+      }),
+    );
+    const { container } = await renderPage();
+    const gaps = gapLines(container);
+    const rebuilt = rebuiltLines(container);
+    expect(gaps.map((p) => p.textContent)).toEqual([
+      "No trade data May 24, 2026 – Jun 30, 2026 (38 days). These days are not recovered; they are left out of the record, not counted as zero.",
+    ]);
+    expect(rebuilt.map((p) => p.textContent)).toEqual([
+      "Jul 1, 2026 – Aug 1, 2026: rebuilt from OKX's quarterly account statement, not the live feed.",
+    ]);
+    expect(gaps[0].nextElementSibling).toBe(rebuilt[0]);
   });
 });
