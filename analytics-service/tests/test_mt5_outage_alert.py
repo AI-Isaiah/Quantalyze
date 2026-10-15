@@ -806,7 +806,8 @@ async def test_a_recovered_notice_with_no_sentry_event_and_an_email_502_is_sent_
     (no DSN), the founder-email route answers 502 for the recovered notice, then
     recovers. Expectations are typed by hand: three emails (outage, recovered that
     failed, recovered that landed), the record open after the second and gone
-    after the third."""
+    after the third. This is the caller-level pin of the half of WR-R3-01 that D-16
+    keeps: no Sentry event and no email means no credit."""
     from unittest.mock import MagicMock
 
     spy = MagicMock()
@@ -937,26 +938,28 @@ async def test_a_re_sent_relaunch_debt_notice_does_not_claim_a_restart(
     )
 
 
-async def test_a_recovered_notice_with_a_sentry_event_id_and_an_email_502_is_sent_again(
+async def test_d16_a_recovered_notice_with_a_sentry_event_id_closes_the_record_while_email_fails(
     sink: Any,
     ops_alert_open_store: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Round 3 (WR-R3-01), the production configuration: SENTRY_DSN is set, so the
-    capture returns an event id on every call. No Sentry rule notifies anyone about a
-    RECOVERED (warning-level) event, so the id must not count as delivery. The founder
-    email answers 502 for the recovered notice: the record stays open and the next
-    healthy reading sends it again. Expectations are typed by hand."""
+    """D-16, under D-15, through the REAL channel: the production state while the
+    founder email is unconfigured. CONTEXT D-15: "Sentry is the only live paging
+    channel for now." CONTEXT D-16: a RECOVERED notice counts as delivered once its
+    Sentry capture succeeds. So the first healthy reading closes the open-page record,
+    and the healthy readings after it send nothing, even though every email POST
+    fails. Lineage: review WR-R3-01 had pinned the opposite direction (a re-send on
+    every healthy reading, until a 2xx email) before the founder decided D-16 on
+    2026-10-14. Expectations are typed by hand."""
     from unittest.mock import MagicMock
 
     spy = MagicMock()
-    spy.capture_message.return_value = "an-event-id"
+    spy.capture_message.return_value = "synthetic-event-id"
     emails: list[str] = []
-    answers = iter([True, False, True])
 
     async def _post(payload: dict[str, Any]) -> bool:
         emails.append(payload["event"])
-        return next(answers)
+        return False
 
     monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
     monkeypatch.setattr(ops_alert, "_post_founder_email", _post)
@@ -966,16 +969,21 @@ async def test_a_recovered_notice_with_a_sentry_event_id_and_an_email_502_is_sen
         await _fault_until_paged()
         await _observe(_AUTHORIZED)
         await mt5_outage_alert._drain_recovery_tasks_for_tests()
+        await ops_alert._drain_ops_alert_tasks_for_tests()
 
         assert emails == ["outage", "recovered"]
-        assert _JOBS_SOURCE in ops_alert_open_store.pages, "closed over a notice nobody got"
-        assert ops_alert_open_store.close_calls == 0
+        assert ops_alert_open_store.pages == {}, "the credited recovery left its record open"
+        assert ops_alert_open_store.close_calls == 1
+        assert spy.capture_message.call_count == 2
 
-        await _observe(_AUTHORIZED)
-        await mt5_outage_alert._drain_recovery_tasks_for_tests()
+        for _ in range(2):
+            await _observe(_AUTHORIZED)
+            await mt5_outage_alert._drain_recovery_tasks_for_tests()
+            await ops_alert._drain_ops_alert_tasks_for_tests()
 
-        assert emails == ["outage", "recovered", "recovered"]
-        assert ops_alert_open_store.pages == {}
+        assert emails == ["outage", "recovered"]
+        assert spy.capture_message.call_count == 2
+        assert ops_alert_open_store.close_calls == 1
     finally:
         ops_alert._reset_ops_alert_for_tests()
 
