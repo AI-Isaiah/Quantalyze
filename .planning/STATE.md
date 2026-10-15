@@ -6,14 +6,14 @@ current_phase: "166.5"
 current_phase_name: COMPUTEDATSTAMP
 status: executing
 stopped_at: 167.1.1 HOLDINGKEYSCOPE closed; 166.5 post-merge plan 09 outstanding
-last_updated: "2026-10-15T18:32:32.092Z"
+last_updated: "2026-10-15T21:27:19.578Z"
 last_activity: 2026-10-15
 last_activity_desc: "167.1.1 HOLDINGKEYSCOPE closed (#1053 and #1056); 167.1.1.1 BRIDGERETURNS booked (D-06)"
-state_head: fdc7b8d9099e89ba70f6f5c4c93e1db0164094d5
+state_head: 2feb0d20147fded408b57eee95320b8af5b94bb4
 progress:
   total_phases: 116
   completed_phases: 105
-  total_plans: 751
+  total_plans: 760
   completed_plans: 743
   percent: 91
 ---
