@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.131.13.4] - 2026-10-15 — Test fix: the Private link dialog's focus assert waits for the focus move instead of racing it
+
+### Root cause
+- **The test asserted focus before React had run the effect that moves it.** In `src/components/strategy/ShareableLink.test.tsx`, the arm "clipboard rejects and the fallback fails: the Private link dialog opens and shows the minted URL, selectable" found the URL field with `findByLabelText`, then checked `document.activeElement` straight away. The field is in the DOM as soon as React commits. But `Modal`'s `showModal()` and `ShareableLink`'s `focus()` + `select()` both run later, from passive `useEffect`s. That order is deliberate: `showModal` moves focus to the Close button, so the field has to take focus after it. The update starts after `await fetch`, so it is not a sync lane. When React's Scheduler yields between the commit and the passive-effect task, as it does when a render overruns its 5 ms slice on a loaded runner, the assert ran first. It read `<body>`, and the dialog was not open yet. Both CI failures on 2026-10-15 (runs 38744823426 and 38758942630, vitest shard 2) show exactly that DOM: the field is present and the `<dialog>` has no `open` attribute.
+- **This is not a product bug.** In a browser, React flushes pending passive effects before it handles the next user event, so the field always has focus before the user can press a key.
+
+### Fixed
+- **The assert now waits for the dialog to be open and the field to have focus** (`await waitFor`), and then checks the selection as before. This is the same fix the close assert in the revoke test of the same file already carries for the same reason (CI run 38587166468).
+
+### Tests
+- **RED before the fix, measured locally.** The unchanged arm, run alone 12 times, failed 3 times with the CI signature. A 10-copy variant that forces the Scheduler to yield after every task (it moves `performance.now` forward) failed 19 of 20, and every failure printed `dialogOpen=false active=BODY` just before the assert.
+- **GREEN after the fix.** The forced-yield variant passed 30 of 30. The unforced variant passed 30 of 30, the arm alone passed 12 of 12, and the whole file passed 30 of 30 tests in each of 3 runs. The variant was a scratch file and is not committed.
+- **The fixed assert can still fail.** With `urlFieldRef.current?.focus()` neutered in the component, the arm goes RED on the `waitFor` timeout. The component was restored from a byte backup afterwards.
+
 ## [0.131.13.3] - 2026-10-15 — GSDFORMAT: ROADMAP.md and STATE.md take a shape the gsd-tools handlers can edit without corrupting them
 
 Founder decision 2026-10-15, "Fix our format + report upstream". This repo's own rule had been "prefer hand-editing ROADMAP.md and STATE.md". It existed because the gsd-tools handlers corrupted both files. A debugger run traced that to four tool assumptions our file shape broke. This release fixes the shape, adds a lint that keeps it fixed, and drafts the tool bugs as upstream issues. Measured in a throwaway worktree after the reshape: `roadmap.update-plan-progress 159` is a no-op (before, it ticked another phase's plan). `170` changes only its `**Plans:**` count and the plan ticks its SUMMARYs earn (before, it also ticked 169.4-07 and stamped "(completed …)" onto 169.4-08). `164.4.2.1` changes one count line (before: duplicate rows above the wrong heading, plus a ticked TBD stub). `state.advance-plan` moves `Plan: 8 of 9` to `9 of 9` (before, it refused on 28 `Phase:` candidates).
