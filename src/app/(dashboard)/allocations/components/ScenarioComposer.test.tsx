@@ -5446,11 +5446,18 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         await act(async () => {
           await new Promise((r) => setTimeout(r, 0));
         });
-        const toggle = within(view.container)
-          .getByText("BTC Benchmark")
-          .closest("label")!
-          .querySelector("input") as HTMLInputElement;
-        expect(toggle.disabled).toBe(disabled);
+        const toggle = () =>
+          within(view.container)
+            .getByText("BTC Benchmark")
+            .closest("label")!
+            .querySelector("input") as HTMLInputElement;
+        // AWAIT the toggle state. `setBtc` runs at the end of the fetch's
+        // promise chain, usually while the waitFor above is polling, which is
+        // OUTSIDE act, so the update goes to the Scheduler rather than the act
+        // queue and the act drain above does not flush it. When the Scheduler
+        // yields, a sync read here saw the pre-fetch DOM and the control arm
+        // read disabled (forced-yield harness, 2026-10-15).
+        await waitFor(() => expect(toggle().disabled).toBe(disabled));
         view.unmount();
       } finally {
         vi.unstubAllGlobals();

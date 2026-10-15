@@ -1273,12 +1273,17 @@ describe("focus management — pre-flight portal + failure transition", () => {
     const preflightBtns2 = screen.getAllByRole("button", { name: /^Submit$/i });
     fireEvent.click(preflightBtns2[preflightBtns2.length - 1]);
 
+    // AWAIT the focus inside the waitFor. The banner lands in the DOM at
+    // commit, but the drawer focuses it from a passive useEffect([state.kind]),
+    // and the failure state is set after `await fetch` (not a sync lane). When
+    // the Scheduler yields before the passive-effect task, a sync read after a
+    // presence-only waitFor sees <body>. A drawer that never moves focus to the
+    // banner still fails here, on the waitFor timeout.
     await waitFor(() => {
-      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+      expect(document.activeElement).toBe(
+        screen.getByTestId("commit-drawer-error"),
+      );
     });
-    expect(document.activeElement).toBe(
-      screen.getByTestId("commit-drawer-error"),
-    );
 
     vi.unstubAllGlobals();
   });

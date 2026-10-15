@@ -392,7 +392,14 @@ describe("<ContactForm> success view", () => {
   it("is a role=status region whose heading takes focus, with no reference line when none was given", async () => {
     const heading = await sent();
     expect(heading.closest("[role='status']")).not.toBeNull();
-    expect(heading).toHaveFocus();
+    // AWAIT the focus; never assert it synchronously after findByRole. The
+    // heading lands in the DOM at commit, but ContactForm focuses it from a
+    // passive useEffect([sent]). setSent runs after `await fetch`, so it is not
+    // a sync lane, and when the Scheduler yields before the passive-effect task
+    // findByRole resolves on the insertion alone and the assert reads <body>
+    // (CI run 38785325178). A component that never focuses the heading still
+    // fails here, on the waitFor timeout.
+    await waitFor(() => expect(heading).toHaveFocus());
     expect(heading.tagName).toBe("H2");
     expect(screen.queryByText(/^Reference:/)).not.toBeInTheDocument();
   });

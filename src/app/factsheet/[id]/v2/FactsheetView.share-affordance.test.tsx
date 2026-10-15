@@ -458,9 +458,15 @@ describe("D-03 / SHARE-03 — revoke lives on the factsheet, with an INLINE conf
       )!,
     );
 
-    await waitFor(() =>
-      expect(container.textContent).not.toContain(LABEL_REVOKE),
-    );
+    // Wait for the REVOKE RESULT, not just for "Revoke link" to be gone: the
+    // inline confirm already hides that label, so on its own the wait passed
+    // before the fetch answered. The result (confirm closed + live flag off)
+    // is committed after `await fetch`, not in a sync lane, and when the
+    // Scheduler yields the sync reads below saw the confirm-state DOM.
+    await waitFor(() => {
+      expect(container.textContent).not.toContain(CONFIRM_SENTENCE);
+      expect(container.textContent).not.toContain(LABEL_REVOKE);
+    });
     expect(fetchMock.mock.calls[0][0]).toBe(REVOKE_PATH);
     // The next mint click starts a fresh link, so the affordance goes back to
     // "create".
@@ -492,9 +498,15 @@ describe("D-03 / SHARE-03 — revoke lives on the factsheet, with an INLINE conf
       )!,
     );
 
-    await waitFor(() =>
-      expect(container.textContent).not.toContain(LABEL_REVOKE),
-    );
+    // Wait for the REVOKE RESULT, not just for "Revoke link" to be gone: the
+    // inline confirm already hides that label, so on its own the wait passed
+    // before the fetch answered. The result (confirm closed + live flag off)
+    // is committed after `await fetch`, not in a sync lane, and when the
+    // Scheduler yields the sync reads below saw the confirm-state DOM.
+    await waitFor(() => {
+      expect(container.textContent).not.toContain(CONFIRM_SENTENCE);
+      expect(container.textContent).not.toContain(LABEL_REVOKE);
+    });
     expect(container.textContent).not.toContain(REVOKE_FAILED);
     expect(container.textContent).toContain(FOUR_OH_FOUR_CLAIM);
   });
