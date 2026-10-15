@@ -294,6 +294,15 @@ def _install(
     monkeypatch.setattr(okx_archive_job, "_utc_today", lambda: ENV["today"])
     monkeypatch.setattr(okx_archive_job, "_wall_ms", lambda: NOW_MS)
     monkeypatch.setattr(okx_archive_job, "download_archive_csv", world.download)
+
+    async def _skip_evaluation(*_args: Any, **_kwargs: Any) -> None:
+        # Plan 08's evaluation (live crawl, reconciliation, rebuild, apply) is exercised by
+        # tests/test_okx_archive_apply.py with its own live-side fakes. These tests protect
+        # the wait, the ingest and the refusals in front of it, so they stop where that
+        # layer begins and keep asserting the readings that layer must not disturb.
+        return None
+
+    monkeypatch.setattr(okx_archive_job, "_run_evaluation", _skip_evaluation)
     return world
 
 
@@ -758,7 +767,6 @@ class TestRefusals:
     @pytest.mark.parametrize(
         "metadata",
         [
-            {"mode": "apply"},
             {"mode": "nonsense"},
             {"mode": None},
             {"quarters": [{"year": 2026, "quarter": "Q4"}]},  # the current quarter
@@ -781,8 +789,9 @@ class TestRefusals:
     async def test_malformed_input_is_invalid_input_with_zero_okx_calls(
         self, monkeypatch: pytest.MonkeyPatch, metadata: dict[str, Any]
     ) -> None:
-        """Calibrate and apply are not accepted by this plan; a quarter OKX cannot have a file
-        for (current or future) or a malformed request never reaches the exchange."""
+        """A quarter OKX cannot have a file for (current or future) or a malformed request
+        never reaches the exchange. (An apply without its fingerprint is `fingerprint_missing`,
+        not `invalid_input`: tests/test_okx_archive_apply.py pins it.)"""
         world = _happy(monkeypatch)
         outcome = await dispatch(_job(metadata))
         _assert_refused(world, outcome, "invalid_input", okx_calls=[])
@@ -1457,6 +1466,22 @@ PARSE_CASES: list[tuple[str, Callable[[], bytes], str, str]] = [
 ]
 
 
+#: The two classification stops whose result block carries the file's census (counts only):
+#: the founder reads the per-currency / per-subType picture there to decide what to do.
+#: Independent literals: each is `Q3_CENSUS` with the one row the case edits moved by hand
+#: (`PARSE_CASES`: the first USDT row becomes BTC; the first `SWAP ... 2` row becomes 99999).
+CENSUS_ON_STOP = {
+    "non_usd_ccy": {
+        **Q3_CENSUS,
+        "by_ccy": {"BTC": 1, "USDC": 1, "USDT": 18},
+    },
+    "unknown_subtype_nonzero": {
+        **Q3_CENSUS,
+        "by_sub_type": {**Q3_CENSUS["by_sub_type"], "2": 3, "99999": 1},
+    },
+}
+
+
 class TestIngestStops:
     @pytest.mark.parametrize(
         ("served", "stop_class", "label"),
@@ -1481,7 +1506,12 @@ class TestIngestStops:
         quarter = result["quarters"][0]
         assert quarter["container"] == "zip" and quarter["compressed_bytes"] == 1234
         assert quarter["decompressed_bytes"] == len(world.csv_override)
-        assert result["census"] is None
+        if label in CENSUS_ON_STOP:
+            # Plan 16 left this null; the founder cannot decide a currency or a subtype from
+            # `parse=<label>` alone (carry-forward to plan 08, RESEARCH Section 1).
+            assert result["census"] == CENSUS_ON_STOP[label]
+        else:
+            assert result["census"] is None
         for forbidden in ("10.50", "99.99", "700000001"):
             assert forbidden not in json.dumps(result) + (outcome.error_message or "")
         _assert_no_other_writes(world)

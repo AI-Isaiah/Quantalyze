@@ -13,8 +13,10 @@ Section 5). This plan owns:
 * the result writer.
 
 Plan 16 (this module's second layer) owns the stateless wait on OKX's archive request and
-the download-and-parse ingest ``calibrate`` ends with; plan 08 adds the reconciliation, the
-rebuild, the D-03 check, the fingerprint and ``apply`` mode to this same module.
+the download-and-parse ingest; plan 08 (its third layer) adds the evaluation ``calibrate`` ends
+with (the live reference, the reconciliation to the cent, the rebuild preview, the D-03 check
+and the fingerprint) and ``apply`` mode, which re-runs that same evaluation and then writes
+through ``apply_okx_archive_rebuild``, the only write path.
 
 **The wait is stateless (SC-1).** Every claim re-applies each requested quarter (OKX's apply
 is idempotent), re-reads the request state, and then does exactly one of: defer
@@ -56,31 +58,54 @@ through ``_okx_bills_fetch_with_backoff``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import math
 import re
 import time
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Context, Decimal, InvalidOperation
 from typing import Any, Final, Mapping, cast
 
 import ccxt.async_support as ccxt
 import httpx
 
 from services.account_identity import venue_account_id_from
+from services.ccxt_flow_fetch import fetch_ccxt_transfers
+from services.ccxt_flows import ccxt_rows_to_dated_flows
 from services.db import db_execute, get_supabase, one, rows
 from services.encryption import decrypt_credentials, get_kek
-from services.exchange import _okx_bills_fetch_with_backoff, aclose_exchange
+from services.exchange import (
+    _okx_bills_fetch_with_backoff,
+    aclose_exchange,
+    fetch_account_equity_and_upnl_usd,
+    fetch_all_trades,
+)
+from services.external_flows import ExternalFlow
+from services.funding_fetch import fetch_funding_okx
 from services.job_worker import (
+    _BROKER_CRAWL_TIMEOUT_S,
     DispatchOutcome,
     DispatchResult,
     _allocator_key_preflight,
+    _ccxt_full_history_verdict,
     _defer_lost_ownership,
     _make_exchange_client,
+    _resolve_ccxt_flow_price_index,
 )
-from services.okx_archive_classify import SUBTYPE_BUCKETS, Bucket, aggregate_archive
+from services.nav_twr import DUST_NAV_FLOOR, NavReconstructionError, flow_retention_floor
+from services.okx_archive_classify import (
+    ARCHIVE_USD_FAMILY,
+    CLASSIFICATION_TABLE_VERSION,
+    SUBTYPE_BUCKETS,
+    ArchiveAggregate,
+    Bucket,
+    aggregate_archive,
+)
 from services.okx_archive_download import (
     DownloadRefused,
     LinkExpired,
@@ -93,6 +118,15 @@ from services.okx_archive_files import (
     parse_archive_csv,
     quarter_bounds,
 )
+from services.okx_archive_rebuild import (
+    RebuildRefused,
+    RebuildResult,
+    days_to_ranges,
+    rebuild_union,
+    rows_for_strategy,
+    subtract_ranges,
+)
+from services.okx_archive_reconcile import LegReading, overlap_window, reconcile_leg
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger(__name__)
@@ -170,8 +204,8 @@ def _utc_today() -> date:
 
 
 MODES: Final[tuple[str, ...]] = ("preflight", "calibrate", "apply")
-#: Modes accepted so far. Plan 16 added ``calibrate`` (ends after ingest); plan 08 adds ``apply``.
-ACCEPTED_MODES: Final[tuple[str, ...]] = ("preflight", "calibrate")
+#: Every mode is accepted: plan 16 added ``calibrate``, plan 08 adds ``apply``.
+ACCEPTED_MODES: Final[tuple[str, ...]] = MODES
 _QUARTER_LABELS: Final[tuple[str, ...]] = ("Q1", "Q2", "Q3", "Q4")
 _MAX_QUARTERS: Final[int] = 4
 _FINGERPRINT_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
@@ -219,6 +253,10 @@ class _Stop(Exception):
         super().__init__(stop_class)
         self.stop_class = stop_class
         self.detail = detail
+        #: The Result shape v1 ``census`` of the file that caused this stop, for the two
+        #: classification stops the founder must see the per-currency / per-subType counts
+        #: of (``non_usd_ccy``, ``unknown_subtype_nonzero``). Counts only, never an amount.
+        self.census: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +355,8 @@ async def _finish_stop(
     A failed result write is logged and swallowed on this path: the stop class already
     rides in ``last_error``, and retrying a refusal would only repeat it."""
     result["stop_class"] = stop.stop_class
+    if stop.census is not None:
+        result["census"] = stop.census
     logger.warning("%s", _error_text(stop.stop_class, stop.detail))
     try:
         await _write_result(supabase, job, result)
@@ -346,6 +386,13 @@ class _JobInput:
     quarters: tuple[tuple[int, str], ...]
     #: Strategies whose keys must share the job key's account, in input order, deduped.
     target_strategy_ids: tuple[str, ...]
+    #: The strategies to rebuild, in input order. A strategy's ``position`` in a result is its
+    #: index here (0-based): the result names no strategy id.
+    rebuild_strategy_ids: tuple[str, ...] = ()
+    #: D-03: strategies whose stored 0.0 days are checked read-only (calibrate only).
+    zero_check_strategy_ids: tuple[str, ...] = ()
+    #: Apply only: the fingerprint the founder approved on the calibrate preview.
+    approved_fingerprint: str | None = None
 
 
 def _invalid(reason: str) -> _Stop:
@@ -423,16 +470,40 @@ def _read_job_input(job: Mapping[str, Any]) -> _JobInput:
     ):
         raise _invalid("approved_fingerprint_shape")
 
-    if mode == "calibrate":
+    if mode in ("calibrate", "apply"):
         # Contract per-mode rules: the strategies to rebuild are required (a calibration of
-        # nothing proves nothing), and the fingerprint belongs to ``apply`` only.
+        # nothing proves nothing). A strategy listed twice would be rebuilt twice, and a
+        # strategy both rebuilt and zero-checked contradicts D-03 (read-only on a strategy
+        # that is NOT rebuilt).
         if not rebuild:
             raise _invalid("rebuild_strategy_ids_required")
+        if len(set(rebuild)) != len(rebuild):
+            raise _invalid("rebuild_strategy_ids_duplicate")
+        if set(rebuild) & set(zero_check):
+            raise _invalid("zero_check_overlaps_rebuild")
+    if mode == "calibrate":
+        # The fingerprint belongs to ``apply`` only.
         if fingerprint is not None:
             raise _invalid("approved_fingerprint_not_for_mode")
+    if mode == "apply":
+        # D-03 is a calibrate check; an apply carrying the key means the operator mixed up
+        # the modes (present at all, even empty, is refused).
+        if metadata.get("zero_check_strategy_ids") is not None:
+            raise _invalid("zero_check_not_for_mode")
+        if fingerprint is None:
+            # Raised here, before any key or exchange work: an apply that cannot name what
+            # the founder approved must not wait hours for a file first.
+            raise _Stop("fingerprint_missing")
 
     targets = tuple(dict.fromkeys([*rebuild, *zero_check]))
-    return _JobInput(mode=mode, quarters=tuple(quarters), target_strategy_ids=targets)
+    return _JobInput(
+        mode=mode,
+        quarters=tuple(quarters),
+        target_strategy_ids=targets,
+        rebuild_strategy_ids=tuple(rebuild),
+        zero_check_strategy_ids=tuple(zero_check),
+        approved_fingerprint=fingerprint,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1029,22 +1100,73 @@ async def _ingest_quarter(
     return parsed
 
 
+def _stop_census(files: list[ArchiveFile]) -> dict[str, Any]:
+    """The Result shape v1 ``census`` of files that stopped in classification.
+
+    ``aggregate_archive`` raises BEFORE it returns a census, and its stop detail is
+    deliberately not echoed (file-derived labels). The two stops where the founder must see
+    the per-currency / per-subType picture to decide (``non_usd_ccy``,
+    ``unknown_subtype_nonzero``) therefore get the same counts the clean census carries,
+    computed here from the same de-duplicated rows. Counts only, never an amount; a label
+    that is not a short plain token is merged into ``(malformed)`` as everywhere else."""
+    unique: dict[str, Any] = {}
+    for file in files:
+        for row in file.rows:
+            unique.setdefault(row.bill_id, row)
+    by_ccy: Counter[str] = Counter()
+    by_inst: Counter[str] = Counter()
+    by_sub: Counter[str] = Counter()
+    unknown_zero = 0
+    for row in unique.values():
+        by_ccy[row.ccy or _BLANK_LABEL] += 1
+        by_inst[row.inst_type or _BLANK_LABEL] += 1
+        by_sub[row.sub_type or _BLANK_LABEL] += 1
+        if SUBTYPE_BUCKETS.get(row.sub_type, Bucket.UNKNOWN) is Bucket.UNKNOWN and not (
+            row.pnl != 0 or row.fee != 0 or row.bal_chg != 0
+        ):
+            unknown_zero += 1
+    return {
+        "by_ccy": _safe_counts(by_ccy),
+        "by_inst_type": _safe_counts(by_inst),
+        "by_sub_type": _safe_counts(by_sub),
+        "unknown_zero_effect": unknown_zero,
+    }
+
+
+#: Classification stops whose result block carries the file's census (see ``_stop_census``).
+_CENSUS_ON_STOP: Final[frozenset[str]] = frozenset({"non_usd_ccy", "unknown_subtype_nonzero"})
+
+
 async def _census_of(
     files: list[ArchiveFile], live_types: Mapping[str, str]
-) -> dict[str, Any]:
-    """Classify every bill of the verified files and return the Result shape v1 ``census``:
-    counts only, never an amount."""
+) -> tuple[dict[str, Any], ArchiveAggregate]:
+    """Classify every bill of the verified files and return the Result shape v1 ``census``
+    (counts only, never an amount) together with the aggregate the evaluation reads."""
     try:
         aggregate = await asyncio.to_thread(aggregate_archive, files, live_types)
     except ArchiveParseError as exc:
-        raise _parse_stop(exc) from None
+        stop = _parse_stop(exc)
+        if exc.stop_class in _CENSUS_ON_STOP:
+            stop.census = _stop_census(files)
+        raise stop from None
     census = aggregate.census
-    return {
-        "by_ccy": _safe_counts(census["by_ccy"]),
-        "by_inst_type": _safe_counts(census["by_inst_type"]),
-        "by_sub_type": _safe_counts(census["by_sub_type"]),
-        "unknown_zero_effect": aggregate.unknown_zero_effect,
-    }
+    return (
+        {
+            "by_ccy": _safe_counts(census["by_ccy"]),
+            "by_inst_type": _safe_counts(census["by_inst_type"]),
+            "by_sub_type": _safe_counts(census["by_sub_type"]),
+            "unknown_zero_effect": aggregate.unknown_zero_effect,
+        },
+        aggregate,
+    )
+
+
+@dataclass(frozen=True)
+class _Ingested:
+    """The verified files and their classification, for this claim only."""
+
+    files: list[ArchiveFile]
+    aggregate: ArchiveAggregate
 
 
 async def _ingest_all(
@@ -1053,12 +1175,846 @@ async def _ingest_all(
     steps: list[_QuarterStep],
     live_types: Mapping[str, str],
     result: dict[str, Any],
-) -> None:
+) -> _Ingested:
     files: list[ArchiveFile] = []
     for entry, step in zip(quarters, steps):
         assert step.href is not None  # every quarter was ready, or the job deferred
         files.append(await _ingest_quarter(exchange, entry, step.href))
-    result["census"] = await _census_of(files, live_types)
+    result["census"], aggregate = await _census_of(files, live_types)
+    return _Ingested(files=files, aggregate=aggregate)
+
+
+# ---------------------------------------------------------------------------
+# Evaluation (plan 08): the live reference, the reconciliation to the cent, the rebuild
+# preview, the D-03 check and the fingerprint. ``calibrate`` ends here; ``apply`` runs the
+# SAME code and then writes (so what the founder approved is exactly what apply re-checks).
+# ---------------------------------------------------------------------------
+
+#: The unit of a D-03 hit and of nothing else: a stored 0.0 day is a hit when the archive
+#: realized or funding sum for it, rounded to the cent (half up), is not zero.
+_CENT: Final[Decimal] = Decimal("0.01")
+#: Wide enough that rounding an archive sum (bounded to 30 digits per cell) cannot raise.
+_WIDE: Final[Context] = Context(prec=80)
+_READ_PAGE: Final[int] = 1000
+#: The provenance source the RPC pins (``c_source`` in the migration, ``RECONSTRUCTED_SOURCE``
+#: in the public reader). A stored range with any other source is not this job's.
+_ARCHIVE_SOURCE: Final[str] = "okx_bills_history_archive"
+#: ``info.stored_vs_core``: one basis point of return, the return-space analogue of the cent.
+#: A reported reading, never a gate (D-09: information, not a gate).
+STORED_VS_CORE_TOL: Final[float] = 1e-4
+#: Misses echoed per leg (the count is always exact; the list is for reading, not for gating).
+_MAX_MISSES_REPORTED: Final[int] = 100
+_ISO_DAY_RE: Final[re.Pattern[str]] = re.compile(r"\d{4}-\d{2}-\d{2}")
+_FAR_FUTURE_DAY: Final[str] = "2999-12-31"
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _dec(value: Decimal) -> str:
+    """Canonical text of a Decimal: no exponent, no trailing zeros (10.50 and 10.5 read the
+    same), ``"0"`` for any zero."""
+    if value == 0:
+        return "0"
+    return format(value.normalize(), "f")
+
+
+def _cent_nonzero(value: Decimal) -> bool:
+    return value.quantize(_CENT, rounding=ROUND_HALF_UP, context=_WIDE) != 0
+
+
+def _iso_day(value: object) -> str | None:
+    """``value`` when it is a real ``YYYY-MM-DD`` calendar day (the compact ``YYYYMMDD`` form
+    that ``date.fromisoformat`` also accepts is not), else None."""
+    if not isinstance(value, str) or not _ISO_DAY_RE.fullmatch(value):
+        return None
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return None
+    return value
+
+
+def _days_in(first: str, last: str) -> list[str]:
+    start, end = date.fromisoformat(first), date.fromisoformat(last)
+    return [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
+
+
+def _expand(ranges: list[dict[str, str]]) -> set[str]:
+    out: set[str] = set()
+    for r in ranges:
+        out.update(_days_in(r["from"], r["to"]))
+    return out
+
+
+# ----- the live side, crawled fresh at job time (D-09) ------------------------------------
+
+@dataclass(frozen=True)
+class _LiveReference:
+    """What the live derive would see right now, from the same functions and bounds, so the
+    comparison with the archive is two endpoints of one ledger minutes apart."""
+
+    equity: float | None
+    balance_error: bool
+    #: Already noise-guarded exactly as the derive does (0.0 on a heuristic or dust anchor).
+    open_unrealized_usd: float
+    upnl_unreadable: bool
+    realized: list[dict[str, Any]]
+    funding: list[Any]
+    flows: list[ExternalFlow]
+    full_history: bool
+    realized_by_day: dict[str, Decimal]
+    funding_by_day: dict[str, Decimal]
+    #: The first day the live realized reach carries a record: the reach boundary day, which
+    #: is partial (OKX cut the reach mid-day), so it is never compared.
+    first_realized_day: str | None
+
+
+def _record_day(timestamp: object) -> str:
+    day = _iso_day(str(timestamp)[:10])
+    if day is None:
+        raise _Stop("live_anchor_unusable", "live_record=undatable")
+    return day
+
+
+def _decimal_of(value: object) -> Decimal:
+    try:
+        out = value if isinstance(value, Decimal) else Decimal(repr(float(value)))  # type: ignore[arg-type]
+    except (InvalidOperation, TypeError, ValueError):
+        raise _Stop("live_anchor_unusable", "live_amount=unreadable") from None
+    if not out.is_finite():
+        raise _Stop("live_anchor_unusable", "live_amount=unreadable")
+    return out
+
+
+def _live_realized_by_day(records: list[dict[str, Any]]) -> dict[str, Decimal]:
+    """Signed dollars per UTC day from the ``fetch_daily_pnl`` records (``side`` encodes the
+    sign, ``price`` is the absolute amount)."""
+    out: dict[str, Decimal] = {}
+    for rec in records:
+        day = _record_day(rec.get("timestamp"))
+        amount = _decimal_of(rec.get("price"))
+        out[day] = out.get(day, Decimal(0)) + (amount if rec.get("side") == "buy" else -amount)
+    return out
+
+
+def _live_funding_by_day(funding_rows: list[Any]) -> dict[str, Decimal]:
+    out: dict[str, Decimal] = {}
+    for row in funding_rows:
+        stamp = row.get("timestamp")
+        if isinstance(stamp, datetime):
+            aware = stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=timezone.utc)
+            day = aware.astimezone(timezone.utc).date().isoformat()
+        else:
+            day = _record_day(stamp)
+        out[day] = out.get(day, Decimal(0)) + _decimal_of(row.get("amount"))
+    return out
+
+
+async def _live_reference(
+    exchange: ccxt.Exchange, supabase: Any, api_key_id: str
+) -> _LiveReference:
+    """The live derive's crawl for an OKX key, with its bounds: equity and open uPnL, the
+    FULL realized history (``since_ms=None``), OKX funding, and ccxt deposits and withdrawals
+    valued by the same flow valuer, each hard-bounded by ``_BROKER_CRAWL_TIMEOUT_S``. A
+    timeout propagates as the dispatcher's transient (a retry resumes statelessly); a venue
+    rate limit is deferred by the handler."""
+    equity, balance_error, open_unrealized, upnl_unreadable = await asyncio.wait_for(
+        fetch_account_equity_and_upnl_usd(exchange, "okx"), timeout=_BROKER_CRAWL_TIMEOUT_S
+    )
+    realized = await asyncio.wait_for(
+        fetch_all_trades(exchange, since_ms=None), timeout=_BROKER_CRAWL_TIMEOUT_S
+    )
+    funding = await asyncio.wait_for(
+        fetch_funding_okx(exchange, api_key_id, None), timeout=_BROKER_CRAWL_TIMEOUT_S
+    )
+    now_utc = _utc_now()
+    now_ms = int(now_utc.timestamp() * 1000)
+    floor = flow_retention_floor("okx", now_utc)
+    flow_since_ms = 0 if floor is None else max(0, int(floor.timestamp() * 1000))
+    deposits = await asyncio.wait_for(
+        fetch_ccxt_transfers(exchange, "deposits", flow_since_ms, now_ms),
+        timeout=_BROKER_CRAWL_TIMEOUT_S,
+    )
+    withdrawals = await asyncio.wait_for(
+        fetch_ccxt_transfers(exchange, "withdrawals", flow_since_ms, now_ms),
+        timeout=_BROKER_CRAWL_TIMEOUT_S,
+    )
+    flow_rows = list(deposits) + list(withdrawals)
+    price_index = await asyncio.wait_for(
+        _resolve_ccxt_flow_price_index(exchange, "okx", supabase, flow_rows),
+        timeout=_BROKER_CRAWL_TIMEOUT_S,
+    )
+    try:
+        flows = ccxt_rows_to_dated_flows(flow_rows, venue="okx", price_index=price_index)
+    except NavReconstructionError:
+        # A coin flow with no same-day price, or a schema-drifted amount: the live anchor
+        # cannot be rolled, and a rebuild must not guess it. (Message dropped: it can carry
+        # a raw amount.)
+        raise _Stop("live_anchor_unusable", "live_flows=unvaluable") from None
+
+    # The derive's noise guard: the open-uPnL wedge is only trustworthy on a trustworthy anchor.
+    if balance_error or equity is None or abs(equity) <= DUST_NAV_FLOOR:
+        open_unrealized = 0.0
+
+    realized_by_day = _live_realized_by_day(realized)
+    return _LiveReference(
+        equity=equity,
+        balance_error=balance_error,
+        open_unrealized_usd=open_unrealized,
+        upnl_unreadable=upnl_unreadable,
+        realized=realized,
+        funding=list(funding),
+        flows=list(flows),
+        # The same verdict the derive passes (164.6.6.2.3 D-11), on the same live inputs.
+        full_history=_ccxt_full_history_verdict("okx", realized, funding, now_utc),
+        realized_by_day=realized_by_day,
+        funding_by_day=_live_funding_by_day(list(funding)),
+        first_realized_day=min(realized_by_day) if realized_by_day else None,
+    )
+
+
+# ----- reconciliation (D-09, D-10, D-11) --------------------------------------------------
+
+def _windows(
+    quarters: list[tuple[int, str]], first_full_day: date, today: date
+) -> list[tuple[str, str]]:
+    """The inclusive overlap windows of the requested quarters, adjacent ones merged."""
+    runs: list[tuple[str, str]] = []
+    for year, label in quarters:
+        start, end_excl = quarter_bounds(year, label)
+        window = overlap_window(start, end_excl, first_full_day, today)
+        if window is not None:
+            runs.append(window)
+    merged: list[list[str]] = []
+    for first, last in sorted(runs):
+        if merged and date.fromisoformat(first) <= date.fromisoformat(merged[-1][1]) + timedelta(days=1):
+            merged[-1][1] = max(merged[-1][1], last)
+        else:
+            merged.append([first, last])
+    return [(first, last) for first, last in merged]
+
+
+def _leg_of(readings: list[LegReading]) -> dict[str, Any]:
+    """One Result shape v1 ``Leg`` from the reading of each window (usually one)."""
+    misses = [m for r in readings for m in r.misses]
+    return {
+        "ok": all(r.ok for r in readings),
+        "days_compared": sum(r.days_compared for r in readings),
+        "max_abs_diff": _dec(max((r.max_abs_diff for r in readings), default=Decimal(0))),
+        "window_total_diff": _dec(sum((r.window_total_diff for r in readings), Decimal(0))),
+        "days_over_half_cent": sum(r.days_over_half_cent for r in readings),
+        "days_over_cent": sum(r.days_over_cent for r in readings),
+        "first_offending": [m[0] for m in misses[:10]],
+        "misses": [
+            {"date": day, "archive": _dec(archive), "live": _dec(live)}
+            for day, archive, live in misses[:_MAX_MISSES_REPORTED]
+        ],
+    }
+
+
+def _reconcile(
+    result: dict[str, Any],
+    aggregate: ArchiveAggregate,
+    live: _LiveReference,
+    quarters: list[tuple[int, str]],
+) -> list[tuple[str, str]]:
+    """D-09 / D-10: the realized leg and the funding leg per day and on the window total over
+    the overlap window, with ``TOLERANCE_USD`` only (``reconcile_leg`` carries it, with no
+    parameter). The excluded classes, flow totals and ``bal`` continuity are reported, never
+    gated. A miss, or no window at all, is the permanent ``reconcile_miss`` (D-11). Returns
+    the windows."""
+    boundary = live.first_realized_day
+    reconcile: dict[str, Any] = {
+        "window": None,
+        "excluded_boundary_day": boundary,
+        "realized": None,
+        "funding": None,
+    }
+    result["reconcile"] = reconcile
+    result["excluded"] = {
+        "excluded_by_month": {
+            month: {cls: _dec(total) for cls, total in sorted(by_class.items())}
+            for month, by_class in sorted(aggregate.excluded_by_month.items())
+        }
+    }
+    windows = (
+        _windows(quarters, date.fromisoformat(boundary) + timedelta(days=1), _utc_today())
+        if boundary is not None
+        else []
+    )
+    if not windows:
+        # Calibration cannot be taken: the live reach no longer touches the verified quarters
+        # (RESEARCH Pitfall 9) or there is no live record at all. The runbook names the date.
+        raise _Stop("reconcile_miss", "window=none")
+    reconcile["window"] = {"from": windows[0][0], "to": windows[-1][1]}
+    realized_readings = [
+        reconcile_leg("realized", aggregate.realized_by_day, live.realized_by_day, w) for w in windows
+    ]
+    funding_readings = [
+        reconcile_leg("funding", aggregate.funding_by_day, live.funding_by_day, w) for w in windows
+    ]
+    reconcile["realized"] = _leg_of(realized_readings)
+    reconcile["funding"] = _leg_of(funding_readings)
+    if all(r.ok for r in realized_readings + funding_readings):
+        return windows
+    offending = sorted(
+        {m[0] for r in realized_readings + funding_readings for m in r.misses}
+    )
+    detail = f"window={windows[0][0]}..{windows[-1][1]}"
+    detail += f" realized_days_over_cent={reconcile['realized']['days_over_cent']}"
+    detail += f" funding_days_over_cent={reconcile['funding']['days_over_cent']}"
+    if offending:
+        detail += f" offending={offending[0]}..{offending[-1]}"
+    else:
+        detail += " cause=window_total"
+    raise _Stop("reconcile_miss", detail)
+
+
+# ----- reads of the stored side -----------------------------------------------------------
+
+async def _read_daily_returns(
+    supabase: Any, strategy_id: str, first: str, last: str
+) -> list[dict[str, Any]]:
+    """A strategy's stored ``csv_daily_returns`` rows in ``[first, last]``, keyset-paged on
+    the date (a PostgREST response is capped, and a page boundary must never lose a day)."""
+    out: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while True:
+
+        def _page(after: str | None = cursor) -> Any:
+            query = (
+                supabase.table("csv_daily_returns")
+                .select("date,daily_return")
+                .eq("strategy_id", strategy_id)
+                .gte("date", first)
+                .lte("date", last)
+            )
+            if after is not None:
+                query = query.gt("date", after)
+            return query.order("date", desc=False).limit(_READ_PAGE).execute()
+
+        chunk = rows(await db_execute(_page))
+        out.extend(chunk)
+        if len(chunk) < _READ_PAGE:
+            return out
+        cursor = str(chunk[-1]["date"])
+
+
+def _refused(position: int, reason: str) -> _Stop:
+    """A state the RPC cannot express, decided before the first RPC (D-11). ``reason`` is a
+    fixed literal of this module."""
+    return _Stop("rpc_refused", f"position={position} reason={reason}")
+
+
+def _stored_ranges(
+    provenance: object, key: str, position: int, *, archive_only: bool
+) -> list[dict[str, str]]:
+    """``[{from, to}]`` sorted, from ``series_provenance[key]``. A malformed record is a
+    stop, not a guess (the RPC refuses it too, and it must be refused before the first call).
+    With ``archive_only`` only entries whose ``source`` is the archive's are returned."""
+    if provenance is None:
+        return []
+    if not isinstance(provenance, Mapping):
+        raise _refused(position, "provenance_malformed")
+    raw = provenance.get(key)
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise _refused(position, f"{key}_malformed")
+    out: list[dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, Mapping):
+            raise _refused(position, f"{key}_malformed")
+        if archive_only and entry.get("source") != _ARCHIVE_SOURCE:
+            continue
+        first, last = _iso_day(entry.get("from")), _iso_day(entry.get("to"))
+        if first is None or last is None or last < first:
+            raise _refused(position, f"{key}_malformed")
+        out.append({"from": first, "to": last})
+    return sorted(out, key=lambda r: (r["from"], r["to"]))
+
+
+@dataclass(frozen=True)
+class _TargetPlan:
+    """One rebuild target's slice of the preview, and what apply sends for it."""
+
+    position: int
+    strategy_id: str
+    #: The stored gaps as read (``p_expected_gaps``).
+    stored_gaps: list[dict[str, str]]
+    #: The rows to insert (covered, in a stored gap, finite, no existing row, before the live
+    #: first day). Empty when the target has nothing left to write.
+    rows: list[dict[str, Any]]
+    #: The narrowed gaps the RPC must compute for itself (``p_expected_gaps_after``).
+    expected_after: list[dict[str, str]]
+    #: Resumability rule 1: covered, finite, before the live first day, and either a stored
+    #: gap day with no row or a day inside a stored archive range. It equals the row date set
+    #: before this target's RPC commits and after it, which is why the fingerprint hashes it.
+    planned_dates: list[str]
+
+
+def _plan_target(
+    position: int,
+    strategy_id: str,
+    provenance: object,
+    existing_days: set[str],
+    rebuilt: RebuildResult,
+    covered: frozenset[str],
+) -> _TargetPlan:
+    gaps = _stored_ranges(provenance, "unrecovered_gaps", position, archive_only=False)
+    archive_ranges = _stored_ranges(provenance, "reconstructed_ranges", position, archive_only=True)
+    rows_out, expected_after = rows_for_strategy(rebuilt, gaps, existing_days, covered)
+    gap_days_without_row = _expand(gaps) - existing_days
+    eligible = gap_days_without_row | _expand(archive_ranges)
+    finite = {
+        ts.date().isoformat()
+        for ts, value in rebuilt.returns.items()
+        if math.isfinite(float(value))
+    }
+    planned = sorted(
+        day for day in eligible if day in finite and day in covered and day < rebuilt.live_first_day
+    )
+    return _TargetPlan(
+        position=position,
+        strategy_id=strategy_id,
+        stored_gaps=gaps,
+        rows=rows_out,
+        expected_after=expected_after,
+        planned_dates=planned,
+    )
+
+
+# ----- D-03 --------------------------------------------------------------------------------
+
+async def _d03_check(
+    supabase: Any, zero_check_ids: tuple[str, ...], aggregate: ArchiveAggregate
+) -> dict[str, Any]:
+    """D-03, read-only: every stored 0.0-return day of each zero-check strategy that lies
+    inside a verified quarter is compared with the archive. A day whose archive realized or
+    funding sum is nonzero at the cent is a hit. Nothing is ever rewritten."""
+    covered = aggregate.covered_days
+    first, last = min(covered), max(covered)
+    checked = 0
+    hits: list[dict[str, Any]] = []
+    for strategy_id in zero_check_ids:
+        for row in await _read_daily_returns(supabase, strategy_id, first, last):
+            day, value = str(row["date"]), row.get("daily_return")
+            if day not in covered or value is None or float(value) != 0.0:
+                continue
+            checked += 1
+            realized = aggregate.realized_by_day.get(day, Decimal(0))
+            funding = aggregate.funding_by_day.get(day, Decimal(0))
+            if _cent_nonzero(realized) or _cent_nonzero(funding):
+                hits.append(
+                    {
+                        "date": day,
+                        "stored_return": float(value),
+                        "archive_realized": _dec(realized),
+                        "archive_funding": _dec(funding),
+                    }
+                )
+    hits.sort(key=lambda h: h["date"])
+    return {"checked_days": checked, "hits": hits}
+
+
+# ----- information readings (never gates) -------------------------------------------------
+
+def _balance_vs_nav(
+    files: list[ArchiveFile], live: _LiveReference, live_first_day: str
+) -> dict[str, Any]:
+    """The archive's USD-family balance after its last bill on or before the day before the
+    live first day, against the NAV the live roll puts at the end of that day."""
+    prev = (date.fromisoformat(live_first_day) - timedelta(days=1)).isoformat()
+    latest: dict[str, Any] = {}
+    for file in files:
+        for row in file.rows:
+            if row.day > prev or row.ccy not in ARCHIVE_USD_FAMILY:
+                continue
+            order = (row.ts_ms, int(row.bill_id) if row.bill_id.isdigit() else 0, row.bill_id)
+            kept = latest.get(row.ccy)
+            if kept is None or order > kept[0]:
+                latest[row.ccy] = (order, row.bal)
+    archive_bal = sum((bal for _, bal in latest.values()), Decimal(0)) if latest else None
+    rolled: Decimal | None = None
+    if live.equity is not None and math.isfinite(live.equity):
+        after = sum(
+            (v for d, v in live.realized_by_day.items() if d >= live_first_day), Decimal(0)
+        ) + sum((v for d, v in live.funding_by_day.items() if d >= live_first_day), Decimal(0))
+        after += sum(
+            (Decimal(repr(float(f.usd_signed))) for f in live.flows if f.utc_day_iso >= live_first_day),
+            Decimal(0),
+        )
+        rolled = Decimal(repr(live.equity)) - Decimal(repr(live.open_unrealized_usd)) - after
+    return {
+        "day": prev,
+        "archive_balance_usd_family": None if archive_bal is None else _dec(archive_bal),
+        "rolled_nav": None if rolled is None else _dec(rolled),
+        "diff": None if archive_bal is None or rolled is None else _dec(archive_bal - rolled),
+    }
+
+
+async def _stored_vs_core(
+    supabase: Any, target_ids: tuple[str, ...], rebuilt: RebuildResult
+) -> dict[str, Any]:
+    """Each target's STORED live-day returns against the live-only core's, over the days both
+    carry. A reading of whether the stored live series still matches what the derive would
+    write today; never a gate. The first live day is left out (it is no longer day 0 in the
+    union, and ``first_live_day_differs`` already reports it)."""
+    core = {ts.date().isoformat(): float(v) for ts, v in rebuilt.returns.items()}
+    compared = 0
+    offending: list[str] = []
+    for strategy_id in target_ids:
+        stored = await _read_daily_returns(
+            supabase, strategy_id, rebuilt.live_first_day, _FAR_FUTURE_DAY
+        )
+        for row in stored:
+            day, value = str(row["date"]), row.get("daily_return")
+            if day <= rebuilt.live_first_day or value is None or day not in core:
+                continue
+            if not (math.isfinite(core[day]) and math.isfinite(float(value))):
+                continue
+            compared += 1
+            if abs(float(value) - core[day]) > STORED_VS_CORE_TOL:
+                offending.append(day)
+    offending.sort()
+    return {
+        "days_compared": compared,
+        "days_over_cent": len(offending),
+        "first_offending": offending[:10],
+    }
+
+
+# ----- the fingerprint (T-167.1.2.2.2.1-20) -----------------------------------------------
+
+def _fingerprint(
+    aggregate: ArchiveAggregate, quarters: list[dict[str, Any]], plans: list[_TargetPlan]
+) -> str:
+    """sha256 of a canonical JSON of what the founder reviews: the per-day archive aggregates
+    as Decimal strings, the census, the classification table version, each quarter's content
+    readings and each target's PLANNED date list in input order.
+
+    NEVER a live-anchored return value: those move with the equity anchor between a
+    calibrate and an apply, and the approval is of the archive and the days, not of numbers
+    the live account will change. The quarter readings are content-derived only
+    (``state``, ``applied_existing``, the link and the compressed size can differ between two
+    runs over the same file)."""
+
+    def _per_day(by_day: Mapping[str, Decimal]) -> dict[str, str]:
+        return {day: _dec(by_day[day]) for day in sorted(by_day)}
+
+    payload = {
+        "table_version": CLASSIFICATION_TABLE_VERSION,
+        "realized": _per_day(aggregate.realized_by_day),
+        "funding": _per_day(aggregate.funding_by_day),
+        "flows": _per_day(aggregate.flows_by_day),
+        "non_external": _per_day(aggregate.non_external_by_day),
+        "excluded": {
+            month: {cls: _dec(total) for cls, total in sorted(by_class.items())}
+            for month, by_class in sorted(aggregate.excluded_by_month.items())
+        },
+        "census": aggregate.census,
+        "unknown_zero_effect": aggregate.unknown_zero_effect,
+        "quarters": [
+            {
+                "year": q["year"],
+                "quarter": q["quarter"],
+                "has_type_column": q["has_type_column"],
+                "ts_min_day": q["ts_min_day"],
+                "ts_max_day": q["ts_max_day"],
+                "row_count": q["row_count"],
+            }
+            for q in quarters
+        ],
+        "targets": [plan.planned_dates for plan in plans],
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# ----- the evaluation ----------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _Evaluation:
+    fingerprint: str
+    plans: list[_TargetPlan]
+
+
+async def _load_provenance(supabase: Any, strategy_ids: list[str]) -> dict[str, Any]:
+    """``strategy_id -> series_provenance`` for the rebuild targets (a missing row is absent)."""
+
+    def _load() -> Any:
+        return (
+            supabase.table("strategy_analytics")
+            .select("strategy_id,series_provenance")
+            .in_("strategy_id", strategy_ids)
+            .execute()
+        )
+
+    return {str(r.get("strategy_id")): r.get("series_provenance") for r in rows(await db_execute(_load))}
+
+
+async def _evaluate(
+    supabase: Any,
+    exchange: ccxt.Exchange,
+    api_key_id: str,
+    inp: _JobInput,
+    ingested: _Ingested,
+    quarter_entries: list[dict[str, Any]],
+    result: dict[str, Any],
+) -> _Evaluation:
+    """The calibrate evaluation, shared by ``calibrate`` and ``apply``. Every stop here is
+    raised BEFORE any write, and apply's first RPC comes after this returns, so a reconcile
+    miss (or any other evaluation stop) can never follow a committed target (D-11)."""
+    aggregate = ingested.aggregate
+    quarters = list(inp.quarters)
+
+    live = await _live_reference(exchange, supabase, api_key_id)
+    windows = _reconcile(result, aggregate, live, quarters)
+
+    if inp.mode == "calibrate":
+        # D-03 is a calibrate check; apply refuses the key at input.
+        result["d03"] = await _d03_check(supabase, inp.zero_check_strategy_ids, aggregate)
+        if result["d03"]["hits"]:
+            dates = [h["date"] for h in result["d03"]["hits"]]
+            raise _Stop(
+                "d03_zero_day_has_archive_pnl",
+                f"hits={len(dates)} first={dates[0]} last={dates[-1]}",
+            )
+
+    if live.upnl_unreadable and not (
+        live.balance_error
+        or live.equity is None
+        or abs(live.equity) <= DUST_NAV_FLOOR
+    ):
+        # OKX returned totalEq but a garbled upl: the anchor may embed mark-to-market the
+        # roll cannot subtract. The derive only warns; a rebuild must not guess.
+        raise _Stop("live_anchor_unusable", "upnl_unreadable")
+
+    target_ids = list(inp.rebuild_strategy_ids)
+    provenance = await _load_provenance(supabase, target_ids)
+    for position, strategy_id in enumerate(target_ids):
+        if strategy_id not in provenance:
+            raise _refused(position, "no_analytics_row")
+    stored_gaps = [
+        _stored_ranges(provenance[sid], "unrecovered_gaps", i, archive_only=False)
+        for i, sid in enumerate(target_ids)
+    ]
+    archive_ranges = [
+        _stored_ranges(provenance[sid], "reconstructed_ranges", i, archive_only=True)
+        for i, sid in enumerate(target_ids)
+    ]
+    # Resumability rule 2: the earliest day across every target's stored gaps AND archive
+    # ranges, so a committed target narrowing its own gap does not move the rebuild window.
+    candidates = [r["from"] for group in (*stored_gaps, *archive_ranges) for r in group]
+    from_day = min(candidates) if candidates else min(aggregate.covered_days)
+
+    try:
+        rebuilt = rebuild_union(
+            live_realized=live.realized,
+            live_funding=live.funding,
+            live_flows=live.flows,
+            equity=live.equity,
+            balance_error=live.balance_error,
+            open_unrealized_usd=live.open_unrealized_usd,
+            full_history=live.full_history,
+            archive_realized_by_day=aggregate.realized_by_day,
+            archive_funding_by_day=aggregate.funding_by_day,
+            archive_flows_by_day=aggregate.flows_by_day,
+            covered_days=aggregate.covered_days,
+            from_day=from_day,
+        )
+    except RebuildRefused as refusal:
+        raise _Stop(refusal.stop_class) from None
+
+    plans: list[_TargetPlan] = []
+    for position, strategy_id in enumerate(target_ids):
+        gaps = stored_gaps[position]
+        existing: set[str] = set()
+        if gaps:
+            span = await _read_daily_returns(
+                supabase, strategy_id, min(g["from"] for g in gaps), max(g["to"] for g in gaps)
+            )
+            existing = {str(r["date"]) for r in span}
+        plans.append(
+            _plan_target(
+                position, strategy_id, provenance[strategy_id], existing, rebuilt,
+                aggregate.covered_days,
+            )
+        )
+
+    # The information readings (never gates).
+    planned_union = sorted({d for plan in plans for d in plan.planned_dates})
+    active = [
+        d for d in planned_union
+        if aggregate.realized_by_day.get(d, Decimal(0)) != 0
+        or aggregate.funding_by_day.get(d, Decimal(0)) != 0
+        or aggregate.flows_by_day.get(d, Decimal(0)) != 0
+    ]
+    window_days = sorted({d for first, last in windows for d in _days_in(first, last)})
+    archive_only = sorted(
+        d for d in window_days
+        if (_cent_nonzero(aggregate.realized_by_day.get(d, Decimal(0))) and d not in live.realized_by_day)
+        or (_cent_nonzero(aggregate.funding_by_day.get(d, Decimal(0))) and d not in live.funding_by_day)
+    )
+    window_set = set(window_days)
+    result["info"] = {
+        "bal_continuity": aggregate.bal_continuity,
+        "flow_totals_overlap": {
+            "archive": _dec(sum((v for d, v in aggregate.flows_by_day.items() if d in window_set), Decimal(0))),
+            "live": _dec(
+                sum(
+                    (Decimal(repr(float(f.usd_signed))) for f in live.flows if f.utc_day_iso in window_set),
+                    Decimal(0),
+                )
+            ),
+        },
+        "realized_balance_vs_rolled_nav": _balance_vs_nav(ingested.files, live, rebuilt.live_first_day),
+        "first_live_day_differs": rebuilt.first_live_day_differs,
+        "archive_days_prepended": rebuilt.archive_days_prepended,
+        "gap_days_active": len(active),
+        "gap_days_quiet": len(planned_union) - len(active),
+        "archive_only_in_live_reach": archive_only,
+        "stored_vs_core": await _stored_vs_core(supabase, inp.rebuild_strategy_ids, rebuilt),
+    }
+    result["strategies"] = [
+        {
+            "position": plan.position,
+            "insert_days": len(plan.rows),
+            "insert_ranges": days_to_ranges(r["date"] for r in plan.rows),
+            "gaps_before": plan.stored_gaps,
+            "gaps_after": plan.expected_after,
+            "rpc": None,
+        }
+        for plan in plans
+    ]
+    fingerprint = _fingerprint(aggregate, quarter_entries, plans)
+    result["fingerprint"] = fingerprint
+    return _Evaluation(fingerprint=fingerprint, plans=plans)
+
+
+# ----- apply: the only write path (D-05, D-11, D-12) ----------------------------------------
+
+def _is_refusal(exc: BaseException) -> bool:
+    """The RPC's own refusals: 22023 (malformed input, row outside every stored gap, a missing
+    ``strategy_analytics`` row) and P0001 (``gaps_changed``, ``gaps_after_mismatch``). By the
+    SQLSTATE the driver surfaces, never by message."""
+    return getattr(exc, "code", None) in ("22023", "P0001")
+
+
+def _already_complete(plan: _TargetPlan) -> bool:
+    """Resumability rule 3: nothing left to write and nothing left to narrow. The RPC refuses
+    an empty ``p_rows`` by contract, so such a target is never sent."""
+    return not plan.rows and plan.expected_after == plan.stored_gaps
+
+
+async def _apply_targets(
+    supabase: Any, job: Mapping[str, Any], plans: list[_TargetPlan], result: dict[str, Any]
+) -> None:
+    """Call ``apply_okx_archive_rebuild`` once per target, in input order, recording each
+    answer in ``strategies[i].rpc``. Everything evaluation can decide has been decided before
+    this runs, so a stop here is the RPC's own refusal (``rpc_refused``, naming the position)
+    or a transport failure, which writes the per-target record and re-raises for the worker to
+    retry (the re-claim resumes through ``_already_complete``)."""
+    strategies = result["strategies"]
+
+    # A target the RPC cannot express (rows empty, gaps would still change: live rows filled
+    # gap days since the read) is decided here, before the FIRST call, and writes nothing.
+    for plan in plans:
+        if not plan.rows and not _already_complete(plan):
+            raise _refused(plan.position, "empty_rows_gap_delta")
+
+    for plan in plans:
+        entry = strategies[plan.position]
+        if _already_complete(plan):
+            entry["insert_days"] = 0
+            entry["insert_ranges"] = []
+            entry["rpc"] = {"status": "already_applied", "error_class": None}
+            continue
+
+        def _rpc(p: _TargetPlan = plan) -> Any:
+            return supabase.rpc(
+                "apply_okx_archive_rebuild",
+                {
+                    "p_strategy_id": p.strategy_id,
+                    "p_rows": p.rows,
+                    "p_expected_gaps": p.stored_gaps,
+                    "p_expected_gaps_after": p.expected_after,
+                },
+            ).execute()
+
+        try:
+            response = await db_execute(_rpc)
+            answer = response.data
+            status = answer.get("status") if isinstance(answer, Mapping) else None
+            if status not in ("applied", "already_applied"):
+                raise RuntimeError("apply_okx_archive_rebuild: unreadable answer")
+        except asyncio.CancelledError:
+            raise  # never swallow cancellation
+        except Exception as exc:  # noqa: BLE001
+            if _is_refusal(exc):
+                logger.warning(
+                    "okx_archive_rebuild: apply_okx_archive_rebuild refused position %d (%s): %s",
+                    plan.position,
+                    getattr(exc, "code", None),
+                    scrub_freeform_string(str(exc))[:200],
+                )
+                entry["rpc"] = {"status": None, "error_class": "rpc_refused"}
+                applied = sum(1 for s in strategies if (s["rpc"] or {}).get("status") == "applied")
+                raise _Stop("rpc_refused", f"position={plan.position} applied={applied}") from None
+            # Not a stop class: a timeout, a connection error or a 5xx may have arrived after
+            # the commit. Record where each target stands, then let the worker's own error
+            # classification retry; the re-claim resumes through rule 3.
+            entry["rpc"] = {"status": None, "error_class": "rpc_transport"}
+            logger.error(
+                "okx_archive_rebuild: apply_okx_archive_rebuild transport failure at position %d (%s)",
+                plan.position,
+                type(exc).__name__,
+            )
+            try:
+                await _write_result(supabase, job, result)
+            except asyncio.CancelledError:
+                raise
+            except Exception as write_exc:  # noqa: BLE001
+                logger.error(
+                    "okx_archive_rebuild: the per-target record could not be written (%s)",
+                    type(write_exc).__name__,
+                )
+            raise
+        entry["rpc"] = {"status": status, "error_class": None}
+        if status == "already_applied":
+            entry["insert_days"] = 0
+            entry["insert_ranges"] = []
+        elif answer.get("inserted") != len(plan.rows):
+            # D-12 at work: a live day appeared since the read and kept its row. Counts only.
+            logger.warning(
+                "okx_archive_rebuild: position %d inserted %s of %d planned rows",
+                plan.position,
+                answer.get("inserted"),
+                len(plan.rows),
+            )
+
+
+async def _run_evaluation(
+    supabase: Any,
+    job: Mapping[str, Any],
+    exchange: ccxt.Exchange,
+    inp: _JobInput,
+    ingested: _Ingested,
+    quarter_entries: list[dict[str, Any]],
+    result: dict[str, Any],
+) -> None:
+    """Calibrate and apply: evaluate, then (apply only) gate on the approved fingerprint and
+    write. The fingerprint comparison, like every evaluation stop, precedes the first RPC."""
+    evaluation = await _evaluate(
+        supabase, exchange, str(job.get("api_key_id")), inp, ingested, quarter_entries, result
+    )
+    if inp.mode != "apply":
+        return
+    if inp.approved_fingerprint != evaluation.fingerprint:
+        raise _Stop("fingerprint_mismatch")
+    await _apply_targets(supabase, job, evaluation.plans, result)
 
 
 # ---------------------------------------------------------------------------
@@ -1066,9 +2022,9 @@ async def _ingest_all(
 # ---------------------------------------------------------------------------
 
 async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
-    """``dispatch()`` handler for kind ``okx_archive_rebuild`` (``preflight`` and
-    ``calibrate``). See the module docstring for the order, which is the D-02 guarantee,
-    and for the stateless wait."""
+    """``dispatch()`` handler for kind ``okx_archive_rebuild`` (``preflight``, ``calibrate``
+    and ``apply``). See the module docstring for the order, which is the D-02 guarantee, and
+    for the stateless wait."""
     supabase = get_supabase()
     result = _blank_result(None)
     metadata = job.get("metadata")
@@ -1104,8 +2060,11 @@ async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
                     supabase, job, min(waits),
                     f"{KIND}: waiting quarters_ready={ready}/{len(steps)}",
                 )
-            if inp.mode == "calibrate":
-                await _ingest_all(exchange, quarters, steps, live_types, result)
+            if inp.mode in ("calibrate", "apply"):
+                ingested = await _ingest_all(exchange, quarters, steps, live_types, result)
+                await _run_evaluation(
+                    supabase, job, exchange, inp, ingested, quarters, result
+                )
         except _Stop as stop:
             return await _finish_stop(supabase, job, result, stop)
         except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as exc:
