@@ -112,7 +112,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — verified 2026-10-04 (completed 2026-10-04)
 - [x] **Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out** (INSERTED) — 8 plans, shipped v0.125.0.0 (#950); closed 2026-10-14 (records PR), live half of criterion 2 booked as MT5SCRUB-L3-JOBS-TERMINAL-READING-01
 - [x] **Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series** (INSERTED) — shipped v0.126.0.0 (#969, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
-- [ ] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — not yet planned (booked 2026-10-07 by 164.6.6.2 D-15)
+- [x] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — 17 plans, shipped v0.129.8.0 and v0.130.0.0; verified 2026-10-15 (completed 2026-10-15)
 - [x] **Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend** (INSERTED) — shipped v0.128.0.0 (#973, merged 2026-10-08); verification: passed (D-03 post-deploy reading 2026-10-08) (completed 2026-10-08)
 - [x] **Phase 164.6.6.2.3: FLOWTIMING — a deposit never breaks a return, and an account's first day is its inception, not a warning** (INSERTED 2026-10-08) — 12 plans, shipped v0.131.1.0 (#1018) (completed 2026-10-13)
 - [x] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
@@ -3295,10 +3295,26 @@ and `bridge_scoring.find_replacement_candidates` still correlate a BTC-unit seri
 `nativeAmount` (the BTC amount formatter) with its first caller.
 **Requirements**: TBD
 **Depends on:** Phase 164.6.6.2
-**Plans:** 0 plans
+**Plans:** 17/17 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 164.6.6.2.1-01-PLAN.md — Native-balance GRANT, close-date and holdings-unit columns
+- [x] 164.6.6.2.1-02-PLAN.md — Native levels and live balance to USD
+- [x] 164.6.6.2.1-03-PLAN.md — Compose spike for an unpriced BTC key
+- [x] 164.6.6.2.1-04-PLAN.md — Matchers compare in USD
+- [x] 164.6.6.2.1-05-PLAN.md — Shared USD-view helpers, payload types and compact unit chip
+- [x] 164.6.6.2.1-06-PLAN.md — Own-capital MTD in USD
+- [x] 164.6.6.2.1-07-PLAN.md — Dated USD balance of a BTC key
+- [x] 164.6.6.2.1-08-PLAN.md — Key-mode USD inputs for a BTC key
+- [x] 164.6.6.2.1-09-PLAN.md — BTC key in the USD allocator book
+- [x] 164.6.6.2.1-10-PLAN.md — Positions poll and history backfill price a BTC MT5 account
+- [x] 164.6.6.2.1-11-PLAN.md — Server-built USD view of a native factsheet
+- [x] 164.6.6.2.1-12-PLAN.md — Per-view benchmark-vs-BTC withholding reasons
+- [x] 164.6.6.2.1-13-PLAN.md — Units toggle, native masthead and USD disclosure
+- [x] 164.6.6.2.1-14-PLAN.md — Leverage and basis in the USD view
+- [x] 164.6.6.2.1-15-PLAN.md — Key card shows the native balance with its dated USD value
+- [x] 164.6.6.2.1-16-PLAN.md — Compact `in BTC` chip on StrategyTable
+- [x] 164.6.6.2.1-17-PLAN.md — Native Holdings row, D-20 unpriced-account note, departed copy
 
 ### Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out (INSERTED)
 
@@ -4884,6 +4900,7 @@ Measured at `e34605be`: `reconstruct_symbol_returns` in `analytics-service/route
 2. A holding the price rule cannot price (a fixed mark, an account balance, or too few adjacent priced days) is withheld from the matcher's per-holding signal by name. It is never zero-filled.
 3. The TypeScript and Python rules agree on one shared fixture.
 4. The effect on PROD's current Bridge outputs is read before and after deploy, read-only and with the marker query first.
+
 **Plans:** 0 plans
 
 Plans:
@@ -6133,7 +6150,7 @@ kept verbatim.
 | 164.6.6 MT5TERMINALISOLATION | 9/9 | Complete    | 2026-10-04 |
 | 164.6.6.1 MT5SCRUB | 8/8 | Complete — L-3 NOT OBSERVED, booked (founder 2026-10-14) | 2026-10-14 |
 | 164.6.6.2 BTCNATIVE | 12/13 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
-| 164.6.6.2.1 BTCUSDVIEW | 0/? | Queued — booked 2026-10-07 by 164.6.6.2 D-15 | - |
+| 164.6.6.2.1 BTCUSDVIEW | 17/17 | Complete | v0.129.8.0, v0.130.0.0; closed 2026-10-15 |
 | 164.6.6.2.2 WEALTHRETURNS | 7/7 | Complete — verification passed after the D-03 post-deploy reading | 2026-10-08 · v0.128.0.0 · #973 |
 | 164.6.6.2.3 FLOWTIMING | 12/12 | Complete | 2026-10-13 |
 | 164.6.6.3 UATFIXES | 7/7 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
