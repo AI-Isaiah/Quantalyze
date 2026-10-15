@@ -5947,11 +5947,33 @@ Plans:
 
 **Founder decisions, 2026-10-15 (recorded in `170.1-CONTEXT.md`):** the CSV wizard's "Check the file format you selected" hint shows when every required column of the chosen format other than `date` is missing (R-2, option 1; `date` is required in every format, so the literal reading could never fire). The factsheet's `QSF · <id8> · <date>` document stamp stays as it is (R-5, option 1; a document reference, not a label standing in for a name). An exploratory-tier strategy whose real name is withheld keeps its `Strategy #<8-char id>` handle (D-13).
 
-**Plans:** 0 plans
+**Plans:** 23 plans
 
 Plans:
 
-- [ ] TBD — plans not listed yet
+- [ ] 170.1-01: shared label module with the baseline CHECK census, Badge sentence case, Unnamed strategy null arm (wave 1)
+- [ ] 170.1-02: root title template, auth titles, marketing suffix normalisation (wave 1)
+- [ ] 170.1-03: public product page titles, no "v2" in the strategy tab (wave 1)
+- [ ] 170.1-04: dashboard page titles and the /profile H1 (wave 1)
+- [ ] 170.1-05: admin page titles, two client-page layouts, Admin dashboard anchor (wave 1)
+- [ ] 170.1-06: CSV producer names the missing column; column field through the projection (wave 1)
+- [ ] 170.1-07: CSV envelope in plain words, format hint, rule labels (wave 1)
+- [ ] 170.1-08: no "vs None" chart subtitle; KPI delta "vs current book" (wave 1)
+- [ ] 170.1-09: /referral removed with its manifest entry and sidebar link, sidebar "My allocation", no "Coming soon" default (wave 1)
+- [ ] 170.1-10: key-card timing and passive strings (wave 1)
+- [ ] 170.1-11: status-surface strings and the finished_not_built note kind (wave 1)
+- [ ] 170.1-12: /strategies status line, finished-not-built list note, "Strategies" H1 (wave 2)
+- [ ] 170.1-13: duplicate-with-ok is success; owner banner agrees with the body (wave 2)
+- [ ] 170.1-14: compute-jobs and CSV submissions admin labels and names (wave 2)
+- [ ] 170.1-15: users, intros and partner-pilot admin labels and names (wave 2)
+- [ ] 170.1-16: match eval names, decision labels, Unknown allocator (wave 2)
+- [ ] 170.1-17: venue display names on allocator and strategy surfaces (wave 2)
+- [ ] 170.1-18: breach-reason and venue labels on bridge surfaces; OutcomeForm placeholder removed (wave 2)
+- [ ] 170.1-19: Unnamed strategy for every lookup miss; event-type and relationship-status labels; manage page title (wave 2)
+- [ ] 170.1-20: page-title census, phase gate, recorded sweep; SC-5 orchestrator-owned (wave 3)
+- [ ] 170.1-21: "My allocation" and "Compare strategies" H1s, breadcrumb and prose, with moved e2e anchors (wave 1)
+- [ ] 170.1-22: AdminTabs source, analytics and intro labels; OrganizationTab role (wave 2)
+- [ ] 170.1-23: venue display names in the degraded-member lines and wizard member names (wave 2)
 
 ---
 
