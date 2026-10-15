@@ -15,7 +15,6 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-import pandas as pd
 import pytest
 
 from routers import match as match_mod
@@ -68,13 +67,6 @@ def _holding(
         "asof": asof,
         "updated_at": updated_at,
     }
-
-
-@pytest.fixture(autouse=True)
-def _warm_series(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every holding clears the 30-day warm-up gate, so AUM is the plain sum."""
-    series = pd.Series([0.001] * 40)
-    monkeypatch.setattr(match_mod, "reconstruct_symbol_returns", lambda _s, _sym: series)
 
 
 def _with_history(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pandas as pd
 import pytest
 
 from routers import match as match_mod
@@ -64,13 +63,6 @@ def _book(marker_day: str | None) -> FakeDb:
             "allocator_equity_derived": [_marker(MT5_KEY, marker_day)] if marker_day else [],
         }
     )
-
-
-@pytest.fixture(autouse=True)
-def _warm_series(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every holding clears the 30-day warm-up gate, so AUM is the plain sum."""
-    series = pd.Series([0.001] * 40)
-    monkeypatch.setattr(match_mod, "reconstruct_symbol_returns", lambda _s, _sym: series)
 
 
 def _aum(monkeypatch: pytest.MonkeyPatch, db: FakeDb) -> dict[str, Any]:
