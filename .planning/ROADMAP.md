@@ -2914,10 +2914,26 @@ Plans:
 - **(v) No broker match is a named error.** A name no broker knows becomes a named wizard error, never `KEY_SIGN_IN_FAILED`.
 
 D-14 of 164.6.6.3 ("the service never reads `servers.dat`") stands: the terminal writes its own store through its own search, and the service never parses it. Research input: `164.6.6.3.6-BROKER-SERVERS.md`. It shows that most large brokers assign NUMBERED per-account servers that differ by legal entity, which is why a curated list cannot scale.
-**Plans:** 0 plans
+
+⭐ **Founder decisions 2026-10-15 (smart discuss, AskUserQuestion; recorded in full as D-01–D-15 in `164.6.6.3.6-CONTEXT.md`).**
+- **The gate is founder-run.** It runs over `railway ssh` on the VALIDATION gateway, using the bridge's Wine `python.exe`, plus VNC for route (a). The protocol goes one step at a time, with placeholders only (D-01).
+- **Demo accounts only.** Each route uses a fresh DEMO account at a DIFFERENT never-seen broker (D-02). The 2026-10-05 broker is treated as possibly known, so its key is not a test case (D-03, founder "Not sure" on Step 2d).
+- **ALL routes are measured.** The order is: M1 control by name; M2 route (b) `host:port`, then a retry by name; M3 route (c) startup config or CLI flags; M4 route (a) broker search, including whether it can be driven without a human. Each reading is authorized y/n, elapsed seconds, and a Journal authorization attempt. The terminal is then parked on the house server, followed by L6 (D-04).
+- **A pasted `host:port` is a valid server entry** if route (b) works (D-05).
+- **If the gate passes:**
+  - The learned servers go in a service-role table, one row per server per terminal role, with the env list as a seed (D-06).
+  - If the table read fails, the service falls back to the env seed and logs ERROR. It never admits blind (D-07).
+  - Nothing is forgotten automatically (D-08).
+  - An unseen name enqueues a resolve job on the validation terminal, and the wizard shows "checking a new broker server" (D-09).
+  - A name no broker knows gets a new named, recoverable wire code (D-10).
+  - The resolve's bound comes from the measured timing, and a house park always follows (D-11).
+  - The jobs terminal runs the same resolve under its lease before the key's first sync, or the sync is refused by name (D-12).
+- **Only plan 01 (the gate) is planned now.** The build is re-planned from the verdict (D-14). The founder ratifies each new remote verb per route after the gate (D-15).
+
+**Plans:** 1 plan so far (gate only; build re-planned from the verdict, D-14)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.3.6 to break down)
+- [ ] 164.6.6.3.6-01-PLAN.md — criterion 1 gate: founder-run headless-resolution measurement on the VALIDATION terminal (M1–M4, park, L6) and its verdict
 
 ### Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults (INSERTED)
 
