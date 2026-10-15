@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.132.0.1] - 2026-10-15 — HOLDINGKEYSCOPE follow-up: a holding with a long symbol wraps inside its /compare card on a phone
+
+Found by HOLDINGKEYSCOPE's post-ship 375px check. Two commits: the fix with its test, and this release commit.
+
+### Fixed
+- **A holding card on /compare no longer pushes an unbroken symbol past its edge at 375px.** Measured at 375x812 on the local stack, an MT5 `ACCOUNT-<48 hex>` holding's heading ran to x 519 against a card edge of 359. Its withheld note and the venue line overflowed the same way. A 57-character spot symbol overflowed its price-basis caption too. The card now sets `overflow-wrap: anywhere`, which the heading and every note inherit, and `min-w-0` on both flex levels, so neither can grow past its column. Normal tickers such as ETH and USDT were already wrapping and are unchanged.
+
+### Tests
+- `HoldingFactsheet.test.tsx` pins the wrap and `min-w-0` properties on a 56-character `ACCOUNT-` symbol. jsdom cannot measure layout, so the pin covers the properties the fix rests on. It was seen RED with the classes removed.
+
+### Notes
+- The same check confirmed the "Key disconnected" chip on Holdings and Open positions: it sits 8 px clear of the symbol, and all overflow scrolls inside the table. That half of HOLDINGKEYSCOPE's 375px UAT passed with no change.
+
 ## [0.132.0.0] - 2026-10-15 — HOLDINGKEYSCOPE: a disconnected key's holdings say so, and /compare shows a spot holding's metrics again, computed from its daily price
 
 Phase 167.1.1 HOLDINGKEYSCOPE, re-scoped on 2026-10-15 as a close-out. Phase 170.4 had already stopped two keys holding one asset on one venue from merging into one holding, and had closed the routed readers R-15-1, R-15-2 and R-15-3. This release proves that with a test, pins every consumer of the holding scope key, discloses soft-disconnected keys, and brings back `/compare`'s per-holding metrics from a source that buying or selling cannot distort. Founder decisions D-01 to D-06 are recorded in the phase CONTEXT and the ROADMAP.
