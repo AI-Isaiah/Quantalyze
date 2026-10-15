@@ -32,6 +32,7 @@ from typing import Any, Callable
 import httpx
 import pytest
 
+from services import exchange as exchange_module
 from services import job_worker, okx_archive_job
 from services.job_worker import DispatchOutcome, dispatch
 from tests.test_okx_archive_job import (
@@ -146,6 +147,9 @@ class _Live:
     funding: dict[str, float] = field(default_factory=dict)
     transfers: list[dict[str, Any]] = field(default_factory=list)
     calls: list[tuple[str, Any]] = field(default_factory=list)
+    #: What ``fetch_daily_pnl`` leaves in the per-task DQ buffer when the crawl swallowed an
+    #: error or hit a page cap: ``{"daily_pnl_fetch_error": True, ...}``.
+    dq_flags: dict[str, Any] = field(default_factory=dict)
 
 
 def _records(realized: dict[str, float]) -> list[dict[str, Any]]:
@@ -453,6 +457,11 @@ def _install(
 
     async def _trades(exchange: Any, symbol: Any = None, since_ms: Any = None) -> list[dict[str, Any]]:
         live.calls.append(("trades", since_ms))
+        # The real fetch_daily_pnl resets the buffer at entry and records its flags here, on the
+        # asyncio task the job later reads them on.
+        exchange_module._LAST_DQ_FLAGS.set({})
+        for key, value in live.dq_flags.items():
+            exchange_module._record_dq_flag(key, value)
         return _records(live.realized)
 
     async def _funding(exchange: Any, label: str, since_ms: Any) -> list[dict[str, Any]]:
@@ -938,6 +947,82 @@ class TestFlowSeamsReachTheJob:
         (call,) = _apply_calls(db)
         values = {r["date"]: r["daily_return"] for r in call["p_rows"]}
         assert values["2026-07-10"] == pytest.approx(ORACLE["2026-07-10"], abs=1e-12)
+
+
+class TestLiveCrawlFlags:
+    """F2 / WR-03. ``fetch_daily_pnl`` swallows every error and returns whatever it has,
+    recording ``daily_pnl_fetch_error`` (with the exception CLASS) or
+    ``daily_pnl_truncated_okx`` in a per-task buffer. The job never read the buffer, so a
+    crawl that died on a 502 read as an empty live series: ``reconcile_miss window=...`` (or,
+    on a quiet account, a pass), and a venue 429 could never reach the handler's deferral."""
+
+    @pytest.mark.asyncio
+    async def test_a_swallowed_fetch_error_is_a_transient_stop_not_an_empty_series(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _Live(realized={})
+        live.dq_flags = {"daily_pnl_fetch_error": True, "daily_pnl_fetch_error_class": "ExchangeNotAvailable"}
+        world = _install(monkeypatch, db, live, q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "transient"
+        assert outcome.error_message == "okx_archive_rebuild: live_fetch_failed class=ExchangeNotAvailable"
+        result = world.result()
+        assert result["stop_class"] == "live_fetch_failed"
+        assert result["reconcile"] is None, "the reconciliation must not run on a failed crawl"
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_a_swallowed_rate_limit_is_deferred_not_failed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 429 that outlasted the helper's retries ends in the same buffer. It is a reason
+        to wait (never stamped on the key), exactly like a 429 raised anywhere else."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        live.dq_flags = {"daily_pnl_fetch_error": True, "daily_pnl_fetch_error_class": "RateLimitExceeded"}
+        world = _install(monkeypatch, db, live, q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DEFERRED
+        (defer,) = [p for n, p in db.rpcs if n == "defer_compute_job"]
+        assert defer["p_reason"] == "okx_archive_rebuild: waiting rate_limited"
+        assert defer["p_defer_seconds"] == okx_archive_job.RATE_LIMIT_DEFER_S
+        assert [n for n, _ in db.rpcs if n == PROGRESS] == []
+        assert db.table_writes == []
+
+    @pytest.mark.asyncio
+    async def test_a_page_cap_truncation_is_a_named_stop_never_a_partial_series(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The OKX walk pages newest-first, so a capped walk drops the OLDEST days: the days
+        the reconciliation and the NAV roll lean on. The records that came back look fine."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        live.dq_flags = {"daily_pnl_truncated_okx": True}
+        world = _install(monkeypatch, db, live, q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "permanent"
+        assert outcome.error_message == "okx_archive_rebuild: live_anchor_unusable live_realized=truncated"
+        assert world.result()["reconcile"] is None
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_a_clean_crawl_leaves_no_flag_behind_for_the_next_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        assert exchange_module.get_and_clear_last_dq_flags() == {}
 
 
 class TestWindows:

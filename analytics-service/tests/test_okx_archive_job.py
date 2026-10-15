@@ -1677,11 +1677,12 @@ class TestStopClassContract:
             "archive_request_failed", "archive_give_up", "download_refused", "link_expired",
             "container_unknown", "archive_incomplete", "header_drift", "quarter_range_mismatch",
             "duplicate_bill_conflict", "unparseable_amount", "unknown_subtype_nonzero",
-            "non_usd_ccy", "live_anchor_unusable", "identity_violation", "reconcile_miss",
+            "non_usd_ccy", "live_anchor_unusable", "live_fetch_failed", "identity_violation",
+            "reconcile_miss",
             "d03_zero_day_has_archive_pnl", "fingerprint_missing", "fingerprint_mismatch",
             "rpc_refused",
         }
-        assert okx_archive_job.TRANSIENT_STOP_CLASSES == {"link_expired"}
+        assert okx_archive_job.TRANSIENT_STOP_CLASSES == {"link_expired", "live_fetch_failed"}
 
     def test_an_unlisted_class_cannot_be_raised(self) -> None:
         """A typo'd class would otherwise ship as a silent new class no reader knows."""

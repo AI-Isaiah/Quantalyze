@@ -84,6 +84,7 @@ from services.exchange import (
     aclose_exchange,
     fetch_account_equity_and_upnl_usd,
     fetch_all_trades,
+    get_and_clear_last_dq_flags,
 )
 from services.external_flows import ExternalFlow
 from services.funding_fetch import fetch_funding_okx
@@ -136,8 +137,8 @@ logger = logging.getLogger(__name__)
 KIND: Final[str] = "okx_archive_rebuild"
 RESULT_VERSION: Final[int] = 1
 
-# Closed set of stop classes (job contract). ``link_expired`` is transient; every other
-# class is permanent. A stop writes the result block first, then returns FAILED.
+# Closed set of stop classes (job contract). ``link_expired`` and ``live_fetch_failed`` are
+# transient (a retry resumes statelessly); every other class is permanent. A stop writes the result block first, then returns FAILED.
 STOP_CLASSES: Final[frozenset[str]] = frozenset(
     {
         "invalid_input",
@@ -160,6 +161,7 @@ STOP_CLASSES: Final[frozenset[str]] = frozenset(
         "unknown_subtype_nonzero",
         "non_usd_ccy",
         "live_anchor_unusable",
+        "live_fetch_failed",
         "identity_violation",
         "reconcile_miss",
         "d03_zero_day_has_archive_pnl",
@@ -168,7 +170,7 @@ STOP_CLASSES: Final[frozenset[str]] = frozenset(
         "rpc_refused",
     }
 )
-TRANSIENT_STOP_CLASSES: Final[frozenset[str]] = frozenset({"link_expired"})
+TRANSIENT_STOP_CLASSES: Final[frozenset[str]] = frozenset({"link_expired", "live_fetch_failed"})
 
 # ---------------------------------------------------------------------------
 # Timings (RESEARCH A9, discretion), used by the stateless wait.
@@ -1374,6 +1376,31 @@ def _live_funding_by_day(funding_rows: list[Any]) -> dict[str, Decimal]:
     return out
 
 
+#: ccxt exception classes ``fetch_daily_pnl`` records (by name) for a venue rate limit.
+_RATE_LIMIT_CLASSES: Final[frozenset[str]] = frozenset({"RateLimitExceeded", "DDoSProtection"})
+_CLASS_NAME_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
+
+
+def _check_live_realized_flags(flags: Mapping[str, Any]) -> None:
+    """Turn what ``fetch_daily_pnl`` left in the DQ buffer into a decision, never into data.
+
+    * a swallowed venue rate limit is re-raised as ``ccxt.RateLimitExceeded`` so the handler
+      defers (and, as everywhere in this job, never stamps the key);
+    * any other swallowed fetch error is the transient ``live_fetch_failed`` (the exception
+      CLASS only, never its text, which can carry a signed URL): a failed crawl is not a
+      quiet account, and an empty series must not reach the reconciliation;
+    * a page-cap truncation means the OLDEST live days are missing, the very days the
+      reconciliation and the NAV roll lean on: the live realized series is unusable."""
+    if flags.get("daily_pnl_fetch_error"):
+        name = flags.get("daily_pnl_fetch_error_class")
+        if name in _RATE_LIMIT_CLASSES:
+            raise ccxt.RateLimitExceeded("live realized crawl was rate limited")
+        label = name if isinstance(name, str) and _CLASS_NAME_RE.fullmatch(name) else _MALFORMED
+        raise _Stop("live_fetch_failed", f"class={label}")
+    if flags.get("daily_pnl_truncated_okx"):
+        raise _Stop("live_anchor_unusable", "live_realized=truncated")
+
+
 async def _live_reference(
     exchange: ccxt.Exchange, supabase: Any, api_key_id: str
 ) -> _LiveReference:
@@ -1388,6 +1415,9 @@ async def _live_reference(
     realized = await asyncio.wait_for(
         fetch_all_trades(exchange, since_ms=None), timeout=_BROKER_CRAWL_TIMEOUT_S
     )
+    # F2 / WR-03: the fetch swallows every error and returns what it has; the only trace is
+    # the per-task DQ buffer. Read it NOW, before any other crawl can reset it.
+    _check_live_realized_flags(get_and_clear_last_dq_flags())
     funding = await asyncio.wait_for(
         fetch_funding_okx(exchange, api_key_id, None), timeout=_BROKER_CRAWL_TIMEOUT_S
     )
