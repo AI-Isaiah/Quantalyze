@@ -15,7 +15,11 @@
  * HOLDING_COMPARE_MIN_PRICED_DAYS priced days (`priced_days < MIN`, not "all
  * four null"), shows em-dashes and the threshold (State R0). At or above the
  * minimum, a null vol adds one muted sentence naming why (State R2, SFH-02).
- * Derivatives stay withheld until a signed basis is defined (State D); a spot holding whose recorded price is a writer constant
+ * Phase 167.1.1.1 / D-02: a derivative takes the same grid from its direction-signed
+ * mark price (State RD), and its caption says the sign rule in words: a price rise is
+ * a gain while the position was long and a loss while it was short. A derivative with
+ * priced days and no established direction (State ND) and an option (State OP) are
+ * withheld with a named note. A spot holding whose recorded price is a writer constant
  * (stablecoin, MT5 account, sFOX) is withheld with a named note (State F); any
  * other holding_type fails closed (State X).
  * Fail-closed: only an explicit `historyState === "ready"` with analytics
@@ -46,9 +50,6 @@ function pricedDayCount(n: number): string {
   return n === 1 ? "1 priced day" : `${formatNumber(n, 0)} priced days`;
 }
 
-const DERIVATIVE_NOTE =
-  "Return, Sharpe, max drawdown and volatility are not shown for derivative holdings yet. A price rise is a gain on a long position and a loss on a short one, and these figures wait until that direction is defined for each day.";
-
 // CR-01 / SFH-01 (167.1.1 round 1) and M-R2-01 (round 2): a spot holding whose
 // recorded price is not a market price has rows and an owner but no metric, so it
 // shows a named note (State F). One sentence per cause, because the false cause is
@@ -65,6 +66,10 @@ function withheldNote(
       return `${lead} its recorded price is a fixed value, not a market price.`;
     case "no_price":
       return `${lead} no market price has been recorded for it.`;
+    case "no_direction":
+      return `${lead} its long or short direction could not be established from the recorded positions.`;
+    case "option_premium":
+      return `${lead} it is an option, and these figures are not computed from option premiums.`;
   }
 }
 
@@ -73,6 +78,18 @@ function withheldNote(
 // even when return and drawdown (level metrics) are numbers.
 const ADJACENCY_NOTE =
   "Volatility and Sharpe need at least two pairs of consecutive priced days.";
+
+// 167.1.1.1 D-02: the derivative basis line. "while" is neutral about which day's direction
+// governs an interval, and "opening, closing or resizing" is the consequence that matters.
+function derivativePriceBasis(n: number, symbol: string): string {
+  return `Computed from ${dayCount(n)} of ${symbol}'s daily mark price. A price rise counts as a gain while the position was long and as a loss while it was short, so opening, closing or resizing the position does not count as a gain or loss.`;
+}
+
+// The signed series compounds adjacent-day returns only, so a move across a missing day
+// (or across a day with no established direction, which is a missing day of that series)
+// is dropped. Spot reads a price LEVEL ratio and does not drop it, so only a derivative
+// says so.
+const DERIVATIVE_GAP_NOTE = "A price move across a missing day is not counted.";
 
 const NOT_SPOT_NOTE =
   "Return, Sharpe, max drawdown and volatility are computed for spot holdings only, and this holding is not recorded as spot.";
@@ -120,9 +137,7 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
         >
           {item.historyState === "withheld"
             ? withheldNote(symbol, item.withheld_reason)
-            : holding_type === "derivative"
-              ? DERIVATIVE_NOTE
-              : NOT_SPOT_NOTE}
+            : NOT_SPOT_NOTE}
         </p>
       ) : (
         <>
@@ -166,7 +181,9 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
           >
             {tooFewPricedDays
               ? `Only ${pricedDayCount(analytics.priced_days)} of ${symbol} so far. These four figures need at least ${HOLDING_COMPARE_MIN_PRICED_DAYS} priced days.`
-              : `Computed from ${dayCount(analytics.priced_days)} of ${symbol}'s daily price, so buying, selling or moving more of it does not count as a gain or loss.`}
+              : holding_type === "derivative"
+                ? `${derivativePriceBasis(analytics.priced_days, symbol)} ${DERIVATIVE_GAP_NOTE}`
+                : `Computed from ${dayCount(analytics.priced_days)} of ${symbol}'s daily price, so buying, selling or moving more of it does not count as a gain or loss.`}
           </p>
           {needsAdjacentDays && (
             <p
