@@ -123,7 +123,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults** (INSERTED) — verification: passed (PR #971, v0.127.0.0) (completed 2026-10-08)
 - [ ] **Phase 164.6.6.3.6: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed** (INSERTED) — not yet planned (booked 2026-10-06, founder)
 - [x] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
-- [ ] **Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button** (INSERTED) — not yet verified
+- [x] **Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button** (INSERTED) — 10 plans, shipped in #1031, #1036 and #1038 (completed 2026-10-15)
 - [x] **Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here** (INSERTED)
 - [x] **Phase 164.8: TESTPREPROD — TEST becomes a real pre-prod: every migration is proven on a real Postgres before it reaches a customer** (INSERTED)
 - [x] **Phase 164.8.1: REFDATA — a schema-only restore destroys migration-seeded reference data while the ledger swears those migrations applied** (INSERTED)
@@ -187,8 +187,8 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 3 plans (completed 2026-10-11)
 - [x] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — 14 plans, two PRs (#1003, #1006) (completed 2026-10-11)
 - [x] **Phase 170.5: FACTSHEETV2PANELS — /strategy/[id]/v2 panels render or say why** (INSERTED 2026-10-03) — 7 plans; closed 2026-10-14 (records PR) (verification passed, live readings 2026-10-14; two observations booked in TODOS)
-- [ ] **Phase 170.6: DISPLAYPOLISH — no signed zeros or red positives; short overlaps read em-dash** (INSERTED 2026-10-03; NUMBERS only since 2026-10-13) — not yet planned
-- [x] **Phase 170.6.1: DISCOVERYPHONE — the Discovery table works on a phone and names the right venue** (INSERTED 2026-10-13) — 5 plans, shipped v0.131.5.0 (#1026) and v0.131.6.0 (#1030) (completed 2026-10-14); verification passed 2/2, security secured 27/27
+- [x] **Phase 170.6: DISPLAYPOLISH — no signed zeros or red positives; short overlaps read em-dash** (INSERTED 2026-10-03; NUMBERS only since 2026-10-13) — 14 plans, shipped in #1037 (completed 2026-10-15)
+- [x] **Phase 170.6.1: DISCOVERYPHONE — the Discovery table works on a phone and names the right venue** (INSERTED 2026-10-13) — 6 plans, shipped v0.131.5.0 (#1026), v0.131.6.0 (#1030) and the D-10 follow-up v0.131.10.0 (#1039) (completed 2026-10-15); verification passed 2/2, security secured 27/27
 - [x] **Phase 170.6.2: COPYPASS — copy fixes, the /browse example flash, the admin kind filter** (INSERTED 2026-10-13) — 4 plans, shipped v0.131.4.0 (#1023) (completed 2026-10-14); closed 2026-10-14 (records PR)
 - [x] **Phase 170.7: MYSTRATTABLE — My Strategies uses the ranking table, and the name opens the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 9 plans (completed 2026-10-11)
 
@@ -3347,7 +3347,10 @@ Plans:
 ### Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button (INSERTED)
 
 **Goal:** A shared-terminal outage reaches a human without one clicking a button.
-**Requirements**: TBD
+**Requirements**: SC-1, SC-2; TODOS MT5-VALIDATION-TERMINAL-COVERAGE-01,
+MT5-RELAUNCH-DEBT-LEASE-WAIT-01, 167.1.2.2.2-TRADESYNC-STALENESS-ALARM, 167.1.2.2-BACKFILL-STALENESS-ALARM,
+[167.1.2.2.2-CRON-TICK-RESIDUALS] item 4; live-gated (D-12): MT5-PROBER-WEDGE-CALIBRATION-01,
+MT5-SWITCH-WEDGE-CAUSE-01
 **Depends on:** Phase 164.6.5 (the salience work sits on 164.6.5's terminal-measuring prober arm, and
 a real-wedge capture has to beat 164.6.5's own heal, which can recycle a wedge before a scheduled
 prober run reads it). It does NOT depend on Phase 164.6.6: alerting on an outage does not need the
@@ -3385,7 +3388,12 @@ lands, a wedged or logged-out validation terminal is noticed only when a validat
 
 **Owns (routed 2026-10-10 from Phase 167.1.2.2.2 SC-6, default per research, the founder confirms at this phase's planning):** `TODOS.md` `167.1.2.2.2-TRADESYNC-STALENESS-ALARM` — a daily `cron_sync` trade-sync heartbeat (`cron_runs`, `cron_name = 'cron_sync'`) older than 2 days, or two consecutive `error` rows, reaches a human without one running a query. Input: the heartbeat Phase 167.1.2.2.2 plan 06 writes; ceiling: its D-05 (2 days). Interim, and not a close: the public stale styling (D-06) and the go-live runbook's manual reads. Sibling: `167.1.2.2-BACKFILL-STALENESS-ALARM`.
 
-**Plans:** 0 plans
+**⭐ 2026-10-14, founder decision at the plan 09 drill (D-15, deviates from D-01):** Sentry is the only live paging channel for now. The PROD drill reached Sentry, and the founder confirmed the rule notified them. The founder email did not send because production has no Resend key (502, logged loud). The email half is booked as `164.6.8-OPS-ALERT-EMAIL-UNCONFIGURED`. CONTEXT D-15 carries the record.
+
+**⭐ 2026-10-14, founder decision after verification (D-16):** under D-15, a RECOVERED notice counts as delivered once its Sentry capture succeeds, so it stops retrying while email is unconfigured. It ships as a gap-closure plan before the phase closes.
+
+**⭐ 2026-10-15, founder decision (D-16 amended):** "Widen the rule to recovered". The Sentry rule "Ops alert: outage (164.6.8)" now also notifies on `ops_alert_event=recovered`, through a second action group that emails the issue owners. A credited recovered notice therefore reaches the founder. This is a live Sentry setting, not a repo file.
+**Plans:** 10 plans (plan 10 is the D-16 gap closure, 2026-10-15)
 
 **Success criteria (to be derived properly at planning):**
 
@@ -3404,10 +3412,28 @@ lands, a wedged or logged-out validation terminal is noticed only when a validat
    `mt5_relaunch_debt` is set, the lease-busy branch logs at ERROR, so Sentry and the outage path
    see it, and a stuck debt reaches a human the same way criterion 1's outage does. A test fails on
    today's busy branch. *(Routed 2026-10-12 from 164.6.6.1 MT5SCRUB review WR-02; founder: "Book a fix".)*
+   ⛔ **CORRECTED 2026-10-14 (Phase 164.6.8 planning, D-14):** the lease-busy ERROR while a relaunch
+   debt is owed already exists at HEAD and is pinned by
+   `test_T15_a_BUSY_tick_with_a_relaunch_debt_owed_logs_ERROR_and_never_session_is_fine`
+   (`377353b2c`, #950), so "a test fails on today's busy branch" no longer holds. This phase adds the
+   two open parts: the ERROR now also pages through the phase's alert channel (Sentry tagged capture
+   plus founder email), and the heal waits up to the lease-wait ceiling while a debt is owed
+   (`MT5-RELAUNCH-DEBT-LEASE-WAIT-01`). Plan 07. The sentence above is kept as lineage.
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.6.8 to break down)
+- [x] 164.6.8-01-PLAN.md — (wave 1) the alert channel: never-raising Python page helper (tagged Sentry capture + email), authenticated Next.js founder-email route, cadence route re-wired; founder records the Sentry rule type (D-01, D-02)
+- [x] 164.6.8-02-PLAN.md — (wave 1) `public.ops_staleness_check()`: cron_sync heartbeat (2 days or two consecutive errors) and backfill-queue stall reader posting to the existing alert route, SQL gate with biting twins, parity pin (D-10, D-11)
+- [x] 164.6.8-03-PLAN.md — (wave 1) prod-prober: one GitHub issue per incident, closed by the first clean scheduled run; still exit-0 (D-07)
+- [x] 164.6.8-04-PLAN.md — (wave 2) MT5 jobs-terminal outage pages at the existing threshold, hourly per cause, one recovered notice on a measured healthy reading, scrubbed pre-recycle wedge evidence (D-04, D-05, D-06, D-13)
+- [x] 164.6.8-05-PLAN.md — (wave 2) SQL census moved by one measured full lane run, schedule-nothing census, live-registration runbook (D-10)
+- [x] 164.6.8-06-PLAN.md — (wave 3) validation terminal: liveness probe on every monitor tick and the reader of non-scrubbed `mt5_terminal_scrub` rows (D-09)
+- [x] 164.6.8-07-PLAN.md — (wave 4) longer lease wait while a relaunch debt is owed, the debt page and recovery, SC-2 text corrected to HEAD (D-14)
+- [x] 164.6.8-08-PLAN.md — (wave 5) release and ship: stamp re-pick, VERSION/CHANGELOG/TODOS (wedge items booked live-gated, D-12), review gates, land outside 04:00-05:45Z
+- [x] 164.6.8-09-PLAN.md — (wave 6) post-ship live checks: founder drill arrival test, PROD pg_cron registration (marker query first), validation probe live, TODOS closures
+- [x] 164.6.8-10-PLAN.md — (gap closure, D-16) a RECOVERED notice is credited on its Sentry event id, so the open-page record closes while email is unconfigured; a failed capture still is not credited (WR-R3-01, Sentry half); executed 2026-10-15
+
+Live-gated human items, not plans (D-12): `MT5-PROBER-WEDGE-CALIBRATION-01`, `MT5-SWITCH-WEDGE-CAUSE-01`. The phase closes without them.
 
 ### Phase 164.6.1: MYPYSTRICT — the strict gate claims to cover all running-service code and does not cover the module that IS the service (INSERTED)
 
@@ -5607,8 +5633,7 @@ Plans:
 
 This phase keeps signed zeros and non-negative *values* drawn red, plus its other items.
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** No surface prints a signed zero or tones a value against its rounded sign, and a comparator overlap too short to annualize prints "—" for its annualized figures and names the day its prices end.
 **Depends on:** Phase 170
 
 ⚠️ **Re-scoped 2026-10-13 (founder, "Split in three"):** this phase is NUMBERS only (signed zeros, tone, the comparator annualization floor and its dated floor sentence). SC-1 (phone table) and SC-2 (exchange label) **moved to 170.6.1 DISCOVERYPHONE**; the /recommendations copy, the D-26 rebuilding-panel copy, the anonymous /browse example flash and the admin Compute Jobs kind filter **moved to 170.6.2 COPYPASS**. The title above is kept as lineage.
@@ -5622,10 +5647,25 @@ This phase keeps signed zeros and non-negative *values* drawn red, plus its othe
 4. A comparator overlap under 90 days shows "—" for Sharpe, Sortino, Calmar, CAGR and annualized vol, keeping cumulative return and max drawdown; a test fails on today's 5-day SPX Sharpe 10.24 (D-07).
 5. When the comparator ends early, the paired-floor sentence says "{CN} prices end Mon D." (D-08).
 
-**Plans:** 0 plans
+**⭐ 2026-10-14, founder override at review:** "if we run a fixer, then fix all medium items". The review fix round fixes every MEDIUM. That includes SFH-1: the withheld comparator figures now carry a reason line, which supersedes orchestrator call O-5's "no reason line". CONTEXT O-5 carries the dated note.
+
+**Plans:** 14 plans in 5 waves (re-planned 2026-10-13 after plan-check iterations 1 and 2; O-7..O-9 widened the scope to every surface; plan 14 runs in wave 2)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 170.6 to break down)
+- [x] 170.6-01-PLAN.md — W1 tracer: the one rule in display-sign.ts (detect-only digits, drawdownTone, isPrintedZero), v2/format.ts and strategy-v2/format.ts delegate, KPI strip and OG Sharpe print an unsigned rounded zero; census; neuter proof (D-02, D-03, D-05, D-06)
+- [x] 170.6-02-PLAN.md — W2 utils.ts delegates (formatPercent, formatNumber detect-only on Intl, formatCurrency, metricColor with a unit); 13 metricColor calls, StrategyBreakdownTable Max DD, BenchmarkComparison's copy, tearsheet tones; grep -a pin sweep (D-02..D-05)
+- [x] 170.6-03-PLAN.md — W2 factsheet rail: MetricsColumn text and colours on the rounded sign; drawdown never green (D-02..D-05)
+- [x] 170.6-04-PLAN.md — W2 factsheet table panels: stress windows, BatchD, Analytical, Distribution (D-02..D-05)
+- [x] 170.6-05-PLAN.md — W2 factsheet v2 chart ticks, tooltips, heatmap text (fills unchanged), daily-return bar fill (D-02, D-03, D-06)
+- [x] 170.6-06-PLAN.md — W2 shared chart components (src/components/charts): heatmap text, ticks, tooltips, bar fills, rolling-ratio charts (D-02, D-03, D-06; O-7)
+- [x] 170.6-07-PLAN.md — W2 allocations alpha/beta comparator panel, KPI and composer delta pills, outcomes widget (D-02, D-03; O-7)
+- [x] 170.6-08-PLAN.md — W2 allocations equity chart, drawdown chart, tail risk, correlation matrix text, risk decomposition (D-02, D-03, D-06; O-7)
+- [x] 170.6-09-PLAN.md — W2 portfolio deltas, attribution bar, equity curve, correlation heatmap text, winners/losers strip, editorial hero drawdowns, what-we'd-do card (D-02..D-06; O-7)
+- [x] 170.6-10-PLAN.md — W2 StrategyTable signColor and drawdownColor, holding factsheet, compare views, wizard sync preview, demo / portfolio-PDF / recommendations Max DD cells (D-02..D-05; O-7, O-8, O-9)
+- [x] 170.6-11-PLAN.md — W3 90-day comparator annualization floor with neuter proof, "{CN} prices end Mon D." floor sentence (D-07, D-08)
+- [x] 170.6-12-PLAN.md — W4 SC-3 single-source guard R1-R8 over the whole census, four neuter proofs (D-02..D-05)
+- [x] 170.6-13-PLAN.md — W5 release: merged head green, late fixes in their own commit, version re-picked from origin/main, one CHANGELOG entry; orchestrator review and ship checkpoint
+- [x] 170.6-14-PLAN.md — W2 /strategy/[id]/v2 headline and trade panels, split from plan 05 for budget (D-02..D-05)
 
 ### Phase 170.6.1: DISCOVERYPHONE — the Crypto SMA Discovery table works on a phone and names the right venue (INSERTED)
 
@@ -5639,7 +5679,10 @@ Split out of 170.6 DISPLAYPOLISH on 2026-10-13 (founder, "Split in three"); SC-1
 2. A Discovery row's exchange label, and the "Trades fetched" tooltip that says "from the exchange", name the venue the strategy's trades actually come from. Measured 2026-10-13 by TRADESYNC plan 21 (anon curl on PROD): one published strategy's row reads "Bybit", taken from its descriptive `strategies.supported_exchanges`, while its connected key is on OKX. Either the label reads the connected key's venue, or the mismatch is surfaced; a test fails on today's behaviour. (Routed 2026-10-13 from 167.1.2.2.2 TRADESYNC plan 21; founder: "Route to DISPLAYPOLISH".)
 
 **Decision 2026-10-14 (founder, D-09, supersedes D-03):** below `@3xl` the Strategy name column is pinned, reversing 170.2 D-05 for that width range, because removing the collapse also widened laptop tables (PR-A review WR-02). Scroll-cue checks run at every viewport.
-**Plans:** 5 plans (two PRs: PR-A = plans 01-03, the venue function and the phone table; PR-B = plans 04-05, the venue reader, merged only after the function is live on PROD)
+
+**⭐ 2026-10-14, founder decision at close-out (D-10):** an unavailable venue read shows a muted "Venue unavailable" placeholder, not a blank label and never the listed exchange. Ships as a follow-up plan.
+
+**Plans:** 6 plans (two PRs: PR-A = plans 01-03, the venue function and the phone table; PR-B = plans 04-05, the venue reader, merged only after the function is live on PROD; plan 06 is the D-10 gap closure)
 
 Plans:
 - [x] 170.6.1-01-PLAN.md — wave 1: `get_published_trade_venues` SECURITY DEFINER migration, rollback, RED-UNDER gate and function censuses (SC-2, D-04, D-08)
@@ -5647,6 +5690,7 @@ Plans:
 - [x] 170.6.1-03-PLAN.md — wave 2: PR-A release: gate floors and censuses, database reviews, release commit (anon `api_key_id` exposure pointed at 170.6.1.1 ANONKEYID), ship and PROD presence check (D-08)
 - [x] 170.6.1-04-PLAN.md — wave 3: the batched venue reader and the SyncBadge label and mismatch tooltip on the Discovery table and grid (SC-2, D-04, D-05, D-06, D-07)
 - [x] 170.6.1-05-PLAN.md — wave 4: PR-B release behind the PROD function, follow-ups booked, SC-2 confirmed on PROD as anon
+- [x] 170.6.1-06-PLAN.md — wave 1 (gap closure, D-10): an unavailable venue read shows a muted "Venue unavailable" on the Discovery table and grid, never the listed exchange; WR-01's one Sentry capture per call pinned and proven able to fail (SC-2)
 
 ### Phase 170.6.2: COPYPASS — copy fixes, the anonymous /browse example flash and the admin Compute Jobs kind filter (INSERTED)
 
@@ -5968,7 +6012,7 @@ kept verbatim.
 | 164.6.6.3.5 DOMAINONE | 13/13 | Complete — verification passed after plan 13's live checks | 2026-10-08 · v0.127.0.0 · #971 |
 | 164.6.6.3.6 MT5SERVERLEARN | 0/? | Queued — booked 2026-10-06 (founder); BROKER-SERVERS.md measured, no plans | - |
 | 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Complete    | 2026-10-04 |
-| 164.6.8 OUTAGEALERT | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
+| 164.6.8 OUTAGEALERT | 10/10 | Complete | 2026-10-15 |
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 7/7 | Complete | v0.77.32.1 · finalized v0.77.32.1; its 33 stranded artifacts restored to main by PR #785. Row said `0/? Queued 2nd` until 2026-09-12 |
 | 164.8 TESTPREPROD (TEST becomes a real pre-prod: apply on merge to TEST before PROD) | 6/6 | Complete | v0.77.31.2 · . Row said `3/6 Queued 5th` until 2026-09-12 |
 | 164.8.1 REFDATA (a schema-only restore destroys migration-seeded reference data) | 4/4 | Complete | PR #767. ⚠️ `164.8.1-04-SUMMARY.md` is still stranded off main; local disk reads 4/3 |
@@ -6029,8 +6073,8 @@ kept verbatim.
 | 170.3 OGPUBLIC | 3/3 | Complete | 2026-10-11 |
 | 170.4 ALLOCHOLDINGS | 14/14 | Complete | 2026-10-11 |
 | 170.5 FACTSHEETV2PANELS | 7/7 | Complete | 2026-10-14 |
-| 170.6 DISPLAYPOLISH | 0/? | Queued — user-facing, booked 2026-10-03 | - |
-| 170.6.1 DISCOVERYPHONE | 5/5 | Complete | 2026-10-14 |
+| 170.6 DISPLAYPOLISH | 14/14 | Complete | 2026-10-15 |
+| 170.6.1 DISCOVERYPHONE | 6/6 | Complete | 2026-10-15 |
 | 170.6.2 COPYPASS | 4/4 | Complete | 2026-10-14 |
 | 170.7 MYSTRATTABLE | 9/9 | Complete | 2026-10-11 |
 
