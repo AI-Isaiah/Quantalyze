@@ -720,7 +720,7 @@ Plans:
 - [x] 164.3-04-PLAN.md — VAC-07 SPIKE: 263-migration replay measured + local-stack lane with trapped teardown (D-15) [wave 1]
 - [x] 164.3-05-PLAN.md — Mutation runner core: RED-UNDER-M grammar + parser + first-failure identity + both exit-1 modes + aggregation (VAC-01, OPS-08-F8) [wave 2]
 - [x] 164.3-06-PLAN.md — Static vacuity linter, mechanisms 1/2/4 + narrow 3, red fixtures per rule, NO mechanism-5 rule (VAC-03, D-16) [wave 2]
-- [ ] 164.3-07-PLAN.md — Phase 159 closure spec: two concurrent csv-finalize POSTs, one 2xx + one honest 409, winner holds (VAC-07, D-08) [wave 2]
+- [ ] 164.3-07-PLAN.md — closure spec for 159: two concurrent csv-finalize POSTs, one 2xx + one honest 409, winner holds (VAC-07, D-08) [wave 2]
   ⭐ **164.3-07 SUPERSEDED 2026-10-02:** VAC-07 was delivered and scored by Phase 164.5 plan 07 (`src/__tests__/csv-finalize-concurrent-never-classified.test.ts`, run by `frontend-local-stack`); no SUMMARY is written for it here: a SUMMARY ends the deferral that `verify-plan-anchors.test.ts` pins by name, and the one added in #930 turned `main` red (removed 2026-10-03 in the 164.9.4 PR); `164.3-07-DEFERRED.md` stays the record.
 - [x] 164.3-08-PLAN.md — Corpus annotation backfill (30 arm-anchored markers, measured), full run green, ARMS_FLOOR pinned, sql-mutation CI job + aggregator row (VAC-01) [wave 3]
 - [x] 164.3-09-PLAN.md — Plan-anchor verifier: range + quote re-resolution over pending plans, CI seam + execute-time convention (VAC-05, D-06 own wave) [wave 4]
@@ -1010,7 +1010,9 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.4.2.1 to break down)
+- [x] 164.4.2.1-01-PLAN.md
+- [x] 164.4.2.1-02-PLAN.md
+- [x] 164.4.2.1-03-PLAN.md
 
 ### Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral (INSERTED)
 
@@ -2917,7 +2919,7 @@ D-14 of 164.6.6.3 ("the service never reads `servers.dat`") stands: the terminal
 **Plans:** 0 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.3.6 to break down)
+- [ ] TBD — plans not listed yet
 
 ### Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults (INSERTED)
 
@@ -3294,7 +3296,7 @@ and `bridge_scoring.find_replacement_candidates` still correlate a BTC-unit seri
 **Plans:** 0 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.2.1 to break down)
+- [ ] TBD — plans not listed yet
 
 ### Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out (INSERTED)
 
@@ -3899,7 +3901,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.9.8.1 to break down)
+- [ ] TBD — plans not listed yet
 
 ### Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables (measured read-only on PROD 2026-10-03: anon 56 of 63 tables, authenticated 59, api_keys included; RLS never covers TRUNCATE). One migration revokes it and the default privilege; migration-reviewer + rls-policy-auditor + silent-failure-hunter before merge, since merges auto-apply to PROD. (INSERTED)
 
@@ -4076,7 +4078,11 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9.2 to break down)
+- [x] 164.9.2-01-PLAN.md
+- [x] 164.9.2-02-PLAN.md
+- [x] 164.9.2-03-PLAN.md
+- [x] 164.9.2-04-PLAN.md
+- [x] 164.9.2-05-PLAN.md
 
 ### Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim (INSERTED)
 
@@ -4162,7 +4168,7 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9.3.1 to break down)
+- [ ] TBD — plans not listed yet
 
 **⭐ ROUTED IN 2026-09-26 (founder, "164.9.3.1 FANINGRAPH"; found by the 164.5.2 round-1 code review, WR-02, pre-existing):** a fan-in lost release. When two parents of one `done_pending_children` child mark done at the same time, the fan-in UPDATE in `mark_compute_job_done` (carried unchanged from `20260603120000`) lets each parent see the other as still running, so neither releases the child, and no sweep recovers it. This is the concurrent-parents twin of this phase's parent-fails strand. The 164.5.2 advisory lock is taken after the fan-in by design and does not change this. Success: two parents marking done concurrently always release the child exactly once, proven by a two-backend lane arm that fails on today's body.
 
@@ -4493,7 +4499,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 166.5 to break down)
+- [ ] TBD — plans not listed yet
 
 ⚠️ **Routed in from 164.6.6.3.4 STATUSBRIDGE (review round 4, 2026-10-08):** a SUCCESSFUL side-kind job whose sibling side job is still in flight takes the bridge's branch (a) and stamps `computed_at = now()` over stale analytics (and blanks the sentence); a later sibling failure then keeps that stamp under the D-09 hold. Same class as the successful-side-job stamp this phase owns. Also from that review: no gate arm pins the equal boundary of STATUSBRIDGE's D-09 release (`updated_at > computed_at`), and the marker retractions (`long_fetch.py`, `src/lib/ledger-refresh-marker.ts`) update a job by id with no status guard, which can bump a done row's `updated_at`.
 
@@ -4858,7 +4864,7 @@ After 167.1.2 PR C ships, Open Positions (per key, latest asof) and the exposure
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 167.1.1 to break down)
+- [ ] TBD — plans not listed yet
 
 ### Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports (INSERTED)
 
@@ -4922,7 +4928,22 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 167.1.2 to break down)
+- [x] 167.1.2-01-PLAN.md
+- [x] 167.1.2-02-PLAN.md
+- [x] 167.1.2-03-PLAN.md
+- [x] 167.1.2-04-PLAN.md
+- [x] 167.1.2-05-PLAN.md
+- [x] 167.1.2-06-PLAN.md
+- [x] 167.1.2-07-PLAN.md
+- [x] 167.1.2-08-PLAN.md
+- [x] 167.1.2-09-PLAN.md
+- [x] 167.1.2-10-PLAN.md
+- [x] 167.1.2-11-PLAN.md
+- [x] 167.1.2-12-PLAN.md
+- [x] 167.1.2-13-PLAN.md
+- [x] 167.1.2-14-PLAN.md
+- [x] 167.1.2-15-PLAN.md
+- [x] 167.1.2-16-PLAN.md
 
 **Cross-phase note 2026-09-27 (Phase 169 D-51, D-57):** Phase 169 plan 169-05 now owns `MetricsColumn`'s period rows and record length (it was "Phase 169 plan 07" in 167.1.2-07's text). After C3 merges, 169-05 may edit only the observation-clock length assertion in C3's `MetricsColumn.periods-per-year.test.tsx` (to the calendar-year length, D-12), and may move a C3 assertion that pinned a 6 Month / 1 Year row on a too-short record to the row-absent form (D-57); its SUMMARY records each such edit. 167.1.2's own CONTEXT lives on its branch and should carry the same note.
 
@@ -5112,7 +5133,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 167.1.2.2.2.1 to break down)
+- [ ] TBD — plans not listed yet
 
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
@@ -5200,7 +5221,7 @@ Split out of Phase 167.1.2.1 RECONMARKER by founder decision D-01 (2026-10-13, s
 Each item is fixed with a test that fails on the old behaviour, or closed by a recorded founder decision. Any grouping change moves Python `account_groups`, TS `accountIdentityTokens`/`keyAccountOf`, `one_key_per_account_day`/`oneKeyPerAccountDay` and the `queries.ts` reader together (167.1.2.1 re-measure, item (5) WR-03).
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 167.1.2.1.1 to break down)
+- [ ] TBD — plans not listed yet
 
 ### Phase 167.1.2.1.2: HISTORYREADER — Open Positions, Exchanges and the Overview show a departed or stale key's history truthfully (INSERTED)
 
@@ -5223,7 +5244,7 @@ Split out of Phase 167.1.2.1 RECONMARKER by founder decision D-01 (2026-10-13, s
 Each item is fixed with a test that fails on the old behaviour, or closed by a recorded founder decision. Any grouping change moves Python `account_groups`, TS `accountIdentityTokens`/`keyAccountOf`, `one_key_per_account_day`/`oneKeyPerAccountDay` and the `queries.ts` reader together (167.1.2.1 re-measure, item (5) WR-03).
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 167.1.2.1.2 to break down)
+- [ ] TBD — plans not listed yet
 
 ### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
 
@@ -5549,7 +5570,7 @@ Plans:
 - [ ] 169.4-04-PLAN.md — Scenario tab and share page switch to closes and the pairing (SC11, SC12, D-66, D-68)
 - [ ] 169.4-05-PLAN.md — event signatures break on a comparator null (D-65, D-70)
 - [ ] 169.4-06-PLAN.md — allocator blends on the legs' common calendar, unavailable form, cache key v10 (D-65, D-70, D-71)
-- [ ] 169.4-07-PLAN.md — integration run + post-deploy browser re-check after Phase 170 (SC9; was 169.4-03)
+- [ ] 169.4-07-PLAN.md — integration run + post-deploy browser re-check after 170 LAYOUT (SC9; was 169.4-03)
 - [ ] 169.4-08-PLAN.md — returns route and its test removed, composer on the one key-label rule (SC11, SC12, D-67; split out of 169.4-04)
 
 **Amended 2026-09-30 (code review round 1, recorded at round 2):** D-70(2)'s allocator-blend calendar is narrowed to the dates every leg actually priced, so a US-market holiday is not a blend date and BTC's move across it is carried; the day after a holiday is unpaired for the weekday legs. Full text in 169.4-CONTEXT.md D-70 (AMENDED line).
@@ -5908,7 +5929,7 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 170.1 to break down)
+- [ ] TBD — plans not listed yet
 
 ---
 
@@ -7777,7 +7798,7 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 142.3 to break down)
+- [ ] TBD — plans not listed yet
 
 ## v1.16 Progress (PARKED)
 
