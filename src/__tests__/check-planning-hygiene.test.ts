@@ -809,11 +809,32 @@ describe("Rule 6e — no unchecked bullet the completion regex would tick for th
       "",
     ].join("\n");
 
-  it("is RED on the `TBD (run /gsd-plan-phase N …)` stub that phase insert writes", () => {
-    const r = checkRoadmapStructure(doc(["- [ ] TBD (run /gsd-plan-phase 7 to break down)"]));
-    const e = r.violations.filter((v) => v.includes("rule 6e"));
+  const STUB7 = "- [ ] TBD (run /gsd-plan-phase 7 to break down)";
+
+  it("is GREEN on a fresh insert's stub: the overview bullet is unchecked and comes first, so the regex ticks that", () => {
+    expect(checkRoadmapStructure(doc([STUB7])).violations).toEqual([]);
+  });
+
+  it("is RED on the stub once the phase lists plan rows (164.4.2.1's stub was ticked this way)", () => {
+    const e = checkRoadmapStructure(doc(["- [ ] 7-01-PLAN.md", STUB7])).violations.filter((v) =>
+      v.includes("rule 6e"),
+    );
     expect(e).toHaveLength(1);
     expect(e[0]).toContain("TBD (run /gsd-plan-phase 7");
+  });
+
+  it("is RED on the stub once the phase's overview bullet is ticked: the stub is now the first unchecked match", () => {
+    const ticked = doc([STUB7]).replace("- [ ] **Phase 7: ALPHA**", "- [x] **Phase 7: ALPHA**");
+    const e = checkRoadmapStructure(ticked).violations.filter((v) => v.includes("rule 6e"));
+    expect(e).toHaveLength(1);
+    expect(e[0]).toContain("TBD (run /gsd-plan-phase 7");
+  });
+
+  it("is RED on a stub naming a DIFFERENT phase than the section it sits in", () => {
+    const e = checkRoadmapStructure(doc(["- [ ] TBD (run /gsd-plan-phase 8 to break down)"])).violations.filter(
+      (v) => v.includes("rule 6e"),
+    );
+    expect(e).toHaveLength(1);
   });
 
   it("is RED on a plan bullet whose prose names another phase (164.3-07 was ticked when 159 closed)", () => {

@@ -799,8 +799,14 @@ function findNulViolations(rel: string, contents: string): string[] {
  *       whose prose says "Phase 159" was ticked when 159 closed, and the
  *       `- [ ] TBD (run /gsd-plan-phase N …)` stub that `phase insert` writes
  *       matches its own phase ("-phase N"). Name the other phase without the
- *       word ("closure spec for 159"), and replace the stub with the plan rows
- *       or `- [ ] TBD — plans not listed yet`.
+ *       word ("closure spec for 159").
+ *       ONE ALLOWED FORM: the tool's own stub, sitting in phase N's own
+ *       section, while phase N's overview bullet is still `[ ]` and the section
+ *       lists no plan rows. The overview bullet comes first in the milestone, so
+ *       the regex ticks that bullet, not the stub. The stub becomes a target
+ *       only once the bullet is `[x]` or plan rows exist, and that is when this
+ *       arm fails. A fresh `/gsd-phase --insert` therefore stays green. Replace
+ *       the stub with the plan rows or `- [ ] TBD — plans not listed yet`.
  *
  * ONE DELIBERATE EXEMPTION, by form and not by name: a bullet written
  * `**~~Phase N~~:` marks a phase the founder RETIRED (Phases 165, 165.1, 165.2,
@@ -963,7 +969,34 @@ function findPhaseSectionViolations(lines: string[], headingRe: RegExp): string[
   // (e) — an unchecked bullet the unanchored completion regex would tick for a
   // phase it does not belong to.
   const mentionRe = new RegExp(`Phase\\s+(${ROADMAP_PHASE_TOKEN})`, "gi");
+  const stubRe = new RegExp(
+    `^[ \\t]*-\\s*\\[ \\]\\s*TBD \\(run /gsd-plan-phase (${ROADMAP_PHASE_TOKEN}) to break down\\)\\s*$`,
+  );
+  // The tool's own stub is harmless while its phase is fresh: the overview
+  // bullet is unchecked (so the regex ticks that first) and no plan rows exist.
+  const freshStub = (text: string, i: number): boolean => {
+    const m = text.match(stubRe);
+    if (!m) return false;
+    const n = m[1];
+    const section = starts.filter((s) => s.i < i).pop();
+    if (!section || section.phase !== n) return false;
+    const k = starts.indexOf(section);
+    const end = k + 1 < starts.length ? starts[k + 1].i : lines.length;
+    const nEsc = escapeForRegex(n);
+    const rowRe = new RegExp(`^[ \\t]*-\\s*\\[.\\]\\s*(?:\\*\\*)?${nEsc}-[0-9]`);
+    for (let j = section.i + 1; j < end; j += 1) if (rowRe.test(lines[j])) return false;
+    const bulletRe = new RegExp(
+      `^[ \\t]*-\\s*\\[(.)\\]\\s*(?:\\*\\*)?\\s*(?:~~)?Phase\\s+${nEsc}(?:~~)?${ROADMAP_TAG}[:\\s]`,
+      "i",
+    );
+    for (const l of lines) {
+      const b = l.match(bulletRe);
+      if (b) return b[1] === " ";
+    }
+    return false;
+  };
   lines.forEach((text, i) => {
+    if (freshStub(text, i)) return;
     const box = text.match(/-\s*\[ \](.*)$/);
     if (!box) return;
     const rest = box[1];
@@ -977,7 +1010,7 @@ function findPhaseSectionViolations(lines: string[], headingRe: RegExp): string[
     const stub = /TBD \(run \/gsd-plan-phase/.test(rest);
     violations.push(
       stub
-        ? `ROADMAP-STRUCTURE (rule 6e): ROADMAP.md:${i + 1} is the \`- [ ] TBD (run /gsd-plan-phase ${named} …)\` stub. The completion regex reads "-phase ${named}" as the phase's own checklist bullet, so closing the phase ticks this stub. Replace it with the plan rows, or with \`- [ ] TBD — plans not listed yet\`.`
+        ? `ROADMAP-STRUCTURE (rule 6e): ROADMAP.md:${i + 1} is the \`- [ ] TBD (run /gsd-plan-phase ${named} …)\` stub, and its phase already has plan rows or a ticked overview bullet (or the stub sits outside that phase's section). The completion regex reads "-phase ${named}" as a checklist bullet, so the next update-plan-progress ticks this stub. Replace it with the plan rows, or with \`- [ ] TBD — plans not listed yet\`.`
         : `ROADMAP-STRUCTURE (rule 6e): ROADMAP.md:${i + 1} is an unchecked bullet that names Phase ${named}. The completion regex in gsd-tools is unanchored, so closing that phase ticks THIS line (and can stamp "(completed …)" onto the next). Name the phase without the word "Phase" (e.g. "closure spec for 159"), or tick the bullet.`,
     );
   });

@@ -593,6 +593,9 @@ normally, and still `git diff` after every run, because three behaviours remain:
 - `phase complete` moves STATE to the next phase in roadmap order, which is wrong when several phases
   run in parallel. Correct `## Current Position` by hand.
 - Most handlers rewrite `.planning/state.json` and re-derive the `progress:` block from local disk.
-⚠️ `/gsd-phase --insert` still writes the `- [ ] TBD (run /gsd-plan-phase N …)` stub, so lint is red
-until that line becomes `- [ ] TBD — plans not listed yet` or the plan rows. Drafted upstream issues:
+⚠️ `/gsd-phase --insert` still writes the `- [ ] TBD (run /gsd-plan-phase N …)` stub. Rule 6e
+ALLOWS it while the phase's overview bullet is `[ ]` and its section lists no plan rows, because the
+completion regex ticks the overview bullet first. Lint goes red once the phase gets plan rows or its
+bullet is ticked. At that point the stub becomes a target, so replace it with the plan rows or
+`- [ ] TBD — plans not listed yet`. Drafted upstream issues:
 `.planning/research/gsd-tools-upstream-bugs.md`.
