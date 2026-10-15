@@ -73,6 +73,22 @@ Review rounds 1 to 3, each fix seen RED before it was applied:
 - **Pre-existing and not touched:** the `compute.conventions` inline snapshots B and C fail on the phase base under local Node 25, on a last-digit float difference.
 - **Phase records:** context, research, UI contract, validation strategy, patterns, five plans and their summaries, four review rounds with fix reports, the security register (0 open of 20), verification (human_needed) and tracking. (a330c0094 through cfe0668fd: every docs commit on this branch, including 75c3134da, 03238c759, 02d60d366, b0eb07ae3, 909590d48, 57e080fdb, ee1e6f259, 98b1e0db7, a9ac8ca60, 0530fa3e9, 83df3a54b, 7691f70fa, 15d6b2f87, a8df9d8ee, 415689a24, cebb3bf2b, c5c5cc5ea, fe6aa39a9, 6d9dfdd98, 8dea6d08d, 666f63ffb)
 
+## [0.131.13.6] - 2026-10-15 — Test fix: the Private link dialog's Close button is found once the dialog is open, not grabbed before it opens
+
+### Root cause
+- **A second arm in `src/components/strategy/ShareableLink.test.tsx` had the same race v0.131.13.4 fixed.** "the URL stays reachable through 'Manage private link' after the dialog is closed, and is gone once the link is revoked" found the URL field with `findByLabelText`, then grabbed the Close button with a synchronous `getByRole`. The field is in the DOM as soon as React commits. But `Modal` calls `showModal()` from a passive `useEffect`. Until that runs, the `<dialog>` has no `open` attribute, so jsdom's default stylesheet (`dialog:not([open])`) hides it and every role inside it is inaccessible. The update starts after `await fetch`, so it is not a sync lane. When React's Scheduler yields before the passive-effect task, `getByRole` finds no "Close". Main run 38766733041 (job 116532021011) failed exactly that way: the dump shows the Close button in the DOM, inside a `<dialog>` with no `open` attribute.
+- **This is not a product bug.** In a browser, React runs pending passive effects before it handles the next user event, so the dialog is open before anyone can reach its Close button.
+
+### Fixed
+- **The Close click goes through `findByRole`**, which resolves only once the dialog is open. The comment beside it records why.
+
+### Tests
+- **Forced-yield harness, re-run for this arm.** A scratch copy of the file moves `performance.now` 50 ms forward on every read, so React's Scheduler yields after every task. The copy is not committed. Before the fix, this arm failed 9 of 10 runs with the CI message. After it, the arm passed 20 of 20, and the whole file passed 30 of 30 tests in each of 10 runs.
+- **Unforced, after the fix:** the arm alone passed 12 of 12. The file, together with `FactsheetView.usd-toggle.test.tsx`, passed 64 of 64 tests in each of 3 runs.
+- **The fixed lookup can still fail.** With `showModal()` neutered in `Modal.tsx`, the arm goes RED on the `findByRole` timeout. The file was restored from a byte backup.
+- **Audit of every other synchronous read in the file.** The audit checked every read of state that a passive effect sets: focus, `dialog.open`, selection, and role visibility around `showModal()` and `close()`. No other instance races. Clicks through `fireEvent` run inside `act`, which flushes effects before it returns. The other post-`await fetch` arms already await `close` with a `waitFor`, or read state that the render sets, not an effect. The forced-yield run of the whole file confirms it.
+- **`FactsheetView.usd-toggle.test.tsx:208` is a different case.** That test is fully synchronous. It sets focus itself and clicks through `act`, and its `activeElement` check only proves the button was not remounted. It passed 34 of 34 tests in each of 5 forced-yield runs.
+
 ## [0.131.13.4] - 2026-10-15 — Test fix: the Private link dialog's focus assert waits for the focus move instead of racing it
 
 ### Root cause
