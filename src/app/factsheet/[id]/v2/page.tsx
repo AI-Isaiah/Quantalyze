@@ -266,7 +266,8 @@ function buildFactsheetPayloadCached(
     // separate change). A longer keyParts array already separated every entry built under the
     // five-member v17 key.
     // Bumped v17→v18 (Phase 170.6 DISPLAYPOLISH SFH-2, 2026-10-14): the values inside `comparators.*.summary`, `summarySince` and the windowed comparator views change without a shape change. Below the 90-day overlap floor (D-07) the comparator's Sharpe, Sortino, Calmar, CAGR and annualized volatility are NaN, not the figures a v17 entry holds (SPX over 5 days read a Sharpe of 10.24). The key's other members (`computedAt`, `tradesFetchedAt`, provenance, status) do not move at deploy, so under v17 an entry built before the deploy would keep serving the old figures for the 1 h TTL drain, beside a fresh build and the OG card that show "—".
-    ["factsheet-v2-payload-v18", id, computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus],
+    // Bumped v18→v19 (Phase 167.1.2.2.2.1 OKXHISTORY plan 05, 2026-10-15): the payload gains the required `reconstructedRanges` (the spans of days rebuilt from the venue's bills archive, read from `series_provenance.reconstructed_ranges`, which feeds the "rebuilt from the OKX archive" line on both surfaces). A v18 entry lacks the field, so for the 1 h TTL drain a rebuilt strategy's page would show no reconstructed line. A provenance write already busts the key through `provenanceKey`; this bump is for the new payload shape.
+    ["factsheet-v2-payload-v19", id, computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
