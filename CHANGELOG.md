@@ -1,8 +1,8 @@
 # Changelog
 
-## [0.132.1.3] - 2026-10-15 — PYXDIST: the python CI job runs pytest in parallel, and the flakes that serial order hid are fixed at their root
+## [0.132.1.6] - 2026-10-15 — PYXDIST: the python CI job runs pytest in parallel, and the flakes that serial order hid are fixed at their root
 
-Phase 164.9.8.1. Since `origin/main` the branch carries 78 non-merge commits: 54 that touch paths outside `.planning` (this release commit among them) and 24 planning and records commits, and this entry maps them all. It also carries 10 merge commits: the per-plan and fixer worktrees merging back, and two merges of `origin/main` before the release. Grouped by theme below, each bullet ends with the hashes it covers. The version is a fourth-digit bump. It was re-picked from a freshly fetched `origin/main` at 0.132.1.2, and PYXDIST lands before the open PRs #1060 and #1064, which re-pick above it. This is a CI and test change; no production code changes.
+Phase 164.9.8.1. Since `origin/main` the branch carries 78 non-merge commits: 54 that touch paths outside `.planning` (this release commit among them) and 24 planning and records commits, and this entry maps them all. It also carries 11 merge commits: the per-plan and fixer worktrees merging back, and three merges of `origin/main` before the release. Grouped by theme below, each bullet ends with the hashes it covers. The version is a fourth-digit bump. It was re-picked from a freshly fetched `origin/main` at 0.132.1.5, after #1064 landed, and the open PR #1060 re-picks above it. This is a CI and test change; no production code changes.
 
 ### Changed
 - **The `python` CI job and the Makefile `test:` target run `pytest -n auto --dist loadgroup --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80`.** Both carry the identical argument string. The coverage floor is still enforced on the combined result of all workers. Measured offline on the same tree, coverage was 93.57% serial and 93.57% parallel. A run with the floor raised to 99 under xdist exited 1. The SERIAL deferral comments in both files stay as lineage beside a dated PYXDIST note. That note also records that the comment's pointer to the "TODOS: v1.9.1 Phase-97 parallelization deferral" is dangling, because that entry was dropped in `193afe818`. (`c16a41633`)
@@ -54,6 +54,13 @@ Phase 164.9.8.1. Since `origin/main` the branch carries 78 non-merge commits: 54
 - **SC-4 met:** across those 20 runs the `python` job took **340 to 497 s**, against the 654.5 s threshold and the 1190 s before-median, so 29% to 42% of before. The pytest step alone took 175 to 305 s, against about 15 to 17 minutes serial. The 942 s reading from before the sysmon switch is kept as lineage.
 - **Recorded deviation:** during review round 1 a fixer ran broad `pkill -f` patterns on the machine shared with other sessions. That could have stopped another session's matching process; none was reported. Every later brief forbade it.
 - **Planning and records:** TODOS `ci/pytest-xdist-parallel` now records what this phase measured (`192e38347`). The phase's planning, review and soak records are in `.planning` and do not ship on the PR branch (`f332031e4`, `d794f12fa`, `9ef11b9df`, `f1af82495`, `5aadd6cce`, `1f5f82500`, `efb5124b6`, `6e5c38b0c`, `9e7d1b7d1`, `e58003867`, `299f55c4f`, `ab33cb14e`, `2bc424316`, `a48d25427`, `5dca51cd1`, `d36de89d6`, `a6bded3f2`, `4458d4eae`, `eb97f9da3`, `2e9814697`, `d84bc2143`, `72dd0654c`, `5806c5c61`, `33ff9020e`).
+## [0.132.1.5] - 2026-10-15 — FANINGRAPH post-apply: delete the `_fan_in_lock_rows` snapshot ratchet row the re-dump cleared
+
+One commit plus this release commit.
+
+### Fixed
+- **Main's "SQL Function Snapshot — Drift Gate" was red after the baseline re-dump (#1061).** `scripts/dump-sql-functions.ts --check` failed with `ratchet-stale: _fan_in_lock_rows`. The FANINGRAPH row in `NAME_SET_RATCHET` (`snapshot-only`, captured 2026-10-15) recorded that the helper existed in the migration chain but not yet in the PROD baseline. The re-dump taken after `20261024120000` applied to PROD put it on both sides. A row that no longer describes a disagreement is a hard failure by design, so the row is deleted, replaced by a dated lineage comment in the same style as the 164.6.8 and 170.6.1 rows. This was the phase's own planned post-apply step. With the row gone, the gate reads `0 ratcheted disagreement(s)`, 129 functions on both sides, and `baseline-content-drift` reports 0 findings.
+
 ## [0.132.1.2] - 2026-10-15 — RECORDS: close BTCUSDVIEW 164.6.6.2.1 (human verification 7/7) and book the owner trust-tier finding
 
 Records only: `.planning`, `TODOS.md`, and this release. One commit plus this release commit.
