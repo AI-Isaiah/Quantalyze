@@ -6,16 +6,16 @@ current_phase: "166.5"
 current_phase_name: COMPUTEDATSTAMP
 status: executing
 stopped_at: 167.1.1 HOLDINGKEYSCOPE closed; 166.5 post-merge plan 09 outstanding
-last_updated: "2026-10-15T18:32:32.092Z"
+last_updated: "2026-10-15T20:12:01.146Z"
 last_activity: 2026-10-15
 last_activity_desc: "167.1.1 HOLDINGKEYSCOPE closed (#1053 and #1056); 167.1.1.1 BRIDGERETURNS booked (D-06)"
-state_head: fdc7b8d9099e89ba70f6f5c4c93e1db0164094d5
+state_head: 3175e5dd496e9cf774764e4c028afe982bae8961
 progress:
-  total_phases: 116
+  total_phases: 117
   completed_phases: 105
   total_plans: 751
   completed_plans: 743
-  percent: 91
+  percent: 90
 ---
 
 ## ⭐ STATE lineage
@@ -176,7 +176,7 @@ Phase: 166.5 (COMPUTEDATSTAMP) — EXECUTING
 Plan: 9 of 9
 Status: Executing — several phases in parallel. 166.5 COMPUTEDATSTAMP is the current one: both PRs merged and applied on PROD (#1047, #1050); the post-merge plan 09 reading is outstanding. Also in flight: 164.9.3.1 FANINGRAPH, 167.1.2.2.2.1 OKXHISTORY, 164.6.6.3.6 MT5SERVERLEARN and 164.9.8.1 PYXDIST. 167.1.2.1 RECONMARKER is waiting on its day-1 reading.
 Last activity: 2026-10-15 — 167.1.1 HOLDINGKEYSCOPE closed (#1053; 375px follow-up #1056)
-Progress: [█████████░] 91%
+Progress: [█████████░] 90%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -630,6 +630,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 170.6 edited: edited fields: success_criteria (Discovery exchange label vs the connected key's venue, routed from TRADESYNC plan 21, founder 2026-10-13)
 - Phase 164.9.8.1 inserted after Phase 164.9.8: PYXDIST: python CI job runs pytest in parallel (founder 2026-10-14: starts after 166.5 COMPUTEDATSTAMP)
 - Phase 167.1.1.1 inserted after Phase 167.1.1: BRIDGERETURNS: the Bridge matcher's per-holding returns from the daily mark price (founder decision 167.1.1 D-06)
+- Phase 167.1.1.2 inserted after Phase 167.1.1: AUMBASIS: commit sizing counts derivative unrealized P&L not notional; missing P&L stored as missing (founder 2026-10-15)
 
 ### Decisions
 
