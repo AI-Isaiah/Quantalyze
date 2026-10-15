@@ -96,10 +96,13 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
   return (
     <div
       data-testid="holding-factsheet"
-      className="rounded-lg border border-border bg-surface p-6 flex flex-col gap-4"
+      // An unbroken symbol (an MT5 `ACCOUNT-<hex>` row, a long contract name)
+      // must wrap inside the card at 375px instead of pushing past it.
+      // `overflow-wrap` inherits, so it covers the heading and every note.
+      className="min-w-0 [overflow-wrap:anywhere] rounded-lg border border-border bg-surface p-6 flex flex-col gap-4"
     >
       <div className="flex items-start justify-between">
-        <div>
+        <div className="min-w-0">
           <span className="inline-block text-fixed-10 uppercase tracking-wider text-text-muted font-medium px-2 py-0.5 rounded-sm bg-page mb-2">
             Holding
           </span>
