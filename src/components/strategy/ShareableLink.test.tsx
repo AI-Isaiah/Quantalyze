@@ -811,8 +811,18 @@ describe("ShareableLink — a minted private link is never left invisible (170.6
     await findField();
 
     // Close through the native close (the v0.131.5.3 rule: await it).
+    //
+    // FIND the Close button; never get it synchronously after findField. The
+    // field is in the DOM at commit, but `showModal` runs from Modal's passive
+    // useEffect, and until it runs the <dialog> has no `open` attribute, so
+    // jsdom's default stylesheet hides it and every role inside it is
+    // inaccessible. This update starts after `await fetch`, so it is not a sync
+    // lane; on a CPU-starved worker the Scheduler yields before the
+    // passive-effect task and getByRole found no "Close" (CI run 38766733041).
+    // findByRole resolves once the dialog is open; a component that never
+    // opens it still fails, on the findByRole timeout.
     const closeSpy = vi.spyOn(HTMLDialogElement.prototype, "close");
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Close" }));
     await waitFor(() => expect(closeSpy).toHaveBeenCalledTimes(1));
     expect(screen.queryByLabelText(FIELD)).toBeNull();
 
