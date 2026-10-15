@@ -3585,7 +3585,12 @@ jobs:
           # A SECOND deferral therefore reddens this job until someone raises
           # this number in a reviewed edit to this file — which is exactly the
           # cost an exemption should carry. It never demands fewer.
-          DEFERRED_CEILING=1
+          #
+          # RAISED 1 -> 2 on 2026-10-15 (NAVBREACH records, v0.131.11.2):
+          #   -> scanned: 4 pending plan file(s) of 732
+          #      deferred: 2 plan file(s) exempted …   (164.3-07, and
+          #      166.3.1-03, ABSORBED into DERIBITWEDGE under 166.3.1 D-07)
+          DEFERRED_CEILING=2
           deferred_n=$(echo "$deferred_line" | sed -E 's|^deferred: ([0-9]+) plan file\(s\) exempted by an explicit deferral marker$|\1|')
           case "$deferred_n" in ''|*[!0-9]*)
             echo "::error::MEASURE_FAIL: could not read the deferral count out of '$deferred_line'."; exit 1;; esac
