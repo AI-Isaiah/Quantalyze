@@ -9868,6 +9868,20 @@ message (but not the `code` tag). The landing helper has the same shape.
 **Owner / Trigger:** fixed together with 170.6.1.1-LANDING-CAPTURE-THROTTLE; or the first Sentry event seen
 without its `code` tag.
 
+## Phase 167.1.2.2.2.1 (OKXHISTORY) — routed items (logged 2026-10-15)
+
+- **[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]** (logged 2026-10-15, OKXHISTORY discuss; founder instruction
+  to book it). `fetch_daily_pnl` in `analytics-service/services/exchange.py` (OKX branch) sums
+  `pnl + fee` per UTC day across every bill regardless of `ccy`, with no currency conversion. A bill in
+  BTC (a coin-margined position, a fee charged in the base coin) is added to USDT P&L at face value, so the
+  daily P&L, the NAV roll-back and every metric built on it would be wrong for any account with a non-USDT
+  bill. Exposure is UNMEASURED for the live strategies. **Owner:** Phase 167.1.2.2.2.1 OKXHISTORY research
+  measures whether the in-scope account's bills (live and archive) are all USDT; if they are not, it is a
+  planning input of that phase, and the fix owner is routed by founder decision. **Trigger:** the first
+  OKX bill with `ccy` other than USDT in any strategy's window, or OKXHISTORY research finding one.
+  **Done when** a non-USDT bill is converted at a stated rate or fails loud, with a test that goes RED on
+  today's code.
+
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
 - **"Do NOT implement" landmines (keep documented, do not touch):** bridge-scoring precompute;
