@@ -67,7 +67,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmS
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 /**
  * ⛔ AN ALLOW-LIST. It must never become a deny-list of code paths: under a
@@ -870,6 +870,13 @@ function emit(value, reason) {
   }
 }
 
+// `maintenance.auto=false`: since git 2.47 (`maintenance.autoDetach`, default on) every
+// `git commit` starts `git maintenance run --auto` in the BACKGROUND, which can still be
+// writing into `.git` when the row's cleanup removes the directory, failing it with
+// ENOTEMPTY (TODOS CI-CLASSIFY-SCRATCHREPO-ENOTEMPTY, seen twice on the runner's git 2.55).
+// A throwaway repository never needs maintenance, so it never starts one.
+const SCRATCH_GIT_CONFIG = ["-c", "maintenance.auto=false", "-c", "user.name=self-test", "-c", "user.email=self-test@invalid", "-c", "commit.gpgsign=false"];
+
 /**
  * A throwaway git repository for the push-range rows. `commit(files)` writes
  * the given paths, commits them and returns the new HEAD sha.
@@ -877,7 +884,7 @@ function emit(value, reason) {
 export function scratchRepo(label) {
   const dir = mkdtempSync(join(tmpdir(), `gsd-classify-${label}-`));
   const g = (args) =>
-    execFileSync("git", ["-c", "user.name=self-test", "-c", "user.email=self-test@invalid", "-c", "commit.gpgsign=false", ...args], {
+    execFileSync("git", [...SCRATCH_GIT_CONFIG, ...args], {
       cwd: dir,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -1174,7 +1181,7 @@ const CASES = [
       // because the defect lives in git's output format, not in our parsing.
       const dir = mkdtempSync(join(tmpdir(), "gsd-classify-quote-"));
       const g = (args) =>
-        execFileSync("git", ["-c", "user.name=self-test", "-c", "user.email=self-test@invalid", "-c", "commit.gpgsign=false", ...args], {
+        execFileSync("git", [...SCRATCH_GIT_CONFIG, ...args], {
           cwd: dir,
           encoding: "utf8",
           stdio: ["ignore", "pipe", "pipe"],
@@ -1456,6 +1463,31 @@ const CASES = [
         pass = ok(only.docsOnly === false && only.reason.includes("is not a GitHub PR merge"), `a direct push alone classifies as code (${only.reason})`) && pass;
         return pass;
       } finally {
+        r.cleanup();
+      }
+    },
+  },
+  {
+    claim: "CI-CLASSIFY-SCRATCHREPO-ENOTEMPTY: a scratch-repo commit starts no `git maintenance` child that could outlive the row's cleanup",
+    run: (ok) => {
+      const r = scratchRepo("no-maintenance");
+      const trace = join(r.dir, "..", `${basename(r.dir)}-trace2.json`);
+      process.env.GIT_TRACE2_EVENT = trace;
+      try {
+        r.commit({ "a.txt": "a\n" });
+        const spawned = readFileSync(trace, "utf8").includes('"maintenance"');
+        // CALIBRATION: the same commit WITHOUT the pinned config does start one, so the row can fail.
+        writeFileSync(trace, "");
+        writeFileSync(join(r.dir, "b.txt"), "b\n");
+        execFileSync("git", ["-c", "user.name=s", "-c", "user.email=s@invalid", "-c", "commit.gpgsign=false", "add", "-A"], { cwd: r.dir, stdio: "ignore" });
+        execFileSync("git", ["-c", "user.name=s", "-c", "user.email=s@invalid", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "c"], { cwd: r.dir, stdio: "ignore" });
+        const unpinned = readFileSync(trace, "utf8").includes('"maintenance"');
+        let pass = ok(unpinned, "CALIBRATION: an unpinned commit starts `git maintenance run --auto`");
+        pass = ok(!spawned, "the scratch helper's commit starts no `git maintenance` child") && pass;
+        return pass;
+      } finally {
+        delete process.env.GIT_TRACE2_EVENT;
+        rmSync(trace, { force: true });
         r.cleanup();
       }
     },

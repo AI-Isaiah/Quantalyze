@@ -90,6 +90,17 @@ Phase 167.1.2.2.2.1, PR-A (plans 01-10 and 16). The branch has 73 non-merge comm
   - The two pre-existing `compute.conventions.test.ts` snapshot failures (fixtures B and C) are not from this phase.
 - **Founder decision D-13 ("Decide after calibrate"):** `info.realized_balance_vs_rolled_nav.diff` and `info.flow_seam.diff` stay readings, not gates. The founder sets any limit at plan 15's checkpoint.
 - Booked in TODOS: `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`. Live `fetch_daily_pnl` sums every bill currency at face value. Calibrate's `census.by_ccy` is the measurement, and a non-USD row is a founder stop. Also booked: the Wave 5 recompute hand-off.
+## [0.132.1.9] - 2026-10-15 — Test fix: the changed-path classifier's throwaway git repositories start no background maintenance, so their cleanup cannot race it
+
+### Root cause
+- `scripts/classify-changed-paths.mjs` self-test builds throwaway git repositories and removes them after each row. Every `git commit` spawns `git maintenance run --auto`, and since git 2.47 (`maintenance.autoDetach`, on by default) that child runs in the background. On the runner's git 2.55 it could still be writing into `.git` when the row's `rmSync` ran, which failed with `ENOTEMPTY`. Seen twice: once on 2026-10-14, and on PR #1060's Contracts run `38809136016`, where the mutated-classifier calibration crashed in cleanup before printing its banner.
+
+### Fixed
+- Both scratch-repo helpers now pass `-c maintenance.auto=false` (`SCRATCH_GIT_CONFIG`), so no maintenance child starts. The cause is removed rather than retried: the `rmSync` has no retry.
+
+### Tests
+- A new self-test row checks with `GIT_TRACE2_EVENT` that a scratch commit starts no `git maintenance` child. Its calibration arm shows an unpinned commit does start one. Neutering the flag turned the row RED; restored from a byte backup (`cmp` clean). The self-test now has 25 rows and passes, and `ci-docs-path-filter.contract.test.ts` passes 67/67.
+- TODOS `CI-CLASSIFY-SCRATCHREPO-ENOTEMPTY` is closed with the measurement.
 
 ## [0.132.1.8] - 2026-10-15 — RECORDS: close PYXDIST 164.9.8.1 (soak 20/20 and wall time read from CI)
 
