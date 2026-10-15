@@ -301,7 +301,37 @@ proceed on a guess.
 node "$TS_SP/form.mjs" marker > "$TS_SP/p0.sql" && q "$TS_SP/p0.sql" > "$TS_SP/p0.csv"
 ```
 
-**P1. The OKX universe, by ordinal.** `ordinals` lists each non-archived OKX strategy with its status,
+**P1. The guard proves itself, and the deploy order is read.** `guard-check` carries the guard and
+returns the marker column, whether the job kind is registered in this database (`kind_registered`, 1
+after the migration applied) and how many jobs of the kind are in flight. It proves the guard on three
+branches; each run renders the same form with one change:
+
+<!-- form: guard-check -->
+```sql
+__GUARD__
+WITH m AS (SELECT __MARKER_IS_PROD__ AS marker_is_prod)
+SELECT m.marker_is_prod,
+       (SELECT count(*) FROM compute_job_kinds WHERE name = 'okx_archive_rebuild') AS kind_registered,
+       (SELECT count(*) FROM compute_jobs WHERE kind = 'okx_archive_rebuild' AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry')) AS in_flight
+  FROM m;
+```
+
+- Positive (no `GUARD_TEST`): returns one row, `1,1,0` once the migration has applied and nothing runs.
+  `kind_registered` 0 means the migration has not applied: stop, nothing below can be enqueued.
+- `GUARD_TEST=mismatch`: must exit non-zero with `refusing to continue` and return NO row.
+- `GUARD_TEST=null`: the live value replaced by a NULL text literal; same expectation. This is the
+  proof that a lost marker refuses rather than passes.
+
+```bash
+node "$TS_SP/form.mjs" guard-check > "$TS_SP/p1.sql" && q "$TS_SP/p1.sql" > "$TS_SP/p1.csv"
+node "$TS_SP/form.mjs" guard-check GUARD_TEST=mismatch > "$TS_SP/p1m.sql"; q "$TS_SP/p1m.sql" && echo "UNEXPECTED: mismatch did not refuse"
+node "$TS_SP/form.mjs" guard-check GUARD_TEST=null > "$TS_SP/p1n.sql"; q "$TS_SP/p1n.sql" && echo "UNEXPECTED: null did not refuse"
+```
+
+Also confirm the worker is live with the merge: the analytics service `/health` `git_sha` contains the
+merge commit (the Railway deploy runs only after main CI is green; see `docs/runbooks/railway-worker.md`).
+
+**P2. The OKX universe, by ordinal.** `ordinals` lists each non-archived OKX strategy with its status,
 whether its key is connected, whether that key shares the venue account with ordinal 2, and the role
 the enqueue forms would give it. Expected on 2026-10-15: four rows; ordinals 1 and 2 `rebuild target`;
 ordinal 3 key NOT connected, `refused (D-02)`; ordinal 4 `zero-check`; ordinals 1, 2 and 4 share the
@@ -324,7 +354,7 @@ SELECT m.marker_is_prod, ou.ord AS ordinal, ou.status, ou.connected AS key_conne
  ORDER BY ou.ord;
 ```
 
-**P2. The work list, by ordinal.** `worklist` counts and dates only: the carried-forward
+**P3. The work list, by ordinal.** `worklist` counts and dates only: the carried-forward
 `legacy_ranges`, the named `unrecovered_gaps`, any `reconstructed_ranges`, and `headline_since`. Each
 `*_dates` column is `from:to` islands joined by `+`, or `none`.
 Expected on 2026-10-15: ordinal 1 gap 2026-05-24 to 2026-08-01, ordinal 2 gap 2026-05-07 to 2026-08-01,
@@ -353,4 +383,537 @@ for n in ordinals worklist; do
 done
 ```
 
-The step forms (Steps 1 to 5), the rollback and the parameter table follow in the sections below.
+## Forms and their parameters
+
+| Parameter | Meaning | Example |
+|---|---|---|
+| `RUN` | a run label, letters, digits and `: . -` only; it becomes part of the job's idempotency key | `20261020T1000` |
+| `FP` | the founder-approved fingerprint, 64 lowercase hex, copied from the `calibrate` result | |
+| `O1_GAPS`, `O2_GAPS` | ordinal 1's and ordinal 2's stored gaps BEFORE apply: the `before` CSV's `gaps_param` value, `from:to` islands joined by `+`, or `none` | `2026-05-24:2026-08-01` |
+| `ORD` | the ordinal to roll back | `1` |
+| `GAPS` | that ordinal's `before` `gaps_param` value (the gaps to restore) | `2026-05-24:2026-08-01` |
+
+| Form | Kind | Parameters |
+|---|---|---|
+| `marker`, `ordinals`, `worklist`, `job-result`, `before`, `survival` | read, run with `DRY=1` | none |
+| `after` | read, run with `DRY=1` | `O1_GAPS`, `O2_GAPS` |
+| `guard-check` | read behind the guard | none (`GUARD_TEST` optional) |
+| `enqueue-preflight`, `enqueue-calibrate` | WRITE (one job row) | `RUN` |
+| `enqueue-apply` | WRITE (one job row) | `RUN`, `FP` |
+| `rollback` | WRITE (founder decision only) | `ORD`, `GAPS` |
+
+The fragments `okx-universe`, `okx-prov` and `target-refusal` are expanded by the forms and are never
+run on their own. The enqueue forms carry today's work list as literals: rebuild targets are ordinals
+1 and 2, the job key is ordinal 2's, the zero-check target is ordinal 4, the quarters are 2026 Q2 and
+Q3. A different work list is a reviewed edit of these forms, never a parameter.
+
+## Step 1 — preflight
+
+Reads the account and the quarter state; writes nothing. It proves the key is the right account before
+anything is requested from OKX's archive.
+
+Every enqueue form starts from the marker guard, then refuses in SQL when: the time is inside the
+04:15-05:45 UTC window; a rebuild target is missing, sits on a disconnected, inactive or revoked key
+(the D-02 refusal; ordinal 3 is exactly this case), or is on another venue account than the job key.
+It then enqueues, and ends with a readback row counting this run's job and the in-flight jobs.
+
+<!-- form: target-refusal -->
+```sql
+DO $refuse$
+DECLARE
+  v_bad integer;
+  v_now time := (now() AT TIME ZONE 'UTC')::time;
+BEGIN
+  IF v_now BETWEEN time '04:15' AND time '05:45' THEN
+    RAISE EXCEPTION 'okx_archive_rebuild: 04:15-05:45 UTC belongs to the daily tick and the allocator derive; run this form outside it';
+  END IF;
+  WITH __OKX_UNIVERSE__
+  SELECT count(*) INTO v_bad
+    FROM unnest(ARRAY[1, 2]) AS t (ord)
+    LEFT JOIN ou ON ou.ord = t.ord
+   WHERE ou.strategy_id IS NULL
+      OR ou.connected IS NOT TRUE
+      OR ou.acct IS NULL
+      OR ou.acct IS DISTINCT FROM (SELECT o2.acct FROM ou o2 WHERE o2.ord = 2);
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'okx_archive_rebuild: a rebuild target is missing, sits on a disconnected key, or is on another venue account (D-02); re-read ordinals';
+  END IF;
+END
+$refuse$;
+```
+
+<!-- form: enqueue-preflight -->
+```sql
+__GUARD__
+__TARGET_REFUSAL__
+SELECT enqueue_compute_job( -- WRITE
+  p_kind := 'okx_archive_rebuild', -- WRITE
+  p_api_key_id := (WITH __OKX_UNIVERSE__ SELECT ou.key_id FROM ou WHERE ou.ord = 2), -- WRITE
+  p_strategy_id := NULL, -- WRITE
+  p_idempotency_key := 'okx-archive-preflight-' || __RUN__, -- WRITE
+  p_metadata := jsonb_build_object( -- WRITE
+    'mode', 'preflight', -- WRITE
+    'quarters', '[{"year": 2026, "quarter": "Q2"}, {"year": 2026, "quarter": "Q3"}]'::jsonb, -- WRITE
+    'rebuild_strategy_ids', (WITH __OKX_UNIVERSE__ SELECT jsonb_agg(ou.strategy_id ORDER BY ou.ord) FROM ou WHERE ou.ord IN (1, 2)) -- WRITE
+  ), -- WRITE
+  p_run_at := now() -- WRITE
+); -- WRITE
+WITH m AS (SELECT __MARKER_IS_PROD__ AS marker_is_prod)
+SELECT m.marker_is_prod, 'preflight' AS mode,
+       (SELECT count(*) FROM compute_jobs WHERE kind = 'okx_archive_rebuild' AND idempotency_key = 'okx-archive-preflight-' || __RUN__) AS this_run_jobs,
+       (SELECT count(*) FROM compute_jobs WHERE kind = 'okx_archive_rebuild' AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry')) AS in_flight
+  FROM m;
+```
+
+```bash
+node "$TS_SP/form.mjs" enqueue-preflight RUN=20261020T1000 > "$TS_SP/s1.sql" && q "$TS_SP/s1.sql" > "$TS_SP/s1.csv"
+```
+
+Expected readback: `this_run_jobs 1`. The idempotency key makes a repeat of the same `RUN` a no-op that
+returns the same job; use a new `RUN` for a new preflight. Then read the job (below) until it is `done`.
+
+**Read the result.** `job-result` lists the five newest jobs of the kind: status, attempts,
+`next_attempt_at`, the class prefix of `last_error`, `stop_class` from the result, and the whole
+`member_progress` object as text. The CSV goes to `TS_SP` and is read there; **its `member_progress`
+column carries amounts and is never pasted into a tracked file or a chat.**
+
+<!-- form: job-result -->
+```sql
+WITH m AS (SELECT __MARKER_IS_PROD__ AS marker_is_prod),
+j AS (
+  SELECT * FROM compute_jobs WHERE kind = 'okx_archive_rebuild' ORDER BY created_at DESC LIMIT 5
+)
+SELECT m.marker_is_prod, j.idempotency_key, j.metadata ->> 'mode' AS mode, j.status, j.attempts, j.max_attempts,
+       j.next_attempt_at,
+       substring(j.last_error from '^okx_archive_rebuild: ([a-z0-9_]+)') AS error_class,
+       j.error_kind,
+       j.metadata ->> 'member_progress_at' AS progress_at,
+       j.metadata -> 'member_progress' ->> 'stop_class' AS stop_class,
+       (j.metadata -> 'member_progress')::text AS member_progress
+  FROM m
+  LEFT JOIN j ON true
+ ORDER BY j.created_at DESC;
+```
+
+```bash
+node "$TS_SP/form.mjs" job-result DRY=1 > "$TS_SP/jr.sql" && q "$TS_SP/jr.sql" > "$TS_SP/jr.csv"
+```
+
+A job that is `pending` or `running` is waiting or working: the archive wait is hours and the job defers
+itself, so there is nothing to do but read again later. `failed_retry` with `error_class` `link_expired`
+is the one transient class and the job retries itself. Any other `error_class` is permanent
+(`failed_final`): it is a STOP, read the class and the dates and counts in `last_error`, and return to
+the founder. Never re-enqueue to get past a stop.
+
+**Preflight reading, from `member_progress`:** `account.uid_match` true, `account.read_only` true,
+`subtypes.drift` empty, `quarters[].state` per quarter (`finished`, `ongoing`, `failed` or null) and
+`quarters[].href_scheme` / `href_host` (the allow-list entry the founder reviews at Step 3).
+**STOP if** `uid_match` is false (the key is not the account the strategies were derived from),
+`read_only` is false, `subtypes.drift` is non-empty, or `stop_class` is set.
+
+## Step 2 — calibrate
+
+Requests the Q2 and Q3 files (the ~2-3 hour wait is the job's, not yours), downloads and parses them,
+and measures the reconciliation against the live-derived days both cover. It also runs the D-03
+read-only check of ordinal 4's stored zero-return days. It writes NOTHING and returns a `fingerprint` of
+what `apply` would write.
+
+`enqueue-calibrate` is `enqueue-preflight` with the mode `calibrate`, ordinal 4 as the zero-check
+target, and one more refusal for that target.
+
+<!-- form: enqueue-calibrate -->
+```sql
+__GUARD__
+__TARGET_REFUSAL__
+DO $refuse0$
+DECLARE
+  v_bad integer;
+BEGIN
+  WITH __OKX_UNIVERSE__
+  SELECT count(*) INTO v_bad
+    FROM unnest(ARRAY[4]) AS t (ord)
+    LEFT JOIN ou ON ou.ord = t.ord
+   WHERE ou.strategy_id IS NULL
+      OR ou.connected IS NOT TRUE
+      OR ou.acct IS DISTINCT FROM (SELECT o2.acct FROM ou o2 WHERE o2.ord = 2);
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'okx_archive_rebuild: the zero-check target is missing, sits on a disconnected key, or is on another venue account (D-02); re-read ordinals';
+  END IF;
+END
+$refuse0$;
+SELECT enqueue_compute_job( -- WRITE
+  p_kind := 'okx_archive_rebuild', -- WRITE
+  p_api_key_id := (WITH __OKX_UNIVERSE__ SELECT ou.key_id FROM ou WHERE ou.ord = 2), -- WRITE
+  p_strategy_id := NULL, -- WRITE
+  p_idempotency_key := 'okx-archive-calibrate-' || __RUN__, -- WRITE
+  p_metadata := jsonb_build_object( -- WRITE
+    'mode', 'calibrate', -- WRITE
+    'quarters', '[{"year": 2026, "quarter": "Q2"}, {"year": 2026, "quarter": "Q3"}]'::jsonb, -- WRITE
+    'rebuild_strategy_ids', (WITH __OKX_UNIVERSE__ SELECT jsonb_agg(ou.strategy_id ORDER BY ou.ord) FROM ou WHERE ou.ord IN (1, 2)), -- WRITE
+    'zero_check_strategy_ids', (WITH __OKX_UNIVERSE__ SELECT jsonb_agg(ou.strategy_id ORDER BY ou.ord) FROM ou WHERE ou.ord = 4) -- WRITE
+  ), -- WRITE
+  p_run_at := now() -- WRITE
+); -- WRITE
+WITH m AS (SELECT __MARKER_IS_PROD__ AS marker_is_prod)
+SELECT m.marker_is_prod, 'calibrate' AS mode,
+       (SELECT count(*) FROM compute_jobs WHERE kind = 'okx_archive_rebuild' AND idempotency_key = 'okx-archive-calibrate-' || __RUN__) AS this_run_jobs,
+       (SELECT count(*) FROM compute_jobs WHERE kind = 'okx_archive_rebuild' AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry')) AS in_flight
+  FROM m;
+```
+
+```bash
+node "$TS_SP/form.mjs" enqueue-calibrate RUN=20261020T1100 > "$TS_SP/s2.sql" && q "$TS_SP/s2.sql" > "$TS_SP/s2.csv"
+```
+
+**Calibrate reading, from `member_progress`** (read in `TS_SP`, counts and dates only into any note):
+
+- `quarters[]`: `state` `finished` for both, `container`, `has_type_column`, `ts_min_day` / `ts_max_day`
+  matching the quarter (a mismatch is the STOP `quarter_range_mismatch`).
+- `census`: `by_ccy` all USDT, `by_sub_type` with no unclassified type, `unknown_zero_effect` 0. A
+  non-USD currency is the STOP `non_usd_ccy`, and it is the measurement that settles
+  `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`.
+- `reconcile`: for `realized` and `funding`, `ok` true, `days_over_cent` 0, `max_abs_diff` and
+  `window_total_diff` within one cent, `misses` empty, and `reconcile.window` naming the overlap days
+  actually compared.
+- `d03`: `hits` empty (D-03). A hit is the STOP `d03_zero_day_has_archive_pnl`; nothing is rewritten and
+  the fix, if any, is a separate founder decision.
+- `strategies[]`: `insert_days`, `insert_ranges`, `gaps_before` and `gaps_after` per target, in input order.
+- `fingerprint`: 64 lowercase hex, the value Step 3 approves.
+
+**D-10: any calibration day above one cent STOPS for the founder.** The tolerance is one cent per day
+and the same bound on the window total, measured first on the real overlap. It is never widened, never
+configurable, and nothing in this file or in the job changes it. A reading above it ends this runbook at
+this step and returns the exact day count and dates to the founder. **D-11: a miss writes nothing**;
+there is nothing to clean up after a stop here.
+
+## Step 3 — founder review (go / no-go and the fingerprint)
+
+No form runs here; the founder reads and decides, with the orchestrator's summary of counts and dates:
+
+1. The calibration readings above are clean (no STOP class, `days_over_cent` 0 in both legs).
+2. The download host named by `quarters[].href_host` is in the code allow-list of `okx_archive_download`
+   (a host that is not there stops the job as `download_refused`; adding one is a reviewed code change).
+3. The `excluded` totals by month and class, and the `info` readings, are as expected (information, not
+   gates).
+4. The headline change for ordinal 2 (published) and ordinal 1 (`pending_review`): `strategies[]`
+   `insert_ranges` is what each factsheet will name, and each headline start moves earlier.
+5. **Timing.** The 04:30Z tick recomputes anyway (Blast radius, item 4), so the moment of `apply` is the
+   founder's decision: apply just before the Wave 5 consolidated recompute to review the changed
+   headline first, or apply early and let the next tick publish it.
+6. Go / no-go. On go, the founder approves the `fingerprint` from the calibrate result. That value is
+   `FP` below, and `apply` refuses on any other.
+
+## Step 4 — apply
+
+Run outside 04:15-05:45 UTC. Order: `before`, then `enqueue-apply`, then `job-result`, then `after` and
+`survival`.
+
+**4a. `before`.** Per ordinal: total `csv_daily_returns` rows, rows inside the stored gap ranges, the
+gap and range entries with dates, a `gaps_param` column encoding the stored gaps as `from:to` islands
+joined by `+` (for example `2026-05-24:2026-08-01`, or `none`), `headline_since`, and the full
+`series_provenance` value. **Save the CSV in `TS_SP` under a name that says `before`: its
+`series_provenance` column is the rollback reference, and `gaps_param` for ordinals 1 and 2 is what
+`after` and `rollback` take.**
+
+<!-- form: before -->
+```sql
+WITH __OKX_PROV__,
+m AS (SELECT __MARKER_IS_PROD__ AS marker_is_prod)
+SELECT m.marker_is_prod, pv.ord AS ordinal, pv.status,
+       (SELECT count(*) FROM csv_daily_returns c WHERE c.strategy_id = pv.strategy_id) AS csv_rows_total,
+       (SELECT count(*) FROM csv_daily_returns c
+         WHERE c.strategy_id = pv.strategy_id
+           AND EXISTS (SELECT 1 FROM jsonb_array_elements(pv.gaps) g
+                        WHERE c.date BETWEEN (g ->> 'from')::date AND (g ->> 'to')::date)) AS rows_in_stored_gaps,
+       jsonb_array_length(pv.gaps) AS unrecovered_gaps_n,
+       coalesce((SELECT string_agg((g ->> 'from') || ':' || (g ->> 'to'), '+' ORDER BY g ->> 'from') FROM jsonb_array_elements(pv.gaps) g), 'none') AS gaps_param,
+       jsonb_array_length(pv.recon) AS reconstructed_ranges_n,
+       coalesce((SELECT string_agg((g ->> 'from') || ':' || (g ->> 'to'), '+' ORDER BY g ->> 'from') FROM jsonb_array_elements(pv.recon) g), 'none') AS reconstructed_dates,
+       jsonb_array_length(pv.legacy) AS legacy_ranges_n,
+       pv.headline_since,
+       pv.series_provenance::text AS series_provenance
+  FROM m
+  LEFT JOIN pv ON true
+ ORDER BY pv.ord;
+```
+
+```bash
+node "$TS_SP/form.mjs" before DRY=1 > "$TS_SP/b.sql" && q "$TS_SP/b.sql" > "$TS_SP/before-$(date -u +%Y%m%dT%H%M%SZ).csv"
+```
+
+**4b. `enqueue-apply`.** Takes the approved fingerprint as `FP`. The form refuses a value that is not 64
+lowercase hex before anything is enqueued; the job refuses any value that is not the fingerprint it
+re-derives (`fingerprint_mismatch`), and `zero_check_strategy_ids` is not passed (the job refuses it in
+`apply`).
+
+<!-- form: enqueue-apply -->
+```sql
+__GUARD__
+DO $fp$
+BEGIN
+  IF __FP__ !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'okx_archive_rebuild: FP must be 64 lowercase hex characters (the approved fingerprint); refusing';
+  END IF;
+END
+$fp$;
+__TARGET_REFUSAL__
+SELECT enqueue_compute_job( -- WRITE
+  p_kind := 'okx_archive_rebuild', -- WRITE
+  p_api_key_id := (WITH __OKX_UNIVERSE__ SELECT ou.key_id FROM ou WHERE ou.ord = 2), -- WRITE
+  p_strategy_id := NULL, -- WRITE
+  p_idempotency_key := 'okx-archive-apply-' || __RUN__, -- WRITE
+  p_metadata := jsonb_build_object( -- WRITE
+    'mode', 'apply', -- WRITE
+    'quarters', '[{"year": 2026, "quarter": "Q2"}, {"year": 2026, "quarter": "Q3"}]'::jsonb, -- WRITE
+    'rebuild_strategy_ids', (WITH __OKX_UNIVERSE__ SELECT jsonb_agg(ou.strategy_id ORDER BY ou.ord) FROM ou WHERE ou.ord IN (1, 2)), -- WRITE
+    'approved_fingerprint', __FP__ -- WRITE
+  ), -- WRITE
+  p_run_at := now() -- WRITE
+); -- WRITE
+WITH m AS (SELECT __MARKER_IS_PROD__ AS marker_is_prod)
+SELECT m.marker_is_prod, 'apply' AS mode,
+       (SELECT count(*) FROM compute_jobs WHERE kind = 'okx_archive_rebuild' AND idempotency_key = 'okx-archive-apply-' || __RUN__) AS this_run_jobs,
+       (SELECT count(*) FROM compute_jobs WHERE kind = 'okx_archive_rebuild' AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry')) AS in_flight
+  FROM m;
+```
+
+```bash
+node "$TS_SP/form.mjs" enqueue-apply RUN=20261020T1500 FP=<the-approved-64-hex> > "$TS_SP/s4.sql" && q "$TS_SP/s4.sql" > "$TS_SP/s4.csv"
+```
+
+**4c. `job-result`.** Read until `done`. `strategies[].rpc.status` is `applied` (or `already_applied` on
+a repeat, which writes nothing), `strategies[].insert_days` and `insert_ranges` name what was written,
+and `gaps_after` is what remains unrecovered. A stop here (`fingerprint_missing`,
+`fingerprint_mismatch`, `reconcile_miss`, `rpc_refused`, ...) wrote nothing for the strategy that
+stopped (D-11, and the RPC's own rollback), and returns to the founder.
+
+**4d. `after`.** Same columns as `before`, except the row count is taken inside the OLD gap ranges given
+by the parameters, because apply NARROWS the stored gaps, so counting inside the stored gaps at read
+time would undercount. Copy `O1_GAPS` and `O2_GAPS` from the saved `before` CSV's `gaps_param` column
+(ordinals 1 and 2). The form refuses a malformed value (anything that is not `from:to` islands joined by
+`+`, or `none`, or a range that ends before it starts).
+
+<!-- form: after -->
+```sql
+DO $chk$
+DECLARE
+  p text;
+  e text;
+BEGIN
+  FOREACH p IN ARRAY ARRAY[__O1_GAPS__, __O2_GAPS__] LOOP
+    IF p <> 'none' THEN
+      IF p !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}:[0-9]{4}-[0-9]{2}-[0-9]{2}(\+[0-9]{4}-[0-9]{2}-[0-9]{2}:[0-9]{4}-[0-9]{2}-[0-9]{2})*$' THEN
+        RAISE EXCEPTION 'after: O1_GAPS and O2_GAPS must be from:to islands joined by +, or none; refusing';
+      END IF;
+      FOREACH e IN ARRAY string_to_array(p, '+') LOOP
+        IF split_part(e, ':', 1)::date > split_part(e, ':', 2)::date THEN
+          RAISE EXCEPTION 'after: a gap island ends before it starts; refusing';
+        END IF;
+      END LOOP;
+    END IF;
+  END LOOP;
+END
+$chk$;
+WITH __OKX_PROV__,
+m AS (SELECT __MARKER_IS_PROD__ AS marker_is_prod),
+old AS (
+  SELECT 1 AS ord, __O1_GAPS__ AS p
+  UNION ALL
+  SELECT 2, __O2_GAPS__
+),
+oi AS (
+  SELECT old.ord, split_part(e, ':', 1)::date AS d_from, split_part(e, ':', 2)::date AS d_to
+    FROM old
+   CROSS JOIN LATERAL unnest(string_to_array(old.p, '+')) AS e
+   WHERE old.p <> 'none'
+)
+SELECT m.marker_is_prod, pv.ord AS ordinal, pv.status,
+       (SELECT count(*) FROM csv_daily_returns c WHERE c.strategy_id = pv.strategy_id) AS csv_rows_total,
+       (SELECT count(*) FROM csv_daily_returns c
+         WHERE c.strategy_id = pv.strategy_id
+           AND EXISTS (SELECT 1 FROM oi WHERE oi.ord = pv.ord AND c.date BETWEEN oi.d_from AND oi.d_to)) AS rows_in_old_gaps,
+       jsonb_array_length(pv.gaps) AS unrecovered_gaps_n,
+       coalesce((SELECT string_agg((g ->> 'from') || ':' || (g ->> 'to'), '+' ORDER BY g ->> 'from') FROM jsonb_array_elements(pv.gaps) g), 'none') AS gaps_param,
+       jsonb_array_length(pv.recon) AS reconstructed_ranges_n,
+       coalesce((SELECT string_agg((g ->> 'from') || ':' || (g ->> 'to'), '+' ORDER BY g ->> 'from') FROM jsonb_array_elements(pv.recon) g), 'none') AS reconstructed_dates,
+       jsonb_array_length(pv.legacy) AS legacy_ranges_n,
+       pv.headline_since,
+       pv.series_provenance::text AS series_provenance
+  FROM m
+  LEFT JOIN pv ON true
+ ORDER BY pv.ord;
+```
+
+```bash
+node "$TS_SP/form.mjs" after O1_GAPS=<before-gaps_param-of-1> O2_GAPS=<before-gaps_param-of-2> DRY=1 > "$TS_SP/a.sql" \
+  && q "$TS_SP/a.sql" > "$TS_SP/after-$(date -u +%Y%m%dT%H%M%SZ).csv"
+```
+
+**Expected, per rebuilt ordinal (1 and 2):** `rows_in_old_gaps` (after) minus `rows_in_stored_gaps` (before) equals
+the job result's `strategies[].insert_days`; `reconstructed_ranges_n` rose by the number of
+`insert_ranges`; `unrecovered_gaps_n` and `gaps_param` equal the result's `gaps_after` (a day nothing
+covered stays named, never 0.0, never interpolated); `legacy_ranges_n` and the other ordinals'
+`csv_rows_total` are unchanged (ordinals 3 and 4 and `legacy_ranges` are never touched, D-01 / D-02).
+`headline_since` does NOT move until the next analytics compute: that is Step 5.
+
+**4e. `survival`.** Per ordinal, the number of days inside `reconstructed_ranges` that have no
+`csv_daily_returns` row. Expected 0 for every ordinal. It is the check that a rebuilt day was not lost,
+and it is run again after the next 04:30Z tick (Step 5).
+
+<!-- form: survival -->
+```sql
+WITH __OKX_PROV__,
+m AS (SELECT __MARKER_IS_PROD__ AS marker_is_prod)
+SELECT m.marker_is_prod, pv.ord AS ordinal,
+       jsonb_array_length(pv.recon) AS reconstructed_ranges_n,
+       (SELECT coalesce(sum((r ->> 'to')::date - (r ->> 'from')::date + 1), 0)
+          FROM jsonb_array_elements(pv.recon) r) AS days_in_ranges,
+       (SELECT count(*)
+          FROM jsonb_array_elements(pv.recon) r
+         CROSS JOIN LATERAL generate_series(0, (r ->> 'to')::date - (r ->> 'from')::date) AS n
+         WHERE NOT EXISTS (SELECT 1 FROM csv_daily_returns c
+                            WHERE c.strategy_id = pv.strategy_id AND c.date = (r ->> 'from')::date + n)) AS days_without_row
+  FROM m
+  LEFT JOIN pv ON true
+ ORDER BY pv.ord;
+```
+
+```bash
+node "$TS_SP/form.mjs" survival DRY=1 > "$TS_SP/sv.sql" && q "$TS_SP/sv.sql" > "$TS_SP/survival-$(date -u +%Y%m%dT%H%M%SZ).csv"
+```
+
+## Step 5 — Wave 5 hand-off and read-backs
+
+The recompute that moves each `headline_since` is not run by this runbook and the job never enqueues
+analytics. The rebuilt rows are recomputed by the next 04:30Z tick's derive-then-compute chain
+regardless, and by the Wave 5 consolidated recompute when it runs first. The hand-off is booked as
+`167.1.2.2.2.1-WAVE5-RECOMPUTE` in `TODOS.md`, with its Owner, trigger (the apply job `done` and the
+analytics service deployed) and acceptance reading.
+
+After the recompute (or the next tick), read back, per ordinal 1 and 2:
+
+1. `worklist`: `headline_since` has moved earlier (ordinal 2 from 2026-08-02 toward 2026-02-23, ordinal 1
+   toward about 2026-05-24), `unrecovered_gaps` is what the apply result's `gaps_after` said, and
+   `reconstructed_ranges` is present.
+2. `survival`: `days_without_row` 0 for every ordinal. A live derive upserts by date and never deletes
+   an archive day, so a non-zero here is a defect to return to the founder, not noise.
+3. The public line: the factsheet names each `reconstructed_ranges` entry once (D-06), shown to everyone,
+   and the chart is not marked.
+
+**`reconstructed_ranges` can over-claim a day.** If a later live derive overwrites a rebuilt day (live
+wins, D-12), that day keeps its row, now live-derived, and `survival` still reads 0, so the public line
+may name a day whose stored value is the live one. This is accepted: the range records what was rebuilt,
+not who owns a day today. A day the archive never covered is never named as rebuilt.
+
+## Rollback
+
+**A founder decision only.** Apply is atomic per strategy, a stop writes nothing, and the job never
+undoes anything, so a rollback is for the case where the founder reverses the rebuild after it applied.
+
+`rollback` takes the ordinal and that ordinal's `before` `gaps_param` value (`ORD`, `GAPS`). For that
+one strategy it, in a single statement: deletes the `csv_daily_returns` rows inside the strategy's
+`okx_bills_history_archive` ranges, removes only those range entries from `reconstructed_ranges`, and
+sets `unrecovered_gaps` back to `GAPS`. It touches no other strategy, no other key and no
+`legacy_ranges`. It refuses (in SQL, before writing) a `GAPS` that is not `from:to` islands joined by `+`
+(or `none`), and an ordinal with no archive range to roll back. Run it only after reading `before` and
+`after`; the saved `before` CSV's `series_provenance` column is the reference the post-rollback reading
+is compared against.
+
+<!-- form: rollback -->
+```sql
+__GUARD__
+DO $rb$
+DECLARE
+  e text;
+BEGIN
+  IF __GAPS__ <> 'none' THEN
+    IF __GAPS__ !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}:[0-9]{4}-[0-9]{2}-[0-9]{2}(\+[0-9]{4}-[0-9]{2}-[0-9]{2}:[0-9]{4}-[0-9]{2}-[0-9]{2})*$' THEN
+      RAISE EXCEPTION 'rollback: GAPS must be from:to islands joined by +, or none; refusing';
+    END IF;
+    FOREACH e IN ARRAY string_to_array(__GAPS__, '+') LOOP
+      IF split_part(e, ':', 1)::date > split_part(e, ':', 2)::date THEN
+        RAISE EXCEPTION 'rollback: a gap island ends before it starts; refusing';
+      END IF;
+    END LOOP;
+  END IF;
+  IF NOT EXISTS (
+    WITH __OKX_PROV__
+    SELECT 1 FROM pv, jsonb_array_elements(pv.recon) r
+     WHERE pv.ord = __ORD__::int AND r ->> 'source' = 'okx_bills_history_archive'
+  ) THEN
+    RAISE EXCEPTION 'rollback: that ordinal has no okx_bills_history_archive range; nothing to roll back';
+  END IF;
+END
+$rb$;
+WITH __OKX_UNIVERSE__, -- WRITE
+tgt AS ( -- WRITE
+  SELECT ou.strategy_id FROM ou WHERE ou.ord = __ORD__::int -- WRITE
+), -- WRITE
+rng AS ( -- WRITE
+  SELECT tgt.strategy_id, (x ->> 'from')::date AS d_from, (x ->> 'to')::date AS d_to -- WRITE
+    FROM tgt -- WRITE
+    JOIN strategy_analytics a ON a.strategy_id = tgt.strategy_id -- WRITE
+   CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(a.series_provenance -> 'reconstructed_ranges') = 'array' THEN a.series_provenance -> 'reconstructed_ranges' ELSE '[]'::jsonb END) AS x -- WRITE
+   WHERE x ->> 'source' = 'okx_bills_history_archive' -- WRITE
+), -- WRITE
+del AS ( -- WRITE
+  DELETE FROM csv_daily_returns c USING rng -- WRITE
+   WHERE c.strategy_id = rng.strategy_id AND c.date BETWEEN rng.d_from AND rng.d_to -- WRITE
+  RETURNING c.date -- WRITE
+) -- WRITE
+UPDATE strategy_analytics a -- WRITE
+   SET series_provenance = jsonb_set( -- WRITE
+         jsonb_set(a.series_provenance, '{reconstructed_ranges}', -- WRITE
+           coalesce((SELECT jsonb_agg(r) FROM jsonb_array_elements(CASE WHEN jsonb_typeof(a.series_provenance -> 'reconstructed_ranges') = 'array' THEN a.series_provenance -> 'reconstructed_ranges' ELSE '[]'::jsonb END) AS r WHERE r ->> 'source' IS DISTINCT FROM 'okx_bills_history_archive'), '[]'::jsonb), true), -- WRITE
+         '{unrecovered_gaps}', -- WRITE
+         coalesce((SELECT jsonb_agg(jsonb_build_object('from', split_part(e, ':', 1), 'to', split_part(e, ':', 2), 'recorded_at', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')) ORDER BY split_part(e, ':', 1)) FROM unnest(string_to_array(__GAPS__, '+')) AS e WHERE __GAPS__ <> 'none'), '[]'::jsonb), true) -- WRITE
+  FROM tgt -- WRITE
+ WHERE a.strategy_id = tgt.strategy_id AND a.series_provenance IS NOT NULL; -- WRITE
+WITH __OKX_PROV__,
+m AS (SELECT __MARKER_IS_PROD__ AS marker_is_prod)
+SELECT m.marker_is_prod, pv.ord AS ordinal,
+       (SELECT count(*) FROM csv_daily_returns c WHERE c.strategy_id = pv.strategy_id) AS csv_rows_after,
+       jsonb_array_length(pv.gaps) AS unrecovered_gaps_n,
+       coalesce((SELECT string_agg((g ->> 'from') || ':' || (g ->> 'to'), '+' ORDER BY g ->> 'from') FROM jsonb_array_elements(pv.gaps) g), 'none') AS gaps_param,
+       jsonb_array_length(pv.recon) AS reconstructed_ranges_n,
+       pv.headline_since,
+       pv.series_provenance::text AS series_provenance
+  FROM m
+  LEFT JOIN pv ON pv.ord = __ORD__::int
+ ORDER BY pv.ord;
+```
+
+```bash
+node "$TS_SP/form.mjs" rollback ORD=1 GAPS=<before-gaps_param-of-1> > "$TS_SP/rb.sql" && q "$TS_SP/rb.sql" > "$TS_SP/rollback-$(date -u +%Y%m%dT%H%M%SZ).csv"
+```
+
+Expected readback: `reconstructed_ranges_n` back to its `before` value, `gaps_param` equal to the `before`
+`gaps_param`, `csv_rows_after` equal to the `before` `csv_rows_total`. Then run `survival` (expected 0
+everywhere) and `before` once more and compare the `series_provenance` column with the saved `before`
+copy: it differs only in the `recorded_at` stamps of the restored gaps (re-stamped at the rollback) and,
+if the key was absent before the apply, an empty `reconstructed_ranges` array in its place.
+
+- **Caveat on a live-overwritten day.** The delete covers the recorded archive ranges, so a day inside a
+  range that a later live derive overwrote (the over-claim above) is deleted with the range. The next
+  derive re-creates it if the venue still serves that day. Read `before` and `after` first and decide
+  case by case.
+- **Data is kept otherwise.** Nothing else is removed: the job's own `compute_jobs` rows, the live-derived
+  series and every other strategy stay as they were.
+- **Re-applying after a rollback** needs a fresh `calibrate` and a fresh founder-approved fingerprint:
+  the stored gaps are the compare-and-set input, so a stale fingerprint cannot apply.
+
+## What this runbook does not cover
+
+- **Automatic triggering (D-04).** There is no cron and no onboarding hook. A new OKX key onboarded later
+  is rebuilt only by a reviewed edit of these forms (the ordinals, the quarters) and a founder go.
+- **The carried-forward `legacy_ranges` and ordinal 4's stored January-April daily P&L (D-01).** They are
+  not replaced and not extended into a series. Deferred.
+- **Any fix to ordinal 4's June or July 0.0 days (D-03).** The check is read-only; if it finds realized
+  P&L the dates and both figures are reported and any fix is a separate founder decision.
+- **The live-path defects.** `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]` (the live aggregation sums every
+  currency at face value; the `calibrate` census is its measurement) and
+  `[167.1.2.2.2-OKX-PERSISTENT-TRUNCATION]` (the live page cap; the reconciliation's archive-only day
+  inside live reach is its detector) stay open in `TODOS.md`. This runbook fixes neither.
+- **Running the recompute.** Step 5 books and reads it; the Wave 5 consolidated recompute runs it.
+- **A page when the job fails.** No human is paged. A stuck or failed job is seen only by reading
+  `job-result`; the compute-jobs admin table shows the same row.
