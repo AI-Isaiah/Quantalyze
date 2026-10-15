@@ -20,7 +20,10 @@ from services import okx_archive_reconcile
 from services.okx_archive_classify import aggregate_archive
 from services.okx_archive_files import parse_archive_csv
 from services.okx_archive_reconcile import (
+    MIN_ACTIVE_DAYS,
+    MIN_COMPARED_DAYS,
     TOLERANCE_USD,
+    overlap_evidence,
     overlap_window,
     reconcile_leg,
 )
@@ -287,3 +290,55 @@ class TestOverlapWindow:
 
     def test_window_is_none_when_today_is_the_quarter_start(self):
         assert overlap_window(date(2026, 7, 1), date(2026, 10, 1), date(2026, 6, 1), date(2026, 7, 1)) is None
+
+
+class TestOverlapEvidence:
+    """F3. A comparison passes when two series agree, and two series that are both zero agree
+    however wrong the archive file is. So agreement only authenticates a file when the window
+    is long enough and active enough to have been able to disagree."""
+
+    def _days(self, first: str, count: int) -> list[str]:
+        start = date.fromisoformat(first)
+        return [(start + timedelta(days=i)).isoformat() for i in range(count)]
+
+    def test_the_floors_are_pinned_and_are_not_a_tolerance(self):
+        assert (MIN_COMPARED_DAYS, MIN_ACTIVE_DAYS) == (14, 5)
+        assert TOLERANCE_USD == Decimal("0.01")  # D-10: the cent is untouched
+        assert list(inspect.signature(overlap_evidence).parameters) == ["readings"]
+
+    def test_a_long_window_where_both_sides_are_zero_agrees_and_proves_nothing(self):
+        window = ("2026-09-01", "2026-09-30")  # 30 days, nothing on either side
+        reading = reconcile_leg("realized", {}, {}, window)
+        assert reading.ok is True and reading.days_compared == 30 and reading.active_days == 0
+        assert overlap_evidence([reading]) == (30, 0, False)
+
+    def test_five_active_days_in_fourteen_is_exactly_enough(self):
+        days = self._days("2026-09-01", 14)
+        both = {d: Decimal("1.50") for d in days[:5]}
+        reading = reconcile_leg("realized", both, dict(both), ("2026-09-01", "2026-09-14"))
+        assert overlap_evidence([reading]) == (14, 5, True)
+
+    def test_thirteen_days_or_four_active_days_is_not_enough(self):
+        days = self._days("2026-09-01", 14)
+        both = {d: Decimal("1.50") for d in days[:5]}
+        short = reconcile_leg("realized", both, dict(both), ("2026-09-01", "2026-09-13"))
+        assert overlap_evidence([short]) == (13, 5, False)
+        four = {d: Decimal("1.50") for d in days[:4]}
+        quiet = reconcile_leg("realized", four, dict(four), ("2026-09-01", "2026-09-14"))
+        assert overlap_evidence([quiet]) == (14, 4, False)
+
+    def test_a_day_counts_when_either_side_carries_it_and_dust_does_not(self):
+        archive = {"2026-09-01": Decimal("2"), "2026-09-02": Decimal("0.004")}
+        live = {"2026-09-03": Decimal("-2"), "2026-09-04": Decimal("0.005")}
+        reading = reconcile_leg("realized", archive, live, ("2026-09-01", "2026-09-05"))
+        # 09-01 archive only, 09-03 live only, 09-04 live at exactly half a cent: three
+        # days; 09-02 is dust (0.004) and 09-05 is empty.
+        assert reading.active_days == 3
+        assert reading.ok is False  # the one-sided days are misses; the evidence is separate
+
+    def test_the_evidence_sums_over_merged_windows(self):
+        a = reconcile_leg("realized", {"2026-07-01": Decimal("1")}, {"2026-07-01": Decimal("1")},
+                          ("2026-07-01", "2026-07-08"))
+        b = reconcile_leg("realized", {"2026-09-01": Decimal("1")}, {"2026-09-01": Decimal("1")},
+                          ("2026-09-01", "2026-09-08"))
+        assert overlap_evidence([a, b]) == (16, 2, False)

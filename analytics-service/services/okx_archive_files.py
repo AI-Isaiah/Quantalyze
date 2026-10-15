@@ -27,6 +27,9 @@ Stop classes raised here (``ArchiveParseError.stop_class``):
 * ``duplicate_bill_conflict``- one ``billId`` carried with different content
 * ``unparseable_amount``     - a money field that is not a finite plain decimal
 
+(``okx_archive_classify.verify_bal_chain`` adds ``archive_incomplete``: a file whose running
+``bal`` does not chain is missing rows. It lives there because it reads the typed rows.)
+
 ``ArchiveParseError.detail`` carries dates, labels, counts and line numbers ONLY.
 Never an amount, a billId or a raw cell value (the account-size leak class).
 
@@ -144,6 +147,27 @@ def quarter_bounds(year: int, quarter: str) -> tuple[date, date]:
     start = date(year, first_month, 1)
     end = date(year + 1, 1, 1) if first_month == 10 else date(year, first_month + 3, 1)
     return start, end
+
+
+def longest_billless_run(file: ArchiveFile) -> dict[str, Any]:
+    """The longest run of consecutive covered days on which the file carries NO bill at all.
+
+    Counts and dates only. A quarter file is read as the complete ledger of its quarter, so a
+    bill-less day becomes an explicit zero; this reading puts the longest such stretch next to
+    ``ts_min_day`` / ``ts_max_day`` so a file with a missing head or tail shows as one long
+    quiet run. The earliest run wins a tie. ``{"days": 0, "from": None, "to": None}`` when
+    every covered day has a bill."""
+    billed = {row.day for row in file.rows}
+    best_len, best_from, best_to = 0, None, None
+    run: list[str] = []
+    for day in sorted(file.covered_days):
+        if day in billed:
+            run = []
+            continue
+        run.append(day)
+        if len(run) > best_len:
+            best_len, best_from, best_to = len(run), run[0], run[-1]
+    return {"days": best_len, "from": best_from, "to": best_to}
 
 
 def _day_number(day: date) -> int:

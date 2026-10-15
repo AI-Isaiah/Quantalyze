@@ -22,7 +22,10 @@ through ``apply_okx_archive_rebuild``, the only write path.
 is idempotent), re-reads the request state, and then does exactly one of: defer
 (``defer_compute_job``, attempts untouched, at most one hour, claim-token fenced), re-apply
 once, ingest, or give up. The give-up bound comes from OKX's own request ``ts`` (8 h), never
-from a counter. Nothing about a download link or a ``ts`` is stored between claims: not in
+from a counter; because that ``ts`` is unverified, EVERY defer also passes a backstop of
+``BACKSTOP_AFTER_S`` (24 h) from the job's own ``created_at`` (F7). One claim as a whole has a
+budget (``CLAIM_BUDGET_S``, the handler timeout less a reserve) that every live crawl and the
+download are bounded by; running out is the named transient ``claim_budget_exceeded`` (WR-06). Nothing about a download link or a ``ts`` is stored between claims: not in
 the job metadata, not in the result, not in a log or an error text (the link is a bearer
 token; only its scheme and host are ever described). A restart, an expired link or an empty
 link therefore costs a fresh read, never a gap.
@@ -69,11 +72,12 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Context, Decimal, InvalidOperation
-from typing import Any, Final, Mapping, cast
+from typing import Any, Awaitable, Final, Mapping, TypeVar, cast
 
 import ccxt.async_support as ccxt
 import httpx
 
+from services import job_worker as _job_worker  # the handler timeout is read through the module
 from services.account_identity import venue_account_id_from
 from services.ccxt_flow_fetch import fetch_ccxt_transfers
 from services.ccxt_flows import ccxt_rows_to_dated_flows
@@ -84,6 +88,7 @@ from services.exchange import (
     aclose_exchange,
     fetch_account_equity_and_upnl_usd,
     fetch_all_trades,
+    get_and_clear_last_dq_flags,
 )
 from services.external_flows import ExternalFlow
 from services.funding_fetch import fetch_funding_okx
@@ -105,6 +110,7 @@ from services.okx_archive_classify import (
     ArchiveAggregate,
     Bucket,
     aggregate_archive,
+    verify_bal_chain,
 )
 from services.okx_archive_download import (
     DownloadRefused,
@@ -115,6 +121,7 @@ from services.okx_archive_download import (
 from services.okx_archive_files import (
     ArchiveFile,
     ArchiveParseError,
+    longest_billless_run,
     parse_archive_csv,
     quarter_bounds,
 )
@@ -126,7 +133,14 @@ from services.okx_archive_rebuild import (
     rows_for_strategy,
     subtract_ranges,
 )
-from services.okx_archive_reconcile import LegReading, overlap_window, reconcile_leg
+from services.okx_archive_reconcile import (
+    MIN_ACTIVE_DAYS,
+    MIN_COMPARED_DAYS,
+    LegReading,
+    overlap_evidence,
+    overlap_window,
+    reconcile_leg,
+)
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger(__name__)
@@ -134,8 +148,9 @@ logger = logging.getLogger(__name__)
 KIND: Final[str] = "okx_archive_rebuild"
 RESULT_VERSION: Final[int] = 1
 
-# Closed set of stop classes (job contract). ``link_expired`` is transient; every other
-# class is permanent. A stop writes the result block first, then returns FAILED.
+# Closed set of stop classes (job contract). ``link_expired``, ``live_fetch_failed`` and
+# ``claim_budget_exceeded`` are transient (a retry resumes statelessly); every other class is
+# permanent. A stop writes the result block first, then returns FAILED.
 STOP_CLASSES: Final[frozenset[str]] = frozenset(
     {
         "invalid_input",
@@ -150,6 +165,7 @@ STOP_CLASSES: Final[frozenset[str]] = frozenset(
         "download_refused",
         "link_expired",
         "container_unknown",
+        "archive_incomplete",
         "header_drift",
         "quarter_range_mismatch",
         "duplicate_bill_conflict",
@@ -157,15 +173,20 @@ STOP_CLASSES: Final[frozenset[str]] = frozenset(
         "unknown_subtype_nonzero",
         "non_usd_ccy",
         "live_anchor_unusable",
+        "live_fetch_failed",
+        "claim_budget_exceeded",
         "identity_violation",
         "reconcile_miss",
         "d03_zero_day_has_archive_pnl",
         "fingerprint_missing",
         "fingerprint_mismatch",
+        "nothing_to_apply",
         "rpc_refused",
     }
 )
-TRANSIENT_STOP_CLASSES: Final[frozenset[str]] = frozenset({"link_expired"})
+TRANSIENT_STOP_CLASSES: Final[frozenset[str]] = frozenset(
+    {"link_expired", "live_fetch_failed", "claim_budget_exceeded"}
+)
 
 # ---------------------------------------------------------------------------
 # Timings (RESEARCH A9, discretion), used by the stateless wait.
@@ -185,9 +206,36 @@ MIN_APPLY_GAP_S: Final[int] = 11
 MAX_DEFER_S: Final[int] = 3600
 #: A wait shorter than this is a tight loop, not a wait.
 MIN_DEFER_S: Final[int] = 60
+#: A backstop on WAITING that does not depend on anything OKX says (F7 / WR-04): a job older
+#: than this, measured from its own ``compute_jobs.created_at``, is not deferred again. The
+#: 8 h bound above reads OKX's request ``ts``, whose meaning is unverified; if it tracks the
+#: LATEST apply it never ages and nothing else ends the wait (a defer does not use an attempt).
+BACKSTOP_AFTER_S: Final[int] = 24 * 60 * 60
 #: A venue rate limit on an archive call defers at least this long (15 minutes), and never
 #: stamps the key's 429 (that opens the exchange-wide breaker and pauses normal OKX syncs).
 RATE_LIMIT_DEFER_S: Final[int] = 15 * 60
+
+#: How far back the live ``bills-archive`` walk is ASSUMED to reach, in days (CR-01). OKX
+#: documents "the last 3 months"; a calendar three months is 89..92 days and
+#: ``exchange.fetch_daily_pnl`` itself approximates it as 90. The reach starts at an arbitrary
+#: instant, so its first day is PARTIAL, and the job must name that day from the fetch window,
+#: never from the first record the crawl happened to return (a quiet stretch or a page-cap cut
+#: moves the first record, not the reach). The assumed reach is deliberately the shortest the
+#: venue can serve (89) less a day of margin: assuming a SHORTER reach than the venue gives only
+#: hands one more whole day to the archive, while assuming a longer one would treat a partial
+#: live day as whole, which skews every rebuilt NAV.
+LIVE_REACH_ASSUMED_DAYS: Final[int] = 88
+
+#: What is kept back from the handler timeout for the result write and the client closes.
+CLAIM_RESERVE_S: Final[float] = 60.0
+#: One claim's whole budget (WR-06). A calibrate or apply claim chains two apply POSTs paced
+#: >= 11 s apart, status reads, up to two downloads (``TOTAL_TIMEOUT_S`` = 300 s each), the
+#: parse, SIX sequential live crawls (each bounded by ``_BROKER_CRAWL_TIMEOUT_S`` = 810 s), the
+#: rebuild and the RPCs. Their sum can far exceed the handler timeout, so every step that can
+#: take long is bounded by what is LEFT of this budget (``_ClaimBudget``) and running out is the
+#: named transient ``claim_budget_exceeded``, never the dispatcher's generic cancellation. It is
+#: derived from the kind's handler timeout (the reaper ceiling does not move: plan 07).
+CLAIM_BUDGET_S: Final[float] = _job_worker.TIMEOUT_PER_KIND[KIND] - CLAIM_RESERVE_S
 
 # Seams for tests (a fake clock and a recorded sleep); production uses the real ones.
 _monotonic = time.monotonic
@@ -257,6 +305,49 @@ class _Stop(Exception):
         #: classification stops the founder must see the per-currency / per-subType counts
         #: of (``non_usd_ccy``, ``unknown_subtype_nonzero``). Counts only, never an amount.
         self.census: dict[str, Any] | None = None
+        #: The Result shape v1 ``info`` of a stop that carries evidence beside its class
+        #: (``archive_incomplete``: where the running ``bal`` chain broke). Counts and dates only.
+        self.info: dict[str, Any] | None = None
+
+
+_T = TypeVar("_T")
+
+
+class _ClaimBudget:
+    """One claim's wall-clock budget (WR-06), on the monotonic clock seam. Created at the top of
+    the handler and handed down to every step that can take long."""
+
+    def __init__(self, seconds: float) -> None:
+        self._deadline = _monotonic() + seconds
+
+    def remaining(self) -> float:
+        return self._deadline - _monotonic()
+
+
+async def _within(
+    budget: _ClaimBudget, work: Awaitable[_T], *, step: str, cap: float | None = None
+) -> _T:
+    """Await ``work`` for at most ``min(cap, what is left of the claim's budget)``.
+
+    The budget's own expiry (and starting with nothing left) is the named transient
+    ``claim_budget_exceeded`` naming the STEP, so an overlong claim ends as a class an operator
+    can read, not as the dispatcher's generic cancellation after a wasted attempt. A
+    ``TimeoutError`` the work raises on its own account is NOT the budget's: it propagates
+    untouched for whatever already classifies it."""
+    remaining = budget.remaining()
+    if remaining <= 0:
+        close = getattr(work, "close", None)
+        if callable(close):
+            close()  # never leave a coroutine that was never started un-awaited
+        raise _Stop("claim_budget_exceeded", f"step={step}")
+    timeout = remaining if cap is None else min(cap, remaining)
+    try:
+        async with asyncio.timeout(timeout) as scope:
+            return await work
+    except TimeoutError:
+        if scope.expired():
+            raise _Stop("claim_budget_exceeded", f"step={step}") from None
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +369,9 @@ def _blank_quarter(year: int, quarter: str) -> dict[str, Any]:
         "ts_min_day": None,
         "ts_max_day": None,
         "row_count": None,
+        #: ``{days, from, to}``: the longest run of covered days with no bill at all. Beside
+        #: ``ts_min_day`` / ``ts_max_day`` it is how a file with a missing head or tail shows.
+        "longest_billless_run": None,
     }
 
 
@@ -357,6 +451,8 @@ async def _finish_stop(
     result["stop_class"] = stop.stop_class
     if stop.census is not None:
         result["census"] = stop.census
+    if stop.info is not None:
+        result["info"] = stop.info
     logger.warning("%s", _error_text(stop.stop_class, stop.detail))
     try:
         await _write_result(supabase, job, result)
@@ -908,6 +1004,16 @@ async def _quarter_step(
     tag = _quarter_tag(year, label)
     answer = await pacer.apply(key_row, year, label)
     entry["applied_existing"] = answer.existing
+    # RESEARCH leaves the meaning of ``ts`` open (the apply time, or the first request's). Its
+    # age class on every claim is how the first real run measures it: a request that ages
+    # across claims has a stable ts, one that keeps reading young does not. Hours only.
+    _ts_age = _age_s(answer.ts_ms)
+    logger.info(
+        "okx_archive_rebuild: %s apply existing=%s ts_age_h=%s",
+        tag,
+        answer.existing,
+        "unreadable" if _ts_age is None else int(_ts_age // 3600),
+    )
 
     if not answer.existing:
         # OKX takes 2-3 h to generate a file: no point asking before then.
@@ -959,6 +1065,28 @@ async def _quarter_step(
 # Waiting: defer_compute_job
 # ---------------------------------------------------------------------------
 
+def _check_backstop(job: Mapping[str, Any]) -> None:
+    """Raise ``archive_give_up`` when this job is too old to wait any longer. Called by every
+    path that would defer. A ``created_at`` that cannot be read is treated as too old to wait:
+    a bound that cannot be evaluated must not become no bound at all."""
+    raw = job.get("created_at")
+    created_ms: int | None = None
+    if isinstance(raw, str) and raw.strip():
+        try:
+            created = datetime.fromisoformat(raw.strip())
+        except ValueError:
+            created = None
+        if created is not None:
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            created_ms = int(created.timestamp() * 1000)
+    if created_ms is None:
+        raise _Stop("archive_give_up", "backstop age=unreadable")
+    age = max(0.0, (_wall_ms() - created_ms) / 1000.0)
+    if age >= BACKSTOP_AFTER_S:
+        raise _Stop("archive_give_up", f"backstop age_h={int(age // 3600)}")
+
+
 async def _defer_job(
     supabase: Any, job: Mapping[str, Any], seconds: float, reason: str
 ) -> DispatchResult:
@@ -966,7 +1094,11 @@ async def _defer_job(
     decrements ``attempts`` (waiting never burns a retry) and is fenced on the claim token.
 
     The SQL raises above 3600 s, so the wait is clamped here; ``reason`` becomes
-    ``last_error`` and must hold a short class and counts only (no ``ts``, no link)."""
+    ``last_error`` and must hold a short class and counts only (no ``ts``, no link).
+
+    Every wait passes the backstop first (``_check_backstop``): a job past ``BACKSTOP_AFTER_S``
+    ends in the named ``archive_give_up`` instead of parking again."""
+    _check_backstop(job)
     defer_seconds = int(min(max(seconds, MIN_DEFER_S), MAX_DEFER_S))
 
     def _defer() -> None:
@@ -1022,6 +1154,8 @@ _PARSE_STOP_CLASS: Final[Mapping[str, str]] = {
     "empty_file": "quarter_range_mismatch",
     # Without a billId neither dedup nor conflict detection is possible:
     "missing_bill_id": "duplicate_bill_conflict",
+    # The running ``bal`` does not chain: the file is missing rows (verify_bal_chain):
+    "archive_incomplete": "archive_incomplete",
 }
 
 
@@ -1046,7 +1180,7 @@ def _safe_counts(counts: Mapping[str, int]) -> dict[str, int]:
 
 
 async def _download_quarter(
-    exchange: ccxt.Exchange, entry: dict[str, Any], href: str
+    exchange: ccxt.Exchange, entry: dict[str, Any], href: str, budget: _ClaimBudget
 ) -> tuple[bytes, str, int]:
     """Download one quarter's file. A 403/410 (an expired link, about 5.5 h after
     generation) is answered with exactly ONE fresh status read and ONE retry on the link
@@ -1061,7 +1195,7 @@ async def _download_quarter(
     refreshed = False
     while True:
         try:
-            return await download_archive_csv(href)
+            return await _within(budget, download_archive_csv(href), step="download")
         except LinkExpired:
             if refreshed:
                 raise _Stop("link_expired", f"quarter={tag} cause=expired_twice") from None
@@ -1078,14 +1212,14 @@ async def _download_quarter(
 
 
 async def _ingest_quarter(
-    exchange: ccxt.Exchange, entry: dict[str, Any], href: str
+    exchange: ccxt.Exchange, entry: dict[str, Any], href: str, budget: _ClaimBudget
 ) -> ArchiveFile:
     """Download one quarter's file, record the Result shape v1 readings and parse it.
 
     The parsed file lives in the caller's local variables for this claim only."""
     year, label = entry["year"], entry["quarter"]
     tag = _quarter_tag(year, label)
-    csv_bytes, container, compressed_bytes = await _download_quarter(exchange, entry, href)
+    csv_bytes, container, compressed_bytes = await _download_quarter(exchange, entry, href, budget)
     entry["container"] = container
     entry["compressed_bytes"] = compressed_bytes
     entry["decompressed_bytes"] = len(csv_bytes)
@@ -1097,6 +1231,7 @@ async def _ingest_quarter(
     entry["ts_min_day"] = parsed.ts_min_day
     entry["ts_max_day"] = parsed.ts_max_day
     entry["row_count"] = parsed.row_count
+    entry["longest_billless_run"] = longest_billless_run(parsed)
     return parsed
 
 
@@ -1133,6 +1268,31 @@ def _stop_census(files: list[ArchiveFile]) -> dict[str, Any]:
     }
 
 
+def _bal_chain_info(detail: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """``archive_incomplete`` evidence for the Result: per file the ts range and, per ccy,
+    pairs checked, breaks and the day of the first break. Counts and dates only; a ccy label
+    that is not a short plain token is merged into ``(malformed)`` as everywhere else."""
+    out: list[dict[str, Any]] = []
+    for file in detail.get("files", []):
+        ccys: dict[str, dict[str, Any]] = {}
+        for ccy, reading in file["ccys"].items():
+            safe = _malformed_or(ccy)
+            kept = ccys.get(safe)
+            if kept is None:
+                ccys[safe] = dict(reading)
+                continue
+            kept["checked"] += reading["checked"]
+            kept["breaks"] += reading["breaks"]
+            kept["first_break_day"] = min(
+                (d for d in (kept["first_break_day"], reading["first_break_day"]) if d is not None),
+                default=None,
+            )
+        out.append(
+            {"ts_min_day": file["ts_min_day"], "ts_max_day": file["ts_max_day"], "ccys": ccys}
+        )
+    return out
+
+
 #: Classification stops whose result block carries the file's census (see ``_stop_census``).
 _CENSUS_ON_STOP: Final[frozenset[str]] = frozenset({"non_usd_ccy", "unknown_subtype_nonzero"})
 
@@ -1144,10 +1304,15 @@ async def _census_of(
     (counts only, never an amount) together with the aggregate the evaluation reads."""
     try:
         aggregate = await asyncio.to_thread(aggregate_archive, files, live_types)
+        # F1: only after the rows classify, prove each file is whole. Interior completeness
+        # is what lets a bill-less covered day stand as a real zero.
+        await asyncio.to_thread(verify_bal_chain, files)
     except ArchiveParseError as exc:
         stop = _parse_stop(exc)
         if exc.stop_class in _CENSUS_ON_STOP:
             stop.census = _stop_census(files)
+        if exc.stop_class == "archive_incomplete":
+            stop.info = {"bal_chain": _bal_chain_info(exc.detail)}
         raise stop from None
     census = aggregate.census
     return (
@@ -1175,11 +1340,12 @@ async def _ingest_all(
     steps: list[_QuarterStep],
     live_types: Mapping[str, str],
     result: dict[str, Any],
+    budget: _ClaimBudget,
 ) -> _Ingested:
     files: list[ArchiveFile] = []
     for entry, step in zip(quarters, steps):
         assert step.href is not None  # every quarter was ready, or the job deferred
-        files.append(await _ingest_quarter(exchange, entry, step.href))
+        files.append(await _ingest_quarter(exchange, entry, step.href, budget))
     result["census"], aggregate = await _census_of(files, live_types)
     return _Ingested(files=files, aggregate=aggregate)
 
@@ -1266,9 +1432,16 @@ class _LiveReference:
     full_history: bool
     realized_by_day: dict[str, Decimal]
     funding_by_day: dict[str, Decimal]
-    #: The first day the live realized reach carries a record: the reach boundary day, which
-    #: is partial (OKX cut the reach mid-day), so it is never compared.
-    first_realized_day: str | None
+    #: The live realized reach's boundary day, derived from the FETCH WINDOW (never from the
+    #: first record): OKX cut the reach at an arbitrary instant that day, so it is partial,
+    #: never compared, and owned by the archive (CR-01).
+    reach_boundary_day: str
+    #: The first day the live realized P&L owns: the day after the boundary day.
+    first_full_day: str
+    #: The first day of the live deposit/withdrawal window (``flow_retention_floor``), or None
+    #: for a venue with no retention cap. The archive's transfer bills are used before it,
+    #: the live flows from it (F4).
+    flow_window_first_day: str | None
 
 
 def _record_day(timestamp: object) -> str:
@@ -1312,39 +1485,71 @@ def _live_funding_by_day(funding_rows: list[Any]) -> dict[str, Decimal]:
     return out
 
 
+#: ccxt exception classes ``fetch_daily_pnl`` records (by name) for a venue rate limit.
+_RATE_LIMIT_CLASSES: Final[frozenset[str]] = frozenset({"RateLimitExceeded", "DDoSProtection"})
+_CLASS_NAME_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
+
+
+def _check_live_realized_flags(flags: Mapping[str, Any]) -> None:
+    """Turn what ``fetch_daily_pnl`` left in the DQ buffer into a decision, never into data.
+
+    * a swallowed venue rate limit is re-raised as ``ccxt.RateLimitExceeded`` so the handler
+      defers (and, as everywhere in this job, never stamps the key);
+    * any other swallowed fetch error is the transient ``live_fetch_failed`` (the exception
+      CLASS only, never its text, which can carry a signed URL): a failed crawl is not a
+      quiet account, and an empty series must not reach the reconciliation;
+    * a page-cap truncation means the OLDEST live days are missing, the very days the
+      reconciliation and the NAV roll lean on: the live realized series is unusable."""
+    if flags.get("daily_pnl_fetch_error"):
+        name = flags.get("daily_pnl_fetch_error_class")
+        if name in _RATE_LIMIT_CLASSES:
+            raise ccxt.RateLimitExceeded("live realized crawl was rate limited")
+        label = name if isinstance(name, str) and _CLASS_NAME_RE.fullmatch(name) else _MALFORMED
+        raise _Stop("live_fetch_failed", f"class={label}")
+    if flags.get("daily_pnl_truncated_okx"):
+        raise _Stop("live_anchor_unusable", "live_realized=truncated")
+
+
 async def _live_reference(
-    exchange: ccxt.Exchange, supabase: Any, api_key_id: str
+    exchange: ccxt.Exchange, supabase: Any, api_key_id: str, budget: _ClaimBudget
 ) -> _LiveReference:
     """The live derive's crawl for an OKX key, with its bounds: equity and open uPnL, the
     FULL realized history (``since_ms=None``), OKX funding, and ccxt deposits and withdrawals
-    valued by the same flow valuer, each hard-bounded by ``_BROKER_CRAWL_TIMEOUT_S``. A
-    timeout propagates as the dispatcher's transient (a retry resumes statelessly); a venue
-    rate limit is deferred by the handler."""
-    equity, balance_error, open_unrealized, upnl_unreadable = await asyncio.wait_for(
-        fetch_account_equity_and_upnl_usd(exchange, "okx"), timeout=_BROKER_CRAWL_TIMEOUT_S
+    valued by the same flow valuer. Each crawl is bounded by ``_BROKER_CRAWL_TIMEOUT_S`` AND by
+    what is left of the claim's budget (WR-06); running out is the named transient
+    ``claim_budget_exceeded`` naming the step (a retry resumes statelessly). A venue rate limit
+    is deferred by the handler."""
+    equity, balance_error, open_unrealized, upnl_unreadable = await _within(
+        budget, fetch_account_equity_and_upnl_usd(exchange, "okx"),
+        step="live_equity", cap=_BROKER_CRAWL_TIMEOUT_S,
     )
-    realized = await asyncio.wait_for(
-        fetch_all_trades(exchange, since_ms=None), timeout=_BROKER_CRAWL_TIMEOUT_S
+    realized = await _within(
+        budget, fetch_all_trades(exchange, since_ms=None),
+        step="live_realized", cap=_BROKER_CRAWL_TIMEOUT_S,
     )
-    funding = await asyncio.wait_for(
-        fetch_funding_okx(exchange, api_key_id, None), timeout=_BROKER_CRAWL_TIMEOUT_S
+    # F2 / WR-03: the fetch swallows every error and returns what it has; the only trace is
+    # the per-task DQ buffer. Read it NOW, before any other crawl can reset it.
+    _check_live_realized_flags(get_and_clear_last_dq_flags())
+    funding = await _within(
+        budget, fetch_funding_okx(exchange, api_key_id, None),
+        step="live_funding", cap=_BROKER_CRAWL_TIMEOUT_S,
     )
     now_utc = _utc_now()
     now_ms = int(now_utc.timestamp() * 1000)
     floor = flow_retention_floor("okx", now_utc)
     flow_since_ms = 0 if floor is None else max(0, int(floor.timestamp() * 1000))
-    deposits = await asyncio.wait_for(
-        fetch_ccxt_transfers(exchange, "deposits", flow_since_ms, now_ms),
-        timeout=_BROKER_CRAWL_TIMEOUT_S,
+    deposits = await _within(
+        budget, fetch_ccxt_transfers(exchange, "deposits", flow_since_ms, now_ms),
+        step="live_deposits", cap=_BROKER_CRAWL_TIMEOUT_S,
     )
-    withdrawals = await asyncio.wait_for(
-        fetch_ccxt_transfers(exchange, "withdrawals", flow_since_ms, now_ms),
-        timeout=_BROKER_CRAWL_TIMEOUT_S,
+    withdrawals = await _within(
+        budget, fetch_ccxt_transfers(exchange, "withdrawals", flow_since_ms, now_ms),
+        step="live_withdrawals", cap=_BROKER_CRAWL_TIMEOUT_S,
     )
     flow_rows = list(deposits) + list(withdrawals)
-    price_index = await asyncio.wait_for(
-        _resolve_ccxt_flow_price_index(exchange, "okx", supabase, flow_rows),
-        timeout=_BROKER_CRAWL_TIMEOUT_S,
+    price_index = await _within(
+        budget, _resolve_ccxt_flow_price_index(exchange, "okx", supabase, flow_rows),
+        step="live_prices", cap=_BROKER_CRAWL_TIMEOUT_S,
     )
     try:
         flows = ccxt_rows_to_dated_flows(flow_rows, venue="okx", price_index=price_index)
@@ -1359,6 +1564,7 @@ async def _live_reference(
         open_unrealized = 0.0
 
     realized_by_day = _live_realized_by_day(realized)
+    reach_boundary = (now_utc - timedelta(days=LIVE_REACH_ASSUMED_DAYS)).date()
     return _LiveReference(
         equity=equity,
         balance_error=balance_error,
@@ -1371,7 +1577,9 @@ async def _live_reference(
         full_history=_ccxt_full_history_verdict("okx", realized, funding, now_utc),
         realized_by_day=realized_by_day,
         funding_by_day=_live_funding_by_day(list(funding)),
-        first_realized_day=min(realized_by_day) if realized_by_day else None,
+        reach_boundary_day=reach_boundary.isoformat(),
+        first_full_day=(reach_boundary + timedelta(days=1)).isoformat(),
+        flow_window_first_day=None if floor is None else floor.date().isoformat(),
     )
 
 
@@ -1402,6 +1610,7 @@ def _leg_of(readings: list[LegReading]) -> dict[str, Any]:
     return {
         "ok": all(r.ok for r in readings),
         "days_compared": sum(r.days_compared for r in readings),
+        "active_days": sum(r.active_days for r in readings),
         "max_abs_diff": _dec(max((r.max_abs_diff for r in readings), default=Decimal(0))),
         "window_total_diff": _dec(sum((r.window_total_diff for r in readings), Decimal(0))),
         "days_over_half_cent": sum(r.days_over_half_cent for r in readings),
@@ -1422,13 +1631,14 @@ def _reconcile(
 ) -> list[tuple[str, str]]:
     """D-09 / D-10: the realized leg and the funding leg per day and on the window total over
     the overlap window, with ``TOLERANCE_USD`` only (``reconcile_leg`` carries it, with no
-    parameter). The excluded classes, flow totals and ``bal`` continuity are reported, never
-    gated. A miss, or no window at all, is the permanent ``reconcile_miss`` (D-11). Returns
-    the windows."""
-    boundary = live.first_realized_day
+    parameter). The excluded classes and flow totals are reported, never gated. The window
+    opens the day after the reach boundary day, which comes from the fetch window (CR-01): a
+    day the crawl missed inside it is then an archive-only day and a miss, not an unexamined
+    one. A miss, or no window at all, is the permanent ``reconcile_miss`` (D-11). Returns the
+    windows."""
     reconcile: dict[str, Any] = {
         "window": None,
-        "excluded_boundary_day": boundary,
+        "excluded_boundary_day": live.reach_boundary_day,
         "realized": None,
         "funding": None,
     }
@@ -1439,14 +1649,10 @@ def _reconcile(
             for month, by_class in sorted(aggregate.excluded_by_month.items())
         }
     }
-    windows = (
-        _windows(quarters, date.fromisoformat(boundary) + timedelta(days=1), _utc_today())
-        if boundary is not None
-        else []
-    )
+    windows = _windows(quarters, date.fromisoformat(live.first_full_day), _utc_today())
     if not windows:
         # Calibration cannot be taken: the live reach no longer touches the verified quarters
-        # (RESEARCH Pitfall 9) or there is no live record at all. The runbook names the date.
+        # (RESEARCH Pitfall 9). The runbook names the date.
         raise _Stop("reconcile_miss", "window=none")
     reconcile["window"] = {"from": windows[0][0], "to": windows[-1][1]}
     realized_readings = [
@@ -1458,6 +1664,17 @@ def _reconcile(
     reconcile["realized"] = _leg_of(realized_readings)
     reconcile["funding"] = _leg_of(funding_readings)
     if all(r.ok for r in realized_readings + funding_readings):
+        # F3: agreement only authenticates the file when the window could have disagreed. Two
+        # empty series agree however wrong the file is, so a short or quiet window is a stop of
+        # its own. Judged on the realized leg: that is the P&L being rebuilt.
+        days, active, enough = overlap_evidence(realized_readings)
+        if not enough:
+            raise _Stop(
+                "reconcile_miss",
+                f"cause=insufficient_overlap window={windows[0][0]}..{windows[-1][1]} "
+                f"days={days} active={active} need_days={MIN_COMPARED_DAYS} "
+                f"need_active={MIN_ACTIVE_DAYS}",
+            )
         return windows
     offending = sorted(
         {m[0] for r in realized_readings + funding_readings for m in r.misses}
@@ -1553,6 +1770,10 @@ class _TargetPlan:
     #: gap day with no row or a day inside a stored archive range. It equals the row date set
     #: before this target's RPC commits and after it, which is why the fingerprint hashes it.
     planned_dates: list[str]
+    #: True when ``planned_dates`` is non-empty and every planned day already lies inside a
+    #: stored archive-sourced ``reconstructed_ranges`` entry: the proof that THIS job applied
+    #: this target already (WR-05).
+    archive_covers_planned: bool
 
 
 def _plan_target(
@@ -1576,6 +1797,7 @@ def _plan_target(
     planned = sorted(
         day for day in eligible if day in finite and day in covered and day < rebuilt.live_first_day
     )
+    recorded = _expand(archive_ranges)
     return _TargetPlan(
         position=position,
         strategy_id=strategy_id,
@@ -1583,6 +1805,7 @@ def _plan_target(
         rows=rows_out,
         expected_after=expected_after,
         planned_dates=planned,
+        archive_covers_planned=bool(planned) and all(day in recorded for day in planned),
     )
 
 
@@ -1621,12 +1844,14 @@ async def _d03_check(
 
 # ----- information readings (never gates) -------------------------------------------------
 
-def _balance_vs_nav(
-    files: list[ArchiveFile], live: _LiveReference, live_first_day: str
-) -> dict[str, Any]:
-    """The archive's USD-family balance after its last bill on or before the day before the
-    live first day, against the NAV the live roll puts at the end of that day."""
-    prev = (date.fromisoformat(live_first_day) - timedelta(days=1)).isoformat()
+def _balance_vs_nav(files: list[ArchiveFile], live: _LiveReference) -> dict[str, Any]:
+    """The archive's USD-family balance after its last bill on or before the reach boundary
+    day (the last day the archive owns), against the NAV the live roll puts at the end of that
+    day: today's equity less the open-uPnL wedge less every live P&L, funding and flow dated
+    from the first full live day on. The union rolls its archive days from exactly this NAV,
+    so a large ``diff`` is the one reading that checks the anchor itself (CR-01)."""
+    prev = live.reach_boundary_day
+    owned = live.first_full_day
     latest: dict[str, Any] = {}
     for file in files:
         for row in file.rows:
@@ -1640,10 +1865,10 @@ def _balance_vs_nav(
     rolled: Decimal | None = None
     if live.equity is not None and math.isfinite(live.equity):
         after = sum(
-            (v for d, v in live.realized_by_day.items() if d >= live_first_day), Decimal(0)
-        ) + sum((v for d, v in live.funding_by_day.items() if d >= live_first_day), Decimal(0))
+            (v for d, v in live.realized_by_day.items() if d >= owned), Decimal(0)
+        ) + sum((v for d, v in live.funding_by_day.items() if d >= owned), Decimal(0))
         after += sum(
-            (Decimal(repr(float(f.usd_signed))) for f in live.flows if f.utc_day_iso >= live_first_day),
+            (Decimal(repr(float(f.usd_signed))) for f in live.flows if f.utc_day_iso >= owned),
             Decimal(0),
         )
         rolled = Decimal(repr(live.equity)) - Decimal(repr(live.open_unrealized_usd)) - after
@@ -1683,6 +1908,27 @@ async def _stored_vs_core(
         "days_compared": compared,
         "days_over_cent": len(offending),
         "first_offending": offending[:10],
+    }
+
+
+def _returns_summary(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The founder's preview of the VALUES a target's rows carry (F4): the smallest and the
+    largest daily return and the compounded return of the whole stretch, as plain floats
+    (a return is a ratio, not an amount). ``None`` when there is no row. ``cumulative`` is
+    ``None`` when a day's return would make the compounding meaningless (<= -100%): an
+    uncomputable value is null, never a guess.
+
+    These are anchored on today's equity, so they are NOT in the fingerprint (a legitimate
+    equity move between calibrate and apply must not void the approval); they are what the
+    founder reads to judge the numbers the fingerprint deliberately does not pin."""
+    if not rows:
+        return None
+    values = [float(r["daily_return"]) for r in rows]
+    factors = [1.0 + v for v in values]
+    return {
+        "min": min(values),
+        "max": max(values),
+        "cumulative": math.prod(factors) - 1.0 if all(f > 0.0 for f in factors) else None,
     }
 
 
@@ -1763,6 +2009,7 @@ async def _evaluate(
     ingested: _Ingested,
     quarter_entries: list[dict[str, Any]],
     result: dict[str, Any],
+    budget: _ClaimBudget,
 ) -> _Evaluation:
     """The calibrate evaluation, shared by ``calibrate`` and ``apply``. Every stop here is
     raised BEFORE any write, and apply's first RPC comes after this returns, so a reconcile
@@ -1770,7 +2017,7 @@ async def _evaluate(
     aggregate = ingested.aggregate
     quarters = list(inp.quarters)
 
-    live = await _live_reference(exchange, supabase, api_key_id)
+    live = await _live_reference(exchange, supabase, api_key_id, budget)
     windows = _reconcile(result, aggregate, live, quarters)
 
     if inp.mode == "calibrate":
@@ -1824,6 +2071,8 @@ async def _evaluate(
             archive_flows_by_day=aggregate.flows_by_day,
             covered_days=aggregate.covered_days,
             from_day=from_day,
+            live_pnl_from_day=live.first_full_day,
+            live_flows_from_day=live.flow_window_first_day,
         )
     except RebuildRefused as refusal:
         raise _Stop(refusal.stop_class) from None
@@ -1870,7 +2119,8 @@ async def _evaluate(
                 )
             ),
         },
-        "realized_balance_vs_rolled_nav": _balance_vs_nav(ingested.files, live, rebuilt.live_first_day),
+        "realized_balance_vs_rolled_nav": _balance_vs_nav(ingested.files, live),
+        "live_from": {"pnl": live.first_full_day, "flows": live.flow_window_first_day},
         "first_live_day_differs": rebuilt.first_live_day_differs,
         "archive_days_prepended": rebuilt.archive_days_prepended,
         "gap_days_active": len(active),
@@ -1883,6 +2133,8 @@ async def _evaluate(
             "position": plan.position,
             "insert_days": len(plan.rows),
             "insert_ranges": days_to_ranges(r["date"] for r in plan.rows),
+            "insert_returns": _returns_summary(plan.rows),
+            "apply_state": _target_state(plan),
             "gaps_before": plan.stored_gaps,
             "gaps_after": plan.expected_after,
             "rpc": None,
@@ -1903,10 +2155,25 @@ def _is_refusal(exc: BaseException) -> bool:
     return getattr(exc, "code", None) in ("22023", "P0001")
 
 
-def _already_complete(plan: _TargetPlan) -> bool:
-    """Resumability rule 3: nothing left to write and nothing left to narrow. The RPC refuses
-    an empty ``p_rows`` by contract, so such a target is never sent."""
-    return not plan.rows and plan.expected_after == plan.stored_gaps
+def _target_state(plan: _TargetPlan) -> str:
+    """What an apply does with one target (resumability rule 3, WR-05).
+
+    * ``insert``: there are rows to write; one RPC.
+    * ``already_applied``: nothing left to write and nothing left to narrow, AND the target's
+      stored archive ``reconstructed_ranges`` already cover every day this plan would have
+      planned. That is the only proof this job applied the target before.
+    * ``gap_delta``: nothing to write but the stored gaps would still change (a live row filled
+      a gap day since the read). The RPC refuses an empty ``p_rows`` by contract, so this
+      cannot be expressed through it.
+    * ``nothing_to_apply``: nothing to write and nothing recorded: a wrong strategy id, a
+      strategy with no stored gap, a gap wholly outside the ingested quarters, or one whose
+      every day the NaN guard left out. Calling that ``already_applied`` reported a successful
+      re-run that never happened."""
+    if plan.rows:
+        return "insert"
+    if plan.expected_after != plan.stored_gaps:
+        return "gap_delta"
+    return "already_applied" if plan.archive_covers_planned else "nothing_to_apply"
 
 
 async def _apply_targets(
@@ -1916,20 +2183,27 @@ async def _apply_targets(
     answer in ``strategies[i].rpc``. Everything evaluation can decide has been decided before
     this runs, so a stop here is the RPC's own refusal (``rpc_refused``, naming the position)
     or a transport failure, which writes the per-target record and re-raises for the worker to
-    retry (the re-claim resumes through ``_already_complete``)."""
+    retry (the re-claim resumes through ``_target_state``)."""
     strategies = result["strategies"]
 
     # A target the RPC cannot express (rows empty, gaps would still change: live rows filled
-    # gap days since the read) is decided here, before the FIRST call, and writes nothing.
+    # gap days since the read) and a target with nothing to apply at all are decided here,
+    # before the FIRST call, and write nothing.
     for plan in plans:
-        if not plan.rows and not _already_complete(plan):
+        if _target_state(plan) == "gap_delta":
             raise _refused(plan.position, "empty_rows_gap_delta")
+    idle = [plan.position for plan in plans if _target_state(plan) == "nothing_to_apply"]
+    if idle:
+        for position in idle:
+            strategies[position]["rpc"] = {"status": "nothing_to_apply", "error_class": None}
+        raise _Stop("nothing_to_apply", f"position={idle[0]}")
 
     for plan in plans:
         entry = strategies[plan.position]
-        if _already_complete(plan):
+        if _target_state(plan) == "already_applied":
             entry["insert_days"] = 0
             entry["insert_ranges"] = []
+            entry["insert_returns"] = None
             entry["rpc"] = {"status": "already_applied", "error_class": None}
             continue
 
@@ -1986,6 +2260,7 @@ async def _apply_targets(
         if status == "already_applied":
             entry["insert_days"] = 0
             entry["insert_ranges"] = []
+            entry["insert_returns"] = None
         elif answer.get("inserted") != len(plan.rows):
             # D-12 at work: a live day appeared since the read and kept its row. Counts only.
             logger.warning(
@@ -2004,11 +2279,13 @@ async def _run_evaluation(
     ingested: _Ingested,
     quarter_entries: list[dict[str, Any]],
     result: dict[str, Any],
+    budget: _ClaimBudget,
 ) -> None:
     """Calibrate and apply: evaluate, then (apply only) gate on the approved fingerprint and
     write. The fingerprint comparison, like every evaluation stop, precedes the first RPC."""
     evaluation = await _evaluate(
-        supabase, exchange, str(job.get("api_key_id")), inp, ingested, quarter_entries, result
+        supabase, exchange, str(job.get("api_key_id")), inp, ingested, quarter_entries, result,
+        budget,
     )
     if inp.mode != "apply":
         return
@@ -2027,6 +2304,7 @@ async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
     for the stateless wait."""
     supabase = get_supabase()
     result = _blank_result(None)
+    budget = _ClaimBudget(CLAIM_BUDGET_S)
     metadata = job.get("metadata")
     raw_mode = metadata.get("mode") if isinstance(metadata, Mapping) else None
     if isinstance(raw_mode, str) and raw_mode in MODES:
@@ -2061,9 +2339,9 @@ async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
                     f"{KIND}: waiting quarters_ready={ready}/{len(steps)}",
                 )
             if inp.mode in ("calibrate", "apply"):
-                ingested = await _ingest_all(exchange, quarters, steps, live_types, result)
+                ingested = await _ingest_all(exchange, quarters, steps, live_types, result, budget)
                 await _run_evaluation(
-                    supabase, job, exchange, inp, ingested, quarters, result
+                    supabase, job, exchange, inp, ingested, quarters, result, budget
                 )
         except _Stop as stop:
             return await _finish_stop(supabase, job, result, stop)
@@ -2076,9 +2354,12 @@ async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
                 type(exc).__name__,
                 RATE_LIMIT_DEFER_S,
             )
-            return await _defer_job(
-                supabase, job, RATE_LIMIT_DEFER_S, f"{KIND}: waiting rate_limited"
-            )
+            try:
+                return await _defer_job(
+                    supabase, job, RATE_LIMIT_DEFER_S, f"{KIND}: waiting rate_limited"
+                )
+            except _Stop as stop:
+                return await _finish_stop(supabase, job, result, stop)
         # DONE is only honest once the result is stored: a failed write propagates and the
         # dispatcher retries the whole (idempotent) claim.
         json.dumps(result)  # the object must be plain JSON: no Decimal, no datetime

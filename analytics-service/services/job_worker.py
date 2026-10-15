@@ -673,10 +673,16 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "derive_broker_dailies": 15 * 60,  # full-history realized PnL + funding fetch (mirrors sync_trades envelope)
     "stitch_composite": 20 * 60,  # Phase 86 / COMP-02 — N-member fan-out (worst case 2× crawl per key when MTM open)
     "derive_allocator_equity": 5 * 60,  # Phase 115.1 / RD-3 Option B — pure DB + math, no exchange I/O (5 min < 10 min watchdog floor → no override needed)
-    # Phase 167.1.2.2.2.1 / OKXHISTORY (D-04) — ONE claim covers a preflight, a status read,
-    # a download-and-parse, or a live crawl-and-reconcile. The 2-3 h wait for OKX to
-    # generate a quarterly file is NOT this timeout: it is defer_compute_job, which returns
-    # the row to pending between claims.
+    # Phase 167.1.2.2.2.1 / OKXHISTORY (D-04) — the 2-3 h wait for OKX to generate a
+    # quarterly file is NOT this timeout: it is defer_compute_job, which returns the row to
+    # pending between claims. But ONE calibrate or apply claim does ALL of the rest in
+    # sequence: two apply POSTs paced >= 11 s apart, status reads, up to two downloads
+    # (okx_archive_download.TOTAL_TIMEOUT_S = 300 s each), the parse, six live crawls (each up
+    # to _BROKER_CRAWL_TIMEOUT_S = 810 s), the rebuild and the RPCs. Their bounds SUM to far
+    # more than this timeout, so the handler gives itself a claim budget of this value less
+    # okx_archive_job.CLAIM_RESERVE_S, bounds each step by what is left of it, and ends an
+    # overlong claim as the named transient `claim_budget_exceeded` (WR-06). Keep this <= 30
+    # min: main_worker's watchdog override for the kind (30 minutes) must stay above it.
     "okx_archive_rebuild": 15 * 60,
 }
 

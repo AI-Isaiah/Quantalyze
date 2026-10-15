@@ -27,10 +27,12 @@ from services.okx_archive_classify import (
     SUBTYPE_BUCKETS,
     Bucket,
     aggregate_archive,
+    verify_bal_chain,
 )
 from services.okx_archive_files import (
     ARCHIVE_HEADER,
     ArchiveParseError,
+    longest_billless_run,
     parse_archive_csv,
     quarter_bounds,
 )
@@ -429,11 +431,26 @@ class TestCurrencyStop:
         assert _stop(_aggregate_q3, funding).stop_class == "non_usd_ccy"
         assert _stop(_aggregate_q3, flow).stop_class == "non_usd_ccy"
 
-    def test_currency_non_external_row_in_btc_does_not_raise_and_is_counted_in_the_census(self):
+    def test_currency_non_external_row_in_btc_is_a_stop_because_the_live_path_would_sum_it_as_dollars(self):
+        # WR-01. The live aggregator sums pnl + fee of EVERY non-funding bill in its four
+        # instTypes with no ccy conversion, a liquidation transfer included. A coin-denominated
+        # one inside that set therefore cannot be compared like for like, and was skipped by a
+        # ``continue`` that ran before the currency check. It must hit ``non_usd_ccy`` like
+        # every other counted bucket.
+        data = _q3_with(_row_kwargs("799999013", "110", "2026-07-12 12:00:00", ccy="BTC", pnl="0.3"))
+        err = _stop(_aggregate_q3, data)
+        assert err.stop_class == "non_usd_ccy"
+        assert err.detail["ccys"] == {"BTC": {"rows": 1, "months": ["2026-07"]}}
+        assert "0.3" not in _detail_text(err)
+
+    def test_currency_non_external_coin_row_the_live_path_never_sees_is_counted_not_a_stop(self):
+        # Outside the live instTypes (a blank instType) the live path never reads the row, so
+        # there is nothing to reproduce: counted like the excluded realized classes.
         agg = _aggregate_q3(
-            _q3_with(_row_kwargs("799999013", "110", "2026-07-12 12:00:00", ccy="BTC", balChg="0.3"))
+            _q3_with(_row_kwargs("799999013", "110", "2026-07-12 12:00:00", instType="", ccy="BTC", balChg="0.3"))
         )
         assert agg.census["by_ccy"]["BTC"] == 1
+        assert agg.census["excluded_non_usd_rows"] == 1
         assert "2026-07-12" not in agg.non_external_by_day  # a coin amount is never summed as dollars
         assert agg.non_external_by_day == {"2026-07-15": Decimal("30.00")}
 
@@ -487,6 +504,52 @@ class TestExcludedInstTypeClasses:
         )
         assert "2026-09" not in agg.excluded_by_month
         assert agg.census["excluded_non_usd_rows"] == 1
+
+
+class TestNonExternalRealizedParity:
+    """WR-01: the archive realized leg is ``pnl + fee`` of every non-funding bill in the live
+    path's four instTypes, whatever its subtype (``exchange.fetch_daily_pnl`` filters on
+    ``instType`` and drops only type 8). The seed table keeps liquidation transfers and forced
+    repayments out of FLOWS (they are not external capital), but their ``pnl`` and ``fee`` are
+    inside the live number, so leaving them out of the archive leg changes the P&L of every
+    gap day, where nothing reconciles, relative to the method D-07 promises is identical."""
+
+    def test_a_forced_repayment_row_adds_its_pnl_and_fee_to_the_day(self):
+        # Independent literal: one 114 row, pnl -3.00 and fee -0.50, on a day with no other bill.
+        agg = _aggregate_q3(
+            _q3_with(
+                _row_kwargs("799999030", "114", "2026-07-12 12:00:00", pnl="-3.00", fee="-0.50", balChg="-3.50")
+            )
+        )
+        assert agg.realized_by_day["2026-07-12"] == Decimal("-3.50")
+        # ... and its balance change is still reported as non-external, never as a flow.
+        assert agg.non_external_by_day["2026-07-12"] == Decimal("-3.50")
+        assert "2026-07-12" not in agg.flows_by_day
+
+    def test_it_is_added_to_a_trade_of_the_same_day_not_instead_of_it(self):
+        agg = _aggregate_q3(
+            _q3_with(
+                _row_kwargs("799999031", "2", "2026-07-12 10:00:00", pnl="10.00", fee="-0.25", balChg="9.75"),
+                _row_kwargs("799999032", "115", "2026-07-12 11:00:00", pnl="-4.00", fee="-1.00", balChg="-5.00"),
+            )
+        )
+        assert agg.realized_by_day["2026-07-12"] == Decimal("4.75")
+
+    def test_a_non_external_row_outside_the_live_inst_types_is_excluded_and_reported(self):
+        agg = _aggregate_q3(
+            _q3_with(
+                _row_kwargs("799999033", "16", "2026-07-12 12:00:00", instType="OPTION", pnl="-2.00", fee="-0.20")
+            )
+        )
+        assert agg.realized_by_day.get("2026-07-12", Decimal(0)) == 0
+        assert agg.excluded_by_month["2026-07"]["OPTION"] == Decimal("2.90") - Decimal("2.20")
+
+    def test_a_zero_effect_liquidation_transfer_changes_nothing(self):
+        # The fixture's own 110 row (SWAP, pnl 0, fee 0, balChg 30) shares 07-15 with a
+        # partial liquidation of pnl -25.00 and fee -2.00: the day's realized stays -27.00.
+        agg = _aggregate_q3((FIXTURES / "q3_like.csv").read_bytes())
+        assert agg.realized_by_day["2026-07-15"] == Decimal("-27.00")
+        assert agg.non_external_by_day == {"2026-07-15": Decimal("30.00")}
 
 
 class TestLiveInstTypePin:
@@ -568,3 +631,93 @@ class TestBalanceContinuityReading:
         rows[-1][header.index("bal")] = "1.00"  # the last USDT bill no longer follows its predecessor
         agg = _aggregate_q3(_emit(header, rows))
         assert agg.bal_continuity["USDT"] == {"checked": 18, "mismatches": 1}
+
+
+class TestBalChainCompleteness:
+    """F1 (silent-failure-hunter, HIGH): a quarter file is treated as the COMPLETE ledger of
+    its quarter, so a covered day with no bill becomes an explicit 0.0 return. A file that is
+    missing rows (a truncated download, a partial export) must therefore be refused, or its
+    missing weeks are published as quiet days. OKX's ``bal`` is the balance after each bill,
+    so per ccy and in billId order ``bal == previous bal + balChg`` must hold; a dropped row
+    breaks the chain at the next bill."""
+
+    def _file(self, name="q3_like.csv", *, quarter="Q3", drop=(), edit=None):
+        header, rows = _read_fixture(name)
+        rows = [r for r in rows if r[header.index("billId")] not in drop]
+        if edit is not None:
+            edit(header, rows)
+        return parse_archive_csv(_emit(header, rows), year=2026, quarter=quarter)
+
+    @pytest.mark.parametrize(("name", "quarter"), [("q3_like.csv", "Q3"), ("q2_like.csv", "Q2")])
+    def test_a_chaining_file_passes(self, name, quarter):
+        verify_bal_chain([self._file(name, quarter=quarter)])  # must not raise
+
+    def test_an_interior_row_dropped_from_the_file_is_archive_incomplete(self):
+        # 700000007 (a 7.47 trade) is removed: the next bill's bal no longer follows.
+        err = _stop(verify_bal_chain, [self._file(drop={"700000007"})])
+        assert err.stop_class == "archive_incomplete"
+        usdt = err.detail["files"][0]["ccys"]["USDT"]
+        assert usdt["breaks"] == 1
+        # The first row AFTER the gap is 700000008 on 2026-07-15 (ts 1784106000000).
+        assert usdt["first_break_day"] == "2026-07-15"
+
+    def test_the_stop_carries_counts_and_dates_never_an_amount(self):
+        err = _stop(verify_bal_chain, [self._file(drop={"700000007"})])
+        text = _detail_text(err)
+        for amount in ("5487", "5514", "7.47", "27.00", "5517"):
+            assert amount not in text, f"an amount leaked into the stop detail: {amount}"
+
+    def test_dropping_the_last_row_of_a_ccy_cannot_be_seen_and_is_the_documented_residual(self):
+        # A tail loss leaves the surviving prefix intact: the chain proves INTERIOR
+        # completeness only. The head and tail are what ts_min_day / ts_max_day and the
+        # longest bill-less run are for; this test records the limit instead of hiding it.
+        verify_bal_chain([self._file(drop={"700000020"})])
+
+    def test_a_row_with_no_ccy_cannot_be_chained_and_stops_rather_than_assuming(self):
+        def blank_ccy(header, rows):
+            rows[3][header.index("ccy")] = ""
+
+        err = _stop(verify_bal_chain, [self._file(edit=blank_ccy)])
+        assert err.stop_class == "archive_incomplete"
+        assert err.detail["reason"] == "unchainable_row"
+
+    def test_a_non_numeric_bill_id_cannot_be_ordered_and_stops_rather_than_assuming(self):
+        def odd_id(header, rows):
+            rows[3][header.index("billId")] = "abc-3"
+
+        err = _stop(verify_bal_chain, [self._file(edit=odd_id)])
+        assert err.stop_class == "archive_incomplete"
+        assert err.detail["reason"] == "unchainable_row"
+
+    def test_each_file_is_chained_on_its_own(self):
+        # Q2 and Q3 are separate ledgers of separate quarters: the seam between them is
+        # not asserted, but a break inside either one is.
+        good = self._file("q2_like.csv", quarter="Q2")
+        broken = self._file(drop={"700000007"})
+        err = _stop(verify_bal_chain, [good, broken])
+        assert err.stop_class == "archive_incomplete"
+        assert len(err.detail["files"]) == 2
+        assert err.detail["files"][0]["ccys"]["USDT"]["breaks"] == 0
+        assert err.detail["files"][1]["ccys"]["USDT"]["breaks"] == 1
+
+
+class TestLongestBilllessRun:
+    """F1: counts and dates only, per quarter, so a file whose head or tail is missing shows
+    as one long quiet stretch the founder can read next to ``ts_min_day`` / ``ts_max_day``."""
+
+    def test_q3_fixture_longest_run_is_worked_by_hand(self):
+        # The Q3 fixture's bills fall on 13 UTC days (worked out with date arithmetic over the
+        # file's ts column, not through the parser): 07-01 07-02 07-05 07-09 07-15 07-20 08-03
+        # 08-10 08-12 08-20 09-02 09-15 09-30. The quiet stretches are 07-03..07-04 (2),
+        # 07-06..07-08 (3), 07-10..07-14 (5), 07-16..07-19 (4), 07-21..08-02 (13), 08-04..08-09 (6),
+        # 08-11 (1), 08-13..08-19 (7), 08-21..09-01 (12), 09-03..09-14 (12), 09-16..09-29 (14).
+        # The longest is 14 days, 09-16..09-29.
+        parsed = parse_archive_csv((FIXTURES / "q3_like.csv").read_bytes(), year=2026, quarter="Q3")
+        assert longest_billless_run(parsed) == {"days": 14, "from": "2026-09-16", "to": "2026-09-29"}
+
+    def test_a_file_missing_its_whole_tail_shows_the_tail_as_the_run(self):
+        header, rows = _read_fixture("q3_like.csv")
+        rows = [r for r in rows if int(r[header.index("ts")]) < 1_784_600_000_000]  # up to 07-20
+        parsed = parse_archive_csv(_emit(header, rows), year=2026, quarter="Q3")
+        run = longest_billless_run(parsed)
+        assert run["to"] == "2026-09-30" and run["days"] >= 60

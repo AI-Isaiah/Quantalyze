@@ -99,6 +99,10 @@ def _run(**overrides):
         archive_flows_by_day=ARCHIVE_FLOWS,
         covered_days=set(Q_DAYS),
         from_day="2026-07-01",
+        # The live P&L owns its days from the first record (08-02 here, a FULL day), and the
+        # live deposit window opens the same day, so the archive transfer on 07-15 is used.
+        live_pnl_from_day="2026-08-02",
+        live_flows_from_day="2026-08-02",
     )
     kwargs.update(overrides)
     return rebuild_union(**kwargs)
@@ -252,6 +256,167 @@ class TestIdentity:
         with pytest.raises(RebuildRefused) as exc:
             _run(live_realized=[])
         assert exc.value.stop_class == "live_anchor_unusable"
+
+
+class TestPartialLiveBoundaryDay:
+    """CR-01. The live realized fetch reaches back about three months from an arbitrary
+    instant, so its FIRST day is partial. The backward roll
+    ``nav[t-1] = nav[t] - pnl[t] - flows[t]`` run through a partial day gives every earlier NAV
+    (and so every rebuilt return) the error of the P&L that day is missing, and the archive
+    holds the whole day. The archive owns every day before the first FULL live day, the
+    boundary day included."""
+
+    def test_the_boundary_day_uses_the_archive_full_value_in_the_roll(self) -> None:
+        """Independent hand roll. Live: 08-02 is the reach boundary day and carries only a
+        PARTIAL +40; 08-03 is the first full day, -50. Archive (whole days): 08-01 +200,
+        08-02 +100. Anchor 10000 at the end of 08-03.
+          nav_end(08-02) = 10000 - (-50)  = 10050
+          nav_end(08-01) = 10050 - 100    =  9950   (the ARCHIVE's 100, not the partial 40)
+          nav_end(07-31) =  9950 - 200    =  9750
+        Returns: 08-01 = 200/9750, 08-02 = 100/9950, 08-03 = -50/10050.
+        Rolling through the partial +40 instead gives nav_end(08-01) = 10010 and
+        08-01 = 200/9810, which is what the old code produced."""
+        result = _run(
+            live_realized=[_record("2026-08-02", 40.0), _record("2026-08-03", -50.0)],
+            archive_realized_by_day={"2026-08-01": Decimal("200"), "2026-08-02": Decimal("100")},
+            archive_funding_by_day={},
+            archive_flows_by_day={},
+            covered_days={"2026-08-01", "2026-08-02"},
+            from_day="2026-08-01",
+            live_pnl_from_day="2026-08-03",
+            live_flows_from_day="2026-08-03",
+        )
+        got = {d.date().isoformat(): v for d, v in result.returns.items()}
+        assert got["2026-08-01"] == pytest.approx(200.0 / 9750.0, abs=1e-12, rel=0)
+        assert got["2026-08-02"] == pytest.approx(100.0 / 9950.0, abs=1e-12, rel=0)
+        assert got["2026-08-03"] == pytest.approx(-50.0 / 10050.0, abs=1e-12, rel=0)
+        assert result.archive_days_prepended == 2
+        # The derive-equivalent first day is still the first live RECORD: a stored live row can
+        # exist from there, and rows_for_strategy must never write on or after it (D-12).
+        assert result.live_first_day == "2026-08-02"
+
+    def test_a_partial_boundary_record_with_a_funding_row_is_dropped_too(self) -> None:
+        result = _run(
+            live_realized=[_record("2026-08-03", -50.0)],
+            live_funding=[{"timestamp": pd.Timestamp("2026-08-02T08:00:00+00:00").to_pydatetime(),
+                           "amount": 7.0}],
+            archive_realized_by_day={"2026-08-01": Decimal("200"), "2026-08-02": Decimal("100")},
+            archive_funding_by_day={"2026-08-02": Decimal("3")},
+            archive_flows_by_day={},
+            covered_days={"2026-08-01", "2026-08-02"},
+            from_day="2026-08-01",
+            live_pnl_from_day="2026-08-03",
+            live_flows_from_day="2026-08-03",
+        )
+        # The live funding (7) is a partial-day record and is NOT used; the archive's (3) is.
+        # nav_end(08-02) = 10000 + 50 = 10050; nav_end(08-01) = 10050 - (100 + 3) = 9947.
+        got = {d.date().isoformat(): v for d, v in result.returns.items()}
+        assert got["2026-08-02"] == pytest.approx(103.0 / 9947.0, abs=1e-12, rel=0)
+
+    def test_every_live_day_from_the_first_full_day_is_still_identical(self) -> None:
+        """D-12 is unchanged for every day the live P&L owns."""
+        result = _run(live_pnl_from_day="2026-08-03", live_flows_from_day="2026-08-03")
+        live_only = _live_only()
+        for ts in live_only.index:
+            if ts >= pd.Timestamp("2026-08-03"):
+                assert result.returns.loc[ts] == pytest.approx(live_only.loc[ts], abs=1e-9, rel=0), ts
+
+    def test_a_live_series_that_is_only_the_partial_day_has_no_whole_day_to_roll_from(self) -> None:
+        with pytest.raises(RebuildRefused) as exc:
+            _run(
+                live_realized=[_record("2026-08-02", 40.0)],
+                live_pnl_from_day="2026-08-03",
+                live_flows_from_day="2026-08-03",
+            )
+        assert exc.value.stop_class == "live_anchor_unusable"
+
+    def test_the_seam_arguments_are_required(self) -> None:
+        """A caller that forgets them must fail loudly rather than fall back to the first
+        record: that fallback is the defect."""
+        params = inspect.signature(rebuild_union).parameters
+        for name in ("live_pnl_from_day", "live_flows_from_day"):
+            assert params[name].default is inspect.Parameter.empty, name
+
+
+class TestFlowSeam:
+    """F4. The archive's transfer bills (trading account) and the live deposits/withdrawals
+    (funding account) are two models of capital. A day described by both must count once."""
+
+    BASE = dict(
+        live_realized=[_record("2026-08-02", 100.0), _record("2026-08-03", -50.0)],
+        archive_realized_by_day={
+            "2026-07-30": Decimal("10"), "2026-07-31": Decimal("20"), "2026-08-01": Decimal("30"),
+        },
+        archive_funding_by_day={},
+        covered_days={"2026-07-30", "2026-07-31", "2026-08-01"},
+        from_day="2026-07-30",
+        live_pnl_from_day="2026-08-02",
+    )
+    #: By hand, one +300 deposit on 07-31, anchor 10000 at the end of 08-03:
+    #:   nav_end(08-02) = 10000 + 50 = 10050;  nav_end(08-01) = 10050 - 100 = 9950
+    #:   nav_end(07-31) = 9950 - 30 = 9920;    nav_end(07-30) = 9920 - 20 - 300 = 9600
+    #:   nav_end(07-29) = 9600 - 10 = 9590
+    #: Returns: 07-30 = 10/9590, 07-31 = 20/9600 (the deposit is not performance),
+    #: 08-01 = 30/9920.  Counting the movement twice would put nav_end(07-30) at 9300.
+    ONCE = {"2026-07-30": 10 / 9590, "2026-07-31": 20 / 9600, "2026-08-01": 30 / 9920}
+
+    def _returns(self, **overrides) -> dict[str, float]:
+        kwargs = dict(self.BASE)
+        kwargs.update(overrides)
+        result = _run(**kwargs)
+        return {d.date().isoformat(): v for d, v in result.returns.items()}
+
+    def _check(self, got: dict[str, float]) -> None:
+        for day, want in self.ONCE.items():
+            assert got[day] == pytest.approx(want, abs=1e-12, rel=0), day
+
+    def test_a_movement_in_both_sources_on_the_same_live_day_counts_once(self) -> None:
+        """The live window opens 07-31 and holds the deposit; the archive's transfer bill for
+        the same movement is on the same day. Only the live one is used."""
+        live_deposit = ExternalFlow("2026-07-31", 300.0, currency="USD", quantity=None)
+        got = self._returns(
+            archive_flows_by_day={"2026-07-31": Decimal("300")},
+            live_flows=[live_deposit],
+            live_flows_from_day="2026-07-31",
+        )
+        self._check(got)
+
+    def test_the_archive_alone_before_the_window_counts_once(self) -> None:
+        got = self._returns(
+            archive_flows_by_day={"2026-07-31": Decimal("300")},
+            live_flows=[],
+            live_flows_from_day="2026-08-02",
+        )
+        self._check(got)
+
+    def test_the_live_window_alone_counts_once(self) -> None:
+        got = self._returns(
+            archive_flows_by_day={},
+            live_flows=[ExternalFlow("2026-07-31", 300.0, currency="USD", quantity=None)],
+            live_flows_from_day="2026-07-31",
+        )
+        self._check(got)
+
+    def test_an_archive_transfer_inside_the_live_window_is_not_used(self) -> None:
+        """From the first day of the live window the live deposits and withdrawals are the
+        capital record; an archive bill there (a movement the live endpoints do not list, such
+        as an internal transfer) is reported by the job and never silently added."""
+        got = self._returns(
+            archive_flows_by_day={"2026-07-31": Decimal("300")},
+            live_flows=[],
+            live_flows_from_day="2026-07-30",
+        )
+        # No flow at all: the NAV chain is 9920 -> 9900 -> 9890 with no 300 step.
+        assert got["2026-07-30"] == pytest.approx(10 / 9890, abs=1e-12, rel=0)
+        assert got["2026-07-31"] == pytest.approx(20 / 9900, abs=1e-12, rel=0)
+
+    def test_a_venue_with_no_retention_cap_never_uses_archive_flows(self) -> None:
+        got = self._returns(
+            archive_flows_by_day={"2026-07-31": Decimal("300")},
+            live_flows=[],
+            live_flows_from_day=None,
+        )
+        assert got["2026-07-30"] == pytest.approx(10 / 9890, abs=1e-12, rel=0)
 
 
 class TestRowsForStrategy:
