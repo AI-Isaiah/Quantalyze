@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "166.5"
 current_phase_name: COMPUTEDATSTAMP
 status: executing
-stopped_at: "164.9.8.1 PYXDIST closed; 166.5 post-merge plan 09 outstanding"
-last_updated: "2026-10-15T21:25:00.000Z"
+stopped_at: 164.9.8.1 PYXDIST closed; 166.5 post-merge plan 09 outstanding
+last_updated: "2026-10-15T22:25:31.496Z"
 last_activity: 2026-10-15
 last_activity_desc: "164.9.8.1 PYXDIST shipped (#1054, v0.132.1.6) and closed; soak 20/20 and wall time MET"
-state_head: 8dca598c54fc6ef56e28c9bae4f768323add3adc
+state_head: 3dfc733667e8a5ac48cd1c8b830090c19e23460c
 progress:
-  total_phases: 116
+  total_phases: 118
   completed_phases: 107
   total_plans: 772
   completed_plans: 764
-  percent: 92
+  percent: 91
 ---
 
 ## ⭐ STATE lineage
@@ -176,7 +176,7 @@ Phase: 166.5 (COMPUTEDATSTAMP) — EXECUTING
 Plan: 9 of 9
 Status: Executing — several phases in parallel. 166.5 COMPUTEDATSTAMP is the current one: both PRs merged and applied on PROD (#1047, #1050); the post-merge plan 09 reading is outstanding. Also in flight: 164.9.3.1 FANINGRAPH (merged as #1059, applied on PROD, ratchet follow-up #1064 merged, records pending), 167.1.2.2.2.1 OKXHISTORY (reviewed, ship next), 167.1.1.1 BRIDGERETURNS (planning), 170.1 COPY (planning) and 164.6.6.3.6 MT5SERVERLEARN (waiting on the founder's MT5 accounts). 164.9.8.1 PYXDIST closed 2026-10-15 (#1054). 167.1.2.1 RECONMARKER is waiting on its day-1 reading.
 Last activity: 2026-10-15 — 164.9.8.1 PYXDIST shipped (#1054, v0.132.1.6) and closed (verification passed)
-Progress: [█████████░] 92%
+Progress: [█████████░] 91%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -630,6 +630,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 170.6 edited: edited fields: success_criteria (Discovery exchange label vs the connected key's venue, routed from TRADESYNC plan 21, founder 2026-10-13)
 - Phase 164.9.8.1 inserted after Phase 164.9.8: PYXDIST: python CI job runs pytest in parallel (founder 2026-10-14: starts after 166.5 COMPUTEDATSTAMP)
 - Phase 167.1.1.1 inserted after Phase 167.1.1: BRIDGERETURNS: the Bridge matcher's per-holding returns from the daily mark price (founder decision 167.1.1 D-06)
+- Phase 170.1.1 inserted after Phase 170.1: TITLES: every page has its own tab title and a sentence-case heading (founder 2026-10-15, "Split into 3 phases")
+- Phase 170.1.2 inserted after Phase 170.1: LABELS: names and readable labels instead of ids and internal values (founder 2026-10-15, "Split into 3 phases")
 
 ### Decisions
 

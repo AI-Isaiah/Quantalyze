@@ -184,6 +184,8 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 169.5: BENCHCOMPARE — a factsheet's BTC comparator is read from the database through 169.2's reader, paired over the same interval as the strategy** (INSERTED) — verification: passed (completed 2026-10-04, PR #908)
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
 - [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
+- [ ] **Phase 170.1.1: TITLES — every page has its own tab title and a sentence-case heading** (INSERTED 2026-10-15) — not yet planned (split from 170.1 by founder decision; after 170.1)
+- [ ] **Phase 170.1.2: LABELS — every page shows names and readable labels instead of ids and internal values** (INSERTED 2026-10-15) — not yet planned (split from 170.1 by founder decision; after 170.1)
 - [x] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned — shipped v0.129.11.0 (#997); closed 2026-10-12 after the founder phone re-check (completed 2026-10-12)
 - [x] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 3 plans (completed 2026-10-11)
 - [x] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — 14 plans, two PRs (#1003, #1006) (completed 2026-10-11)
@@ -5983,6 +5985,49 @@ Plans:
 (a) With no benchmark selected, the scenario Returns chart subtitle reads "vs None". Root cause: `src/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload.ts` builds the `none` comparator with `inertComparatorBlock("None", "None")`, and `subtitleFor` in `src/app/factsheet/[id]/v2/TimeSeriesChart.tsx` prints `vs ${cmpName}` whenever the chart config has a `comparatorField`. Success: with no benchmark chosen the subtitle is empty or says "no benchmark".
 (b) The scenario KPI tiles show an unlabelled delta line (e.g. "+0.00") under each value. Success: the delta says what it is compared against (e.g. "vs current book").
 
+### Phase 170.1.1: TITLES — every page has its own tab title and a sentence-case heading (INSERTED)
+
+**Goal:** Every page names itself: a tab title of its own on every dashboard, admin and auth route, under one "%s — Quantalyze" template with "—" as the one separator, and sentence-case page headings per DESIGN.md. No placeholder page or internal label stays reachable from the navigation. Split from Phase 170.1 COPY on 2026-10-15 by founder decision ("Split into 3 phases"): this phase carries 170.1's titles topic (D-02, D-04, D-06, R-6), with the plans, decisions and approved design contract already made there. It is not re-discussed.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 170.1 (both edit `src/app/(dashboard)/strategies/page.tsx`; COPY ships first and this phase rebases on it)
+
+**Success Criteria** (what must be TRUE):
+
+1. A root `title.template` "%s — Quantalyze" applies, and every dashboard, admin and auth route renders its own tab title. No title doubles the brand or uses "|" (170.1 SC-3, D-06).
+2. Pages that shared a title are distinguished: the manager `/strategies` H1 reads "Strategies", while `/my-strategies` keeps "My Strategies". PageHeader titles and the `/allocations` heading are in sentence case ("My allocation", "Compare strategies"), and e2e anchors that key on a renamed title move in the same commit (D-06, R-6).
+3. `/referral` is gone: the page, its sidebar link and its route-contract manifest entry are removed in one commit. The `/strategy/[id]/v2` tab title no longer says "v2". No "Coming soon" default tooltip remains (170.1 SC-2, D-02, D-04).
+4. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom after deploy, by the orchestrator.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 170.1.1 to break down)
+
+---
+
+### Phase 170.1.2: LABELS — every page shows names and readable labels instead of ids and internal values (INSERTED)
+
+**Goal:** No page shows a short id where a name exists, or a raw internal value as a label. Roles, statuses, compute-job kinds, allocation event types, match decisions, breach reasons, venues and trust tiers read through shared label maps, and a failed name lookup reads "Unnamed strategy" or "Unknown allocator", never an id. Split from Phase 170.1 COPY on 2026-10-15 by founder decision ("Split into 3 phases"): this phase carries 170.1's labels topic (D-01, D-03, D-13), with the plans, decisions and approved design contract already made there. It is not re-discussed.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 170.1
+
+**Success Criteria** (what must be TRUE):
+
+1. Every page, admin included, shows labels instead of raw internal values for roles, statuses, compute-job kinds, allocation event types, match decisions, breach reasons, venues and trust tiers. Each label map covers every value its database CHECK constraint allows, and an unknown value reads the map's own fallback label (170.1 SC-1, D-01).
+2. No page shows a short or full id where a name exists. A lookup miss reads "Unnamed strategy" or "Unknown allocator" in visible text, `title` and `aria-label`. An exploratory-tier strategy whose real name is withheld keeps its `Strategy #<8-char id>` handle, and the factsheet's `QSF · <id8> · <date>` stamp stays (D-01, D-13, R-5).
+3. The OutcomeForm's disabled "Modified (coming soon)" option and its roadmap tooltip are removed (170.1 SC-2, D-03).
+4. The listed exchange matches the linked key's venue for every published strategy (TODOS `[170.1-LISTED-EXCHANGE-VS-KEY-VENUE]`), or the entry is re-routed by founder decision.
+5. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom after deploy, by the orchestrator.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 170.1.2 to break down)
+
+---
+
 ### Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity (INSERTED)
 
 **Goal:** Six user-facing items are fixed (the sixth, the Discovery page's phone overflow, routed 2026-10-08), four from Phase 170's post-deploy pass and one from Phase 166.3's recompute. The Allocations Holdings tab never scrolls sideways. The daily BTC benchmark refresh still lands a day when Binance fails. The /compare equity chart shows each strategy's real cumulative return. A CSV-ingested strategy's factsheet masthead states its venue as self-reported. Every benchmark-relative metric is measured over the strategy's full history wherever BTC prices exist.
@@ -6222,6 +6267,8 @@ kept verbatim.
 | 169.5 BENCHCOMPARE (split from 169 2026-09-27) | 5/5 | Complete    | 2026-10-04 |
 | 170. LAYOUT | 20/20 | Complete | verification passed (ROADMAP phase list: completed 2026-10-01; this row read `In Progress` until 2026-10-04) |
 | 170.1 COPY | 0/? | Queued — feature, after 170 | - |
+| 170.1.1 TITLES | 0/? | Queued — split from 170.1 (founder 2026-10-15), after 170.1 | - |
+| 170.1.2 LABELS | 0/? | Queued — split from 170.1 (founder 2026-10-15), after 170.1 | - |
 | 170.2 PROBEFIXES | 11/11 | Complete | 2026-10-12 |
 | 170.3 OGPUBLIC | 3/3 | Complete | 2026-10-11 |
 | 170.4 ALLOCHOLDINGS | 14/14 | Complete | 2026-10-11 |
