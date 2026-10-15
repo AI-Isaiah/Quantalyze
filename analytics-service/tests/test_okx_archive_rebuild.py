@@ -285,3 +285,184 @@ class TestRowsForStrategy:
         rows, narrowed = rows_for_strategy(patched, gaps, set(), set(Q_DAYS))
         assert "2026-07-20" not in {r["date"] for r in rows}
         assert narrowed == [{"from": "2026-07-20", "to": "2026-07-20"}]
+
+
+class TestRangeArithmetic:
+    """T-GAP-2: ``subtract_ranges`` / ``days_to_ranges``, inclusive ends."""
+
+    GAP = [{"from": "2026-07-01", "to": "2026-07-05"}]
+
+    def test_full_cover_removes_the_gap(self) -> None:
+        assert subtract_ranges(self.GAP, set(_day_range("2026-07-01", "2026-07-05"))) == []
+
+    def test_head_covered_narrows_to_the_tail(self) -> None:
+        got = subtract_ranges(self.GAP, {"2026-07-01", "2026-07-02", "2026-07-03"})
+        assert got == [{"from": "2026-07-04", "to": "2026-07-05"}]
+
+    def test_tail_covered_narrows_to_the_head(self) -> None:
+        got = subtract_ranges(self.GAP, {"2026-07-04", "2026-07-05"})
+        assert got == [{"from": "2026-07-01", "to": "2026-07-03"}]
+
+    def test_middle_day_covered_splits_in_two(self) -> None:
+        got = subtract_ranges(self.GAP, {"2026-07-03"})
+        assert got == [
+            {"from": "2026-07-01", "to": "2026-07-02"},
+            {"from": "2026-07-04", "to": "2026-07-05"},
+        ]
+
+    def test_one_day_gap(self) -> None:
+        one = [{"from": "2026-07-09", "to": "2026-07-09"}]
+        assert subtract_ranges(one, {"2026-07-09"}) == []
+        assert subtract_ranges(one, {"2026-07-08", "2026-07-10"}) == one
+
+    def test_ends_are_inclusive(self) -> None:
+        got = subtract_ranges(self.GAP, {"2026-06-30", "2026-07-06"})
+        assert got == self.GAP
+
+    def test_adjacent_gaps_stay_two_and_the_output_is_sorted(self) -> None:
+        gaps = [
+            {"from": "2026-07-06", "to": "2026-07-08"},
+            {"from": "2026-07-01", "to": "2026-07-05"},
+        ]
+        assert subtract_ranges(gaps, set()) == [
+            {"from": "2026-07-01", "to": "2026-07-05"},
+            {"from": "2026-07-06", "to": "2026-07-08"},
+        ]
+
+    def test_a_backwards_gap_fails_loud(self) -> None:
+        with pytest.raises(ValueError):
+            subtract_ranges([{"from": "2026-07-05", "to": "2026-07-01"}], set())
+
+    def test_days_to_ranges_collapses_consecutive_days_and_sorts(self) -> None:
+        got = days_to_ranges(
+            ["2026-07-09", "2026-07-01", "2026-07-02", "2026-07-03", "2026-07-02"]
+        )
+        assert got == [
+            {"from": "2026-07-01", "to": "2026-07-03"},
+            {"from": "2026-07-09", "to": "2026-07-09"},
+        ]
+        assert days_to_ranges([]) == []
+
+    def test_a_month_boundary_is_consecutive(self) -> None:
+        assert days_to_ranges(["2026-07-31", "2026-08-01"]) == [
+            {"from": "2026-07-31", "to": "2026-08-01"}
+        ]
+
+
+class TestUncoveredGap:
+    """T-GAP-1 / SC-4: a quarter that was not ingested is never zero-filled."""
+
+    Q3 = _day_range("2026-07-01", "2026-09-30")
+    GAP = [{"from": "2026-05-24", "to": "2026-08-01"}]
+
+    def _q3_only(self):
+        return _run(
+            archive_realized_by_day=ARCHIVE_REALIZED,
+            archive_funding_by_day=ARCHIVE_FUNDING,
+            archive_flows_by_day=ARCHIVE_FLOWS,
+            covered_days=set(self.Q3),
+            from_day="2026-05-24",
+        )
+
+    def test_gap_q3_only_rows_exist_only_in_q3_and_the_q2_part_stays_named(self) -> None:
+        result = self._q3_only()
+        # No May or June day ever enters the union: no record, so no 0.0.
+        assert result.returns.index.min() == pd.Timestamp("2026-07-01")
+        assert result.archive_days_prepended == 32
+        rows, narrowed = rows_for_strategy(result, self.GAP, set(), set(self.Q3))
+        assert [r["date"] for r in rows] == _day_range("2026-07-01", "2026-08-01")
+        assert not any(r["date"] < "2026-07-01" for r in rows)
+        assert narrowed == [{"from": "2026-05-24", "to": "2026-06-30"}]
+
+    def test_gap_covered_quiet_day_is_a_real_zero_but_the_same_day_uncovered_has_no_row(self) -> None:
+        # 07-05 has no archive bill and a covered quarter: a real, explicit zero.
+        with_q = self._q3_only()
+        rows, _ = rows_for_strategy(with_q, self.GAP, set(), set(self.Q3))
+        quiet = next(r for r in rows if r["date"] == "2026-07-05")
+        assert quiet["daily_return"] == 0.0
+
+        # The same day OUTSIDE the covered set: the surrounding days are covered, so the
+        # core's gap fill writes a 0.0 into the union at 07-05, and the slice must still
+        # refuse to turn that fill into a row. It stays a one-day named gap.
+        covered_without = set(self.Q3) - {"2026-07-05"}
+        bills = {d: v for d, v in ARCHIVE_REALIZED.items() if d in covered_without}
+        without = _run(
+            archive_realized_by_day=bills,
+            archive_funding_by_day=ARCHIVE_FUNDING,
+            archive_flows_by_day=ARCHIVE_FLOWS,
+            covered_days=covered_without,
+            from_day="2026-05-24",
+        )
+        assert pd.Timestamp("2026-07-05") in without.returns.index  # the core's fill
+        rows2, narrowed2 = rows_for_strategy(without, self.GAP, set(), covered_without)
+        assert "2026-07-05" not in {r["date"] for r in rows2}
+        assert {"from": "2026-07-05", "to": "2026-07-05"} in narrowed2
+
+    def test_gap_days_before_from_day_never_enter_the_union_index(self) -> None:
+        result = _run(covered_days=set(Q_DAYS), from_day="2026-07-10")
+        assert result.returns.index.min() == pd.Timestamp("2026-07-10")
+        assert result.archive_days_prepended == len(_day_range("2026-07-10", "2026-08-01"))
+        # The identity still holds with the shorter prepend.
+        live_only = _live_only()
+        for ts in live_only.index[1:]:
+            assert result.returns.loc[ts] == pytest.approx(live_only.loc[ts], abs=1e-9, rel=0)
+
+    def test_gap_archive_days_outside_the_interval_are_ignored(self) -> None:
+        """A Q3 file also holds days at and after the first live day (the reconciliation
+        overlap). They are not rebuilt days: live wins (D-12), so they must neither
+        raise as 'uncovered' nor enter the union as archive records."""
+        extra = dict(ARCHIVE_REALIZED)
+        extra["2026-08-05"] = Decimal("999")
+        result = _run(archive_realized_by_day=extra, covered_days=set(self.Q3))
+        live_only = _live_only()
+        assert result.returns.loc[pd.Timestamp("2026-08-05")] == pytest.approx(
+            live_only.loc[pd.Timestamp("2026-08-05")], abs=1e-9, rel=0
+        )
+
+
+class TestLiveDaysAreNeverRows:
+    """T-LIVE-1 / D-12 (Python side): a day that already has a row is not rewritten."""
+
+    def test_live_existing_day_is_not_a_row_and_leaves_the_expected_gaps(self) -> None:
+        result = _run()
+        gaps = [{"from": "2026-07-10", "to": "2026-08-01"}]
+        rows, narrowed = rows_for_strategy(result, gaps, {"2026-07-20"}, set(Q_DAYS))
+        dates = {r["date"] for r in rows}
+        assert "2026-07-20" not in dates
+        assert len(rows) == 22
+        # The day already has a row, so it is no longer an unrecovered gap day either.
+        assert narrowed == []
+
+    def test_live_existing_day_splits_the_remaining_gap_when_a_refusal_remains(self) -> None:
+        result = _run()
+        nan_returns = result.returns.copy()
+        nan_returns.loc[pd.Timestamp("2026-07-25")] = np.nan
+        patched = RebuildResult(
+            returns=nan_returns,
+            live_first_day=result.live_first_day,
+            first_live_day_differs=False,
+            archive_days_prepended=result.archive_days_prepended,
+        )
+        gaps = [{"from": "2026-07-10", "to": "2026-08-01"}]
+        _, narrowed = rows_for_strategy(patched, gaps, {"2026-07-20"}, set(Q_DAYS))
+        assert narrowed == [{"from": "2026-07-25", "to": "2026-07-25"}]
+
+    def test_live_days_and_legacy_days_are_never_rows(self) -> None:
+        result = _run()
+        # A gap that (wrongly) reaches into the live span and a legacy day before the
+        # earliest target gap: neither may ever become a row.
+        gaps = [{"from": "2026-07-28", "to": "2026-08-06"}]
+        rows, _ = rows_for_strategy(result, gaps, set(), set(Q_DAYS) | set(LIVE_DAYS))
+        assert [r["date"] for r in rows] == ["2026-07-28", "2026-07-29", "2026-07-30",
+                                            "2026-07-31", "2026-08-01"]
+        legacy_rows, _ = rows_for_strategy(
+            result, [{"from": "2026-07-10", "to": "2026-08-01"}], set(), set(Q_DAYS)
+        )
+        assert not any(r["date"] < "2026-07-10" for r in legacy_rows)
+
+
+def test_the_identity_tolerance_is_a_constant_not_a_parameter() -> None:
+    """Widening the tolerance is how a real divergence would be waved through."""
+    params = inspect.signature(rebuild_union).parameters
+    assert not any("atol" in p or "tol" in p or "tolerance" in p for p in params)
+    assert rebuild_mod.IDENTITY_ATOL == 1e-9
