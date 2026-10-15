@@ -184,7 +184,7 @@ def _parse_amount(text: str, *, field: str, line: int) -> Decimal:
         try:
             value = Decimal(text)
         except InvalidOperation:
-            value = None
+            pass
         else:
             if value.is_finite() and (value == 0 or abs(value.adjusted()) <= _MONETARY_MAX_ADJUSTED):
                 return value
@@ -245,17 +245,17 @@ def parse_archive_csv(data: bytes, *, year: int, quarter: str) -> ArchiveFile:
     seen: dict[str, tuple[str, ...]] = {}
     rows: list[ArchiveRow] = []
     dropped = 0
-    for line, row, cells, ts_ms in raw_rows:
+    for line, row, cell_tuple, ts_ms in raw_rows:
         bill_id = row["billId"]
         if not bill_id:
             raise ArchiveParseError("missing_bill_id", {"line": line})
         earlier = seen.get(bill_id)
         if earlier is not None:
-            if earlier == cells:
+            if earlier == cell_tuple:
                 dropped += 1
                 continue
             raise ArchiveParseError("duplicate_bill_conflict", {"line": line})
-        seen[bill_id] = cells
+        seen[bill_id] = cell_tuple
         rows.append(
             ArchiveRow(
                 bill_id=bill_id,

@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
-from typing import Final, Mapping, Sequence
+from typing import Any, Final, Mapping, Sequence
 
 from services.okx_archive_files import ArchiveFile, ArchiveParseError, ArchiveRow
 
@@ -107,17 +107,17 @@ class ArchiveAggregate:
     flows_by_day: dict[str, Decimal]
     non_external_by_day: dict[str, Decimal]
     excluded_by_month: dict[str, dict[str, Decimal]]
-    census: dict
+    census: dict[str, Any]
     unknown_zero_effect: int
     covered_days: frozenset[str]
-    bal_continuity: dict
+    bal_continuity: dict[str, dict[str, int]]
 
 
 def _bill_order_key(row: ArchiveRow) -> tuple[bool, int, str]:
     return (not row.bill_id.isdigit(), int(row.bill_id) if row.bill_id.isdigit() else 0, row.bill_id)
 
 
-def _bal_continuity(rows: Sequence[ArchiveRow]) -> dict:
+def _bal_continuity(rows: Sequence[ArchiveRow]) -> dict[str, dict[str, int]]:
     """Per ccy: how many consecutive-bill pairs break ``bal == previous bal + balChg``.
 
     An information reading in billId order; never a gate (RESEARCH Section 4).

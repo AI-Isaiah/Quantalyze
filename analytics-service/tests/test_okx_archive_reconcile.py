@@ -9,12 +9,21 @@ rows; none of them is computed by the modules under test.
 """
 from __future__ import annotations
 
+import inspect
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
+from services import okx_archive_reconcile
 from services.okx_archive_classify import aggregate_archive
 from services.okx_archive_files import parse_archive_csv
-from services.okx_archive_reconcile import reconcile_leg
+from services.okx_archive_reconcile import (
+    TOLERANCE_USD,
+    overlap_window,
+    reconcile_leg,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "okx_archive"
 
@@ -99,3 +108,182 @@ class TestTracerQ3:
         assert reading.ok is False
         assert reading.first_offending == ("2026-08-12",)
         assert reading.max_abs_diff == Decimal("0.011")
+
+
+WINDOW = ("2026-08-01", "2026-08-10")  # ten calendar days, both ends inclusive
+
+
+def _leg(archive: dict[str, str], live: dict[str, str], window=WINDOW):
+    return reconcile_leg(
+        "realized",
+        {d: Decimal(v) for d, v in archive.items()},
+        {d: Decimal(v) for d, v in live.items()},
+        window,
+    )
+
+
+class TestToleranceBoundaries:
+    """T-RECON-1: the one-cent line is exact, per day AND on the window total.
+
+    A tolerance that drifts by a tenth of a cent is a tolerance that eventually admits a
+    mis-parsed day; these cases sit on both sides of the line so any shift is caught.
+    """
+
+    def test_a_day_off_by_0_011_is_a_miss(self):
+        reading = _leg({"2026-08-04": "10.011"}, {"2026-08-04": "10.000"})
+        assert reading.ok is False
+        assert reading.first_offending == ("2026-08-04",)
+        assert reading.misses == (("2026-08-04", Decimal("10.011"), Decimal("10.000")),)
+        assert reading.days_over_cent == 1
+
+    def test_a_day_off_by_exactly_0_010_passes(self):
+        reading = _leg({"2026-08-04": "10.010"}, {"2026-08-04": "10.000"})
+        assert reading.ok is True
+        assert reading.misses == ()
+        assert reading.days_over_cent == 0
+        assert reading.days_over_half_cent == 1
+
+    def test_the_sign_of_the_difference_does_not_matter(self):
+        assert _leg({"2026-08-04": "9.989"}, {"2026-08-04": "10.000"}).ok is False
+        assert _leg({"2026-08-04": "9.990"}, {"2026-08-04": "10.000"}).ok is True
+
+    def test_every_day_within_a_cent_but_window_total_off_by_0_011_is_a_miss(self):
+        reading = _leg(
+            {"2026-08-02": "1.0055", "2026-08-03": "2.0055"},
+            {"2026-08-02": "1.0000", "2026-08-03": "2.0000"},
+        )
+        assert reading.misses == ()
+        assert reading.days_over_cent == 0
+        assert reading.window_total_diff == Decimal("0.0110")
+        assert reading.ok is False
+
+    def test_window_total_off_by_exactly_a_cent_passes(self):
+        reading = _leg({"2026-08-02": "1.005", "2026-08-03": "2.005"}, {"2026-08-02": "1", "2026-08-03": "2"})
+        assert reading.window_total_diff == Decimal("0.010")
+        assert reading.ok is True
+
+    def test_half_cent_and_cent_counters_count_each_day_once(self):
+        # per-day differences: 0.004 (neither), 0.006 (half only), 0.010 (half only),
+        # 0.011 (both), 0.020 (both)
+        archive = {
+            "2026-08-01": "0.004",
+            "2026-08-02": "0.006",
+            "2026-08-03": "0.010",
+            "2026-08-04": "0.011",
+            "2026-08-05": "0.020",
+        }
+        reading = _leg(archive, {})
+        assert reading.days_over_half_cent == 4
+        assert reading.days_over_cent == 2
+        assert reading.max_abs_diff == Decimal("0.020")
+        assert reading.first_offending == ("2026-08-04", "2026-08-05")
+        assert reading.days_compared == 10
+
+    def test_first_offending_holds_at_most_ten_sorted_dates(self):
+        window = ("2026-08-01", "2026-08-20")
+        archive = {f"2026-08-{d:02d}": "1" for d in range(20, 4, -1)}  # 16 offending days, reverse order
+        reading = _leg(archive, {}, window)
+        assert len(reading.misses) == 16
+        assert reading.first_offending == tuple(f"2026-08-{d:02d}" for d in range(5, 15))
+        assert list(reading.first_offending) == sorted(reading.first_offending)
+
+    def test_reading_carries_the_leg_name(self):
+        assert _leg({}, {}).name == "realized"
+
+    def test_inverted_window_is_refused(self):
+        with pytest.raises(ValueError):
+            _leg({}, {}, ("2026-08-10", "2026-08-01"))
+
+
+class TestToleranceCannotBeWidened:
+    """D-10: no parameter, no override, one literal.
+
+    A calibration miss is a founder STOP. If a keyword could loosen the comparison, the
+    first awkward real file would be 'fixed' by passing a bigger number instead of by
+    looking at why the archive and the live endpoint disagree.
+    """
+
+    def test_tolerance_constant_is_one_cent(self):
+        assert TOLERANCE_USD == Decimal("0.01")
+
+    def test_no_function_takes_a_tolerance_parameter(self):
+        for fn in (reconcile_leg, overlap_window):
+            names = list(inspect.signature(fn).parameters)
+            assert names, "guard-the-guard: the signature read must find parameters"
+            assert not [n for n in names if "tol" in n.lower()], (fn.__name__, names)
+        assert list(inspect.signature(reconcile_leg).parameters) == [
+            "name",
+            "archive_by_day",
+            "live_by_day",
+            "window",
+        ]
+
+    def test_source_has_the_cent_literal_exactly_once_and_reads_no_environment(self):
+        source = inspect.getsource(okx_archive_reconcile)
+        assert source.count('Decimal("0.01")') == 1
+        for forbidden in ("environ", "getenv", "import os", "argparse", "sys.argv"):
+            assert forbidden not in source, forbidden
+
+    def test_a_cent_and_a_bit_cannot_be_tolerated_through_any_keyword(self):
+        with pytest.raises(TypeError):
+            reconcile_leg("x", {}, {}, WINDOW, tolerance=Decimal("1"))  # type: ignore[call-arg]
+
+
+class TestTruncationDetector:
+    """T-RECON-2: inside the overlap window, a one-sided day is a miss in both directions.
+
+    An archive-only day with activity means the LIVE fetch lost it (the persistent
+    truncation class); a live-only day means the ARCHIVE dropped it. Either would
+    silently shift a rebuilt day's return if it passed.
+    """
+
+    def test_archive_only_day_with_activity_is_a_miss(self):
+        reading = _leg({"2026-08-06": "-12.34"}, {})
+        assert reading.ok is False
+        assert reading.misses == (("2026-08-06", Decimal("-12.34"), Decimal("0")),)
+
+    def test_live_only_day_is_a_miss(self):
+        reading = _leg({}, {"2026-08-06": "5.55"})
+        assert reading.ok is False
+        assert reading.misses == (("2026-08-06", Decimal("0"), Decimal("5.55")),)
+
+    def test_one_sided_days_outside_the_window_do_not_count(self):
+        reading = _leg(
+            {"2026-07-31": "100", "2026-08-11": "100", "2026-08-05": "3"},
+            {"2026-07-30": "-50", "2026-08-12": "-50", "2026-08-05": "3"},
+        )
+        assert reading.ok is True
+        assert reading.window_total_diff == Decimal("0")
+
+    def test_window_ends_are_inclusive(self):
+        reading = _leg({"2026-08-01": "1", "2026-08-10": "1"}, {})
+        assert [m[0] for m in reading.misses] == ["2026-08-01", "2026-08-10"]
+
+
+class TestOverlapWindow:
+    """The comparable window is where BOTH sources can speak, and it expires."""
+
+    def test_window_runs_from_the_later_start_to_the_earlier_end(self):
+        got = overlap_window(date(2026, 7, 1), date(2026, 10, 1), date(2026, 8, 2), date(2026, 10, 20))
+        assert got == ("2026-08-02", "2026-09-30")
+
+    def test_window_starts_at_the_quarter_when_the_live_reach_is_older(self):
+        got = overlap_window(date(2026, 7, 1), date(2026, 10, 1), date(2026, 5, 1), date(2026, 10, 20))
+        assert got == ("2026-07-01", "2026-09-30")
+
+    def test_window_ends_the_day_before_today_while_the_quarter_is_running(self):
+        got = overlap_window(date(2026, 7, 1), date(2026, 10, 1), date(2026, 8, 2), date(2026, 8, 10))
+        assert got == ("2026-08-02", "2026-08-09")
+
+    def test_window_is_none_when_the_live_reach_starts_after_the_quarter(self):
+        assert overlap_window(date(2026, 7, 1), date(2026, 10, 1), date(2026, 10, 1), date(2026, 12, 30)) is None
+
+    def test_q3_window_expires_around_2026_12_30(self):
+        def window_on(today: date):
+            return overlap_window(date(2026, 7, 1), date(2026, 10, 1), today - timedelta(days=90), today)
+
+        assert window_on(date(2026, 12, 29)) == ("2026-09-30", "2026-09-30")
+        assert window_on(date(2026, 12, 30)) is None
+
+    def test_window_is_none_when_today_is_the_quarter_start(self):
+        assert overlap_window(date(2026, 7, 1), date(2026, 10, 1), date(2026, 6, 1), date(2026, 7, 1)) is None
