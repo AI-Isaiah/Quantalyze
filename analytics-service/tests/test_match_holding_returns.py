@@ -12,9 +12,11 @@ history window start is pinned), so nothing depends on today's date.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, timedelta
 from typing import Any
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pandas as pd
@@ -557,3 +559,330 @@ def test_a_spot_holding_with_a_non_finite_value_counts_zero_and_has_weight_zero(
     assert ctx["portfolio_aum"] == pytest.approx(10000.0)
     assert ctx["portfolio_weights"][eth] == 0.0
     assert ctx["portfolio_weights"][BTC] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Plan 08: every derivative is NAMED in holding_flags (D-02, D-09, D-10, D-18, D-19)
+# ---------------------------------------------------------------------------
+
+# 41 adjacent daily marks (40 returns, above plan 05's D-20 floor of 30), typed by hand
+# as 100 + i, plus 3 on odd days, so the spot return signal is non-trivial.
+SPOT_41 = [100.0 + i + (3.0 if i % 2 else 0.0) for i in range(41)]
+
+# A perp's marks: 2000 + 10 * (i % 5), a repeating wobble that stays positive.
+PERP_MARKS = [2000.0 + 10.0 * (i % 5) for i in range(40)]
+
+
+def _derivative_history(
+    key: str,
+    venue: str,
+    symbol: str,
+    marks: list[float],
+    sides: list[str] | str,
+    *,
+    notional: float,
+    pnl: float | None,
+    end: str = END,
+) -> list[dict[str, Any]]:
+    """One derivative row per day for ``marks`` (the last on ``end``). ``sides`` is one
+    side for every day or one per day. ``notional`` is ``value_usd`` (the contract value);
+    ``pnl`` the unrealized P&L (None = the writer reported none)."""
+    side_path = sides if isinstance(sides, list) else [sides] * len(marks)
+    assert len(side_path) == len(marks)
+    return [
+        {
+            "allocator_id": ALLOCATOR,
+            "api_key_id": key,
+            "venue": venue,
+            "symbol": symbol,
+            "holding_type": "derivative",
+            "side": side,
+            "value_usd": notional,
+            "unrealized_pnl_usd": pnl,
+            "mark_price": mark,
+            "asof": day,
+            "updated_at": f"{day}T04:00:00+00:00",
+        }
+        for day, mark, side in zip(_days(len(marks), end), marks, side_path)
+    ]
+
+
+def _book(derivative_rows: list[dict[str, Any]], *, derivative_venue: str = "bybit") -> FakeDb:
+    return _db(
+        _history("key-a", "binance", "BTC", SPOT_41, 10000.0) + derivative_rows,
+        keys=[_key("key-a"), _key("key-b", exchange=derivative_venue)],
+    )
+
+
+def _flag_entries(
+    ctx: dict[str, Any], preferences: dict[str, Any] | None = None
+) -> dict[str, dict[str, Any]]:
+    entries = match_mod.compute_holding_flags(
+        holdings_rows_eligible=ctx["_holdings_rows_eligible"],
+        holdings_rows_withheld=ctx["_holdings_rows_withheld"],
+        holdings_rows_derivative=ctx["_holdings_rows_derivative"],
+        portfolio_returns=ctx["portfolio_returns"],
+        portfolio_weights=ctx["portfolio_weights"],
+        portfolio_aum=ctx["portfolio_aum"],
+        allocator_preferences=preferences or {},
+        scored_candidates_by_slot={},
+    )
+    return {e["holding_ref"]: e for e in entries}
+
+
+def test_a_short_perp_with_forty_usable_days_is_named_derivative_out_of_book_and_stays_out_of_the_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tracer for D-02, D-09, D-19. Spot BTC 10,000 with 40 adjacent returns; a bybit
+    ETHUSDT perp, short on all 40 days, notional 1,000,000, P&L -250. The perp's signed
+    series is complete (40 usable days) and STILL stays out of the return join. AUM =
+    10,000 - 250 = 9,750. Its flag entry is exactly the documented shape."""
+    db = _book(
+        _derivative_history(
+            "key-b", "bybit", "ETHUSDT", PERP_MARKS, "short", notional=1_000_000.0, pnl=-250.0
+        )
+    )
+
+    ctx = _context(monkeypatch, db)
+
+    assert set(ctx["portfolio_returns"]) == {BTC}, "D-09: the derivative series never joins"
+    assert [s["strategy_id"] for s in ctx["portfolio_strategies"]] == [BTC]
+    assert ctx["portfolio_aum"] == pytest.approx(9750.0)
+    # D-09: the portfolio-fit join (the engine's and compute_holding_flags' dropna) sees
+    # the spot series only.
+    joined = pd.DataFrame(ctx["portfolio_returns"]).dropna()
+    assert list(joined.columns) == [BTC]
+    assert len(joined) == 40
+
+    flags = _flag_entries(ctx)
+
+    assert flags[ETHUSDT] == {
+        "holding_ref": ETHUSDT,
+        "value_usd": None,
+        "aum_contribution_usd": -250.0,
+        "weight": None,
+        "breach_reasons": [],
+        "top_candidate_strategy_id": None,
+        "top_candidate_composite": None,
+        "flagged": False,
+        "withheld_reason": "derivative_out_of_book",
+    }
+    assert "withheld_reason" not in flags[BTC], "the priced spot holding is not withheld"
+
+
+def test_a_derivative_never_carries_its_notional_in_a_flag_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-15. Notional 1,000,000 and P&L 40: the entry's value_usd and weight are None and
+    its dollar figure is the P&L, 40."""
+    db = _book(
+        _derivative_history(
+            "key-b", "bybit", "ETHUSDT", PERP_MARKS, "long", notional=1_000_000.0, pnl=40.0
+        )
+    )
+
+    entry = _flag_entries(_context(monkeypatch, db))[ETHUSDT]
+
+    assert entry["value_usd"] is None
+    assert entry["weight"] is None
+    assert entry["aum_contribution_usd"] == pytest.approx(40.0)
+    assert 1_000_000.0 not in entry.values()
+
+
+def test_a_derivative_is_never_max_weight_tested(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-19. With max_weight 0.01 the spot holding (about 1.03 of AUM) breaches, and the
+    derivative, whose notional dwarfs the AUM, never does."""
+    db = _book(
+        _derivative_history(
+            "key-b", "bybit", "ETHUSDT", PERP_MARKS, "long", notional=1_000_000.0, pnl=-250.0
+        )
+    )
+
+    flags = _flag_entries(_context(monkeypatch, db), {"max_weight": 0.01})
+
+    assert flags[BTC]["breach_reasons"] == ["max_weight"], "the control: the test does run on spot"
+    assert flags[ETHUSDT]["breach_reasons"] == []
+    assert flags[ETHUSDT]["flagged"] is False
+
+
+def test_a_deribit_option_is_option_premium_and_its_pnl_still_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-10, D-16. The option's returns are withheld by name while its +75 P&L is in the AUM."""
+    symbol = "BTC-10OCT26-81000-P"
+    ref = f"holding:deribit:{symbol}:derivative"
+    db = _book(
+        _derivative_history(
+            "key-b", "deribit", symbol, PERP_MARKS, "long", notional=900_000.0, pnl=75.0
+        ),
+        derivative_venue="deribit",
+    )
+
+    ctx = _context(monkeypatch, db)
+    entry = _flag_entries(ctx)[ref]
+
+    assert entry["withheld_reason"] == "option_premium"
+    assert entry["aum_contribution_usd"] == pytest.approx(75.0)
+    assert ctx["portfolio_aum"] == pytest.approx(10075.0)
+    assert ref not in ctx["portfolio_returns"]
+
+
+@pytest.mark.parametrize(
+    ("marks", "sides", "expected_reason"),
+    [
+        pytest.param(PERP_MARKS, "flat", "no_direction", id="all-flat"),
+        pytest.param(PERP_MARKS[:12], "short", "too_few_priced_days", id="twelve-usable-days"),
+        pytest.param([-1.0] * 40, "long", "no_price", id="no-positive-mark"),
+    ],
+)
+def test_the_price_rule_reasons_name_a_derivative_whose_pnl_is_present(
+    monkeypatch: pytest.MonkeyPatch, marks: list[float], sides: str, expected_reason: str
+) -> None:
+    db = _book(
+        _derivative_history("key-b", "bybit", "ETHUSDT", marks, sides, notional=5000.0, pnl=10.0)
+    )
+
+    ctx = _context(monkeypatch, db)
+
+    entry = _flag_entries(ctx)[ETHUSDT]
+    assert entry["withheld_reason"] == expected_reason
+    assert entry["aum_contribution_usd"] == pytest.approx(10.0)
+    assert ETHUSDT not in ctx["portfolio_returns"]
+
+
+def test_a_missing_pnl_is_pnl_missing_and_persists_as_null_never_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-18. A derivative with a fully usable series but no P&L: reason pnl_missing, and
+    aum_contribution_usd is None (asserted with ``is None``) and the JSON the batch persists
+    says null, so a computed 0.0 fails both."""
+    db = _book(
+        _derivative_history(
+            "key-b", "bybit", "ETHUSDT", PERP_MARKS, "short", notional=1_000_000.0, pnl=None
+        )
+    )
+
+    ctx = _context(monkeypatch, db)
+    entry = _flag_entries(ctx)[ETHUSDT]
+
+    assert entry["withheld_reason"] == "pnl_missing"
+    assert entry["aum_contribution_usd"] is None
+    assert '"aum_contribution_usd": null' in json.dumps(entry)
+    assert ctx["portfolio_aum"] == pytest.approx(10000.0), "a missing P&L adds nothing"
+
+
+def test_pnl_missing_outranks_every_price_rule_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-18 precedence. An option (price rule: option_premium) and an all-flat perp (price
+    rule: no_direction), each with no P&L, are both pnl_missing."""
+    symbol = "BTC-10OCT26-81000-P"
+    ref = f"holding:deribit:{symbol}:derivative"
+    db = _db(
+        _history("key-a", "binance", "BTC", SPOT_41, 10000.0)
+        + _derivative_history(
+            "key-b", "deribit", symbol, PERP_MARKS, "long", notional=900_000.0, pnl=None
+        )
+        + _derivative_history(
+            "key-c", "bybit", "ETHUSDT", PERP_MARKS, "flat", notional=5000.0, pnl=None
+        ),
+        keys=[_key("key-a"), _key("key-b", exchange="deribit"), _key("key-c", exchange="bybit")],
+    )
+
+    flags = _flag_entries(_context(monkeypatch, db))
+
+    assert flags[ref]["withheld_reason"] == "pnl_missing"
+    assert flags[ETHUSDT]["withheld_reason"] == "pnl_missing"
+    assert flags[ref]["aum_contribution_usd"] is None
+    assert flags[ETHUSDT]["aum_contribution_usd"] is None
+
+
+def test_a_derivative_on_two_accounts_with_one_pnl_missing_is_pnl_missing_with_the_counted_part(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-18 partial. P&L 40 on one account, none on the other: pnl_missing, 40.0 counted."""
+    db = _db(
+        _history("key-a", "binance", "BTC", SPOT_41, 10000.0)
+        + _derivative_history(
+            "key-b", "bybit", "ETHUSDT", PERP_MARKS, "short", notional=500_000.0, pnl=40.0
+        )
+        + _derivative_history(
+            "key-c", "bybit", "ETHUSDT", PERP_MARKS, "short", notional=500_000.0, pnl=None
+        ),
+        keys=[_key("key-a"), _key("key-b", exchange="bybit"), _key("key-c", exchange="bybit")],
+    )
+
+    entry = _flag_entries(_context(monkeypatch, db))[ETHUSDT]
+
+    assert entry["withheld_reason"] == "pnl_missing"
+    assert entry["aum_contribution_usd"] == pytest.approx(40.0)
+
+
+def test_the_flag_value_helper_refuses_a_derivative_row() -> None:
+    """A derivative's notional can never become a flag's dollar figure by the helper's
+    ``value_usd`` fallback."""
+    with pytest.raises(ValueError):
+        match_mod._flag_value_usd(
+            {"holding_type": "derivative", "value_usd": 1_000_000.0, "aum_contribution_usd": None}
+        )
+
+
+async def test_the_scorer_persists_every_derivative_in_holding_flags_with_a_json_null(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wiring: ``_score_one_allocator`` passes the context's derivative rows to
+    ``compute_holding_flags`` and the batch it inserts carries the entries, with a missing
+    P&L as JSON null."""
+    db = _book(
+        _derivative_history(
+            "key-b", "bybit", "ETHUSDT", PERP_MARKS, "short", notional=1_000_000.0, pnl=None
+        )
+        + _derivative_history(
+            "key-b", "bybit", "SOLUSDT", PERP_MARKS, "short", notional=40_000.0, pnl=12.5
+        )
+    )
+    ctx = _context(monkeypatch, db)
+
+    import services.feedback_engine as feedback_engine
+
+    monkeypatch.setattr(feedback_engine, "compute_adjusted_weights", lambda allocator_id: None)
+    monkeypatch.setattr(match_mod, "_load_allocator_context", lambda allocator_id: ctx)
+    monkeypatch.setattr(
+        match_mod,
+        "score_candidates",
+        lambda **kwargs: {
+            "candidates": [],
+            "excluded": [],
+            "excluded_total": 0,
+            "mode": "personalized",
+            "filter_relaxed": False,
+            "effective_preferences": {},
+            "effective_thresholds": {},
+            "source_strategy_count": 0,
+        },
+    )
+    inserted: list[dict[str, Any]] = []
+
+    def _insert(payload: dict[str, Any]) -> Any:
+        inserted.append(payload)
+        return MagicMock(execute=lambda: MagicMock(data=[{"id": "batch-1"}]))
+
+    supabase = MagicMock()
+    supabase.table.return_value.insert = _insert
+    monkeypatch.setattr(match_mod, "get_supabase", lambda: supabase)
+
+    class _NoConversion:
+        async def convert(self, series: Any, units: Any) -> tuple[Any, Any]:
+            return series, {}
+
+    universe = {"strategies_by_id": {}, "returns_by_id": {}, "_usd_converter": _NoConversion()}
+
+    await match_mod._score_one_allocator(ALLOCATOR, universe)
+
+    (batch,) = [p for p in inserted if "holding_flags" in p]
+    by_ref = {e["holding_ref"]: e for e in batch["holding_flags"]}
+    assert by_ref[ETHUSDT]["withheld_reason"] == "pnl_missing"
+    assert by_ref[SOLUSDT]["withheld_reason"] == "derivative_out_of_book"
+    assert by_ref[SOLUSDT]["aum_contribution_usd"] == pytest.approx(12.5)
+    persisted = json.loads(json.dumps(batch["holding_flags"]))
+    persisted_by_ref = {e["holding_ref"]: e for e in persisted}
+    assert persisted_by_ref[ETHUSDT]["aum_contribution_usd"] is None
+    assert all(e["flagged"] is False for e in persisted if e["holding_ref"] in (ETHUSDT, SOLUSDT))

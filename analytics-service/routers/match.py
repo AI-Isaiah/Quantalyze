@@ -69,7 +69,7 @@ from services.equity_reconstruction import reconstruct_symbol_returns
 # site-by-site. Contract: analytics-service/docs/STATUS_CONTRACT.md.
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
 from services.holding_equity import holding_equity_contribution
-from services.holding_marks import classify_spot_marks
+from services.holding_marks import classify_derivative_marks, classify_spot_marks
 from services.match_engine import (
     ENGINE_VERSION,
     WEIGHTS_VERSION,
@@ -688,8 +688,10 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
       holdings_rows_withheld: list[dict]  (one row per withheld spot holding, the same
                                            shape plus ``withheld_reason``)
       holdings_rows_derivative: list[dict]  (one row per collapsed derivative holding, with
-                                           ``aum_contribution_usd`` (float | None) and
-                                           ``pnl_missing``)
+                                           ``aum_contribution_usd`` (float | None),
+                                           ``pnl_missing`` and ``withheld_reason``: the
+                                           reason it is out of the book, ``pnl_missing`` >
+                                           the price rule's > ``derivative_out_of_book``)
 
     Every collapsed row carries ``aum_contribution_usd`` (float | None: None only for a
     derivative none of whose counted rows had a P&L) and ``pnl_missing`` (bool).
@@ -915,6 +917,7 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
     # A None (a derivative with no P&L, D-18) adds nothing; it is skipped here, not coerced.
     total_aum = 0.0
     withheld_counts: dict[str, int] = {}
+    derivative_counts: dict[str, int] = {}
 
     for row in collapsed:
         venue = row["venue"]
@@ -925,8 +928,27 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
             total_aum += contribution
         if holding_type != "spot":
             # D-19, D-09: a derivative is in the AUM (its P&L, above) and nowhere else in
-            # the book: no weight, no max-weight test, no return series.
-            holdings_rows_derivative.append(row)
+            # the book: no weight, no max-weight test, no return series. It is NAMED in
+            # holding_flags with a reason (D-02), chosen in this precedence order:
+            #   1. ``pnl_missing`` (D-18): a counted row had no P&L, so its AUM
+            #      contribution is not a full figure; this outranks any price-rule reason;
+            #   2. the price rule's reason (``option_premium`` D-10, ``no_price``,
+            #      ``no_direction``, ``too_few_priced_days``);
+            #   3. ``derivative_out_of_book`` (D-09): the signed series is usable, but a
+            #      derivative never joins the book's return signal.
+            # The marks are always classified, so a row that breaks the read contract
+            # raises here exactly as a spot one does, whatever the P&L says.
+            derivative_marks = classify_derivative_marks(
+                marks_by_ref.get((venue, symbol, holding_type), []), symbol=symbol
+            )
+            if row["pnl_missing"]:
+                derivative_reason = "pnl_missing"
+            elif derivative_marks.withheld_reason is not None:
+                derivative_reason = derivative_marks.withheld_reason
+            else:
+                derivative_reason = "derivative_out_of_book"
+            holdings_rows_derivative.append({**row, "withheld_reason": derivative_reason})
+            derivative_counts[derivative_reason] = derivative_counts.get(derivative_reason, 0) + 1
             continue
         pseudo_id = f"holding:{venue}:{symbol}:{holding_type}"
         # A spot row's contribution is never None (only a derivative can be); its finite
@@ -966,6 +988,15 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
             "(by reason: %s); they stay in the AUM and the weights",
             len(holdings_rows_withheld), allocator_id,
             ", ".join(f"{reason}={n}" for reason, n in sorted(withheld_counts.items())),
+        )
+
+    if derivative_counts:
+        # Counts per reason only: no symbol, value or key id (T-167.1.1.1-08).
+        logger.info(
+            "match: %d derivative holding(s) named in holding_flags for allocator %s "
+            "(by reason: %s); each adds only its P&L to the AUM",
+            len(holdings_rows_derivative), allocator_id,
+            ", ".join(f"{reason}={n}" for reason, n in sorted(derivative_counts.items())),
         )
 
     # --- Step 5: weights (aum_contribution_usd / AUM) over priced AND withheld spot ---
@@ -1159,6 +1190,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     # D-01: a withheld spot holding stays in the AUM and the weights; only its returns
     # are left out of portfolio_returns (it is not in holding_strategies).
     holdings_rows_withheld = holdings_ctx.get("holdings_rows_withheld", [])
+    holdings_rows_derivative = holdings_ctx.get("holdings_rows_derivative", [])
 
     # Merge strategies + holdings into combined dicts
     portfolio_strategies.extend(holding_strategies)
@@ -1220,6 +1252,9 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         "_holdings_rows_eligible": holdings_rows_eligible,
         # D-01: spot held out of the return signal by name; plan 05 names them in holding_flags.
         "_holdings_rows_withheld": holdings_rows_withheld,
+        # D-02, D-19: every derivative in the book, named in holding_flags by reason and
+        # P&L contribution, never weighed, never max-weight tested, never in the returns.
+        "_holdings_rows_derivative": holdings_rows_derivative,
     }
 
 
@@ -1228,7 +1263,10 @@ def _flag_value_usd(row: dict[str, Any]) -> float:
 
     The collapsed row's ``aum_contribution_usd`` when it has one (the AUM basis: a finite
     value, so a NaN ``value_usd`` weighs 0 rather than producing a NaN weight), else its
-    ``value_usd`` as before. A derivative's notional never reaches this function."""
+    ``value_usd`` as before. A derivative's notional never reaches this function: a
+    derivative row is refused here, so a future caller cannot weigh or print a notional."""
+    if row.get("holding_type") == "derivative":
+        raise ValueError("_flag_value_usd is for spot rows; a derivative has no flag value")
     contribution = row.get("aum_contribution_usd")
     if contribution is not None:
         return float(contribution)
@@ -1244,11 +1282,13 @@ def compute_holding_flags(
     allocator_preferences: dict[str, Any],
     scored_candidates_by_slot: dict[str, list[Any]],
     holdings_rows_withheld: list[dict[str, Any]] | None = None,
+    holdings_rows_derivative: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Phase 09 / finding f5. Per-holding flag rows persisted into match_batches.holding_flags.
 
     Returns list[dict] — one entry per eligible holding (those present in portfolio_returns),
-    then (167.1.1.1 D-04, D-12) one per withheld SPOT holding in ``holdings_rows_withheld``.
+    then (167.1.1.1 D-04, D-12) one per withheld SPOT holding in ``holdings_rows_withheld``,
+    then (D-02, D-19) one per DERIVATIVE holding in ``holdings_rows_derivative``.
     Applies D-04 (breach + candidate-exists gate) + D-05 (max_weight + correlation_ceiling)
     + D-06 (FLAG_COMPOSITE_THRESHOLD=50 gate on top candidate composite score).
 
@@ -1271,6 +1311,30 @@ def compute_holding_flags(
     ``flagged`` is forced False (D-12), ``top_candidate_*`` are None (no candidate is
     picked for it) and no correlation test runs (it has no return series). The dashboard
     reader keeps only ``flagged`` entries with a candidate, so such an entry is not shown.
+
+    A DERIVATIVE holding (D-02, D-09, D-19) is named with a different shape: it is in the AUM
+    through its signed unrealized P&L only, never its notional, and it has no weight.
+    ::
+
+        {
+            "holding_ref":              "holding:{venue}:{symbol}:derivative",
+            "value_usd":                None,        # never the notional (D-15)
+            "aum_contribution_usd":     float | None,# the P&L it added to the AUM (D-16);
+                                                     # None (JSON null) when no counted row
+                                                     # had a P&L, never 0.0 (D-18)
+            "weight":                   None,        # a derivative has no weight (D-19)
+            "breach_reasons":           [],          # no max-weight, no correlation test
+            "top_candidate_strategy_id": None,
+            "top_candidate_composite":  None,
+            "flagged":                  False,
+            "withheld_reason":          str,         # pnl_missing | option_premium | no_price
+                                                     # | no_direction | too_few_priced_days
+                                                     # | derivative_out_of_book
+        }
+
+    ``pnl_missing`` (D-18) outranks the price rule's reasons, which outrank
+    ``derivative_out_of_book`` (D-09: a usable signed series still never joins the book's
+    return signal). The row's ``aum_contribution_usd`` is copied as it is, never coerced.
 
     This is a synchronous plain `def` per finding f1.
     """
@@ -1362,6 +1426,24 @@ def compute_holding_flags(
             "value_usd": value,
             "weight": weight,
             "breach_reasons": withheld_breaches,
+            "top_candidate_strategy_id": None,
+            "top_candidate_composite": None,
+            "flagged": False,
+            "withheld_reason": row["withheld_reason"],
+        })
+
+    # 167.1.1.1 D-02, D-19: every derivative is named, with its P&L contribution to the AUM
+    # (D-16) and the reason it is out of the book. No max-weight test (it has no weight:
+    # value_usd and weight are None, never the notional, D-15), no correlation test, no
+    # candidate, never flagged. ``aum_contribution_usd`` is copied as it is, so a derivative
+    # with no P&L at all persists as JSON null and not as a 0.0 it never reported (D-18).
+    for row in holdings_rows_derivative or []:
+        flags.append({
+            "holding_ref": f"holding:{row['venue']}:{row['symbol']}:{row['holding_type']}",
+            "value_usd": None,
+            "aum_contribution_usd": row["aum_contribution_usd"],
+            "weight": None,
+            "breach_reasons": [],
             "top_candidate_strategy_id": None,
             "top_candidate_composite": None,
             "flagged": False,
@@ -1515,6 +1597,7 @@ async def _score_one_allocator(
             compute_holding_flags,
             holdings_rows_eligible=holdings_eligible,
             holdings_rows_withheld=ctx.get("_holdings_rows_withheld") or [],
+            holdings_rows_derivative=ctx.get("_holdings_rows_derivative") or [],
             portfolio_returns=portfolio_returns,  # D-23: the converted book
             portfolio_weights=ctx["portfolio_weights"],
             portfolio_aum=ctx["portfolio_aum"],
