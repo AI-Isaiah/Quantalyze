@@ -1,8 +1,8 @@
 # Changelog
 
-## [0.132.1.4] - 2026-10-15 — PYXDIST: the python CI job runs pytest in parallel, and the flakes that serial order hid are fixed at their root
+## [0.132.1.3] - 2026-10-15 — PYXDIST: the python CI job runs pytest in parallel, and the flakes that serial order hid are fixed at their root
 
-Phase 164.9.8.1. Since `origin/main` the branch carries 77 non-merge commits: 53 that touch paths outside `.planning` (this release commit among them) and 24 planning and records commits, and this entry maps them all. It also carries 9 merge commits: the per-plan and fixer worktrees merging back, and one merge of `origin/main` before the release. Grouped by theme below, each bullet ends with the hashes it covers. The version is a fourth-digit bump. It was re-picked from a freshly fetched `origin/main` at 0.132.1.1, with 0.132.1.2 and 0.132.1.3 held by the open PRs #1062 and #1060. This is a CI and test change; no production code changes.
+Phase 164.9.8.1. Since `origin/main` the branch carries 78 non-merge commits: 54 that touch paths outside `.planning` (this release commit among them) and 24 planning and records commits, and this entry maps them all. It also carries 10 merge commits: the per-plan and fixer worktrees merging back, and two merges of `origin/main` before the release. Grouped by theme below, each bullet ends with the hashes it covers. The version is a fourth-digit bump. It was re-picked from a freshly fetched `origin/main` at 0.132.1.2, and PYXDIST lands before the open PRs #1060 and #1064, which re-pick above it. This is a CI and test change; no production code changes.
 
 ### Changed
 - **The `python` CI job and the Makefile `test:` target run `pytest -n auto --dist loadgroup --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80`.** Both carry the identical argument string. The coverage floor is still enforced on the combined result of all workers. Measured offline on the same tree, coverage was 93.57% serial and 93.57% parallel. A run with the floor raised to 99 under xdist exited 1. The SERIAL deferral comments in both files stay as lineage beside a dated PYXDIST note. That note also records that the comment's pointer to the "TODOS: v1.9.1 Phase-97 parallelization deferral" is dangling, because that entry was dropped in `193afe818`. (`c16a41633`)
@@ -10,6 +10,7 @@ Phase 164.9.8.1. Since `origin/main` the branch carries 77 non-merge commits: 53
 - **CLAUDE.md cites the coverage floor's CI step by symbol.** It previously cited the line number `ci.yml:3819`, which had drifted to about line 5600. (this release commit)
 
 ### Fixed
+- **The two new pins in `local-stack-lane-wiring.test.ts` check their lookup index.** The repo's narrowing-call scanner (`test-restore-workflow-wiring.test.ts`) went RED on CI: a raw `search()` and a raw `indexOf()` fed `slice()`, and a miss there returns -1, which counts from the end and turns the pin into a PASS. Both now throw on a miss. The final CI run on the previous head was red for this, in `frontend-test (2)`, twice. (`fbfc15a5a`)
 - **Root cause of the Phase 97 "global-claim fence tests flake under xdist ordering": the `shared_test_db` group never formed.** The conftest hook that marks live-DB modules with `xdist_group("shared_test_db")` ran after xdist's own worker hook had already turned markers into scheduling keys. So no nodeid ever carried the `@shared_test_db` suffix, and the live fence tests ran on different workers at once, claiming each other's rows. `@pytest.hookimpl(tryfirst=True)` makes the marker land first. On the lane, the group soak ran 20 of 20 consecutive green, twice (once before and once after the review fixes). Every run was on exactly one worker, with every result line suffixed. (`02e5120d5`, `4157db634`)
 - **Root cause of the limiter-identity flake: fixtures evicted `routers.*` modules and never restored them.** `limiter_stub.evict_module` deleted both the `sys.modules` entry and the `routers` package attribute, and ten test files called it in teardown without restoring anything. `test_limiter_identity.py` looks routers up by attribute at call time, so under `--dist loadgroup` it raised `AttributeError` whenever it ran right after a polluter on the same worker. New `restoring()` and `evicted()` helpers put back exactly what was there, and the polluters use them. The victim test is byte-identical. A pairwise bisect, running every test file and every polluter node before the victim, was green: 316 of 316 files and 452 of 452 nodes. (`794a59219`, `2658c886e`, `90d372f72`)
 - **Review round 1 fixes.**
@@ -53,6 +54,22 @@ Phase 164.9.8.1. Since `origin/main` the branch carries 77 non-merge commits: 53
 - **SC-4 met:** across those 20 runs the `python` job took **340 to 497 s**, against the 654.5 s threshold and the 1190 s before-median, so 29% to 42% of before. The pytest step alone took 175 to 305 s, against about 15 to 17 minutes serial. The 942 s reading from before the sysmon switch is kept as lineage.
 - **Recorded deviation:** during review round 1 a fixer ran broad `pkill -f` patterns on the machine shared with other sessions. That could have stopped another session's matching process; none was reported. Every later brief forbade it.
 - **Planning and records:** TODOS `ci/pytest-xdist-parallel` now records what this phase measured (`192e38347`). The phase's planning, review and soak records are in `.planning` and do not ship on the PR branch (`f332031e4`, `d794f12fa`, `9ef11b9df`, `f1af82495`, `5aadd6cce`, `1f5f82500`, `efb5124b6`, `6e5c38b0c`, `9e7d1b7d1`, `e58003867`, `299f55c4f`, `ab33cb14e`, `2bc424316`, `a48d25427`, `5dca51cd1`, `d36de89d6`, `a6bded3f2`, `4458d4eae`, `eb97f9da3`, `2e9814697`, `d84bc2143`, `72dd0654c`, `5806c5c61`, `33ff9020e`).
+## [0.132.1.2] - 2026-10-15 — RECORDS: close BTCUSDVIEW 164.6.6.2.1 (human verification 7/7) and book the owner trust-tier finding
+
+Records only: `.planning`, `TODOS.md`, and this release. One commit plus this release commit.
+
+### Notes
+- **BTCUSDVIEW is closed.** It shipped on 2026-10-09 and 2026-10-10 (v0.129.8.0, v0.130.0.0), but its verification stayed `human_needed` with seven open items. All seven are now resolved, and the readings are in `164.6.6.2.1-UAT.md`:
+  - The WR-01 decision was booked at ship.
+  - A real BTC MT5 account's USD toggle was checked on PROD in the founder's browser.
+  - PROD's dated USD balance and the account's place in the book were read, marker query first, read-only.
+  - The anonymous `native_unit` read was checked as the anon role, inside a rolled-back transaction.
+  - The 320 to 390 px layout and the USD-view print preview were measured on the private local stack.
+  - The verification moves to `passed`. The ROADMAP lists its 17 plans and the Progress row cites both releases. STATE keeps the parallel position that the `phase complete` handler overwrote.
+- **Limits recorded with the readings:**
+  - PROD's only BTC strategy is private, so no anonymous viewer can see a BTC value there today. The anon read itself works.
+  - That the BTC key is in the book is inferred: it is not omitted, it has a priced close for the latest day, and its holdings are valued. The payload does not list which keys are included.
+- **Booked:** `164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED`. An owner's private factsheet shows "Data source —" for their own key-backed strategy, because the trust tier is read through `get_published_trust_signals`, which answers only for published strategies. It is user-facing and owner-only, and it withholds a true fact rather than showing a false one.
 
 ## [0.132.1.1] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of d1852bc2
 
