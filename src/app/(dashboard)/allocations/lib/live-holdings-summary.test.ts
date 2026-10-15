@@ -33,6 +33,7 @@ import {
   holdingEquityContributionLocal,
   holdingEquityIsReported,
   holdingsByRef,
+  keyStateMapsOf,
   managerSideKeyIds,
   summarizeLiveHoldings,
 } from "./live-holdings-summary";
@@ -41,12 +42,17 @@ import {
 // The shared-predicate double (D-15 pin 5)
 // ---------------------------------------------------------------------------
 
-// The double DELEGATES to the real `isUntrustedKeySyncStatus` unless the
-// hoisted toggle is on, and only then also answers true for `error` — a status
-// the real predicate calls trusted. So every other case in this file still
-// exercises the REAL predicate, and the widened case proves the helper asks the
-// shared predicate: a local equality on the status column would ignore the
-// double and stay blind to `error`.
+// The double DELEGATES to the real `keyNeedsAttention` unless the hoisted
+// toggle is on, and only then also answers true for an `error` status — a
+// status the real predicate calls trusted. So every other case in this file
+// still exercises the REAL predicate, and the widened case proves the helper
+// asks the shared predicate `keyNeedsAttention`: a local equality on the status
+// column would ignore the double and stay blind to `error`.
+//
+// 167.1.1 D-02: the helper now asks `keyNeedsAttention`, which reaches
+// `isUntrustedKeySyncStatus` through ITS OWN module-internal reference, so a
+// double on `isUntrustedKeySyncStatus` no longer reaches it. The double wraps
+// the predicate the helper actually calls.
 //
 // It lives in this file and not in the composer suite on purpose. No other
 // test in the repo mocks `@/lib/closed-sets`, and `vi.mock` is hoisted to the
@@ -58,9 +64,11 @@ vi.mock("@/lib/closed-sets", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/closed-sets")>();
   return {
     ...real,
-    isUntrustedKeySyncStatus: (status: string | null | undefined) =>
-      real.isUntrustedKeySyncStatus(status) ||
-      (WIDEN.toError && status === "error"),
+    keyNeedsAttention: (k: {
+      sync_status?: string | null;
+      disconnected_at?: string | null;
+    }) =>
+      real.keyNeedsAttention(k) || (WIDEN.toError && k.sync_status === "error"),
   };
 });
 
@@ -210,6 +218,7 @@ function summarize(opts: {
     contributingApiKeyIds: opts.contributing,
     managerSideApiKeyIds: opts.managerSide ?? [],
     statusByKeyId: STATUS_BY_KEY_ID,
+    disconnectedAtByKeyId: new Map(),
   });
 }
 
@@ -290,7 +299,7 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     expect(s.untrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
   });
 
-  it("pin 5 (D-05): the membership test is the SHARED predicate — an `error` key is trusted under the real module, and counted once the double widens the set", () => {
+  it("pin 5 (D-05): the membership test is the SHARED predicate `keyNeedsAttention` — an `error` key is trusted under the real module, and counted once the double widens the set", () => {
     const run = () =>
       summarize({
         holdings: [H_TRUSTED, H_ERROR],
@@ -378,6 +387,7 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
       contributingApiKeyIds: [KEY_TRUSTED],
       managerSideApiKeyIds: [],
       statusByKeyId: new Map(),
+      disconnectedAtByKeyId: new Map(),
     });
     expect(s.total).toBe(480_000);
     // The summed trusted holding's key is unknown too, so it is disclosed on
@@ -762,6 +772,7 @@ describe("summarizeLiveHoldings — [review C2 WR-03] excludedNotConnected", () 
       contributingApiKeyIds: [KEY_TRUSTED],
       managerSideApiKeyIds: [],
       statusByKeyId: statusWithGone,
+      disconnectedAtByKeyId: new Map(),
       eligibleApiKeyIds: eligible,
     });
 
@@ -868,6 +879,7 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
         contributingApiKeyIds: contributing,
         managerSideApiKeyIds: managerSide,
         statusByKeyId: GEN_STATUS,
+        disconnectedAtByKeyId: new Map(),
         eligibleApiKeyIds: eligible,
       });
       if (s.excludedNotConnected.count > 0) casesWithNotConnectedExclusion += 1;
@@ -1024,6 +1036,7 @@ describe("holdingsByRef + summarizeLiveHoldings — D-08 two keys, one venue:sym
       contributingApiKeyIds: [],
       managerSideApiKeyIds: [],
       statusByKeyId: STATUS,
+      disconnectedAtByKeyId: new Map(),
     });
   }
 
@@ -1050,5 +1063,130 @@ describe("holdingsByRef + summarizeLiveHoldings — D-08 two keys, one venue:sym
     const s = twoKeySummary(false);
     expect(s.total).toBe(0);
     expect(s.untrusted.count).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.1 D-02 — a soft-disconnected key is "needing attention"
+// ---------------------------------------------------------------------------
+//
+// Founder decision 2026-10-15: a key with `disconnected_at` set is disclosed as
+// "keys needing attention" whatever its `sync_status`. Its dollars are in the
+// total only where the loop SUMS them (the degrade branch); in the narrowed book
+// branch, the one production runs, it is never contributing and lands in
+// `excludedUntrusted` (round-1 WR-03). ORACLE INDEPENDENCE: every figure below
+// (65,000, 40,000, 25,000, 3,300 and the counts) is a typed literal over the
+// hand-listed rows, never computed from the fixture. The maps are built through
+// `keyStateMapsOf` so the test exercises the production derivation, not a
+// hand-built map that could differ from it.
+describe("summarizeLiveHoldings — [167.1.1 D-02] a soft-disconnected key is needing attention", () => {
+  const KEY_A = "d02-key-a";
+  const KEY_D = "d02-key-disconnected";
+  const KEY_I = "d02-key-inactive";
+  const DISCONNECTED = "2026-10-01T00:00:00Z";
+
+  const ROW_A = buildHolding({
+    venue: "venue-a",
+    symbol: "D02-A",
+    value_usd: 40_000,
+    api_key_id: KEY_A,
+  });
+  // The disconnected key's status is `complete`: a disconnected key runs no
+  // sync, so its status is frozen at whatever it last was.
+  const ROW_D = buildHolding({
+    venue: "venue-d",
+    symbol: "D02-D",
+    value_usd: 25_000,
+    api_key_id: KEY_D,
+  });
+  // Inactive but NOT disconnected: `disconnected_at` is null.
+  const ROW_I = buildHolding({
+    venue: "venue-i",
+    symbol: "D02-I",
+    value_usd: 3_300,
+    api_key_id: KEY_I,
+  });
+
+  const KEY_LIST = [
+    { id: KEY_A, sync_status: null, disconnected_at: null },
+    { id: KEY_D, sync_status: "complete", disconnected_at: DISCONNECTED },
+    { id: KEY_I, sync_status: "complete", disconnected_at: null },
+  ];
+  const ZERO = { amount: 0, count: 0, unavailable: 0 };
+
+  function run(opts: {
+    holdings: readonly DashboardHolding[];
+    contributing: readonly string[];
+    eligible?: readonly string[];
+  }) {
+    const maps = keyStateMapsOf(KEY_LIST);
+    return summarizeLiveHoldings({
+      toggleByScopeRef: allOn(opts.holdings),
+      holdingsByRef: holdingsByRef(opts.holdings),
+      contributingApiKeyIds: opts.contributing,
+      managerSideApiKeyIds: [],
+      statusByKeyId: maps.statusByKeyId,
+      disconnectedAtByKeyId: maps.disconnectedAtByKeyId,
+      eligibleApiKeyIds: opts.eligible,
+    });
+  }
+
+  it("fixture self-proof: the three rows have distinct scope refs, and the disconnected key's status is one the real untrusted set calls trusted", () => {
+    expect(new Set([ROW_A, ROW_D, ROW_I].map(ref)).size).toBe(3);
+    expect(TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES).toContain("complete");
+  });
+
+  it("degrade branch (contributing []): the disconnected key's 25,000 stays IN the 65,000 total and is counted as untrusted, not as not-connected", () => {
+    const s = run({ holdings: [ROW_A, ROW_D], contributing: [] });
+    expect(s.total).toBe(65_000);
+    expect(s.untrusted).toEqual({ amount: 25_000, count: 1, unavailable: 0 });
+    expect(s.excludedNotConnected).toEqual(ZERO);
+    expect(s.excludedUntrusted).toEqual(ZERO);
+  });
+
+  it("narrowed branch (contributing [A], eligible [A]): the total is 40,000 and the disconnected key's 25,000 is named in excludedUntrusted, never excludedNotConnected", () => {
+    const s = run({
+      holdings: [ROW_A, ROW_D],
+      contributing: [KEY_A],
+      eligible: [KEY_A],
+    });
+    expect(s.total).toBe(40_000);
+    expect(s.excludedUntrusted).toEqual({ amount: 25_000, count: 1, unavailable: 0 });
+    expect(s.excludedNotConnected).toEqual(ZERO);
+    expect(s.untrusted).toEqual(ZERO);
+  });
+
+  it("control: an inactive key whose disconnected_at is null (3,300, not eligible) still lands in excludedNotConnected and NOT in excludedUntrusted", () => {
+    const s = run({
+      holdings: [ROW_A, ROW_I],
+      contributing: [KEY_A],
+      eligible: [KEY_A],
+    });
+    expect(s.total).toBe(40_000);
+    expect(s.excludedNotConnected).toEqual({ amount: 3_300, count: 1, unavailable: 0 });
+    expect(s.excludedUntrusted).toEqual(ZERO);
+  });
+
+  it("keyStateMapsOf: two keys in, both maps carry both ids with the input values", () => {
+    const m = keyStateMapsOf([
+      { id: "k1", sync_status: "complete", disconnected_at: DISCONNECTED },
+      { id: "k2", sync_status: null, disconnected_at: null },
+    ]);
+    expect([...m.statusByKeyId.entries()]).toEqual([
+      ["k1", "complete"],
+      ["k2", null],
+    ]);
+    expect([...m.disconnectedAtByKeyId.entries()]).toEqual([
+      ["k1", DISCONNECTED],
+      ["k2", null],
+    ]);
+  });
+
+  it("keyStateMapsOf: a null or undefined key list yields two empty maps", () => {
+    for (const input of [null, undefined]) {
+      const m = keyStateMapsOf(input);
+      expect(m.statusByKeyId.size).toBe(0);
+      expect(m.disconnectedAtByKeyId.size).toBe(0);
+    }
   });
 });
