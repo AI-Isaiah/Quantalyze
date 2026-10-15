@@ -5961,41 +5961,26 @@ Plans:
 
 **Success Criteria** (what must be TRUE):
 
-1. No page shows a short id where a name exists, or a raw internal value as a label (strategy type, allocator type, event kinds, roles).
-2. No production page carries QA, test or internal-phase text, including strategy descriptions and the placeholder Referral page.
-3. The recorded typos are fixed and pages that share a title are distinguished.
+1. No page shows a short id where a name exists, or a raw internal value as a label (strategy type, allocator type, event kinds, roles). *(Moved 2026-10-16 to Phase 170.1.2 LABELS by the founder's split, "Split into 3 phases".)*
+2. No production page carries QA, test or internal-phase text, including strategy descriptions and the placeholder Referral page. *(Strategy descriptions: done 2026-10-15, D-05 PROD rewrite. Referral page and the v2 tab title: moved 2026-10-16 to Phase 170.1.1 TITLES. OutcomeForm placeholder: moved to Phase 170.1.2 LABELS.)*
+3. The recorded typos are fixed and pages that share a title are distinguished. *(Moved 2026-10-16 to Phase 170.1.1 TITLES; the typo half rests on the recorded sweep, R-7.)*
 4. The wizard's post-Submit copy says "submitted" on success, not "already submitted".
 5. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom in the logged-in browser after deploy, by the orchestrator *(was "at 320 px and 200% zoom"; edited 2026-09-27 by `/gsd-phase --edit` on the founder decision of 2026-09-27: the narrowest supported viewport is 390 px plus desktop 200% zoom, recorded in full under Phase 170 LAYOUT)*.
 
 **Founder decisions, 2026-10-15 (recorded in `170.1-CONTEXT.md`):** the CSV wizard's "Check the file format you selected" hint shows when every required column of the chosen format other than `date` is missing (R-2, option 1; `date` is required in every format, so the literal reading could never fire). The factsheet's `QSF · <id8> · <date>` document stamp stays as it is (R-5, option 1; a document reference, not a label standing in for a name). An exploratory-tier strategy whose real name is withheld keeps its `Strategy #<8-char id>` handle (D-13).
 
-**Plans:** 23 plans
+**Plans:** 8 plans
 
 Plans:
 
-- [ ] 170.1-01: shared label module with the baseline CHECK census, Badge sentence case, Unnamed strategy null arm (wave 1)
-- [ ] 170.1-02: root title template, auth titles, marketing suffix normalisation (wave 1)
-- [ ] 170.1-03: public product page titles, no "v2" in the strategy tab (wave 1)
-- [ ] 170.1-04: dashboard page titles and the /profile H1 (wave 1)
-- [ ] 170.1-05: admin page titles, two client-page layouts, Admin dashboard anchor (wave 1)
-- [ ] 170.1-06: CSV producer names the missing column; column field through the projection (wave 1)
-- [ ] 170.1-07: CSV envelope in plain words, format hint, rule labels (wave 1)
-- [ ] 170.1-08: no "vs None" chart subtitle; KPI delta "vs current book" (wave 1)
-- [ ] 170.1-09: /referral removed with its manifest entry and sidebar link, sidebar "My allocation", no "Coming soon" default (wave 1)
-- [ ] 170.1-10: key-card timing and passive strings (wave 1)
-- [ ] 170.1-11: status-surface strings and the finished_not_built note kind (wave 1)
-- [ ] 170.1-12: /strategies status line, finished-not-built list note, "Strategies" H1 (wave 2)
-- [ ] 170.1-13: duplicate-with-ok is success; owner banner agrees with the body (wave 2)
-- [ ] 170.1-14: compute-jobs and CSV submissions admin labels and names (wave 2)
-- [ ] 170.1-15: users, intros and partner-pilot admin labels and names (wave 2)
-- [ ] 170.1-16: match eval names, decision labels, Unknown allocator (wave 2)
-- [ ] 170.1-17: venue display names on allocator and strategy surfaces (wave 2)
-- [ ] 170.1-18: breach-reason and venue labels on bridge surfaces; OutcomeForm placeholder removed (wave 2)
-- [ ] 170.1-19: Unnamed strategy for every lookup miss; event-type and relationship-status labels; manage page title (wave 2)
-- [ ] 170.1-20: page-title census, phase gate, recorded sweep; SC-5 orchestrator-owned (wave 3)
-- [ ] 170.1-21: "My allocation" and "Compare strategies" H1s, breadcrumb and prose, with moved e2e anchors (wave 1)
-- [ ] 170.1-22: AdminTabs source, analytics and intro labels; OrganizationTab role (wave 2)
-- [ ] 170.1-23: venue display names in the degraded-member lines and wizard member names (wave 2)
+- [ ] 170.1-01: CSV producer names the missing column; column field through the projection (wave 1)
+- [ ] 170.1-02: CSV envelope in plain words, format hint, rule labels (wave 1)
+- [ ] 170.1-03: no "vs None" chart subtitle; KPI delta "vs current book" (wave 1)
+- [ ] 170.1-04: key-card timing and passive strings (wave 1)
+- [ ] 170.1-05: status-surface strings and the finished_not_built note kind (wave 1)
+- [ ] 170.1-06: /strategies status line and finished-not-built list note (wave 2)
+- [ ] 170.1-07: duplicate-with-ok is success; owner banner agrees with the body (wave 2)
+- [ ] 170.1-08: phase gate, routed-findings sweep; SC-5 orchestrator-owned (wave 3)
 
 ---
 
@@ -6022,11 +6007,19 @@ Plans:
 3. `/referral` is gone: the page, its sidebar link and its route-contract manifest entry are removed in one commit. The `/strategy/[id]/v2` tab title no longer says "v2". No "Coming soon" default tooltip remains (170.1 SC-2, D-02, D-04).
 4. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom after deploy, by the orchestrator.
 
-**Plans:** 0 plans
+**Plans:** 9 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 170.1.1 to break down)
+- [ ] 170.1.1-01: root title template, auth titles, marketing suffix normalisation (wave 1)
+- [ ] 170.1.1-02: public product page titles, no "v2" in the strategy tab, factsheet-share title (wave 1)
+- [ ] 170.1.1-03: dashboard page titles and the /profile H1 (wave 1)
+- [ ] 170.1.1-04: admin page titles, two client-page layouts, Admin dashboard anchor (wave 1)
+- [ ] 170.1.1-05: /referral removed with its manifest entry and sidebar link, sidebar "My allocation", no "Coming soon" default (wave 1)
+- [ ] 170.1.1-06: "My allocation" and "Compare strategies" H1s, breadcrumb and prose, with moved e2e anchors (wave 1)
+- [ ] 170.1.1-07: titles and sentence-case H1s for the label-plan admin pages and /portfolios/[id]/manage, admin-gated (wave 1)
+- [ ] 170.1.1-08: /strategies H1 and title "Strategies", e2e anchors (wave 2)
+- [ ] 170.1.1-09: page-title census, phase gate, SC-3 sweep; SC-4 orchestrator-owned (wave 3)
 
 ---
 
@@ -6044,11 +6037,20 @@ Plans:
 4. The listed exchange matches the linked key's venue for every published strategy (TODOS `[170.1-LISTED-EXCHANGE-VS-KEY-VENUE]`), or the entry is re-routed by founder decision.
 5. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom after deploy, by the orchestrator.
 
-**Plans:** 0 plans
+**Plans:** 10 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 170.1.2 to break down)
+- [ ] 170.1.2-01: shared label module with the baseline CHECK census, Badge sentence case, Unnamed strategy null arm (wave 1)
+- [ ] 170.1.2-02: compute-jobs and CSV submissions admin labels and names (wave 2)
+- [ ] 170.1.2-03: users, intros and partner-pilot admin labels and names (wave 2)
+- [ ] 170.1.2-04: match eval names, decision labels, Unknown allocator (wave 2)
+- [ ] 170.1.2-05: venue display names on allocator and strategy surfaces (wave 2)
+- [ ] 170.1.2-06: breach-reason and venue labels on bridge surfaces; OutcomeForm placeholder removed (wave 2)
+- [ ] 170.1.2-07: Unnamed strategy for every lookup miss; event-type and relationship-status labels (wave 2)
+- [ ] 170.1.2-08: AdminTabs source, analytics and intro labels; OrganizationTab role (wave 2)
+- [ ] 170.1.2-09: venue display names in the degraded-member lines and wizard member names (wave 2)
+- [ ] 170.1.2-10: phase gate, label and id sweep; SC-4 and SC-5 orchestrator-owned (wave 3)
 
 ---
 
