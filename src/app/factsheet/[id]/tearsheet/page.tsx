@@ -16,9 +16,15 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { withPublishedOnly } from "@/lib/visibility";
 import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
 import { parseReturnsUnit, withUnit } from "@/lib/factsheet/returns-unit";
-import { parseUnrecoveredGaps, type UnrecoveredGap } from "@/lib/factsheet/trade-fetch-provenance";
+import {
+  parseReconstructedRanges,
+  parseUnrecoveredGaps,
+  type ReconstructedRange,
+  type UnrecoveredGap,
+} from "@/lib/factsheet/trade-fetch-provenance";
 import { captureToSentry } from "@/lib/sentry-capture";
 import {
+  ReconstructedRangeLines,
   TradeFetchLineView,
   TradeFetchUnavailableLine,
   UnrecoveredGapLines,
@@ -138,6 +144,8 @@ type TradeFactsRead =
       tradesFetchedAt: string | null;
       tradeFetchVenue: string | null;
       unrecoveredGaps: UnrecoveredGap[];
+      /** Phase 167.1.2.2.2.1 D-06: ranges rebuilt from OKX's quarterly statement. */
+      reconstructedRanges: ReconstructedRange[];
     };
 
 function reportTradeFactsFailure(
@@ -208,6 +216,7 @@ async function readTradeFacts(strategyId: string): Promise<TradeFactsRead> {
       tradeFetchVenue:
         typeof rawExchange === "string" && rawExchange.length > 0 ? rawExchange.toLowerCase() : null,
       unrecoveredGaps: parseUnrecoveredGaps(analytics?.series_provenance),
+      reconstructedRanges: parseReconstructedRanges(analytics?.series_provenance),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -449,7 +458,12 @@ export default async function TearSheetPage({
                 <TradeFetchUnavailableLine size="fixed-10" />
               )}
               {tradeRead.readable && (
-                <UnrecoveredGapLines gaps={tradeRead.unrecoveredGaps} size="fixed-10" />
+                <>
+                  <UnrecoveredGapLines gaps={tradeRead.unrecoveredGaps} size="fixed-10" />
+                  {/* D-06: the rebuilt ranges, directly after the gap lines,
+                      same words as the factsheet header (SC-4). */}
+                  <ReconstructedRangeLines ranges={tradeRead.reconstructedRanges} size="fixed-10" />
+                </>
               )}
             </div>
           )}
