@@ -212,8 +212,8 @@ _ISO_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 def _assert_iso_day_index(index: Any, context: str) -> None:
     """Fail loud (C-idx) if any index label is not a bare ``YYYY-MM-DD`` string. The
-    whole module keys days via ``str(d)`` (the ``csv_daily_returns`` /
-    ``reconstruct_symbol_returns`` day-key shape). A ``DatetimeIndex`` stringifies to
+    whole module keys days via ``str(d)`` (the ``csv_daily_returns``
+    day-key shape). A ``DatetimeIndex`` stringifies to
     ``'YYYY-MM-DD 00:00:00'`` and would SILENTLY MISALIGN flow days vs return days in
     the ``set(r) | set(fbd)`` union — enforce the ISO-day contract at the boundary."""
     for d in index:

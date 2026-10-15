@@ -61,9 +61,6 @@ from services.db import (
     paginated_select,
     rows,
 )
-# Kept for now: sibling tests still patch this name. The matcher no longer calls it
-# (per-holding returns come from marks); the last of those patches go with it.
-from services.equity_reconstruction import reconstruct_symbol_returns
 # PYAPI-05 — every deliberate error in this file's seam-reachable arms goes
 # through service_error so the four status classes cannot drift apart
 # site-by-site. Contract: analytics-service/docs/STATUS_CONTRACT.md.
