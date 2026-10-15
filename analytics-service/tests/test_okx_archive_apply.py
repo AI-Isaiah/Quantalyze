@@ -19,6 +19,7 @@ under test.
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
@@ -1110,6 +1111,127 @@ class TestInsufficientOverlap:
         outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
         assert outcome.error_message is not None and "offending=2026-09-15" in outcome.error_message
         assert "insufficient_overlap" not in outcome.error_message
+
+
+class TestClaimBudget:
+    """WR-06. One claim of a calibrate or an apply does everything: two apply POSTs paced at
+    11 s, status reads, up to two downloads of 300 s each, parsing, SIX sequential live crawls
+    of up to 810 s each, the rebuild and the RPCs, all under ONE 900 s handler timeout. On a
+    heavy account the handler timeout cancelled it from outside every time, each retry burnt an
+    attempt after a fresh archive POST and download, and the failure was a generic timeout
+    with no class. A claim now has a single budget derived from the handler timeout; each step
+    is bounded by what is left of it, and running out is the named transient
+    ``claim_budget_exceeded`` naming the step."""
+
+    def test_the_budget_fits_inside_the_handler_timeout_with_room_for_the_result_write(self) -> None:
+        handler = job_worker.TIMEOUT_PER_KIND["okx_archive_rebuild"]
+        assert 0 < okx_archive_job.CLAIM_BUDGET_S <= handler - 30
+        assert okx_archive_job.CLAIM_BUDGET_S == handler - okx_archive_job.CLAIM_RESERVE_S
+
+    @pytest.mark.asyncio
+    async def test_a_live_crawl_that_outlasts_the_budget_is_a_named_transient_not_a_generic_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        world = _install(monkeypatch, db, live, q3=_standard_q3())
+        monkeypatch.setattr(okx_archive_job, "CLAIM_BUDGET_S", 0.3)
+
+        async def _slow_equity(exchange: Any, venue: str) -> tuple[float | None, bool, float, bool]:
+            await asyncio.sleep(30)  # far past the budget; cancelled at 0.3 s
+            return live.equity, False, 0.0, False
+
+        monkeypatch.setattr(okx_archive_job, "fetch_account_equity_and_upnl_usd", _slow_equity)
+
+        outcome = await asyncio.wait_for(_run(_meta("calibrate", [STRATEGY_ID])), timeout=10)
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "transient"
+        assert outcome.error_message == "okx_archive_rebuild: claim_budget_exceeded step=live_equity"
+        assert world.result()["stop_class"] == "claim_budget_exceeded"
+        _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_the_budget_is_shared_by_the_steps_not_granted_to_each(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each fake crawl takes 0.2 s: individually inside the budget, together past it."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        world = _install(monkeypatch, db, live, q3=_standard_q3())
+        monkeypatch.setattr(okx_archive_job, "CLAIM_BUDGET_S", 0.5)
+
+        async def _equity(exchange: Any, venue: str) -> tuple[float | None, bool, float, bool]:
+            await asyncio.sleep(0.2)
+            return live.equity, False, 0.0, False
+
+        async def _funding(exchange: Any, label: str, since_ms: Any) -> list[dict[str, Any]]:
+            await asyncio.sleep(0.2)
+            return _funding_rows(live.funding)
+
+        async def _transfers(exchange: Any, kind: str, since_ms: int, now_ms: int) -> list[dict[str, Any]]:
+            await asyncio.sleep(0.2)
+            return []
+
+        monkeypatch.setattr(okx_archive_job, "fetch_account_equity_and_upnl_usd", _equity)
+        monkeypatch.setattr(okx_archive_job, "fetch_funding_okx", _funding)
+        monkeypatch.setattr(okx_archive_job, "fetch_ccxt_transfers", _transfers)
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message is not None
+        assert outcome.error_message.startswith("okx_archive_rebuild: claim_budget_exceeded step=live_")
+        assert outcome.error_kind == "transient"
+
+    @pytest.mark.asyncio
+    async def test_a_claim_with_nothing_left_does_not_start_the_next_crawl(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        world = _install(monkeypatch, db, live, q3=_standard_q3())
+        monkeypatch.setattr(okx_archive_job, "CLAIM_BUDGET_S", 0.0)
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message is not None
+        assert outcome.error_message.startswith("okx_archive_rebuild: claim_budget_exceeded")
+        assert live.calls == [], "no live crawl was started on an exhausted budget"
+
+    @pytest.mark.asyncio
+    async def test_a_download_is_bounded_by_the_budget_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+        monkeypatch.setattr(okx_archive_job, "CLAIM_BUDGET_S", 0.3)
+
+        async def _slow(url: str) -> tuple[bytes, str, int]:
+            await asyncio.sleep(30)
+            return b"", "zip", 1
+
+        monkeypatch.setattr(okx_archive_job, "download_archive_csv", _slow)
+
+        outcome = await asyncio.wait_for(_run(_meta("calibrate", [STRATEGY_ID])), timeout=10)
+
+        assert outcome.error_message == "okx_archive_rebuild: claim_budget_exceeded step=download"
+        assert outcome.error_kind == "transient"
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_raised_by_the_work_itself_is_not_mislabelled_a_budget_stop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the budget's own expiry is ``claim_budget_exceeded``: a TimeoutError the crawl
+        raised on its own account keeps the dispatcher's transient disposition."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=_standard_q3())
+
+        async def _own_timeout(exchange: Any, venue: str) -> tuple[float | None, bool, float, bool]:
+            raise TimeoutError("the venue socket timed out")
+
+        monkeypatch.setattr(okx_archive_job, "fetch_account_equity_and_upnl_usd", _own_timeout)
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message is not None
+        assert "claim_budget_exceeded" not in outcome.error_message
 
 
 class TestWindows:

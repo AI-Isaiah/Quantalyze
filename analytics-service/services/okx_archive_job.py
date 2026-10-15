@@ -69,11 +69,12 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Context, Decimal, InvalidOperation
-from typing import Any, Final, Mapping, cast
+from typing import Any, Awaitable, Final, Mapping, TypeVar, cast
 
 import ccxt.async_support as ccxt
 import httpx
 
+from services import job_worker as _job_worker  # the handler timeout is read through the module
 from services.account_identity import venue_account_id_from
 from services.ccxt_flow_fetch import fetch_ccxt_transfers
 from services.ccxt_flows import ccxt_rows_to_dated_flows
@@ -144,8 +145,9 @@ logger = logging.getLogger(__name__)
 KIND: Final[str] = "okx_archive_rebuild"
 RESULT_VERSION: Final[int] = 1
 
-# Closed set of stop classes (job contract). ``link_expired`` and ``live_fetch_failed`` are
-# transient (a retry resumes statelessly); every other class is permanent. A stop writes the result block first, then returns FAILED.
+# Closed set of stop classes (job contract). ``link_expired``, ``live_fetch_failed`` and
+# ``claim_budget_exceeded`` are transient (a retry resumes statelessly); every other class is
+# permanent. A stop writes the result block first, then returns FAILED.
 STOP_CLASSES: Final[frozenset[str]] = frozenset(
     {
         "invalid_input",
@@ -169,6 +171,7 @@ STOP_CLASSES: Final[frozenset[str]] = frozenset(
         "non_usd_ccy",
         "live_anchor_unusable",
         "live_fetch_failed",
+        "claim_budget_exceeded",
         "identity_violation",
         "reconcile_miss",
         "d03_zero_day_has_archive_pnl",
@@ -178,7 +181,9 @@ STOP_CLASSES: Final[frozenset[str]] = frozenset(
         "rpc_refused",
     }
 )
-TRANSIENT_STOP_CLASSES: Final[frozenset[str]] = frozenset({"link_expired", "live_fetch_failed"})
+TRANSIENT_STOP_CLASSES: Final[frozenset[str]] = frozenset(
+    {"link_expired", "live_fetch_failed", "claim_budget_exceeded"}
+)
 
 # ---------------------------------------------------------------------------
 # Timings (RESEARCH A9, discretion), used by the stateless wait.
@@ -217,6 +222,17 @@ RATE_LIMIT_DEFER_S: Final[int] = 15 * 60
 #: hands one more whole day to the archive, while assuming a longer one would treat a partial
 #: live day as whole, which skews every rebuilt NAV.
 LIVE_REACH_ASSUMED_DAYS: Final[int] = 88
+
+#: What is kept back from the handler timeout for the result write and the client closes.
+CLAIM_RESERVE_S: Final[float] = 60.0
+#: One claim's whole budget (WR-06). A calibrate or apply claim chains two apply POSTs paced
+#: >= 11 s apart, status reads, up to two downloads (``TOTAL_TIMEOUT_S`` = 300 s each), the
+#: parse, SIX sequential live crawls (each bounded by ``_BROKER_CRAWL_TIMEOUT_S`` = 810 s), the
+#: rebuild and the RPCs. Their sum can far exceed the handler timeout, so every step that can
+#: take long is bounded by what is LEFT of this budget (``_ClaimBudget``) and running out is the
+#: named transient ``claim_budget_exceeded``, never the dispatcher's generic cancellation. It is
+#: derived from the kind's handler timeout (the reaper ceiling does not move: plan 07).
+CLAIM_BUDGET_S: Final[float] = _job_worker.TIMEOUT_PER_KIND[KIND] - CLAIM_RESERVE_S
 
 # Seams for tests (a fake clock and a recorded sleep); production uses the real ones.
 _monotonic = time.monotonic
@@ -289,6 +305,46 @@ class _Stop(Exception):
         #: The Result shape v1 ``info`` of a stop that carries evidence beside its class
         #: (``archive_incomplete``: where the running ``bal`` chain broke). Counts and dates only.
         self.info: dict[str, Any] | None = None
+
+
+_T = TypeVar("_T")
+
+
+class _ClaimBudget:
+    """One claim's wall-clock budget (WR-06), on the monotonic clock seam. Created at the top of
+    the handler and handed down to every step that can take long."""
+
+    def __init__(self, seconds: float) -> None:
+        self._deadline = _monotonic() + seconds
+
+    def remaining(self) -> float:
+        return self._deadline - _monotonic()
+
+
+async def _within(
+    budget: _ClaimBudget, work: Awaitable[_T], *, step: str, cap: float | None = None
+) -> _T:
+    """Await ``work`` for at most ``min(cap, what is left of the claim's budget)``.
+
+    The budget's own expiry (and starting with nothing left) is the named transient
+    ``claim_budget_exceeded`` naming the STEP, so an overlong claim ends as a class an operator
+    can read, not as the dispatcher's generic cancellation after a wasted attempt. A
+    ``TimeoutError`` the work raises on its own account is NOT the budget's: it propagates
+    untouched for whatever already classifies it."""
+    remaining = budget.remaining()
+    if remaining <= 0:
+        close = getattr(work, "close", None)
+        if callable(close):
+            close()  # never leave a coroutine that was never started un-awaited
+        raise _Stop("claim_budget_exceeded", f"step={step}")
+    timeout = remaining if cap is None else min(cap, remaining)
+    try:
+        async with asyncio.timeout(timeout) as scope:
+            return await work
+    except TimeoutError:
+        if scope.expired():
+            raise _Stop("claim_budget_exceeded", f"step={step}") from None
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -1121,7 +1177,7 @@ def _safe_counts(counts: Mapping[str, int]) -> dict[str, int]:
 
 
 async def _download_quarter(
-    exchange: ccxt.Exchange, entry: dict[str, Any], href: str
+    exchange: ccxt.Exchange, entry: dict[str, Any], href: str, budget: _ClaimBudget
 ) -> tuple[bytes, str, int]:
     """Download one quarter's file. A 403/410 (an expired link, about 5.5 h after
     generation) is answered with exactly ONE fresh status read and ONE retry on the link
@@ -1136,7 +1192,7 @@ async def _download_quarter(
     refreshed = False
     while True:
         try:
-            return await download_archive_csv(href)
+            return await _within(budget, download_archive_csv(href), step="download")
         except LinkExpired:
             if refreshed:
                 raise _Stop("link_expired", f"quarter={tag} cause=expired_twice") from None
@@ -1153,14 +1209,14 @@ async def _download_quarter(
 
 
 async def _ingest_quarter(
-    exchange: ccxt.Exchange, entry: dict[str, Any], href: str
+    exchange: ccxt.Exchange, entry: dict[str, Any], href: str, budget: _ClaimBudget
 ) -> ArchiveFile:
     """Download one quarter's file, record the Result shape v1 readings and parse it.
 
     The parsed file lives in the caller's local variables for this claim only."""
     year, label = entry["year"], entry["quarter"]
     tag = _quarter_tag(year, label)
-    csv_bytes, container, compressed_bytes = await _download_quarter(exchange, entry, href)
+    csv_bytes, container, compressed_bytes = await _download_quarter(exchange, entry, href, budget)
     entry["container"] = container
     entry["compressed_bytes"] = compressed_bytes
     entry["decompressed_bytes"] = len(csv_bytes)
@@ -1281,11 +1337,12 @@ async def _ingest_all(
     steps: list[_QuarterStep],
     live_types: Mapping[str, str],
     result: dict[str, Any],
+    budget: _ClaimBudget,
 ) -> _Ingested:
     files: list[ArchiveFile] = []
     for entry, step in zip(quarters, steps):
         assert step.href is not None  # every quarter was ready, or the job deferred
-        files.append(await _ingest_quarter(exchange, entry, step.href))
+        files.append(await _ingest_quarter(exchange, entry, step.href, budget))
     result["census"], aggregate = await _census_of(files, live_types)
     return _Ingested(files=files, aggregate=aggregate)
 
@@ -1451,41 +1508,45 @@ def _check_live_realized_flags(flags: Mapping[str, Any]) -> None:
 
 
 async def _live_reference(
-    exchange: ccxt.Exchange, supabase: Any, api_key_id: str
+    exchange: ccxt.Exchange, supabase: Any, api_key_id: str, budget: _ClaimBudget
 ) -> _LiveReference:
     """The live derive's crawl for an OKX key, with its bounds: equity and open uPnL, the
     FULL realized history (``since_ms=None``), OKX funding, and ccxt deposits and withdrawals
-    valued by the same flow valuer, each hard-bounded by ``_BROKER_CRAWL_TIMEOUT_S``. A
-    timeout propagates as the dispatcher's transient (a retry resumes statelessly); a venue
-    rate limit is deferred by the handler."""
-    equity, balance_error, open_unrealized, upnl_unreadable = await asyncio.wait_for(
-        fetch_account_equity_and_upnl_usd(exchange, "okx"), timeout=_BROKER_CRAWL_TIMEOUT_S
+    valued by the same flow valuer. Each crawl is bounded by ``_BROKER_CRAWL_TIMEOUT_S`` AND by
+    what is left of the claim's budget (WR-06); running out is the named transient
+    ``claim_budget_exceeded`` naming the step (a retry resumes statelessly). A venue rate limit
+    is deferred by the handler."""
+    equity, balance_error, open_unrealized, upnl_unreadable = await _within(
+        budget, fetch_account_equity_and_upnl_usd(exchange, "okx"),
+        step="live_equity", cap=_BROKER_CRAWL_TIMEOUT_S,
     )
-    realized = await asyncio.wait_for(
-        fetch_all_trades(exchange, since_ms=None), timeout=_BROKER_CRAWL_TIMEOUT_S
+    realized = await _within(
+        budget, fetch_all_trades(exchange, since_ms=None),
+        step="live_realized", cap=_BROKER_CRAWL_TIMEOUT_S,
     )
     # F2 / WR-03: the fetch swallows every error and returns what it has; the only trace is
     # the per-task DQ buffer. Read it NOW, before any other crawl can reset it.
     _check_live_realized_flags(get_and_clear_last_dq_flags())
-    funding = await asyncio.wait_for(
-        fetch_funding_okx(exchange, api_key_id, None), timeout=_BROKER_CRAWL_TIMEOUT_S
+    funding = await _within(
+        budget, fetch_funding_okx(exchange, api_key_id, None),
+        step="live_funding", cap=_BROKER_CRAWL_TIMEOUT_S,
     )
     now_utc = _utc_now()
     now_ms = int(now_utc.timestamp() * 1000)
     floor = flow_retention_floor("okx", now_utc)
     flow_since_ms = 0 if floor is None else max(0, int(floor.timestamp() * 1000))
-    deposits = await asyncio.wait_for(
-        fetch_ccxt_transfers(exchange, "deposits", flow_since_ms, now_ms),
-        timeout=_BROKER_CRAWL_TIMEOUT_S,
+    deposits = await _within(
+        budget, fetch_ccxt_transfers(exchange, "deposits", flow_since_ms, now_ms),
+        step="live_deposits", cap=_BROKER_CRAWL_TIMEOUT_S,
     )
-    withdrawals = await asyncio.wait_for(
-        fetch_ccxt_transfers(exchange, "withdrawals", flow_since_ms, now_ms),
-        timeout=_BROKER_CRAWL_TIMEOUT_S,
+    withdrawals = await _within(
+        budget, fetch_ccxt_transfers(exchange, "withdrawals", flow_since_ms, now_ms),
+        step="live_withdrawals", cap=_BROKER_CRAWL_TIMEOUT_S,
     )
     flow_rows = list(deposits) + list(withdrawals)
-    price_index = await asyncio.wait_for(
-        _resolve_ccxt_flow_price_index(exchange, "okx", supabase, flow_rows),
-        timeout=_BROKER_CRAWL_TIMEOUT_S,
+    price_index = await _within(
+        budget, _resolve_ccxt_flow_price_index(exchange, "okx", supabase, flow_rows),
+        step="live_prices", cap=_BROKER_CRAWL_TIMEOUT_S,
     )
     try:
         flows = ccxt_rows_to_dated_flows(flow_rows, venue="okx", price_index=price_index)
@@ -1945,6 +2006,7 @@ async def _evaluate(
     ingested: _Ingested,
     quarter_entries: list[dict[str, Any]],
     result: dict[str, Any],
+    budget: _ClaimBudget,
 ) -> _Evaluation:
     """The calibrate evaluation, shared by ``calibrate`` and ``apply``. Every stop here is
     raised BEFORE any write, and apply's first RPC comes after this returns, so a reconcile
@@ -1952,7 +2014,7 @@ async def _evaluate(
     aggregate = ingested.aggregate
     quarters = list(inp.quarters)
 
-    live = await _live_reference(exchange, supabase, api_key_id)
+    live = await _live_reference(exchange, supabase, api_key_id, budget)
     windows = _reconcile(result, aggregate, live, quarters)
 
     if inp.mode == "calibrate":
@@ -2214,11 +2276,13 @@ async def _run_evaluation(
     ingested: _Ingested,
     quarter_entries: list[dict[str, Any]],
     result: dict[str, Any],
+    budget: _ClaimBudget,
 ) -> None:
     """Calibrate and apply: evaluate, then (apply only) gate on the approved fingerprint and
     write. The fingerprint comparison, like every evaluation stop, precedes the first RPC."""
     evaluation = await _evaluate(
-        supabase, exchange, str(job.get("api_key_id")), inp, ingested, quarter_entries, result
+        supabase, exchange, str(job.get("api_key_id")), inp, ingested, quarter_entries, result,
+        budget,
     )
     if inp.mode != "apply":
         return
@@ -2237,6 +2301,7 @@ async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
     for the stateless wait."""
     supabase = get_supabase()
     result = _blank_result(None)
+    budget = _ClaimBudget(CLAIM_BUDGET_S)
     metadata = job.get("metadata")
     raw_mode = metadata.get("mode") if isinstance(metadata, Mapping) else None
     if isinstance(raw_mode, str) and raw_mode in MODES:
@@ -2271,9 +2336,9 @@ async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
                     f"{KIND}: waiting quarters_ready={ready}/{len(steps)}",
                 )
             if inp.mode in ("calibrate", "apply"):
-                ingested = await _ingest_all(exchange, quarters, steps, live_types, result)
+                ingested = await _ingest_all(exchange, quarters, steps, live_types, result, budget)
                 await _run_evaluation(
-                    supabase, job, exchange, inp, ingested, quarters, result
+                    supabase, job, exchange, inp, ingested, quarters, result, budget
                 )
         except _Stop as stop:
             return await _finish_stop(supabase, job, result, stop)
