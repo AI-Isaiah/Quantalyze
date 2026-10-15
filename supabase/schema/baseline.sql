@@ -17683,9 +17683,133 @@ GRANT SELECT("partner_tag") ON TABLE "public"."profiles" TO "authenticated";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."strategies" TO "anon";
+GRANT REFERENCES ON TABLE "public"."strategies" TO "anon";
 GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."strategies" TO "authenticated";
 GRANT ALL ON TABLE "public"."strategies" TO "service_role";
+
+
+
+GRANT SELECT("id") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("user_id") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("category_id") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("name") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("description") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("strategy_types") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("subtypes") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("markets") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("supported_exchanges") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("leverage_range") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("avg_daily_turnover") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("aum") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("max_capacity") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("start_date") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("status") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("is_example") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("benchmark") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("created_at") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("review_note") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("organization_id") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("disclosure_tier") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("public_contact_email") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("tenant_id") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("codename") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("partner_tag") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("source") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("fingerprint") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("wizard_session_id") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("returns_denominator_config") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("asset_class") ON TABLE "public"."strategies" TO "anon";
+
+
+
+GRANT SELECT("capital_ownership") ON TABLE "public"."strategies" TO "anon";
 
 
 
