@@ -12,9 +12,18 @@ Section 5). This plan owns:
   host does OKX serve the file from", without a shell on Railway;
 * the result writer.
 
-Plan 16 replaces the single-pass quarter step with the stateless wait and adds the
-ingest; plan 08 adds the reconciliation, the rebuild, the D-03 check, the fingerprint and
-``apply`` mode to this same module.
+Plan 16 (this module's second layer) owns the stateless wait on OKX's archive request and
+the download-and-parse ingest ``calibrate`` ends with; plan 08 adds the reconciliation, the
+rebuild, the D-03 check, the fingerprint and ``apply`` mode to this same module.
+
+**The wait is stateless (SC-1).** Every claim re-applies each requested quarter (OKX's apply
+is idempotent), re-reads the request state, and then does exactly one of: defer
+(``defer_compute_job``, attempts untouched, at most one hour, claim-token fenced), re-apply
+once, ingest, or give up. The give-up bound comes from OKX's own request ``ts`` (8 h), never
+from a counter. Nothing about a download link or a ``ts`` is stored between claims: not in
+the job metadata, not in the result, not in a log or an error text (the link is a bearer
+token; only its scheme and host are ever described). A restart, an expired link or an empty
+link therefore costs a fresh read, never a gap.
 
 **Job contract (identical text in plans 07, 16, 08 and 10).**
 
@@ -53,11 +62,12 @@ import re
 import time
 import uuid
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Final, Mapping, cast
 
 import ccxt.async_support as ccxt
+import httpx
 
 from services.account_identity import venue_account_id_from
 from services.db import db_execute, get_supabase, one, rows
@@ -67,11 +77,22 @@ from services.job_worker import (
     DispatchOutcome,
     DispatchResult,
     _allocator_key_preflight,
+    _defer_lost_ownership,
     _make_exchange_client,
 )
-from services.okx_archive_classify import SUBTYPE_BUCKETS, Bucket
-from services.okx_archive_download import describe_href
-from services.okx_archive_files import quarter_bounds
+from services.okx_archive_classify import SUBTYPE_BUCKETS, Bucket, aggregate_archive
+from services.okx_archive_download import (
+    DownloadRefused,
+    LinkExpired,
+    describe_href,
+    download_archive_csv,
+)
+from services.okx_archive_files import (
+    ArchiveFile,
+    ArchiveParseError,
+    parse_archive_csv,
+    quarter_bounds,
+)
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger(__name__)
@@ -113,8 +134,7 @@ STOP_CLASSES: Final[frozenset[str]] = frozenset(
 TRANSIENT_STOP_CLASSES: Final[frozenset[str]] = frozenset({"link_expired"})
 
 # ---------------------------------------------------------------------------
-# Timings (RESEARCH A9, discretion). Defined here, used by plan 16's stateless wait; this
-# plan's single-pass quarter step uses only MIN_APPLY_GAP_S.
+# Timings (RESEARCH A9, discretion), used by the stateless wait.
 # ---------------------------------------------------------------------------
 #: First status read no earlier than the request ``ts`` + 2 h, unless the apply answered
 #: "already exists" (OKX: "check after 2 hours", up to 3 at peak).
@@ -127,10 +147,22 @@ GIVE_UP_AFTER_S: Final[int] = 8 * 60 * 60
 MAX_REAPPLIES: Final[int] = 1
 #: At least 11 s between two apply POSTs (OKX documents 1 per 10 s).
 MIN_APPLY_GAP_S: Final[int] = 11
+#: ``defer_compute_job`` raises above one hour, so no single wait is longer.
+MAX_DEFER_S: Final[int] = 3600
+#: A wait shorter than this is a tight loop, not a wait.
+MIN_DEFER_S: Final[int] = 60
+#: A venue rate limit on an archive call defers at least this long (15 minutes), and never
+#: stamps the key's 429 (that opens the exchange-wide breaker and pauses normal OKX syncs).
+RATE_LIMIT_DEFER_S: Final[int] = 15 * 60
 
 # Seams for tests (a fake clock and a recorded sleep); production uses the real ones.
 _monotonic = time.monotonic
 _sleep = asyncio.sleep
+
+
+def _wall_ms() -> int:
+    """Wall clock in epoch milliseconds, the scale of OKX's request ``ts``."""
+    return int(time.time() * 1000)
 
 
 def _utc_today() -> date:
@@ -138,8 +170,8 @@ def _utc_today() -> date:
 
 
 MODES: Final[tuple[str, ...]] = ("preflight", "calibrate", "apply")
-#: Modes this plan accepts. Plan 16 adds ``calibrate``; plan 08 adds ``apply``.
-ACCEPTED_MODES: Final[tuple[str, ...]] = ("preflight",)
+#: Modes accepted so far. Plan 16 added ``calibrate`` (ends after ingest); plan 08 adds ``apply``.
+ACCEPTED_MODES: Final[tuple[str, ...]] = ("preflight", "calibrate")
 _QUARTER_LABELS: Final[tuple[str, ...]] = ("Q1", "Q2", "Q3", "Q4")
 _MAX_QUARTERS: Final[int] = 4
 _FINGERPRINT_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
@@ -391,6 +423,14 @@ def _read_job_input(job: Mapping[str, Any]) -> _JobInput:
     ):
         raise _invalid("approved_fingerprint_shape")
 
+    if mode == "calibrate":
+        # Contract per-mode rules: the strategies to rebuild are required (a calibration of
+        # nothing proves nothing), and the fingerprint belongs to ``apply`` only.
+        if not rebuild:
+            raise _invalid("rebuild_strategy_ids_required")
+        if fingerprint is not None:
+            raise _invalid("approved_fingerprint_not_for_mode")
+
     targets = tuple(dict.fromkeys([*rebuild, *zero_check]))
     return _JobInput(mode=mode, quarters=tuple(quarters), target_strategy_ids=targets)
 
@@ -625,25 +665,69 @@ async def _subtypes_census(
 
 
 # ---------------------------------------------------------------------------
-# The quarter step (single pass here; plan 16 replaces it with the stateless wait)
+# The quarter step: stateless against OKX's own request state (SC-1)
 # ---------------------------------------------------------------------------
 
 def _quarter_tag(year: int, quarter: str) -> str:
     return f"{year}-{quarter}"
 
 
+def _parse_ts_ms(value: object) -> int | None:
+    """OKX's request ``ts`` (epoch milliseconds, as digits), else None. A value that is not
+    plain digits is unreadable, never guessed."""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    text = str(value).strip()
+    if not (text.isascii() and text.isdigit()) or len(text) > 16:
+        return None
+    return int(text)
+
+
+def _age_s(ts_ms: int | None) -> float | None:
+    """Seconds since OKX first saw the request (never negative: a ``ts`` ahead of this
+    clock reads as a brand-new request), or None when ``ts`` is unreadable."""
+    if ts_ms is None:
+        return None
+    return max(0.0, (_wall_ms() - ts_ms) / 1000.0)
+
+
+@dataclass(frozen=True)
+class _ApplyAnswer:
+    #: OKX said a file already exists for the quarter (``result: true``).
+    existing: bool
+    #: The request's first-request time, or None when OKX did not return a readable one.
+    ts_ms: int | None
+
+
+@dataclass(frozen=True)
+class _StatusReading:
+    #: ``finished`` | ``ongoing`` | ``failed``, or None when OKX answered nothing readable.
+    state: str | None
+    #: The signed download link. A bearer token: held in memory for this claim only, never
+    #: stored, logged or put in an error (``repr=False`` keeps it out of any repr too).
+    href: str | None = field(default=None, repr=False)
+    ts_ms: int | None = None
+
+
+@dataclass(frozen=True)
+class _QuarterStep:
+    #: The link when the quarter is ready to read (memory only, see ``_StatusReading``).
+    href: str | None = field(default=None, repr=False)
+    #: Seconds to wait when the quarter is not ready.
+    wait_s: float = 0.0
+
+
 async def _apply_quarter_on_fresh_instance(
     key_row: Mapping[str, Any], year: int, quarter: str
-) -> bool:
+) -> _ApplyAnswer:
     """Request one quarter with ONE apply POST on an exchange instance of its own, the
     last call on that instance (ccxt prices it at cost 72000: any later call on the same
     instance blocks about two hours). Exactly one attempt, never routed through
     ``_okx_bills_fetch_with_backoff`` (a retry loop on this call stalls for two hours),
     and the client is closed in ``finally``.
 
-    Returns True when OKX answered that a file already exists (``result: true``).
-    A transient venue failure (``ccxt.OperationFailed``: rate limit, network) propagates
-    for the dispatcher to classify; any other venue refusal is ``archive_request_failed``."""
+    A transient venue failure (``ccxt.OperationFailed``: rate limit, network) propagates for
+    the handler to defer; any other venue refusal is ``archive_request_failed``."""
     api_key, api_secret, passphrase = decrypt_credentials(dict(key_row), get_kek())
     client = _make_exchange_client(key_row["exchange"], api_key, api_secret, passphrase)
     try:
@@ -666,14 +750,33 @@ async def _apply_quarter_on_fresh_instance(
     entry = _first_entry(raw)
     if entry is None:
         raise _Stop("archive_request_failed", f"quarter={_quarter_tag(year, quarter)}")
-    return str(entry.get("result")).strip().lower() == "true"
+    return _ApplyAnswer(
+        existing=str(entry.get("result")).strip().lower() == "true",
+        ts_ms=_parse_ts_ms(entry.get("ts")),
+    )
+
+
+class _ApplyPacer:
+    """Spaces the apply POSTs of ONE claim at least ``MIN_APPLY_GAP_S`` apart (OKX documents
+    one per 10 s). Per claim and in memory only: across claims the defer is the spacing."""
+
+    def __init__(self) -> None:
+        self._last: float | None = None
+
+    async def apply(self, key_row: Mapping[str, Any], year: int, quarter: str) -> _ApplyAnswer:
+        if self._last is not None:
+            wait = MIN_APPLY_GAP_S - (_monotonic() - self._last)
+            if wait > 0:
+                await _sleep(wait)
+        self._last = _monotonic()
+        return await _apply_quarter_on_fresh_instance(key_row, year, quarter)
 
 
 async def _read_quarter_status(
     exchange: ccxt.Exchange, year: int, quarter: str
-) -> tuple[str | None, str | None]:
-    """One status read on the preflight instance: ``(state, fileHref)``. The link is
-    returned to the caller for ``describe_href`` and is never stored or logged."""
+) -> _StatusReading:
+    """One status read on the preflight instance. The link rides in the returned reading for
+    this claim only."""
     raw = await _okx_bills_fetch_with_backoff(
         exchange,
         _STATUS_ENDPOINT_METHOD,
@@ -683,50 +786,279 @@ async def _read_quarter_status(
     )
     entry = _first_entry(raw)
     if entry is None:
-        return None, None
+        return _StatusReading(state=None)
     state = entry.get("state")
     href = entry.get("fileHref")
-    return (
-        state if isinstance(state, str) and state in _ARCHIVE_STATES else None,
-        href if isinstance(href, str) and href.strip() else None,
+    return _StatusReading(
+        state=state if isinstance(state, str) and state in _ARCHIVE_STATES else None,
+        href=href if isinstance(href, str) and href.strip() else None,
+        ts_ms=_parse_ts_ms(entry.get("ts")),
     )
 
 
-async def _preflight_quarters(
+def _record_ready(entry: dict[str, Any], href: str) -> _QuarterStep:
+    """The quarter is ready: record the link's scheme and host (and nothing else about it)."""
+    scheme, host = describe_href(href)
+    if not host:
+        # A finished request whose link names no host cannot be read, and a preflight that
+        # reports ``finished`` must have the host to report.
+        raise _Stop("archive_request_failed", f"quarter={_quarter_tag(entry['year'], entry['quarter'])} link=unreadable")
+    entry["href_scheme"] = scheme or None
+    entry["href_host"] = host
+    logger.info(
+        "okx_archive_rebuild: %s finished, link scheme=%s host=%s",
+        _quarter_tag(entry["year"], entry["quarter"]),
+        scheme,
+        host,
+    )
+    return _QuarterStep(href=href)
+
+
+async def _quarter_step(
     exchange: ccxt.Exchange,
     key_row: Mapping[str, Any],
-    inp: _JobInput,
+    entry: dict[str, Any],
+    pacer: _ApplyPacer,
+) -> _QuarterStep:
+    """ONE claim's decision for ONE quarter, derived from OKX alone (RESEARCH Pattern 1).
+
+    Apply (idempotent), read the state, then ready / wait / stop. Nothing is remembered:
+    the same inputs on a different worker give the same answer, which is what makes a
+    restart harmless. The request ``ts`` is read from OKX on every claim, so the 8 h bound
+    survives restarts and cannot be reset by one.
+
+    * ``finished`` with a link: ready.
+    * ``ongoing``: wait (give up at ``GIVE_UP_AFTER_S`` from ``ts``).
+    * ``failed``, or ``finished`` WITHOUT a link (a job that took that for success would
+      report DONE with the data missing): re-apply ``MAX_REAPPLIES`` times and read again;
+      a request that is still ``failed`` afterwards is a permanent stop, and one still
+      linkless waits."""
+    year, label = entry["year"], entry["quarter"]
+    tag = _quarter_tag(year, label)
+    answer = await pacer.apply(key_row, year, label)
+    entry["applied_existing"] = answer.existing
+
+    if not answer.existing:
+        # OKX takes 2-3 h to generate a file: no point asking before then.
+        age = _age_s(answer.ts_ms)
+        if age is not None and age < FIRST_STATUS_READ_AFTER_S:
+            return _QuarterStep(wait_s=FIRST_STATUS_READ_AFTER_S - age)
+
+    ts_ms = answer.ts_ms
+    reapplies = 0
+    while True:
+        reading = await _read_quarter_status(exchange, year, label)
+        entry["state"] = reading.state
+        if reading.state is None:
+            # The state vocabulary is closed; anything else is contract drift, and waiting
+            # eight hours to discover it would hide it.
+            raise _Stop("archive_request_failed", f"quarter={tag}")
+        if reading.state == "finished" and reading.href is not None:
+            return _record_ready(entry, reading.href)
+
+        if reading.ts_ms is not None:
+            ts_ms = reading.ts_ms
+        age = _age_s(ts_ms)
+        if age is None:
+            # Without OKX's ts there is no bound on the wait: refuse to wait unboundedly.
+            raise _Stop("archive_request_failed", f"quarter={tag}")
+        too_old = age >= GIVE_UP_AFTER_S
+        if reading.state == "ongoing":
+            if too_old:
+                raise _Stop("archive_give_up", f"quarter={tag} age_h={int(age // 3600)}")
+            return _QuarterStep(wait_s=STATUS_POLL_INTERVAL_S)
+
+        # ``failed``, or ``finished`` with no link.
+        linkless = reading.state == "finished"
+        if too_old:
+            if linkless:
+                raise _Stop("archive_give_up", f"quarter={tag} age_h={int(age // 3600)}")
+            raise _Stop("archive_request_failed", f"quarter={tag}")
+        if reapplies >= MAX_REAPPLIES:
+            if linkless:
+                return _QuarterStep(wait_s=STATUS_POLL_INTERVAL_S)
+            raise _Stop("archive_request_failed", f"quarter={tag}")
+        reapplies += 1
+        renewed = await pacer.apply(key_row, year, label)
+        if renewed.ts_ms is not None:
+            ts_ms = renewed.ts_ms
+
+
+# ---------------------------------------------------------------------------
+# Waiting: defer_compute_job
+# ---------------------------------------------------------------------------
+
+async def _defer_job(
+    supabase: Any, job: Mapping[str, Any], seconds: float, reason: str
+) -> DispatchResult:
+    """Park the job: ``defer_compute_job`` returns it to ``pending`` at ``now + seconds``,
+    decrements ``attempts`` (waiting never burns a retry) and is fenced on the claim token.
+
+    The SQL raises above 3600 s, so the wait is clamped here; ``reason`` becomes
+    ``last_error`` and must hold a short class and counts only (no ``ts``, no link)."""
+    defer_seconds = int(min(max(seconds, MIN_DEFER_S), MAX_DEFER_S))
+
+    def _defer() -> None:
+        supabase.rpc(
+            "defer_compute_job",
+            {
+                "p_job_id": job.get("id"),
+                "p_defer_seconds": defer_seconds,
+                "p_reason": reason,
+                "p_claim_token": job.get("claim_token"),
+            },
+        ).execute()
+
+    try:
+        await db_execute(_defer)
+    except asyncio.CancelledError:
+        raise  # never swallow cancellation
+    except Exception as exc:  # noqa: BLE001
+        if _defer_lost_ownership(exc):
+            # A watchdog reclaim gave the row to another worker: it owns the wait now.
+            logger.info(
+                "okx_archive_rebuild: defer for job %s preempted; another worker owns it",
+                job.get("id"),
+            )
+            return DispatchResult(outcome=DispatchOutcome.DEFERRED)
+        raise
+    logger.info("%s (defer %ds)", reason, defer_seconds)
+    return DispatchResult(outcome=DispatchOutcome.DEFERRED)
+
+
+# ---------------------------------------------------------------------------
+# Ingest: download, parse, classify (calibrate; apply reuses it in plan 08)
+# ---------------------------------------------------------------------------
+
+#: Parse and classification stops mapped into the closed ``STOP_CLASSES``. The first four
+#: and the three classification stops keep their names; the parser's remaining stops have
+#: no class of their own in the contract, so they map to the nearest one by WHAT FAILED, and
+#: the original label always rides in ``last_error`` (``parse=<label>``).
+_PARSE_STOP_CLASS: Final[Mapping[str, str]] = {
+    "header_drift": "header_drift",
+    "quarter_range_mismatch": "quarter_range_mismatch",
+    "duplicate_bill_conflict": "duplicate_bill_conflict",
+    "unparseable_amount": "unparseable_amount",
+    "subtype_map_drift": "subtype_map_drift",
+    "unknown_subtype_nonzero": "unknown_subtype_nonzero",
+    "non_usd_ccy": "non_usd_ccy",
+    # The file's layout is not the pinned one:
+    "undecodable_file": "header_drift",
+    "malformed_csv": "header_drift",
+    "malformed_row": "header_drift",
+    "unparseable_ts": "header_drift",
+    # A header-only file has no row to authenticate the quarter against:
+    "empty_file": "quarter_range_mismatch",
+    # Without a billId neither dedup nor conflict detection is possible:
+    "missing_bill_id": "duplicate_bill_conflict",
+}
+
+
+def _parse_stop(exc: ArchiveParseError, tag: str | None = None) -> _Stop:
+    detail = f"parse={exc.stop_class}" if tag is None else f"quarter={tag} parse={exc.stop_class}"
+    return _Stop(_PARSE_STOP_CLASS[exc.stop_class], detail)
+
+
+#: The aggregator's own label for an empty cell (``okx_archive_classify._BLANK``); pinned
+#: equal by a census test, not imported (it is private there).
+_BLANK_LABEL: Final[str] = "(blank)"
+
+
+def _safe_counts(counts: Mapping[str, int]) -> dict[str, int]:
+    """Counts keyed by labels that came from a file: a label that is not a short plain token
+    is merged into ``(malformed)`` rather than echoed into the result."""
+    out: dict[str, int] = {}
+    for key, count in counts.items():
+        safe = key if key == _BLANK_LABEL else (_malformed_or(key) if key else _MALFORMED)
+        out[safe] = out.get(safe, 0) + count
+    return dict(sorted(out.items()))
+
+
+async def _download_quarter(
+    exchange: ccxt.Exchange, entry: dict[str, Any], href: str
+) -> tuple[bytes, str, int]:
+    """Download one quarter's file. A 403/410 (an expired link, about 5.5 h after
+    generation) is answered with exactly ONE fresh status read and ONE retry on the link
+    that read returns; a second expiry, or a read with no link, is the transient
+    ``link_expired``: come back later, never DONE with data missing.
+
+    Every exception that can carry the signed URL in its message (httpx's do) is turned
+    into a fixed-vocabulary stop here, with ``from None``, so the link reaches neither
+    ``last_error`` nor a log."""
+    year, label = entry["year"], entry["quarter"]
+    tag = _quarter_tag(year, label)
+    refreshed = False
+    while True:
+        try:
+            return await download_archive_csv(href)
+        except LinkExpired:
+            if refreshed:
+                raise _Stop("link_expired", f"quarter={tag} cause=expired_twice") from None
+            refreshed = True
+            reading = await _read_quarter_status(exchange, year, label)
+            if reading.state != "finished" or reading.href is None:
+                raise _Stop("link_expired", f"quarter={tag} cause=no_fresh_link") from None
+            href = reading.href
+        except DownloadRefused as refusal:
+            # ``reason`` is the downloader's closed vocabulary; the host rides in the block.
+            raise _Stop("download_refused", f"quarter={tag} reason={refusal.reason}") from None
+        except (httpx.HTTPError, TimeoutError):
+            raise _Stop("link_expired", f"quarter={tag} cause=network") from None
+
+
+async def _ingest_quarter(
+    exchange: ccxt.Exchange, entry: dict[str, Any], href: str
+) -> ArchiveFile:
+    """Download one quarter's file, record the Result shape v1 readings and parse it.
+
+    The parsed file lives in the caller's local variables for this claim only."""
+    year, label = entry["year"], entry["quarter"]
+    tag = _quarter_tag(year, label)
+    csv_bytes, container, compressed_bytes = await _download_quarter(exchange, entry, href)
+    entry["container"] = container
+    entry["compressed_bytes"] = compressed_bytes
+    entry["decompressed_bytes"] = len(csv_bytes)
+    try:
+        parsed = await asyncio.to_thread(parse_archive_csv, csv_bytes, year=year, quarter=label)
+    except ArchiveParseError as exc:
+        raise _parse_stop(exc, tag) from None
+    entry["has_type_column"] = parsed.has_type_column
+    entry["ts_min_day"] = parsed.ts_min_day
+    entry["ts_max_day"] = parsed.ts_max_day
+    entry["row_count"] = parsed.row_count
+    return parsed
+
+
+async def _census_of(
+    files: list[ArchiveFile], live_types: Mapping[str, str]
+) -> dict[str, Any]:
+    """Classify every bill of the verified files and return the Result shape v1 ``census``:
+    counts only, never an amount."""
+    try:
+        aggregate = await asyncio.to_thread(aggregate_archive, files, live_types)
+    except ArchiveParseError as exc:
+        raise _parse_stop(exc) from None
+    census = aggregate.census
+    return {
+        "by_ccy": _safe_counts(census["by_ccy"]),
+        "by_inst_type": _safe_counts(census["by_inst_type"]),
+        "by_sub_type": _safe_counts(census["by_sub_type"]),
+        "unknown_zero_effect": aggregate.unknown_zero_effect,
+    }
+
+
+async def _ingest_all(
+    exchange: ccxt.Exchange,
+    quarters: list[dict[str, Any]],
+    steps: list[_QuarterStep],
+    live_types: Mapping[str, str],
     result: dict[str, Any],
 ) -> None:
-    """Per quarter: one apply POST on a fresh instance, then one status read. Nothing about
-    the link is kept except its scheme and host."""
-    quarters = [_blank_quarter(year, label) for year, label in inp.quarters]
-    result["quarters"] = quarters
-    last_apply_at: float | None = None
-    for entry in quarters:
-        year, label = entry["year"], entry["quarter"]
-        if last_apply_at is not None:
-            wait = MIN_APPLY_GAP_S - (_monotonic() - last_apply_at)
-            if wait > 0:
-                await _sleep(wait)
-        last_apply_at = _monotonic()
-        entry["applied_existing"] = await _apply_quarter_on_fresh_instance(key_row, year, label)
-        state, href = await _read_quarter_status(exchange, year, label)
-        entry["state"] = state
-        if state == "finished" and href is not None:
-            scheme, host = describe_href(href)
-            entry["href_scheme"] = scheme or None
-            entry["href_host"] = host or None
-            logger.info(
-                "okx_archive_rebuild: %s finished, link scheme=%s host=%s",
-                _quarter_tag(year, label),
-                scheme,
-                host,
-            )
-        else:
-            logger.info(
-                "okx_archive_rebuild: %s state=%s", _quarter_tag(year, label), state
-            )
+    files: list[ArchiveFile] = []
+    for entry, step in zip(quarters, steps):
+        assert step.href is not None  # every quarter was ready, or the job deferred
+        files.append(await _ingest_quarter(exchange, entry, step.href))
+    result["census"] = await _census_of(files, live_types)
 
 
 # ---------------------------------------------------------------------------
@@ -734,9 +1066,9 @@ async def _preflight_quarters(
 # ---------------------------------------------------------------------------
 
 async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
-    """``dispatch()`` handler for kind ``okx_archive_rebuild``. Only ``preflight`` is
-    accepted by this plan. See the module docstring for the order, which is the D-02
-    guarantee."""
+    """``dispatch()`` handler for kind ``okx_archive_rebuild`` (``preflight`` and
+    ``calibrate``). See the module docstring for the order, which is the D-02 guarantee,
+    and for the stateless wait."""
     supabase = get_supabase()
     result = _blank_result(None)
     metadata = job.get("metadata")
@@ -760,12 +1092,36 @@ async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
         exchange = cast("ccxt.Exchange", ctx.exchange)
         try:
             await _check_account(exchange, scope, result)
-            await _subtypes_census(exchange, result)
-            await _preflight_quarters(exchange, ctx.key_row, inp, result)
+            live_types = await _subtypes_census(exchange, result)
+            quarters = [_blank_quarter(year, label) for year, label in inp.quarters]
+            result["quarters"] = quarters
+            pacer = _ApplyPacer()
+            steps = [await _quarter_step(exchange, ctx.key_row, q, pacer) for q in quarters]
+            waits = [step.wait_s for step in steps if step.href is None]
+            if waits:
+                ready = len(steps) - len(waits)
+                return await _defer_job(
+                    supabase, job, min(waits),
+                    f"{KIND}: waiting quarters_ready={ready}/{len(steps)}",
+                )
+            if inp.mode == "calibrate":
+                await _ingest_all(exchange, quarters, steps, live_types, result)
         except _Stop as stop:
             return await _finish_stop(supabase, job, result, stop)
+        except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as exc:
+            # A venue rate limit is a reason to wait, not to fail, and it is NEVER stamped
+            # onto the key: ``stamp_api_key_429`` opens the exchange-wide breaker and pauses
+            # every normal OKX sync for a quota this job alone spent.
+            logger.warning(
+                "okx_archive_rebuild: venue rate limit (%s); deferring %ds",
+                type(exc).__name__,
+                RATE_LIMIT_DEFER_S,
+            )
+            return await _defer_job(
+                supabase, job, RATE_LIMIT_DEFER_S, f"{KIND}: waiting rate_limited"
+            )
         # DONE is only honest once the result is stored: a failed write propagates and the
-        # dispatcher retries the whole (idempotent) preflight.
+        # dispatcher retries the whole (idempotent) claim.
         json.dumps(result)  # the object must be plain JSON: no Decimal, no datetime
         await _write_result(supabase, job, result)
         return DispatchResult(outcome=DispatchOutcome.DONE)
