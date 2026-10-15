@@ -1912,6 +1912,70 @@ def _balance_vs_nav(files: list[ArchiveFile], live: _LiveReference) -> dict[str,
     }
 
 
+#: How many days either side of the flow seam (``live_flows_from_day``) the seam reading looks.
+#: A movement straddles the seam when its on-chain leg and its funding-to-trading transfer fall
+#: on different sides of it; those legs are usually minutes to a few days apart, so a week each
+#: way catches the realistic cases and stays small enough to read. A reading, not a bound.
+FLOW_SEAM_MARGIN_DAYS: Final[int] = 7
+
+
+def _flow_readings(
+    aggregate: ArchiveAggregate, live: _LiveReference, reconcile_days: set[str]
+) -> tuple[dict[str, str], dict[str, Any] | None]:
+    """The two flow readings, both measured around the REAL flow seam (WR-03), never gated.
+
+    The rebuild uses archive transfer bills dated before ``live.flow_window_first_day`` and
+    live deposits and withdrawals from it on, so a movement whose two legs straddle the seam
+    is either in neither source or in both. The reconcile window opens at the live P&L reach
+    (run date minus 87 days), not at the flow seam (midnight minus 90 days), so a total over
+    it never looks at the seam.
+
+    * ``flow_totals_overlap``: the archive and live flow totals from ``FLOW_SEAM_MARGIN_DAYS``
+      before the seam to the last covered archive day. A venue with no deposit retention cap
+      has no seam; its total stays over the reconcile window.
+    * ``flow_seam``: within ``FLOW_SEAM_MARGIN_DAYS`` either side of the seam, the archive
+      transfers the roll USES (before it), the archive transfers it DISCARDS (from it on), and
+      the live flows it uses (from it on). ``diff`` is discarded minus used: nonzero when the
+      sources disagree after the seam, which is what a straddle looks like. ``None`` with no
+      seam."""
+    seam = live.flow_window_first_day
+    live_flows = [(f.utc_day_iso, Decimal(repr(float(f.usd_signed)))) for f in live.flows]
+    if seam is None:
+        days = reconcile_days
+        archive_total = sum((v for d, v in aggregate.flows_by_day.items() if d in days), Decimal(0))
+        live_total = sum((v for d, v in live_flows if d in days), Decimal(0))
+        return {"archive": _dec(archive_total), "live": _dec(live_total)}, None
+
+    seam_day = date.fromisoformat(seam)
+    margin = timedelta(days=FLOW_SEAM_MARGIN_DAYS)
+    first = (seam_day - margin).isoformat()
+    last_covered = max(aggregate.covered_days, default=first)
+    archive_total = sum(
+        (v for d, v in aggregate.flows_by_day.items() if first <= d <= last_covered), Decimal(0)
+    )
+    live_total = sum((v for d, v in live_flows if first <= d <= last_covered), Decimal(0))
+    after_last = (seam_day + margin - timedelta(days=1)).isoformat()
+    archive_before = sum(
+        (v for d, v in aggregate.flows_by_day.items() if first <= d < seam), Decimal(0)
+    )
+    archive_after = sum(
+        (v for d, v in aggregate.flows_by_day.items() if seam <= d <= after_last), Decimal(0)
+    )
+    live_after = sum((v for d, v in live_flows if seam <= d <= after_last), Decimal(0))
+    return (
+        {"archive": _dec(archive_total), "live": _dec(live_total)},
+        {
+            "seam_day": seam,
+            "margin_days": FLOW_SEAM_MARGIN_DAYS,
+            "window": {"from": first, "to": after_last},
+            "archive_before_seam_used": _dec(archive_before),
+            "archive_from_seam_discarded": _dec(archive_after),
+            "live_from_seam_used": _dec(live_after),
+            "diff": _dec(archive_after - live_after),
+        },
+    )
+
+
 async def _stored_vs_core(
     supabase: Any, target_ids: tuple[str, ...], rebuilt: RebuildResult
 ) -> dict[str, Any]:
@@ -2139,18 +2203,11 @@ async def _evaluate(
         if (_cent_nonzero(aggregate.realized_by_day.get(d, Decimal(0))) and d not in live.realized_by_day)
         or (_cent_nonzero(aggregate.funding_by_day.get(d, Decimal(0))) and d not in live.funding_by_day)
     )
-    window_set = set(window_days)
+    flow_totals, flow_seam = _flow_readings(aggregate, live, set(window_days))
     result["info"] = {
         "bal_chain": ingested.bal_chain,
-        "flow_totals_overlap": {
-            "archive": _dec(sum((v for d, v in aggregate.flows_by_day.items() if d in window_set), Decimal(0))),
-            "live": _dec(
-                sum(
-                    (Decimal(repr(float(f.usd_signed))) for f in live.flows if f.utc_day_iso in window_set),
-                    Decimal(0),
-                )
-            ),
-        },
+        "flow_totals_overlap": flow_totals,
+        "flow_seam": flow_seam,
         "realized_balance_vs_rolled_nav": _balance_vs_nav(ingested.files, live),
         "live_from": {"pnl": live.first_full_day, "flows": live.flow_window_first_day},
         "first_live_day_differs": rebuilt.first_live_day_differs,

@@ -963,6 +963,96 @@ class TestFlowSeamsReachTheJob:
         assert values["2026-07-10"] == pytest.approx(ORACLE["2026-07-10"], abs=1e-12)
 
 
+class TestFlowSeamReading:
+    """WR-03 / N-flow. The archive's transfer bills are used before ``live_flows_from_day`` (the
+    start of the live deposit window, midnight(run) - 90 d = 2026-07-31 in these scenarios) and
+    the live flows from it. A movement can straddle that seam in either direction, and the only
+    flow reading was summed over the RECONCILE window (opens run-87 d = 08-03), so it never
+    looked at the seam at all. The reading below is measured around the real seam. It is a
+    reading, not a gate: whether to bound it is a founder decision."""
+
+    SEAM = "2026-07-31"
+
+    @pytest.mark.asyncio
+    async def test_a_deposit_that_predates_the_live_window_but_whose_transfer_lands_after_the_seam_shows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On-chain deposit 07-29 (outside the live window, so no live flow) whose
+        funding-to-trading transfer bill is on 08-02 (after the seam, so the rebuild discards
+        the archive bill): the +400 is in NEITHER source the roll reads, and every rebuilt NAV
+        before 08-02 is 400 too high. The reading must make that visible."""
+        both = _standard_bills().flow("2026-08-02", "400").bytes()
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=both)
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        info = world.result()["info"]
+        # Window: 7 days before the seam (07-24) to 6 days after it (08-06).
+        assert info["flow_seam"] == {
+            "seam_day": self.SEAM,
+            "margin_days": 7,
+            "window": {"from": "2026-07-24", "to": "2026-08-06"},
+            "archive_before_seam_used": "0",
+            "archive_from_seam_discarded": "400",
+            "live_from_seam_used": "0",
+            "diff": "400",
+        }
+        # The overlap totals open at the seam window too, so the 08-02 transfer is inside them
+        # (the reconcile window opens 08-03 and never saw it).
+        assert info["flow_totals_overlap"] == {"archive": "400", "live": "0"}
+
+    @pytest.mark.asyncio
+    async def test_a_withdrawal_counted_by_both_sources_across_the_seam_shows_both_sides(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Trading-to-funding transfer on 07-30 (before the seam, so the archive bill is
+        used) followed by the on-chain withdrawal on 07-31 (the live window's first day, so the
+        live flow is used): the same 200 leaves the roll twice. Both halves must be readable."""
+        live = _standard_live()
+        live.transfers = [{"type": "withdrawal", "currency": "USDT", "amount": 200, "id": "w1",
+                           "timestamp": _noon_ms("2026-07-31")}]
+        both = _standard_bills().flow("2026-07-30", "-200").bytes()
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, live, q3=both)
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        seam = world.result()["info"]["flow_seam"]
+        assert seam["archive_before_seam_used"] == "-200"
+        assert seam["live_from_seam_used"] == "-200"
+        assert seam["archive_from_seam_discarded"] == "0"
+        assert seam["diff"] == "200"
+
+    @pytest.mark.asyncio
+    async def test_a_quiet_seam_reads_all_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        world = _install(monkeypatch, _db_with((STRATEGY_ID, GAP_A)), _standard_live(), q3=_standard_q3())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        seam = world.result()["info"]["flow_seam"]
+        assert (seam["archive_before_seam_used"], seam["archive_from_seam_discarded"],
+                seam["live_from_seam_used"], seam["diff"]) == ("0", "0", "0", "0")
+
+    @pytest.mark.asyncio
+    async def test_the_seam_reading_is_a_reading_and_never_a_gate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A large straddle must not stop the run: the gate is a founder decision (D-10 binds
+        only the P&L legs)."""
+        both = _standard_bills().flow("2026-08-02", "400000").bytes()
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=both)
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        assert world.result()["info"]["flow_seam"]["diff"] == "400000"
+
+
 class TestLiveCrawlFlags:
     """F2 / WR-03. ``fetch_daily_pnl`` swallows every error and returns whatever it has,
     recording ``daily_pnl_fetch_error`` (with the exception CLASS) or
@@ -2382,7 +2472,7 @@ class TestResultShape:
             assert isinstance(reconcile[leg]["first_offending"], list)
         info = result["info"]
         assert set(info) == {
-            "bal_chain", "flow_totals_overlap", "realized_balance_vs_rolled_nav", "live_from",
+            "bal_chain", "flow_totals_overlap", "flow_seam", "realized_balance_vs_rolled_nav", "live_from",
             "first_live_day_differs", "archive_days_prepended", "gap_days_active",
             "gap_days_quiet", "archive_only_in_live_reach", "stored_vs_core",
         }
