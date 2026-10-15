@@ -67,6 +67,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Final, Mapping, cast
 
 import ccxt.async_support as ccxt
+import httpx
 
 from services.account_identity import venue_account_id_from
 from services.db import db_execute, get_supabase, one, rows
@@ -80,7 +81,12 @@ from services.job_worker import (
     _make_exchange_client,
 )
 from services.okx_archive_classify import SUBTYPE_BUCKETS, Bucket, aggregate_archive
-from services.okx_archive_download import describe_href, download_archive_csv
+from services.okx_archive_download import (
+    DownloadRefused,
+    LinkExpired,
+    describe_href,
+    download_archive_csv,
+)
 from services.okx_archive_files import (
     ArchiveFile,
     ArchiveParseError,
@@ -968,13 +974,47 @@ def _safe_counts(counts: Mapping[str, int]) -> dict[str, int]:
     return dict(sorted(out.items()))
 
 
-async def _ingest_quarter(entry: dict[str, Any], href: str) -> ArchiveFile:
+async def _download_quarter(
+    exchange: ccxt.Exchange, entry: dict[str, Any], href: str
+) -> tuple[bytes, str, int]:
+    """Download one quarter's file. A 403/410 (an expired link, about 5.5 h after
+    generation) is answered with exactly ONE fresh status read and ONE retry on the link
+    that read returns; a second expiry, or a read with no link, is the transient
+    ``link_expired``: come back later, never DONE with data missing.
+
+    Every exception that can carry the signed URL in its message (httpx's do) is turned
+    into a fixed-vocabulary stop here, with ``from None``, so the link reaches neither
+    ``last_error`` nor a log."""
+    year, label = entry["year"], entry["quarter"]
+    tag = _quarter_tag(year, label)
+    refreshed = False
+    while True:
+        try:
+            return await download_archive_csv(href)
+        except LinkExpired:
+            if refreshed:
+                raise _Stop("link_expired", f"quarter={tag} cause=expired_twice") from None
+            refreshed = True
+            reading = await _read_quarter_status(exchange, year, label)
+            if reading.state != "finished" or reading.href is None:
+                raise _Stop("link_expired", f"quarter={tag} cause=no_fresh_link") from None
+            href = reading.href
+        except DownloadRefused as refusal:
+            # ``reason`` is the downloader's closed vocabulary; the host rides in the block.
+            raise _Stop("download_refused", f"quarter={tag} reason={refusal.reason}") from None
+        except (httpx.HTTPError, TimeoutError):
+            raise _Stop("link_expired", f"quarter={tag} cause=network") from None
+
+
+async def _ingest_quarter(
+    exchange: ccxt.Exchange, entry: dict[str, Any], href: str
+) -> ArchiveFile:
     """Download one quarter's file, record the Result shape v1 readings and parse it.
 
     The parsed file lives in the caller's local variables for this claim only."""
     year, label = entry["year"], entry["quarter"]
     tag = _quarter_tag(year, label)
-    csv_bytes, container, compressed_bytes = await download_archive_csv(href)
+    csv_bytes, container, compressed_bytes = await _download_quarter(exchange, entry, href)
     entry["container"] = container
     entry["compressed_bytes"] = compressed_bytes
     entry["decompressed_bytes"] = len(csv_bytes)
@@ -1008,6 +1048,7 @@ async def _census_of(
 
 
 async def _ingest_all(
+    exchange: ccxt.Exchange,
     quarters: list[dict[str, Any]],
     steps: list[_QuarterStep],
     live_types: Mapping[str, str],
@@ -1016,7 +1057,7 @@ async def _ingest_all(
     files: list[ArchiveFile] = []
     for entry, step in zip(quarters, steps):
         assert step.href is not None  # every quarter was ready, or the job deferred
-        files.append(await _ingest_quarter(entry, step.href))
+        files.append(await _ingest_quarter(exchange, entry, step.href))
     result["census"] = await _census_of(files, live_types)
 
 
@@ -1064,7 +1105,7 @@ async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
                     f"{KIND}: waiting quarters_ready={ready}/{len(steps)}",
                 )
             if inp.mode == "calibrate":
-                await _ingest_all(quarters, steps, live_types, result)
+                await _ingest_all(exchange, quarters, steps, live_types, result)
         except _Stop as stop:
             return await _finish_stop(supabase, job, result, stop)
         except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as exc:

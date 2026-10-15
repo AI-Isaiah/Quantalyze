@@ -23,11 +23,13 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 import ccxt.async_support as ccxt
+import httpx
 import pytest
 
 import main_worker
-from services import job_worker, okx_archive_job
+from services import job_worker, okx_archive_download, okx_archive_job
 from services.job_worker import DispatchOutcome, TIMEOUT_PER_KIND, dispatch
+from services.okx_archive_download import LinkExpired
 
 KEY_ID = "11111111-1111-4111-8111-111111111111"
 OTHER_KEY_ID = "22222222-2222-4222-8222-222222222222"
@@ -224,6 +226,8 @@ class _World:
         self.downloads: list[str] = []
         #: Queue of exceptions the downloader raises (consumed one per call), then it serves.
         self.download_errors: list[Exception] = []
+        #: When set, the downloader serves these bytes instead of the committed fixture.
+        self.csv_override: bytes | None = None
 
     async def download(self, url: str) -> tuple[bytes, str, int]:
         """Stands in for ``okx_archive_download.download_archive_csv``: serves the committed
@@ -231,6 +235,8 @@ class _World:
         self.downloads.append(url)
         if self.download_errors:
             raise self.download_errors.pop(0)
+        if self.csv_override is not None:
+            return self.csv_override, "zip", 1234
         if "2026Q2" in url:
             return (FIXTURES / "q2_like.csv").read_bytes(), "zip", 987
         return (FIXTURES / "q3_like.csv").read_bytes(), "zip", 1234
@@ -1266,6 +1272,246 @@ class TestPreflightSharesWait:
 
 
 # ---------------------------------------------------------------------------
+# Plan 16 Task 3: ingest edges, a lost or expired link never yields a partial result
+# ---------------------------------------------------------------------------
+
+LINK_FULL = _link("2026", "Q3")
+ALLOWED_WRITES = {"set_compute_job_progress", "defer_compute_job"}
+
+
+def _assert_no_other_writes(world: _World) -> None:
+    """The ingest may write NOTHING but the progress block and a defer: a lost link that
+    left a half-applied rebuild behind is the failure this plan exists to prevent. The
+    recording supabase fake has no insert/update/delete at all, so a table write would
+    raise; this also pins that no other RPC (apply, mark_*, stamp) was called."""
+    assert set(_rpc_names(world)) <= ALLOWED_WRITES, _rpc_names(world)
+    assert all(table in ("api_keys", "strategies") for table, _ in world.supabase.reads)  # type: ignore[union-attr]
+
+
+class TestLostOrExpiredLink:
+    @pytest.mark.parametrize(
+        "make_exc",
+        [
+            lambda: httpx.ConnectError(f"cannot reach {LINK_FULL}"),
+            lambda: httpx.ReadTimeout(f"timed out fetching {LINK_FULL}"),
+            lambda: TimeoutError(f"deadline for {LINK_FULL}"),
+        ],
+        ids=["connect-error", "read-timeout", "total-deadline"],
+    )
+    @pytest.mark.asyncio
+    async def test_a_download_that_fails_after_finished_is_transient_with_no_partial_result(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+        make_exc: Callable[[], Exception],
+    ) -> None:
+        """T-LINK-1. OKX answered `finished` and then the download died. The job must come
+        back later (transient FAILED, retried by the queue) and write nothing that a later
+        reader could mistake for a finished quarter. The exceptions here deliberately carry
+        the signed URL in their message, as httpx's do: it must not reach last_error, the
+        result block or a log."""
+        caplog.set_level(logging.DEBUG)
+        world = _happy(monkeypatch)
+        world.download_errors.append(make_exc())
+        outcome = await dispatch(_calibrate())
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "transient"
+        assert outcome.error_message == "okx_archive_rebuild: link_expired quarter=2026-Q3 cause=network"
+        result = world.result()
+        assert result["stop_class"] == "link_expired" and result["census"] is None
+        assert result["quarters"][0]["row_count"] is None, "nothing was read, so nothing is claimed"
+        _assert_no_other_writes(world)
+        everything = json.dumps(world.supabase.rpcs, default=str) + caplog.text + repr(outcome)  # type: ignore[union-attr]
+        for secret in LINK_SECRETS:
+            assert secret not in everything, f"the link leaked: {secret!r}"
+
+    @pytest.mark.asyncio
+    async def test_a_403_triggers_one_fresh_status_read_and_one_retry_with_the_new_link(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T-LINK-3. OKX links expire (about 5.5 h): a 403/410 means "ask again", and the
+        retry must use the link from the FRESH read, not the dead one."""
+        world = _happy(monkeypatch)
+        world.answers[STATUS] = _sequence(_finished("2026", "Q3", "v1"), _finished("2026", "Q3", "v2"))
+        world.download_errors.append(LinkExpired())
+        outcome = await dispatch(_calibrate())
+
+        assert outcome.outcome == DispatchOutcome.DONE
+        assert world.downloads == [_link("2026", "Q3", "v1"), _link("2026", "Q3", "v2")]
+        assert world.instances[0].calls == [CONFIG, SUBTYPES, STATUS, STATUS], "exactly one fresh read"
+        assert _applies(world) == 1, "the refresh is a read; it does not re-apply"
+        assert world.result()["quarters"][0]["row_count"] == 20
+
+    @pytest.mark.asyncio
+    async def test_a_second_403_is_transient_link_expired_not_a_third_try(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = _happy(monkeypatch)
+        world.answers[STATUS] = _sequence(_finished("2026", "Q3", "v1"), _finished("2026", "Q3", "v2"))
+        world.download_errors.extend([LinkExpired(), LinkExpired()])
+        outcome = await dispatch(_calibrate())
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "transient"
+        assert outcome.error_message == "okx_archive_rebuild: link_expired quarter=2026-Q3 cause=expired_twice"
+        assert world.downloads == [_link("2026", "Q3", "v1"), _link("2026", "Q3", "v2")]
+        assert world.instances[0].calls == [CONFIG, SUBTYPES, STATUS, STATUS]
+        _assert_no_other_writes(world)
+
+    @pytest.mark.asyncio
+    async def test_a_403_whose_fresh_read_has_no_link_is_transient_link_expired(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If OKX no longer offers a link when asked again, there is nothing to retry with:
+        come back later (the next claim re-applies and waits properly), never DONE."""
+        world = _happy(monkeypatch)
+        world.answers[STATUS] = _sequence(_finished("2026", "Q3", "v1"), _status("ongoing"))
+        world.download_errors.append(LinkExpired())
+        outcome = await dispatch(_calibrate())
+
+        assert outcome.outcome == DispatchOutcome.FAILED and outcome.error_kind == "transient"
+        assert outcome.error_message == "okx_archive_rebuild: link_expired quarter=2026-Q3 cause=no_fresh_link"
+        assert world.downloads == [_link("2026", "Q3", "v1")]
+
+    @pytest.mark.asyncio
+    async def test_after_a_lost_link_a_restarted_claim_gets_a_fresh_link_and_reuses_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T-LINK-2 (variant). A claim dies on a lost link; the next one starts with fresh
+        fakes, so the only way it can finish is by asking OKX again."""
+        first = _happy(monkeypatch)
+        first.answers[STATUS] = _sequence(_finished("2026", "Q3", "dead"), _finished("2026", "Q3", "dead2"))
+        first.download_errors.extend([LinkExpired(), LinkExpired()])
+        lost = await dispatch(_calibrate())
+        assert lost.outcome == DispatchOutcome.FAILED
+
+        second = _happy(monkeypatch)
+        second.answers[STATUS] = _finished("2026", "Q3", "fresh")
+        done = await dispatch(_calibrate())
+
+        assert done.outcome == DispatchOutcome.DONE
+        assert second.downloads == [_link("2026", "Q3", "fresh")], "no link from the lost claim"
+        assert STATUS in second.instances[0].calls, "the new claim re-read OKX"
+        assert second.result()["quarters"][0]["row_count"] == 20
+
+
+class TestDownloadRefusals:
+    @pytest.mark.asyncio
+    async def test_the_real_downloader_refuses_a_host_not_on_the_allow_list(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The link is untrusted input. Here the REAL downloader runs with an allow-list the
+        test empties itself (plan 13 populates the shipped one, so leaning on its being empty
+        would break there). The refusal is permanent, the result names the host the link
+        pointed at, and nothing of the path or query survives anywhere."""
+        caplog.set_level(logging.DEBUG)
+        world = _happy(monkeypatch)
+        monkeypatch.setattr(okx_archive_job, "download_archive_csv", okx_archive_download.download_archive_csv)
+        monkeypatch.setattr(okx_archive_download, "ARCHIVE_ALLOWED_HOSTS", frozenset())
+        outcome = await dispatch(_calibrate())
+
+        result = _assert_stopped(
+            world, outcome, "download_refused", detail="quarter=2026-Q3 reason=host_not_allowed"
+        )
+        assert result["quarters"][0]["href_host"] == "archive.example.test"
+        assert result["quarters"][0]["container"] is None
+        assert world.downloads == [], "the fake downloader was bypassed"
+        _assert_no_other_writes(world)
+        everything = json.dumps(world.supabase.rpcs, default=str) + caplog.text + repr(outcome)  # type: ignore[union-attr]
+        for secret in LINK_SECRETS:
+            assert secret not in everything, f"the link leaked: {secret!r}"
+
+    @pytest.mark.parametrize("reason", sorted(okx_archive_download.REFUSAL_REASONS))
+    @pytest.mark.asyncio
+    async def test_every_refusal_reason_is_a_permanent_download_refused(
+        self, monkeypatch: pytest.MonkeyPatch, reason: str
+    ) -> None:
+        world = _happy(monkeypatch)
+        world.download_errors.append(okx_archive_download.DownloadRefused(reason))
+        outcome = await dispatch(_calibrate())
+
+        _assert_stopped(world, outcome, "download_refused", detail=f"quarter=2026-Q3 reason={reason}")
+
+
+def _q3_lines() -> list[str]:
+    return (FIXTURES / "q3_like.csv").read_text().splitlines()
+
+
+PARSE_CASES: list[tuple[str, Callable[[], bytes], str, str]] = [
+    # (id, bytes served, expected stop class in the closed set, parser/classifier label)
+    ("header-drift", lambda: (FIXTURES / "q3_like.csv").read_bytes().replace(b"billId", b"billID", 1),
+     "header_drift", "header_drift"),
+    ("wrong-quarter", lambda: (FIXTURES / "q2_like.csv").read_bytes(),
+     "quarter_range_mismatch", "quarter_range_mismatch"),
+    ("conflicting-duplicate",
+     lambda: ("\n".join([*_q3_lines(), _q3_lines()[1].replace("10.50", "99.99")]) + "\n").encode(),
+     "duplicate_bill_conflict", "duplicate_bill_conflict"),
+    ("unparseable-amount", lambda: (FIXTURES / "q3_like.csv").read_bytes().replace(b"10.50", b"ten", 1),
+     "unparseable_amount", "unparseable_amount"),
+    ("undecodable", lambda: b"\xff\xfe\x00bad", "header_drift", "undecodable_file"),
+    ("header-only", lambda: (_q3_lines()[0] + "\n").encode(), "quarter_range_mismatch", "empty_file"),
+    ("missing-bill-id", lambda: ("\n".join([_q3_lines()[0], _q3_lines()[1].replace("700000001", "", 1)]) + "\n").encode(),
+     "duplicate_bill_conflict", "missing_bill_id"),
+    ("non-usd-nonzero", lambda: (FIXTURES / "q3_like.csv").read_bytes().replace(b"USDT,10.50", b"BTC,10.50", 1),
+     "non_usd_ccy", "non_usd_ccy"),
+    ("unknown-subtype-nonzero",
+     lambda: (FIXTURES / "q3_like.csv").read_bytes().replace(b"SWAP,700000001,2,", b"SWAP,700000001,99999,", 1),
+     "unknown_subtype_nonzero", "unknown_subtype_nonzero"),
+]
+
+
+class TestIngestStops:
+    @pytest.mark.parametrize(
+        ("served", "stop_class", "label"),
+        [pytest.param(b, c, lbl, id=i) for i, b, c, lbl in PARSE_CASES],
+    )
+    @pytest.mark.asyncio
+    async def test_a_file_that_cannot_be_read_exactly_is_a_permanent_stop_with_its_class(
+        self, monkeypatch: pytest.MonkeyPatch, served: Callable[[], bytes], stop_class: str, label: str
+    ) -> None:
+        """No archive checksum exists, so the parser's pins and the classification are the only
+        authentication of the file (CONTEXT D-09/D-10): each must stop the job LOUD, with the
+        result block written first, and never surface a figure. The size readings of the
+        download that DID happen survive in the block, because calibration compares them
+        with the caps."""
+        world = _happy(monkeypatch)
+        world.csv_override = served()
+        outcome = await dispatch(_calibrate())
+
+        result = _assert_stopped(world, outcome, stop_class, detail=f"quarter=2026-Q3 parse={label}"
+                                 if label not in ("non_usd_ccy", "unknown_subtype_nonzero")
+                                 else f"parse={label}")
+        quarter = result["quarters"][0]
+        assert quarter["container"] == "zip" and quarter["compressed_bytes"] == 1234
+        assert quarter["decompressed_bytes"] == len(world.csv_override)
+        assert result["census"] is None
+        for forbidden in ("10.50", "99.99", "700000001"):
+            assert forbidden not in json.dumps(result) + (outcome.error_message or "")
+        _assert_no_other_writes(world)
+
+    def test_every_stop_the_parser_and_classifier_can_raise_maps_into_the_closed_set(self) -> None:
+        """The contract's stop classes are closed, but plan 02's parser has stops of its own.
+        This scans the two modules' raise sites, so a new parser stop with no mapping fails
+        here instead of surfacing at runtime as a KeyError in the middle of a calibration."""
+        import inspect
+        import re
+
+        from services import okx_archive_classify, okx_archive_files
+
+        raised = set()
+        for module in (okx_archive_files, okx_archive_classify):
+            raised |= set(re.findall(r'ArchiveParseError\(\s*"([a-z_]+)"', inspect.getsource(module)))
+        assert raised >= {"header_drift", "empty_file", "non_usd_ccy"}, "the scan found the raise sites"
+        assert raised <= set(okx_archive_job._PARSE_STOP_CLASS), raised - set(okx_archive_job._PARSE_STOP_CLASS)
+        assert set(okx_archive_job._PARSE_STOP_CLASS.values()) <= okx_archive_job.STOP_CLASSES
+
+    def test_a_signed_link_never_appears_in_the_repr_of_a_value_that_carries_it(self) -> None:
+        """The link rides in two small dataclasses for the length of a claim. A repr in a
+        log line or an assertion message is the easiest way for it to escape."""
+        reading = okx_archive_job._StatusReading(state="finished", href=LINK_FULL, ts_ms=1)
+        step = okx_archive_job._QuarterStep(href=LINK_FULL)
+        for secret in LINK_SECRETS:
+            assert secret not in repr(reading) + repr(step)
+
+
+# ---------------------------------------------------------------------------
 # Result shape v1
 # ---------------------------------------------------------------------------
 
@@ -1317,6 +1563,39 @@ class TestResultShape:
         for unreached in ("census", "reconcile", "excluded", "info", "d03", "strategies", "fingerprint"):
             assert result[unreached] is None, unreached
         json.dumps(result)  # plain JSON all the way down
+
+    @pytest.mark.asyncio
+    async def test_a_calibrate_result_carries_the_ingest_readings_with_the_pinned_types(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Plan 14's founder step compares these readings with the download caps and reads
+        the census; the types are part of that contract."""
+        world = _happy(monkeypatch)
+
+        async def _no_sleep(_s: float) -> None:
+            return None
+
+        monkeypatch.setattr(okx_archive_job, "_sleep", _no_sleep)
+        await dispatch(_calibrate({"quarters": [
+            {"year": 2026, "quarter": "Q2"}, {"year": 2026, "quarter": "Q3"}]}))
+        result = world.result()
+
+        assert set(result) == TOP_LEVEL_KEYS and result["mode"] == "calibrate"
+        for q in result["quarters"]:
+            assert set(q) == QUARTER_KEYS
+            assert q["container"] in ("zip", "gzip")
+            assert isinstance(q["compressed_bytes"], int) and not isinstance(q["compressed_bytes"], bool)
+            assert isinstance(q["decompressed_bytes"], int) and not isinstance(q["decompressed_bytes"], bool)
+            assert isinstance(q["has_type_column"], bool)
+            assert isinstance(q["ts_min_day"], str) and isinstance(q["ts_max_day"], str)
+            assert isinstance(q["row_count"], int) and not isinstance(q["row_count"], bool)
+        census = result["census"]
+        assert set(census) == {"by_ccy", "by_inst_type", "by_sub_type", "unknown_zero_effect"}
+        for key in ("by_ccy", "by_inst_type", "by_sub_type"):
+            assert all(isinstance(k, str) and isinstance(v, int) for k, v in census[key].items()), key
+        assert isinstance(census["unknown_zero_effect"], int)
+        assert "(blank)" in census["by_inst_type"], "the aggregator's own empty-cell label passes through"
+        json.dumps(result)
 
     @pytest.mark.asyncio
     async def test_a_refusal_result_has_every_key_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
