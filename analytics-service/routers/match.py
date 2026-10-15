@@ -39,7 +39,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from functools import partial
-from typing import Annotated, Any
+from typing import Annotated, Any, Final
 from uuid import UUID, uuid4
 
 import pandas as pd
@@ -586,6 +586,18 @@ _HOLDINGS_HISTORY_WINDOW_DAYS = 730
 _HOLDINGS_HISTORY_MAX_PAGES = 50
 
 
+# D-20 (founder, 167.1.1.1): the fewest ADJACENT one-day returns a spot holding needs to join
+# the matcher's return signal. The shared price rule (``MIN_PRICED_DAYS``, D-03) admits a
+# holding by how many days it is priced, and 30 priced days that are not adjacent have no
+# one-day return at all. ``score_candidates`` joins the book on the days every series carries
+# a return, so one such series would empty that join, null the portfolio-fit axis and silence
+# every correlation-ceiling test for the allocator. The old dollar-ratio gate counted 30
+# returns, not 30 days. This is a MATCHER constant on purpose and a distinct cause from
+# ``too_few_priced_days``: /compare and the shared rule are unchanged, and a false cause is
+# the defect class this repo avoids.
+_MATCHER_MIN_ADJACENT_RETURNS: Final[int] = 30
+
+
 def _holdings_history_window_start() -> str:
     """The first ``asof`` (YYYY-MM-DD, UTC) the holdings history read asks for.
 
@@ -636,11 +648,17 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
     ===========================  ========  ==================  ==================
     spot holding                 AUM       weights / max-wt    returns, eligible
     ===========================  ========  ==================  ==================
-    priced (30+ priced days)     in        in                  in
+    priced (30+ priced days and  in        in                  in
+    30+ adjacent returns)
     withheld (account_balance,   in        in                  out (named)
     fixed_price, no_price,
-    too_few_priced_days)
+    too_few_priced_days,
+    too_few_adjacent_returns)
     ===========================  ========  ==================  ==================
+
+    ``too_few_adjacent_returns`` (D-20) is a matcher-only reason: a holding with 30 or more
+    priced days whose marks give fewer than ``_MATCHER_MIN_ADJACENT_RETURNS`` adjacent
+    one-day returns. It keeps the price rule's reasons below 30 priced days.
 
     The AUM is the allocator's own (D-15, D-16): every collapsed holding, spot priced,
     spot withheld and derivative, adds ``aum_contribution_usd``, which is
@@ -921,11 +939,15 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
         # D-01: priced or withheld, a spot holding keeps its dollars in the AUM and
         # its weight. Only a priced one carries a return series.
         raw_values[pseudo_id] = value_usd
-        if marks.withheld_reason is not None:
-            holdings_rows_withheld.append({**row, "withheld_reason": marks.withheld_reason})
-            withheld_counts[marks.withheld_reason] = (
-                withheld_counts.get(marks.withheld_reason, 0) + 1
-            )
+        # D-20: a holding the price rule ADMITTED but whose series has fewer than
+        # ``_MATCHER_MIN_ADJACENT_RETURNS`` adjacent one-day returns cannot join the book's
+        # return signal; the price rule's own reason always wins when it fired.
+        withheld_reason = marks.withheld_reason
+        if withheld_reason is None and len(marks.returns) < _MATCHER_MIN_ADJACENT_RETURNS:
+            withheld_reason = "too_few_adjacent_returns"
+        if withheld_reason is not None:
+            holdings_rows_withheld.append({**row, "withheld_reason": withheld_reason})
+            withheld_counts[withheld_reason] = withheld_counts.get(withheld_reason, 0) + 1
             continue
 
         portfolio_strategies.append({"strategy_id": pseudo_id})
