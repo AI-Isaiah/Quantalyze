@@ -1,6 +1,9 @@
 import { resolveTradeFetch } from "@/lib/freshness";
 import { inclusiveDayCount } from "@/lib/factsheet/build-payload";
-import type { UnrecoveredGap } from "@/lib/factsheet/trade-fetch-provenance";
+import type {
+  ReconstructedRange,
+  UnrecoveredGap,
+} from "@/lib/factsheet/trade-fetch-provenance";
 
 /**
  * Phase 167.1.2.2.2 (TRADESYNC) - the two header statements about the record's
@@ -142,7 +145,10 @@ const MAX_NAMED_GAPS = 3;
  *
  * F1 - THE COPY STATES ONLY WHAT IS TRUE AT SHIP TIME. The UI-SPEC's draft said
  * "the exchange no longer serves these days". That is false: OKX's quarterly
- * archive serves them and Phase 167.1.2.2.2.1 OKXHISTORY recovers them. Do not
+ * archive serves them and Phase 167.1.2.2.2.1 OKXHISTORY recovers them.
+ * (History, dated 2026-10-15: that phase now recovers them and records each
+ * rebuilt range in `reconstructed_ranges`; `ReconstructedRangeLines` below
+ * states it. This gap line's copy is unchanged and the F1 rule stands.) Do not
  * reintroduce a claim about what the exchange can or cannot supply; this line
  * says only that the days are not recovered and are not counted as zero.
  * `FactsheetView.unrecovered-gap.test.tsx` pins the absence of that phrase.
@@ -193,6 +199,79 @@ export function UnrecoveredGapLines({
       {more > 0 && (
         <p className={className}>
           {more} more {more === 1 ? "gap" : "gaps"} without trade data.
+        </p>
+      )}
+    </>
+  );
+}
+
+/** The founder's D-06 sentence after the `{from} – {to}: ` prefix, character for character. */
+const RECONSTRUCTED_SENTENCE = "rebuilt from OKX's quarterly account statement, not the live feed.";
+
+/**
+ * Review round 1, F5 / IN-01: the line for a `reconstructed_ranges` record that
+ * was present but malformed. NOT the D-06 sentence (that names a range we could
+ * not read) and NOT silence: the rebuild RPC already removed the rebuilt days
+ * from `unrecovered_gaps`, so printing nothing would present them as live days.
+ * It states the limit, in DESIGN.md's declarative sentence-case voice, and
+ * deliberately avoids the D-06 wording ("quarterly account statement") so no
+ * reader or test can mistake it for a stored range. Muted-secondary like its
+ * sibling lines: the page admits it does not know, it makes no finding.
+ */
+const RECONSTRUCTED_UNAVAILABLE_SENTENCE =
+  "Record of rebuilt days unavailable. Some days may come from a quarterly statement, not the live feed.";
+
+/**
+ * Reconstructed range - Phase 167.1.2.2.2.1 (OKXHISTORY), D-06 and D-07.
+ *
+ * WHY THIS LINE EXISTS. Rebuilt days COUNT in the headline metrics (D-07), so
+ * every reader is told which days were rebuilt and from what (D-06). One
+ * sentence per stored range, the founder's wording and nothing added:
+ * `{from} – {to}: rebuilt from OKX's quarterly account statement, not the live
+ * feed.` A one-day range renders the same sentence with both dates equal; there
+ * is no one-day variant, the founder fixed one sentence. The chart is not marked
+ * or shaded and no per-row marker exists: this caption is how a rebuilt day is
+ * told from a live one (SC-2). Shown to every viewer.
+ *
+ * `ranges` is `parseReconstructedRanges` output: validated `{from, to, source}`
+ * spans, newest `to` first. Rendered in the order given, at most three named
+ * and then one count line, like `UnrecoveredGapLines`, with which it sits: a
+ * partly rebuilt gap shows both lines, so the days still missing stay named
+ * (SC-4). Dates go through the same `formatIsoDate` as the gap lines.
+ *
+ * Muted-secondary caption, plain wrapping text, no glyph (DESIGN.md: declarative
+ * sentence-case captions). `undefined` is a payload cached before the field
+ * existed: render nothing rather than throw on `.length`.
+ *
+ * `unavailable` (review round 1, F5 / IN-01) is the parser's verdict that the
+ * stored record was malformed: `ranges` is then `[]` and this prints the
+ * unavailable sentence instead of nothing. Absent on a payload cached before the
+ * flag existed, which reads as false (the prior behaviour, no new claim).
+ */
+export function ReconstructedRangeLines({
+  ranges,
+  unavailable = false,
+  size = "caption",
+}: {
+  ranges: ReconstructedRange[] | undefined;
+  unavailable?: boolean;
+  size?: TradeLineSize;
+}) {
+  const className = `mt-1 ${SIZE_CLASS[size]} text-text-secondary`;
+  if (unavailable) return <p className={className}>{RECONSTRUCTED_UNAVAILABLE_SENTENCE}</p>;
+  if (!ranges || ranges.length === 0) return null;
+  const named = ranges.slice(0, MAX_NAMED_GAPS);
+  const more = ranges.length - named.length;
+  return (
+    <>
+      {named.map((range) => (
+        <p key={`${range.from}:${range.to}`} className={className}>
+          {formatIsoDate(range.from)} – {formatIsoDate(range.to)}: {RECONSTRUCTED_SENTENCE}
+        </p>
+      ))}
+      {more > 0 && (
+        <p className={className}>
+          {`${more} more ${more === 1 ? "range" : "ranges"} rebuilt from OKX's quarterly account statement.`}
         </p>
       )}
     </>
