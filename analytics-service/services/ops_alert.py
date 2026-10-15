@@ -12,10 +12,12 @@ call does three things, in this order:
    so an outage that re-opens inside the hour pages again. The window is stamped
    before delivery (concurrent pages cannot both send) and RELEASED when neither
    channel succeeded (the email failed and Sentry produced no event id), so the
-   next reading retries instead of waiting out the hour. A caller that must act
-   on the outcome (the RECOVERED notice is one-shot: the caller closes its durable
-   record only once a channel has the notice) awaits ``page``'s return value
-   through ``await_delivery``;
+   next reading retries instead of waiting out the hour. A page counts as
+   delivered when Sentry returns an event id, for an outage and a recovered notice
+   alike (D-16, under D-15: Sentry is the only live paging channel for now), or when
+   the email answers 2xx. A caller that must act on the outcome (the RECOVERED
+   notice is one-shot: the caller closes its durable record only once a channel has
+   the notice) awaits ``page``'s return value through ``await_delivery``;
 3. one authenticated POST to the Next.js ``/api/cron/ops-alert`` route, which
    emails the founder through ``notifyFounderGeneric``. The POST runs as a held
    background task so the caller never waits on HTTP.
@@ -350,15 +352,15 @@ def _settle_window(
     and publish the outcome to whoever awaits ``page``'s return value.
 
     The window is stamped BEFORE delivery so two concurrent pages cannot both
-    send. If neither channel succeeded (the email failed AND Sentry did not take it
-    as a notifying event: no event id, or a recovered event) the stamp is released,
-    so the next reading retries instead of the outage staying unreported for the
-    rest of the hour (review SFH-F2). Logged at ERROR: that is the level the Sentry
-    LoggingIntegration reports.
+    send. If neither channel succeeded (the email failed AND Sentry returned no
+    event id) the stamp is released, so the next reading retries instead of the
+    outage staying unreported for the rest of the hour (review SFH-F2). Logged at
+    ERROR: that is the level the Sentry LoggingIntegration reports.
 
     The outcome is ``sentry_counts or email_ok``, the one rule for "a channel has
-    it". ``sentry_counts`` is a Sentry event id for an OUTAGE only: no rule notifies
-    anyone about a recovered event (review WR-R3-01).
+    it". ``sentry_counts`` is a Sentry event id for either event since D-16 (under
+    D-15). Lineage: review WR-R3-01 had credited a recovered event to the email
+    alone.
     An outcome that cannot be determined is "not delivered": a caller then keeps
     its record and the notice is sent again, never lost (review WR-R2-01).
     """
@@ -375,7 +377,7 @@ def _settle_window(
         _release_window(key, stamp)
         logger.error(
             "ops_alert: no channel delivered the page (the founder email failed "
-            "and Sentry did not take it as a notifying event); the window is "
+            "and Sentry returned no event id); the window is "
             "not spent and the next reading retries (source=%s event=%s "
             "cause=%s)",
             key[0],
@@ -435,9 +437,11 @@ async def page(
     """Page a human about ``source``. Never raises. See the module docstring.
 
     Returns the page's delivery OUTCOME, a future that resolves True when a channel
-    has the page (a Sentry event id for an OUTAGE, or a 2xx from the founder email)
-    and False when none does. A recovered event is not credited to Sentry: no alert
-    rule notifies anyone about it (review WR-R3-01). A page suppressed by the
+    has the page (a Sentry event id for an outage or a recovered notice alike, D-16
+    under D-15, or a 2xx from the founder email) and False when none does. Lineage:
+    review WR-R3-01 had credited a recovered notice to the email alone. The live
+    Sentry rule "Ops alert: outage (164.6.8)" notifies on ``ops_alert_event=outage``
+    and, since 2026-10-15 (founder), on ``recovered`` too. A page suppressed by the
     window returns the outcome of the page that holds the window. Most callers
     ignore it; a RECOVERED notice is one-shot, so its callers pass it to
     ``await_delivery`` before they close a durable record (review WR-R2-01).
@@ -505,12 +509,21 @@ async def page(
                 type(exc).__name__,
             )
 
-        # Only an OUTAGE capture is covered by a Sentry alert rule that notifies a
-        # person ("Ops alert: outage (164.6.8)", filter ops_alert_event=outage). A
-        # RECOVERED capture is a warning-level event no rule fires on, so its event
-        # id proves the event was queued and nothing more: it is not a delivery
-        # (review WR-R3-01). A recovered notice counts only on a 2xx founder email.
-        sentry_counts = sentry_ok and event_n == "outage"
+        # D-16, under D-15: a Sentry event id credits the page for BOTH events. CONTEXT
+        # D-15 makes Sentry the only live paging channel for now, and D-16 (founder,
+        # 2026-10-14, "Credit recovery via Sentry") says a RECOVERED notice counts as
+        # delivered once its Sentry capture succeeds. The email is still scheduled
+        # below for every admitted page, so it goes out whenever Resend is configured.
+        # Lineage: review WR-R3-01 had credited a recovered notice to the founder email
+        # alone, because the live Sentry rule ("Ops alert: outage (164.6.8)") filters
+        # ops_alert_event=outage and a recovered capture is a warning-level event no
+        # rule fires on. With the email unconfigured that retried every healthy
+        # reading for ever, which is what D-16 stops.
+        # 2026-10-15 (founder): that rule now has a second action group on
+        # ops_alert_event=recovered, so a credited recovered capture notifies the
+        # founder the way an outage does. A FAILED capture (no event id, or a raise) is not
+        # credited: sentry_ok stays False and WR-R3-01's retry still holds for it.
+        sentry_counts = sentry_ok
         if sentry_counts:
             # Decided: a channel already has this page, whatever the email does.
             # Resolve now so a caller waiting on the outcome is not held behind the

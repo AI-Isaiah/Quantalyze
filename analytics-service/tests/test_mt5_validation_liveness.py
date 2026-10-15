@@ -44,6 +44,7 @@ from services import (
     mt5_session_episodes,
     mt5_session_monitor,
     mt5_validation_liveness,
+    ops_alert,
 )
 from services.mt5_client import (
     HOLDER_HOUSE,
@@ -705,6 +706,55 @@ async def test_a_scrub_recovered_notice_that_reached_no_channel_keeps_the_record
     assert ops_alert_open_store.pages == {}
     await _read()
     assert len(_scrub_pages(mt5_outage_pages)) == 3, "a delivered notice is not repeated"
+
+
+async def test_d16_a_scrub_recovered_notice_with_a_sentry_event_id_closes_the_record_while_email_fails(
+    scrub_sink: _ScrubSink,
+    ops_alert_open_store: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-16, under D-15, through the REAL channel and the scrub reader: the
+    production state while the founder email is unconfigured. CONTEXT D-15: "Sentry is
+    the only live paging channel for now." CONTEXT D-16: a RECOVERED notice counts as
+    delivered once its Sentry capture succeeds. So the read that sees the scrub
+    succeed closes the open-page record, and the reads after it send nothing, even
+    though every email POST fails. Lineage: review WR-R3-01 had pinned a re-send on
+    every read until a 2xx email. Expectations are typed by hand."""
+    from unittest.mock import MagicMock
+
+    spy = MagicMock()
+    spy.capture_message.return_value = "synthetic-event-id"
+    emails: list[str] = []
+
+    async def _post(payload: dict[str, Any]) -> bool:
+        emails.append(payload["event"])
+        return False
+
+    monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
+    monkeypatch.setattr(ops_alert, "_post_founder_email", _post)
+    monkeypatch.setattr(mt5_validation_liveness, "ops_alert", ops_alert)
+    ops_alert._reset_ops_alert_for_tests()
+    try:
+        scrub_sink.newest = _row("r1", "relaunch_unverified")
+        await _read()
+        scrub_sink.newest = _row("r2", "scrubbed", _T1)
+        await _read()
+        await ops_alert._drain_ops_alert_tasks_for_tests()
+
+        assert emails == ["outage", "recovered"]
+        assert ops_alert_open_store.pages == {}, "the credited recovery left its record open"
+        assert ops_alert_open_store.close_calls == 1
+        assert spy.capture_message.call_count == 2
+
+        for _ in range(2):
+            await _read()
+            await ops_alert._drain_ops_alert_tasks_for_tests()
+
+        assert emails == ["outage", "recovered"]
+        assert spy.capture_message.call_count == 2
+        assert ops_alert_open_store.close_calls == 1
+    finally:
+        ops_alert._reset_ops_alert_for_tests()
 
 
 async def test_a_reader_cancelled_while_waiting_on_the_recovered_notice_marks_the_row_stale(

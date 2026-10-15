@@ -782,30 +782,44 @@ async def test_a_page_with_no_sentry_event_and_a_401_reports_not_delivered(chan)
 
 
 async def test_a_sentry_event_alone_reports_delivered_even_when_the_email_fails(chan):
-    # Round 3 (WR-R3-01): scoped to the OUTAGE event. Only an outage capture is
-    # covered by a Sentry alert rule that notifies a person ("Ops alert: outage
-    # (164.6.8)", filter ops_alert_event=outage); the same Sentry credit for a
-    # RECOVERED notice is pinned the other way just below.
+    # Since D-16 (under D-15) the same Sentry credit applies to a RECOVERED notice,
+    # pinned by the D-16 tests below. Lineage: round 3 (WR-R3-01) had scoped this
+    # credit to the OUTAGE event, because the live Sentry rule ("Ops alert: outage
+    # (164.6.8)") filters ops_alert_event=outage.
     chan.http.status = 502
     assert await _delivered(event="outage") is True
 
 
-async def test_a_sentry_event_alone_does_not_deliver_a_recovered_notice(chan):
-    """No Sentry rule notifies anyone about a recovered (warning-level) event, so a
-    Sentry event id proves only that the event was queued. With the founder email at
-    502 a recovered notice reached nobody: not delivered, and the window is released
-    so the next healthy reading sends it again."""
+async def test_d16_a_recovered_notice_with_a_sentry_event_id_is_credited_and_its_failing_email_is_tried_once(
+    chan, caplog
+):
+    """D-16, under D-15. CONTEXT D-15: "Sentry is the only live paging channel for
+    now." CONTEXT D-16: "a RECOVERED notice counts as delivered once its Sentry
+    capture succeeds", so with the founder email unconfigured (here: 502 on every
+    POST) a recovery is credited on its Sentry event id. The email is still attempted
+    and still logs loud when it fails, but ONCE per window, not once per healthy
+    reading: before D-16 each of these three pages reported False, released the
+    window and sent another email, another Sentry warning and another ERROR.
+    Lineage: review WR-R3-01 had pinned the opposite direction until the founder
+    decided D-16 on 2026-10-14."""
+    chan.spy.capture_message.return_value = "synthetic-event-id"
     chan.http.status = 502
 
-    assert await _delivered(event="recovered", cause="recovered_from_x") is False
-    assert await _delivered(event="recovered", cause="recovered_from_x") is False
+    with caplog.at_level("ERROR", logger="quantalyze.analytics.ops_alert"):
+        assert await _delivered(event="recovered", cause="recovered_from_x") is True
+        assert await _delivered(event="recovered", cause="recovered_from_x") is True
+        assert await _delivered(event="recovered", cause="recovered_from_x") is True
+        await ops_alert._drain_ops_alert_tasks_for_tests()
 
-    assert len(chan.http.posts) == 2, "the window was released, so it re-sent"
-    assert chan.spy.capture_message.call_count == 2
+    assert [p["json"]["event"] for p in chan.http.posts] == ["recovered"]
+    assert chan.spy.capture_message.call_count == 1
+    messages = [r.getMessage() for r in _error_records(caplog)]
+    assert sum("founder email POST was not accepted" in m for m in messages) == 1
+    assert sum("no channel delivered the page" in m for m in messages) == 0
 
 
 async def test_a_recovered_notice_is_delivered_by_the_founder_email_alone(chan):
-    chan.spy.capture_message.return_value = "event-id"
+    chan.spy.capture_message.return_value = None
     chan.http.status = 200
     assert await _delivered(event="recovered", cause="recovered_from_x") is True
 
@@ -839,11 +853,18 @@ async def test_an_outage_taken_by_sentry_is_decided_without_waiting_on_the_email
     await ops_alert._drain_ops_alert_tasks_for_tests()
 
 
-async def test_a_recovered_notice_still_waits_for_the_founder_email(chan, monkeypatch):
-    """The other side of the early outcome: a recovered notice is not decided by
-    Sentry, so its outcome stays open until the email answers."""
+async def test_d16_a_recovered_notice_taken_by_sentry_is_decided_without_waiting_on_the_email(
+    chan, monkeypatch
+):
+    """D-16, under D-15. A recovered notice whose Sentry capture returned an event id
+    is credited at capture time, exactly like an outage (CONTEXT D-16: "a RECOVERED
+    notice counts as delivered once its Sentry capture succeeds"). The POST here never
+    answers; the wait is shortened so a wrong implementation fails fast with False
+    rather than waiting out the real bound. Lineage: review WR-R3-01 had held a
+    recovered outcome open until the email answered."""
     import asyncio
 
+    monkeypatch.setattr(ops_alert, "_DELIVERY_WAIT_S", 0.5)
     release = asyncio.Event()
     original_post = chan.http.module.AsyncClient.post
 
@@ -854,6 +875,35 @@ async def test_a_recovered_notice_still_waits_for_the_founder_email(chan, monkey
     chan.http.module.AsyncClient.post = slow_post
     chan.spy.capture_message.return_value = "event-id"
 
+    try:
+        delivery = await ops_alert.page(
+            "mt5_jobs_terminal", "recovered_from_x", event="recovered"
+        )
+
+        assert delivery.done(), "the outcome was held back for the email POST"
+        assert await ops_alert.await_delivery(delivery) is True
+    finally:
+        release.set()
+        await ops_alert._drain_ops_alert_tasks_for_tests()
+
+
+async def test_a_recovered_notice_with_no_sentry_event_still_waits_for_the_founder_email(
+    chan,
+):
+    """Without a Sentry event only the email can deliver a recovered notice, so its
+    outcome stays open until the email answers rather than guessing."""
+    import asyncio
+
+    release = asyncio.Event()
+    original_post = chan.http.module.AsyncClient.post
+
+    async def slow_post(self, url, **kw):
+        await release.wait()
+        return await original_post(self, url, **kw)
+
+    chan.http.module.AsyncClient.post = slow_post
+    chan.spy.capture_message.return_value = None
+
     delivery = await ops_alert.page(
         "mt5_jobs_terminal", "recovered_from_x", event="recovered"
     )
@@ -861,6 +911,30 @@ async def test_a_recovered_notice_still_waits_for_the_founder_email(chan, monkey
     assert not delivery.done()
     release.set()
     assert await ops_alert.await_delivery(delivery) is True
+
+
+@pytest.mark.parametrize("failure", ["no_event_id", "capture_raises"])
+async def test_wr_r3_01_a_failed_sentry_capture_does_not_credit_a_recovered_notice(
+    chan, caplog, failure
+):
+    """D-16 credits a SUCCESSFUL capture only. A capture that produced no event id,
+    or raised, reached nobody, so the WR-R3-01 rule still holds for it: with the
+    email also failing, the page reports not delivered, the window is released and
+    the next healthy reading sends the notice again."""
+    if failure == "no_event_id":
+        chan.spy.capture_message.return_value = None
+    else:
+        chan.spy.capture_message.side_effect = RuntimeError("sdk down")
+    chan.http.status = 502
+
+    with caplog.at_level("ERROR", logger="quantalyze.analytics.ops_alert"):
+        assert await _delivered(event="recovered", cause="recovered_from_x") is False
+        assert await _delivered(event="recovered", cause="recovered_from_x") is False
+        await ops_alert._drain_ops_alert_tasks_for_tests()
+
+    assert [p["json"]["event"] for p in chan.http.posts] == ["recovered", "recovered"]
+    messages = [r.getMessage() for r in _error_records(caplog)]
+    assert sum("no channel delivered the page" in m for m in messages) == 2
 
 
 async def test_the_founder_email_post_has_a_total_deadline(chan, monkeypatch):

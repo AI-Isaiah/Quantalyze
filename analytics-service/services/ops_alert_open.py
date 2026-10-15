@@ -46,7 +46,10 @@ THE CONTRACT with the callers (``mt5_outage_alert``, ``mt5_validation_liveness``
 * ``close_open_page`` closes every open row of the source. The callers call it only
   once a channel HAS the RECOVERED notice (``ops_alert.await_delivery``: a Sentry
   event id or a 2xx from the founder email), because the notice is one-shot and the
-  open row is the only thing that can make it be sent again (review WR-R2-01).
+  open row is the only thing that can make it be sent again (review WR-R2-01). For
+  a recovered notice a Sentry event id is a delivery since D-16 (founder
+  2026-10-14, under D-15: "Sentry is the only live paging channel for now"); review
+  WR-R3-01 had credited the email alone before that.
 
 THE REAL GUARANTEE, and its limits. A recovered notice that reached no channel, and a
 crash between the notice and the close, both leave the row open. The caller then

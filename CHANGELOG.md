@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.131.9.1] - 2026-10-15 — OUTAGEALERT D-16: a recovered notice is credited once Sentry has it, so a closed outage stops re-paging while the founder email is unconfigured
+
+Phase 164.6.8, gap-closure plan 10, founder decision D-16 ("Credit recovery via Sentry", 2026-10-14). It follows from D-15: Sentry is the only live paging channel for now. Seven branch commits over five themes, mapped below: `3cb476a49` (plan), `2e2a274c4` (fix), `ddf990d80` (tests and module text), `f4886fd14` (summary), `124e14ead` (ROADMAP), `1cae0ad31` (review, residuals booked), `d1f8ff9f8` (re-verification); plus this release commit (version, CHANGELOG, TODOS routing). The other non-merge commits ahead of `main` are OUTAGEALERT plans 01 to 09, already shipped as v0.131.7.0 (#1031) with an identical tree. No migration, no TypeScript change, no new dependency.
+
+### Fixed
+- **A RECOVERED notice is credited on its Sentry event id (D-16; commit `2e2a274c4`).** `page()` in `analytics-service/services/ops_alert.py` now sets `sentry_counts = sentry_ok` for both events. Before, it was `sentry_ok and event_n == "outage"` (review WR-R3-01), so a recovered notice counted only on a 2xx from the founder email. Production has no Resend key (D-15), so after the first paged outage ended, its `ops_alert_open` record never closed, and every healthy reading re-sent the notice: a Sentry warning, an ERROR log and a failing email POST, each time, for ever. Now the outcome is decided at capture time, the window is spent, and both callers close the record (`mt5_outage_alert._finish_recovered`, `mt5_validation_liveness._close_after_recovered`).
+- **What did not change.** The founder email is still POSTed for every admitted page, so it sends as soon as Resend is configured, and a failure still logs `the founder email POST was not accepted` at ERROR. It does so once per window now, not once per reading. A FAILED capture (no event id, or `capture_message` raising) is still not credited: the window is released, `no channel delivered the page` is logged, and the next reading retries (the Sentry half of WR-R3-01).
+
+### Tests
+- **Hand-typed D-16 tests, seen RED on the unfixed code (commits `2e2a274c4`, `ddf990d80`).**
+  - Channel level: three recovered pages with a Sentry id and a 502 email give 1 POST, 1 capture, 1 "not accepted" ERROR and 0 "no channel delivered" lines.
+  - A recovered page taken by Sentry is decided before the email answers.
+  - Caller level, through the outage tracker and the scrub reader: the record closes once, with emails `["outage", "recovered"]` and 2 captures, and nothing is sent on two further healthy readings.
+- **The WR-R3-01 Sentry half is pinned for both failure shapes** (`[no_event_id]`, `[capture_raises]`). A recovered page with no Sentry event still waits for the email. The email-alone test now returns no Sentry event, so it tests the email alone.
+- **Neuter proof.** N1 put the base line back: exactly the four `test_d16_` tests went RED. N2 set the credit to `True`: the four Sentry-failure tests went RED. Each restore was `cp` from a byte backup with `cmp` clean. The orchestrator and the verifier each re-ran N1 independently with the same four RED.
+- **Gates.** Six affected suites 255 passed; full analytics suite 10095 passed, 90 skipped; strict mypy clean; ruff unchanged on the touched files.
+
+### Changed
+- **Module text matches the rule (commit `ddf990d80`).** The `ops_alert.py` module docstring, `_settle_window`, `page` and the comment above the fix, and the `close_open_page` contract in `ops_alert_open.py`, state D-16 and cite D-15, with WR-R3-01 kept as lineage. The `_settle_window` log now reads "Sentry returned no event id". Its leading words `ops_alert: no channel delivered the page` are unchanged.
+
+### Notes
+- **The Sentry rule now notifies on recoveries too.** "Ops alert: outage (164.6.8)" filtered `ops_alert_event=outage` only, so a credited recovered capture would have notified nobody. On 2026-10-15 the founder chose to widen it, and the rule now carries a second action group on `ops_alert_event=recovered` that sends the same email to the issue owners. This is a live Sentry setting and no file in this repo holds it.
+- **Review, one round (commit `1cae0ad31`).** The code review and the silent-failure hunt found no HIGH or CRITICAL, so no fixer round ran. Two MEDIUM residuals are booked in `TODOS.md`:
+  - `164.6.8-WR-D16-01-PROBE-BOUND-INLINE-CLOSE` (confidence 5): a credited recovery now closes inline, outside the one-call `PROBE_TICK_BOUND_S` budget.
+  - `164.6.8-SFH-D16-01-SENTRY-ID-IS-QUEUED-NOT-SENT` (confidence 4): an event id means queued, so a later transport drop closes the one-shot record with nobody notified.
+- **Verification (commit `d1f8ff9f8`): human_needed.** SC-1, SC-2 and D-16 are verified. Two human items stay pending, neither a code gap: a clean scheduled prod-prober run closing the long-open prober issue now that the cron manifest is on `main`, and resolving the drill's Sentry issue.
+
 ## [0.131.9.0] - 2026-10-14 — DISPLAYPOLISH: a figure that rounds to zero prints unsigned and neutral everywhere, a tone follows the printed sign, Max DD is never green, and a comparator overlap under 90 days annualizes nothing
 
 Phase 170.6, the NUMBERS third of the original 170.6 (D-01, founder 2026-10-13: 170.6 split in three; the phone table went to DISCOVERYPHONE and the copy items to COPYPASS, both already on `main`). Plans 01 to 12 and 14 plus gap plan G01, three code-review fix rounds, and a merge of `origin/main` at `0.131.8.1`. 50 non-planning commits, no migration, no new dependency, no lockfile change.
