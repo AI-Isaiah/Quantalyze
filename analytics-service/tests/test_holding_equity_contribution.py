@@ -46,3 +46,26 @@ def test_holding_equity_contribution_matches_the_shared_table(case: dict[str, An
         assert got is None
     else:
         assert got == case["expected_py"]
+
+
+def test_python_diverges_from_typescript_only_on_the_d18_case() -> None:
+    """D-18 allows exactly one behavioural difference from ``holdingEquityContribution``:
+    a derivative with a NULL P&L is withheld here and counted 0 there. A second
+    divergence, or the loss of this one, fails here."""
+    diverging = {c["name"] for c in _SPEC["cases"] if c["expected_py"] != c["expected_ts"]}
+    assert diverging == {"derivative_null_pnl_is_withheld"}
+
+
+def test_fixture_pins_the_edges_the_rule_names() -> None:
+    """A thin fixture would let a rewritten helper pass. The edges D-16 and D-18 name
+    must each be present."""
+    names = {c["name"] for c in _SPEC["cases"]}
+    assert {
+        "derivative_counts_pnl_not_notional",
+        "losing_short_kept_signed",
+        "option_pnl_counts",
+        "deribit_inverse_perp_pnl",
+        "derivative_null_pnl_is_withheld",
+        "spot_counts_value",
+    } <= names
+    assert len(_SPEC["cases"]) >= 13

@@ -8,6 +8,108 @@
       "unrealized_pnl_usd": 500,
       "expected_ts": 500,
       "expected_py": 500
+    },
+    {
+      "name": "spot_counts_value",
+      "holding_type": "spot",
+      "value_usd": 1234.5,
+      "unrealized_pnl_usd": 99,
+      "expected_ts": 1234.5,
+      "expected_py": 1234.5
+    },
+    {
+      "name": "spot_null_value",
+      "holding_type": "spot",
+      "value_usd": null,
+      "unrealized_pnl_usd": null,
+      "expected_ts": 0,
+      "expected_py": 0
+    },
+    {
+      "name": "spot_nan_value",
+      "holding_type": "spot",
+      "value_usd": {
+        "nonfinite": "NaN"
+      },
+      "unrealized_pnl_usd": null,
+      "expected_ts": 0,
+      "expected_py": 0
+    },
+    {
+      "name": "spot_bool_value",
+      "holding_type": "spot",
+      "value_usd": true,
+      "unrealized_pnl_usd": null,
+      "expected_ts": 0,
+      "expected_py": 0
+    },
+    {
+      "name": "spot_string_value",
+      "holding_type": "spot",
+      "value_usd": "5",
+      "unrealized_pnl_usd": null,
+      "expected_ts": 0,
+      "expected_py": 0
+    },
+    {
+      "name": "losing_short_kept_signed",
+      "holding_type": "derivative",
+      "value_usd": 3000000,
+      "unrealized_pnl_usd": -1200,
+      "expected_ts": -1200,
+      "expected_py": -1200
+    },
+    {
+      "name": "derivative_zero_pnl",
+      "holding_type": "derivative",
+      "value_usd": 800000,
+      "unrealized_pnl_usd": 0,
+      "expected_ts": 0,
+      "expected_py": 0
+    },
+    {
+      "name": "derivative_null_pnl_is_withheld",
+      "holding_type": "derivative",
+      "value_usd": 5000000,
+      "unrealized_pnl_usd": null,
+      "expected_ts": 0,
+      "expected_py": null
+    },
+    {
+      "name": "derivative_infinite_pnl",
+      "holding_type": "derivative",
+      "value_usd": 250000,
+      "unrealized_pnl_usd": {
+        "nonfinite": "Infinity"
+      },
+      "expected_ts": 0,
+      "expected_py": 0
+    },
+    {
+      "name": "derivative_nan_pnl",
+      "holding_type": "derivative",
+      "value_usd": 250000,
+      "unrealized_pnl_usd": {
+        "nonfinite": "NaN"
+      },
+      "expected_ts": 0,
+      "expected_py": 0
+    },
+    {
+      "name": "option_pnl_counts",
+      "holding_type": "derivative",
+      "value_usd": 900,
+      "unrealized_pnl_usd": 75,
+      "expected_ts": 75,
+      "expected_py": 75
+    },
+    {
+      "name": "deribit_inverse_perp_pnl",
+      "holding_type": "derivative",
+      "value_usd": 120000,
+      "unrealized_pnl_usd": 310.25,
+      "expected_ts": 310.25,
+      "expected_py": 310.25
     }
   ]
 }
