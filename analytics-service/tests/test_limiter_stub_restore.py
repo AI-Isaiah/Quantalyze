@@ -18,6 +18,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from tests.child_deadman import run_child
 from tests.limiter_stub import (
     evict_module,
     evicted,
@@ -158,7 +159,11 @@ def _run_pytest_pair(*targets: str) -> subprocess.CompletedProcess[str]:
     can follow any other on the same worker; this is such an order, made
     deterministic.
     """
-    return subprocess.run(
+    # The verdict is the child's exit code and output, never how long it took
+    # (a child pytest session took 50-130 s under heavy load); `run_child` carries
+    # only the shared DEADMAN, which names this test if the child hangs.
+    return run_child(
+        f"the limiter stub restores cleanly across a serial pytest pair {targets}",
         [
             sys.executable,
             "-m",
@@ -172,12 +177,6 @@ def _run_pytest_pair(*targets: str) -> subprocess.CompletedProcess[str]:
             *targets,
         ],
         cwd=SERVICE_ROOT,
-        capture_output=True,
-        text=True,
-        # NO `timeout=`, ON PURPOSE: the verdict is the child's exit code and
-        # output, never how long it took. The child is CPU-bound (a child pytest
-        # session took 50-130 s under heavy load), so any clock bound is a bet on
-        # CPU speed. A child that genuinely hangs is stopped by the CI job timeout.
     )
 
 

@@ -396,15 +396,29 @@ async def test_lease_bound_expiry_raises_busy_and_never_acquires() -> None:
     await lock.acquire()  # somebody else holds the terminal
     started = time.monotonic()
 
-    with pytest.raises(mt5_concurrency.Mt5TerminalBusyError):
+    async def _attempt() -> None:
         async with mt5_concurrency.mt5_terminal_lease("h:1", wait_s=0.05):
             pytest.fail("the body must never run when the terminal was never acquired")
 
+    try:
+        with pytest.raises(mt5_concurrency.Mt5TerminalBusyError):
+            # DEADMAN, not a stopwatch. `wait_s=None` means UNBOUNDED, so a
+            # regression that drops or mis-threads the bound waits FOREVER on the
+            # lock nothing will release; this converts that hang into a named
+            # failure instead of an anonymous CI cancellation.
+            await asyncio.wait_for(_attempt(), timeout=10.0)
+    except asyncio.TimeoutError:
+        pytest.fail(
+            "the bounded wait never fired: the lease waited on the held lock as "
+            "if wait_s were None (unbounded)"
+        )
+
     elapsed = time.monotonic() - started
-    # DEADMAN, not a stopwatch. A wait that ignored `wait_s=0.05` would fall back to
-    # the module default (20 s), so any bound strictly inside that default tells the
-    # two apart. A tight one (this was 1.0 s) raced a starved runner's scheduling.
-    assert elapsed < mt5_concurrency._MT5_LEASE_WAIT_S / 2, (
+    # A LITERAL bar, not `_MT5_LEASE_WAIT_S / 2`: that value is read from the
+    # `MT5_LEASE_WAIT_S` environment variable, so an env below 0.1 would put the bar
+    # under the 0.05 s bound under test and redden it falsely. Once the deadman
+    # above has not fired this is belt and braces, 100x the bound under test.
+    assert elapsed < 5.0, (
         "the bounded wait did not fire at its bound"
     )
     assert lock.locked(), (

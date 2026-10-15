@@ -168,6 +168,9 @@ class _FakeMt5Transport:
         # the job returned" (`shutdown_finished`) instead of timing the job.
         self._shutdown_release = threading.Event()
         self.shutdown_finished = threading.Event()
+        # Set when `shutdown` is ENTERED, so a test can prove the teardown was
+        # attempted at all without racing the worker thread against a tiny bound.
+        self.shutdown_started = threading.Event()
         # MT5CONC-02: when set, the SECOND (and later) account_info() call returns
         # this snapshot — a mid-read terminal re-login/hijack that the POST login
         # bracket must catch independently of the PRE bracket.
@@ -223,6 +226,7 @@ class _FakeMt5Transport:
 
     def shutdown(self):
         self.calls.append("shutdown")
+        self.shutdown_started.set()
         if self._shutdown_hang_s:
             # a teardown too wedged to complete: parked until released (or the deadman)
             self._shutdown_release.wait(self._shutdown_hang_s)
@@ -1359,13 +1363,26 @@ async def test_mt5_restart_itself_bounded(monkeypatch) -> None:
     # ~10s bound was in force — the test was green on the shutdown hang running
     # to completion, i.e. on the very failure it exists to catch.
     #
-    # Returning with the hung teardown still parked has only one way to happen: the
-    # restart's own wait_for cut it short. Unbounded ⇒ the job waits out the whole
-    # park (`shutdown_hang`, the deadman) and the teardown has COMPLETED by the time
-    # it returns, so the failure mode is deterministic rather than timing-lucky.
+    # `shutdown_completed` False is only HALF the proof: it is equally True when
+    # `shutdown` was never called (a restart that skipped the teardown), where
+    # nothing was bounded at all. So the test first proves the teardown WAS
+    # attempted (`shutdown_started`), and only then does "returned with the hung
+    # teardown still parked" have one meaning: the restart's own wait_for cut it
+    # short. Unbounded ⇒ the job waits out the whole park (`shutdown_hang`, the
+    # deadman) and the teardown has COMPLETED by the time it returns, so the
+    # failure mode is deterministic rather than timing-lucky.
     # ⛔ This is a record of what had happened, not a stopwatch: the earlier form
     # asserted `elapsed < 1.0 s`, which a starved runner could miss on scheduling
     # alone while the restart bound was working.
+    # The teardown runs on a worker thread that a 0.05 s bound can outrun on a
+    # starved runner, so wait for it to have STARTED (a deadman, not a bar: it
+    # returns the moment `shutdown` is entered, and is only ever exhausted when
+    # `shutdown` is never called).
+    assert await asyncio.to_thread(transport.shutdown_started.wait, 10.0), (
+        "the restart never called shutdown on the terminal, so there was no hung "
+        "teardown for the bound to cut short"
+    )
+    assert "shutdown" in transport.calls
     assert not shutdown_completed, (
         f"the bounded restart must return before the hung shutdown "
         f"({shutdown_hang}s park) could even have completed"

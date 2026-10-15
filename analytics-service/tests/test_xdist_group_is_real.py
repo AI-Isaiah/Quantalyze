@@ -23,9 +23,10 @@ pin (the partition-column tests of the fence module), so no database is needed.
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
+
+from tests.child_deadman import run_child
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 
@@ -48,7 +49,12 @@ def test_shared_db_group_runs_on_one_worker_with_the_group_suffix() -> None:
     moves another's pending row. That is the Phase 97 flake, so this gate must
     fail whenever the marker stops landing before xdist reads it.
     """
-    distributed = subprocess.run(
+    # The verdict is each child's exit code and output, never how long it took
+    # (a child pytest session took 50-130 s under heavy load); `run_child` carries
+    # only the shared DEADMAN, which names this test if a child hangs.
+    distributed = run_child(
+        "the shared_test_db xdist group forms and pins its tests to one worker "
+        "(nested `-n 2 --dist loadgroup` session)",
         [
             sys.executable,
             "-m",
@@ -66,12 +72,6 @@ def test_shared_db_group_runs_on_one_worker_with_the_group_suffix() -> None:
             _CHILD_SELECTION,
         ],
         cwd=SERVICE_ROOT,
-        capture_output=True,
-        text=True,
-        # NO `timeout=`, ON PURPOSE: the verdict is the child's exit code and
-        # output, never how long it took. The child is CPU-bound (a child pytest
-        # session took 50-130 s under heavy load), so any clock bound is a bet on
-        # CPU speed. A child that genuinely hangs is stopped by the CI job timeout.
     )
     assert distributed.returncode == 0, distributed.stdout + distributed.stderr
 
@@ -93,7 +93,8 @@ def test_shared_db_group_runs_on_one_worker_with_the_group_suffix() -> None:
         f"{distributed.stdout}"
     )
 
-    serial = subprocess.run(
+    serial = run_child(
+        "the serial collection order the distributed run must reproduce",
         [
             sys.executable,
             "-m",
@@ -110,12 +111,6 @@ def test_shared_db_group_runs_on_one_worker_with_the_group_suffix() -> None:
             _CHILD_SELECTION,
         ],
         cwd=SERVICE_ROOT,
-        capture_output=True,
-        text=True,
-        # NO `timeout=`, ON PURPOSE: the verdict is the child's exit code and
-        # output, never how long it took. The child is CPU-bound (a child pytest
-        # session took 50-130 s under heavy load), so any clock bound is a bet on
-        # CPU speed. A child that genuinely hangs is stopped by the CI job timeout.
     )
     assert serial.returncode == 0, serial.stdout + serial.stderr
     collected = [line for line in serial.stdout.splitlines() if line.startswith("tests/")]
