@@ -3,7 +3,8 @@
 Tests:
 - Holdings-only allocator produces holding-sourced pseudo-strategies (LIVE-01)
 - Mixed portfolio (strategies + holdings) weights normalize across combined set (D-16)
-- Warm-up gate: holding with <30d breakdown excluded entirely (Phase 07 D-03 analog)
+- Short history: a spot holding with <30 priced days is withheld from the returns (named
+  too_few_priced_days) and stays in the AUM and weights (167.1.1.1 D-01)
 - FLAG_COMPOSITE_THRESHOLD constant equals 50 (D-06 + RESEARCH A3)
 
 All tests are plain `def` (NOT async def) per finding f1.
@@ -12,8 +13,10 @@ asyncio.to_thread from _score_one_allocator. Tests call it without await.
 """
 from __future__ import annotations
 
+from datetime import date, timedelta
+from typing import Any
+
 import pytest
-from unittest.mock import MagicMock
 
 # NOTE per finding f1: _load_allocator_context is sync `def` at routers/match.py:172.
 # Tests MUST be plain `def` (NOT `async def`) and call without `await`. Adding
@@ -21,108 +24,63 @@ from unittest.mock import MagicMock
 # `TypeError: object dict can't be used in 'await' expression`.
 from routers.match import _load_allocator_context, FLAG_COMPOSITE_THRESHOLD
 from tests._curve_fixtures import curve_from_returns
+from tests.fake_postgrest import FakeDb
 
 _STRAT_DATES = ["2026-01-01", "2026-01-02", "2026-01-03"]
+
+
+@pytest.fixture(autouse=True)
+def _history_window(monkeypatch):
+    """Pin the holdings-history window start so the fixed 2026 calendar always lies in it."""
+    monkeypatch.setattr("routers.match._holdings_history_window_start", lambda: "2025-01-01")
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_snapshot_series(days: int, symbol: str, start_value: float = 100.0, daily_return: float = 0.01) -> list[dict]:
-    """Generate N days of breakdown snapshots with the given symbol compounding at daily_return."""
-    from datetime import date, timedelta
-    snapshots = []
-    value = start_value
-    base = date(2026, 1, 1)
-    for i in range(days):
-        d = base + timedelta(days=i)
-        snapshots.append({
-            "asof": d.isoformat(),
-            "breakdown": {symbol: round(value, 4)},
-        })
-        value *= (1 + daily_return)
-    return snapshots
-
-
-def _make_multi_symbol_snapshots(days: int, symbols: dict[str, float], daily_return: float = 0.01) -> list[dict]:
-    """Generate N days of breakdown snapshots covering multiple symbols."""
-    from datetime import date, timedelta
-    base = date(2026, 1, 1)
-    snapshots = []
-    values = {sym: start for sym, start in symbols.items()}
-    for i in range(days):
-        d = base + timedelta(days=i)
-        bd = {sym: round(v, 4) for sym, v in values.items()}
-        snapshots.append({"asof": d.isoformat(), "breakdown": bd})
-        for sym in values:
-            values[sym] *= (1 + daily_return)
-    return snapshots
-
-
-def _build_mock_supabase(
+def _mark_rows(
+    allocator: str,
+    symbol: str,
+    days: int,
     *,
-    prefs: dict | None = None,
+    value: float,
+    first_mark: float,
+    end: str = "2026-02-10",
+    daily_return: float = 0.01,
+) -> list[dict[str, Any]]:
+    """One spot row per day for ``days`` adjacent days ending on ``end``. The mark compounds
+    at ``daily_return``; ``value_usd`` is constant, so only the marks can make a return."""
+    last = date.fromisoformat(end)
+    rows: list[dict[str, Any]] = []
+    for i in range(days):
+        day = (last - timedelta(days=days - 1 - i)).isoformat()
+        rows.append({
+            "allocator_id": allocator, "api_key_id": "key-phase09", "venue": "binance",
+            "symbol": symbol, "holding_type": "spot", "side": "flat",
+            "value_usd": value, "mark_price": round(first_mark * (1 + daily_return) ** i, 4),
+            "asof": day, "updated_at": f"{day}T04:00:00+00:00",
+        })
+    return rows
+
+
+def _build_db(
+    allocator: str,
+    *,
     portfolios: list[dict] | None = None,
     portfolio_strategies: list[dict] | None = None,
     strategy_analytics: list[dict] | None = None,
     holdings: list[dict] | None = None,
-    snapshots: list[dict] | None = None,
-    thumbs_down: list[dict] | None = None,
-) -> MagicMock:
-    """Build a MagicMock Supabase client routing table queries to fixtures.
-
-    Uses side_effect on mock_sb.table() to return different mock builders
-    depending on table name.
-    """
-    prefs = prefs or {}
-    portfolios = portfolios or []
-    portfolio_strategies = portfolio_strategies or []
-    strategy_analytics = strategy_analytics or []
-    holdings = holdings or []
-    snapshots = snapshots or []
-    thumbs_down = thumbs_down or []
-
-    # Build a minimal query-builder chain that returns .execute() -> MagicMock(data=...)
-    def _chain(data):
-        """Return a MagicMock that, at any query-chain terminus, returns MagicMock(data=data)."""
-        result = MagicMock(data=data)
-        mock = MagicMock()
-        # Ensure any attribute access / chaining returns mock itself until .execute()
-        mock.select.return_value = mock
-        mock.eq.return_value = mock
-        mock.in_.return_value = mock
-        mock.order.return_value = mock
-        mock.limit.return_value = mock
-        mock.maybe_single.return_value = mock
-        mock.execute.return_value = result
-        return mock
-
-    def _table_router(table_name: str):
-        if table_name == "allocator_preferences":
-            return _chain(prefs)
-        if table_name == "portfolios":
-            return _chain(portfolios)
-        if table_name == "portfolio_strategies":
-            return _chain(portfolio_strategies)
-        if table_name == "strategy_analytics":
-            return _chain(strategy_analytics)
-        if table_name == "allocator_holdings":
-            return _chain(holdings)
-        if table_name == "api_keys":
-            # 170.4 WR-03: the scorer reads the owner's keys, then each key's
-            # newest day. This chain ignores filters, so the fixtures have ONE key.
-            return _chain([{"id": "key-phase09"}])
-        if table_name == "allocator_equity_snapshots":
-            return _chain(snapshots)
-        if table_name == "match_decisions":
-            return _chain(thumbs_down)
-        # Fallback for any other table
-        return _chain([])
-
-    mock_sb = MagicMock()
-    mock_sb.table.side_effect = _table_router
-    return mock_sb
+) -> FakeDb:
+    """The shared PostgREST fake seeded with the allocator's book: one API key, its
+    portfolios and strategies, and its holdings rows."""
+    return FakeDb({
+        "api_keys": [{"id": "key-phase09", "user_id": allocator, "exchange": "binance"}],
+        "portfolios": [{**p, "user_id": allocator} for p in (portfolios or [])],
+        "portfolio_strategies": portfolio_strategies or [],
+        "strategy_analytics": strategy_analytics or [],
+        "allocator_holdings": holdings or [],
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -135,23 +93,13 @@ def test_load_allocator_context_holdings_only(monkeypatch):
 
     NOTE per finding f1: plain `def`, no await — function is sync.
     """
-    holdings = [
-        {
-            "venue": "binance", "symbol": "BTC", "holding_type": "spot",
-            "value_usd": 50000.0, "asof": "2026-02-10", "api_key_id": "key-phase09", "updated_at": "2026-02-10T04:00:00+00:00",
-        },
-        {
-            "venue": "binance", "symbol": "ETH", "holding_type": "spot",
-            "value_usd": 30000.0, "asof": "2026-02-10", "api_key_id": "key-phase09", "updated_at": "2026-02-10T04:00:00+00:00",
-        },
-    ]
-    # 41 days of snapshots so warm-up gate (>=30 returns) passes
-    snapshots = _make_multi_symbol_snapshots(
-        41,
-        {"BTC": 50000.0, "ETH": 30000.0},
+    # 41 adjacent days of marks so the 30-priced-day rule passes
+    holdings = (
+        _mark_rows("alloc-1", "BTC", 41, value=50000.0, first_mark=50000.0)
+        + _mark_rows("alloc-1", "ETH", 41, value=30000.0, first_mark=30000.0)
     )
 
-    mock_sb = _build_mock_supabase(holdings=holdings, snapshots=snapshots)
+    mock_sb = _build_db("alloc-1", holdings=holdings)
     monkeypatch.setattr("routers.match.get_supabase", lambda: mock_sb)
 
     result = _load_allocator_context("alloc-1")  # NO await — function is sync
@@ -168,7 +116,7 @@ def test_load_allocator_context_holdings_only(monkeypatch):
     # BTC weight = 50000 / 80000
     assert abs(result["portfolio_weights"]["holding:binance:BTC:spot"] - (50000.0 / 80000.0)) < 1e-9
 
-    # Each series has >=30 returns (41 snapshots → 40 returns)
+    # Each series has >=30 returns (41 priced days → 40 returns)
     assert all(len(s) >= 30 for s in result["portfolio_returns"].values())
 
     # portfolio_aum = sum of holding value_usd
@@ -198,19 +146,18 @@ def test_mixed_portfolio_weights_sum_to_one(monkeypatch):
         {"strategy_id": "uuid-strat-2",
          "returns_series": curve_from_returns([0.0, 0.02, -0.01], _STRAT_DATES)},
     ]
-    # Two holdings each with 41-day history
-    holdings = [
-        {"venue": "binance", "symbol": "SOL", "holding_type": "spot", "value_usd": 25000.0, "asof": "2026-02-10", "api_key_id": "key-phase09", "updated_at": "2026-02-10T04:00:00+00:00"},
-        {"venue": "binance", "symbol": "AVAX", "holding_type": "spot", "value_usd": 25000.0, "asof": "2026-02-10", "api_key_id": "key-phase09", "updated_at": "2026-02-10T04:00:00+00:00"},
-    ]
-    snapshots = _make_multi_symbol_snapshots(41, {"SOL": 25000.0, "AVAX": 25000.0})
+    # Two holdings each with a 41-day mark history
+    holdings = (
+        _mark_rows("alloc-mixed", "SOL", 41, value=25000.0, first_mark=25000.0)
+        + _mark_rows("alloc-mixed", "AVAX", 41, value=25000.0, first_mark=25000.0)
+    )
 
-    mock_sb = _build_mock_supabase(
+    mock_sb = _build_db(
+        "alloc-mixed",
         portfolios=portfolios,
         portfolio_strategies=ps_rows,
         strategy_analytics=sa_rows,
         holdings=holdings,
-        snapshots=snapshots,
     )
     monkeypatch.setattr("routers.match.get_supabase", lambda: mock_sb)
 
@@ -254,7 +201,8 @@ def test_one_point_curve_contributes_no_series_not_a_zero_return(monkeypatch):
         {"strategy_id": "uuid-full",
          "returns_series": curve_from_returns([0.0, 0.03, 0.01], _STRAT_DATES)},
     ]
-    mock_sb = _build_mock_supabase(
+    mock_sb = _build_db(
+        "alloc-one-point",
         portfolios=[{"id": "port-1"}], portfolio_strategies=ps_rows, strategy_analytics=sa_rows,
     )
     monkeypatch.setattr("routers.match.get_supabase", lambda: mock_sb)
@@ -273,38 +221,35 @@ def test_one_point_curve_contributes_no_series_not_a_zero_return(monkeypatch):
 
 
 def test_warmup_gate_under_30d(monkeypatch):
-    """Warm-up gate per Phase 07 D-03: holding with <30d breakdown excluded entirely.
+    """167.1.1.1 D-01 (the Phase 07 D-03 warm-up, now on priced days): a spot holding with
+    fewer than 30 priced days is withheld from the returns by name, and it STAYS in the AUM
+    and the weights. It is never zero-filled.
 
     NOTE per finding f1: plain `def`, no await.
     """
-    holdings = [
-        {"venue": "binance", "symbol": "BTC", "holding_type": "spot", "value_usd": 50000.0, "asof": "2026-01-20", "api_key_id": "key-phase09", "updated_at": "2026-01-20T04:00:00+00:00"},
-        {"venue": "binance", "symbol": "ETH", "holding_type": "spot", "value_usd": 30000.0, "asof": "2026-01-20", "api_key_id": "key-phase09", "updated_at": "2026-01-20T04:00:00+00:00"},
-    ]
-    # BTC gets only 20 days (→ 19 returns, < 30 warm-up gate); ETH gets 41 days (→ 40 returns, passes)
-    btc_snaps = _make_snapshot_series(20, "BTC", start_value=50000.0)
-    eth_snaps = _make_snapshot_series(41, "ETH", start_value=30000.0)
-    # Merge into a unified snapshot list covering the same asof range
-    combined: dict[str, dict] = {}
-    for s in btc_snaps:
-        combined.setdefault(s["asof"], {"asof": s["asof"], "breakdown": {}})
-        combined[s["asof"]]["breakdown"].update(s["breakdown"])
-    for s in eth_snaps:
-        combined.setdefault(s["asof"], {"asof": s["asof"], "breakdown": {}})
-        combined[s["asof"]]["breakdown"].update(s["breakdown"])
-    snapshots = sorted(combined.values(), key=lambda x: x["asof"])
-
-    mock_sb = _build_mock_supabase(holdings=holdings, snapshots=snapshots)
+    # BTC gets only 20 priced days (< 30); ETH gets 41 (passes)
+    holdings = (
+        _mark_rows("alloc-warmup", "BTC", 20, value=50000.0, first_mark=50000.0, end="2026-01-20")
+        + _mark_rows("alloc-warmup", "ETH", 41, value=30000.0, first_mark=30000.0, end="2026-01-20")
+    )
+    mock_sb = _build_db("alloc-warmup", holdings=holdings)
     monkeypatch.setattr("routers.match.get_supabase", lambda: mock_sb)
 
     result = _load_allocator_context("alloc-warmup")  # NO await
 
     pseudo_ids = [ps["strategy_id"] for ps in result["portfolio_strategies"]]
-    assert "holding:binance:BTC:spot" not in pseudo_ids  # excluded by warm-up gate (<30 returns)
+    assert "holding:binance:BTC:spot" not in pseudo_ids  # withheld: no return series
     assert "holding:binance:ETH:spot" in pseudo_ids
+    assert "holding:binance:BTC:spot" not in result["portfolio_returns"]
+    assert [
+        (r["symbol"], r["withheld_reason"]) for r in result["_holdings_rows_withheld"]
+    ] == [("BTC", "too_few_priced_days")]
 
-    # Remaining weight renormalizes to 1.0 over ETH alone
-    assert result["portfolio_weights"].get("holding:binance:ETH:spot") == pytest.approx(1.0)
+    # D-01: the short-history holding keeps its dollars in the AUM and its weight.
+    assert result["portfolio_aum"] == pytest.approx(80000.0)
+    assert result["portfolio_weights"]["holding:binance:BTC:spot"] == pytest.approx(50000.0 / 80000.0)
+    assert result["portfolio_weights"]["holding:binance:ETH:spot"] == pytest.approx(30000.0 / 80000.0)
+    assert abs(sum(result["portfolio_weights"].values()) - 1.0) < 1e-9
 
 
 def test_flag_composite_threshold_equals_50():

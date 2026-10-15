@@ -3219,59 +3219,42 @@ class TestRetentionSweepActualDeleteCount:
 
 
 class TestHoldingsWarmUpDroppedLogging:
-    """NEW-C08-05: when the 30-day warm-up gate silently drops one or more
-    holdings, a logger.info call must surface the count so the caller can
-    distinguish empty-book from freshly-funded (portfolio_aum=0 with
-    warm_up_dropped>0 means real holdings exist but lack history)."""
+    """NEW-C08-05, reworded by 167.1.1.1 D-01: when a spot holding cannot be priced well
+    enough to carry a return series, a logger.info call must surface the count (by reason)
+    so the caller can distinguish empty-book from a book whose holdings are all withheld.
+    The withheld holding STAYS in the AUM (portfolio_aum is its value, not 0), because a
+    withheld holding is still held: only its returns leave the signal."""
 
     def test_warm_up_dropped_holdings_emit_info_log(self, monkeypatch, caplog):
         from routers import match as match_mod
+        from tests.fake_postgrest import FakeDb
 
-        # One holding with insufficient history (warm-up gate drops it)
-        collapsed = [
-            {"api_key_id": "key-a", "venue": "binance", "symbol": "BTC/USDT",
-             "holding_type": "spot", "value_usd": 10_000, "asof": "2026-01-15",
-             "updated_at": "2026-01-15T04:00:00+00:00"},
-        ]
-
-        def _make_query_result(data):
-            q = MagicMock()
-            q.select.return_value = q
-            q.eq.return_value = q
-            q.order.return_value = q
-            q.limit.return_value = q
-            q.execute.return_value = MagicMock(data=data)
-            return q
-
-        def _table(name):
-            if name == "allocator_holdings":
-                return _make_query_result(collapsed)
-            if name == "api_keys":
-                # 170.4 WR-03: the scorer reads the owner's keys, then each key's
-                # newest day.
-                return _make_query_result([{"id": "key-a"}])
-            # allocator_equity_snapshots: empty snapshots
-            return _make_query_result([])
-
-        sb = MagicMock()
-        sb.table.side_effect = _table
-        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
-
-        # Patch reconstruct_symbol_returns to return None (simulates <30 days)
-        monkeypatch.setattr(
-            match_mod,
-            "reconstruct_symbol_returns",
-            lambda _snapshots, _symbol: None,
-        )
+        # One holding whose only mark is 0 (a gap): there is no priced day at all.
+        holding = {
+            "allocator_id": "alloc-test", "api_key_id": "key-a", "venue": "binance",
+            "symbol": "BTC/USDT", "holding_type": "spot", "side": "flat",
+            "value_usd": 10_000, "mark_price": 0.0, "asof": "2026-01-15",
+            "updated_at": "2026-01-15T04:00:00+00:00",
+        }
+        db = FakeDb({
+            "api_keys": [{"id": "key-a", "user_id": "alloc-test", "exchange": "binance"}],
+            "allocator_holdings": [holding],
+        })
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: db)
+        monkeypatch.setattr(match_mod, "_holdings_history_window_start", lambda: "2025-01-01")
 
         with caplog.at_level("INFO", logger="quantalyze.analytics"):
             result = match_mod._load_holding_portfolio_context("alloc-test")
 
-        assert result["portfolio_aum"] == 0.0, "all holdings dropped → aum=0"
+        assert result["portfolio_aum"] == 10_000, "the withheld holding stays in the AUM (D-01)"
+        assert result["portfolio_returns"] == {}, "and has no return series, never a zero-filled one"
+        assert [(r["symbol"], r["withheld_reason"]) for r in result["holdings_rows_withheld"]] == [
+            ("BTC/USDT", "no_price")
+        ]
         assert any(
-            "warm-up gate dropped 1/" in rec.getMessage()
+            "1 spot holding(s) withheld" in rec.getMessage() and "no_price=1" in rec.getMessage()
             for rec in caplog.records
-        ), "warm-up dropped count must be logged at INFO (NEW-C08-05)"
+        ), "the withheld count, by reason, must be logged at INFO (NEW-C08-05)"
 
 
 # ---------------------------------------------------------------------------
