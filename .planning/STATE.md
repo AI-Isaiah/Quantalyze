@@ -5,13 +5,13 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "166.5"
 current_phase_name: COMPUTEDATSTAMP
 status: executing
-stopped_at: "167.1.1 HOLDINGKEYSCOPE closed; 166.5 post-merge plan 09 outstanding"
-last_updated: "2026-10-15T18:25:18.721Z"
+stopped_at: 167.1.1 HOLDINGKEYSCOPE closed; 166.5 post-merge plan 09 outstanding
+last_updated: "2026-10-15T18:32:32.092Z"
 last_activity: 2026-10-15
-last_activity_desc: 167.1.1 HOLDINGKEYSCOPE closed (#1053, #1056)
-state_head: e34605beff7a63e64ad982812435d1957d1f1c37
+last_activity_desc: "167.1.1 HOLDINGKEYSCOPE closed (#1053 and #1056); 167.1.1.1 BRIDGERETURNS booked (D-06)"
+state_head: fdc7b8d9099e89ba70f6f5c4c93e1db0164094d5
 progress:
-  total_phases: 115
+  total_phases: 116
   completed_phases: 105
   total_plans: 751
   completed_plans: 743
@@ -629,6 +629,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.1.2.1.1 edited: success criterion 9 added: MT5 BTC-unit inception residual routed from NAVBREACH D-08 (founder 2026-10-13)
 - Phase 170.6 edited: edited fields: success_criteria (Discovery exchange label vs the connected key's venue, routed from TRADESYNC plan 21, founder 2026-10-13)
 - Phase 164.9.8.1 inserted after Phase 164.9.8: PYXDIST: python CI job runs pytest in parallel (founder 2026-10-14: starts after 166.5 COMPUTEDATSTAMP)
+- Phase 167.1.1.1 inserted after Phase 167.1.1: BRIDGERETURNS: the Bridge matcher's per-holding returns from the daily mark price (founder decision 167.1.1 D-06)
 
 ### Decisions
 
