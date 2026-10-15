@@ -613,6 +613,14 @@ export type FactsheetCommon = {
    * means none recorded (and is the value for blends and scenarios).
    */
   reconstructedRanges: ReconstructedRange[];
+  /**
+   * Review round 1, F5 / IN-01: true when `series_provenance.reconstructed_ranges`
+   * was present but malformed, so `reconstructedRanges` is `[]` because we could
+   * not read the record, not because nothing was rebuilt. The header then says
+   * the record is unavailable instead of printing nothing. Optional: absent
+   * (a payload cached before the flag) and `false` both mean a readable record.
+   */
+  reconstructedRangesUnavailable?: boolean;
   trustTier: TrustTierKind | null;
   /** Author-provided strategy description (registry row `strategies.description`). */
   description: string | null;

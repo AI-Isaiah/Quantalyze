@@ -82,7 +82,9 @@ this section states no number.**
 - **The forms below.** Every read is a counts-and-dates form that carries the marker as its first
   column; every write form starts from a guard that RAISES on a wrong, NULL or missing marker; the
   enqueue forms refuse in SQL when a target's key is disconnected (D-02) and `enqueue-apply`
-  refuses a fingerprint that is not 64 lowercase hex.
+  refuses a fingerprint that is not 64 lowercase hex. `after` and `rollback` refuse in SQL when the
+  ordinal no longer names the strategy the saved `before` CSV described (its `ord_digest`), because
+  ordinals are a `row_number()` and not ids.
 
 ## Blast radius
 
@@ -216,6 +218,11 @@ Usage: `node "$TS_SP/form.mjs" <form-name> [KEY=value ...] > "$TS_SP/<file>.sql"
 - **Ordinals are not ids.** `ord` numbers the non-archived OKX strategies by status, then id
   (`row_number() OVER (ORDER BY s.status, s.id)`). A new OKX strategy can shift them, which is why the
   enqueue forms re-check each target's key and venue account in SQL and why `ordinals` is read first.
+  **`before` therefore records an `ord_digest` per ordinal** (`md5(strategy_id::text)`, an identity
+  check and not a secret), and `after` and `rollback` take the digest as a parameter and REFUSE in SQL,
+  before any read or write, when the ordinal now names a different strategy. The digest lives only in the
+  scratch `before` CSV and never in tracked text (tracked text names no strategy id, and a digest of one
+  is treated the same).
 
 ### The guard and the read column
 
@@ -390,17 +397,19 @@ done
 | `RUN` | a run label, letters, digits and `: . -` only; it becomes part of the job's idempotency key | `20261020T1000` |
 | `FP` | the founder-approved fingerprint, 64 lowercase hex, copied from the `calibrate` result | |
 | `O1_GAPS`, `O2_GAPS` | ordinal 1's and ordinal 2's stored gaps BEFORE apply: the `before` CSV's `gaps_param` value, `from:to` islands joined by `+`, or `none` | `2026-05-24:2026-08-01` |
+| `O1_DIGEST`, `O2_DIGEST` | ordinal 1's and ordinal 2's `ord_digest` from the SAME `before` CSV row (32 lowercase hex); `after` refuses in SQL when either ordinal is no longer that strategy | `0123456789abcdef0123456789abcdef` |
 | `ORD` | the ordinal to roll back | `1` |
 | `GAPS` | that ordinal's `before` `gaps_param` value (the gaps to restore) | `2026-05-24:2026-08-01` |
+| `DIGEST` | that ordinal's `before` `ord_digest` value; `rollback` refuses in SQL when the ordinal is no longer that strategy | `0123456789abcdef0123456789abcdef` |
 
 | Form | Kind | Parameters |
 |---|---|---|
 | `marker`, `ordinals`, `worklist`, `job-result`, `before`, `survival` | read, run with `DRY=1` | none |
-| `after` | read, run with `DRY=1` | `O1_GAPS`, `O2_GAPS` |
+| `after` | read, run with `DRY=1` | `O1_GAPS`, `O2_GAPS`, `O1_DIGEST`, `O2_DIGEST` |
 | `guard-check` | read behind the guard | none (`GUARD_TEST` optional) |
 | `enqueue-preflight`, `enqueue-calibrate` | WRITE (one job row) | `RUN` |
 | `enqueue-apply` | WRITE (one job row) | `RUN`, `FP` |
-| `rollback` | WRITE (founder decision only) | `ORD`, `GAPS` |
+| `rollback` | WRITE (founder decision only) | `ORD`, `GAPS`, `DIGEST` |
 
 The fragments `okx-universe`, `okx-prov` and `target-refusal` are expanded by the forms and are never
 run on their own. The enqueue forms carry today's work list as literals: rebuild targets are ordinals
@@ -569,6 +578,7 @@ node "$TS_SP/form.mjs" enqueue-calibrate RUN=20261020T1100 > "$TS_SP/s2.sql" && 
 
 - `quarters[]`: `state` `finished` for both, `container`, `has_type_column`, `ts_min_day` / `ts_max_day`
   matching the quarter (a mismatch is the STOP `quarter_range_mismatch`).
+  Also in the result, per quarter: `quarters[].longest_billless_run_days`. Step 3 reads all three.
 - `census`: `by_ccy` all USDT, `by_sub_type` with no unclassified type, `unknown_zero_effect` 0. A
   non-USD currency is the STOP `non_usd_ccy`, and it is the measurement that settles
   `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`.
@@ -591,16 +601,27 @@ there is nothing to clean up after a stop here.
 No form runs here; the founder reads and decides, with the orchestrator's summary of counts and dates:
 
 1. The calibration readings above are clean (no STOP class, `days_over_cent` 0 in both legs).
-2. The download host named by `quarters[].href_host` is in the code allow-list of `okx_archive_download`
+2. **The archive file is complete, not merely in range (review round 1, F1).** A bill-less day is rebuilt
+   as an explicit 0.0 return, so a file that silently lost weeks would publish zeros for days that were
+   real. Read, per quarter, `quarters[].ts_min_day`, `quarters[].ts_max_day` and
+   `quarters[].longest_billless_run_days`. `ts_min_day` and `ts_max_day` must sit at the quarter's first
+   and last days (a file that stops short of an edge is missing days, not quiet ones), and the longest
+   bill-less run must be a length the account's real activity can explain (an account that traded weekly
+   does not have a 40-day silence). A short edge or an unexplained long run is a no-go to return to the
+   founder, never a figure to approve. These three key names are as the analytics job's result block
+   was specified in this round; the orchestrator reconciles the exact names against the shipped
+   `okx_archive_job.py`, so read the names off the real `member_progress` and correct this item if they
+   differ.
+3. The download host named by `quarters[].href_host` is in the code allow-list of `okx_archive_download`
    (a host that is not there stops the job as `download_refused`; adding one is a reviewed code change).
-3. The `excluded` totals by month and class, and the `info` readings, are as expected (information, not
+4. The `excluded` totals by month and class, and the `info` readings, are as expected (information, not
    gates).
-4. The headline change for ordinal 2 (published) and ordinal 1 (`pending_review`): `strategies[]`
+5. The headline change for ordinal 2 (published) and ordinal 1 (`pending_review`): `strategies[]`
    `insert_ranges` is what each factsheet will name, and each headline start moves earlier.
-5. **Timing.** The 04:30Z tick recomputes anyway (Blast radius, item 4), so the moment of `apply` is the
+6. **Timing.** The 04:30Z tick recomputes anyway (Blast radius, item 4), so the moment of `apply` is the
    founder's decision: apply just before the Wave 5 consolidated recompute to review the changed
    headline first, or apply early and let the next tick publish it.
-6. Go / no-go. On go, the founder approves the `fingerprint` from the calibrate result. That value is
+7. Go / no-go. On go, the founder approves the `fingerprint` from the calibrate result. That value is
    `FP` below, and `apply` refuses on any other.
 
 ## Step 4 — apply
@@ -610,16 +631,20 @@ Run outside 04:15-05:45 UTC. Order: `before`, then `enqueue-apply`, then `job-re
 
 **4a. `before`.** Per ordinal: total `csv_daily_returns` rows, rows inside the stored gap ranges, the
 gap and range entries with dates, a `gaps_param` column encoding the stored gaps as `from:to` islands
-joined by `+` (for example `2026-05-24:2026-08-01`, or `none`), `headline_since`, and the full
+joined by `+` (for example `2026-05-24:2026-08-01`, or `none`), `headline_since`, the `ord_digest`
+(`md5(strategy_id::text)`: which strategy this ordinal named at this moment), and the full
 `series_provenance` value. **Save the CSV in `TS_SP` under a name that says `before`: its
-`series_provenance` column is the rollback reference, and `gaps_param` for ordinals 1 and 2 is what
-`after` and `rollback` take.**
+`series_provenance` column is the rollback reference, and `gaps_param` and `ord_digest` for ordinals 1
+and 2 are what `after` and `rollback` take. Take both from the SAME `before` CSV row: ordinals are
+`row_number()` over status then id, so an ordinal read from a stale `before` can name another strategy,
+and the digest is what makes `after` and `rollback` refuse that.**
 
 <!-- form: before -->
 ```sql
 WITH __OKX_PROV__,
 m AS (SELECT __MARKER_IS_PROD__ AS marker_is_prod)
 SELECT m.marker_is_prod, pv.ord AS ordinal, pv.status,
+       md5(pv.strategy_id::text) AS ord_digest,
        (SELECT count(*) FROM csv_daily_returns c WHERE c.strategy_id = pv.strategy_id) AS csv_rows_total,
        (SELECT count(*) FROM csv_daily_returns c
          WHERE c.strategy_id = pv.strategy_id
@@ -690,8 +715,11 @@ stopped (D-11, and the RPC's own rollback), and returns to the founder.
 **4d. `after`.** Same columns as `before`, except the row count is taken inside the OLD gap ranges given
 by the parameters, because apply NARROWS the stored gaps, so counting inside the stored gaps at read
 time would undercount. Copy `O1_GAPS` and `O2_GAPS` from the saved `before` CSV's `gaps_param` column
-(ordinals 1 and 2). The form refuses a malformed value (anything that is not `from:to` islands joined by
-`+`, or `none`, or a range that ends before it starts).
+and `O1_DIGEST` and `O2_DIGEST` from its `ord_digest` column (ordinals 1 and 2, the same CSV). The form
+refuses a malformed value (anything that is not `from:to` islands joined by `+`, or `none`, or a range
+that ends before it starts, or a digest that is not 32 lowercase hex), and it refuses when ordinal 1 or 2
+no longer names the strategy whose digest was given, so a shifted ordinal cannot produce a readback
+for another strategy.
 
 <!-- form: after -->
 ```sql
@@ -700,6 +728,13 @@ DECLARE
   p text;
   e text;
 BEGIN
+  IF __O1_DIGEST__ !~ '^[0-9a-f]{32}$' OR __O2_DIGEST__ !~ '^[0-9a-f]{32}$' THEN
+    RAISE EXCEPTION 'after: O1_DIGEST and O2_DIGEST must be the 32-hex ord_digest values of the saved before CSV; refusing';
+  END IF;
+  IF (WITH __OKX_UNIVERSE__ SELECT md5(ou.strategy_id::text) FROM ou WHERE ou.ord = 1) IS DISTINCT FROM __O1_DIGEST__
+     OR (WITH __OKX_UNIVERSE__ SELECT md5(ou.strategy_id::text) FROM ou WHERE ou.ord = 2) IS DISTINCT FROM __O2_DIGEST__ THEN
+    RAISE EXCEPTION 'after: ordinal 1 or 2 no longer names the strategy the before CSV described (ord_digest mismatch); re-read ordinals and before; refusing';
+  END IF;
   FOREACH p IN ARRAY ARRAY[__O1_GAPS__, __O2_GAPS__] LOOP
     IF p <> 'none' THEN
       IF p !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}:[0-9]{4}-[0-9]{2}-[0-9]{2}(\+[0-9]{4}-[0-9]{2}-[0-9]{2}:[0-9]{4}-[0-9]{2}-[0-9]{2})*$' THEN
@@ -745,7 +780,8 @@ SELECT m.marker_is_prod, pv.ord AS ordinal, pv.status,
 ```
 
 ```bash
-node "$TS_SP/form.mjs" after O1_GAPS=<before-gaps_param-of-1> O2_GAPS=<before-gaps_param-of-2> DRY=1 > "$TS_SP/a.sql" \
+node "$TS_SP/form.mjs" after O1_GAPS=<before-gaps_param-of-1> O2_GAPS=<before-gaps_param-of-2> \
+  O1_DIGEST=<before-ord_digest-of-1> O2_DIGEST=<before-ord_digest-of-2> DRY=1 > "$TS_SP/a.sql" \
   && q "$TS_SP/a.sql" > "$TS_SP/after-$(date -u +%Y%m%dT%H%M%SZ).csv"
 ```
 
@@ -810,12 +846,16 @@ not who owns a day today. A day the archive never covered is never named as rebu
 **A founder decision only.** Apply is atomic per strategy, a stop writes nothing, and the job never
 undoes anything, so a rollback is for the case where the founder reverses the rebuild after it applied.
 
-`rollback` takes the ordinal and that ordinal's `before` `gaps_param` value (`ORD`, `GAPS`). For that
+`rollback` takes the ordinal, that ordinal's `before` `gaps_param` value and its `before` `ord_digest`
+value (`ORD`, `GAPS`, `DIGEST`). Ordinals are `row_number()` over status then id, not ids, so between
+`before` and a rollback an ordinal can come to name another strategy; the form therefore refuses, in SQL
+and before any write, a `DIGEST` that is not 32 lowercase hex or that is not `md5(strategy_id::text)` of
+the strategy `ORD` names NOW, and an `ORD` that names no strategy at all. For that
 one strategy it, in a single statement: deletes the `csv_daily_returns` rows inside the strategy's
 `okx_bills_history_archive` ranges, removes only those range entries from `reconstructed_ranges`, and
 sets `unrecovered_gaps` back to `GAPS`. It touches no other strategy, no other key and no
 `legacy_ranges`. It refuses (in SQL, before writing) a `GAPS` that is not `from:to` islands joined by `+`
-(or `none`), and an ordinal with no archive range to roll back. Run it only after reading `before` and
+(or `none`), a digest mismatch, and an ordinal with no archive range to roll back. Run it only after reading `before` and
 `after`; the saved `before` CSV's `series_provenance` column is the reference the post-rollback reading
 is compared against.
 
@@ -826,6 +866,12 @@ DO $rb$
 DECLARE
   e text;
 BEGIN
+  IF __DIGEST__ !~ '^[0-9a-f]{32}$' THEN
+    RAISE EXCEPTION 'rollback: DIGEST must be the 32-hex ord_digest of the saved before CSV row for this ordinal; refusing';
+  END IF;
+  IF (WITH __OKX_UNIVERSE__ SELECT md5(ou.strategy_id::text) FROM ou WHERE ou.ord = __ORD__::int) IS DISTINCT FROM __DIGEST__ THEN
+    RAISE EXCEPTION 'rollback: that ordinal no longer names the strategy the before CSV described (ord_digest mismatch); re-read ordinals and before; refusing';
+  END IF;
   IF __GAPS__ <> 'none' THEN
     IF __GAPS__ !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}:[0-9]{4}-[0-9]{2}-[0-9]{2}(\+[0-9]{4}-[0-9]{2}-[0-9]{2}:[0-9]{4}-[0-9]{2}-[0-9]{2})*$' THEN
       RAISE EXCEPTION 'rollback: GAPS must be from:to islands joined by +, or none; refusing';
@@ -884,7 +930,7 @@ SELECT m.marker_is_prod, pv.ord AS ordinal,
 ```
 
 ```bash
-node "$TS_SP/form.mjs" rollback ORD=1 GAPS=<before-gaps_param-of-1> > "$TS_SP/rb.sql" && q "$TS_SP/rb.sql" > "$TS_SP/rollback-$(date -u +%Y%m%dT%H%M%SZ).csv"
+node "$TS_SP/form.mjs" rollback ORD=1 GAPS=<before-gaps_param-of-1> DIGEST=<before-ord_digest-of-1> > "$TS_SP/rb.sql" && q "$TS_SP/rb.sql" > "$TS_SP/rollback-$(date -u +%Y%m%dT%H%M%SZ).csv"
 ```
 
 Expected readback: `reconstructed_ranges_n` back to its `before` value, `gaps_param` equal to the `before`

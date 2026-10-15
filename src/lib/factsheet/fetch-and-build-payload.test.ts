@@ -1042,6 +1042,48 @@ describe("167.1.2.2.2 plan 10 - tradesFetchedAt, tradeFetchVenue and unrecovered
     expect(payload?.unrecoveredGaps).toEqual([{ from: "2026-05-24", to: "2026-06-30" }]);
   });
 
+  it("167.1.2.2.2.1 review round 1 F5/IN-01: a malformed reconstructed_ranges is flagged on the payload and reported to Sentry once", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    seed(
+      withKey(
+        {
+          series_provenance: {
+            reconstructed_ranges: [{ from: "2026-07-01", to: "2026-08-01", source: "manual" }],
+          },
+        },
+        { api_keys: { exchange: "okx" } },
+      ),
+    );
+    vi.mocked(captureToSentry).mockClear();
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload).not.toBeNull();
+    expect(payload?.reconstructedRanges).toEqual([]);
+    expect(payload?.reconstructedRangesUnavailable).toBe(true);
+    const calls = vi
+      .mocked(captureToSentry)
+      .mock.calls.filter(([, o]) => o.tags.stage === "factsheet-reconstructed-ranges");
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toMatchObject({
+      tags: { stage: "factsheet-reconstructed-ranges", strategy_id: STRATEGY_ID },
+      extra: { detail: "an entry carries an unknown source" },
+    });
+  });
+
+  it("167.1.2.2.2.1 review round 1 F5/IN-01: an absent or valid reconstructed_ranges is not flagged and reports nothing", async () => {
+    for (const provenance of [
+      {},
+      { reconstructed_ranges: [{ from: "2026-07-01", to: "2026-08-01", source: "okx_bills_history_archive" }] },
+    ]) {
+      seed(withKey({ series_provenance: provenance }, { api_keys: { exchange: "okx" } }));
+      vi.mocked(captureToSentry).mockClear();
+      const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+      expect(payload?.reconstructedRangesUnavailable ?? false).toBe(false);
+      expect(
+        vi.mocked(captureToSentry).mock.calls.filter(([, o]) => o.tags.stage === "factsheet-reconstructed-ranges"),
+      ).toHaveLength(0);
+    }
+  });
+
   it("a malformed provenance names no gap", async () => {
     seed(withKey({ series_provenance: { unrecovered_gaps: [{ from: "2026-07-08", to: "2026-05-07" }] } }, {}));
     const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
