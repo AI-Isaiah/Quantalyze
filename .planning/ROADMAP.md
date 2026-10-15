@@ -118,7 +118,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
 - [x] **Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8)** (INSERTED) — shipped v0.125.2.1 (#968, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
 - [x] **Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy)** (INSERTED) — verification: passed (v0.129.0.0) (completed 2026-10-08)
-- [ ] **Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b)** (INSERTED) — not yet planned (164.6.6.3 split C, founder 2026-10-06)
+- [x] **Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b)** (INSERTED) — verification: passed (v0.130.1.0, close-out v0.131.12.0, review fixes v0.131.12.1; founder-deferred residue booked as 164.6.6.3.3-WITHHELD-RESIDUE) (completed 2026-10-15)
 - [x] **Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status** (INSERTED) — shipped v0.129.1.0 (merged 2026-10-08); verification: passed (plan 04 PROD re-sync 2026-10-08) (completed 2026-10-08)
 - [x] **Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults** (INSERTED) — verification: passed (PR #971, v0.127.0.0) (completed 2026-10-08)
 - [ ] **Phase 164.6.6.3.6: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed** (INSERTED) — not yet planned (booked 2026-10-06, founder)
@@ -3038,10 +3038,59 @@ a guarded composite headline is consistent, a flat strategy leg reads "—" wher
 rule says so, the card and the factsheet show one value, and an empty scenario shows "—".
 **Requirements**: none in REQUIREMENTS.md; the items above are the spec.
 **Depends on:** Phase 164.6.6.3 (order only, D-02)
-**Plans:** 0 plans
+**Plans:** 15 plans (12 shipped in #999, plans 13-15 gap closure)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.3.3 to break down)
+- [x] 164.6.6.3.3-01-PLAN.md — wave 1 — one headline suffix for every stat in `compute_all_metrics`, `headline_since` stored by both writers (D-01, D-02, D-12)
+- [x] 164.6.6.3.3-02-PLAN.md — wave 1 — read path: shared `readHeadlineBasis`, Dated span and reasons in the payload, legacy chain-broken rows withheld on both arms, cache key one above origin/main (D-03, B21, B22)
+- [x] 164.6.6.3.3-03-PLAN.md — wave 1 — empty scenario quantiles NaN with a guarded box plot, a "—" never carries accent, KS p = 1 at D = 0 (D-10, D-05, B11, B12, B14, B15)
+- [x] 164.6.6.3.3-04-PLAN.md — wave 2 — "Measured since" and Withheld notes in five slots, range sentences (B16-B18)
+- [x] 164.6.6.3.3-05-PLAN.md — wave 2 — job finished, analytics failed: Eclipse re-measured, owner line, three share notes (D-08, D-09, B23, B24)
+- [x] 164.6.6.3.3-06-PLAN.md — wave 2 — share card equals the factsheet: 30-observation gate gone, E1/E2 the only CAGR exceptions, no tone on a dash or a zero (D-06, D-07, D-11, B7-B10)
+- [x] 164.6.6.3.3-07-PLAN.md — wave 2 — every analytics failure path stores and logs its error, so "We've logged the error" is true (D-08, RESEARCH A5)
+- [x] 164.6.6.3.3-08-PLAN.md — wave 3 — trailing windows on the suffix, 6M/1Y record-length rule (D-01, D-12, B20)
+- [x] 164.6.6.3.3-09-PLAN.md — wave 4 — flat strategy leg reads "—" with one reason (gate after `jointMetrics`), strip tone and sign from the rounded value (D-04, B1-B6, B13)
+- [x] 164.6.6.3.3-10-PLAN.md — wave 5 — rail benchmark column over the same span on a Dated row, then the `{B}` copy (B19)
+- [x] 164.6.6.3.3-11-PLAN.md — wave 6 — PROD recompute set re-measured (counts only), `[164.6.6.3.3-WAVE5-RECOMPUTE]` named and not run, 166.2 correction, leak scan, phase gate
+- [x] 164.6.6.3.3-12-PLAN.md — wave 7 — release: final merge from main, version re-picked from origin/main, unified CHANGELOG, cache-key re-check, skip-token and leak scans
+- [x] 164.6.6.3.3-13-PLAN.md — gap closure, wave 1 — a Withheld strip dashes alpha and IR too, one shared `isHeadlineWithheld` verdict (D-15, review WR-04)
+- [x] 164.6.6.3.3-14-PLAN.md — gap closure, wave 1 — the rail's Alpha (ann) row follows the Withheld strip through the same predicate (D-15 extended)
+- [x] 164.6.6.3.3-15-PLAN.md — gap closure, wave 1 — one rail gate dashes every whole-record figure on a Withheld row; peer max_dd rank guarded (D-15 extended again)
+
+⭐ 2026-10-09 (plan 11): `[164.6.6.3.3-WAVE5-RECOMPUTE]` "FACTSHEETTRUTH item 2" is named here and in `TODOS.md`
+under the same id. **This phase does not run it.**
+- **The set.** The union of 11 guarded `strategy_analytics` rows, re-measured read-only on PROD behind the
+  marker query (2026-10-09): 7 carry `twr_chain_broken` (6 `private`, 1 `draft`, none published; none carries
+  `headline_since` yet) and 4 are guard-only. This equals RESEARCH 1.8 (7, 4, union 11).
+- **Why.** Plan 01 changes the stored metrics of a guarded row (every stat on one post-break suffix, with
+  `headline_since` stored). Plan 02 withholds a legacy chain-broken row's headline ("—") until
+  `headline_since` exists, so those rows read blank until the recompute writes it.
+- **Order.** This phase merges; main CI is green; the analytics deploy is confirmed by `/health` `git_sha`
+  containing the merge; then the recompute runs inside the Wave 5 consolidated PROD recompute.
+- **Acceptance reading.** Zero rows with `twr_chain_broken: true` and no `headline_since`; a dry-run diff
+  shows the 4 guard-only rows' stored scalars unchanged; Quantum Drift then reads "Measured since Apr 18,
+  2026" (D-12).
+
+⭐ 2026-10-10: shipped as #999 (v0.130.1.0), plans 01-12 on main.
+
+⭐ **D-15 (founder, 2026-10-15, AskUserQuestion, answer "Withhold them too").** Review round 1 WR-04 is
+FIXED, not accepted: on a Withheld row the KPI strip's alpha and IR cells also read "—", so nothing under
+the "Headline figures withheld" note shows a number. Chosen over adding a "α and IR cover the whole
+record" arm to the Withheld sentence. Carried by a gap-closure plan after the ship; recorded as D-15 in
+`164.6.6.3.3-CONTEXT.md`.
+- ⭐ **D-15 extended (founder, 2026-10-15, "Rail follows the strip").** On a Withheld row at full history
+  with no what-if, the rail's §IV "Alpha (ann)" row also reads "—" (no tone), through the same
+  `isHeadlineWithheld` predicate; a zoom window keeps its own slice. Carried by gap-closure plan 14.
+- ⭐ **D-15 extended again (founder, 2026-10-15, "Dash all of them"; supersedes the Alpha-only scope above,
+  kept as lineage).** On a Withheld row at full history with no what-if, EVERY rail figure computed over the
+  whole record reads "—" with no tone (Information Ratio, Beta, Treynor, up and down capture alongside Alpha
+  (ann)); zoom windows keep their slice figures; dates and sample counts are not dashed. Carried by
+  gap-closure plan 15.
+- ⭐ **Plan 15 residue (founder, 2026-10-15, "Ship as is, book them").** Worst 10 Drawdowns, the break-year EOY and
+  Calmar rows that are not the last year, and Style Drift with its KS line stay undashed; booked as
+  `164.6.6.3.3-WITHHELD-RESIDUE`. The plan 15 review's MEDIUMs were fixed, not booked, under the founder's
+  2026-10-15 rule ("fix also the medium user facing and data integrity issues"): four rounds, shipped as
+  #1045 (v0.131.12.0) and #1046 (v0.131.12.1).
 
 ### Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy) (INSERTED)
 
@@ -6049,7 +6098,7 @@ kept verbatim.
 | 164.6.6.3 UATFIXES | 7/7 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
 | 164.6.6.3.1 UIPOLISH | 6/6 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
 | 164.6.6.3.2 WIZARDCODES | 4/4 | Complete — verification passed (WR-01 MEDIUM recorded as a known gap) | 2026-10-08 · v0.129.0.0 |
-| 164.6.6.3.3 FACTSHEETTRUTH | 0/? | Queued — 164.6.6.3 split C (founder 2026-10-06) | - |
+| 164.6.6.3.3 FACTSHEETTRUTH | 15/15 | Complete — verification passed (plan 15 review MEDIUMs fixed over four rounds) | 2026-10-15 · v0.131.12.1 |
 | 164.6.6.3.4 STATUSBRIDGE | 4/4 | Complete — verification passed after the plan 04 PROD re-sync | 2026-10-08 · v0.129.1.0 · #977 |
 | 164.6.6.3.5 DOMAINONE | 13/13 | Complete — verification passed after plan 13's live checks | 2026-10-08 · v0.127.0.0 · #971 |
 | 164.6.6.3.6 MT5SERVERLEARN | 0/? | Queued — booked 2026-10-06 (founder); BROKER-SERVERS.md measured, no plans | - |

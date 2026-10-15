@@ -6,16 +6,16 @@ current_phase: 164.6.6.1
 current_phase_name: MT5SCRUB
 status: executing
 stopped_at: 164.6.6.1 re-planned 2026-10-04 after the scrub spike (8 plans, 6 waves, plan-check passed); next execute, plan 02 S-11 checkpoint first
-last_updated: "2026-10-12T20:53:03.485Z"
+last_updated: "2026-10-15T13:40:00.000Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 164.6.6.1 execution started
 state_head: 88b8e34938c6d0fec2d7343558a1b9f8126fbcb3
 progress:
-  total_phases: 108
-  completed_phases: 91
+  total_phases: 115
+  completed_phases: 104
   total_plans: 632
   completed_plans: 621
-  percent: 84
+  percent: 90
 ---
 
 ## ⭐ STATE lineage
