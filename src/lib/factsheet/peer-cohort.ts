@@ -114,6 +114,8 @@ export function computePeerPercentile(stratSharpe: number, stratSortino: number,
     // HI-02): no rank, not the 5th percentile.
     sortino: Number.isFinite(stratSortino) ? percentileRank(stratSortino, cohort.map(p => p.sortino)) : NaN,
     // For max_dd, less negative = better, so higher max_dd value → higher percentile.
-    max_dd: percentileRank(stratMaxDd, cohort.map(p => p.max_dd)),
+    // A redacted max_dd (NaN: the read path nulls it on a Withheld row, plan 15 / D-15 extended
+    // again) has no rank either: not the 0th percentile, the same as Sharpe and Sortino (D7).
+    max_dd: Number.isFinite(stratMaxDd) ? percentileRank(stratMaxDd, cohort.map(p => p.max_dd)) : NaN,
   };
 }

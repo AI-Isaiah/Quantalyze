@@ -273,13 +273,21 @@ describe("a Withheld row: no measured span, so the headline benchmark cells read
     for (const [k, v] of Object.entries(headlineBenchCells(container))) expect(v, k).toBe(dash);
   });
 
-  it("the whole-record rows are unchanged: the whole-record comparator figures", () => {
+  // FLIPPED DELIBERATELY by plan 15 (D-15 extended again, founder 2026-10-15, "Dash all of
+  // them"). Plan 10 pinned these three whole-record comparator figures as unchanged on a
+  // Withheld row. They are computed over the whole record, which compounds across the break
+  // the Withheld note names, so beside the strategy's dashed figure they dash too. The Dated
+  // describes of this file (where they stay whole-record) are untouched.
+  it("the whole-record rows read the em-dash too: Win Rate, Profit Factor and Longest DD (D-15 extended again)", () => {
     const p = build(WITHHELD);
     const w = oracle(p);
+    // Premise: the whole-record comparator figures exist and are numeric, so a dash is a decision.
+    expect(pctU(w.win_rate)).toMatch(/\d/);
+    expect(cnt(w.longest_dd)).toMatch(/\d/);
     const { container } = mount(p);
-    expect(bench(container, RETURNS, "Win Rate (days)")).toBe(pctU(w.win_rate));
-    expect(bench(container, RETURNS, "Profit Factor")).toBe(n2(w.profit_factor));
-    expect(bench(container, MAXDD, "Longest DD (days)")).toBe(cnt(w.longest_dd));
+    expect(bench(container, RETURNS, "Win Rate (days)")).toBe(dash);
+    expect(bench(container, RETURNS, "Profit Factor")).toBe(dash);
+    expect(bench(container, MAXDD, "Longest DD (days)")).toBe(dash);
   });
 });
 
