@@ -2992,9 +2992,9 @@ Plans:
 - [x] 164.6.6.3.4-03-PLAN.md — snapshot and earned VAC-04 ack, kind-classification drift test, local-stack bridge family, mutation census, release commit
 - [x] 164.6.6.3.4-04-PLAN.md — post-deploy PROD re-sync of the `failed` rows that have jobs (D-08 as amended), before/after recorded, founder checkpoint
 
-
 ⭐ **Founder 2026-10-07 (D-09, CONTEXT):** a call whose only failures are excluded side kinds must not stamp `computed_at` or clear a foreign `computation_error`; fixed before merge.
 ⚠️ **Founder 2026-10-08 (D-10, CONTEXT) — DEVIATION from the 3-round review cap:** a 4th fix round, on Opus, for CR-R3-01 (a genuine recompute on a warned row keeps a stale `computed_at`) and WR-R3-01 (the DEFERRED side path stamps), both in this phase's own logic.
+
 ### Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b) (INSERTED)
 
 Split C of 164.6.6.3 (founder, 2026-10-06, `164.6.6.3-CONTEXT.md` D-01). It delivers items **2,
@@ -3212,8 +3212,8 @@ Plans:
 - [ ] 164.6.6.2-12-PLAN.md — post-deploy: MM-2x re-derived via Sync and read live on PROD; D-06 canary (wave 4)
 - [ ] 164.6.6.2-13-PLAN.md — Python twin of the conversion on the shared oracle fixture; portfolio analytics, simulator and match engine convert BTC before weighting (D-23) (wave 2)
 
-
 ⭐ **Founder 2026-10-08 (D-24, CONTEXT):** the BTC dust floor drops from 0.001 to 1e-7 BTC ("it should measure more"), shipped as a gap-closure fix after plan 12's read.
+
 ### Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend (INSERTED)
 
 **Goal:** Every Python blend reads daily returns, not the stored wealth curve. `strategy_analytics.returns_series` holds the cumprod wealth curve (`(1 + r).cumprod()`, `services/metrics.py`), measured on PROD 2026-10-07 across 32 rows: first value about 1.0, last values averaging about 209k. `routers/simulator.py`, `routers/match.py` and `routers/portfolio.py` (analytics, optimizer, bridge) and the 164.6.6.2 Python BTC twin (`services/native_to_usd.py`) read it as daily returns, so a wealth of 1.30 is weighted as a +130% day. The TypeScript side already converts through `resolveDailyReturnSeries`.
@@ -3253,6 +3253,7 @@ Plans:
 - What to do where one is missing. Never invent a time: fall back to the current day-level rule, named.
 - How this interacts with `pnl_dominated_guard`, the negative-NAV guard, the allocator compose replay (Phase 167.1.2.2's realized basis and dropped-day P&L), and the TS factsheet readers.
 - Re-derive and re-measure every affected PROD strategy, not just MM-2x. Before and after readings, marker first.
+
 ⭐ **Founder answers 2026-10-11 (recorded in CONTEXT):** FLOWTIMING-Q1 ACCEPT (the MT5 derive stores its writer basis like Deribit; compose code unchanged, inside D-14). FLOWTIMING-Q2 ACCEPT (Deribit stays day level this phase; intraday Deribit booked as `[164.6.6.2.3-DERIBIT-INTRADAY-TIMING]` in TODOS).
 **Requirements**: TBD (contract: CONTEXT D-01..D-14)
 **Depends on:** Phase 164.6.6.2.2
@@ -3867,6 +3868,7 @@ Plans:
 2. Every install step carries its own `timeout-minutes`, so a hang ends the step, not the job.
 3. Where the runner image already ships the tool (psql measured on the runner first), the install is skipped, with the measurement recorded.
 4. The `sql-mutation` ↔ `sql-mutation-nightly` byte-parity pin and every other ci.yml contract test stay green; the 20-min sql-mutation ceiling is not raised.
+
 **Deviations from D-03 (recorded 2026-10-07, planner revision; the same text is in 164.9.8-CONTEXT.md):** (1) the two `Acquire shared-test-db mutex` steps carry no step `timeout-minutes`, because they wait up to about 33 min for the shared-TEST lock by design, and the wrapper's 400 s budget bounds their dead-branch apt; (2) Playwright's internal apt is bounded only by the image defaults plus a 10-minute step cap, about 1.9 times the slowest measured cache-miss install (308 s).
 **Requirements**: SC-1, SC-2, SC-3, SC-4 (the four success criteria above, in order)
 **Depends on:** none (ships first in the merge queue, founder 2026-10-07)
@@ -4995,13 +4997,11 @@ Plans:
 - [x] 167.1.2.2-08-PLAN.md — the first 05:30 UTC run: D-06 reads judged on computed_at, SC-3 verdict
 - [x] 167.1.2.2-09-PLAN.md — 167.1.2's remaining browser UAT against rebuilt books (SC-4), recorded as a dated addendum
 
-
 ⭐ **Rehearsal 2026-10-07 UNCLEAN (2 failed_final): founder D-11/D-12 (CONTEXT).** The bybit key's IP allow-list gains the backfill egress (founder action), and the compose divergence is root-caused before the cron is registered. Plans 04-06 wait on both.
 
 ⭐ **Founder 2026-10-08 (D-13/D-14, CONTEXT):** opening deposits are judged by a zero-start check with a 0.01% band, not by their position; outside the band they block under an unreconciled-start reason. D-12's self-check fix is `cf73bf7a1`.
 ⚠️ **Founder 2026-10-08 (D-16, CONTEXT) — DEVIATION from the worst-MEDIUM-no-fixer rule:** review round 2's R2-WR-01 (a compose read race leaves the book untrustworthy until the next day) and R2-WR-02 (OKX levels carry the open-uPnL shift) are fixed before the cron is registered.
 ⭐ **Orchestrator 2026-10-08 (CONTEXT):** plan 04 not taken (0 reclaims). The D-12..D-16 code ships in its own PR before plan 05, and plan 05 re-runs the rehearsal on the deployed code.
-
 
 ### Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital instead of refusing the allocator's book (INSERTED)
 
@@ -5073,7 +5073,6 @@ Plans:
 **Evidence (PROD, read-only, marker first, counts only, 2026-10-09):** nothing calls `POST /api/cron-sync` (`analytics-service/routers/cron.py`). No migration, `vercel.json` entry, GitHub schedule, Railway cron or PROD `cron.job` row has ever scheduled it; a Railway probe outside git called it in June 2026 and is gone. ADR-0008 claims a pg_cron trigger that does not exist. 4 live strategy keys (3 okx, 1 bybit; one strategy published) have their newest trade 14 to 156 days old while their accounts are live (funding rows 0.3 days old; bybit open positions on 13 of the last 14 days). The UI hides it: `SyncBadge` "Synced Nd ago" reads `strategy_analytics.computed_at`, and `api_keys.last_sync_at` is overwritten daily about 04:05 UTC by `poll_allocator_positions`, strategy keys included. PROD `strategy_sync_cursors` has 0 rows, so the route's resume fallback (`_strategy_resume_point` / `_resume_floor_ms`) would start from that overwritten `last_sync_at`, and the first tick would silently skip the whole gap.
 **Requirements**: TBD (phase-local)
 **Depends on:** Phase 167.1.2.2 (the same runbook-registration route for PROD crons)
-
 
 **⭐ AMENDED 2026-10-09 (research, founder-confirmed in discussion; CONTEXT D-11):** SC-2's cursor-row seeding cannot recover the gap: a seeded marker is clamped to 30 days by `MAX_MARKER_LOOKBACK_MS` (`analytics-service/routers/cron.py`), which would silently cut three of the five gaps. The resume fallback instead starts from a data-derived high-water (the strategy's newest stored daily-P&L row, floored to UTC midnight, unclamped), and the runbook step becomes a read-only pre-tick proof. Days the venue no longer serves are named, not filled; their recovery moved to Phase 167.1.2.2.2.1 OKXHISTORY (founder: split D-01). SC-2's text below is kept as lineage.
 
@@ -5218,6 +5217,7 @@ Split out of Phase 167.1.2.1 RECONMARKER by founder decision D-01 (2026-10-13, s
 8. **R3-WR-02 (landing constraint, not a defect):** a deploy between the 04:00 poll and the 05:00 refresh writes one stale row per emptied account (`_polled_empty_since` rests on the poll's audit event). Any writer change in this phase lands outside that window, or removes the constraint.
 
 9. **MT5 BTC-unit inception residual (routed 2026-10-13 from 166.3.1 NAVBREACH D-08; founder "Route to a phase").** NAVBREACH plan 08 measured on PROD that one allocator book stays `is_trustworthy` false under every exit rule: its MT5 BTC-unit `dust` key (357 return days) replays to `inception_unreconciled`, because the implied start is 0.15% of the first return day's level against the 0.01% band. The gate is not loosened (NAVBREACH D-02). The cause is found in the stored series and fixed at the writer, so the book reads trustworthy, or the reason is recorded by a founder decision. Evidence: `166.3.1-SC5-DECISION.md`.
+
 Each item is fixed with a test that fails on the old behaviour, or closed by a recorded founder decision. Any grouping change moves Python `account_groups`, TS `accountIdentityTokens`/`keyAccountOf`, `one_key_per_account_day`/`oneKeyPerAccountDay` and the `queries.ts` reader together (167.1.2.1 re-measure, item (5) WR-03).
 
 Plans:
@@ -5710,7 +5710,6 @@ Plans:
 ⚠️ **Review round 1 (2026-10-11), founder override D-10:** MEDIUM-only findings get a fixer round anyway (WR-01, WR-02, WR-03, SFH-1); rank numbering per D-11. SFH-2/SFH-3 booked in TODOS.
 
 ### Phase 170.6: DISPLAYPOLISH — no signed zero (-0.00, -0.0%) and no non-negative value drawn red on factsheets and OG cards; a comparator overlap too short to annualize reads em-dash (SPX annualized 5 days to Sharpe 10.24); the paired-floor sentence names the date the comparator's prices end (169.4, founder: fix); /recommendations unset-mandate copy reworded (169.3, founder: reword); anonymous /browse never flashes example rows that then vanish; admin Compute Jobs kind filter lists every present kind; the recommendations disclaimer renders once. (INSERTED)
-
 
 ⚠️ **Re-scoped 2026-10-06 (founder, "Ok" to de-duplicating against the 164.6.6.3 split):**
 - "the recommendations disclaimer renders once" **moved to 164.6.6.3.1 UIPOLISH item 6a**;
