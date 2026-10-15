@@ -1083,7 +1083,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round 2, SFH R2-1): `armsSeen` 689 -> 692: +3 arms (O13, O13l, O13r) in test_refresh_fanout_owed_key_reconstruct.sql. MEASURED: this file's run read `expected 692 to be 689`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): `armsSeen` 697 -> 716: the owed-key gate's 20 arms less N5 moved out of the 167.1.2 gate (+19 net) join main's 697. MEASURED: this file's run read `expected 716 to be 697`, and the full lane run printed `arms: 716/716/0`, `biting: 716`.
     // ⭐ CURRENCY 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): `armsSeen` 716 -> 723 on the tree merged with origin/main (1cde77edf): the NEW gate test_strategies_anon_grants.sql (7 arms: GRANT 1-4, WRITE 1-2, KEEP 1). MEASURED: this file's run read `expected 723 to be 716`, and ONE full lane run on the committed merge printed `arms: 723/723/0`.
-    expect(armsSeen).toBe(723);
+    // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): `armsSeen` 723 -> 732: +10 arms of the NEW gate test_sync_status_computed_at_runner_only.sql (N1 to N10), -1 for arm D15 retired from test_sync_status_analytics_scope.sql. MEASURED: this file's run read `expected 732 to be 723`, and ONE full runner run on the merged tree printed `arms: 732/732/0`.
+    expect(armsSeen).toBe(732);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1102,7 +1103,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round 2, SFH R2-1): `stepsSeen` 784 -> 787: one file step for each of the three new twins (O13, O13l, O13r). MEASURED: the needle test read `expected 787 to be 784`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): `stepsSeen` 788 -> 809: +21 file steps from the owed-key gate (15 at plan 04, +5 at the first fix round, +3 at the second, -1 for N5's edit step, -1 for N4d's second copy). MEASURED: the needle test read `expected 809 to be 788`.
     // ⭐ NOTE 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): `stepsSeen` stays 809 with the anon grants gate in the corpus: all 7 of its twins are one `sql` step each, which this count does not include. MEASURED: this file's run read 809 with the gate present.
-    expect(stepsSeen).toBe(809);
+    // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): `stepsSeen` 809 -> 828: +19 file steps across the NEW gate test_sync_status_computed_at_runner_only.sql and the scope gate's re-pointed twins (D15's retired); the split is not decomposed here. MEASURED: this file's run read `expected 828 to be 809`.
+    expect(stepsSeen).toBe(828);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2037,7 +2039,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round): the needle count 779 -> 784, moving WITH `stepsSeen`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, PR 2 fix round 2, SFH R2-1): the needle count 784 -> 787, moving WITH `stepsSeen`. MEASURED: this file's run read `expected 787 to be 784`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): the needle count 788 -> 809, moving WITH `stepsSeen`. MEASURED: this file's run read `expected 809 to be 788`.
-    expect(needles.length).toBe(809);
+    // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): the needle count 809 -> 828, moving WITH `stepsSeen`. MEASURED: this file's run read `expected 828 to be 809`.
+    expect(needles.length).toBe(828);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2632,7 +2635,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): 95 -> 96, the owed-key fan-out gate file. MEASURED: this file's run read `expected 96 to be 95`, and the full lane run printed `coverage: files 69/96`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): 97 -> 98, the owed-key fan-out gate on top of main's 97. MEASURED: this file's run read `expected 98 to be 97`, and the full lane run printed `coverage: files 71/98`.
     // ⭐ CURRENCY 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): 98 -> 99, the anon grants gate file. MEASURED: this file's run read `expected 99 to be 98`, and the full lane run printed `coverage: files 72/99`.
-    expect(corpus.filesTotal).toBe(99);
+    // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): 99 -> 100, the runner-only date gate file. MEASURED: this file's run read `expected 100 to be 99`, and the full lane run printed `coverage: files 73/100`.
+    expect(corpus.filesTotal).toBe(100);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2709,7 +2713,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): 68 -> 69, the owed-key fan-out gate file (test_refresh_fanout_owed_key_reconstruct.sql), with the denominator above and the by-name list below.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): 70 -> 71, moving WITH `filesTotal`; the by-name list below holds the owed-key gate and both main gates.
     // ⭐ CURRENCY 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): 71 -> 72, moving WITH `filesTotal`; the by-name list below gained test_strategies_anon_grants.sql. MEASURED: this file's run read `expected 72 to be 71`, and the full lane run printed `scope: FULL 72/72 annotated files`.
-    expect(corpus.filesAnnotated).toBe(72);
+    // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): 72 -> 73, moving WITH `filesTotal`; the by-name list below gained test_sync_status_computed_at_runner_only.sql. MEASURED: this file's run read `expected 73 to be 72`, and the full lane run printed `scope: FULL 73/73 annotated files`.
+    expect(corpus.filesAnnotated).toBe(73);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2830,6 +2835,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_sync_status_analytics_scope.sql",
       "test_sync_status_bridge_lock.sql",
       "test_sync_status_bridge_residues.sql",
+      // ⭐ ADDED 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): the runner-only date gate (10 arms, N1 to N10) for migration 20261023120000.
+      "test_sync_status_computed_at_runner_only.sql",
       "test_sync_status_curated_sentence_survives.sql",
       "test_sync_status_marked_refresh_protected.sql",
       "test_truncate_revoke_anon_authenticated.sql",
@@ -3249,7 +3256,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): 95 -> 96, the owed-key fan-out gate file. MEASURED: this file's run read `expected 96 to be 95`, and the full lane run printed `coverage: files 69/96`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): 97 -> 98, the owed-key fan-out gate on top of main's 97. MEASURED: this file's run read `expected 98 to be 97`, and the full lane run printed `coverage: files 71/98`.
     // ⭐ CURRENCY 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): 98 -> 99, the anon grants gate file. MEASURED: this file's run read `expected 99 to be 98`, and the full lane run printed `coverage: files 72/99`.
-    expect(corpus.filesTotal).toBe(99);
+    // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): 99 -> 100, the runner-only date gate file. MEASURED: this file's run read `expected 100 to be 99`, and the full lane run printed `coverage: files 73/100`.
+    expect(corpus.filesTotal).toBe(100);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3282,7 +3290,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER, plan 07): 68 -> 69, moving WITH `filesAnnotated`.
     // ⭐ CURRENCY 2026-10-14 (Phase 167.1.2.1 RECONMARKER PR 2, pre-ship merge of origin/main v0.131.7.0): 70 -> 71, moving WITH `filesAnnotated`.
     // ⭐ CURRENCY 2026-10-15 (Phase 170.6.1.1 ANONKEYID, plan 07): 71 -> 72, moving WITH `filesAnnotated`. MEASURED: this file's run read `expected [ …(72) ] to have a length of 71 but got 72`.
-    expect(corpus.annotatedFiles).toHaveLength(72);
+    // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): 72 -> 73, moving WITH `filesAnnotated`. MEASURED: this file's run read `expected [ …(73) ] to have a length of 72 but got 73`.
+    expect(corpus.annotatedFiles).toHaveLength(73);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

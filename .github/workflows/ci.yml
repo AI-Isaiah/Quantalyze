@@ -5054,14 +5054,27 @@ jobs:
           #   Merged with origin/main 2026-10-14 (NAVBREACH, whose gate declares no sentinel): the
           #   mutation figures became FILES_FLOOR 68 and ARMS_FLOOR 657, one full run; SENTINEL_FLOOR
           #   17 and ARMS_FLOOR 299 here are unchanged, and the contract test re-derived them.
+          # Re-measured 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07), TWO moves in one
+          #   commit, read off the local-stack run of this very step on the merged tree
+          #   ("covering 308 declared arms", 18 sentinel-bearing files) and then confirmed by
+          #   ci-anti-skip-gate.contract.test.ts, never by arithmetic:
+          #   (1) test_sync_status_computed_at_runner_only.sql, NEW, 10 arms (N1..N10) - the
+          #       gate for migration 20261023120000, under which the status bridge writes no
+          #       computed_at and the analytics runner is its only writer. A new
+          #       sentinel-bearing file changes the FILE SET.
+          #   (2) test_sync_status_analytics_scope.sql 21 -> 20: arm D15 is retired because the
+          #       release clause it pinned is deleted (its scenario is arm N6 of the new gate).
+          #   So SENTINEL_FLOOR moves 17 -> 18 and ARMS_FLOOR 299 -> 308. The mutation runner's
+          #   own floors moved in the same plan by one full run.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
-          #   test_sync_status_analytics_scope.sql             21
+          #   test_sync_status_analytics_scope.sql             20
           #   test_sync_status_bridge_residues.sql             16
+          #   test_sync_status_computed_at_runner_only.sql     10
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=17  # files declaring a sentinel
-          ARMS_FLOOR=299     # 13 + 8 + 9 + 8 + 3 + 6 + 23 + 26 + 8 + 14 + 7 + 4 + 103 + 21 + 16 + 7 + 23
+          SENTINEL_FLOOR=18  # files declaring a sentinel
+          ARMS_FLOOR=308     # 13 + 8 + 9 + 8 + 3 + 6 + 23 + 26 + 8 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

@@ -1952,7 +1952,7 @@ per-metric decision.
         Python-side item (the honour path is the only place that knows X's writer reached the row), or
         (c) a SQL redesign in which branch (a) preserves sentence and provenance for a still-non-terminal
         job, which changes Phase 164.2's "branch (a) clears both markers" contract.
-- [ ] **`[164.5.2.1-COMPUTED-AT-RUNNER-STAMP]` After a real recompute that ends
+- [x] **`[164.5.2.1-COMPUTED-AT-RUNNER-STAMP]` After a real recompute that ends
       `complete_with_warnings` while a sibling job is still in flight, the factsheet keeps its old
       `computed_at` until the sibling finishes (booked 2026-10-03, Phase 164.5.2.1 BRIDGERESIDUE;
       USER-FACING; founder 2026-10-03: "Keep the hold, book the fix").**
@@ -1983,6 +1983,22 @@ per-metric decision.
         that ends `complete_with_warnings` beside an in-flight sibling advances `computed_at` at the
         runner's finish, AND a terminal job that recomputed nothing (branch (c)) leaves
         `computed_at` unchanged, each with a test that fails on today's behaviour.
+      - ✅ **CLOSED 2026-10-15 by Phase 166.5 COMPUTEDATSTAMP (evidence, clause by clause).**
+        **Clause 1** (a real recompute ending `complete_with_warnings` beside an in-flight sibling advances
+        `computed_at` at the runner's finish): the runner's two success writes now carry
+        `"computed_at": "now"` (the database clock) in the same upsert as the metrics. Covered by
+        `test_mark_complete_stamps_computed_at_with_db_clock_literal` and
+        `test_headline_payload_stamps_computed_at_with_db_clock_literal` (plan 01, RED on the code before the
+        stamp), the live PostgREST probe `test_computed_at_now_literal_live.py`, and gate arm N10 of
+        `supabase/tests/test_sync_status_computed_at_runner_only.sql` (a runner-shaped success write lands, then
+        the counting job's mark reaches branch (a) beside an in-flight sibling side job, and the date stays AT
+        the runner's stamp; before this phase that mark re-held the old date over it).
+        **Clause 2** (a terminal job that recomputed nothing leaves `computed_at` unchanged): migration
+        `20261023120000` removes every date write from `sync_strategy_analytics_status` and refuses any later
+        apply that reintroduces one (`v_no_date_write_ok`). Covered by gate arms N2 (RED on the
+        `20261009120000` body, plan 02) and N5.
+        The same gate also pins N3, N4, N7, N8 and N9; the three older stamp gates (scope D10 and D12,
+        marked-refresh I3, 166.3.1's C1) were re-specified to assert the date HELD (plan 06).
 - [ ] **`[169-DEAD-ADMIN-JOBS-RPC]` Drop the dead `get_admin_compute_jobs` database function
       (booked 2026-09-25, Phase 169 D-01).**
       It raises "column reference `id` is ambiguous" on every call (its `RETURNS TABLE` declares an
