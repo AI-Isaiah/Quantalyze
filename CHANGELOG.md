@@ -72,6 +72,19 @@ Review rounds 1 to 3, each fix seen RED before it was applied:
   - A mark is sampled when the account is polled, not at a fixed close, so the copy says "daily price", never close-to-close.
 - **Pre-existing and not touched:** the `compute.conventions` inline snapshots B and C fail on the phase base under local Node 25, on a last-digit float difference.
 - **Phase records:** context, research, UI contract, validation strategy, patterns, five plans and their summaries, four review rounds with fix reports, the security register (0 open of 20), verification (human_needed) and tracking. (a330c0094 through cfe0668fd: every docs commit on this branch, including 75c3134da, 03238c759, 02d60d366, b0eb07ae3, 909590d48, 57e080fdb, ee1e6f259, 98b1e0db7, a9ac8ca60, 0530fa3e9, 83df3a54b, 7691f70fa, 15d6b2f87, a8df9d8ee, 415689a24, cebb3bf2b, c5c5cc5ea, fe6aa39a9, 6d9dfdd98, 8dea6d08d, 666f63ffb)
+## [0.131.13.4] - 2026-10-15 — Test fix: the Private link dialog's focus assert waits for the focus move instead of racing it
+
+### Root cause
+- **The test asserted focus before React had run the effect that moves it.** In `src/components/strategy/ShareableLink.test.tsx`, the arm "clipboard rejects and the fallback fails: the Private link dialog opens and shows the minted URL, selectable" found the URL field with `findByLabelText`, then checked `document.activeElement` straight away. The field is in the DOM as soon as React commits. But `Modal`'s `showModal()` and `ShareableLink`'s `focus()` + `select()` both run later, from passive `useEffect`s. That order is deliberate: `showModal` moves focus to the Close button, so the field has to take focus after it. The update starts after `await fetch`, so it is not a sync lane. When React's Scheduler yields between the commit and the passive-effect task, as it does when a render overruns its 5 ms slice on a loaded runner, the assert ran first. It read `<body>`, and the dialog was not open yet. Both CI failures on 2026-10-15 (runs 38744823426 and 38758942630, vitest shard 2) show exactly that DOM: the field is present and the `<dialog>` has no `open` attribute.
+- **This is not a product bug.** In a browser, React flushes pending passive effects before it handles the next user event, so the field always has focus before the user can press a key.
+
+### Fixed
+- **The assert now waits for the dialog to be open and the field to have focus** (`await waitFor`), and then checks the selection as before. This is the same fix the close assert in the revoke test of the same file already carries for the same reason (CI run 38587166468).
+
+### Tests
+- **RED before the fix, measured locally.** The unchanged arm, run alone 12 times, failed 3 times with the CI signature. A 10-copy variant that forces the Scheduler to yield after every task (it moves `performance.now` forward) failed 19 of 20, and every failure printed `dialogOpen=false active=BODY` just before the assert.
+- **GREEN after the fix.** The forced-yield variant passed 30 of 30. The unforced variant passed 30 of 30, the arm alone passed 12 of 12, and the whole file passed 30 of 30 tests in each of 3 runs. The variant was a scratch file and is not committed.
+- **The fixed assert can still fail.** With `urlFieldRef.current?.focus()` neutered in the component, the arm goes RED on the `waitFor` timeout. The component was restored from a byte backup afterwards.
 
 ## [0.131.13.3] - 2026-10-15 — GSDFORMAT: ROADMAP.md and STATE.md take a shape the gsd-tools handlers can edit without corrupting them
 
