@@ -27,6 +27,7 @@ import {
   HOLDING_MARK_WITHHELD_REASONS,
 } from "./holding-compare-adapter";
 import { HoldingsUpdatedAtError } from "@/lib/holdings-account-day";
+import { CRYPTO_EXCHANGES, isCryptoExchange } from "@/lib/closed-sets";
 
 // ---------------------------------------------------------------------------
 // A filter-honouring Supabase stub for the paged `allocator_holdings` read.
@@ -960,6 +961,7 @@ const MARK_FIXTURE = JSON.parse(
 ) as {
   min_priced_days: number;
   withheld_reasons: string[];
+  crypto_venues: string[];
   cases: FixtureCase[];
 };
 const ERROR_CLASSES = { HoldingMarkContractError, HoldingsUpdatedAtError } as const;
@@ -990,6 +992,13 @@ describe("shared fixture: holding_mark_returns_cases.json", () => {
   it("the minimum priced days and the reason vocabulary are the fixture's", () => {
     expect(MARK_FIXTURE.min_priced_days).toBe(HOLDING_COMPARE_MIN_PRICED_DAYS);
     expect([...HOLDING_MARK_WITHHELD_REASONS].sort()).toEqual(MARK_FIXTURE.withheld_reasons);
+  });
+
+  it("venue_census: the crypto venues behind account_balance are the fixture's hand-typed list", () => {
+    expect([...CRYPTO_EXCHANGES].sort()).toEqual(MARK_FIXTURE.crypto_venues);
+    for (const v of MARK_FIXTURE.crypto_venues) expect(isCryptoExchange(v)).toBe(true);
+    expect(isCryptoExchange("mt5")).toBe(false);
+    expect(MARK_FIXTURE.cases.length).toBeGreaterThan(15);
   });
 
   it.each(MARK_FIXTURE.cases.map((c) => [c.name, c] as const))(
