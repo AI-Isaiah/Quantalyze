@@ -24,6 +24,8 @@ import {
   holdingMarkIsFixed,
   holdingWithheldReason,
   classifySpotMarks,
+  classifyDerivativeMarks,
+  analyzeSignedReturns,
   HOLDING_MARK_WITHHELD_REASONS,
 } from "./holding-compare-adapter";
 import { HoldingsUpdatedAtError } from "@/lib/holdings-account-day";
@@ -937,7 +939,7 @@ describe("D-03: per-holding metrics from the daily mark price", () => {
 type FixtureRow = {
   asof: string;
   mark_price: unknown;
-  side: string;
+  side: unknown;
   updated_at: string;
   api_key_id: string;
   value_usd: number;
@@ -952,6 +954,8 @@ type FixtureCase = {
   expected?: { withheld: string | null; priced_days: number; returns: Array<[string, number]> };
   expect_error?: "HoldingMarkContractError" | "HoldingsUpdatedAtError";
   ts?: { historyState: "ready" | "withheld"; null_metrics?: boolean };
+  /** What `analyzeSignedReturns` must give over the case's returns (derivative cases). */
+  ts_nav?: { cumulative_return: number | null; max_drawdown: number | null };
 };
 const MARK_FIXTURE = JSON.parse(
   readFileSync(
@@ -1001,25 +1005,41 @@ describe("shared fixture: holding_mark_returns_cases.json", () => {
     expect(MARK_FIXTURE.cases.length).toBeGreaterThan(15);
   });
 
+  const classify = (c: FixtureCase) =>
+    c.holding_type === "derivative"
+      ? classifyDerivativeMarks(c.rows, c.symbol)
+      : classifySpotMarks(c.rows, c.venue, c.symbol);
+
   it.each(MARK_FIXTURE.cases.map((c) => [c.name, c] as const))(
-    "classifySpotMarks replays %s",
+    "the mark rule replays %s",
     (_name, c) => {
+      expect(["spot", "derivative"]).toContain(c.holding_type);
       if (c.expect_error) {
-        expect(() => classifySpotMarks(c.rows, c.venue, c.symbol)).toThrow(
-          ERROR_CLASSES[c.expect_error],
-        );
+        expect(() => classify(c)).toThrow(ERROR_CLASSES[c.expect_error]);
         return;
       }
-      const got = classifySpotMarks(c.rows, c.venue, c.symbol);
+      const got = classify(c);
       const want = c.expected!;
       expect(got.withheld_reason).toBe(want.withheld);
       expect(got.priced_days).toBe(want.priced_days);
       expect(got.returns.map(([day]) => day)).toEqual(want.returns.map(([day]) => day));
       got.returns.forEach(([, value], i) => expect(value).toBeCloseTo(want.returns[i][1], 12));
+      if (c.ts_nav) {
+        const nav = analyzeSignedReturns(
+          got.returns.map(([, value]) => value),
+          365,
+        );
+        for (const key of ["cumulative_return", "max_drawdown"] as const) {
+          const wantValue = c.ts_nav[key];
+          if (wantValue === null) expect(nav[key]).toBeNull();
+          else expect(nav[key]).toBeCloseTo(wantValue, 12);
+        }
+      }
     },
   );
 
-  it.each(MARK_FIXTURE.cases.map((c) => [c.name, c] as const))(
+  // /compare reads spot only until plan 07 wires the derivative path.
+  it.each(MARK_FIXTURE.cases.filter((c) => c.holding_type === "spot").map((c) => [c.name, c] as const))(
     "fetchHoldingCompareItem maps %s onto what /compare shows",
     async (_name, c) => {
       vi.spyOn(console, "error").mockImplementation(() => {});

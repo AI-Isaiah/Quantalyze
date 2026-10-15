@@ -1,7 +1,7 @@
-"""Phase 167.1.1.1 (BRIDGERETURNS) D-03, SC3: the Python half of the SPOT mark-price rule,
-replayed against the case table the TypeScript twin reads too
-(``tests/fixtures/holding_mark_returns_cases.json``;
-``classifySpotMarks`` in ``src/app/(dashboard)/compare/lib/holding-compare-adapter.ts``).
+"""Phase 167.1.1.1 (BRIDGERETURNS) D-02, D-03, SC3: the Python half of the mark-price rule
+(spot and signed derivative), replayed against the case table the TypeScript twin reads too
+(``tests/fixtures/holding_mark_returns_cases.json``; ``classifySpotMarks`` and
+``classifyDerivativeMarks`` in ``src/app/(dashboard)/compare/lib/holding-compare-adapter.ts``).
 
 Every expectation in that file is hand-typed. Nothing here derives an expectation from
 the code under test.
@@ -23,6 +23,7 @@ from services.holding_marks import (
     DailyMark,
     HoldingMarkContractError,
     adjacent_daily_returns,
+    classify_holding_marks,
     classify_spot_marks,
 )
 
@@ -50,13 +51,14 @@ def test_venue_census_matches_the_shared_fixture() -> None:
 
 
 @pytest.mark.parametrize("case", _CASES, ids=lambda c: c["name"])
-def test_spot_case_matches_the_shared_table(case: dict[str, Any]) -> None:
-    assert case["holding_type"] == "spot"
+def test_case_matches_the_shared_table(case: dict[str, Any]) -> None:
+    assert case["holding_type"] in ("spot", "derivative")
+    args = {"venue": case["venue"], "symbol": case["symbol"], "holding_type": case["holding_type"]}
     if "expect_error" in case:
         with pytest.raises(_ERRORS[case["expect_error"]]):
-            classify_spot_marks(case["rows"], venue=case["venue"], symbol=case["symbol"])
+            classify_holding_marks(case["rows"], **args)
         return
-    got = classify_spot_marks(case["rows"], venue=case["venue"], symbol=case["symbol"])
+    got = classify_holding_marks(case["rows"], **args)
     want = case["expected"]
     assert got.withheld_reason == want["withheld"]
     assert got.priced_days == want["priced_days"]

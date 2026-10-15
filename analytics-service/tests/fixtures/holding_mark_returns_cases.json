@@ -1,7 +1,7 @@
 {
-  "_comment": "Phase 167.1.1.1 (BRIDGERETURNS) D-03, SC3. The cross-runtime oracle for the SPOT mark-price rule. Read by analytics-service/tests/test_holding_marks_fixture.py (classify_spot_marks) and src/app/(dashboard)/compare/lib/holding-compare-adapter.test.ts (classifySpotMarks, fetchHoldingCompareItem). HAND-TYPED: every expected figure was worked out by hand from the case's own marks (the arithmetic is in each case's why), never produced by either implementation. The rule: one mark per UTC day from the row with the latest updated_at instant, ties to the smallest LOWERCASE api_key_id; a finite mark at or below 0 is a gap skipped BEFORE that pick; a return exists only between two ADJACENT calendar days that both carry a mark, keyed by the LATER day; a spot holding needs min_priced_days priced days; the withheld ladder is account_balance, fixed_price (marks not read), then the read contract, then no_price, then too_few_priced_days. ts maps a case onto what /compare shows. Do not add a case here without both runtimes consuming it; the two suites read this file whole.",
+  "_comment": "Phase 167.1.1.1 (BRIDGERETURNS) D-03, SC3. The cross-runtime oracle for the mark-price rule, spot and derivative. Read by analytics-service/tests/test_holding_marks_fixture.py (classify_spot_marks, classify_derivative_marks) and src/app/(dashboard)/compare/lib/holding-compare-adapter.test.ts (classifySpotMarks, classifyDerivativeMarks, analyzeSignedReturns, fetchHoldingCompareItem). HAND-TYPED: every expected figure was worked out by hand from the case's own marks (the arithmetic is in each case's why), never produced by either implementation. The rule: one mark per UTC day from the row with the latest updated_at instant, ties to the smallest LOWERCASE api_key_id; a finite mark at or below 0 is a gap skipped BEFORE that pick; a return exists only between two ADJACENT calendar days that both carry a mark, keyed by the LATER day; a spot holding needs min_priced_days priced days; the SPOT withheld ladder is account_balance, fixed_price (marks not read), then the read contract, then no_price, then too_few_priced_days. DERIVATIVE cases (holding_type derivative; D-02, D-10, D-12) are signed: a day direction is the single long or short value shared by ALL rows of that day (gap-mark rows and every key included); a flat row or mixed sides leave the day with NO direction, a gap; the return from day i-1 to day i carries DAY i-1 direction and exists only between adjacent days that BOTH have a positive mark and a direction; r = s(i-1) * (p_i / p_(i-1) - 1), s = +1 long and -1 short, floored at -1.0; priced_days counts usable days; the DERIVATIVE ladder is option_premium (symbol only, marks not read), the read contract (side must be long, short or flat), no_price, no_direction, too_few_priced_days. ts_nav (optional) is what the TypeScript analyzeSignedReturns must give for the case returns. ts maps a SPOT case onto what /compare shows; derivative cases are not mapped there until plan 07 wires /compare. Do not add a case here without both runtimes consuming it; the two suites read this file whole.",
   "min_priced_days": 30,
-  "withheld_reasons": ["account_balance", "fixed_price", "no_price", "too_few_priced_days"],
+  "withheld_reasons": ["account_balance", "fixed_price", "no_direction", "no_price", "option_premium", "too_few_priced_days"],
   "crypto_venues": ["binance", "bybit", "deribit", "okx", "sfox"],
   "cases": [
     {
@@ -334,6 +334,34 @@
       "rows": [
         {"asof": "2026-01-01", "mark_price": 100, "side": "flat", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
         {"asof": "2026-01-02", "mark_price": 100, "side": "flat", "updated_at": "not-a-time", "api_key_id": "key-a", "value_usd": 100, "quantity": 1}
+      ]
+    },
+    {
+      "name": "worked_example_long",
+      "why": "D-02 worked example (RESEARCH Q4), all rows long, marks 100, 110, 100 on adjacent days. Returns +110/100-1 = 0.1 (keyed day 2) and 100/110-1 = -1/11 = -0.0909090909090909 (day 3). NAV 1.1 then 1.0: cumulative 0, max drawdown (1.0-1.1)/1.1 = -1/11.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 3, "returns": [["2026-01-02", 0.1], ["2026-01-03", -0.0909090909090909]]},
+      "ts_nav": {"cumulative_return": 0.0, "max_drawdown": -0.0909090909090909},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "long", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 110, "side": "long", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 110, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 100, "side": "long", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1}
+      ]
+    },
+    {
+      "name": "worked_example_short",
+      "why": "D-02 worked example (RESEARCH Q4), the same marks 100, 110, 100 with every row short: each return is the long return negated. Returns -0.1 (day 2) and +1/11 = 0.0909090909090909 (day 3). NAV 0.9 then 0.9*(12/11) = 0.981818...: cumulative -0.0181818181818182, max drawdown (0.9-1)/1 = -0.1.",
+      "venue": "bybit",
+      "symbol": "BTCUSDT",
+      "holding_type": "derivative",
+      "expected": {"withheld": "too_few_priced_days", "priced_days": 3, "returns": [["2026-01-02", -0.1], ["2026-01-03", 0.0909090909090909]]},
+      "ts_nav": {"cumulative_return": -0.0181818181818182, "max_drawdown": -0.1},
+      "rows": [
+        {"asof": "2026-01-01", "mark_price": 100, "side": "short", "updated_at": "2026-01-01T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1},
+        {"asof": "2026-01-02", "mark_price": 110, "side": "short", "updated_at": "2026-01-02T10:00:00Z", "api_key_id": "key-a", "value_usd": 110, "quantity": 1},
+        {"asof": "2026-01-03", "mark_price": 100, "side": "short", "updated_at": "2026-01-03T10:00:00Z", "api_key_id": "key-a", "value_usd": 100, "quantity": 1}
       ]
     }
   ]
