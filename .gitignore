@@ -64,6 +64,10 @@ yarn-error.log*
 # allowlisted by path in .gitleaks.toml.
 # Session-scoped workstream pointer is local state, not history:
 .planning/active-workstream
+# gsd-tools' milestone lock is a runtime lock (phase, session, pid, updated_at),
+# rewritten or deleted by every `phase complete`; tracking it put a pid diff in
+# every records commit (untracked 2026-10-15).
+.planning/milestone.lock
 
 # Per-developer AI scratchpads (ADVERSARIAL_USER_NOTES.md etc.) — never committed.
 tasks/
