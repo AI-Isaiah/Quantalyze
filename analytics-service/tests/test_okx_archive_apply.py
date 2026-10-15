@@ -1410,6 +1410,44 @@ class TestArchiveCompleteness:
         assert quarter["longest_billless_run"] == {"days": 42, "from": "2026-08-04", "to": "2026-09-14"}
 
 
+class TestNonExternalPnlIsInTheLiveNumber:
+    """WR-01. A liquidation transfer or forced repayment is not external capital (D-08), but a
+    ``pnl`` and ``fee`` on it are inside the live aggregator's day total. The archive leg must
+    include them or the two ledgers disagree by exactly that amount, and on gap days, where
+    nothing reconciles, the rebuilt P&L silently differs from the method D-07 promises."""
+
+    @pytest.mark.asyncio
+    async def test_a_forced_repayment_with_pnl_and_fee_reconciles_against_the_live_day_that_includes_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        live = _standard_live()
+        live.realized["2026-09-15"] = 16.5  # 20 from the trade plus (-3.00 pnl, -0.50 fee)
+        bills = _standard_bills()._row("SWAP", "114", "2026-09-15", "-3.5", "USDT", "-3", "-0.5")
+        world = _install(monkeypatch, db, live, q3=bills.bytes())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        realized = world.result()["reconcile"]["realized"]
+        assert realized["ok"] is True and realized["days_over_cent"] == 0
+        assert realized["window_total_diff"] == "0"
+
+    @pytest.mark.asyncio
+    async def test_a_coin_denominated_forced_repayment_in_the_live_set_is_a_non_usd_stop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _db_with((STRATEGY_ID, GAP_A))
+        bills = _standard_bills()._row("SWAP", "114", "2026-07-11", "-0.001", "BTC", "-0.001", "0")
+        world = _install(monkeypatch, db, _standard_live(), q3=bills.bytes())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.error_message == "okx_archive_rebuild: non_usd_ccy parse=non_usd_ccy"
+        assert world.result()["census"]["by_ccy"] == {"BTC": 1, "USDT": 7}
+        _no_writes_but_progress(world, db)
+
+
 class TestEvaluationStops:
     @pytest.mark.parametrize(
         ("mutate", "stop_class"),

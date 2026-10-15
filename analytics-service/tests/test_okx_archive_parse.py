@@ -431,11 +431,26 @@ class TestCurrencyStop:
         assert _stop(_aggregate_q3, funding).stop_class == "non_usd_ccy"
         assert _stop(_aggregate_q3, flow).stop_class == "non_usd_ccy"
 
-    def test_currency_non_external_row_in_btc_does_not_raise_and_is_counted_in_the_census(self):
+    def test_currency_non_external_row_in_btc_is_a_stop_because_the_live_path_would_sum_it_as_dollars(self):
+        # WR-01. The live aggregator sums pnl + fee of EVERY non-funding bill in its four
+        # instTypes with no ccy conversion, a liquidation transfer included. A coin-denominated
+        # one inside that set therefore cannot be compared like for like, and was skipped by a
+        # ``continue`` that ran before the currency check. It must hit ``non_usd_ccy`` like
+        # every other counted bucket.
+        data = _q3_with(_row_kwargs("799999013", "110", "2026-07-12 12:00:00", ccy="BTC", pnl="0.3"))
+        err = _stop(_aggregate_q3, data)
+        assert err.stop_class == "non_usd_ccy"
+        assert err.detail["ccys"] == {"BTC": {"rows": 1, "months": ["2026-07"]}}
+        assert "0.3" not in _detail_text(err)
+
+    def test_currency_non_external_coin_row_the_live_path_never_sees_is_counted_not_a_stop(self):
+        # Outside the live instTypes (a blank instType) the live path never reads the row, so
+        # there is nothing to reproduce: counted like the excluded realized classes.
         agg = _aggregate_q3(
-            _q3_with(_row_kwargs("799999013", "110", "2026-07-12 12:00:00", ccy="BTC", balChg="0.3"))
+            _q3_with(_row_kwargs("799999013", "110", "2026-07-12 12:00:00", instType="", ccy="BTC", balChg="0.3"))
         )
         assert agg.census["by_ccy"]["BTC"] == 1
+        assert agg.census["excluded_non_usd_rows"] == 1
         assert "2026-07-12" not in agg.non_external_by_day  # a coin amount is never summed as dollars
         assert agg.non_external_by_day == {"2026-07-15": Decimal("30.00")}
 
@@ -489,6 +504,52 @@ class TestExcludedInstTypeClasses:
         )
         assert "2026-09" not in agg.excluded_by_month
         assert agg.census["excluded_non_usd_rows"] == 1
+
+
+class TestNonExternalRealizedParity:
+    """WR-01: the archive realized leg is ``pnl + fee`` of every non-funding bill in the live
+    path's four instTypes, whatever its subtype (``exchange.fetch_daily_pnl`` filters on
+    ``instType`` and drops only type 8). The seed table keeps liquidation transfers and forced
+    repayments out of FLOWS (they are not external capital), but their ``pnl`` and ``fee`` are
+    inside the live number, so leaving them out of the archive leg changes the P&L of every
+    gap day, where nothing reconciles, relative to the method D-07 promises is identical."""
+
+    def test_a_forced_repayment_row_adds_its_pnl_and_fee_to_the_day(self):
+        # Independent literal: one 114 row, pnl -3.00 and fee -0.50, on a day with no other bill.
+        agg = _aggregate_q3(
+            _q3_with(
+                _row_kwargs("799999030", "114", "2026-07-12 12:00:00", pnl="-3.00", fee="-0.50", balChg="-3.50")
+            )
+        )
+        assert agg.realized_by_day["2026-07-12"] == Decimal("-3.50")
+        # ... and its balance change is still reported as non-external, never as a flow.
+        assert agg.non_external_by_day["2026-07-12"] == Decimal("-3.50")
+        assert "2026-07-12" not in agg.flows_by_day
+
+    def test_it_is_added_to_a_trade_of_the_same_day_not_instead_of_it(self):
+        agg = _aggregate_q3(
+            _q3_with(
+                _row_kwargs("799999031", "2", "2026-07-12 10:00:00", pnl="10.00", fee="-0.25", balChg="9.75"),
+                _row_kwargs("799999032", "115", "2026-07-12 11:00:00", pnl="-4.00", fee="-1.00", balChg="-5.00"),
+            )
+        )
+        assert agg.realized_by_day["2026-07-12"] == Decimal("4.75")
+
+    def test_a_non_external_row_outside_the_live_inst_types_is_excluded_and_reported(self):
+        agg = _aggregate_q3(
+            _q3_with(
+                _row_kwargs("799999033", "16", "2026-07-12 12:00:00", instType="OPTION", pnl="-2.00", fee="-0.20")
+            )
+        )
+        assert agg.realized_by_day.get("2026-07-12", Decimal(0)) == 0
+        assert agg.excluded_by_month["2026-07"]["OPTION"] == Decimal("2.90") - Decimal("2.20")
+
+    def test_a_zero_effect_liquidation_transfer_changes_nothing(self):
+        # The fixture's own 110 row (SWAP, pnl 0, fee 0, balChg 30) shares 07-15 with a
+        # partial liquidation of pnl -25.00 and fee -2.00: the day's realized stays -27.00.
+        agg = _aggregate_q3((FIXTURES / "q3_like.csv").read_bytes())
+        assert agg.realized_by_day["2026-07-15"] == Decimal("-27.00")
+        assert agg.non_external_by_day == {"2026-07-15": Decimal("30.00")}
 
 
 class TestLiveInstTypePin:

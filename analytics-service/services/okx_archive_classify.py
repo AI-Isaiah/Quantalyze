@@ -21,8 +21,10 @@ census extends the table. Do not encode a number from memory here.
 * FUNDING     173, 174    own stream, amount = ``pnl``, no instType filter
 * FLOW        11, 12      external capital, signed by ``balChg``
 * REALIZED    trade-like  ``pnl + fee``, restricted to the live path's instType set
-* NON_EXTERNAL 110, 111, 114, 115, 16, 17   balance movements that are neither P&L nor
-                          external capital (liquidation transfers are NOT flows)
+* NON_EXTERNAL 110, 111, 114, 115, 16, 17   balance movements that are not external capital
+                          (liquidation transfers are NOT flows). Their ``pnl + fee`` is still
+                          inside the live number, so inside the live instType set it joins the
+                          realized leg; their ``balChg`` is collected apart
 * UNKNOWN     everything else: a nonzero effect is a permanent stop
 
 Stop classes raised here (all ``okx_archive_files.ArchiveParseError``):
@@ -255,8 +257,28 @@ def aggregate_archive(
             continue
 
         if bucket is Bucket.NON_EXTERNAL:
-            if usd:
-                non_external[row.day] += row.bal_chg
+            # WR-01. The live aggregator sums ``pnl + fee`` of EVERY non-funding bill in its
+            # four instTypes, whatever the subtype, so a liquidation transfer or forced
+            # repayment carrying either is inside the live number even though it is not
+            # external capital. The archive realized leg must be the same set. Its balChg is
+            # still collected apart (never a flow). A coin-denominated row the live path would
+            # have summed as dollars is a ``non_usd_ccy`` stop like every other counted bucket.
+            in_live_set = row.inst_type in LIVE_REALIZED_INST_TYPES
+            if not usd:
+                if not in_live_set:
+                    if nonzero:
+                        excluded_non_usd += 1
+                elif nonzero:
+                    non_usd_rows[row.ccy or _BLANK] += 1
+                    non_usd_months[row.ccy or _BLANK].add(month)
+                continue
+            non_external[row.day] += row.bal_chg
+            if in_live_set:
+                realized[row.day] += row.pnl + row.fee
+            elif row.pnl + row.fee != 0:
+                cls = row.inst_type or "BLANK"
+                month_entry = excluded.setdefault(month, {})
+                month_entry[cls] = month_entry.get(cls, Decimal(0)) + row.pnl + row.fee
             continue
 
         if bucket is Bucket.REALIZED and row.inst_type not in LIVE_REALIZED_INST_TYPES:
