@@ -19,65 +19,9 @@ import pytest
 
 from routers import match as match_mod
 from services.allocator_equity_derive import HoldingsUpdatedAtError
+from tests.fake_postgrest import FakeDb
 
 ALLOCATOR = "alloc-1"
-
-
-class _Query:
-    def __init__(self, db: "_Db", name: str) -> None:
-        self._db = db
-        self._name = name
-        self._eq: list[tuple[str, Any]] = []
-        self._in: list[tuple[str, list[Any]]] = []
-        self._desc: tuple[str, bool] | None = None
-        self._limit: int | None = None
-
-    def select(self, *_a: Any, **_k: Any) -> "_Query":
-        return self
-
-    def eq(self, col: str, val: Any) -> "_Query":
-        self._eq.append((col, val))
-        return self
-
-    def in_(self, col: str, vals: Any) -> "_Query":
-        self._in.append((col, list(vals)))
-        return self
-
-    def order(self, col: str, desc: bool = False) -> "_Query":
-        self._desc = (col, desc)
-        return self
-
-    def limit(self, count: int) -> "_Query":
-        self._limit = count
-        return self
-
-    def execute(self) -> Any:
-        data = [
-            dict(r)
-            for r in self._db.tables.get(self._name, [])
-            if all(r.get(c) == v for c, v in self._eq)
-            and all(r.get(c) in vs for c, vs in self._in)
-        ]
-        if self._desc is not None:
-            col, desc = self._desc
-            data.sort(key=lambda r: r[col], reverse=desc)
-        # PostgREST: a response never exceeds the explicit limit nor the server's
-        # max_rows (1000 on this project), and a capped read carries no error.
-        ceilings = [n for n in (self._limit, self._db.max_rows) if n is not None]
-        if ceilings:
-            data = data[: min(ceilings)]
-        self._db.reads.append((self._name, list(self._eq)))
-        return type("R", (), {"data": data})()
-
-
-class _Db:
-    def __init__(self, tables: dict[str, list[dict[str, Any]]]) -> None:
-        self.tables = tables
-        self.reads: list[tuple[str, list[tuple[str, Any]]]] = []
-        self.max_rows: int | None = None  # PostgREST's server-side cap
-
-    def table(self, name: str) -> _Query:
-        return _Query(self, name)
 
 
 def _key(key_id: str, **over: Any) -> dict[str, Any]:
@@ -107,6 +51,9 @@ def _holding(
         "symbol": symbol,
         "holding_type": "spot",
         "value_usd": value,
+        "mark_price": 100.0,
+        "side": "flat",
+        "unrealized_pnl_usd": None,
         "asof": asof,
         "updated_at": updated_at,
     }
@@ -119,7 +66,7 @@ def _warm_series(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(match_mod, "reconstruct_symbol_returns", lambda _s, _sym: series)
 
 
-def _ctx(monkeypatch: pytest.MonkeyPatch, db: _Db) -> dict[str, Any]:
+def _ctx(monkeypatch: pytest.MonkeyPatch, db: FakeDb) -> dict[str, Any]:
     monkeypatch.setattr(match_mod, "get_supabase", lambda: db)
     return match_mod._load_holding_portfolio_context(ALLOCATOR)
 
@@ -127,7 +74,7 @@ def _ctx(monkeypatch: pytest.MonkeyPatch, db: _Db) -> dict[str, Any]:
 def test_two_keys_on_different_accounts_holding_one_symbol_are_both_counted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db = _Db(
+    db = FakeDb(
         {
             "api_keys": [_key("key-a"), _key("key-b")],
             "allocator_holdings": [
@@ -151,7 +98,7 @@ def test_two_keys_on_one_account_count_the_account_once(monkeypatch: pytest.Monk
     # key-b is marked a duplicate of key-a. Same day; key-b polled later, so its
     # rows are the account's: BTC 30000 + ETH 5000 = 35000. key-a's BTC 30000 and
     # SOL 12000 do not count.
-    db = _Db(
+    db = FakeDb(
         {
             "api_keys": [
                 _key("key-a", venue_account_id="acct-D"),
@@ -186,7 +133,7 @@ def test_a_keys_row_before_its_accounts_newest_day_is_not_counted(
     # key-a's ETH row is from 10-09, before key-a's own newest day (10-11): gone.
     # key-c shares an account with key-d; key-c's 10-10 row is older than key-d's
     # 10-11 row of the SAME account, so it is gone too. 40000 + 3000 = 43000.
-    db = _Db(
+    db = FakeDb(
         {
             "api_keys": [
                 _key("key-a"),
@@ -219,7 +166,7 @@ def test_a_keys_row_before_its_accounts_newest_day_is_not_counted(
 def test_the_key_read_is_owner_filtered_and_no_audit_log_is_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db = _Db(
+    db = FakeDb(
         {
             "api_keys": [_key("key-a"), _key("key-x", user_id="someone-else")],
             "allocator_holdings": [
@@ -239,7 +186,7 @@ def test_the_key_read_is_owner_filtered_and_no_audit_log_is_read(
 def test_a_row_without_a_parseable_updated_at_raises_like_any_failed_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db = _Db(
+    db = FakeDb(
         {
             "api_keys": [_key("key-a")],
             "allocator_holdings": [_holding("key-a", "BTC", 40000.0, "2026-10-11", None)],
@@ -262,7 +209,7 @@ def test_a_disconnected_key_and_its_replacement_on_one_login_count_the_account_o
     that one account, whose newest day is 10-11, so only key-b's rows count:
     BTC 25000 + ETH 5000 = 30000. Grouped by the marker alone, key-a's 10-10 BTC
     40000 was added on top (BTC 65000 + ETH 5000 = 70000)."""
-    db = _Db(
+    db = FakeDb(
         {
             "api_keys": [
                 _key(
@@ -295,7 +242,7 @@ def test_one_venue_account_id_on_two_exchanges_is_two_accounts(
 ) -> None:
     """The identity is the PAIR (exchange, venue_account_id): the same id string
     on binance and on okx is two accounts, both counted: 40000 + 7000 = 47000."""
-    db = _Db(
+    db = FakeDb(
         {
             "api_keys": [
                 _key("key-a", venue_account_id="login-7"),
@@ -330,7 +277,7 @@ def test_a_quiet_accounts_newest_day_is_read_although_the_history_exceeds_the_se
         for day in ("2026-10-09", "2026-10-10", "2026-10-11")
         for n in range(400)
     ]
-    db = _Db(
+    db = FakeDb(
         {
             "api_keys": [_key("key-a"), _key("key-q")],
             "allocator_holdings": [
@@ -354,7 +301,7 @@ def test_a_capped_day_read_fails_instead_of_scoring_a_partial_book(
     """One key with 1005 rows on its newest day: the server returns 1000 and no
     error. A response that size may be a partial list, so the load raises rather
     than report an AUM for a book it could not fully read."""
-    db = _Db(
+    db = FakeDb(
         {
             "api_keys": [_key("key-a")],
             "allocator_holdings": [
@@ -373,7 +320,7 @@ def test_a_capped_day_read_fails_instead_of_scoring_a_partial_book(
 def test_a_capped_key_read_fails_instead_of_grouping_a_partial_key_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db = _Db(
+    db = FakeDb(
         {
             "api_keys": [_key(f"key-{n:04d}") for n in range(1000)],
             "allocator_holdings": [],
@@ -389,7 +336,7 @@ def test_a_capped_key_read_fails_instead_of_grouping_a_partial_key_list(
 def test_every_holdings_read_is_owner_filtered_and_scoped_to_one_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db = _Db(
+    db = FakeDb(
         {
             "api_keys": [_key("key-a")],
             "allocator_holdings": [
