@@ -787,7 +787,7 @@ def test_the_failing_cell_value_is_not_echoed_into_the_message():
 
 # ---------------------------------------------------------------------------
 # 170.1-01 / D-10 — the founder's routed specimen: a `date,daily_return` file
-# validated as `trades` printed "Failed rule 'column_in_dataframe'." five times.
+# validated as `trades` printed the generic failed-rule sentence five times.
 # ---------------------------------------------------------------------------
 
 def test_routed_specimen_names_each_missing_trades_column():
