@@ -27,6 +27,14 @@ import { describe, it, expect, afterEach } from "vitest";
 import { cleanup } from "@testing-library/react";
 import { CsvValidationEnvelope } from "./CsvValidationEnvelope";
 import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
+import {
+  BESPOKE_SPECIMENS,
+  DATE_FORMAT_AMBIGUOUS,
+  EMPTY_NO_FILE,
+  PARSE_ERROR,
+  TOO_MANY_ROWS,
+  UNKNOWN_PANDERA_RULE_FALLBACK,
+} from "./CsvValidationEnvelope.producer-specimens";
 
 afterEach(() => cleanup());
 
@@ -480,22 +488,28 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
     expect(text).not.toContain("failed rule");
   });
 
-  it("LONG-TEXT BACKSTOP: a long BESPOKE producer message renders verbatim and keeps its row index", () => {
+  it("LONG-TEXT BACKSTOP: a long BESPOKE producer message renders verbatim in its summary and its list item", () => {
+    // `parse_error` is emitted at row 0 only (csv_validator.py), so the
+    // absent-row shape is the one under test.
     const LONG_BESPOKE =
-      "This explanation is written by the producer and continues at length about exactly which of the many " .repeat(
+      "Could not parse CSV: " +
+      "the parser explains at length exactly which of the many fields is wrong ".repeat(
         4,
-      );
+      ).trim();
     renderWire({
       code: "CSV_VALIDATION_FAILED",
       human_message: "Your file did not pass validation.",
       debug_context: {
-        pandera_errors: [{ rule: "parse_error", row: 12, message: LONG_BESPOKE }],
+        pandera_errors: [{ rule: "parse_error", row: 0, message: LONG_BESPOKE }],
       },
       correlation_id: null,
     });
 
-    const text = panelText();
-    expect(text).toContain(`Row 12: ${LONG_BESPOKE}`);
+    const panel = screen.getByTestId("wizard-csv-error");
+    expect(panel.querySelector("summary")?.textContent).toBe(LONG_BESPOKE);
+    expect([...panel.querySelectorAll("li")].map((li) => li.textContent)).toEqual([
+      LONG_BESPOKE,
+    ]);
   });
 });
 
@@ -781,14 +795,121 @@ describe("[170.1-02 R-3] CsvValidationEnvelope — other-rule lines from labels"
     expect(titleAttrs().join("\n")).not.toContain("mystery");
   });
 
-  it("bespoke producer messages render byte for byte", () => {
-    const TOO_MANY = "Your file has 60000 rows. The limit is 50000 rows per upload.";
-    const AMBIGUOUS =
-      "We could not tell whether 03/04/2024 is day-first or month-first. Use YYYY-MM-DD dates.";
+  it("two bespoke producer messages render byte for byte in the list", () => {
     renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
-      { rule: "too_many_rows", row: 0, message: TOO_MANY },
-      { rule: "date_format_ambiguous", row: 0, message: AMBIGUOUS },
+      TOO_MANY_ROWS,
+      DATE_FORMAT_AMBIGUOUS,
     ]);
-    expect(lines()).toEqual([TOO_MANY, AMBIGUOUS]);
+    expect(lines()).toEqual([TOO_MANY_ROWS.message, DATE_FORMAT_AMBIGUOUS.message]);
+  });
+});
+
+/**
+ * 170.1 round-1 WR-01 + WR-02. The producer itself emits four rules that have
+ * no `CSV_RULE_LABELS` entry (`too_many_rows`, `empty`, `parse_error`,
+ * `date_format_ambiguous`). The UI-SPEC fallback "This value does not pass a
+ * format check" is written for an unknown PANDERA rule and is FALSE for them: a
+ * 7300-row upload used to read "Rule violated: This value does not pass a
+ * format check. We checked the whole file, so no single row is at fault."
+ *
+ * Specimens are the producer's real messages (see the specimens module). For
+ * each rule the whole panel is pinned: headline, cause line (absent), summary
+ * and list item. No new copy: the only words are the producer's own.
+ */
+describe("[170.1 round-1 WR-01/WR-02] CsvValidationEnvelope — bespoke producer rules never read the pandera fallback", () => {
+  const paragraphs = () =>
+    [...screen.getByTestId("wizard-csv-error").querySelectorAll("p")].map(
+      (p) => p.textContent,
+    );
+
+  it.each(BESPOKE_SPECIMENS.map((s) => [`${s.rule}: ${s.message.slice(0, 40)}`, s] as const))(
+    "🔴 %s: headline, no cause line, producer sentence as summary and list item",
+    (_name, specimen) => {
+      renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+        specimen,
+      ]);
+      const panel = screen.getByTestId("wizard-csv-error");
+
+      // headline, then ONLY the correlation marker: no cause line claims a label
+      expect(paragraphs()).toEqual(["Your file failed validation", "correlation_id: —"]);
+      expect(panel.querySelector("summary")?.textContent).toBe(specimen.message);
+      expect([...panel.querySelectorAll("li")].map((li) => li.textContent)).toEqual([
+        specimen.message,
+      ]);
+
+      const text = panel.textContent ?? "";
+      expect(text, "the unknown-pandera-rule fallback is false for a producer rule").not.toContain(
+        UNKNOWN_PANDERA_RULE_FALLBACK,
+      );
+      expect(text).not.toContain("Rule violated");
+      expect(text).not.toContain(specimen.rule);
+    },
+  );
+
+  it("the 7300-row specimen reads the row limit and nothing about a format check", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      TOO_MANY_ROWS,
+    ]);
+    expect(screen.getByTestId("wizard-csv-error").textContent).toContain(
+      "CSV exceeds the 5000-row limit (got 7300 rows).",
+    );
+  });
+
+  it("a bespoke message with no text falls back rather than rendering a blank summary", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      { rule: "parse_error", row: 0, message: "   " },
+    ]);
+    expect(screen.getByTestId("wizard-csv-error").querySelector("summary")?.textContent).toBe(
+      UNKNOWN_PANDERA_RULE_FALLBACK,
+    );
+  });
+
+  it("a genuinely unknown PANDERA rule keeps the UI-SPEC fallback in cause line and summary", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      { rule: "mystery_rule", row: 4, message: "Column 'x' failed rule 'mystery_rule' at row 4." },
+    ]);
+    const panel = screen.getByTestId("wizard-csv-error");
+    expect(paragraphs()[1]).toBe(
+      "Rule violated: This value does not pass a format check. Expand below for the row-level breakdown.",
+    );
+    expect(panel.querySelector("summary")?.textContent).toBe(
+      "This value does not pass a format check (1 rows)",
+    );
+  });
+
+  it("🔴 two unlabelled pandera rules are named once in the multi-rule line, never 'X, X'", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      { rule: "mystery_rule", row: 4, message: "Column 'x' failed rule 'mystery_rule' at row 4." },
+      { rule: "other_mystery", row: 6, message: "Column 'y' failed rule 'other_mystery' at row 6." },
+    ]);
+    expect(paragraphs()[1]).toBe(
+      "Across 2 rule categories: This value does not pass a format check.",
+    );
+  });
+
+  it("a bespoke rule beside a labelled rule names each by its own words in the multi-rule line", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      DATE_FORMAT_AMBIGUOUS,
+      { rule: "monotonic_dates", row: 5, message: "Column 'date' failed rule 'monotonic_dates' at row 5." },
+    ]);
+    const panel = screen.getByTestId("wizard-csv-error");
+    expect(paragraphs()[1]).toBe(
+      "Across 2 rule categories: Could not determine the date format — these dates are ambiguous (each could be DD/MM/YYYY or MM/DD/YYYY). Please re-upload with ISO dates in YYYY-MM-DD format, Dates must be strictly increasing.",
+    );
+    expect(panel.textContent).not.toContain(UNKNOWN_PANDERA_RULE_FALLBACK);
+    expect([...panel.querySelectorAll("summary")].map((s) => s.textContent)).toEqual([
+      DATE_FORMAT_AMBIGUOUS.message,
+      "Dates must be strictly increasing (1 rows)",
+    ]);
+  });
+
+  it("an empty upload and a parse failure each read their own sentence", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      EMPTY_NO_FILE,
+      PARSE_ERROR,
+    ]);
+    expect(paragraphs()[1]).toBe(
+      "Across 2 rule categories: No file uploaded, Could not parse CSV: Error tokenizing data. C error: Expected 2 fields in line 3, saw 4.",
+    );
   });
 });
