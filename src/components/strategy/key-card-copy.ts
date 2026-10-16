@@ -215,7 +215,7 @@ export const PANEL_STOP_COPY = {
   chain_unreadable: {
     label: "Sync not started",
     detail:
-      "This sync did not start: we could not check whether a sync for this strategy is still running. Try again in a moment.",
+      "This sync did not start: we could not check whether a sync for this strategy is still running. Reload this page, then start the sync again.",
   },
   // Review fix round 2 (167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1): the route's
   // DETERMINISTIC degrade causes. "Try again in a moment" is false there, so

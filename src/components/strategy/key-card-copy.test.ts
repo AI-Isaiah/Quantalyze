@@ -192,7 +192,7 @@ describe("KCS-GATE (167.2-REVIEW CR-01 / WR-06): the pre-attempt job-state gate 
   it("KCS-GATE-UNREADABLE: label and detail", () => {
     expect(PANEL_STOP_COPY.chain_unreadable.label).toBe("Sync not started");
     expect(PANEL_STOP_COPY.chain_unreadable.detail).toBe(
-      "This sync did not start: we could not check whether a sync for this strategy is still running. Try again in a moment.",
+      "This sync did not start: we could not check whether a sync for this strategy is still running. Reload this page, then start the sync again.",
     );
   });
 
