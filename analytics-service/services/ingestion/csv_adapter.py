@@ -34,6 +34,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from services.csv_fault import report_csv_internal_fault
 from services.ingestion.adapter import (
     Fingerprint,
     KeySubmissionRequest,
@@ -145,14 +146,20 @@ class CsvAdapter:
         try:
             envelope = csv_validator.validate_csv(raw_bytes, fmt)
         except Exception as exc:  # noqa: BLE001 — classified, never echoed
-            # Defence in depth behind the validator's own never-raise contract.
-            # Before this arm only ValueError was caught, so any other type
-            # left `/process-key` as a bodyless 500 whose traceback (server log,
-            # error tracker) carries the exception text, and that text can be a
-            # cell. Log the TYPE only. The code and sentence are the legacy
+            # `validate_csv` is contracted to return an envelope for any file
+            # content (`tests/test_csv_never_raises_170_1.py` pins that over a
+            # hostile corpus), so an exception here is an internal fault. Before
+            # this arm only ValueError was caught, so any other type left
+            # `/process-key` as a bodyless 500 whose traceback (server log, error
+            # tracker) carries the exception text, and that text can be a cell.
+            #
+            # 170.1 / D-14 (SFH-L1) — log the type and the INNERMOST FRAME and
+            # capture to Sentry with the exception text, frame locals and request
+            # body (this path's body IS the upload) withheld; never the text. See
+            # services/csv_fault.py. The code and sentence are the legacy
             # router's own CSV_UPSTREAM_FAIL, which the wizard already maps to
             # its own copy.
-            logger.error("[csv-adapter] validate_csv raised %s", type(exc).__name__)
+            report_csv_internal_fault(exc, source="csv-adapter")
             return ValidationResult(
                 valid=False,
                 read_only=None,

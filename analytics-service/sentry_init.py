@@ -94,6 +94,15 @@ _PII_KEYS: frozenset[str] = frozenset({
     "_proxy",
     "_egress_proxy",
     "worker_egress_proxy_url",
+    # --- 170.1 / D-14 (SFH-L1) — the CSV upload itself. `/process-key` carries the
+    # whole file as `context.raw_bytes_base64` (legacy callers: `raw_bytes`) in its
+    # JSON body, and the request integration attaches that body to EVERY event
+    # raised during the request. The file's cells are user data that can hold PII,
+    # and neither key was on the denylist, so a small upload shipped to Sentry
+    # base64-encoded on any error event from that request (measured). Swept at any
+    # depth by `_broker_quirk_sweep`, like the other local extras.
+    "raw_bytes_base64",
+    "raw_bytes",
 })
 
 # Mirror of src/lib/admin/pii-scrub.ts L27 DENYLIST_PREFIX. Case-insensitive.
