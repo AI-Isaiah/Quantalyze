@@ -663,11 +663,46 @@ def _carries_zone(value: str) -> bool:
     return parsed is not pd.NaT and getattr(parsed, "tzinfo", None) is not None
 
 
-def _normalise_date_zones(df: pd.DataFrame, fmt: str) -> tuple[list[int | None] | None, dict[int, str]]:
+# A capitalised zone NAME (`EST`, `CEST`, `AEST`) after a wall-clock time. pandas
+# reads such a value as NaT under every reading, so `_carries_zone` cannot see it
+# and, in a day-first column, the day/month detector would turn the cell into a
+# blank (`not_nullable`) instead of the date error it is (review SFH-R2).
+_TRAILING_ZONE_NAME_RE = re.compile(
+    r"(?P<rest>.*\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?)\s*[A-Z]{2,5}",
+    re.ASCII,
+)
+
+
+def _names_an_unread_zone(value: str) -> bool:
+    """True when `value` is a readable date and time followed by a zone NAME that
+    pandas will not read (so the whole value is NaT).
+
+    A value pandas reads as it stands (`10:00 PM`, where `PM` is a meridian and
+    not a zone) is not this case, and neither is one whose date part is not
+    readable either: that stays for pandera to report as it always has.
+    """
+    m = _TRAILING_ZONE_NAME_RE.fullmatch(value.strip())
+    if m is None:
+        return False
+    try:
+        if pd.to_datetime(value, errors="coerce") is not pd.NaT:
+            return False
+        rest = m.group("rest")
+        return any(
+            pd.to_datetime(rest, errors="coerce", dayfirst=dayfirst) is not pd.NaT
+            for dayfirst in (False, True)
+        )
+    except (ValueError, OverflowError, TypeError):
+        return False
+
+
+def _normalise_date_zones(
+    df: pd.DataFrame, fmt: str
+) -> tuple[list[int | None] | None, dict[int, str], dict[int, str]]:
     """Strip every recognised trailing UTC offset from `df["date"]` (in place,
     keeping the wall clock) and fail closed on any zone left over.
 
-    Returns `(offsets, rejected)`:
+    Returns `(offsets, rejected, named)`:
       - `offsets`: per row, the stripped offset in seconds or None, or None
         overall when no row had one. A column with no offsets is left
         byte-for-byte unchanged.
@@ -675,20 +710,27 @@ def _normalise_date_zones(df: pd.DataFrame, fmt: str) -> tuple[list[int | None] 
         still carries a zone after the strip. Each is replaced in `df` by
         `_UNSUPPORTED_ZONE_TOKEN`, so pandera reports it as a date error at its
         real row. The caller restores the original text for the preview.
+      - `named`: row position -> the cell as written, for every cell that is a
+        readable date and time followed by a zone NAME pandas will not read
+        (`_names_an_unread_zone`). These cells are NOT touched in `df`: left as
+        they are, pandera already reports them as a date error. They are
+        reported here only so `validate_csv` can put them back when the
+        day-first detector rewrites the column and turns them into blanks.
 
     Only a string that ends in a TIME followed by an offset is stripped, so a
     plain date such as `2024-03-30` (whose `-30` is a day, not an offset) is
     never altered.
     """
     if "date" not in df.columns:
-        return None, {}
+        return None, {}, {}
     col = df["date"]
     if not (pd.api.types.is_string_dtype(col) or pd.api.types.is_object_dtype(col)):
-        return None, {}
+        return None, {}, {}
 
     cleaned: list[Any] = []
     offsets: list[int | None] = []
     rejected: dict[int, str] = {}
+    named: dict[int, str] = {}
     changed = False
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # dateutil's per-value zone warnings
@@ -699,12 +741,14 @@ def _normalise_date_zones(df: pd.DataFrame, fmt: str) -> tuple[list[int | None] 
                 if _carries_zone(wall):
                     rejected[position] = value
                     wall, offset = _UNSUPPORTED_ZONE_TOKEN, None
+                elif offset is None and _names_an_unread_zone(wall):
+                    named[position] = value
                 changed = changed or wall is not value
             cleaned.append(wall)
             offsets.append(offset)
     if changed:
         df["date"] = pd.Series(cleaned, index=df.index, dtype=col.dtype)
-    return (offsets if any(o is not None for o in offsets) else None), rejected
+    return (offsets if any(o is not None for o in offsets) else None), rejected, named
 
 
 def _apply_trade_offsets(df: pd.DataFrame, offsets: list[int | None]) -> None:
@@ -1094,13 +1138,15 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # determined (validate_csv rejects rather than guess). See
     # _detect_and_normalize_date_column.
     # 170.1 / D-14 amendment: offsets stripped (or rejected) before any parse.
-    zone_offsets, zone_rejected = _normalise_date_zones(df, fmt)
+    zone_offsets, zone_rejected, zone_named = _normalise_date_zones(df, fmt)
     date_result = _detect_and_normalize_date_column(df)
-    if zone_rejected and pd.api.types.is_datetime64_any_dtype(df["date"]):
+    if (zone_rejected or zone_named) and pd.api.types.is_datetime64_any_dtype(df["date"]):
         # The detector rewrote the column and wrote a NaT where it could not read
-        # the placeholder; put the placeholder back so pandera reports the cell
-        # through `coerce_dtype`, as it does in a file the detector leaves alone,
-        # and not as a blank (`not_nullable`).
+        # the placeholder, or a zone NAME it will not read; put the placeholder
+        # back so pandera reports the cell through `coerce_dtype`, as it does in a
+        # file the detector leaves alone, and not as a blank (`not_nullable`).
+        # (Review SFH-R2: a named zone is only ever in this state after a rewrite.)
+        zone_rejected = {**zone_rejected, **zone_named}
         restored = df["date"].astype(object)
         restored.iloc[list(zone_rejected)] = _UNSUPPORTED_ZONE_TOKEN
         df["date"] = restored

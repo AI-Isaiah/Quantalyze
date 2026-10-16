@@ -479,6 +479,101 @@ def test_a_bad_zone_in_a_day_first_file_is_the_same_date_error_at_its_real_row(
     assert "0000-00-00" not in json.dumps(envelope, default=str)
 
 
+# Review SFH-R2 (D-14 final round). A NAMED zone the validator does not read
+# (`EST`, `CET`, ...) beside recognised offsets, in a DAY-FIRST column. pandas
+# reads such a value as NaT under every reading, so the zone check never saw it,
+# the day/month detector rewrote the column, and the unreadable cell became a
+# blank: `not_nullable` ("A required value is blank") instead of the
+# `coerce_dtype` ("A value is not a valid date or number") the D-14 amendment
+# requires. The same cell in an ISO column was already `coerce_dtype`.
+DAY_FIRST_NAMED_ZONE = [
+    "13/01/2024 10:00 +01:00",
+    "14/01/2024 10:00 +01:00",
+    "15/01/2024 10:00 EST",
+    "16/01/2024 10:00 +01:00",
+]
+ISO_NAMED_ZONE = [
+    "2024-01-13 10:00 +01:00",
+    "2024-01-14 10:00 +01:00",
+    "2024-01-15 10:00 EST",
+    "2024-01-16 10:00 +01:00",
+]
+
+
+def _date_errors(envelope: dict) -> list[tuple[str, int, str, str]]:
+    return [
+        (e["rule"], e["row"], e["message"], e["column"])
+        for e in envelope["errors"]
+        if e["rule"].startswith(COERCE_RULE_PREFIX)
+    ]
+
+
+@pytest.mark.parametrize("fmt", list(HEADER))
+@pytest.mark.parametrize(
+    "dates,bad_row",
+    [
+        pytest.param(DAY_FIRST_NAMED_ZONE, 3, id="day-first-est-in-the-middle"),
+        pytest.param(
+            ["13/01/2024 10:00 EST", "14/01/2024 10:00 +01:00", "15/01/2024 10:00 +01:00", "16/01/2024 10:00 +01:00"],
+            1,
+            id="day-first-est-first",
+        ),
+        pytest.param(
+            ["13/01/2024 10:00 +01:00", "14/01/2024 10:00 +01:00", "15/01/2024 10:00 +01:00", "16/01/2024 10:00 CEST"],
+            4,
+            id="day-first-cest-last",
+        ),
+    ],
+)
+def test_a_named_zone_in_a_day_first_file_is_a_date_error_not_a_blank(
+    fmt: str, dates: list[str], bad_row: int
+) -> None:
+    envelope = validate_csv(_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert {row for _, row, _, _ in _date_errors(envelope)} == {bad_row}, envelope["errors"]
+    assert "not_nullable" not in {e["rule"] for e in envelope["errors"]}, envelope["errors"]
+    assert "0000-00-00" not in json.dumps(envelope, default=str)
+
+
+@pytest.mark.parametrize("fmt", list(HEADER))
+def test_the_day_first_named_zone_error_has_the_shape_the_iso_file_gets(fmt: str) -> None:
+    """Rule string, row, message and column are what pandera emits for the same
+    cell in an ISO column: the day-first file must not read differently."""
+    day_first = validate_csv(_file(fmt, DAY_FIRST_NAMED_ZONE), fmt)
+    iso = validate_csv(_file(fmt, ISO_NAMED_ZONE), fmt)
+
+    assert day_first["ok"] is False and iso["ok"] is False
+    assert _date_errors(iso), iso["errors"]  # the ISO path still gives coerce_dtype
+    assert _date_errors(day_first) == _date_errors(iso)
+
+
+def test_the_repro_from_the_review_gives_coerce_dtype_at_row_3() -> None:
+    """Five rows, `daily_returns`, one `EST` among `+01:00` rows (SFH-R2)."""
+    dates = [
+        "13/01/2024 10:00 +01:00",
+        "14/01/2024 10:00 +01:00",
+        "15/01/2024 10:00 EST",
+        "16/01/2024 10:00 +01:00",
+        "17/01/2024 10:00 +01:00",
+    ]
+    raw = ("date,daily_return\n" + "\n".join(f"{d},0.0{i + 1}" for i, d in enumerate(dates)) + "\n").encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert envelope["ok"] is False
+    assert [(rule.split("(")[0], row) for rule, row, _, _ in _date_errors(envelope)] == [("coerce_dtype", 3)]
+    assert "not_nullable" not in {e["rule"] for e in envelope["errors"]}
+
+
+def test_a_time_with_am_pm_is_not_mistaken_for_a_zone_name() -> None:
+    """Control for the reach of the rule: `PM` is a trailing capital word too, but
+    pandas reads the value, so it is a date and not a zone."""
+    dates = ["13/01/2024 10:00 PM", "14/01/2024 10:00 PM", "15/01/2024 10:00 PM", "16/01/2024 10:00 PM"]
+    envelope = validate_csv(_file("daily_returns", dates), "daily_returns")
+
+    assert envelope["ok"] is True, envelope["errors"]
+
+
 def test_the_preview_of_a_rejected_zone_file_shows_what_the_user_wrote() -> None:
     """The guard replaces the cell with an unparseable token while pandera runs.
     That token is an implementation detail and must not reach the preview."""
