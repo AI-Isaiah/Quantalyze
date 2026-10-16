@@ -1090,7 +1090,7 @@ describe("ApiKeyManager + the REAL job-state read: no attempt starts while a cha
 describe("ApiKeyManager + the REAL job-state read: the pre-attempt gate cannot hang the card (167.2-REVIEW-R2 WR-03)", () => {
   // Hand-typed from the UI-SPEC review-fix row KCS-GATE-UNREADABLE.
   const GATE_UNREADABLE =
-    "This sync did not start: we could not check whether a sync for this strategy is still running. Try again in a moment.";
+    "This sync did not start: we could not check whether a sync for this strategy is still running. Reload this page, then start the sync again.";
   /** 15 s, hand-typed: `CHAIN_JOB_READ_BOUND_MS`. */
   const CHAIN_JOB_BOUND = 15_000;
 
@@ -1195,7 +1195,7 @@ describe("ApiKeyManager: the Delete's membership read is bounded (167.2-REVIEW-R
 describe("ApiKeyManager + the REAL job-state read: a deterministic DEGRADED answer does not promise a retry (167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1)", () => {
   // Hand-typed from the UI-SPEC round-2 rows.
   const GATE_UNREADABLE =
-    "This sync did not start: we could not check whether a sync for this strategy is still running. Try again in a moment.";
+    "This sync did not start: we could not check whether a sync for this strategy is still running. Reload this page, then start the sync again.";
   // The detail holds a contact-form link (164.6.6.3.5), so match the <p> by its
   // whole textContent, not by its own text nodes.
   const wholeText = (text: string) => (_content: string, el: Element | null) =>
@@ -1252,7 +1252,7 @@ describe("ApiKeyManager + the REAL job-state read: a deterministic DEGRADED answ
     },
   );
 
-  it("GATE-TRANSIENT (CONTROL): a DEGRADED body with no reason (a failed read) keeps the \"in a moment\" copy", async () => {
+  it("GATE-TRANSIENT (CONTROL): a DEGRADED body with no reason (a failed read) keeps the reload-and-start-again copy", async () => {
     await resyncAgainst({ jobStatus: null, stalled: false, memberProgress: [], degraded: true });
     expect(screen.getByText(GATE_UNREADABLE)).toBeInTheDocument();
     expect(screen.queryByText(wholeText(GATE_PERSISTENT))).not.toBeInTheDocument();

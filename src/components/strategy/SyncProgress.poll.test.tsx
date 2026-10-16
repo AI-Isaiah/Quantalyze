@@ -987,7 +987,7 @@ describe("SyncProgress — the in-flight hints promise no duration (167.2-REVIEW
   // minutes. The sync may still be running". Hand-typed from the UI-SPEC
   // review-fix row KCS-SLOW, never imported.
   const KCS_SLOW =
-    "Large accounts can take longer. This panel checks for 2 minutes; the sync may still be running after that.";
+    "This panel checks for 2 minutes; the sync may still be running after that.";
 
   it("NO-DURATION-PROMISE: no estimate before 60 s, the KCS-SLOW line after it, and never a duration the sync is said to take", async () => {
     const { container } = render(
@@ -999,6 +999,13 @@ describe("SyncProgress — the in-flight hints promise no duration (167.2-REVIEW
 
     await tick(61_000);
     expect(container.textContent).toContain(KCS_SLOW);
+    // The whole paragraph, not a substring: a sentence added in front of the
+    // locked line (the retired "Large accounts can take longer.") must fail.
+    const note = Array.from(container.querySelectorAll("p")).find((p) =>
+      p.textContent?.includes(KCS_SLOW),
+    );
+    expect(note?.textContent).toBe(KCS_SLOW);
+    expect(container.textContent).not.toContain("Large accounts");
     expect(container.textContent).not.toMatch(/up to 2 minutes/);
     expect(container.textContent).not.toMatch(/taking longer than usual/);
   });

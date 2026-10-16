@@ -3167,7 +3167,7 @@ describe("[167-06] the persisted credential state renders on the manager's key c
     // ── 167.2-REVIEW-SFH L-1 / L-2: a withheld success leaves a trace ─────
     // Hand-typed from the UI-SPEC review-fix row KCS-FINISH-UNVERIFIED.
     const FINISH_UNVERIFIED =
-      "This sync finished, but the key list could not be re-read to confirm the key's status. Reload this page to see it.";
+      "This sync finished, but we could not re-read the key list to confirm the key's status. Reload this page to see it.";
 
     it("L1-NOTE-SURVIVES: a success withheld for an unverified list leaves a note that the late clean re-read does not clear, and the next attempt does", async () => {
       routeFetch();
@@ -3659,7 +3659,7 @@ describe("[167-06] the persisted credential state renders on the manager's key c
         });
         await waitFor(() => {
           expect(within(confirmDialog()).getByTestId("delete-composite-warning")).toHaveTextContent(
-            "This key is part of 1 composite strategy: a composite whose name could not be read.",
+            "This key is part of 1 composite strategy: a composite whose name we could not read.",
           );
         });
       } finally {
@@ -3808,7 +3808,7 @@ describe("[167-06] the persisted credential state renders on the manager's key c
       );
       await waitFor(() => {
         expect(within(confirmDialog()).getByTestId("delete-composite-warning")).toHaveTextContent(
-          "This key is part of 1 composite strategy: a composite whose name could not be read.",
+          "This key is part of 1 composite strategy: a composite whose name we could not read.",
         );
       });
       expect(membershipReadCaptures()).toHaveLength(0);
