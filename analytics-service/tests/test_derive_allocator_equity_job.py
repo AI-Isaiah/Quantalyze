@@ -4590,3 +4590,136 @@ async def test_no_capital_exit_two_candidates_each_leave_on_their_own_day() -> N
         {"api_key_id": "key-B", "reason": "dust", "day": d[2]},
         {"api_key_id": "key-D", "reason": "dust", "day": d[4]},
     ]
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2.1.1 WRITERRESIDUALS plan 02, SC-2 (decision D-03): a single FAILING key
+# whose series ends before the book's last day.
+#
+# WHY. Such a key is counted, but its series stopped the day it began to fail and
+# the compose carries it flat at r = 0 (the benign ``stale_mark_carry``) while the
+# rest of the book moves. The book's return is diluted by frozen capital and the
+# curve still read "ready". A shared account with no working key already raises
+# ``shared_account_no_working_key`` for the same dilution; a LONE failing key did
+# not. A key that works but ends early, a failing key that reaches the book's last
+# day, and a key that leaves the book on purpose (a no-capital exit) dilute nothing
+# and raise nothing.
+# ---------------------------------------------------------------------------
+
+_SC2_ALLOC = "alloc-sc2"
+_SC2_DAYS = [f"2026-06-{n:02d}" for n in range(1, 6)]  # 06-01 .. 06-05
+
+
+def _sc2_book(
+    *,
+    a_status: str,
+    a_days: list[str],
+    b_days: list[str] | None = None,
+    a_returns: bool = True,
+    alloc: str = _SC2_ALLOC,
+) -> _FakeSupabase:
+    """Two single-key accounts: A (``a_status``, series over ``a_days``) and a
+    working B (series over ``b_days``, default the whole span). Distinct stamped
+    venue ids, so neither the identity gate nor SC-6 is in play."""
+    b_days = _SC2_DAYS if b_days is None else b_days
+    keys = [
+        _gate_key("key-A", alloc, venue_account_id="venue-a", sync_status=a_status),
+        _gate_key("key-B", alloc, venue_account_id="venue-b"),
+    ]
+    csv: list[dict] = []
+    derived: list[dict] = [_stale_curve(alloc)]
+    for key_id, days, anchor in (
+        ("key-A", a_days if a_returns else [], 40_000.0),
+        ("key-B", b_days, 60_000.0),
+    ):
+        csv += [
+            {"api_key_id": key_id, "allocator_id": alloc, "date": day, "daily_return": 0.0}
+            for day in days
+        ]
+        derived.append({
+            "allocator_id": alloc,
+            "kind": f"key_inputs:{key_id}",
+            "payload": {
+                "flows": [], "anchor_usd": anchor,
+                "anchor_asof": (days or _SC2_DAYS)[-1], "venue": "binance",
+            },
+        })
+    return _FakeSupabase({
+        "api_keys": keys, "csv_daily_returns": csv, DERIVED_TABLE: derived, LEGACY_TABLE: [],
+    })
+
+
+@pytest.mark.asyncio
+async def test_sc2_failing_single_key_ending_early_blocks() -> None:
+    """A is failing (``error``) and its returns end two days before B's. The book
+    carries A flat for those two days, so the curve is untrustworthy under
+    ``failing_key_series_ended``. This is the derive half; the reader line is
+    pinned by the writer_residual_resolution parity fixture."""
+    fake = _sc2_book(a_status="error", a_days=_SC2_DAYS[:3])
+    assert (await _run_gate(fake, _SC2_ALLOC)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "failing_key_series_ended" in payload["degrade_reasons"], payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+
+
+@pytest.mark.asyncio
+async def test_sc2_failing_key_that_reaches_the_books_last_day_dilutes_nothing() -> None:
+    """The same failing A, but its series reaches B's last day: no frozen capital
+    is carried, so nothing is raised and the curve stays trustworthy."""
+    fake = _sc2_book(a_status="error", a_days=_SC2_DAYS)
+    assert (await _run_gate(fake, _SC2_ALLOC)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "failing_key_series_ended" not in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_sc2_working_key_ending_early_raises_only_the_benign_carry() -> None:
+    """A WORKING key that ends early is a sync lag, which the daily recompute
+    answers; D-03 names a FAILING key. Only the benign ``stale_mark_carry`` shows."""
+    fake = _sc2_book(a_status="connected", a_days=_SC2_DAYS[:3])
+    assert (await _run_gate(fake, _SC2_ALLOC)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "failing_key_series_ended" not in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_sc2_failing_key_that_leaves_the_book_on_purpose_raises_nothing() -> None:
+    """RESEARCH Pitfall 7. A failing key in ``departed_end_by_key`` (here a
+    no-capital exit: a Deribit dust key that is composed through its terminal day
+    and then LEAVES the book) carries no frozen capital past that day, so ending
+    early is its intended shape and not dilution."""
+    seed = _no_capital_book()
+    seed["api_keys"][1]["sync_status"] = "error"  # key-B: failing, ends on day 3 of 5
+    payload = await _compose_no_capital_book(seed)
+    assert "failing_key_series_ended" not in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert payload["no_capital_exited_keys"], "the key must really have exited"
+
+
+@pytest.mark.asyncio
+async def test_sc2_failing_key_recovering_clears_the_token() -> None:
+    """RESEARCH Pitfall 6. No grace is added: the token is a property of this
+    derive's inputs. The same book with A back to working on the next derive
+    carries no token."""
+    failing = _sc2_book(a_status="error", a_days=_SC2_DAYS[:3])
+    assert (await _run_gate(failing, _SC2_ALLOC)).outcome.name == "DONE"
+    assert "failing_key_series_ended" in _composed_payload(failing)["degrade_reasons"]
+    recovered = _sc2_book(a_status="connected", a_days=_SC2_DAYS[:3])
+    assert (await _run_gate(recovered, _SC2_ALLOC)).outcome.name == "DONE"
+    assert "failing_key_series_ended" not in _composed_payload(recovered)["degrade_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_sc2_failing_key_with_inputs_but_no_returns_raises_no_keyerror() -> None:
+    """A failing single key with a ``key_inputs`` row and no csv return rows has no
+    last return day. SC-2 must not index ``last_return_day`` blindly (KeyError) and
+    must not flag it: the compose already classifies it anchored-without-returns,
+    which is the blocking ``dropped_key``, so the key is not silent."""
+    fake = _sc2_book(a_status="error", a_days=[], a_returns=False)
+    assert (await _run_gate(fake, _SC2_ALLOC)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "failing_key_series_ended" not in payload["degrade_reasons"]
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False

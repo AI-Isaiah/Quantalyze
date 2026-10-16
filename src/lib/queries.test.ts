@@ -1771,7 +1771,19 @@ describe("derived-row outcomes — the reason says why there is no series", () =
     expect(untrusted(["shared_account_history_truncated", "account_identity_collision"])).toBe(
       "duplicate_account",
     );
+    // 167.1.2.1.1 SC-2 (D-03/D-04): a lone failing key whose series ended early reads
+    // the SAME existing line as a shared account with no working key (no new copy).
+    expect(untrusted(["failing_key_series_ended"])).toBe("shared_account_no_working_key");
+    // It shares the first precedence slot, so it beats the truncated-history line
+    // whatever the array order.
+    expect(
+      untrusted(["failing_key_series_ended", "shared_account_history_truncated"]),
+    ).toBe("shared_account_no_working_key");
+    expect(
+      untrusted(["shared_account_history_truncated", "failing_key_series_ended"]),
+    ).toBe("shared_account_no_working_key");
     // The token in `flags` only, or in a non-array, keeps the generic line.
+    expect(untrusted([], { flags: ["failing_key_series_ended"] })).toBe("derivation_rejected");
     expect(untrusted([], { flags: ["account_identity_collision"] })).toBe("derivation_rejected");
     expect(untrusted("account_duplicate")).toBe("derivation_rejected");
     // Only the writer's untrustworthy verdict is read this way: a pre-v2 row

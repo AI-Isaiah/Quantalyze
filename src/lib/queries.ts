@@ -4421,7 +4421,10 @@ export type MissingSeriesReason = Extract<
  * from `degrade_reasons` (where job_worker puts them, never in `flags`), and the
  * most actionable cause wins, so the writer's sorted array order never decides:
  *
- *   1. `shared_account_no_working_key`: the one the owner can fix.
+ *   1. `shared_account_no_working_key`: the one the owner can fix. 167.1.2.1.1
+ *      SC-2 (D-03, D-04): `failing_key_series_ended` (a lone failing key whose series
+ *      stopped before the book's last day) shares this slot and this line, since it is
+ *      the same fact and the same owner action.
  *   2. `account_duplicate` / `account_identity_collision`: the derive refused
  *      the book over two keys reading one exchange account (SC-1 persists the
  *      refusal instead of deleting the row), the line the key list already
@@ -4459,7 +4462,10 @@ function untrustworthyRebuildReason(
       ? (payload as Record<string, unknown>).degrade_reasons
       : undefined;
   if (!Array.isArray(tokens)) return "derivation_rejected";
-  if (tokens.includes("shared_account_no_working_key")) {
+  if (
+    tokens.includes("shared_account_no_working_key") ||
+    tokens.includes("failing_key_series_ended")
+  ) {
     return "shared_account_no_working_key";
   }
   if (tokens.includes("account_duplicate") || tokens.includes("account_identity_collision")) {

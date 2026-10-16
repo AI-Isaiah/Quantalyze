@@ -13351,6 +13351,50 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             allocator_id,
         )
 
+    # 167.1.2.1.1 SC-2 (D-03): a SINGLE eligible key that is failing (not
+    # ``working_holder_predicate``) and whose series ends before the book's last return
+    # day. It is still counted, so the compose carries it flat at r = 0 (the benign
+    # ``stale_mark_carry``) while the rest of the book moves, and the book's return is
+    # diluted by frozen capital. Decided HERE, after the no-capital exit rule has run,
+    # because that rule puts a key in ``departed_end_by_key``: such a key leaves the
+    # book on purpose after its end day and carries nothing past it, so ending early is
+    # its intended shape (RESEARCH Pitfall 7). A WORKING key that ends early is a sync
+    # lag the daily recompute answers; a failing key that reaches the book's last day
+    # dilutes nothing. A key with no return day at all (a ``key_inputs`` row and no csv
+    # rows) is NOT flagged: the compose already classifies it anchored-without-returns,
+    # which is the blocking ``dropped_key``, so it is not silent and ``last_return_day``
+    # has no entry to index. A shared group (two or more eligible members) is
+    # ``shared_account_no_working_key``'s concern, not this one's. The derive does not
+    # test that the account id is known; a failing key with an unknown id is named
+    # earlier by the reader as ``key_not_syncing``, so this flag is a harmless superset
+    # of D-03's wording. Counts only (no key id, no day, no USD - T-167.1.2-22).
+    failing_series_ended_keys = 0
+    _book_last_days = [last_return_day[k] for k in counted_ids if k in last_return_day]
+    if _book_last_days:
+        _book_last_day = max(_book_last_days)
+        for _group in account_groups(key_rows):
+            _eligible_members = [row for row in _group if row["id"] in eligible_ids]
+            if len(_eligible_members) != 1:
+                continue
+            _member = _eligible_members[0]
+            _member_id = _member["id"]
+            if _member_id not in counted_ids or _member_id in departed_end_by_key:
+                continue
+            if working_holder_predicate(_member):
+                continue
+            _member_last = last_return_day.get(_member_id)
+            if _member_last is not None and _member_last < _book_last_day:
+                failing_series_ended_keys += 1
+    if failing_series_ended_keys:
+        logger.warning(
+            "derive_allocator_equity: %d failing key(s) of allocator %s stopped "
+            "returning before the book's last day - each is carried flat while the "
+            "rest of the book moves; the curve is untrustworthy (%s)",
+            failing_series_ended_keys,
+            allocator_id,
+            DegradeReason.FAILING_KEY_SERIES_ENDED.value,
+        )
+
     # A departed key the rule includes but whose inputs are gone was left out of
     # departed_end_by_key before the rule's end days were used (WR-R2-02), so it
     # never reached the returns, the flows or the collision gate.
@@ -13451,6 +13495,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 for reason, raised in (
                     (DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED, truncated_accounts > 0),
                     (DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY, no_working_groups > 0),
+                    (DegradeReason.FAILING_KEY_SERIES_ENDED, failing_series_ended_keys > 0),
                 )
                 if raised
             ]

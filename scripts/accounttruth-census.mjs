@@ -345,7 +345,8 @@ judged AS (
          ) AS well_formed,
          CASE
            WHEN COALESCE(jsonb_typeof(cv.p -> 'degrade_reasons') = 'array', false) IS NOT TRUE THEN 'derivation_rejected'
-           WHEN cv.p -> 'degrade_reasons' @> '["shared_account_no_working_key"]'::jsonb THEN 'shared_account_no_working_key'
+           WHEN cv.p -> 'degrade_reasons' @> '["shared_account_no_working_key"]'::jsonb
+             OR cv.p -> 'degrade_reasons' @> '["failing_key_series_ended"]'::jsonb THEN 'shared_account_no_working_key'
            WHEN cv.p -> 'degrade_reasons' @> '["account_duplicate"]'::jsonb
              OR cv.p -> 'degrade_reasons' @> '["account_identity_collision"]'::jsonb THEN 'duplicate_account'
            WHEN cv.p -> 'degrade_reasons' @> '["shared_account_history_truncated"]'::jsonb THEN 'shared_account_history_truncated'
