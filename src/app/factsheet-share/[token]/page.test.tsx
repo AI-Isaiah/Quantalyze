@@ -301,7 +301,7 @@ function jobRow(
 const escaped = (s: string) => s.replaceAll("'", "&#x27;");
 const KCS11_A_HEADING = escaped("This factsheet isn't ready yet");
 const KCS11_A_BODY = escaped(
-  "The link works \u2014 the strategy's performance data is being prepared. Try again later.",
+  "The link works \u2014 the strategy's performance data is being prepared. This page shows the factsheet once it is ready.",
 );
 const KCS11_B_HEADING = escaped("This factsheet isn't available yet");
 const KCS11_B_BODY = escaped(
