@@ -119,7 +119,24 @@ _PII_COLUMN_PATTERN = re.compile(
 # UI label says "Dates must be strictly increasing"; the prior
 # `is_monotonic_increasing`-only check accepted equal consecutive
 # dates which would silently double-count days downstream.
+#
+# The order is judged on the cells that READ AS A DATE (review TR-3). When pandera
+# cannot coerce a cell (a zone the validator does not read, the placeholder
+# standing in for one, plain garbage) the column reaches this check UN-coerced,
+# as text or as a mix of timestamps and text, and the old check then compared
+# those: a file whose dates increase also reported "dates must be strictly
+# increasing" beside the real date error at the unreadable row. So an un-coerced
+# column is read cell by cell here, an unreadable cell becomes NaT and is left
+# out of the order. That cell is always reported by its own rule (`coerce_dtype`
+# and `dtype`, or `not_nullable`), so leaving it out accepts nothing new, and a
+# file whose readable dates are out of order or repeated still fails this rule.
+# A column pandera DID coerce arrives as datetime64 and takes the old path.
 def _strictly_increasing(s: pd.Series) -> bool:
+    if not pd.api.types.is_datetime64_any_dtype(s):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # pandas' per-value inference warnings
+            s = _parse_dates(s)
+    s = s.dropna()
     return bool(s.is_monotonic_increasing and s.is_unique)
 
 

@@ -508,6 +508,11 @@ def _date_errors(envelope: dict) -> list[tuple[str, int, str, str]]:
     ]
 
 
+def _all_errors(envelope: dict) -> list[tuple[str, int, str, str | None]]:
+    """Every error, rule included, whatever its rule: nothing filtered out."""
+    return [(e["rule"], e["row"], e["message"], e.get("column")) for e in envelope["errors"]]
+
+
 @pytest.mark.parametrize("fmt", list(HEADER))
 @pytest.mark.parametrize(
     "dates,bad_row",
@@ -536,6 +541,91 @@ def test_a_named_zone_in_a_day_first_file_is_a_date_error_not_a_blank(
     assert "0000-00-00" not in json.dumps(envelope, default=str)
 
 
+# Review TR-3 (tiny round, MEDIUM, user-facing). The dates below INCREASE; one cell
+# has a zone the validator does not read. The unreadable cell is a date error at
+# its row, and that is ALL the user should be told: before this fix the file also
+# got `monotonic_dates` at row 0, "dates must be strictly increasing", which
+# says the user's dates are out of order when they are not.
+ONLY_THE_DATE_ERROR = ["coerce_dtype('datetime64[ns]')", "dtype('datetime64[ns]')"]
+
+INCREASING_WITH_ONE_BAD_ZONE = [
+    pytest.param(DAY_FIRST_NAMED_ZONE, 3, id="day-first-est-in-the-middle"),
+    pytest.param(
+        ["13/01/2024 10:00 EST", "14/01/2024 10:00 +01:00", "15/01/2024 10:00 +01:00", "16/01/2024 10:00 +01:00"],
+        1,
+        id="day-first-est-first",
+    ),
+    pytest.param(
+        ["13/01/2024 10:00 +01:00", "14/01/2024 10:00 +01:00", "15/01/2024 10:00 +01:00", "16/01/2024 10:00 CEST"],
+        4,
+        id="day-first-cest-last",
+    ),
+    pytest.param(ISO_NAMED_ZONE, 3, id="iso-est-in-the-middle"),
+    # The ISO twin of the DST file: a `GMT+1` spelling (read as UTC-1 by dateutil,
+    # so never converted) between two recognised offsets.
+    pytest.param(
+        ["2024-03-30T00:00:00+01:00", "2024-03-31 00:00:00 GMT+1", "2024-04-01T00:00:00+02:00"],
+        2,
+        id="iso-gmt-plus-1-between-recognised-offsets",
+    ),
+    pytest.param(
+        ["13/01/2024 00:00:00 +01:00", "14/01/2024 00:00:00 +01:00 (CET)", "15/01/2024 00:00:00 +01:00", "16/01/2024 00:00:00 +01:00"],
+        2,
+        id="day-first-name-after-offset",
+    ),
+]
+
+
+@pytest.mark.parametrize("fmt", list(HEADER))
+@pytest.mark.parametrize("dates,bad_row", INCREASING_WITH_ONE_BAD_ZONE)
+def test_dates_that_increase_with_one_unreadable_zone_get_only_the_date_error(
+    fmt: str, dates: list[str], bad_row: int
+) -> None:
+    envelope = validate_csv(_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert [(rule, row) for rule, row, _, _ in _all_errors(envelope)] == [
+        (rule, bad_row) for rule in ONLY_THE_DATE_ERROR
+    ], envelope["errors"]
+    assert "monotonic_dates" not in {e["rule"] for e in envelope["errors"]}
+
+
+OUT_OF_ORDER_WITH_ONE_BAD_ZONE = [
+    pytest.param(
+        ["13/01/2024 10:00 +01:00", "16/01/2024 10:00 +01:00", "15/01/2024 10:00 +01:00", "17/01/2024 10:00 EST"],
+        id="day-first-est",
+    ),
+    pytest.param(
+        ["2024-01-13 10:00 +01:00", "2024-01-16 10:00 +01:00", "2024-01-15 10:00 +01:00", "2024-01-17 10:00 EST"],
+        id="iso-est",
+    ),
+    # Two readable dates on the same day: not strictly increasing, whatever the
+    # third cell is.
+    pytest.param(
+        ["2024-01-13 10:00 +01:00", "2024-01-13 10:00 +01:00", "2024-01-15 10:00 EST", "2024-01-16 10:00 +01:00"],
+        id="iso-duplicate-readable-dates",
+    ),
+    pytest.param(
+        ["13/01/2024 10:00 +01:00", "16/01/2024 10:00 +01:00", "15/01/2024 10:00 GMT+1", "14/01/2024 10:00 +01:00"],
+        id="day-first-gmt-plus-1",
+    ),
+]
+
+
+@pytest.mark.parametrize("fmt", list(HEADER))
+@pytest.mark.parametrize("dates", OUT_OF_ORDER_WITH_ONE_BAD_ZONE)
+def test_dates_that_really_are_out_of_order_still_report_it_beside_a_bad_zone(
+    fmt: str, dates: list[str]
+) -> None:
+    """Control for TR-3: the order is checked on the readable rows, not dropped."""
+    envelope = validate_csv(_file(fmt, dates), fmt)
+
+    rules = {e["rule"] for e in envelope["errors"]}
+    assert envelope["ok"] is False
+    assert "monotonic_dates" in rules, envelope["errors"]
+    assert set(ONLY_THE_DATE_ERROR) <= rules, envelope["errors"]
+
+
 @pytest.mark.parametrize("fmt", list(HEADER))
 def test_the_day_first_named_zone_error_has_the_shape_the_iso_file_gets(fmt: str) -> None:
     """Rule string, row, message and column are what pandera emits for the same
@@ -546,6 +636,9 @@ def test_the_day_first_named_zone_error_has_the_shape_the_iso_file_gets(fmt: str
     assert day_first["ok"] is False and iso["ok"] is False
     assert _date_errors(iso), iso["errors"]  # the ISO path still gives coerce_dtype
     assert _date_errors(day_first) == _date_errors(iso)
+    # The FULL rule list, not only the `coerce_dtype` subset: filtering to that
+    # subset is what hid a spurious `monotonic_dates` here (review TR-3).
+    assert _all_errors(day_first) == _all_errors(iso), (day_first["errors"], iso["errors"])
 
 
 def test_the_repro_from_the_review_gives_coerce_dtype_at_row_3() -> None:
