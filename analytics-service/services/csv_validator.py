@@ -859,7 +859,21 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             column_raw = row.get("column")
             has_column = column_raw is not None and not pd.isna(column_raw)
             column_name = str(column_raw).strip() if has_column else ""
-            if column_name and has_row:
+            #
+            # 170.1-01 / D-10 — A MISSING COLUMN IS NAMED IN PLAIN WORDS.
+            # For `column_in_dataframe` ONLY, pandera reports `column=None`,
+            # `index=None` and `failure_case=<the SCHEMA's expected column
+            # name>` (measured, not the file's header and not a cell), so it is
+            # safe to read here and nowhere else: for every other rule
+            # `failure_case` IS the raw cell. ⛔ Never widen this branch.
+            expected_column = ""
+            if rule_name == "column_in_dataframe":
+                failure_case_raw = row.get("failure_case")
+                if failure_case_raw is not None and not pd.isna(failure_case_raw):
+                    expected_column = str(failure_case_raw).strip()
+            if expected_column:
+                message = f"Your file has no {expected_column} column."
+            elif column_name and has_row:
                 message = (
                     f"Column '{column_name}' failed rule "
                     f"'{rule_name}' at row {row_idx}."
@@ -870,11 +884,19 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
                 message = f"Failed rule '{rule_name}' at row {row_idx}."
             else:
                 message = f"Failed rule '{rule_name}'."
-            all_errors.append({
+            error: dict[str, Any] = {
                 "rule": rule_name,
                 "row": row_idx,
                 "message": message,
-            })
+            }
+            if expected_column:
+                error["column"] = expected_column
+            elif column_name:
+                # Every other rule: pandera's `column` is the SCHEMA key the
+                # check is attached to. `failure_case` (the raw cell) is never
+                # consulted here.
+                error["column"] = column_name
+            all_errors.append(error)
         df_validated = df
 
     # 2026-05-25 prod incident hotfix — auto-normalize percent-form

@@ -679,9 +679,13 @@ def test_dataframe_level_failure_omits_the_column_clause_entirely():
         f"{sorted({e['rule'] for e in result['errors']})}"
     )
     # Hand-typed oracle: the SENTENCE, not the producer's own f-string.
+    # 170.1-01 / D-10 RE-POINTED THIS ORACLE: the generic "Failed rule
+    # 'column_in_dataframe'." told a founder nothing; the producer now names the
+    # SCHEMA's expected column in plain words and carries it as `column`.
     assert (
-        dataframe_level[0]["message"] == "Failed rule 'column_in_dataframe'."
+        dataframe_level[0]["message"] == "Your file has no daily_return column."
     ), dataframe_level[0]["message"]
+    assert dataframe_level[0]["column"] == "daily_return", dataframe_level[0]
 
 
 def test_dataframe_level_failure_names_no_row_number_at_all():
@@ -754,7 +758,17 @@ def test_no_produced_error_carries_the_raw_failing_cell():
     result = validate_csv(_csv_bytes(df), "trades")
     assert result["errors"], "fixture produced no errors"
     for err in result["errors"]:
-        assert set(err.keys()) == {"rule", "row", "message"}, sorted(err.keys())
+        # 170.1-01 / D-10: `column` (the SCHEMA key, never a cell) may ride
+        # along; nothing else may. The cell-bearing `failure_case` stays out.
+        assert set(err.keys()) in (
+            {"rule", "row", "message"},
+            {"rule", "row", "message", "column"},
+        ), sorted(err.keys())
+        assert "failure_case" not in err
+    # `column` is present exactly when the producer had a schema column to name.
+    currency_errors = [e for e in result["errors"] if e["rule"] == "currency_usd_or_blank"]
+    assert currency_errors, [e["rule"] for e in result["errors"]]
+    assert all(e.get("column") == "currency" for e in currency_errors), currency_errors
 
 
 def test_the_failing_cell_value_is_not_echoed_into_the_message():
@@ -769,3 +783,119 @@ def test_the_failing_cell_value_is_not_echoed_into_the_message():
     for err in result["errors"]:
         assert len(marker) > 4  # the needle is real, not blank
         assert marker not in err["message"], err["message"]
+
+
+# ---------------------------------------------------------------------------
+# 170.1-01 / D-10 — the founder's routed specimen: a `date,daily_return` file
+# validated as `trades` printed the generic failed-rule sentence five times.
+# ---------------------------------------------------------------------------
+
+def test_routed_specimen_names_each_missing_trades_column():
+    """A daily-returns shaped file under fmt "trades" is missing exactly five
+    columns, and each one is named in plain words with a first-class field."""
+    raw = b"date,daily_return\n2024-01-02,0.001\n2024-01-03,0.002\n"
+    result = validate_csv(raw, "trades")
+    missing = [e for e in result["errors"] if e["rule"] == "column_in_dataframe"]
+    assert len(missing) == 5, [e["message"] for e in result["errors"]]
+    assert {e["column"] for e in missing} == {
+        "side", "qty", "price", "symbol", "currency",
+    }
+    for e in missing:
+        assert e["message"] == f"Your file has no {e['column']} column.", e
+        assert e["row"] == 0, e
+
+
+# ---------------------------------------------------------------------------
+# 170.1-01 / D-10, R-3 — `column` on every other pandera row comes from the
+# SCHEMA key only, `failure_case` is read for column_in_dataframe alone, and
+# bespoke producer messages are untouched.
+# ---------------------------------------------------------------------------
+
+def test_blank_cell_row_carries_its_schema_column_and_keeps_its_message():
+    df = _daily_returns_df(n=5)
+    df.loc[2, "daily_return"] = None
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    nulls = [e for e in result["errors"] if e["rule"] == "not_nullable"]
+    assert nulls, [e["rule"] for e in result["errors"]]
+    assert nulls[0]["column"] == "daily_return", nulls[0]
+    # The renderer (170.1-02) keys off this substring; it must survive.
+    assert "failed rule '" in nulls[0]["message"], nulls[0]["message"]
+    assert nulls[0]["message"] == (
+        "Column 'daily_return' failed rule 'not_nullable' at row 3."
+    ), nulls[0]["message"]
+
+
+def test_neither_a_header_nor_a_cell_marker_reaches_any_message_or_column():
+    """T-170.1-09 / T-170.1-11 — a distinctive HEADER and a distinctive CELL
+    VALUE, both in one file, appear nowhere in the produced errors."""
+    header_marker = "ZZHDRLEAKCOL"
+    cell_marker = "ZZCELLLEAKVAL"
+    df = _trades_df(n=5)
+    # `qty` is now absent (column_in_dataframe fires) and the file carries a
+    # header the schema never heard of.
+    df = df.rename(columns={"qty": header_marker})
+    df.loc[3, "currency"] = cell_marker
+    result = validate_csv(_csv_bytes(df), "trades")
+    rules = {e["rule"] for e in result["errors"]}
+    assert "column_in_dataframe" in rules, rules
+    assert "currency_usd_or_blank" in rules, rules
+    # A rule whose pandera `failure_case` IS the raw cell (a bound check on a
+    # numeric column): the string-cell marker above cannot prove this arm, so a
+    # distinctive out-of-bounds number rides in a second file.
+    numeric_marker = "-987654.321"
+    bounded = validate_csv(
+        _csv_bytes(pd.DataFrame({
+            "date": ["2024-01-02", "2024-01-03", "2024-01-04"],
+            "daily_return": [0.01, float(numeric_marker), 0.02],
+        })),
+        "daily_returns",
+    )
+    assert any(
+        e["rule"] == "daily_return_lower_bound" for e in bounded["errors"]
+    ), bounded["errors"]
+    produced = result["errors"] + bounded["errors"]
+    for needle in (header_marker, cell_marker, numeric_marker):
+        assert len(needle) > 4  # the needle is real, not blank
+        for err in produced:
+            assert needle not in err["message"], err
+            assert needle not in str(err.get("column", "")), err
+    missing = [e for e in result["errors"] if e["rule"] == "column_in_dataframe"]
+    assert [e["column"] for e in missing] == ["qty"], missing
+
+
+def test_bespoke_producer_messages_are_byte_unchanged():
+    """R-3 — too_many_rows and date_format_ambiguous keep their exact wording
+    and gain no `column`."""
+    import datetime as _dt
+
+    from services.csv_validator import MAX_INGEST_ROWS
+
+    base = _dt.date(2000, 1, 1)
+    lines = ["date,daily_return"] + [
+        f"{(base + _dt.timedelta(days=i)).isoformat()},0.001"
+        for i in range(MAX_INGEST_ROWS + 5)
+    ]
+    big = validate_csv("\n".join(lines).encode("utf-8"), "daily_returns")
+    assert big["errors"] == [{
+        "rule": "too_many_rows",
+        "row": 0,
+        "message": (
+            f"CSV exceeds the {MAX_INGEST_ROWS}-row limit "
+            f"(got {MAX_INGEST_ROWS + 5} rows)."
+        ),
+    }], big["errors"]
+
+    ambiguous = validate_csv(
+        b"date,daily_return\n01/02/2023,0.01\n02/02/2023,0.02\n03/02/2023,-0.01\n",
+        "daily_returns",
+    )
+    amb = [e for e in ambiguous["errors"] if e["rule"] == "date_format_ambiguous"]
+    assert amb == [{
+        "rule": "date_format_ambiguous",
+        "row": 0,
+        "message": (
+            "Could not determine the date format — these dates are "
+            "ambiguous (each could be DD/MM/YYYY or MM/DD/YYYY). Please "
+            "re-upload with ISO dates in YYYY-MM-DD format."
+        ),
+    }], ambiguous["errors"]
