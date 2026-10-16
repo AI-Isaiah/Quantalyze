@@ -5972,14 +5972,18 @@ Plans:
 **Plans:** 8 plans
 
 Plans:
-
+**Wave 1**
 - [ ] 170.1-01: CSV producer names the missing column; column field through the projection (wave 1)
 - [ ] 170.1-02: CSV envelope in plain words, format hint, rule labels (wave 1)
 - [ ] 170.1-03: no "vs None" chart subtitle; KPI delta "vs current book" (wave 1)
 - [ ] 170.1-04: key-card timing and passive strings (wave 1)
 - [ ] 170.1-05: status-surface strings and the finished_not_built note kind (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 170.1-06: /strategies status line and finished-not-built list note (wave 2)
 - [ ] 170.1-07: duplicate-with-ok is success; owner banner agrees with the body (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 170.1-08: phase gate, routed-findings sweep; SC-5 orchestrator-owned (wave 3)
 
 ---
