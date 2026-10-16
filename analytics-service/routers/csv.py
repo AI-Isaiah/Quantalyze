@@ -17,7 +17,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 
-from services.csv_validator import validate_csv
+from services.csv_validator import UNSUPPORTED_FMT_MESSAGE, validate_csv
 # PYAPI-03 — the canonical process-wide Limiter. This module used to declare its
 # own ``Limiter(key_func=get_remote_address)``: keyed on the Railway EDGE ip
 # (G-10/G-11) so the 30/hour budget was platform-wide, and with its own isolated
@@ -79,26 +79,26 @@ async def csv_validate(
         raise HTTPException(status_code=400, detail={
             "ok": False,
             "code": "CSV_INVALID_FORMAT",
-            "human_message": "fmt must be one of daily_returns, daily_nav, trades.",
+            "human_message": UNSUPPORTED_FMT_MESSAGE,
             "debug_context": {"fmt_received": fmt},
             "correlation_id": None,
         })
 
     try:
         result = validate_csv(raw, fmt)
-    except ValueError as e:
-        # Cross-AI revision 2026-04-30: log only the rule key / message,
-        # never the file contents.
-        logger.warning("[csv-validator] ValueError: %s", e)
-        raise HTTPException(status_code=400, detail={
-            "ok": False,
-            "code": "CSV_VALIDATION_FAILED",
-            "human_message": str(e),
-            "debug_context": {},
-            "correlation_id": None,
-        })
     except Exception as e:
-        logger.error("[csv-validator] unexpected error: %s", e)
+        # 170.1 / D-10 — NEVER LOG OR RETURN THE EXCEPTION TEXT. A pandas /
+        # pandera / int() message routinely carries the offending CELL
+        # ("could not convert string to float: '<the cell>'"), which is
+        # untrusted upload content that can hold PII. Log the exception TYPE
+        # only; the client gets a fixed sentence.
+        #
+        # One arm, not two. The old `except ValueError` arm returned a 400 with
+        # `str(e)`, but `validate_csv` raises ValueError for exactly one reason
+        # (an unsupported fmt) and the pre-check above has already rejected
+        # that with the fixed sentence, so a ValueError reaching here is an
+        # internal fault, not a client error. 500 is the honest status.
+        logger.error("[csv-validator] unexpected error: %s", type(e).__name__)
         raise HTTPException(status_code=500, detail={
             "ok": False,
             "code": "CSV_UPSTREAM_FAIL",
