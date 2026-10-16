@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.csv_fault import report_csv_internal_fault
+from services.csv_offload import run_csv_validation
 from services.ingestion.adapter import (
     Fingerprint,
     KeySubmissionRequest,
@@ -144,7 +145,8 @@ class CsvAdapter:
             )
 
         try:
-            envelope = csv_validator.validate_csv(raw_bytes, fmt)
+            # Off the event loop (T-170.1-51): see services/csv_offload.py.
+            envelope = await run_csv_validation(csv_validator.validate_csv, raw_bytes, fmt)
         except Exception as exc:  # noqa: BLE001 — classified, never echoed
             # `validate_csv` is contracted to return an envelope for any file
             # content (`tests/test_csv_never_raises_170_1.py` pins that over a
