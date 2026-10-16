@@ -5327,6 +5327,18 @@ export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
         "the route vocabulary, never by the key-validation classifier.",
     ],
     [
+      "CSV_UPSTREAM_FAIL",
+      "CSV-surface code (170.1 D-14): `services/ingestion/csv_adapter.py` emits " +
+        "it when `validate_csv` raises an unexpected exception, on the " +
+        "/process-key validate-only path. That reply is a 200 `ok:false` " +
+        "envelope; `postProcessKey` passes it through as a transport success " +
+        "and the csv-validate route returns that body unchanged, so " +
+        "CsvValidationEnvelope renders " +
+        "WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL. The route already emits the same " +
+        "code for its own unclassified residue. Never seen by the key-validation " +
+        "classifier.",
+    ],
+    [
       "CSV_VALIDATION_FAILED",
       "CSV-surface code AND the static fallback of the DYNAMIC emitter below. " +
         "Rendered by CsvValidationEnvelope through WIZARD_ERROR_COPY, never by " +
