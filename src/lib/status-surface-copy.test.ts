@@ -2,12 +2,14 @@ import { describe, it, expect } from "vitest";
 import type { ComputeState } from "./compute-state";
 import {
   KCS10_PUBLIC_SENTENCE,
+  KEY_STATUS_UNREADABLE_NOTE,
   ownerRemedy,
   ownerStateLine,
   probeUnreadableShareNote,
   recipientShareNote,
   recipientShareNoteFor,
   SHARE_CARD_COPY,
+  STRATEGIES_LIST_UNREADABLE,
   unbuildableNoteKindOf,
   untrustedKeyCaption,
   type OwnerRemedy,
@@ -597,7 +599,7 @@ describe("S9 — KCS-11 share page arms", () => {
   it("KCS11-A: in progress", () => {
     expect(SHARE_CARD_COPY.in_progress).toEqual({
       heading: "This factsheet isn't ready yet",
-      body: "The link works — the strategy's performance data is being prepared. Try again later.",
+      body: "The link works — the strategy's performance data is being prepared. This page shows the factsheet once it is ready.",
     });
   });
 
@@ -730,5 +732,99 @@ describe("Phase 164.6.6.3.5 DOMAINONE — no status surface names an address", (
         }
       }
     }
+  });
+});
+
+describe("170.1 D-09 — grep invariant: no rendered status-surface string carries a passive or timing phrase", () => {
+  // UI-SPEC "Grep invariant after the phase": none of status-surface-copy.ts's
+  // RENDERED strings contains these. The module's tables are private on
+  // purpose, so the walk reaches them through the public functions, over every
+  // input that selects a different row, and then through the exported
+  // constants. A phrase re-introduced into a private table turns this RED.
+  //
+  // `untrustedKeyCaption` is excluded: it echoes exchange display names, it is
+  // not authored copy.
+  const FORBIDDEN = ["could not be", "Try again in a moment", "Try again later", "Large accounts"] as const;
+  // Measured at write time (see the 170.1-05 SUMMARY); equals the design count
+  // of 17 state lines + 8 remedies + 4 arm notes + 12 unbuildable notes + 2
+  // probe notes + 7 exported constant strings. Never lower it to fit.
+  const DISTINCT_FLOOR = 50;
+
+  const MODES = ["mint-token", "public-url"] as const;
+  const ARMS = ["in_progress", "not_available", "unreadable"] as const;
+  const KINDS = ["too_short", "cannot_build", "analytics_failed", "finished_not_built"] as const;
+  const SHAPES = ["single", "unlinked", "composite", "csv", "unknown"] as const;
+  const VARIANTS: ComputeState[] = [
+    { state: "queued" },
+    { state: "retrying" },
+    { state: "running", phase: "fetch" },
+    { state: "running", phase: "fetch", memberOf: { n: 1, m: 1 } },
+    { state: "running", phase: "compute" },
+    { state: "running", phase: "unknown" },
+    { state: "stalled" },
+    { state: "failed", errorKind: "permanent" },
+    { state: "failed", errorKind: "transient" },
+    { state: "failed", errorKind: "orphaned" },
+    { state: "failed", errorKind: "unknown" },
+    { state: "failed", errorKind: null },
+    { state: "finished" },
+    { state: "never_started" },
+    { state: "unreadable" },
+  ];
+  // `finished` is the only state whose line and remedy depend on build facts.
+  const BUILDS = [undefined, { buildUnreadable: true }, { buildUnreadable: false, analyticsFailed: true }] as const;
+
+  function leaves(value: unknown): string[] {
+    if (typeof value === "string") return [value];
+    if (value && typeof value === "object") return Object.values(value).flatMap(leaves);
+    return [];
+  }
+
+  function everyRenderedString(): Set<string> {
+    const out = new Set<string>();
+    for (const state of VARIANTS) {
+      for (const build of BUILDS) {
+        out.add(ownerStateLine(state, build).text);
+        for (const shape of SHAPES) out.add(rendered(ownerRemedy(state, shape, SID, build)));
+      }
+    }
+    for (const mode of MODES) {
+      for (const arm of ARMS) {
+        out.add(recipientShareNote(mode, arm));
+        out.add(recipientShareNoteFor(mode, arm, null));
+        for (const kind of KINDS) out.add(recipientShareNoteFor(mode, arm, kind));
+      }
+      out.add(probeUnreadableShareNote(mode));
+    }
+    for (const text of [
+      ...leaves(SHARE_CARD_COPY),
+      KCS10_PUBLIC_SENTENCE,
+      STRATEGIES_LIST_UNREADABLE,
+      KEY_STATUS_UNREADABLE_NOTE,
+    ]) {
+      out.add(text);
+    }
+    return out;
+  }
+
+  it("no rendered string contains a forbidden phrase", () => {
+    for (const text of everyRenderedString()) {
+      for (const phrase of FORBIDDEN) {
+        expect(text, `"${phrase}" in: ${text}`).not.toContain(phrase);
+      }
+    }
+  });
+
+  it("the walk reached the private tables: the distinct-string count meets the design floor", () => {
+    // Anti-vacuity: an enumeration that stops reaching a table passes the test
+    // above trivially. The floor makes that a failure instead.
+    expect(everyRenderedString().size).toBeGreaterThanOrEqual(DISTINCT_FLOOR);
+  });
+
+  it("the D-09 locked strings render where the constants are read", () => {
+    expect(STRATEGIES_LIST_UNREADABLE).toBe("We could not load your strategies. Reload this page to try again.");
+    expect(KEY_STATUS_UNREADABLE_NOTE).toBe(
+      "We could not check key status right now. Open a strategy to see its keys.",
+    );
   });
 });

@@ -1534,9 +1534,9 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
 describe("StrategiesPage — an errored read is never rendered as healthy or empty (167.2-REVIEW-SFH H-1, H-3)", () => {
   // Hand-typed from the UI-SPEC review-fix rows, never imported.
-  const LIST_UNREADABLE = "Your strategies could not be loaded. Reload this page to try again.";
+  const LIST_UNREADABLE = "We could not load your strategies. Reload this page to try again.";
   const KEY_STATUS_UNREADABLE =
-    "Key status could not be checked right now. Open a strategy to see its keys.";
+    "We could not check key status right now. Open a strategy to see its keys.";
 
   it("H1-LIST-ERROR: a failed list read renders the load-failure line, never \"No strategies yet\", and is logged and captured", async () => {
     state.strategiesError = { message: "synthetic list failure" };

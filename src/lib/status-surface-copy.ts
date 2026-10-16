@@ -599,7 +599,7 @@ export function recipientShareNoteFor(
 export const SHARE_CARD_COPY = {
   in_progress: {
     heading: "This factsheet isn't ready yet",
-    body: `The link works ${EM_DASH} the strategy's performance data is being prepared. Try again later.`,
+    body: `The link works ${EM_DASH} the strategy's performance data is being prepared. This page shows the factsheet once it is ready.`,
   },
   not_available: {
     heading: "This factsheet isn't available yet",
@@ -624,7 +624,7 @@ export const KCS10_PUBLIC_SENTENCE =
  * live strategies must not be told they have none.
  */
 export const STRATEGIES_LIST_UNREADABLE =
-  "Your strategies could not be loaded. Reload this page to try again.";
+  "We could not load your strategies. Reload this page to try again.";
 
 /**
  * KCS-KEYSTATUS-UNREADABLE (UI-SPEC § Review-fix amendments,
@@ -632,7 +632,7 @@ export const STRATEGIES_LIST_UNREADABLE =
  * key pill no longer means "healthy"; this one page-level line says so.
  */
 export const KEY_STATUS_UNREADABLE_NOTE =
-  "Key status could not be checked right now. Open a strategy to see its keys.";
+  "We could not check key status right now. Open a strategy to see its keys.";
 
 // ── S4 — KCS-06 key-mark caption ──────────────────────────────────────────
 
