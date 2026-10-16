@@ -5244,7 +5244,7 @@ Plans:
 **Priority:** data integrity (founder priority rule, 2026-09-27).
 **Requirements**: success criteria below
 **Depends on:** Phase 167.1.2.1
-**Plans:** 0 plans
+**Plans:** 4 plans (3 waves: W1 01 · W2 02 · W3 03, 04)
 
 Split out of Phase 167.1.2.1 RECONMARKER by founder decision D-01 (2026-10-13, smart discuss "Accept all"; `167.1.2.1-CONTEXT.md`). Every item was re-measured LIVE at `origin/main` `c85c938e1` on 2026-10-13, by reading code, symbols cited by name. The founder calls marked below are asked in this phase's own discuss (D-03).
 
@@ -5274,7 +5274,18 @@ Each item is fixed with a test that fails on the old behaviour, or closed by a r
 - **D-05 (SC-9):** research first. The tolerance is never loosened, and if the stored data is right the measurement goes back to the founder.
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+
+- [ ] 167.1.2.1.1-01-PLAN.md — a derive refusal persists its reason in the equity_curve row; the reader maps each token to an existing line; census mirror (SC-1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 167.1.2.1.1-02-PLAN.md — blocking tokens for a failing key's stopped series, disagreeing shared-account flows and unstamped working keys; departed_history_unavailable Sentry event and count (SC-2, SC-3, SC-6, SC-7)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 167.1.2.1.1-03-PLAN.md — refresh holds for a never-polled working account, a carry over 7 days and pending identity; the refresh_held audit action (SC-4, SC-5, SC-6)
+- [ ] 167.1.2.1.1-04-PLAN.md — SC-9 read-only PROD re-measure and the SC-8 deploy note (SC-8, SC-9)
 
 ### Phase 167.1.2.1.2: HISTORYREADER — Open Positions, Exchanges and the Overview show a departed or stale key's history truthfully (INSERTED)
 
