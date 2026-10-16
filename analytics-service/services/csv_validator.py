@@ -843,6 +843,30 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     return None  # neither reading is a clean ascending series — let pandera raise
 
 
+def _raw_header_names(raw_bytes: bytes, header_row: int) -> list[str] | None:
+    """The header cells exactly as written in the file, or None if unreadable.
+
+    `pd.read_csv` renames a repeated header (`x,x` -> `x`, `x.1`) before the
+    frame exists, so a repeat can only be seen on the raw row. `header_row` is
+    0 for a normal file and 1 when the Excel blank first row was skipped. A read
+    that fails here is not an error: the caller falls back to the frame's names.
+    """
+    try:
+        raw = pd.read_csv(
+            io.BytesIO(raw_bytes),
+            encoding="utf-8-sig",
+            header=None,
+            nrows=header_row + 1,
+            dtype=str,
+            keep_default_na=False,
+        )
+    except Exception:  # noqa: BLE001 - a pandas parse failure of any kind
+        return None
+    if len(raw) <= header_row:
+        return None
+    return [str(c) for c in raw.iloc[header_row].tolist()]
+
+
 # ---------------------------------------------------------------------------
 # validate_csv — public API used by the FastAPI router AND (Phase 19) by
 # the worker. Pure logic; no I/O beyond pd.read_csv on the in-memory bytes.
@@ -895,11 +919,13 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # which makes every column "Unnamed: N" and the actual headers slip
     # into row 0 of the data. Re-parse with header=1 once we detect this
     # so the founder doesn't have to hand-clean their export.
+    header_row = 0
     looks_like_blank_header = (
         len(df.columns) > 0
         and all(str(c).startswith("Unnamed:") for c in df.columns)
     )
     if looks_like_blank_header:
+        header_row = 1
         try:
             df = pd.read_csv(io.BytesIO(raw_bytes), encoding="utf-8-sig", header=1)
         except Exception as e:
@@ -949,29 +975,38 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # _redact_preview / Sharpe sentinel / preview accessors all expect.
     # Trailing/leading whitespace is also stripped because Excel and
     # certain accounting tools sometimes emit "  date  ,  daily_return  ".
-    normalized_columns = [str(c).strip().lower() for c in df.columns]
-
-    # 170.1 / D-14 (WR-A) - TWO HEADERS THAT COLLIDE ONCE LOWER-CASED ARE A NAMED
-    # REJECTION. `date,Date,daily_return` leaves two columns called `date`, so
-    # `df["date"]` is a two-column FRAME and the date detector raised
+    #
+    # 170.1 / D-14 (WR-A, amended 2026-10-16) - TWO HEADERS WITH THE SAME NAME ARE
+    # A NAMED REJECTION. `date,Date,daily_return` leaves two columns called `date`,
+    # so `df["date"]` is a two-column FRAME and the date detector raised
     # AttributeError ('DataFrame' has no attribute 'str'); `Daily_Return` beside
     # `daily_return` raised TypeError in the percent normaliser. Either escape
     # reached the callers as CSV_UPSTREAM_FAIL, "our side, try again", for a
     # deterministic file defect. The sentence is founder-approved (D-14) and names
     # no header: the header text is the user's own and is not echoed.
     #
-    # Only a collision on a column the schema DECLARES is rejected. Pandas already
-    # suffixes an exact repeat (`x,x` -> `x`, `x.1`), so the collisions that reach
-    # here differ in case or padding, and an undeclared pair (`Notes,notes`) is
-    # dropped by the schema's `strict="filter"` without touching anything: that
-    # file validated before this change and still must.
+    # The collision is counted on the RAW header row, not on `df.columns`: pandas
+    # renames an exact repeat (`daily_return,daily_return` -> `daily_return`,
+    # `daily_return.1`) before the frame exists, and `strict="filter"` then drops
+    # the copy, so the file was accepted using only the first column and the
+    # user's second one was silently ignored. Counting the raw names covers an
+    # exact repeat and a case or padding difference alike.
+    #
+    # Only a collision on a column the schema DECLARES is rejected (D-14
+    # amendment). An undeclared pair (`Notes,notes`, `notes,notes`) is dropped by
+    # `strict="filter"` without being read: that file validated before and still
+    # must. A literal `daily_return.1` is a different name, not a repeat, and is
+    # undeclared too.
+    normalized_columns = [str(c).strip().lower() for c in df.columns]
+    header_names = _raw_header_names(raw_bytes, header_row) or list(df.columns)
+    normalized_header = [str(c).strip().lower() for c in header_names]
     declared = SCHEMAS[fmt].columns.keys()
     if any(
-        normalized_columns.count(name) > 1
+        normalized_header.count(name) > 1
         for name in declared
-        if name in normalized_columns
+        if name in normalized_header
     ):
-        logger.warning("[csv-validator] header collision after lower-casing")
+        logger.warning("[csv-validator] two columns have the same declared name")
         return {
             "ok": False,
             "preview": None,

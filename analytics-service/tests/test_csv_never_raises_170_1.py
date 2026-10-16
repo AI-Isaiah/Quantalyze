@@ -13,10 +13,17 @@ user was told to retry a deterministic failure:
      `AttributeError` at the date detector and a `TypeError` in the percent
      normaliser, because `df["date"]` is a two-column frame.
 
-Part A pins the DST outcome (valid file, dates exactly as written, rows
-unchanged). Part B pins the duplicate-header sentence. Part C is the corpus: a
-hostile-input sweep, parametrized over the three formats, asserting
-`validate_csv` returns an envelope and no error text carries a cell.
+D-14 amendment (founder, 2026-10-16, "One more round"): offsets are handled per
+format and a zone we cannot read fails closed. Part A pins the daily formats (the
+wall clock, so the calendar date written is the date stored). Part A1 pins
+`trades` (each timestamp is an instant, the reading the worker's
+`coerce_to_aware_utc` gives). Part A2 pins the rejection of a zone the strip does
+not recognise, as a date error at the real row; nothing converts a date silently.
+Part B pins the duplicate-header sentence, for a case or padding collision and
+for an exact repeat of a header the schema declares (an undeclared pair stays
+accepted). Part C is the corpus: a hostile-input sweep, parametrized over the
+three formats, asserting `validate_csv` returns an envelope and no error text
+carries a cell.
 
 Every cell value is a synthetic marker (`ZXQCELL`). No real data.
 """
@@ -550,14 +557,84 @@ def test_a_collision_between_undeclared_columns_does_not_reject_a_good_file() ->
     assert envelope["ok"] is True, envelope["errors"]
 
 
-def test_pandas_own_duplicate_suffixing_is_not_mistaken_for_a_collision() -> None:
-    """Control: `daily_return,daily_return` is mangled by pandas to
-    `daily_return.1` and was never a collision. It must keep its existing
-    outcome, not the new sentence."""
-    raw = b"date,daily_return,daily_return\n2024-01-01,0.01,5\n2024-01-02,0.02,5\n"
+# An exact repeat of a header the schema declares. Pandas renames the second one
+# (`daily_return` -> `daily_return.1`) BEFORE any check of ours runs, and
+# `strict="filter"` then drops the copy, so the file used to be accepted using
+# only the first column: the user's second column was silently ignored (review
+# finding F2). The collision is read off the RAW header.
+EXACT_REPEATS = [
+    pytest.param("daily_returns", "date,daily_return,daily_return", id="daily_return-twice"),
+    pytest.param("daily_returns", "date,daily_return,daily_return,daily_return", id="daily_return-three-times"),
+    pytest.param("daily_returns", "date,date,daily_return", id="date-twice"),
+    pytest.param("daily_returns", "daily_return,date,daily_return", id="daily_return-apart"),
+    pytest.param("daily_returns", "date,daily_return,currency,currency", id="optional-currency-twice"),
+    pytest.param("daily_returns", "date,daily_return,daily_return,Daily_Return", id="repeat-and-case"),
+    pytest.param("daily_nav", "date,nav,nav", id="nav-twice"),
+    pytest.param("trades", "date,side,qty,price,symbol,currency,symbol", id="trades-symbol-twice"),
+    pytest.param("trades", "date,side,side,qty,price,symbol,currency", id="trades-side-twice"),
+]
+
+
+@pytest.mark.parametrize("fmt,header", EXACT_REPEATS)
+def test_an_exact_repeat_of_a_declared_header_gets_the_founder_sentence(fmt: str, header: str) -> None:
+    width = len(header.split(","))
+    row = ",".join(["2024-01-01"] + ["1"] * (width - 1))
+    raw = (header + "\n" + row + "\n" + row.replace("01-01", "01-02") + "\n").encode()
+
+    envelope = validate_csv(raw, fmt)  # must not raise
+
+    assert envelope["ok"] is False
+    assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", 0, DUPLICATE_HEADER_MESSAGE)
+    ]
+    assert envelope["preview"] is None
+
+
+def test_an_exact_repeat_under_a_leading_blank_header_row_is_found_too() -> None:
+    """The Excel shape: an all-empty first row, then the real header. The raw
+    header to read is the SECOND row."""
+    raw = b",,\ndate,daily_return,daily_return\n2024-01-01,0.01,5\n2024-01-02,0.02,5\n"
     envelope = validate_csv(raw, "daily_returns")
 
+    assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", 0, DUPLICATE_HEADER_MESSAGE)
+    ]
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        pytest.param("date,daily_return,Notes,notes", id="undeclared-case-pair"),
+        pytest.param("date,daily_return,notes,notes", id="undeclared-exact-pair"),
+        pytest.param("notes,notes,date,daily_return", id="undeclared-exact-pair-first"),
+        pytest.param("date,daily_return,daily_return.1", id="declared-name-with-a-literal-dot-one"),
+    ],
+)
+def test_a_pair_the_schema_does_not_declare_is_still_accepted(header: str) -> None:
+    """Control for the scope of the rule (D-14 amendment): the founder sentence is
+    for a collision on a column the schema READS. Undeclared columns are dropped
+    by `strict="filter"` without being read, these files validated before this
+    change, and a literal `daily_return.1` is a different name, not a repeat."""
+    width = len(header.split(","))
+    cells = {"date": "2024-01-0{n}", "daily_return": "0.0{n}"}
+    cols = header.split(",")
+
+    def row(n: int) -> str:
+        return ",".join(cells[c].format(n=n) if c in cells else "x" for c in cols)
+
+    raw = (header + "\n" + row(1) + "\n" + row(2) + "\n").encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert envelope["ok"] is True, (width, envelope["errors"])
     assert DUPLICATE_HEADER_MESSAGE not in {e["message"] for e in envelope["errors"]}
+
+
+def test_the_exact_repeat_sentence_names_no_header_and_echoes_no_cell() -> None:
+    raw = f"date,daily_return,daily_return\n{MARKER},{MARKER},{MARKER}\n".encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert envelope["errors"][0]["message"] == DUPLICATE_HEADER_MESSAGE
+    assert MARKER.lower() not in json.dumps(envelope, default=str).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -698,6 +775,12 @@ def _corpus() -> list[tuple[str, str, bytes]]:
         add("offset-garbage", fmt, _file(fmt, ["2024-03-29T00:00:00+99:99", "2024-03-30T00:00:00+01:00", "2024-03-31T00:00:00+zz"]))
         add("header-case-collision-date", fmt, h.replace("date", "date,Date", 1) + "\n" + "\n".join(x.replace(",", ",x,", 1) for x in rows) + "\n")
         add("header-case-collision-last", fmt, h + f",{cols[-1].upper()}\n" + "\n".join(x + ",5" for x in rows) + "\n")
+        add("header-exact-repeat-first", fmt, f"{cols[0]},{h}\n" + "\n".join(x.split(",")[0] + "," + x for x in rows) + "\n")
+        add("header-exact-repeat-last", fmt, h + f",{cols[-1]}\n" + "\n".join(x + ",5" for x in rows) + "\n")
+        add("header-exact-repeat-thrice", fmt, h + f",{cols[-1]},{cols[-1]}\n" + "\n".join(x + ",5,5" for x in rows) + "\n")
+        add("header-exact-repeat-marker-cells", fmt, h + f",{cols[-1]}\n" + "\n".join(x + f",{MARKER}" for x in rows) + "\n")
+        add("header-exact-repeat-undeclared", fmt, h + ",notes,notes\n" + "\n".join(x + ",a,b" for x in rows) + "\n")
+        add("header-exact-repeat-blank-header-row", fmt, "," * (ncol) + "\n" + h + f",{cols[-1]}\n" + "\n".join(x + ",5" for x in rows) + "\n")
         add("header-case-collision-marker", fmt, f"{MARKER},{MARKER.lower()}\n" + "\n".join(rows) + "\n")
         # D-14 amendment specimens: zones the strip does not recognise.
         for zone_case in ZONE_REJECTED:
