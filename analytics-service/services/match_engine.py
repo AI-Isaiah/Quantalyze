@@ -24,7 +24,7 @@ import json
 import logging
 import math
 from enum import Enum
-from typing import Any, Literal, Optional, TypedDict
+from typing import Any, Final, Literal, Optional, TypedDict
 
 import numpy as np
 import pandas as pd
@@ -166,6 +166,11 @@ max_drawdown = _max_drawdown
 # stays v2.0.0 because no weight changed.
 ENGINE_VERSION = "v2.3.0"
 WEIGHTS_VERSION = "v2.0.0"
+
+# The fewest days a candidate must share with the book for the portfolio-fit axis to compute.
+# One constant for the alignment call, the persisted ``fit_min_overlap_days`` and
+# ``routers/match.py`` ``_BOOK_JOIN_MIN_DAYS``, so the book marker and the candidate marker agree.
+PORTFOLIO_FIT_MIN_OVERLAP_DAYS: Final[int] = 30
 
 # Top-N candidates returned per batch
 TOP_N_CANDIDATES = 30
@@ -633,12 +638,16 @@ def _compute_capacity_fit(
     return _clamp(1 - (concentration / max_concentration), 0, 1)
 
 
-def _empty_pf_components() -> dict[str, Optional[float]]:
+def _empty_pf_components() -> dict[str, float | int | str | None]:
     """Single source of truth for the empty portfolio_fit components dict.
 
     Returns a fresh dict on each call so callers can mutate without aliasing.
     Adding a new portfolio_fit sidecar field (e.g. M-0675 data_completeness)
     requires ONE edit here — previously four sites needed lockstep updates.
+
+    Keys: sharpe_lift, corr_reduction, dd_improvement, corr_with_portfolio,
+    data_completeness, and the GAP-01 short-overlap marker fit_unavailable_reason,
+    fit_overlap_days, fit_min_overlap_days (set only by the short-overlap branch).
     """
     return {
         "sharpe_lift": None,
@@ -646,6 +655,9 @@ def _empty_pf_components() -> dict[str, Optional[float]]:
         "dd_improvement": None,
         "corr_with_portfolio": None,
         "data_completeness": None,
+        "fit_unavailable_reason": None,
+        "fit_overlap_days": None,
+        "fit_min_overlap_days": None,
     }
 
 
@@ -655,7 +667,7 @@ def _compute_portfolio_fit_components(
     portfolio_strategies_returns: dict[str, pd.Series],
     candidate_returns: pd.Series,
     add_weight: float,
-) -> dict[str, Optional[float]]:
+) -> dict[str, float | int | str | None]:
     """Compute sharpe_lift, corr_reduction, dd_improvement, corr_with_portfolio.
 
     All four can be None if the data is too sparse to compute meaningfully.
@@ -688,17 +700,20 @@ def _compute_portfolio_fit_components(
         port_df,
         candidate_returns,
         candidate_id="__cand__",
-        min_overlap_days=30,
+        min_overlap_days=PORTFOLIO_FIT_MIN_OVERLAP_DAYS,
     )
     aligned = alignment.aligned_concat
     if not alignment.sufficient:
-        portfolio_count = max(len(portfolio_weights), 1)
-        data_completeness_short = len(port_df.columns) / portfolio_count
+        # GAP-01 (167.1.1.1), D-22 naming: the fit is null because the candidate shares too few
+        # days with the book, and the persisted raw says so. ``data_completeness`` stays None
+        # here: it measures the book's own join, so it must not read complete beside a null fit.
         components = _empty_pf_components()
         components["corr_with_portfolio"] = _compute_corr_with_portfolio(
             current_port, candidate_returns,
         )
-        components["data_completeness"] = _safe_float(data_completeness_short)
+        components["fit_unavailable_reason"] = "overlap_below_min"
+        components["fit_overlap_days"] = alignment.overlap_days
+        components["fit_min_overlap_days"] = PORTFOLIO_FIT_MIN_OVERLAP_DAYS
         return components
 
     # NEW-C08-01: reindex current_port baseline to the intersection window
@@ -1071,6 +1086,9 @@ def score_candidates(
             "dd_improvement": pf_components.get("dd_improvement"),
             "corr_with_portfolio": pf_components.get("corr_with_portfolio"),
             "data_completeness": pf_components.get("data_completeness"),
+            "fit_unavailable_reason": pf_components.get("fit_unavailable_reason"),
+            "fit_overlap_days": pf_components.get("fit_overlap_days"),
+            "fit_min_overlap_days": pf_components.get("fit_min_overlap_days"),
             "ticket_concentration": ticket_concentration,
         })
 
@@ -1179,6 +1197,12 @@ def score_candidates(
                 "data_completeness": rc.get("data_completeness"),  # M-0675 sidecar
             },
         }
+        # GAP-01: the short-overlap cause is persisted on the short path only, so a computed
+        # fit and a screening row carry none of the three keys. Admin-only: never in reasons.
+        if rc.get("fit_unavailable_reason") is not None:
+            score_breakdown["raw"]["fit_unavailable_reason"] = rc["fit_unavailable_reason"]
+            score_breakdown["raw"]["fit_overlap_days"] = rc["fit_overlap_days"]
+            score_breakdown["raw"]["fit_min_overlap_days"] = rc["fit_min_overlap_days"]
         # Only include portfolio_fit when in personalized mode — guards against
         # silent reversion to "personalized for you" framing on cold-start.
         if mode == "personalized":

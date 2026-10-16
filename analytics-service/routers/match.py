@@ -71,6 +71,7 @@ from services.holding_marks import classify_derivative_marks, classify_spot_mark
 from services.match_defaults import merge_with_defaults
 from services.match_engine import (
     ENGINE_VERSION,
+    PORTFOLIO_FIT_MIN_OVERLAP_DAYS,
     WEIGHTS_VERSION,
     score_candidates,
 )
@@ -597,10 +598,10 @@ _HOLDINGS_HISTORY_MAX_PAGES = 50
 _MATCHER_MIN_ADJACENT_RETURNS: Final[int] = 30
 
 # D-22 (founder, 167.1.1.1): the fewest days the book's shared-days join must span for the
-# portfolio-fit axis to compute. It equals ``min_overlap_days`` in
-# ``match_engine._compute_portfolio_fit_components`` (a module-local literal there); a book
-# whose join is shorter is NAMED with ``book_join_marker`` and no holding is withheld to fit it.
-_BOOK_JOIN_MIN_DAYS: Final[int] = 30
+# portfolio-fit axis to compute. It IS the engine's ``PORTFOLIO_FIT_MIN_OVERLAP_DAYS`` (the same
+# constant feeds the candidate-level marker, so the two cannot disagree); a book whose join is
+# shorter is NAMED with ``book_join_marker`` and no holding is withheld to fit it.
+_BOOK_JOIN_MIN_DAYS: Final[int] = PORTFOLIO_FIT_MIN_OVERLAP_DAYS
 
 # D-23 (founder, 167.1.1.1 round 2): a book whose matcher AUM is zero or below sizes the ticket
 # at the engine's add-weight CEILING, ``_clamp(ticket / aum, 0.01, 0.5)`` at its top, consistent
