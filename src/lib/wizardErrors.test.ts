@@ -15,6 +15,8 @@ import {
   CSV_PREVIEW_STEP_HEADINGS,
   CSV_SUBMIT_STEP_HEADINGS,
   formatCsvRuleCauseSingle,
+  csvFormatHintApplies,
+  CSV_FORMAT_HINT,
   type WizardErrorCode,
   type WizardErrorContext,
 } from "./wizardErrors";
@@ -6644,5 +6646,40 @@ describe("[164.6.6.3.2 D-06] GATE_HISTORY_NOT_SETTLED rests on one sentence two 
 
   it("[164.6.6.3.2 D-05] the mirror names no email address", () => {
     expect(MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR).not.toContain("@");
+  });
+});
+
+// 170.1-02 / R-2 (founder decision 2026-10-15, option 1) — when "Check the file
+// format you selected." applies. Column lists are HAND-TYPED from the producer's
+// schemas, not read from csv-required-columns.json, so the assertion and the
+// helper do not share an oracle.
+describe("[170.1-02 / R-2] csvFormatHintApplies", () => {
+  it("the locked sentence", () => {
+    expect(CSV_FORMAT_HINT).toBe("Check the file format you selected.");
+  });
+
+  it("🔴 the routed specimen: a date,daily_return file under Trade list misses everything but date", () => {
+    expect(
+      csvFormatHintApplies("trades", ["side", "qty", "price", "symbol", "currency"]),
+    ).toBe(true);
+  });
+
+  it("a Trade list file missing only some non-date columns does not get the hint", () => {
+    expect(csvFormatHintApplies("trades", ["side", "qty"])).toBe(false);
+  });
+
+  it("daily_returns: true when daily_return is missing, false when nothing is", () => {
+    expect(csvFormatHintApplies("daily_returns", ["daily_return"])).toBe(true);
+    expect(csvFormatHintApplies("daily_returns", [])).toBe(false);
+  });
+
+  it("daily_nav keys on nav", () => {
+    expect(csvFormatHintApplies("daily_nav", ["nav"])).toBe(true);
+    expect(csvFormatHintApplies("daily_nav", ["daily_return"])).toBe(false);
+  });
+
+  it("an unknown format (including an Object.prototype key) never gets the hint", () => {
+    expect(csvFormatHintApplies("parquet", ["x"])).toBe(false);
+    expect(csvFormatHintApplies("constructor", ["x"])).toBe(false);
   });
 });

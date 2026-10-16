@@ -600,3 +600,66 @@ describe("[170.1 D-10] CsvValidationEnvelope — a missing column is named in pl
     expect(panelText()).not.toMatch(/no\s+column/);
   });
 });
+
+/**
+ * 170.1-02 / R-2 (founder decision 2026-10-15, option 1; UI-SPEC "zero-one-many"
+ * row): "Check the file format you selected." renders exactly once, directly
+ * after the cause line, when every required column of the selected format other
+ * than `date` is missing.
+ */
+describe("[170.1-02 R-2] CsvValidationEnvelope — the format hint", () => {
+  const HINT = "Check the file format you selected.";
+  const missing = (...cols: string[]): TestRow[] =>
+    cols.map((column) => ({
+      rule: "column_in_dataframe",
+      row: 0,
+      message: `Your file has no ${column} column.`,
+      column,
+    }));
+
+  it("🔴 the routed specimen (date,daily_return under Trade list) shows the hint exactly once, after the cause line", () => {
+    renderEnvelope(
+      "CSV_VALIDATION_FAILED",
+      "Your file did not pass validation.",
+      missing("side", "qty", "price", "symbol", "currency"),
+      "trades",
+    );
+    expect(screen.queryAllByText(HINT)).toHaveLength(1);
+    // Five lines, one hint: it is per envelope, never per column.
+    expect(
+      screen.getByTestId("wizard-csv-error").querySelectorAll("li"),
+    ).toHaveLength(5);
+    const hint = screen.getByText(HINT);
+    expect(hint.previousElementSibling?.textContent).toContain("Rule violated:");
+  });
+
+  it("a Trade list file missing only some non-date columns shows no hint", () => {
+    renderEnvelope(
+      "CSV_VALIDATION_FAILED",
+      "Your file did not pass validation.",
+      missing("side", "qty"),
+      "trades",
+    );
+    expect(screen.queryByText(HINT)).toBeNull();
+    expect(panelText()).toContain("Your file has no side column.");
+  });
+
+  it("no format prop, no hint", () => {
+    renderEnvelope(
+      "CSV_VALIDATION_FAILED",
+      "Your file did not pass validation.",
+      missing("side", "qty", "price", "symbol", "currency"),
+    );
+    expect(screen.queryByText(HINT)).toBeNull();
+  });
+
+  it("legacy rows without `column` give the hint nothing to read", () => {
+    renderEnvelope(
+      "CSV_VALIDATION_FAILED",
+      "Your file did not pass validation.",
+      [{ rule: "column_in_dataframe", row: 0, message: "Failed rule 'column_in_dataframe'." }],
+      "daily_returns",
+    );
+    expect(screen.queryByText(HINT)).toBeNull();
+  });
+});

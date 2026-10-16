@@ -3,9 +3,11 @@
 import { type ReactNode } from "react";
 import {
   CSV_FILE_LEVEL_HEADLINE,
+  CSV_FORMAT_HINT,
   CSV_RULE_LABELS,
   WIZARD_ERROR_COPY,
   formatCsvRuleCauseFileLevel,
+  csvFormatHintApplies,
   formatCsvRuleCauseSingle,
 } from "@/lib/wizardErrors";
 
@@ -150,6 +152,7 @@ function MissingColumnLine({ column }: { column: string | undefined }) {
 
 export function CsvValidationEnvelope({
   envelope,
+  format,
   action,
 }: CsvValidationEnvelopeProps) {
   const errors = envelope.debug_context?.pandera_errors ?? [];
@@ -210,6 +213,17 @@ export function CsvValidationEnvelope({
     causeText = authoredCause ?? null;
   }
 
+  // 170.1-02 / R-2 — the format hint. The missing columns are the schema's own
+  // names off the wire (never cell content); the reading of "every required
+  // column missing" lives in `csvFormatHintApplies`. Once per envelope.
+  const missingColumns = errors.flatMap((e) =>
+    e.rule === "column_in_dataframe" && typeof e.column === "string"
+      ? [e.column.trim()]
+      : [],
+  );
+  const showFormatHint =
+    format !== undefined && csvFormatHintApplies(format, missingColumns);
+
   return (
     <div
       role="alert"
@@ -226,6 +240,9 @@ export function CsvValidationEnvelope({
       </p>
       {causeText !== null && (
         <p className="mt-1 text-caption text-text-secondary">{causeText}</p>
+      )}
+      {showFormatHint && (
+        <p className="mt-1 text-caption text-text-secondary">{CSV_FORMAT_HINT}</p>
       )}
       {action !== undefined && action !== null && (
         <div className="mt-3" data-testid="wizard-csv-error-action">

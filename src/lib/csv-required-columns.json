@@ -1,0 +1,5 @@
+{
+  "daily_returns": ["date", "daily_return"],
+  "daily_nav": ["date", "nav"],
+  "trades": ["date", "side", "qty", "price", "symbol", "currency"]
+}

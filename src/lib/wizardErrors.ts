@@ -58,6 +58,11 @@ import {
   venueIsSubstitutable,
   type SupportedExchange,
 } from "./closed-sets";
+// 170.1-02 / R-2 — the per-format required columns, mirrored from the
+// analytics service's `SCHEMAS`. `analytics-service/tests/
+// test_csv_required_columns_parity.py` fails when this file and the schemas
+// disagree, so the hint below cannot drift from the producer.
+import csvRequiredColumns from "./csv-required-columns.json";
 
 export type WizardErrorCode =
   // Key validation (ConnectKeyStep)
@@ -6472,6 +6477,42 @@ export function formatCsvRuleCauseFileLevel(humanLabel: string): string {
  * "failed validation", which `e2e/csv-upload-flow.spec.ts` matches.
  */
 export const CSV_FILE_LEVEL_HEADLINE = "Your file failed validation";
+
+/**
+ * 170.1-02 / D-10 + R-2 — the one hint line `CsvValidationEnvelope` shows when
+ * the user most likely picked the wrong file format. Locked wording
+ * (170.1-UI-SPEC "Copy - CSV errors").
+ */
+export const CSV_FORMAT_HINT = "Check the file format you selected.";
+
+/**
+ * 170.1-02 / R-2 (FOUNDER DECISION 2026-10-15, option 1) — does
+ * {@link CSV_FORMAT_HINT} apply?
+ *
+ * True when every required column of `format` OTHER THAN `date` is among
+ * `missingColumns`. `date` is excluded because every format requires it, so the
+ * literal reading ("every required column is missing") could never fire on the
+ * routed specimen: a `date,daily_return` file under Trade list misses five of
+ * six required columns and `date` is not one of them.
+ *
+ * A format with no required column beyond `date`, or one this table does not
+ * know, never shows the hint. The whole reading lives here and nowhere else.
+ */
+export function csvFormatHintApplies(
+  format: string,
+  missingColumns: readonly string[],
+): boolean {
+  const table: Readonly<Record<string, readonly string[] | undefined>> =
+    csvRequiredColumns;
+  const required = Object.prototype.hasOwnProperty.call(table, format)
+    ? table[format]
+    : undefined;
+  if (required === undefined) return false;
+  const nonDate = required.filter((c) => c !== "date");
+  if (nonDate.length === 0) return false;
+  const missing = new Set(missingColumns);
+  return nonDate.every((c) => missing.has(c));
+}
 
 /*
  * ⚰️ REMOVED 161-REVIEW / CR-02 — `formatColumnInDataframeMessage(raw)`.
