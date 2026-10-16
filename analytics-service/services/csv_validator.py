@@ -891,6 +891,11 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             }
             if expected_column:
                 error["column"] = expected_column
+            elif column_name:
+                # Every other rule: pandera's `column` is the SCHEMA key the
+                # check is attached to. `failure_case` (the raw cell) is never
+                # consulted here.
+                error["column"] = column_name
             all_errors.append(error)
         df_validated = df
 

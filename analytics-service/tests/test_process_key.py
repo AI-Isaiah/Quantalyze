@@ -4953,3 +4953,39 @@ def test_forwarded_rows_carry_a_valid_column(client):
             "column": "side",
         }
     ], rows
+
+
+def test_forwarded_rows_drop_an_invalid_column_and_still_drop_failure_case(client):
+    """170.1-01 / D-10, T-170.1-10 — `column` crosses only as a non-empty str of
+    at most 128 characters; an int, an empty string and a 129-character string
+    are dropped, and the injected `failure_case` never reaches the wire."""
+    fake = _build_supabase_mock(existing_row=None)
+    adapter = MagicMock()
+    long_column = "c" * 129
+    assert len(long_column) == 129
+    adapter.validate = AsyncMock(
+        return_value=_csv_validation_result([
+            {"rule": "r_int", "row": 1, "message": "m1", "column": 7},
+            {"rule": "r_empty", "row": 2, "message": "m2", "column": ""},
+            {"rule": "r_long", "row": 3, "message": "m3", "column": long_column},
+            {"rule": "r_ok", "row": 4, "message": "m4", "column": "c" * 128},
+            {
+                "rule": "r_leak",
+                "row": 5,
+                "message": "m5",
+                "column": "side",
+                "failure_case": _PII_MARKER,
+            },
+        ])
+    )
+
+    r = _post_validate_only(client, fake, adapter)
+
+    rows = r.json()["debug_context"]["pandera_errors"]
+    assert [("column" in row) for row in rows] == [False, False, False, True, True], rows
+    assert rows[3]["column"] == "c" * 128
+    assert rows[4]["column"] == "side"
+    for row in rows:
+        assert "failure_case" not in row, row
+    assert len(_PII_MARKER) > 10
+    assert _PII_MARKER not in r.text, r.text
