@@ -6465,10 +6465,23 @@ export const CSV_RULE_LABELS: Readonly<Record<string, string>> = {
  * key like `constructor` is a miss, not `Object`'s function.
  */
 export function csvRuleLabel(rule: string): string {
-  const key = rule.replace(/\([^)]*\)\s*$/, "").trim();
-  return Object.prototype.hasOwnProperty.call(CSV_RULE_LABELS, key)
-    ? CSV_RULE_LABELS[key]
+  return hasCsvRuleLabel(rule)
+    ? CSV_RULE_LABELS[csvRuleKey(rule)]
     : "This value does not pass a format check";
+}
+
+const csvRuleKey = (rule: string): string =>
+  rule.replace(/\([^)]*\)\s*$/, "").trim();
+
+/**
+ * 170.1 round-1 WR-01 — does `rule` have a `CSV_RULE_LABELS` entry? The
+ * envelope must tell a LABELLED rule from one that falls to the
+ * {@link csvRuleLabel} fallback: that fallback is written for an unknown
+ * PANDERA rule and is false for a producer-authored (bespoke) rule such as
+ * `too_many_rows`, which carries its own sentence instead.
+ */
+export function hasCsvRuleLabel(rule: string): boolean {
+  return Object.prototype.hasOwnProperty.call(CSV_RULE_LABELS, csvRuleKey(rule));
 }
 
 /**

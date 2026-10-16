@@ -9,6 +9,7 @@ import {
   formatCsvRuleCauseFileLevel,
   csvFormatHintApplies,
   csvRuleLabel,
+  hasCsvRuleLabel,
   formatCsvRuleCauseSingle,
 } from "@/lib/wizardErrors";
 
@@ -165,6 +166,29 @@ const isPanderaBuilt = (message: string) =>
   typeof message === "string" && PANDERA_BUILT_MESSAGE.test(message);
 
 /**
+ * 170.1 round-1 WR-01 — the producer's own sentence for a BESPOKE rule, or
+ * `null` when the rule is not bespoke. A rule is bespoke when it has no
+ * `CSV_RULE_LABELS` entry AND none of its rows is pandera-built, i.e. the
+ * producer authored the sentence itself (too_many_rows, empty, parse_error,
+ * date_format_ambiguous). The unknown-pandera-rule fallback is false for such a
+ * rule ("This value does not pass a format check" when the file is too long),
+ * so every slot that would show a label shows this sentence instead, and the
+ * single-rule cause line claims no label at all. A genuinely unknown PANDERA
+ * rule (its rows are pandera-built) keeps the fallback.
+ */
+function bespokeRuleMessage(
+  rule: string,
+  list: readonly { message: string }[],
+): string | null {
+  if (hasCsvRuleLabel(rule)) return null;
+  if (list.some((e) => isPanderaBuilt(e.message))) return null;
+  const own = list.find(
+    (e) => typeof e.message === "string" && e.message.trim() !== "",
+  );
+  return own === undefined ? null : own.message.trim();
+}
+
+/**
  * 170.1-02 / R-3 — "Row {row}, column {column}: {label}." and its three
  * degradations. `{column}` is the schema's name off the wire, never cell
  * content; a period is added only when the label lacks one.
@@ -234,15 +258,27 @@ export function CsvValidationEnvelope({
     // Phase 17 / DESIGN-05: "Across {n} rule categories: {labels}." — the keys
     // are humanized via CSV_RULE_LABELS first (this surface joins
     // human-readable labels rather than raw rule keys).
-    const humanizedKeys = ruleKeys.map((r) => csvRuleLabel(r));
+    // 170.1 round-1 WR-01: a bespoke rule reads the producer's sentence (minus
+    // its closing period, the line adds its own), and two rules that read the
+    // same are named once, never "X, X".
+    const humanizedKeys = [
+      ...new Set(
+        ruleKeys.map((r) =>
+          (bespokeRuleMessage(r, byRule[r]) ?? csvRuleLabel(r)).replace(/\.$/, ""),
+        ),
+      ),
+    ];
     causeText = `Across ${ruleCount} rule categories: ${humanizedKeys.join(", ")}.`;
   } else if (ruleCount === 1 && errors.length > 0) {
     const onlyRule = ruleKeys[0];
-    const human = csvRuleLabel(onlyRule);
+    // 170.1 round-1 WR-01: a bespoke rule has no label to claim, so it has no
+    // cause line; its own sentence is the `<summary>` below.
     causeText =
-      realRowCount > 0
-        ? formatCsvRuleCauseSingle(human)
-        : formatCsvRuleCauseFileLevel(human);
+      bespokeRuleMessage(onlyRule, byRule[onlyRule]) !== null
+        ? null
+        : realRowCount > 0
+          ? formatCsvRuleCauseSingle(csvRuleLabel(onlyRule))
+          : formatCsvRuleCauseFileLevel(csvRuleLabel(onlyRule));
   } else {
     causeText = authoredCause ?? null;
   }
@@ -286,7 +322,7 @@ export function CsvValidationEnvelope({
       {Object.entries(byRule).map(([rule, list]) => (
         <details key={rule} className="mt-2 text-caption">
           <summary className="cursor-pointer text-text-secondary">
-            {csvRuleLabel(rule)}
+            {bespokeRuleMessage(rule, list) ?? csvRuleLabel(rule)}
             {/* 166.1 WR-01: a row count only when this rule failed on real rows. */}
             {list.some(isRealRow) ? ` (${list.filter(isRealRow).length} rows)` : ""}
           </summary>
