@@ -141,7 +141,9 @@ def test_a_priced_holding_carries_its_mark_returns_and_a_stablecoin_stays_in_the
     assert list(ctx["portfolio_returns"]) == [BTC]
     series = ctx["portfolio_returns"][BTC]
     assert len(series) == 30
-    assert list(series.index) == _days(31)[1:], "returns are keyed by the LATER day"
+    assert list(series.index) == list(pd.DatetimeIndex(_days(31)[1:])), (
+        "returns are keyed by the LATER day, on a DatetimeIndex like every other series"
+    )
     assert series.iloc[0] == pytest.approx(0.02), "102 over 100"
     assert list(series.to_numpy()) == pytest.approx(_returns(BTC_MARKS))
     assert [s["strategy_id"] for s in ctx["portfolio_strategies"]] == [BTC]
@@ -394,6 +396,10 @@ def test_a_priced_series_is_a_float_series_named_by_its_pseudo_id(
     assert isinstance(series, pd.Series)
     assert series.dtype == float
     assert series.name == BTC
+    # CR-01 (round 2): the index type the candidate and strategy series carry (a tz-naive
+    # DatetimeIndex), since a string day never equals a Timestamp in the engine's joins.
+    assert isinstance(series.index, pd.DatetimeIndex)
+    assert series.index.tz is None
 
 
 # ---------------------------------------------------------------------------

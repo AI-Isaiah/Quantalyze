@@ -42,6 +42,7 @@ import pytest
 
 from routers.match import _load_allocator_context
 from services.match_engine import ENGINE_VERSION, WEIGHTS_VERSION, score_candidates
+from tests._returns_fixtures import production_series
 from tests.fake_postgrest import FakeDb
 
 GOLDEN_PATH = Path(__file__).parent / "fixtures" / "e2_match_score_golden.json"
@@ -96,8 +97,10 @@ def _expected_symbol_series(symbol: str) -> pd.Series:
     """Independent re-derivation (bare pandas) of the per-symbol return series from the
     marks — deliberately NOT calling classify_spot_marks so the assertion has teeth."""
     marks = _fixture_marks()[symbol]
+    # A DatetimeIndex, like every series production joins (CR-01, round 2); built here with
+    # bare pandas, not through the converter under test.
     return pd.Series(
-        [mark for _, mark in marks], index=[day for day, _ in marks], name=symbol
+        [mark for _, mark in marks], index=pd.DatetimeIndex([day for day, _ in marks]), name=symbol
     ).pct_change().dropna()
 
 
@@ -122,7 +125,7 @@ def _fixture_candidates() -> tuple[list[dict], dict[str, pd.Series]]:
             "strategy_type": "trend_following",
         })
         vals = [round(0.002 * math.sin((i + k) * 0.4) + 0.0005 * k, 8) for i in range(n)]
-        returns[sid] = pd.Series(vals, index=idx, name=sid)
+        returns[sid] = production_series(idx, vals, name=sid)
     return candidates, returns
 
 

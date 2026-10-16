@@ -22,6 +22,7 @@ import pandas as pd
 import pytest
 
 from routers import match as match_mod
+from tests._returns_fixtures import production_series
 from tests.fake_postgrest import FakeDb
 from tests.test_match_holding_returns import (
     ALLOCATOR,
@@ -154,8 +155,8 @@ async def test_a_book_with_no_series_gets_no_marker(monkeypatch: pytest.MonkeyPa
 
 
 def _series(days: int) -> pd.Series:
-    index = [f"2026-09-{d:02d}" for d in range(1, days + 1)]
-    return pd.Series([0.01] * days, index=index, dtype=float)
+    # CR-01 (round 2): the production shape (tz-naive DatetimeIndex), not a string index.
+    return production_series([f"2026-09-{d:02d}" for d in range(1, days + 1)], [0.01] * days)
 
 
 def test_the_marker_boundary_is_thirty_shared_days() -> None:

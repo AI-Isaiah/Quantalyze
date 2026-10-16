@@ -36,6 +36,7 @@ import pytest
 
 from routers import match as match_mod
 from services import match_engine
+from tests._returns_fixtures import production_series
 from tests.fake_postgrest import FakeDb
 
 ALLOCATOR = "alloc-1"
@@ -131,10 +132,11 @@ def _context(monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, Any]]) -> dic
 
 def _candidate_returns() -> pd.Series:
     days = _adjacent_days(BOOK_DAYS + 1)[1:]  # 120 returns, ending on END
-    return pd.Series(
+    # CR-01 (round 2): through the converter production uses (a tz-naive DatetimeIndex), not a
+    # string index, so the join with the book's series is the one production performs.
+    return production_series(
+        days,
         [0.004 * math.sin(0.9 * i + 1.3) + 0.0005 * ((i % 7) - 3) for i in range(len(days))],
-        index=days,
-        dtype=float,
         name="cand-1",
     )
 

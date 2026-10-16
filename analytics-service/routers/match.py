@@ -77,7 +77,7 @@ from services.match_eval import (
 )
 from services.native_to_usd import UsdSeriesConverter, native_units_by_id
 from services.rate_limit import limiter, tenant_or_platform_key
-from services.wealth_returns import daily_returns_from_row
+from services.wealth_returns import daily_returns_from_row, records_to_series
 
 router = APIRouter(prefix="/api/match", tags=["match"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -609,6 +609,58 @@ def _holdings_history_window_start() -> str:
     return start.isoformat()
 
 
+class SeriesIndexError(RuntimeError):
+    """The return series handed to the matcher's scoring do not share ONE index type
+    (CR-01, round 2). pandas treats a string day and a ``Timestamp`` (or a tz-naive and a
+    tz-aware day) as different labels, so a mixed set joins to ZERO shared days without any
+    error: the portfolio-fit axis goes null, every correlation-ceiling test is skipped, and
+    the D-22 marker blames an overlap that is fine. Raised before scoring so that can never be
+    silent."""
+
+
+def assert_uniform_datetime_index(
+    groups: dict[str, dict[str, pd.Series]], *, allocator_id: str
+) -> None:
+    """Raise :class:`SeriesIndexError` unless every non-empty series across ``groups``
+    (``{label: {series_id: Series}}``, e.g. the book and the candidates) is indexed by a
+    ``DatetimeIndex`` of ONE tz-awareness, the shape ``records_to_series`` gives every
+    strategy, candidate and holding series. Names the group, the series ids and the offending
+    index types, never a value. An empty series has no day to join and is skipped."""
+    not_datetime: list[str] = []
+    naive: list[str] = []
+    aware: list[str] = []
+    for label, series_by_id in groups.items():
+        for sid, series in series_by_id.items():
+            if len(series) == 0:
+                continue
+            index = series.index
+            ref = f"{label}:{sid}"
+            if not isinstance(index, pd.DatetimeIndex):
+                not_datetime.append(f"{ref} ({type(index).__name__})")
+            elif index.tz is None:
+                naive.append(ref)
+            else:
+                aware.append(ref)
+    if not_datetime or (naive and aware):
+        parts: list[str] = []
+        if not_datetime:
+            parts.append(f"{len(not_datetime)} not DatetimeIndex-indexed: {_sample(not_datetime)}")
+        if naive and aware:
+            parts.append(
+                f"{len(naive)} tz-naive ({_sample(naive)}) beside {len(aware)} tz-aware "
+                f"({_sample(aware)})"
+            )
+        raise SeriesIndexError(
+            f"allocator {allocator_id}: the scored series must all share one DatetimeIndex "
+            f"type (the shape records_to_series produces), but " + "; ".join(parts)
+        )
+
+
+def _sample(refs: list[str], limit: int = 3) -> str:
+    more = f", and {len(refs) - limit} more" if len(refs) > limit else ""
+    return ", ".join(refs[:limit]) + more
+
+
 class HoldingsReadTruncated(RuntimeError):
     """A holdings or key read reached ``_HOLDINGS_ROW_CAP`` rows, so it may be a
     partial list. Scoring on a partial book would report a confident, wrong
@@ -985,12 +1037,23 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
             continue
 
         portfolio_strategies.append({"strategy_id": pseudo_id})
-        portfolio_returns[pseudo_id] = pd.Series(
-            [ret for _, ret in marks.returns],
-            index=[day for day, _ in marks.returns],
-            dtype=float,
-            name=pseudo_id,
+        # CR-01 (round 2): the SAME converter the strategy and candidate series go through
+        # (``daily_returns_from_row`` reaches ``records_to_series``), so a holding's days are
+        # a tz-naive ``DatetimeIndex`` like theirs. A plain "YYYY-MM-DD" string index never
+        # equals a ``Timestamp``, so the engine's date joins found no shared day with any
+        # candidate or strategy in production.
+        holding_series = records_to_series(
+            [{"date": day, "value": ret} for day, ret in marks.returns], name=pseudo_id
         )
+        if holding_series is None:
+            # Unreachable for a finite return: the rule floors each signed return at -100% and
+            # a price is positive, so every adjacent return is a finite float. Fail loud
+            # rather than carry a holding with no usable series into the book.
+            raise SeriesIndexError(
+                f"allocator {allocator_id}: a priced spot holding's mark returns produced "
+                f"no usable date-indexed series"
+            )
+        portfolio_returns[pseudo_id] = holding_series
         holdings_rows_eligible.append(row)
 
     if withheld_counts:
@@ -1549,6 +1612,9 @@ def book_join_marker(
     """
     if not portfolio_returns:
         return None
+    # The same guarantee as the scoring call: a mixed index would read as shared_days 0 and
+    # persist a false cause. ``_score_one_allocator`` has already checked this book.
+    assert_uniform_datetime_index({"book": portfolio_returns}, allocator_id=allocator_id)
     shared_days = len(pd.DataFrame(portfolio_returns).dropna())
     if shared_days >= _BOOK_JOIN_MIN_DAYS:
         return None
@@ -1670,6 +1736,15 @@ async def _score_one_allocator(
         )
         candidate_returns, _ = await _usd.convert(
             candidate_returns, universe.get("native_units") or {}
+        )
+
+        # CR-01 (round 2): every joined series must share ONE index type. A string-indexed
+        # holding beside Timestamp-indexed candidates joins to zero days with no error, so
+        # check the converted book and the converted candidates here, before anything joins
+        # them (the D-22 marker and compute_holding_flags below read the same book).
+        assert_uniform_datetime_index(
+            {"book": portfolio_returns, "candidate": candidate_returns},
+            allocator_id=allocator_id,
         )
 
         # score_candidates runs pandas/numpy heavy work (DataFrame builds,

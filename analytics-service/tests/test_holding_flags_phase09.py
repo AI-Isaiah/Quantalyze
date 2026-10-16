@@ -14,6 +14,7 @@ import pandas as pd
 from unittest.mock import MagicMock
 
 from routers.match import compute_holding_flags, FLAG_COMPOSITE_THRESHOLD
+from tests._returns_fixtures import production_series
 
 
 # ---------------------------------------------------------------------------
@@ -33,7 +34,7 @@ def _mk_holding(venue: str = "binance", symbol: str = "BTC", holding_type: str =
 def _mk_series(n_days: int = 40, daily_return: float = 0.01) -> pd.Series:
     """Build a deterministic daily-return series of length n_days."""
     idx = pd.date_range("2026-01-01", periods=n_days, freq="D").strftime("%Y-%m-%d").tolist()
-    return pd.Series([daily_return] * n_days, index=idx)
+    return production_series(idx, [daily_return] * n_days)
 
 
 # ---------------------------------------------------------------------------
@@ -106,9 +107,9 @@ def test_holding_flags_correlation_ceiling():
         _mk_holding(symbol="SOL", value_usd=200.0),
     ]
     portfolio_returns = {
-        "holding:binance:BTC:spot": pd.Series(btc_vals.tolist(), index=idx),
-        "holding:binance:ETH:spot": pd.Series(eth_vals.tolist(), index=idx),
-        "holding:binance:SOL:spot": pd.Series(sol_vals.tolist(), index=idx),
+        "holding:binance:BTC:spot": production_series(idx, btc_vals.tolist()),
+        "holding:binance:ETH:spot": production_series(idx, eth_vals.tolist()),
+        "holding:binance:SOL:spot": production_series(idx, sol_vals.tolist()),
     }
     portfolio_weights = {
         "holding:binance:BTC:spot": 0.5,
