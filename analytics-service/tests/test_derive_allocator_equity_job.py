@@ -499,9 +499,11 @@ async def test_pin_fourthbucket_dust_null_anchor_sibling_omitted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pin_f2_permanent_failure_deletes_stale_curve() -> None:
+async def test_pin_f2_permanent_failure_records_refusal_for_stale_curve() -> None:
     """F2: a poison structural input → permanent FAILED → the stale equity_curve
-    row is DELETED (degrade to legacy), never left rendering as trustworthy."""
+    row is REPLACED by a refusal record, never left rendering as trustworthy.
+    167.1.2.1.1 D-04: it used to be deleted, which let the reader say the history
+    is recomputed daily; the row now names ``compose_refused``."""
     from services.job_worker import run_derive_allocator_equity_job
 
     fake = _FakeSupabase(_seed_poison_with_stale_curve())
@@ -514,19 +516,13 @@ async def test_pin_f2_permanent_failure_deletes_stale_curve() -> None:
 
     assert result.outcome.name == "FAILED"
     assert result.error_kind == "permanent"
-    curve_deletes = [
-        d for d in fake.deletes
-        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
-        and d[1].get("allocator_id") == "alloc-poison"
-    ]
-    assert len(curve_deletes) == 1, (
-        f"a permanent failure must delete the stale equity_curve row (F2); got {fake.deletes!r}"
-    )
+    _assert_refusal_recorded(fake, "alloc-poison", "compose_refused")
 
 
 @pytest.mark.asyncio
-async def test_pin_f2_corrupt_input_permanent_deletes_stale_curve() -> None:
-    """F2: the M3 corrupt-input permanent disposition also deletes the stale row."""
+async def test_pin_f2_corrupt_input_permanent_records_refusal() -> None:
+    """F2: the M3 corrupt-input permanent disposition also replaces the stale row
+    (167.1.2.1.1 D-04: with an ``input_corrupt`` refusal record, not a delete)."""
     from services.job_worker import run_derive_allocator_equity_job
 
     seed = _seed_poison_with_stale_curve()
@@ -542,13 +538,7 @@ async def test_pin_f2_corrupt_input_permanent_deletes_stale_curve() -> None:
 
     assert result.outcome.name == "FAILED"
     assert result.error_kind == "permanent"
-    curve_deletes = [
-        d for d in fake.deletes
-        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
-    ]
-    assert len(curve_deletes) == 1, (
-        f"the M3 corrupt-input permanent path must delete the stale row; got {fake.deletes!r}"
-    )
+    _assert_refusal_recorded(fake, "alloc-poison", "input_corrupt")
 
 
 @pytest.mark.asyncio
@@ -622,8 +612,9 @@ def _seed_partial_backfill() -> dict[str, list[dict]]:
 async def test_pin_f1b_partial_backfill_refuses_and_degrades() -> None:
     """F1(b): an allocator with 2 eligible keys where one key is absent from BOTH
     the returns and key_inputs maps (backfill window) → the compose is INCOMPLETE
-    and must refuse: delete the equity_curve row (degrade to legacy), NEVER compose
-    a trustworthy 1-of-2-capital curve."""
+    and must refuse: replace the equity_curve row with a ``compose_incomplete``
+    refusal record (167.1.2.1.1 D-04; it used to be deleted), NEVER compose a
+    trustworthy 1-of-2-capital curve."""
     from services.job_worker import run_derive_allocator_equity_job
 
     fake = _FakeSupabase(_seed_partial_backfill())
@@ -639,15 +630,8 @@ async def test_pin_f1b_partial_backfill_refuses_and_degrades() -> None:
     assert [u for u in fake.upserts if _is_equity_curve_upsert(u[1])] == [], (
         f"a partial (incomplete) compose must NOT upsert a curve; got {fake.upserts!r}"
     )
-    # The stale equity_curve row is deleted → legacy fallback.
-    curve_deletes = [
-        d for d in fake.deletes
-        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
-        and d[1].get("allocator_id") == "alloc-partial"
-    ]
-    assert len(curve_deletes) == 1, (
-        f"an incomplete compose must delete the stale equity_curve row; got {fake.deletes!r}"
-    )
+    # The stale equity_curve row is replaced by the refusal record, not deleted.
+    _assert_refusal_recorded(fake, "alloc-partial", "compose_incomplete")
 
 
 @pytest.mark.asyncio
@@ -783,12 +767,15 @@ def _seed_zero_anchored_with_stale_curve() -> dict[str, list[dict]]:
 
 
 @pytest.mark.asyncio
-async def test_pin_b2_empty_compose_deletes_stale_curve_no_upsert() -> None:
+async def test_pin_b2_empty_compose_records_refusal_no_curve() -> None:
     """B2 (root cause): a zero-anchored-keys / empty-curve compose must NOT upsert
-    an empty equity_curve row and MUST delete any existing one, so the dashboard
-    degrades to the clean no-row legacy fallback (never a blank chart labeled
-    'derived', never a stale trustworthy row surviving a structurally-empty
-    recompute — this also closes L1)."""
+    an empty equity_curve CURVE row and MUST replace any existing one (never a
+    blank chart labeled 'derived', never a stale trustworthy row surviving a
+    structurally-empty recompute — this also closes L1). 167.1.2.1.1 D-04: it is
+    replaced by a refusal record, not deleted. This seed has no key_inputs row, so
+    the job stops at F1b and the token is ``compose_incomplete``; the B2 tokens
+    themselves (``compose_empty``, ``compose_empty_blocked``) are pinned by
+    ``test_every_refusal_path_persists_a_reason_row``."""
     from services.job_worker import run_derive_allocator_equity_job
 
     fake = _FakeSupabase(_seed_zero_anchored_with_stale_curve())
@@ -808,15 +795,8 @@ async def test_pin_b2_empty_compose_deletes_stale_curve_no_upsert() -> None:
     assert curve_upserts == [], (
         f"empty compose must NOT upsert an equity_curve row; got {fake.upserts!r}"
     )
-    # The stale equity_curve row was deleted (scoped to this allocator + kind).
-    curve_deletes = [
-        d for d in fake.deletes
-        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
-        and d[1].get("allocator_id") == "alloc-empty"
-    ]
-    assert len(curve_deletes) == 1, (
-        f"empty compose must DELETE the stale equity_curve row; got {fake.deletes!r}"
-    )
+    # The stale equity_curve row was replaced (scoped to this allocator + kind).
+    _assert_refusal_recorded(fake, "alloc-empty", "compose_incomplete")
 
 
 def _seed_malformed_daily_return() -> dict[str, list[dict]]:
@@ -931,8 +911,10 @@ async def test_pin_structural_refusal_permanent_scrubbed_failed() -> None:
     # No raw USD anchor magnitude (100000 / 50000) leaked into the message.
     assert "100000" not in (result.error_message or "")
     assert "50000" not in (result.error_message or "")
-    # No poison equity_curve upsert on a structural failure.
+    # No poison equity_curve upsert on a structural failure; the row holds the
+    # refusal record instead (167.1.2.1.1 D-04).
     assert [u for u in fake.upserts if _is_equity_curve_upsert(u[1])] == []
+    _assert_refusal_recorded(fake, "alloc-1", "compose_refused")
 
 
 @pytest.mark.asyncio
@@ -1518,6 +1500,16 @@ def _refusal_upserts(fake: _FakeSupabase) -> list:
     ]
 
 
+def _assert_refusal_recorded(fake: _FakeSupabase, alloc: str, token: str) -> None:
+    """167.1.2.1.1 SC-1 (D-04): the refusal is ONE atomic upsert of the
+    ``equity_curve`` row naming ``token``, no curve is written, nothing is deleted."""
+    refusals = _refusal_upserts(fake)
+    assert [r["payload"]["refusal"] for _, r, _ in refusals] == [token], fake.upserts
+    assert refusals[0][1]["allocator_id"] == alloc
+    assert _curve_upserts(fake) == []
+    assert _curve_deletes(fake, alloc) == [], fake.deletes
+
+
 def _curve_deletes(fake: _FakeSupabase, alloc: str) -> list:
     return [
         d for d in fake.deletes
@@ -1602,10 +1594,11 @@ def test_account_identity_collisions_intervals() -> None:
 
 
 @pytest.mark.asyncio
-async def test_duplicate_with_working_holder_deletes_curve(caplog: pytest.LogCaptureFixture) -> None:
+async def test_duplicate_with_working_holder_records_refusal(caplog: pytest.LogCaptureFixture) -> None:
     """A marked duplicate whose holder is still connected is not counted on its
     own. The marker alone refuses the curve — the two keys need not share a
-    venue id — and the log is the token plus counts, never an id."""
+    venue id — and the log is the token plus counts, never an id. 167.1.2.1.1
+    D-04: the refusal is recorded in the row (``account_duplicate``), not deleted."""
     import logging
 
     alloc = "alloc-dup"
@@ -1628,8 +1621,7 @@ async def test_duplicate_with_working_holder_deletes_curve(caplog: pytest.LogCap
     })
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
-    assert _curve_upserts(fake) == []
-    assert len(_curve_deletes(fake, alloc)) == 1
+    _assert_refusal_recorded(fake, alloc, "account_duplicate")
     assert "account_duplicate" in caplog.text
     assert "account_identity_collision" not in caplog.text
     assert "key-D" not in caplog.text
@@ -1803,6 +1795,160 @@ async def test_identity_collision_persists_its_refusal_reason() -> None:
     assert "account_identity_collision" in payload["degrade_reasons"]
     assert _curve_upserts(fake) == [], "a refusal row is not a curve"
     assert _curve_deletes(fake, alloc) == [], "the refusal replaces the row; nothing is deleted"
+
+
+def _refusal_case_returns_read_cap() -> dict[str, Any]:
+    rows, _first, _last = _seed_long_history()
+    rows[DERIVED_TABLE].append(_stale_curve(_LONG_ALLOC))
+    return {
+        "fake": _FakeSupabase(rows),
+        "alloc": _LONG_ALLOC,
+        "token": "returns_read_cap",
+        "outcome": "FAILED",
+        "truncate_returns": True,
+    }
+
+
+def _refusal_case_duplicate() -> dict[str, Any]:
+    alloc = "alloc-refusal-dup"
+    csv, ki = _series_rows(alloc, "key-D", 1_000.0)
+    _, holder_ki = _series_rows(alloc, "key-H", 1_000.0)
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key(
+                "key-D", alloc,
+                venue_account_id="venue-dup",
+                account_share_kind="duplicate",
+                account_shared_with_api_key_id="key-H",
+            ),
+            _gate_key("key-H", alloc, venue_account_id="venue-holder"),
+        ],
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: [ki, holder_ki, _stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    return {"fake": fake, "alloc": alloc, "token": "account_duplicate", "outcome": "DONE"}
+
+
+def _refusal_case_input_corrupt() -> dict[str, Any]:
+    seed = _seed_poison_with_stale_curve()
+    # A NULL daily_return: float(None) raises, the M3 permanent disposition.
+    seed["csv_daily_returns"][1]["daily_return"] = None
+    return {
+        "fake": _FakeSupabase(seed), "alloc": "alloc-poison",
+        "token": "input_corrupt", "outcome": "FAILED",
+    }
+
+
+def _refusal_case_compose_incomplete() -> dict[str, Any]:
+    return {
+        "fake": _FakeSupabase(_seed_partial_backfill()), "alloc": "alloc-partial",
+        "token": "compose_incomplete", "outcome": "DONE",
+    }
+
+
+def _refusal_case_compose_empty() -> dict[str, Any]:
+    """B2 with a TRUSTWORTHY empty compose. The only key has a key_inputs row (so
+    it is visible and F1b does not refuse) whose anchor is NULL for the benign
+    reason ``dust``, and no returns: the compose omits it, composes nothing and
+    stays trustworthy. (``_seed_zero_anchored_with_stale_curve`` has NO key_inputs
+    row, so it stops earlier, at F1b, as ``compose_incomplete``.)"""
+    alloc = "alloc-empty-dust"
+    fake = _FakeSupabase({
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [
+            {"allocator_id": alloc, "kind": "key_inputs:key-Z",
+             "payload": {"flows": [], "anchor_usd": None, "venue": "binance",
+                         "anchor_null_reason": "dust"}},
+            _stale_curve(alloc),
+        ],
+        LEGACY_TABLE: [],
+        "api_keys": [_gate_key("key-Z", alloc)],
+    })
+    return {"fake": fake, "alloc": alloc, "token": "compose_empty", "outcome": "DONE"}
+
+
+def _refusal_case_compose_empty_blocked() -> dict[str, Any]:
+    """The only key has an anchor and NO returns: the compose drops it as
+    DROPPED_KEY (blocking), so the compose is empty AND untrustworthy."""
+    alloc = "alloc-empty-blocked"
+    fake = _FakeSupabase({
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [
+            {"allocator_id": alloc, "kind": "key_inputs:key-Z",
+             "payload": {"flows": [], "anchor_usd": 50_000.0, "venue": "binance"}},
+            _stale_curve(alloc),
+        ],
+        LEGACY_TABLE: [],
+        "api_keys": [_gate_key("key-Z", alloc)],
+    })
+    return {
+        "fake": fake, "alloc": alloc, "token": "compose_empty_blocked",
+        "outcome": "DONE", "blocking": ["dropped_key"],
+    }
+
+
+def _refusal_case_compose_refused() -> dict[str, Any]:
+    return {
+        "fake": _FakeSupabase(_seed_poison_with_stale_curve()), "alloc": "alloc-poison",
+        "token": "compose_refused", "outcome": "FAILED",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "build",
+    [
+        _refusal_case_returns_read_cap,
+        _refusal_case_duplicate,
+        _refusal_case_input_corrupt,
+        _refusal_case_compose_incomplete,
+        _refusal_case_compose_empty,
+        _refusal_case_compose_empty_blocked,
+        _refusal_case_compose_refused,
+    ],
+    ids=lambda b: b.__name__.removeprefix("_refusal_case_"),
+)
+async def test_every_refusal_path_persists_a_reason_row(build: Any) -> None:
+    """Phase 167.1.2.1.1 SC-1 (D-04): every derive refusal path used to DELETE the
+    allocator's equity_curve row, so the reader fell back to "recomputed daily"
+    for a book the derive refuses every day. Each now replaces the row in ONE
+    atomic upsert with a version-2 payload that names the token, and deletes
+    nothing. The stale trustworthy curve is gone either way (T-167.1.2.1.1-01):
+    the upsert replaces it. The job outcome of each path is unchanged."""
+    from contextlib import ExitStack
+    from unittest.mock import patch
+
+    from services.db import PaginatedSelectTruncated
+
+    case = build()
+    fake, alloc = case["fake"], case["alloc"]
+    with ExitStack() as stack:
+        if case.get("truncate_returns"):
+            def _boom(*_a: Any, **_kw: Any) -> list[dict]:
+                raise PaginatedSelectTruncated(page_count=1000, page_size=1000, hint="probe")
+
+            stack.enter_context(
+                patch("services.job_worker._load_allocator_daily_returns", side_effect=_boom)
+            )
+        result = await _run_gate(fake, alloc)
+
+    assert result.outcome.name == case["outcome"], result
+    if case["outcome"] == "FAILED":
+        assert result.error_kind == "permanent", result.error_kind
+    refusals = _refusal_upserts(fake)
+    assert len(refusals) == 1, f"one atomic refusal upsert, got {fake.upserts!r}"
+    _table, row, on_conflict = refusals[0]
+    assert on_conflict == "allocator_id,kind"
+    assert row["allocator_id"] == alloc and row["kind"] == "equity_curve"
+    payload = row["payload"]
+    assert payload["refusal"] == case["token"]
+    assert payload["version"] == 2
+    assert payload["is_trustworthy"] is False
+    assert payload["curve"] == [] and payload["returns"] == []
+    assert payload["degrade_reasons"] == sorted([case["token"], *case.get("blocking", [])])
+    assert _curve_upserts(fake) == [], "a refusal row is not a curve"
+    assert _curve_deletes(fake, alloc) == [], "nothing is deleted; the row is replaced"
 
 
 @pytest.mark.asyncio
@@ -2061,9 +2207,10 @@ async def test_shared_account_with_no_working_key_is_counted_once_and_loudly(
 async def test_identity_refusal_is_a_warning_not_info(
     caplog: pytest.LogCaptureFixture, keys: list[dict[str, Any]], token: str
 ) -> None:
-    """C2 silent-failure SFH-07: the identity refusal deletes the allocator's
-    curve and ends the job DONE. At INFO nobody can find out from the logs why
-    the curve keeps disappearing. It logs at WARNING: token and counts only."""
+    """C2 silent-failure SFH-07: the identity refusal replaces the allocator's
+    curve with a refusal record and ends the job DONE. At INFO nobody can find out
+    from the logs why the curve keeps disappearing. It logs at WARNING: token and
+    counts only."""
     import logging
 
     alloc = "alloc-refuse"
@@ -2075,13 +2222,8 @@ async def test_identity_refusal_is_a_warning_not_info(
         LEGACY_TABLE: [],
     })
     assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
-    if token == "account_identity_collision":
-        # 167.1.2.1.1 SC-1 (D-04): recorded in the row, not deleted. The
-        # duplicate arm follows in the same phase (plan 01 task 2).
-        assert len(_refusal_upserts(fake)) == 1
-        assert _curve_deletes(fake, alloc) == []
-    else:
-        assert len(_curve_deletes(fake, alloc)) == 1
+    # 167.1.2.1.1 SC-1 (D-04): recorded in the row, not deleted.
+    _assert_refusal_recorded(fake, alloc, token)
     refusals = [r for r in caplog.records if token in r.getMessage()]
     assert refusals, caplog.text
     assert all(r.levelno == logging.WARNING for r in refusals), [
@@ -2395,12 +2537,12 @@ async def test_a_working_key_with_no_returns_yet_is_not_stitched_and_the_book_is
 async def test_duplicate_whose_marked_key_fails_behind_a_working_holder_still_refuses() -> None:
     """Reader parity (queries.ts countsAsDuplicate): an ELIGIBLE duplicate-marked
     key whose holder is working is a duplicate, whatever the marked key's own
-    status. The curve is refused, as before."""
+    status. The curve is refused, as before (167.1.2.1.1 D-04: the refusal is
+    recorded in the row, not deleted)."""
     alloc = "alloc-dup-marked-failing"
     fake = _shared_pair(alloc, "duplicate", holder={}, marked={"sync_status": "error"})
     assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
-    assert _curve_upserts(fake) == []
-    assert len(_curve_deletes(fake, alloc)) == 1
+    _assert_refusal_recorded(fake, alloc, "account_duplicate")
 
 
 @pytest.mark.asyncio
@@ -2565,11 +2707,12 @@ async def test_sfh_r3_07_returns_read_drains_past_the_response_cap() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sfh_r3_07_returns_read_truncation_is_permanent_and_deletes_curve() -> None:
+async def test_sfh_r3_07_returns_read_truncation_is_permanent_and_records_refusal() -> None:
     """A returns read past the read's hard cap raises
     PaginatedSelectTruncated. Retrying re-reads the same rows, so the job must
-    end permanent FAILED (not the classifier's retrying `unknown`), delete the
-    stale equity_curve row, and never compose from partial data. The message
+    end permanent FAILED (not the classifier's retrying `unknown`), replace the
+    stale equity_curve row with a ``returns_read_cap`` refusal record (167.1.2.1.1
+    D-04; it used to delete it), and never compose from partial data. The message
     carries no allocator id (the hint is a log-only triage string)."""
     from unittest.mock import patch
 
@@ -2593,13 +2736,7 @@ async def test_sfh_r3_07_returns_read_truncation_is_permanent_and_deletes_curve(
     assert result.outcome.name == "FAILED", result
     assert result.error_kind == "permanent", result.error_kind
     assert _LONG_ALLOC not in (result.error_message or ""), result.error_message
-    curve_deletes = [
-        d for d in fake.deletes
-        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
-        and d[1].get("allocator_id") == _LONG_ALLOC
-    ]
-    assert len(curve_deletes) == 1, fake.deletes
-    assert not [u for u in fake.upserts if _is_equity_curve_upsert(u[1])], fake.upserts
+    _assert_refusal_recorded(fake, _LONG_ALLOC, "returns_read_cap")
 
 
 # ---------------------------------------------------------------------------
@@ -4379,11 +4516,11 @@ async def test_no_capital_exit_compose_refusal_reverts_the_candidates_and_keeps_
 
 
 @pytest.mark.asyncio
-async def test_no_capital_exit_refusal_without_a_candidate_still_deletes_the_row() -> None:
+async def test_no_capital_exit_refusal_without_a_candidate_still_replaces_the_row() -> None:
     """T-166.3.1-39. The re-compose exists only for candidates. A compose that refuses with none in
-    play is today's permanent failure and deletes the stale row (F2); and when the re-compose
-    itself refuses, the same path runs, so the job never loops and never keeps a row it cannot
-    stand behind."""
+    play is today's permanent failure and replaces the stale row with a refusal record (F2;
+    167.1.2.1.1 D-04, it used to delete it); and when the re-compose itself refuses, the same path
+    runs, so the job never loops and never keeps a row it cannot stand behind."""
     from unittest.mock import patch
 
     from services.job_worker import run_derive_allocator_equity_job
@@ -4407,9 +4544,7 @@ async def test_no_capital_exit_refusal_without_a_candidate_still_deletes_the_row
         ):
             result = await run_derive_allocator_equity_job(job)
         assert result.outcome.name == "FAILED" and result.error_kind == "permanent"
-        assert [
-            x for x in fake.deletes if x[0] == DERIVED_TABLE and x[1].get("kind") == "equity_curve"
-        ], fake.deletes
+        _assert_refusal_recorded(fake, _NOCAP_ALLOC, "compose_refused")
 
 
 @pytest.mark.asyncio

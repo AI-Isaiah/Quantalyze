@@ -3,6 +3,58 @@
   "composed_at": "2026-10-16T00:00:00+00:00",
   "refusals": [
     {
+      "token": "returns_read_cap",
+      "extra_reasons": [],
+      "reader_reason": "derivation_rejected",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "returns_read_cap"
+        ],
+        "is_trustworthy": false,
+        "refusal": "returns_read_cap",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    },
+    {
+      "token": "account_duplicate",
+      "extra_reasons": [],
+      "reader_reason": "duplicate_account",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "account_duplicate"
+        ],
+        "is_trustworthy": false,
+        "refusal": "account_duplicate",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    },
+    {
       "token": "account_identity_collision",
       "extra_reasons": [],
       "reader_reason": "duplicate_account",
@@ -11,11 +63,154 @@
         "returns": [],
         "version": 2,
         "flags": [],
-        "degrade_reasons": ["account_identity_collision"],
+        "degrade_reasons": [
+          "account_identity_collision"
+        ],
         "is_trustworthy": false,
         "refusal": "account_identity_collision",
-        "scalars": {"mwr": null, "dietz": null, "computable": false},
-        "inputs": {"n_keys": 0, "anchor_asof": null, "composed_at": "2026-10-16T00:00:00+00:00"}
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    },
+    {
+      "token": "input_corrupt",
+      "extra_reasons": [],
+      "reader_reason": "derivation_rejected",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "input_corrupt"
+        ],
+        "is_trustworthy": false,
+        "refusal": "input_corrupt",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    },
+    {
+      "token": "compose_incomplete",
+      "extra_reasons": [],
+      "reader_reason": "awaiting_derivation",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "compose_incomplete"
+        ],
+        "is_trustworthy": false,
+        "refusal": "compose_incomplete",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    },
+    {
+      "token": "compose_empty",
+      "extra_reasons": [],
+      "reader_reason": "awaiting_derivation",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "compose_empty"
+        ],
+        "is_trustworthy": false,
+        "refusal": "compose_empty",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    },
+    {
+      "token": "compose_empty_blocked",
+      "extra_reasons": [
+        "dropped_key"
+      ],
+      "reader_reason": "derivation_rejected",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "compose_empty_blocked",
+          "dropped_key"
+        ],
+        "is_trustworthy": false,
+        "refusal": "compose_empty_blocked",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    },
+    {
+      "token": "compose_refused",
+      "extra_reasons": [],
+      "reader_reason": "derivation_rejected",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "compose_refused"
+        ],
+        "is_trustworthy": false,
+        "refusal": "compose_refused",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
       }
     }
   ]

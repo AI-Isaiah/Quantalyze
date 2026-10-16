@@ -12409,6 +12409,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         DegradeReason,
         DeriveRefusal,
         account_groups,
+        blocking_degrade_tokens,
         eligible_key_predicate,
         read_dropped_day_pnl,
         read_realized_terminal,
@@ -12425,20 +12426,6 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
 
     allocator_id = job["allocator_id"]
     supabase = get_supabase()
-
-    async def _delete_equity_curve_row() -> None:
-        # Leave NO row, so the reader renders its rebuilding panel (Phase
-        # 167.1.2 plan 11 removed the legacy-curve fallback: a missing row is no
-        # longer drawn from allocator_equity_snapshots). Shared by the identity
-        # refusal, the empty-compose (B2), incomplete-compose (F1b), and
-        # permanent-failure (F2) paths so a structurally-failed / partial / empty
-        # recompute can never leave a STALE trustworthy row rendering as "derived".
-        def _del() -> None:
-            supabase.table("allocator_equity_derived").delete().eq(
-                "allocator_id", allocator_id
-            ).eq("kind", "equity_curve").execute()
-
-        await db_execute(_del)
 
     async def _persist_refusal(
         token: str, *, extra_reasons: Sequence[str] = ()
@@ -12568,25 +12555,26 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # rows, and this exception would otherwise reach classify_exception's
         # catch-all as a retrying `unknown` forever (the T-74-02 class), so it
         # ends permanent. Nothing is composed from a partial read, and the stale
-        # curve row is deleted as on every other permanent path (F2), so the book
-        # shows the rebuilding panel. The hint (with the allocator id) goes to the
-        # operator log only; the job's message carries the row cap alone.
+        # curve row is replaced by a refusal record as on every other permanent
+        # path (F2, 167.1.2.1.1 D-04), so the book shows the rebuilding panel and
+        # the reason. The hint (with the allocator id) goes to the operator log
+        # only; the job's message carries the row cap alone.
         logger.error(
             "derive_allocator_equity: csv_daily_returns read for allocator %s hit "
-            "the pagination cap (page_count=%d, page_size=%d, hint=%s) — deleted "
-            "any stale equity_curve row; nothing was composed",
+            "the pagination cap (page_count=%d, page_size=%d, hint=%s) — recorded "
+            "the refusal in the equity_curve row; nothing was composed",
             allocator_id,
             trunc.page_count,
             trunc.page_size,
             trunc.hint or "n/a",
         )
-        await _delete_equity_curve_row()
+        await _persist_refusal(DeriveRefusal.RETURNS_READ_CAP.value)
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=(
                 "derive_allocator_equity: the allocator's daily returns exceed "
                 f"{trunc.page_count * trunc.page_size:,} rows; nothing was "
-                "composed and the stale equity curve was removed"
+                "composed and the stale equity curve was replaced by a refusal"
             ),
             error_kind="permanent",
         )
@@ -12771,14 +12759,12 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             if duplicate_keys
             else DeriveRefusal.ACCOUNT_IDENTITY_COLLISION.value
         )
-        if duplicate_keys:
-            await _delete_equity_curve_row()
-        else:
-            await _persist_refusal(reason)
+        await _persist_refusal(reason)
         # Reason token + counts only. No key id, no venue id, no USD (T-167.1.2-22).
-        # C2 silent-failure SFH-07: WARNING, not INFO. The refusal deletes the
-        # curve and ends DONE, so this line is the only trace of why the book
-        # renders "rebuilding". An audit action for it needs a member in BOTH
+        # C2 silent-failure SFH-07: WARNING, not INFO. The refusal replaces the
+        # curve with a refusal record and ends DONE, so this line (and the record's
+        # token) is the trace of why the book renders "rebuilding". An audit action
+        # for it needs a member in BOTH
         # services/audit.py and src/lib/audit.ts (test_action_literal_matches_ts_union),
         # and this derive has no api_key to anchor it on; recorded in the
         # 167.1.2 REVIEW-FIX report rather than half-added here.
@@ -12798,8 +12784,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         logger.warning(
             "derive_allocator_equity: %s for allocator %s "
             "(counted_keys=%d duplicate_keys=%d colliding_groups=%d) — "
-            "deleted any stale equity_curve row; the book shows the rebuilding "
-            "panel until the keys are resolved",
+            "recorded the refusal in the equity_curve row; the book shows the "
+            "rebuilding panel until the keys are resolved",
             reason,
             allocator_id,
             len(counted_rows),
@@ -12836,10 +12822,10 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # DB row FOREVER as transient `unknown` (the T-74-02 class). Dispose it as a
         # permanent scrubbed FAILED so the admin sees a terminal state, not an
         # infinite poison-retry. Scrubbed for defence in depth (no raw value leak).
-        # F2: DELETE the stale equity_curve row first so a structurally-failed
-        # recompute leaves no row (the book shows "rebuilding") instead of a
-        # stale trustworthy row.
-        await _delete_equity_curve_row()
+        # F2: replace the stale equity_curve row first (167.1.2.1.1 D-04: with a
+        # refusal record, not a delete) so a structurally-failed recompute can
+        # never leave a stale trustworthy row rendering as "derived".
+        await _persist_refusal(DeriveRefusal.INPUT_CORRUPT.value)
         import re
 
         # F4b: the corrupt-input ValueError/TypeError echoes the raw value
@@ -13415,22 +13401,22 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # so composing now would emit a TRUSTWORTHY curve over a SUBSET of the
     # allocator's capital (a transient 1-of-N-capital curve rendered as ready).
     # If ANY eligible key is
-    # absent from BOTH maps the compose is INCOMPLETE → refuse: delete the
-    # equity_curve row (the book shows "rebuilding") rather than compose a silently-partial
-    # trustworthy curve. A key WITH a key_inputs row but no returns is NOT missing
+    # absent from BOTH maps the compose is INCOMPLETE → refuse: replace the
+    # equity_curve row with a refusal record (the book shows "rebuilding") rather than
+    # compose a silently-partial trustworthy curve. A key WITH a key_inputs row but no returns is NOT missing
     # here — it is visible to the compose core, which classifies it
     # anchored-without-returns → DROPPED_KEY → untrustworthy (B3). This gate is for
     # the strictly-invisible key (no returns AND no key_inputs — its derive has not
     # run yet). Self-healing: each sibling derive re-enqueues the compose.
     missing_ids = counted_ids - (set(returns_by_key) | key_inputs_ids)
     if missing_ids:
-        await _delete_equity_curve_row()
+        await _persist_refusal(DeriveRefusal.COMPOSE_INCOMPLETE.value)
         logger.info(
             "derive_allocator_equity: INCOMPLETE compose for allocator %s "
             "(eligible_keys=%d returns_keys=%d key_inputs_keys=%d missing=%d) — "
             "an eligible key has neither returns nor key_inputs (backfill window); "
-            "deleted any stale equity_curve row; the book shows the rebuilding "
-            "panel until every sibling derives (self-healing)",
+            "recorded the refusal in the equity_curve row; the book shows the "
+            "rebuilding panel until every sibling derives (self-healing)",
             allocator_id, len(eligible_ids), len(returns_by_key),
             len(key_inputs_ids), len(missing_ids),
         )
@@ -13504,11 +13490,11 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # unpriceable flow, a ≤−100% liquidation day). Retrying cannot help →
         # permanent FAILED with a scrubbed message (the T-74-02 DoS class; the core
         # errors carry counts/day-indices only, still scrubbed for defence in
-        # depth). F2: DELETE the stale equity_curve row first — otherwise a
+        # depth). F2: replace the stale equity_curve row first — otherwise a
         # post-liquidation poison input would leave the frozen pre-liquidation curve
-        # rendering as trustworthy FOREVER; leave no row (the book shows
-        # "rebuilding") instead.
-        await _delete_equity_curve_row()
+        # rendering as trustworthy FOREVER; the refusal record (167.1.2.1.1 D-04)
+        # holds the row instead and the book shows "rebuilding" with its reason.
+        await _persist_refusal(DeriveRefusal.COMPOSE_REFUSED.value)
         scrubbed = str(scrub_freeform_string(str(exc)))
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
@@ -13569,15 +13555,29 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     #      empty shapes degrade the same. Upserting it would render a blank
     #      chart as the book's history, and a later
     #      structurally-empty recompute would leave a STALE trustworthy row (L1).
-    #      Instead DELETE any existing equity_curve row → no row, which the
-    #      reader renders as the rebuilding panel (plan 11). The frontend
-    #      extractTrustworthyDerivedCurve is the paired last-line defense (B2a). ──
+    #      Instead REPLACE any existing equity_curve row with a refusal record
+    #      (167.1.2.1.1 D-04), which the reader renders as the rebuilding panel
+    #      (plan 11). The compose payload itself is never persisted with an empty
+    #      curve (the reader would call it malformed): a trustworthy empty compose
+    #      is ``compose_empty`` (nothing to draw yet, a wait); an untrustworthy one
+    #      is ``compose_empty_blocked`` and carries the compose's own blocking
+    #      tokens, so the wait mapping of ``compose_empty`` cannot swallow a blocking
+    #      cause. The frontend extractTrustworthyDerivedCurve is the paired
+    #      last-line defense (B2a). ──
     if not (payload.get("curve") or []):
-        await _delete_equity_curve_row()
+        if payload.get("is_trustworthy"):
+            await _persist_refusal(DeriveRefusal.COMPOSE_EMPTY.value)
+        else:
+            await _persist_refusal(
+                DeriveRefusal.COMPOSE_EMPTY_BLOCKED.value,
+                extra_reasons=blocking_degrade_tokens(
+                    payload.get("degrade_reasons") or []
+                ),
+            )
         logger.info(
             "derive_allocator_equity: empty compose for allocator %s "
-            "(eligible_keys=%d returns_keys=%d orphans_cleaned=%d) — deleted any "
-            "stale equity_curve row; the book shows the rebuilding panel",
+            "(eligible_keys=%d returns_keys=%d orphans_cleaned=%d) — recorded the "
+            "refusal in the equity_curve row; the book shows the rebuilding panel",
             allocator_id, len(eligible_ids), len(returns_by_key), len(orphan_kinds),
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)

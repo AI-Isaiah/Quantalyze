@@ -175,6 +175,14 @@ def _is_trustworthy(reasons: frozenset[DegradeReason]) -> bool:
     return not (reasons & _BLOCKING_REASONS)
 
 
+def blocking_degrade_tokens(tokens: Sequence[str]) -> list[str]:
+    """The members of ``tokens`` that are BLOCKING ``DegradeReason`` values, sorted.
+    The derive job uses it to carry a compose's own blocking causes onto a refusal row
+    (``compose_empty_blocked``); a benign or unknown token is not carried."""
+    blocking = {reason.value for reason in _BLOCKING_REASONS}
+    return sorted({str(t) for t in tokens if str(t) in blocking})
+
+
 class DeriveRefusal(str, Enum):
     """167.1.2.1.1 SC-1 (D-04): the CLOSED set of reasons the allocator equity derive
     REFUSES to publish a curve at all. A sibling of ``DegradeReason``, deliberately not
