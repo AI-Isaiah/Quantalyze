@@ -10058,6 +10058,70 @@ phase makes the NEW column `former_match_decision_id` trigger-owned but leaves `
 column UPDATE from `authenticated`).
 **Owner / Trigger:** the next phase touching the sync trigger.
 
+## Phase 167.1.2.1.1 (WRITERRESIDUALS) — routed review items (logged 2026-10-16)
+
+Round-1 review (gsd-code-reviewer and silent-failure-hunter) found 0 HIGH or CRITICAL and 4 MEDIUM. The founder ruled
+on 2026-10-16: "no more fix round for mediums". All four are booked here unfixed. Reports:
+`.planning/phases/167.1.2.1.1-*/167.1.2.1.1-REVIEW.md` (MR-01) and `167.1.2.1.1-REVIEW-SFH.md` (M-1..M-3).
+
+### 167.1.2.1.1-NEWBOOK-HELD-BACK-LINE — a brand-new book's first days read "held back" instead of "being rebuilt" (booked 2026-10-16, code review MR-01, MEDIUM, USER-FACING, introduced by this phase)
+
+**Failure scenario.**
+- A key with fewer than 2 days of history writes a `key_inputs` row with a real anchor and no return rows.
+- The compose marks it anchored-without-returns, which is the blocking `dropped_key`, and comes back empty.
+- SC-1 stores `['compose_empty_blocked', 'dropped_key']`.
+- The reader maps that to `derivation_rejected`: "We are holding back your equity history … did not pass its checks".
+- Before this phase the row was deleted, and the Overview said "being rebuilt … recomputed once a day". That line is true here: the book composes as soon as the key has a return day.
+- It hits single-key or all-new books on their first day or two, i.e. onboarding.
+
+**Fix.**
+- In `run_derive_allocator_equity_job`'s B2 split, store `compose_empty` (a wait) when the ONLY blocking token is `dropped_key` and every dropped key has a non-null anchor and no return rows.
+- Keep `compose_empty_blocked` otherwise.
+- Add a `derive_refusal_rows.json` row so the TS reader and the census pin the line.
+
+**Owner / Trigger:** before or with the WRITERRESIDUALS ship; at the latest, the next allocator-onboarding phase.
+
+### 167.1.2.1.1-HOLD-SENTRY-LEADER — the refresh hold's Sentry event can silently never fire (booked 2026-10-16, SFH M-1 + code review LR-01, MEDIUM, data-integrity visibility)
+
+**Failure scenario.**
+- Only the job for the smallest eligible key id (failing keys included) raises the hold and left-out Sentry events.
+- Several cases stop that job before it raises anything:
+  - the job defers on the circuit breaker;
+  - it fails its preflight (decrypt or client build);
+  - it is never enqueued (a strategy-linked key).
+- In each of those cases the hold is audit-only. A failing key is the likeliest to fail its preflight.
+
+**Fix.** Make the event idempotent per (allocator, day, outcome), e.g. the first job that finds no `refresh_held` row for today raises it, or pick the leader from WORKING keys. Add a test where the smallest-id job fails at preflight.
+
+**Owner / Trigger:** the next phase touching `run_refresh_allocator_equity_daily_job`.
+
+### 167.1.2.1.1-LEFTOUT-SENTRY-NO-WRITE — the `left_out_*` Sentry events never fire when no day is written (booked 2026-10-16, SFH M-2, MEDIUM, data-integrity visibility)
+
+**Failure scenario.**
+- The D-01 and D-12 left-out events are emitted only after `persist_equity_snapshots`.
+- A book whose only accounts are never-polled-failing or over-age-failing has no holdings and takes the `no_holdings_today` early return (and `refresh_held_for_reconstruct` returns early too).
+- That book gets an audit row and no Sentry event: the worst left-out case is the quiet one.
+
+**Fix.** Raise the left-out events before those early returns. Add an all-failing-book test.
+
+**Owner / Trigger:** with 167.1.2.1.1-HOLD-SENTRY-LEADER.
+
+### 167.1.2.1.1-IDENTITY-HOLD-DERIBIT — the identity-pending refresh hold fires for Deribit and has no bound (booked 2026-10-16, SFH M-3 + code review LR-03/LR-06, MEDIUM, USER-FACING via /compare)
+
+**Failure scenario.**
+- `identity_pending_venues` counts Deribit, which is in `VENUES_WITH_ACCOUNT_ID`.
+- The refresh adds $0 for Deribit, and the never-polled and over-age holds both exempt it.
+- So two unstamped working Deribit keys hold the snapshot write, and those days stay missing for `/compare` and the dashboard per-holding returns (first-writer-wins).
+- If the stamper never stamps (e.g. a Bybit UTA parse miss), the hold repeats daily with one warning and no escalation.
+- Affected on PROD 2026-10-16: 0 keys.
+
+**Fix.**
+- Exclude Deribit from the REFRESH's call only; the derive's call stays.
+- Escalate after N consecutive held days.
+- Add a test with two unstamped Deribit keys.
+
+**Owner / Trigger:** the next phase touching the refresh holds, or 167.1.2.1.2 HISTORYREADER (Bybit parse miss).
+
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
 - **"Do NOT implement" landmines (keep documented, do not touch):** bridge-scoring precompute;
