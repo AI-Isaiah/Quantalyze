@@ -45,9 +45,9 @@ describe("S6 — KCS-09 owner state lines", () => {
     ["KCS09-FAIL-ORPHANED", { state: "failed", errorKind: "orphaned" }, "The last computation stopped before it finished because the process running it went away.", "amber"],
     ["KCS09-FAIL-UNKNOWN", { state: "failed", errorKind: "unknown" }, "The last computation stopped, and the service could not tell why.", "amber"],
     ["KCS09-FAIL-OTHER", { state: "failed", errorKind: null }, "The last computation did not finish.", "amber"],
-    ["KCS09-FINISHED", { state: "finished" }, "The last computation finished, but the factsheet could not be built from its results.", "amber"],
+    ["KCS09-FINISHED", { state: "finished" }, "The last computation finished, but we could not build the factsheet from its results.", "amber"],
     ["KCS09-NEVER", { state: "never_started" }, "No computation is running for this strategy, and none is on record.", "muted"],
-    ["KCS09-UNREADABLE", { state: "unreadable" }, "The computation status for this strategy could not be read.", "muted"],
+    ["KCS09-UNREADABLE", { state: "unreadable" }, "We could not read this strategy's computation status.", "muted"],
   ];
   for (const [id, state, text, tone] of cases) {
     it(`${id}: text and tone`, () => {

@@ -130,12 +130,12 @@ const STATE_LINES = {
   finished: {
     id: "KCS09-FINISHED",
     tone: "amber",
-    text: "The last computation finished, but the factsheet could not be built from its results.",
+    text: "The last computation finished, but we could not build the factsheet from its results.",
   },
   // 167.2.1-REVIEW-R2 WR-03 — the jobs finished, but the owner build could not
   // READ the row (`read_error`, or `not_visible` under the owner predicate), so
-  // nothing was built from the results and KCS09-FINISHED's "could not be
-  // built from its results" would be false. States only what is known, beside
+  // nothing was built from the results and KCS09-FINISHED's "we could not
+  // build the factsheet from its results" would be false. States only what is known, beside
   // KCS12-PROBE-UNREADABLE's "We could not check …".
   finished_build_unreadable: {
     id: "KCS09-FINISHED-UNREADABLE",
@@ -161,7 +161,7 @@ const STATE_LINES = {
   unreadable: {
     id: "KCS09-UNREADABLE",
     tone: "muted",
-    text: "The computation status for this strategy could not be read.",
+    text: "We could not read this strategy's computation status.",
   },
 } as const satisfies Record<
   StateLineKey,

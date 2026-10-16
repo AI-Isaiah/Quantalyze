@@ -104,7 +104,7 @@ const RELOAD = "Reload this page to see the latest status.";
 const CONTACT_CHECK = "Use the contact form to have it checked.";
 const RETRY_READ = "Reload this page to try again.";
 const UNREADABLE_LINE =
-  "The computation status for this strategy could not be read.";
+  "We could not read this strategy's computation status.";
 const FAIL_TRANSIENT =
   "The last computation stopped after its automatic retries ran out.";
 const SHAPE_SINGLE =
@@ -537,7 +537,7 @@ const STATE_ROWS: ReadonlyArray<{
   {
     id: "KCS09-FINISHED",
     rows: [chainJob("compute_analytics_from_csv", "done")],
-    line: "The last computation finished, but the factsheet could not be built from its results.",
+    line: "The last computation finished, but we could not build the factsheet from its results.",
     tone: "text-warning",
     remedy: CONTACT_CHECK,
   },
@@ -898,7 +898,7 @@ const NEVER_LINE = "No computation is running for this strategy, and none is on 
 // 167.2.1-REVIEW-R2 WR-03, typed as literals: the jobs finished, the owner
 // build could not read the row. KCS09-FINISHED would claim a build outcome.
 const FINISHED_LINE =
-  "The last computation finished, but the factsheet could not be built from its results.";
+  "The last computation finished, but we could not build the factsheet from its results.";
 const FINISHED_UNREADABLE_LINE =
   "The last computation finished. We could not read its results to build the factsheet.";
 const SHARE_NOTE_CLASS = "mt-2 text-fixed-12 text-text-muted";
