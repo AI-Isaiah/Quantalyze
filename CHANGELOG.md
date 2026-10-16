@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.132.4.1] - 2026-10-16 — RECORDS: close BRIDGERETURNS 167.1.1.1 (verification passed, SECURED 23/23, PROD readings as expected)
+
+Records only: `.planning`, `TODOS.md`, and this release.
+
+### Added
+- The BRIDGERETURNS phase directory joins the tracked tree: 10 plans and summaries, CONTEXT, RESEARCH, PATTERNS, VALIDATION, the review and review-fix rounds, `SECURITY.md` (SECURED, 23 of 23), `UAT.md` (3 of 3 passed) and `VERIFICATION.md` (status passed).
+- `VERIFICATION.md` gains "Human items resolved (2026-10-16)" with the three post-deploy readings.
+- `TODOS.md` books `CI-LOCALSTACK-DB-PORT-IN-USE`, a first occurrence: main's CI run on #1070's merge commit failed only in `frontend-local-stack` because the runner's Docker could not bind the lane database's port ("address already in use"). Later main commits are green. Fix on the second occurrence.
+
+### Changed
+- `.planning/ROADMAP.md`: the BRIDGERETURNS overview bullet is ticked with its outcome (v0.132.3.0 #1070, gap closure v0.132.4.0 #1074), its ten plan rows replace the `TBD` stub, and its Progress-table row reads Complete with the outcome prose.
+- `.planning/STATE.md` and `.planning/state.json`: progress moves to 110 of 118 phases. The current position stays on 166.5 COMPUTEDATSTAMP, and the Status line records the founder's hold to 2026-10-20 on 170.1 COPY, 167.1.2.1.1 WRITERRESIDUALS and 167.1.1.2 AUMBASIS.
+
+### Notes
+- PROD readings, read-only with the marker query first, counts only:
+  - **SC4 after (engine v2.4.0, every allocator re-scored by 14:00Z):** 213 holding-flag entries, each withheld holding named by reason (`too_few_priced_days` 111, `derivative_out_of_book` 75, `option_premium` 9, `account_balance` 8, `fixed_price` 7, `too_few_adjacent_returns` 1), and 0 correlation or max-weight breaches. Portfolio fit is computed for 3 of 5 personalized candidates; before the phase it was 0 of 8.
+  - **GAP-01:** the remaining 2 candidates read `overlap_below_min` with 8 and 9 shared days, a minimum of 30 and `data_completeness` null. Computed candidates and screening rows carry none of the marker keys.
+- The v2.4.0 re-score does not happen in one cron run: the cron works through allocators a page per hourly tick with its saved cursor, so it took two ticks (13:00Z and 14:00Z).
+- 375px derivative caption: PROD's only derivative holding has 7 priced days, so the basis caption was measured by writing it into the live caption element at 375px. It wraps to 8 lines inside the card with no horizontal scroll.
+- `RESEARCH.md` named the CI skip-trailer tokens literally in a rule line. It now describes them in words.
+
 ## [0.132.4.0] - 2026-10-16 — BRIDGERETURNS gap 01: a Bridge candidate's missing portfolio fit says why (engine v2.4.0)
 
 Gap closure for Phase 167.1.1.1 BRIDGERETURNS (plan 10). The SC4 after-deploy reading on PROD found 2 of 5 personalized candidates with an empty portfolio fit and nothing saying why. Both are one strategy whose 25-point curve shares 8 and 9 days with each book's priced holding, under the 30-day minimum. The empty fit is correct; the silence was the defect.

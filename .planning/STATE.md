@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "166.5"
 current_phase_name: COMPUTEDATSTAMP
 status: executing
-stopped_at: 164.9.8.1 PYXDIST closed; 166.5 post-merge plan 09 outstanding
-last_updated: "2026-10-16T07:30:38.590Z"
+stopped_at: 167.1.1.1 BRIDGERETURNS closed; 170.1, 167.1.2.1.1 and 167.1.1.2 held to 2026-10-20 by founder
+last_updated: "2026-10-16T14:09:57.692Z"
 last_activity: 2026-10-16
-last_activity_desc: "164.9.3.1 FANINGRAPH closed (post-merge items confirmed; verification passed 8/8; SECURED 27/27)"
-state_head: 3dfc733667e8a5ac48cd1c8b830090c19e23460c
+last_activity_desc: "167.1.1.1 BRIDGERETURNS closed (SC4 and GAP-01 PROD readings as expected; verification passed; SECURED 23/23)"
+state_head: 64a7fceaba20b03bb62b4c60129ea87f95fbae17
 progress:
-  total_phases: 119
-  completed_phases: 109
-  total_plans: 783
-  completed_plans: 776
-  percent: 92
+  total_phases: 118
+  completed_phases: 110
+  total_plans: 793
+  completed_plans: 786
+  percent: 93
 ---
 
 ## ⭐ STATE lineage
@@ -174,9 +174,9 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: 166.5 (COMPUTEDATSTAMP) — EXECUTING
 Plan: 9 of 9
-Status: Executing — several phases in parallel. 166.5 COMPUTEDATSTAMP is the current one: both PRs merged and applied on PROD (#1047, #1050); plan 09 done 2026-10-16, verification waits on the Wave 5 recompute (D-05). Also in flight: 170.1 COPY (executed, final fixer round), 167.1.2.1.1 WRITERRESIDUALS (started 2026-10-16). Shipped, waiting on readings or founder steps: 167.1.1.1 BRIDGERETURNS (#1070, post-deploy SC4 reading), 167.1.2.2.2.1 OKXHISTORY (PR-A #1067, founder steps plans 12-15). 164.9.3.1 FANINGRAPH closed 2026-10-16 (#1059, re-dump #1061, ratchet follow-up #1064; post-merge items confirmed, verification passed 8/8, SECURED 27/27). 164.6.6.3.6 MT5SERVERLEARN was retired from v1.20 on 2026-10-16 (founder: next milestone, maybe). 164.9.8.1 PYXDIST closed 2026-10-15 (#1054). 167.1.2.1 RECONMARKER closed 2026-10-16 (PR 1 #1022, PR 2 #1033; D-11 reads as expected, verification passed, SECURED 33/33).
-Last activity: 2026-10-16 — 164.9.3.1 FANINGRAPH closed (post-merge items confirmed; verification passed 8/8; SECURED 27/27)
-Progress: [█████████░] 92%
+Status: Executing — several phases in parallel. 166.5 COMPUTEDATSTAMP is the current one: both PRs merged and applied on PROD (#1047, #1050); plan 09 done 2026-10-16, verification waits on the Wave 5 recompute (D-05). Held by the founder until 2026-10-20 ("wait for Tuesday", 2026-10-16): 170.1 COPY (last fixer round merged on its branch, review and gates not re-run, unshipped), 167.1.2.1.1 WRITERRESIDUALS (verification passed 9/9, SECURED 19/19, unshipped; MR-01 new-book "held back" line open), 167.1.1.2 AUMBASIS (not started). Waiting on founder steps: 167.1.2.2.2.1 OKXHISTORY (PR-A #1067, plans 12-15). 167.1.1.1 BRIDGERETURNS closed 2026-10-16 (#1070, gap closure #1074 engine v2.4.0; SC4 and GAP-01 PROD readings as expected, verification passed, SECURED 23/23). 164.9.3.1 FANINGRAPH, 167.1.2.1 RECONMARKER and 164.9.8.1 PYXDIST closed; 164.6.6.3.6 MT5SERVERLEARN retired from v1.20.
+Last activity: 2026-10-16 — 167.1.1.1 BRIDGERETURNS closed (SC4 and GAP-01 PROD readings as expected; verification passed; SECURED 23/23)
+Progress: [█████████░] 93%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 

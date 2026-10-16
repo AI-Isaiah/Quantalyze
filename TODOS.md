@@ -9860,6 +9860,12 @@ repository when the remove runs. A red from this is a flake, not a verdict on th
 to the helper's `g()` so no background gc runs in a throwaway repository. Prove it with a loop of self-test runs.
 **Owner / Trigger:** the next phase touching `scripts/classify-changed-paths.mjs`; or the second occurrence.
 
+### CI-LOCALSTACK-DB-PORT-IN-USE — the local-stack lane's database container fails to bind its port on the runner (booked 2026-10-16)
+
+**Failure scenario.** Main's CI run `38865344350` (merge commit of #1070) failed in `frontend-local-stack` only: `failed to start docker container "supabase_db_quantalyze": … driver failed programming external connectivity on endpoint supabase_db_quantalyze … address already in use`. Every other job, and every later main commit, was green. First occurrence. Suspected cause, not measured: another process or a leftover container on the hosted runner already holds the lane's database port when `scripts/local-stack/run.sh up` starts the stack. A red from this is a runner flake, not a verdict on the SHA.
+**Fix (candidates).** Before `up`, have `run.sh` name the process or container holding the port and fail with that name, then decide between a free-port pick and a stop-and-retry from what the second occurrence shows.
+**Owner / Trigger:** the second occurrence, or the next phase touching `scripts/local-stack/run.sh`.
+
 ## Phase 170.6.1.1 (ANONKEYID) — routed review items, PR-A (logged 2026-10-14)
 
 Five MEDIUM findings from the PR-A review army (plan 03), booked rather than fixed because none is
