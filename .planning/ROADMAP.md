@@ -4943,7 +4943,7 @@ Measured at `e34605be`: `reconstruct_symbol_returns` in `analytics-service/route
 **Founder decision D-23 (2026-10-15, review round 2):** when the matcher AUM is zero or below, a candidate is sized at the 0.5 add-weight ceiling, never at the engine's fixed 0.10 default (amended by D-25: in personalized mode). The fallback is recorded on the batch, and a test pins that such a book never scores better on max weight than one with an AUM of +$100.
 **Founder decision D-24 (2026-10-16):** when the matcher AUM is unknown (a strategies-only book with every `allocated_amount` missing), a candidate keeps the 0.10 default sizing, so scores do not change. The fallback is named on the batch as `add_weight_fallback: "aum_unknown_default_0_10"` with a named WARNING, and a test pins it.
 **Founder decision D-25 (2026-10-16, review round 3 Q-D):** a screening-mode book (no strategy, no priced spot holding) with AUM zero or below keeps the 0.10 sizing every screening book gets, named on the batch as `add_weight_fallback: "aum_not_positive_screening_default_0_10"` with a named WARNING and a RED test. D-23's entry is written only when the engine ran personalized and returned candidates.
-**Plans:** 9/10 plans executed
+**Plans:** 10/10 plans executed
 
 Plans:
 **Wave 1**
@@ -4966,7 +4966,7 @@ Plans:
 - [x] 167.1.1.1-09-PLAN.md — dollar-ratio read deleted, phase-wide matcher gate (wave 5)
 
 **Wave 6** *(gap closure GAP-01, blocked on Wave 5 completion)*
-- [ ] 167.1.1.1-10-PLAN.md — a short-overlap candidate names why its fit is null (raw marker, admin line), ENGINE_VERSION v2.4.0 (wave 6)
+- [x] 167.1.1.1-10-PLAN.md — a short-overlap candidate names why its fit is null (raw marker, admin line), ENGINE_VERSION v2.4.0 (wave 6)
 
 ### Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports (INSERTED)
 
