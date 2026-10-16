@@ -67,6 +67,7 @@ from services.db import (
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
 from services.holding_equity import holding_equity_contribution
 from services.holding_marks import classify_derivative_marks, classify_spot_marks
+from services.match_defaults import merge_with_defaults
 from services.match_engine import (
     ENGINE_VERSION,
     WEIGHTS_VERSION,
@@ -599,6 +600,16 @@ _MATCHER_MIN_ADJACENT_RETURNS: Final[int] = 30
 # ``match_engine._compute_portfolio_fit_components`` (a module-local literal there); a book
 # whose join is shorter is NAMED with ``book_join_marker`` and no holding is withheld to fit it.
 _BOOK_JOIN_MIN_DAYS: Final[int] = 30
+
+# D-23 (founder, 167.1.1.1 round 2): a book whose matcher AUM is zero or below sizes the ticket
+# at the engine's add-weight CEILING, ``_clamp(ticket / aum, 0.01, 0.5)`` at its top, consistent
+# with D-21 (a tiny positive AUM). ``score_candidates`` reads ``portfolio_aum=None`` as
+# "cold-start or unknown AUM" and sizes at a fixed 0.10, which would score a LOSING book better
+# on max weight than a book with $100. ``_AUM_NOT_POSITIVE_SCORING_AUM`` is the AUM handed to the
+# engine instead: positive and so small that any positive ticket divided by it clamps to the
+# ceiling. It exists only for that call; the persisted AUM share stays null.
+_ADD_WEIGHT_CEILING: Final[float] = 0.5
+_AUM_NOT_POSITIVE_SCORING_AUM: Final[float] = 1e-6
 
 
 def _holdings_history_window_start() -> str:
@@ -1326,15 +1337,22 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         for pid in all_ids:
             portfolio_weights[pid] = eq_w
 
-    if combined_aum <= 0 and (holdings_rows_eligible or holdings_rows_withheld or holdings_rows_derivative):
+    aum_not_positive = combined_aum <= 0 and bool(
+        holdings_rows_eligible or holdings_rows_withheld or holdings_rows_derivative
+    )
+    if aum_not_positive:
         # SFH-01: a non-positive matcher AUM is real (derivative losses can exceed spot), not
-        # "no AUM data". It leaves the scoring weights alone; the AUM share and the max-weight
-        # test cannot be computed, so holding_flags names that (weight None, breach_skipped).
+        # "no AUM data". The scoring weights do not depend on it; the AUM share and the
+        # max-weight test cannot be computed, so holding_flags names that (weight None,
+        # breach_skipped). D-23: the ticket is sized at the 0.5 add-weight ceiling, never at the
+        # engine's fixed 0.10 default (see ``_score_one_allocator``).
         logger.warning(
             "match: aum_not_positive: the matcher AUM of allocator %s is not positive "
             "(derivative P&L exceeds the spot and strategy value), so holding weights are "
-            "persisted as null and the max-weight test is skipped; scoring weights are unaffected",
-            allocator_id,
+            "persisted as null and the max-weight test is skipped; scoring weights are "
+            "unaffected, and a ticket is sized at the %s add-weight ceiling (D-23), the "
+            "same sizing as a tiny positive AUM",
+            allocator_id, _ADD_WEIGHT_CEILING,
         )
 
     # Thumbs-down history
@@ -1354,6 +1372,10 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         "portfolio_returns": portfolio_returns,
         "native_units": native_units,
         "portfolio_aum": combined_aum if combined_aum > 0 else None,
+        # D-23: True when the AUM is at or below zero for a book that holds holdings; the
+        # engine's own ``portfolio_aum=None`` reading ("unknown AUM", 0.10 sizing) must not
+        # apply to it.
+        "aum_not_positive": aum_not_positive,
         "thumbs_down_ids": thumbs_down_ids,
         # Internal-use: passed to compute_holding_flags in _score_one_allocator (Task 3)
         "_holdings_rows_eligible": holdings_rows_eligible,
@@ -1634,6 +1656,49 @@ def book_join_marker(
     }
 
 
+def add_weight_fallback_entry(
+    ctx: dict[str, Any], *, allocator_id: str
+) -> dict[str, Any] | None:
+    """D-23. The book-level ``holding_flags`` entry recording that the ticket was sized at the
+    0.5 add-weight ceiling because the matcher AUM is zero or below, else None.
+
+    It is due only when the sizing is actually in play: the AUM is not positive for a book of
+    holdings (``ctx["aum_not_positive"]``) AND the engine's effective ``target_ticket_size_usd``
+    (the preference merged with its default) is positive (an explicit zero ticket sizes at 0.10
+    whatever the AUM, so nothing was substituted). Same family as :func:`book_join_marker`: ``kind`` "book", a null
+    ``holding_ref`` and ``flagged`` false, so the dashboard reader (which keeps only flagged
+    entries that carry a candidate) ignores it. Shape::
+
+        {
+            "kind":                "book",
+            "holding_ref":         None,
+            "add_weight_fallback": "aum_not_positive_ceiling_0_5",
+            "add_weight":          0.5,
+            "flagged":             False,
+        }
+    """
+    if not ctx.get("aum_not_positive"):
+        return None
+    # The engine reads the ticket after ``merge_with_defaults``: a missing or null ticket is
+    # the 50,000 default there, so ask the same function rather than the raw preference.
+    ticket = merge_with_defaults(ctx.get("preferences")).get("target_ticket_size_usd")
+    if isinstance(ticket, bool) or not isinstance(ticket, (int, float)) or not ticket > 0:
+        return None
+    logger.warning(
+        "match: add_weight_fallback: allocator %s has a non-positive matcher AUM and a ticket, "
+        "so the candidate is sized at the %s add-weight ceiling (D-23), not the engine's 0.10 "
+        "default",
+        allocator_id, _ADD_WEIGHT_CEILING,
+    )
+    return {
+        "kind": "book",
+        "holding_ref": None,
+        "add_weight_fallback": "aum_not_positive_ceiling_0_5",
+        "add_weight": _ADD_WEIGHT_CEILING,
+        "flagged": False,
+    }
+
+
 class _ScoredProxy:
     """Attribute-access view over a scored candidate dict.
 
@@ -1738,6 +1803,15 @@ async def _score_one_allocator(
             candidate_returns, universe.get("native_units") or {}
         )
 
+        # D-23: an AUM at or below zero must not read as "unknown AUM" (the engine's fixed 0.10
+        # sizing). Hand it a positive AUM that clamps a ticket to the 0.5 ceiling instead.
+        scoring_aum = ctx["portfolio_aum"]
+        add_weight_fallback = (
+            add_weight_fallback_entry(ctx, allocator_id=allocator_id)
+        )
+        if add_weight_fallback is not None:
+            scoring_aum = _AUM_NOT_POSITIVE_SCORING_AUM
+
         # CR-01 (round 2): every joined series must share ONE index type. A string-indexed
         # holding beside Timestamp-indexed candidates joins to zero days with no error, so
         # check the converted book and the converted candidates here, before anything joins
@@ -1760,7 +1834,7 @@ async def _score_one_allocator(
             candidate_strategies=candidate_strategies,
             candidate_returns=candidate_returns,
             thumbs_down_ids=ctx["thumbs_down_ids"],
-            portfolio_aum=ctx["portfolio_aum"],
+            portfolio_aum=scoring_aum,
         )
 
         latency_ms = int((time.monotonic() - start) * 1000)
@@ -1798,6 +1872,8 @@ async def _score_one_allocator(
         book_marker = book_join_marker(portfolio_returns, allocator_id=allocator_id)
         if book_marker is not None:
             holding_flags_list.append(book_marker)
+        if add_weight_fallback is not None:
+            holding_flags_list.append(add_weight_fallback)
 
         # Persist: one match_batches row, N match_candidates rows.
         supabase = get_supabase()
