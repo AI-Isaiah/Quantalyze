@@ -169,7 +169,9 @@ max_drawdown = _max_drawdown
 # days with the book now carries fit_unavailable_reason, fit_overlap_days and
 # fit_min_overlap_days, and data_completeness is None on that path. Trigger #2 re-scores cached
 # v2.3.0 batches on the first post-deploy cron tick, so the PROD rows gain the marker without
-# an input change; WEIGHTS_VERSION stays v2.0.0.
+# an input change; WEIGHTS_VERSION stays v2.0.0. The same v2.4.0 bump also covers a personalized
+# candidate with no returns series at all, which carries fit_unavailable_reason
+# "no_candidate_returns" (fit_overlap_days 0, fit_min_overlap_days the same constant).
 ENGINE_VERSION = "v2.4.0"
 WEIGHTS_VERSION = "v2.0.0"
 
@@ -653,7 +655,8 @@ def _empty_pf_components() -> dict[str, float | int | str | None]:
 
     Keys: sharpe_lift, corr_reduction, dd_improvement, corr_with_portfolio,
     data_completeness, and the GAP-01 short-overlap marker fit_unavailable_reason,
-    fit_overlap_days, fit_min_overlap_days (set only by the short-overlap branch).
+    fit_overlap_days, fit_min_overlap_days (set only by the short-overlap and no-candidate-returns
+    branches).
     """
     return {
         "sharpe_lift": None,
@@ -667,6 +670,21 @@ def _empty_pf_components() -> dict[str, float | int | str | None]:
     }
 
 
+def _no_candidate_returns_components() -> dict[str, float | int | str | None]:
+    """Empty fit components naming a candidate that has no returns series to compare.
+
+    SFH-R5 M1 (167.1.1.1 GAP-01): same marker keys as the short-overlap branch, with the true
+    facts for this cause (zero shared days against the same minimum), so the persisted raw
+    shape stays uniform. Used only when the fit would otherwise have been attempted
+    (personalized mode, non-empty book series).
+    """
+    components = _empty_pf_components()
+    components["fit_unavailable_reason"] = "no_candidate_returns"
+    components["fit_overlap_days"] = 0
+    components["fit_min_overlap_days"] = PORTFOLIO_FIT_MIN_OVERLAP_DAYS
+    return components
+
+
 def _compute_portfolio_fit_components(
     portfolio_returns_series: pd.Series,
     portfolio_weights: dict[str, float],
@@ -678,11 +696,16 @@ def _compute_portfolio_fit_components(
 
     All four can be None if the data is too sparse to compute meaningfully.
     """
-    if portfolio_returns_series.empty or candidate_returns.empty:
+    # Book-side empties carry no per-candidate reason: the batch-level D-22 ``book_join_marker``
+    # in routers/match.py already names them.
+    if portfolio_returns_series.empty:
         return _empty_pf_components()
+    if candidate_returns.empty:
+        return _no_candidate_returns_components()
 
     # Align candidate to portfolio dates
     port_df = pd.DataFrame(portfolio_strategies_returns).dropna()
+    # Book-side empty: named by the batch-level D-22 ``book_join_marker``, not per candidate.
     if port_df.empty:
         return _empty_pf_components()
 
@@ -1061,7 +1084,13 @@ def score_candidates(
                 cand_returns,
                 add_weight,
             )
+        elif mode == "personalized" and not portfolio_returns_series.empty:
+            # SFH-R5 M1: the fit would have been attempted, but this candidate has no returns
+            # series. Name it, so the admin does not read a 0 bar as "scored and fit badly".
+            pf_components = _no_candidate_returns_components()
         else:
+            # Screening mode never attempts the fit; an empty book series is named by the
+            # batch-level D-22 ``book_join_marker`` in routers/match.py.
             pf_components = _empty_pf_components()
 
         # B3.4 (audit-2026-05-07) truthy-sweep: mirror the ``is None``

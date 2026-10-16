@@ -136,3 +136,47 @@ def test_arm_d_screening_mode_carries_no_marker() -> None:
 def test_arm_e_one_constant_feeds_both_markers() -> None:
     assert match_engine.PORTFOLIO_FIT_MIN_OVERLAP_DAYS == 30
     assert match_mod._BOOK_JOIN_MIN_DAYS == match_engine.PORTFOLIO_FIT_MIN_OVERLAP_DAYS
+
+
+def test_arm_f_a_candidate_with_no_returns_series_is_named() -> None:
+    # SFH-R5 M1: the candidate is eligible but has NO entry in ``candidate_returns`` (the
+    # universe load skipped it, or its USD conversion dropped it). The fit is null, and the
+    # persisted raw must say why: zero shared days against the 30 required.
+    raw = _raw_of(None)
+    assert raw["sharpe_lift"] is None
+    assert raw["corr_with_portfolio"] is None
+    assert raw["dd_improvement"] is None
+    assert raw["fit_unavailable_reason"] == "no_candidate_returns"
+    assert raw["fit_overlap_days"] == 0
+    assert raw["fit_min_overlap_days"] == 30
+    assert raw["data_completeness"] is None
+    # Admin-only, like overlap_below_min: no allocator-facing reason names it.
+    result = score_candidates(
+        allocator_id="alloc-1",
+        preferences=None,
+        portfolio_strategies=[{"strategy_id": "p1"}],
+        portfolio_returns={"p1": BOOK},
+        portfolio_weights={"p1": 1.0},
+        candidate_strategies=[_candidate("c1")],
+        candidate_returns={},
+        portfolio_aum=1_000_000,
+    )
+    for reason in result["candidates"][0]["reasons"]:
+        assert "daily returns" not in reason
+        assert "shared day" not in reason
+        assert "overlap" not in reason.lower()
+
+
+def test_arm_g_an_empty_returns_series_is_named_like_an_absent_one() -> None:
+    raw = _raw_of(pd.Series(dtype=float))
+    assert raw["fit_unavailable_reason"] == "no_candidate_returns"
+    assert raw["fit_overlap_days"] == 0
+    assert raw["fit_min_overlap_days"] == 30
+    assert raw["data_completeness"] is None
+
+
+def test_arm_h_screening_mode_without_a_series_still_carries_no_marker() -> None:
+    # Screening never attempts the fit, so a missing series is not a missing-fit cause.
+    raw = _raw_of(None, personalized=False)
+    for key in REASON_KEYS:
+        assert key not in raw
