@@ -133,3 +133,40 @@ describe("CandidateDetail short-overlap line (GAP-01)", () => {
     expect(items.map((li) => li.textContent)).toEqual(REASONS);
   });
 });
+
+describe("CandidateDetail no-returns line (GAP-01, SFH-R5 M1)", () => {
+  const NO_RETURNS =
+    "Portfolio fit not computed: this strategy has no daily returns to compare with the book.";
+
+  it("names a candidate with no returns series, and only that sentence", () => {
+    renderDetail({
+      fit_unavailable_reason: "no_candidate_returns",
+      fit_overlap_days: 0,
+      fit_min_overlap_days: 30,
+    });
+    expect(screen.getByText(NO_RETURNS)).toBeInTheDocument();
+    expect(screen.getAllByText(LINE)).toHaveLength(1);
+  });
+
+  it("does not show the short-overlap sentence for a short-overlap candidate", () => {
+    renderDetail({
+      fit_unavailable_reason: "overlap_below_min",
+      fit_overlap_days: 8,
+      fit_min_overlap_days: 30,
+    });
+    expect(screen.queryByText(NO_RETURNS)).not.toBeInTheDocument();
+  });
+
+  it("keeps the line out of the Why this match list", () => {
+    renderDetail({
+      fit_unavailable_reason: "no_candidate_returns",
+      fit_overlap_days: 0,
+      fit_min_overlap_days: 30,
+    });
+    const heading = screen.getByText("Why this match");
+    const list = heading.parentElement?.querySelector("ul");
+    expect(list).not.toBeNull();
+    const items = within(list as HTMLElement).getAllByRole("listitem");
+    expect(items.map((li) => li.textContent)).toEqual(REASONS);
+  });
+});
