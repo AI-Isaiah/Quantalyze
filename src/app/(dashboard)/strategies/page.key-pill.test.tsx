@@ -422,7 +422,13 @@ function key(
 
 async function renderPage(): Promise<HTMLElement> {
   const { default: StrategiesPage } = await import("./page");
-  const jsx = await (StrategiesPage as unknown as () => Promise<React.ReactElement>)();
+  // 170.1 D-07: the page reads `searchParams` (a Promise in Next 16), so every
+  // render passes the empty query a plain /strategies visit carries.
+  const jsx = await (
+    StrategiesPage as unknown as (props: {
+      searchParams: Promise<Record<string, string | string[] | undefined>>;
+    }) => Promise<React.ReactElement>
+  )({ searchParams: Promise.resolve({}) });
   const { container } = render(jsx);
   return container;
 }
@@ -1452,6 +1458,186 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
       "[strategies/page] compute-state read failed",
       expect.anything(),
     );
+  });
+
+  // ── Phase 170.1 D-08 / R-1 (SC-4, R-09-26) — a finished computation that left
+  // no factsheet. The kind is chosen from the ComputeState (`finished`), never
+  // from the three-valued arm: failed, stalled and never_started share the
+  // `not_available` arm with finished and must keep their own notes.
+  //
+  // Typed out, never imported (UI-SPEC § 4.2). The instruction at the end is
+  // the one the factsheet body gives, and the note never promises that numbers
+  // appear "once a computation succeeds".
+  const FINISHED_NOT_BUILT =
+    "Right now, a private link to this strategy shows that its factsheet is not available. The last computation finished, but we could not build the factsheet from its results. Use the contact form to have it checked.";
+  const doneJob = { kind: "process_key_long", status: "done", created_at: "2026-02-01T00:00:00.000Z" };
+
+  it("D-08 FINISHED-NOT-BUILT: an unpublished row whose analytics never computed but whose jobs finished says so and gives the contact-form instruction", async () => {
+    state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "pending" } })];
+    state.jobs = { "s-1": [doneJob] };
+
+    const container = await renderPage();
+
+    const note = noteOf(container, "Strategy s-1");
+    expect(note).toBe(FINISHED_NOT_BUILT);
+    expect(note).toMatch(/Use the contact form to have it checked\.$/);
+    expect(note).not.toContain("once a computation succeeds");
+    // AD-05: the instruction's pointer is a real link carrying this row's id.
+    const pointers = shareNoteOf(container, "Strategy s-1")!.querySelectorAll("a");
+    expect(pointers).toHaveLength(1);
+    expect(pointers[0].getAttribute("href")).toBe("/contact?topic=support&strategy=s-1");
+  });
+
+  it("D-08 FINISHED-NOT-BUILT: a row with no analytics row at all takes the same note", async () => {
+    state.strategies = [row("s-1", { status: "draft", strategy_analytics: null })];
+    state.jobs = { "s-1": [doneJob] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-1")).toBe(FINISHED_NOT_BUILT);
+  });
+
+  it("D-08 FINISHED-NOT-BUILT race: the embed says complete, the builder's read says not computed, and the jobs finished", async () => {
+    state.strategies = [row("c-1", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = {
+      "c-1": { data: adminStrategy("c-1", { computation_status: "pending" }), error: null },
+    };
+    state.jobs = { "c-1": [doneJob] };
+
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const container = await renderPage();
+
+      expect(noteOf(container, "Strategy c-1")).toBe(FINISHED_NOT_BUILT);
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
+  // One case per ComputeState variant. Only `finished` selects the note: if the
+  // kind were taken from the arm, failed, stalled and never_started (all
+  // `not_available`, like finished) would say "The last computation finished"
+  // about a computation that failed, stalled or never started.
+  const variants: Array<{
+    variant: string;
+    setup: () => void;
+    expected: () => string;
+  }> = [
+    {
+      variant: "queued",
+      setup: () => {
+        state.jobs = { "s-1": [{ kind: "process_key_long", status: "pending", created_at: isoMinutesAgo(2) }] };
+      },
+      expected: () => MINT_A,
+    },
+    {
+      variant: "running",
+      setup: () => {
+        state.jobs = { "s-1": [running] };
+      },
+      expected: () => MINT_A,
+    },
+    {
+      variant: "retrying",
+      setup: () => {
+        state.jobs = {
+          "s-1": [{ kind: "process_key_long", status: "failed_retry", created_at: isoMinutesAgo(5) }],
+        };
+      },
+      expected: () => MINT_A,
+    },
+    {
+      variant: "stalled",
+      setup: () => {
+        state.jobs = {
+          "s-1": [
+            {
+              kind: "stitch_composite",
+              status: "running",
+              created_at: isoMinutesAgo(60),
+              claimed_at: isoMinutesAgo(60),
+            },
+          ],
+        };
+      },
+      expected: () => MINT_B,
+    },
+    {
+      variant: "failed",
+      setup: () => {
+        state.jobs = {
+          "s-1": [
+            {
+              kind: "stitch_composite",
+              status: "failed_final",
+              error_kind: "permanent",
+              created_at: "2026-02-01T00:00:00.000Z",
+            },
+          ],
+        };
+      },
+      expected: () => MINT_B,
+    },
+    {
+      variant: "never_started",
+      setup: () => {
+        state.jobs = { "s-1": [] };
+      },
+      expected: () => MINT_B,
+    },
+    {
+      variant: "unreadable",
+      setup: () => {
+        state.jobsError = { message: "synthetic rpc failure" };
+      },
+      expected: () => UNREADABLE,
+    },
+  ];
+
+  it.each(variants)(
+    "D-08 R-1 VARIANT $variant: only a finished state selects the finished-not-built note",
+    async ({ setup, expected }) => {
+      state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "pending" } })];
+      setup();
+
+      const container = await renderPage();
+
+      const note = noteOf(container, "Strategy s-1");
+      expect(note).toBe(expected());
+      expect(note).not.toBe(FINISHED_NOT_BUILT);
+      expect(note).not.toContain("The last computation finished");
+    },
+  );
+
+  it("D-08 ANALYTICS-FAILED WINS: an embed reading failed keeps the analytics-failed note even when the jobs finished", async () => {
+    state.strategies = [row("s-1", { status: "draft", strategy_analytics: { computation_status: "failed" } })];
+    state.jobs = { "s-1": [doneJob] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-1")).toBe(ANALYTICS_FAILED);
+  });
+
+  it("D-08 PUBLISHED-FINISHED: a published row whose jobs finished keeps its public note and reads no jobs", async () => {
+    state.strategies = [row("s-pub", { status: "published", strategy_analytics: { computation_status: "pending" } })];
+    state.jobs = { "s-pub": [doneJob] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-pub")).toBe(PUBLIC);
+    expect(state.rpcCalls).toEqual([]);
+  });
+
+  it("D-08 COMPUTED-UNBUILDABLE keeps its own reason when the jobs finished: the finished kind never replaces a stored-results reason", async () => {
+    state.strategies = [row("s-short", { status: "draft", strategy_analytics: { computation_status: "complete" } })];
+    state.adminRows = {
+      "s-short": { data: adminStrategy("s-short", { daily_returns: points(1) }), error: null },
+    };
+    state.jobs = { "s-short": [doneJob] };
+
+    const container = await renderPage();
+
+    expect(noteOf(container, "Strategy s-short")).toBe(UNBUILDABLE_SHORT);
   });
 
   it("calls the RPC once per uncomputed row with its own p_strategy_id and the shared limit", async () => {

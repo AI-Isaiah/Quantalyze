@@ -15,6 +15,7 @@ import { isComputedAnalytics, isUntrustedKeySyncStatus } from "@/lib/closed-sets
 import {
   deriveComputeState,
   recipientArm,
+  type ComputeState,
   type RecipientArm,
 } from "@/lib/compute-state";
 import { readOwnerComputeJobs } from "@/lib/compute-jobs-read";
@@ -37,7 +38,6 @@ import {
   STRATEGIES_LIST_UNREADABLE,
   unbuildableNoteKindOf,
   untrustedKeyCaption,
-  type UnbuildableNoteKind,
 } from "@/lib/status-surface-copy";
 // Phase 167.2.1 (D-04, D-08): the builder's own resolve stage, so the list and
 // the share page decide "can this factsheet build?" from the same code.
@@ -144,6 +144,11 @@ function computationStatusOf(embed: unknown): string | null {
  * ⛔ error-absent ≠ legit-absent: an error, an answer that is not a rows array,
  * or a throw derives `unreadable`, is logged, and is never an in-progress
  * claim. The server clock is read here, never in the component.
+ *
+ * 170.1 D-08 / R-1: returns the ComputeState beside the arm. The arm is
+ * three-valued and `failed`, `stalled`, `finished` and `never_started` all map
+ * to `not_available`, so a note that depends on "the jobs FINISHED" must read
+ * `state.state`, never the arm.
  */
 async function readRecipientArm(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -153,7 +158,7 @@ async function readRecipientArm(
   // for a proven single-key strategy (a linked key, or no stitch in the rows
   // read below), because RLS can fabricate a zero count.
   stitchInputs: { memberCount: CompositeMemberCount; apiKeyId: string | null },
-): Promise<RecipientArm> {
+): Promise<{ arm: RecipientArm; state: ComputeState }> {
   // 167.2-REVIEW-SFH M-5: the shared bounded read, which re-asks once at the
   // RPC's cap when the first window is full of non-chain rows. A throw is
   // folded into the same failed-read arm.
@@ -184,7 +189,8 @@ async function readRecipientArm(
     captureToSentry(new Error(read.message), {
       tags: { route: "strategies/page", stage: "compute-state" },
     });
-    return recipientArm(deriveComputeState({ readError: true }));
+    const state = deriveComputeState({ readError: true });
+    return { arm: recipientArm(state), state };
   }
   if (read.windowFull) {
     // Deterministic, and a reload cannot fix it, so it is logged and captured
@@ -198,17 +204,16 @@ async function readRecipientArm(
       { tags: { route: "strategies/page", stage: "compute-state-window-full" } },
     );
   }
-  return recipientArm(
-    deriveComputeState({
-      rows: read.rows,
-      readExhaustive: read.readExhaustive,
-      nowMs: Date.now(),
-      preferStitch: shouldPreferStitch({
-        ...stitchInputs,
-        compositeHistory: compositeHistoryOf(read),
-      }),
+  const state = deriveComputeState({
+    rows: read.rows,
+    readExhaustive: read.readExhaustive,
+    nowMs: Date.now(),
+    preferStitch: shouldPreferStitch({
+      ...stitchInputs,
+      compositeHistory: compositeHistoryOf(read),
     }),
-  );
+  });
+  return { arm: recipientArm(state), state };
 }
 
 /**
@@ -369,7 +374,21 @@ function captureProbeThrows(throws: readonly unknown[]): void {
   }
 }
 
-export default async function StrategiesPage() {
+/**
+ * Phase 170.1 D-07 — the wizard's submit lands here with `?wizard_submitted=1`.
+ * `searchParams` is a Promise in Next 16.
+ */
+interface StrategiesPageProps {
+  searchParams: Promise<{ wizard_submitted?: string | string[] }>;
+}
+
+export default async function StrategiesPage({ searchParams }: StrategiesPageProps) {
+  // D-07 / T-170.1-19: only the exact string "1" shows the status line. The
+  // value is compared and never echoed, so a forged param can show only the
+  // fixed sentence. An array (`?wizard_submitted=1&wizard_submitted=1`) is not "1".
+  const { wizard_submitted } = await searchParams;
+  const justSubmitted = wizard_submitted === "1";
+
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
@@ -589,14 +608,16 @@ export default async function StrategiesPage() {
   const armOf = async (
     s: NonNullable<typeof strategies>[number],
     mode: ReturnType<typeof shareAffordanceMode>,
-  ): Promise<RecipientArm> =>
+  ): Promise<{ arm: RecipientArm; state: ComputeState | null }> =>
     // 167.2-REVIEW IN-04: a published row's note is the public line whatever
     // the arm (`recipientShareNote` / `recipientShareNoteFor` ignore it for
     // "public-url"), so its jobs are not read: that was one RPC per row whose
     // answer, and whose failure log, described a value nobody reads. The arm
     // passed for it is the one that claims least; it is never rendered.
+    // 170.1 D-08: its `state` is null for the same reason, so a published row
+    // can never take the finished-not-built kind.
     mode === "public-url"
-      ? "not_available"
+      ? { arm: "not_available", state: null }
       : readRecipientArm(
           supabase,
           s.id,
@@ -611,11 +632,23 @@ export default async function StrategiesPage() {
   // 164.6.6.3.3 D-08: `kind` is `analytics_failed` for a row whose analytics
   // FAILED, else null (`recipientShareNoteFor` with no kind is exactly
   // `recipientShareNote`). A running recompute keeps KCS12-MINT-A.
+  // 170.1 D-08 / R-1: an unpublished row whose jobs FINISHED without a built
+  // factsheet takes `finished_not_built`. `jobsFinished` is read from the
+  // ComputeState (`finished`), never from the arm, which `failed`, `stalled` and
+  // `never_started` share. `analyticsFailed` wins inside the selector, and the
+  // in_progress arm keeps KCS12-MINT-A for every kind (`recipientShareNoteFor`).
   const uncomputedNote = async (
     s: NonNullable<typeof strategies>[number],
     mode: ReturnType<typeof shareAffordanceMode>,
-    kind: UnbuildableNoteKind | null = null,
-  ): Promise<string> => recipientShareNoteFor(mode, await armOf(s, mode), kind);
+    analyticsFailed = false,
+  ): Promise<string> => {
+    const { arm, state } = await armOf(s, mode);
+    const kind = unbuildableNoteKindOf("not_computed", {
+      ...(analyticsFailed ? { analyticsFailed: true as const } : {}),
+      jobsFinished: state?.state === "finished",
+    });
+    return recipientShareNoteFor(mode, arm, kind);
+  };
 
   // WR-01: the probes share one limiter per page load, and a probe that
   // THROWS is recorded here and captured after the fan-out, one event per
@@ -636,7 +669,7 @@ export default async function StrategiesPage() {
           if (!isComputedAnalytics(embedStatus)) {
             return [
               s.id,
-              await uncomputedNote(s, mode, embedStatus === "failed" ? "analytics_failed" : null),
+              await uncomputedNote(s, mode, embedStatus === "failed"),
             ] as const;
           }
           // D-08: a computed row is probed, uncached, under the owner
@@ -733,10 +766,10 @@ export default async function StrategiesPage() {
             });
             // D-08: when the builder's read says the row FAILED, the same
             // analytics-failed note as the embed path (`kind` is that or null).
-            return [s.id, await uncomputedNote(s, mode, kind)] as const;
+            return [s.id, await uncomputedNote(s, mode, kind === "analytics_failed")] as const;
           }
           // D-02: computed, but the builder refuses it (`kind`, above).
-          return [s.id, recipientShareNoteFor(mode, await armOf(s, mode), kind)] as const;
+          return [s.id, recipientShareNoteFor(mode, (await armOf(s, mode)).arm, kind)] as const;
         }),
       )
     ).filter((entry): entry is readonly [string, string] => entry[1] !== null),
@@ -868,6 +901,20 @@ export default async function StrategiesPage() {
           </Link>
         }
       />
+
+      {/* 170.1 D-07 / UI-SPEC V-1: renders whether or not the list read
+          succeeded; the unreadable card below states a read failure itself. A
+          square data panel (DESIGN.md): no radius, no shadow, no icon, and no
+          truncation, so it wraps by word at 390 px. */}
+      {justSubmitted && (
+        <p
+          role="status"
+          data-testid="wizard-submitted-status"
+          className="mb-4 border border-border bg-surface px-4 py-3 text-small text-text-primary"
+        >
+          Strategy submitted. It is listed below as pending review.
+        </p>
+      )}
 
       {introRequests && introRequests.length > 0 && (
         <PendingIntros requests={introRequests as Parameters<typeof PendingIntros>[0]["requests"]} />
