@@ -112,7 +112,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — verified 2026-10-04 (completed 2026-10-04)
 - [x] **Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out** (INSERTED) — 8 plans, shipped v0.125.0.0 (#950); closed 2026-10-14 (records PR), live half of criterion 2 booked as MT5SCRUB-L3-JOBS-TERMINAL-READING-01
 - [x] **Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series** (INSERTED) — shipped v0.126.0.0 (#969, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
-- [ ] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — not yet planned (booked 2026-10-07 by 164.6.6.2 D-15)
+- [x] **Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view** (INSERTED) — 17 plans, shipped v0.129.8.0 and v0.130.0.0; verified 2026-10-15 (completed 2026-10-15)
 - [x] **Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend** (INSERTED) — shipped v0.128.0.0 (#973, merged 2026-10-08); verification: passed (D-03 post-deploy reading 2026-10-08) (completed 2026-10-08)
 - [x] **Phase 164.6.6.2.3: FLOWTIMING — a deposit never breaks a return, and an account's first day is its inception, not a warning** (INSERTED 2026-10-08) — 12 plans, shipped v0.131.1.0 (#1018) (completed 2026-10-13)
 - [x] **Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed** (INSERTED) — shipped v0.125.2.0 (#967, merged 2026-10-07); verification: human_needed (shipped; founder/post-deploy checks pending) — closed 2026-10-12 by founder decision (completed 2026-10-12)
@@ -121,7 +121,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b)** (INSERTED) — verification: passed (v0.130.1.0, close-out v0.131.12.0, review fixes v0.131.12.1; founder-deferred residue booked as 164.6.6.3.3-WITHHELD-RESIDUE) (completed 2026-10-15)
 - [x] **Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status** (INSERTED) — shipped v0.129.1.0 (merged 2026-10-08); verification: passed (plan 04 PROD re-sync 2026-10-08) (completed 2026-10-08)
 - [x] **Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults** (INSERTED) — verification: passed (PR #971, v0.127.0.0) (completed 2026-10-08)
-- [ ] **Phase 164.6.6.3.6: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed** (INSERTED) — not yet planned (booked 2026-10-06, founder)
+- [x] **~~Phase 164.6.6.3.6~~: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed** (INSERTED) — ⛔ RETIRED from v1.20 2026-10-16 by founder decision ("We will do it in the next milestone (maybe)"): moved out of this milestone, not delivered. The research, plan 01 and the gate protocol are kept on branch `feat/164.6.6.3.6-mt5serverlearn` (pushed); TODOS `[164.6.6.3.6-MT5SERVERLEARN-NEXT-MILESTONE]` carries it
 - [x] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
 - [x] **Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button** (INSERTED) — 10 plans, shipped in #1031, #1036 and #1038 (completed 2026-10-15)
 - [x] **Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here** (INSERTED)
@@ -136,7 +136,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.1: JOBRPCTRUTH — the compute-job RPC surface does what its own comments say** (INSERTED) — verification: passed (completed 2026-09-27)
 - [x] **Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD** (INSERTED)
 - [x] **Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim** (INSERTED) — verification: passed (completed 2026-09-27, PR #890, v0.109.0.0)
-- [ ] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — not yet verified
+- [x] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — 11 plans, shipped as v0.132.1.0 (#1059), applied on TEST then PROD, re-dump #1061 and ratchet-row follow-up #1064; D-04 census on PROD 0 stranded children; verification passed 8/8; security SECURED 27/27 (completed 2026-10-16)
 - [x] **Phase 164.9.3.2: DEFER40001 — a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end** (INSERTED) — verification: passed (completed 2026-10-02, PR #919, v0.118.0.0)
 - [x] **Phase 164.9.3.2.1: ENQ40001 — the enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) answers a PostgREST caller instead of re-running the call** (INSERTED) — verification: passed (completed 2026-10-02, PR #929, v0.118.1.5)
 - [x] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — verification: passed (completed 2026-10-03, PR #880, v0.119.0.0)
@@ -146,7 +146,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables** (INSERTED 2026-10-03) — shipped v0.129.2.0 (merged 2026-10-08); verification: passed (plan 04 PROD after-reading 2026-10-08) (completed 2026-10-08)
 - [x] **Phase 164.9.7.1: TRIGGERREVOKE — anon and authenticated no longer hold TRIGGER or MAINTAIN on public tables** (INSERTED 2026-10-08) — shipped v0.129.5.0 (merged 2026-10-09, #987; applied to TEST then PROD, PROD after-reading `0 0 0 0`); verification: passed 2026-10-09 (founder D-06, 164.9.7)
 - [x] **Phase 164.9.8: APTHANG — a CI job's apt step never hangs on a dead package mirror** (INSERTED 2026-10-07) — shipped v0.129.1.2 (merged 2026-10-08); verification: passed (D-04 runner measurement recorded) (completed 2026-10-08)
-- [ ] **Phase 164.9.8.1: PYXDIST — the python CI job runs pytest in parallel and finishes in about half its time** (INSERTED 2026-10-14) — started 2026-10-14 (founder override: runs now, outside the in-flight phase limit)
+- [x] **Phase 164.9.8.1: PYXDIST — the python CI job runs pytest in parallel and finishes in about half its time** (INSERTED 2026-10-14) — started 2026-10-14 (founder override: runs now, outside the in-flight phase limit) — shipped v0.132.1.6 (merged 2026-10-15, #1054); verification: passed (SC-3 soak 20/20 and SC-4 wall time read from CI) (completed 2026-10-15)
 - [x] **~~Phase 165~~: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"), as 165 ACTIONSDEPS: #643 (superseded by #916), #627, #626 and #612 landed green; deviations in `165-VERIFICATION.md`.
 - [x] **~~Phase 165.1~~: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule. ⭐ PASSED 2026-10-06 (completed 2026-10-06) by founder decision ("Pass 165/165.1 now, 165.2 after nightly"): the maintenance landings meet the criteria, C1 in substance and not to the letter (the pandas fix rode inside #898); deviations in `165.1-VERIFICATION.md`.
 - [x] **~~Phase 165.2~~: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -165,7 +165,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.1.1.1: BRIDGERETURNS — the Bridge matcher's per-holding returns come from each holding's daily mark price, so buying, selling or moving an asset never reads as a gain or loss** (INSERTED 2026-10-15) — not yet planned (data integrity; founder decision 167.1.1 D-06)
 - [ ] **Phase 167.1.1.2: AUMBASIS — scenario commit sizing counts a derivative at its unrealized P&L, never its notional, and a missing P&L is stored as missing, never as 0** (INSERTED 2026-10-15) — not yet planned (data integrity; founder decision during 167.1.1.1 discuss)
 - [x] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — verified 2026-10-11 (completed 2026-10-11)
-- [ ] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — not yet planned (data integrity; after 167.1.2 PR C)
+- [x] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — 10 plans, shipped as PR 1 v0.131.3.0 (#1022) and PR 2 v0.131.8.0 (#1033); D-11 day-0 and day-1 PROD reads as expected (capped_events 0), founder acknowledged 2026-10-16; verification passed 7/7; security SECURED 33/33 (completed 2026-10-16)
 - [ ] **Phase 167.1.2.1.1: WRITERRESIDUALS — the allocator equity writer persists why a curve was refused and never dilutes or drops a key silently** (INSERTED) — not yet planned (data integrity; split from 167.1.2.1 by D-01, 2026-10-13)
 - [ ] **Phase 167.1.2.1.2: HISTORYREADER — Open Positions, Exchanges and the Overview show a departed or stale key's history truthfully** (INSERTED) — not yet planned (data integrity and user-facing; split from 167.1.2.1 by D-01, 2026-10-13)
 - [x] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — planned 2026-10-07, 9 plans (completed 2026-10-11)
@@ -185,6 +185,8 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 169.5: BENCHCOMPARE — a factsheet's BTC comparator is read from the database through 169.2's reader, paired over the same interval as the strategy** (INSERTED) — verification: passed (completed 2026-10-04, PR #908)
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
 - [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
+- [ ] **Phase 170.1.1: TITLES — every page has its own tab title and a sentence-case heading** (INSERTED 2026-10-15) — not yet planned (split from 170.1 by founder decision; after 170.1)
+- [ ] **Phase 170.1.2: LABELS — every page shows names and readable labels instead of ids and internal values** (INSERTED 2026-10-15) — not yet planned (split from 170.1 by founder decision; after 170.1)
 - [x] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned — shipped v0.129.11.0 (#997); closed 2026-10-12 after the founder phone re-check (completed 2026-10-12)
 - [x] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 3 plans (completed 2026-10-11)
 - [x] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — 14 plans, two PRs (#1003, #1006) (completed 2026-10-11)
@@ -2896,6 +2898,8 @@ Plans:
 
 ### Phase 164.6.6.3.6: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed (INSERTED)
 
+⛔ RETIRED from v1.20 2026-10-16 by founder decision ("We will do it in the next milestone (maybe)"): moved out of this milestone, not delivered. The research, plan 01 and the gate protocol are kept on branch `feat/164.6.6.3.6-mt5serverlearn` (pushed); TODOS `[164.6.6.3.6-MT5SERVERLEARN-NEXT-MILESTONE]` carries it. The section below is kept as the spec for that milestone.
+
 **Goal:** A broker server that the terminals can actually reach is learned automatically on its first successful validation, instead of being hand-listed in `MT5_KNOWN_SERVERS`. Phase 164.6.6.3 ships the static list (D-09, D-14) and the Step 2d runbook. This phase replaces the hand-listing, if and only if its first measurement allows it.
 **Source:** founder decision 2026-10-06 (AskUserQuestion "Ship static, book the dynamic phase"). **Order:** runs NEXT, immediately after 164.6.6.3 ships, ahead of 164.6.6.3.1–.5 in the queue (founder 2026-10-06, AskUserQuestion "Next, right after 164.6.6.3 ships"). ⛔ **CORRECTED the same day:** 164.6.6.2 BTCNATIVE goes FIRST after 164.6.6.3 merges, and this phase follows it. Its VNC measurement may run alongside.
 **Requirements**: TBD (no v1.20 requirement IDs)
@@ -2921,7 +2925,7 @@ D-14 of 164.6.6.3 ("the service never reads `servers.dat`") stands: the terminal
 **Plans:** 0 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+- (none — retired before any plan shipped; plan 01 lives on the branch above)
 
 ### Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults (INSERTED)
 
@@ -3296,10 +3300,26 @@ and `bridge_scoring.find_replacement_candidates` still correlate a BTC-unit seri
 `nativeAmount` (the BTC amount formatter) with its first caller.
 **Requirements**: TBD
 **Depends on:** Phase 164.6.6.2
-**Plans:** 0 plans
+**Plans:** 17/17 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 164.6.6.2.1-01-PLAN.md — Native-balance GRANT, close-date and holdings-unit columns
+- [x] 164.6.6.2.1-02-PLAN.md — Native levels and live balance to USD
+- [x] 164.6.6.2.1-03-PLAN.md — Compose spike for an unpriced BTC key
+- [x] 164.6.6.2.1-04-PLAN.md — Matchers compare in USD
+- [x] 164.6.6.2.1-05-PLAN.md — Shared USD-view helpers, payload types and compact unit chip
+- [x] 164.6.6.2.1-06-PLAN.md — Own-capital MTD in USD
+- [x] 164.6.6.2.1-07-PLAN.md — Dated USD balance of a BTC key
+- [x] 164.6.6.2.1-08-PLAN.md — Key-mode USD inputs for a BTC key
+- [x] 164.6.6.2.1-09-PLAN.md — BTC key in the USD allocator book
+- [x] 164.6.6.2.1-10-PLAN.md — Positions poll and history backfill price a BTC MT5 account
+- [x] 164.6.6.2.1-11-PLAN.md — Server-built USD view of a native factsheet
+- [x] 164.6.6.2.1-12-PLAN.md — Per-view benchmark-vs-BTC withholding reasons
+- [x] 164.6.6.2.1-13-PLAN.md — Units toggle, native masthead and USD disclosure
+- [x] 164.6.6.2.1-14-PLAN.md — Leverage and basis in the USD view
+- [x] 164.6.6.2.1-15-PLAN.md — Key card shows the native balance with its dated USD value
+- [x] 164.6.6.2.1-16-PLAN.md — Compact `in BTC` chip on StrategyTable
+- [x] 164.6.6.2.1-17-PLAN.md — Native Holdings row, D-20 unpriced-account note, departed copy
 
 ### Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out (INSERTED)
 
@@ -3902,10 +3922,13 @@ Plans:
 
 **Requirements**: SC-1..SC-4 above
 **Depends on:** Phase 164.9.8 (ordering only)
-**Plans:** 0 plans
+**Plans:** 4/4 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 164.9.8.1-01-PLAN.md — the `shared_test_db` xdist group made real (`tryfirst=True`), with a gate seen RED without it
+- [x] 164.9.8.1-02-PLAN.md — the limiter-identity flake fixed in the polluters (`tests/limiter_stub.py`), victim untouched
+- [x] 164.9.8.1-03-PLAN.md — `-n auto --dist loadgroup` in CI and the Makefile, byte-identical and pinned, coverage enforced combined
+- [x] 164.9.8.1-04-PLAN.md — soak and wall time, moved to the PR's CI by D-14: 20/20 green, `python` job 340 to 497 s against 654.5 s
 
 ### Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables (measured read-only on PROD 2026-10-03: anon 56 of 63 tables, authenticated 59, api_keys included; RLS never covers TRUNCATE). One migration revokes it and the default privilege; migration-reviewer + rls-policy-auditor + silent-failure-hunter before merge, since merges auto-apply to PROD. (INSERTED)
 
@@ -4154,7 +4177,7 @@ Plans:
 **Goal:** The compute-job fan-in graph and the bridge's decision cascade never strand a job, raise a spurious 23505, or deadlock: a fan-in child whose parent fails reaches a terminal state, a `match_decisions` delete cascades without a unique violation, and a fan-in diamond cannot deadlock on the parent lock.
 **Requirements**: TODOS `[164.9.3.1-FANIN-GRAPH-RESIDUALS]` (owned here)
 **Depends on:** Phase 164.9.3 (the same compute-job RPC surface; CLAIMPAIR's migration re-bases `_enqueue_compute_job_internal` and the claim RPCs first, and this phase re-bases on it) ⛔ **CORRECTED 2026-09-27 (164.9.3 CONTEXT D-05/D-08):** CLAIMPAIR's migration re-bases ONLY the three claim bodies (`claim_compute_jobs`, both `claim_compute_jobs_with_priority` overloads). It edits NONE of `_enqueue_compute_job_internal`, `defer_compute_job`, `mark_compute_job_done` or `mark_compute_job_failed`, so this phase re-bases those on whatever is latest at its own plan time. The sentence before this note is kept as lineage.
-**Plans:** 0 plans
+**Plans:** 11/11 plans complete
 
 ⛔ **BOOKED 2026-09-26 UNDER THE NEW-PHASE FREEZE — NOT STARTED.** Founder decision (AskUserQuestion, "Re-route, don't start"): items (1), (2) and (3) of Phase 164.5.2's routed list leave 164.5.2 and land here. This phase gets no discuss, plan or execute step until the founder lifts the freeze for it.
 
@@ -4172,7 +4195,17 @@ Plans:
 
 Plans:
 
-- [ ] TBD — plans not listed yet
+- [x] 164.9.3.1-01-PLAN.md — wave 1: red-first SQL gate for the stranded child (D-01 to D-03) and the lock helper's ACL (D-06), four routed items booked
+- [x] 164.9.3.1-02-PLAN.md — wave 1: red-first two-backend gate for the lost release (D-07) and the diamond deadlock (D-06, SC-3)
+- [x] 164.9.3.1-03-PLAN.md — wave 1: red-first proofs for the cascade 23505 (D-05, SC-2): lane stand-in fixture, single-session gate, one live-DB arm
+- [x] 164.9.3.1-04-PLAN.md — wave 2: the single migration's lock half (ancestor-first helper, enqueue lock swap, lock-then-release split in `mark_compute_job_done`)
+- [x] 164.9.3.1-05-PLAN.md — wave 3: the failure cascade with the child-strategy bridge (D-01 to D-03), re-base proven minimal
+- [x] 164.9.3.1-06-PLAN.md — wave 4: the D-05 fix (option Y), catalog COMMENTs and generated types, gate C green
+- [x] 164.9.3.1-07-PLAN.md — wave 5: compute-job COMMENTs, VAC-04 acks, manual rollback, `[BLOCKING]` schema proof by local-stack replay
+- [x] 164.9.3.1-08-PLAN.md — wave 6: layered mutation twins for every arm of gates A and C
+- [x] 164.9.3.1-09-PLAN.md — wave 6: layered mutation twins for every arm of the two-backend gate B
+- [x] 164.9.3.1-10-PLAN.md — wave 7: every corpus census the new gates and arms shift
+- [x] 164.9.3.1-11-PLAN.md — wave 8: `POST /api/bridge/outcome` 500 fixed at its root (upsert `onConflict` pointed at the real unique index)
 
 **⭐ ROUTED IN 2026-09-26 (founder, "164.9.3.1 FANINGRAPH"; found by the 164.5.2 round-1 code review, WR-02, pre-existing):** a fan-in lost release. When two parents of one `done_pending_children` child mark done at the same time, the fan-in UPDATE in `mark_compute_job_done` (carried unchanged from `20260603120000`) lets each parent see the other as still running, so neither releases the child, and no sweep recovers it. This is the concurrent-parents twin of this phase's parent-fails strand. The 164.5.2 advisory lock is taken after the fan-in by design and does not change this. Success: two parents marking done concurrently always release the child exactly once, proven by a two-backend lane arm that fails on today's body.
 
@@ -5182,7 +5215,7 @@ Plans:
 **Priority:** data integrity (founder priority rule, 2026-09-27: data integrity ahead of features). Registered through `/gsd-phase --insert 167.1.2`; gsd-tools numbered it 167.1.2.1 and the number is kept.
 **Requirements**: TBD (criteria below)
 **Depends on:** Phase 167.1.2 (PR C: its history rebuild changes `replace_equity_snapshots` and the per-key reconstruct path this phase builds on).
-**Plans:** 10 plans (PR 1: 01-03; PR 2: 04-09; post-ship read: 10)
+**Plans:** 10/10 plans complete (PR 1: 01-03; PR 2: 04-09; post-ship read: 10)
 
 ⭐ **Re-scoped 2026-10-13 (founder, smart discuss "Accept all"; `167.1.2.1-CONTEXT.md` D-01/D-02):** this phase delivers success criteria **1-7 only** (the per-key marker, retry, replace scope, `failed_retry`, migration review, the fast-fail race), in two PRs (D-08). The writer residuals of the first ROUTED IN block moved to **Phase 167.1.2.1.1 WRITERRESIDUALS**, and items (1), (2), (3) and (7) of the second moved to **Phase 167.1.2.1.2 HISTORYREADER**. Re-measured at `c85c938e1`: **SFH-R3-07 is CLOSED** (keyset paging in `_load_allocator_daily_returns`, v0.111.1.0, #903) and **item (4) WR-02 is CLOSED** (`20261011120000_allocator_holdings_per_key_unique.sql` and `HOLDINGS_CONFLICT_TARGET`, v0.130.6.0, #1006). Item (5) WR-03 is now a coupling rule both new phases carry. The blocks below are kept as lineage.
 
@@ -5217,16 +5250,16 @@ Plans:
 
 Plans:
 
-- [ ] 167.1.2.1-01-PLAN.md — PR 1 migration M1: the two `api_keys` marker columns, the D-05/D-12/D-15 backfill, `request_allocator_holdings_sync` counting `failed_retry` and reading the marker (SC-1, SC-5), new SQL gate, census
-- [ ] 167.1.2.1-02-PLAN.md — PR 1 worker: D-07, every non-deleted sibling blocks the sole-key replace (SC-3), three old-rule tests inverted
-- [ ] 167.1.2.1-03-PLAN.md — PR 1 ship: migration-reviewer, rls-policy-auditor and silent-failure-hunter on M1 (SC-6), release commit, midday merge
-- [ ] 167.1.2.1-04-PLAN.md — PR 2 migration M2: the fan-out retries every owed key, counts attempts at the enqueue, caps at 5 with a cron_runs trace (SC-2, SC-4, SC-7 SQL half), new owed-key gate
-- [ ] 167.1.2.1-05-PLAN.md — PR 2 worker: marker writer and decider (D-15 noop stays owed), the refresh hold on "owed and being worked" (SC-7), the D-09 Sentry event
-- [ ] 167.1.2.1-06-PLAN.md — PR 2 reader: the non-gating "history could not be rebuilt" Overview note (D-09, D-14)
-- [ ] 167.1.2.1-07-PLAN.md — PR 2: repoint the 167.1.2 fan-out gate to M2 (every original arm machine-checked, none silently dropped), census by one measured run, the SQL/Python/TS attempt-cap twins pinned by test
-- [ ] 167.1.2.1-08-PLAN.md — D-12 read-only PROD census of the owed set, brought to the founder before PR 2 merges
-- [ ] 167.1.2.1-09-PLAN.md — PR 2 ship: the three migration reviewers on M2 (SC-6), release commit, merge and deploy clear of 04:00-05:45 UTC
-- [ ] 167.1.2.1-10-PLAN.md — D-11 read of the first post-PR-2 fan-out and the next day's outcome, counts only
+- [x] 167.1.2.1-01-PLAN.md — PR 1 migration M1: the two `api_keys` marker columns, the D-05/D-12/D-15 backfill, `request_allocator_holdings_sync` counting `failed_retry` and reading the marker (SC-1, SC-5), new SQL gate, census
+- [x] 167.1.2.1-02-PLAN.md — PR 1 worker: D-07, every non-deleted sibling blocks the sole-key replace (SC-3), three old-rule tests inverted
+- [x] 167.1.2.1-03-PLAN.md — PR 1 ship: migration-reviewer, rls-policy-auditor and silent-failure-hunter on M1 (SC-6), release commit, midday merge
+- [x] 167.1.2.1-04-PLAN.md — PR 2 migration M2: the fan-out retries every owed key, counts attempts at the enqueue, caps at 5 with a cron_runs trace (SC-2, SC-4, SC-7 SQL half), new owed-key gate
+- [x] 167.1.2.1-05-PLAN.md — PR 2 worker: marker writer and decider (D-15 noop stays owed), the refresh hold on "owed and being worked" (SC-7), the D-09 Sentry event
+- [x] 167.1.2.1-06-PLAN.md — PR 2 reader: the non-gating "history could not be rebuilt" Overview note (D-09, D-14)
+- [x] 167.1.2.1-07-PLAN.md — PR 2: repoint the 167.1.2 fan-out gate to M2 (every original arm machine-checked, none silently dropped), census by one measured run, the SQL/Python/TS attempt-cap twins pinned by test
+- [x] 167.1.2.1-08-PLAN.md — D-12 read-only PROD census of the owed set, brought to the founder before PR 2 merges
+- [x] 167.1.2.1-09-PLAN.md — PR 2 ship: the three migration reviewers on M2 (SC-6), release commit, merge and deploy clear of 04:00-05:45 UTC
+- [x] 167.1.2.1-10-PLAN.md — D-11 read of the first post-PR-2 fan-out and the next day's outcome, counts only
 
 ⭐ **ROUTED IN 2026-09-29 (from 167.1.2 PR C4 review rounds 1-3 and its verification; data integrity and user-facing).** Sources: `167.1.2-C4-REVIEW-FIX-K1.md`, `-K2a.md`, `-R2C.md`, `167.1.2-C4-VERIFY.md`, `167.1.2-C4-REVIEW-R3.md`. Items (1)-(3) are the D-16 gaps the founder chose to book here (AskUserQuestion 2026-09-29, "Book them to a phase") rather than accept or fix in C4; (4)-(7) were routed out of C4's fix rounds because each needs a file set or a migration outside a fixer's topic.
 (1) **D-16, unlinked departed key:** a departed key never stamped with `venue_account_id` and never marked is not grouped with its account by `accountIdentityTokens`, so its older rows still show on Open Positions (dated, never as current dollars).
@@ -5984,6 +6017,49 @@ Plans:
 (a) With no benchmark selected, the scenario Returns chart subtitle reads "vs None". Root cause: `src/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload.ts` builds the `none` comparator with `inertComparatorBlock("None", "None")`, and `subtitleFor` in `src/app/factsheet/[id]/v2/TimeSeriesChart.tsx` prints `vs ${cmpName}` whenever the chart config has a `comparatorField`. Success: with no benchmark chosen the subtitle is empty or says "no benchmark".
 (b) The scenario KPI tiles show an unlabelled delta line (e.g. "+0.00") under each value. Success: the delta says what it is compared against (e.g. "vs current book").
 
+### Phase 170.1.1: TITLES — every page has its own tab title and a sentence-case heading (INSERTED)
+
+**Goal:** Every page names itself: a tab title of its own on every dashboard, admin and auth route, under one "%s — Quantalyze" template with "—" as the one separator, and sentence-case page headings per DESIGN.md. No placeholder page or internal label stays reachable from the navigation. Split from Phase 170.1 COPY on 2026-10-15 by founder decision ("Split into 3 phases"): this phase carries 170.1's titles topic (D-02, D-04, D-06, R-6), with the plans, decisions and approved design contract already made there. It is not re-discussed.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 170.1 (both edit `src/app/(dashboard)/strategies/page.tsx`; COPY ships first and this phase rebases on it)
+
+**Success Criteria** (what must be TRUE):
+
+1. A root `title.template` "%s — Quantalyze" applies, and every dashboard, admin and auth route renders its own tab title. No title doubles the brand or uses "|" (170.1 SC-3, D-06).
+2. Pages that shared a title are distinguished: the manager `/strategies` H1 reads "Strategies", while `/my-strategies` keeps "My Strategies". PageHeader titles and the `/allocations` heading are in sentence case ("My allocation", "Compare strategies"), and e2e anchors that key on a renamed title move in the same commit (D-06, R-6).
+3. `/referral` is gone: the page, its sidebar link and its route-contract manifest entry are removed in one commit. The `/strategy/[id]/v2` tab title no longer says "v2". No "Coming soon" default tooltip remains (170.1 SC-2, D-02, D-04).
+4. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom after deploy, by the orchestrator.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 170.1.1 to break down)
+
+---
+
+### Phase 170.1.2: LABELS — every page shows names and readable labels instead of ids and internal values (INSERTED)
+
+**Goal:** No page shows a short id where a name exists, or a raw internal value as a label. Roles, statuses, compute-job kinds, allocation event types, match decisions, breach reasons, venues and trust tiers read through shared label maps, and a failed name lookup reads "Unnamed strategy" or "Unknown allocator", never an id. Split from Phase 170.1 COPY on 2026-10-15 by founder decision ("Split into 3 phases"): this phase carries 170.1's labels topic (D-01, D-03, D-13), with the plans, decisions and approved design contract already made there. It is not re-discussed.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 170.1
+
+**Success Criteria** (what must be TRUE):
+
+1. Every page, admin included, shows labels instead of raw internal values for roles, statuses, compute-job kinds, allocation event types, match decisions, breach reasons, venues and trust tiers. Each label map covers every value its database CHECK constraint allows, and an unknown value reads the map's own fallback label (170.1 SC-1, D-01).
+2. No page shows a short or full id where a name exists. A lookup miss reads "Unnamed strategy" or "Unknown allocator" in visible text, `title` and `aria-label`. An exploratory-tier strategy whose real name is withheld keeps its `Strategy #<8-char id>` handle, and the factsheet's `QSF · <id8> · <date>` stamp stays (D-01, D-13, R-5).
+3. The OutcomeForm's disabled "Modified (coming soon)" option and its roadmap tooltip are removed (170.1 SC-2, D-03).
+4. The listed exchange matches the linked key's venue for every published strategy (TODOS `[170.1-LISTED-EXCHANGE-VS-KEY-VENUE]`), or the entry is re-routed by founder decision.
+5. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom after deploy, by the orchestrator.
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 170.1.2 to break down)
+
+---
+
 ### Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity (INSERTED)
 
 **Goal:** Six user-facing items are fixed (the sixth, the Discovery page's phone overflow, routed 2026-10-08), four from Phase 170's post-deploy pass and one from Phase 166.3's recompute. The Allocations Holdings tab never scrolls sideways. The daily BTC benchmark refresh still lands a day when Binance fails. The /compare equity chart shows each strategy's real cumulative return. A CSV-ingested strategy's factsheet masthead states its venue as self-reported. Every benchmark-relative metric is measured over the strategy's full history wherever BTC prices exist.
@@ -6154,7 +6230,7 @@ kept verbatim.
 | 164.6.6 MT5TERMINALISOLATION | 9/9 | Complete    | 2026-10-04 |
 | 164.6.6.1 MT5SCRUB | 8/8 | Complete — L-3 NOT OBSERVED, booked (founder 2026-10-14) | 2026-10-14 |
 | 164.6.6.2 BTCNATIVE | 12/13 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
-| 164.6.6.2.1 BTCUSDVIEW | 0/? | Queued — booked 2026-10-07 by 164.6.6.2 D-15 | - |
+| 164.6.6.2.1 BTCUSDVIEW | 17/17 | Complete | v0.129.8.0, v0.130.0.0; closed 2026-10-15 |
 | 164.6.6.2.2 WEALTHRETURNS | 7/7 | Complete — verification passed after the D-03 post-deploy reading | 2026-10-08 · v0.128.0.0 · #973 |
 | 164.6.6.2.3 FLOWTIMING | 12/12 | Complete | 2026-10-13 |
 | 164.6.6.3 UATFIXES | 7/7 | Complete (closed 2026-10-12, founder) | 2026-10-12 |
@@ -6163,7 +6239,7 @@ kept verbatim.
 | 164.6.6.3.3 FACTSHEETTRUTH | 15/15 | Complete — verification passed (plan 15 review MEDIUMs fixed over four rounds) | 2026-10-15 · v0.131.12.1 |
 | 164.6.6.3.4 STATUSBRIDGE | 4/4 | Complete — verification passed after the plan 04 PROD re-sync | 2026-10-08 · v0.129.1.0 · #977 |
 | 164.6.6.3.5 DOMAINONE | 13/13 | Complete — verification passed after plan 13's live checks | 2026-10-08 · v0.127.0.0 · #971 |
-| 164.6.6.3.6 MT5SERVERLEARN | 0/? | Queued — booked 2026-10-06 (founder); BROKER-SERVERS.md measured, no plans | - |
+| ~~164.6.6.3.6 MT5SERVERLEARN~~ | — | RETIRED from v1.20 (founder, "next milestone (maybe)"); work kept on its branch | 2026-10-16 |
 | 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Complete    | 2026-10-04 |
 | 164.6.8 OUTAGEALERT | 10/10 | Complete | 2026-10-15 |
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 7/7 | Complete | v0.77.32.1 · finalized v0.77.32.1; its 33 stranded artifacts restored to main by PR #785. Row said `0/? Queued 2nd` until 2026-09-12 |
@@ -6178,7 +6254,7 @@ kept verbatim.
 | 164.9.1 JOBRPCTRUTH | 14/14 | Complete | v0.93.0.0 · #860 · verification passed 2026-09-27 (last browser check closed) |
 | 164.9.2 REFDATAUPDATES | 5/5 | Complete | v0.93.0.1 · #862 |
 | 164.9.3 CLAIMPAIR | 6/6 | Complete    | 2026-09-27 |
-| 164.9.3.1 FANINGRAPH | 0/? | Queued — blocker, after 164.9.3 | - |
+| 164.9.3.1 FANINGRAPH | 11/11 | Complete — fan-in child never strands, decision delete and diamond stop failing; PROD stranded-child census 0; verification passed 8/8, SECURED 27/27 | 2026-10-16 · v0.132.1.0 · #1059, v0.132.1.1 · #1061, v0.132.1.5 · #1064 |
 | 164.9.3.2 DEFER40001 | 8/8 | Complete    | 2026-10-02 |
 | 164.9.3.2.1 ENQ40001 | 3/3 | Complete    | 2026-10-02 |
 | 164.9.4 CIOFFMUTEX | 12/12 | Complete    | 2026-10-03 |
@@ -6188,7 +6264,7 @@ kept verbatim.
 | 164.9.7 TRUNCATEREVOKE | 4/4 | Complete — verification passed after the plan 04 PROD after-reading | 2026-10-08 · v0.129.2.0 · #980 |
 | 164.9.7.1 TRIGGERREVOKE | 5/5 | Complete — merged and applied, PROD after-reading `0 0 0 0`; verification passed | 2026-10-09 · v0.129.5.0 · #987 |
 | 164.9.8 APTHANG | 5/5 | Complete — verification passed after the D-04 runner measurement | 2026-10-08 · v0.129.1.2 · #979 |
-| 164.9.8.1 PYXDIST | 0/? | In progress — CI throughput, started 2026-10-14 outside the phase limit (founder) | - |
+| 164.9.8.1 PYXDIST | 4/4 | Complete — soak 20/20 and wall time MET, read from CI; verification passed | 2026-10-15 · v0.132.1.6 · #1054 |
 | 166. QSTATS-TRUTH | 10/10 | Complete    | 2026-10-04 |
 | 166.1 ENGINEFLOOR | 4/4 | Complete    | 2026-10-04 |
 | 166.1.1 DDSIGN | 3/3 | Complete | v0.129.6.0 · #988 · verification passed 2026-10-09 |
@@ -6204,7 +6280,7 @@ kept verbatim.
 | 167.1.1.1 BRIDGERETURNS | 0/? | Queued — data integrity; founder decision 167.1.1 D-06 | - |
 | 167.1.1.2 AUMBASIS | 0/? | Queued — data integrity; founder decision 2026-10-15 | - |
 | 167.1.2 ACCOUNTTRUTH | PR A, B, C1–C5 shipped | Complete | 2026-10-11 |
-| 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
+| 167.1.2.1 RECONMARKER | 10/10 | Complete — D-11 day-0 and day-1 PROD reads as expected, capped_events 0; verification passed, SECURED 33/33 | 2026-10-16 · v0.131.3.0 · #1022, v0.131.8.0 · #1033 |
 | 167.1.2.1.1 WRITERRESIDUALS | 0/? | Queued — data integrity; split from 167.1.2.1 (D-01), after it | - |
 | 167.1.2.1.2 HISTORYREADER | 0/? | Queued — data integrity and user-facing; split from 167.1.2.1 (D-01), after it | - |
 | 167.1.2.2 DERIVECRON | 9/9 | Complete | 2026-10-11 |
@@ -6224,6 +6300,8 @@ kept verbatim.
 | 169.5 BENCHCOMPARE (split from 169 2026-09-27) | 5/5 | Complete    | 2026-10-04 |
 | 170. LAYOUT | 20/20 | Complete | verification passed (ROADMAP phase list: completed 2026-10-01; this row read `In Progress` until 2026-10-04) |
 | 170.1 COPY | 0/? | Queued — feature, after 170 | - |
+| 170.1.1 TITLES | 0/? | Queued — split from 170.1 (founder 2026-10-15), after 170.1 | - |
+| 170.1.2 LABELS | 0/? | Queued — split from 170.1 (founder 2026-10-15), after 170.1 | - |
 | 170.2 PROBEFIXES | 11/11 | Complete | 2026-10-12 |
 | 170.3 OGPUBLIC | 3/3 | Complete | 2026-10-11 |
 | 170.4 ALLOCHOLDINGS | 14/14 | Complete | 2026-10-11 |

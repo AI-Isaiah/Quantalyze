@@ -138,6 +138,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.child_deadman import run_child
+
 _ANALYTICS_ROOT: Path = Path(__file__).resolve().parents[1]
 
 # A canary that appears in NO source file, so finding it in a captured stream is
@@ -158,8 +160,6 @@ _HMAC_URL = (
     "&timestamp=1700000000&signature=" + _LEAK_TOKEN
 )
 
-_SUBPROCESS_TIMEOUT_S = 300
-
 
 def _run_probe(code: str) -> subprocess.CompletedProcess[str]:
     """Run `code` in a FRESH interpreter rooted at analytics-service/.
@@ -170,13 +170,14 @@ def _run_probe(code: str) -> subprocess.CompletedProcess[str]:
     sibling tests did to those globals. A fresh interpreter is the only honest
     way to observe an UNCONFIGURED process.
     """
-    return subprocess.run(
+    # The verdict is the child's exit code and output, never how long it took;
+    # `run_child` carries only the shared DEADMAN, which names this test if the
+    # child hangs.
+    return run_child(
+        "a fresh interpreter shows how structlog / the log record factory behave "
+        "before and after configure",
         [sys.executable, "-c", code],
         cwd=str(_ANALYTICS_ROOT),
-        capture_output=True,
-        text=True,
-        timeout=_SUBPROCESS_TIMEOUT_S,
-        check=False,
     )
 
 

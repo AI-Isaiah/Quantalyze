@@ -43,6 +43,38 @@ from main_worker import (
 from services.job_worker import DispatchOutcome, DispatchResult
 
 
+@pytest.fixture(autouse=True)
+def _claim_rpc_latch_is_test_scoped() -> Iterator[None]:
+    """Make the claim-RPC fallback latch test-scoped for every test in this file.
+
+    `main_worker._FALLBACK_CLAIM_RPC` / `_FALLBACK_LATCHED_AT` are process-wide
+    and, once a structured 42883 latches them, stay set for
+    `_FALLBACK_REPROBE_INTERVAL_S` (300 s of `time.monotonic()`). While set,
+    `dispatch_tick` skips the priority claim RPC. A test that latches therefore
+    broke whichever test the SAME process ran next and did not reset it
+    (`test_role_interactive_excludes_backfill_kinds`,
+    `test_last_tick_advances_between_jobs`). Serial file order hid this because
+    a reset always happened to sit between a latching test and those victims;
+    xdist's `--dist loadgroup` schedules every ungrouped test as its own unit,
+    so a worker can run them back to back.
+
+    Reset on the way IN (every test starts from the production default, so no
+    test depends on what ran before it) and restore on the way OUT (nothing this
+    file latches survives it). Scoped to this module deliberately: the latch is
+    only SET here. The other two files that drive it
+    (`test_job07_reaper_off_worker_loop.py`, `test_worker_isolation_e2e.py`)
+    already save and restore it themselves, so a conftest-wide fixture would
+    cover nothing that is not covered.
+    """
+    saved = (main_worker._FALLBACK_CLAIM_RPC, main_worker._FALLBACK_LATCHED_AT)
+    main_worker._FALLBACK_CLAIM_RPC = False
+    main_worker._FALLBACK_LATCHED_AT = 0.0
+    try:
+        yield
+    finally:
+        main_worker._FALLBACK_CLAIM_RPC, main_worker._FALLBACK_LATCHED_AT = saved
+
+
 # ---------------------------------------------------------------------------
 # dispatch_tick
 # ---------------------------------------------------------------------------
@@ -283,7 +315,19 @@ class TestDispatchTick:
         async def _slow_dispatch(job):
             # LAST_TICK_AT here == the top-of-iteration stamp (before the crawl).
             captured["at_start"] = main_worker_healthz.LAST_TICK_AT
-            await asyncio.sleep(0.15)  # ~7 heartbeat intervals, all yielding
+            # ⛔ RENDEZVOUS, NOT A STOPWATCH. This used to `asyncio.sleep(0.15)` and
+            # rely on the heartbeat's 20 ms timer being registered and due before the
+            # dispatch's own 150 ms timer; a loop starved between those two
+            # registrations ended the dispatch first and the heartbeat never got to
+            # refresh anything. The dispatch now stays in flight, yielding, until the
+            # heartbeat has refreshed LAST_TICK_AT (bounded at 5 s so a heartbeat that
+            # never fires fails the assertion below instead of hanging).
+            deadline = time.monotonic() + 5.0
+            while (
+                main_worker_healthz.LAST_TICK_AT <= captured["at_start"]
+                and time.monotonic() < deadline
+            ):
+                await asyncio.sleep(0.005)
             return DispatchResult(outcome=DispatchOutcome.DONE)
 
         _saved_tick = main_worker_healthz.LAST_TICK_AT
@@ -291,7 +335,7 @@ class TestDispatchTick:
             with patch("main_worker.get_supabase", return_value=mock_supabase), \
                  patch("main_worker.dispatch", new=_slow_dispatch):
                 await dispatch_tick("worker-hb")
-            # The heartbeat advanced LAST_TICK_AT DURING the 0.15s dispatch, past the
+            # The heartbeat advanced LAST_TICK_AT DURING the dispatch, past the
             # stamp captured at dispatch start — proving mid-dispatch liveness.
             assert "at_start" in captured
             assert main_worker_healthz.LAST_TICK_AT > captured["at_start"], (
@@ -1339,9 +1383,14 @@ class TestReaperThresholdInvariant:
         # and never to JOB_CHAIN_FOLLOW_ON could therefore never raise the
         # ceiling. Pinning the registry SIZE to a literal (not to len() of the
         # table under test) converts that silent gap into a forced decision.
-        assert len(TIMEOUT_PER_KIND) == 15, (
+        # 16 since Phase 167.1.2.2.2.1 / OKXHISTORY: `okx_archive_rebuild` is
+        # CHAIN-TERMINAL by decision (api_key-scoped, enqueues nothing, nobody's
+        # follow-on, claimed by the interactive loop; it never holds a
+        # strategy_analytics row 'computing'), so JOB_CHAIN_FOLLOW_ON and the
+        # reaper ceiling are unchanged.
+        assert len(TIMEOUT_PER_KIND) == 16, (
             f"TIMEOUT_PER_KIND now has {len(TIMEOUT_PER_KIND)} kinds, not the "
-            "pinned 15 — a job kind was added/removed. Decide consciously "
+            "pinned 16 — a job kind was added/removed. Decide consciously "
             "whether it joins JOB_CHAIN_FOLLOW_ON (it is a chain edge: some "
             "handler enqueues it, or it enqueues a follow-on) or is "
             "chain-terminal, re-derive STRATEGY_ANALYTICS_REAP_THRESHOLD if the "
@@ -1473,16 +1522,6 @@ class TestClaimRpcFallback:
     """audit-2026-05-07 C-0190 — when migration 086 has not been applied,
     the worker must catch SQLSTATE 42883 from claim_compute_jobs_with_priority
     and fall back to the legacy claim_compute_jobs RPC."""
-
-    def setup_method(self) -> None:
-        # Reset the module-level latch so each test starts from "no
-        # fallback yet". Necessary because the latch is process-wide so a
-        # prior test that exercised the fallback would otherwise leak
-        # state into this test class.
-        import main_worker
-
-        main_worker._FALLBACK_CLAIM_RPC = False
-        main_worker._FALLBACK_LATCHED_AT = 0.0
 
     @pytest.mark.asyncio
     async def test_undefined_function_falls_back_to_legacy_rpc(self) -> None:
@@ -1788,6 +1827,29 @@ def _make_worker_api_error(code: str | int):
     )
 
 
+
+class _BackoffSleepSpy:
+    """Records every delay `services.db.db_read_with_retry` asks to sleep.
+
+    ⛔ A RECORD, NOT A STOPWATCH. The retry tests zero the backoff and used to prove
+    the patch landed by asserting the call returned in under a second (an unpatched
+    retry sleeps ~3 s). That raced CPU contention: a starved runner could spend the
+    second on scheduling alone. The delay the seam actually computed is the
+    property, and it does not depend on how fast the box is. The spy is installed
+    as `services.db.asyncio` only, so no other module's `asyncio.sleep` is seen;
+    every other attribute is the real `asyncio`."""
+
+    def __init__(self) -> None:
+        self.delays: list[float] = []
+
+    async def sleep(self, delay: float, *args: Any, **kwargs: Any) -> None:
+        self.delays.append(delay)
+        await asyncio.sleep(delay, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(asyncio, name)
+
+
 class TestWorkerGatewayTimeoutRetry:
     """`_claim_priority` (dispatch_tick) and `_reset` (watchdog_tick) both
     consume `db_read_with_retry` (plan 02's seam) instead of the fail-fast
@@ -1795,13 +1857,6 @@ class TestWorkerGatewayTimeoutRetry:
     times; a structured SQLSTATE 42883 is NOT gateway-shaped and must never
     be retried — it propagates on the first attempt, unchanged, straight
     into the claim site's own 42883 classification and latch."""
-
-    def setup_method(self) -> None:
-        # Same module-wide latch reset as TestClaimRpcFallback — necessary
-        # because _FALLBACK_CLAIM_RPC is process-wide state that would
-        # otherwise leak across tests in this class and its siblings.
-        main_worker._FALLBACK_CLAIM_RPC = False
-        main_worker._FALLBACK_LATCHED_AT = 0.0
 
     @pytest.mark.asyncio
     async def test_claim_site_retries_gateway_timeout_then_succeeds(
@@ -1874,11 +1929,11 @@ class TestWorkerGatewayTimeoutRetry:
 
         from postgrest.exceptions import APIError
 
-        start = time.monotonic()
+        spy = _BackoffSleepSpy()
+        monkeypatch.setattr("services.db.asyncio", spy)
         with patch("main_worker.get_supabase", return_value=mock_supabase):
             with pytest.raises(APIError) as excinfo:
                 await dispatch_tick("worker-gateway-timeout-exhausted")
-        elapsed = time.monotonic() - start
 
         assert excinfo.value is gateway_exc, (
             "the exhausted exception reaching the claim site's except arm "
@@ -1893,10 +1948,10 @@ class TestWorkerGatewayTimeoutRetry:
             "an exhausted gateway timeout must never latch the legacy-claim "
             "fallback -- it is not a structured 42883"
         )
-        assert elapsed < 1.0, (
+        assert spy.delays == [0.0, 0.0], (
             "the backoff patch must have applied -- an unpatched retry "
-            "would sleep ~3s across 3 attempts; a >=1s elapsed time means "
-            "the patch silently missed"
+            "would sleep ~3s across 3 attempts (attempts 0 and 1 sleep, "
+            f"attempt 2 raises); got the delays {spy.delays}"
         )
 
     @pytest.mark.asyncio
@@ -2055,11 +2110,11 @@ class TestWorkerGatewayTimeoutRetry:
 
         from postgrest.exceptions import APIError
 
-        start = time.monotonic()
+        spy = _BackoffSleepSpy()
+        monkeypatch.setattr("services.db.asyncio", spy)
         with patch("main_worker.get_supabase", return_value=mock_supabase):
             with pytest.raises(APIError) as excinfo:
                 await watchdog_tick()
-        elapsed = time.monotonic() - start
 
         assert excinfo.value is gateway_exc, (
             "the exception propagating out of watchdog_tick must be the "
@@ -2069,9 +2124,10 @@ class TestWorkerGatewayTimeoutRetry:
             "db_read_with_retry must attempt exactly DB_READ_MAX_RETRIES=3 "
             "times before giving up"
         )
-        assert elapsed < 1.0, (
+        assert spy.delays == [0.0, 0.0], (
             "the backoff patch must have applied -- an unpatched retry "
-            "would sleep ~3s across 3 attempts"
+            "would sleep ~3s across 3 attempts (attempts 0 and 1 sleep, "
+            f"attempt 2 raises); got the delays {spy.delays}"
         )
 
 

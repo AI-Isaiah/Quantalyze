@@ -8,6 +8,7 @@
  */
 
 import type { GuardReason } from "./headline-basis";
+import type { ReconstructedRange } from "./trade-fetch-provenance";
 
 /** One day of strategy or benchmark returns. `value` is a decimal return (not %). */
 export type DailyReturn = { date: string; value: number };
@@ -603,6 +604,23 @@ export type FactsheetCommon = {
    * infers a gap from holes in `dates`. `[]` means none recorded.
    */
   unrecoveredGaps: { from: string; to: string }[];
+  /**
+   * Phase 167.1.2.2.2.1 (OKXHISTORY), D-05/D-06: spans (inclusive UTC
+   * `YYYY-MM-DD`) rebuilt from the venue's bills archive rather than ticked
+   * live, parsed by `parseReconstructedRanges` from
+   * `strategy_analytics.series_provenance.reconstructed_ranges`. Server truth
+   * only: the client never infers a range from the shape of `dates`. `[]`
+   * means none recorded (and is the value for blends and scenarios).
+   */
+  reconstructedRanges: ReconstructedRange[];
+  /**
+   * Review round 1, F5 / IN-01: true when `series_provenance.reconstructed_ranges`
+   * was present but malformed, so `reconstructedRanges` is `[]` because we could
+   * not read the record, not because nothing was rebuilt. The header then says
+   * the record is unavailable instead of printing nothing. Optional: absent
+   * (a payload cached before the flag) and `false` both mean a readable record.
+   */
+  reconstructedRangesUnavailable?: boolean;
   trustTier: TrustTierKind | null;
   /** Author-provided strategy description (registry row `strategies.description`). */
   description: string | null;

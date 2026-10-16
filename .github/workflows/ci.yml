@@ -4929,6 +4929,7 @@ jobs:
           #   test_ledger_refresh_composite_arm.sql          23
           #   test_ledger_refresh_fanout.sql                 26
           #   test_ledger_refresh_staleness.sql               8
+          #   test_okx_archive_rebuild.sql                   15
           #   test_ops_staleness_check.sql                   14
           #   test_prod_prober_cadence.sql                    7
           #   test_retention_crons_safe.sql                   4
@@ -5104,6 +5105,18 @@ jobs:
           #   the file's own sentinel and re-derived by ci-anti-skip-gate.contract.test.ts, which read the sum 332
           #   against 331 and the race row as 8 against 7 before this edit. The mutation runner moved with it
           #   (ARMS_FLOOR 755 -> 756, same +1 arm, one full run).
+          # Re-measured 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09), ONE file joined:
+          #   test_okx_archive_rebuild.sql declares `ALL 15 ARMS EXECUTED` (arms 0-14), so
+          #   SENTINEL_FLOOR moves 17 -> 18 and ARMS_FLOOR 299 -> 314. Unlike the two LANE-ONLY
+          #   files above it posts nothing and runs on the ordinary sql-tests lane; its arms also
+          #   bite on the pg-lane under sql-mutation (mutation runner, same date: FILES_FLOOR
+          #   72 -> 73 and ARMS_FLOOR 723 -> 738, the same +15 arms, one full run). The row sits
+          #   in the contiguous table above, in file-name order, and the contract test
+          #   re-derived both floors from the corpus.
+          # MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): the OKXHISTORY
+          #   block moved the floors from the same base (17/299) as the blocks above it. The merged table
+          #   carries every row, so SENTINEL_FLOOR is 22 and ARMS_FLOOR 347, read off the merged table and
+          #   re-derived by ci-anti-skip-gate.contract.test.ts on the merged tree, never by adding the moves.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_analytics_scope.sql             20
@@ -5111,8 +5124,8 @@ jobs:
           #   test_sync_status_computed_at_runner_only.sql     10
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=21  # files declaring a sentinel
-          ARMS_FLOOR=332     # 13 + 8 + 8 + 9 + 8 + 3 + 8 + 8 + 6 + 23 + 26 + 8 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 23
+          SENTINEL_FLOOR=22  # files declaring a sentinel
+          ARMS_FLOOR=347     # 13 + 8 + 8 + 9 + 8 + 3 + 8 + 8 + 6 + 23 + 26 + 8 + 15 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
@@ -5651,7 +5664,13 @@ jobs:
       # shared-test-db mutex acquired in the step below still prevents two runs
       # from contending. Keep byte-identical with Makefile `test:`.
       # (2026-09-26, Phase 164.9.4 CIOFFMUTEX: this job no longer reaches the shared TEST project or takes the shared-test-db key; pytest runs against the local-stack lane private to this runner. The text above is lineage.)
-      - run: pytest --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
+      # (2026-10-14, Phase 164.9.8.1 PYXDIST: pytest now runs in parallel, `-n auto --dist loadgroup`. The SERIAL deferral above misread the cause: the
+      # `shared_test_db` group never formed, because the conftest grouping hook ran after xdist's own hook had already read the markers, so each live DB
+      # test was its own work unit; `tryfirst=True` on that hook makes the group real, proven by `tests/test_xdist_group_is_real.py`. The limiter-identity
+      # flake was `routers.*` module pollution from fixtures that evicted without restoring, fixed in the polluters through `tests/limiter_stub.py`.
+      # The pointer "(TODOS: v1.9.1 Phase-97 parallelization deferral)" is dangling: that TODOS entry was dropped by tracker consolidation `193afe818`.
+      # Byte-identity with Makefile `test:` is now pinned in `src/__tests__/local-stack-lane-wiring.test.ts`. The text above is lineage.)
+      - run: pytest -n auto --dist loadgroup --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
         env:
           # D-05 / D-08 (Phase 164.9.4): `CI` is 'true' unconditionally now,
           # because the lane is always present. That keeps `_need_supabase()`'s

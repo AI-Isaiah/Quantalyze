@@ -20,14 +20,18 @@ Covers:
 from __future__ import annotations
 
 import importlib
-import sys
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from tests.limiter_stub import evict_module, patch_shared_limiter
+from tests.limiter_stub import (
+    evict_module,
+    patch_shared_limiter,
+    stub_missing_modules,
+    unstub_modules,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +67,7 @@ class _NoopLimiter:
 
 
 _PATCHED_SLOWAPI: dict[str, object] = {}
+_INSTALLED_STUBS: dict[str, MagicMock] = {}
 
 
 def _install_router_stubs():
@@ -86,9 +91,10 @@ def _install_router_stubs():
     slowapi.Limiter = _NoopLimiter  # type: ignore[attr-defined,assignment]
     slowapi_util.get_remote_address = MagicMock()  # type: ignore[attr-defined,assignment]
 
-    for name in ("ccxt", "ccxt.async_support"):
-        if name not in sys.modules:
-            sys.modules[name] = MagicMock()
+    # ccxt is a real dependency: stub it only where it is genuinely missing, and
+    # take the stub out again at module teardown (Phase 164.9.8.1, WR-01 — a
+    # leaked MagicMock made `ccxt.NetworkError` a TypeError in test_cron_router).
+    _INSTALLED_STUBS.update(stub_missing_modules("ccxt", "ccxt.async_support"))
 
 
 def _restore_slowapi():
@@ -146,6 +152,7 @@ def _restore_router_state_at_module_teardown_c19():
     """
     yield
     _restore_slowapi()
+    unstub_modules(_INSTALLED_STUBS)
     evict_module("routers.portfolio")
     evict_module("routers.cron")
     # ⛔ EVICTION ALONE LEAVES A HOLE, and it is not this file's own tests that pay.

@@ -1,4 +1,5 @@
 import type { BenchmarkPricesOpt, ComputeResult, CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, BasisSeriesBundle, TrustTierKind, IngestSource } from "./types";
+import type { ReconstructedRange } from "./trade-fetch-provenance";
 import { alignCoveredReturns, COMPARATOR_CALENDARS } from "./align";
 import type { CoveredAlignment } from "./align";
 import { compute, cumEq, metricsBasisSeries, worstDrawdowns } from "./compute";
@@ -542,6 +543,10 @@ type FactsheetStrategyInput = {
     tradeFetchVenue?: string | null;
     /** D-02: named unrecovered gaps, already validated by `parseUnrecoveredGaps`. */
     unrecoveredGaps?: { from: string; to: string }[];
+    /** D-05: rebuilt-from-archive spans, already validated by `parseReconstructedRanges`. */
+    reconstructedRanges?: ReconstructedRange[];
+    /** F5 / IN-01: the stored record was malformed; see `FactsheetPayload.reconstructedRangesUnavailable`. */
+    reconstructedRangesUnavailable?: boolean;
     trustTier: TrustTierKind | null;
     /** Origin of the daily-return series — "api" (live-ingested) or "csv"
      *  (user-uploaded). Defaults to "csv" when absent so existing callers
@@ -860,6 +865,10 @@ function buildFromBuildableSeries(
     tradesFetchedAt: strategy.tradesFetchedAt ?? null,
     tradeFetchVenue: strategy.tradeFetchVenue ?? null,
     unrecoveredGaps: strategy.unrecoveredGaps ?? [],
+    reconstructedRanges: strategy.reconstructedRanges ?? [],
+    // Present only when true, so every payload with a readable record keeps its
+    // exact serialised shape (the SC-4 whole-payload byte pins).
+    ...(strategy.reconstructedRangesUnavailable ? { reconstructedRangesUnavailable: true } : {}),
     trustTier: strategy.trustTier,
     description: strategy.description ?? null,
     subtypes: strategy.subtypes ?? [],

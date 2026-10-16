@@ -55,6 +55,7 @@ from services.mt5_client import Mt5Client
 # is what rots. `tests/` is a package and `pytest.ini` sets `pythonpath = .`, so
 # this import is a plain one — MEASURED to work before it was written.
 from tests.test_mt5_relogin import _HEAL_GUARD_MUTANTS, _heal_guard_defects
+from tests.budget_rendezvous import expire_module_budget_when_reached
 
 # The obviously-fake register, matching `tests/test_mt5_relogin.py` byte for byte.
 _FAKE_LOGIN = "4242424"
@@ -244,6 +245,31 @@ def fast_cadence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(monitor.MT5_SESSION_POLL_INTERVAL_ENV, str(_TEST_CADENCE_S))
 
 
+def _tick_deadline_never_bites(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Take the tick's OWN outer deadline out of the race for one test.
+
+    The tick wraps the heal in `wait_for(heal(...), timeout=interval)` and the
+    cadence doubles as `interval`, so under `fast_cadence` that deadline is 10 ms.
+    The heal's first pool-thread hop on a starved worker can outlast that, the tick
+    is cut before its transition row is written, and (the terminal then being
+    healed) no later tick writes it either: a permanent miss, not a retry. A test
+    about what a COMPLETED tick does must not depend on how fast the pool is.
+
+    Only the heal's `wait_for` is exempted (by coroutine name); the loop's pacing
+    `wait_for(SHUTDOWN.wait(), timeout=interval)` keeps its real timeout. The tick
+    DEADLINE itself is exercised by the tests that name it
+    (`test_a_tick_that_outruns_its_own_cadence_is_BOUNDED_and_logged_distinctly`).
+    """
+    expire_module_budget_when_reached(
+        monkeypatch,
+        monitor,
+        asyncio.Event(),  # never set: the deadline never arms
+        only=lambda aw: getattr(
+            getattr(aw, "cr_code", None), "co_name", ""
+        ) == "heal_mt5_terminal_session",
+    )
+
+
 @pytest.fixture
 def shutdown(monkeypatch: pytest.MonkeyPatch) -> asyncio.Event:
     """A PER-TEST `SHUTDOWN`, never the shared module-level one.
@@ -293,6 +319,7 @@ async def test_CRITERION_2_a_dark_reading_drives_the_heal_with_no_human_and_no_r
     — and wave 5 measured no analytics deployment at all on the day the session
     lapsed, so nothing in the system was able to notice or act for ≥2h34m.
     """
+    _tick_deadline_never_bites(monkeypatch)
     _set_full_env(monkeypatch)
     fake = _install_client(
         monkeypatch,
@@ -304,7 +331,19 @@ async def test_CRITERION_2_a_dark_reading_drives_the_heal_with_no_human_and_no_r
         },
     )
 
-    await _run_until(lambda: "initialize_credentialed" in fake.call_order, shutdown)
+    # ⛔ Wait for the END STATE the assertions read, not for the first sign of it.
+    # `initialize_credentialed` lands in the heal's pool thread, and the `dark` row
+    # is written by a LATER pool-thread hop in the same tick; stopping the loop at
+    # the first one cancelled the tick before the second on a starved worker and
+    # `sink.rows` was empty.
+    await _run_until(
+        lambda: "initialize_credentialed" in fake.call_order
+        and any(
+            r["metadata"]["state"] == mt5_session_episodes.STATE_DARK
+            for r in sink.rows
+        ),
+        shutdown,
+    )
 
     assert "initialize_credentialed" in fake.call_order, (
         "the monitor observed a `-6` and never drove the credentialed heal — the "
@@ -335,10 +374,16 @@ async def test_CRITERION_3_an_already_authorized_terminal_is_never_sent_a_creden
     `_raise_last` exposure — on a schedule, forever. The measurement is the FAKE's
     own record: across many ticks, not ONE call carried a `login` kwarg.
     """
+    _tick_deadline_never_bites(monkeypatch)
     _set_full_env(monkeypatch)
     fake = _install_client(monkeypatch, {"initialize": True})
 
-    await _run_until(lambda: len(fake.call_order) >= 3, shutdown)
+    # Wait for the transition row as well as the third reading: the row is written
+    # by a later pool-thread hop than the reading itself, and `sink.rows` is
+    # asserted below.
+    await _run_until(
+        lambda: len(fake.call_order) >= 3 and len(sink.rows) >= 1, shutdown
+    )
 
     assert fake.call_order, "the loop never touched the terminal at all"
     assert all(c == "initialize" for c in fake.call_order), fake.call_order
@@ -600,6 +645,37 @@ async def _wait_until(predicate, *, poll_s: float = 0.005) -> None:
         await asyncio.sleep(poll_s)
 
 
+class _WaitForSpy:
+    """Stand-in for the monitor module's ``asyncio`` that records every
+    ``wait_for`` it is asked to do, then delegates to the real one.
+
+    The deadline and the interval wait are decided by the VALUE passed as
+    ``timeout`` and by WHAT is awaited, so those are what the tests below read.
+    Elapsed time proves neither: a deadline of 30 s instead of the cadence is
+    still "cancelled within 50 s". Patching the monitor's own ``asyncio`` name
+    (not ``asyncio.wait_for`` itself) keeps the spy off pytest-asyncio and
+    every other caller in the process.
+    """
+
+    def __init__(self) -> None:
+        #: ``(timeout, owner)`` per call; ``owner`` is the ``self`` of the awaited
+        #: coroutine when it is a bound-method coroutine (``Event.wait``), else None.
+        self.calls: list[tuple[float | None, object]] = []
+
+    @property
+    def timeouts(self) -> list[float | None]:
+        return [timeout for timeout, _owner in self.calls]
+
+    def __getattr__(self, name: str):
+        return getattr(asyncio, name)
+
+    async def wait_for(self, aw, timeout=None):
+        frame = getattr(aw, "cr_frame", None)
+        owner = frame.f_locals.get("self") if frame is not None else None
+        self.calls.append((timeout, owner))
+        return await asyncio.wait_for(aw, timeout)
+
+
 async def test_a_tick_that_outruns_its_own_cadence_is_BOUNDED_and_logged_distinctly(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, sink
 ) -> None:
@@ -632,19 +708,43 @@ async def test_a_tick_that_outruns_its_own_cadence_is_BOUNDED_and_logged_distinc
 
     started = asyncio.get_running_loop().time()
 
+    park_s = 100.0
+    cut_short = False
+
     async def _never_finishes(*, source: str, poll_interval_s: float | None) -> None:
-        await asyncio.sleep(100.0)
+        nonlocal cut_short
+        try:
+            await asyncio.sleep(park_s)
+        except asyncio.CancelledError:
+            cut_short = True
+            raise
 
     monkeypatch.setattr(monitor, "heal_mt5_terminal_session", _never_finishes)
+    spy = _WaitForSpy()
+    monkeypatch.setattr(monitor, "asyncio", spy)
 
     with caplog.at_level(logging.ERROR, logger=_MONITOR_LOGGER):
         await monitor.run_mt5_session_monitor_tick()
 
     elapsed = asyncio.get_running_loop().time() - started
-    assert elapsed < 2.0, (
-        f"the tick took {elapsed:.2f}s against a {cadence_s}s cadence — an "
-        "UNBOUNDED heal call is exactly the silent cadence stretch WR-06 exists "
-        "to bound"
+    # ⛔ THE VERDICT IS THE VALUE THAT DECIDES THE BEHAVIOUR, not the clock. "Cut
+    # off AT the cadence" means the tick handed `wait_for` a timeout EQUAL to the
+    # configured cadence; a deadline of 30 s, the relogin budget, or a mis-scaled
+    # interval would still cancel the heal inside any elapsed bar loose enough to
+    # survive a starved runner. The cancellation record (`cut_short`) carries the
+    # structural half: the parked heal was cancelled, not run to completion.
+    # The heal's deadline is the tick's FIRST `wait_for`; the later ones are the
+    # validation-terminal probe and the scrub-row reader, each under its own
+    # fixed bound (PROBE_TICK_BOUND_S / READ_TICK_BOUND_S), not what is under test.
+    assert cut_short and spy.timeouts[:1] == [cadence_s], (
+        f"the heal was not cut off AT the cadence: wait_for timeout(s)="
+        f"{spy.timeouts}, expected the first to be {cadence_s} (heal cancelled by the "
+        f"deadline: {cut_short}) — an UNBOUNDED or mis-sized heal deadline is "
+        "exactly the silent cadence stretch WR-06 exists to bound"
+    )
+    # DEADMAN only, not a stopwatch: half the park the heal would otherwise sit in.
+    assert elapsed < park_s / 2, (
+        f"the tick took {elapsed:.2f}s against a {cadence_s}s cadence"
     )
     messages = [r.getMessage() for r in caplog.records]
     assert any("did not complete inside its own" in m for m in messages), messages
@@ -677,6 +777,8 @@ async def test_the_loop_exits_on_SHUTDOWN_well_inside_the_ten_second_gather(
         "(the heal's budget ceiling) and the ceiling (the hourly prober's cadence)"
     )
 
+    spy = _WaitForSpy()
+    monkeypatch.setattr(monitor, "asyncio", spy)
     task = asyncio.create_task(monitor.mt5_session_monitor_loop())
     await asyncio.sleep(0.05)
     assert not task.done()
@@ -685,7 +787,20 @@ async def test_the_loop_exits_on_SHUTDOWN_well_inside_the_ten_second_gather(
     shutdown.set()
     await asyncio.wait_for(task, timeout=_LIFESPAN_GATHER_BUDGET_S)
     elapsed = asyncio.get_running_loop().time() - started
-    assert elapsed < 1.0, (
+    # ⛔ THE STRUCTURAL VERDICT: the loop's interval wait IS `SHUTDOWN.wait()` under
+    # the shipped 600 s cadence. A loop that polls SHUTDOWN on a 2-4 s timer (or
+    # sleeps) still exits inside any elapsed bar loose enough to survive a starved
+    # runner, so the clock cannot tell that apart from the event wait; the awaited
+    # object and the timeout can.
+    assert spy.calls and spy.calls[0][0] == 600.0 and spy.calls[0][1] is shutdown, (
+        f"the loop's interval wait is not `SHUTDOWN.wait()` under the 600 s "
+        f"cadence: wait_for calls (timeout, awaiting-event?)="
+        f"{[(t, o is shutdown) for t, o in spy.calls]}"
+    )
+    # "Well inside" the gather, as a DEADMAN at half its budget: the wait_for above
+    # already RAISES past the full budget. A 1 s bar raced a starved runner's
+    # scheduling.
+    assert elapsed < _LIFESPAN_GATHER_BUDGET_S / 2, (
         f"the loop took {elapsed:.2f}s to notice SHUTDOWN against a 600s cadence "
         f"— it is not sleeping on the event, so every deploy force-cancels it"
     )

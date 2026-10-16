@@ -1501,9 +1501,34 @@ class TestCronResponseShape:
 
         scored: list[str] = []
 
+        # ⛔ A CLOCK THE TEST OWNS, NOT A STOPWATCH. This used a real
+        # `asyncio.sleep(0.15)` per allocator against a real 0.25 s budget and
+        # asserted EXACTLY two were scored. On a CPU-starved worker the first
+        # allocator alone could take past 0.25 s, the loop stopped after one, and
+        # the count was wrong for a reason unrelated to the budget. The route reads
+        # `time.monotonic()` through its module-level `time`, so a virtual monotonic
+        # clock that advances only when an allocator is scored makes the arithmetic
+        # exact on any box. The property is unchanged: the budget is measured against
+        # a clock that elapses, and the allocator that crosses it is the last one
+        # started.
+        class _VirtualClock:
+            now = 1_000.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+            def __getattr__(self, name):
+                import time as _real_time
+
+                return getattr(_real_time, name)
+
+        clock = _VirtualClock()
+        monkeypatch.setattr(match_mod, "time", clock)
+
         async def _slow_score(allocator_id, universe):
             scored.append(allocator_id)
-            await asyncio.sleep(0.15)
+            clock.now += 0.15
+            await asyncio.sleep(0)
             return {}
 
         monkeypatch.setattr(match_mod, "_score_one_allocator", _slow_score)
@@ -1512,8 +1537,8 @@ class TestCronResponseShape:
 
         # 0.25s budget / 0.15s per allocator: the second allocator is the
         # one that crosses it, so the loop stops after 2 and never starts a
-        # third. The observed duration confirms the clock is real elapsed
-        # time, not a constant.
+        # third. The observed duration confirms the clock is a clock that
+        # elapses, not a constant.
         assert body["status"] == "partial"
         assert len(scored) == 2, (
             f"expected the budget to stop the loop after 2 allocators, scored {scored}"
@@ -3219,59 +3244,42 @@ class TestRetentionSweepActualDeleteCount:
 
 
 class TestHoldingsWarmUpDroppedLogging:
-    """NEW-C08-05: when the 30-day warm-up gate silently drops one or more
-    holdings, a logger.info call must surface the count so the caller can
-    distinguish empty-book from freshly-funded (portfolio_aum=0 with
-    warm_up_dropped>0 means real holdings exist but lack history)."""
+    """NEW-C08-05, reworded by 167.1.1.1 D-01: when a spot holding cannot be priced well
+    enough to carry a return series, a logger.info call must surface the count (by reason)
+    so the caller can distinguish empty-book from a book whose holdings are all withheld.
+    The withheld holding STAYS in the AUM (portfolio_aum is its value, not 0), because a
+    withheld holding is still held: only its returns leave the signal."""
 
     def test_warm_up_dropped_holdings_emit_info_log(self, monkeypatch, caplog):
         from routers import match as match_mod
+        from tests.fake_postgrest import FakeDb
 
-        # One holding with insufficient history (warm-up gate drops it)
-        collapsed = [
-            {"api_key_id": "key-a", "venue": "binance", "symbol": "BTC/USDT",
-             "holding_type": "spot", "value_usd": 10_000, "asof": "2026-01-15",
-             "updated_at": "2026-01-15T04:00:00+00:00"},
-        ]
-
-        def _make_query_result(data):
-            q = MagicMock()
-            q.select.return_value = q
-            q.eq.return_value = q
-            q.order.return_value = q
-            q.limit.return_value = q
-            q.execute.return_value = MagicMock(data=data)
-            return q
-
-        def _table(name):
-            if name == "allocator_holdings":
-                return _make_query_result(collapsed)
-            if name == "api_keys":
-                # 170.4 WR-03: the scorer reads the owner's keys, then each key's
-                # newest day.
-                return _make_query_result([{"id": "key-a"}])
-            # allocator_equity_snapshots: empty snapshots
-            return _make_query_result([])
-
-        sb = MagicMock()
-        sb.table.side_effect = _table
-        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
-
-        # Patch reconstruct_symbol_returns to return None (simulates <30 days)
-        monkeypatch.setattr(
-            match_mod,
-            "reconstruct_symbol_returns",
-            lambda _snapshots, _symbol: None,
-        )
+        # One holding whose only mark is 0 (a gap): there is no priced day at all.
+        holding = {
+            "allocator_id": "alloc-test", "api_key_id": "key-a", "venue": "binance",
+            "symbol": "BTC/USDT", "holding_type": "spot", "side": "flat",
+            "value_usd": 10_000, "mark_price": 0.0, "asof": "2026-01-15",
+            "updated_at": "2026-01-15T04:00:00+00:00",
+        }
+        db = FakeDb({
+            "api_keys": [{"id": "key-a", "user_id": "alloc-test", "exchange": "binance"}],
+            "allocator_holdings": [holding],
+        })
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: db)
+        monkeypatch.setattr(match_mod, "_holdings_history_window_start", lambda: "2025-01-01")
 
         with caplog.at_level("INFO", logger="quantalyze.analytics"):
             result = match_mod._load_holding_portfolio_context("alloc-test")
 
-        assert result["portfolio_aum"] == 0.0, "all holdings dropped → aum=0"
+        assert result["portfolio_aum"] == 10_000, "the withheld holding stays in the AUM (D-01)"
+        assert result["portfolio_returns"] == {}, "and has no return series, never a zero-filled one"
+        assert [(r["symbol"], r["withheld_reason"]) for r in result["holdings_rows_withheld"]] == [
+            ("BTC/USDT", "no_price")
+        ]
         assert any(
-            "warm-up gate dropped 1/" in rec.getMessage()
+            "1 spot holding(s) withheld" in rec.getMessage() and "no_price=1" in rec.getMessage()
             for rec in caplog.records
-        ), "warm-up dropped count must be logged at INFO (NEW-C08-05)"
+        ), "the withheld count, by reason, must be logged at INFO (NEW-C08-05)"
 
 
 # ---------------------------------------------------------------------------
@@ -4739,11 +4747,24 @@ class TestRecomputeSerializationLock:
         async def fake_skip(allocator_id, force):
             return False
 
+        both_in = asyncio.Event()
+
         async def fake_score(allocator_id, universe):
             score_calls.append(allocator_id)
             in_flight["n"] += 1
             in_flight["max"] = max(in_flight["max"], in_flight["n"])
-            await asyncio.sleep(0.05)
+            if in_flight["n"] == 2:
+                both_in.set()
+            # ⛔ RENDEZVOUS, NOT A STOPWATCH. This used to hold the slot for
+            # `sleep(0.05)` and rely on the second allocator arriving inside that
+            # window, which a starved worker missed (peak 1). Each scorer now waits
+            # until BOTH are inside. If the lock serialized them the second never
+            # arrives; the 5 s ceiling is only the deadman that turns that into the
+            # assertion below instead of a hang.
+            try:
+                await asyncio.wait_for(both_in.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                pass
             in_flight["n"] -= 1
             return {"batch_id": f"b-{allocator_id}", "candidate_count": 0}
 

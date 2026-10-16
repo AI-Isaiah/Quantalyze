@@ -8284,7 +8284,17 @@ class TestCronSyncHeartbeat:
             _make_mock_supabase_for_cron_sync(keys_data=[_strategy_key("live", "okx")])
         )
         cron_mod._key_validation_cache.clear()
-        with patch.object(cron_mod, "_CRON_SYNC_HEARTBEAT_TIMEOUT_S", 0.05):
+        # ⛔ Only the `times_out` mode wants the bound shrunk (its insert blocks for
+        # 0.5 s). `raises` and `no_rows` are about the insert FAILING, and the
+        # `no_rows` log assertion below holds only if the insert is allowed to
+        # finish: with the bound at 50 ms for all three, a CPU-starved pool thread
+        # that started late made the heartbeat time out first and the "INSERT
+        # returned no rows" line never appeared. The real bound stays in force
+        # for the other two.
+        heartbeat_timeout_s = (
+            0.05 if mode == "times_out" else cron_mod._CRON_SYNC_HEARTBEAT_TIMEOUT_S
+        )
+        with patch.object(cron_mod, "_CRON_SYNC_HEARTBEAT_TIMEOUT_S", heartbeat_timeout_s):
             with caplog.at_level("ERROR", logger="quantalyze.analytics"):
                 broken = await _drive_heartbeat_run(_fixture())
 

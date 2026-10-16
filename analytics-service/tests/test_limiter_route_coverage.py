@@ -75,7 +75,6 @@ from __future__ import annotations
 
 import json
 import pathlib
-import subprocess
 import sys
 from typing import Any
 
@@ -83,6 +82,7 @@ import pytest
 from fastapi.routing import APIRoute
 
 from services import rate_limit as rl
+from tests.child_deadman import run_child
 
 
 @pytest.fixture(autouse=True)
@@ -239,12 +239,13 @@ def _probe() -> dict[str, Any]:
     """
     global _probe_cache
     if _probe_cache is None:
-        proc = subprocess.run(
+        # The verdict is the child's exit code and output, never how long it took;
+        # `run_child` carries only the shared DEADMAN, which names this test if the
+        # child hangs.
+        proc = run_child(
+            "the clean-interpreter probe enumerates the app's real route surface",
             [sys.executable, "-c", _PROBE_SRC],
             cwd=str(pathlib.Path(__file__).resolve().parents[1]),
-            capture_output=True,
-            text=True,
-            timeout=180,
         )
         assert proc.returncode == 0, (
             "the clean-interpreter probe failed to import the app. This is a "
