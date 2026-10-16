@@ -803,7 +803,7 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
   // in holding_flags (kind "book", holding_ref null, flagged false). The reader keeps only
   // `flagged && top_candidate_strategy_id`, so it must neither surface nor throw on it
   // (its null holding_ref is never split).
-  it("flaggedHoldings ignores the book-level book_join_too_short entry (holding_ref null, flagged false)", async () => {
+  it("flaggedHoldings ignores the book-level book_join_too_short and add_weight_fallback entries (holding_ref null, flagged false)", async () => {
     buildResult.byTable["match_batches"] = {
       data: [
         {
@@ -824,6 +824,14 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
               book_join_too_short: true,
               shared_days: 0,
               min_days: 30,
+              flagged: false,
+            },
+            // 167.1.1.1 D-23: the sizing fallback for a non-positive AUM is the same family.
+            {
+              kind: "book",
+              holding_ref: null,
+              add_weight_fallback: "aum_not_positive_ceiling_0_5",
+              add_weight: 0.5,
               flagged: false,
             },
           ],
