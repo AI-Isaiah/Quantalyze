@@ -5282,7 +5282,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 167.1.2.1.1-02-PLAN.md — blocking tokens for a failing key's stopped series, disagreeing shared-account flows and unstamped working keys; departed_history_unavailable Sentry event and count (SC-2, SC-3, SC-6, SC-7)
+- [x] 167.1.2.1.1-02-PLAN.md — blocking tokens for a failing key's stopped series, disagreeing shared-account flows and unstamped working keys; departed_history_unavailable Sentry event and count (SC-2, SC-3, SC-6, SC-7)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
