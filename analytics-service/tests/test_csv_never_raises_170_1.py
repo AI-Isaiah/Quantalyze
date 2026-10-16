@@ -877,6 +877,143 @@ def test_the_exact_repeat_sentence_names_no_header_and_echoes_no_cell() -> None:
     assert MARKER.lower() not in json.dumps(envelope, default=str).lower()
 
 
+# Review TR-1 and TR-2 (tiny round, both HIGH). The raw header read that R-1
+# introduced regressed two shapes that validated correctly before it:
+#   TR-1  pandas skips a line of spaces or tabs; the stdlib reader keeps it as a
+#         one-field record, so the "header" was that line. A repeated column under
+#         it was ACCEPTED (the second one silently ignored) or RAISED.
+#   TR-2  `io.StringIO(text)` without `newline=""` splits only on a line feed, so a
+#         file with bare-carriage-return line ends (Excel for Mac) was rejected
+#         with a Python hint, "do you need to open the file with newline=''?".
+# The `\r` and `\t` below are real control characters in the file, not escapes the
+# test forgot to decode.
+_DUP_BODY = "2024-03-10,0.001,0.5\n2024-03-11,0.002,0.5\n2024-03-12,-0.001,0.5\n"
+_DUP_BODY_DATE_DATE = "2024-03-10,2024-03-10,0.001\n2024-03-11,2024-03-11,0.002\n2024-03-12,2024-03-12,-0.001\n"
+
+# (line above the header, header, body, id). Every one must get the founder
+# sentence: the header repeats, or collides after lower-casing, a declared column.
+WHITESPACE_LINE_REPEATS = [
+    pytest.param(" ", "date,daily_return,daily_return", _DUP_BODY, id="space-above-exact-repeat"),
+    pytest.param("\t", "date,daily_return,daily_return", _DUP_BODY, id="tab-above-exact-repeat"),
+    pytest.param(" \t  ", "date,daily_return,daily_return", _DUP_BODY, id="mixed-whitespace-above-exact-repeat"),
+    pytest.param(" ", "date,daily_return,Daily_Return", _DUP_BODY, id="space-above-case-collision"),
+    pytest.param(" ", "date,Date,daily_return", _DUP_BODY_DATE_DATE, id="space-above-date-Date"),
+    pytest.param(",", "date,daily_return,daily_return", _DUP_BODY, id="comma-above-exact-repeat-original-R1"),
+]
+
+
+@pytest.mark.parametrize("above,header,body", WHITESPACE_LINE_REPEATS)
+def test_a_whitespace_only_line_above_the_header_does_not_hide_a_repeated_column(
+    above: str, header: str, body: str
+) -> None:
+    envelope = validate_csv(f"{above}\n{header}\n{body}".encode(), "daily_returns")  # must not raise
+
+    assert envelope["ok"] is False, envelope
+    assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", 0, DUPLICATE_HEADER_MESSAGE)
+    ]
+    assert envelope["preview"] is None
+    assert "daily_returns_series" not in envelope
+
+
+@pytest.mark.parametrize("above", [" ", "\t", " \t  "])
+def test_a_good_header_under_a_whitespace_only_line_is_still_accepted(above: str) -> None:
+    """Control: skipping the line must not cost a good file."""
+    raw = f"{above}\ndate,daily_return\n2024-03-10,0.001\n2024-03-11,0.002\n2024-03-12,-0.001\n".encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert [r["daily_return"] for r in envelope["daily_returns_series"]] == [0.001, 0.002, -0.001]
+
+
+# A bare carriage return ends a line for pandas, and for the raw header read too.
+_CR_GOOD = b"date,daily_return\r2024-03-10,0.001\r2024-03-11,0.002\r2024-03-12,-0.001\r"
+_CR_GOOD_UNDER_BLANK = b",\rdate,daily_return\r2024-03-10,0.001\r2024-03-11,0.002\r2024-03-12,-0.001\r"
+_CR_GOOD_UNDER_SPACE = b" \rdate,daily_return\r2024-03-10,0.001\r2024-03-11,0.002\r2024-03-12,-0.001\r"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(_CR_GOOD, id="bare-cr"),
+        pytest.param(_CR_GOOD_UNDER_BLANK, id="bare-cr-blank-first-row"),
+        pytest.param(_CR_GOOD_UNDER_SPACE, id="bare-cr-whitespace-first-row"),
+    ],
+)
+def test_a_file_with_bare_carriage_return_line_ends_validates(raw: bytes) -> None:
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert [r["daily_return"] for r in envelope["daily_returns_series"]] == [0.001, 0.002, -0.001]
+    # Never the Python developer hint.
+    assert "newline=" not in json.dumps(envelope, default=str)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(
+            b"date,daily_return,daily_return\r2024-03-10,0.001,0.5\r2024-03-11,0.002,0.5\r",
+            id="bare-cr-exact-repeat",
+        ),
+        pytest.param(
+            b",\rdate,daily_return,daily_return\r2024-03-10,0.001,0.5\r2024-03-11,0.002,0.5\r",
+            id="bare-cr-blank-first-row-exact-repeat",
+        ),
+        pytest.param(
+            b"date,daily_return,Daily_Return\r2024-03-10,0.001,0.5\r2024-03-11,0.002,0.5\r",
+            id="bare-cr-case-collision",
+        ),
+    ],
+)
+def test_a_bare_carriage_return_duplicate_header_gets_the_founder_sentence(raw: bytes) -> None:
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", 0, DUPLICATE_HEADER_MESSAGE)
+    ]
+
+
+def test_crlf_bom_quoted_comma_and_quoted_newline_headers_still_behave() -> None:
+    """Controls for the `newline=""` change: every other line-end and quoting shape
+    reads the same as before, for a good header and for a repeated one."""
+    body_lf = _DUP_BODY
+    good = b"date,daily_return\r\n2024-03-10,0.001\r\n2024-03-11,0.002\r\n"
+    assert validate_csv(good, "daily_returns")["ok"] is True
+    assert validate_csv(b"\xef\xbb\xbf" + good, "daily_returns")["ok"] is True
+    assert validate_csv(b'date,daily_return,"a,b"\n2024-03-10,0.001,x\n2024-03-11,0.002,x\n', "daily_returns")["ok"] is True
+    assert validate_csv(b'"no\nte",date,daily_return\nx,2024-03-10,0.001\nx,2024-03-11,0.002\n', "daily_returns")["ok"] is True
+
+    for dup in (
+        b"date,daily_return,daily_return\r\n" + body_lf.replace("\n", "\r\n").encode(),
+        b"\xef\xbb\xbfdate,daily_return,daily_return\n" + body_lf.encode(),
+        b'date,"a,b",daily_return,daily_return\n' + body_lf.replace(",0.5", ",x,0.5").encode(),
+        b'"no\nte",date,daily_return,daily_return\n' + body_lf.replace("2024", "x,2024").encode(),
+    ):
+        envelope = validate_csv(dup, "daily_returns")
+        assert [(e["rule"], e["message"]) for e in envelope["errors"]] == [
+            ("parse_error", DUPLICATE_HEADER_MESSAGE)
+        ], dup
+
+
+def test_a_raw_header_the_frame_read_disagrees_with_is_rejected_not_checked() -> None:
+    """The guard against the two readers drifting apart (review TR-1). A leading
+    bare carriage return makes pandas drop the empty first field of the next line
+    (header `date`, `daily_return`) where the raw read sees a three-field record.
+    Neither can be trusted to name a column, so the file is rejected with the
+    existing wrong-width sentence, never raised and never validated against a
+    header that may be the wrong line."""
+    raw = b"\r,date,daily_return\n2024-03-10,0.001\n2024-03-11,0.002\n"
+    envelope = validate_csv(raw, "daily_returns")  # must not raise
+
+    assert envelope["ok"] is False, envelope
+    assert envelope["preview"] is None
+    assert "daily_returns_series" not in envelope
+    assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", 0, "Could not parse CSV: a data row has more fields than the header row.")
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Part C - the corpus: validate_csv never raises, no error text carries a cell
 # ---------------------------------------------------------------------------

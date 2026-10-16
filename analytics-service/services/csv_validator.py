@@ -902,18 +902,55 @@ def _raw_header_names(raw_bytes: bytes, header_row: int) -> list[str]:
     are skipped the way pandas skips blank lines, so `header_row` counts the same
     records the frame read counted.
 
+    Two details keep this read aligned with the frame's (review TR-1 and TR-2):
+      - pandas also skips a line made only of spaces and tabs, which the stdlib
+        reader returns as a one-field record (`[' ']`). It is skipped here too;
+        keeping it made `header_row` point one record too early, so the "header"
+        was that line and a repeated column went unseen.
+      - the text is wrapped with `newline=""`, as the `csv` docs require. Without
+        it only a line feed ends a line, so a file whose lines end in a bare
+        carriage return (Excel for Mac, "CSV (Macintosh)") reached the reader as
+        one line and was rejected with a Python hint, although pandas reads it.
+    The caller also checks that the width read here equals the frame's, so any
+    future drift between the two readers rejects loudly instead of silently.
+
     FAIL CLOSED: a header that cannot be read RAISES (`csv.Error`, or
     `UnicodeDecodeError`). There is no fallback to the frame's own names; they are
     the renamed ones, which would restore the defect this function exists to
     remove. The caller turns the exception into a `parse_error`.
     """
     text = raw_bytes.decode("utf-8-sig")
-    records = (record for record in csv.reader(io.StringIO(text)) if record)
+    records = (
+        record
+        for record in csv.reader(io.StringIO(text, newline=""))
+        if record and not (len(record) == 1 and not record[0].strip(" \t"))
+    )
     taken = list(itertools.islice(records, header_row + 1))
     if len(taken) <= header_row:
         # pandas' own sentence for this shape, which it raises before we get here.
         raise csv.Error(f"Passed header={header_row} but only {len(taken)} lines in file")
     return taken[header_row]
+
+
+def _row_longer_than_header() -> dict[str, Any]:
+    """The `parse_error` envelope for a file whose header row and data rows do not
+    line up in width. It is the one sentence for two paths: pandas promoted the
+    first column to the index because a data row is longer than the header, and
+    the raw header read (`_raw_header_names`) came out a different width than the
+    frame (review TR-1, a guard against the two readers drifting apart). It names
+    the problem and never a cell."""
+    return {
+        "ok": False,
+        "preview": None,
+        "errors": [{
+            "rule": "parse_error",
+            "row": 0,
+            # One literal, on one line: the WR-01 parity test greps the
+            # producer source for this exact sentence.
+            "message": "Could not parse CSV: a data row has more fields than the header row.",
+        }],
+        "correlation_id": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1003,18 +1040,7 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # NOT promote a column, including for a header-only file.)
     if not isinstance(df.index, pd.RangeIndex):
         logger.warning("[csv-validator] data row longer than header")
-        return {
-            "ok": False,
-            "preview": None,
-            "errors": [{
-                "rule": "parse_error",
-                "row": 0,
-                # One literal, on one line: the WR-01 parity test greps the
-                # producer source for this exact sentence.
-                "message": "Could not parse CSV: a data row has more fields than the header row.",
-            }],
-            "correlation_id": None,
-        }
+        return _row_longer_than_header()
 
     # 2026-05-07 — case-insensitive header normalization. Real-world CSVs
     # ship headers like "Date,Daily_Return" or "DATE,DAILY_RETURN". Pandera
@@ -1064,6 +1090,13 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             }],
             "correlation_id": None,
         }
+    if len(header_names) != len(df.columns):
+        # The raw read and the frame read disagree about which record is the
+        # header (review TR-1). Neither can be trusted to name a column, so the
+        # file is rejected rather than checked against a header that may be the
+        # wrong line. Fixed text, no cell.
+        logger.warning("[csv-validator] raw header and frame disagree on width")
+        return _row_longer_than_header()
     normalized_header = [str(c).strip().lower() for c in header_names]
     declared = SCHEMAS[fmt].columns.keys()
     if any(
