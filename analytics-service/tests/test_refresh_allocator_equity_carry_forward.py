@@ -1428,6 +1428,142 @@ async def test_deribit_only_over_age_account_does_not_hold(
     assert sentry.capture_message.call_count == 0
 
 
+# ---------------------------------------------------------------------------
+# 167.1.2.1.1 SC-6 (D-03), the refresh half: two unstamped working keys of one
+# stamping venue may read ONE exchange account, which `account_groups` would
+# count as two accounts (no venue_account_id, no marker). The refresh holds the
+# day until the stamper groups them; the derive blocks on the same helper.
+# ---------------------------------------------------------------------------
+
+
+def _seed_two_keys_on_one_venue(
+    fake: FakeSupabaseClient, venue: str = "okx", **second: Any
+) -> None:
+    """Keys 1 and 2: eligible, working, unstamped, unmarked, same venue, each
+    with holdings today (so nothing else holds the day)."""
+    base = {"exchange": venue, "sync_status": "complete", "venue_account_id": None}
+    _seed_key(fake, API_KEY_ID_1, **base)
+    _seed_key(fake, API_KEY_ID_2, **{**base, **second})
+    _seed_holding(fake, API_KEY_ID_1, venue, "USDT", TODAY, HOLDER_USD)
+    _seed_holding(fake, API_KEY_ID_2, venue, "BTC", TODAY, 500.0)
+
+
+@pytest.mark.asyncio
+async def test_two_unstamped_working_keys_on_one_stamping_venue_hold_the_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SC-6 / D-03 (167.1.2.1.1). Before this, the refresh counted both keys as
+    two accounts and wrote 1500 where one shared account may hold 1000,
+    first-writer-wins. It now holds until the stamper groups them (grouping
+    itself is unchanged)."""
+    fake = FakeSupabaseClient()
+    _seed_two_keys_on_one_venue(fake)
+
+    audit, sentry = await _run_with_sentry(monkeypatch, fake)
+
+    _no_today_row(fake)
+    metadata = _held_metadata(audit)
+    assert metadata["reason"] == "identity_pending"
+    assert metadata["identity_pending_venues"] == 1
+    ((message, tags),) = _sentry_calls(sentry)
+    assert tags["refresh_outcome"] == "held_identity_pending"
+    for secret in (API_KEY_ID_1, API_KEY_ID_2, ALLOCATOR_ID, "okx", "1500"):
+        assert secret not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param("one-key", id="one-unstamped-key"),
+        pytest.param("mt5-pair", id="two-mt5-keys-stamp-no-id"),
+        pytest.param("one-stamped", id="one-of-the-two-is-stamped"),
+        pytest.param("one-failing", id="one-of-the-two-is-failing"),
+    ],
+)
+async def test_a_key_list_that_cannot_double_count_does_not_hold(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """The hold is narrow: one candidate cannot be counted twice, MT5 stamps no
+    id (so two MT5 keys are unstampable, not unknown), a stamped key's account
+    is known, and a failing key is no candidate (the stamper only runs after a
+    successful poll)."""
+    fake = FakeSupabaseClient()
+    if case == "one-key":
+        _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id=None)
+        _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    elif case == "mt5-pair":
+        _seed_two_keys_on_one_venue(fake, venue="mt5")
+    elif case == "one-stamped":
+        _seed_two_keys_on_one_venue(fake, venue_account_id="o-2")
+    else:
+        _seed_two_keys_on_one_venue(fake, sync_status="error")
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    assert len([
+        r for r in fake.rows_for("allocator_equity_snapshots") if r["asof"] == TODAY.isoformat()
+    ]) == 1
+    assert HELD_ACTION not in _audit_actions(audit)
+    assert _refresh_complete_metadata(audit)["identity_pending_venues"] == 0
+
+
+@pytest.mark.asyncio
+async def test_hold_reason_precedence_names_never_polled_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two causes at once: the reason is the first in the order
+    never_polled_working, carry_over_age, identity_pending, and the audit
+    carries every count so the second cause is not lost."""
+    fake = FakeSupabaseClient()
+    _seed_two_keys_on_one_venue(fake)
+    _seed_key(fake, API_KEY_ID_3, exchange="bybit", sync_status="complete", venue_account_id="b-1")
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    _no_today_row(fake)
+    metadata = _held_metadata(audit)
+    assert metadata["reason"] == "never_polled_working"
+    assert metadata["never_polled_working_accounts"] == 1
+    assert metadata["identity_pending_venues"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending", [True, False])
+async def test_a_held_first_day_stays_zero_snapshot_and_enqueues_nothing(
+    monkeypatch: pytest.MonkeyPatch, pending: bool
+) -> None:
+    """Pitfall 4 (167.1.2.1.1). A zero-snapshot book whose first day is held
+    must stay zero-snapshot, so the fan-out's bootstrap gate is still open
+    tomorrow. The identity hold returns BEFORE the owed-reconstruct probe, so
+    that probe does not run, writes nothing and enqueues nothing. The control
+    (a stamped second key, nothing pending) reaches the owed-reconstruct hold
+    with the very same keys, which shows the setup would hold for it."""
+    fake = FakeSupabaseClient()
+    _seed_two_keys_on_one_venue(
+        fake,
+        **({} if pending else {"venue_account_id": "o-2"}),
+    )
+    for key_id in (API_KEY_ID_1, API_KEY_ID_2):
+        fake.store[("api_keys", (key_id,))].update(
+            {"history_reconstructed_at": None, "history_reconstruct_attempts": 1}
+        )
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    _no_today_row(fake)
+    assert fake.rows_for("allocator_equity_snapshots") == []
+    assert fake.rows_for("compute_jobs") == []
+    assert fake.rpc_calls == []
+    actions = _audit_actions(audit)
+    if pending:
+        assert _held_metadata(audit)["reason"] == "identity_pending"
+        assert "allocator.equity.refresh_held_for_reconstruct" not in actions
+    else:
+        assert HELD_ACTION not in actions
+        assert "allocator.equity.refresh_held_for_reconstruct" in actions
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("stale_days", "warns"), [(2, False), (3, False), (5, True)])
 async def test_carry_age_is_recorded_and_an_old_carry_warns(

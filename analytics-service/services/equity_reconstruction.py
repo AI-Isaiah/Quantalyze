@@ -45,6 +45,7 @@ from services.allocator_positions import read_native_unpriced_days
 from services.allocator_equity_derive import (
     account_groups,
     eligible_key_predicate,
+    identity_pending_venues,
     one_key_per_account_day,
     working_holder_predicate,
 )
@@ -2067,6 +2068,11 @@ class _LatestHoldings:
     over_age_failing_accounts: int = 0
     oldest_over_age_days: int = 0
     over_age_excluded_venue_accounts: int = 0
+    # 167.1.2.1.1 SC-6 / D-03: stamping venues holding two or more eligible
+    # WORKING keys whose account is still unknown (``identity_pending_venues``,
+    # the helper the derive blocks on too). Two such keys may read one account,
+    # which the grouping below would count twice, so the caller holds the day.
+    identity_pending_venues: int = 0
 
 
 async def _fetch_latest_holdings_per_eligible_key(
@@ -2213,6 +2219,7 @@ async def _fetch_latest_holdings_per_eligible_key(
         getattr(await db_execute(_sel_keys), "data", None) or []
     )
     eligible_keys = sum(1 for r in key_rows if eligible_key_predicate(r))
+    pending_venues = identity_pending_venues(key_rows, VENUES_WITH_ACCOUNT_ID)
     eligible_ids = sorted(
         str(r["id"]) for r in key_rows if r.get("id") and eligible_key_predicate(r)
     )
@@ -2399,6 +2406,7 @@ async def _fetch_latest_holdings_per_eligible_key(
         over_age_failing_accounts=over_age_failing,
         oldest_over_age_days=oldest_over_age,
         over_age_excluded_venue_accounts=over_age_excluded_venue,
+        identity_pending_venues=pending_venues,
     )
 
 
@@ -4231,6 +4239,7 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
 _HOLD_SENTRY_OUTCOME: Final[dict[str, str]] = {
     "never_polled_working": "held_never_polled",
     "carry_over_age": "held_carry_over_age",
+    "identity_pending": "held_identity_pending",
 }
 
 
@@ -4241,6 +4250,8 @@ def _refresh_hold_reason(latest: _LatestHoldings) -> str | None:
         return "never_polled_working"
     if latest.over_age_accounts > 0:
         return "carry_over_age"
+    if latest.identity_pending_venues > 0:
+        return "identity_pending"
     return None
 
 
@@ -4265,6 +4276,7 @@ def _refresh_audit_counts(latest: _LatestHoldings) -> dict[str, int]:
         "over_age_failing_accounts": latest.over_age_failing_accounts,
         "oldest_over_age_days": latest.oldest_over_age_days,
         "over_age_excluded_venue_accounts": latest.over_age_excluded_venue_accounts,
+        "identity_pending_venues": latest.identity_pending_venues,
     }
 
 
@@ -4313,8 +4325,10 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
         if hold_reason is not None:
             logger.warning(
                 "refresh_allocator_equity_daily: held for allocator=%s reason=%s "
-                "(never_polled_working_accounts=%d, eligible_keys=%d)",
+                "(never_polled_working_accounts=%d, over_age_accounts=%d, "
+                "identity_pending_venues=%d, eligible_keys=%d)",
                 allocator_id, hold_reason, latest.never_polled_working_accounts,
+                latest.over_age_accounts, latest.identity_pending_venues,
                 latest.eligible_keys,
             )
             _emit_audit(
