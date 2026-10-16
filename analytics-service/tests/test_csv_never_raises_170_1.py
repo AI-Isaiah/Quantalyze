@@ -30,6 +30,7 @@ Every cell value is a synthetic marker (`ZXQCELL`). No real data.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -1105,6 +1106,101 @@ def test_a_raw_header_the_frame_read_disagrees_with_is_rejected_not_checked() ->
     assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
         ("parse_error", 0, "Could not parse CSV: a data row has more fields than the header row.")
     ]
+
+
+# Security re-audit T-170.1-51 (availability, validator half). The per-cell zone
+# check called `pd.to_datetime` on every date cell and only the row count and the
+# 10 MB body were capped, not the length of a cell: a 10 MB file of 5,000 rows of
+# 2 KB (or 500 of 20 KB) of repeated `1:11 ` took 42 to 45 s here (11.9 s before
+# D-14, 58.8 s in the audit's own run) on a synchronous call in a single-process
+# service. A date cell longer than 64 characters is now unreadable without a call
+# into pandas or a zone regex: it is the same `coerce_dtype` date error at its
+# row. The bound below is generous on purpose, 5 s against a measured fraction of
+# one, so a slow CI runner cannot flake it; the shape it replaces takes 40 s.
+MAX_DATE_CELL_CHARS = 64  # hand-typed: the cap the audit asked for, pinned here
+TIME_BOUND_SECONDS = 5.0
+
+
+def _long_cell(size: int) -> str:
+    return ("1:11 " * (size // 5 + 1))[:size].strip()
+
+
+@pytest.mark.parametrize(
+    "rows,size",
+    [pytest.param(5000, 2000, id="5000-rows-x-2KB"), pytest.param(500, 20000, id="500-rows-x-20KB")],
+)
+def test_a_10mb_file_of_very_long_date_cells_is_rejected_in_bounded_time(rows: int, size: int) -> None:
+    cell = _long_cell(size)
+    raw = ("date,daily_return\n" + "".join(f"{cell},0.001\n" for _ in range(rows))).encode()
+    assert len(raw) > 9_000_000  # the worst case the 10 MB body cap allows
+
+    started = time.perf_counter()
+    envelope = validate_csv(raw, "daily_returns")  # must not raise
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < TIME_BOUND_SECONDS, f"{elapsed:.1f}s for {rows} rows of {size} characters"
+    assert envelope["ok"] is False
+    # Every long cell is the existing date error at its own 1-based row.
+    assert sorted({row for rule, row, _, _ in _all_errors(envelope) if rule.startswith(COERCE_RULE_PREFIX)}) == list(
+        range(1, rows + 1)
+    )
+
+
+@pytest.mark.parametrize("fmt", list(HEADER))
+def test_one_over_long_date_cell_is_a_date_error_at_its_row_and_only_that(fmt: str) -> None:
+    dates = ["2024-03-01", "2024-03-02", "2024-03-03 " + "9" * 200, "2024-03-04"]
+    envelope = validate_csv(_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert [(rule, row) for rule, row, _, _ in _all_errors(envelope)] == [
+        (rule, 3) for rule in ONLY_THE_DATE_ERROR
+    ], envelope["errors"]
+    assert "9" * 50 not in json.dumps(_all_errors(envelope))  # no cell in a message
+
+
+def test_the_cap_is_on_the_cell_not_its_padding() -> None:
+    """Spaces around a short date are not part of the date. A fixed-width export
+    pads every cell; the cap must not read that padding as length."""
+    padded = [" " * 80 + d + " " * 80 for d in ("2024-03-01", "2024-03-02", "2024-03-03")]
+    envelope = validate_csv(_file("daily_returns", padded), "daily_returns")
+
+    assert envelope["ok"] is True, envelope["errors"]
+
+
+# The longest spellings a date cell can honestly take: nanoseconds and a zone.
+# Every one is far under the cap, and every one validated before the cap existed.
+LONGEST_LEGITIMATE_SPELLINGS = [
+    "2024-03-{d}T00:00:00.123456789+02:00",
+    "2024-03-{d} 00:00:00.123456789 UTC+02:00",
+    "2024-03-{d} 00:00:00.123456789 GMT",
+    '"2024-03-{d}T00:00:00,123456789Z"',  # quoted: the comma is the fraction mark
+    "{d}/03/2024 12:00:00.123456789 PM",
+]
+
+
+@pytest.mark.parametrize("spelling", LONGEST_LEGITIMATE_SPELLINGS)
+@pytest.mark.parametrize("fmt", ["daily_returns", "daily_nav", "trades"])
+def test_the_longest_legitimate_date_spellings_are_under_the_cap_and_validate(spelling: str, fmt: str) -> None:
+    dates = [spelling.format(d=d) for d in (13, 14, 15)]  # day > 12: no day/month ambiguity
+    assert max(len(d) for d in dates) <= 40 < MAX_DATE_CELL_CHARS
+    envelope = validate_csv(_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is True, envelope["errors"]
+
+
+def test_the_cap_is_exactly_64_characters() -> None:
+    """64 characters of a readable date is read; 65 is not. Pins the number."""
+    head = "2024-03-0{d} 00:00:00."
+
+    def cell(d: int, length: int) -> str:
+        return head.format(d=d) + "1" * (length - len(head.format(d=d)))
+
+    at_cap = validate_csv(_file("daily_returns", [cell(d, MAX_DATE_CELL_CHARS) for d in (1, 2, 3)]), "daily_returns")
+    over = validate_csv(_file("daily_returns", [cell(d, MAX_DATE_CELL_CHARS + 1) for d in (1, 2, 3)]), "daily_returns")
+
+    assert at_cap["ok"] is True, at_cap["errors"]
+    assert over["ok"] is False
+    assert {row for rule, row, _, _ in _all_errors(over) if rule.startswith(COERCE_RULE_PREFIX)} == {1, 2, 3}
 
 
 # ---------------------------------------------------------------------------

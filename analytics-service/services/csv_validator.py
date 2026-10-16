@@ -645,6 +645,16 @@ _ZONE_FREE_SHAPE_RE = re.compile(
 # message ever carries a cell.
 _UNSUPPORTED_ZONE_TOKEN = "0000-00-00"
 
+# The longest date cell, measured without its padding, that is read at all (security
+# re-audit T-170.1-51). The longest honest spelling is a date, a time to the
+# nanosecond and a zone (`2024-03-31 00:00:00.123456789 UTC+02:00`, 39 characters),
+# so 64 leaves room for any real export. A longer cell is NOT handed to pandas or to
+# a zone regex: both cost grows with the cell on a hostile shape (repeated `1:11 `
+# took 40 s or more for a 10 MB file), and the row cap and body cap do not bound a
+# cell. It is replaced by the placeholder, so it is the same `coerce_dtype` date
+# error at its row as any other unreadable zone.
+MAX_DATE_CELL_CHARS = 64
+
 
 def _split_zone(value: str) -> tuple[str, int | None]:
     """Split a recognised trailing zone off `value`: `(wall_clock_text, offset)`.
@@ -724,7 +734,8 @@ def _normalise_date_zones(
         overall when no row had one. A column with no offsets is left
         byte-for-byte unchanged.
       - `rejected`: row position -> the cell as written, for every cell that
-        still carries a zone after the strip. Each is replaced in `df` by
+        still carries a zone after the strip, and every cell longer than
+        `MAX_DATE_CELL_CHARS` (which is never parsed). Each is replaced in `df` by
         `_UNSUPPORTED_ZONE_TOKEN`, so pandera reports it as a date error at its
         real row. The caller restores the original text for the preview.
       - `named`: row position -> the cell as written, for every cell that is a
@@ -753,7 +764,11 @@ def _normalise_date_zones(
         warnings.simplefilter("ignore")  # dateutil's per-value zone warnings
         for position, value in enumerate(col.tolist()):
             wall, offset = value, None
-            if isinstance(value, str) and not _ZONE_FREE_SHAPE_RE.fullmatch(value.strip()):
+            if isinstance(value, str) and len(value.strip()) > MAX_DATE_CELL_CHARS:
+                rejected[position] = value
+                wall = _UNSUPPORTED_ZONE_TOKEN
+                changed = True
+            elif isinstance(value, str) and not _ZONE_FREE_SHAPE_RE.fullmatch(value.strip()):
                 wall, offset = _split_zone(value)
                 if _carries_zone(wall):
                     rejected[position] = value
