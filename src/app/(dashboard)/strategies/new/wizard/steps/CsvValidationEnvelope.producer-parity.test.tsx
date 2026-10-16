@@ -106,6 +106,7 @@ describe("[170.1 round-1 WR-01] csv_validator.py rule literals vs CSV_RULE_LABEL
       "No file uploaded",
       "No data rows found",
       "Could not parse CSV: ",
+      "a data row has more fields than the header row.",
       "Could not determine the date format",
     ]) {
       expect(producerSource, `producer no longer contains "${fixed}"`).toContain(fixed);
