@@ -3173,7 +3173,7 @@ def _mt5_rows_from_levels(
     * ``breakdown`` is nullable JSONB and NULL here: MT5 is single-currency with
       no per-symbol decomposition. ⛔ Do not fabricate a single-key breakdown.
       VERIFIED against every reader before relying on it — the Python
-      ``reconstruct_symbol_returns`` (``snap.get("breakdown") or {}``), the
+      per-symbol breakdown readers (``snap.get("breakdown") or {}``), the
       TypeScript ``holding-compare-adapter`` (``s.breakdown?.[symbol]`` with a
       null guard), and migration 073's ``extract_symbol_value_at``
       (``NULLIF((breakdown ->> p_symbol)::NUMERIC, 0)``, NULL-propagating, and
@@ -4429,69 +4429,6 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
             await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup
             pass
-
-
-# ---------------------------------------------------------------------------
-# Phase 09 / D-01 + LIVE-01: per-symbol returns reconstruction helper
-# ---------------------------------------------------------------------------
-
-
-def reconstruct_symbol_returns(
-    snapshots: list[dict[str, Any]],
-    symbol: str,
-) -> "pd.Series | None":
-    """Phase 09 / D-01 + D-02. Reconstruct a per-symbol daily-return Series
-    from allocator_equity_snapshots rows.
-
-    Algorithm:
-    - Extract (asof, breakdown.get(symbol)) from each snapshot (ordered ASC by asof).
-    - Drop entries where the symbol is absent OR zero (matches migration 073's
-      extract_symbol_value_at NULLIF + (breakdown IS NULL OR value = 0) semantics).
-      Rationale per RESEARCH Pitfall 2: partial days are treated as missing, NOT
-      forward-filled — a deposit arriving on day N means the symbol's series
-      legitimately starts at day N.
-    - pct_change().dropna() over the remaining values.
-    - Return None if fewer than 2 symbol-present data points exist (cannot compute
-      any return).
-
-    Callers apply a further >= 30-day warm-up gate on the returned series per
-    Phase 07 D-03 analog (see _load_holding_portfolio_context in routers/match.py).
-
-    Args:
-        snapshots: List of allocator_equity_snapshots rows, each with
-                   ``asof`` (DATE string, ISO format) and
-                   ``breakdown`` (dict mapping symbol -> value_usd float).
-                   Must already be ordered ascending by asof.
-        symbol: The CCXT-stripped uppercase symbol to extract (e.g. "BTC").
-
-    Returns:
-        pd.Series of daily percentage returns indexed by asof strings,
-        or None if insufficient data exists for the symbol.
-    """
-    pairs: list[tuple[str, float]] = []
-    for snap in snapshots:
-        bd = snap.get("breakdown") or {}
-        raw = bd.get(symbol)
-        if raw is None:
-            continue
-        try:
-            val = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if val == 0:
-            continue
-        pairs.append((snap["asof"], val))
-
-    if len(pairs) < 2:
-        return None
-
-    asofs = [p[0] for p in pairs]
-    values = [p[1] for p in pairs]
-    series = pd.Series(values, index=asofs, name=symbol)
-    returns = series.pct_change().dropna()
-    if len(returns) == 0:
-        return None
-    return returns
 
 
 # ---------------------------------------------------------------------------
