@@ -679,7 +679,14 @@ export default async function FactsheetV2Page({
     // reaches the payload or the cached wrapper.
     const ownerBuildability =
       ownerBuild && ownerBuild.reason !== null
-        ? ownerBuildabilityOf(id, ownerBuild.reason, ownerBuild)
+        ? ownerBuildabilityOf(id, ownerBuild.reason, {
+            analyticsFailed: ownerBuild.analyticsFailed,
+            // 170.1 D-08 / R-1: jobs that finished without a built factsheet
+            // give the banner the body's instruction (finished_not_built)
+            // instead of a "once a computation succeeds" wait that will not
+            // end. A running or pending job keeps the arm-derived note.
+            jobsFinished: ownerStatus?.state.state === "finished",
+          })
         : null;
     // 167.2.1-REVIEW-R2 WR-03: the state line is about the compute JOBS, the
     // share note about the owner BUILD. When the build could not read the row,
@@ -1033,7 +1040,7 @@ async function readOwnerPendingStatus(
 function ownerBuildabilityOf(
   id: string,
   reason: NotBuildableReason,
-  detail?: Pick<NotBuildableDetail, "analyticsFailed">,
+  detail?: Pick<NotBuildableDetail, "analyticsFailed"> & { jobsFinished?: boolean },
 ): { unreadable: boolean; kind: UnbuildableNoteKind | null } {
   if (reason === "read_error") return { unreadable: true, kind: null };
   if (reason === "not_visible") {

@@ -6,14 +6,15 @@
  * The actual code is more precise: it trusts data.code ONLY when it is a
  * known finalize code (KEY_SCOPE_BROADENED, KEY_NETWORK_TIMEOUT) and
  * otherwise maps to UNKNOWN, so a garbled response can't poison the
- * envelope. It also surfaces WIZARD_DUPLICATE on a 200 + idempotent return,
- * and maps a thrown fetch to KEY_NETWORK_TIMEOUT.
+ * envelope. It treats a 2xx WIZARD_DUPLICATE as success (170.1 D-07), surfaces
+ * WIZARD_DUPLICATE only on a non-2xx reply, and maps a thrown fetch to
+ * SERVICE_UNREACHABLE.
  *
  * These pin the real contract via the wizard_error telemetry `code`
  * dimension (the funnel-truth value):
  *   (a) known finalize code passes through,
  *   (b) an unknown/garbled code → UNKNOWN (poison guard),
- *   (c) WIZARD_DUPLICATE on a 200 surfaces the duplicate code,
+ *   (c) WIZARD_DUPLICATE on a 2xx is success; on a non-2xx it surfaces the code,
  *   (d) 2xx success calls onSubmitted with no wizard_error.
  */
 import { render, screen, fireEvent, within } from "@testing-library/react";
@@ -234,7 +235,13 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     expect(findWizardError()!.code).toBe("UNKNOWN");
   });
 
-  it("surfaces WIZARD_DUPLICATE on a 200 + idempotent return", async () => {
+  // 170.1 D-07 — RE-POINTED (was: "surfaces WIZARD_DUPLICATE on a 200 +
+  // idempotent return", asserting onSubmitted NOT called). A 2xx duplicate means
+  // the server already holds this submission (a lost-response retry), so it
+  // follows the success path and the user lands on the "submitted" status line.
+  // Showing "You've already submitted this strategy." to someone whose submit
+  // worked read as a failure.
+  it("[170.1 D-07] a 2xx WIZARD_DUPLICATE is success: onSubmitted once, no envelope, no wizard_error", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(
         { strategy_id: "strat-1", code: "WIZARD_DUPLICATE", idempotent: true },
@@ -244,9 +251,42 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     const onSubmitted = renderStep();
     fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
 
+    await vi.waitFor(() => expect(onSubmitted).toHaveBeenCalledTimes(1));
+    expect(onSubmitted).toHaveBeenCalledWith("strat-1");
+    expect(screen.queryByTestId("error-envelope")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("You've already submitted this strategy."),
+    ).not.toBeInTheDocument();
+    expect(findWizardError()).toBeUndefined();
+  });
+
+  it("[170.1 D-07] a 2xx WIZARD_DUPLICATE without a strategy_id falls back to the held id", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ ok: true, code: "WIZARD_DUPLICATE", idempotent: true }, 200),
+    );
+    const onSubmitted = renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(onSubmitted).toHaveBeenCalledTimes(1));
+    // renderStep holds strategyId="strat-1".
+    expect(onSubmitted).toHaveBeenCalledWith("strat-1");
+    expect(findWizardError()).toBeUndefined();
+  });
+
+  // Positive control: only a 2xx duplicate is success. A non-2xx reply that
+  // carries the code still renders its copy, so the entry stays reachable.
+  it("[170.1 D-07] a non-2xx WIZARD_DUPLICATE still renders the duplicate envelope", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "WIZARD_DUPLICATE", error: "duplicate" }, 409),
+    );
+    const onSubmitted = renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
     await vi.waitFor(() => expect(findWizardError()).toBeDefined());
     expect(findWizardError()!.code).toBe("WIZARD_DUPLICATE");
-    // A duplicate is NOT a successful submit — onSubmitted must not fire.
+    expect(
+      await screen.findByText("You've already submitted this strategy."),
+    ).toBeInTheDocument();
     expect(onSubmitted).not.toHaveBeenCalled();
   });
 
