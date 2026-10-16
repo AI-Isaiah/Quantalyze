@@ -11,7 +11,7 @@ last_activity: 2026-10-16
 last_activity_desc: "164.9.3.1 FANINGRAPH closed (post-merge items confirmed; verification passed 8/8; SECURED 27/27)"
 state_head: 3dfc733667e8a5ac48cd1c8b830090c19e23460c
 progress:
-  total_phases: 118
+  total_phases: 119
   completed_phases: 109
   total_plans: 783
   completed_plans: 776
@@ -632,6 +632,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.1.1.1 inserted after Phase 167.1.1: BRIDGERETURNS: the Bridge matcher's per-holding returns from the daily mark price (founder decision 167.1.1 D-06)
 - Phase 170.1.1 inserted after Phase 170.1: TITLES: every page has its own tab title and a sentence-case heading (founder 2026-10-15, "Split into 3 phases")
 - Phase 170.1.2 inserted after Phase 170.1: LABELS: names and readable labels instead of ids and internal values (founder 2026-10-15, "Split into 3 phases")
+- Phase 167.1.1.2 inserted after Phase 167.1.1: AUMBASIS: commit sizing counts derivative unrealized P&L not notional; missing P&L stored as missing (founder 2026-10-15)
 
 ### Decisions
 

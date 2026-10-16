@@ -163,6 +163,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — verified 2026-10-15 (completed 2026-10-15)
 - [ ] **Phase 167.1.1.1: BRIDGERETURNS — the Bridge matcher's per-holding returns come from each holding's daily mark price, so buying, selling or moving an asset never reads as a gain or loss** (INSERTED 2026-10-15) — not yet planned (data integrity; founder decision 167.1.1 D-06)
+- [ ] **Phase 167.1.1.2: AUMBASIS — scenario commit sizing counts a derivative at its unrealized P&L, never its notional, and a missing P&L is stored as missing, never as 0** (INSERTED 2026-10-15) — not yet planned (data integrity; founder decision during 167.1.1.1 discuss)
 - [x] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — verified 2026-10-11 (completed 2026-10-11)
 - [x] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — 10 plans, shipped as PR 1 v0.131.3.0 (#1022) and PR 2 v0.131.8.0 (#1033); D-11 day-0 and day-1 PROD reads as expected (capped_events 0), founder acknowledged 2026-10-16; verification passed 7/7; security SECURED 33/33 (completed 2026-10-16)
 - [ ] **Phase 167.1.2.1.1: WRITERRESIDUALS — the allocator equity writer persists why a curve was refused and never dilutes or drops a key silently** (INSERTED) — not yet planned (data integrity; split from 167.1.2.1 by D-01, 2026-10-13)
@@ -4906,6 +4907,25 @@ Plans:
 - [x] 167.1.1-04-PLAN.md — two keys on one venue holding one asset, proven and pinned
 - [x] 167.1.1-05-PLAN.md — the holding card states where its numbers come from
 
+### Phase 167.1.1.2: AUMBASIS — scenario commit sizing counts a derivative at its unrealized P&L, never its notional, and a missing P&L is stored as missing, never as 0 (INSERTED)
+
+**Goal:** Every place that sizes an allocator's book from derivative holdings counts a derivative at its unrealized P&L, never its notional, and a venue that reports no unrealized P&L is stored and shown as missing, never as 0. Booked 2026-10-15 by founder decision ("Book one new phase", AskUserQuestion during 167.1.1.1 BRIDGERETURNS discuss), after the founder's rule: "Derivatives value are not counted towards AUM only unrealized profits or losses are". Data integrity.
+**Requirements**: TBD
+**Depends on:** Phase 167.1.1
+Measured at `3175e5dd` by the 167.1.1.1 researcher:
+- `src/app/api/allocator/scenario/commit/route.ts` `serverAumUsd` sizes `size_at_decision_usd` from the `value_usd` (notional) sum. Its own comment says the downstream daily-delta cron divides realized P&L by that figure, so a book with derivatives reads understated returns. In the same file, `serverEquityAumUsd` already uses `unrealized_pnl_usd`.
+- The derivative writers (`analytics-service/services/allocator_positions.py`, `positions.py`) store `float(unrealized_pnl or 0)`, so a venue that reports no P&L writes 0.0, which looks like a real zero. On PROD, 0 of 294 current derivative rows are NULL, so missing values are invisible today.
+- Readers disagree on a missing P&L: the dashboard `holdingEquityContribution` counts it as 0, and `refresh_allocator_equity_daily` skips it with an audit event.
+**Success Criteria** (what must be TRUE):
+1. Scenario commit sizing counts each derivative at its unrealized P&L, using the same `holdingEquityContribution` definition as the dashboard, never `value_usd`. A test goes RED on the notional sum.
+2. A venue that reports no unrealized P&L is written as NULL, never 0.0, on every derivative writer path. A test goes RED on the `or 0` coercion.
+3. Every reader of `unrealized_pnl_usd` handles NULL by name: it is withheld and disclosed, never summed as 0. That covers the dashboard, the composer, the commit route, the equity curve and the 167.1.1.1 matcher.
+4. Before and after on PROD, read-only and marker first: the number of NULL derivative P&L rows, and the commit sizing of the books holding derivatives. Past `size_at_decision_usd` rows are read, never rewritten, unless the founder decides otherwise.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ### Phase 167.1.1.1: BRIDGERETURNS — the Bridge matcher's per-holding returns come from each holding's daily mark price, so buying, selling or moving an asset never reads as a gain or loss (INSERTED)
 
 **Goal:** The Bridge matcher's per-holding returns come from each holding's daily mark price, so buying, selling or moving an asset never reads as a gain or loss. Booked 2026-10-15 by founder decision 167.1.1 D-06 ("Book a follow-up phase"). Owns TODOS `[167.1.1-BRIDGE-DOLLAR-RATIO-RETURNS]`. Data integrity: the user-facing Bridge flags rest on it.
@@ -6258,6 +6278,7 @@ kept verbatim.
 | 167.1 AUMTRUST | 6/6 | Complete    | 2026-10-04 |
 | 167.1.1 HOLDINGKEYSCOPE | 5/5 | Complete | v0.132.0.0 · #1053; 375px follow-up v0.132.0.1 · #1056 |
 | 167.1.1.1 BRIDGERETURNS | 0/? | Queued — data integrity; founder decision 167.1.1 D-06 | - |
+| 167.1.1.2 AUMBASIS | 0/? | Queued — data integrity; founder decision 2026-10-15 | - |
 | 167.1.2 ACCOUNTTRUTH | PR A, B, C1–C5 shipped | Complete | 2026-10-11 |
 | 167.1.2.1 RECONMARKER | 10/10 | Complete — D-11 day-0 and day-1 PROD reads as expected, capped_events 0; verification passed, SECURED 33/33 | 2026-10-16 · v0.131.3.0 · #1022, v0.131.8.0 · #1033 |
 | 167.1.2.1.1 WRITERRESIDUALS | 0/? | Queued — data integrity; split from 167.1.2.1 (D-01), after it | - |
