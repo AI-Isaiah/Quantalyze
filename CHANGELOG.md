@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.132.3.2] - 2026-10-16 — RECORDS: retire MT5SERVERLEARN 164.6.6.3.6 from v1.20 (founder: next milestone, maybe)
+
+Records only; no code changes.
+
+### Removed
+- **Phase 164.6.6.3.6 MT5SERVERLEARN is retired from v1.20, by founder decision on 2026-10-16: "We will do it in the next milestone (maybe)".** It never shipped. Broker servers stay hand-listed in `MT5_KNOWN_SERVERS`, and the Step 2d runbook from 164.6.6.3 applies.
+  - The ROADMAP marks the phase retired, in the same style as 165, 165.1 and 165.2. Its section stays as the spec, and its Progress row reads RETIRED.
+  - STATE no longer lists it as waiting on the founder's MT5 accounts.
+  - The work done so far (CONTEXT, RESEARCH, PATTERNS, VALIDATION, BROKER-SERVERS, plan 01 and the S0-S9 gate protocol) is kept on the pushed branch `feat/164.6.6.3.6-mt5serverlearn`.
+- TODOS gains `[164.6.6.3.6-MT5SERVERLEARN-NEXT-MILESTONE]`, which carries the phase to the next milestone's planning.
+
 ## [0.132.3.0] - 2026-10-16 — BRIDGERETURNS: the Bridge matcher's per-holding returns come from each holding's daily mark price
 
 Phase 167.1.1.1 (plans 01-09 and three review rounds plus one narrow round). The branch has 67 non-merge commits since `origin/main` plus per-plan worktree merges and one merge of `origin/main`. 28 of the 67 touch paths outside `.planning`, and this entry maps every one of them. The other 39 are planning and records commits: CONTEXT with founder decisions D-01..D-25, research, the UI spec, the pattern map, 9 plans and their summaries, four review rounds, verification and the security audit. Closes TODOS `[167.1.1-BRIDGE-DOLLAR-RATIO-RETURNS]` (`77b639a4b`). No migration.

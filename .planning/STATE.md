@@ -174,7 +174,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: 166.5 (COMPUTEDATSTAMP) — EXECUTING
 Plan: 9 of 9
-Status: Executing — several phases in parallel. 166.5 COMPUTEDATSTAMP is the current one: both PRs merged and applied on PROD (#1047, #1050); the post-merge plan 09 reading is outstanding. Also in flight: 164.9.3.1 FANINGRAPH (merged as #1059, applied on PROD, ratchet follow-up #1064 merged, records pending), 167.1.2.2.2.1 OKXHISTORY (reviewed, ship next), 167.1.1.1 BRIDGERETURNS (planning), 170.1 COPY (planning) and 164.6.6.3.6 MT5SERVERLEARN (waiting on the founder's MT5 accounts). 164.9.8.1 PYXDIST closed 2026-10-15 (#1054). 167.1.2.1 RECONMARKER is waiting on its day-1 reading.
+Status: Executing — several phases in parallel. 166.5 COMPUTEDATSTAMP is the current one: both PRs merged and applied on PROD (#1047, #1050); the post-merge plan 09 reading is outstanding. Also in flight: 164.9.3.1 FANINGRAPH (merged as #1059, applied on PROD, ratchet follow-up #1064 merged, records pending), 167.1.2.2.2.1 OKXHISTORY (reviewed, ship next), 167.1.1.1 BRIDGERETURNS (planning), 170.1 COPY (planning). 164.6.6.3.6 MT5SERVERLEARN was retired from v1.20 on 2026-10-16 (founder: next milestone, maybe). 164.9.8.1 PYXDIST closed 2026-10-15 (#1054). 167.1.2.1 RECONMARKER is waiting on its day-1 reading.
 Last activity: 2026-10-15 — 164.9.8.1 PYXDIST shipped (#1054, v0.132.1.6) and closed (verification passed)
 Progress: [█████████░] 91%
 
