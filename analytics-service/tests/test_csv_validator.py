@@ -679,9 +679,13 @@ def test_dataframe_level_failure_omits_the_column_clause_entirely():
         f"{sorted({e['rule'] for e in result['errors']})}"
     )
     # Hand-typed oracle: the SENTENCE, not the producer's own f-string.
+    # 170.1-01 / D-10 RE-POINTED THIS ORACLE: the generic "Failed rule
+    # 'column_in_dataframe'." told a founder nothing; the producer now names the
+    # SCHEMA's expected column in plain words and carries it as `column`.
     assert (
-        dataframe_level[0]["message"] == "Failed rule 'column_in_dataframe'."
+        dataframe_level[0]["message"] == "Your file has no daily_return column."
     ), dataframe_level[0]["message"]
+    assert dataframe_level[0]["column"] == "daily_return", dataframe_level[0]
 
 
 def test_dataframe_level_failure_names_no_row_number_at_all():
@@ -769,3 +773,23 @@ def test_the_failing_cell_value_is_not_echoed_into_the_message():
     for err in result["errors"]:
         assert len(marker) > 4  # the needle is real, not blank
         assert marker not in err["message"], err["message"]
+
+
+# ---------------------------------------------------------------------------
+# 170.1-01 / D-10 — the founder's routed specimen: a `date,daily_return` file
+# validated as `trades` printed "Failed rule 'column_in_dataframe'." five times.
+# ---------------------------------------------------------------------------
+
+def test_routed_specimen_names_each_missing_trades_column():
+    """A daily-returns shaped file under fmt "trades" is missing exactly five
+    columns, and each one is named in plain words with a first-class field."""
+    raw = b"date,daily_return\n2024-01-02,0.001\n2024-01-03,0.002\n"
+    result = validate_csv(raw, "trades")
+    missing = [e for e in result["errors"] if e["rule"] == "column_in_dataframe"]
+    assert len(missing) == 5, [e["message"] for e in result["errors"]]
+    assert {e["column"] for e in missing} == {
+        "side", "qty", "price", "symbol", "currency",
+    }
+    for e in missing:
+        assert e["message"] == f"Your file has no {e['column']} column.", e
+        assert e["row"] == 0, e

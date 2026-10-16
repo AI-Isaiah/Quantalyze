@@ -4923,3 +4923,33 @@ def test_sync_pipeline_rejection_also_forwards_the_breakdown(client):
     assert body["debug_context"]["verification_id"] == "ver-csv-rows"
     assert len(_PII_MARKER) > 10
     assert _PII_MARKER not in r.text, r.text
+
+
+def test_forwarded_rows_carry_a_valid_column(client):
+    """170.1-01 / D-10 — `column` (the schema's column name) crosses the
+    projection on a row that carries a valid one, on the validate-only path."""
+    fake = _build_supabase_mock(existing_row=None)
+    adapter = MagicMock()
+    adapter.validate = AsyncMock(
+        return_value=_csv_validation_result([
+            {
+                "rule": "column_in_dataframe",
+                "row": 0,
+                "message": "Your file has no side column.",
+                "column": "side",
+            },
+        ])
+    )
+
+    r = _post_validate_only(client, fake, adapter)
+
+    assert r.status_code == 200, r.text
+    rows = r.json()["debug_context"]["pandera_errors"]
+    assert rows == [
+        {
+            "rule": "column_in_dataframe",
+            "row": 0,
+            "message": "Your file has no side column.",
+            "column": "side",
+        }
+    ], rows

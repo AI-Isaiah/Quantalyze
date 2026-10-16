@@ -403,7 +403,12 @@ _ROUTE_TERMINAL_ERROR_CODES = frozenset(
 # a producer adds a fourth key, it crosses the wire and lands in
 # strategy_verifications metadata silently. Naming the three keys here means an
 # added key is dropped by construction rather than by remembering.
-_FORWARDED_ROW_KEYS = ("rule", "row", "message")
+#
+# 170.1-01 / D-10 — `column` joins the whitelist: the SCHEMA's column name (never
+# a cell or a header from the file), forwarded only when it is a non-empty str of
+# at most `_MAX_FORWARDED_COLUMN_LEN` characters. `failure_case` stays out.
+_FORWARDED_ROW_KEYS = ("rule", "row", "message", "column")
+_MAX_FORWARDED_COLUMN_LEN = 128
 
 
 def _forwarded_pandera_rows(source_debug_context: Any) -> list[dict[str, Any]]:
@@ -426,16 +431,22 @@ def _forwarded_pandera_rows(source_debug_context: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         row_raw = item.get("row")
-        rows.append(
-            {
-                "rule": str(item.get("rule", "unknown")),
-                # A row index that did not come back is reported as 0 — the
-                # same "no row" sentinel `csv_validator` already uses for a
-                # dataframe-level failure. Never invented, never omitted.
-                "row": row_raw if isinstance(row_raw, int) and not isinstance(row_raw, bool) else 0,
-                "message": str(item.get("message", "")),
-            }
-        )
+        projected: dict[str, Any] = {
+            "rule": str(item.get("rule", "unknown")),
+            # A row index that did not come back is reported as 0 — the
+            # same "no row" sentinel `csv_validator` already uses for a
+            # dataframe-level failure. Never invented, never omitted.
+            "row": row_raw if isinstance(row_raw, int) and not isinstance(row_raw, bool) else 0,
+            "message": str(item.get("message", "")),
+        }
+        column_raw = item.get("column")
+        if (
+            isinstance(column_raw, str)
+            and column_raw.strip()
+            and len(column_raw) <= _MAX_FORWARDED_COLUMN_LEN
+        ):
+            projected["column"] = column_raw
+        rows.append(projected)
     return rows
 
 
