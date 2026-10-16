@@ -12,74 +12,16 @@ from __future__ import annotations
 
 from typing import Any
 
-import pandas as pd
 import pytest
 
 from routers import match as match_mod
+from tests.fake_postgrest import FakeDb
 
 ALLOCATOR = "alloc-1"
 MT5_KEY = "00000000-0000-0000-0000-0000000000a1"
 OKX_KEY = "00000000-0000-0000-0000-0000000000a2"
 BTC_USD = 26_100.0
 OKX_USD = 1_000.0
-
-
-class _Query:
-    def __init__(self, db: "_Db", name: str) -> None:
-        self._db = db
-        self._name = name
-        self._eq: list[tuple[str, Any]] = []
-        self._in: list[tuple[str, list[Any]]] = []
-        self._desc: tuple[str, bool] | None = None
-        self._limit: int | None = None
-
-    def select(self, *_a: Any, **_k: Any) -> "_Query":
-        return self
-
-    def eq(self, col: str, val: Any) -> "_Query":
-        self._eq.append((col, val))
-        return self
-
-    def in_(self, col: str, vals: Any) -> "_Query":
-        self._in.append((col, list(vals)))
-        return self
-
-    def order(self, col: str, desc: bool = False) -> "_Query":
-        self._desc = (col, desc)
-        return self
-
-    def limit(self, count: int) -> "_Query":
-        self._limit = count
-        return self
-
-    def execute(self) -> Any:
-        if self._name == "allocator_equity_derived" and self._db.derived_error is not None:
-            raise self._db.derived_error
-        data = [
-            dict(r)
-            for r in self._db.tables.get(self._name, [])
-            if all(r.get(c) == v for c, v in self._eq)
-            and all(r.get(c) in vs for c, vs in self._in)
-        ]
-        if self._desc is not None:
-            col, desc = self._desc
-            data.sort(key=lambda r: r[col], reverse=desc)
-        # PostgREST: a response never exceeds the explicit limit nor the server's
-        # max_rows (1000 on this project), and a capped read carries no error.
-        ceilings = [n for n in (self._limit, self._db.max_rows) if n is not None]
-        if ceilings:
-            data = data[: min(ceilings)]
-        return type("R", (), {"data": data})()
-
-
-class _Db:
-    def __init__(self, tables: dict[str, list[dict[str, Any]]]) -> None:
-        self.tables = tables
-        self.derived_error: Exception | None = None
-        self.max_rows: int | None = None  # PostgREST's server-side cap
-
-    def table(self, name: str) -> _Query:
-        return _Query(self, name)
 
 
 def _holding(key: str, venue: str, symbol: str, asof: str, value: float) -> dict[str, Any]:
@@ -90,6 +32,9 @@ def _holding(key: str, venue: str, symbol: str, asof: str, value: float) -> dict
         "symbol": symbol,
         "holding_type": "spot",
         "value_usd": value,
+        "mark_price": 100.0,
+        "side": "flat",
+        "unrealized_pnl_usd": None,
         "asof": asof,
         "updated_at": f"{asof}T04:00:00+00:00",
     }
@@ -103,8 +48,8 @@ def _marker(key: str, day: str) -> dict[str, Any]:
     }
 
 
-def _book(marker_day: str | None) -> _Db:
-    return _Db(
+def _book(marker_day: str | None) -> FakeDb:
+    return FakeDb(
         {
             "api_keys": [
                 {"id": MT5_KEY, "user_id": ALLOCATOR, "exchange": "mt5"},
@@ -120,14 +65,7 @@ def _book(marker_day: str | None) -> _Db:
     )
 
 
-@pytest.fixture(autouse=True)
-def _warm_series(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every holding clears the 30-day warm-up gate, so AUM is the plain sum."""
-    series = pd.Series([0.001] * 40)
-    monkeypatch.setattr(match_mod, "reconstruct_symbol_returns", lambda _s, _sym: series)
-
-
-def _aum(monkeypatch: pytest.MonkeyPatch, db: _Db) -> dict[str, Any]:
+def _aum(monkeypatch: pytest.MonkeyPatch, db: FakeDb) -> dict[str, Any]:
     monkeypatch.setattr(match_mod, "get_supabase", lambda: db)
     return match_mod._load_holding_portfolio_context(ALLOCATOR)
 
@@ -140,8 +78,13 @@ def test_a_marker_dated_after_the_priced_row_removes_the_account_from_aum_and_we
     assert ctx["portfolio_aum"] == pytest.approx(OKX_USD), (
         "the unpriced account was summed at its older close-priced row"
     )
-    assert list(ctx["portfolio_weights"]) == ["holding:okx:USDT:spot"]
-    assert ctx["portfolio_weights"]["holding:okx:USDT:spot"] == pytest.approx(1.0)
+    # The one remaining holding is USDT, a withheld stablecoin (no series): it is in the AUM
+    # (above) and has no SCORING weight (CR-01). The unpriced MT5 BTC is in neither.
+    assert ctx["portfolio_weights"] == {}
+    assert [f"holding:{r['venue']}:{r['symbol']}:{r['holding_type']}" for r in ctx["holdings_rows_withheld"]] == [
+        "holding:okx:USDT:spot"
+    ]
+    assert ctx["holdings_rows_eligible"] == []
 
 
 @pytest.mark.parametrize(
@@ -166,7 +109,7 @@ def test_a_failed_marker_read_keeps_the_rows_and_logs_at_error(
     """The request-time scorer must not blank on a marker-table outage: it keeps the rows
     as they were before the marker existed, and the error log is what reaches Sentry."""
     db = _book("2026-10-10")
-    db.derived_error = RuntimeError("marker table unavailable")
+    db.errors["allocator_equity_derived"] = RuntimeError("marker table unavailable")
 
     with caplog.at_level("ERROR", logger="quantalyze.analytics"):
         ctx = _aum(monkeypatch, db)

@@ -68,7 +68,7 @@ def make_per_key_returns(
     """A deterministic per-key daily-return Series indexed by ISO day strings.
 
     Constant `daily` return over `n_days` starting at `start_day`. Index entries are
-    'YYYY-MM-DD' strings (matching reconstruct_symbol_returns / csv_daily_returns day
+    'YYYY-MM-DD' strings (matching the csv_daily_returns day
     keys); name == key_id. Pure — no rounding surprises, no I/O.
     """
     if isinstance(start_day, str):
