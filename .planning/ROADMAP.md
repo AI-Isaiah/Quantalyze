@@ -164,7 +164,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — verified 2026-10-15 (completed 2026-10-15)
 - [ ] **Phase 167.1.1.1: BRIDGERETURNS — the Bridge matcher's per-holding returns come from each holding's daily mark price, so buying, selling or moving an asset never reads as a gain or loss** (INSERTED 2026-10-15) — not yet planned (data integrity; founder decision 167.1.1 D-06)
 - [x] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — verified 2026-10-11 (completed 2026-10-11)
-- [ ] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — not yet planned (data integrity; after 167.1.2 PR C)
+- [x] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — 10 plans, shipped as PR 1 v0.131.3.0 (#1022) and PR 2 v0.131.8.0 (#1033); D-11 day-0 and day-1 PROD reads as expected (capped_events 0), founder acknowledged 2026-10-16; verification passed 7/7; security SECURED 33/33 (completed 2026-10-16)
 - [ ] **Phase 167.1.2.1.1: WRITERRESIDUALS — the allocator equity writer persists why a curve was refused and never dilutes or drops a key silently** (INSERTED) — not yet planned (data integrity; split from 167.1.2.1 by D-01, 2026-10-13)
 - [ ] **Phase 167.1.2.1.2: HISTORYREADER — Open Positions, Exchanges and the Overview show a departed or stale key's history truthfully** (INSERTED) — not yet planned (data integrity and user-facing; split from 167.1.2.1 by D-01, 2026-10-13)
 - [x] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — planned 2026-10-07, 9 plans (completed 2026-10-11)
@@ -5183,7 +5183,7 @@ Plans:
 **Priority:** data integrity (founder priority rule, 2026-09-27: data integrity ahead of features). Registered through `/gsd-phase --insert 167.1.2`; gsd-tools numbered it 167.1.2.1 and the number is kept.
 **Requirements**: TBD (criteria below)
 **Depends on:** Phase 167.1.2 (PR C: its history rebuild changes `replace_equity_snapshots` and the per-key reconstruct path this phase builds on).
-**Plans:** 10 plans (PR 1: 01-03; PR 2: 04-09; post-ship read: 10)
+**Plans:** 10/10 plans complete (PR 1: 01-03; PR 2: 04-09; post-ship read: 10)
 
 ⭐ **Re-scoped 2026-10-13 (founder, smart discuss "Accept all"; `167.1.2.1-CONTEXT.md` D-01/D-02):** this phase delivers success criteria **1-7 only** (the per-key marker, retry, replace scope, `failed_retry`, migration review, the fast-fail race), in two PRs (D-08). The writer residuals of the first ROUTED IN block moved to **Phase 167.1.2.1.1 WRITERRESIDUALS**, and items (1), (2), (3) and (7) of the second moved to **Phase 167.1.2.1.2 HISTORYREADER**. Re-measured at `c85c938e1`: **SFH-R3-07 is CLOSED** (keyset paging in `_load_allocator_daily_returns`, v0.111.1.0, #903) and **item (4) WR-02 is CLOSED** (`20261011120000_allocator_holdings_per_key_unique.sql` and `HOLDINGS_CONFLICT_TARGET`, v0.130.6.0, #1006). Item (5) WR-03 is now a coupling rule both new phases carry. The blocks below are kept as lineage.
 
@@ -5218,16 +5218,16 @@ Plans:
 
 Plans:
 
-- [ ] 167.1.2.1-01-PLAN.md — PR 1 migration M1: the two `api_keys` marker columns, the D-05/D-12/D-15 backfill, `request_allocator_holdings_sync` counting `failed_retry` and reading the marker (SC-1, SC-5), new SQL gate, census
-- [ ] 167.1.2.1-02-PLAN.md — PR 1 worker: D-07, every non-deleted sibling blocks the sole-key replace (SC-3), three old-rule tests inverted
-- [ ] 167.1.2.1-03-PLAN.md — PR 1 ship: migration-reviewer, rls-policy-auditor and silent-failure-hunter on M1 (SC-6), release commit, midday merge
-- [ ] 167.1.2.1-04-PLAN.md — PR 2 migration M2: the fan-out retries every owed key, counts attempts at the enqueue, caps at 5 with a cron_runs trace (SC-2, SC-4, SC-7 SQL half), new owed-key gate
-- [ ] 167.1.2.1-05-PLAN.md — PR 2 worker: marker writer and decider (D-15 noop stays owed), the refresh hold on "owed and being worked" (SC-7), the D-09 Sentry event
-- [ ] 167.1.2.1-06-PLAN.md — PR 2 reader: the non-gating "history could not be rebuilt" Overview note (D-09, D-14)
-- [ ] 167.1.2.1-07-PLAN.md — PR 2: repoint the 167.1.2 fan-out gate to M2 (every original arm machine-checked, none silently dropped), census by one measured run, the SQL/Python/TS attempt-cap twins pinned by test
-- [ ] 167.1.2.1-08-PLAN.md — D-12 read-only PROD census of the owed set, brought to the founder before PR 2 merges
-- [ ] 167.1.2.1-09-PLAN.md — PR 2 ship: the three migration reviewers on M2 (SC-6), release commit, merge and deploy clear of 04:00-05:45 UTC
-- [ ] 167.1.2.1-10-PLAN.md — D-11 read of the first post-PR-2 fan-out and the next day's outcome, counts only
+- [x] 167.1.2.1-01-PLAN.md — PR 1 migration M1: the two `api_keys` marker columns, the D-05/D-12/D-15 backfill, `request_allocator_holdings_sync` counting `failed_retry` and reading the marker (SC-1, SC-5), new SQL gate, census
+- [x] 167.1.2.1-02-PLAN.md — PR 1 worker: D-07, every non-deleted sibling blocks the sole-key replace (SC-3), three old-rule tests inverted
+- [x] 167.1.2.1-03-PLAN.md — PR 1 ship: migration-reviewer, rls-policy-auditor and silent-failure-hunter on M1 (SC-6), release commit, midday merge
+- [x] 167.1.2.1-04-PLAN.md — PR 2 migration M2: the fan-out retries every owed key, counts attempts at the enqueue, caps at 5 with a cron_runs trace (SC-2, SC-4, SC-7 SQL half), new owed-key gate
+- [x] 167.1.2.1-05-PLAN.md — PR 2 worker: marker writer and decider (D-15 noop stays owed), the refresh hold on "owed and being worked" (SC-7), the D-09 Sentry event
+- [x] 167.1.2.1-06-PLAN.md — PR 2 reader: the non-gating "history could not be rebuilt" Overview note (D-09, D-14)
+- [x] 167.1.2.1-07-PLAN.md — PR 2: repoint the 167.1.2 fan-out gate to M2 (every original arm machine-checked, none silently dropped), census by one measured run, the SQL/Python/TS attempt-cap twins pinned by test
+- [x] 167.1.2.1-08-PLAN.md — D-12 read-only PROD census of the owed set, brought to the founder before PR 2 merges
+- [x] 167.1.2.1-09-PLAN.md — PR 2 ship: the three migration reviewers on M2 (SC-6), release commit, merge and deploy clear of 04:00-05:45 UTC
+- [x] 167.1.2.1-10-PLAN.md — D-11 read of the first post-PR-2 fan-out and the next day's outcome, counts only
 
 ⭐ **ROUTED IN 2026-09-29 (from 167.1.2 PR C4 review rounds 1-3 and its verification; data integrity and user-facing).** Sources: `167.1.2-C4-REVIEW-FIX-K1.md`, `-K2a.md`, `-R2C.md`, `167.1.2-C4-VERIFY.md`, `167.1.2-C4-REVIEW-R3.md`. Items (1)-(3) are the D-16 gaps the founder chose to book here (AskUserQuestion 2026-09-29, "Book them to a phase") rather than accept or fix in C4; (4)-(7) were routed out of C4's fix rounds because each needs a file set or a migration outside a fixer's topic.
 (1) **D-16, unlinked departed key:** a departed key never stamped with `venue_account_id` and never marked is not grouped with its account by `accountIdentityTokens`, so its older rows still show on Open Positions (dated, never as current dollars).
@@ -6247,7 +6247,7 @@ kept verbatim.
 | 167.1.1 HOLDINGKEYSCOPE | 5/5 | Complete | v0.132.0.0 · #1053; 375px follow-up v0.132.0.1 · #1056 |
 | 167.1.1.1 BRIDGERETURNS | 0/? | Queued — data integrity; founder decision 167.1.1 D-06 | - |
 | 167.1.2 ACCOUNTTRUTH | PR A, B, C1–C5 shipped | Complete | 2026-10-11 |
-| 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
+| 167.1.2.1 RECONMARKER | 10/10 | Complete — D-11 day-0 and day-1 PROD reads as expected, capped_events 0; verification passed, SECURED 33/33 | 2026-10-16 · v0.131.3.0 · #1022, v0.131.8.0 · #1033 |
 | 167.1.2.1.1 WRITERRESIDUALS | 0/? | Queued — data integrity; split from 167.1.2.1 (D-01), after it | - |
 | 167.1.2.1.2 HISTORYREADER | 0/? | Queued — data integrity and user-facing; split from 167.1.2.1 (D-01), after it | - |
 | 167.1.2.2 DERIVECRON | 9/9 | Complete | 2026-10-11 |

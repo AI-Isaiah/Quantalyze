@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.132.2.2] - 2026-10-16 — RECORDS: close RECONMARKER 167.1.2.1 (D-11 day-0/day-1 reads as-expected, verification passed, SECURED 33/33)
+
+### Added
+- `167.1.2.1-SECURITY.md`: audit of Phase 167.1.2.1 RECONMARKER by gsd-security-auditor at head `f590cdf42`, read-only, no database touched. Verdict SECURED, 33 of 33 registered threats closed, `threats_open: 0`. Four accepted risks are logged (T-02 column SELECT for authenticated only, T-07 stale curve on disconnect-then-add, T-20 widened projection, T-SC no package installed).
+- `167.1.2.1-VERIFICATION.md` (status passed, 7 of 7 success criteria) and `167.1.2.1-10-SUMMARY.md` (the D-11 day-0 and day-1 PROD reads, counts only, founder acknowledged 2026-10-16) join the tracked phase directory.
+
+### Changed
+- `.planning/ROADMAP.md`: the RECONMARKER overview bullet is ticked with its outcome (PR 1 v0.131.3.0 #1022, PR 2 v0.131.8.0 #1033), its ten plan rows are ticked, and its Progress-table row reads Complete with the outcome prose rather than the bare word.
+- `.planning/STATE.md` and `.planning/state.json`: progress counts and the last-activity lines move to 2026-10-16. The current position stays on 166.5 COMPUTEDATSTAMP, and the Status line now says RECONMARKER is closed.
+
+### Notes
+- One finding the audit flagged as an unregistered WARNING is closed in code: `log_audit_event` let a signed-in user write `allocator.equity.reconstruct_*` rows. Migration 20261014120100 refuses that prefix to non-service_role callers (SQLSTATE 22023) and the backfill joins on `a.user_id = ak.user_id`. Rows forged before that migration applied can only affect the forger's own key.
+- Two residuals stay open and non-blocking, booked in `TODOS.md`: `167.1.2.1-TRANSIENT-NEVER-CAPS` and `167.1.2.1-TWIN-STALE-DEFINITION`. `TODOS.md` itself is unchanged here; no entry said it was waiting on the D-11 reading.
+- Observation, low severity: the Sentry read-failure branch in `job_worker.py` calls `capture_exception` without the `_read_failure_text` scrub, and the global `before_send` scrubber was not verified.
+
 ## [0.132.2.1] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of f5dc21b3
 
 ### Changed
