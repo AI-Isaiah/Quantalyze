@@ -2009,11 +2009,16 @@ _REFRESH_HOLDINGS_COLUMNS = (
 )
 
 # C2 silent-failure SFH-09: a carried account contributes its value_usd from its
-# last poll, priced at THAT day's marks, and D-07 sets no horizon. A carry older
-# than this many days logs a WARNING. It is a LOG threshold only: capping or
-# dropping an old carry changes the persisted number and is a founder call, not
-# a default for the code to pick.
+# last poll, priced at THAT day's marks. A carry older than CARRY_AGE_WARN_DAYS
+# logs a WARNING; that threshold stays a LOG threshold only.
 CARRY_AGE_WARN_DAYS = 3
+
+# 167.1.2.1.1 D-02 / SC-5 (founder): the cap D-07 left open. A carry older than
+# this many days is not carried: past a week an account's last marks no longer
+# describe the book, and the snapshot is first-writer-wins. The check is
+# strictly "older than" (age 7 is carried, age 8 is not). What the refusal DOES
+# is D-12's split, in ``_over_age_account_holds``.
+CARRY_AGE_CAP_DAYS = 7
 
 
 @dataclass(frozen=True)
@@ -2052,6 +2057,16 @@ class _LatestHoldings:
     # smallest eligible key id), so one hold raises one Sentry event instead of
     # one per key. A bool: the "no key id leaves this object" contract holds.
     job_key_is_leader: bool = False
+    # 167.1.2.1.1 D-02 / D-12: accounts whose latest day is older than
+    # CARRY_AGE_CAP_DAYS and so are not carried. ``over_age_accounts`` have a
+    # WORKING eligible key (the caller holds the day), ``over_age_failing_accounts``
+    # do not (left out with a count), ``over_age_excluded_venue_accounts`` are
+    # Deribit-only (their rows add $0, so neither). ``oldest_over_age_days`` is
+    # the largest age among ``over_age_accounts``.
+    over_age_accounts: int = 0
+    over_age_failing_accounts: int = 0
+    oldest_over_age_days: int = 0
+    over_age_excluded_venue_accounts: int = 0
 
 
 async def _fetch_latest_holdings_per_eligible_key(
@@ -2068,9 +2083,14 @@ async def _fetch_latest_holdings_per_eligible_key(
     ``asof = today``: a key that had not polled yet today contributed $0, so
     the legacy snapshot showed the book losing that key's whole balance, and
     first-writer-wins on (allocator_id, asof) then kept whichever patchwork of
-    keys the first job saw. There is no staleness horizon: an account is
+    keys the first job saw. An account is
     carried for as long as one of its keys passes ``eligible_key_predicate``,
     and drops out the day its last eligible key is revoked or disconnected.
+    167.1.2.1.1 D-02 added the one horizon: a latest day older than
+    ``CARRY_AGE_CAP_DAYS`` is not carried (``over_age_accounts`` when an
+    eligible key is working, so the caller holds the day;
+    ``over_age_failing_accounts`` when none is, left out with a count;
+    ``_over_age_account_holds`` is the one place that decides).
 
     Grain: per ACCOUNT, not per key (C2 review CR-03). Keys that read one
     exchange account form a group (``account_groups``: a holder plus every key
@@ -2218,6 +2238,11 @@ async def _fetch_latest_holdings_per_eligible_key(
     never_polled_working = 0
     never_polled_failing = 0
     polled_no_rows = 0
+    over_age = 0
+    over_age_failing = 0
+    oldest_over_age = 0
+    over_age_excluded_venue = 0
+    today_date = date.fromisoformat(today_iso)
     for group in account_groups(key_rows):
         eligible = [r for r in group if eligible_key_predicate(r)]
         if not eligible:
@@ -2311,6 +2336,24 @@ async def _fetch_latest_holdings_per_eligible_key(
                 continue
             latest = max(recheck)
 
+        age_days = (today_date - date.fromisoformat(latest)).days
+        if age_days > CARRY_AGE_CAP_DAYS:
+            # D-02: not carried. After the emptiness proof, which is about value
+            # (a proven-empty account adds $0 at any age), and before the rows
+            # read, which this account no longer needs.
+            if all(
+                str(r.get("exchange") or "").strip().lower() == "deribit" for r in eligible
+            ):
+                # D-13 (technical choice): Deribit rows add $0 to the refresh
+                # total, so a stale Deribit carry cannot make the total stale.
+                over_age_excluded_venue += 1
+            elif _over_age_account_holds(eligible):
+                over_age += 1
+                oldest_over_age = max(oldest_over_age, age_days)
+            else:
+                over_age_failing += 1
+            continue
+
         def _sel_rows(group_ids: list[str] = group_ids, latest: str = latest) -> Any:
             return (
                 supabase.table("allocator_holdings")
@@ -2352,7 +2395,22 @@ async def _fetch_latest_holdings_per_eligible_key(
         never_polled_failing_accounts=never_polled_failing,
         polled_no_rows_accounts=polled_no_rows,
         job_key_is_leader=job_key_is_leader,
+        over_age_accounts=over_age,
+        over_age_failing_accounts=over_age_failing,
+        oldest_over_age_days=oldest_over_age,
+        over_age_excluded_venue_accounts=over_age_excluded_venue,
     )
+
+
+def _over_age_account_holds(eligible: Sequence[Mapping[str, Any]]) -> bool:
+    """D-12 (founder-confirmed 2026-10-16, "Same split"): does an account over
+    ``CARRY_AGE_CAP_DAYS`` hold the day's write? Only when one of its eligible
+    keys is WORKING, the same split D-01 uses for a never-polled account: a
+    working key that has not produced rows in a week is a fault worth stopping
+    the day for, a dead key is not (T-11, it would freeze the snapshot store).
+    The ONLY place that decides this. Reverting to D-02 as originally worded
+    ("any over-age account holds") is this line returning True."""
+    return any(working_holder_predicate(r) for r in eligible)
 
 
 def _identity_unknown_and_not_working(
@@ -4172,6 +4230,7 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
 # set, so the message built from it carries no id and no figure.
 _HOLD_SENTRY_OUTCOME: Final[dict[str, str]] = {
     "never_polled_working": "held_never_polled",
+    "carry_over_age": "held_carry_over_age",
 }
 
 
@@ -4180,6 +4239,8 @@ def _refresh_hold_reason(latest: _LatestHoldings) -> str | None:
     Precedence is the order of the checks; every count rides in the audit."""
     if latest.never_polled_working_accounts > 0:
         return "never_polled_working"
+    if latest.over_age_accounts > 0:
+        return "carry_over_age"
     return None
 
 
@@ -4200,6 +4261,10 @@ def _refresh_audit_counts(latest: _LatestHoldings) -> dict[str, int]:
         "never_polled_working_accounts": latest.never_polled_working_accounts,
         "never_polled_failing_accounts": latest.never_polled_failing_accounts,
         "polled_no_rows_accounts": latest.polled_no_rows_accounts,
+        "over_age_accounts": latest.over_age_accounts,
+        "over_age_failing_accounts": latest.over_age_failing_accounts,
+        "oldest_over_age_days": latest.oldest_over_age_days,
+        "over_age_excluded_venue_accounts": latest.over_age_excluded_venue_accounts,
     }
 
 
@@ -4265,6 +4330,10 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 with sentry_sdk.new_scope() as scope:
                     scope.set_tag("compute_job_id", str(job.get("id")))
                     scope.set_tag("refresh_outcome", outcome)
+                    if hold_reason == "carry_over_age":
+                        # D-02: the count and the age, as integer tags only.
+                        scope.set_tag("over_age_accounts", latest.over_age_accounts)
+                        scope.set_tag("oldest_over_age_days", latest.oldest_over_age_days)
                     sentry_sdk.capture_message(
                         f"refresh_allocator_equity_daily: {outcome}, the day's "
                         "legacy snapshot write was held",
@@ -4466,6 +4535,23 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
         count = await persist_equity_snapshots(
             ctx.supabase, [row], allocator_id, depth_months,
         )
+        if latest.job_key_is_leader:
+            # D-01 / D-12: an account left out of a day that IS written is
+            # raised once per kind, by the leader only. Static messages, no id.
+            for left_out, outcome in (
+                (latest.never_polled_failing_accounts, "left_out_never_polled_failing"),
+                (latest.over_age_failing_accounts, "left_out_carry_over_age_failing"),
+            ):
+                if left_out > 0:
+                    with sentry_sdk.new_scope() as scope:
+                        scope.set_tag("compute_job_id", str(job.get("id")))
+                        scope.set_tag("refresh_outcome", outcome)
+                        sentry_sdk.capture_message(
+                            f"refresh_allocator_equity_daily: {outcome}, an "
+                            "account whose keys all fail was left out of today's "
+                            "legacy snapshot",
+                            level="warning",
+                        )
         if book_emptied:
             # SFH-R2-02: rare, and it zeroes the book's legacy series, so it is
             # loud. Counts only (no key id, no USD).

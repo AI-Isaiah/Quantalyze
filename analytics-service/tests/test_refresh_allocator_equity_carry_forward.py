@@ -1259,6 +1259,175 @@ async def test_hold_sentry_is_raised_by_the_leader_only(
             assert secret not in [str(v) for v in tags.values()]
 
 
+def _tags(sentry: Any) -> dict[str, Any]:
+    scope = sentry.new_scope.return_value.__enter__.return_value
+    return {call.args[0]: call.args[1] for call in scope.set_tag.call_args_list}
+
+
+async def _run_with_sentry(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeSupabaseClient, job_key: str = API_KEY_ID_1
+) -> tuple[Any, Any]:
+    from unittest.mock import patch
+
+    with patch("services.equity_reconstruction.sentry_sdk") as sentry:
+        audit = await _run_refresh(monkeypatch, fake, job_key)
+    return audit, sentry
+
+
+def _book_with_account_b(
+    fake: FakeSupabaseClient, *, b_age_days: int, b_venue: str = "bybit", **b_key: Any
+) -> None:
+    """Account A (key 1, okx) polled today. Account B (key 2) last had rows
+    ``b_age_days`` ago. B's account id is stamped, so the identity-unknown rule
+    (R2-CR-02) is not what decides these cases."""
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(
+        fake, API_KEY_ID_2,
+        **{"exchange": b_venue, "sync_status": "complete", "venue_account_id": "b-1", **b_key},
+    )
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    _seed_holding(fake, API_KEY_ID_2, b_venue, "BTC", TODAY - timedelta(days=b_age_days), 500.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("age", "held"), [(7, False), (8, True)])
+async def test_carry_age_cap_boundary(
+    monkeypatch: pytest.MonkeyPatch, age: int, held: bool
+) -> None:
+    """D-02 / SC-5 (167.1.2.1.1). A carry prices an account at ITS last poll's
+    marks. Past CARRY_AGE_CAP_DAYS = 7 days that is no longer the book's value,
+    and first-writer-wins would keep it. Age 7 is carried and written; age 8,
+    with a WORKING key (so the key is polled and the stale rows are not
+    explained by a dead key), holds the day with the count and the age."""
+    from services.equity_reconstruction import CARRY_AGE_CAP_DAYS
+
+    assert CARRY_AGE_CAP_DAYS == 7
+    fake = FakeSupabaseClient()
+    _book_with_account_b(fake, b_age_days=age)
+
+    audit, sentry = await _run_with_sentry(monkeypatch, fake)
+
+    if not held:
+        assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD + 500.0)
+        assert HELD_ACTION not in _audit_actions(audit)
+        assert _refresh_complete_metadata(audit)["max_carry_age_days"] == 7
+        assert sentry.capture_message.call_count == 0
+        return
+    _no_today_row(fake)
+    metadata = _held_metadata(audit)
+    assert metadata["reason"] == "carry_over_age"
+    assert metadata["over_age_accounts"] == 1
+    assert metadata["oldest_over_age_days"] == 8
+    assert "allocator.equity.refresh_complete" not in _audit_actions(audit)
+    ((message, tags),) = _sentry_calls(sentry)
+    assert tags["refresh_outcome"] == "held_carry_over_age"
+    assert tags["over_age_accounts"] == 1 and tags["oldest_over_age_days"] == 8
+    for secret in (API_KEY_ID_1, API_KEY_ID_2, ALLOCATOR_ID, "b-1", "bybit", "500"):
+        assert secret not in message
+
+
+@pytest.mark.asyncio
+async def test_over_age_account_with_only_failing_keys_is_left_out_not_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-12 (167.1.2.1.1, founder 2026-10-16 "Same split"). An account that is
+    over the cap AND whose eligible keys all fail has no key anyone can fix by
+    waiting, so holding the day for it would freeze the owner's snapshot store
+    for a dead key (T-11). It is left out with a count and a Sentry event
+    instead, and the day is written without it."""
+    fake = FakeSupabaseClient()
+    _book_with_account_b(fake, b_age_days=8, sync_status="error")
+
+    audit, sentry = await _run_with_sentry(monkeypatch, fake)
+
+    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert HELD_ACTION not in _audit_actions(audit)
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["over_age_failing_accounts"] == 1
+    assert metadata["over_age_accounts"] == 0
+    assert metadata["carried_keys"] == 0
+    ((message, tags),) = _sentry_calls(sentry)
+    assert tags["refresh_outcome"] == "left_out_carry_over_age_failing"
+    for secret in (API_KEY_ID_1, API_KEY_ID_2, ALLOCATOR_ID, "b-1", "bybit", "500"):
+        assert secret not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("job_key", "raises"), [(API_KEY_ID_1, True), (API_KEY_ID_2, False)])
+async def test_never_polled_failing_account_is_left_out_not_held(
+    monkeypatch: pytest.MonkeyPatch, job_key: str, raises: bool
+) -> None:
+    """D-01 (167.1.2.1.1). A never-read account whose eligible keys all fail is
+    a dead key, and nothing a later poll could fix by waiting. Holding the day
+    would freeze the snapshot store for it (T-11), so the day is written
+    without it, the audit counts it, and the LEADER job raises one Sentry
+    event."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="error", venue_account_id="b-1")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+
+    audit, sentry = await _run_with_sentry(monkeypatch, fake, job_key)
+
+    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert HELD_ACTION not in _audit_actions(audit)
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["never_polled_failing_accounts"] == 1
+    assert metadata["never_polled_working_accounts"] == 0
+    calls = _sentry_calls(sentry)
+    assert len(calls) == (1 if raises else 0), calls
+    if raises:
+        message, tags = calls[0]
+        assert tags["refresh_outcome"] == "left_out_never_polled_failing"
+        for secret in (API_KEY_ID_1, API_KEY_ID_2, ALLOCATOR_ID, "b-1", "bybit"):
+            assert secret not in message
+
+
+@pytest.mark.asyncio
+async def test_a_proven_empty_old_account_is_exempt_from_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap is about stale VALUE. An account whose poll proved it empty
+    contributes $0 whatever its last rows' age, so it is neither carried nor
+    held: the emptiness proof is decided BEFORE the cap."""
+    fake = FakeSupabaseClient()
+    _book_with_account_b(fake, b_age_days=10)
+    _seed_empty_proof(fake, API_KEY_ID_2, _at(TODAY))
+
+    audit, sentry = await _run_with_sentry(monkeypatch, fake)
+
+    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert HELD_ACTION not in _audit_actions(audit)
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["emptied_accounts"] == 1
+    assert metadata["over_age_accounts"] == 0
+    assert metadata["over_age_failing_accounts"] == 0
+    assert sentry.capture_message.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_deribit_only_over_age_account_does_not_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-13 (167.1.2.1.1), technical choice extended to the cap. Deribit rows
+    add $0 to the refresh total (the job skips the venue), so a stale Deribit
+    carry cannot make the total stale or short, the same reasoning as the
+    never-polled Deribit exemption. Holding the day for it would freeze the
+    book for a $0 contribution. It is counted for visibility only."""
+    fake = FakeSupabaseClient()
+    _book_with_account_b(fake, b_age_days=10, b_venue="deribit")
+
+    audit, sentry = await _run_with_sentry(monkeypatch, fake)
+
+    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert HELD_ACTION not in _audit_actions(audit)
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["over_age_excluded_venue_accounts"] == 1
+    assert metadata["over_age_accounts"] == 0
+    assert metadata["over_age_failing_accounts"] == 0
+    assert sentry.capture_message.call_count == 0
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("stale_days", "warns"), [(2, False), (3, False), (5, True)])
 async def test_carry_age_is_recorded_and_an_old_carry_warns(
