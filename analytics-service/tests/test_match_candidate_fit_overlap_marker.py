@@ -180,3 +180,29 @@ def test_arm_h_screening_mode_without_a_series_still_carries_no_marker() -> None
     raw = _raw_of(None, personalized=False)
     for key in REASON_KEYS:
         assert key not in raw
+
+
+def test_arm_i_an_empty_book_join_names_no_candidate() -> None:
+    # R6 MEDIUM-01: personalized (a holding exists) but the book has no returns of its own, so
+    # the batch-level D-22 ``book_join_marker`` names that cause. The ``and not
+    # portfolio_returns_series.empty`` guard on score_candidates' no-candidate-returns branch is
+    # what keeps the per-candidate marker off EVERY candidate here, with a series or without one.
+    # Without the guard each would read "no daily returns", a false cause that hides the book.
+    for cand_returns in ({"c1": _candidate_series("2026-01-01", "2026-03-01")}, {}):
+        result = score_candidates(
+            allocator_id="alloc-1",
+            preferences=None,
+            portfolio_strategies=[{"strategy_id": "p1"}],
+            portfolio_returns={},
+            portfolio_weights={"p1": 1.0},
+            candidate_strategies=[_candidate("c1")],
+            candidate_returns=cand_returns,
+            portfolio_aum=1_000_000,
+        )
+        # Not vacuous: the batch really is personalized while the book series is empty.
+        assert result["mode"] == "personalized"
+        assert [c["strategy_id"] for c in result["candidates"]] == ["c1"]
+        raw = json.loads(json.dumps(result["candidates"][0]["score_breakdown"]))["raw"]
+        assert raw["sharpe_lift"] is None
+        for key in REASON_KEYS:
+            assert key not in raw
