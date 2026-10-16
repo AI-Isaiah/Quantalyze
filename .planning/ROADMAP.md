@@ -5286,8 +5286,8 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 167.1.2.1.1-03-PLAN.md — refresh holds for a never-polled working account, a carry over 7 days and pending identity; the refresh_held audit action (SC-4, SC-5, SC-6)
-- [ ] 167.1.2.1.1-04-PLAN.md — SC-9 read-only PROD re-measure and the SC-8 deploy note (SC-8, SC-9)
+- [x] 167.1.2.1.1-03-PLAN.md — refresh holds for a never-polled working account, a carry over 7 days and pending identity; the refresh_held audit action (SC-4, SC-5, SC-6)
+- [x] 167.1.2.1.1-04-PLAN.md — SC-9 read-only PROD re-measure and the SC-8 deploy note (SC-8, SC-9)
 
 ### Phase 167.1.2.1.2: HISTORYREADER — Open Positions, Exchanges and the Overview show a departed or stale key's history truthfully (INSERTED)
 
