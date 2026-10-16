@@ -136,7 +136,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.1: JOBRPCTRUTH — the compute-job RPC surface does what its own comments say** (INSERTED) — verification: passed (completed 2026-09-27)
 - [x] **Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD** (INSERTED)
 - [x] **Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim** (INSERTED) — verification: passed (completed 2026-09-27, PR #890, v0.109.0.0)
-- [ ] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — not yet verified
+- [x] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — 11 plans, shipped as v0.132.1.0 (#1059), applied on TEST then PROD, re-dump #1061 and ratchet-row follow-up #1064; D-04 census on PROD 0 stranded children; verification passed 8/8; security SECURED 27/27 (completed 2026-10-16)
 - [x] **Phase 164.9.3.2: DEFER40001 — a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end** (INSERTED) — verification: passed (completed 2026-10-02, PR #919, v0.118.0.0)
 - [x] **Phase 164.9.3.2.1: ENQ40001 — the enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) answers a PostgREST caller instead of re-running the call** (INSERTED) — verification: passed (completed 2026-10-02, PR #929, v0.118.1.5)
 - [x] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — verification: passed (completed 2026-10-03, PR #880, v0.119.0.0)
@@ -4176,7 +4176,7 @@ Plans:
 **Goal:** The compute-job fan-in graph and the bridge's decision cascade never strand a job, raise a spurious 23505, or deadlock: a fan-in child whose parent fails reaches a terminal state, a `match_decisions` delete cascades without a unique violation, and a fan-in diamond cannot deadlock on the parent lock.
 **Requirements**: TODOS `[164.9.3.1-FANIN-GRAPH-RESIDUALS]` (owned here)
 **Depends on:** Phase 164.9.3 (the same compute-job RPC surface; CLAIMPAIR's migration re-bases `_enqueue_compute_job_internal` and the claim RPCs first, and this phase re-bases on it) ⛔ **CORRECTED 2026-09-27 (164.9.3 CONTEXT D-05/D-08):** CLAIMPAIR's migration re-bases ONLY the three claim bodies (`claim_compute_jobs`, both `claim_compute_jobs_with_priority` overloads). It edits NONE of `_enqueue_compute_job_internal`, `defer_compute_job`, `mark_compute_job_done` or `mark_compute_job_failed`, so this phase re-bases those on whatever is latest at its own plan time. The sentence before this note is kept as lineage.
-**Plans:** 0 plans
+**Plans:** 11/11 plans complete
 
 ⛔ **BOOKED 2026-09-26 UNDER THE NEW-PHASE FREEZE — NOT STARTED.** Founder decision (AskUserQuestion, "Re-route, don't start"): items (1), (2) and (3) of Phase 164.5.2's routed list leave 164.5.2 and land here. This phase gets no discuss, plan or execute step until the founder lifts the freeze for it.
 
@@ -4194,7 +4194,17 @@ Plans:
 
 Plans:
 
-- [ ] TBD — plans not listed yet
+- [x] 164.9.3.1-01-PLAN.md — wave 1: red-first SQL gate for the stranded child (D-01 to D-03) and the lock helper's ACL (D-06), four routed items booked
+- [x] 164.9.3.1-02-PLAN.md — wave 1: red-first two-backend gate for the lost release (D-07) and the diamond deadlock (D-06, SC-3)
+- [x] 164.9.3.1-03-PLAN.md — wave 1: red-first proofs for the cascade 23505 (D-05, SC-2): lane stand-in fixture, single-session gate, one live-DB arm
+- [x] 164.9.3.1-04-PLAN.md — wave 2: the single migration's lock half (ancestor-first helper, enqueue lock swap, lock-then-release split in `mark_compute_job_done`)
+- [x] 164.9.3.1-05-PLAN.md — wave 3: the failure cascade with the child-strategy bridge (D-01 to D-03), re-base proven minimal
+- [x] 164.9.3.1-06-PLAN.md — wave 4: the D-05 fix (option Y), catalog COMMENTs and generated types, gate C green
+- [x] 164.9.3.1-07-PLAN.md — wave 5: compute-job COMMENTs, VAC-04 acks, manual rollback, `[BLOCKING]` schema proof by local-stack replay
+- [x] 164.9.3.1-08-PLAN.md — wave 6: layered mutation twins for every arm of gates A and C
+- [x] 164.9.3.1-09-PLAN.md — wave 6: layered mutation twins for every arm of the two-backend gate B
+- [x] 164.9.3.1-10-PLAN.md — wave 7: every corpus census the new gates and arms shift
+- [x] 164.9.3.1-11-PLAN.md — wave 8: `POST /api/bridge/outcome` 500 fixed at its root (upsert `onConflict` pointed at the real unique index)
 
 **⭐ ROUTED IN 2026-09-26 (founder, "164.9.3.1 FANINGRAPH"; found by the 164.5.2 round-1 code review, WR-02, pre-existing):** a fan-in lost release. When two parents of one `done_pending_children` child mark done at the same time, the fan-in UPDATE in `mark_compute_job_done` (carried unchanged from `20260603120000`) lets each parent see the other as still running, so neither releases the child, and no sweep recovers it. This is the concurrent-parents twin of this phase's parent-fails strand. The 164.5.2 advisory lock is taken after the fan-in by design and does not change this. Success: two parents marking done concurrently always release the child exactly once, proven by a two-backend lane arm that fails on today's body.
 
@@ -6224,7 +6234,7 @@ kept verbatim.
 | 164.9.1 JOBRPCTRUTH | 14/14 | Complete | v0.93.0.0 · #860 · verification passed 2026-09-27 (last browser check closed) |
 | 164.9.2 REFDATAUPDATES | 5/5 | Complete | v0.93.0.1 · #862 |
 | 164.9.3 CLAIMPAIR | 6/6 | Complete    | 2026-09-27 |
-| 164.9.3.1 FANINGRAPH | 0/? | Queued — blocker, after 164.9.3 | - |
+| 164.9.3.1 FANINGRAPH | 11/11 | Complete — fan-in child never strands, decision delete and diamond stop failing; PROD stranded-child census 0; verification passed 8/8, SECURED 27/27 | 2026-10-16 · v0.132.1.0 · #1059, v0.132.1.1 · #1061, v0.132.1.5 · #1064 |
 | 164.9.3.2 DEFER40001 | 8/8 | Complete    | 2026-10-02 |
 | 164.9.3.2.1 ENQ40001 | 3/3 | Complete    | 2026-10-02 |
 | 164.9.4 CIOFFMUTEX | 12/12 | Complete    | 2026-10-03 |

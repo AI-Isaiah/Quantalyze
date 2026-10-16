@@ -6,15 +6,15 @@ current_phase: "166.5"
 current_phase_name: COMPUTEDATSTAMP
 status: executing
 stopped_at: 164.9.8.1 PYXDIST closed; 166.5 post-merge plan 09 outstanding
-last_updated: "2026-10-15T22:25:31.496Z"
+last_updated: "2026-10-16T07:30:38.590Z"
 last_activity: 2026-10-16
-last_activity_desc: "167.1.2.1 RECONMARKER closed (D-11 day-0 and day-1 reads as expected; verification passed; SECURED 33/33)"
+last_activity_desc: "164.9.3.1 FANINGRAPH closed (post-merge items confirmed; verification passed 8/8; SECURED 27/27)"
 state_head: 3dfc733667e8a5ac48cd1c8b830090c19e23460c
 progress:
   total_phases: 118
-  completed_phases: 108
-  total_plans: 772
-  completed_plans: 765
+  completed_phases: 109
+  total_plans: 783
+  completed_plans: 776
   percent: 92
 ---
 
@@ -174,8 +174,8 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: 166.5 (COMPUTEDATSTAMP) — EXECUTING
 Plan: 9 of 9
-Status: Executing — several phases in parallel. 166.5 COMPUTEDATSTAMP is the current one: both PRs merged and applied on PROD (#1047, #1050); the post-merge plan 09 reading is outstanding. Also in flight: 164.9.3.1 FANINGRAPH (merged as #1059, applied on PROD, ratchet follow-up #1064 merged, records pending), 167.1.2.2.2.1 OKXHISTORY (reviewed, ship next), 167.1.1.1 BRIDGERETURNS (planning), 170.1 COPY (planning). 164.6.6.3.6 MT5SERVERLEARN was retired from v1.20 on 2026-10-16 (founder: next milestone, maybe). 164.9.8.1 PYXDIST closed 2026-10-15 (#1054). 167.1.2.1 RECONMARKER closed 2026-10-16 (PR 1 #1022, PR 2 #1033; D-11 reads as expected, verification passed, SECURED 33/33).
-Last activity: 2026-10-16 — 167.1.2.1 RECONMARKER closed (D-11 reads as expected; verification passed; SECURED 33/33)
+Status: Executing — several phases in parallel. 166.5 COMPUTEDATSTAMP is the current one: both PRs merged and applied on PROD (#1047, #1050); plan 09 done 2026-10-16, verification waits on the Wave 5 recompute (D-05). Also in flight: 170.1 COPY (executed, final fixer round), 167.1.2.1.1 WRITERRESIDUALS (started 2026-10-16). Shipped, waiting on readings or founder steps: 167.1.1.1 BRIDGERETURNS (#1070, post-deploy SC4 reading), 167.1.2.2.2.1 OKXHISTORY (PR-A #1067, founder steps plans 12-15). 164.9.3.1 FANINGRAPH closed 2026-10-16 (#1059, re-dump #1061, ratchet follow-up #1064; post-merge items confirmed, verification passed 8/8, SECURED 27/27). 164.6.6.3.6 MT5SERVERLEARN was retired from v1.20 on 2026-10-16 (founder: next milestone, maybe). 164.9.8.1 PYXDIST closed 2026-10-15 (#1054). 167.1.2.1 RECONMARKER closed 2026-10-16 (PR 1 #1022, PR 2 #1033; D-11 reads as expected, verification passed, SECURED 33/33).
+Last activity: 2026-10-16 — 164.9.3.1 FANINGRAPH closed (post-merge items confirmed; verification passed 8/8; SECURED 27/27)
 Progress: [█████████░] 92%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
