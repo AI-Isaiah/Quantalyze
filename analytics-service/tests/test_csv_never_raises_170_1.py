@@ -479,6 +479,101 @@ def test_a_bad_zone_in_a_day_first_file_is_the_same_date_error_at_its_real_row(
     assert "0000-00-00" not in json.dumps(envelope, default=str)
 
 
+# Review SFH-R2 (D-14 final round). A NAMED zone the validator does not read
+# (`EST`, `CET`, ...) beside recognised offsets, in a DAY-FIRST column. pandas
+# reads such a value as NaT under every reading, so the zone check never saw it,
+# the day/month detector rewrote the column, and the unreadable cell became a
+# blank: `not_nullable` ("A required value is blank") instead of the
+# `coerce_dtype` ("A value is not a valid date or number") the D-14 amendment
+# requires. The same cell in an ISO column was already `coerce_dtype`.
+DAY_FIRST_NAMED_ZONE = [
+    "13/01/2024 10:00 +01:00",
+    "14/01/2024 10:00 +01:00",
+    "15/01/2024 10:00 EST",
+    "16/01/2024 10:00 +01:00",
+]
+ISO_NAMED_ZONE = [
+    "2024-01-13 10:00 +01:00",
+    "2024-01-14 10:00 +01:00",
+    "2024-01-15 10:00 EST",
+    "2024-01-16 10:00 +01:00",
+]
+
+
+def _date_errors(envelope: dict) -> list[tuple[str, int, str, str]]:
+    return [
+        (e["rule"], e["row"], e["message"], e["column"])
+        for e in envelope["errors"]
+        if e["rule"].startswith(COERCE_RULE_PREFIX)
+    ]
+
+
+@pytest.mark.parametrize("fmt", list(HEADER))
+@pytest.mark.parametrize(
+    "dates,bad_row",
+    [
+        pytest.param(DAY_FIRST_NAMED_ZONE, 3, id="day-first-est-in-the-middle"),
+        pytest.param(
+            ["13/01/2024 10:00 EST", "14/01/2024 10:00 +01:00", "15/01/2024 10:00 +01:00", "16/01/2024 10:00 +01:00"],
+            1,
+            id="day-first-est-first",
+        ),
+        pytest.param(
+            ["13/01/2024 10:00 +01:00", "14/01/2024 10:00 +01:00", "15/01/2024 10:00 +01:00", "16/01/2024 10:00 CEST"],
+            4,
+            id="day-first-cest-last",
+        ),
+    ],
+)
+def test_a_named_zone_in_a_day_first_file_is_a_date_error_not_a_blank(
+    fmt: str, dates: list[str], bad_row: int
+) -> None:
+    envelope = validate_csv(_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert {row for _, row, _, _ in _date_errors(envelope)} == {bad_row}, envelope["errors"]
+    assert "not_nullable" not in {e["rule"] for e in envelope["errors"]}, envelope["errors"]
+    assert "0000-00-00" not in json.dumps(envelope, default=str)
+
+
+@pytest.mark.parametrize("fmt", list(HEADER))
+def test_the_day_first_named_zone_error_has_the_shape_the_iso_file_gets(fmt: str) -> None:
+    """Rule string, row, message and column are what pandera emits for the same
+    cell in an ISO column: the day-first file must not read differently."""
+    day_first = validate_csv(_file(fmt, DAY_FIRST_NAMED_ZONE), fmt)
+    iso = validate_csv(_file(fmt, ISO_NAMED_ZONE), fmt)
+
+    assert day_first["ok"] is False and iso["ok"] is False
+    assert _date_errors(iso), iso["errors"]  # the ISO path still gives coerce_dtype
+    assert _date_errors(day_first) == _date_errors(iso)
+
+
+def test_the_repro_from_the_review_gives_coerce_dtype_at_row_3() -> None:
+    """Five rows, `daily_returns`, one `EST` among `+01:00` rows (SFH-R2)."""
+    dates = [
+        "13/01/2024 10:00 +01:00",
+        "14/01/2024 10:00 +01:00",
+        "15/01/2024 10:00 EST",
+        "16/01/2024 10:00 +01:00",
+        "17/01/2024 10:00 +01:00",
+    ]
+    raw = ("date,daily_return\n" + "\n".join(f"{d},0.0{i + 1}" for i, d in enumerate(dates)) + "\n").encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert envelope["ok"] is False
+    assert [(rule.split("(")[0], row) for rule, row, _, _ in _date_errors(envelope)] == [("coerce_dtype", 3)]
+    assert "not_nullable" not in {e["rule"] for e in envelope["errors"]}
+
+
+def test_a_time_with_am_pm_is_not_mistaken_for_a_zone_name() -> None:
+    """Control for the reach of the rule: `PM` is a trailing capital word too, but
+    pandas reads the value, so it is a date and not a zone."""
+    dates = ["13/01/2024 10:00 PM", "14/01/2024 10:00 PM", "15/01/2024 10:00 PM", "16/01/2024 10:00 PM"]
+    envelope = validate_csv(_file("daily_returns", dates), "daily_returns")
+
+    assert envelope["ok"] is True, envelope["errors"]
+
+
 def test_the_preview_of_a_rejected_zone_file_shows_what_the_user_wrote() -> None:
     """The guard replaces the cell with an unparseable token while pandera runs.
     That token is an implementation detail and must not reach the preview."""
@@ -640,6 +735,110 @@ def test_an_exact_repeat_under_a_leading_blank_header_row_is_found_too() -> None
     assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
         ("parse_error", 0, DUPLICATE_HEADER_MESSAGE)
     ]
+
+
+# Review R-1 / SFH-R1 (D-14 final round). The raw header used to be read with
+# `pd.read_csv(header=None)`, which fixes the field count from the FIRST line. An
+# Excel-style blank first row NARROWER than the real header made that read raise,
+# the error was swallowed, and the caller fell back to pandas' renamed columns
+# (`daily_return`, `daily_return.1`), so the repeat was never seen and the user's
+# second column was ignored without a word. The header is now read with the stdlib
+# `csv` reader, which infers no field count.
+_BODY_ROWS = "2024-03-10,0.001,0.5\n2024-03-11,0.002,0.5\n2024-03-12,-0.001,0.5\n"
+
+
+def _under_blank_row(blank: str, header: str, rows: str = _BODY_ROWS) -> bytes:
+    return f"{blank}\n{header}\n{rows}".encode()
+
+
+# (blank first row, header, id). Each header repeats the declared `daily_return`.
+BLANK_ROW_REPEATS = [
+    pytest.param(",", "date,daily_return,daily_return", id="narrower-blank-row"),
+    pytest.param(",,", "date,daily_return,daily_return", id="equal-width-blank-row"),
+    pytest.param(",,,,", "date,daily_return,daily_return", id="wider-blank-row"),
+    pytest.param(
+        ",",
+        'date,daily_return,"a,b",daily_return',
+        id="narrower-blank-row-quoted-comma-before-the-repeat",
+    ),
+]
+
+
+@pytest.mark.parametrize("blank,header", BLANK_ROW_REPEATS)
+def test_an_exact_repeat_is_found_under_a_blank_first_row_of_any_width(blank: str, header: str) -> None:
+    rows = _BODY_ROWS if "a,b" not in header else _BODY_ROWS.replace(",0.5", ",x,0.5")
+    envelope = validate_csv(_under_blank_row(blank, header, rows), "daily_returns")
+
+    assert envelope["ok"] is False, envelope
+    assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", 0, DUPLICATE_HEADER_MESSAGE)
+    ]
+    assert envelope["preview"] is None
+    assert "daily_returns_series" not in envelope
+
+
+def test_an_exact_repeat_is_found_under_a_leading_empty_line_and_a_narrower_blank_row() -> None:
+    """pandas skips a truly empty line; the blank row that follows is record 0."""
+    raw = b"\n,\ndate,daily_return,daily_return\n" + _BODY_ROWS.encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert [(e["rule"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", DUPLICATE_HEADER_MESSAGE)
+    ]
+
+
+def test_an_exact_repeat_is_found_under_a_byte_order_mark_and_a_narrower_blank_row() -> None:
+    raw = b"\xef\xbb\xbf,\ndate,daily_return,daily_return\n" + _BODY_ROWS.encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert [(e["rule"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", DUPLICATE_HEADER_MESSAGE)
+    ]
+
+
+def test_an_exact_repeat_is_found_when_an_earlier_header_cell_holds_a_quoted_newline() -> None:
+    raw = (
+        b',\ndate,"no\nte",daily_return,daily_return\n'
+        b"2024-03-10,x,0.001,0.5\n2024-03-11,x,0.002,0.5\n2024-03-12,x,-0.001,0.5\n"
+    )
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert [(e["rule"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", DUPLICATE_HEADER_MESSAGE)
+    ]
+
+
+@pytest.mark.parametrize("blank", [",", ",,", ",,,,"])
+def test_a_good_header_under_a_blank_first_row_of_any_width_is_still_accepted(blank: str) -> None:
+    """Control: the blank-row skip still works, and a header that repeats nothing
+    (a quoted comma inside one cell is one cell, an undeclared pair is dropped) is
+    not rejected by the raw-header read."""
+    raw = (
+        f'{blank}\ndate,daily_return,"a,b",Notes,notes\n'
+        "2024-03-10,0.001,x,p,q\n2024-03-11,0.002,x,p,q\n2024-03-12,-0.001,x,p,q\n"
+    ).encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert [r["daily_return"] for r in envelope["daily_returns_series"]] == [0.001, 0.002, -0.001]
+
+
+def test_a_header_record_the_raw_read_cannot_parse_is_rejected_not_waved_through() -> None:
+    """FAIL CLOSED. The raw-header read used to fall back to pandas' renamed
+    columns when it failed, which restores the exact defect it exists to remove.
+    A header cell over the stdlib reader's field limit (131072 characters) is a
+    file pandas reads and the raw read cannot: it must be rejected, with the
+    existing `Could not parse CSV: ...` sentence, and echo no cell."""
+    big = "x" * 200_000
+    raw = f"date,daily_return,{big}\n2024-03-10,0.001,a\n2024-03-11,0.002,b\n".encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert envelope["ok"] is False, envelope
+    assert "daily_returns_series" not in envelope
+    assert envelope["preview"] is None
+    assert [(e["rule"], e["row"]) for e in envelope["errors"]] == [("parse_error", 0)]
+    assert envelope["errors"][0]["message"].startswith("Could not parse CSV: ")
+    assert big[:50] not in json.dumps(envelope, default=str)
 
 
 @pytest.mark.parametrize(
