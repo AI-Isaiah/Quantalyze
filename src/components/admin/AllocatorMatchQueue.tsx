@@ -42,6 +42,10 @@ interface ScoreBreakdown {
     ticket_concentration?: number | null;
     sharpe?: number | null;
     max_drawdown_pct?: number | null;
+    // GAP-01: present only when the candidate shares too few days with the book.
+    fit_unavailable_reason?: string | null;
+    fit_overlap_days?: number | null;
+    fit_min_overlap_days?: number | null;
   };
 }
 
