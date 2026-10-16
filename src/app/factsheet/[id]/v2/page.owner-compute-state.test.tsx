@@ -1207,7 +1207,7 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
 const ANALYTICS_FAILED_LINE =
   "Analytics couldn't be computed from this data. We've logged the error.";
 const SHARE_ANALYTICS_FAILED =
-  "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy yet.";
+  "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy. Use the contact form to have it resolved.";
 
 describe("164.6.6.3.3 D-08 — a finished job whose analytics failed", () => {
   it("B23 KCS09-FINISHED-ANALYTICS-FAILED: the red line and the permanent contact remedy, not the generic 'could not be built' line", async () => {

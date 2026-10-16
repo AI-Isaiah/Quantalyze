@@ -721,9 +721,9 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
   // 164.6.6.3.3 D-08 (UI-SPEC section 4.2), typed out, never imported: the
   // analytics row FAILED. The second sentence is D-08's public sentence.
   const ANALYTICS_FAILED =
-    "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy yet.";
+    "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy. Use the contact form to have it resolved.";
   const PUBLIC_ANALYTICS_FAILED =
-    "Right now, this strategy's factsheet link opens a page without the numbers. Analytics are not available for this strategy yet.";
+    "Right now, this strategy's factsheet link opens a page without the numbers. Analytics are not available for this strategy. Use the contact form to have it resolved.";
 
   function noteOf(container: HTMLElement, strategyName: string): string | null {
     return shareNoteOf(container, strategyName)?.textContent ?? null;

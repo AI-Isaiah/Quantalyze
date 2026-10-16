@@ -329,14 +329,14 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     }
   });
 
-  // 164.6.6.3.3 D-08 (UI-SPEC section 4.2): the analytics row failed. Typed out,
-  // never imported. The second sentence is D-08's public sentence verbatim.
+  // 164.6.6.3.3 D-08 (UI-SPEC section 4.2), 170.1 D-08: the analytics row
+  // failed. Typed out, never imported. The tail tells the owner to act.
   const ANALYTICS_FAILED =
-    "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy yet.";
+    "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy. Use the contact form to have it resolved.";
   const ANALYTICS_FAILED_UNREADABLE =
-    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. Analytics are not available for this strategy yet.";
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. Analytics are not available for this strategy. Use the contact form to have it resolved.";
   const PUBLIC_ANALYTICS_FAILED =
-    "Right now, this strategy's factsheet link opens a page without the numbers. Analytics are not available for this strategy yet.";
+    "Right now, this strategy's factsheet link opens a page without the numbers. Analytics are not available for this strategy. Use the contact form to have it resolved.";
 
   it("KCS12-UNBUILDABLE-ANALYTICS-FAILED: private link, arm not_available", () => {
     expect(recipientShareNoteFor("mint-token", "not_available", "analytics_failed")).toBe(
@@ -358,6 +358,41 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     }
   });
 
+  // 170.1 D-08 / R-1: the jobs finished but no factsheet was built. Typed out
+  // from 170.1-UI-SPEC.md "Finished job, factsheet not built", never imported.
+  const FINISHED_NOT_BUILT =
+    "Right now, a private link to this strategy shows that its factsheet is not available. The last computation finished, but we could not build the factsheet from its results. Use the contact form to have it checked.";
+  const FINISHED_NOT_BUILT_UNREADABLE =
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. The last computation finished, but we could not build the factsheet from its results. Use the contact form to have it checked.";
+  const PUBLIC_FINISHED_NOT_BUILT =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. The last computation finished, but we could not build the factsheet from its results. Use the contact form to have it checked.";
+
+  it("KCS12-FINISHED-NOT-BUILT: private link, arm not_available, ends with the body's contact-check instruction", () => {
+    expect(recipientShareNoteFor("mint-token", "not_available", "finished_not_built")).toBe(
+      FINISHED_NOT_BUILT,
+    );
+  });
+
+  it("KCS12-FINISHED-NOT-BUILT: private link, arm unreadable (type-forced row)", () => {
+    expect(recipientShareNoteFor("mint-token", "unreadable", "finished_not_built")).toBe(
+      FINISHED_NOT_BUILT_UNREADABLE,
+    );
+  });
+
+  it("KCS12-PUBLIC-FINISHED-NOT-BUILT: public URL, any arm", () => {
+    for (const arm of ARMS) {
+      expect(recipientShareNoteFor("public-url", arm, "finished_not_built")).toBe(
+        PUBLIC_FINISHED_NOT_BUILT,
+      );
+    }
+  });
+
+  it("a running recompute keeps KCS12-MINT-A for a finished-not-built row (in_progress is not this state)", () => {
+    expect(recipientShareNoteFor("mint-token", "in_progress", "finished_not_built")).toBe(
+      "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.",
+    );
+  });
+
   it("a running recompute keeps KCS12-MINT-A for an analytics-failed row", () => {
     expect(recipientShareNoteFor("mint-token", "in_progress", "analytics_failed")).toBe(
       "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.",
@@ -368,10 +403,10 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     for (const mode of ["mint-token", "public-url"] as const) {
       for (const arm of ["not_available", "unreadable"] as const) {
         const note = recipientShareNoteFor(mode, arm, "analytics_failed").toLowerCase();
-        for (const word of ["computation", "computing", "failed", "pending", "job", "error", "stored results"]) {
+        for (const word of ["computation", "computing", "failed", "pending", "job", "error", "stored results", "yet"]) {
           expect(note).not.toContain(word);
         }
-        expect(note.endsWith("analytics are not available for this strategy yet.")).toBe(true);
+        expect(note.endsWith("use the contact form to have it resolved.")).toBe(true);
       }
     }
   });
@@ -419,7 +454,7 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     // The row's computation DID succeed; waiting for one changes nothing.
     for (const mode of ["mint-token", "public-url"] as const) {
       for (const arm of ARMS) {
-        for (const kind of ["too_short", "cannot_build", "analytics_failed"] as const) {
+        for (const kind of ["too_short", "cannot_build", "analytics_failed", "finished_not_built"] as const) {
           if (mode === "mint-token" && arm === "in_progress") continue; // MINT-A, D-02
           expect(recipientShareNoteFor(mode, arm, kind)).not.toContain(
             "once a computation succeeds",
@@ -451,6 +486,18 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     // The detail never changes a reason it does not belong to.
     expect(unbuildableNoteKindOf("too_few_points", { analyticsFailed: true })).toBe("too_short");
     expect(unbuildableNoteKindOf("read_error", { analyticsFailed: true })).toBeNull();
+  });
+
+  it("unbuildableNoteKindOf: not_computed is finished_not_built only with jobsFinished, and analyticsFailed wins (170.1 D-08, T-170.1-18)", () => {
+    expect(unbuildableNoteKindOf("not_computed", { jobsFinished: true })).toBe("finished_not_built");
+    expect(unbuildableNoteKindOf("not_computed", { analyticsFailed: true, jobsFinished: true })).toBe(
+      "analytics_failed",
+    );
+    expect(unbuildableNoteKindOf("not_computed", { jobsFinished: false })).toBeNull();
+    expect(unbuildableNoteKindOf("not_computed", {})).toBeNull();
+    // jobsFinished never changes a reason it does not belong to.
+    expect(unbuildableNoteKindOf("too_few_points", { jobsFinished: true })).toBe("too_short");
+    expect(unbuildableNoteKindOf("read_error", { jobsFinished: true })).toBeNull();
   });
 
   it("L-1 EXHAUSTIVE: a reason the switch does not list fails loud instead of reading as 'no kind'", () => {

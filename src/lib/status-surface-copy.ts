@@ -422,7 +422,11 @@ export function recipientShareNote(
  * composite, or since 167.2.1-REVIEW-SFH M-3 a single-key series whose stored
  * entries are malformed.
  */
-export type UnbuildableNoteKind = "too_short" | "cannot_build" | "analytics_failed";
+export type UnbuildableNoteKind =
+  | "too_short"
+  | "cannot_build"
+  | "analytics_failed"
+  | "finished_not_built";
 
 /**
  * The note kind for a probe reason, or null when the reason is not a
@@ -431,6 +435,11 @@ export type UnbuildableNoteKind = "too_short" | "cannot_build" | "analytics_fail
  * the resolve stage said the analytics row FAILED (`detail.analyticsFailed`,
  * 164.6.6.3.3 D-08); otherwise it is null and the caller keeps the arm note.
  *
+ * 170.1 D-08: a `not_computed` row whose compute JOBS read finished
+ * (`detail.jobsFinished`, supplied by the caller from the derived
+ * ComputeState) is `finished_not_built`: the jobs ran, the factsheet did not
+ * build, and waiting changes nothing. `analyticsFailed` still wins.
+ *
  * 167.2.1-REVIEW-SFH L-1: every reason is listed and the switch ends in a
  * `never` check, so a new `NotBuildableReason` is a compile error here instead
  * of silently answering "no kind" (which renders uncomputed copy for a
@@ -438,7 +447,9 @@ export type UnbuildableNoteKind = "too_short" | "cannot_build" | "analytics_fail
  */
 export function unbuildableNoteKindOf(
   reason: NotBuildableReason,
-  detail?: Pick<NotBuildableDetail, "analyticsFailed">,
+  detail?: Pick<NotBuildableDetail, "analyticsFailed"> & {
+    jobsFinished?: boolean;
+  },
 ): UnbuildableNoteKind | null {
   switch (reason) {
     case "too_few_points":
@@ -451,10 +462,13 @@ export function unbuildableNoteKindOf(
       return null;
     // 164.6.6.3.3 D-08: an analytics row that FAILED is a fact about the data,
     // and the recipient's page is the same placeholder whatever the jobs say.
-    // A running or pending row (no `analyticsFailed`) keeps the arm-derived
-    // note, decided by the caller.
+    // A running or pending row (neither fact) keeps the arm-derived note,
+    // decided by the caller. 170.1 D-08: jobs that FINISHED without a built
+    // factsheet are `finished_not_built`.
     case "not_computed":
-      return detail?.analyticsFailed ? "analytics_failed" : null;
+      if (detail?.analyticsFailed) return "analytics_failed";
+      if (detail?.jobsFinished) return "finished_not_built";
+      return null;
     default: {
       const unhandled: never = reason;
       throw new Error(`unbuildableNoteKindOf: unhandled reason ${String(unhandled)}`);
@@ -489,7 +503,9 @@ const MINT_UNBUILDABLE_NOTES = {
   cannot_build:
     "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Use the contact form to have them checked.",
   analytics_failed:
-    "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy yet.",
+    "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy. Use the contact form to have it resolved.",
+  finished_not_built:
+    "Right now, a private link to this strategy shows that its factsheet is not available. The last computation finished, but we could not build the factsheet from its results. Use the contact form to have it checked.",
 } as const satisfies Record<UnbuildableNoteKind, string>;
 
 const PUBLIC_UNBUILDABLE_NOTES = {
@@ -498,7 +514,9 @@ const PUBLIC_UNBUILDABLE_NOTES = {
   cannot_build:
     "Right now, this strategy's factsheet link shows that the factsheet is not available. We cannot build a factsheet from its stored results. Use the contact form to have them checked.",
   analytics_failed:
-    "Right now, this strategy's factsheet link opens a page without the numbers. Analytics are not available for this strategy yet.",
+    "Right now, this strategy's factsheet link opens a page without the numbers. Analytics are not available for this strategy. Use the contact form to have it resolved.",
+  finished_not_built:
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. The last computation finished, but we could not build the factsheet from its results. Use the contact form to have it checked.",
 } as const satisfies Record<UnbuildableNoteKind, string>;
 
 // 167.2.1-REVIEW-SFH H-2 — a private link to an unbuildable row whose job
@@ -513,7 +531,12 @@ const MINT_UNBUILDABLE_UNREADABLE_NOTES = {
   cannot_build:
     "Right now, a private link to this strategy shows a placeholder page instead of the numbers. We cannot build a factsheet from its stored results. Use the contact form to have them checked.",
   analytics_failed:
-    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. Analytics are not available for this strategy yet.",
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. Analytics are not available for this strategy. Use the contact form to have it resolved.",
+  // Type-forced: `unbuildableNoteKindOf` yields this kind only for a finished
+  // job, and a finished job's state read did not fail, so this arm combination
+  // is not reached today. The string is the UI-SPEC row, kept so the map stays total.
+  finished_not_built:
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. The last computation finished, but we could not build the factsheet from its results. Use the contact form to have it checked.",
 } as const satisfies Record<UnbuildableNoteKind, string>;
 
 // 167.2.1-REVIEW-SFH H-2 — the buildability check itself failed (the probe
