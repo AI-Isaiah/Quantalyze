@@ -18,6 +18,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 
 from services.csv_fault import report_csv_internal_fault
+from services.csv_offload import run_csv_validation
 from services.csv_validator import UNSUPPORTED_FMT_MESSAGE, validate_csv
 # PYAPI-03 — the canonical process-wide Limiter. This module used to declare its
 # own ``Limiter(key_func=get_remote_address)``: keyed on the Railway EDGE ip
@@ -86,7 +87,8 @@ async def csv_validate(
         })
 
     try:
-        result = validate_csv(raw, fmt)
+        # Off the event loop (T-170.1-51): see services/csv_offload.py.
+        result = await run_csv_validation(validate_csv, raw, fmt)
     except Exception as e:
         # 170.1 / D-10 — NEVER LOG OR RETURN THE EXCEPTION TEXT. A pandas /
         # pandera / int() message routinely carries the offending CELL
