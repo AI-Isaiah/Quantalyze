@@ -903,16 +903,20 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
       />
 
       {/* 170.1 D-07 / UI-SPEC V-1: renders whether or not the list read
-          succeeded; the unreadable card below states a read failure itself. A
-          square data panel (DESIGN.md): no radius, no shadow, no icon, and no
-          truncation, so it wraps by word at 390 px. */}
+          succeeded. When it failed there is no list, so "listed below as
+          pending review" would be false (170.1-REVIEW SFH-3): the line is cut
+          to "Strategy submitted." and the unreadable card below states the read
+          failure itself. A square data panel (DESIGN.md): no radius, no shadow,
+          no icon, and no truncation, so it wraps by word at 390 px. */}
       {justSubmitted && (
         <p
           role="status"
           data-testid="wizard-submitted-status"
           className="mb-4 border border-border bg-surface px-4 py-3 text-small text-text-primary"
         >
-          Strategy submitted. It is listed below as pending review.
+          {strategiesUnreadable
+            ? "Strategy submitted."
+            : "Strategy submitted. It is listed below as pending review."}
         </p>
       )}
 

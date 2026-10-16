@@ -97,6 +97,9 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 const STATUS_LINE = "Strategy submitted. It is listed below as pending review.";
+// When the list read failed there is no list, so the sentence is cut short
+// (170.1-REVIEW SFH-3): "listed below" would be false.
+const STATUS_LINE_LIST_UNREADABLE = "Strategy submitted.";
 const LIST_UNREADABLE = "We could not load your strategies. Reload this page to try again.";
 
 type Query = Record<string, string | string[] | undefined>;
@@ -215,13 +218,15 @@ describe("StrategiesPage — the wizard-submitted status line (170.1 D-07, UI-SP
     expect(line.compareDocumentPosition(list) & FOLLOWING).toBeTruthy();
   });
 
-  it("still renders when the list read fails, and the load-failure sentence follows it", async () => {
+  it("still renders when the list read fails, drops \"listed below\" (no list exists), and the load-failure sentence follows it", async () => {
     state.strategiesError = { message: "synthetic list failure" };
 
     const container = await renderPage({ wizard_submitted: "1" });
 
     const line = statusOf(container)!;
-    expect(line.textContent).toBe(STATUS_LINE);
+    expect(line.textContent).toBe(STATUS_LINE_LIST_UNREADABLE);
+    expect(line.textContent).not.toContain("listed below");
+    expect(container.textContent).not.toContain("listed below");
     const unreadable = container.querySelector('[data-testid="strategies-list-unreadable"]')!;
     expect(unreadable.textContent).toBe(LIST_UNREADABLE);
     expect(line.compareDocumentPosition(unreadable) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
