@@ -1746,6 +1746,34 @@ describe("derived-row outcomes — the reason says why there is no series", () =
     expect(untrusted([], { flags: ["shared_account_no_working_key"] })).toBe(
       "derivation_rejected",
     );
+    // 167.1.2.1.1 SC-1 (D-04): a derive refusal persists its token and the reader
+    // maps it onto a line the owner already has (the full table is
+    // analytics-service/tests/fixtures/derive_refusal_rows.json, asserted in
+    // src/lib/__tests__/derive-refusal-rows.test.ts; these are the negative controls).
+    expect(untrusted(["account_duplicate"])).toBe("duplicate_account");
+    expect(untrusted(["account_identity_collision"])).toBe("duplicate_account");
+    expect(untrusted(["compose_incomplete"])).toBe("awaiting_derivation");
+    expect(untrusted(["compose_empty"])).toBe("awaiting_derivation");
+    for (const token of [
+      "returns_read_cap",
+      "input_corrupt",
+      "compose_refused",
+      "compose_empty_blocked",
+    ]) {
+      expect(untrusted([token])).toBe("derivation_rejected");
+    }
+    // A wait token is a wait only ALONE: next to another token it is a refusal.
+    expect(untrusted(["compose_incomplete", "dropped_key"])).toBe("derivation_rejected");
+    // Precedence: the owner-fixable cause wins, whatever the array order.
+    expect(untrusted(["account_duplicate", "shared_account_no_working_key"])).toBe(
+      "shared_account_no_working_key",
+    );
+    expect(untrusted(["shared_account_history_truncated", "account_identity_collision"])).toBe(
+      "duplicate_account",
+    );
+    // The token in `flags` only, or in a non-array, keeps the generic line.
+    expect(untrusted([], { flags: ["account_identity_collision"] })).toBe("derivation_rejected");
+    expect(untrusted("account_duplicate")).toBe("derivation_rejected");
     // Only the writer's untrustworthy verdict is read this way: a pre-v2 row
     // waits, and a malformed v2 row stays derivation_rejected.
     expect(

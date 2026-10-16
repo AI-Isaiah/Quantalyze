@@ -37,6 +37,8 @@ type RefusalRow = {
 type Table = {
   composed_at: string;
   refusals: RefusalRow[];
+  blocking: { token: string; reader_reason: string }[];
+  precedence: { degrade_reasons: string[]; reader_reason: string }[];
 };
 
 const FIXTURE = resolve(
@@ -63,6 +65,33 @@ describe("derive refusal rows: the reader names a line it already has", () => {
       expect(result.equityDailyReturns).toEqual([]);
       expect(result.equityCurveSource).toBe("legacy");
       expect(result.derivedCurveComputedAt).toBeNull();
+    },
+  );
+});
+
+/** An untrustworthy v2 row carrying exactly these tokens (the writer's own shape). */
+const untrusted = (degrade_reasons: string[]) => ({
+  ...TABLE.refusals[0].payload,
+  degrade_reasons,
+});
+
+describe("every blocking DegradeReason keeps its line, and a wait token is a wait only alone", () => {
+  it.each(TABLE.blocking.map((b) => [b.token, b] as const))(
+    "%s -> its fixture reader_reason",
+    (_token, row) => {
+      expect(readRow(untrusted([row.token])).equityHistoryRebuildReason).toBe(row.reader_reason);
+    },
+  );
+
+  it.each(TABLE.precedence.map((p) => [p.degrade_reasons.join(" + "), p] as const))(
+    "%s -> its fixture reader_reason, whatever the array order",
+    (_name, row) => {
+      const want = row.reader_reason;
+      expect(readRow(untrusted(row.degrade_reasons)).equityHistoryRebuildReason).toBe(want);
+      // The writer sorts the tokens, so array order must never decide.
+      expect(readRow(untrusted([...row.degrade_reasons].reverse())).equityHistoryRebuildReason).toBe(
+        want,
+      );
     },
   );
 });

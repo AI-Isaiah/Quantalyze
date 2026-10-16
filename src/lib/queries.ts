@@ -4416,14 +4416,29 @@ export type MissingSeriesReason = Extract<
 >;
 
 /**
- * Review C2 round 3 R3-WR-03 / SFH-R3-04. The reason for a v2 row the writer
- * marked untrustworthy. Two of the writer's blocking tokens (job_worker's
- * compose call puts them in `degrade_reasons`, never in `flags`) have a cause
- * the owner can be told, so they get their own line instead of "did not pass
- * its checks". When both are present, `shared_account_no_working_key` wins
- * because it is the one the owner can fix; the writer sorts the tokens, so
- * array order must not decide. Every other token, and a payload with no
- * readable tokens, keeps `derivation_rejected`.
+ * Review C2 round 3 R3-WR-03 / SFH-R3-04, widened by 167.1.2.1.1 SC-1 (D-04).
+ * The reason for a v2 row the writer marked untrustworthy. The tokens are read
+ * from `degrade_reasons` (where job_worker puts them, never in `flags`), and the
+ * most actionable cause wins, so the writer's sorted array order never decides:
+ *
+ *   1. `shared_account_no_working_key`: the one the owner can fix.
+ *   2. `account_duplicate` / `account_identity_collision`: the derive refused
+ *      the book over two keys reading one exchange account (SC-1 persists the
+ *      refusal instead of deleting the row), the line the key list already
+ *      gives a marked duplicate: `duplicate_account`.
+ *   3. `shared_account_history_truncated`.
+ *   4. `compose_incomplete` / `compose_empty` ALONE: the derive is waiting on
+ *      its siblings or has nothing to draw yet, which the daily recompute does
+ *      answer: `awaiting_derivation`. Next to ANY other token (for example
+ *      `dropped_key`) it is not a wait, so it falls through. `compose_empty_blocked`
+ *      is a different token, so a blocking cause cannot be swallowed by the wait.
+ *   5. Every other token, and a payload with no readable tokens, keeps
+ *      `derivation_rejected` (`returns_read_cap`, `input_corrupt`,
+ *      `compose_refused`, `compose_empty_blocked`, every other blocker).
+ *
+ * No new line exists for any refusal token: each maps onto one the owner already
+ * sees. The table both runtimes and the census assert is
+ * analytics-service/tests/fixtures/derive_refusal_rows.json.
  *
  * Residual (recorded): alongside another blocker (for example `dropped_key`)
  * the named line is still true, but fixing the key alone may not unlock the
@@ -4433,6 +4448,7 @@ function untrustworthyRebuildReason(
   payload: unknown,
 ): Extract<
   MissingSeriesReason,
+  | "awaiting_derivation"
   | "derivation_rejected"
   | "duplicate_account"
   | "shared_account_no_working_key"
@@ -4446,10 +4462,17 @@ function untrustworthyRebuildReason(
   if (tokens.includes("shared_account_no_working_key")) {
     return "shared_account_no_working_key";
   }
-  // 167.1.2.1.1 SC-1 (D-04): the derive's identity refusal persists its token.
-  if (tokens.includes("account_identity_collision")) return "duplicate_account";
+  if (tokens.includes("account_duplicate") || tokens.includes("account_identity_collision")) {
+    return "duplicate_account";
+  }
   if (tokens.includes("shared_account_history_truncated")) {
     return "shared_account_history_truncated";
+  }
+  if (
+    tokens.length === 1 &&
+    (tokens[0] === "compose_incomplete" || tokens[0] === "compose_empty")
+  ) {
+    return "awaiting_derivation";
   }
   return "derivation_rejected";
 }

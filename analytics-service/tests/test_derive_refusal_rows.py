@@ -37,3 +37,55 @@ def test_refusal_payload_is_the_fixture_row(row: dict[str, Any]) -> None:
     )
     # Through JSON, as the row is stored: enum members must serialise as tokens.
     assert json.loads(json.dumps(built)) == row["payload"]
+
+
+# The reader lines a degrade_reasons token can map to. All exist in the reader
+# already (EquityHistoryRebuildReason in src/lib/queries.ts); a value outside
+# this set would mean a new owner-facing line, which this phase does not add.
+EXISTING_READER_LINES = {
+    "awaiting_derivation",
+    "derivation_rejected",
+    "duplicate_account",
+    "shared_account_no_working_key",
+    "shared_account_history_truncated",
+}
+
+
+def test_the_fixture_has_one_refusal_row_per_derive_refusal_member() -> None:
+    """A member added to ``DeriveRefusal`` without a fixture row, or a row left
+    behind for a removed member, fails here by name. Without this, a token the
+    reader and the census never learned would still persist, and the owner
+    would read the generic line for a cause the fixture never pinned."""
+    from services.allocator_equity_derive import DeriveRefusal
+
+    tokens = [row["token"] for row in TABLE["refusals"]]
+    assert len(tokens) == len(set(tokens)), "a token appears twice"
+    assert set(tokens) == {m.value for m in DeriveRefusal}
+    for row in TABLE["refusals"]:
+        assert row["reader_reason"] in EXISTING_READER_LINES, row["token"]
+
+
+def test_the_fixture_has_one_blocking_row_per_blocking_degrade_reason() -> None:
+    """The reader falls back to ``derivation_rejected`` for any blocking token it
+    has no line for, and names the two shared-account tokens. A blocking token
+    added to the writer without a row here is a decision nobody made."""
+    from services.allocator_equity_derive import _BLOCKING_REASONS
+
+    tokens = [row["token"] for row in TABLE["blocking"]]
+    assert len(tokens) == len(set(tokens)), "a token appears twice"
+    assert set(tokens) == {r.value for r in _BLOCKING_REASONS}
+    for row in TABLE["blocking"]:
+        assert row["reader_reason"] in EXISTING_READER_LINES, row["token"]
+
+
+def test_every_precedence_row_names_an_existing_line_over_known_tokens() -> None:
+    """A precedence row is a multi-token ``degrade_reasons`` array. Each token is
+    one the writer can really produce (a refusal token or a DegradeReason value),
+    so the table cannot pin an order for a pair that never occurs."""
+    from services.allocator_equity_derive import DegradeReason, DeriveRefusal
+
+    producible = {m.value for m in DeriveRefusal} | {m.value for m in DegradeReason}
+    assert TABLE["precedence"], "the precedence table must not be empty"
+    for row in TABLE["precedence"]:
+        assert set(row["degrade_reasons"]) <= producible, row
+        assert row["reader_reason"] in EXISTING_READER_LINES, row

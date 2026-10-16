@@ -277,7 +277,12 @@ ORDER BY 1`;
 //                            no known venue id, and not a duplicate whose
 //                            holder carries a known id;
 //   then the series: extractTrustworthyDerivedSeries accepts the row -> ready;
-//   else derivedPayloadRejection + untrustworthyRebuildReason name the reason
+//   else derivedPayloadRejection + untrustworthyRebuildReason name the reason,
+//   with the token precedence of that function mirrored in the `judged` CTE's
+//   `untrustworthy_reason` CASE (167.1.2.1.1 SC-1: a derive refusal persists
+//   its token; src/__tests__/accounttruth-census.test.ts runs this CASE over
+//   analytics-service/tests/fixtures/derive_refusal_rows.json, the table the
+//   reader is asserted on)
 //   (no row or a pre-v2 row -> awaiting_derivation; a JSON array is an
 //   object to JS `typeof`, so it reads as pre-v2 too, while a scalar or JSON
 //   null is `malformed`). `history_read_failed` is
@@ -341,7 +346,12 @@ judged AS (
          CASE
            WHEN COALESCE(jsonb_typeof(cv.p -> 'degrade_reasons') = 'array', false) IS NOT TRUE THEN 'derivation_rejected'
            WHEN cv.p -> 'degrade_reasons' @> '["shared_account_no_working_key"]'::jsonb THEN 'shared_account_no_working_key'
+           WHEN cv.p -> 'degrade_reasons' @> '["account_duplicate"]'::jsonb
+             OR cv.p -> 'degrade_reasons' @> '["account_identity_collision"]'::jsonb THEN 'duplicate_account'
            WHEN cv.p -> 'degrade_reasons' @> '["shared_account_history_truncated"]'::jsonb THEN 'shared_account_history_truncated'
+           WHEN jsonb_array_length(cv.p -> 'degrade_reasons') = 1
+            AND (cv.p -> 'degrade_reasons' @> '["compose_incomplete"]'::jsonb
+              OR cv.p -> 'degrade_reasons' @> '["compose_empty"]'::jsonb) THEN 'awaiting_derivation'
            ELSE 'derivation_rejected'
          END AS untrustworthy_reason
     FROM curve cv
