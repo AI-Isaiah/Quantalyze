@@ -1,5 +1,63 @@
 # Changelog
 
+## [0.132.3.0] - 2026-10-16 — BRIDGERETURNS: the Bridge matcher's per-holding returns come from each holding's daily mark price
+
+Phase 167.1.1.1 (plans 01-09 and three review rounds plus one narrow round). The branch has 67 non-merge commits since `origin/main` plus per-plan worktree merges and one merge of `origin/main`. 28 of the 67 touch paths outside `.planning`, and this entry maps every one of them. The other 39 are planning and records commits: CONTEXT with founder decisions D-01..D-25, research, the UI spec, the pattern map, 9 plans and their summaries, four review rounds, verification and the security audit. Closes TODOS `[167.1.1-BRIDGE-DOLLAR-RATIO-RETURNS]` (`77b639a4b`). No migration.
+
+### Root cause
+- ⛔ **A LIVE PRODUCTION DEFECT THAT PREDATES THIS PHASE: portfolio-fit has been null on PROD for every book that holds a holding.** The matcher indexed each holding's return series by plain `YYYY-MM-DD` strings, while every candidate series reaches the engine with a `DatetimeIndex`. A string never equals a timestamp, so the engine's date join found no shared day. The portfolio-fit axis (`sharpe_lift`, `dd_improvement`, `corr_reduction`, `corr_with_portfolio`, 40% of the personalized score) came back null for every such book, a strategies-plus-holdings book skipped every correlation-ceiling test, and the phase's own tests could not see it because each built its candidate with a string index too. Found in review round 2 (CR-01). Fixed in `b5d829711`, pinned end to end through the real loaders in `22b34cd8b`.
+  - Holding series are now built with `records_to_series`, the converter the candidate side uses.
+  - `SeriesIndexError` / `assert_uniform_datetime_index` run before scoring and in the book-join marker, so a mixed index fails the batch loudly (a logged `SCORING_FAILED` with a correlation id) instead of scoring a silent null.
+  - Measured on a production-shaped book (BTC 6,000 and ETH 4,000, 120 adjacent marked days, one candidate, the real `score_candidates`):
+
+    | component | before (string index) | after (DatetimeIndex) |
+    |---|---|---|
+    | sharpe_lift | None | -0.3397 |
+    | dd_improvement | None | 0.0277 |
+    | corr_reduction | None | 0.0068 |
+    | corr_with_portfolio | None | 0.9235 |
+
+  - PROD reading before deploy (2026-10-16, read-only, counts only): of the latest batch per allocator, the personalized books that hold holdings have 8 candidates, and all 8 carry null `sharpe_lift`, `dd_improvement` and `corr_with_portfolio`. The after reading is taken once the first v2.3.0 recompute runs.
+
+### Added
+- **Spot mark-price rule in Python and TypeScript** (`analytics-service/services/holding_marks.py`, `classifySpotMarks` in `holding-compare-adapter.ts`; `ecfc7c43e`, `1708fb23e`). One mark per day (latest `updated_at`, ties to the smallest lowercase `api_key_id`), a mark at or below zero is a gap, returns only between adjacent calendar days, and at least 30 priced days or the holding is withheld `too_few_priced_days`. Fixed-mark and account-balance holdings are withheld by name. Both runtimes replay one shared fixture, `holding_mark_returns_cases.json`, whose tracer case is a purchase at a constant mark that must not read as a return.
+- **Signed derivative rule in both runtimes** (`classify_derivative_marks` / `classifyDerivativeMarks`, `analyzeSignedReturns`; `a2fdda38f`, `3e55ae256`). The direction on day i-1 signs the move from i-1 to i; a flat or mixed day is a gap; returns are floored at -100%; options are withheld `option_premium` (D-10). Every derivative edge is in the shared fixture with independent invariants.
+- **One matcher AUM basis, pinned to the dashboard's** (`analytics-service/services/holding_equity.py`, `holding_equity_contribution_cases.json`, `src/lib/holding-equity-contribution.parity.test.ts`; `7d9268328`, `68b516cf4`). Spot counts its `value_usd`, a derivative counts only its signed `unrealized_pnl_usd`, never its notional (D-15..D-19). A NULL P&L is withheld `pnl_missing`, never 0 (D-18); the one divergence from `holdingEquityContribution` is pinned as such.
+- **`holding_flags` names every holding the matcher could not use** (`b7e58e473`, `14a47c587`, `ac7718044`). Withheld spot (`too_few_priced_days`, `too_few_adjacent_returns` under D-20, fixed-mark and account-balance reasons) and every derivative (by reason) get an entry with `flagged: false`. Withheld spot stays in AUM, weights and the max-weight test (D-01).
+- **Book-level entries in `holding_flags`** (`kind: "book"`, `holding_ref: null`, `flagged: false`; the dashboard reader ignores them):
+  - `book_join_too_short` with the shared-day count when the book's shared-days join is under 30 days; no holding is withheld for it (D-22, `577ce672d`).
+  - `add_weight_fallback` naming the sizing the engine actually used when the AUM could not size the ticket (`96779045e`, `d7ba54c97`): `aum_not_positive_ceiling_0_5` (D-23), `aum_not_positive_screening_default_0_10` (D-25), `aum_unknown_default_0_10` (D-24). Each has its own named WARNING.
+
+### Changed
+- **The matcher's per-holding returns come from each holding's daily mark price** (`analytics-service/routers/match.py`; `02dff2195`, `30b60228a`). One paginated history read, filtered by `allocator_id`, over a 730-day window and capped by `_HOLDINGS_HISTORY_MAX_PAGES`; overflow raises `HoldingsReadTruncated` instead of truncating. Buying, selling or moving an asset no longer reads as a gain or loss. A spot holding with fewer than 30 adjacent one-day returns is withheld from the join by name (D-20). The neighbour tests moved to the mark-history read.
+- **Matcher AUM is the allocator's AUM** on the basis above, and scoring weights are separated from the AUM share: scoring weights cover only the series the engine joins, while the AUM share (the max-weight denominator) covers the whole D-16 AUM (`14a47c587`, `5aab1256c`).
+- **`/compare` reads a derivative as a signed return** (`holding-compare-adapter.ts`, `HoldingFactsheet.tsx`; `229024bc9`, `363f18316`). The "rebuilding" state is gone; UI-SPEC states RD, ND and OP render, with a derivative gap note. `/compare` spot is unchanged by D-20.
+- **`ENGINE_VERSION` v2.2.0 → v2.3.0** (`551caf304`), so the hourly cron recomputes every allocator. The goldens change only `engine_version` (D-12); two comments in `allocator_equity_derive.py` and `feedback_engine.py` follow the version and the deleted read.
+
+### Fixed
+- **Scoring weights inflated by withheld value** (review round 1 CR-01, `5aab1256c`): withheld value no longer dilutes the joined set's weights.
+- **A non-positive matcher AUM** (derivative losses larger than spot) persists a null weight and names the skipped test `aum_not_positive` in `breach_skipped`, never a 0.0 weight (SFH-01, D-21, `a82156f8b`). A tiny positive AUM flags every holding on max weight, accepted and pinned (`8bef9e2a2`).
+- **Ticket sizing when the AUM is at or below zero** (`96779045e`, `cdc804f1d`): in personalized mode the ticket is sized at the 0.5 add-weight ceiling, never the engine's 0.10 default (D-23), so such a book never scores better on max weight or total than a book with an AUM of +$100.
+- **The sizing record told the truth only in personalized mode** (review round 3 CR-01 / SFH-R3-01, `d7ba54c97`): the `add_weight_fallback` entry is now decided after scoring from the engine's own mode and candidates, and nothing is recorded when no candidate was returned.
+
+### Removed
+- **`reconstruct_symbol_returns`**, the dollar-ratio per-symbol read that turned purchases and transfers into returns, with its golden tests and its import (`608a4f30d`, `a339e528c`). 0 code references remain.
+
+### Tests
+- One shared pytest PostgREST fake, proven against the real `paginated_select`, carries the matcher AUM and history tests (`91aa9fde9`, `a0dd464a6`).
+- New matcher suites: holding returns, book-join overlap, scoring weights, book-join marker, book-join end to end, AUM-not-positive sizing. Each key gate was neutered and seen RED; the sizing gates and entries each go RED when removed (`REVIEW-FIX-R3`).
+- Holdings-scope census counts for `match.py` updated by measurement; `queries.audit-2026-05-07` arms added.
+- On the merged tree: the full Python suite with the CI command, 10817 passed, 91 skipped, coverage 93.83%; `tsc` clean; vitest over `src/__tests__` and the touched files, 4519 passed, 279 skipped.
+
+### Notes
+- Founder decisions recorded during review: D-20 (thin spot series withheld `too_few_adjacent_returns`), D-21 (the max-weight denominator stays the D-16 AUM; an AUM at or below zero persists a null weight), D-22 (`book_join_too_short` marker, no holding withheld), D-23 (0.5 ceiling when AUM ≤ 0, amended to personalized mode only), D-24 (unknown AUM keeps 0.10, named), D-25 (screening mode with AUM ≤ 0 keeps 0.10, named).
+- Known limits:
+  - Screening-mode books (no strategy and no priced spot holding) are sized at 0.10 whatever their AUM (D-25); the batch says so.
+  - D-24 logs one WARNING per batch for every strategies-only allocator with no allocated amount.
+  - Options' returns are withheld (`option_premium`); their P&L still counts toward AUM.
+  - `pnl_missing` fires on 0 rows today: the writers still coerce a missing P&L to 0. That coercion and the scenario commit route's notional sizing are out of scope here by founder decision D-17 and owned by a separately booked phase.
+- After deploy: the PROD `holding_flags` and portfolio-fit "after" reading at v2.3.0, and a 375px check of the derivative caption on the holding factsheet.
+
 ## [0.132.2.1] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of f5dc21b3
 
 ### Changed
