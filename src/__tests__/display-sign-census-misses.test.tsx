@@ -153,6 +153,8 @@ describe("KpiStrip value colour follows the rounded sign (D-03)", () => {
   });
 });
 
+// Phase 170.1 (D-11): the aria-label element holds two spans, the toned figure and the
+// untoned "vs current book" suffix, so the colour pins read the first span.
 describe("KpiStrip delta pill at the noise floor keeps its direction word and colour (characterization)", () => {
   const live: ComputedMetrics = { ...EMPTY_METRICS, n: 252, sharpe: 1.2, max_drawdown: -0.08, twr: 0.15 };
   const strip = (scenario: ComputedMetrics) =>
@@ -170,31 +172,31 @@ describe("KpiStrip delta pill at the noise floor keeps its direction word and co
 
   it("a Sharpe delta of exactly +0.01 is 'improved' in text-positive", () => {
     const { container } = strip({ ...live, sharpe: 1.21 });
-    const pill = container.querySelector('[aria-label^="Sharpe delta:"]');
+    const pill = container.querySelector('[aria-label^="Sharpe delta vs current book:"]');
     expect(pill).not.toBeNull();
-    expect(pill!.getAttribute("aria-label")).toBe("Sharpe delta: +0.01 (improved)");
-    expect(pill!.className).toContain("text-positive");
+    expect(pill!.getAttribute("aria-label")).toBe("Sharpe delta vs current book: +0.01 (improved)");
+    expect((pill!.children[0] as HTMLElement).className).toContain("text-positive");
   });
 
   it("a Sharpe delta of exactly -0.01 is 'regressed' in text-negative", () => {
     const { container } = strip({ ...live, sharpe: 1.19 });
-    const pill = container.querySelector('[aria-label^="Sharpe delta:"]');
-    expect(pill!.getAttribute("aria-label")).toBe("Sharpe delta: −0.01 (regressed)");
-    expect(pill!.className).toContain("text-negative");
+    const pill = container.querySelector('[aria-label^="Sharpe delta vs current book:"]');
+    expect(pill!.getAttribute("aria-label")).toBe("Sharpe delta vs current book: −0.01 (regressed)");
+    expect((pill!.children[0] as HTMLElement).className).toContain("text-negative");
   });
 
   it("a Sharpe delta of +0.004 is under the noise floor: 'no change' in the muted colour", () => {
     const { container } = strip({ ...live, sharpe: 1.204 });
-    const pill = container.querySelector('[aria-label^="Sharpe delta:"]');
-    expect(pill!.getAttribute("aria-label")).toBe("Sharpe delta: 0.00 (no change)");
-    expect(pill!.className).toContain("text-text-muted");
+    const pill = container.querySelector('[aria-label^="Sharpe delta vs current book:"]');
+    expect(pill!.getAttribute("aria-label")).toBe("Sharpe delta vs current book: 0.00 (no change)");
+    expect((pill!.children[0] as HTMLElement).className).toContain("text-text-muted");
   });
 
   it("a Max DD delta of +0.04 (a shallower drawdown) is 'improved' in text-positive", () => {
     const { container } = strip({ ...live, max_drawdown: -0.04 });
-    const pill = container.querySelector('[aria-label^="Max DD 12m delta:"]');
-    expect(pill!.getAttribute("aria-label")).toBe("Max DD 12m delta: +4.0% (improved)");
-    expect(pill!.className).toContain("text-positive");
+    const pill = container.querySelector('[aria-label^="Max DD 12m delta vs current book:"]');
+    expect(pill!.getAttribute("aria-label")).toBe("Max DD 12m delta vs current book: +4.0% (improved)");
+    expect((pill!.children[0] as HTMLElement).className).toContain("text-positive");
   });
 });
 
