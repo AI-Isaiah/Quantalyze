@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.132.3.2] - 2026-10-16 — RECORDS: close FANINGRAPH 164.9.3.1 (verification passed 8/8, SECURED 27/27, post-merge items confirmed)
+
+Records only: `.planning`, `TODOS.md`, and this release. One commit.
+
+### Added
+- The FANINGRAPH phase directory joins the tracked tree: 11 plans and summaries, CONTEXT, RESEARCH, PATTERNS, VALIDATION, `REVIEW.md` with rounds 2 to 4, `REVIEW-FIX.md`, `SECURITY.md` (SECURED, 27 of 27 threats closed) and `VERIFICATION.md` (status passed, 8 of 8).
+- `VERIFICATION.md` gains a dated section, "Post-merge items resolved (2026-10-16)", with all seven post-merge items confirmed and the evidence for each. Status stays passed.
+
+### Changed
+- `.planning/ROADMAP.md`: the FANINGRAPH overview bullet is ticked with its outcome (v0.132.1.0 #1059, re-dump #1061, ratchet-row follow-up #1064), its eleven plan rows replace the `TBD` stub and are ticked, and its Progress-table row reads Complete with the outcome prose.
+- `.planning/STATE.md` and `.planning/state.json`: progress counts and the last-activity lines move to 2026-10-16. The current position stays on 166.5 COMPUTEDATSTAMP, and the Status line now says FANINGRAPH is closed.
+
+### Notes
+- Read-only PROD readings taken for the post-merge items (marker query first, counts and booleans only): the ledger rows for `20261023120000` and `20261024120000` are present; `_fan_in_lock_rows` and `bridge_outcomes_sync_holding_ref` exist; `_fan_in_lock_rows` is executable by service_role only, matching the migration's REVOKE; the D-04 census reads 0 parented `compute_jobs` rows and 0 `done_pending_children` of 2332.
+- Main at the merge commit was red on the baseline content-drift gate by construction until the re-dump (#1061). The separate snapshot-drift workflow went red one commit later on the stale `_fan_in_lock_rows` ratchet row, and #1064 deleted it. Both are green now.
+- Two review residuals were not yet in `TODOS.md` and are booked: `164.9.3.1-FL8-SEAM-RESTORE` (lane-only, founder-accepted) and `164.9.3.1-55P03-RECOVERY-LATENCY` (latent, no caller passes parents). The earlier three entries (`REAPER-STRAND`, `VOLUNTARY-REMOVE-23514`, `HOLDING-REF-DIRECT-UPDATE`) were already booked.
+
 ## [0.132.3.1] - 2026-10-16 — RECORDS: close RECONMARKER 167.1.2.1 (D-11 day-0/day-1 reads as-expected, verification passed, SECURED 33/33)
 
 ### Added
