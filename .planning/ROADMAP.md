@@ -5272,6 +5272,8 @@ Each item is fixed with a test that fails on the old behaviour, or closed by a r
   - SC-6 under `account_identity_pending`, with the refresh holding its write.
 - **D-04 (SC-1):** the writer stores the refusal token, and the reader maps it to its existing lines (no new copy).
 - **D-05 (SC-9):** research first. The tolerance is never loosened, and if the stored data is right the measurement goes back to the founder.
+- **D-11 (SC-9, "Close as cleared"):** the residual was cleared upstream by the 164.6.6.2.3 recompute and re-measured clean on PROD (8/8 MT5 keys replay clean, book 1 trustworthy). No writer change, and the band is untouched. Plan 04 re-runs the read-only measurement.
+- **D-12 (D-02, "Same split"):** an over-age account whose keys all fail is left out with a count and a Sentry event. An over-age account with a working key holds.
 
 Plans:
 **Wave 1**
