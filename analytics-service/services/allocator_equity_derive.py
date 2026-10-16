@@ -160,6 +160,14 @@ class DegradeReason(str, Enum):
     # dilution; a lone failing key did not, and the book read "ready". The reader maps
     # it onto that same existing line (D-04: no new copy).
     FAILING_KEY_SERIES_ENDED = "failing_key_series_ended"
+    # 167.1.2.1.1 SC-3 (D-03, 2026-10-16): the members of a stitched shared account list
+    # DIFFERENT flow totals for a day the older member owns (see
+    # ``stitch_flow_disagreement_days``). The stitch keeps the owner's flows and discards
+    # the newer key's, so the curve is built on flows the account's own keys do not agree
+    # on, and it read "ready". Blocking; the stitch itself is unchanged (D-03 asks for a
+    # blocking reason, not a different join). The reader maps it onto the existing
+    # truncated-history line (D-04: no new copy).
+    SHARED_ACCOUNT_FLOWS_DISAGREE = "shared_account_flows_disagree"
 
 
 # The BLOCKING subset: any of these present -> ``is_trustworthy`` is False.
@@ -175,6 +183,7 @@ _BLOCKING_REASONS: frozenset[DegradeReason] = frozenset(
         DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY,
         DegradeReason.KEY_INPUTS_MISMATCH,
         DegradeReason.FAILING_KEY_SERIES_ENDED,
+        DegradeReason.SHARED_ACCOUNT_FLOWS_DISAGREE,
     }
 )
 
@@ -580,6 +589,70 @@ def one_key_per_account_day(rows: Sequence[_Row]) -> list[_Row]:
     ]
 
 
+def _stitch_owned_window(firsts: Sequence[str], index: int) -> tuple[str | None, str | None]:
+    """THE ownership rule of a stitched shared account, in one place.
+
+    ``firsts`` is each member's first return day, in stitch order (oldest first, the
+    counted member last). Member ``index`` owns the half-open day window
+    ``[lower, upper)``: ``lower`` is its own first return day, except that the FIRST
+    member also owns every earlier day (``None``, a key's pre-window flow), and
+    ``upper`` is the next member's first return day (``None`` for the last member,
+    which owns every day from its own first on). ``stitch_shared_account`` takes a
+    day's series values and flows only from the member that owns it, and
+    ``stitch_flow_disagreement_days`` compares the owner against the later members
+    over the same window, so the stitch and the check cannot drift (167.1.2.1.1 SC-3)."""
+    lower = None if index == 0 else firsts[index]
+    upper = None if index == len(firsts) - 1 else firsts[index + 1]
+    return lower, upper
+
+
+def _owns_day(window: tuple[str | None, str | None], day: str) -> bool:
+    lower, upper = window
+    return (lower is None or day >= lower) and (upper is None or day < upper)
+
+
+def stitch_flow_disagreement_days(
+    links: Sequence[tuple[pd.Series, Sequence[Any]]],
+) -> int:
+    """How many owned days of a stitched shared account its members disagree on.
+
+    167.1.2.1.1 SC-3 (D-03). ``links`` has the shape ``stitch_shared_account`` takes
+    (oldest first, the counted member last). For every day an earlier member OWNS
+    (``_stitch_owned_window``), the owner's per-day flow total is compared with that of
+    every LATER member that LISTS the day; a total that differs beyond
+    ``math.isclose(rel_tol=1e-9, abs_tol=0.01)`` counts the day once. A later member
+    that lists nothing on the day is silence, not disagreement (a newer crawl that does
+    not reach back lists none of the older key's flows, which is the normal case), and a
+    day the LAST member owns has nobody to disagree with. Tolerance is RESEARCH
+    assumption A1: one cent absolute, so a venue's own rounding passes and a second
+    transfer does not. Returns a count only, never a day or an amount. Pure."""
+    if len(links) < 2:
+        return 0
+    firsts: list[str] = []
+    for series, _flows in links:
+        if len(series) == 0:
+            return 0
+        firsts.append(min(str(d) for d in series.index))
+    totals: list[dict[str, float]] = []
+    for _series, flows in links:
+        by_day: dict[str, float] = defaultdict(float)
+        for flow in flows or ():
+            by_day[str(flow[0])] += float(flow[1])
+        totals.append(by_day)
+    disagreeing: set[str] = set()
+    for index in range(len(links) - 1):
+        window = _stitch_owned_window(firsts, index)
+        for later in totals[index + 1 :]:
+            for day, listed in later.items():
+                if not _owns_day(window, day):
+                    continue
+                if not math.isclose(
+                    totals[index].get(day, 0.0), listed, rel_tol=1e-9, abs_tol=0.01
+                ):
+                    disagreeing.add(day)
+    return len(disagreeing)
+
+
 def stitch_shared_account(
     links: Sequence[tuple[pd.Series, Sequence[Any]]],
 ) -> tuple[pd.Series, list[Any]] | None:
@@ -616,9 +689,8 @@ def stitch_shared_account(
     values: list[float] = []
     flows_out: list[Any] = []
     for index, (series, flows) in enumerate(links):
-        own_first = firsts[index]
-        is_last = index == len(links) - 1
-        next_first = None if is_last else firsts[index + 1]
+        window = _stitch_owned_window(firsts, index)
+        next_first = window[1]
         if next_first is not None:
             day_before = (date.fromisoformat(next_first) - timedelta(days=1)).isoformat()
             if max(str(d) for d in series.index) < day_before:
@@ -626,15 +698,14 @@ def stitch_shared_account(
         for day, value in sorted(
             ((str(d), float(v)) for d, v in series.items()), key=lambda item: item[0]
         ):
-            if day < own_first or (next_first is not None and day >= next_first):
+            # A series has no day before its own first one, so the first member's
+            # unbounded lower edge changes nothing here.
+            if not _owns_day(window, day):
                 continue
             days.append(day)
             values.append(value)
         for flow in flows or ():
-            flow_day = str(flow[0])
-            if next_first is not None and flow_day >= next_first:
-                continue
-            if index > 0 and flow_day < own_first:
+            if not _owns_day(window, str(flow[0])):
                 continue
             flows_out.append(flow)
     return pd.Series(values, index=days, dtype="float64"), flows_out

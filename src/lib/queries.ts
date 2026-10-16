@@ -4429,7 +4429,9 @@ export type MissingSeriesReason = Extract<
  *      the book over two keys reading one exchange account (SC-1 persists the
  *      refusal instead of deleting the row), the line the key list already
  *      gives a marked duplicate: `duplicate_account`.
- *   3. `shared_account_history_truncated`.
+ *   3. `shared_account_history_truncated`. 167.1.2.1.1 SC-3 (D-03, D-04):
+ *      `shared_account_flows_disagree` (stitched members list different flows for an
+ *      owned day) reads this same existing line.
  *   4. `compose_incomplete` / `compose_empty` ALONE: the derive is waiting on
  *      its siblings or has nothing to draw yet, which the daily recompute does
  *      answer: `awaiting_derivation`. Next to ANY other token (for example
@@ -4471,7 +4473,10 @@ function untrustworthyRebuildReason(
   if (tokens.includes("account_duplicate") || tokens.includes("account_identity_collision")) {
     return "duplicate_account";
   }
-  if (tokens.includes("shared_account_history_truncated")) {
+  if (
+    tokens.includes("shared_account_history_truncated") ||
+    tokens.includes("shared_account_flows_disagree")
+  ) {
     return "shared_account_history_truncated";
   }
   if (

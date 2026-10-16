@@ -12416,6 +12416,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         read_writer_basis,
         refusal_payload,
         stitch_dropped_day_pnl,
+        stitch_flow_disagreement_days,
         stitch_shared_account,
         working_holder_predicate,
     )
@@ -13151,6 +13152,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # SFH-R2-03: join each stitched account's older members onto its kept key.
     stitched_accounts = 0
     truncated_accounts = 0
+    # 167.1.2.1.1 SC-3: stitched accounts whose members list different flow totals for a
+    # day the older member owns. Counted per account; the stitch itself is unchanged.
+    flows_disagree_accounts = 0
     # D-06: the stitched kept keys, and the writer basis of those accounts whose EVERY member
     # carries one (a stitched series is one account, so its basis is the members' bases joined
     # by the same day ownership the stitch applies to flows and dropped-day P&L).
@@ -13176,14 +13180,17 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         if kept_series is None:
             continue  # the kept key's returns vanished between the two reads
         stitched = None
+        stitch_links: list[tuple[pd.Series, Sequence[Any]]] = []
         if all(k in source_returns and k in source_flows for k in source_ids):
-            stitched = stitch_shared_account(
-                [(source_returns[k], source_flows[k]) for k in source_ids]
-                + [(kept_series, flows_by_key.get(kept_id, []))]
-            )
+            stitch_links = [(source_returns[k], source_flows[k]) for k in source_ids] + [
+                (kept_series, flows_by_key.get(kept_id, []))
+            ]
+            stitched = stitch_shared_account(stitch_links)
         if stitched is None:
             truncated_accounts += 1
             continue
+        if stitch_flow_disagreement_days(stitch_links):
+            flows_disagree_accounts += 1
         # D-15: the dropped days follow the same ownership as the flows.
         dropped_pnl_by_key[kept_id] = stitch_dropped_day_pnl(
             [source_returns[k] for k in source_ids] + [kept_series],
@@ -13213,6 +13220,16 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         stitched_kept.add(kept_id)
         returns_by_key[kept_id], flows_by_key[kept_id] = stitched
         stitched_accounts += 1
+    if flows_disagree_accounts:
+        # Counts only (no key id, no venue id, no day, no USD - T-167.1.2-22).
+        logger.warning(
+            "derive_allocator_equity: %d stitched shared account(s) for allocator %s "
+            "have members that list different flow totals for a day the older member "
+            "owns - the stitch keeps the owner's flows and the curve is untrustworthy (%s)",
+            flows_disagree_accounts,
+            allocator_id,
+            DegradeReason.SHARED_ACCOUNT_FLOWS_DISAGREE.value,
+        )
     if truncated_accounts:
         # Counts only (no key id, no venue id, no USD — T-167.1.2-22).
         logger.warning(
@@ -13496,6 +13513,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                     (DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED, truncated_accounts > 0),
                     (DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY, no_working_groups > 0),
                     (DegradeReason.FAILING_KEY_SERIES_ENDED, failing_series_ended_keys > 0),
+                    (DegradeReason.SHARED_ACCOUNT_FLOWS_DISAGREE, flows_disagree_accounts > 0),
                 )
                 if raised
             ]

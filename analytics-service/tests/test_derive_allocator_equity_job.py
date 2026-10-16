@@ -4723,3 +4723,66 @@ async def test_sc2_failing_key_with_inputs_but_no_returns_raises_no_keyerror() -
     assert "failing_key_series_ended" not in payload["degrade_reasons"]
     assert "dropped_key" in payload["degrade_reasons"]
     assert payload["is_trustworthy"] is False
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2.1.1 WRITERRESIDUALS plan 02, SC-3 (decision D-03): the members of a
+# stitched shared account disagree about the flows of a day the older one owns.
+#
+# WHY. The stitch keeps the owner's flows for a day and discards the newer key's
+# (taking both would double a transfer the two crawls both list). If the newer key
+# lists a DIFFERENT total, the curve is built on flows the account's own keys do
+# not agree on, and it read "ready". The stitch itself is unchanged: the curve is
+# withheld by the blocking token.
+# ---------------------------------------------------------------------------
+
+_SC3_MAY_DEPOSIT = {"utc_day_iso": "2026-05-15", "usd_signed": 10_000.0}
+
+
+@pytest.mark.asyncio
+async def test_sc3_flows_disagree_blocks() -> None:
+    """M lists the May deposit AND a second 4000 deposit on 2026-05-20, a day H
+    owns and lists nothing on. The two keys disagree on that day, so the book is
+    untrustworthy under ``shared_account_flows_disagree``. The stitch is unchanged
+    (the history still starts on H's first day, one counted key)."""
+    alloc = "alloc-sc3-disagree"
+    fake = _rotation_pair(
+        alloc, "duplicate",
+        old_flows=[_SC3_MAY_DEPOSIT],
+        new_flows=[_SC3_MAY_DEPOSIT, {"utc_day_iso": "2026-05-20", "usd_signed": 4_000.0}],
+    )
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "shared_account_flows_disagree" in payload["degrade_reasons"], payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert payload["curve"][0]["date"] == "2026-05-01"
+    assert payload["inputs"]["n_keys"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sc3_flows_agree_keeps_the_stitch() -> None:
+    """Both keys list the same May deposit: nothing disagrees, the stitch is
+    today's (``shared_account_history_stitched``, trustworthy)."""
+    alloc = "alloc-sc3-agree"
+    fake = _rotation_pair(
+        alloc, "duplicate",
+        old_flows=[_SC3_MAY_DEPOSIT],
+        new_flows=[_SC3_MAY_DEPOSIT],
+    )
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "shared_account_flows_disagree" not in payload["degrade_reasons"]
+    assert "shared_account_history_stitched" in payload["flags"]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_sc3_a_newer_key_that_lists_nothing_is_silence() -> None:
+    """The newer key's crawl does not reach back over H's days, so it lists none of
+    H's flows. That is silence, not disagreement, and the book stays trustworthy."""
+    alloc = "alloc-sc3-silence"
+    fake = _rotation_pair(alloc, "duplicate", old_flows=[_SC3_MAY_DEPOSIT], new_flows=[])
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "shared_account_flows_disagree" not in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]

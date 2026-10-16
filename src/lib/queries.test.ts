@@ -1782,6 +1782,20 @@ describe("derived-row outcomes — the reason says why there is no series", () =
     expect(
       untrusted(["shared_account_history_truncated", "failing_key_series_ended"]),
     ).toBe("shared_account_no_working_key");
+    // 167.1.2.1.1 SC-3 (D-03/D-04): stitched members that disagree about an owned day's
+    // flows read the existing truncated-history line (no new copy), and the
+    // owner-fixable and duplicate causes still outrank it.
+    expect(untrusted(["shared_account_flows_disagree"])).toBe("shared_account_history_truncated");
+    expect(untrusted(["dropped_key", "shared_account_flows_disagree"])).toBe(
+      "shared_account_history_truncated",
+    );
+    expect(untrusted(["shared_account_flows_disagree", "shared_account_no_working_key"])).toBe(
+      "shared_account_no_working_key",
+    );
+    expect(untrusted(["shared_account_flows_disagree", "account_duplicate"])).toBe(
+      "duplicate_account",
+    );
+    expect(untrusted([], { flags: ["shared_account_flows_disagree"] })).toBe("derivation_rejected");
     // The token in `flags` only, or in a non-array, keeps the generic line.
     expect(untrusted([], { flags: ["failing_key_series_ended"] })).toBe("derivation_rejected");
     expect(untrusted([], { flags: ["account_identity_collision"] })).toBe("derivation_rejected");
