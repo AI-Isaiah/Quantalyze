@@ -17,6 +17,7 @@ Records only: `.planning`, `TODOS.md`, and this release. One commit.
 - Main at the merge commit was red on the baseline content-drift gate by construction until the re-dump (#1061). The separate snapshot-drift workflow went red one commit later on the stale `_fan_in_lock_rows` ratchet row, and #1064 deleted it. Both are green now.
 - Two review residuals were not yet in `TODOS.md` and are booked: `164.9.3.1-FL8-SEAM-RESTORE` (lane-only, founder-accepted) and `164.9.3.1-55P03-RECOVERY-LATENCY` (latent, no caller passes parents). The earlier three entries (`REAPER-STRAND`, `VOLUNTARY-REMOVE-23514`, `HOLDING-REF-DIRECT-UPDATE`) were already booked.
 - STATE's Status line is rewritten to match today: 170.1 COPY and WRITERRESIDUALS are in flight. BRIDGERETURNS (#1070) and OKXHISTORY (#1067) are shipped and waiting on readings or founder steps. FANINGRAPH, RECONMARKER and PYXDIST are closed, and MT5SERVERLEARN is retired.
+- SECURITY.md's T-24 row now describes the secret-scan pattern in words. It was written as a literal URL with a user and password, which the push-time credential scanner refused.
 
 ## [0.132.3.2] - 2026-10-16 — RECORDS: retire MT5SERVERLEARN 164.6.6.3.6 from v1.20 (founder: next milestone, maybe)
 
