@@ -5278,7 +5278,7 @@ Each item is fixed with a test that fails on the old behaviour, or closed by a r
 Plans:
 **Wave 1**
 
-- [ ] 167.1.2.1.1-01-PLAN.md — a derive refusal persists its reason in the equity_curve row; the reader maps each token to an existing line; census mirror (SC-1)
+- [x] 167.1.2.1.1-01-PLAN.md — a derive refusal persists its reason in the equity_curve row; the reader maps each token to an existing line; census mirror (SC-1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
