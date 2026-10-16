@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.132.3.2] - 2026-10-16 — RECORDS: close FANINGRAPH 164.9.3.1 (verification passed 8/8, SECURED 27/27, post-merge items confirmed)
+## [0.132.3.3] - 2026-10-16 — RECORDS: close FANINGRAPH 164.9.3.1 (verification passed 8/8, SECURED 27/27, post-merge items confirmed)
 
 Records only: `.planning`, `TODOS.md`, and this release. One commit.
 
@@ -16,6 +16,18 @@ Records only: `.planning`, `TODOS.md`, and this release. One commit.
 - Read-only PROD readings taken for the post-merge items (marker query first, counts and booleans only): the ledger rows for `20261023120000` and `20261024120000` are present; `_fan_in_lock_rows` and `bridge_outcomes_sync_holding_ref` exist; `_fan_in_lock_rows` is executable by service_role only, matching the migration's REVOKE; the D-04 census reads 0 parented `compute_jobs` rows and 0 `done_pending_children` of 2332.
 - Main at the merge commit was red on the baseline content-drift gate by construction until the re-dump (#1061). The separate snapshot-drift workflow went red one commit later on the stale `_fan_in_lock_rows` ratchet row, and #1064 deleted it. Both are green now.
 - Two review residuals were not yet in `TODOS.md` and are booked: `164.9.3.1-FL8-SEAM-RESTORE` (lane-only, founder-accepted) and `164.9.3.1-55P03-RECOVERY-LATENCY` (latent, no caller passes parents). The earlier three entries (`REAPER-STRAND`, `VOLUNTARY-REMOVE-23514`, `HOLDING-REF-DIRECT-UPDATE`) were already booked.
+- STATE's Status line is rewritten to match today: 170.1 COPY and WRITERRESIDUALS are in flight. BRIDGERETURNS (#1070) and OKXHISTORY (#1067) are shipped and waiting on readings or founder steps. FANINGRAPH, RECONMARKER and PYXDIST are closed, and MT5SERVERLEARN is retired.
+
+## [0.132.3.2] - 2026-10-16 — RECORDS: retire MT5SERVERLEARN 164.6.6.3.6 from v1.20 (founder: next milestone, maybe)
+
+Records only; no code changes.
+
+### Removed
+- **Phase 164.6.6.3.6 MT5SERVERLEARN is retired from v1.20, by founder decision on 2026-10-16: "We will do it in the next milestone (maybe)".** It never shipped. Broker servers stay hand-listed in `MT5_KNOWN_SERVERS`, and the Step 2d runbook from 164.6.6.3 applies.
+  - The ROADMAP marks the phase retired, in the same style as 165, 165.1 and 165.2. Its section stays as the spec, and its Progress row reads RETIRED.
+  - STATE no longer lists it as waiting on the founder's MT5 accounts.
+  - The work done so far (CONTEXT, RESEARCH, PATTERNS, VALIDATION, BROKER-SERVERS, plan 01 and the S0-S9 gate protocol) is kept on the pushed branch `feat/164.6.6.3.6-mt5serverlearn`.
+- TODOS gains `[164.6.6.3.6-MT5SERVERLEARN-NEXT-MILESTONE]`, which carries the phase to the next milestone's planning.
 
 ## [0.132.3.1] - 2026-10-16 — RECORDS: close RECONMARKER 167.1.2.1 (D-11 day-0/day-1 reads as-expected, verification passed, SECURED 33/33)
 

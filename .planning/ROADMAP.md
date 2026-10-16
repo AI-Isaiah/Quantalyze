@@ -121,7 +121,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b)** (INSERTED) — verification: passed (v0.130.1.0, close-out v0.131.12.0, review fixes v0.131.12.1; founder-deferred residue booked as 164.6.6.3.3-WITHHELD-RESIDUE) (completed 2026-10-15)
 - [x] **Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status** (INSERTED) — shipped v0.129.1.0 (merged 2026-10-08); verification: passed (plan 04 PROD re-sync 2026-10-08) (completed 2026-10-08)
 - [x] **Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults** (INSERTED) — verification: passed (PR #971, v0.127.0.0) (completed 2026-10-08)
-- [ ] **Phase 164.6.6.3.6: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed** (INSERTED) — not yet planned (booked 2026-10-06, founder)
+- [x] **~~Phase 164.6.6.3.6~~: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed** (INSERTED) — ⛔ RETIRED from v1.20 2026-10-16 by founder decision ("We will do it in the next milestone (maybe)"): moved out of this milestone, not delivered. The research, plan 01 and the gate protocol are kept on branch `feat/164.6.6.3.6-mt5serverlearn` (pushed); TODOS `[164.6.6.3.6-MT5SERVERLEARN-NEXT-MILESTONE]` carries it
 - [x] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
 - [x] **Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button** (INSERTED) — 10 plans, shipped in #1031, #1036 and #1038 (completed 2026-10-15)
 - [x] **Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here** (INSERTED)
@@ -2897,6 +2897,8 @@ Plans:
 
 ### Phase 164.6.6.3.6: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed (INSERTED)
 
+⛔ RETIRED from v1.20 2026-10-16 by founder decision ("We will do it in the next milestone (maybe)"): moved out of this milestone, not delivered. The research, plan 01 and the gate protocol are kept on branch `feat/164.6.6.3.6-mt5serverlearn` (pushed); TODOS `[164.6.6.3.6-MT5SERVERLEARN-NEXT-MILESTONE]` carries it. The section below is kept as the spec for that milestone.
+
 **Goal:** A broker server that the terminals can actually reach is learned automatically on its first successful validation, instead of being hand-listed in `MT5_KNOWN_SERVERS`. Phase 164.6.6.3 ships the static list (D-09, D-14) and the Step 2d runbook. This phase replaces the hand-listing, if and only if its first measurement allows it.
 **Source:** founder decision 2026-10-06 (AskUserQuestion "Ship static, book the dynamic phase"). **Order:** runs NEXT, immediately after 164.6.6.3 ships, ahead of 164.6.6.3.1–.5 in the queue (founder 2026-10-06, AskUserQuestion "Next, right after 164.6.6.3 ships"). ⛔ **CORRECTED the same day:** 164.6.6.2 BTCNATIVE goes FIRST after 164.6.6.3 merges, and this phase follows it. Its VNC measurement may run alongside.
 **Requirements**: TBD (no v1.20 requirement IDs)
@@ -2922,7 +2924,7 @@ D-14 of 164.6.6.3 ("the service never reads `servers.dat`") stands: the terminal
 **Plans:** 0 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+- (none — retired before any plan shipped; plan 01 lives on the branch above)
 
 ### Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults (INSERTED)
 
@@ -6217,7 +6219,7 @@ kept verbatim.
 | 164.6.6.3.3 FACTSHEETTRUTH | 15/15 | Complete — verification passed (plan 15 review MEDIUMs fixed over four rounds) | 2026-10-15 · v0.131.12.1 |
 | 164.6.6.3.4 STATUSBRIDGE | 4/4 | Complete — verification passed after the plan 04 PROD re-sync | 2026-10-08 · v0.129.1.0 · #977 |
 | 164.6.6.3.5 DOMAINONE | 13/13 | Complete — verification passed after plan 13's live checks | 2026-10-08 · v0.127.0.0 · #971 |
-| 164.6.6.3.6 MT5SERVERLEARN | 0/? | Queued — booked 2026-10-06 (founder); BROKER-SERVERS.md measured, no plans | - |
+| ~~164.6.6.3.6 MT5SERVERLEARN~~ | — | RETIRED from v1.20 (founder, "next milestone (maybe)"); work kept on its branch | 2026-10-16 |
 | 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Complete    | 2026-10-04 |
 | 164.6.8 OUTAGEALERT | 10/10 | Complete | 2026-10-15 |
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 7/7 | Complete | v0.77.32.1 · finalized v0.77.32.1; its 33 stranded artifacts restored to main by PR #785. Row said `0/? Queued 2nd` until 2026-09-12 |
