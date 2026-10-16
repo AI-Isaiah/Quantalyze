@@ -1075,7 +1075,15 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # 170.1 / D-14 amendment: offsets stripped (or rejected) before any parse.
     zone_offsets, zone_rejected = _normalise_date_zones(df, fmt)
     date_result = _detect_and_normalize_date_column(df)
-    if fmt == "trades" and zone_offsets is not None:
+    if zone_rejected and pd.api.types.is_datetime64_any_dtype(df["date"]):
+        # The detector rewrote the column and wrote a NaT where it could not read
+        # the placeholder; put the placeholder back so pandera reports the cell
+        # through `coerce_dtype`, as it does in a file the detector leaves alone,
+        # and not as a blank (`not_nullable`).
+        restored = df["date"].astype(object)
+        restored.iloc[list(zone_rejected)] = _UNSUPPORTED_ZONE_TOKEN
+        df["date"] = restored
+    elif fmt == "trades" and zone_offsets is not None:
         _apply_trade_offsets(df, zone_offsets)  # instants, like the worker reads them
     date_flag: dict[str, Any] | None = None
     date_error: dict[str, Any] | None = None

@@ -438,6 +438,47 @@ def test_only_the_row_with_the_unsupported_zone_is_reported_and_at_its_real_row(
     assert "+2" not in json.dumps(envelope["errors"])
 
 
+@pytest.mark.parametrize("fmt", list(HEADER))
+@pytest.mark.parametrize(
+    "dates,bad_row",
+    [
+        pytest.param(
+            [
+                "13/01/2024 00:00:00 +01:00",
+                "14/01/2024 00:00:00 +01:00",
+                "15/01/2024 00:00:00 +01:00 (CET)",
+                "16/01/2024 00:00:00 +01:00",
+            ],
+            3,
+            id="day-first-name-after-offset",
+        ),
+        pytest.param(
+            [
+                "29/03/2024 00:00:00 +01:00",
+                "30/03/2024 00:00:00 +01:00",
+                "31/03/2024 00:00:00 GMT+2",
+                "01/04/2024 00:00:00 +02:00",
+            ],
+            3,
+            id="day-first-gmt-plus-2",
+        ),
+    ],
+)
+def test_a_bad_zone_in_a_day_first_file_is_the_same_date_error_at_its_real_row(
+    fmt: str, dates: list[str], bad_row: int
+) -> None:
+    """The day/month detector rewrites the date column when its dates parse. A
+    cell it cannot read must not come out as a NaT (`not_nullable`, "A required
+    value is blank"): it is the same `coerce_dtype` date error as in an ISO file,
+    at the same real row."""
+    envelope = validate_csv(_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert {e["row"] for e in envelope["errors"] if e["rule"].startswith(COERCE_RULE_PREFIX)} == {bad_row}
+    assert "not_nullable" not in {e["rule"] for e in envelope["errors"]}
+    assert "0000-00-00" not in json.dumps(envelope, default=str)
+
+
 def test_the_preview_of_a_rejected_zone_file_shows_what_the_user_wrote() -> None:
     """The guard replaces the cell with an unparseable token while pandera runs.
     That token is an implementation detail and must not reach the preview."""
