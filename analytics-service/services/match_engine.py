@@ -164,7 +164,13 @@ max_drawdown = _max_drawdown
 # Trigger #2 re-scores every batch cached under the previous version on the first
 # post-deploy cron tick, so the after-deploy PROD reading is unambiguous; WEIGHTS_VERSION
 # stays v2.0.0 because no weight changed.
-ENGINE_VERSION = "v2.3.0"
+# Phase 167.1.1.1 GAP-01 (2026-10-16) bumps ENGINE_VERSION to v2.4.0 because the persisted
+# score_breakdown.raw shape changed: a candidate sharing fewer than PORTFOLIO_FIT_MIN_OVERLAP_DAYS
+# days with the book now carries fit_unavailable_reason, fit_overlap_days and
+# fit_min_overlap_days, and data_completeness is None on that path. Trigger #2 re-scores cached
+# v2.3.0 batches on the first post-deploy cron tick, so the PROD rows gain the marker without
+# an input change; WEIGHTS_VERSION stays v2.0.0.
+ENGINE_VERSION = "v2.4.0"
 WEIGHTS_VERSION = "v2.0.0"
 
 # The fewest days a candidate must share with the book for the portfolio-fit axis to compute.
