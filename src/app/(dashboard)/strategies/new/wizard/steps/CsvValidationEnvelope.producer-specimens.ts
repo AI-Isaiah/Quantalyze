@@ -56,6 +56,17 @@ export const PARSE_ERROR_LONG_ROW: ProducerSpecimen = {
   message: "Could not parse CSV: a data row has more fields than the header row.",
 };
 
+/**
+ * 170.1 D-14 (WR-A): two headers that collide once lower-cased (`date,Date,...`).
+ * Same rule (`parse_error`), a third emission site. The founder-approved sentence,
+ * verbatim; it names no header, because the header text is the user's own.
+ */
+export const PARSE_ERROR_DUPLICATE_HEADER: ProducerSpecimen = {
+  rule: "parse_error",
+  row: 0,
+  message: "Could not parse CSV: two columns have the same name.",
+};
+
 export const DATE_FORMAT_AMBIGUOUS: ProducerSpecimen = {
   rule: "date_format_ambiguous",
   row: 0,
@@ -63,13 +74,14 @@ export const DATE_FORMAT_AMBIGUOUS: ProducerSpecimen = {
     "Could not determine the date format — these dates are ambiguous (each could be DD/MM/YYYY or MM/DD/YYYY). Please re-upload with ISO dates in YYYY-MM-DD format.",
 };
 
-/** One specimen per emission site; `empty` and `parse_error` have two. */
+/** One specimen per emission site; `empty` has two, `parse_error` three. */
 export const BESPOKE_SPECIMENS: readonly ProducerSpecimen[] = [
   TOO_MANY_ROWS,
   EMPTY_NO_FILE,
   EMPTY_NO_ROWS,
   PARSE_ERROR,
   PARSE_ERROR_LONG_ROW,
+  PARSE_ERROR_DUPLICATE_HEADER,
   DATE_FORMAT_AMBIGUOUS,
 ];
 

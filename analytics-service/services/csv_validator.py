@@ -568,6 +568,59 @@ def _coerce_numeric_string(value: object) -> object:
 # unambiguous day-first case emits a `date_format_normalized` info-flag.
 # ---------------------------------------------------------------------------
 
+# 170.1 / D-14 (WR-A) - A UTC OFFSET IS NOT PART OF THE DATE THE USER WROTE.
+#
+# A local-time broker export carries the offset in force on each row, and the
+# offset changes across a daylight-saving boundary (`...T00:00:00+01:00` then
+# `...T00:00:00+02:00`). `pd.to_datetime` refuses a column with more than one
+# offset ("Mixed timezones detected") and it raised out of `validate_csv`, so an
+# ordinary file came back as CSV_UPSTREAM_FAIL ("our side, try again") and a
+# retry could never help.
+#
+# Parsing with `utc=True` stops the raise but moves the DAY: local midnight at
+# +02:00 is the previous evening in UTC, so `2024-03-31T00:00:00+02:00` becomes
+# 2024-03-30 and collides with the row before it. The calendar date the user
+# wrote is the wall-clock date, so the offset is removed BEFORE any parse and the
+# wall clock is what gets parsed. `_parse_dates` below keeps `utc=True` as the
+# backstop for any zone spelling this pattern does not recognise (a named zone
+# beside numeric offsets), where the file then validates instead of raising.
+_UTC_OFFSET_SUFFIX_RE = re.compile(
+    r"(\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?)"  # the wall-clock time, kept
+    r"\s*(?:[Zz]|UTC|GMT|(?:UTC|GMT)?[+-]\d{2}(?::?\d{2})?)\s*$"  # the offset, dropped
+)
+
+
+def _drop_utc_offsets(df: pd.DataFrame) -> None:
+    """Strip a trailing UTC offset (`+01:00`, `-0500`, `Z`, `UTC`) from every
+    timestamp string in `df["date"]`, in place, keeping the wall clock.
+
+    Only a string that ends in a TIME followed by an offset is touched, so a
+    plain date such as `2024-03-30` (whose `-30` is a day, not an offset) is
+    never altered. A column with no offsets is left byte-for-byte unchanged.
+    """
+    if "date" not in df.columns:
+        return
+    col = df["date"]
+    if not (pd.api.types.is_string_dtype(col) or pd.api.types.is_object_dtype(col)):
+        return
+    stripped = col.map(
+        lambda v: _UTC_OFFSET_SUFFIX_RE.sub(r"\1", v) if isinstance(v, str) else v
+    )
+    if not stripped.equals(col):
+        df["date"] = stripped
+
+
+def _parse_dates(values: pd.Series, **kwargs: Any) -> pd.Series:
+    """`pd.to_datetime(errors="coerce")` that cannot raise on mixed UTC offsets.
+
+    `utc=True` makes every zone-bearing value comparable; the result is returned
+    naive so it compares with the naive columns the rest of the module builds.
+    Naive input is read as UTC and comes back unchanged. See the module comment
+    above `_drop_utc_offsets` for why the wall-clock date is taken first.
+    """
+    return pd.to_datetime(values, errors="coerce", utc=True, **kwargs).dt.tz_localize(None)
+
+
 def _date_parse_is_usable(parsed: pd.Series) -> bool:
     """True when every value parsed (no NaT) AND the series is monotonic
     non-decreasing.
@@ -607,8 +660,8 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # silence pandas' per-row inference warnings
-        parsed_mf = pd.to_datetime(s, dayfirst=False, errors="coerce")
-        parsed_df = pd.to_datetime(s, dayfirst=True, errors="coerce")
+        parsed_mf = _parse_dates(s, dayfirst=False)
+        parsed_df = _parse_dates(s, dayfirst=True)
 
     # Identical under both flags → no day/month ambiguity to resolve (e.g.
     # every first component > 12, so pandas can only read it day-first). ISO
@@ -767,7 +820,42 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # _redact_preview / Sharpe sentinel / preview accessors all expect.
     # Trailing/leading whitespace is also stripped because Excel and
     # certain accounting tools sometimes emit "  date  ,  daily_return  ".
-    df.columns = [str(c).strip().lower() for c in df.columns]
+    normalized_columns = [str(c).strip().lower() for c in df.columns]
+
+    # 170.1 / D-14 (WR-A) - TWO HEADERS THAT COLLIDE ONCE LOWER-CASED ARE A NAMED
+    # REJECTION. `date,Date,daily_return` leaves two columns called `date`, so
+    # `df["date"]` is a two-column FRAME and the date detector raised
+    # AttributeError ('DataFrame' has no attribute 'str'); `Daily_Return` beside
+    # `daily_return` raised TypeError in the percent normaliser. Either escape
+    # reached the callers as CSV_UPSTREAM_FAIL, "our side, try again", for a
+    # deterministic file defect. The sentence is founder-approved (D-14) and names
+    # no header: the header text is the user's own and is not echoed.
+    #
+    # Only a collision on a column the schema DECLARES is rejected. Pandas already
+    # suffixes an exact repeat (`x,x` -> `x`, `x.1`), so the collisions that reach
+    # here differ in case or padding, and an undeclared pair (`Notes,notes`) is
+    # dropped by the schema's `strict="filter"` without touching anything: that
+    # file validated before this change and still must.
+    declared = SCHEMAS[fmt].columns.keys()
+    if any(
+        normalized_columns.count(name) > 1
+        for name in declared
+        if name in normalized_columns
+    ):
+        logger.warning("[csv-validator] header collision after lower-casing")
+        return {
+            "ok": False,
+            "preview": None,
+            "errors": [{
+                "rule": "parse_error",
+                "row": 0,
+                # One literal, on one line: the WR-01 parity test greps the
+                # producer source for this exact sentence.
+                "message": "Could not parse CSV: two columns have the same name.",
+            }],
+            "correlation_id": None,
+        }
+    df.columns = normalized_columns
 
     # 2026-05-07 — currency / percent / thousands-separator scrub on the
     # numeric schema columns. Excel + accounting tools love to format
@@ -820,6 +908,7 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # a `date_format_ambiguous` error when the format genuinely can't be
     # determined (validate_csv rejects rather than guess). See
     # _detect_and_normalize_date_column.
+    _drop_utc_offsets(df)  # 170.1 / D-14: wall-clock dates, before any parse
     date_result = _detect_and_normalize_date_column(df)
     date_flag: dict[str, Any] | None = None
     date_error: dict[str, Any] | None = None
@@ -996,7 +1085,7 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
         # (ISO / month-first / rejected paths) rather than a redundant pass.
         date_col = df["date"]
         if not pd.api.types.is_datetime64_any_dtype(date_col):
-            date_col = pd.to_datetime(date_col, errors="coerce")
+            date_col = _parse_dates(date_col)
         dates = date_col.dropna()
         if not dates.empty:
             date_min = str(dates.min().date())

@@ -17,6 +17,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 
+from services.csv_fault import report_csv_internal_fault
 from services.csv_validator import UNSUPPORTED_FMT_MESSAGE, validate_csv
 # PYAPI-03 — the canonical process-wide Limiter. This module used to declare its
 # own ``Limiter(key_func=get_remote_address)``: keyed on the Railway EDGE ip
@@ -90,22 +91,41 @@ async def csv_validate(
         # 170.1 / D-10 — NEVER LOG OR RETURN THE EXCEPTION TEXT. A pandas /
         # pandera / int() message routinely carries the offending CELL
         # ("could not convert string to float: '<the cell>'"), which is
-        # untrusted upload content that can hold PII. Log the exception TYPE
-        # only; the client gets a fixed sentence.
+        # untrusted upload content that can hold PII. The client gets a fixed
+        # sentence.
+        #
+        # 170.1 / D-14 (SFH-L1) — BUT THE FAULT MUST BE LOCATABLE. Logging the
+        # type alone made an internal fault impossible to find. The helper logs
+        # the type plus the INNERMOST FRAME and captures the exception to Sentry
+        # through a scoped `capture_exception` (through `_redact_before_send`,
+        # with the exception text, frame locals and request body withheld), so
+        # the stack survives and the cell does not. See services/csv_fault.py.
         #
         # One arm, not two. The old `except ValueError` arm returned a 400 with
-        # `str(e)`, but `validate_csv` raises ValueError for exactly one reason
-        # (an unsupported fmt) and the pre-check above has already rejected
-        # that with the fixed sentence, so a ValueError reaching here is an
-        # internal fault, not a client error. 500 is the honest status.
-        logger.error("[csv-validator] unexpected error: %s", type(e).__name__)
+        # `str(e)`. `validate_csv` is contracted to RETURN an envelope for any
+        # file content, rejected or not, and to raise ValueError only for an
+        # unsupported fmt, which the pre-check above has already rejected with
+        # the fixed sentence. So anything reaching here, a ValueError included,
+        # is an internal fault and not a client error. 500 is the honest status.
+        # (An earlier version of this comment said ValueError had exactly one
+        # source. That was false: a daylight-saving offset change in the dates
+        # raised "Mixed timezones" from pandas. It is fixed in the validator, and
+        # `tests/test_csv_never_raises_170_1.py` pins the never-raise contract
+        # over a hostile corpus so the next escape is a red test, not a retry
+        # message.)
+        #
+        # `from None`: Starlette's integration captures a 500 HTTPException, and
+        # with the implicit `__context__` still attached the SDK walks into the
+        # exception above and ships its text (measured). `from None` sets
+        # `__suppress_context__`, which the SDK honours.
+        report_csv_internal_fault(e, source="csv-validator")
         raise HTTPException(status_code=500, detail={
             "ok": False,
             "code": "CSV_UPSTREAM_FAIL",
             "human_message": "CSV validation failed. Please retry.",
             "debug_context": {},
             "correlation_id": None,
-        })
+        }) from None
 
     # 200 OK even when ok=False — the envelope itself carries the error
     # detail. The Next.js client distinguishes by the envelope's `ok` field.
