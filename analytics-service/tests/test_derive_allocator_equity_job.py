@@ -4401,13 +4401,18 @@ async def test_no_capital_exit_dust_sized_final_days_still_exit() -> None:
 
 @pytest.mark.asyncio
 async def test_no_capital_exit_inception_residual_stays_dropped() -> None:
-    """(c) PROD book 1's MT5 dust key: the founder's "stays blocked, unchanged". Its opening flows
-    do not reconcile with its first return day's level (the capital implied before them is 0.15%
-    of that level, against a 0.01% band), a fact in the writer's stored data that no exit rule may
-    paper over (D-02: the gate is not loosened). Routed by the founder to Phase 167.1.2.1.1
-    WRITERRESIDUALS as SC-9. Until that is fixed the key keeps today's named ``dropped_key``: the
+    """(c) A key whose opening flows do not reconcile with its first return day's level (here the
+    capital implied before them is 0.15% of that level, against a 0.01% band) is a fact in the
+    writer's stored data that no exit rule may paper over (D-02: the gate is not loosened). This
+    test pins that a genuine unreconciled opening flow keeps today's named ``dropped_key``: the
     candidate falls back before its blocked curve can enter the book, so ``inception_unreconciled``
-    is NOT what the book says, the key is not named as exited, and the book is untrustworthy."""
+    is NOT what the book says, the key is not named as exited, and the book is untrustworthy.
+
+    SC-9 (Phase 167.1.2.1.1 WRITERRESIDUALS) is no longer open. The 0.15% residual was measured on
+    PROD book 1's MT5 key before the 164.6.6.2.3 recompute; it was re-measured clean on PROD on
+    2026-10-16 (no equity-curve row carries ``inception_unreconciled``, book 1 is trustworthy,
+    every connected MT5 key replays clean on its stored writer basis, far inside the band), and SC-9
+    is closed by recorded decision (D-11, founder 2026-10-16), not by a code change."""
     d = _BTC_DAYS
     book = _nc_assemble([
         _nc_candidate(
