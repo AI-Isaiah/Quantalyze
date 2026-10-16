@@ -162,7 +162,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [x] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — verified 2026-10-15 (completed 2026-10-15)
-- [ ] **Phase 167.1.1.1: BRIDGERETURNS — the Bridge matcher's per-holding returns come from each holding's daily mark price, so buying, selling or moving an asset never reads as a gain or loss** (INSERTED 2026-10-15) — not yet planned (data integrity; founder decision 167.1.1 D-06)
+- [x] **Phase 167.1.1.1: BRIDGERETURNS — the Bridge matcher's per-holding returns come from each holding's daily mark price, so buying, selling or moving an asset never reads as a gain or loss** (INSERTED 2026-10-15) — 10 plans, shipped as v0.132.3.0 (#1070) and gap-closure v0.132.4.0 (#1074, engine v2.4.0); SC4 PROD before/after read 2026-10-16 (portfolio fit 0/8 → 3/5 personalized candidates, every holding named by reason, the 2 remaining nulls named overlap_below_min 8 and 9 days); verification passed; security SECURED 23/23 (completed 2026-10-16)
 - [ ] **Phase 167.1.1.2: AUMBASIS — scenario commit sizing counts a derivative at its unrealized P&L, never its notional, and a missing P&L is stored as missing, never as 0** (INSERTED 2026-10-15) — not yet planned (data integrity; founder decision during 167.1.1.1 discuss)
 - [x] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — verified 2026-10-11 (completed 2026-10-11)
 - [x] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — 10 plans, shipped as PR 1 v0.131.3.0 (#1022) and PR 2 v0.131.8.0 (#1033); D-11 day-0 and day-1 PROD reads as expected (capped_events 0), founder acknowledged 2026-10-16; verification passed 7/7; security SECURED 33/33 (completed 2026-10-16)
@@ -4943,7 +4943,7 @@ Measured at `e34605be`: `reconstruct_symbol_returns` in `analytics-service/route
 **Founder decision D-23 (2026-10-15, review round 2):** when the matcher AUM is zero or below, a candidate is sized at the 0.5 add-weight ceiling, never at the engine's fixed 0.10 default (amended by D-25: in personalized mode). The fallback is recorded on the batch, and a test pins that such a book never scores better on max weight than one with an AUM of +$100.
 **Founder decision D-24 (2026-10-16):** when the matcher AUM is unknown (a strategies-only book with every `allocated_amount` missing), a candidate keeps the 0.10 default sizing, so scores do not change. The fallback is named on the batch as `add_weight_fallback: "aum_unknown_default_0_10"` with a named WARNING, and a test pins it.
 **Founder decision D-25 (2026-10-16, review round 3 Q-D):** a screening-mode book (no strategy, no priced spot holding) with AUM zero or below keeps the 0.10 sizing every screening book gets, named on the batch as `add_weight_fallback: "aum_not_positive_screening_default_0_10"` with a named WARNING and a RED test. D-23's entry is written only when the engine ran personalized and returned candidates.
-**Plans:** 10/10 plans executed
+**Plans:** 10/10 plans complete
 
 Plans:
 **Wave 1**
@@ -6302,7 +6302,7 @@ kept verbatim.
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Complete    | 2026-10-04 |
 | 167.1.1 HOLDINGKEYSCOPE | 5/5 | Complete | v0.132.0.0 · #1053; 375px follow-up v0.132.0.1 · #1056 |
-| 167.1.1.1 BRIDGERETURNS | 0/? | Queued — data integrity; founder decision 167.1.1 D-06 | - |
+| 167.1.1.1 BRIDGERETURNS | 10/10 | Complete — SC4 PROD before/after read, short-overlap nulls named; verification passed, SECURED 23/23 | 2026-10-16 · v0.132.3.0 · #1070, v0.132.4.0 · #1074 |
 | 167.1.1.2 AUMBASIS | 0/? | Queued — data integrity; founder decision 2026-10-15 | - |
 | 167.1.2 ACCOUNTTRUTH | PR A, B, C1–C5 shipped | Complete | 2026-10-11 |
 | 167.1.2.1 RECONMARKER | 10/10 | Complete — D-11 day-0 and day-1 PROD reads as expected, capped_events 0; verification passed, SECURED 33/33 | 2026-10-16 · v0.131.3.0 · #1022, v0.131.8.0 · #1033 |
