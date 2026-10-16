@@ -149,7 +149,7 @@ interface ValidationEnvelope {
   code: string;
   human_message: string;
   debug_context: {
-    pandera_errors?: { rule: string; row: number; message: string }[];
+    pandera_errors?: { rule: string; row: number; message: string; column?: string }[];
   };
   correlation_id: string | null;
 }
@@ -183,11 +183,11 @@ interface ValidateResponse {
    * quotation from a prose scan yet.
    */
   daily_returns_series?: { date: string; daily_return: number }[];
-  errors?: { rule: string; row: number; message: string }[];
+  errors?: { rule: string; row: number; message: string; column?: string }[];
   correlation_id?: string | null;
   code?: string;
   human_message?: string;
-  debug_context?: { pandera_errors?: { rule: string; row: number; message: string }[] };
+  debug_context?: { pandera_errors?: { rule: string; row: number; message: string; column?: string }[] };
 }
 
 export interface CsvUploadStepProps {
@@ -745,6 +745,7 @@ export function CsvUploadStep({
               debug_context: envelope.debug_context,
               correlation_id: envelope.correlation_id,
             }}
+            format={fmt}
           />
         )}
 

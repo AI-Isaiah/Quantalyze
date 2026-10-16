@@ -98,10 +98,24 @@ interface CsvValidationEnvelopeProps {
     code: string;
     human_message: string;
     debug_context: {
-      pandera_errors?: { rule: string; row: number; message: string }[];
+      pandera_errors?: {
+        rule: string;
+        row: number;
+        message: string;
+        /**
+         * 170.1 / D-10 — the SCHEMA's expected column name (never CSV cell
+         * content). Absent on envelopes persisted before the producer emitted it.
+         */
+        column?: string;
+      }[];
     };
     correlation_id: string | null;
   };
+  /**
+   * 170.1 / D-10 — the format the user selected (`daily_returns` | `daily_nav`
+   * | `trades`). Lets the panel tell a wrong-format pick from a wrong file.
+   */
+  format?: string;
   /**
    * 146.2-08 / B1 — an optional remedy CTA, rendered BELOW the body and ABOVE
    * the per-rule accordion. That position is DESIGN.md's Error Envelope
@@ -115,6 +129,23 @@ interface CsvValidationEnvelopeProps {
    * would put that decision two files away from the state it mutates.
    */
   action?: ReactNode;
+}
+
+/**
+ * 170.1 / D-10 — one `column_in_dataframe` row. The column is the schema's
+ * expected name, rendered as React text in the data voice (`font-metric`), with
+ * no quotes or backticks. A row persisted before the producer carried `column`
+ * has no name to print, so it reads the rule's label instead of a sentence with
+ * a hole in it.
+ */
+function MissingColumnLine({ column }: { column: string | undefined }) {
+  const name = typeof column === "string" ? column.trim() : "";
+  if (name === "") return <>{CSV_RULE_LABELS.column_in_dataframe}.</>;
+  return (
+    <>
+      Your file has no <span className="font-metric">{name}</span> column.
+    </>
+  );
 }
 
 export function CsvValidationEnvelope({
@@ -244,7 +275,13 @@ export function CsvValidationEnvelope({
             */}
             {list.map((e, i) => (
               <li key={i}>
-                {e.row >= 1 ? `Row ${e.row}: ${e.message}` : e.message}
+                {e.rule === "column_in_dataframe" ? (
+                  <MissingColumnLine column={e.column} />
+                ) : e.row >= 1 ? (
+                  `Row ${e.row}: ${e.message}`
+                ) : (
+                  e.message
+                )}
               </li>
             ))}
           </ul>

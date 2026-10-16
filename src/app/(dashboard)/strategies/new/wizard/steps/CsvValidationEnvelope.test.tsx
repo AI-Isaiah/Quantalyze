@@ -30,10 +30,13 @@ import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
 
 afterEach(() => cleanup());
 
+type TestRow = { rule: string; row: number; message: string; column?: string };
+
 function renderEnvelope(
   code: string,
   human_message: string,
-  pandera_errors?: { rule: string; row: number; message: string }[],
+  pandera_errors?: TestRow[],
+  format?: string,
 ) {
   render(
     <CsvValidationEnvelope
@@ -43,6 +46,7 @@ function renderEnvelope(
         debug_context: pandera_errors ? { pandera_errors } : {},
         correlation_id: null,
       }}
+      format={format}
     />,
   );
 }
@@ -211,7 +215,7 @@ function renderWire(envelope: unknown) {
           code: string;
           human_message: string;
           debug_context: {
-            pandera_errors?: { rule: string; row: number; message: string }[];
+            pandera_errors?: TestRow[];
           };
           correlation_id: string | null;
         }
@@ -306,7 +310,11 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
 
     const text = panelText();
     expect(text.length).toBeGreaterThan(20); // the haystack is real
-    expect(text).toContain("Failed rule 'column_in_dataframe'.");
+    // 170.1 / D-10: a row persisted before the producer carried `column` reads
+    // the rule's label, never the raw producer sentence or a hole in a sentence.
+    expect(text).toContain("Your CSV is missing a required column.");
+    expect(text).not.toContain("Failed rule");
+    expect(text).not.toContain("column_in_dataframe");
     expect(
       text.toLowerCase(),
       "the panel named a column called 'nan' — the float NaN pandera reports " +
@@ -353,9 +361,10 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
 
     const text = panelText();
     expect(text.length).toBeGreaterThan(20); // the haystack is real
-    // The message itself still renders — "suppress the prefix" must not be
-    // satisfied by dropping the row.
-    expect(text).toContain("Failed rule 'column_in_dataframe'.");
+    // The line itself still renders — "suppress the prefix" must not be
+    // satisfied by dropping the row. 170.1 / D-10: the label stands in for the
+    // raw producer sentence.
+    expect(text).toContain("Your CSV is missing a required column.");
     expect(
       text,
       "the panel prefixed a row number onto a failure that has no row — the " +
@@ -525,5 +534,69 @@ describe("[166.1 WR-01] CsvValidationEnvelope — a file-level rule names no row
     const text = screen.getByTestId("wizard-csv-error").textContent ?? "";
     expect(text).toContain("1 row failed validation");
     expect(text).not.toContain("2 rows failed validation");
+  });
+});
+
+/**
+ * 170.1 / D-10 (UI-SPEC "Copy - CSV errors"): a `column_in_dataframe` row that
+ * carries the schema's `column` reads "Your file has no {column} column." with
+ * the column in the data voice, and no raw pandera rule name reaches the DOM.
+ *
+ * ⚠️ Expected strings are HAND-TYPED. The `<li>` text is read through
+ * `textContent` because the column sits inside its own `<span>`.
+ */
+describe("[170.1 D-10] CsvValidationEnvelope — a missing column is named in plain words", () => {
+  const MISSING = [
+    { rule: "column_in_dataframe", row: 0, message: "Your file has no side column.", column: "side" },
+    { rule: "column_in_dataframe", row: 0, message: "Your file has no qty column.", column: "qty" },
+  ];
+
+  const lineTexts = () =>
+    [...screen.getByTestId("wizard-csv-error").querySelectorAll("li")].map(
+      (li) => li.textContent,
+    );
+
+  it("🔴 each row with a column renders one sentence, the column in font-metric", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", MISSING, "trades");
+
+    expect(lineTexts()).toEqual([
+      "Your file has no side column.",
+      "Your file has no qty column.",
+    ]);
+    const mono = [
+      ...screen.getByTestId("wizard-csv-error").querySelectorAll("li .font-metric"),
+    ].map((el) => el.textContent);
+    expect(mono, "the column name must sit in Geist Mono (font-metric)").toEqual(["side", "qty"]);
+  });
+
+  it("no raw pandera rule name or producer sentence anywhere in the DOM, titles included", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", MISSING, "trades");
+
+    const panel = screen.getByTestId("wizard-csv-error");
+    const titles = [...panel.querySelectorAll("[title]")].map((el) => el.getAttribute("title"));
+    const haystack = `${panel.textContent}\n${titles.join("\n")}`;
+    expect(haystack.length).toBeGreaterThan(20);
+    expect(haystack).not.toContain("column_in_dataframe");
+    expect(haystack).not.toContain("Failed rule");
+  });
+
+  it("the column is React text, never HTML", () => {
+    renderEnvelope(
+      "CSV_VALIDATION_FAILED",
+      "Your file did not pass validation.",
+      [{ rule: "column_in_dataframe", row: 0, message: "x", column: "<b>side</b>" }],
+      "trades",
+    );
+    const panel = screen.getByTestId("wizard-csv-error");
+    expect(panel.querySelector("li b")).toBeNull();
+    expect(lineTexts()).toEqual(["Your file has no <b>side</b> column."]);
+  });
+
+  it("a row persisted before the producer carried `column` reads the label, not a sentence with a hole", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      { rule: "column_in_dataframe", row: 0, message: "Failed rule 'column_in_dataframe'." },
+    ]);
+    expect(lineTexts()).toEqual(["Your CSV is missing a required column."]);
+    expect(panelText()).not.toMatch(/no\s+column/);
   });
 });
