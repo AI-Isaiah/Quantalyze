@@ -30,6 +30,7 @@ Every cell value is a synthetic marker (`ZXQCELL`). No real data.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -508,6 +509,11 @@ def _date_errors(envelope: dict) -> list[tuple[str, int, str, str]]:
     ]
 
 
+def _all_errors(envelope: dict) -> list[tuple[str, int, str, str | None]]:
+    """Every error, rule included, whatever its rule: nothing filtered out."""
+    return [(e["rule"], e["row"], e["message"], e.get("column")) for e in envelope["errors"]]
+
+
 @pytest.mark.parametrize("fmt", list(HEADER))
 @pytest.mark.parametrize(
     "dates,bad_row",
@@ -536,6 +542,91 @@ def test_a_named_zone_in_a_day_first_file_is_a_date_error_not_a_blank(
     assert "0000-00-00" not in json.dumps(envelope, default=str)
 
 
+# Review TR-3 (tiny round, MEDIUM, user-facing). The dates below INCREASE; one cell
+# has a zone the validator does not read. The unreadable cell is a date error at
+# its row, and that is ALL the user should be told: before this fix the file also
+# got `monotonic_dates` at row 0, "dates must be strictly increasing", which
+# says the user's dates are out of order when they are not.
+ONLY_THE_DATE_ERROR = ["coerce_dtype('datetime64[ns]')", "dtype('datetime64[ns]')"]
+
+INCREASING_WITH_ONE_BAD_ZONE = [
+    pytest.param(DAY_FIRST_NAMED_ZONE, 3, id="day-first-est-in-the-middle"),
+    pytest.param(
+        ["13/01/2024 10:00 EST", "14/01/2024 10:00 +01:00", "15/01/2024 10:00 +01:00", "16/01/2024 10:00 +01:00"],
+        1,
+        id="day-first-est-first",
+    ),
+    pytest.param(
+        ["13/01/2024 10:00 +01:00", "14/01/2024 10:00 +01:00", "15/01/2024 10:00 +01:00", "16/01/2024 10:00 CEST"],
+        4,
+        id="day-first-cest-last",
+    ),
+    pytest.param(ISO_NAMED_ZONE, 3, id="iso-est-in-the-middle"),
+    # The ISO twin of the DST file: a `GMT+1` spelling (read as UTC-1 by dateutil,
+    # so never converted) between two recognised offsets.
+    pytest.param(
+        ["2024-03-30T00:00:00+01:00", "2024-03-31 00:00:00 GMT+1", "2024-04-01T00:00:00+02:00"],
+        2,
+        id="iso-gmt-plus-1-between-recognised-offsets",
+    ),
+    pytest.param(
+        ["13/01/2024 00:00:00 +01:00", "14/01/2024 00:00:00 +01:00 (CET)", "15/01/2024 00:00:00 +01:00", "16/01/2024 00:00:00 +01:00"],
+        2,
+        id="day-first-name-after-offset",
+    ),
+]
+
+
+@pytest.mark.parametrize("fmt", list(HEADER))
+@pytest.mark.parametrize("dates,bad_row", INCREASING_WITH_ONE_BAD_ZONE)
+def test_dates_that_increase_with_one_unreadable_zone_get_only_the_date_error(
+    fmt: str, dates: list[str], bad_row: int
+) -> None:
+    envelope = validate_csv(_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert [(rule, row) for rule, row, _, _ in _all_errors(envelope)] == [
+        (rule, bad_row) for rule in ONLY_THE_DATE_ERROR
+    ], envelope["errors"]
+    assert "monotonic_dates" not in {e["rule"] for e in envelope["errors"]}
+
+
+OUT_OF_ORDER_WITH_ONE_BAD_ZONE = [
+    pytest.param(
+        ["13/01/2024 10:00 +01:00", "16/01/2024 10:00 +01:00", "15/01/2024 10:00 +01:00", "17/01/2024 10:00 EST"],
+        id="day-first-est",
+    ),
+    pytest.param(
+        ["2024-01-13 10:00 +01:00", "2024-01-16 10:00 +01:00", "2024-01-15 10:00 +01:00", "2024-01-17 10:00 EST"],
+        id="iso-est",
+    ),
+    # Two readable dates on the same day: not strictly increasing, whatever the
+    # third cell is.
+    pytest.param(
+        ["2024-01-13 10:00 +01:00", "2024-01-13 10:00 +01:00", "2024-01-15 10:00 EST", "2024-01-16 10:00 +01:00"],
+        id="iso-duplicate-readable-dates",
+    ),
+    pytest.param(
+        ["13/01/2024 10:00 +01:00", "16/01/2024 10:00 +01:00", "15/01/2024 10:00 GMT+1", "14/01/2024 10:00 +01:00"],
+        id="day-first-gmt-plus-1",
+    ),
+]
+
+
+@pytest.mark.parametrize("fmt", list(HEADER))
+@pytest.mark.parametrize("dates", OUT_OF_ORDER_WITH_ONE_BAD_ZONE)
+def test_dates_that_really_are_out_of_order_still_report_it_beside_a_bad_zone(
+    fmt: str, dates: list[str]
+) -> None:
+    """Control for TR-3: the order is checked on the readable rows, not dropped."""
+    envelope = validate_csv(_file(fmt, dates), fmt)
+
+    rules = {e["rule"] for e in envelope["errors"]}
+    assert envelope["ok"] is False
+    assert "monotonic_dates" in rules, envelope["errors"]
+    assert set(ONLY_THE_DATE_ERROR) <= rules, envelope["errors"]
+
+
 @pytest.mark.parametrize("fmt", list(HEADER))
 def test_the_day_first_named_zone_error_has_the_shape_the_iso_file_gets(fmt: str) -> None:
     """Rule string, row, message and column are what pandera emits for the same
@@ -546,6 +637,9 @@ def test_the_day_first_named_zone_error_has_the_shape_the_iso_file_gets(fmt: str
     assert day_first["ok"] is False and iso["ok"] is False
     assert _date_errors(iso), iso["errors"]  # the ISO path still gives coerce_dtype
     assert _date_errors(day_first) == _date_errors(iso)
+    # The FULL rule list, not only the `coerce_dtype` subset: filtering to that
+    # subset is what hid a spurious `monotonic_dates` here (review TR-3).
+    assert _all_errors(day_first) == _all_errors(iso), (day_first["errors"], iso["errors"])
 
 
 def test_the_repro_from_the_review_gives_coerce_dtype_at_row_3() -> None:
@@ -875,6 +969,238 @@ def test_the_exact_repeat_sentence_names_no_header_and_echoes_no_cell() -> None:
 
     assert envelope["errors"][0]["message"] == DUPLICATE_HEADER_MESSAGE
     assert MARKER.lower() not in json.dumps(envelope, default=str).lower()
+
+
+# Review TR-1 and TR-2 (tiny round, both HIGH). The raw header read that R-1
+# introduced regressed two shapes that validated correctly before it:
+#   TR-1  pandas skips a line of spaces or tabs; the stdlib reader keeps it as a
+#         one-field record, so the "header" was that line. A repeated column under
+#         it was ACCEPTED (the second one silently ignored) or RAISED.
+#   TR-2  `io.StringIO(text)` without `newline=""` splits only on a line feed, so a
+#         file with bare-carriage-return line ends (Excel for Mac) was rejected
+#         with a Python hint, "do you need to open the file with newline=''?".
+# The `\r` and `\t` below are real control characters in the file, not escapes the
+# test forgot to decode.
+_DUP_BODY = "2024-03-10,0.001,0.5\n2024-03-11,0.002,0.5\n2024-03-12,-0.001,0.5\n"
+_DUP_BODY_DATE_DATE = "2024-03-10,2024-03-10,0.001\n2024-03-11,2024-03-11,0.002\n2024-03-12,2024-03-12,-0.001\n"
+
+# (line above the header, header, body, id). Every one must get the founder
+# sentence: the header repeats, or collides after lower-casing, a declared column.
+WHITESPACE_LINE_REPEATS = [
+    pytest.param(" ", "date,daily_return,daily_return", _DUP_BODY, id="space-above-exact-repeat"),
+    pytest.param("\t", "date,daily_return,daily_return", _DUP_BODY, id="tab-above-exact-repeat"),
+    pytest.param(" \t  ", "date,daily_return,daily_return", _DUP_BODY, id="mixed-whitespace-above-exact-repeat"),
+    pytest.param(" ", "date,daily_return,Daily_Return", _DUP_BODY, id="space-above-case-collision"),
+    pytest.param(" ", "date,Date,daily_return", _DUP_BODY_DATE_DATE, id="space-above-date-Date"),
+    pytest.param(",", "date,daily_return,daily_return", _DUP_BODY, id="comma-above-exact-repeat-original-R1"),
+]
+
+
+@pytest.mark.parametrize("above,header,body", WHITESPACE_LINE_REPEATS)
+def test_a_whitespace_only_line_above_the_header_does_not_hide_a_repeated_column(
+    above: str, header: str, body: str
+) -> None:
+    envelope = validate_csv(f"{above}\n{header}\n{body}".encode(), "daily_returns")  # must not raise
+
+    assert envelope["ok"] is False, envelope
+    assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", 0, DUPLICATE_HEADER_MESSAGE)
+    ]
+    assert envelope["preview"] is None
+    assert "daily_returns_series" not in envelope
+
+
+@pytest.mark.parametrize("above", [" ", "\t", " \t  "])
+def test_a_good_header_under_a_whitespace_only_line_is_still_accepted(above: str) -> None:
+    """Control: skipping the line must not cost a good file."""
+    raw = f"{above}\ndate,daily_return\n2024-03-10,0.001\n2024-03-11,0.002\n2024-03-12,-0.001\n".encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert [r["daily_return"] for r in envelope["daily_returns_series"]] == [0.001, 0.002, -0.001]
+
+
+# A bare carriage return ends a line for pandas, and for the raw header read too.
+_CR_GOOD = b"date,daily_return\r2024-03-10,0.001\r2024-03-11,0.002\r2024-03-12,-0.001\r"
+_CR_GOOD_UNDER_BLANK = b",\rdate,daily_return\r2024-03-10,0.001\r2024-03-11,0.002\r2024-03-12,-0.001\r"
+_CR_GOOD_UNDER_SPACE = b" \rdate,daily_return\r2024-03-10,0.001\r2024-03-11,0.002\r2024-03-12,-0.001\r"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(_CR_GOOD, id="bare-cr"),
+        pytest.param(_CR_GOOD_UNDER_BLANK, id="bare-cr-blank-first-row"),
+        pytest.param(_CR_GOOD_UNDER_SPACE, id="bare-cr-whitespace-first-row"),
+    ],
+)
+def test_a_file_with_bare_carriage_return_line_ends_validates(raw: bytes) -> None:
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert [r["daily_return"] for r in envelope["daily_returns_series"]] == [0.001, 0.002, -0.001]
+    # Never the Python developer hint.
+    assert "newline=" not in json.dumps(envelope, default=str)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(
+            b"date,daily_return,daily_return\r2024-03-10,0.001,0.5\r2024-03-11,0.002,0.5\r",
+            id="bare-cr-exact-repeat",
+        ),
+        pytest.param(
+            b",\rdate,daily_return,daily_return\r2024-03-10,0.001,0.5\r2024-03-11,0.002,0.5\r",
+            id="bare-cr-blank-first-row-exact-repeat",
+        ),
+        pytest.param(
+            b"date,daily_return,Daily_Return\r2024-03-10,0.001,0.5\r2024-03-11,0.002,0.5\r",
+            id="bare-cr-case-collision",
+        ),
+    ],
+)
+def test_a_bare_carriage_return_duplicate_header_gets_the_founder_sentence(raw: bytes) -> None:
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", 0, DUPLICATE_HEADER_MESSAGE)
+    ]
+
+
+def test_crlf_bom_quoted_comma_and_quoted_newline_headers_still_behave() -> None:
+    """Controls for the `newline=""` change: every other line-end and quoting shape
+    reads the same as before, for a good header and for a repeated one."""
+    body_lf = _DUP_BODY
+    good = b"date,daily_return\r\n2024-03-10,0.001\r\n2024-03-11,0.002\r\n"
+    assert validate_csv(good, "daily_returns")["ok"] is True
+    assert validate_csv(b"\xef\xbb\xbf" + good, "daily_returns")["ok"] is True
+    assert validate_csv(b'date,daily_return,"a,b"\n2024-03-10,0.001,x\n2024-03-11,0.002,x\n', "daily_returns")["ok"] is True
+    assert validate_csv(b'"no\nte",date,daily_return\nx,2024-03-10,0.001\nx,2024-03-11,0.002\n', "daily_returns")["ok"] is True
+
+    for dup in (
+        b"date,daily_return,daily_return\r\n" + body_lf.replace("\n", "\r\n").encode(),
+        b"\xef\xbb\xbfdate,daily_return,daily_return\n" + body_lf.encode(),
+        b'date,"a,b",daily_return,daily_return\n' + body_lf.replace(",0.5", ",x,0.5").encode(),
+        b'"no\nte",date,daily_return,daily_return\n' + body_lf.replace("2024", "x,2024").encode(),
+    ):
+        envelope = validate_csv(dup, "daily_returns")
+        assert [(e["rule"], e["message"]) for e in envelope["errors"]] == [
+            ("parse_error", DUPLICATE_HEADER_MESSAGE)
+        ], dup
+
+
+def test_a_raw_header_the_frame_read_disagrees_with_is_rejected_not_checked() -> None:
+    """The guard against the two readers drifting apart (review TR-1). A leading
+    bare carriage return makes pandas drop the empty first field of the next line
+    (header `date`, `daily_return`) where the raw read sees a three-field record.
+    Neither can be trusted to name a column, so the file is rejected with the
+    existing wrong-width sentence, never raised and never validated against a
+    header that may be the wrong line."""
+    raw = b"\r,date,daily_return\n2024-03-10,0.001\n2024-03-11,0.002\n"
+    envelope = validate_csv(raw, "daily_returns")  # must not raise
+
+    assert envelope["ok"] is False, envelope
+    assert envelope["preview"] is None
+    assert "daily_returns_series" not in envelope
+    assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", 0, "Could not parse CSV: a data row has more fields than the header row.")
+    ]
+
+
+# Security re-audit T-170.1-51 (availability, validator half). The per-cell zone
+# check called `pd.to_datetime` on every date cell and only the row count and the
+# 10 MB body were capped, not the length of a cell: a 10 MB file of 5,000 rows of
+# 2 KB (or 500 of 20 KB) of repeated `1:11 ` took 42 to 45 s here (11.9 s before
+# D-14, 58.8 s in the audit's own run) on a synchronous call in a single-process
+# service. A date cell longer than 64 characters is now unreadable without a call
+# into pandas or a zone regex: it is the same `coerce_dtype` date error at its
+# row. The bound below is generous on purpose, 5 s against a measured fraction of
+# one, so a slow CI runner cannot flake it; the shape it replaces takes 40 s.
+MAX_DATE_CELL_CHARS = 64  # hand-typed: the cap the audit asked for, pinned here
+TIME_BOUND_SECONDS = 5.0
+
+
+def _long_cell(size: int) -> str:
+    return ("1:11 " * (size // 5 + 1))[:size].strip()
+
+
+@pytest.mark.parametrize(
+    "rows,size",
+    [pytest.param(5000, 2000, id="5000-rows-x-2KB"), pytest.param(500, 20000, id="500-rows-x-20KB")],
+)
+def test_a_10mb_file_of_very_long_date_cells_is_rejected_in_bounded_time(rows: int, size: int) -> None:
+    cell = _long_cell(size)
+    raw = ("date,daily_return\n" + "".join(f"{cell},0.001\n" for _ in range(rows))).encode()
+    assert len(raw) > 9_000_000  # the worst case the 10 MB body cap allows
+
+    started = time.perf_counter()
+    envelope = validate_csv(raw, "daily_returns")  # must not raise
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < TIME_BOUND_SECONDS, f"{elapsed:.1f}s for {rows} rows of {size} characters"
+    assert envelope["ok"] is False
+    # Every long cell is the existing date error at its own 1-based row.
+    assert sorted({row for rule, row, _, _ in _all_errors(envelope) if rule.startswith(COERCE_RULE_PREFIX)}) == list(
+        range(1, rows + 1)
+    )
+
+
+@pytest.mark.parametrize("fmt", list(HEADER))
+def test_one_over_long_date_cell_is_a_date_error_at_its_row_and_only_that(fmt: str) -> None:
+    dates = ["2024-03-01", "2024-03-02", "2024-03-03 " + "9" * 200, "2024-03-04"]
+    envelope = validate_csv(_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert [(rule, row) for rule, row, _, _ in _all_errors(envelope)] == [
+        (rule, 3) for rule in ONLY_THE_DATE_ERROR
+    ], envelope["errors"]
+    assert "9" * 50 not in json.dumps(_all_errors(envelope))  # no cell in a message
+
+
+def test_the_cap_is_on_the_cell_not_its_padding() -> None:
+    """Spaces around a short date are not part of the date. A fixed-width export
+    pads every cell; the cap must not read that padding as length."""
+    padded = [" " * 80 + d + " " * 80 for d in ("2024-03-01", "2024-03-02", "2024-03-03")]
+    envelope = validate_csv(_file("daily_returns", padded), "daily_returns")
+
+    assert envelope["ok"] is True, envelope["errors"]
+
+
+# The longest spellings a date cell can honestly take: nanoseconds and a zone.
+# Every one is far under the cap, and every one validated before the cap existed.
+LONGEST_LEGITIMATE_SPELLINGS = [
+    "2024-03-{d}T00:00:00.123456789+02:00",
+    "2024-03-{d} 00:00:00.123456789 UTC+02:00",
+    "2024-03-{d} 00:00:00.123456789 GMT",
+    '"2024-03-{d}T00:00:00,123456789Z"',  # quoted: the comma is the fraction mark
+    "{d}/03/2024 12:00:00.123456789 PM",
+]
+
+
+@pytest.mark.parametrize("spelling", LONGEST_LEGITIMATE_SPELLINGS)
+@pytest.mark.parametrize("fmt", ["daily_returns", "daily_nav", "trades"])
+def test_the_longest_legitimate_date_spellings_are_under_the_cap_and_validate(spelling: str, fmt: str) -> None:
+    dates = [spelling.format(d=d) for d in (13, 14, 15)]  # day > 12: no day/month ambiguity
+    assert max(len(d) for d in dates) <= 40 < MAX_DATE_CELL_CHARS
+    envelope = validate_csv(_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is True, envelope["errors"]
+
+
+def test_the_cap_is_exactly_64_characters() -> None:
+    """64 characters of a readable date is read; 65 is not. Pins the number."""
+    head = "2024-03-0{d} 00:00:00."
+
+    def cell(d: int, length: int) -> str:
+        return head.format(d=d) + "1" * (length - len(head.format(d=d)))
+
+    at_cap = validate_csv(_file("daily_returns", [cell(d, MAX_DATE_CELL_CHARS) for d in (1, 2, 3)]), "daily_returns")
+    over = validate_csv(_file("daily_returns", [cell(d, MAX_DATE_CELL_CHARS + 1) for d in (1, 2, 3)]), "daily_returns")
+
+    assert at_cap["ok"] is True, at_cap["errors"]
+    assert over["ok"] is False
+    assert {row for rule, row, _, _ in _all_errors(over) if rule.startswith(COERCE_RULE_PREFIX)} == {1, 2, 3}
 
 
 # ---------------------------------------------------------------------------

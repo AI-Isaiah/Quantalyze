@@ -119,7 +119,24 @@ _PII_COLUMN_PATTERN = re.compile(
 # UI label says "Dates must be strictly increasing"; the prior
 # `is_monotonic_increasing`-only check accepted equal consecutive
 # dates which would silently double-count days downstream.
+#
+# The order is judged on the cells that READ AS A DATE (review TR-3). When pandera
+# cannot coerce a cell (a zone the validator does not read, the placeholder
+# standing in for one, plain garbage) the column reaches this check UN-coerced,
+# as text or as a mix of timestamps and text, and the old check then compared
+# those: a file whose dates increase also reported "dates must be strictly
+# increasing" beside the real date error at the unreadable row. So an un-coerced
+# column is read cell by cell here, an unreadable cell becomes NaT and is left
+# out of the order. That cell is always reported by its own rule (`coerce_dtype`
+# and `dtype`, or `not_nullable`), so leaving it out accepts nothing new, and a
+# file whose readable dates are out of order or repeated still fails this rule.
+# A column pandera DID coerce arrives as datetime64 and takes the old path.
 def _strictly_increasing(s: pd.Series) -> bool:
+    if not pd.api.types.is_datetime64_any_dtype(s):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # pandas' per-value inference warnings
+            s = _parse_dates(s)
+    s = s.dropna()
     return bool(s.is_monotonic_increasing and s.is_unique)
 
 
@@ -628,6 +645,16 @@ _ZONE_FREE_SHAPE_RE = re.compile(
 # message ever carries a cell.
 _UNSUPPORTED_ZONE_TOKEN = "0000-00-00"
 
+# The longest date cell, measured without its padding, that is read at all (security
+# re-audit T-170.1-51). The longest honest spelling is a date, a time to the
+# nanosecond and a zone (`2024-03-31 00:00:00.123456789 UTC+02:00`, 39 characters),
+# so 64 leaves room for any real export. A longer cell is NOT handed to pandas or to
+# a zone regex: both cost grows with the cell on a hostile shape (repeated `1:11 `
+# took 40 s or more for a 10 MB file), and the row cap and body cap do not bound a
+# cell. It is replaced by the placeholder, so it is the same `coerce_dtype` date
+# error at its row as any other unreadable zone.
+MAX_DATE_CELL_CHARS = 64
+
 
 def _split_zone(value: str) -> tuple[str, int | None]:
     """Split a recognised trailing zone off `value`: `(wall_clock_text, offset)`.
@@ -707,7 +734,8 @@ def _normalise_date_zones(
         overall when no row had one. A column with no offsets is left
         byte-for-byte unchanged.
       - `rejected`: row position -> the cell as written, for every cell that
-        still carries a zone after the strip. Each is replaced in `df` by
+        still carries a zone after the strip, and every cell longer than
+        `MAX_DATE_CELL_CHARS` (which is never parsed). Each is replaced in `df` by
         `_UNSUPPORTED_ZONE_TOKEN`, so pandera reports it as a date error at its
         real row. The caller restores the original text for the preview.
       - `named`: row position -> the cell as written, for every cell that is a
@@ -736,7 +764,11 @@ def _normalise_date_zones(
         warnings.simplefilter("ignore")  # dateutil's per-value zone warnings
         for position, value in enumerate(col.tolist()):
             wall, offset = value, None
-            if isinstance(value, str) and not _ZONE_FREE_SHAPE_RE.fullmatch(value.strip()):
+            if isinstance(value, str) and len(value.strip()) > MAX_DATE_CELL_CHARS:
+                rejected[position] = value
+                wall = _UNSUPPORTED_ZONE_TOKEN
+                changed = True
+            elif isinstance(value, str) and not _ZONE_FREE_SHAPE_RE.fullmatch(value.strip()):
                 wall, offset = _split_zone(value)
                 if _carries_zone(wall):
                     rejected[position] = value
@@ -902,18 +934,55 @@ def _raw_header_names(raw_bytes: bytes, header_row: int) -> list[str]:
     are skipped the way pandas skips blank lines, so `header_row` counts the same
     records the frame read counted.
 
+    Two details keep this read aligned with the frame's (review TR-1 and TR-2):
+      - pandas also skips a line made only of spaces and tabs, which the stdlib
+        reader returns as a one-field record (`[' ']`). It is skipped here too;
+        keeping it made `header_row` point one record too early, so the "header"
+        was that line and a repeated column went unseen.
+      - the text is wrapped with `newline=""`, as the `csv` docs require. Without
+        it only a line feed ends a line, so a file whose lines end in a bare
+        carriage return (Excel for Mac, "CSV (Macintosh)") reached the reader as
+        one line and was rejected with a Python hint, although pandas reads it.
+    The caller also checks that the width read here equals the frame's, so any
+    future drift between the two readers rejects loudly instead of silently.
+
     FAIL CLOSED: a header that cannot be read RAISES (`csv.Error`, or
     `UnicodeDecodeError`). There is no fallback to the frame's own names; they are
     the renamed ones, which would restore the defect this function exists to
     remove. The caller turns the exception into a `parse_error`.
     """
     text = raw_bytes.decode("utf-8-sig")
-    records = (record for record in csv.reader(io.StringIO(text)) if record)
+    records = (
+        record
+        for record in csv.reader(io.StringIO(text, newline=""))
+        if record and not (len(record) == 1 and not record[0].strip(" \t"))
+    )
     taken = list(itertools.islice(records, header_row + 1))
     if len(taken) <= header_row:
         # pandas' own sentence for this shape, which it raises before we get here.
         raise csv.Error(f"Passed header={header_row} but only {len(taken)} lines in file")
     return taken[header_row]
+
+
+def _row_longer_than_header() -> dict[str, Any]:
+    """The `parse_error` envelope for a file whose header row and data rows do not
+    line up in width. It is the one sentence for two paths: pandas promoted the
+    first column to the index because a data row is longer than the header, and
+    the raw header read (`_raw_header_names`) came out a different width than the
+    frame (review TR-1, a guard against the two readers drifting apart). It names
+    the problem and never a cell."""
+    return {
+        "ok": False,
+        "preview": None,
+        "errors": [{
+            "rule": "parse_error",
+            "row": 0,
+            # One literal, on one line: the WR-01 parity test greps the
+            # producer source for this exact sentence.
+            "message": "Could not parse CSV: a data row has more fields than the header row.",
+        }],
+        "correlation_id": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1003,18 +1072,7 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # NOT promote a column, including for a header-only file.)
     if not isinstance(df.index, pd.RangeIndex):
         logger.warning("[csv-validator] data row longer than header")
-        return {
-            "ok": False,
-            "preview": None,
-            "errors": [{
-                "rule": "parse_error",
-                "row": 0,
-                # One literal, on one line: the WR-01 parity test greps the
-                # producer source for this exact sentence.
-                "message": "Could not parse CSV: a data row has more fields than the header row.",
-            }],
-            "correlation_id": None,
-        }
+        return _row_longer_than_header()
 
     # 2026-05-07 — case-insensitive header normalization. Real-world CSVs
     # ship headers like "Date,Daily_Return" or "DATE,DAILY_RETURN". Pandera
@@ -1064,6 +1122,13 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             }],
             "correlation_id": None,
         }
+    if len(header_names) != len(df.columns):
+        # The raw read and the frame read disagree about which record is the
+        # header (review TR-1). Neither can be trusted to name a column, so the
+        # file is rejected rather than checked against a header that may be the
+        # wrong line. Fixed text, no cell.
+        logger.warning("[csv-validator] raw header and frame disagree on width")
+        return _row_longer_than_header()
     normalized_header = [str(c).strip().lower() for c in header_names]
     declared = SCHEMAS[fmt].columns.keys()
     if any(
