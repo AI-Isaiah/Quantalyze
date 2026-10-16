@@ -4410,6 +4410,7 @@ export type MissingSeriesReason = Extract<
   | "awaiting_derivation"
   | "derivation_rejected"
   | "duplicate_account"
+  | "account_identity_pending"
   | "shared_account_no_working_key"
   | "shared_account_history_truncated"
   | "history_read_failed"
@@ -4429,6 +4430,9 @@ export type MissingSeriesReason = Extract<
  *      the book over two keys reading one exchange account (SC-1 persists the
  *      refusal instead of deleting the row), the line the key list already
  *      gives a marked duplicate: `duplicate_account`.
+ *   2b. `account_identity_pending` (167.1.2.1.1 SC-6, D-03/D-04): two or more unknown
+ *      working keys on one stamping venue may be one account counted twice. The
+ *      existing identity-pending line, after a duplicate and before the history lines.
  *   3. `shared_account_history_truncated`. 167.1.2.1.1 SC-3 (D-03, D-04):
  *      `shared_account_flows_disagree` (stitched members list different flows for an
  *      owned day) reads this same existing line.
@@ -4456,6 +4460,7 @@ function untrustworthyRebuildReason(
   | "awaiting_derivation"
   | "derivation_rejected"
   | "duplicate_account"
+  | "account_identity_pending"
   | "shared_account_no_working_key"
   | "shared_account_history_truncated"
 > {
@@ -4472,6 +4477,9 @@ function untrustworthyRebuildReason(
   }
   if (tokens.includes("account_duplicate") || tokens.includes("account_identity_collision")) {
     return "duplicate_account";
+  }
+  if (tokens.includes("account_identity_pending")) {
+    return "account_identity_pending";
   }
   if (
     tokens.includes("shared_account_history_truncated") ||

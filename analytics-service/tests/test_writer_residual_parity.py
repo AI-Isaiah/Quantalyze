@@ -76,9 +76,11 @@ def test_the_cells_are_unique_and_cover_every_derive_side_token() -> None:
     assert len(ids) == len(set(ids)), "a cell id appears twice"
     raised = {t for c in TABLE["cells"] for t in c["derive"]["blocking_tokens"]}
     assert "failing_key_series_ended" in raised
-    assert any(
-        c["sc"] == "SC-2" and not c["derive"]["blocking_tokens"] for c in TABLE["cells"]
-    ), "SC-2 needs a negative cell"
+    assert "account_identity_pending" in raised
+    for sc in ("SC-2", "SC-6"):
+        assert any(
+            c["sc"] == sc and not c["derive"]["blocking_tokens"] for c in TABLE["cells"]
+        ), f"{sc} needs a negative cell"
 
 
 @pytest.mark.asyncio

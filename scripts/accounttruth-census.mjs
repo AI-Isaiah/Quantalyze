@@ -349,6 +349,7 @@ judged AS (
              OR cv.p -> 'degrade_reasons' @> '["failing_key_series_ended"]'::jsonb THEN 'shared_account_no_working_key'
            WHEN cv.p -> 'degrade_reasons' @> '["account_duplicate"]'::jsonb
              OR cv.p -> 'degrade_reasons' @> '["account_identity_collision"]'::jsonb THEN 'duplicate_account'
+           WHEN cv.p -> 'degrade_reasons' @> '["account_identity_pending"]'::jsonb THEN 'account_identity_pending'
            WHEN cv.p -> 'degrade_reasons' @> '["shared_account_history_truncated"]'::jsonb
              OR cv.p -> 'degrade_reasons' @> '["shared_account_flows_disagree"]'::jsonb THEN 'shared_account_history_truncated'
            WHEN jsonb_array_length(cv.p -> 'degrade_reasons') = 1

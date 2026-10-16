@@ -12411,6 +12411,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         account_groups,
         blocking_degrade_tokens,
         eligible_key_predicate,
+        identity_pending_venues,
         read_dropped_day_pnl,
         read_realized_terminal,
         read_writer_basis,
@@ -12420,6 +12421,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         stitch_shared_account,
         working_holder_predicate,
     )
+    from services.account_identity import VENUES_WITH_ACCOUNT_ID
     from services.equity_reconstruction import _NO_CAPITAL_ANCHOR_REASONS
     from services.external_flows import ExternalFlow, validate_flow_shape
     from services.nav_twr import DUST_NAV_FLOOR, NavReconstructionError
@@ -13412,9 +13414,29 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             DegradeReason.FAILING_KEY_SERIES_ENDED.value,
         )
 
+    # 167.1.2.1.1 SC-6 (D-03): venues holding two or more eligible WORKING keys whose
+    # account is still unknown. They may read one account, counted twice, so the stored
+    # curve is untrustworthy until the stamper reads their ids. Reads the grouping and
+    # changes none of it. Counts only (no key id, no venue - T-167.1.2-22).
+    identity_pending_venue_count = identity_pending_venues(key_rows, VENUES_WITH_ACCOUNT_ID)
+    if identity_pending_venue_count:
+        logger.warning(
+            "derive_allocator_equity: %d venue(s) of allocator %s hold two or more "
+            "working keys whose exchange account is still unknown - they may read one "
+            "account counted twice; the curve is untrustworthy until the stamper reads "
+            "their ids (%s)",
+            identity_pending_venue_count,
+            allocator_id,
+            DegradeReason.ACCOUNT_IDENTITY_PENDING.value,
+        )
+
     # A departed key the rule includes but whose inputs are gone was left out of
     # departed_end_by_key before the rule's end days were used (WR-R2-02), so it
     # never reached the returns, the flows or the collision gate.
+    # 167.1.2.1.1 SC-7 (D-06): the same counts the WARNING below states, kept for the
+    # payload and one Sentry event. Empty (and absent from the payload) when nothing is
+    # unavailable.
+    departed_unavailable_counts: dict[str, int] = {}
     if departed_unavailable:
         # Counts only (no key id, no venue id, no USD — T-167.1.2-22). A key
         # whose row was deleted and a key whose last balance read failed are
@@ -13425,6 +13447,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 reason_token = departed_null_anchor_reasons[k]
                 null_anchor_counts[reason_token] = null_anchor_counts.get(reason_token, 0) + 1
         null_anchor_total = sum(null_anchor_counts.values())
+        departed_no_inputs_total = len(departed_unavailable) - null_anchor_total
         logger.warning(
             "derive_allocator_equity: %d departed key(s) for allocator %s are "
             "included by the history rule but have no usable anchor: %d with no "
@@ -13432,7 +13455,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             "their history is left out of the book (%s)",
             len(departed_unavailable),
             allocator_id,
-            len(departed_unavailable) - null_anchor_total,
+            departed_no_inputs_total,
             null_anchor_total,
             ", ".join(
                 f"{token}={count}" for token, count in sorted(null_anchor_counts.items())
@@ -13440,6 +13463,11 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             or "none",
             "departed_history_unavailable",
         )
+        departed_unavailable_counts = {
+            "departed_history_unavailable_keys": len(departed_unavailable),
+            "departed_history_unavailable_no_inputs_keys": departed_no_inputs_total,
+            "departed_history_unavailable_no_anchor_keys": null_anchor_total,
+        }
 
     # A key with returns but no key_inputs row → anchor None (compose honestly
     # DROPS it, exactly as an unanchored key). Never fabricate an anchor.
@@ -13514,6 +13542,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                     (DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY, no_working_groups > 0),
                     (DegradeReason.FAILING_KEY_SERIES_ENDED, failing_series_ended_keys > 0),
                     (DegradeReason.SHARED_ACCOUNT_FLOWS_DISAGREE, flows_disagree_accounts > 0),
+                    (DegradeReason.ACCOUNT_IDENTITY_PENDING, identity_pending_venue_count > 0),
                 )
                 if raised
             ]
@@ -13603,6 +13632,24 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             payload = _compose(no_capital_stored)
         except NavReconstructionError as exc_again:
             return await _compose_refused(exc_again)
+
+    if departed_unavailable_counts:
+        # SC-7 (D-06): the left-out departed history is a count in the payload, beside
+        # the benign flag the reader reads, and ONE Sentry warning event. A WARNING log
+        # reaches Sentry only as a breadcrumb, and the benign flag is invisible there, so
+        # a book silently shorter than its history read like every healthy one. Static
+        # message, tags are the job and the outcome token only, no key id, allocator id,
+        # venue id or USD figure (D-09). A healthy payload carries none of these keys.
+        payload["inputs"].update(departed_unavailable_counts)
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("compute_job_id", str(job.get("id")))
+            scope.set_tag("derive_outcome", "departed_history_unavailable")
+            sentry_sdk.capture_message(
+                "derive_allocator_equity: departed_history_unavailable, a departed "
+                "key's history that the rule includes could not be levelled and was "
+                "left out of the book",
+                level="warning",
+            )
 
     if absent_stitched_accounts:
         # SFH-02: counts only (no key id, no USD). Both are absent when every stitched

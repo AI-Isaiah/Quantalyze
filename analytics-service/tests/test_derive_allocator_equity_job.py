@@ -4786,3 +4786,127 @@ async def test_sc3_a_newer_key_that_lists_nothing_is_silence() -> None:
     payload = _composed_payload(fake)
     assert "shared_account_flows_disagree" not in payload["degrade_reasons"]
     assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2.1.1 WRITERRESIDUALS plan 02, SC-6 (decision D-03): two or more eligible
+# WORKING keys on one stamping venue whose account is still UNKNOWN.
+#
+# WHY. Until the stamper reads a venue account id, the derive cannot tell whether two
+# such keys read one exchange account (counted twice) or two. The reader already holds
+# the book for any unknown key; the derive raised nothing, so the stored curve read
+# "ready" to every consumer that does not go through the reader. The check reads the
+# grouping and changes none of it (the four-way coupling rule is not triggered).
+# ---------------------------------------------------------------------------
+
+
+def _pending_key(key_id: str, **extra: Any) -> dict[str, Any]:
+    """An eligible working key on a stamping venue with no account id yet."""
+    return _gate_key(key_id, "alloc-pending", **{"exchange": "okx", **extra})
+
+
+def test_identity_pending_venues_counts_venues_with_two_unknown_working_keys() -> None:
+    from services.allocator_equity_derive import identity_pending_venues
+
+    stamping = frozenset({"okx", "bybit", "binance", "deribit"})
+    two = [_pending_key("k1"), _pending_key("k2")]
+    assert identity_pending_venues(two, stamping) == 1
+    assert identity_pending_venues(two[:1], stamping) == 0, "one unknown key is no pair"
+    # Case and padding of the exchange do not hide the venue.
+    assert identity_pending_venues(
+        [_pending_key("k1", exchange=" OKX "), _pending_key("k2")], stamping
+    ) == 1
+    # Two venues with two keys each are counted as two.
+    both = two + [
+        _pending_key("k3", exchange="bybit"),
+        _pending_key("k4", exchange="bybit"),
+    ]
+    assert identity_pending_venues(both, stamping) == 2
+    # Keys on different venues never pair up.
+    assert identity_pending_venues(
+        [_pending_key("k1"), _pending_key("k2", exchange="bybit")], stamping
+    ) == 0
+
+
+def test_identity_pending_venues_ignores_every_key_that_cannot_be_a_pair_member() -> None:
+    from services.allocator_equity_derive import identity_pending_venues
+
+    stamping = frozenset({"okx", "bybit", "binance", "deribit"})
+    # MT5 is not a stamping venue: its keys are exempt.
+    assert identity_pending_venues(
+        [_pending_key("k1", exchange="mt5"), _pending_key("k2", exchange="mt5")], stamping
+    ) == 0
+    # A marked key knows its account (the holder's), and so does the holder.
+    assert identity_pending_venues(
+        [
+            _pending_key("k1"),
+            _pending_key(
+                "k2", account_share_kind="duplicate", account_shared_with_api_key_id="k1"
+            ),
+        ],
+        stamping,
+    ) == 0
+    # A stamped key is known.
+    assert identity_pending_venues(
+        [_pending_key("k1", venue_account_id="v-1"), _pending_key("k2")], stamping
+    ) == 0
+    # A failing key is not WORKING: it is no candidate (the reader names it key_not_syncing).
+    assert identity_pending_venues(
+        [_pending_key("k1"), _pending_key("k2", sync_status="error")], stamping
+    ) == 0
+    # A disconnected or revoked key is not eligible at all.
+    assert identity_pending_venues(
+        [_pending_key("k1"), _pending_key("k2", disconnected_at="2026-06-01T00:00:00+00:00")],
+        stamping,
+    ) == 0
+    assert identity_pending_venues(
+        [_pending_key("k1"), _pending_key("k2", sync_status="revoked")], stamping
+    ) == 0
+    assert identity_pending_venues([], stamping) == 0
+
+
+def _sc6_book(keys: list[dict[str, Any]], alloc: str = "alloc-pending") -> _FakeSupabase:
+    csv: list[dict] = []
+    derived: list[dict] = [_stale_curve(alloc)]
+    for index, key in enumerate(keys):
+        rows, ki = _series_rows(alloc, key["id"], 10_000.0 * (index + 1))
+        csv += rows
+        ki["payload"]["venue"] = key["exchange"]
+        derived.append(ki)
+    return _FakeSupabase({
+        "api_keys": keys, "csv_daily_returns": csv, DERIVED_TABLE: derived, LEGACY_TABLE: [],
+    })
+
+
+@pytest.mark.asyncio
+async def test_sc6_unknown_working_keys_block_the_derive() -> None:
+    """Two unknown working okx keys: the book may count one account twice, so the
+    curve is untrustworthy under ``account_identity_pending``."""
+    fake = _sc6_book([_pending_key("key-A"), _pending_key("key-B")])
+    assert (await _run_gate(fake, "alloc-pending")).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "account_identity_pending" in payload["degrade_reasons"], payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "keys",
+    [
+        pytest.param([_pending_key("key-A"), _pending_key("key-B", venue_account_id="v-b")], id="one-unknown"),
+        pytest.param(
+            [_pending_key("key-A", exchange="mt5"), _pending_key("key-B", exchange="mt5")],
+            id="mt5-pair",
+        ),
+        pytest.param(
+            [_pending_key("key-A"), _pending_key("key-B", sync_status="error")], id="one-failing"
+        ),
+    ],
+)
+async def test_sc6_a_book_that_is_not_a_pair_of_unknown_working_keys_raises_nothing(
+    keys: list[dict[str, Any]],
+) -> None:
+    fake = _sc6_book(keys)
+    assert (await _run_gate(fake, "alloc-pending")).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "account_identity_pending" not in payload["degrade_reasons"]

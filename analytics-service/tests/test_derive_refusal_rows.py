@@ -46,6 +46,7 @@ EXISTING_READER_LINES = {
     "awaiting_derivation",
     "derivation_rejected",
     "duplicate_account",
+    "account_identity_pending",
     "shared_account_no_working_key",
     "shared_account_history_truncated",
 }

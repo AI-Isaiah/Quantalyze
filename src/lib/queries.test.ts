@@ -1796,6 +1796,18 @@ describe("derived-row outcomes — the reason says why there is no series", () =
       "duplicate_account",
     );
     expect(untrusted([], { flags: ["shared_account_flows_disagree"] })).toBe("derivation_rejected");
+    // 167.1.2.1.1 SC-6 (D-03/D-04): two unknown working keys on one stamping venue read
+    // the EXISTING identity-pending line. It sits after a duplicate and before the
+    // truncated-history line, and the owner-fixable no-working-key cause outranks it.
+    expect(untrusted(["account_identity_pending"])).toBe("account_identity_pending");
+    expect(untrusted(["account_identity_pending", "shared_account_history_truncated"])).toBe(
+      "account_identity_pending",
+    );
+    expect(untrusted(["account_duplicate", "account_identity_pending"])).toBe("duplicate_account");
+    expect(untrusted(["account_identity_pending", "shared_account_no_working_key"])).toBe(
+      "shared_account_no_working_key",
+    );
+    expect(untrusted([], { flags: ["account_identity_pending"] })).toBe("derivation_rejected");
     // The token in `flags` only, or in a non-array, keeps the generic line.
     expect(untrusted([], { flags: ["failing_key_series_ended"] })).toBe("derivation_rejected");
     expect(untrusted([], { flags: ["account_identity_collision"] })).toBe("derivation_rejected");

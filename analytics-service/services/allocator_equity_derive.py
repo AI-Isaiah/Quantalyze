@@ -168,6 +168,14 @@ class DegradeReason(str, Enum):
     # blocking reason, not a different join). The reader maps it onto the existing
     # truncated-history line (D-04: no new copy).
     SHARED_ACCOUNT_FLOWS_DISAGREE = "shared_account_flows_disagree"
+    # 167.1.2.1.1 SC-6 (D-03, 2026-10-16): two or more eligible WORKING keys on one
+    # venue that stamps an account id, all still identity-unknown (see
+    # ``identity_pending_venues``). Until the stamper reads their account ids the derive
+    # cannot tell whether they read one account (counted twice) or two, so the book may be
+    # double-counted. The reader already holds such a book from the key list; this makes
+    # the STORED curve say so too. Blocking; it reads grouping and changes none of it. The
+    # reader maps it onto the existing ``account_identity_pending`` line (D-04).
+    ACCOUNT_IDENTITY_PENDING = "account_identity_pending"
 
 
 # The BLOCKING subset: any of these present -> ``is_trustworthy`` is False.
@@ -184,6 +192,7 @@ _BLOCKING_REASONS: frozenset[DegradeReason] = frozenset(
         DegradeReason.KEY_INPUTS_MISMATCH,
         DegradeReason.FAILING_KEY_SERIES_ENDED,
         DegradeReason.SHARED_ACCOUNT_FLOWS_DISAGREE,
+        DegradeReason.ACCOUNT_IDENTITY_PENDING,
     }
 )
 
@@ -481,6 +490,44 @@ def account_identity_tokens(
         key_id: (f"account:{_find(key_id)}" if key_id in known else None)
         for key_id in ids
     }
+
+
+def identity_pending_venues(
+    key_rows: Sequence[Mapping[str, Any]],
+    stamping_venues: frozenset[str],
+) -> int:
+    """How many stamping venues hold two or more unknown working keys.
+
+    167.1.2.1.1 SC-6 (D-03). A candidate is an ELIGIBLE (``eligible_key_predicate``),
+    WORKING (``working_holder_predicate``) key on a venue in ``stamping_venues`` whose
+    account is still unknown (``account_identity_tokens(key_rows)[id] is None``: no
+    venue account id and no marker link either way). Two such keys on one venue may read
+    ONE exchange account, which the book would then count twice, so the number of venues
+    with two or more candidates is the count the blocking
+    ``DegradeReason.ACCOUNT_IDENTITY_PENDING`` is raised on. A failing key is no
+    candidate (the stamper only runs after a successful poll, and the reader names it
+    ``key_not_syncing``), an MT5 key is no candidate (MT5 is not in the set), and a
+    marked key or its holder is known.
+
+    ``stamping_venues`` is an argument, not an import of
+    ``services.account_identity.VENUES_WITH_ACCOUNT_ID``, so this pure module stays free
+    of the exchange adapters (ccxt, httpx); callers pass that set. Called by BOTH
+    allocator writers (the derive here, and the daily refresh's hold, plan 03), so they
+    cannot disagree. It reads the grouping helpers and changes none of them. Returns a
+    count only, never a key id or a venue."""
+    tokens = account_identity_tokens(key_rows)
+    candidates: dict[str, int] = defaultdict(int)
+    for row in key_rows:
+        exchange = row.get("exchange")
+        venue = exchange.strip().lower() if isinstance(exchange, str) else ""
+        if (
+            venue in stamping_venues
+            and eligible_key_predicate(row)
+            and working_holder_predicate(row)
+            and tokens.get(str(row["id"])) is None
+        ):
+            candidates[venue] += 1
+    return sum(1 for count in candidates.values() if count >= 2)
 
 
 class HoldingsUpdatedAtError(ValueError):

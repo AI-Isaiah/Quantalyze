@@ -669,3 +669,91 @@ def test_account_identity_reads_the_derives_marker_kinds(monkeypatch: pytest.Mon
         },
     ])
     assert tokens["k-marked"] == tokens["k-holder"] is not None
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2.1.1 WRITERRESIDUALS plan 02, SC-7 (decision D-06): a departed key the
+# history rule includes but that cannot be levelled is left out under a benign flag.
+# The flag is invisible in Sentry and a WARNING log is only a breadcrumb, so a book
+# silently shorter than its history looked like every healthy one. It is now ONE
+# Sentry warning event with a static message and a count in the payload.
+# ---------------------------------------------------------------------------
+
+_SC7_KEYS = (
+    "departed_history_unavailable_keys",
+    "departed_history_unavailable_no_inputs_keys",
+    "departed_history_unavailable_no_anchor_keys",
+)
+
+
+def _two_unavailable_departed_keys() -> _FakeSupabase:
+    """Two departed keys the rule includes: key-D1 has no saved inputs row, key-D2 has
+    a row whose last balance read gave no anchor."""
+    null_anchor = _key_inputs("key-D2", DEP_ANCHOR, DAYS[9])
+    null_anchor["payload"] = {
+        **null_anchor["payload"], "anchor_usd": None, "anchor_null_reason": "balance_error",
+    }
+    return _FakeSupabase({
+        "api_keys": [
+            _gate_key("key-L", ALLOC, venue_account_id="acct-live"),
+            _gate_key(
+                "key-D1", ALLOC, venue_account_id="acct-d1",
+                disconnected_at="2026-06-10T15:30:00+00:00",
+            ),
+            _gate_key(
+                "key-D2", ALLOC, venue_account_id="acct-d2",
+                disconnected_at="2026-06-10T15:30:00+00:00",
+            ),
+        ],
+        "csv_daily_returns": (
+            _csv("key-L", DAYS, LIVE_R) + _csv("key-D1", DAYS[:10], DEP_R)
+            + _csv("key-D2", DAYS[:10], DEP_R)
+        ),
+        DERIVED_TABLE: [_key_inputs("key-L", LIVE_ANCHOR, DAYS[-1]), null_anchor],
+        LEGACY_TABLE: [],
+    })
+
+
+@pytest.mark.asyncio
+async def test_departed_history_unavailable_reaches_sentry_with_a_count() -> None:
+    fake = _two_unavailable_departed_keys()
+    with patch("services.job_worker.sentry_sdk") as sentry:
+        assert (await _run(fake)).outcome.name == "DONE"
+    assert sentry.capture_message.call_count == 1
+    args, kwargs = sentry.capture_message.call_args
+    message = args[0]
+    assert kwargs.get("level") == "warning"
+    # Static: no key id, allocator id, venue id or USD figure rides in the message.
+    for secret in ("key-D1", "key-D2", "key-L", ALLOC, "acct-", "500", "1000"):
+        assert secret not in message
+    assert "departed_history_unavailable" in message
+    scope = sentry.new_scope.return_value.__enter__.return_value
+    tags = {call.args[0]: call.args[1] for call in scope.set_tag.call_args_list}
+    assert tags == {
+        "compute_job_id": "j-departed",
+        "derive_outcome": "departed_history_unavailable",
+    }
+    inputs = _book(fake)["inputs"]
+    assert inputs["departed_history_unavailable_keys"] == 2
+    assert inputs["departed_history_unavailable_no_inputs_keys"] == 1
+    assert inputs["departed_history_unavailable_no_anchor_keys"] == 1
+    # The benign flag the reader reads stays.
+    assert "departed_history_unavailable" in _book(fake)["flags"]
+
+
+@pytest.mark.asyncio
+async def test_healthy_derive_writes_no_departed_count() -> None:
+    """A derive with nothing unavailable raises no such event and its payload
+    carries none of the three keys."""
+    departed = _gate_key(
+        "key-D", ALLOC, venue_account_id="acct-departed",
+        disconnected_at="2026-06-10T15:30:00+00:00",
+    )
+    fake = _live_and_departed(departed, DAYS[:10])
+    with patch("services.job_worker.sentry_sdk") as sentry:
+        assert (await _run(fake)).outcome.name == "DONE"
+    assert sentry.capture_message.call_count == 0
+    payload = _book(fake)
+    assert "departed_history_unavailable" not in payload["flags"]
+    for key in _SC7_KEYS:
+        assert key not in payload["inputs"]
