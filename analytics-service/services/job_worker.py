@@ -1616,6 +1616,9 @@ AllocatorEquityAction = Literal[
     # Phase 167.1.2 plan 12, review SFH-R2-01: the daily refresh held a
     # zero-snapshot book's first row while its reconstruct was in flight.
     "allocator.equity.refresh_held_for_reconstruct",
+    # Phase 167.1.2.1.1 D-14: the daily refresh held the day's snapshot write
+    # (never-polled working account, carry over the age cap, identity pending).
+    "allocator.equity.refresh_held",
 ]
 
 

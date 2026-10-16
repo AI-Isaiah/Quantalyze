@@ -28,6 +28,7 @@ from tests.test_equity_reconstruction import (
     API_KEY_ID_1,
     API_KEY_ID_2,
     FakeSupabaseClient,
+    _FakeTable,
     _install_fake_audit,
     _install_fake_preflight,
 )
@@ -1012,13 +1013,37 @@ async def test_a_funded_account_whose_poll_reads_empty_keeps_its_carried_value(
         assert "200000" not in r.getMessage() and "200,000" not in r.getMessage()
 
 
+HELD_ACTION = "allocator.equity.refresh_held"
+
+
+def _audit_actions(audit: Any) -> list[str]:
+    return [c.kwargs.get("action") for c in audit.call_args_list]
+
+
+def _held_metadata(audit: Any) -> dict[str, Any]:
+    calls = [c for c in audit.call_args_list if c.kwargs.get("action") == HELD_ACTION]
+    assert len(calls) == 1, f"expected one {HELD_ACTION} audit, got {len(calls)}"
+    metadata: dict[str, Any] = calls[0].kwargs["metadata"]
+    return metadata
+
+
+def _no_today_row(fake: FakeSupabaseClient) -> None:
+    rows = [
+        r for r in fake.rows_for("allocator_equity_snapshots") if r["asof"] == TODAY.isoformat()
+    ]
+    assert rows == [], f"a held day must write no snapshot row, got {len(rows)}"
+
+
 @pytest.mark.asyncio
 async def test_a_book_with_an_account_it_cannot_read_is_not_written_as_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The $0 row needs proof for EVERY counted account. One proven empty and
-    one that has never polled is not an empty book: nothing is written, as
-    before, under the no_holdings_today reason."""
+    one WORKING account that has never been polled is not an empty book, and
+    (167.1.2.1.1 D-01) it is not a short book either: the day is HELD, so the
+    snapshot store never records the unread account as absent. Before D-01
+    this took the no_holdings_today branch, which also wrote nothing but named
+    no cause and only for this accidental shape."""
     fake = FakeSupabaseClient()
     _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
     _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="complete", venue_account_id="b-1")
@@ -1027,23 +1052,24 @@ async def test_a_book_with_an_account_it_cannot_read_is_not_written_as_zero(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
-    assert [
-        r for r in fake.rows_for("allocator_equity_snapshots") if r["asof"] == TODAY.isoformat()
-    ] == []
-    metadata = _refresh_complete_metadata(audit)
-    assert metadata["reason"] == "no_holdings_today"
+    _no_today_row(fake)
+    metadata = _held_metadata(audit)
+    assert metadata["reason"] == "never_polled_working"
     assert metadata["emptied_accounts"] == 1
+    assert metadata["never_polled_working_accounts"] == 1
     assert metadata["never_polled_keys"] == 1
+    assert "allocator.equity.refresh_complete" not in _audit_actions(audit)
 
 
 @pytest.mark.asyncio
 async def test_eligible_key_that_never_polled_is_counted_not_silent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """C2 silent-failure SFH-08: an eligible key with no holdings row yet (a key
-    just added, or a broken poller) adds $0 to the day's row. Holding the write
-    for it is a design call not taken here; the day is written without it, and
-    the audit says how many such keys there were."""
+    """D-01 (167.1.2.1.1) replaces C2 silent-failure SFH-08. SFH-08 wrote the
+    day WITHOUT an eligible key that had no holdings row and counted it. That
+    persisted a short total, first-writer-wins, so a key added (or a broken
+    poller) permanently understated the day. A WORKING key that was never read
+    now holds the day: no snapshot row, one refresh_held audit naming why."""
     fake = FakeSupabaseClient()
     _seed_key(fake, API_KEY_ID_1)
     _seed_key(fake, API_KEY_ID_2)
@@ -1051,10 +1077,186 @@ async def test_eligible_key_that_never_polled_is_counted_not_silent(
 
     audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
 
+    _no_today_row(fake)
+    metadata = _held_metadata(audit)
+    assert metadata["reason"] == "never_polled_working"
+    assert metadata["never_polled_keys"] == 1
+    assert metadata["never_polled_working_accounts"] == 1
+    assert metadata["carried_keys"] == 0
+    leaked = {k: v for k, v in metadata.items() if v in (HOLDER_USD, 1000, 1000.0)}
+    assert not leaked, f"hold metadata carries a USD figure: {sorted(leaked)}"
+
+
+@pytest.mark.asyncio
+async def test_never_polled_working_account_holds_the_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-01 / SC-4 (167.1.2.1.1). Two accounts; B's working key has no holdings
+    row and no sync_completed event, so nothing says anyone ever read it. A day
+    written now omits B's whole balance and first-writer-wins keeps it. The job
+    ends DONE with no snapshot insert and one refresh_held audit."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="complete", venue_account_id="b-1")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    _no_today_row(fake)
+    metadata = _held_metadata(audit)
+    assert metadata["reason"] == "never_polled_working"
+    assert metadata["never_polled_working_accounts"] == 1
+    assert metadata["venue"] == "okx"
+    assert "allocator.equity.refresh_complete" not in _audit_actions(audit)
+
+
+@pytest.mark.asyncio
+async def test_polled_account_with_no_rows_does_not_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-13 (167.1.2.1.1). An account whose poll COMPLETED and wrote no rows is
+    polled_no_rows, not never-polled: PROD has 5 such Deribit keys, and a
+    row-only predicate would freeze that book for ever. The sync_completed
+    audit event is what tells the two apart. The day is written without it
+    (nothing to carry) and the audit counts it."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="complete", venue_account_id="b-1")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    _seed_poll_outcome(fake, API_KEY_ID_2, _at(TODAY - timedelta(days=1)))
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
     assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert HELD_ACTION not in _audit_actions(audit)
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["polled_no_rows_accounts"] == 1
+    assert metadata["never_polled_working_accounts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_owners_poll_event_does_not_release_the_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-10 (167.1.2.1.1). The polled evidence is read for THIS allocator's
+    user_id only. A sync_completed row naming the key under another user is not
+    proof that this owner's key was read, so the hold stands."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="complete", venue_account_id="b-1")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    _seed_poll_outcome(
+        fake, API_KEY_ID_2, _at(TODAY - timedelta(days=1)),
+        user_id="00000000-0000-0000-0000-0000000000ff",
+    )
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    _no_today_row(fake)
+    assert _held_metadata(audit)["reason"] == "never_polled_working"
+
+
+@pytest.mark.asyncio
+async def test_deribit_only_never_polled_does_not_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-13 (167.1.2.1.1), technical choice. Deribit rows add $0 to the refresh
+    total (the loop skips venue deribit), so an unread Deribit account cannot
+    make the total short. Freezing the day for it would hold the book for a
+    $0 contribution. Today's behaviour stays: the day is written, the key is
+    counted in never_polled_keys."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="deribit", sync_status="complete", venue_account_id="d-1")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    assert _today_row(fake)["value_usd"] == pytest.approx(HOLDER_USD)
+    assert HELD_ACTION not in _audit_actions(audit)
     metadata = _refresh_complete_metadata(audit)
     assert metadata["never_polled_keys"] == 1
-    assert metadata["carried_keys"] == 0
+    assert metadata["never_polled_working_accounts"] == 0
+
+
+class _AuditReadFailsTable(_FakeTable):
+    def execute(self) -> Any:
+        if self._pending_op == "select":
+            raise RuntimeError("fixture: read of audit_log failed")
+        return super().execute()
+
+
+class _AuditReadFails(FakeSupabaseClient):
+    """A fake whose audit_log SELECT raises, to prove a failed polled-evidence
+    read fails the job instead of falling through to the write."""
+
+    def table(self, name: str) -> _FakeTable:
+        if name == "audit_log":
+            return _AuditReadFailsTable(name, self.store)
+        return super().table(name)
+
+
+@pytest.mark.asyncio
+async def test_failed_polled_evidence_read_fails_the_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-13 (167.1.2.1.1). If the evidence read fails and the code treated that
+    as "no event", a polled-but-empty account would look never-polled (or the
+    reverse) and the day would be held or written on a guess. The read raises
+    into the handler: FAILED job, refresh_failed audit, no snapshot."""
+    fake = _AuditReadFails()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="complete", venue_account_id="b-1")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1, expect_failed=True)
+
+    _no_today_row(fake)
+    actions = _audit_actions(audit)
+    assert "allocator.equity.refresh_failed" in actions
+    assert HELD_ACTION not in actions
+
+
+def _sentry_calls(sentry: Any) -> list[tuple[str, dict[str, Any]]]:
+    """(message, tags) for each capture_message the job made."""
+    scope = sentry.new_scope.return_value.__enter__.return_value
+    tags = {call.args[0]: call.args[1] for call in scope.set_tag.call_args_list}
+    return [(c.args[0], tags) for c in sentry.capture_message.call_args_list]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("job_key", "raises"), [(API_KEY_ID_1, True), (API_KEY_ID_2, False)]
+)
+async def test_hold_sentry_is_raised_by_the_leader_only(
+    monkeypatch: pytest.MonkeyPatch, job_key: str, raises: bool
+) -> None:
+    """D-14 (167.1.2.1.1). A book with N keys runs N refresh jobs a day, and all
+    N reach the same hold. Every job writes its own audit row, but only the
+    LEADER (the smallest eligible key id of the allocator) raises the Sentry
+    event, so one hold is one event, not N. The message is static and carries
+    no key id, allocator id, venue id or USD (D-09)."""
+    from unittest.mock import patch
+
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="complete", venue_account_id="b-1")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+
+    with patch("services.equity_reconstruction.sentry_sdk") as sentry:
+        audit = await _run_refresh(monkeypatch, fake, job_key)
+
+    _held_metadata(audit)  # every job writes its own audit row
+    calls = _sentry_calls(sentry)
+    assert len(calls) == (1 if raises else 0), calls
+    if raises:
+        message, tags = calls[0]
+        assert sentry.capture_message.call_args.kwargs.get("level") == "warning"
+        assert tags.get("compute_job_id") == f"refresh-{job_key}"
+        assert tags.get("refresh_outcome") == "held_never_polled"
+        for secret in (API_KEY_ID_1, API_KEY_ID_2, ALLOCATOR_ID, "o-1", "b-1", "bybit", "okx", "1000"):
+            assert secret not in message
+            assert secret not in [str(v) for v in tags.values()]
 
 
 @pytest.mark.asyncio

@@ -528,6 +528,9 @@ export type AuditAction =
   // Phase 167.1.2 plan 12, review SFH-R2-01: the daily refresh held a
   // zero-snapshot book's first row while a reconstruct was in flight.
   | "allocator.equity.refresh_held_for_reconstruct"
+  // Phase 167.1.2.1.1 D-14: the daily refresh held the day's snapshot write
+  // (reason never_polled_working, carry_over_age or identity_pending).
+  | "allocator.equity.refresh_held"
   // --- Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint ---
   | "debug_key_flow.invoke"
   // --- audit-2026-05-07 P700: break-glass ADMIN_EMAIL fallback grant ---
@@ -755,6 +758,7 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP = {
   "allocator.equity.sibling_lookup_failed": "api_key",
   "allocator.equity.perp_upnl_missing": "api_key",
   "allocator.equity.refresh_held_for_reconstruct": "api_key",
+  "allocator.equity.refresh_held": "api_key",
   // Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint
   "debug_key_flow.invoke": "debug_session",
   // audit-2026-05-07 P700 / admin-auth cluster
