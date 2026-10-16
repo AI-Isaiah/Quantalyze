@@ -38,6 +38,13 @@ logger = logging.getLogger("quantalyze.analytics")
 SHARPE_SENTINEL_DAILY = 10.0
 DEFAULT_RISK_FREE_DAILY = 0.0
 
+# 170.1 / D-10 — the ONE sentence every layer uses for an unsupported `fmt`.
+# `validate_csv` raises ValueError for it, and the exception text must never
+# reach a client or a log: a caller that put `str(exc)` on the wire would echo
+# whatever the caller sent as `fmt`. The router's pre-check and the CSV adapter
+# send this fixed sentence instead. It is the router's long-standing wording.
+UNSUPPORTED_FMT_MESSAGE = "fmt must be one of daily_returns, daily_nav, trades."
+
 # QA report 2026-05-21 ISSUE-008: an uploaded series where the user
 # pasted raw dollar PnL into the `daily_return` column slipped through.
 # The values (-3.29, +1.71, …) sit well within the wide -100.0..+inf
@@ -223,9 +230,19 @@ SCHEMAS: dict[str, pa.DataFrameSchema] = {
 # Sharpe-sentinel post-check (run AFTER pandera; dataset-level not row-level).
 # ---------------------------------------------------------------------------
 
+def _has_numeric_daily_return(df: pd.DataFrame) -> bool:
+    """True when `df` carries a `daily_return` column the sentinels can do float
+    maths on. Pandera's `coerce=True` makes it float on a file that passes the
+    schema; on the SchemaErrors fallback the frame is the unvalidated read and a
+    non-numeric cell leaves the column as strings (170.1 / D-10)."""
+    return "daily_return" in df.columns and pd.api.types.is_numeric_dtype(
+        df["daily_return"]
+    )
+
+
 def _check_sharpe_sentinel(df: pd.DataFrame, fmt: str) -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
-    if fmt == "daily_returns" and "daily_return" in df.columns and len(df) >= 2:
+    if fmt == "daily_returns" and _has_numeric_daily_return(df) and len(df) >= 2:
         r = df["daily_return"].dropna()
         if len(r) >= 2:
             sd = r.std(ddof=1)
@@ -298,7 +315,7 @@ def _check_dollar_form_sentinel(df: pd.DataFrame, fmt: str) -> list[dict[str, An
     PERCENT_FORM_AUTO_NORM_LOWER comment block for the prod incident.
     """
     errors: list[dict[str, Any]] = []
-    if fmt == "daily_returns" and "daily_return" in df.columns and len(df) >= 2:
+    if fmt == "daily_returns" and _has_numeric_daily_return(df) and len(df) >= 2:
         r = df["daily_return"].dropna()
         # 2026-05-25 fix: prefer the non-zero subset so zero-padded
         # files don't drag the median to 0. Fall back to all-rows if
@@ -656,6 +673,8 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     Raises ValueError if fmt is not one of the three supported formats.
     """
     if fmt not in SCHEMAS:
+        # The text is for a developer reading a traceback; no caller may send it
+        # to a client or a log (see UNSUPPORTED_FMT_MESSAGE).
         raise ValueError(f"Unsupported fmt: {fmt}")
 
     if not raw_bytes:
@@ -713,6 +732,32 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
                 }],
                 "correlation_id": None,
             }
+
+    # 170.1 / D-10 — A DATA ROW LONGER THAN THE HEADER IS A NAMED REJECTION.
+    # When a data row has more fields than the header, pandas does not raise: it
+    # promotes the FIRST column to the frame's INDEX and shifts every other
+    # column left. Everything below assumes the positional RangeIndex that a
+    # normal read gives. The row-number step in the SchemaErrors loop does
+    # `int(failure.index) + 1`, and with a date index that is `int("<a date>")`,
+    # a ValueError whose text carries a cell. The tokenizer error already
+    # reported for a LATER over-long row says the same thing in the same rule, so
+    # this shape gets the same rule with a fixed sentence: it names the problem,
+    # never a cell. (`RangeIndex` is the only index a read gives when pandas did
+    # NOT promote a column, including for a header-only file.)
+    if not isinstance(df.index, pd.RangeIndex):
+        logger.warning("[csv-validator] data row longer than header")
+        return {
+            "ok": False,
+            "preview": None,
+            "errors": [{
+                "rule": "parse_error",
+                "row": 0,
+                # One literal, on one line: the WR-01 parity test greps the
+                # producer source for this exact sentence.
+                "message": "Could not parse CSV: a data row has more fields than the header row.",
+            }],
+            "correlation_id": None,
+        }
 
     # 2026-05-07 — case-insensitive header normalization. Real-world CSVs
     # ship headers like "Date,Daily_Return" or "DATE,DAILY_RETURN". Pandera
@@ -921,6 +966,23 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     if norm_flag is not None:
         info_flags.append(norm_flag)
 
+    # 170.1 / D-10 — THE DATASET-LEVEL SENTINELS NEED A NUMERIC `daily_return`
+    # COLUMN, AND THEY NOW CHECK FOR ONE. On the SchemaErrors fallback
+    # `df_validated = df` is the UNVALIDATED, uncoerced frame, so a non-numeric
+    # `daily_return` cell leaves the whole column as strings and both sentinels
+    # did float maths on it. The result was a TypeError out of `r.std(...)`
+    # whose text carries the cell, escaping `validate_csv` instead of the
+    # `coerce_dtype` row pandera had already emitted for that cell (measured at
+    # HEAD 712c47eea). The precondition lives in `_has_numeric_daily_return`, so
+    # a rejected file reports its pandera rows and never raises.
+    #
+    # ⚠️ This is NOT `if schema_validation_ok`, the guard the auto-normalize step
+    # above uses, and the difference is deliberate. A dollar-PnL upload with a
+    # negative day (-329) ALSO fails the schema (`daily_return_lower_bound`), yet
+    # its column is numeric and the sentinel's actionable "looks like dollar PnL,
+    # convert each row" message is exactly what that user needs
+    # (`test_dollar_form_daily_return_caught_by_sentinel`). Gating on schema
+    # success would have replaced it with a bare row-0 bound rule.
     all_errors.extend(_check_sharpe_sentinel(df_validated, fmt))
     all_errors.extend(_check_dollar_form_sentinel(df_validated, fmt))
     # _check_trading_window REMOVED 2026-04-30 (crypto trades 24/7)

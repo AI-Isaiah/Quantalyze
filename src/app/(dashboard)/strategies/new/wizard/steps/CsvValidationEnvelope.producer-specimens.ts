@@ -45,6 +45,17 @@ export const PARSE_ERROR: ProducerSpecimen = {
     "Could not parse CSV: Error tokenizing data. C error: Expected 2 fields in line 3, saw 4",
 };
 
+/**
+ * 170.1 D-10 follow-up: a data row with more fields than the header. Same rule
+ * (`parse_error`), a second emission site with its own fixed sentence, which
+ * names the problem and never a cell.
+ */
+export const PARSE_ERROR_LONG_ROW: ProducerSpecimen = {
+  rule: "parse_error",
+  row: 0,
+  message: "Could not parse CSV: a data row has more fields than the header row.",
+};
+
 export const DATE_FORMAT_AMBIGUOUS: ProducerSpecimen = {
   rule: "date_format_ambiguous",
   row: 0,
@@ -52,12 +63,13 @@ export const DATE_FORMAT_AMBIGUOUS: ProducerSpecimen = {
     "Could not determine the date format — these dates are ambiguous (each could be DD/MM/YYYY or MM/DD/YYYY). Please re-upload with ISO dates in YYYY-MM-DD format.",
 };
 
-/** One specimen per emission site; `empty` has two. */
+/** One specimen per emission site; `empty` and `parse_error` have two. */
 export const BESPOKE_SPECIMENS: readonly ProducerSpecimen[] = [
   TOO_MANY_ROWS,
   EMPTY_NO_FILE,
   EMPTY_NO_ROWS,
   PARSE_ERROR,
+  PARSE_ERROR_LONG_ROW,
   DATE_FORMAT_AMBIGUOUS,
 ];
 
