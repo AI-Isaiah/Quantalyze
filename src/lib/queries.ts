@@ -4409,6 +4409,7 @@ export type MissingSeriesReason = Extract<
   EquityHistoryRebuildReason,
   | "awaiting_derivation"
   | "derivation_rejected"
+  | "duplicate_account"
   | "shared_account_no_working_key"
   | "shared_account_history_truncated"
   | "history_read_failed"
@@ -4432,7 +4433,10 @@ function untrustworthyRebuildReason(
   payload: unknown,
 ): Extract<
   MissingSeriesReason,
-  "derivation_rejected" | "shared_account_no_working_key" | "shared_account_history_truncated"
+  | "derivation_rejected"
+  | "duplicate_account"
+  | "shared_account_no_working_key"
+  | "shared_account_history_truncated"
 > {
   const tokens =
     payload !== null && typeof payload === "object"
@@ -4442,6 +4446,8 @@ function untrustworthyRebuildReason(
   if (tokens.includes("shared_account_no_working_key")) {
     return "shared_account_no_working_key";
   }
+  // 167.1.2.1.1 SC-1 (D-04): the derive's identity refusal persists its token.
+  if (tokens.includes("account_identity_collision")) return "duplicate_account";
   if (tokens.includes("shared_account_history_truncated")) {
     return "shared_account_history_truncated";
   }

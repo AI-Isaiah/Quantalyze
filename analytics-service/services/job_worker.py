@@ -12407,11 +12407,13 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         FULL_HISTORY_VENUES,
         SHARED_ACCOUNT_KINDS,
         DegradeReason,
+        DeriveRefusal,
         account_groups,
         eligible_key_predicate,
         read_dropped_day_pnl,
         read_realized_terminal,
         read_writer_basis,
+        refusal_payload,
         stitch_dropped_day_pnl,
         stitch_shared_account,
         working_holder_predicate,
@@ -12437,6 +12439,34 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             ).eq("kind", "equity_curve").execute()
 
         await db_execute(_del)
+
+    async def _persist_refusal(
+        token: str, *, extra_reasons: Sequence[str] = ()
+    ) -> None:
+        # 167.1.2.1.1 SC-1 (D-04): a refusal REPLACES the (allocator_id,
+        # 'equity_curve') row with a version-2 payload that names why, in ONE atomic
+        # upsert with the call shape of ``_upsert_curve``. Deleting the row left the
+        # reader with nothing to read, so it told the owner the history is
+        # "recomputed daily" for a book the derive refuses every day. The payload is
+        # untrustworthy with an empty curve and empty returns, so it can never
+        # render as a curve (``refusal_payload``). Counts and a closed token only.
+        row = {
+            "allocator_id": allocator_id,
+            "kind": "equity_curve",
+            "payload": refusal_payload(
+                token,
+                composed_at=datetime.now(timezone.utc).isoformat(),
+                extra_reasons=extra_reasons,
+            ),
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        def _upsert() -> None:
+            supabase.table("allocator_equity_derived").upsert(
+                row, on_conflict="allocator_id,kind"
+            ).execute()
+
+        await db_execute(_upsert)
 
     # ── 1. Eligible key set — the ONE predicate, never inlined. ──────────────
     def _load_keys() -> list[dict[str, Any]]:
@@ -12736,7 +12766,15 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         ]
     )
     if duplicate_keys or collisions:
-        await _delete_equity_curve_row()
+        reason = (
+            DeriveRefusal.ACCOUNT_DUPLICATE.value
+            if duplicate_keys
+            else DeriveRefusal.ACCOUNT_IDENTITY_COLLISION.value
+        )
+        if duplicate_keys:
+            await _delete_equity_curve_row()
+        else:
+            await _persist_refusal(reason)
         # Reason token + counts only. No key id, no venue id, no USD (T-167.1.2-22).
         # C2 silent-failure SFH-07: WARNING, not INFO. The refusal deletes the
         # curve and ends DONE, so this line is the only trace of why the book
@@ -12749,15 +12787,12 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # the refusal is also captured explicitly, once, at level warning:
         # tagged with the job and the token, one static message per token so
         # Sentry groups them, and no key id, venue id or USD figure.
-        reason = (
-            "account_duplicate" if duplicate_keys else "account_identity_collision"
-        )
         with sentry_sdk.new_scope() as scope:
             scope.set_tag("compute_job_id", str(job.get("id")))
             scope.set_tag("derive_refusal", reason)
             sentry_sdk.capture_message(
                 f"derive_allocator_equity: {reason} — the equity curve was "
-                "refused and deleted; the book shows the rebuilding panel",
+                "refused and recorded; the book shows the rebuilding panel",
                 level="warning",
             )
         logger.warning(

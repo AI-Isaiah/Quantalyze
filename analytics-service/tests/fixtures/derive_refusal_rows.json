@@ -1,0 +1,22 @@
+{
+  "notes": "Phase 167.1.2.1.1 WRITERRESIDUALS, SC-1 (decision D-04). ONE table for three consumers, so the Python writer, the TS reader and the SQL census mirror cannot drift apart silently. When the allocator equity derive REFUSES to publish a curve it no longer deletes the (allocator_id, 'equity_curve') row: it upserts a version-2 refusal row (is_trustworthy false, curve [], returns [], degrade_reasons carrying the token, refusal set to the token) that says why. `refusals` has one row per DeriveRefusal member: `payload` is exactly what refusal_payload(token, composed_at=composed_at, extra_reasons=extra_reasons) returns, and `reader_reason` is the EquityHistoryRebuildReason untrustworthyRebuildReason (src/lib/queries.ts) maps that row to. The reader maps each token onto a line the owner already sees; no new copy exists for any of them. analytics-service/tests/test_derive_refusal_rows.py asserts the payloads, src/lib/__tests__/derive-refusal-rows.test.ts asserts the reader, and src/__tests__/accounttruth-census.test.ts evaluates the census CASE arms (scripts/accounttruth-census.mjs, untrustworthy_reason) over the same rows.",
+  "composed_at": "2026-10-16T00:00:00+00:00",
+  "refusals": [
+    {
+      "token": "account_identity_collision",
+      "extra_reasons": [],
+      "reader_reason": "duplicate_account",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": ["account_identity_collision"],
+        "is_trustworthy": false,
+        "refusal": "account_identity_collision",
+        "scalars": {"mwr": null, "dietz": null, "computable": false},
+        "inputs": {"n_keys": 0, "anchor_asof": null, "composed_at": "2026-10-16T00:00:00+00:00"}
+      }
+    }
+  ]
+}

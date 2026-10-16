@@ -175,6 +175,74 @@ def _is_trustworthy(reasons: frozenset[DegradeReason]) -> bool:
     return not (reasons & _BLOCKING_REASONS)
 
 
+class DeriveRefusal(str, Enum):
+    """167.1.2.1.1 SC-1 (D-04): the CLOSED set of reasons the allocator equity derive
+    REFUSES to publish a curve at all. A sibling of ``DegradeReason``, deliberately not
+    folded into it: a ``DegradeReason`` describes a curve that WAS composed (and how far
+    to trust it), while these describe "no curve". The value of each member is its
+    lower-case name, and it is the token ``refusal_payload`` stores and the reader
+    (``untrustworthyRebuildReason`` in src/lib/queries.ts) maps onto a line it already
+    has.
+    """
+
+    # The allocator's daily returns exceed the read's hard cap; nothing was composed.
+    RETURNS_READ_CAP = "returns_read_cap"
+    # A marked duplicate behind a working holder: the account would be summed twice.
+    ACCOUNT_DUPLICATE = "account_duplicate"
+    # Two live keys read one exchange account with no marker between them.
+    ACCOUNT_IDENTITY_COLLISION = "account_identity_collision"
+    # A persisted value is corrupt (a NULL return, a non-numeric or non-finite flow).
+    INPUT_CORRUPT = "input_corrupt"
+    # F1b: an eligible key has neither returns nor a key_inputs row yet (backfill window).
+    COMPOSE_INCOMPLETE = "compose_incomplete"
+    # B2: the compose came back with no curve and nothing blocking it (nothing to draw yet).
+    COMPOSE_EMPTY = "compose_empty"
+    # B2: the compose came back with no curve AND a blocking cause. Its own token so the
+    # wait mapping of ``compose_empty`` cannot swallow a cause the owner is not waiting out.
+    COMPOSE_EMPTY_BLOCKED = "compose_empty_blocked"
+    # The compose refused a structural input (the core's loud asserts).
+    COMPOSE_REFUSED = "compose_refused"
+
+
+def refusal_payload(
+    token: str,
+    *,
+    composed_at: str,
+    extra_reasons: Sequence[str] = (),
+) -> dict[str, Any]:
+    """167.1.2.1.1 SC-1 (D-04): the ``equity_curve`` row payload for a derive REFUSAL.
+
+    The refusal is persisted in the SAME ``(allocator_id, 'equity_curve')`` row the
+    reader already reads, in one atomic upsert, so a stale trustworthy curve is
+    replaced rather than deleted and the reason survives on disk. Nothing in it can
+    render as a curve, by three guards the reader relies on, each of which holds on its
+    own: ``version`` is 2 (so the reader treats it as a current-contract row, not a
+    pre-v2 one it would wait out), ``is_trustworthy`` is False, and ``curve`` and
+    ``returns`` are empty.
+
+    ``degrade_reasons`` is the sorted set of the token plus ``extra_reasons`` (the
+    compose's own blocking tokens on ``compose_empty_blocked``), so the reader's
+    token precedence reads one list. ``refusal`` repeats the token as a string, which is
+    also how a test tells a refusal row from a curve row. Counts and closed-enum tokens
+    only: no key id, venue id or USD figure (T-167.1.2-22, D-09).
+    """
+    # An Enum member's ``str()`` is "Class.MEMBER"; the stored token is its value.
+    def _value(raw: Any) -> str:
+        return raw.value if isinstance(raw, Enum) else str(raw)
+
+    return {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": sorted({_value(token), *(_value(r) for r in extra_reasons)}),
+        "is_trustworthy": False,
+        "refusal": _value(token),
+        "scalars": {"mwr": None, "dietz": None, "computable": False},
+        "inputs": {"n_keys": 0, "anchor_asof": None, "composed_at": composed_at},
+    }
+
+
 # Backwards-compatible aliases (the enum members ARE these strings).
 REASON_NO_KEYS = DegradeReason.NO_KEYS
 REASON_MISSING_SERIES = DegradeReason.MISSING_SERIES

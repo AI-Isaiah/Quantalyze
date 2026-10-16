@@ -1502,6 +1502,22 @@ def _curve_upserts(fake: _FakeSupabase) -> list:
     ]
 
 
+def _refusal_upserts(fake: _FakeSupabase) -> list:
+    """The ``equity_curve`` upserts that are a derive REFUSAL (SC-1, D-04): the
+    payload's ``refusal`` is a token string. ``_curve_upserts`` excludes them.
+    Each entry is ``(table, row, on_conflict)`` with ``row`` the single upserted
+    row."""
+    return [
+        (table, row, on_conflict)
+        for table, payload, on_conflict in fake.upserts
+        if table == DERIVED_TABLE
+        for row in _rows_of(payload)
+        if row.get("kind") == "equity_curve"
+        and isinstance(row.get("payload"), dict)
+        and isinstance(row["payload"].get("refusal"), str)
+    ]
+
+
 def _curve_deletes(fake: _FakeSupabase, alloc: str) -> list:
     return [
         d for d in fake.deletes
@@ -1646,7 +1662,11 @@ async def test_duplicate_with_revoked_holder_is_a_collision(caplog: pytest.LogCa
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
     assert _curve_upserts(fake) == []
-    assert len(_curve_deletes(fake, alloc)) == 1
+    # 167.1.2.1.1 SC-1 (D-04): the refusal is recorded, not deleted.
+    assert [r["payload"]["refusal"] for _, r, _ in _refusal_upserts(fake)] == [
+        "account_identity_collision"
+    ]
+    assert _curve_deletes(fake, alloc) == []
     assert "account_identity_collision" in caplog.text
     assert "account_duplicate" not in caplog.text
     assert "key-D" not in caplog.text
@@ -1721,7 +1741,8 @@ async def test_duplicate_with_revoked_holder_counts_when_alone() -> None:
 @pytest.mark.asyncio
 async def test_two_keys_same_venue_without_marker_collide(caplog: pytest.LogCaptureFixture) -> None:
     """No duplicate marker, but two eligible keys share (exchange, venue id).
-    Open intervals overlap, so the curve is deleted with the collision token."""
+    Open intervals overlap, so the curve is refused with the collision token
+    (167.1.2.1.1 SC-1, D-04: the refusal is recorded in the row, not deleted)."""
     import logging
 
     alloc = "alloc-collide"
@@ -1738,10 +1759,50 @@ async def test_two_keys_same_venue_without_marker_collide(caplog: pytest.LogCapt
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
     assert _curve_upserts(fake) == []
-    assert len(_curve_deletes(fake, alloc)) == 1
+    # 167.1.2.1.1 SC-1 (D-04): the refusal is recorded, not deleted.
+    assert [r["payload"]["refusal"] for _, r, _ in _refusal_upserts(fake)] == [
+        "account_identity_collision"
+    ]
+    assert _curve_deletes(fake, alloc) == []
     assert "account_identity_collision" in caplog.text
     assert "key-A" not in caplog.text
     assert "venue-shared" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_identity_collision_persists_its_refusal_reason() -> None:
+    """Phase 167.1.2.1.1 SC-1 (D-04). Two unmarked keys on one venue collide, and
+    the derive refuses the curve. It used to DELETE the row, so the reader fell
+    back to "recomputed daily" for a book the derive refuses every day. It now
+    replaces the row in ONE atomic upsert with a version-2 refusal payload that
+    names the token, so no stale trustworthy curve survives and the reason is on
+    disk. Nothing is deleted."""
+    alloc = "alloc-collide-persist"
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key("key-A", alloc, venue_account_id="venue-shared"),
+            _gate_key("key-B", alloc, venue_account_id="venue-shared"),
+        ],
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [_stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    refusals = _refusal_upserts(fake)
+    assert len(refusals) == 1, "one atomic upsert of the refusal row"
+    table, rows, on_conflict = refusals[0]
+    assert table == DERIVED_TABLE
+    assert on_conflict == "allocator_id,kind"
+    assert rows["allocator_id"] == alloc and rows["kind"] == "equity_curve"
+    payload = rows["payload"]
+    assert payload["version"] == 2
+    assert payload["is_trustworthy"] is False
+    assert payload["curve"] == [] and payload["returns"] == []
+    assert payload["refusal"] == "account_identity_collision"
+    assert "account_identity_collision" in payload["degrade_reasons"]
+    assert _curve_upserts(fake) == [], "a refusal row is not a curve"
+    assert _curve_deletes(fake, alloc) == [], "the refusal replaces the row; nothing is deleted"
 
 
 @pytest.mark.asyncio
@@ -2014,7 +2075,13 @@ async def test_identity_refusal_is_a_warning_not_info(
         LEGACY_TABLE: [],
     })
     assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
-    assert len(_curve_deletes(fake, alloc)) == 1
+    if token == "account_identity_collision":
+        # 167.1.2.1.1 SC-1 (D-04): recorded in the row, not deleted. The
+        # duplicate arm follows in the same phase (plan 01 task 2).
+        assert len(_refusal_upserts(fake)) == 1
+        assert _curve_deletes(fake, alloc) == []
+    else:
+        assert len(_curve_deletes(fake, alloc)) == 1
     refusals = [r for r in caplog.records if token in r.getMessage()]
     assert refusals, caplog.text
     assert all(r.levelno == logging.WARNING for r in refusals), [
@@ -2384,7 +2451,16 @@ def _rows_of(payload: Any) -> list[dict]:
 
 
 def _is_equity_curve_upsert(payload: Any) -> bool:
-    return any(r.get("kind") == "equity_curve" for r in _rows_of(payload))
+    # A derive REFUSAL row (SC-1, D-04: ``payload.refusal`` is a token string) is
+    # an ``equity_curve`` row but not a curve. ``_refusal_upserts`` counts those.
+    return any(
+        r.get("kind") == "equity_curve"
+        and not (
+            isinstance(r.get("payload"), dict)
+            and isinstance(r["payload"].get("refusal"), str)
+        )
+        for r in _rows_of(payload)
+    )
 
 
 def _extract_payload(payload: Any) -> dict:
