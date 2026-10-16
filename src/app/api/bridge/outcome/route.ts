@@ -8,6 +8,10 @@ import { userActionLimiter } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { REJECTION_REASONS } from "@/lib/bridge-outcome-schema";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+import {
+  BRIDGE_OUTCOME_CONFLICT_TARGET,
+  BRIDGE_OUTCOME_CROSS_ALLOCATOR_HINT,
+} from "@/lib/bridge/outcome-conflict";
 
 /**
  * Records or updates a bridge outcome (allocated / rejected) for a
@@ -119,13 +123,23 @@ export const POST = withAuthLimited(
   // runs through the admin client. The .eq("allocator_id", user.id) is the
   // ownership gate — it MUST stay inline with the query.
   const admin = createAdminClient();
-  const { data: decision } = await admin
+  const { data: decision, error: decisionError } = await admin
     .from("match_decisions")
     .select("id")
     .eq("allocator_id", user.id)
     .eq("strategy_id", parsed.strategy_id)
     .eq("decision", "sent_as_intro")
     .maybeSingle();
+  // A failed lookup is NOT "no sent_as_intro": answering 403 NOT_ELIGIBLE for a
+  // transient DB error would tell an eligible allocator they cannot record an
+  // outcome, with nothing logged. Only a clean empty answer is a 403.
+  if (decisionError) {
+    console.error("[api/bridge/outcome] eligibility lookup error:", decisionError);
+    return NextResponse.json(
+      { error: "Failed to record outcome" },
+      { status: 500, headers: NO_STORE_HEADERS },
+    );
+  }
   if (!decision) {
     return NextResponse.json(
       {
@@ -150,12 +164,44 @@ export const POST = withAuthLimited(
         note: parsed.note ?? null,
         needs_recompute: true,
       },
-      { onConflict: "allocator_id,strategy_id" },
+      { onConflict: BRIDGE_OUTCOME_CONFLICT_TARGET },
     )
     .select(
       "id, kind, percent_allocated, allocated_at, rejection_reason, note, delta_30d, delta_90d, delta_180d, estimated_delta_bps, estimated_days, needs_recompute, created_at, updated_at",
     )
     .single();
+
+  // The sync trigger refuses (42501, this hint) an outcome whose decision belongs
+  // to another allocator. This route only ever sends the caller's own
+  // sent_as_intro decision, so it cannot reach here today; the mapping keeps a
+  // refusal from the database a fixed 4xx instead of the generic 500 (which would
+  // also log it as an upsert failure). The response names no id.
+  //
+  // Reaching this branch means an invariant is broken: the decision lookup above
+  // is already scoped to the caller (.eq("allocator_id", user.id)), so the
+  // decision it returns can only be the caller's own. Log it, so a refusal that
+  // "cannot happen" is not silent. The ids go to the server log ONLY, never into
+  // the response body.
+  if (
+    error?.code === "42501" &&
+    error.hint === BRIDGE_OUTCOME_CROSS_ALLOCATOR_HINT
+  ) {
+    console.error(
+      "[api/bridge/outcome] cross-allocator decision refusal reached; the eligibility lookup is scoped to the caller, so this is a broken invariant:",
+      {
+        userId: user.id,
+        strategyId: parsed.strategy_id,
+        decisionId: decision.id,
+      },
+    );
+    return NextResponse.json(
+      {
+        error: "NOT_ELIGIBLE",
+        reason: "Decision does not belong to this allocator",
+      },
+      { status: 403, headers: NO_STORE_HEADERS },
+    );
+  }
 
   if (error || !inserted) {
     console.error("[api/bridge/outcome] upsert error:", error);

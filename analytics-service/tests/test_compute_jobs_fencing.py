@@ -486,6 +486,84 @@ class TestDispatchTickThreadsClaimToken:
         )
 
     @pytest.mark.asyncio
+    async def test_mark_failed_lock_bound_55p03_is_not_re_marked_unknown(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Phase 164.9.3.1 review round 3 WR-01: mark_compute_job_failed raises
+        SQLSTATE 55P03 after its bounded fan-in closure lock retry. The RPC rolled
+        back whole, so the job is still `running` and the watchdog owns it. The
+        worker must NOT fall into dispatch_tick's catch-all, which would call
+        mark_compute_job_failed AGAIN with error_kind='unknown': that turns a
+        permanent failure into failed_retry/unknown (its waiting children stay
+        stranded) or makes every descendant inherit 'unknown'. It must log ONE
+        ERROR carrying the ORIGINAL error_kind so the real failure survives."""
+        tok = str(uuid.uuid4())
+        jobs = [
+            {
+                "id": "job-lock-bound",
+                "kind": "sync_trades",
+                "strategy_id": "s-lb",
+                "claim_token": tok,
+            }
+        ]
+        mock_supabase = MagicMock()
+
+        def _rpc_side_effect(name: str, params: dict):
+            chain = MagicMock()
+            if name == "claim_compute_jobs_with_priority":
+                chain.execute.return_value = MagicMock(data=jobs)
+            elif name == "mark_compute_job_failed":
+                chain.execute.side_effect = APIError({
+                    "code": "55P03",
+                    "message": (
+                        "mark_compute_job_failed: the waiting closure of job "
+                        "job-lock-bound kept growing across 10 lock attempts"
+                    ),
+                })
+            else:
+                chain.execute.return_value = MagicMock(data=None)
+            return chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        result = DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message="exchange key revoked",
+            error_kind="permanent",
+        )
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock(return_value=result)), \
+             caplog.at_level(logging.WARNING, logger="quantalyze.analytics.worker"):
+            await dispatch_tick("worker-lock-bound")
+
+        fail_calls = [
+            c for c in mock_supabase.rpc.call_args_list
+            if c.args[0] == "mark_compute_job_failed"
+        ]
+        assert len(fail_calls) == 1, (
+            f"expected exactly one mark_compute_job_failed call, got "
+            f"{len(fail_calls)}: the 55P03 fell into the generic fallback, which "
+            "re-marks the job error_kind='unknown'"
+        )
+        assert fail_calls[0].args[1]["p_error_kind"] == "permanent"
+        bound_records = [
+            r for r in caplog.records
+            if r.levelname == "ERROR" and "MARK_FAILED_LOCK_BOUND" in r.getMessage()
+        ]
+        assert len(bound_records) == 1
+        msg = bound_records[0].getMessage()
+        assert "job-lock-bound" in msg
+        assert "permanent" in msg, "the ERROR line must carry the original error_kind"
+        assert "exchange key revoked" in msg
+        assert "55P03" in msg
+        assert getattr(bound_records[0], "error_kind", None) == "permanent"
+        # No other ERROR record: the catch-all's "dispatch_tick: unhandled error"
+        # lines must not fire for a bound the worker handled on purpose.
+        assert [
+            r for r in caplog.records if r.levelname == "ERROR" and r is not bound_records[0]
+        ] == []
+
+    @pytest.mark.asyncio
     async def test_late_mark_from_outer_fallback_tagged_with_event_type(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:

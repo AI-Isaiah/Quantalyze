@@ -1509,6 +1509,36 @@ through `stitch_composite` after NAVBREACH, run it once, inside that recompute; 
 - **Closed by:** the Wave 5 consolidated run and the orchestrator's single-key recompute. Phase 164.6.6.3.3's
   VERIFICATION keeps this as its one open human item until both have run. ✅ Both ran on 2026-10-15 (see the CLOSED note at the top of this entry).
 
+### 167.1.2.2.2.1-WAVE5-RECOMPUTE — the two rebuilt OKX strategies' headlines move when the Wave 5 recompute reads the rebuilt rows (booked 2026-10-15, Phase 167.1.2.2.2.1 plan 10)
+
+**Why it is open.** Phase 167.1.2.2.2.1 OKXHISTORY rebuilds the days two OKX strategies lost beyond the
+3-month `bills-archive` reach from OKX's quarterly `bills-history-archive`, and the rebuilt days COUNT in
+headline metrics (D-07). The `apply` job writes `csv_daily_returns` rows and `series_provenance`
+(`reconstructed_ranges`, narrower `unrecovered_gaps`); it deliberately enqueues no analytics (the job writes
+only what the reconciliation proved). Until an analytics compute reads the new rows, each strategy's stored
+`headline_since` and metrics still describe the shorter series. Ordinal 2's published `headline_since` moves
+from 2026-08-02 toward 2026-02-23, and ordinal 1's toward about 2026-05-24.
+
+**The set (counts only, ordinals of the non-archived OKX strategies ordered by status then id).** 2 strategies:
+ordinal 1 (`pending_review`, a 70-day gap) and ordinal 2 (`published`, an 87-day gap). Ordinal 3 (disconnected
+key, D-02) and ordinal 4 (read-only zero-check, D-03) are not in the set.
+
+**Trigger.** The `apply` job is `done` for both ordinals (runbook `docs/runbooks/okxhistory-go-live.md`,
+Step 4) and the analytics service carrying the rebuilt-range reader is deployed.
+
+**Order.** The recompute runs inside the Wave 5 consolidated PROD recompute, through the product's own
+paths (`enqueue_compute_job` for `compute_analytics_from_csv`). The daily 04:30Z tick's derive-then-compute
+chain recomputes the same rows anyway, so the timing of `apply` relative to the consolidated run is the
+founder's decision (Step 3 of the runbook, plan 15): apply just before the consolidated run to review the
+changed headline first, or apply early and let the next tick publish it.
+
+**Acceptance reading (per ordinal 1 and 2).** `headline_since` and `unrecovered_gaps` read back through the
+runbook's `worklist` form (`headline_since` earlier than before; `unrecovered_gaps` equal to the apply
+result's `gaps_after`), `reconstructed_ranges` present, and the runbook's `survival` form reads 0 days
+without a row for every ordinal (also re-read after the next 04:30Z tick).
+
+**Owner: the Wave 5 consolidated PROD recompute** (run by the orchestrator, founder-authorized).
+
 ### 164.6.6.3.3-COMPARE-SPAN-SOURCE — /compare names its "Measured since" span from the stored cash series, the factsheet from `headline_since` (booked 2026-10-10, Phase 164.6.6.3.3 release)
 
 **Why it is open.** Phase 164.6.6.3.3 (FACTSHEETTRUTH) removed `deriveHeadlineCoversFrom` and
@@ -9295,6 +9325,23 @@ Confidence 5, below the fix bar.
 number, with a test that fails first.
 ⛔ **Not a close:** inferring the unit from the symbol.
 
+### 164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED — an owner's private factsheet shows "Data source —" for their own key-backed strategy (booked 2026-10-15, Phase 164.6.6.2.1 UAT item 2)
+
+**Why it is open.** `src/app/factsheet/[id]/v2/page.tsx` reads the trust tier from
+`readPublicVerificationSignals`, which calls `get_published_trust_signals`, an RPC that answers only
+for PUBLISHED strategies. On a private strategy it returns nothing, so the Terms panel's "Data source"
+(`MandatePanels.tsx`) prints "—", even on the owner's own view of a strategy that is backed by an API
+key. Measured 2026-10-15 on PROD's only BTC-unit strategy (private): "—" in both the BTC and USD views.
+The two views agree, so the 164.6.6.2.1 CR-02 overlay is not at fault. User-facing, owner-only, and it
+withholds a true fact rather than showing a false one.
+
+**Owner:** unrouted; the next phase touching the factsheet trust tier or `get_published_trust_signals`.
+**Trigger:** an owner asks why their own factsheet does not say API-verified.
+**Gate (what closes it):** an owner viewing their own unpublished strategy sees its real tier,
+read through a path that also checks ownership. Anonymous and non-owner readers still get nothing for
+an unpublished strategy. A test fails first on the "—".
+⛔ **Not a close:** widening `get_published_trust_signals` to unpublished strategies for every caller.
+
 ### [167.1.2.2.2-CRON-TICK-RESIDUALS] — four MEDIUM residuals of `public.cron_sync_tick()` that the plan 01 review round recorded and did not fix (booked 2026-10-09, Phase 167.1.2.2.2 plan 01 Task 3)
 
 **Why it is open.** The three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter)
@@ -9386,6 +9433,17 @@ reads an unpublished row's value. (5) plan 05's red-first test on a `computing` 
 ## Phase 167.1.2.2.2 (TRADESYNC) — routed items (logged 2026-10-10)
 
 - **[167.1.2.2.2-OKX-PERSISTENT-TRUNCATION]** (logged 2026-10-11, PR-B fix round SFH-H2; owner: Phase 167.1.2.2.2.1 OKXHISTORY). A truncated window is now degraded: nothing stored, no stamp, key `error`. An OKX first window above the page cap (10k bills per inst type over ~157 days) therefore truncates on every tick and reports `error` daily instead of leaving a silent hole. Done when the OKX fetch is chunked or windowed so a large first window completes.
+  ⭐ **2026-10-15 (Phase 167.1.2.2.2.1 plan 10, RESEARCH Section 11): measured, not fixed, stays open.** The live
+  walk is 100 pages of 100 per instrument type (`OKX_BILLS_PAGE_CAP = 100`); a capped walk drops the oldest days
+  and records `daily_pnl_truncated_okx`. Evidence today: the 2026-10-12 rehearsal tick reported no `partial`,
+  `fetch_degraded`, `results_truncated` or key `error`; the stored `data_quality_flags` of ordinals 1, 2 and 4
+  carry no `daily_pnl_truncated_okx` key; ordinal 4's stored series is flat 2026-06-08 to 2026-08-01; the
+  heaviest stored account holds a few thousand fills over several months, far from 10,000 bills per instrument
+  type in 90 days. Reading: the first live row of 2026-08-02 for ordinals 1 and 2 is consistent with a flat
+  account, not with the page cap. NOT proven until the Q3 archive file shows no activity in 2026-07-17 to
+  2026-08-01. The OKXHISTORY reconciliation is the detector (`info.archive_only_in_live_reach` in the job result:
+  archive activity on a day inside live reach with no live row). **Trigger (narrowed 2026-10-15):** an OKX
+  derive sets `daily_pnl_truncated_okx` or the OKXHISTORY reconciliation reports an archive-only day inside live reach.
 - **[167.1.2.2.2-BINANCE-INCOME-PAGINATION]** (logged 2026-10-11, PR-B fix round; owner: the next phase that ships a Binance strategy key). The Binance income call uses `limit=1000` with no pagination and no truncation flag, so a capped Binance window is still invisible. No Binance key on PROD today. Done when it paginates or stamps `daily_pnl_truncated_binance`.
 - **[167.1.2.2.2-INCOME-FALLBACK-PRODUCER-PIN]** (logged 2026-10-11, PR-B review round 3 R3-ME-01, MEDIUM, confidence 5; owner: the next phase that ships a Binance strategy key). The cron reads `daily_pnl_binance_income_fallback` through its own string constant in `routers/cron.py`, and the fetcher writes it as a separate literal in `services/exchange.py`. The round-3 tests hand the flag to the cron through a patched buffer, so a rename on the fetcher side would silently reopen R2-ME-01 (Binance spot fills stored over daily P&L). Done when one test runs the real `fetch_daily_pnl` with the income call failing and the spot call succeeding and asserts `_fetch_degradation` names the flag, or when both sides import one constant. Dormant until a Binance strategy key exists on PROD. Also correct the comment beside the cron constant: nothing in the tree reads the flag by name for an admin health card.
 - **[167.1.2.2.2-GAP-RECORD-SILENT-PARSE]** (logged 2026-10-11, PR-B SFH round 2 NEW-3 / review R2-LO-04, MEDIUM, confidence 6; owner: Phase 164.6.6.3.3 FACTSHEETTRUTH). `parseUnrecoveredGaps` in `src/lib/factsheet/trade-fetch-provenance.ts` returns `[]` on a malformed `series_provenance` with only a `console.warn`, so the public, printable tear sheet reads as having no unrecovered gaps and nothing reaches Sentry. PR-B fixed the same pattern for the fetch stamp (`TradeFetchUnavailableLine`) but not for the gap record. Done when a malformed record reports to Sentry and the tear sheet shows an unavailable state for gaps, with a test that goes RED on today's code.
@@ -9784,6 +9842,8 @@ flush the SDK after a credited recovery before closing, or log a WARNING that th
 
 ### CI-CLASSIFY-SCRATCHREPO-ENOTEMPTY — `scratchRepo` cleanup can fail with ENOTEMPTY on a temp directory (booked 2026-10-14)
 
+✅ **CLOSED 2026-10-15 (v0.132.1.9).** Second occurrence: PR #1060's Contracts run `38809136016`, `rmdir '/tmp/gsd-classify-push-testread-*/.git'`. Root cause, measured: every `git commit` spawns `git maintenance run --auto` (GIT_TRACE2 shows the child), and since git 2.47 `maintenance.autoDetach` runs it in the background. The runner has git 2.55, so the child can still be writing into `.git` while cleanup removes it. A local git 2.39 runs it in the foreground, which is why it never reproduced locally. Fix: both scratch-repo helpers pass `-c maintenance.auto=false` (`SCRATCH_GIT_CONFIG`), so no child starts. A self-test row pins it, with a calibration arm showing an unpinned commit does start one; neutering the flag turns the row RED. No retry was added to the `rmSync`. The text below is kept as lineage.
+
 **Failure scenario.** A CI run of the changed-path classifier's self-test failed with
 `ENOTEMPTY: directory not empty, rmdir '/tmp/gsd-classify-subset-forced-*'`, from the `cleanup` closure that
 `scratchRepo` in `scripts/classify-changed-paths.mjs` returns (`rmSync(dir, { recursive: true, force: true })`, no
@@ -9885,6 +9945,118 @@ message (but not the `code` tag). The landing helper has the same shape.
 `failAnonRead` and in the landing helper.
 **Owner / Trigger:** fixed together with 170.6.1.1-LANDING-CAPTURE-THROTTLE; or the first Sentry event seen
 without its `code` tag.
+
+## Phase 167.1.2.2.2.1 (OKXHISTORY) — routed items (logged 2026-10-15)
+
+- **[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]** (logged 2026-10-15, OKXHISTORY discuss; founder instruction
+  to book it). `fetch_daily_pnl` in `analytics-service/services/exchange.py` (OKX branch) sums
+  `pnl + fee` per UTC day across every bill regardless of `ccy`, with no currency conversion. A bill in
+  BTC (a coin-margined position, a fee charged in the base coin) is added to USDT P&L at face value, so the
+  daily P&L, the NAV roll-back and every metric built on it would be wrong for any account with a non-USDT
+  bill. Exposure is UNMEASURED for the live strategies. **Owner:** Phase 167.1.2.2.2.1 OKXHISTORY research
+  measures whether the in-scope account's bills (live and archive) are all USDT; if they are not, it is a
+  planning input of that phase, and the fix owner is routed by founder decision. **Trigger:** the first
+  OKX bill with `ccy` other than USDT in any strategy's window, or OKXHISTORY research finding one.
+  **Done when** a non-USDT bill is converted at a stated rate or fails loud, with a test that goes RED on
+  today's code.
+  ⭐ **2026-10-15 (Phase 167.1.2.2.2.1 plan 10): the calibrate census is the measurement step; stays open.** Stored
+  OKX rows are all SWAP and USDT (406 OKX-format raw fills, all SWAP, fee currency USDT; 568 funding rows, all
+  USDT), which covers fills and funding only. Bill classes stored nowhere (SPOT, MARGIN, FUTURES, OPTION,
+  transfers, interest, rebates) are unmeasured. The `calibrate` job over the 2026 Q2 and Q3 files settles it for
+  the in-scope account: its `census.by_ccy` is the currency count (runbook `docs/runbooks/okxhistory-go-live.md`,
+  Step 2). A non-USD row is the stop class `non_usd_ccy` and a founder STOP; the fix owner is routed by founder
+  decision then.
+
+- **[167.1.2.2.2.1-REVIEW-R3-SURVIVORS]** (logged 2026-10-15, review round 3, after three fixer rounds; owner:
+  Phase 167.1.2.2.2.1 plan 13 (PR-B), which MUST land them before plan 14's calibrate is read by the founder).
+  Four MEDIUMs on founder-facing readings and one false-stop risk survived round 3
+  (`.planning/phases/167.1.2.2.2.1-okxhistory-an-okx-strategy-s-days-older-than-the-3-month-bil/167.1.2.2.2.1-REVIEW.md`
+  round 3 plus the silent-failure hunt):
+  (1) the `MIN_CHAINED_PAIRS` floor applies to every currency with any nonzero pnl/fee/balChg, including excluded
+  classes the aggregate never sums (one coin-margined OKX option bill stops the job `too_few_pairs`); scope it to
+  currencies whose money the aggregate sums, keep the break check on all;
+  (2) `flow_totals_overlap` opens 7 days before the flow seam where the live side is always empty, so a double
+  count reads as agreement; start it at the seam and correct the runbook sentence;
+  (3) the runbook's `flow_seam` no-go rule "both sides nonzero" fires on any active account; make `diff` the
+  signal;
+  (4) the `flow_seam` after-window is not clamped to the last covered archive day, so a late re-run reports a
+  spurious `diff`; clamp it, or report the reading unmeasurable with a reason.
+  **Trigger:** plan 13 execution. **Done when** each has a test that goes RED on today's code and the runbook
+  Step 3 reads the corrected signals. Also open for the founder (not a defect): whether to bound
+  `info.realized_balance_vs_rolled_nav.diff` and `info.flow_seam.diff` (readings only today).
+  ⭐ **2026-10-15:** items (1)-(4) are now bound in plan 13's PLAN file as Task 2b (WR-01..WR-04), each with a
+  RED-first test, so the binding no longer lives only here. The founder question is DECIDED: "Decide after
+  calibrate" (CONTEXT D-13). Both diffs stay readings, and the founder sets any limit at plan 15's checkpoint.
+
+## Phase 164.9.3.1 (FANINGRAPH) — routed items (logged 2026-10-15)
+
+Found by the phase research on 2026-10-15 while reproducing the four fan-in defects. None of the four is fixed by
+Phase 164.9.3.1; each names an owner and a trigger, and the first is an open founder question.
+
+### 164.9.3.1-REAPER-STRAND — the hourly orphan reaper writes failed_final without mark_compute_job_failed, so a fan-in child of a reaped parent still strands (booked 2026-10-15, FANINGRAPH research, latent)
+
+**Failure scenario.** The inline pg_cron job `retention_compute_jobs_orphaned_running` (last registered by
+`supabase/migrations/20260826140000_compute_jobs_error_kind_orphaned.sql`) sets `status = 'failed_final'` directly on
+stale `running` rows. It never calls `mark_compute_job_failed`, so the failure cascade this phase adds does not run
+for it: a fan-in parent reaped that way leaves its `done_pending_children` child waiting forever, and the child's
+strategy reads computing. Latent today: no caller passes `parent_job_ids`, and the PROD census of 2026-10-15 found 0
+parented rows among 2292 jobs.
+**Fix.** Three options, none discussed with the founder. (i) Book it and leave it (this entry). (ii) Call the cascade
+from the cron body through a helper whose name and tokens leave the retention gate's counts alone. (iii) A status
+trigger on `compute_jobs` that covers every writer, which departs from D-02's "inside `mark_compute_job_failed`".
+Re-registering the cron job gives it a fresh PROD jobid and moves `supabase/tests/test_retention_orphaned_running.sql`
+(token counts in `cron.job.command`, and its twins), invariant 7 of
+`src/__tests__/retention-orphaned-running-terminalize.test.ts` with its `FIX_TS` constants, and
+`scripts/prod-prober/cron-manifest.json`.
+**FOUNDER DECISION 2026-10-15** ("Book it, latent"): option (i). The path stays out of Phase 164.9.3.1 and is kept here
+as booked, latent work. Recorded in CONTEXT ("Research clarifications") and in the ROADMAP phase section.
+**Owner / Trigger:** the first caller that enqueues with parents, or any PROD `compute_jobs` row with parents.
+
+### 164.9.3.1-OUTCOME-ROUTE-42P10 — POST /api/bridge/outcome upserts on a conflict target no unique index matches — USER-FACING (booked 2026-10-15, FANINGRAPH research) — ✅ CLOSED IN CODE 2026-10-15 by Phase 164.9.3.1 plan 11; ⚠️ NOT live until its PR merges and deploys
+
+**Failure scenario.** `src/app/api/bridge/outcome/route.ts` calls `.upsert(..., { onConflict: "allocator_id,strategy_id" })`.
+The unique objects the dump carries on `bridge_outcomes` are the primary key, `bridge_outcomes_allocator_match_decision_unique`
+and the partial expression index `bridge_outcomes_legacy_per_strategy_holding_when_md_null`; none of them is
+`(allocator_id, strategy_id)`. On the research lane stand-in `ON CONFLICT (allocator_id, strategy_id)` raised `42P10`
+("there is no unique or exclusion constraint matching the ON CONFLICT specification"). The PROD runtime was NOT
+exercised (research assumption A2), so this is a claim to measure first. If it holds, an allocator recording an
+outcome gets a 500.
+**Fix.** Measure on the local stack first, then target the per-decision constraint
+(`allocator_id, match_decision_id`) in the upsert. The sibling dismiss route targets a different table and is not
+affected.
+**Owner / Trigger:** route to a phase by founder decision; the trigger is now, because the symptom is user-facing.
+**CLOSED 2026-10-15 (Phase 164.9.3.1 plan 11, CONTEXT D-09).** The claim was measured read-only on PROD that day, after the
+marker query: `bridge_outcomes` has exactly three unique indexes (`bridge_outcomes_pkey`,
+`bridge_outcomes_allocator_match_decision_unique`, the md-NULL partial index) and `EXPLAIN INSERT ... ON CONFLICT
+(allocator_id, strategy_id)` raises `42P10`, so every `POST /api/bridge/outcome` returned 500. The upsert now targets
+`(allocator_id, match_decision_id)` through the one shared constant `BRIDGE_OUTCOME_CONFLICT_TARGET`
+(`src/lib/bridge/outcome-conflict.ts`). Evidence: live-DB arm (e) in `src/__tests__/match-decisions-xor-rls.test.ts`
+failed `42P10` on the local stack at `1e893524a` and passes at `afecce900` (two upserts as the signed-in allocator leave
+exactly one row, carrying the second call's `kind`); route test TC8 went RED to GREEN on the same pair. No migration, no
+RLS change, no new index (a unique on `(allocator_id, strategy_id)` would forbid two outcomes under two decisions, which
+the design allows). The dismiss route is unchanged. Becomes live when the PR merges and Vercel deploys.
+
+### 164.9.3.1-VOLUNTARY-REMOVE-23514 — deleting a voluntary_remove decision fails 23514 through the same ON DELETE SET NULL cascade (booked 2026-10-15, FANINGRAPH research)
+
+**Failure scenario.** The outcome of a `voluntary_remove` decision has `strategy_id IS NULL`. Deleting the decision
+makes the `ON DELETE SET NULL` foreign key null `match_decision_id`, which leaves `strategy_id IS NULL AND
+match_decision_id IS NULL` and violates `bridge_outcomes_kind_rejected` / `bridge_outcomes_kind_allocated`. Lane result:
+`23514`. The admin decisions route cannot reach it (it requires a strategy id), and the option this phase takes for
+the 23505 (re-keying the index on a preserved former decision id) does not change it.
+**Fix.** Decide what a voluntary-remove outcome should become when its decision is deleted (keep it with a former
+decision id, or refuse the delete with a named error), then make the CHECKs and the cascade agree.
+**Owner / Trigger:** the next phase that adds a delete path for voluntary decisions.
+
+### 164.9.3.1-HOLDING-REF-DIRECT-UPDATE — an owner can bypass the md-NULL duplicate guard by updating original_holding_ref directly (booked 2026-10-15, FANINGRAPH research, reasoned and not measured)
+
+**Failure scenario.** `bridge_outcomes_update_own` plus the table-level UPDATE grant let an allocator change
+`original_holding_ref` on its own `match_decision_id IS NULL` row. `bridge_outcomes_sync_holding_ref_trigger` fires on
+`INSERT OR UPDATE OF match_decision_id` only, so it does not run for that column, and a second born-NULL row with the
+same `(allocator, strategy)` then passes the partial unique index under a different holding key. Pre-existing. This
+phase makes the NEW column `former_match_decision_id` trigger-owned but leaves `original_holding_ref` as it is.
+**Fix.** Measure first. If it reproduces, extend the sync trigger to `UPDATE OF original_holding_ref` (or revoke the
+column UPDATE from `authenticated`).
+**Owner / Trigger:** the next phase touching the sync trigger.
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
@@ -10393,6 +10565,25 @@ were NOT, and all four are now pushed to `origin` so they are no longer local-on
   `ci.yml`). Cheap, useful, never merged. ⚠️ Check it against the `-p no:randomly`/VCR-cassette
   constraints before landing — parallel pytest plus cassettes is exactly where LIVE broker calls
   leak in.
+  ⭐ 2026-10-14 (Phase 164.9.8.1 PYXDIST) — what was measured:
+  - The `shared_test_db` xdist group never formed. The conftest grouping hook ran after xdist's own hook
+    had read the markers, so no nodeid received the group suffix until the hook got `tryfirst=True`
+    (gate: `analytics-service/tests/test_xdist_group_is_real.py`, seen RED without the decorator).
+  - The limiter-identity flake was `routers.*` module pollution: fixtures that evicted a module without
+    restoring it. Fixed in the polluters through `tests/limiter_stub.py` (`restoring` / `evicted`); the
+    victim test is byte-identical. Exhaustive bisect after the fix: 316 of 316 file-level and 452 of 452
+    node-level pairs GREEN (0 RED), against 17 RED nodes in one polluter file before it.
+  - The VCR concern is ruled out by reading: `tests/conftest_vcr.py` sets `record_mode="once"`, so
+    cassettes replay only and nothing re-records under parallel workers.
+  - Coverage is combined and enforced under xdist. On the same tree, serial TOTAL 93.57 percent and
+    `-n auto --dist loadgroup` TOTAL 93.57 percent (24238 statements both), a delta of 0.00 point; the
+    same parallel run with the floor raised to 99 exited 1 with `Coverage failure: total of 94 is less
+    than fail-under=99`. The floor of 80 is unchanged.
+  - The Phase-97 parallelization TODOS entry no longer exists: tracker consolidation `193afe818`
+    dropped it. The pointer in the old `ci.yml` comment was dangling, and the entry is NOT re-created.
+  - Parallel pytest reaches main through this phase, not by merging this branch, so this branch's own
+    disposition (land it or close it) is unchanged.
+  - ⛔ CORRECTED 2026-10-15: the soak and wall-time figures are NOT in the plan 04 SUMMARY. Founder decision D-14 moved both to PR #1054's CI, and the readings are in this phase's VERIFICATION ("Human items resolved"): 20 of 20 green on CI run `38776484715`, and the `python` job at 340 to 497 s against a 654.5 s threshold. Shipped as v0.132.1.6 (#1054).
 
 - [ ] **`wip/v1.16-phase140-fix-archive` — 91% divergent (4,046 of 4,441 added lines absent).**
   Highest divergence of any branch, but **no file it touches is missing from main**, so this reads

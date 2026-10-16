@@ -589,6 +589,7 @@ export type Database = {
           deltas_computed_at: string | null
           estimated_days: number | null
           estimated_delta_bps: number | null
+          former_match_decision_id: string | null
           id: string
           kind: string
           match_decision_id: string | null
@@ -610,6 +611,7 @@ export type Database = {
           deltas_computed_at?: string | null
           estimated_days?: number | null
           estimated_delta_bps?: number | null
+          former_match_decision_id?: string | null
           id?: string
           kind: string
           match_decision_id?: string | null
@@ -631,6 +633,7 @@ export type Database = {
           deltas_computed_at?: string | null
           estimated_days?: number | null
           estimated_delta_bps?: number | null
+          former_match_decision_id?: string | null
           id?: string
           kind?: string
           match_decision_id?: string | null

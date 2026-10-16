@@ -4918,14 +4918,18 @@ jobs:
           # inserted between them — or at a different indent — makes the table
           # read as GONE. Keep prose above this line.
           #   test_analytics_service_settings_and_vault_tick.sql 13
+          #   test_bridge_outcomes_decision_delete_cascade.sql    8
           #   test_compute_job_fence_errcode.sql              8
           #   test_create_wizard_strategy_for_key.sql         9
           #   test_cron_sync_tick.sql                         8
           #   test_enqueue_race_loss_40001.sql                3
+          #   test_fan_in_failure_cascade.sql                     8
+          #   test_fan_in_lock_order_race.sql                     8
           #   test_get_verified_cohort_rank_gate.sql          6
           #   test_ledger_refresh_composite_arm.sql          23
           #   test_ledger_refresh_fanout.sql                 26
           #   test_ledger_refresh_staleness.sql               8
+          #   test_okx_archive_rebuild.sql                   15
           #   test_ops_staleness_check.sql                   14
           #   test_prod_prober_cadence.sql                    7
           #   test_retention_crons_safe.sql                   4
@@ -5066,6 +5070,53 @@ jobs:
           #       release clause it pinned is deleted (its scenario is arm N6 of the new gate).
           #   So SENTINEL_FLOOR moves 17 -> 18 and ARMS_FLOOR 299 -> 308. The mutation runner's
           #   own floors moved in the same plan by one full run.
+          # Re-measured 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10), THREE files joined:
+          #   test_bridge_outcomes_decision_delete_cascade.sql declares `ALL 6 ARMS EXECUTED`,
+          #   test_fan_in_failure_cascade.sql `ALL 8 ARMS EXECUTED` and
+          #   test_fan_in_lock_order_race.sql `ALL 3 ARMS EXECUTED`, so SENTINEL_FLOOR moves
+          #   17 -> 20 and ARMS_FLOOR 299 -> 316 (+17), read off each file's own sentinel.
+          #   test_fan_in_lock_order_race.sql is LANE-ONLY (it needs dblink), so this step
+          #   DECLARES it without checking it against a run and it stays in the static
+          #   accounting; its arms execute and bite on the pg-lane under sql-mutation (mutation
+          #   runner, same date: FILES_FLOOR 72 -> 75 and ARMS_FLOOR 723 -> 740, the same +17
+          #   arms, one full run).
+          # Re-measured 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-1 fixes CR-01 and WR-01),
+          #   NO file joined, three arms did: test_fan_in_lock_order_race.sql now declares
+          #   `ALL 5 ARMS EXECUTED` (FL4, FL5; LANE-ONLY, still declared without a run) and
+          #   test_bridge_outcomes_decision_delete_cascade.sql `ALL 7` (OD7), so SENTINEL_FLOOR
+          #   stays 20 and ARMS_FLOOR moves 316 -> 319 (+3), read off each file's own sentinel.
+          #   The mutation runner moved with it (ARMS_FLOOR 740 -> 743, same +3 arms, one full run).
+          # MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both blocks above moved the
+          #   floors from the same base (17/299). The merged table carries both phases' rows,
+          #   so SENTINEL_FLOOR is 21 and ARMS_FLOOR 328, read off the local-stack run of this very
+          #   step on the merged tree (`97 of 103 SQL self-tests passed — no whole-file skips; 6 excluded (LANE-ONLY, still counted in the static accounting above); 17 of 21 completion sentinel(s) verified against THIS run, covering 328 declared arms.`)
+          #   and re-derived by ci-anti-skip-gate.contract.test.ts, never by adding the two moves.
+          # Re-measured 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-2 fixes WR-01/WR-02 and the RLS audit),
+          #   NO file joined, three arms did: test_fan_in_lock_order_race.sql now declares
+          #   `ALL 7 ARMS EXECUTED` (FL6, FL7; LANE-ONLY, still declared without a run) and
+          #   test_bridge_outcomes_decision_delete_cascade.sql `ALL 8` (OD8), so SENTINEL_FLOOR
+          #   stays 21 and ARMS_FLOOR moves 328 -> 331 (+3), read off each file's own sentinel and
+          #   re-derived by ci-anti-skip-gate.contract.test.ts, which read the sum 331 against 328 and the
+          #   delete-cascade row as 8 against 7 before this edit. The mutation runner moved with it
+          #   (ARMS_FLOOR 752 -> 755, same +3 arms, one full run).
+          # Re-measured 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-3 fix SFH M2), NO file joined, one arm did:
+          #   test_fan_in_lock_order_race.sql now declares `ALL 8 ARMS EXECUTED` (FL8, the retry bound; LANE-ONLY,
+          #   still declared without a run), so SENTINEL_FLOOR stays 21 and ARMS_FLOOR moves 331 -> 332 (+1), read off
+          #   the file's own sentinel and re-derived by ci-anti-skip-gate.contract.test.ts, which read the sum 332
+          #   against 331 and the race row as 8 against 7 before this edit. The mutation runner moved with it
+          #   (ARMS_FLOOR 755 -> 756, same +1 arm, one full run).
+          # Re-measured 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09), ONE file joined:
+          #   test_okx_archive_rebuild.sql declares `ALL 15 ARMS EXECUTED` (arms 0-14), so
+          #   SENTINEL_FLOOR moves 17 -> 18 and ARMS_FLOOR 299 -> 314. Unlike the two LANE-ONLY
+          #   files above it posts nothing and runs on the ordinary sql-tests lane; its arms also
+          #   bite on the pg-lane under sql-mutation (mutation runner, same date: FILES_FLOOR
+          #   72 -> 73 and ARMS_FLOOR 723 -> 738, the same +15 arms, one full run). The row sits
+          #   in the contiguous table above, in file-name order, and the contract test
+          #   re-derived both floors from the corpus.
+          # MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): the OKXHISTORY
+          #   block moved the floors from the same base (17/299) as the blocks above it. The merged table
+          #   carries every row, so SENTINEL_FLOOR is 22 and ARMS_FLOOR 347, read off the merged table and
+          #   re-derived by ci-anti-skip-gate.contract.test.ts on the merged tree, never by adding the moves.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_analytics_scope.sql             20
@@ -5073,8 +5124,8 @@ jobs:
           #   test_sync_status_computed_at_runner_only.sql     10
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=18  # files declaring a sentinel
-          ARMS_FLOOR=308     # 13 + 8 + 9 + 8 + 3 + 6 + 23 + 26 + 8 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 23
+          SENTINEL_FLOOR=22  # files declaring a sentinel
+          ARMS_FLOOR=347     # 13 + 8 + 8 + 9 + 8 + 3 + 8 + 8 + 6 + 23 + 26 + 8 + 15 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
@@ -5613,7 +5664,13 @@ jobs:
       # shared-test-db mutex acquired in the step below still prevents two runs
       # from contending. Keep byte-identical with Makefile `test:`.
       # (2026-09-26, Phase 164.9.4 CIOFFMUTEX: this job no longer reaches the shared TEST project or takes the shared-test-db key; pytest runs against the local-stack lane private to this runner. The text above is lineage.)
-      - run: pytest --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
+      # (2026-10-14, Phase 164.9.8.1 PYXDIST: pytest now runs in parallel, `-n auto --dist loadgroup`. The SERIAL deferral above misread the cause: the
+      # `shared_test_db` group never formed, because the conftest grouping hook ran after xdist's own hook had already read the markers, so each live DB
+      # test was its own work unit; `tryfirst=True` on that hook makes the group real, proven by `tests/test_xdist_group_is_real.py`. The limiter-identity
+      # flake was `routers.*` module pollution from fixtures that evicted without restoring, fixed in the polluters through `tests/limiter_stub.py`.
+      # The pointer "(TODOS: v1.9.1 Phase-97 parallelization deferral)" is dangling: that TODOS entry was dropped by tracker consolidation `193afe818`.
+      # Byte-identity with Makefile `test:` is now pinned in `src/__tests__/local-stack-lane-wiring.test.ts`. The text above is lineage.)
+      - run: pytest -n auto --dist loadgroup --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
         env:
           # D-05 / D-08 (Phase 164.9.4): `CI` is 'true' unconditionally now,
           # because the lane is always present. That keeps `_need_supabase()`'s

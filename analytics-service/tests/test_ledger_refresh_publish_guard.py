@@ -54,6 +54,7 @@ from services.job_worker import (
     run_compute_analytics_from_csv_job,
     run_derive_broker_dailies_job,
 )
+from tests.budget_rendezvous import expire_budget_when_reached
 from tests.test_derive_broker_dailies_dualmode import (
     _CCXT_VERDICT,
     _build_ctx,
@@ -1010,6 +1011,19 @@ class TestCR03RunnerGuard:
         )
 
 
+def _hang_announcing(reached: asyncio.Event) -> Any:
+    """A ``get_benchmark_returns`` stand-in that announces it has been entered,
+    then hangs. The fetch sits AFTER ``_mark_computing`` in
+    ``run_csv_strategy_analytics``, so "entered" implies the entry write landed.
+    """
+
+    async def _hang(*_a: object, **_kw: object) -> Any:
+        reached.set()
+        await asyncio.sleep(30)
+
+    return _hang
+
+
 class TestF3BudgetTimeoutLeavesNoParkedFactsheet:
     """F3 — the hole the ``except Exception`` arms cannot see.
 
@@ -1046,23 +1060,21 @@ class TestF3BudgetTimeoutLeavesNoParkedFactsheet:
         """Run the real handler under a real budget that expires mid-compute."""
         from services.analytics_runner import run_csv_strategy_analytics
 
-        async def _hang(*_a: object, **_kw: object) -> Any:
-            await asyncio.sleep(30)
-
+        reached = asyncio.Event()
         with patch("services.analytics_runner.get_supabase", return_value=sb), \
-             patch("services.analytics_runner.get_benchmark_returns", new=_hang):
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(
-                    run_csv_strategy_analytics(
-                        "s1",
-                        refresh_source=marker,
-                        refresh_publish_status=(
-                            "complete_with_warnings" if marker else None
-                        ),
-                        refresh_publish_warned=marker is not None,
+             patch("services.analytics_runner.get_benchmark_returns",
+                   new=_hang_announcing(reached)):
+            await expire_budget_when_reached(
+                run_csv_strategy_analytics(
+                    "s1",
+                    refresh_source=marker,
+                    refresh_publish_status=(
+                        "complete_with_warnings" if marker else None
                     ),
-                    timeout=0.1,
-                )
+                    refresh_publish_warned=marker is not None,
+                ),
+                reached,
+            )
 
     @staticmethod
     async def _cancel_unpublished(sb: MagicMock) -> None:
@@ -1070,16 +1082,14 @@ class TestF3BudgetTimeoutLeavesNoParkedFactsheet:
         not published when the refresh started."""
         from services.analytics_runner import run_csv_strategy_analytics
 
-        async def _hang(*_a: object, **_kw: object) -> Any:
-            await asyncio.sleep(30)
-
+        reached = asyncio.Event()
         with patch("services.analytics_runner.get_supabase", return_value=sb), \
-             patch("services.analytics_runner.get_benchmark_returns", new=_hang):
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(
-                    run_csv_strategy_analytics("s1", refresh_source=_MARKER),
-                    timeout=0.1,
-                )
+             patch("services.analytics_runner.get_benchmark_returns",
+                   new=_hang_announcing(reached)):
+            await expire_budget_when_reached(
+                run_csv_strategy_analytics("s1", refresh_source=_MARKER),
+                reached,
+            )
 
     @pytest.mark.asyncio
     async def test_unmarked_budget_timeout_still_leaves_the_row_computing(self) -> None:
@@ -1374,21 +1384,19 @@ class TestF3RestoreDoesNotBlockTheWorkerLoop:
 
         sb.table.return_value.upsert.side_effect = _record
 
-        async def _hang(*_a: object, **_kw: object) -> Any:
-            await asyncio.sleep(30)
-
+        reached = asyncio.Event()
         with patch("services.analytics_runner.get_supabase", return_value=sb), \
-             patch("services.analytics_runner.get_benchmark_returns", new=_hang):
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(
-                    run_csv_strategy_analytics(
-                        "s1",
-                        refresh_source=_MARKER,
-                        refresh_publish_status="complete_with_warnings",
-                        refresh_publish_warned=True,
-                    ),
-                    timeout=0.1,
-                )
+             patch("services.analytics_runner.get_benchmark_returns",
+                   new=_hang_announcing(reached)):
+            await expire_budget_when_reached(
+                run_csv_strategy_analytics(
+                    "s1",
+                    refresh_source=_MARKER,
+                    refresh_publish_status="complete_with_warnings",
+                    refresh_publish_warned=True,
+                ),
+                reached,
+            )
 
         assert sb.row is not None
         assert sb.row["computation_status"] == "complete_with_warnings", (

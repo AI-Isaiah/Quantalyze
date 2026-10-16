@@ -2349,7 +2349,34 @@ def test_csv_non_finalize_step_keeps_the_default_message(client):
     assert body["human_message"] == _DEFAULT_MISSING_SID_MESSAGE, body
 
 
-def test_process_key_audit_uses_wizard_session_id_when_no_strategy_id(client):
+def _post_and_collect_audit_rpcs(app, fake, payload):
+    """POST once and return (response, the `log_audit_event_service` RPC calls).
+
+    ⛔ The route writes the audit row FIRE-AND-FORGET (`create_task(to_thread(...))`,
+    I-perf-3), so it is only guaranteed to land when the pool thread gets to it.
+    A bare `TestClient(app)` tears its event loop down as soon as the response is
+    returned, and a write still queued on a CPU-starved pool thread is then
+    cancelled before it ever runs: the assertion that the row was written failed
+    on a slow box and passed on a fast one. The client here is a context manager,
+    which keeps the loop alive, and the wait for the write is a bounded poll.
+    """
+    import time as _time
+
+    with TestClient(app) as persistent:
+        r = persistent.post("/process-key", json=payload, headers=_auth_headers())
+        deadline = _time.monotonic() + 5.0
+        while True:
+            calls = [
+                c.args
+                for c in fake.rpc.call_args_list
+                if c.args and c.args[0] == "log_audit_event_service"
+            ]
+            if calls or _time.monotonic() >= deadline:
+                return r, calls
+            _time.sleep(0.01)
+
+
+def test_process_key_audit_uses_wizard_session_id_when_no_strategy_id(app):
     """WR-06 regression: audit_log.entity_id is NOT NULL (migration 010)
     and log_audit_event_service raises when p_entity_id is NULL
     (migration 058). Validate-only flows have no strategy_id; the route
@@ -2377,9 +2404,10 @@ def test_process_key_audit_uses_wizard_session_id_when_no_strategy_id(client):
         "routers.process_key.get_adapter",
         return_value=csv_adapter,
     ):
-        r = client.post(
-            "/process-key",
-            json={
+        r, audit_calls = _post_and_collect_audit_rpcs(
+            app,
+            fake,
+            {
                 "flow_type": "csv",
                 "source": "csv",
                 "context": {
@@ -2390,15 +2418,9 @@ def test_process_key_audit_uses_wizard_session_id_when_no_strategy_id(client):
                     "step": "validate",
                 },
             },
-            headers=_auth_headers(),
         )
 
     assert r.status_code == 200, r.text
-    audit_calls = [
-        c.args
-        for c in fake.rpc.call_args_list
-        if c.args and c.args[0] == "log_audit_event_service"
-    ]
     assert audit_calls, "log_audit_event_service RPC must fire on validate-only"
     payload = audit_calls[0][1]
     # entity_id sentinel — wizard_session_id, never None.
@@ -2406,7 +2428,7 @@ def test_process_key_audit_uses_wizard_session_id_when_no_strategy_id(client):
     assert payload["p_metadata"]["entity_id_source"] == "wizard_session_id"
 
 
-def test_process_key_writes_audit_row(client):
+def test_process_key_writes_audit_row(app):
     """H-2: a successful POST writes a row to audit_log via log_audit_event RPC.
 
     Without this, the flag-monitor cron's denominator is 0/0 forever and
@@ -2443,9 +2465,10 @@ def test_process_key_writes_audit_row(client):
         "routers.process_key.get_adapter",
         return_value=csv_adapter,
     ):
-        r = client.post(
-            "/process-key",
-            json={
+        r, audit_calls = _post_and_collect_audit_rpcs(
+            app,
+            fake,
+            {
                 "flow_type": "csv",
                 "source": "csv",
                 "context": {
@@ -2456,12 +2479,11 @@ def test_process_key_writes_audit_row(client):
                     "raw_bytes_base64": "Y29sCjE=",
                 },
             },
-            headers=_auth_headers(),
         )
 
     assert r.status_code == 200, r.text
     rpc_call_names = [c.args[0] for c in fake.rpc.call_args_list if c.args]
-    assert "log_audit_event_service" in rpc_call_names, (
+    assert audit_calls, (
         f"Expected log_audit_event_service RPC; got {rpc_call_names}"
     )
 

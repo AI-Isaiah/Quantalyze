@@ -163,6 +163,14 @@ class _FakeMt5Transport:
         # tear down (the restart-itself-bounded case).
         self._hang_s = hang_s
         self._shutdown_hang_s = shutdown_hang_s
+        # The shutdown hang is a PARK on an Event, bounded by `shutdown_hang_s` as a
+        # deadman, so a test can observe "the hung teardown had not completed when
+        # the job returned" (`shutdown_finished`) instead of timing the job.
+        self._shutdown_release = threading.Event()
+        self.shutdown_finished = threading.Event()
+        # Set when `shutdown` is ENTERED, so a test can prove the teardown was
+        # attempted at all without racing the worker thread against a tiny bound.
+        self.shutdown_started = threading.Event()
         # MT5CONC-02: when set, the SECOND (and later) account_info() call returns
         # this snapshot — a mid-read terminal re-login/hijack that the POST login
         # bracket must catch independently of the PRE bracket.
@@ -218,8 +226,15 @@ class _FakeMt5Transport:
 
     def shutdown(self):
         self.calls.append("shutdown")
+        self.shutdown_started.set()
         if self._shutdown_hang_s:
-            time.sleep(self._shutdown_hang_s)  # a teardown too wedged to complete
+            # a teardown too wedged to complete: parked until released (or the deadman)
+            self._shutdown_release.wait(self._shutdown_hang_s)
+            self.shutdown_finished.set()
+
+    def release_shutdown(self) -> None:
+        """Let a parked `shutdown` complete (test teardown, so no thread outlives it)."""
+        self._shutdown_release.set()
 
 
 def _session(
@@ -1317,7 +1332,10 @@ async def test_mt5_restart_itself_bounded(monkeypatch) -> None:
     monkeypatch.setattr(jw, "_MT5_HISTORY_WAIT_S", 0.0)
     monkeypatch.setattr(mt5_conc, "_MT5_HISTORY_TRAILING_READ_S", 0.0)
     monkeypatch.setattr(mt5_conc, "_MT5_RESTART_TIMEOUT_S", 0.05)
-    read_hang, shutdown_hang = 0.3, 1.0  # genuine hangs the bounds must cut short
+    # genuine hangs the bounds must cut short. The shutdown hang is a deadman, not a
+    # stopwatch bar: the test asserts the hung teardown had NOT completed when the
+    # job returned, and releases it in `finally`.
+    read_hang, shutdown_hang = 0.3, 5.0
     transport = _FakeMt5Transport(
         account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
         deals=_canonical_deals(),
@@ -1326,10 +1344,12 @@ async def test_mt5_restart_itself_bounded(monkeypatch) -> None:
     )
     ctx, capture = _build_ctx(transport)
 
-    start = time.monotonic()
-    with _apply(_patches(ctx)):
-        result = await run_derive_broker_dailies_job(_job())
-    elapsed = time.monotonic() - start
+    try:
+        with _apply(_patches(ctx)):
+            result = await run_derive_broker_dailies_job(_job())
+        shutdown_completed = transport.shutdown_finished.is_set()
+    finally:
+        transport.release_shutdown()
 
     assert result.outcome == DispatchOutcome.FAILED
     assert result.error_kind == "transient"
@@ -1343,13 +1363,29 @@ async def test_mt5_restart_itself_bounded(monkeypatch) -> None:
     # ~10s bound was in force — the test was green on the shutdown hang running
     # to completion, i.e. on the very failure it exists to catch.
     #
-    # Below `shutdown_hang` there is only one way to arrive: the restart's own
-    # wait_for cut the hung teardown short. Bounded ⇒ ~0.15s (0.1 read + 0.05
-    # restart); unbounded ⇒ ≥ 0.1 + shutdown_hang, which EXCEEDS this bar by
-    # construction, so the failure mode is deterministic rather than timing-lucky.
-    assert elapsed < shutdown_hang, (
+    # `shutdown_completed` False is only HALF the proof: it is equally True when
+    # `shutdown` was never called (a restart that skipped the teardown), where
+    # nothing was bounded at all. So the test first proves the teardown WAS
+    # attempted (`shutdown_started`), and only then does "returned with the hung
+    # teardown still parked" have one meaning: the restart's own wait_for cut it
+    # short. Unbounded ⇒ the job waits out the whole park (`shutdown_hang`, the
+    # deadman) and the teardown has COMPLETED by the time it returns, so the
+    # failure mode is deterministic rather than timing-lucky.
+    # ⛔ This is a record of what had happened, not a stopwatch: the earlier form
+    # asserted `elapsed < 1.0 s`, which a starved runner could miss on scheduling
+    # alone while the restart bound was working.
+    # The teardown runs on a worker thread that a 0.05 s bound can outrun on a
+    # starved runner, so wait for it to have STARTED (a deadman, not a bar: it
+    # returns the moment `shutdown` is entered, and is only ever exhausted when
+    # `shutdown` is never called).
+    assert await asyncio.to_thread(transport.shutdown_started.wait, 10.0), (
+        "the restart never called shutdown on the terminal, so there was no hung "
+        "teardown for the bound to cut short"
+    )
+    assert "shutdown" in transport.calls
+    assert not shutdown_completed, (
         f"the bounded restart must return before the hung shutdown "
-        f"({shutdown_hang}s) could even have completed; elapsed={elapsed:.3f}s"
+        f"({shutdown_hang}s park) could even have completed"
     )
 
 
@@ -1369,14 +1405,18 @@ class _OrderedMt5Transport(_FakeMt5Transport):
     read until job B logs in; under the lock B cannot log in while A holds it, so A
     times out and its block stays contiguous."""
 
-    def __init__(self, tag, *, order, b_login_done, **kw):  # noqa: ANN001
+    def __init__(self, tag, *, order, b_login_done, a_login_done, park_s, **kw):  # noqa: ANN001
         super().__init__(**kw)
         self._tag = tag
         self._order = order
         self._b_login_done = b_login_done
+        self._a_login_done = a_login_done
+        self._park_s = park_s
 
     def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
         self._order.append((self._tag, "enter"))
+        if self._tag == "A":
+            self._a_login_done.set()
         if self._tag == "B":
             self._b_login_done.set()
         return super().login(login, password, server, timeout)
@@ -1386,8 +1426,13 @@ class _OrderedMt5Transport(_FakeMt5Transport):
             # Bounded park: under the lock, B is blocked on the SAME terminal lock
             # and can never set this, so A times out and its block stays contiguous.
             # Without the lock, B logs in during this park and the interleave is
-            # recorded. 0.25s bound → a broken lock reds, never hangs CI.
-            self._b_login_done.wait(0.25)
+            # recorded. The bound is the mode's `park_s`: SHORT for the locked run
+            # (a negative: waiting longer can only make it slower, and a slow B just
+            # weakens it), LONG for the neutered run (a positive control that needs B
+            # to arrive, which on a starved box can take far longer than 250 ms; the
+            # wait is event-driven, so it costs nothing when B arrives). A broken lock
+            # reds at the bound, it never hangs CI.
+            self._b_login_done.wait(self._park_s)
         out = super().history_deals_get(from_ts, to_ts)
         self._order.append((self._tag, "exit"))
         return out
@@ -1396,12 +1441,16 @@ class _OrderedMt5Transport(_FakeMt5Transport):
 async def _run_two_concurrent_mt5(neuter_lock: bool) -> list:
     order: list = []
     b_login_done = threading.Event()
+    a_login_done = threading.Event()
+    park_s = 5.0 if neuter_lock else 0.25
 
     def _mk(tag: str):
         t = _OrderedMt5Transport(
             tag,
             order=order,
             b_login_done=b_login_done,
+            a_login_done=a_login_done,
+            park_s=park_s,
             account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
             deals=_canonical_deals(),
         )
@@ -1492,9 +1541,16 @@ async def _run_two_concurrent_mt5(neuter_lock: bool) -> list:
         )
 
     async def _run_b():
-        # A tiny head start for A so the ordering under test is deterministic (A
-        # acquires the terminal lock first); bounded and independent of the lock.
-        await asyncio.sleep(0.05)
+        # A head start for A so the ordering under test is deterministic (A
+        # acquires the terminal lock first). ⛔ RENDEZVOUS, NOT A STOPWATCH: this was
+        # `sleep(0.05)`, which assumed A reaches its login (past preflight, the lease
+        # and a thread hop) inside 50 ms. If B won that race the neutered control had
+        # nothing to interleave with and failed. B now starts once A's login has
+        # actually begun (bounded, so a job A that never logs in reds, not hangs).
+        deadline = time.monotonic() + 10.0
+        while not a_login_done.is_set():
+            assert time.monotonic() < deadline, "job A never reached its login"
+            await asyncio.sleep(0.005)
         return await run_derive_broker_dailies_job(
             {"id": "j-b", "kind": "derive_broker_dailies", "strategy_id": "strat-b"}
         )

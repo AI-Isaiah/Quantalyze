@@ -392,6 +392,13 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
+  // ⭐ 2026-10-15: the Phase 164.9.3.1 FANINGRAPH row (`_fan_in_lock_rows`,
+  // `snapshot-only`, captured 2026-10-15) was DELETED on the re-dump taken
+  // after 20261024120000 applied to PROD (#1061), its own clearing condition.
+  // ⭐ 2026-10-15: the Phase 167.1.2.2.2.1 OKXHISTORY row (`apply_okx_archive_
+  // rebuild`, `snapshot-only`, captured 2026-10-15) was DELETED on the re-dump
+  // taken after 20261026120000 applied to PROD (#1067), its own clearing
+  // condition.
   // ⭐ 2026-10-14: the Phase 164.6.8 OUTAGEALERT row (`ops_staleness_check`,
   // `snapshot-only`, captured 2026-10-13) was DELETED on the re-dump taken
   // after 20261020120000 applied to PROD, its own clearing condition.

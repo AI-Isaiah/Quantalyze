@@ -79,7 +79,7 @@ from services.ingestion.mt5 import Mt5Adapter
 # emittable family is what makes a newly-added cause arm fence-checked
 # automatically instead of only when somebody remembers to add a case.
 from services.mt5_probe import MT5_GATEWAY_MISCONFIGURED_DETAILS
-from tests.limiter_stub import evict_module, patch_shared_limiter
+from tests.limiter_stub import build_shared_limiter_from_real_slowapi, evicted, patch_shared_limiter
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +116,8 @@ def exchange_module(monkeypatch):
     slowapi_stub.Limiter = _NoopLimiter
     slowapi_util_stub = MagicMock()
     slowapi_util_stub.get_remote_address = lambda *a, **k: "1.2.3.4"
+    # Build the shared limiter from the REAL slowapi before it is stubbed.
+    build_shared_limiter_from_real_slowapi()
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
 
@@ -126,11 +128,10 @@ def exchange_module(monkeypatch):
     # before the router is re-imported below. See tests/limiter_stub.py.
     patch_shared_limiter(monkeypatch)
 
-    evict_module("routers.exchange")
-    from routers import exchange
+    with evicted("routers.exchange"):
+        from routers import exchange
 
-    yield exchange
-    evict_module("routers.exchange")
+        yield exchange
 
 
 def _adapter_req(*, api_key, api_secret, passphrase):

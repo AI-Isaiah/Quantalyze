@@ -1251,7 +1251,38 @@
 // annotated 10 / waived 0 / biting 10` and `test_sync_status_analytics_scope.sql: sections 20 / judged 20 / annotated 20 / waived 0 /
 // biting 20` (arm D15 retired with the release clause it pinned; its scenario is arm N6 of the new gate). The stale-low direction was
 // observed first: `RATCHET STALE: 73 of 100 gate files are now annotated but FILES_FLOOR is still 72.` WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 73;
+// RAISED 72 -> 75 2026-10-15 (Phase 164.9.3.1 FANINGRAPH plan 10): this phase adds THREE annotated gate files,
+// test_fan_in_failure_cascade.sql (gate A), test_fan_in_lock_order_race.sql (gate B, LANE-ONLY: dblink) and
+// test_bridge_outcomes_decision_delete_cascade.sql (gate C), so 75 of 102 files. MEASURED by ONE full
+// `node scripts/mutation-runner/run.mjs` on the COMMITTED, clean phase tree, no file edited during it, exit 0: `scope: FULL 75/75
+// annotated files`, `lane-concurrency: 4`, `coverage: files 75/102`, `pending: 0`, `arms: 740/740/0`, `biting: 740`,
+// `lane-invocations: 740 ... plus 75 baseline / 75 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`,
+// `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean 2.8s over 740 arm run(s)`, `No defects. Every annotated
+// arm bit its own arm first.` Per-file lines: `test_fan_in_failure_cascade.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8`,
+// `test_fan_in_lock_order_race.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3`,
+// `test_bridge_outcomes_decision_delete_cascade.sql: sections 6 / judged 6 / annotated 6 / waived 0 / biting 6`. An EARLIER full run on the
+// same tree read the same coverage and arms but one defect, `wrong-first-failure` on test_wizard_composite_fence.sql Part 3a-2b (a file
+// this phase never touched), measured at load average ~25 on a 10-core host; three narrowed runs of that file afterwards were clean and the
+// second full run was clean: a load transient, recorded rather than hidden. The stale-low direction was observed first: `RATCHET STALE: 75
+// of 102 gate files are now annotated but FILES_FLOOR is still 72.` WAIVED_CEILING stays 0.
+// MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases raised FILES_FLOOR from the same base, 72 -> 73
+// (166.5) and 72 -> 75 (FANINGRAPH). MEASURED by ONE full `node scripts/mutation-runner/run.mjs` on the merged tree, exit 0:
+// `scope: FULL 76/76 annotated files`, `lane-concurrency: 4`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean 3.0s over 752 arm run(s)`, `No defects. Every annotated arm bit its own arm first.` So 76 of 103 files: the three FANINGRAPH gates and 166.5's runner-only gate together. The stale-low direction was observed first: `RATCHET STALE: 76 of 103 gate files are now annotated but FILES_FLOOR is still 75.` WAIVED_CEILING stays 0.
+// RAISED 72 -> 73 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY plan 09): +1 file, test_okx_archive_rebuild.sql (migration
+// 20261026120000), so 73 of 100 files. MEASURED by ONE full `node scripts/mutation-runner/run.mjs`, no file edited during it, exit 0:
+// `lane-concurrency: 4`, `coverage: files 73/100`, `arms: 738/738/0`, `biting: 738`, `lane-invocations: 738 ... plus 73 baseline / 73
+// restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane
+// time: mean 2.5s over 738 arm run(s)`, `No defects. Every annotated arm bit its own arm first.` Per-file line: `test_okx_archive_rebuild.sql:
+// sections 15 / judged 15 / annotated 15 / waived 0 / biting 15`. WAIVED_CEILING stays 0.
+// MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): OKXHISTORY raised FILES_FLOOR 72 -> 73
+// and main 72 -> 76 from the same base; the floor is 77 by measurement, not by adding the two moves. MEASURED by ONE full `node scripts/mutation-runner/run.mjs` on the merged
+// tree: `scope: FULL 77/77 annotated files`, `lane-concurrency: 4`, `coverage: files 77/104`, `arms: 771/771/0`, `biting: 771`,
+// `lane-invocations: 771 ... plus 77 baseline / 77 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe:
+// pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean 1.9s over 771 arm run(s)`; per-file `test_okx_archive_rebuild.sql:
+// sections 15 / judged 15 / annotated 15 / waived 0 / biting 15`. The stale-low direction was observed first (`RATCHET STALE: 77 of 104
+// gate files are now annotated but FILES_FLOOR is still 76`; `The corpus declares 771 twin(s) ... ARMS_FLOOR is 756`). A confirming
+// clean run of the committed merge is recorded in the merge commit. WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 77;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3171,7 +3202,40 @@ export const FILES_FLOOR = 73;
 // MEASURED by the same single run recorded under FILES_FLOOR, not by this addition:
 // `arms: 732/732/0`, `biting: 732`, `lane-invocations: 732`. The stale-low direction was observed first: `The corpus declares 732
 // twin(s) of which 0 are waivers, so a green run bites 732. ARMS_FLOOR is 723.` WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 732;
+// RAISED 723 -> 740 2026-10-15 (Phase 164.9.3.1 FANINGRAPH plan 10): +17 biting arms, gate A's 8 (`test_fan_in_failure_cascade.sql`),
+// gate B's 3 (`test_fan_in_lock_order_race.sql`) and gate C's 6 (`test_bridge_outcomes_decision_delete_cascade.sql`). MEASURED by the same
+// single run recorded under FILES_FLOOR: `arms: 740/740/0`, `biting: 740`, `lane-invocations: 740`. The stale-low direction was observed
+// first: `The corpus declares 740 twin(s) of which 0 are waivers, so a green run bites 740. ARMS_FLOOR is 723.` WAIVED_CEILING stays 0 -
+// no waiver was added.
+// RAISED 740 -> 743 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-1 fixes CR-01 and WR-01): +3 biting arms, FL4 and FL5 in
+// `test_fan_in_lock_order_race.sql` (3 -> 5 arms) and OD7 in `test_bridge_outcomes_decision_delete_cascade.sql` (6 -> 7). The stale-low
+// direction was observed first: `The corpus declares 743 twin(s) of which 0 are waivers, so a green run bites 743. ARMS_FLOOR is 740.`
+// FILES_FLOOR stays 75 (no file joined). WAIVED_CEILING stays 0 - no waiver was added. The full-run reading is recorded in
+// `docs/sql-gate-lineage.md` (entry of the same date).
+// MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases raised ARMS_FLOOR from the same base, 723 -> 732
+// (166.5) and 723 -> 743 (FANINGRAPH). MEASURED by the same single run recorded under FILES_FLOOR, not by adding the two moves:
+// `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752`. Per-file: `test_fan_in_failure_cascade.sql ... biting 8`, `test_fan_in_lock_order_race.sql ... biting 5`, `test_bridge_outcomes_decision_delete_cascade.sql ... biting 7`, `test_sync_status_computed_at_runner_only.sql ... biting 10`, `test_sync_status_analytics_scope.sql ... biting 20`. The stale-low direction was observed first: `The corpus declares 752 twin(s) of which 0 are waivers, so a green run bites 752. ARMS_FLOOR is 743.` WAIVED_CEILING stays 0 - no waiver was added.
+// RAISED 752 -> 755 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-2 fixes WR-01/WR-02 and the RLS audit): +3 biting arms, FL6 and FL7 in
+// `test_fan_in_lock_order_race.sql` (5 -> 7 arms) and OD8 in `test_bridge_outcomes_decision_delete_cascade.sql` (7 -> 8). MEASURED by ONE full
+// run of the committed tree: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 755/755/0`, `biting: 755`,
+// `lane-invocations: 755 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0; per-file
+// `test_fan_in_lock_order_race.sql ... biting 7`, `test_bridge_outcomes_decision_delete_cascade.sql ... biting 8`,
+// `test_fan_in_failure_cascade.sql ... biting 8` (unchanged count; FC5 lost its masking second edit). The stale-low direction was observed first:
+// `The corpus declares 755 twin(s) of which 0 are waivers, so a green run bites 755. ARMS_FLOOR is 752.` FILES_FLOOR stays 76 (no file joined).
+// WAIVED_CEILING stays 0 - no waiver was added.
+// RAISED 755 -> 756 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-3 fix SFH M2): +1 biting arm, FL8 in `test_fan_in_lock_order_race.sql`
+// (7 -> 8 arms; it drives the cascade's retry bound to its 55P03 refusal). MEASURED by ONE full run of the committed tree:
+// `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 756/756/0`, `biting: 756`, `lane-invocations: 756 ... plus 76 baseline / 76 restore
+// leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `per-arm lane time: mean 2.1s over 756 arm run(s)`, `No defects`, exit 0; per-file
+// `test_fan_in_lock_order_race.sql ... biting 8`. The stale-low direction was observed first: `The corpus declares 756 twin(s) of which 0 are waivers, so a
+// green run bites 756. ARMS_FLOOR is 755.` FILES_FLOOR stays 76 (no file joined). WAIVED_CEILING stays 0 - no waiver was added.
+// RAISED 723 -> 738 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY plan 09): +15 biting arms, the okx_archive_rebuild gate's arms 0-14
+// (`test_okx_archive_rebuild.sql: sections 15 / judged 15 / annotated 15 / waived 0 / biting 15`). MEASURED by the same single run recorded
+// under FILES_FLOOR: `arms: 738/738/0`, `biting: 738`, `lane-invocations: 738`. WAIVED_CEILING stays 0 - no waiver was added.
+// MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): OKXHISTORY raised ARMS_FLOOR 723 -> 738
+// and main 723 -> 756 from the same base; 771 is read off the same single run recorded under FILES_FLOOR (`arms: 771/771/0`,
+// `biting: 771`, `lane-invocations: 771`), not by adding the moves. WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 771;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

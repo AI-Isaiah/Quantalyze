@@ -1,5 +1,319 @@
 # Changelog
 
+## [0.132.2.1] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of f5dc21b3
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38817173974`, after the PROD apply of merge `f5dc21b3`: sha256 `19cedd5e…` → `8d428d8a…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 131 → 132, distinct function names 129 → 130, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261026120000_okx_archive_rebuild.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-15` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.132.2.0 → 0.132.2.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=305 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 132 — MATCH 129, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+- The `apply_okx_archive_rebuild` `snapshot-only` row in `NAME_SET_RATCHET` (`scripts/dump-sql-functions.ts`) is DELETED on this re-dump, its own clearing condition. With the row gone, `tsx scripts/dump-sql-functions.ts --check` reads `baseline 130 name(s) vs migration-replay 130 name(s) — agree, with 0 ratcheted disagreement(s) carried`, and `baseline-content-drift` reads `findings 0`. Deleting it in the same PR keeps the snapshot ratchet from turning `main` red, which happened after the previous re-dump (#1061, fixed by #1064).
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38817173974` succeeded, and this entry was composed by the `redump-pr` job. Run `38817173974` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.132.2.0] - 2026-10-15 — OKXHISTORY: an OKX strategy's days older than the 3-month bills window can be rebuilt from OKX's quarterly bills archive (PR-A, code only)
+
+Phase 167.1.2.2.2.1, PR-A (plans 01-10 and 16). The branch has 74 non-merge commits since `origin/main` plus 17 merge commits (per-plan worktree merges and three merges of `origin/main`). 51 of the 73 touch paths outside `.planning`, and this entry maps every one of them. The other 23 are planning and records commits: CONTEXT with founder decisions D-01..D-13, research, the pattern map, 16 plans, SUMMARYs, three review rounds, verification and the security audit. Those are not shipped here. **Nothing is rebuilt on PROD by this release.** The allow-list for the archive download host ships empty on purpose, so every real download is refused until PR-B (plan 13) adds the host measured by the founder's preflight (plan 12). Calibrate (plan 14) and the PROD apply (plan 15) are founder steps that come after it.
+
+### Added
+- **Migration `20261026120000_okx_archive_rebuild.sql`.**
+  - It registers the compute_jobs kind `okx_archive_rebuild`. The kind is api_key-scoped only, and both kind CHECKs are re-based byte-identical to their prior definitions plus one new arm.
+  - It adds the atomic RPC `public.apply_okx_archive_rebuild(uuid, jsonb, jsonb, jsonb)`: SECURITY INVOKER, `service_role` only, with a pinned search_path.
+  - The RPC is a compare-and-set on the strategy's stored gaps. It refuses a row outside every gap (`row_outside_gap`), a changed gap list (`gaps_changed`) and a recomputed gap list that disagrees (`gaps_after_mismatch`).
+  - It inserts with `ON CONFLICT DO NOTHING`, so a live-derived day always wins (D-12).
+  - In the same call it records `series_provenance.reconstructed_ranges` with source `okx_bills_history_archive` (D-05).
+  - The migration carries an in-migration `$verify$` block, and a manual rollback lives in `supabase/migrations/down/`.
+- **Archive parse, classify and reconcile** (`okx_archive_files.py`, `okx_archive_classify.py`, `okx_archive_reconcile.py`).
+  - Parsing: the 28-column header is pinned. The file must fall inside its quarter. Duplicate, missing and unparseable bills stop the job.
+  - Classification: a committed subType table covers realized, funding, flow and non-external bills. Transfers are external flows (D-08). An unknown subtype with a nonzero effect fails loud, and so does a non-USD currency.
+  - Completeness: one balance chain runs across adjacent quarters, with a pairs floor.
+  - Reconciliation: archive versus live-derived on the overlap days, at `TOLERANCE_USD = Decimal("0.01")` per day and over the window total. The tolerance is a fixed module constant (D-09/D-10).
+- **Safe archive downloader** (`okx_archive_download.py`).
+  - Request: https only, an exact-host allow-list held in a code constant, no userinfo, port or fragment.
+  - Address checks: every DNS answer is vetted (private and non-global addresses are refused), and the connection dials the vetted IP with SNI.
+  - Transport: no proxy, cookies or redirects.
+  - Size: 64 MiB compressed, 512 MiB decompressed and a 100:1 ratio, checked per chunk. Inflation happens in memory only, from a zip with exactly one member or a single gzip member.
+  - Logs: only the link's scheme and host are logged.
+- **Rebuild core** (`okx_archive_rebuild.py`).
+  - Archive days go through the live P&L core, with the identity asserted on every run.
+  - A row is emitted only for a covered day inside a stored gap, before the first full live day.
+  - A day in an uningested quarter stays missing and named (SC-4).
+- **The durable job**, wired in `job_worker.py` and `main_worker.py`.
+  - Modes: preflight, calibrate and apply.
+  - Before any archive call it refuses: a disconnected, revoked, non-OKX or inactive key; a uid mismatch; a key without the read-only permission; and subtype drift (D-02).
+  - It writes a v1 result shape, with readings that are information only.
+  - Calibrate fingerprints what it evaluated, and apply writes only a fingerprint the founder approved. Every stop is raised before the first RPC, so a miss writes nothing (D-10). Apply resumes per target.
+- **Stateless wait on the OKX archive** (plan 16).
+  - Each claim re-applies and re-reads status, and waits through `defer_compute_job` for at most 3600 s. It gives up 8 h after OKX's own `ts`, and a 24 h backstop counts from the job's `created_at`.
+  - A 403 or 410 gets one fresh status read and one retry, then ends as the transient `link_expired`.
+  - A lost link never yields a partial result (SC-1).
+- **Factsheet and tear sheet line (D-06).**
+  - `parseReconstructedRanges`/`readReconstructedRanges` put `reconstructedRanges` on the payload.
+  - Each range prints "{from} – {to}: rebuilt from OKX's quarterly account statement, not the live feed." on both surfaces.
+  - A malformed record goes to Sentry, and the page says the record is unavailable.
+  - Rebuilt days count in Sharpe, CAGR and drawdown (D-07).
+- **Operator runbook `docs/runbooks/okxhistory-go-live.md`.**
+  - It has guarded SQL forms for enqueue, readback, before/after, survival and rollback.
+  - The marker is read from the cron manifest, and every write form refuses on a NULL or mismatched marker.
+  - The DRY render strips every write.
+  - Strategies are named by ordinal only.
+
+### Changed
+- The factsheet payload cache key is bumped `factsheet-v2-payload-v18` to `v19` for the new `reconstructedRanges` field.
+
+### Fixed (review rounds 1-3, before this release)
+- The archive realized leg is pnl + fee of every bill the live aggregator sums (WR-01).
+- The archive owns every day before the first FULL live day, and the archive and live flow sources never overlap (CR-01, F4).
+- A quarter file must prove it is whole before a day with no bills counts as a quiet 0.0 (F1). One gated balance chain now spans adjacent quarters, with a pairs floor and a positive proof in the result.
+- Agreement over a short or quiet overlap window no longer authenticates the archive (F3).
+- A failed or capped live crawl is a stop or a deferral, never an empty series (F2/WR-03).
+- A target with nothing to apply is a named stop, not an `already_applied` success (F6/WR-05).
+- Every wait ends at 24 h from the job's own `created_at` (F7/WR-04). One claim fits its handler timeout, and an overlong claim ends in the named transient `claim_budget_exceeded` (WR-06).
+- The flow readings are measured around the real flow seam.
+- A malformed `reconstructed_ranges` reaches Sentry and the page says so (F5/IN-01).
+- The runbook's after and rollback forms refuse when an ordinal no longer names the described strategy (F8). The runbook reads the shipped result keys and names every transient class, the give-up stop and the readings Step 3 reads.
+- The module docstrings now say what they cover: the job's names the 24 h backstop and the claim budget, and `okx_archive_files`'s names what `archive_incomplete` covers.
+
+### Tests
+- New suites:
+  - Python: `test_okx_archive_{download,parse,reconcile,rebuild,apply,job,derive_survival}.py`.
+  - SQL: the fifteen-arm gate `supabase/tests/test_okx_archive_rebuild.sql`, all 15 arms annotated and biting under the mutation runner.
+  - TS: the provenance reader, both D-06 surfaces and a SQL/TS literal pin of the source string.
+- Census moves, re-measured on the tree merged with `origin/main` and never added by hand:
+  - sql-tests `SENTINEL_FLOOR` 22 and `ARMS_FLOOR` 347.
+  - Mutation `FILES_FLOOR` 77 and `ARMS_FLOOR` 771, from one full runner run: `coverage: files 77/104`, `arms: 771/771/0`, `No defects`.
+  - Baseline `COMPARED_FLOOR` 132; `lint-sql-gates` scans 104 files; the annotation-parser pins read 771 arms and 887 needles.
+  - The restore refdata allowlist gains the `compute_job_kinds` row, and the restore script's INSERT-entry pin follows `ENTRY_COUNT` 22 -> 23. The D-05 scoped-update pin counts the gate's one scoped UPDATE.
+- Pins over existing code: the live derive's reach (its delete is bounded to its own span, so rebuilt rows survive it) and the analytics runner's inclusion of rebuilt rows. Covered-quiet zeros and an uncovered quarter are pinned too.
+- The no-link-in-logs capture is pinned to the emitting loggers. It had been order-dependent, and it was seen RED, then GREEN.
+- The q3 fixture now chains from q2's last balance.
+- A comment in `okx_archive_job.py` is reworded so that gitleaks' `generic-api-key` rule does not read the identifier `stamp_api_key_429` as a secret. A scan of this branch's range with `--log-opts` found it, and the push-to-main scan would have found it too. The identifier itself is unchanged.
+- Full python suite on the merged tree: 10669 passed, 93.73% coverage.
+
+- **The userinfo refusal fixture in `test_okx_archive_download.py` is no longer a URL literal.** The push-time credential scanner read the synthetic `user:pw` fixture as a basic-auth leak and refused the push. The row now builds the same URL from `FAKE_USERINFO`, and the file passes 108/108. (`f91580d66`)
+
+### Security
+- 33 of 33 threats in plans 01-10 and 16 are closed (24 mitigated, 9 accepted). The SSRF, bomb, link-leak, grant and wrong-database threats are mitigated as listed under Added.
+
+### Notes
+- **Known limits, recorded rather than fixed here:**
+  - The download allow-list is empty until PR-B.
+  - `baseline-content-drift` reports one expected `SNAPSHOT_MISSING apply_okx_archive_rebuild/4` until plan 11's post-apply re-dump deletes its ratchet row.
+  - The review-round-3 survivors (TODOS `[167.1.2.2.2.1-REVIEW-R3-SURVIVORS]`, WR-01..WR-04) are owned by plan 13 Task 2b and must land before the founder reads plan 14's calibrate. WR-01 is the `MIN_CHAINED_PAIRS` floor, which also counts currencies the rebuild never sums.
+  - The two pre-existing `compute.conventions.test.ts` snapshot failures (fixtures B and C) are not from this phase.
+- **Founder decision D-13 ("Decide after calibrate"):** `info.realized_balance_vs_rolled_nav.diff` and `info.flow_seam.diff` stay readings, not gates. The founder sets any limit at plan 15's checkpoint.
+- Booked in TODOS: `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`. Live `fetch_daily_pnl` sums every bill currency at face value. Calibrate's `census.by_ccy` is the measurement, and a non-USD row is a founder stop. Also booked: the Wave 5 recompute hand-off.
+## [0.132.1.9] - 2026-10-15 — Test fix: the changed-path classifier's throwaway git repositories start no background maintenance, so their cleanup cannot race it
+
+### Root cause
+- `scripts/classify-changed-paths.mjs` self-test builds throwaway git repositories and removes them after each row. Every `git commit` spawns `git maintenance run --auto`, and since git 2.47 (`maintenance.autoDetach`, on by default) that child runs in the background. On the runner's git 2.55 it could still be writing into `.git` when the row's `rmSync` ran, which failed with `ENOTEMPTY`. Seen twice: once on 2026-10-14, and on PR #1060's Contracts run `38809136016`, where the mutated-classifier calibration crashed in cleanup before printing its banner.
+
+### Fixed
+- Both scratch-repo helpers now pass `-c maintenance.auto=false` (`SCRATCH_GIT_CONFIG`), so no maintenance child starts. The cause is removed rather than retried: the `rmSync` has no retry.
+
+### Tests
+- A new self-test row checks with `GIT_TRACE2_EVENT` that a scratch commit starts no `git maintenance` child. Its calibration arm shows an unpinned commit does start one. Neutering the flag turned the row RED; restored from a byte backup (`cmp` clean). The self-test now has 25 rows and passes, and `ci-docs-path-filter.contract.test.ts` passes 67/67.
+- TODOS `CI-CLASSIFY-SCRATCHREPO-ENOTEMPTY` is closed with the measurement.
+
+## [0.132.1.8] - 2026-10-15 — RECORDS: close PYXDIST 164.9.8.1 (soak 20/20 and wall time read from CI)
+
+Records only; no code changes. One commit on this branch.
+
+### Changed
+- **Phase 164.9.8.1 PYXDIST is closed.** Its planning artifacts (CONTEXT, RESEARCH, PATTERNS, VALIDATION, four PLANs and SUMMARYs, REVIEW rounds, REVIEW-FIX, SECURITY, VERIFICATION) land on `main`. The verification moves from human_needed to passed. Founder decision D-14 had moved its two human items to PR #1054's CI, and both are now read there:
+  - SC-3 soak: 20 of 20 consecutive green `python` job attempts on head `b14fc436`, CI run `38776484715`.
+  - SC-4 wall time: MET. The job ran 340 to 497 s and the pytest step 175 to 305 s, against a 654.5 s threshold (55% of the 1190 s median before).
+  - The heads after the soak each got one full CI run, not a new soak; the final head passed all 26 jobs of run `38806555287`.
+- ROADMAP and STATE record the close (v0.132.1.6, #1054). STATE's current position stays on 166.5 COMPUTEDATSTAMP, because several phases run in parallel.
+
+### Fixed
+- **TODOS pointed at the wrong place for the soak figures.** The PYXDIST note said they were in the plan 04 SUMMARY; after D-14 they are in the phase VERIFICATION. Corrected in place with a dated note.
+- **Five local home-path literals in the phase artifacts** (a grep pattern in the four PLANs and one phrase in SECURITY) are reworded, so the public-repo hygiene check passes.
+
+## [0.132.1.7] - 2026-10-15 — Test fix: five test files wait for async results to commit instead of reading them synchronously after an awaited step
+
+Main run 38785325178 (job 116595956122, merge `e34605be`) failed one `ContactForm` arm. It is the third instance today of the race v0.131.13.4 and v0.131.13.6 fixed in `ShareableLink.test.tsx`. This release fixes that arm, then sweeps the suite for the rest of the class. Two commits: the test fix, and this release commit.
+
+### Root cause
+- **The class: a wait that is satisfied before the async result it guards has committed, followed by a synchronous read or click.** The result is set after `await fetch` or another promise, so React does not render it in a sync lane. After every `findBy*` or `waitFor`, Testing Library drains one `setTimeout(0)`, and that drain usually covers React's pending Scheduler task. When the Scheduler yields first, for example on a slow render on a loaded CI runner, the next synchronous line reads the DOM from before the result.
+- **`ContactForm` (the CI failure).** The success heading is focused from a passive `useEffect([sent])`, and `setSent` runs after `await fetch`. `findByRole` resolves as soon as the heading is inserted, so the synchronous `toHaveFocus()` read `<body>`.
+- **This is not a product bug.** In a browser, React runs pending passive effects before it handles the next user event, so the heading has focus before anyone can act on the page. The same holds for every other arm below. In `AllocatorExchangeManager` the switch is disabled while the history loads, and that is intended.
+
+### Fixed
+- `src/components/contact/ContactForm.test.tsx`: the test now waits with `waitFor` until the success heading has focus.
+- `src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.test.tsx`: "submitting → failure transition moves focus to the error banner" now waits for the banner to have focus. It used to wait for the banner to exist and then read `activeElement` synchronously, but the focus is moved from a passive effect that runs after the banner appears.
+- `src/components/exchanges/AllocatorExchangeManager.departed-history.test.tsx`: a new `settledSwitch` helper waits for the history switch to be **enabled** and in the expected `aria-checked` state. Before, the tests waited for `aria-checked="false"` alone. That is already true while the days load and the switch is disabled, so a click could hit a disabled switch and make no RPC, or a read could run before the RPC result. Six waits use the helper now.
+- `src/app/factsheet/[id]/v2/FactsheetView.share-affordance.test.tsx`: the 200 and 404 revoke arms now wait until both the confirm sentence and "Revoke link" are gone. The inline confirm hides "Revoke link" by itself, so the old wait passed before the revoke request had answered.
+- `src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx`: the D-67 BTC toggle arm now waits for the toggle's state. `setBtc` ran during the earlier `waitFor`, which is outside `act`, so the `act` drain after it did not flush the update.
+
+### Tests
+- **Forced-yield harness.** A scratch setup file advances `performance.now` by 50 ms on every read, so React's Scheduler yields after every task. It is not committed. Each file ran 20 times before and after its fix:
+
+  | File | Red runs before | Red runs after |
+  |---|---|---|
+  | `ContactForm` | 13 of 20 | 0 of 20 |
+  | `ScenarioCommitDrawer` | 11 of 20 | 0 of 20 |
+  | `departed-history` | 20 of 20 (86 test failures) | 0 of 20 |
+  | `share-affordance` | 20 of 20 (36 test failures) | 0 of 20 |
+  | `ScenarioComposer` D-67 arm | 15 of 20 | 0 of 20 |
+
+  Without the harness, `ContactForm` was red in 0 of 20 runs locally, which matches the failure showing up only on CI.
+- **Sweep.** The whole jsdom suite ran 3 times under the harness. Runs 1 and 2, before the fixes, failed the same five files and nothing else in this class. Run 3, after the fixes, passed 17,225 tests. Its only failures were the 2 in `src/lib/factsheet/compute.conventions.test.ts`, and those also fail locally without the harness: the last digit of a `skew` float differs on macOS. They are unrelated and not touched here.
+- **Static audit.** About 100 `toHaveFocus()`, `document.activeElement` and `.open` reads across `src/**/*.test.tsx` were classified. All of them come after a synchronous action wrapped in `act` (render, `fireEvent`, user-event, or `act` around `advanceTimersByTimeAsync`), or are already inside `waitFor`. Every `<Modal open>` consumer was also checked. The only one that opens after an `await` is `ShareableLink`, which v0.131.13.4 and v0.131.13.6 already fixed. Those safe tests were left unchanged.
+- **The fixed waits can still fail.** Each one was seen RED with the product behaviour removed, then the source was restored from a byte backup and checked with `cmp`:
+  - removing the heading focus, the banner focus, or the `onShareLiveChange(false)` call on revoke;
+  - forcing the history switch disabled;
+  - making `setBtc` always store `null`.
+- **Unforced, after the fixes:** the five files together passed 548 of 548 tests in each of 3 runs.
+## [0.132.1.6] - 2026-10-15 — PYXDIST: the python CI job runs pytest in parallel, and the flakes that serial order hid are fixed at their root
+
+Phase 164.9.8.1. Since `origin/main` the branch carries 78 non-merge commits: 54 that touch paths outside `.planning` (this release commit among them) and 24 planning and records commits, and this entry maps them all. It also carries 11 merge commits: the per-plan and fixer worktrees merging back, and three merges of `origin/main` before the release. Grouped by theme below, each bullet ends with the hashes it covers. The version is a fourth-digit bump. It was re-picked from a freshly fetched `origin/main` at 0.132.1.5, after #1064 landed, and the open PR #1060 re-picks above it. This is a CI and test change; no production code changes.
+
+### Changed
+- **The `python` CI job and the Makefile `test:` target run `pytest -n auto --dist loadgroup --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80`.** Both carry the identical argument string. The coverage floor is still enforced on the combined result of all workers. Measured offline on the same tree, coverage was 93.57% serial and 93.57% parallel. A run with the floor raised to 99 under xdist exited 1. The SERIAL deferral comments in both files stay as lineage beside a dated PYXDIST note. That note also records that the comment's pointer to the "TODOS: v1.9.1 Phase-97 parallelization deferral" is dangling, because that entry was dropped in `193afe818`. (`c16a41633`)
+- **Founder decision D-15: coverage measures with the `sysmon` core.** `analytics-service/pyproject.toml` gains `[tool.coverage.run] core = "sysmon"`. The first CI soak run on this PR missed SC-4: the job took 942 s, against a 654.5 s threshold, with pytest at 727 s on 4 workers. Under coverage's default settrace core, the AST-heavy `test_qstats_gate.py` tests take 37 to 89 s each and form the parallel critical path. CI and the Makefile both run pytest from `analytics-service/`, so both read this table, and the pinned argument string is unchanged. Measured locally with the exact CI command: 10135 passed, coverage 93.61% (93.60% under settrace), in 81 s instead of 5m13s. `sysmon` gives no branch coverage before Python 3.14; this suite measures none. (`45d5fc2df`)
+- **CLAUDE.md cites the coverage floor's CI step by symbol.** It previously cited the line number `ci.yml:3819`, which had drifted to about line 5600. (this release commit)
+
+### Fixed
+- **The two new pins in `local-stack-lane-wiring.test.ts` check their lookup index.** The repo's narrowing-call scanner (`test-restore-workflow-wiring.test.ts`) went RED on CI: a raw `search()` and a raw `indexOf()` fed `slice()`, and a miss there returns -1, which counts from the end and turns the pin into a PASS. Both now throw on a miss. The final CI run on the previous head was red for this, in `frontend-test (2)`, twice. (`fbfc15a5a`)
+- **Root cause of the Phase 97 "global-claim fence tests flake under xdist ordering": the `shared_test_db` group never formed.** The conftest hook that marks live-DB modules with `xdist_group("shared_test_db")` ran after xdist's own worker hook had already turned markers into scheduling keys. So no nodeid ever carried the `@shared_test_db` suffix, and the live fence tests ran on different workers at once, claiming each other's rows. `@pytest.hookimpl(tryfirst=True)` makes the marker land first. On the lane, the group soak ran 20 of 20 consecutive green, twice (once before and once after the review fixes). Every run was on exactly one worker, with every result line suffixed. (`02e5120d5`, `4157db634`)
+- **Root cause of the limiter-identity flake: fixtures evicted `routers.*` modules and never restored them.** `limiter_stub.evict_module` deleted both the `sys.modules` entry and the `routers` package attribute, and ten test files called it in teardown without restoring anything. `test_limiter_identity.py` looks routers up by attribute at call time, so under `--dist loadgroup` it raised `AttributeError` whenever it ran right after a polluter on the same worker. New `restoring()` and `evicted()` helpers put back exactly what was there, and the polluters use them. The victim test is byte-identical. A pairwise bisect, running every test file and every polluter node before the victim, was green: 316 of 316 files and 452 of 452 nodes. (`794a59219`, `2658c886e`, `90d372f72`)
+- **Review round 1 fixes.**
+  - `restoring()` now restores exactly when the parent package was absent at entry (CR-01). That case had left a stubbed router mounted, so `test_rate_limit_contract.py` stopped throttling.
+  - Collection-time `sys.modules["ccxt"] = MagicMock()` stubs no longer leak into `test_cron_router.py` (WR-01).
+  - Nine slowapi-stubbing fixtures no longer build the process-wide limiter from a no-op. That was the same class of defect, and it was already present at the phase base.
+  - 317-file pairwise checks are now green before each victim. (`5efea4856`, `184e15332`, `275215a38`)
+- **Flakes the local lane soak reproduced, fixed at the root.**
+  - The claim-RPC fallback latch (`main_worker._FALLBACK_CLAIM_RPC` / `_FALLBACK_LATCHED_AT`) leaked from one test to the next. It is now saved and restored per test.
+  - About 18 tests used wall-clock budgets that a loaded box could miss, such as a 0.1 s `asyncio.wait_for` against thread-pool hops, `elapsed <` asserts, and fixed-sleep parks. They now expire their budget at a rendezvous (`tests/budget_rendezvous.py`) or assert the property structurally, with deadmen only for genuine hangs. Each old form was seen RED under a CPU-load or event-loop-stall perturbation, and each new form was seen RED with its fix neutered. (`ba044c09b`, `1e6efd9c3`, `ec62f4410`, `9b71845a1`, `0f1877fab`, `5c0dcedb5`, `8cebc5363`, `cbf2d6306`, `afdfbc81b`, `f3051680c`, `9e8ad22ad`, `153e55de8`, `172ac75e3`, `568d624db`, `3ca8080a3`, `579da84d2`, `c0d3b1915`, `e2edc4522`, `30537dea6`, `498996eb1`)
+- **Review round 2 fixes.**
+  - The remaining rendezvous parks end on a released Event instead of a fixed sleep.
+  - The rendezvous helpers fail closed when the aimed step is never reached.
+  - This also fixed a ceiling that had never fired: it was written `asyncio.timeout(loop.time() + 30)`, a delay rather than a deadline, and is now `asyncio.timeout_at`. (`04c94afd7`, `445f64d30`)
+- **Founder decision D-14: the lazy-import test is decided by the module set, not by the clock.** `test_feedback_engine.py::test_lazy_import_not_triggered_at_module_load` used to spawn a child under a 15 s `subprocess.run` timeout, and a cold import under a load average near 60 overran it. The verdict now comes only from whether `services.feedback_engine` is in the child's `sys.modules`. Neutering the lazy import turns it RED. The same sweep removed every other subprocess child timeout in `analytics-service/tests` and made the remaining `elapsed <` asserts on real work structural or deadmen. (`7f1d20558`, `cca16a6a2`, `39fe4912a`, `5bc77386f`, `fbc29d697`, `55425d821`, `9b562a366`, `abe8532e7`, `0d16fa35f`, `d10d023c5`, `25c93d982`, `8981b3b59`)
+
+- **Review round 4 fixes (the D-14 sweep).**
+  - Every child-process test runs through `tests/child_deadman.py`, which sets one 1800 s deadman. That is about 14 times the worst case observed. A hung child fails with the test's purpose named and its partial output attached, instead of ending in an unnamed CI cancellation. `pytest.ini` sets `faulthandler_timeout = 900`, which only dumps stacks. (`227587ac5`)
+  - The import-order test takes its verdict from the child's return code. A child that dies with empty stderr used to read as a pass. (`d371233af`)
+  - The restart-bounded test asserts that shutdown was actually called before it checks that shutdown did not complete. Without that check it passed when the restart never ran. (`e9340f212`)
+  - The lease-expiry test runs under a named 10 s deadman and checks a literal bar. Its comment no longer claims that an ignored wait falls back to a 20 s default; such a wait is unbounded. (`f2643527a`)
+  - The session-monitor tests assert that the heal's wait timeout equals the cadence, and that the shutdown loop waits on its event. Elapsed time is now only a deadman. (`ed680eaf3`)
+  - Each fix was seen RED with what it guards neutered.
+
+### Tests
+- `tests/test_xdist_group_is_real.py` runs a real distributed child and asserts three things: every grouped result line carries the `@shared_test_db` suffix, the group ran on one worker, and it ran in serial collection order. It was seen RED before the fix and again with `tryfirst` deleted. (`02e5120d5`)
+- `tests/test_limiter_stub_restore.py` covers the restore helpers and adds subprocess pair gates, polluter then victim, for the limiter, rate-limit-contract and cron victims. Each gate was seen RED with its fix neutered. (`794a59219`, `5efea4856`, `184e15332`, `275215a38`)
+- A vitest pin in `src/__tests__/local-stack-lane-wiring.test.ts` (D-07) requires four things:
+  - the CI `python` step and the Makefile `test:` carry the identical argument string, equal to the D-06 literal;
+  - exactly one `PYTEST = $(VENV)/bin/pytest`, one `test:` rule and one recipe command;
+  - exactly one live pytest invocation in the job;
+  - no `continue-on-error`, `if:` or `PYTEST_ADDOPTS` on the step or the job.
+
+  20 neuter drills each turned it RED. The D-04 row moved to the new command after the old substring was seen RED. (`2c1dae27e`, `f972a4a5f`)
+
+### Notes
+- **SC-3 soak and SC-4 timing move to CI (founder decision D-14, 2026-10-15).** The full soak, at least 20 consecutive green `python` job runs, runs on this PR's head. The local box is shared with other phase agents, at a load average of 50 to 63, so a local soak measures the laptop, not the change. Two local lane soaks stopped on a RED under D-04, and their flakes are the ones fixed above. Those stops are kept as lineage in plan 04's SUMMARY. The group soak passed locally, 20 of 20 twice.
+- **Wall time, before:** the `python` job took 19m50s, 20m27s and 18m12s (runs `38611627110`, `38615032784`, `38621574070`). The median is 1190 s, with the pytest step at about 15 to 17 minutes. **SC-4's threshold is 654.5 s, 55% of 1190 s.** The after figure is read from this PR's CI. Indicative only: on an idle box offline, serial took 166.8 s and `-n 4` took 62.3 s. `-n auto` gives 4 workers on the 4-vCPU runner; `psutil` is deliberately not installed, because it would switch xdist to physical cores.
+- **Subprocess children carry a deadman, not a stopwatch.** The D-14 sweep removed their tight timeouts. Review round 4 gave them the shared 1800 s deadman described above, so a hung child fails by name instead of running into the job's 90-minute timeout.
+- **SC-3 met: 20 consecutive green `python` runs** on PR head `b14fc436`, all carrying D-15. The runs were re-runs of the one job between 17:26 and 20:12 UTC on 2026-10-15, with 0 failures.
+- **SC-4 met:** across those 20 runs the `python` job took **340 to 497 s**, against the 654.5 s threshold and the 1190 s before-median, so 29% to 42% of before. The pytest step alone took 175 to 305 s, against about 15 to 17 minutes serial. The 942 s reading from before the sysmon switch is kept as lineage.
+- **Recorded deviation:** during review round 1 a fixer ran broad `pkill -f` patterns on the machine shared with other sessions. That could have stopped another session's matching process; none was reported. Every later brief forbade it.
+- **Planning and records:** TODOS `ci/pytest-xdist-parallel` now records what this phase measured (`192e38347`). The phase's planning, review and soak records are in `.planning` and do not ship on the PR branch (`f332031e4`, `d794f12fa`, `9ef11b9df`, `f1af82495`, `5aadd6cce`, `1f5f82500`, `efb5124b6`, `6e5c38b0c`, `9e7d1b7d1`, `e58003867`, `299f55c4f`, `ab33cb14e`, `2bc424316`, `a48d25427`, `5dca51cd1`, `d36de89d6`, `a6bded3f2`, `4458d4eae`, `eb97f9da3`, `2e9814697`, `d84bc2143`, `72dd0654c`, `5806c5c61`, `33ff9020e`).
+## [0.132.1.5] - 2026-10-15 — FANINGRAPH post-apply: delete the `_fan_in_lock_rows` snapshot ratchet row the re-dump cleared
+
+One commit plus this release commit.
+
+### Fixed
+- **Main's "SQL Function Snapshot — Drift Gate" was red after the baseline re-dump (#1061).** `scripts/dump-sql-functions.ts --check` failed with `ratchet-stale: _fan_in_lock_rows`. The FANINGRAPH row in `NAME_SET_RATCHET` (`snapshot-only`, captured 2026-10-15) recorded that the helper existed in the migration chain but not yet in the PROD baseline. The re-dump taken after `20261024120000` applied to PROD put it on both sides. A row that no longer describes a disagreement is a hard failure by design, so the row is deleted, replaced by a dated lineage comment in the same style as the 164.6.8 and 170.6.1 rows. This was the phase's own planned post-apply step. With the row gone, the gate reads `0 ratcheted disagreement(s)`, 129 functions on both sides, and `baseline-content-drift` reports 0 findings.
+
+## [0.132.1.2] - 2026-10-15 — RECORDS: close BTCUSDVIEW 164.6.6.2.1 (human verification 7/7) and book the owner trust-tier finding
+
+Records only: `.planning`, `TODOS.md`, and this release. One commit plus this release commit.
+
+### Notes
+- **BTCUSDVIEW is closed.** It shipped on 2026-10-09 and 2026-10-10 (v0.129.8.0, v0.130.0.0), but its verification stayed `human_needed` with seven open items. All seven are now resolved, and the readings are in `164.6.6.2.1-UAT.md`:
+  - The WR-01 decision was booked at ship.
+  - A real BTC MT5 account's USD toggle was checked on PROD in the founder's browser.
+  - PROD's dated USD balance and the account's place in the book were read, marker query first, read-only.
+  - The anonymous `native_unit` read was checked as the anon role, inside a rolled-back transaction.
+  - The 320 to 390 px layout and the USD-view print preview were measured on the private local stack.
+  - The verification moves to `passed`. The ROADMAP lists its 17 plans and the Progress row cites both releases. STATE keeps the parallel position that the `phase complete` handler overwrote.
+- **Limits recorded with the readings:**
+  - PROD's only BTC strategy is private, so no anonymous viewer can see a BTC value there today. The anon read itself works.
+  - That the BTC key is in the book is inferred: it is not omitted, it has a priced close for the latest day, and its holdings are valued. The payload does not list which keys are included.
+- **Booked:** `164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED`. An owner's private factsheet shows "Data source —" for their own key-backed strategy, because the trust tier is read through `get_published_trust_signals`, which answers only for published strategies. It is user-facing and owner-only, and it withholds a true fact rather than showing a false one.
+
+## [0.132.1.1] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of d1852bc2
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38793480096`, after the PROD apply of merge `d1852bc2`: sha256 `8e972fb8…` → `19cedd5e…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 130 → 131, distinct function names 128 → 129, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261024120000_fan_in_graph_and_decision_cascade.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-15` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.132.1.0 → 0.132.1.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=304 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 131 — MATCH 128, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38793480096` succeeded, and this entry was composed by the `redump-pr` job. Run `38793480096` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.132.1.0] - 2026-10-15 — FANINGRAPH: a fan-in child never strands when its parent fails, a decision delete no longer raises 23505, a diamond cannot deadlock, and POST /api/bridge/outcome stops returning 500
+
+Phase 164.9.3.1 FANINGRAPH. The compute-job fan-in graph and the bridge's decision cascade had four defects found by the phase research, plus two more found in review. This release fixes all six in one forward migration (`20261024120000_fan_in_graph_and_decision_cascade.sql`), one route change and one worker change. 82 branch commits: 68 non-merge (43 touching code or tests, 25 planning-only) and 14 merges. ⛔ **The migration auto-applies to PROD once `apply-test` succeeds. There is no human reviewer gate between the merge and the PROD apply** (removed 2026-09-23), so every review the migration needed happened before this merge: migration-reviewer, rls-policy-auditor and four code-review rounds, listed below.
+
+### Fixed
+- **A fan-in child whose parent fails is no longer stranded (SC-1, D-01 to D-03).** When a parent reached `failed_final`, its `done_pending_children` child waited forever and its strategy read "computing". `mark_compute_job_failed` now cascades: it fails every waiting descendant, each naming its own failed parent and inheriting the parent's `error_kind`. It then bridges every strategy the cascade touched, in one sorted advisory-lock order. (52210c054, 6217b91e4)
+- **Deleting a `match_decisions` row no longer raises 23505 (SC-2, D-05 option Y).** The `ON DELETE SET NULL` cascade made two outcomes of one allocator, strategy and holding collide on `bridge_outcomes_legacy_per_strategy_holding_when_md_null`. `bridge_outcomes` gains `former_match_decision_id`, owned by the sync trigger (a client cannot write it), and the index is re-keyed on `COALESCE(former_match_decision_id, zero uuid)` as a fourth key. The index was neither dropped nor narrowed, and no outcome row is deleted or merged. (40c2aa268, a2a7fa371)
+- **A diamond in the fan-in graph cannot deadlock (SC-3, routed 164.5.2 WR-02).** New helper `public._fan_in_lock_rows(uuid[], boolean)` locks rows in ascending (longest-ancestor depth, id) order, and every fan-in path now goes through it: the enqueue's parent lock, `mark_compute_job_done` and the failure cascade. The deadlock is removed, not retried. `mark_compute_job_done` now locks its children in a statement of its own and releases them in a later one, so two parents finishing concurrently release a shared child exactly once (before: 0 times). (d37177d01, ab5d23d73)
+- **Every `POST /api/bridge/outcome` returned 500 (D-09).** The route upserted on `allocator_id,strategy_id`, a conflict target no unique index matches, so PostgreSQL raised 42P10 on each request. Measured read-only on PROD that day after the marker query: `bridge_outcomes` has exactly three unique indexes, and `EXPLAIN INSERT ... ON CONFLICT (allocator_id, strategy_id)` raised 42P10. The route now targets `allocator_id,match_decision_id`, the existing `bridge_outcomes_allocator_match_decision_unique`, through one shared constant (`BRIDGE_OUTCOME_CONFLICT_TARGET` in `src/lib/bridge/outcome-conflict.ts`). No migration, no new index: a unique on `(allocator_id, strategy_id)` would forbid two outcomes under two decisions, which the design allows. This part is live when the PR deploys. (1e893524a, afecce900, 24cffc122)
+- **A deep cascade could still deadlock (review round 1, CR-01, HIGH).** The first cascade locked level by level, so a deeper graph, or two cascades over one graph, hit 40P01. It now reads the whole waiting closure without locks, locks it with ONE helper call, then fails it level by level restricted to the locked set. (51f1df169, c61e2c25e)
+- **A voluntary detach could forge `former_match_decision_id` (round 1, WR-01).** Attaching a decision and detaching it while the decision still existed let a client write the trigger-owned column. The trigger now records the old id only when the decision row is gone, so a voluntary detach is a born-NULL row and meets the duplicate guard. (76b1d3c33, 023000835)
+- **The outcome route turned a failed eligibility lookup into a silent 403 (round 1, silent-failure-hunter).** A lookup error is now a logged 500 `Failed to record outcome`. An honest empty answer is still the 403. (e6713ae02, 4ffb7415b)
+- **A grown closure was locked out of order (round 2, WR-01 and WR-02, MEDIUM).** Rows born while the cascade waited for its locks were locked after the first pass's rows. The cascade now re-reads under its locks and, when the closure grew, re-locks the whole closure in one ascending pass inside a subtransaction, bounded to 10 attempts. Past the bound it fails loud with SQLSTATE 55P03 (never 55006, which the worker swallows) rather than failing the closure half-locked. The late-born-child case has its own gate arm, FL6. (25798ad78, 83a4cf29e)
+- **Cross-allocator holding-ref leak closed (round 2 RLS audit, pre-existing, user-facing).** `bridge_outcomes_sync_holding_ref` is SECURITY DEFINER. An allocator who knew another allocator's `match_decisions` id could write an outcome naming it and read that tenant's holding ref back through the copied `original_holding_ref`. The trigger now reads the decision's `allocator_id` with the holding ref in the same primary-key select and, when it differs from the row's, raises SQLSTATE 42501 with hint `cross_allocator_decision` BEFORE copying anything. The route answers that case with the fixed 403 body `NOT_ELIGIBLE` / "Decision does not belong to this allocator", with no database message, hint or id in it. The PROD census found 0 rows already attached across allocators, so there is no data to repair. (0b7cc6b88, edf7232db)
+- **The worker no longer re-marks a 55P03 as `unknown` (round 3, WR-01, MEDIUM).** When the cascade's lock bound tripped, the worker's catch-all re-ran `mark_compute_job_failed` with `error_kind = 'unknown'`, discarding the real permanent failure and its user-facing error kind. `main_worker.py` now leaves the job `running` for the watchdog and logs at ERROR with the original error kind and message. (a7656d4ed)
+- **The route logs a refusal it should never reach (round 3, SFH-M1).** The cross-allocator 42501 can only reach the route if its own eligibility check is bypassed, so it is now logged as well as answered. (edf7232db)
+
+### Added
+- **Three SQL gates, proven RED on the pre-fix tree and GREEN on the final bytes.**
+  - `test_fan_in_failure_cascade.sql` (FC1 to FC8): naming and kind inheritance, retry exhaustion, guard arms for a `failed_retry` parent and an already-moved child, multi-level and multi-strategy cascade, the computation error written for the strategy. (6f1a62b39, f1b555477)
+  - `test_fan_in_lock_order_race.sql` (FL1 to FL8, LANE-ONLY): one real dblink backend per participant, so the lost release (FL1), the diamond (FL2), the transitive cascade (FL3), a deep cascade against an enqueue (FL4) and against a second cascade (FL5), the late-born child of a locked closure row (FL6), a late-born shallow child under a deeper cascade (FL7) and the retry bound's 55P03 refusal (FL8) are genuine concurrent sessions. (4ef330c1f, c807cfc30, 51f1df169, 83a4cf29e, 5e24bbe98)
+  - `test_bridge_outcomes_decision_delete_cascade.sql` (OD1 to OD8): the option Y contract including the trigger-owned column, the voluntary detach (OD7) and the cross-allocator refusal (OD8). (597427125, 36f775b85, 76b1d3c33, 0b7cc6b88)
+  - A live-DB vitest arm (d) in `match-decisions-xor-rls.test.ts` (a multi-row decision delete cascades without 23505) and arm (e) (two upserts leave one row). (3b371e75e, 1e893524a)
+- **Layered mutation twins for every arm** (`RED-UNDER-M`), one distinct mutation per arm, because the runner scores a twin by the file's first failing arm. (02f624438, 740ac897b, 63b935be0, e53e06e02)
+- **Manual rollback** `supabase/migrations/down/20261024120000-rollback.sql` restoring the four prior function bodies, the old trigger list and the old index key; compute-job `COMMENT`s and four VAC-04 prod-body acks. (ad5465463, 7a6f0f83b)
+- **Fixture 40 stand-in** (`scripts/pg-lane/fixtures/40-fixture-match-decisions-bridge-outcomes.sql`) so the decision-delete gate runs on the pg-lane. (597427125)
+
+### Changed
+- `mark_compute_job_failed`, `mark_compute_job_done`, `_enqueue_compute_job_internal` and `bridge_outcomes_sync_holding_ref` are rewritten in the migration, and their schema snapshots in `supabase/schema/functions/` follow. `_fan_in_lock_rows` is a new snapshot-only function. `database.types.ts`, the `bridge_outcomes` catalog and the vitest header describe the re-keyed index. (a2a7fa371)
+- The migration was re-pinned from its first timestamp to `20261024120000` so it sorts after Phase 166.5's `20261023120000`. (18cafcd48)
+
+### Tests
+- **Census moves, each seen RED before it was moved.** Read the live values by symbol: `FILES_FLOOR`, `ARMS_FLOOR` and `WAIVED_CEILING` in `scripts/mutation-floors.mjs` (this release leaves them at 76, 756 and 0, `WAIVED_CEILING` unchanged); `SENTINEL_FLOOR` and `ARMS_FLOOR` in the `sql-tests` anti-skip step of `ci.yml` (21 and 332, with its derivation table); `COMPARED_FLOOR` in `scripts/baseline-content-drift-check.mjs` (130 to 131, one function added); plus the dump list, `drift-check-scripts`, `gate-family-meta`, `mutation-annotation-parser`, `mutation-runner-floors` and the anti-skip contract test. Moves, in order: 3 gates joined (mutation 72/723 to 75/740, anti-skip 17/299 to 20/316); round 1 +3 arms (743 and 319); round 2 +3 arms (755 and 331); FL8 +1 arm (756 and 332). The merge with Phase 166.5 re-derived the anti-skip table from a single run rather than adding the two moves. (7e9b32696, 153253d97, 579b48e7d, 8d84f679a, f588f3514)
+- Route tests TC8 (conflict target) and TC9 (logged 500 on a failed lookup) and a worker test in `test_compute_jobs_fencing.py` for the 55P03 handling, each seen RED first.
+
+### Security
+- Closes the cross-allocator holding-ref disclosure above (42501 plus a fixed 403). Phase SECURITY audit: all 27 registered threats closed (SECURED). The migration adds no policy and no RLS change; the new column falls under the existing owner policies.
+
+### Root cause
+- The strand, the deadlock and the 23505 share one cause: the fan-in graph had one writer per transition and each took its row locks in its own order, with no function owning the order and no statement owning the cascade. The cure is one ordering helper and one cascade, not retries (the migration contains no 40P01 or 40001 retry). The 42P10 was a conflict target written against an index that was never there, and no test hit the real table.
+
+### Notes
+- **PROD reads, all read-only and after the marker query.** The D-04 census found 0 compute_jobs rows with parents and 0 `done_pending_children` of 2297 jobs before the apply (the phase CONTEXT records the earlier 2026-10-15 reading as 0 and 0 of 2292), so the migration carries no data-reading block and owes no one-time release. The 42P10 claim was measured as above. Phase 166.5's `20261023120000` is applied, which this migration needs: it self-verifies a literal in `mark_compute_job_failed` that this migration rewrites.
+- **Booked, not fixed.**
+  - `164.9.3.1-REAPER-STRAND`: the hourly orphan reaper writes `failed_final` without `mark_compute_job_failed`, so a fan-in child of a reaped parent still strands. Latent: no caller passes parents and PROD holds none. Founder decision 2026-10-15, "Book it, latent".
+  - FL8's seam restore on a persistent database: FL8 renames the helper and restores it in a `DO` block, so an error before the restore would leave the wrapper installed. The file is LANE-ONLY and every lane is a throwaway cluster. Round-4 MEDIUM, accepted as booked.
+  - `164.9.3.1-VOLUNTARY-REMOVE-23514`: deleting a `voluntary_remove` decision fails 23514 through the same cascade.
+  - `164.9.3.1-HOLDING-REF-DIRECT-UPDATE`: an owner can bypass the born-NULL duplicate guard by updating `original_holding_ref` directly. Reasoned, not measured.
+  - 55P03 recovery latency: by design a tripwire, so the job stays `running` until the watchdog reclaims it (10 minutes by default). It needs an enqueue to commit a new descendant inside the lock window on 10 consecutive attempts.
+- **After the merge.** VAC-08 and `baseline-content-drift` go RED on the PR by construction until apply-on-merge (`_fan_in_lock_rows` is `SNAPSHOT_MISSING` until the re-dump), then the baseline is re-dumped with its carried-migrations marker in one commit.
+- **Review record.** Round 1 (CR-01 HIGH, WR-01 MEDIUM, one silent-failure finding), round 2 (0 HIGH, 2 MEDIUM, plus the RLS audit), round 3 (1 MEDIUM) and round 4 (clean at MEDIUM and above); verification passed 8 of 8; security audit SECURED.
+- **Planning-only commits (25, no shipped file):** 58b9033e4, b0fe8d4fd, ace76120f, f49920d2c, 794f4d692, dd91f36a2, 6b76fda00, 255f0301a, 46d1a254f, 739c4f466, cb72dbfc4, e0d1f51cc, 90c076997, b33d41a85, feb8b53e6, cc41963b0, f29418eb5, 7016d9e8f, cce12deaa, 2560a9d38, 8a253af9c, 9a2114576, 79f7ad468, b58eabcd8, 1d31de793. They carry the research, plans, summaries, review rounds, verification and security records. Three code-adjacent docs commits are mapped above: ab108e1dc (books the four routed TODOS entries), 4df1d63fa (the reaper decision) and e141053bd (the migration header).
+- **Merges (14):** 8f8e560f8, 2e4e0c9f9, 26709fb57, 9870057fc, 1f2a361a2, ab3b197c2, 4f6f1ce9d, 395f2deac, b4f4a29b8, 232ab1da0, 01b4b211b, 0e124c2be and 356a94f4e fold the per-plan worktree branches and origin/main into the phase branch; 73ee74f60 merges origin/main 4ca0931b1 and re-measures the gate censuses.
+
 ## [0.132.0.1] - 2026-10-15 — HOLDINGKEYSCOPE follow-up: a holding with a long symbol wraps inside its /compare card on a phone
 
 Found by HOLDINGKEYSCOPE's post-ship 375px check. Two commits: the fix with its test, and this release commit.

@@ -527,3 +527,150 @@ not file steps. `lint-sql-gates` scans 99 files; `COMPARED_FLOOR` stays 130 and 
 three allowlisted rows, findings 0. The stamp `20261022120000` sorts above `origin/main`'s highest,
 `20261021120000`. It supersedes the 716 reading above as the latest dated one and is itself not a
 live constant: read `FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): THREE gate files arrived, all new,
+all annotated with biting twins: `supabase/tests/test_fan_in_failure_cascade.sql` (gate A, 8 arms),
+`supabase/tests/test_fan_in_lock_order_race.sql` (gate B, 3 arms, LANE-ONLY: it drives three dblink
+backends) and `supabase/tests/test_bridge_outcomes_decision_delete_cascade.sql` (gate C, 6 arms),
+17 arms in all, none waived. A DATED reading of one full `node scripts/mutation-runner/run.mjs` on
+the COMMITTED, clean phase tree, no file edited during it, exit 0: `scope: FULL 75/75 annotated
+files`, `lane-concurrency: 4`, `coverage: files 75/102`, `pending: 0`, `arms: 740/740/0`,
+`biting: 740`, `lane-invocations: 740` plus 75 baseline / 75 restore legs (the two tallies agree),
+`unreachable: 27`, `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `per-arm lane time: mean 2.8s
+over 740 arm run(s)`, `No defects.`. Wall time 654 s (10 min 54 s) against `sql-mutation`'s declared
+20-minute ceiling, on a host whose load average was about 25 on 10 cores, so the figure is an
+upper-ish reading and the ceiling is neither raised nor approached. Per-file rows:
+`test_fan_in_failure_cascade.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8`,
+`test_fan_in_lock_order_race.sql: sections 3 / judged 3 / annotated 3 / waived 0 / biting 3`,
+`test_bridge_outcomes_decision_delete_cascade.sql: sections 6 / judged 6 / annotated 6 / waived 0 /
+biting 6`. `FILES_FLOOR` 72 -> 75 and `ARMS_FLOOR` 723 -> 740; `WAIVED_CEILING` stays 0.
+⚠️ An EARLIER full run on the same tree printed the same coverage and arm tallies but ended
+`1 defect(s)`: `wrong-first-failure` on `test_wizard_composite_fence.sql` Part 3a-2b, "the lane
+emitted no TEST FAILED at all", at 4.7 s against the file's usual 1.3 s. The file is unchanged by this
+phase; three narrowed `--file` runs of it were clean (5/5 biting each) and the second full run was
+clean. It is recorded here as a load transient rather than hidden, and the census was taken from the
+clean run only.
+The anti-skip half moves with it: gate B is the FOURTH sentinel-bearing LANE-ONLY file (after
+`test_prod_prober_cadence.sql`, `test_cron_sync_tick.sql` and `test_ops_staleness_check.sql`), so
+the `sql-tests` step declares it without checking it against a run. `ci.yml`'s derivation table gained
+the three rows and `SENTINEL_FLOOR` 17 -> 20 and `ARMS_FLOOR` 299 -> 316 (+17), read off each file's
+own `ALL N ARMS EXECUTED` sentinel; `drift-check-scripts.test.ts` mirrors the pair; the contract
+test's verified offset is `sentinelFloor - 4` and `LANE_ONLY_SITES` registers the gate. Every
+dependent pin was seen RED at the old value first (the ratchet read `RATCHET STALE: 75 of 102 gate
+files are now annotated but FILES_FLOOR is still 72`; the ARMS ratchet read `The corpus declares 740
+twin(s) ... ARMS_FLOOR is 723`; the parser file read `expected 740 to be 723`, `840 to be 809`,
+`102 to be 99` and `[ ...(75) ] to have a length of 72`; the floors file read `expected 740 to be
+723`; the lint corpus pin read `scanned 102` against 99; the drift mirror read `expected 1 to be +0`
+against `SENTINEL_FLOOR=17` once `ci.yml` moved; the contract test read `expected 16 to be 17` on the
+old offset and then the `LANE_ONLY_SITES` mismatch). `stepsSeen` 809 -> 840 and the needle count
+809 -> 840, `lint-sql-gates` scans 102 files. It supersedes the 723 reading above as the latest dated
+one and is itself not a live constant: read `FILES_FLOOR`, `ARMS_FLOOR`, `SENTINEL_FLOOR` and the
+anti-skip `ARMS_FLOOR` by SYMBOL.
+One census the plan did not list moved with them: `COMPARED_FLOOR` in
+`scripts/baseline-content-drift-check.mjs` 130 -> 131, a real ADDITION (the migration's new
+`public._fan_in_lock_rows(uuid[], boolean)`), found by the plan's final unit run
+(`the real corpus now compares 131 function(s) but COMPARED_FLOOR is pinned at 130`) and measured by
+`node scripts/baseline-content-drift-check.mjs` (`functions compared 131 — MATCH 123, DRIFT 7,
+SNAPSHOT_MISSING 1`; the DRIFT and SNAPSHOT_MISSING rows are the migration's own bodies awaiting the
+baseline re-dump after the PROD apply, which this move does not suppress).
+
+⚠️ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, round-1 review fixes CR-01 and WR-01): THREE arms
+arrived in two existing gate files, none waived: FL4 and FL5 in `supabase/tests/test_fan_in_lock_order_race.sql`
+(3 -> 5 arms, still LANE-ONLY: dblink) and OD7 in `supabase/tests/test_bridge_outcomes_decision_delete_cascade.sql`
+(6 -> 7). No file joined. A DATED reading of one full `node scripts/mutation-runner/run.mjs` on the
+COMMITTED phase tree (untracked REVIEW.md only), no file edited during it, exit 0: `scope: FULL 75/75
+annotated files`, `lane-concurrency: 4`, `coverage: files 75/102`, `arms: 743/743/0`, `biting: 743`,
+`lane-invocations: 743` plus 75 baseline / 75 restore legs (the two tallies agree), `unreachable: 27`,
+`lane-blocked: 0`, `per-arm lane time: mean 1.9s over 743 arm run(s)`, `No defects.` Wall time about 440 s
+(7 min 20 s), well inside `sql-mutation`'s declared 20-minute ceiling, which is neither raised nor approached.
+Per-file rows: `test_fan_in_lock_order_race.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5`,
+`test_bridge_outcomes_decision_delete_cascade.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7`
+(and `test_fan_in_failure_cascade.sql` still 8 / 8). `ARMS_FLOOR` 740 -> 743; `FILES_FLOOR` stays 75 and
+`WAIVED_CEILING` stays 0.
+⚠️ FL4 and FL5 carry DIFFERENT twins on purpose. The runner scores a twin by the FIRST failing arm of the
+file, so one shared mutation (a non-recursive closure read) reddened FL4 first and scored FL5 `WRONG-ARM(FL4)`
+on the first attempt. FL5's twin now follows only single-parent children, which FL4's single-parent chain
+survives. ⚠️ A second lesson, found as a 10-minute hang rather than a verdict: the first FC6 twin (drop the
+`done_pending_children` filter from the closure read AND the level UPDATE) made the CASCADE LOOP FOREVER,
+because a failed child still matched the seed and was re-failed each pass. The migration's closure read now
+also skips every job already in the failed set, so termination no longer leans on the status filter alone.
+The anti-skip half moves with it: `ci.yml`'s derivation table rows `test_fan_in_lock_order_race.sql` 3 -> 5
+and `test_bridge_outcomes_decision_delete_cascade.sql` 6 -> 7, and `ARMS_FLOOR` 316 -> 319 (`SENTINEL_FLOOR`
+stays 20), read off each file's own `ALL N ARMS EXECUTED` sentinel; `drift-check-scripts.test.ts` mirrors the
+pair. Every dependent pin was seen RED at the old value first: the parser read `expected 743 to be 740`
+(armsSeen) and `847 to be 840` (stepsSeen and the needle count; +6 for the three new twins and +1 because
+the FC5 twin now stands both loop exits down); the ARMS ratchet read `The corpus declares 743 twin(s) ...
+ARMS_FLOOR is 740`; the contract test read the derived sum 319 against 316, the table row 7 against 6, and
+`expected 2 to be 1` on the sentinel-text count, because a second checked file (OD's gate) now prints
+`ALL 7 ARMS EXECUTED`. It supersedes the 740 reading above as the latest dated one and is itself not a live
+constant: read `FILES_FLOOR`, `ARMS_FLOOR`, `SENTINEL_FLOOR` and the anti-skip `ARMS_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, round-2 review fixes WR-01 / WR-02 and the RLS audit):
+THREE arms arrived in two existing gate files, none waived: FL6 and FL7 in
+`supabase/tests/test_fan_in_lock_order_race.sql` (5 -> 7 arms, still LANE-ONLY: dblink) and OD8 in
+`supabase/tests/test_bridge_outcomes_decision_delete_cascade.sql` (7 -> 8). No file joined. A DATED reading of
+one full `node scripts/mutation-runner/run.mjs` on the COMMITTED tree, exit 0: `scope: FULL 76/76 annotated
+files`, `lane-concurrency: 4`, `coverage: files 76/103`, `arms: 755/755/0`, `biting: 755`,
+`lane-invocations: 755` plus 76 baseline / 76 restore legs (the two tallies agree), `unreachable: 27`,
+`lane-blocked: 0`, `per-arm lane time: mean 1.6s over 755 arm run(s)`, `No defects.` Wall time about 6 minutes,
+inside `sql-mutation`'s declared 20-minute ceiling, which is neither raised nor approached. Per-file rows:
+`test_fan_in_lock_order_race.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7`,
+`test_bridge_outcomes_decision_delete_cascade.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8`
+(and `test_fan_in_failure_cascade.sql` still 8 / 8). `ARMS_FLOOR` 752 -> 755; `FILES_FLOOR` stays 76 and
+`WAIVED_CEILING` stays 0.
+⚠️ The cascade's second pass is gone, and with it three twins' old shape. The failure cascade used to lock a
+child committed during its lock wait ON TOP of the deeper rows already held (a 40P01 against a second cascade,
+reproduced by FL7 on the tip body before the fix). It now re-reads its closure under the locks and, if it grew,
+releases them (a rolled-back subtransaction) and locks the grown closure again in one ascending pass. Three
+consequences for the corpus. (1) FL4 and FL5 can no longer be reddened by a closure change alone, because a
+closure the cascade does not know is simply never failed and nothing deadlocks; their twins now ALSO let the
+level UPDATE take whatever rows it updates (`WHERE c.id = ANY(v_held)` -> `WHERE TRUE`), which reinstates the
+per-level lock order, and each was seen to raise 40P01 by hand. (2) FC5 lost the masking second edit (the outer
+loop that hid its first edit is gone), which is the -1 in the step count. (3) FL6 and FL7 each have their OWN
+twin, again different on purpose: FL6 neuters only the stability test of the re-read (the locked set stays the
+first read and the late-born child keeps a failed_final parent); FL7 reinstates the old order (lock the grown
+set on top of the rows held). Both are layered with the new `v_failed_reread_anchored` stand-down. The anti-skip
+half moves with it: `ci.yml`'s derivation table rows `test_fan_in_lock_order_race.sql` 5 -> 7 and
+`test_bridge_outcomes_decision_delete_cascade.sql` 7 -> 8, and `ARMS_FLOOR` 328 -> 331 (`SENTINEL_FLOOR` stays
+21), read off each file's own `ALL N ARMS EXECUTED` sentinel; `drift-check-scripts.test.ts` mirrors the pair.
+Every dependent pin was seen RED at the old value first: the parser read `expected 755 to be 752` (armsSeen) and
+`873 to be 866` (the needle count, and stepsSeen with it); the ARMS ratchet read `The corpus declares 755
+twin(s) ... ARMS_FLOOR is 752`; the contract test read the derived sum 331 against 328, the table row 8 against
+7, and `expected 1 to be 2` on the sentinel-text count, because the delete-cascade gate no longer prints the
+`ALL 7 ARMS EXECUTED` text. It supersedes the 743 reading above as the latest dated one and is itself not a live
+constant: read `FILES_FLOOR`, `ARMS_FLOOR`, `SENTINEL_FLOOR` and the anti-skip `ARMS_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, round-3 review fix SFH M2): ONE arm arrived in an existing gate
+file, none waived: FL8 in `supabase/tests/test_fan_in_lock_order_race.sql` (7 -> 8 arms, still LANE-ONLY: dblink).
+No file joined. It drives `mark_compute_job_failed`'s bounded lock-phase retry to its 55P03 refusal, which until now
+only a text anchor (`v_failed_bound_anchored`) pinned. A DATED reading of one full
+`node scripts/mutation-runner/run.mjs` on the COMMITTED tree, exit 0: `scope: FULL 76/76 annotated files`,
+`lane-concurrency: 4`, `coverage: files 76/103`, `arms: 756/756/0`, `biting: 756`, `lane-invocations: 756` plus 76
+baseline / 76 restore legs (the two tallies agree), `unreachable: 27`, `lane-blocked: 0`,
+`per-arm lane time: mean 2.1s over 756 arm run(s)`, `No defects.` Per-file row
+`test_fan_in_lock_order_race.sql: sections 8 / judged 8 / annotated 8 / waived 0 / biting 8`. `ARMS_FLOOR` 755 -> 756;
+`FILES_FLOOR` stays 76 and `WAIVED_CEILING` stays 0.
+⚠️ How FL8 is deterministic, and the one thing it does not claim. The retry needs a descendant to have committed
+between the cascade's first read of its closure and its re-read under the locks, ten times in a row; a real enqueue
+cannot be timed to do that. So the gate renames the real `_fan_in_lock_rows` to `_fan_in_lock_rows_real` and installs
+a wrapper under the old name that calls the REAL helper first and then commits ONE new waiting child of A through an
+autonomous `dblink` connection (an INSERT, not an enqueue, so it takes no parent lock the cascade holds). One backend,
+no blocker, no wait, no sleep. The function under test, `mark_compute_job_failed`, is the migration's own body. What the
+seam does NOT exercise is the lock wait itself: the child appears after the helper returns rather than during a wait,
+which the cascade cannot tell apart (FL6 and FL7 are the arms that hold a real lock wait). The seam is restored inside
+the arm. It asserts exactly 10 late children, SQLSTATE 55P03 (never 55006), F still `running` with a byte-identical row
+image, A byte-identical, every closure row still `done_pending_children` with no error and an untouched `updated_at`,
+and no committed status transition. The twin replaces `IF v_attempt > 10 THEN` with `IF FALSE THEN` (layered with the
+`v_failed_bound_anchored` stand-down), so the cascade finally finds a stable closure and fails everything. Also seen
+RED by hand: the SQLSTATE changed to 55006, and the bound changed to 11.
+The same round also changed the worker: `dispatch_tick` now matches SQLSTATE 55P03 from `mark_compute_job_failed`,
+logs one ERROR with the original error kind and does not re-mark the job (a re-mark through the catch-all fallback
+recorded `error_kind = 'unknown'`); `test_mark_failed_lock_bound_55p03_is_not_re_marked_unknown` pins it.
+The anti-skip half moves with it: `ci.yml`'s derivation table row `test_fan_in_lock_order_race.sql` 7 -> 8 and
+`ARMS_FLOOR` 331 -> 332 (`SENTINEL_FLOOR` stays 21); `drift-check-scripts.test.ts` mirrors the pair.
+Every dependent pin was seen RED at the old value first: the parser read `expected 756 to be 755` (armsSeen) and
+`875 to be 873` (stepsSeen and the needle count, +2 for the twin's two file edits); the ARMS ratchet read
+`The corpus declares 756 twin(s) ... ARMS_FLOOR is 755`; the contract test read the derived sum 332 against 331 and the
+race row as 8 against 7; the synthetic green log read `the per-file rows sum to 755 biting arm(s) but the aggregate
+'biting:' line reports 756` until its race row moved. It supersedes the 755 reading above as the latest dated one and is
+itself not a live constant: read `FILES_FLOOR`, `ARMS_FLOOR`, `SENTINEL_FLOOR` and the anti-skip `ARMS_FLOOR` by SYMBOL.

@@ -441,11 +441,11 @@ BEGIN
         USING ERRCODE = 'invalid_parameter_value';
     END IF;
 
-    PERFORM 1
-       FROM compute_jobs pj
-      WHERE pj.id = ANY(p_parent_job_ids)
-      ORDER BY pj.id
-      FOR SHARE;
+    -- Phase 164.9.3.1 D-06: the parents are locked through the ancestor-first
+    -- helper (key: depth, then id), not by job id alone. The paragraph above
+    -- that says "in id order" is the lineage this replaces: a pure id order
+    -- deadlocks against mark_compute_job_done on a diamond.
+    PERFORM public._fan_in_lock_rows(p_parent_job_ids, FALSE);
 
     SELECT count(*),
            count(*) FILTER (WHERE pj.status = 'failed_final'),
@@ -617,7 +617,78 @@ $_$;
 ALTER FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "uuid", "p_portfolio_id" "uuid", "p_kind" "text", "p_idempotency_key" "text", "p_parent_job_ids" "uuid"[], "p_exchange" "text", "p_metadata" "jsonb", "p_allocator_id" "uuid", "p_api_key_id" "uuid", "p_run_at" timestamp with time zone) OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "uuid", "p_portfolio_id" "uuid", "p_kind" "text", "p_idempotency_key" "text", "p_parent_job_ids" "uuid"[], "p_exchange" "text", "p_metadata" "jsonb", "p_allocator_id" "uuid", "p_api_key_id" "uuid", "p_run_at" timestamp with time zone) IS 'Private shared implementation of the idempotent enqueue pattern. Handles all four target scopes (strategy / portfolio / allocator / api_key) via 4-way XOR on the four id parameters. Extended in migration 066 for api_key scope + scheduled run_at. ACL re-asserted by migration 118. Rejects the retired compute_analytics kind with invalid_parameter_value (Phase 106 D3). Race-loser re-read uses a plain SELECT INTO on all four arms; if the winner already advanced past the in-flight statuses, raises serialization_failure so the caller can retry vs. surfacing a 500 (Phase 163 OPS-08, parity with the 7-param overload''s mig 109 P3 fix). Computes the initial status and INSERTs it explicitly: done_pending_children while at least one listed parent is not yet done; a child whose parents are all done starts pending, as does a child with no parents (Phase 164.9.1). With parents, it locks and reads them first: a NULL element, a missing parent or a failed_final parent is refused with invalid_parameter_value, so no enqueue creates a child that no mark-done can release.';
+COMMENT ON FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "uuid", "p_portfolio_id" "uuid", "p_kind" "text", "p_idempotency_key" "text", "p_parent_job_ids" "uuid"[], "p_exchange" "text", "p_metadata" "jsonb", "p_allocator_id" "uuid", "p_api_key_id" "uuid", "p_run_at" timestamp with time zone) IS 'Private shared implementation of the idempotent enqueue pattern. Handles all four target scopes (strategy / portfolio / allocator / api_key) via 4-way XOR on the four id parameters. Extended in migration 066 for api_key scope + scheduled run_at. ACL re-asserted by migration 118. Rejects the retired compute_analytics kind with invalid_parameter_value (Phase 106 D3). Race-loser re-read uses a plain SELECT INTO on all four arms; if the winner already advanced past the in-flight statuses, raises serialization_failure so the caller can retry vs. surfacing a 500 (Phase 163 OPS-08, parity with the 7-param overload''s mig 109 P3 fix). Computes the initial status and INSERTs it explicitly: done_pending_children while at least one listed parent is not yet done; a child whose parents are all done starts pending, as does a child with no parents (Phase 164.9.1). With parents, it locks them first through public._fan_in_lock_rows in ancestor-first (depth, id) order (Phase 164.9.3.1 D-06) and reads them: a NULL element, a missing parent or a failed_final parent is refused with invalid_parameter_value, so no enqueue creates a child that no mark-done can release.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."_fan_in_lock_rows"("p_ids" "uuid"[], "p_for_update" boolean) RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+DECLARE
+  r record;
+BEGIN
+  IF p_ids IS NULL OR cardinality(p_ids) = 0 THEN
+    RETURN;
+  END IF;
+
+  IF p_for_update THEN
+    FOR r IN
+      WITH RECURSIVE walk(root, parents, lvl) AS (
+        SELECT j.id, j.parent_job_ids, 0
+          FROM compute_jobs j
+         WHERE j.id = ANY(p_ids)
+        UNION ALL
+        SELECT w.root, a.parent_job_ids, w.lvl + 1
+          FROM walk w
+          JOIN compute_jobs a ON a.id = ANY(w.parents)
+         WHERE w.lvl < 64
+      ), depth AS (
+        SELECT root AS id, max(lvl) AS d
+          FROM walk
+         GROUP BY root
+      )
+      SELECT j.id
+        FROM compute_jobs j
+        JOIN depth ON depth.id = j.id
+       ORDER BY depth.d, j.id
+         FOR UPDATE OF j
+    LOOP
+      NULL;
+    END LOOP;
+  ELSE
+    FOR r IN
+      WITH RECURSIVE walk(root, parents, lvl) AS (
+        SELECT j.id, j.parent_job_ids, 0
+          FROM compute_jobs j
+         WHERE j.id = ANY(p_ids)
+        UNION ALL
+        SELECT w.root, a.parent_job_ids, w.lvl + 1
+          FROM walk w
+          JOIN compute_jobs a ON a.id = ANY(w.parents)
+         WHERE w.lvl < 64
+      ), depth AS (
+        SELECT root AS id, max(lvl) AS d
+          FROM walk
+         GROUP BY root
+      )
+      SELECT j.id
+        FROM compute_jobs j
+        JOIN depth ON depth.id = j.id
+       ORDER BY depth.d, j.id
+         FOR SHARE OF j
+    LOOP
+      NULL;
+    END LOOP;
+  END IF;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_fan_in_lock_rows"("p_ids" "uuid"[], "p_for_update" boolean) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."_fan_in_lock_rows"("p_ids" "uuid"[], "p_for_update" boolean) IS 'Private lock helper for the compute_jobs fan-in graph (Phase 164.9.3.1 D-06). Locks the named rows in ascending (depth, id), depth being the longest chain of ancestors through parent_job_ids, so a parent always sorts before its child: FOR UPDATE OF j when p_for_update, FOR SHARE OF j otherwise. It is the only place a fan-in path takes fan-in row locks, so the order cannot drift. The ancestor walk stops at 64 levels; a deeper chain would tie-break by id. Private on purpose: a callable row-lock helper is a queue-wide denial-of-service lever, so EXECUTE is revoked from PUBLIC, anon and authenticated.';
 
 
 
@@ -1219,6 +1290,346 @@ COMMENT ON FUNCTION "public"."api_key_cooldown_remaining"("p_api_key_id" "uuid",
 
 
 
+CREATE OR REPLACE FUNCTION "public"."apply_okx_archive_rebuild"("p_strategy_id" "uuid", "p_rows" "jsonb", "p_expected_gaps" "jsonb", "p_expected_gaps_after" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $_$
+DECLARE
+  -- The pinned provenance source (D-05). A literal, never a parameter.
+  c_source       CONSTANT text := 'okx_bills_history_archive';
+  -- A calendar date string: 1900..2999, ISO, fixed width. Calendar validity (a
+  -- day that exists in its month) is checked separately, without casting, because
+  -- a cast of 2026-02-30 raises 22008 and a refusal must name the input, not a
+  -- datetime error.
+  c_date_re      CONSTANT text := '^(19|2[0-9])[0-9]{2}-(0[1-9]|1[0-2])-[0-9]{2}$';
+  v_n            integer;
+  v_bad          integer;
+  v_src          text;
+  v_sp           jsonb;     -- stored series_provenance
+  v_rtype        text;
+  v_stored_raw   jsonb;     -- stored unrecovered_gaps entries (with recorded_at)
+  v_stored       jsonb;     -- ... normalised to sorted [{from, to}]
+  v_expected     jsonb;     -- p_expected_gaps, normalised
+  v_expected_aft jsonb;     -- p_expected_gaps_after, normalised
+  v_new_gaps     jsonb;     -- the narrowed gaps in stored form (recorded_at kept)
+  v_new_norm     jsonb;     -- ... normalised to sorted [{from, to}]
+  v_old_ranges   jsonb;
+  v_new_ranges   jsonb;
+  v_ranges_added integer;
+  v_ins_dates    date[];
+  v_ins_n        integer;
+  v_now          text := to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"');
+BEGIN
+  -- ===== 1. NULL and type guards. Every guard is NULL-explicit: a three-valued
+  --          comparison against a NULL argument is NULL, plpgsql takes the ELSE
+  --          branch on a NULL condition, and the guard would silently pass.
+  IF p_strategy_id IS NULL THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_strategy_id is required (got NULL)'
+      USING ERRCODE = '22023';
+  END IF;
+  IF p_rows IS NULL OR p_expected_gaps IS NULL OR p_expected_gaps_after IS NULL THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_rows, p_expected_gaps and p_expected_gaps_after are all required (got NULL)'
+      USING ERRCODE = '22023';
+  END IF;
+  IF jsonb_typeof(p_rows) <> 'array' THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_rows must be a JSONB array, got %', jsonb_typeof(p_rows)
+      USING ERRCODE = '22023';
+  END IF;
+  IF jsonb_typeof(p_expected_gaps) <> 'array' THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_expected_gaps must be a JSONB array, got %', jsonb_typeof(p_expected_gaps)
+      USING ERRCODE = '22023';
+  END IF;
+  IF jsonb_typeof(p_expected_gaps_after) <> 'array' THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_expected_gaps_after must be a JSONB array, got %', jsonb_typeof(p_expected_gaps_after)
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 2. Size guards. At least one row (an empty call cannot be expressed
+  --          through this function by contract), at most 1000.
+  v_n := jsonb_array_length(p_rows);
+  IF v_n < 1 OR v_n > 1000 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_rows must carry 1..1000 rows (got %)', v_n
+      USING ERRCODE = '22023';
+  END IF;
+  IF jsonb_array_length(p_expected_gaps) > 1000 OR jsonb_array_length(p_expected_gaps_after) > 1000 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_expected_gaps and p_expected_gaps_after may carry at most 1000 entries each (got % and %)',
+      jsonb_array_length(p_expected_gaps), jsonb_array_length(p_expected_gaps_after)
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 3. Date validity of every row date and every caller gap bound. One
+  --          query over the union so a refusal names the FIRST argument at fault.
+  --          CASE keeps the evaluation order: the calendar check runs only for a
+  --          string that already matched the shape.
+  SELECT count(*), min(d.src) INTO v_bad, v_src
+    FROM (
+      SELECT 'p_rows' AS src,
+             CASE WHEN jsonb_typeof(e) = 'object' AND jsonb_typeof(e -> 'date') = 'string' THEN e ->> 'date' END AS s
+        FROM jsonb_array_elements(p_rows) e
+      UNION ALL
+      SELECT 'p_expected_gaps',
+             CASE WHEN jsonb_typeof(e) = 'object' AND jsonb_typeof(e -> 'from') = 'string' THEN e ->> 'from' END
+        FROM jsonb_array_elements(p_expected_gaps) e
+      UNION ALL
+      SELECT 'p_expected_gaps',
+             CASE WHEN jsonb_typeof(e) = 'object' AND jsonb_typeof(e -> 'to') = 'string' THEN e ->> 'to' END
+        FROM jsonb_array_elements(p_expected_gaps) e
+      UNION ALL
+      SELECT 'p_expected_gaps_after',
+             CASE WHEN jsonb_typeof(e) = 'object' AND jsonb_typeof(e -> 'from') = 'string' THEN e ->> 'from' END
+        FROM jsonb_array_elements(p_expected_gaps_after) e
+      UNION ALL
+      SELECT 'p_expected_gaps_after',
+             CASE WHEN jsonb_typeof(e) = 'object' AND jsonb_typeof(e -> 'to') = 'string' THEN e ->> 'to' END
+        FROM jsonb_array_elements(p_expected_gaps_after) e
+    ) d
+   WHERE NOT COALESCE(
+           CASE WHEN d.s ~ c_date_re THEN
+                  substr(d.s, 9, 2)::integer BETWEEN 1 AND
+                    extract(day FROM (make_date(substr(d.s, 1, 4)::integer, substr(d.s, 6, 2)::integer, 1)
+                                      + interval '1 month' - interval '1 day'))::integer
+                ELSE false
+           END, false);
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: % entries are not calendar dates in YYYY-MM-DD form or lack a date field (first argument at fault: %)', v_bad, v_src
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 4. daily_return: a JSON number inside the +/-10 fence that the CSV
+  --          finalize path also applies to this table. A JSON number is always
+  --          finite (jsonb cannot hold NaN or Infinity); the fence keeps an
+  --          out-of-range value from surfacing later as a float cast error.
+  SELECT count(*) INTO v_bad
+    FROM jsonb_array_elements(p_rows) e
+   WHERE NOT COALESCE(
+           CASE WHEN jsonb_typeof(e -> 'daily_return') = 'number'
+                THEN abs((e ->> 'daily_return')::numeric) <= 10
+                ELSE false
+           END, false);
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: % rows carry a daily_return that is not a finite number within +/-10', v_bad
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 5. No duplicate date inside one payload (it would raise 23505 on the
+  --          unique index, a code that looks like a double submit).
+  SELECT count(*) - count(DISTINCT e ->> 'date') INTO v_bad FROM jsonb_array_elements(p_rows) e;
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: p_rows repeats a date (% duplicate rows)', v_bad
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 6. A caller gap must end on or after its start.
+  SELECT count(*) INTO v_bad
+    FROM (SELECT e FROM jsonb_array_elements(p_expected_gaps) e
+          UNION ALL SELECT e FROM jsonb_array_elements(p_expected_gaps_after) e) g
+   WHERE (g.e ->> 'from')::date > (g.e ->> 'to')::date;
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: % caller gaps end before they start', v_bad
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 7. Lock the strategy_analytics row. Two concurrent calls for one
+  --          strategy then run one after the other, and the second reads the gaps
+  --          the first left (or loses the compare-and-set below).
+  SELECT sa.series_provenance INTO v_sp
+    FROM public.strategy_analytics sa
+   WHERE sa.strategy_id = p_strategy_id
+     FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: no strategy_analytics row exists for the given strategy'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- The stored unrecovered_gaps. A non-array or absent value reads as empty, as
+  -- the public reader does. A malformed ENTRY is refused: it cannot be reasoned
+  -- about, and guessing would write over a record nobody can read.
+  v_stored_raw := CASE WHEN jsonb_typeof(v_sp -> 'unrecovered_gaps') = 'array'
+                       THEN v_sp -> 'unrecovered_gaps' ELSE '[]'::jsonb END;
+  SELECT count(*) INTO v_bad
+    FROM (
+      SELECT CASE WHEN jsonb_typeof(e) = 'object' AND jsonb_typeof(e -> 'from') = 'string' THEN e ->> 'from' END AS s
+        FROM jsonb_array_elements(v_stored_raw) e
+      UNION ALL
+      SELECT CASE WHEN jsonb_typeof(e) = 'object' AND jsonb_typeof(e -> 'to') = 'string' THEN e ->> 'to' END
+        FROM jsonb_array_elements(v_stored_raw) e
+    ) d
+   WHERE NOT COALESCE(
+           CASE WHEN d.s ~ c_date_re THEN
+                  substr(d.s, 9, 2)::integer BETWEEN 1 AND
+                    extract(day FROM (make_date(substr(d.s, 1, 4)::integer, substr(d.s, 6, 2)::integer, 1)
+                                      + interval '1 month' - interval '1 day'))::integer
+                ELSE false
+           END, false);
+  IF v_bad = 0 THEN
+    SELECT count(*) INTO v_bad
+      FROM jsonb_array_elements(v_stored_raw) e
+     WHERE (e ->> 'from')::date > (e ->> 'to')::date;
+  END IF;
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: stored_gaps_malformed - % stored unrecovered_gaps entries are not valid ranges', v_bad
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- A reconstructed_ranges value that is present but not an array is refused, not
+  -- overwritten: appending would destroy a record the reader may still need.
+  v_rtype := jsonb_typeof(v_sp -> 'reconstructed_ranges');
+  IF v_rtype IS NOT NULL AND v_rtype NOT IN ('array', 'null') THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: stored reconstructed_ranges is a JSON %, not an array', v_rtype
+      USING ERRCODE = '22023';
+  END IF;
+  v_old_ranges := CASE WHEN v_rtype = 'array' THEN v_sp -> 'reconstructed_ranges' ELSE '[]'::jsonb END;
+
+  -- Normalise the three gap lists to sorted [{from, to}] so the comparisons below
+  -- are order-insensitive and ignore recorded_at.
+  v_stored := COALESCE((
+    SELECT jsonb_agg(jsonb_build_object('from', e ->> 'from', 'to', e ->> 'to')
+                     ORDER BY (e ->> 'from') COLLATE "C", (e ->> 'to') COLLATE "C")
+      FROM jsonb_array_elements(v_stored_raw) e), '[]'::jsonb);
+  v_expected := COALESCE((
+    SELECT jsonb_agg(jsonb_build_object('from', e ->> 'from', 'to', e ->> 'to')
+                     ORDER BY (e ->> 'from') COLLATE "C", (e ->> 'to') COLLATE "C")
+      FROM jsonb_array_elements(p_expected_gaps) e), '[]'::jsonb);
+  v_expected_aft := COALESCE((
+    SELECT jsonb_agg(jsonb_build_object('from', e ->> 'from', 'to', e ->> 'to')
+                     ORDER BY (e ->> 'from') COLLATE "C", (e ->> 'to') COLLATE "C")
+      FROM jsonb_array_elements(p_expected_gaps_after) e), '[]'::jsonb);
+
+  -- ===== 8. Already applied: every row date already has a csv_daily_returns row
+  --          AND lies inside a stored reconstructed_ranges entry carrying THIS
+  --          source. A re-run after success writes nothing and says so, with a
+  --          status that cannot be mistaken for a refusal. Checked BEFORE the
+  --          compare-and-set, because after a success the stored gaps have moved.
+  --          Range bounds compare as text (fixed-width ISO sorts chronologically,
+  --          COLLATE "C" removes any locale effect), so a malformed stored range
+  --          is skipped rather than raising.
+  SELECT count(*) INTO v_n
+    FROM jsonb_array_elements(p_rows) e
+   WHERE EXISTS (SELECT 1 FROM public.csv_daily_returns c
+                  WHERE c.strategy_id = p_strategy_id AND c.date = (e ->> 'date')::date)
+     AND EXISTS (SELECT 1 FROM jsonb_array_elements(v_old_ranges) r
+                  WHERE r ->> 'source' = c_source
+                    AND (r ->> 'from') ~ c_date_re
+                    AND (r ->> 'to') ~ c_date_re
+                    AND (e ->> 'date') >= (r ->> 'from') COLLATE "C"
+                    AND (e ->> 'date') <= (r ->> 'to') COLLATE "C");
+  IF v_n = jsonb_array_length(p_rows) THEN
+    RETURN jsonb_build_object('status', 'already_applied', 'inserted', 0, 'ranges_added', 0,
+                              'gaps_before', v_stored, 'gaps_after', v_stored);
+  END IF;
+
+  -- ===== 9. Compare-and-set: the stored gaps must be the ones the caller read.
+  IF v_stored IS DISTINCT FROM v_expected THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: gaps_changed - the stored unrecovered_gaps (% ranges) differ from p_expected_gaps (% ranges); nothing was written',
+      jsonb_array_length(v_stored), jsonb_array_length(v_expected)
+      USING ERRCODE = 'P0001';
+  END IF;
+
+  -- ===== 10. Containment (D-01): every row date lies inside a stored gap. One
+  --           row outside rolls the whole call back; the function can only fill
+  --           days TRADESYNC named.
+  SELECT count(*), min(e ->> 'date') INTO v_bad, v_src
+    FROM jsonb_array_elements(p_rows) e
+   WHERE NOT EXISTS (SELECT 1 FROM jsonb_array_elements(v_stored) g
+                      WHERE (e ->> 'date')::date BETWEEN (g ->> 'from')::date AND (g ->> 'to')::date);
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: row_outside_gap - % rows lie outside every stored gap (earliest: %); nothing was written', v_bad, v_src
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- ===== 11. The rows. D-12: a day that already has a row keeps it untouched.
+  --           RETURNING date is the ONLY source of the reconstructed ranges.
+  WITH ins AS (
+    INSERT INTO public.csv_daily_returns (strategy_id, date, daily_return)
+    SELECT p_strategy_id, (e ->> 'date')::date, (e ->> 'daily_return')::double precision
+      FROM jsonb_array_elements(p_rows) e
+    ON CONFLICT (strategy_id, date) DO NOTHING
+    RETURNING date
+  )
+  SELECT array_agg(ins.date ORDER BY ins.date), count(*) INTO v_ins_dates, v_ins_n FROM ins;
+
+  -- ===== 12. The narrowed gaps: for each stored gap, the days that still have no
+  --           row, collapsed into inclusive islands. recorded_at of the stored
+  --           gap rides along. A day nothing covered stays named.
+  WITH g AS (
+    SELECT gx.gi,
+           (gx.x ->> 'from')::date AS f,
+           (gx.x ->> 'to')::date   AS t,
+           gx.x -> 'recorded_at'   AS ra
+      FROM jsonb_array_elements(v_stored_raw) WITH ORDINALITY AS gx(x, gi)
+  ), days AS (
+    SELECT g.gi, g.ra, g.f + s.n AS d
+      FROM g CROSS JOIN LATERAL generate_series(0, g.t - g.f) AS s(n)
+     WHERE NOT EXISTS (SELECT 1 FROM public.csv_daily_returns c
+                        WHERE c.strategy_id = p_strategy_id AND c.date = g.f + s.n)
+  ), isl AS (
+    SELECT days.gi, days.ra, days.d,
+           days.d - (row_number() OVER (PARTITION BY days.gi ORDER BY days.d))::integer AS grp
+      FROM days
+  ), spans AS (
+    SELECT isl.gi, isl.ra, min(isl.d) AS f, max(isl.d) AS t FROM isl GROUP BY isl.gi, isl.ra, isl.grp
+  )
+  SELECT COALESCE(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+                   'from', to_char(spans.f, 'YYYY-MM-DD'),
+                   'to', to_char(spans.t, 'YYYY-MM-DD'),
+                   'recorded_at', spans.ra)) ORDER BY spans.f, spans.t), '[]'::jsonb)
+    INTO v_new_gaps
+    FROM spans;
+  v_new_norm := COALESCE((
+    SELECT jsonb_agg(jsonb_build_object('from', e ->> 'from', 'to', e ->> 'to')
+                     ORDER BY (e ->> 'from') COLLATE "C", (e ->> 'to') COLLATE "C")
+      FROM jsonb_array_elements(v_new_gaps) e), '[]'::jsonb);
+
+  -- The caller computed the same thing on its own side. A difference means the
+  -- two disagree about which days are covered, and the INSERT above rolls back
+  -- with this raise (D-11).
+  IF v_new_norm IS DISTINCT FROM v_expected_aft THEN
+    RAISE EXCEPTION 'apply_okx_archive_rebuild: gaps_after_mismatch - the narrowed gaps (% ranges) differ from p_expected_gaps_after (% ranges); nothing was written',
+      jsonb_array_length(v_new_norm), jsonb_array_length(v_expected_aft)
+      USING ERRCODE = 'P0001';
+  END IF;
+
+  -- ===== 13. The reconstructed ranges: one per island of the days the INSERT
+  --           returned. Nothing inserted, nothing appended.
+  WITH ins AS (
+    SELECT u.d, u.d - (row_number() OVER (ORDER BY u.d))::integer AS grp
+      FROM unnest(COALESCE(v_ins_dates, ARRAY[]::date[])) AS u(d)
+  ), spans AS (
+    SELECT min(ins.d) AS f, max(ins.d) AS t FROM ins GROUP BY ins.grp
+  )
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                   'from', to_char(spans.f, 'YYYY-MM-DD'),
+                   'to', to_char(spans.t, 'YYYY-MM-DD'),
+                   'source', c_source,
+                   'recorded_at', v_now) ORDER BY spans.f), '[]'::jsonb),
+         count(*)
+    INTO v_new_ranges, v_ranges_added
+    FROM spans;
+
+  -- ===== 14. The ONE provenance write. jsonb_set touches only the keys named,
+  --           so legacy_ranges and every other key survive; a NULL column starts
+  --           from an empty object (the table CHECK wants an object or NULL).
+  v_sp := jsonb_set(COALESCE(v_sp, '{}'::jsonb), '{unrecovered_gaps}', v_new_gaps, true);
+  IF v_ranges_added > 0 THEN
+    v_sp := jsonb_set(v_sp, '{reconstructed_ranges}', v_old_ranges || v_new_ranges, true);
+  END IF;
+  UPDATE public.strategy_analytics
+     SET series_provenance = v_sp
+   WHERE strategy_id = p_strategy_id;
+
+  RETURN jsonb_build_object('status', 'applied', 'inserted', v_ins_n, 'ranges_added', v_ranges_added,
+                            'gaps_before', v_stored, 'gaps_after', v_new_norm);
+END;
+$_$;
+
+
+ALTER FUNCTION "public"."apply_okx_archive_rebuild"("p_strategy_id" "uuid", "p_rows" "jsonb", "p_expected_gaps" "jsonb", "p_expected_gaps_after" "jsonb") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."apply_okx_archive_rebuild"("p_strategy_id" "uuid", "p_rows" "jsonb", "p_expected_gaps" "jsonb", "p_expected_gaps_after" "jsonb") IS 'Phase 167.1.2.2.2.1 OKXHISTORY. The one atomic write of the OKX quarterly-archive rebuild: inserts the rebuilt csv_daily_returns rows (ON CONFLICT (strategy_id, date) DO NOTHING, so a live day always wins), narrows strategy_analytics.series_provenance.unrecovered_gaps to the gap days that still have no row, and appends reconstructed_ranges entries {from, to, source okx_bills_history_archive, recorded_at} derived from the rows the INSERT returned, in ONE transaction. Compare-and-set on the stored gaps (p_expected_gaps) and on the caller''s own narrowed gaps (p_expected_gaps_after). Returns {status applied|already_applied, inserted, ranges_added, gaps_before, gaps_after}. ERRCODE map: 22023 = malformed input, missing strategy_analytics row, a row outside every stored gap (row_outside_gap), malformed stored gaps (stored_gaps_malformed); P0001 = gaps_changed (compare-and-set) or gaps_after_mismatch. Never 40001 (PostgREST re-runs it without bound). Messages carry dates and counts only. SECURITY INVOKER; EXECUTE for service_role only.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."backfill_api_keys_history_reconstructed_at"() RETURNS integer
     LANGUAGE "sql"
     SET "search_path" TO 'public', 'pg_catalog'
@@ -1365,14 +1776,46 @@ CREATE OR REPLACE FUNCTION "public"."bridge_outcomes_sync_holding_ref"() RETURNS
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
     AS $$
+DECLARE
+  v_ref                TEXT;
+  v_decision_allocator UUID;
 BEGIN
   IF NEW.match_decision_id IS NOT NULL THEN
-    SELECT original_holding_ref
-      INTO NEW.original_holding_ref
+    SELECT original_holding_ref, allocator_id
+      INTO v_ref, v_decision_allocator
       FROM match_decisions
      WHERE id = NEW.match_decision_id;
+    -- Round-2 RLS audit. This function is SECURITY DEFINER and copies the
+    -- decision's original_holding_ref into the outcome row, which the row's owner
+    -- can read. Without this test an allocator who knows ANOTHER tenant's
+    -- decision id attaches it (INSERT, or UPDATE SET match_decision_id) and reads
+    -- that tenant's holding ref through its own row. A decision that does not
+    -- exist is left to the foreign key, as before. The message names no id.
+    IF FOUND AND v_decision_allocator IS DISTINCT FROM NEW.allocator_id THEN
+      RAISE EXCEPTION 'bridge_outcomes: match_decision_id names a decision that belongs to another allocator'
+        USING ERRCODE = '42501', HINT = 'cross_allocator_decision';
+    END IF;
+    NEW.original_holding_ref := v_ref;
+    NEW.former_match_decision_id := NULL;
   ELSE
     NEW.original_holding_ref := NULL;
+    IF TG_OP = 'INSERT' THEN
+      NEW.former_match_decision_id := NULL;
+    ELSIF OLD.match_decision_id IS NOT NULL THEN
+      -- Review WR-01. Only the ON DELETE SET NULL cascade may record the old
+      -- decision: its UPDATE runs after the decision row is deleted, so the row
+      -- is gone here. A decision that still exists means an owner detached the
+      -- link on purpose, which is a born-NULL row (no former id) that meets the
+      -- duplicate guard; recording the live id would let an owner attach any
+      -- decision id and detach it to escape that guard.
+      IF EXISTS (SELECT 1 FROM match_decisions WHERE id = OLD.match_decision_id) THEN
+        NEW.former_match_decision_id := NULL;
+      ELSE
+        NEW.former_match_decision_id := OLD.match_decision_id;
+      END IF;
+    ELSE
+      NEW.former_match_decision_id := OLD.former_match_decision_id;
+    END IF;
   END IF;
   RETURN NEW;
 END;
@@ -1382,7 +1825,7 @@ $$;
 ALTER FUNCTION "public"."bridge_outcomes_sync_holding_ref"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."bridge_outcomes_sync_holding_ref"() IS 'Phase 09 / finding f4. BEFORE INSERT OR UPDATE OF match_decision_id trigger function that denormalizes match_decisions.original_holding_ref into bridge_outcomes. SECURITY DEFINER + locked search_path; reads match_decisions by PK only (parameterized). Returns NEW with original_holding_ref populated or NULL when match_decision_id is NULL.';
+COMMENT ON FUNCTION "public"."bridge_outcomes_sync_holding_ref"() IS 'Phase 09 / finding f4, extended by Phase 164.9.3.1 D-05. BEFORE INSERT OR UPDATE OF match_decision_id, former_match_decision_id trigger function that denormalizes match_decisions.original_holding_ref into bridge_outcomes (NULL when match_decision_id IS NULL) and owns former_match_decision_id: NULL when a decision is attached or on INSERT, OLD.match_decision_id when an UPDATE removes the link and that decision row is already gone (the ON DELETE SET NULL cascade), NULL when an UPDATE removes the link of a decision that still exists (a voluntary detach, which is a born-NULL row), OLD.former_match_decision_id when an UPDATE leaves it NULL, so a client cannot forge it. It refuses (SQLSTATE 42501, hint cross_allocator_decision) a decision that belongs to another allocator than the outcome row, before any holding ref is copied. SECURITY DEFINER + locked search_path; reads match_decisions by PK only (parameterized).';
 
 
 
@@ -1514,8 +1957,8 @@ CREATE TABLE IF NOT EXISTS "public"."compute_jobs" (
     CONSTRAINT "compute_jobs_error_kind_check" CHECK (("error_kind" = ANY (ARRAY['transient'::"text", 'permanent'::"text", 'unknown'::"text", 'orphaned'::"text"]))),
     CONSTRAINT "compute_jobs_exchange_check" CHECK ((("exchange" IS NULL) OR ("exchange" = ANY (ARRAY['binance'::"text", 'okx'::"text", 'bybit'::"text", 'deribit'::"text", 'sfox'::"text", 'mt5'::"text"])))),
     CONSTRAINT "compute_jobs_idempotency_key_safe" CHECK ((("idempotency_key" IS NULL) OR (("length"("idempotency_key") <= 128) AND ("idempotency_key" ~ '^[A-Za-z0-9_:.-]+$'::"text")))),
-    CONSTRAINT "compute_jobs_kind_check" CHECK (("kind" = ANY (ARRAY['sync_trades'::"text", 'compute_analytics'::"text", 'compute_portfolio'::"text", 'poll_positions'::"text", 'sync_funding'::"text", 'reconcile_strategy'::"text", 'compute_intro_snapshot'::"text", 'rescore_allocator'::"text", 'poll_allocator_positions'::"text", 'reconstruct_allocator_history'::"text", 'refresh_allocator_equity_daily'::"text", 'process_key_long'::"text", 'compute_analytics_from_csv'::"text", 'derive_broker_dailies'::"text", 'stitch_composite'::"text", 'derive_allocator_equity'::"text"]))),
-    CONSTRAINT "compute_jobs_kind_target_coherence" CHECK (((("kind" = 'compute_portfolio'::"text") AND ("portfolio_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'rescore_allocator'::"text") AND ("allocator_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL)) OR (("kind" = ANY (ARRAY['sync_trades'::"text", 'compute_analytics'::"text", 'poll_positions'::"text", 'sync_funding'::"text", 'reconcile_strategy'::"text", 'compute_intro_snapshot'::"text", 'compute_analytics_from_csv'::"text", 'derive_broker_dailies'::"text", 'stitch_composite'::"text"])) AND ("strategy_id" IS NOT NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'poll_allocator_positions'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'reconstruct_allocator_history'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'refresh_allocator_equity_daily'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'derive_broker_dailies'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'process_key_long'::"text") AND ("strategy_id" IS NOT NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL) AND ("api_key_id" IS NULL)) OR (("kind" = 'derive_allocator_equity'::"text") AND ("allocator_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("api_key_id" IS NULL)))),
+    CONSTRAINT "compute_jobs_kind_check" CHECK (("kind" = ANY (ARRAY['sync_trades'::"text", 'compute_analytics'::"text", 'compute_portfolio'::"text", 'poll_positions'::"text", 'sync_funding'::"text", 'reconcile_strategy'::"text", 'compute_intro_snapshot'::"text", 'rescore_allocator'::"text", 'poll_allocator_positions'::"text", 'reconstruct_allocator_history'::"text", 'refresh_allocator_equity_daily'::"text", 'process_key_long'::"text", 'compute_analytics_from_csv'::"text", 'derive_broker_dailies'::"text", 'stitch_composite'::"text", 'derive_allocator_equity'::"text", 'okx_archive_rebuild'::"text"]))),
+    CONSTRAINT "compute_jobs_kind_target_coherence" CHECK (((("kind" = 'compute_portfolio'::"text") AND ("portfolio_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'rescore_allocator'::"text") AND ("allocator_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL)) OR (("kind" = ANY (ARRAY['sync_trades'::"text", 'compute_analytics'::"text", 'poll_positions'::"text", 'sync_funding'::"text", 'reconcile_strategy'::"text", 'compute_intro_snapshot'::"text", 'compute_analytics_from_csv'::"text", 'derive_broker_dailies'::"text", 'stitch_composite'::"text"])) AND ("strategy_id" IS NOT NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'poll_allocator_positions'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'reconstruct_allocator_history'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'refresh_allocator_equity_daily'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'derive_broker_dailies'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)) OR (("kind" = 'process_key_long'::"text") AND ("strategy_id" IS NOT NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL) AND ("api_key_id" IS NULL)) OR (("kind" = 'derive_allocator_equity'::"text") AND ("allocator_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("api_key_id" IS NULL)) OR (("kind" = 'okx_archive_rebuild'::"text") AND ("api_key_id" IS NOT NULL) AND ("strategy_id" IS NULL) AND ("portfolio_id" IS NULL) AND ("allocator_id" IS NULL)))),
     CONSTRAINT "compute_jobs_max_attempts_positive" CHECK (("max_attempts" > 0)),
     CONSTRAINT "compute_jobs_metadata_size_bounded" CHECK ((("metadata" IS NULL) OR ("octet_length"(("metadata")::"text") <= 8192))),
     CONSTRAINT "compute_jobs_priority_check" CHECK (("priority" = ANY (ARRAY['low'::"text", 'normal'::"text", 'high'::"text"]))),
@@ -1578,11 +2021,11 @@ COMMENT ON CONSTRAINT "compute_jobs_claimed_by_safe" ON "public"."compute_jobs" 
 
 
 
-COMMENT ON CONSTRAINT "compute_jobs_kind_check" ON "public"."compute_jobs" IS 'Simple list-form kind admission check. 2026-07-18: extended with derive_allocator_equity (allocator-scoped compose of the P115 derivation core onto allocator_equity_derived). Re-based on 20260710130000.';
+COMMENT ON CONSTRAINT "compute_jobs_kind_check" ON "public"."compute_jobs" IS 'Simple list-form kind admission check. 2026-10-26: extended with okx_archive_rebuild (Phase 167.1.2.2.2.1 OKXHISTORY, the OKX quarterly bills-history-archive rebuild; api_key-scoped). Re-based on 20260717233529.';
 
 
 
-COMMENT ON CONSTRAINT "compute_jobs_kind_target_coherence" ON "public"."compute_jobs" IS 'Kind<->target-type coherence. 2026-07-18: derive_allocator_equity added to a new allocator-scoped arm (allocator_id NOT NULL). Preserves the 20260624120100/20260710130000 dual-target derive_broker_dailies api_key arm — copying an older def would silently drop it and break key-mode allocator derives.';
+COMMENT ON CONSTRAINT "compute_jobs_kind_target_coherence" ON "public"."compute_jobs" IS 'Kind<->target-type coherence. 2026-10-26: okx_archive_rebuild added as an api_key-scoped arm (api_key_id NOT NULL, every other target NULL), so the archive wait never flips a published strategy to computing. Preserves the derive_broker_dailies api_key arm and the derive_allocator_equity allocator arm from 20260717233529 - copying an older def would silently drop them.';
 
 
 
@@ -7631,6 +8074,7 @@ DECLARE
   v_strategy_id      UUID;
   v_current_status   TEXT;
   v_current_token    UUID;
+  v_kids             UUID[];
 BEGIN
   -- audit-2026-05-07 B5: token is now mandatory. NULL was a documented
   -- pre-mig-117 back-compat path; the only production caller (main_worker)
@@ -7698,17 +8142,36 @@ BEGIN
   -- enforces "all parents done" identically to check_fan_in_ready
   -- (count(parents WHERE status <> 'done') = 0). This form was live in prod
   -- 2026-05-16..2026-05-28 (mig 20260516131500) before the silent revert.
-  UPDATE compute_jobs c
-     SET status          = 'pending',
-         next_attempt_at = now()
+  -- Phase 164.9.3.1 D-07 (the routed 164.5.2 review item WR-02): the release is
+  -- now TWO statements. Under READ COMMITTED a single UPDATE evaluates its
+  -- NOT EXISTS on the statement-start snapshot, so two parents of one child
+  -- finishing in two transactions each saw the other still running and both
+  -- released nothing. The children are read first, locked in a statement of
+  -- their own (through the ancestor-first helper, D-06), and only then released
+  -- by a LATER statement: it starts after the lock wait, so it takes a fresh
+  -- snapshot that sees the other parent's commit. The GIN-supported `@>`
+  -- containment is kept on the read.
+  SELECT COALESCE(array_agg(c.id), '{}'::uuid[])
+    INTO v_kids
+    FROM compute_jobs c
    WHERE c.status = 'done_pending_children'
-     AND c.parent_job_ids @> ARRAY[p_job_id]::uuid[]
-     AND NOT EXISTS (
-       SELECT 1
-         FROM compute_jobs p
-        WHERE p.id = ANY(c.parent_job_ids)
-          AND p.status <> 'done'
-     );
+     AND c.parent_job_ids @> ARRAY[p_job_id]::uuid[];
+
+  IF cardinality(v_kids) > 0 THEN
+    PERFORM public._fan_in_lock_rows(v_kids, TRUE);
+
+    UPDATE compute_jobs c
+       SET status          = 'pending',
+           next_attempt_at = now()
+     WHERE c.id = ANY(v_kids)
+       AND c.status = 'done_pending_children'
+       AND NOT EXISTS (
+         SELECT 1
+           FROM compute_jobs p
+          WHERE p.id = ANY(c.parent_job_ids)
+            AND p.status <> 'done'
+       );
+  END IF;
 
   -- Phase 18: atomic UI bridge (preserved from mig 099).
   IF v_strategy_id IS NOT NULL THEN
@@ -7722,7 +8185,7 @@ $$;
 ALTER FUNCTION "public"."mark_compute_job_done"("p_job_id" "uuid", "p_claim_token" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."mark_compute_job_done"("p_job_id" "uuid", "p_claim_token" "uuid") IS 'Terminal success transition. Migration 117 P97 fence + B5 strict-token gate (20260528183100): p_claim_token MUST be non-NULL (NULL raises 22023); mismatch raises SQLSTATE 55006 (object_in_use), which PostgREST answers once. THIS migration (G23-187-mig-01/03): re-applies the GIN-supported set-based `parent_job_ids @> ARRAY[p_job_id]` fan-in advance (the strict-token rewrite had reverted it to a `= ANY(...)` FOR-loop). Preserves the mig 099 Phase-18 atomic UI status bridge.';
+COMMENT ON FUNCTION "public"."mark_compute_job_done"("p_job_id" "uuid", "p_claim_token" "uuid") IS 'Terminal success transition. Migration 117 P97 fence + B5 strict-token gate (20260528183100): p_claim_token MUST be non-NULL (NULL raises 22023); mismatch raises SQLSTATE 55006 (object_in_use), which PostgREST answers once. THIS migration (G23-187-mig-01/03): re-applies the GIN-supported set-based `parent_job_ids @> ARRAY[p_job_id]` fan-in advance (the strict-token rewrite had reverted it to a `= ANY(...)` FOR-loop). Preserves the mig 099 Phase-18 atomic UI status bridge. Phase 164.9.3.1 D-07: the waiting children are locked in one statement through public._fan_in_lock_rows and released in the next, so two parents of one child that finish concurrently release it exactly once.';
 
 
 
@@ -7738,6 +8201,16 @@ DECLARE
   v_strategy_id   UUID;
   v_current_token UUID;
   v_current_status TEXT;
+  -- Phase 164.9.3.1 D-01..D-03: the failure cascade's working set.
+  v_kids          UUID[];
+  v_held          UUID[];
+  v_frontier      UUID[];
+  v_fail_set      UUID[];
+  v_attempt       INTEGER;
+  v_retry         BOOLEAN;
+  v_casc_jobs     UUID[] := '{}';
+  v_casc_strats   UUID[] := '{}';
+  r_b             RECORD;
 BEGIN
   -- audit-2026-05-07 B5: token mandatory (see mark_compute_job_done above).
   IF p_claim_token IS NULL THEN
@@ -7808,11 +8281,165 @@ BEGIN
          next_attempt_at = v_next_attempt
    WHERE id = p_job_id;
 
-  -- Phase 18: atomic UI bridge (preserved from mig 099).
-  IF v_strategy_id IS NOT NULL THEN
-    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(v_strategy_id::text));
-    PERFORM sync_strategy_analytics_status(v_strategy_id, p_job_id);
+  -- Phase 164.9.3.1 D-01 to D-03: a parent that ENDS failed_final can never
+  -- release a waiting fan-in child (release needs every parent `done`), so the
+  -- child would hold its (target, kind) in-flight slot forever and its strategy
+  -- would read `computing`. Fail the descendant closure now, in this
+  -- transaction:
+  --   * ONE ascending lock pass (review CR-01). The whole waiting closure below
+  --     the failed job is READ first (a recursive CTE, no locks), then locked in
+  --     a single call to _fan_in_lock_rows, and only then written. A lock taken
+  --     once per level would hold a deep row (a direct child of the failed job
+  --     that also hangs under a longer chain) while it waited for a shallower
+  --     one, the opposite of the order every other fan-in path ascends, and that
+  --     deadlocks (40P01) against an enqueue or a second cascade. The CTE only
+  --     picks WHICH rows to lock; it never writes.
+  --   * RE-READ UNDER THE LOCKS (review round 2, WR-01). An enqueue that holds a
+  --     share lock on a closure row can commit a NEW child while this
+  --     transaction waits for that row. That child is visible to every
+  --     transaction from its commit on, so another cascade or an enqueue may
+  --     already hold it, and locking it on top of the rows held here would be
+  --     the hold-deep, wait-shallow order CR-01 removed (FL7 reproduces the
+  --     40P01). The earlier note that only the creator knows such a row was
+  --     wrong. So the lock phase is a block with an exception handler, which is
+  --     a subtransaction: after the helper call the closure is read AGAIN, and
+  --     if it holds a row the locked set does not (the first read has an empty
+  --     v_held, so the first pass always locks), the block raises the private
+  --     SQLSTATE FI001. The handler's rollback RELEASES every row lock the block
+  --     took, and the next attempt reads the grown closure afresh and locks all
+  --     of it in ONE ascending pass. The failed job's own row is taken before
+  --     the block and stays held: every closure row is a strict descendant of
+  --     it, so it sorts first. The loop ends when a re-read under the locks
+  --     finds nothing new. That read is complete: a child of a locked row can
+  --     only be created by an enqueue that first share-locks that row, and that
+  --     waits for this transaction; one committed before the lock was granted is
+  --     visible to the re-read, which starts after it. A row that LEFT the
+  --     closure meanwhile (failed by another cascade) only shrinks the re-read,
+  --     which is still contained in the locked set.
+  --   * the retry is bounded at 10 attempts and then fails loud, SQLSTATE 55P03
+  --     (never 55006, which the worker swallows as a watchdog preemption, and
+  --     never 40001 / 40P01). Each retry needs a concurrent enqueue to have
+  --     committed a new descendant inside the window, so the bound is a
+  --     tripwire, not a path. The RAISE aborts the whole RPC, so the job's own
+  --     row is untouched and stays `running`. The worker (main_worker.py,
+  --     dispatch_tick's FAILED branch) matches SQLSTATE 55P03, logs ONE ERROR
+  --     carrying the original error_kind and error, and does NOT re-mark the job:
+  --     its catch-all fallback would mark it error_kind='unknown' and lose a
+  --     permanent failure. The watchdog reclaims the stalled `running` row.
+  --   * the writes stay level by level, over the locked set (v_held), one
+  --     UPDATE ... RETURNING per level, so each child names its OWN failed parent
+  --     (D-03). The UPDATE re-checks `done_pending_children` after the lock, so a
+  --     child a concurrent mark_compute_job_done released meanwhile is left alone.
+  --   * the child inherits the NAMED parent's error_kind (the lowest-uuid parent
+  --     in the frontier, picked by ORDER BY ... LIMIT 1, not an aggregate) and
+  --     last_error names that parent inside the 60 characters the admin table
+  --     shows. last_error is the OPERATOR surface; the user's copy still derives
+  --     from error_kind alone.
+  --   * a failed_retry parent cascades nothing: it may still succeed.
+  --   * each level only touches done_pending_children rows and turns them
+  --     terminal, so a row is processed at most once and the level loop ends
+  --     when a level fails nothing.
+  IF v_new_status = 'failed_final' THEN
+    v_fail_set := ARRAY[p_job_id];
+    v_attempt  := 0;
+    LOOP
+      v_attempt := v_attempt + 1;
+      IF v_attempt > 10 THEN
+        RAISE EXCEPTION 'mark_compute_job_failed: the waiting closure of job % kept growing across % lock attempts, refusing to fail it half-locked', p_job_id, v_attempt - 1
+          USING ERRCODE = '55P03';
+      END IF;
+      v_held  := '{}'::uuid[];
+      v_retry := FALSE;
+      BEGIN
+        LOOP
+          WITH RECURSIVE clo(id) AS (
+            SELECT c.id
+              FROM compute_jobs c
+             WHERE c.status = 'done_pending_children'
+               AND c.parent_job_ids && v_fail_set
+               AND NOT (c.id = ANY(v_fail_set))
+            UNION
+            SELECT c.id
+              FROM compute_jobs c
+              JOIN clo ON c.parent_job_ids @> ARRAY[clo.id]
+             WHERE c.status = 'done_pending_children'
+          )
+          SELECT COALESCE(array_agg(clo.id), '{}'::uuid[])
+            INTO v_kids
+            FROM clo;
+          EXIT WHEN v_kids <@ v_held;
+          IF cardinality(v_held) > 0 THEN
+            RAISE EXCEPTION 'mark_compute_job_failed: the waiting closure of job % grew while its rows were being locked', p_job_id
+              USING ERRCODE = 'FI001';
+          END IF;
+          PERFORM public._fan_in_lock_rows(v_kids, TRUE);
+          v_held := v_kids;
+        END LOOP;
+      EXCEPTION WHEN SQLSTATE 'FI001' THEN
+        v_retry := TRUE;
+      END;
+      EXIT WHEN NOT v_retry;
+    END LOOP;
+
+    IF cardinality(v_held) <> 0 THEN
+      v_frontier := v_fail_set;
+      LOOP
+        WITH failed_kids AS (
+          UPDATE compute_jobs c
+             SET status          = 'failed_final',
+                 error_kind      = fp.error_kind,
+                 last_error      = 'fan_in_parent_failed: ' || fp.id::text
+                                   || ' ended failed_final; this job can never be released',
+                 next_attempt_at = now()
+            FROM compute_jobs fp
+           WHERE c.id = ANY(v_held)
+             AND c.status = 'done_pending_children'
+             AND c.parent_job_ids && v_frontier
+             AND fp.id = (SELECT x
+                            FROM unnest(c.parent_job_ids) AS x
+                           WHERE x = ANY(v_frontier)
+                           ORDER BY x
+                           LIMIT 1)
+          RETURNING c.id AS kid_id, c.strategy_id AS kid_strategy_id
+        )
+        SELECT COALESCE(array_agg(fk.kid_id), '{}'::uuid[]),
+               v_casc_jobs
+                 || COALESCE(array_agg(fk.kid_id) FILTER (WHERE fk.kid_strategy_id IS NOT NULL), '{}'::uuid[]),
+               v_casc_strats
+                 || COALESCE(array_agg(fk.kid_strategy_id) FILTER (WHERE fk.kid_strategy_id IS NOT NULL), '{}'::uuid[])
+          INTO v_frontier, v_casc_jobs, v_casc_strats
+          FROM failed_kids fk;
+        EXIT WHEN cardinality(v_frontier) = 0;
+      END LOOP;
+    END IF;
   END IF;
+
+  -- Phase 18: atomic UI bridge (preserved from mig 099).
+  -- Phase 164.9.3.1 D-01: the bridge now covers EVERY affected strategy, this
+  -- job's own and each failed descendant's, de-duplicated (one row per
+  -- strategy: the own job when the strategy is the job's own, else the lowest
+  -- failed job id on it, so the trigger job is deterministic). Without it the
+  -- child's strategy keeps reading `computing` although its job is terminal.
+  -- Lock order (rules, not preferences): every fan-in row lock above is already
+  -- held; the per-strategy advisory locks come AFTER them, taken in ONE sorted
+  -- order (hashtext of the strategy id, then the id) so two cascades that
+  -- bridge overlapping strategy sets cannot take them in opposite orders. Two
+  -- strategies whose hashes collide share one advisory key, which
+  -- pg_advisory_xact_lock re-enters in the same transaction (no self-deadlock).
+  FOR r_b IN
+    SELECT d.strategy_id, d.job_id
+      FROM (SELECT DISTINCT ON (u.strategy_id) u.strategy_id, u.job_id
+              FROM (SELECT v_strategy_id AS strategy_id, p_job_id AS job_id, 0 AS ord
+                    UNION ALL
+                    SELECT t.strategy_id, t.job_id, 1
+                      FROM unnest(v_casc_strats, v_casc_jobs) AS t(strategy_id, job_id)) u
+             WHERE u.strategy_id IS NOT NULL
+             ORDER BY u.strategy_id, u.ord, u.job_id) d
+     ORDER BY hashtext(d.strategy_id::text), d.strategy_id
+  LOOP
+    PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(r_b.strategy_id::text));
+    PERFORM sync_strategy_analytics_status(r_b.strategy_id, r_b.job_id);
+  END LOOP;
 
   RETURN v_next_attempt;
 END;
@@ -7822,7 +8449,7 @@ $$;
 ALTER FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_error" "text", "p_error_kind" "text", "p_claim_token" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_error" "text", "p_error_kind" "text", "p_claim_token" "uuid") IS 'Terminal failure transition. Mig 117 / P97 fence + B5 strict-token follow-up: p_claim_token MUST be non-NULL (NULL raises 22023 invalid_parameter_value); mismatch raises SQLSTATE 55006 (object_in_use), which PostgREST answers once. Backoff schedule preserved verbatim from mig 109 P4. HOTFIX 20260529180000: writes error_kind (not the non-existent last_error_kind that mig 20260528183100 typo-introduced, which 42703-errored every failed mark).';
+COMMENT ON FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_error" "text", "p_error_kind" "text", "p_claim_token" "uuid") IS 'Terminal failure transition. Mig 117 / P97 fence + B5 strict-token follow-up: p_claim_token MUST be non-NULL (NULL raises 22023 invalid_parameter_value); mismatch raises SQLSTATE 55006 (object_in_use), which PostgREST answers once. Backoff schedule preserved verbatim from mig 109 P4. HOTFIX 20260529180000: writes error_kind (not the non-existent last_error_kind that mig 20260528183100 typo-introduced, which 42703-errored every failed mark). Phase 164.9.3.1 D-01 to D-03: when the job ends failed_final it locks its whole waiting closure in one ascending pass through public._fan_in_lock_rows and then fails the waiting descendants level by level in the same transaction, each naming its own failed parent in last_error and inheriting that parent''s error_kind, and bridges every affected strategy through sync_strategy_analytics_status. The closure is re-read under the locks: a child committed during the lock wait makes it release the locks it took and lock the grown closure again in one ascending pass (bounded, SQLSTATE 55P03 past ten attempts).';
 
 
 
@@ -12175,6 +12802,7 @@ CREATE TABLE IF NOT EXISTS "public"."bridge_outcomes" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "original_holding_ref" "text",
+    "former_match_decision_id" "uuid",
     CONSTRAINT "bridge_outcomes_allocated_at_check" CHECK ((("allocated_at" IS NULL) OR (("allocated_at" <= CURRENT_DATE) AND ("allocated_at" >= (CURRENT_DATE - '365 days'::interval))))),
     CONSTRAINT "bridge_outcomes_estimated_days_check" CHECK ((("estimated_days" IS NULL) OR (("estimated_days" >= 0) AND ("estimated_days" <= 180)))),
     CONSTRAINT "bridge_outcomes_kind_allocated" CHECK ((("kind" <> 'allocated'::"text") OR (("percent_allocated" IS NOT NULL) AND ("allocated_at" IS NOT NULL) AND ("rejection_reason" IS NULL) AND (("strategy_id" IS NOT NULL) OR ("match_decision_id" IS NOT NULL))))),
@@ -12189,7 +12817,7 @@ CREATE TABLE IF NOT EXISTS "public"."bridge_outcomes" (
 ALTER TABLE "public"."bridge_outcomes" OWNER TO "postgres";
 
 
-COMMENT ON TABLE "public"."bridge_outcomes" IS 'Allocator self-reported post-intro outcome for a Bridge-recommended strategy, or for a voluntary scenario decision (Phase 10). Uniqueness is two-part. (i) bridge_outcomes_allocator_match_decision_unique, UNIQUE (allocator_id, match_decision_id): one outcome per decision (migration 081). (ii) bridge_outcomes_legacy_per_strategy_holding_when_md_null, a partial UNIQUE on (allocator_id, strategy_id, COALESCE(original_holding_ref, '''')) WHERE match_decision_id IS NULL (migration 083), for rows whose decision was nulled out. The sync trigger writes NULL to original_holding_ref for every such row it touches, so that index is in effect one outcome per (allocator, strategy) among them. Two outcomes for the same (allocator, strategy) under two different decisions are allowed by design. Outcomes are editable by owner (D-17) and append-only from an audit perspective (no DELETE policy; corrective edits via UPSERT). Scope: D-08 through D-19, OUTCOME-01 through OUTCOME-08.';
+COMMENT ON TABLE "public"."bridge_outcomes" IS 'Allocator self-reported post-intro outcome for a Bridge-recommended strategy, or for a voluntary scenario decision (Phase 10). Uniqueness is two-part. (i) bridge_outcomes_allocator_match_decision_unique, UNIQUE (allocator_id, match_decision_id): one outcome per decision (migration 081). (ii) bridge_outcomes_legacy_per_strategy_holding_when_md_null, a partial UNIQUE on (allocator_id, strategy_id, COALESCE(original_holding_ref, ''''), COALESCE(former_match_decision_id, zero uuid)) WHERE match_decision_id IS NULL (migration 083, re-keyed by Phase 164.9.3.1 D-05), for rows whose decision is gone. A row orphaned by the ON DELETE SET NULL cascade keeps the decision it came from in former_match_decision_id (written by the sync trigger, never by a client, no foreign key), so orphans of different decisions never collide; a row born with no decision has a NULL former_match_decision_id, so those keep one outcome per (allocator, strategy, holding). The sync trigger writes NULL to original_holding_ref for every md-NULL row it touches, so the holding part of that key is empty for them. Two outcomes for the same (allocator, strategy) under two different decisions are allowed by design. Outcomes are editable by owner (D-17) and append-only from an audit perspective (no DELETE policy; corrective edits via UPSERT). Scope: D-08 through D-19, OUTCOME-01 through OUTCOME-08.';
 
 
 
@@ -12253,7 +12881,11 @@ COMMENT ON COLUMN "public"."bridge_outcomes"."needs_recompute" IS 'Flag set TRUE
 
 
 
-COMMENT ON COLUMN "public"."bridge_outcomes"."original_holding_ref" IS 'Phase 09 / finding f4. Denormalized mirror of match_decisions.original_holding_ref, populated by bridge_outcomes_sync_holding_ref_trigger on INSERT/UPDATE OF match_decision_id. NULL for strategy-sourced rows (original_strategy_id path). NULL when match_decision_id IS NULL (the trigger writes NULL for those rows). The md-NULL partial index bridge_outcomes_legacy_per_strategy_holding_when_md_null (migration 083) keys on COALESCE(original_holding_ref, ''''), but because the trigger nulls this column for md-NULL rows, that index is in effect per (allocator, strategy); a non-empty holding reaches it only through a direct UPDATE of this column that leaves match_decision_id unchanged. Rows with a decision are keyed by bridge_outcomes_allocator_match_decision_unique (migration 081), which does not read this column.';
+COMMENT ON COLUMN "public"."bridge_outcomes"."original_holding_ref" IS 'Phase 09 / finding f4. Denormalized mirror of match_decisions.original_holding_ref, populated by bridge_outcomes_sync_holding_ref_trigger on INSERT/UPDATE OF match_decision_id, only from a decision of the outcome row''s own allocator (another allocator''s decision is refused). NULL for strategy-sourced rows (original_strategy_id path). NULL when match_decision_id IS NULL (the trigger writes NULL for those rows). The md-NULL partial index bridge_outcomes_legacy_per_strategy_holding_when_md_null (migration 083) keys on COALESCE(original_holding_ref, ''''), then on COALESCE(former_match_decision_id, zero uuid) (Phase 164.9.3.1 D-05), but because the trigger nulls this column for md-NULL rows, that index is in effect per (allocator, strategy, former decision); a non-empty holding reaches it only through a direct UPDATE of this column that leaves match_decision_id unchanged. Rows with a decision are keyed by bridge_outcomes_allocator_match_decision_unique (migration 081), which does not read this column.';
+
+
+
+COMMENT ON COLUMN "public"."bridge_outcomes"."former_match_decision_id" IS 'Phase 164.9.3.1 D-05. The match_decisions row this outcome was recorded under, kept after that decision was deleted and the ON DELETE SET NULL cascade nulled match_decision_id. Written only by bridge_outcomes_sync_holding_ref_trigger: NULL whenever match_decision_id is set, NULL on INSERT, the old match_decision_id when an UPDATE removes the link and that decision row no longer exists (the cascade), NULL when an UPDATE removes the link of a decision that still exists (a voluntary detach), unchanged when an UPDATE leaves it NULL. No foreign key by design (the decision it names is deleted by the event that fills it). Keys the md-NULL partial unique index, so cascade orphans of different decisions never collide.';
 
 
 
@@ -14309,11 +14941,11 @@ CREATE INDEX "bridge_outcomes_allocator_recent" ON "public"."bridge_outcomes" US
 
 
 
-CREATE UNIQUE INDEX "bridge_outcomes_legacy_per_strategy_holding_when_md_null" ON "public"."bridge_outcomes" USING "btree" ("allocator_id", "strategy_id", COALESCE("original_holding_ref", ''::"text")) WHERE ("match_decision_id" IS NULL);
+CREATE UNIQUE INDEX "bridge_outcomes_legacy_per_strategy_holding_when_md_null" ON "public"."bridge_outcomes" USING "btree" ("allocator_id", "strategy_id", COALESCE("original_holding_ref", ''::"text"), COALESCE("former_match_decision_id", '00000000-0000-0000-0000-000000000000'::"uuid")) WHERE ("match_decision_id" IS NULL);
 
 
 
-COMMENT ON INDEX "public"."bridge_outcomes_legacy_per_strategy_holding_when_md_null" IS 'Phase 10 / migration 083 (P2). Partial UNIQUE that restores the migration-072 (allocator_id, strategy_id, original_holding_ref) per-strategy invariant for any bridge_outcomes row whose match_decision_id was nulled out (e.g., via the ON DELETE SET NULL cascade when a match_decision is deleted). Migration 081 replaced 072''s unconditional unique with (allocator_id, match_decision_id), which over Postgres''s NULL-distinct semantics no longer blocks duplicate legacy-shape rows. This partial index restores that block strictly for the NULL-md case; rows with a real match_decision_id continue to use the bridge_outcomes_allocator_match_decision_unique constraint.';
+COMMENT ON INDEX "public"."bridge_outcomes_legacy_per_strategy_holding_when_md_null" IS 'Phase 10 / migration 083 (P2), re-keyed by Phase 164.9.3.1 D-05. Partial UNIQUE on (allocator_id, strategy_id, COALESCE(original_holding_ref, ''''), COALESCE(former_match_decision_id, zero uuid)) WHERE match_decision_id IS NULL. Guards two populations of rows with no live decision. Rows born with no decision have a NULL former_match_decision_id and the sync trigger keeps original_holding_ref NULL, so they share one key per (allocator, strategy) and a second one raises 23505 (the owner-insert duplicate guard). Rows orphaned by the ON DELETE SET NULL cascade carry the decision they came from in former_match_decision_id, so orphans of different decisions never collide. Rows with a real match_decision_id use bridge_outcomes_allocator_match_decision_unique.';
 
 
 
@@ -14901,7 +15533,7 @@ CREATE OR REPLACE TRIGGER "bridge_outcomes_set_updated_at_trigger" BEFORE UPDATE
 
 
 
-CREATE OR REPLACE TRIGGER "bridge_outcomes_sync_holding_ref_trigger" BEFORE INSERT OR UPDATE OF "match_decision_id" ON "public"."bridge_outcomes" FOR EACH ROW EXECUTE FUNCTION "public"."bridge_outcomes_sync_holding_ref"();
+CREATE OR REPLACE TRIGGER "bridge_outcomes_sync_holding_ref_trigger" BEFORE INSERT OR UPDATE OF "match_decision_id", "former_match_decision_id" ON "public"."bridge_outcomes" FOR EACH ROW EXECUTE FUNCTION "public"."bridge_outcomes_sync_holding_ref"();
 
 
 
@@ -16672,6 +17304,11 @@ GRANT ALL ON FUNCTION "public"."_enqueue_compute_job_internal"("p_strategy_id" "
 
 
 
+REVOKE ALL ON FUNCTION "public"."_fan_in_lock_rows"("p_ids" "uuid"[], "p_for_update" boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fan_in_lock_rows"("p_ids" "uuid"[], "p_for_update" boolean) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."_match_decisions_visibility_check"() TO "anon";
 GRANT ALL ON FUNCTION "public"."_match_decisions_visibility_check"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."_match_decisions_visibility_check"() TO "service_role";
@@ -16708,6 +17345,11 @@ GRANT ALL ON FUNCTION "public"."advance_sync_cursor"("p_api_key_id" "uuid", "p_j
 
 REVOKE ALL ON FUNCTION "public"."api_key_cooldown_remaining"("p_api_key_id" "uuid", "p_cooldown_seconds" integer) FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."api_key_cooldown_remaining"("p_api_key_id" "uuid", "p_cooldown_seconds" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."apply_okx_archive_rebuild"("p_strategy_id" "uuid", "p_rows" "jsonb", "p_expected_gaps" "jsonb", "p_expected_gaps_after" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."apply_okx_archive_rebuild"("p_strategy_id" "uuid", "p_rows" "jsonb", "p_expected_gaps" "jsonb", "p_expected_gaps_after" "jsonb") TO "service_role";
 
 
 
