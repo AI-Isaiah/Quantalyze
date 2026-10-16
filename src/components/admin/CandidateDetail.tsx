@@ -117,7 +117,27 @@ export function CandidateDetail({
         </p>
         <div className="space-y-2">
           {breakdown.portfolio_fit !== undefined && (
-            <SubScoreBar label="Portfolio fit" value={breakdown.portfolio_fit} />
+            <>
+              <SubScoreBar label="Portfolio fit" value={breakdown.portfolio_fit} />
+              {/* GAP-01: admin-only cause of a null fit. Only a known reason renders (short
+                  overlap also needs numeric counts); an unknown reason or a bad count renders
+                  nothing. */}
+              {raw.fit_unavailable_reason === "overlap_below_min" &&
+                Number.isFinite(raw.fit_overlap_days) &&
+                Number.isFinite(raw.fit_min_overlap_days) && (
+                  <p className="text-caption text-text-muted">
+                    {`Portfolio fit not computed: only ${raw.fit_overlap_days} shared ${
+                      raw.fit_overlap_days === 1 ? "day" : "days"
+                    } with the book (needs ${raw.fit_min_overlap_days}).`}
+                  </p>
+                )}
+              {raw.fit_unavailable_reason === "no_candidate_returns" && (
+                <p className="text-caption text-text-muted">
+                  Portfolio fit not computed: this strategy has no daily returns to compare with
+                  the book.
+                </p>
+              )}
+            </>
           )}
           {breakdown.preference_fit !== undefined && (
             <SubScoreBar label="Preference fit" value={breakdown.preference_fit} />
