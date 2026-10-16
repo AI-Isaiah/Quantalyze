@@ -94,10 +94,17 @@ async def csv_validate(
         # only; the client gets a fixed sentence.
         #
         # One arm, not two. The old `except ValueError` arm returned a 400 with
-        # `str(e)`, but `validate_csv` raises ValueError for exactly one reason
-        # (an unsupported fmt) and the pre-check above has already rejected
-        # that with the fixed sentence, so a ValueError reaching here is an
-        # internal fault, not a client error. 500 is the honest status.
+        # `str(e)`. `validate_csv` is contracted to RETURN an envelope for any
+        # file content, rejected or not, and to raise ValueError only for an
+        # unsupported fmt, which the pre-check above has already rejected with
+        # the fixed sentence. So anything reaching here, a ValueError included,
+        # is an internal fault and not a client error. 500 is the honest status.
+        # (An earlier version of this comment said ValueError had exactly one
+        # source. That was false: a daylight-saving offset change in the dates
+        # raised "Mixed timezones" from pandas. It is fixed in the validator, and
+        # `tests/test_csv_never_raises_170_1.py` pins the never-raise contract
+        # over a hostile corpus so the next escape is a red test, not a retry
+        # message.)
         logger.error("[csv-validator] unexpected error: %s", type(e).__name__)
         raise HTTPException(status_code=500, detail={
             "ok": False,

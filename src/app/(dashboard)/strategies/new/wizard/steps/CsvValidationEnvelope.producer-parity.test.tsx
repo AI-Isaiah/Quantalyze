@@ -107,6 +107,9 @@ describe("[170.1 round-1 WR-01] csv_validator.py rule literals vs CSV_RULE_LABEL
       "No data rows found",
       "Could not parse CSV: ",
       "a data row has more fields than the header row.",
+      // The whole founder-approved sentence as ONE literal (D-14): the producer
+      // keeps it on a single line so this pin can find it.
+      "Could not parse CSV: two columns have the same name.",
       "Could not determine the date format",
     ]) {
       expect(producerSource, `producer no longer contains "${fixed}"`).toContain(fixed);
