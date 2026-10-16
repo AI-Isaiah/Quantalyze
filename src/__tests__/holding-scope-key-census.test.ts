@@ -371,7 +371,7 @@ export const CLASSIFICATION: Classification = {
   },
   "analytics-service/routers/match.py": {
     M4: {
-      count: 4,
+      count: 6,
       verdict: "merges-on-purpose",
       symbols: [
         "_load_holding_portfolio_context",
@@ -379,7 +379,7 @@ export const CLASSIFICATION: Classification = {
         "compute_holding_flags",
         "_score_one_allocator",
       ],
-      reason: "Every f-string builds the Bridge pseudo-strategy id from the COLLAPSED holdings: _load_holding_portfolio_context applies the account rule (one_key_per_account_day) and then SUMS the counted keys' values into one row per (venue, symbol, holding_type); the other three rebuild the same id from those rows. One pseudo-strategy per ref, carrying the total once, is the matcher's unit.",
+      reason: "Every f-string builds the Bridge pseudo-strategy id from the COLLAPSED holdings: _load_holding_portfolio_context applies the account rule (one_key_per_account_day) and then SUMS the counted keys' values into one row per (venue, symbol, holding_type); the other five rebuild the same id from those rows (compute_holding_flags three times: its eligible loop, its withheld-spot loop and its derivative loop). One pseudo-strategy per ref, carrying the total once, is the matcher's unit.",
     },
     M6: {
       count: 1,
@@ -388,10 +388,15 @@ export const CLASSIFICATION: Classification = {
       reason: "A `startswith(\"holding:\")` guard that keeps pseudo-ids out of the real-strategy candidate pick; it reads the prefix.",
     },
     M8: {
-      count: 1,
+      count: 2,
       verdict: "merges-on-purpose",
-      symbols: ["_load_holding_portfolio_context", "holdings_map", "one_key_per_account_day"],
-      reason: "The tuple (venue, symbol, holding_type) is the SUMMING key of holdings_map, the unit the matcher scores. It is built only AFTER the per-key per-account rule: one_key_per_account_day picks one key per account, so two accounts' rows of one asset reach the map as two summands (170.4 D-08, D-10) and are added together on purpose, never overwritten. The same collapse the M4 pseudo-strategy ids rely on.",
+      symbols: [
+        "_load_holding_portfolio_context",
+        "holdings_map",
+        "one_key_per_account_day",
+        "marks_by_ref",
+      ],
+      reason: "Two tuples of (venue, symbol, holding_type), both merging on purpose. (1) The SUMMING key of holdings_map, the unit the matcher scores: it is built only AFTER the per-key per-account rule, since one_key_per_account_day picks one key per account, so two accounts' rows of one asset reach the map as two summands (170.4 D-08, D-10) and are added together, never overwritten. (2) The grouping key of marks_by_ref (167.1.1.1 D-08), the price history: it groups EVERY key's mark rows of one asset on one venue under one ref and keeps all of them, and classify_spot_marks then keeps ONE mark per day across them (latest updated_at, ties to the smallest lowercase api_key_id), so two keys holding the asset never double a day. A venue's marks never feed another venue's series, and no read is keyed by bare symbol.",
     },
   },
 };

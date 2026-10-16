@@ -157,7 +157,14 @@ max_drawdown = _max_drawdown
 # of portfolio_fit changed sign (a shallower drawdown is now positive, through
 # drawdown_improvement); trigger #2 re-scores cached v2.1.0 batches on the first
 # post-deploy cron run, and WEIGHTS_VERSION stays v2.0.0 because no weight changed.
-ENGINE_VERSION = "v2.2.0"
+# Phase 167.1.1.1 (BRIDGERETURNS, 2026-10-16) bumps ENGINE_VERSION to v2.3.0 because the
+# INPUT LAYER changed again: per-holding returns come from mark prices instead of dollar
+# ratios, withheld holdings stay in the AUM and the weights, and the AUM basis is
+# holdingEquityContribution (derivatives add their signed P&L, never their notional).
+# Trigger #2 re-scores every batch cached under the previous version on the first
+# post-deploy cron tick, so the after-deploy PROD reading is unambiguous; WEIGHTS_VERSION
+# stays v2.0.0 because no weight changed.
+ENGINE_VERSION = "v2.3.0"
 WEIGHTS_VERSION = "v2.0.0"
 
 # Top-N candidates returned per batch
