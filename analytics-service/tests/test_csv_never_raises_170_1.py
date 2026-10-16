@@ -160,24 +160,29 @@ def test_day_first_dates_with_offsets_across_dst_keep_the_dates_the_user_wrote()
     ]
 
 
-def test_the_parse_backstop_does_not_raise_on_mixed_offsets_the_pattern_missed() -> None:
-    """`_drop_utc_offsets` takes the wall-clock date for every spelling it
-    recognises. `_parse_dates` is the backstop behind it for any spelling it does
-    not: mixed offsets must come back as a series (UTC, naive), never an exception.
-    Called directly because no realistic file reaches it with the pattern in place."""
+def test_the_parse_backstop_never_converts_a_zone_it_is_handed() -> None:
+    """D-14 amendment (founder, 2026-10-16): "`utc=True` never converts a date
+    silently". `_normalise_date_zones` strips or rejects every zone before any parse, so no
+    accepted file reaches `_parse_dates` with a zone on it. If one ever did, the
+    parser must fail CLOSED: every value NaT, so pandera reports a date error at
+    each row. It must neither raise (the callers turn a raise into "try again")
+    nor return a shifted calendar. Mixed offsets used to come back converted to
+    UTC (`2024-03-29T23:00`), which is the silent move this test now forbids."""
     import pandas as pd
 
     from services.csv_validator import _parse_dates
 
     mixed = pd.Series(["2024-03-30T00:00:00+01:00", "2024-03-31T00:00:00+02:00", "not a date"])
-    parsed = _parse_dates(mixed)  # must not raise
+    single = pd.Series(["2024-03-30T00:00:00+01:00", "2024-03-31T00:00:00+01:00"])
 
-    assert parsed.dt.tz is None
-    assert list(parsed.dropna().dt.strftime("%Y-%m-%dT%H:%M")) == [
-        "2024-03-29T23:00",
-        "2024-03-30T22:00",
-    ]
-    assert bool(parsed.isna().iloc[2])
+    for zoned in (mixed, single):
+        parsed = _parse_dates(zoned)  # must not raise
+        assert parsed.dt.tz is None
+        assert bool(parsed.isna().all()), list(parsed)
+
+    # Naive input is untouched by the guard.
+    naive = _parse_dates(pd.Series(["2024-03-30T00:00:00", "2024-03-31T12:30:00"]))
+    assert list(naive.dt.strftime("%Y-%m-%dT%H:%M")) == ["2024-03-30T00:00", "2024-03-31T12:30"]
 
 
 def test_a_dst_file_with_a_genuine_date_defect_is_still_rejected() -> None:
@@ -188,6 +193,167 @@ def test_a_dst_file_with_a_genuine_date_defect_is_still_rejected() -> None:
 
     assert envelope["ok"] is False
     assert "monotonic_dates" in {e["rule"] for e in envelope["errors"]}
+
+
+# ---------------------------------------------------------------------------
+# Part A2 - a zone that survives the strip is a date error, never a shifted date
+# (D-14 amendment, review finding D14-M2 / F1)
+# ---------------------------------------------------------------------------
+
+COERCE_RULE_PREFIX = "coerce_dtype("
+
+# Each specimen is a file the validator must REJECT. Before this round every one
+# came back `ok: True` with the calendar moved by a day (dateutil reads `GMT+1`
+# as UTC-1, a single-digit hour as a zone, and a trailing `(CET)` defeated the
+# strip's `$` anchor so the `utc=True` backstop converted the value).
+ZONE_REJECTED = [
+    pytest.param(
+        ["2024-03-29T00:00:00+2", "2024-03-30T00:00:00+2", "2024-03-31T00:00:00+2"],
+        id="single-digit-hour-offset",
+    ),
+    pytest.param(
+        ["2024-03-29 00:00+2:00", "2024-03-30 00:00+2:00", "2024-03-31 00:00+2:00"],
+        id="single-digit-hour-with-minutes",
+    ),
+    pytest.param(
+        ["2024-03-29 23:00 GMT+1", "2024-03-30 23:00 GMT+1", "2024-03-31 23:00 GMT+1"],
+        id="gmt-plus-1",
+    ),
+    pytest.param(
+        ["2024-03-29 23:00 GMT+1", "2024-03-30 23:00 GMT+1", "2024-03-31 23:00 GMT+2", "2024-04-01 23:00 GMT+2"],
+        id="gmt-plus-1-then-plus-2",
+    ),
+    pytest.param(
+        ["2024-03-29 23:00 GMT+02:00", "2024-03-30 23:00 GMT+02:00", "2024-03-31 23:00 GMT+02:00"],
+        id="gmt-plus-two-digit-colon",
+    ),
+    pytest.param(
+        [
+            "13/01/2024 00:00 +01:00 (CET)",
+            "14/01/2024 00:00 +01:00 (CET)",
+            "15/01/2024 00:00 +01:00 (CET)",
+            "16/01/2024 00:00 +01:00 (CET)",
+        ],
+        id="offset-then-parenthesised-name",
+    ),
+    pytest.param(
+        [
+            "29/03/2024 00:00 +01:00 (CET)",
+            "30/03/2024 00:00 +01:00 (CET)",
+            "31/03/2024 00:00 +02:00 (CEST)",
+            "01/04/2024 00:00 +02:00 (CEST)",
+        ],
+        id="cet-then-cest-mixed",
+    ),
+]
+
+
+@pytest.mark.parametrize("fmt", list(HEADER))
+@pytest.mark.parametrize("dates", ZONE_REJECTED)
+def test_a_zone_the_strip_does_not_recognise_is_rejected_not_shifted(
+    fmt: str, dates: list[str]
+) -> None:
+    envelope = validate_csv(_file(fmt, dates), fmt)  # must not raise
+
+    assert envelope["ok"] is False, envelope
+    # No series is ever emitted for a rejected file, shifted or otherwise.
+    assert "daily_returns_series" not in envelope
+    # The existing date rule, on the date column, at the real 1-based rows.
+    coerce_rows = sorted(
+        e["row"] for e in envelope["errors"] if e["rule"].startswith(COERCE_RULE_PREFIX)
+    )
+    assert coerce_rows == list(range(1, len(dates) + 1)), envelope["errors"]
+    assert all(
+        e["column"] == "date" for e in envelope["errors"] if e["rule"].startswith(COERCE_RULE_PREFIX)
+    )
+
+
+@pytest.mark.parametrize("fmt", list(HEADER))
+def test_only_the_row_with_the_unsupported_zone_is_reported_and_at_its_real_row(fmt: str) -> None:
+    """Three rows are in a recognised spelling, row 3 is not. The error names row
+    3, not row 1 and not a row index of the stripped frame."""
+    dates = [
+        "2024-03-28T00:00:00+02:00",
+        "2024-03-29T00:00:00+02:00",
+        "2024-03-30T00:00:00+2",
+        "2024-03-31T00:00:00+02:00",
+    ]
+    envelope = validate_csv(_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    coerce = [e for e in envelope["errors"] if e["rule"].startswith(COERCE_RULE_PREFIX)]
+    assert [e["row"] for e in coerce] == [3], envelope["errors"]
+    # The message is the existing pandera sentence: no cell, no zone text.
+    assert "+2" not in json.dumps(envelope["errors"])
+
+
+def test_the_preview_of_a_rejected_zone_file_shows_what_the_user_wrote() -> None:
+    """The guard replaces the cell with an unparseable token while pandera runs.
+    That token is an implementation detail and must not reach the preview."""
+    dates = ["2024-03-29T00:00:00+02:00", "2024-03-30T00:00:00+2", "2024-03-31T00:00:00+02:00"]
+    envelope = validate_csv(_file("daily_returns", dates), "daily_returns")
+
+    shown = [r["date"] for r in envelope["preview"]["first_rows"]]
+    assert shown[1] == "2024-03-30T00:00:00+2"
+    assert "0000-00-00" not in json.dumps(envelope["preview"])
+
+
+# The recognised spellings keep working, with the calendar date the user wrote.
+RECOGNISED_ZONES = [
+    pytest.param("{d}T{c}+02:00", id="colon-offset"),
+    pytest.param("{d}T{c}+0200", id="compact-offset"),
+    pytest.param("{d}T{c}+02", id="hours-only-offset"),
+    pytest.param("{d}T{c}-05:00", id="negative-offset"),
+    pytest.param("{d}T{c}Z", id="z"),
+    pytest.param("{d} {c} UTC", id="utc-word"),
+    pytest.param("{d} {c} UTC+02:00", id="utc-prefixed-offset"),
+    pytest.param("{d} {c} +02:00", id="space-before-offset"),
+]
+
+
+@pytest.mark.parametrize("fmt", ["daily_returns", "daily_nav"])
+@pytest.mark.parametrize("clock", ["00:00:00", "23:30:00"])
+@pytest.mark.parametrize("shape", RECOGNISED_ZONES)
+def test_the_recognised_zone_spellings_keep_the_calendar_date_written(
+    fmt: str, clock: str, shape: str
+) -> None:
+    days = ["2024-03-29", "2024-03-30", "2024-03-31"]
+    dates = [shape.format(d=d, c=clock) for d in days]
+    envelope = validate_csv(_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is True, (dates, envelope["errors"])
+    assert envelope["preview"]["date_range"] == ["2024-03-29", "2024-03-31"]
+    series = [r["date"] for r in envelope["daily_returns_series"]]
+    assert series == (days if fmt == "daily_returns" else days[1:])
+
+
+# The invariant behind all of the above, over a grid of spellings: an ACCEPTED
+# daily file carries exactly the calendar dates written in it. A spelling is
+# either read as the wall clock or rejected; none moves a date.
+_SPELLINGS = [
+    "", "Z", "z", " UTC", " GMT", "+02:00", "+0200", "+02", "-05:00", " +02:00",
+    "+2", "+2:00", "+02:0", "+002", "+99:99", "+24:00", "+0260",
+    " GMT+1", " GMT-5", " GMT+02:00", " UTC+2", " UTC+02:00", " UTC-5",
+    " (CET)", " CET", " +01:00 (CET)", "+01:00 CET", " +0100 CEST", " EST",
+    " America/New_York", " +01:00 +02:00", "+01:00Z", " Z+01:00", "\u200b+02:00",
+]
+_CLOCKS = ["T00:00:00", " 23:30", " 00:00:00.123", "T12:00"]
+
+
+@pytest.mark.parametrize("fmt", ["daily_returns", "daily_nav", "trades"])
+@pytest.mark.parametrize("clock", _CLOCKS)
+@pytest.mark.parametrize("spelling", _SPELLINGS)
+def test_no_zone_spelling_raises_and_none_moves_a_daily_date(
+    fmt: str, clock: str, spelling: str
+) -> None:
+    days = ["2024-03-29", "2024-03-30", "2024-03-31"]
+    dates = [d + clock + spelling for d in days]
+    envelope = validate_csv(_file(fmt, dates), fmt)  # must not raise
+
+    if envelope["ok"] and fmt != "trades":
+        assert envelope["preview"]["date_range"] == [days[0], days[-1]], (spelling, clock)
+        series = [r["date"] for r in envelope["daily_returns_series"]]
+        assert series == (days if fmt == "daily_returns" else days[1:]), (spelling, clock)
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +554,10 @@ def _corpus() -> list[tuple[str, str, bytes]]:
         add("header-case-collision-date", fmt, h.replace("date", "date,Date", 1) + "\n" + "\n".join(x.replace(",", ",x,", 1) for x in rows) + "\n")
         add("header-case-collision-last", fmt, h + f",{cols[-1].upper()}\n" + "\n".join(x + ",5" for x in rows) + "\n")
         add("header-case-collision-marker", fmt, f"{MARKER},{MARKER.lower()}\n" + "\n".join(rows) + "\n")
+        # D-14 amendment specimens: zones the strip does not recognise.
+        for zone_case in ZONE_REJECTED:
+            add(f"zone-{zone_case.id}", fmt, _file(fmt, zone_case.values[0]))
+        add("zone-marker-before-offset", fmt, _file(fmt, [f"2024-03-29 00:00 {MARKER}+2", f"2024-03-30 00:00 {MARKER} GMT+1", "2024-03-31T00:00:00+02:00"]))
 
     # Format-specific shapes.
     add("dr-all-marker-single", "daily_returns", f"date,daily_return\n2024-01-01,{MARKER}\n2024-01-02,{MARKER}\n")

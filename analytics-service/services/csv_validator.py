@@ -568,7 +568,8 @@ def _coerce_numeric_string(value: object) -> object:
 # unambiguous day-first case emits a `date_format_normalized` info-flag.
 # ---------------------------------------------------------------------------
 
-# 170.1 / D-14 (WR-A) - A UTC OFFSET IS NOT PART OF THE DATE THE USER WROTE.
+# 170.1 / D-14 (WR-A, amended 2026-10-16) - A UTC OFFSET IS NOT PART OF THE DATE
+# THE USER WROTE, AND A ZONE WE CANNOT READ IS A DATE ERROR, NEVER A SHIFTED DATE.
 #
 # A local-time broker export carries the offset in force on each row, and the
 # offset changes across a daylight-saving boundary (`...T00:00:00+01:00` then
@@ -577,48 +578,150 @@ def _coerce_numeric_string(value: object) -> object:
 # ordinary file came back as CSV_UPSTREAM_FAIL ("our side, try again") and a
 # retry could never help.
 #
-# Parsing with `utc=True` stops the raise but moves the DAY: local midnight at
-# +02:00 is the previous evening in UTC, so `2024-03-31T00:00:00+02:00` becomes
-# 2024-03-30 and collides with the row before it. The calendar date the user
-# wrote is the wall-clock date, so the offset is removed BEFORE any parse and the
-# wall clock is what gets parsed. `_parse_dates` below keeps `utc=True` as the
-# backstop for any zone spelling this pattern does not recognise (a named zone
-# beside numeric offsets), where the file then validates instead of raising.
+# Converting to UTC stops the raise but moves the DAY: local midnight at +02:00 is
+# the previous evening in UTC. So nothing here converts a date silently
+# (`utc=True` is gone from the parser). The recognised spellings below are
+# handled explicitly, per format, and every other zone is rejected:
+#   - `daily_returns` / `daily_nav`: the offset is removed and the WALL CLOCK is
+#     parsed, so the calendar date the user wrote is the date stored.
+#   - `trades`: a trade timestamp is an instant, and the worker reads it as one
+#     (`services/ingestion/_timestamps.py` `coerce_to_aware_utc`), so each
+#     timestamp is converted to a UTC-naive instant. See `_apply_trade_offsets`.
+#   - any zone that survives the strip is a `coerce_dtype` date error at the
+#     row's real position, the line the wizard already renders as "A value is
+#     not a valid date or number". See `_normalise_date_zones`.
+#
+# What is recognised: `Z`, `UTC`, `GMT` (no number), and a numeric offset of the
+# form `+HH`, `+HHMM`, `+HH:MM` with an optional `UTC` in front, hours 00-23 and
+# minutes 00-59. What is NOT recognised, on purpose, and so rejected:
+#   - `GMT+1`, `GMT-5`, `GMT+02:00`: dateutil reads the sign of a `GMT+N`
+#     spelling INVERTED (the POSIX convention), so `GMT+1` means UTC-1. The sign
+#     is not guessed; the file is rejected.
+#   - a single-digit hour (`+2`, `+2:00`) and a name after the offset
+#     (`+01:00 (CET)`): pandas reads them as zones, so they must not slip through
+#     the strip's `$` anchor and be converted later.
 _UTC_OFFSET_SUFFIX_RE = re.compile(
-    r"(\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?)"  # the wall-clock time, kept
-    r"\s*(?:[Zz]|UTC|GMT|(?:UTC|GMT)?[+-]\d{2}(?::?\d{2})?)\s*$"  # the offset, dropped
+    r"(?P<time>\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?)"  # the wall-clock time, kept
+    r"\s*(?:[Zz]|UTC|GMT"
+    r"|(?:UTC)?(?P<sign>[+-])(?P<hh>\d{2})(?::?(?P<mm>\d{2}))?)\s*$",  # the offset, dropped
+    re.ASCII,
 )
 
+# A value of exactly this shape is digits and separators, an optional time, and
+# nothing else: it cannot carry a zone, so the (slower) per-value zone check
+# skips it. Anything else, a month name, a `PM`, a stray suffix, gets the check.
+_ZONE_FREE_SHAPE_RE = re.compile(
+    r"\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}"
+    r"(?:[T ]\s*\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?)?",
+    re.ASCII,
+)
 
-def _drop_utc_offsets(df: pd.DataFrame) -> None:
-    """Strip a trailing UTC offset (`+01:00`, `-0500`, `Z`, `UTC`) from every
-    timestamp string in `df["date"]`, in place, keeping the wall clock.
+# What a zone-bearing cell is replaced with while the date column is parsed. It
+# is not a date under any reading (month 00), so pandera reports the cell through
+# its own `coerce_dtype` rule at the cell's row. It is year-first on purpose:
+# `_detect_and_normalize_date_column` leaves an all-ISO column to pandera, where a
+# token of another shape would make it rewrite the column and turn this cell into
+# a NaT, which pandera reports as `not_nullable` instead. The user never sees it:
+# the preview gets the original text back (see `validate_csv`), and no error
+# message ever carries a cell.
+_UNSUPPORTED_ZONE_TOKEN = "0000-00-00"
 
-    Only a string that ends in a TIME followed by an offset is touched, so a
+
+def _split_zone(value: str) -> tuple[str, int | None]:
+    """Split a recognised trailing zone off `value`: `(wall_clock_text, offset)`.
+
+    `offset` is the UTC offset in seconds (0 for `Z`/`UTC`/`GMT`), or None when
+    `value` carries no recognised zone (including an offset that is not a real
+    one, such as `+99:99`), in which case `value` comes back unchanged.
+    """
+    m = _UTC_OFFSET_SUFFIX_RE.search(value)
+    if m is None:
+        return value, None
+    seconds = 0
+    if m.group("sign") is not None:
+        hours, minutes = int(m.group("hh")), int(m.group("mm") or 0)
+        if hours > 23 or minutes > 59:
+            return value, None
+        seconds = (hours * 3600 + minutes * 60) * (-1 if m.group("sign") == "-" else 1)
+    return value[: m.end("time")], seconds
+
+
+def _carries_zone(value: str) -> bool:
+    """True when pandas reads `value` as a zone-AWARE timestamp.
+
+    This is the test for "a zone survived the strip". A value pandas cannot read
+    at all is not this case: it stays as it is and pandera reports it.
+    """
+    if _ZONE_FREE_SHAPE_RE.fullmatch(value.strip()):
+        return False
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+    except (ValueError, OverflowError, TypeError):
+        return False
+    return parsed is not pd.NaT and getattr(parsed, "tzinfo", None) is not None
+
+
+def _normalise_date_zones(df: pd.DataFrame, fmt: str) -> tuple[list[int | None] | None, dict[int, str]]:
+    """Strip every recognised trailing UTC offset from `df["date"]` (in place,
+    keeping the wall clock) and fail closed on any zone left over.
+
+    Returns `(offsets, rejected)`:
+      - `offsets`: per row, the stripped offset in seconds or None, or None
+        overall when no row had one. A column with no offsets is left
+        byte-for-byte unchanged.
+      - `rejected`: row position -> the cell as written, for every cell that
+        still carries a zone after the strip. Each is replaced in `df` by
+        `_UNSUPPORTED_ZONE_TOKEN`, so pandera reports it as a date error at its
+        real row. The caller restores the original text for the preview.
+
+    Only a string that ends in a TIME followed by an offset is stripped, so a
     plain date such as `2024-03-30` (whose `-30` is a day, not an offset) is
-    never altered. A column with no offsets is left byte-for-byte unchanged.
+    never altered.
     """
     if "date" not in df.columns:
-        return
+        return None, {}
     col = df["date"]
     if not (pd.api.types.is_string_dtype(col) or pd.api.types.is_object_dtype(col)):
-        return
-    stripped = col.map(
-        lambda v: _UTC_OFFSET_SUFFIX_RE.sub(r"\1", v) if isinstance(v, str) else v
-    )
-    if not stripped.equals(col):
-        df["date"] = stripped
+        return None, {}
+
+    cleaned: list[Any] = []
+    offsets: list[int | None] = []
+    rejected: dict[int, str] = {}
+    changed = False
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # dateutil's per-value zone warnings
+        for position, value in enumerate(col.tolist()):
+            wall, offset = value, None
+            if isinstance(value, str) and not _ZONE_FREE_SHAPE_RE.fullmatch(value.strip()):
+                wall, offset = _split_zone(value)
+                if _carries_zone(wall):
+                    rejected[position] = value
+                    wall, offset = _UNSUPPORTED_ZONE_TOKEN, None
+                changed = changed or wall is not value
+            cleaned.append(wall)
+            offsets.append(offset)
+    if changed:
+        df["date"] = pd.Series(cleaned, index=df.index, dtype=col.dtype)
+    return (offsets if any(o is not None for o in offsets) else None), rejected
 
 
 def _parse_dates(values: pd.Series, **kwargs: Any) -> pd.Series:
-    """`pd.to_datetime(errors="coerce")` that cannot raise on mixed UTC offsets.
+    """`pd.to_datetime(errors="coerce")` that fails CLOSED on a zone.
 
-    `utc=True` makes every zone-bearing value comparable; the result is returned
-    naive so it compares with the naive columns the rest of the module builds.
-    Naive input is read as UTC and comes back unchanged. See the module comment
-    above `_drop_utc_offsets` for why the wall-clock date is taken first.
+    No accepted file reaches this with a zone on a value: `_normalise_date_zones`
+    has already stripped or rejected every one. If one ever did, converting it
+    would move the calendar date silently (the D-14 amendment forbids that), and
+    pandas raises on a column of mixed offsets (which the callers report as "our
+    side, try again"). So a zone-aware result, or the mixed-offset raise, comes
+    back as all-NaT: every row is then a date error, and none is a date.
     """
-    return pd.to_datetime(values, errors="coerce", utc=True, **kwargs).dt.tz_localize(None)
+    try:
+        parsed = pd.to_datetime(values, errors="coerce", **kwargs)
+    except ValueError:  # "Mixed timezones detected"
+        return pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
+    if parsed.dt.tz is not None:
+        return pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
+    return parsed
 
 
 def _date_parse_is_usable(parsed: pd.Series) -> bool:
@@ -908,7 +1011,8 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # a `date_format_ambiguous` error when the format genuinely can't be
     # determined (validate_csv rejects rather than guess). See
     # _detect_and_normalize_date_column.
-    _drop_utc_offsets(df)  # 170.1 / D-14: wall-clock dates, before any parse
+    # 170.1 / D-14 amendment: offsets stripped (or rejected) before any parse.
+    _zone_offsets, zone_rejected = _normalise_date_zones(df, fmt)
     date_result = _detect_and_normalize_date_column(df)
     date_flag: dict[str, Any] | None = None
     date_error: dict[str, Any] | None = None
@@ -1090,6 +1194,10 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
         if not dates.empty:
             date_min = str(dates.min().date())
             date_max = str(dates.max().date())
+        # Give the preview back the text the user wrote in a cell whose zone was
+        # rejected; the placeholder was only for the parse above.
+        if zone_rejected and not pd.api.types.is_datetime64_any_dtype(df["date"]):
+            df.loc[list(zone_rejected), "date"] = list(zone_rejected.values())
 
     # Cross-AI revision 2026-04-30: redact preview rows. Underlying
     # validation already ran on the unredacted df; only the preview
