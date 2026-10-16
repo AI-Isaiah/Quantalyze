@@ -705,6 +705,32 @@ def _normalise_date_zones(df: pd.DataFrame, fmt: str) -> tuple[list[int | None] 
     return (offsets if any(o is not None for o in offsets) else None), rejected
 
 
+def _apply_trade_offsets(df: pd.DataFrame, offsets: list[int | None]) -> None:
+    """`trades` only: turn the wall-clock `date` column into UTC-naive instants.
+
+    A trade timestamp is a moment, and the worker reads it as one
+    (`services/ingestion/_timestamps.py` `coerce_to_aware_utc`: the offset is
+    kept, a naive value is taken as UTC). So a recognised offset is subtracted
+    from the parsed wall clock, which is the same instant, and a value with no
+    offset stays as it is (UTC). The offset is applied AFTER the date column is
+    parsed, because the day/month reading of a `13/01/2024 10:00 +01:00` file is
+    deduced from the whole column, not from one cell.
+
+    The column is converted only when every value parsed. If any did not, the
+    file is rejected by pandera at those rows anyway and the text is left for it.
+
+    This is why the strict-increase check is correct across a daylight-saving
+    fall-back: `01:45-04:00` then `01:10-05:00` is 05:45Z then 06:10Z.
+    """
+    col = df["date"]
+    if not pd.api.types.is_datetime64_any_dtype(col):
+        col = _parse_dates(col)
+    if col.isna().any():
+        return
+    shift = pd.to_timedelta([o or 0 for o in offsets], unit="s")
+    df["date"] = col - pd.Series(shift, index=df.index)
+
+
 def _parse_dates(values: pd.Series, **kwargs: Any) -> pd.Series:
     """`pd.to_datetime(errors="coerce")` that fails CLOSED on a zone.
 
@@ -1012,8 +1038,10 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # determined (validate_csv rejects rather than guess). See
     # _detect_and_normalize_date_column.
     # 170.1 / D-14 amendment: offsets stripped (or rejected) before any parse.
-    _zone_offsets, zone_rejected = _normalise_date_zones(df, fmt)
+    zone_offsets, zone_rejected = _normalise_date_zones(df, fmt)
     date_result = _detect_and_normalize_date_column(df)
+    if fmt == "trades" and zone_offsets is not None:
+        _apply_trade_offsets(df, zone_offsets)  # instants, like the worker reads them
     date_flag: dict[str, Any] | None = None
     date_error: dict[str, Any] | None = None
     if date_result is not None:

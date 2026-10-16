@@ -109,11 +109,16 @@ DST_SPECIMENS = [
 ]
 
 
-@pytest.mark.parametrize("fmt", list(HEADER))
+DAILY_FORMATS = ["daily_returns", "daily_nav"]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
 @pytest.mark.parametrize("dates", DST_SPECIMENS)
 def test_a_dst_crossing_file_validates_and_keeps_the_dates_the_user_wrote(
     fmt: str, dates: list[str]
 ) -> None:
+    """The two DAILY formats read the wall clock: the calendar date written is the
+    date stored. `trades` is the other reading (an instant), pinned further down."""
     envelope = validate_csv(_file(fmt, dates), fmt)  # must not raise
 
     assert envelope["ok"] is True, envelope["errors"]
@@ -193,6 +198,145 @@ def test_a_dst_file_with_a_genuine_date_defect_is_still_rejected() -> None:
 
     assert envelope["ok"] is False
     assert "monotonic_dates" in {e["rule"] for e in envelope["errors"]}
+
+
+# ---------------------------------------------------------------------------
+# Part A1 - a `trades` file is read as INSTANTS (D-14 amendment, review D14-M1)
+# ---------------------------------------------------------------------------
+#
+# A trade timestamp is a moment, and the worker reads it as one:
+# `services/ingestion/_timestamps.py` `coerce_to_aware_utc` keeps the offset. So
+# the validator converts each trades timestamp to a UTC-naive instant, and the
+# oracle in these tests IS the worker's function. (The daily formats take the
+# wall clock instead, because there the calendar date the user wrote is what is
+# stored; see Part A.)
+
+
+def _worker_instant(text: str):
+    """The instant the WORKER reads for `text`, as a UTC-naive Timestamp."""
+    from datetime import timezone
+
+    import pandas as pd
+
+    from services.ingestion._timestamps import coerce_to_aware_utc
+
+    return pd.Timestamp(coerce_to_aware_utc(text, "csv").astimezone(timezone.utc).replace(tzinfo=None))
+
+
+def _validated_instants(envelope: dict) -> list:
+    """The `date` values the validator kept for the first and last rows."""
+    import pandas as pd
+
+    rows = envelope["preview"]["first_rows"]
+    return [pd.Timestamp(r["date"]) for r in rows] + [pd.Timestamp(envelope["preview"]["last_rows"][-1]["date"])]
+
+
+# US fall-back, 2024-11-03: the wall clock repeats the 01:00 hour, the instants
+# do not. In UTC this file is 04:30Z, 05:45Z, 06:10Z, 08:00Z: strictly increasing.
+FALL_BACK_TRADES = [
+    "2024-11-03T00:30:00-04:00",
+    "2024-11-03T01:45:00-04:00",
+    "2024-11-03T01:10:00-05:00",
+    "2024-11-03T03:00:00-05:00",
+]
+
+
+def test_a_trades_file_that_crosses_a_dst_fall_back_validates() -> None:
+    """The review's specimen. Stripped to the wall clock this file reads
+    00:30, 01:45, 01:10, 03:00 and was rejected as "dates must be strictly
+    increasing", telling the user their correct timestamps were out of order."""
+    envelope = validate_csv(_file("trades", FALL_BACK_TRADES), "trades")
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert envelope["preview"]["row_count"] == 4
+    assert _validated_instants(envelope) == [_worker_instant(d) for d in FALL_BACK_TRADES[:3]] + [
+        _worker_instant(FALL_BACK_TRADES[-1])
+    ]
+    # And those instants really are what the review computed.
+    assert [str(i.time()) for i in _validated_instants(envelope)] == [
+        "04:30:00", "05:45:00", "06:10:00", "08:00:00",
+    ]
+    assert envelope["preview"]["date_range"] == ["2024-11-03", "2024-11-03"]
+
+
+def test_two_trades_at_one_wall_clock_in_the_repeated_hour_are_two_instants() -> None:
+    dates = ["2024-11-03T01:30:00-04:00", "2024-11-03T01:30:00-05:00"]
+    envelope = validate_csv(_file("trades", dates), "trades")
+
+    assert envelope["ok"] is True, envelope["errors"]
+
+
+def test_two_trades_at_one_instant_are_still_a_duplicate() -> None:
+    """The conversion must not make a bad file pass: `01:00+01:00` and `00:00Z`
+    are the same moment."""
+    dates = ["2024-03-31T01:00:00+01:00", "2024-03-31T00:00:00Z"]
+    envelope = validate_csv(_file("trades", dates), "trades")
+
+    assert envelope["ok"] is False
+    assert "monotonic_dates" in {e["rule"] for e in envelope["errors"]}
+
+
+@pytest.mark.parametrize("dates", DST_SPECIMENS)
+def test_a_trades_file_reads_each_timestamp_as_the_instant_the_worker_reads(
+    dates: list[str],
+) -> None:
+    envelope = validate_csv(_file("trades", dates), "trades")
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert _validated_instants(envelope) == [_worker_instant(d) for d in dates[:3]] + [
+        _worker_instant(dates[-1])
+    ]
+    assert envelope["preview"]["date_range"] == [
+        str(_worker_instant(dates[0]).date()),
+        str(_worker_instant(dates[-1]).date()),
+    ]
+
+
+def test_a_trades_late_evening_offset_lands_on_the_next_utc_day() -> None:
+    """The reason `trades` and the daily formats differ: 23:30-05:00 is 04:30Z on
+    the NEXT day. A trade is that instant; a daily value is the day written."""
+    dates = ["2024-03-08T23:30:00-05:00", "2024-03-09T23:30:00-05:00"]
+    trades = validate_csv(_file("trades", dates), "trades")
+    daily = validate_csv(_file("daily_returns", dates), "daily_returns")
+
+    assert trades["preview"]["date_range"] == ["2024-03-09", "2024-03-10"]
+    assert daily["preview"]["date_range"] == ["2024-03-08", "2024-03-09"]
+
+
+def test_a_trades_day_first_timestamp_with_an_offset_is_converted_after_the_day_first_reading() -> None:
+    """The day/month reading is deduced from the whole column, so the offset is
+    applied to the PARSED value, not to the text."""
+    dates = [
+        "13/01/2024 10:00:00 +01:00",
+        "14/01/2024 10:00:00 +01:00",
+        "15/01/2024 00:30:00 +02:00",
+    ]
+    envelope = validate_csv(_file("trades", dates), "trades")
+
+    assert envelope["ok"] is True, envelope["errors"]
+    import pandas as pd
+
+    firsts = [pd.Timestamp(r["date"]) for r in envelope["preview"]["first_rows"]]
+    assert firsts == [
+        pd.Timestamp("2024-01-13 09:00"),
+        pd.Timestamp("2024-01-14 09:00"),
+        pd.Timestamp("2024-01-14 22:30"),
+    ]
+
+
+def test_a_naive_trades_timestamp_is_read_as_utc_like_the_worker_reads_it() -> None:
+    dates = ["2024-03-30T09:00:00", "2024-03-30T11:00:00+01:00", "2024-03-30T11:00:00Z"]
+    envelope = validate_csv(_file("trades", dates), "trades")
+
+    import pandas as pd
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert [pd.Timestamp(r["date"]) for r in envelope["preview"]["first_rows"]] == [
+        pd.Timestamp("2024-03-30 09:00"),
+        pd.Timestamp("2024-03-30 10:00"),
+        pd.Timestamp("2024-03-30 11:00"),
+    ]
+    assert pd.Timestamp("2024-03-30 09:00") == _worker_instant("2024-03-30T09:00:00")
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +692,7 @@ def _corpus() -> list[tuple[str, str, bytes]]:
         add("undeclared-col-marker", fmt, h + ",extra\n" + "\n".join(x + f",{MARKER}" for x in rows) + "\n")
         # D-14 specimens: the two ordinary shapes that raised before.
         add("dst-offsets-iso", fmt, _file(fmt, EUROPE_DST_MIDNIGHT))
+        add("fall-back-offsets", fmt, _file(fmt, FALL_BACK_TRADES))
         add("dst-offsets-marker-cell", fmt, _file(fmt, EUROPE_DST_MIDNIGHT[:2] + [f"{MARKER}+02:00"]))
         add("mixed-offsets-and-naive", fmt, _file(fmt, ["2024-03-29T00:00:00", "2024-03-30T00:00:00+01:00", "2024-03-31T00:00:00Z"]))
         add("offset-garbage", fmt, _file(fmt, ["2024-03-29T00:00:00+99:99", "2024-03-30T00:00:00+01:00", "2024-03-31T00:00:00+zz"]))
