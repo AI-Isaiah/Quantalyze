@@ -369,7 +369,21 @@ function captureProbeThrows(throws: readonly unknown[]): void {
   }
 }
 
-export default async function StrategiesPage() {
+/**
+ * Phase 170.1 D-07 — the wizard's submit lands here with `?wizard_submitted=1`.
+ * `searchParams` is a Promise in Next 16.
+ */
+interface StrategiesPageProps {
+  searchParams: Promise<{ wizard_submitted?: string | string[] }>;
+}
+
+export default async function StrategiesPage({ searchParams }: StrategiesPageProps) {
+  // D-07 / T-170.1-19: only the exact string "1" shows the status line. The
+  // value is compared and never echoed, so a forged param can show only the
+  // fixed sentence. An array (`?wizard_submitted=1&wizard_submitted=1`) is not "1".
+  const { wizard_submitted } = await searchParams;
+  const justSubmitted = wizard_submitted === "1";
+
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
@@ -868,6 +882,20 @@ export default async function StrategiesPage() {
           </Link>
         }
       />
+
+      {/* 170.1 D-07 / UI-SPEC V-1: renders whether or not the list read
+          succeeded; the unreadable card below states a read failure itself. A
+          square data panel (DESIGN.md): no radius, no shadow, no icon, and no
+          truncation, so it wraps by word at 390 px. */}
+      {justSubmitted && (
+        <p
+          role="status"
+          data-testid="wizard-submitted-status"
+          className="mb-4 border border-border bg-surface px-4 py-3 text-small text-text-primary"
+        >
+          Strategy submitted. It is listed below as pending review.
+        </p>
+      )}
 
       {introRequests && introRequests.length > 0 && (
         <PendingIntros requests={introRequests as Parameters<typeof PendingIntros>[0]["requests"]} />
