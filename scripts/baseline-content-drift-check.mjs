@@ -225,8 +225,23 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * COMPARED_FLOOR is pinned at 130` first (found by the plan's final unit run; the plan's census
  * list did not name this floor). Raising this floor records the function joining the corpus; it
  * does NOT suppress any finding.
+ * MOVED 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY plan 09), 130 -> 131 on its own base: one ADDITION, not a
+ * removal. `public.apply_okx_archive_rebuild(uuid, jsonb, jsonb, jsonb)` enters the chain via
+ * forward migration 20261026120000_okx_archive_rebuild.sql. MEASURED by
+ * `node scripts/baseline-content-drift-check.mjs` on this tree: `functions compared 131 — MATCH
+ * 127, DRIFT 3, SNAPSHOT_MISSING 1`. The one SNAPSHOT_MISSING finding is
+ * `apply_okx_archive_rebuild/4`, whose migration is not on PROD yet (recorded as a dated
+ * `snapshot-only` row in NAME_SET_RATCHET in scripts/dump-sql-functions.ts, cleared by the
+ * re-dump taken after the apply). The drift-allowlist test read `the real corpus now compares
+ * 131 function(s) but COMPARED_FLOOR is pinned at 130` first. Raising this floor records the
+ * function joining the corpus; it does NOT suppress that finding.
+ * MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): both moves
+ * above went 130 -> 131 from the same base, each adding a different function. MEASURED by
+ * `node scripts/baseline-content-drift-check.mjs` on the merged tree: `functions compared 132 —
+ * MATCH 128, DRIFT 3, SNAPSHOT_MISSING 1`; the one SNAPSHOT_MISSING is `apply_okx_archive_rebuild/4`
+ * (main's `_fan_in_lock_rows/2` cleared with its re-dump), so the floor moves 131 -> 132.
  */
-export const COMPARED_FLOOR = 131;
+export const COMPARED_FLOOR = 132;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

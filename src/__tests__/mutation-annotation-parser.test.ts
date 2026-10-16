@@ -1089,7 +1089,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-2 fixes WR-01/WR-02 and the RLS audit): `armsSeen` 752 -> 755, +3 biting arms (FL6 and FL7 in test_fan_in_lock_order_race.sql, OD8 in test_bridge_outcomes_decision_delete_cascade.sql). MEASURED: this file's run read `expected 755 to be 752`, and ONE full runner run read `arms: 755/755/0`, `biting: 755`.
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-3 fix SFH M2): `armsSeen` 755 -> 756, +1 biting arm (FL8 in test_fan_in_lock_order_race.sql, the retry bound). MEASURED: this file's run read `expected 756 to be 755`.
-    expect(armsSeen).toBe(756);
+    // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): `armsSeen` 723 -> 738: the NEW gate test_okx_archive_rebuild.sql (15 arms, 0-14). MEASURED: the full runner run printed `arms: 738/738/0`.
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 756 -> 771, MEASURED: this pin read `expected 771 to be 756` on the merged tree (main's corpus plus test_okx_archive_rebuild.sql's 15 arms).
+    expect(armsSeen).toBe(771);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1114,7 +1116,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base 809 (-> 847 FANINGRAPH, -> 828 166.5). MEASURED on the merged tree, never summed: this file's run read `expected 866 to be 847`.
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-2 fixes WR-01/WR-02 and the RLS audit): `stepsSeen` 866 -> 873, the net of the file steps across the five touched twins (FL4, FL5, FC5, FC6 re-pointed, FL6, FL7, OD8 new). MEASURED, not summed: the needle test read `expected 873 to be 866`.
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-3 fix SFH M2): `stepsSeen` 873 -> 875, the two file steps of the FL8 twin. MEASURED: this file's run read `expected 875 to be 873`.
-    expect(stepsSeen).toBe(875);
+    // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): `stepsSeen` 809 -> 821: +12 file steps from the NEW gate test_okx_archive_rebuild.sql (its 15 arms carry 12 non-`sql` steps, MEASURED not derived). MEASURED: this file's run read `expected 821 to be 809`.
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 875 -> 887, MEASURED: re-read on the merged tree by this pin, never by adding the two branches' moves.
+    expect(stepsSeen).toBe(887);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2055,7 +2059,9 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base 809 (-> 847 FANINGRAPH, -> 828 166.5). MEASURED on the merged tree, never summed: this file's run read `expected 866 to be 847`.
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-2 fixes WR-01/WR-02 and the RLS audit): the needle count 866 -> 873, moving WITH `stepsSeen`. MEASURED: this file's run read `expected 873 to be 866`.
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH round-3 fix SFH M2): the needle count 873 -> 875, moving WITH `stepsSeen`. MEASURED: this file's run read `expected 875 to be 873`.
-    expect(needles.length).toBe(875);
+    // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 809 -> 821, the same +12 steps as `stepsSeen` above (the okx archive rebuild gate). MEASURED: this pin read `expected 821 to be 809`.
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 875 -> 887, MEASURED: this pin read `expected 887 to be 875` on the merged tree.
+    expect(needles.length).toBe(887);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2653,7 +2659,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): 99 -> 100, the runner-only date gate file. MEASURED: this file's run read `expected 100 to be 99`, and the full lane run printed `coverage: files 73/100`.
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): 99 -> 102, the three FANINGRAPH gate files. MEASURED: this file's run read `expected 102 to be 99`, and the full lane run printed `coverage: files 75/102`.
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
-    expect(corpus.filesTotal).toBe(103);
+    // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 99 -> 100, the okx archive rebuild gate file. MEASURED: this file's run read `expected 100 to be 99`, and the full lane run printed `coverage: files 73/100`.
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 103 -> 104, MEASURED: this pin read `expected 104 to be 103` on the merged tree.
+    expect(corpus.filesTotal).toBe(104);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2733,7 +2741,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): 72 -> 73, moving WITH `filesTotal`; the by-name list below gained test_sync_status_computed_at_runner_only.sql. MEASURED: this file's run read `expected 73 to be 72`, and the full lane run printed `scope: FULL 73/73 annotated files`.
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): 72 -> 75, moving WITH `filesTotal`; the by-name list below gained the three FANINGRAPH gates. MEASURED: this file's run read `expected 75 to be 72`.
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
-    expect(corpus.filesAnnotated).toBe(76);
+    // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 72 -> 73, moving WITH `filesTotal`; the by-name list below gained test_okx_archive_rebuild.sql.
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 76 -> 77, the okx archive rebuild gate joins main's 76 annotated files; MEASURED on the merged tree by this pin.
+    expect(corpus.filesAnnotated).toBe(77);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2811,6 +2821,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       // same-strategy terminal mark waits on the per-strategy bridge lock.
       "test_mark_rpc_bridge_advisory_lock.sql",
       "test_metrics_by_basis_write.sql",
+      // ⭐ ADDED 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): the okx archive rebuild gate (15 arms).
+      "test_okx_archive_rebuild.sql",
       // ⭐ ADDED 2026-10-13 (Phase 164.6.8 OUTAGEALERT, plan 05): the ops_staleness_check gate (14 arms).
       "test_ops_staleness_check.sql",
       // ⚠️ CURRENCY 2026-09-18 (Phase 164.1.1 PROBERCADENCE, plan 01): the
@@ -3283,7 +3295,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): 99 -> 100, the runner-only date gate file. MEASURED: this file's run read `expected 100 to be 99`, and the full lane run printed `coverage: files 73/100`.
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): 99 -> 102, the three FANINGRAPH gate files. MEASURED: this file's run read `expected 102 to be 99`, and the full lane run printed `coverage: files 75/102`.
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
-    expect(corpus.filesTotal).toBe(103);
+    // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 99 -> 100, the okx archive rebuild gate file (test_okx_archive_rebuild.sql). MEASURED: this file's run read `expected 100 to be 99`, and the full lane run printed `coverage: files 73/100`.
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 103 -> 104, MEASURED: this pin read `expected 104 to be 103` on the merged tree.
+    expect(corpus.filesTotal).toBe(104);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3319,7 +3333,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-15 (Phase 166.5 COMPUTEDATSTAMP, plan 07): 72 -> 73, moving WITH `filesAnnotated`. MEASURED: this file's run read `expected [ …(73) ] to have a length of 72 but got 73`.
     // ⭐ CURRENCY 2026-10-15 (Phase 164.9.3.1 FANINGRAPH, plan 10): 72 -> 75, moving WITH `filesAnnotated`. MEASURED: this file's run read `expected [ …(75) ] to have a length of 72 but got 75`.
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases moved this pin from the same base; the value below is MEASURED on the merged tree (one full mutation runner run: `scope: FULL 76/76 annotated files`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `No defects`, exit 0), never summed.
-    expect(corpus.annotatedFiles).toHaveLength(76);
+    // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 72 -> 73, moving WITH `filesAnnotated`.
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): 76 -> 77, MEASURED on the merged tree by this pin.
+    expect(corpus.annotatedFiles).toHaveLength(77);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

@@ -4818,7 +4818,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=21 and ARMS_FLOOR=332 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=22 and ARMS_FLOOR=347 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -5008,9 +5008,18 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // 319 (FANINGRAPH) / 308 (166.5) -> 328 arms. Both phases moved these from the same base (17/299). MEASURED, not
     // summed: the sql-tests step run on the local stack on the merged tree printed
     // `97 of 103 SQL self-tests passed — no whole-file skips; 6 excluded (LANE-ONLY, still counted in the static accounting above); 17 of 21 completion sentinel(s) verified against THIS run, covering 328 declared arms.`, and ci-anti-skip-gate.contract.test.ts re-derived the same table.
+    // RAISED 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09), 17/299 -> 18/314.
+    // test_okx_archive_rebuild.sql JOINED (an ordinary sql-tests gate, not LANE-ONLY: it posts
+    // nothing) and declares `ALL 15 ARMS EXECUTED`. MEASURED: ci-anti-skip-gate.contract.test.ts
+    // read 18 sentinel-bearing files against the table's 17 (`expected [ ...(18) ] to deeply
+    // equal [ ...(17) ]`).
+    // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): both the
+    // OKXHISTORY move (17/299 -> 18/314) and main's (-> 21/332) started from 17/299. The merged ci.yml
+    // table carries every row, so 22/347, re-derived by ci-anti-skip-gate.contract.test.ts on the
+    // merged tree, never by adding the moves.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=21", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=22", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -5021,7 +5030,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=332", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=347", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

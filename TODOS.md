@@ -1509,6 +1509,36 @@ through `stitch_composite` after NAVBREACH, run it once, inside that recompute; 
 - **Closed by:** the Wave 5 consolidated run and the orchestrator's single-key recompute. Phase 164.6.6.3.3's
   VERIFICATION keeps this as its one open human item until both have run. ✅ Both ran on 2026-10-15 (see the CLOSED note at the top of this entry).
 
+### 167.1.2.2.2.1-WAVE5-RECOMPUTE — the two rebuilt OKX strategies' headlines move when the Wave 5 recompute reads the rebuilt rows (booked 2026-10-15, Phase 167.1.2.2.2.1 plan 10)
+
+**Why it is open.** Phase 167.1.2.2.2.1 OKXHISTORY rebuilds the days two OKX strategies lost beyond the
+3-month `bills-archive` reach from OKX's quarterly `bills-history-archive`, and the rebuilt days COUNT in
+headline metrics (D-07). The `apply` job writes `csv_daily_returns` rows and `series_provenance`
+(`reconstructed_ranges`, narrower `unrecovered_gaps`); it deliberately enqueues no analytics (the job writes
+only what the reconciliation proved). Until an analytics compute reads the new rows, each strategy's stored
+`headline_since` and metrics still describe the shorter series. Ordinal 2's published `headline_since` moves
+from 2026-08-02 toward 2026-02-23, and ordinal 1's toward about 2026-05-24.
+
+**The set (counts only, ordinals of the non-archived OKX strategies ordered by status then id).** 2 strategies:
+ordinal 1 (`pending_review`, a 70-day gap) and ordinal 2 (`published`, an 87-day gap). Ordinal 3 (disconnected
+key, D-02) and ordinal 4 (read-only zero-check, D-03) are not in the set.
+
+**Trigger.** The `apply` job is `done` for both ordinals (runbook `docs/runbooks/okxhistory-go-live.md`,
+Step 4) and the analytics service carrying the rebuilt-range reader is deployed.
+
+**Order.** The recompute runs inside the Wave 5 consolidated PROD recompute, through the product's own
+paths (`enqueue_compute_job` for `compute_analytics_from_csv`). The daily 04:30Z tick's derive-then-compute
+chain recomputes the same rows anyway, so the timing of `apply` relative to the consolidated run is the
+founder's decision (Step 3 of the runbook, plan 15): apply just before the consolidated run to review the
+changed headline first, or apply early and let the next tick publish it.
+
+**Acceptance reading (per ordinal 1 and 2).** `headline_since` and `unrecovered_gaps` read back through the
+runbook's `worklist` form (`headline_since` earlier than before; `unrecovered_gaps` equal to the apply
+result's `gaps_after`), `reconstructed_ranges` present, and the runbook's `survival` form reads 0 days
+without a row for every ordinal (also re-read after the next 04:30Z tick).
+
+**Owner: the Wave 5 consolidated PROD recompute** (run by the orchestrator, founder-authorized).
+
 ### 164.6.6.3.3-COMPARE-SPAN-SOURCE — /compare names its "Measured since" span from the stored cash series, the factsheet from `headline_since` (booked 2026-10-10, Phase 164.6.6.3.3 release)
 
 **Why it is open.** Phase 164.6.6.3.3 (FACTSHEETTRUTH) removed `deriveHeadlineCoversFrom` and
@@ -9403,6 +9433,17 @@ reads an unpublished row's value. (5) plan 05's red-first test on a `computing` 
 ## Phase 167.1.2.2.2 (TRADESYNC) — routed items (logged 2026-10-10)
 
 - **[167.1.2.2.2-OKX-PERSISTENT-TRUNCATION]** (logged 2026-10-11, PR-B fix round SFH-H2; owner: Phase 167.1.2.2.2.1 OKXHISTORY). A truncated window is now degraded: nothing stored, no stamp, key `error`. An OKX first window above the page cap (10k bills per inst type over ~157 days) therefore truncates on every tick and reports `error` daily instead of leaving a silent hole. Done when the OKX fetch is chunked or windowed so a large first window completes.
+  ⭐ **2026-10-15 (Phase 167.1.2.2.2.1 plan 10, RESEARCH Section 11): measured, not fixed, stays open.** The live
+  walk is 100 pages of 100 per instrument type (`OKX_BILLS_PAGE_CAP = 100`); a capped walk drops the oldest days
+  and records `daily_pnl_truncated_okx`. Evidence today: the 2026-10-12 rehearsal tick reported no `partial`,
+  `fetch_degraded`, `results_truncated` or key `error`; the stored `data_quality_flags` of ordinals 1, 2 and 4
+  carry no `daily_pnl_truncated_okx` key; ordinal 4's stored series is flat 2026-06-08 to 2026-08-01; the
+  heaviest stored account holds a few thousand fills over several months, far from 10,000 bills per instrument
+  type in 90 days. Reading: the first live row of 2026-08-02 for ordinals 1 and 2 is consistent with a flat
+  account, not with the page cap. NOT proven until the Q3 archive file shows no activity in 2026-07-17 to
+  2026-08-01. The OKXHISTORY reconciliation is the detector (`info.archive_only_in_live_reach` in the job result:
+  archive activity on a day inside live reach with no live row). **Trigger (narrowed 2026-10-15):** an OKX
+  derive sets `daily_pnl_truncated_okx` or the OKXHISTORY reconciliation reports an archive-only day inside live reach.
 - **[167.1.2.2.2-BINANCE-INCOME-PAGINATION]** (logged 2026-10-11, PR-B fix round; owner: the next phase that ships a Binance strategy key). The Binance income call uses `limit=1000` with no pagination and no truncation flag, so a capped Binance window is still invisible. No Binance key on PROD today. Done when it paginates or stamps `daily_pnl_truncated_binance`.
 - **[167.1.2.2.2-INCOME-FALLBACK-PRODUCER-PIN]** (logged 2026-10-11, PR-B review round 3 R3-ME-01, MEDIUM, confidence 5; owner: the next phase that ships a Binance strategy key). The cron reads `daily_pnl_binance_income_fallback` through its own string constant in `routers/cron.py`, and the fetcher writes it as a separate literal in `services/exchange.py`. The round-3 tests hand the flag to the cron through a patched buffer, so a rename on the fetcher side would silently reopen R2-ME-01 (Binance spot fills stored over daily P&L). Done when one test runs the real `fetch_daily_pnl` with the income call failing and the spot call succeeding and asserts `_fetch_degradation` names the flag, or when both sides import one constant. Dormant until a Binance strategy key exists on PROD. Also correct the comment beside the cron constant: nothing in the tree reads the flag by name for an admin health card.
 - **[167.1.2.2.2-GAP-RECORD-SILENT-PARSE]** (logged 2026-10-11, PR-B SFH round 2 NEW-3 / review R2-LO-04, MEDIUM, confidence 6; owner: Phase 164.6.6.3.3 FACTSHEETTRUTH). `parseUnrecoveredGaps` in `src/lib/factsheet/trade-fetch-provenance.ts` returns `[]` on a malformed `series_provenance` with only a `console.warn`, so the public, printable tear sheet reads as having no unrecovered gaps and nothing reaches Sentry. PR-B fixed the same pattern for the fetch stamp (`TradeFetchUnavailableLine`) but not for the gap record. Done when a malformed record reports to Sentry and the tear sheet shows an unavailable state for gaps, with a test that goes RED on today's code.
@@ -9904,6 +9945,48 @@ message (but not the `code` tag). The landing helper has the same shape.
 `failAnonRead` and in the landing helper.
 **Owner / Trigger:** fixed together with 170.6.1.1-LANDING-CAPTURE-THROTTLE; or the first Sentry event seen
 without its `code` tag.
+
+## Phase 167.1.2.2.2.1 (OKXHISTORY) — routed items (logged 2026-10-15)
+
+- **[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]** (logged 2026-10-15, OKXHISTORY discuss; founder instruction
+  to book it). `fetch_daily_pnl` in `analytics-service/services/exchange.py` (OKX branch) sums
+  `pnl + fee` per UTC day across every bill regardless of `ccy`, with no currency conversion. A bill in
+  BTC (a coin-margined position, a fee charged in the base coin) is added to USDT P&L at face value, so the
+  daily P&L, the NAV roll-back and every metric built on it would be wrong for any account with a non-USDT
+  bill. Exposure is UNMEASURED for the live strategies. **Owner:** Phase 167.1.2.2.2.1 OKXHISTORY research
+  measures whether the in-scope account's bills (live and archive) are all USDT; if they are not, it is a
+  planning input of that phase, and the fix owner is routed by founder decision. **Trigger:** the first
+  OKX bill with `ccy` other than USDT in any strategy's window, or OKXHISTORY research finding one.
+  **Done when** a non-USDT bill is converted at a stated rate or fails loud, with a test that goes RED on
+  today's code.
+  ⭐ **2026-10-15 (Phase 167.1.2.2.2.1 plan 10): the calibrate census is the measurement step; stays open.** Stored
+  OKX rows are all SWAP and USDT (406 OKX-format raw fills, all SWAP, fee currency USDT; 568 funding rows, all
+  USDT), which covers fills and funding only. Bill classes stored nowhere (SPOT, MARGIN, FUTURES, OPTION,
+  transfers, interest, rebates) are unmeasured. The `calibrate` job over the 2026 Q2 and Q3 files settles it for
+  the in-scope account: its `census.by_ccy` is the currency count (runbook `docs/runbooks/okxhistory-go-live.md`,
+  Step 2). A non-USD row is the stop class `non_usd_ccy` and a founder STOP; the fix owner is routed by founder
+  decision then.
+
+- **[167.1.2.2.2.1-REVIEW-R3-SURVIVORS]** (logged 2026-10-15, review round 3, after three fixer rounds; owner:
+  Phase 167.1.2.2.2.1 plan 13 (PR-B), which MUST land them before plan 14's calibrate is read by the founder).
+  Four MEDIUMs on founder-facing readings and one false-stop risk survived round 3
+  (`.planning/phases/167.1.2.2.2.1-okxhistory-an-okx-strategy-s-days-older-than-the-3-month-bil/167.1.2.2.2.1-REVIEW.md`
+  round 3 plus the silent-failure hunt):
+  (1) the `MIN_CHAINED_PAIRS` floor applies to every currency with any nonzero pnl/fee/balChg, including excluded
+  classes the aggregate never sums (one coin-margined OKX option bill stops the job `too_few_pairs`); scope it to
+  currencies whose money the aggregate sums, keep the break check on all;
+  (2) `flow_totals_overlap` opens 7 days before the flow seam where the live side is always empty, so a double
+  count reads as agreement; start it at the seam and correct the runbook sentence;
+  (3) the runbook's `flow_seam` no-go rule "both sides nonzero" fires on any active account; make `diff` the
+  signal;
+  (4) the `flow_seam` after-window is not clamped to the last covered archive day, so a late re-run reports a
+  spurious `diff`; clamp it, or report the reading unmeasurable with a reason.
+  **Trigger:** plan 13 execution. **Done when** each has a test that goes RED on today's code and the runbook
+  Step 3 reads the corrected signals. Also open for the founder (not a defect): whether to bound
+  `info.realized_balance_vs_rolled_nav.diff` and `info.flow_seam.diff` (readings only today).
+  ⭐ **2026-10-15:** items (1)-(4) are now bound in plan 13's PLAN file as Task 2b (WR-01..WR-04), each with a
+  RED-first test, so the binding no longer lives only here. The founder question is DECIDED: "Decide after
+  calibrate" (CONTEXT D-13). Both diffs stay readings, and the founder sets any limit at plan 15's checkpoint.
 
 ## Phase 164.9.3.1 (FANINGRAPH) — routed items (logged 2026-10-15)
 

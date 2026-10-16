@@ -489,6 +489,7 @@ export function buildScenarioFactsheetPayload(
     tradesFetchedAt: null,
     tradeFetchVenue: null,
     unrecoveredGaps: [],
+    reconstructedRanges: [],
     trustTier: null,
     description: null,
     subtypes: [],
