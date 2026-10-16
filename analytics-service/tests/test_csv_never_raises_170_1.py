@@ -642,6 +642,110 @@ def test_an_exact_repeat_under_a_leading_blank_header_row_is_found_too() -> None
     ]
 
 
+# Review R-1 / SFH-R1 (D-14 final round). The raw header used to be read with
+# `pd.read_csv(header=None)`, which fixes the field count from the FIRST line. An
+# Excel-style blank first row NARROWER than the real header made that read raise,
+# the error was swallowed, and the caller fell back to pandas' renamed columns
+# (`daily_return`, `daily_return.1`), so the repeat was never seen and the user's
+# second column was ignored without a word. The header is now read with the stdlib
+# `csv` reader, which infers no field count.
+_BODY_ROWS = "2024-03-10,0.001,0.5\n2024-03-11,0.002,0.5\n2024-03-12,-0.001,0.5\n"
+
+
+def _under_blank_row(blank: str, header: str, rows: str = _BODY_ROWS) -> bytes:
+    return f"{blank}\n{header}\n{rows}".encode()
+
+
+# (blank first row, header, id). Each header repeats the declared `daily_return`.
+BLANK_ROW_REPEATS = [
+    pytest.param(",", "date,daily_return,daily_return", id="narrower-blank-row"),
+    pytest.param(",,", "date,daily_return,daily_return", id="equal-width-blank-row"),
+    pytest.param(",,,,", "date,daily_return,daily_return", id="wider-blank-row"),
+    pytest.param(
+        ",",
+        'date,daily_return,"a,b",daily_return',
+        id="narrower-blank-row-quoted-comma-before-the-repeat",
+    ),
+]
+
+
+@pytest.mark.parametrize("blank,header", BLANK_ROW_REPEATS)
+def test_an_exact_repeat_is_found_under_a_blank_first_row_of_any_width(blank: str, header: str) -> None:
+    rows = _BODY_ROWS if "a,b" not in header else _BODY_ROWS.replace(",0.5", ",x,0.5")
+    envelope = validate_csv(_under_blank_row(blank, header, rows), "daily_returns")
+
+    assert envelope["ok"] is False, envelope
+    assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", 0, DUPLICATE_HEADER_MESSAGE)
+    ]
+    assert envelope["preview"] is None
+    assert "daily_returns_series" not in envelope
+
+
+def test_an_exact_repeat_is_found_under_a_leading_empty_line_and_a_narrower_blank_row() -> None:
+    """pandas skips a truly empty line; the blank row that follows is record 0."""
+    raw = b"\n,\ndate,daily_return,daily_return\n" + _BODY_ROWS.encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert [(e["rule"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", DUPLICATE_HEADER_MESSAGE)
+    ]
+
+
+def test_an_exact_repeat_is_found_under_a_byte_order_mark_and_a_narrower_blank_row() -> None:
+    raw = b"\xef\xbb\xbf,\ndate,daily_return,daily_return\n" + _BODY_ROWS.encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert [(e["rule"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", DUPLICATE_HEADER_MESSAGE)
+    ]
+
+
+def test_an_exact_repeat_is_found_when_an_earlier_header_cell_holds_a_quoted_newline() -> None:
+    raw = (
+        b',\ndate,"no\nte",daily_return,daily_return\n'
+        b"2024-03-10,x,0.001,0.5\n2024-03-11,x,0.002,0.5\n2024-03-12,x,-0.001,0.5\n"
+    )
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert [(e["rule"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", DUPLICATE_HEADER_MESSAGE)
+    ]
+
+
+@pytest.mark.parametrize("blank", [",", ",,", ",,,,"])
+def test_a_good_header_under_a_blank_first_row_of_any_width_is_still_accepted(blank: str) -> None:
+    """Control: the blank-row skip still works, and a header that repeats nothing
+    (a quoted comma inside one cell is one cell, an undeclared pair is dropped) is
+    not rejected by the raw-header read."""
+    raw = (
+        f'{blank}\ndate,daily_return,"a,b",Notes,notes\n'
+        "2024-03-10,0.001,x,p,q\n2024-03-11,0.002,x,p,q\n2024-03-12,-0.001,x,p,q\n"
+    ).encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert [r["daily_return"] for r in envelope["daily_returns_series"]] == [0.001, 0.002, -0.001]
+
+
+def test_a_header_record_the_raw_read_cannot_parse_is_rejected_not_waved_through() -> None:
+    """FAIL CLOSED. The raw-header read used to fall back to pandas' renamed
+    columns when it failed, which restores the exact defect it exists to remove.
+    A header cell over the stdlib reader's field limit (131072 characters) is a
+    file pandas reads and the raw read cannot: it must be rejected, with the
+    existing `Could not parse CSV: ...` sentence, and echo no cell."""
+    big = "x" * 200_000
+    raw = f"date,daily_return,{big}\n2024-03-10,0.001,a\n2024-03-11,0.002,b\n".encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert envelope["ok"] is False, envelope
+    assert "daily_returns_series" not in envelope
+    assert envelope["preview"] is None
+    assert [(e["rule"], e["row"]) for e in envelope["errors"]] == [("parse_error", 0)]
+    assert envelope["errors"][0]["message"].startswith("Could not parse CSV: ")
+    assert big[:50] not in json.dumps(envelope, default=str)
+
+
 @pytest.mark.parametrize(
     "header",
     [
