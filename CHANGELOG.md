@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.132.4.0] - 2026-10-16 — BRIDGERETURNS gap 01: a Bridge candidate's missing portfolio fit says why (engine v2.4.0)
+
+Gap closure for Phase 167.1.1.1 BRIDGERETURNS (plan 10). The SC4 after-deploy reading on PROD found 2 of 5 personalized candidates with an empty portfolio fit and nothing saying why. Both are one strategy whose 25-point curve shares 8 and 9 days with each book's priced holding, under the 30-day minimum. The empty fit is correct; the silence was the defect.
+
+### Fixed
+- `analytics-service/services/match_engine.py`: a candidate that shares fewer than 30 days with the book now persists `fit_unavailable_reason: "overlap_below_min"`, `fit_overlap_days` and `fit_min_overlap_days` in `score_breakdown.raw`. A personalized candidate with no returns series at all persists `no_candidate_returns` with 0 days. Computed fits and screening rows carry none of these keys.
+- `data_completeness` is now null on the short-overlap path. It measures the book's own join and read 1.0 ("complete") beside a fit that was never computed.
+- The admin candidate view (`src/components/admin/CandidateDetail.tsx`) shows the cause under the Portfolio fit bar, e.g. "Portfolio fit not computed: only 8 shared days with the book (needs 30)."
+
+### Changed
+- `ENGINE_VERSION` v2.3.0 → v2.4.0, because the persisted `raw` shape changed. **Every cached match batch is re-scored on the first cron run after deploy.** `WEIGHTS_VERSION` stays v2.0.0; no weight or score changed. Both golden fixtures change only in `engine_version`.
+- One constant, `PORTFOLIO_FIT_MIN_OVERLAP_DAYS = 30`, feeds the engine's overlap check, the persisted minimum and `routers/match.py` `_BOOK_JOIN_MIN_DAYS`, so the book-level D-22 marker and the candidate-level marker cannot disagree.
+
+### Tests
+- New `analytics-service/tests/test_match_candidate_fit_overlap_marker.py`, 9 arms: 8 shared days, exactly 30 (no reason key), 29 at the boundary, screening, the one-constant check, absent or empty candidate series, and an empty book series. Each arm was RED before its fix and was neutered back to RED and restored.
+- New `src/components/admin/CandidateDetail.test.tsx` pins the admin sentence and pins that `reasons` stays unchanged.
+
+### Notes
+- The cause is deliberately kept out of `reasons`: `reasons[0]` is the allocator's headline on /recommendations and pre-fills the intro note, so an admin caveat there would reach the allocator.
+- Review: two rounds. Round 1 fixed one silent-failure MEDIUM (the no-returns candidate); round 2 added a test for the empty-book guard. LOW items stay in the phase review files, not fixed by policy. Security SECURED 23/23.
+- After deploy and the re-score, the two PROD candidates are read again (read-only) to confirm they carry `overlap_below_min` with 8 and 9 days.
+
 ## [0.132.3.3] - 2026-10-16 — RECORDS: close FANINGRAPH 164.9.3.1 (verification passed 8/8, SECURED 27/27, post-merge items confirmed)
 
 Records only: `.planning`, `TODOS.md`, and this release. One commit.
