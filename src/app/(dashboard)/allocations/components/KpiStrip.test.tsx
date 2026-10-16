@@ -491,7 +491,7 @@ describe("KpiStrip — Max DD 12m is never green (170.6 D-04)", () => {
 
 // R3-SFH-1 (170.6 round 3): the impossible-drawdown gate covers BOTH operands of the scenario
 // delta, not only the figure the cell prints. A scenario value or a live baseline that prints
-// above zero must not feed a delta pill or the "Live: ..." tooltip, and either side is reported.
+// above zero must not feed a delta pill or the "Current book: ..." tooltip, and either side is reported.
 describe("KpiStrip — an impossible drawdown on either scenario operand (170.6 R3-SFH-1)", () => {
   beforeEach(() => {
     vi.mocked(captureToSentry).mockClear();
@@ -515,32 +515,34 @@ describe("KpiStrip — an impossible drawdown on either scenario operand (170.6 
 
   /** The Max DD cell's primary value and its delta pill, found by the pill's aria-label. */
   function ddPartsIn(container: HTMLElement) {
-    const pill = container.querySelector<HTMLElement>('[aria-label^="Max DD 12m delta:"]')!;
+    const pill = container.querySelector<HTMLElement>('[aria-label^="Max DD 12m delta vs current book:"]')!;
     const cell = pill.parentElement!;
-    return { primary: cell.querySelector<HTMLElement>("div.font-mono")!, pill };
+    // 170.1 (D-11): the pill holds the toned figure, then the untoned "vs current book" suffix.
+    return { primary: cell.querySelector<HTMLElement>("div.font-mono")!, pill, figure: pill.children[0] as HTMLElement };
   }
 
   it("scenario value impossible (+0.04), live valid: the pill prints the dash, not a delta from 0.04", () => {
     const { container } = render(scenarioStrip(0.04, -0.08));
-    const { primary, pill } = ddPartsIn(container);
+    const { primary, pill, figure } = ddPartsIn(container);
     expect(primary.textContent?.trim()).toBe("—");
     // Typed by hand. Before R3-SFH-1 this pill read "+12.0%" (0.04 - -0.08), improved, green.
-    expect(pill.textContent?.trim()).toBe("—");
-    expect(pill.getAttribute("aria-label")).toBe("Max DD 12m delta: — (no change)");
-    expect(pill.className).not.toMatch(/text-(positive|negative)/);
-    expect(pill.getAttribute("title")).toBe("Live: -8.00%");
+    expect(figure.textContent?.trim()).toBe("—");
+    expect(pill.children[1].textContent).toBe("vs current book");
+    expect(pill.getAttribute("aria-label")).toBe("Max DD 12m delta vs current book: — (no change)");
+    expect(figure.className).not.toMatch(/text-(positive|negative)/);
+    expect(pill.getAttribute("title")).toBe("Current book: -8.00%");
     expect(captureToSentry).toHaveBeenCalledTimes(1);
   });
 
   it("live value impossible (+0.04), scenario valid: no delta, no '+4.00%' tooltip, and it is reported", () => {
     const { container } = render(scenarioStrip(-0.04, 0.04));
-    const { primary, pill } = ddPartsIn(container);
+    const { primary, pill, figure } = ddPartsIn(container);
     expect(primary.textContent?.trim()).toBe("-4.00%");
     expect(primary.className).toContain("text-negative");
-    // Before R3-SFH-1: pill "−4.0%" computed against the garbage baseline, tooltip "Live: +4.00%", no report.
-    expect(pill.textContent?.trim()).toBe("—");
-    expect(pill.className).not.toMatch(/text-(positive|negative)/);
-    expect(pill.getAttribute("title")).toBe("Live: —");
+    // Before R3-SFH-1: pill "−4.0%" computed against the garbage baseline, tooltip "Current book: +4.00%", no report.
+    expect(figure.textContent?.trim()).toBe("—");
+    expect(figure.className).not.toMatch(/text-(positive|negative)/);
+    expect(pill.getAttribute("title")).toBe("Current book: —");
     expect(captureToSentry).toHaveBeenCalledTimes(1);
     const [, opts] = vi.mocked(captureToSentry).mock.calls[0];
     expect(opts.extra).toMatchObject({ max_drawdown: 0.04, impossible: "live:0.04" });
@@ -548,17 +550,17 @@ describe("KpiStrip — an impossible drawdown on either scenario operand (170.6 
 
   it("both sides valid: the pill still prints its real delta and the tooltip its real baseline", () => {
     const { container } = render(scenarioStrip(-0.04, -0.08));
-    const { pill } = ddPartsIn(container);
-    expect(pill.textContent?.trim()).toBe("+4.0%");
-    expect(pill.getAttribute("title")).toBe("Live: -8.00%");
-    expect(pill.className).toContain("text-positive");
+    const { pill, figure } = ddPartsIn(container);
+    expect(figure.textContent?.trim()).toBe("+4.0%");
+    expect(pill.getAttribute("title")).toBe("Current book: -8.00%");
+    expect(figure.className).toContain("text-positive");
     expect(captureToSentry).not.toHaveBeenCalled();
   });
 
   it("a live baseline that only rounds to zero (+0.000004) is a zero, not a violation", () => {
     const { container } = render(scenarioStrip(-0.04, 0.000004));
     const { pill } = ddPartsIn(container);
-    expect(pill.getAttribute("title")).toBe("Live: 0.00%");
+    expect(pill.getAttribute("title")).toBe("Current book: 0.00%");
     expect(captureToSentry).not.toHaveBeenCalled();
   });
 });

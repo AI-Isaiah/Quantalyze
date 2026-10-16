@@ -751,7 +751,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
             {config.title}
           </h3>
           <p className="text-[11px] text-text-muted">
-            {config.subtitle ?? subtitleFor(config, cmp.name)}
+            {config.subtitle ?? subtitleFor(config, cmp.name, !!cmp.cumulative)}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -1393,14 +1393,21 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
 }
 
-function subtitleFor(cfg: ChartConfig, cmpName: string): string {
+/**
+ * Phase 170.1 (D-11): with no comparator series (`hasCmp` false: the picker is on "None",
+ * or the block carries a name but no cumulative series) the subtitle is empty. The `<p>`
+ * stays rendered so the header height does not jump when a benchmark is toggled.
+ */
+function subtitleFor(cfg: ChartConfig, cmpName: string, hasCmp: boolean): string {
+  if (!hasCmp) return "";
   if (cfg.comparatorAsPrimary && !cfg.stratField) return `${cmpName} comparator`;
   return cfg.comparatorField ? `vs ${cmpName}` : "";
 }
 
 function ariaLabel(cfg: ChartConfig, strategyName: string, cmpName: string, hasCmp: boolean): string {
+  if (!hasCmp) return `${cfg.title}: ${strategyName}`;
   if (cfg.comparatorAsPrimary) return `${cfg.title}: ${strategyName} divided by ${cmpName}`;
-  return `${cfg.title}: ${strategyName}${hasCmp ? ` vs ${cmpName}` : ""}`;
+  return `${cfg.title}: ${strategyName} vs ${cmpName}`;
 }
 
 /**
