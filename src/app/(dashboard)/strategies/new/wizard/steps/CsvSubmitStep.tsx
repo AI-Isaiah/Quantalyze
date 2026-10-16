@@ -50,7 +50,7 @@ interface ValidationEnvelope {
   code: string;
   human_message: string;
   debug_context: {
-    pandera_errors?: { rule: string; row: number; message: string }[];
+    pandera_errors?: { rule: string; row: number; message: string; column?: string }[];
   };
   correlation_id: string | null;
 }
@@ -485,7 +485,7 @@ export function CsvSubmitStep({
         code?: string;
         human_message?: string;
         debug_context?: {
-          pandera_errors?: { rule: string; row: number; message: string }[];
+          pandera_errors?: { rule: string; row: number; message: string; column?: string }[];
         };
         correlation_id?: string | null;
         error?: string;

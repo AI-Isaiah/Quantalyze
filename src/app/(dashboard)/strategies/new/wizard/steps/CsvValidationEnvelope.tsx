@@ -8,6 +8,7 @@ import {
   WIZARD_ERROR_COPY,
   formatCsvRuleCauseFileLevel,
   csvFormatHintApplies,
+  csvRuleLabel,
   formatCsvRuleCauseSingle,
 } from "@/lib/wizardErrors";
 
@@ -150,6 +151,39 @@ function MissingColumnLine({ column }: { column: string | undefined }) {
   );
 }
 
+/**
+ * 170.1-02 / R-3 — a row is PANDERA-BUILT when the producer composed its
+ * message from the generic "failed rule '<name>'" template (the capital-F form
+ * "Failed rule '<name>'." is the same template with no column clause, so the
+ * match is case-insensitive). Those sentences carry the raw rule key and are
+ * recomposed from `CSV_RULE_LABELS`. Every other message is a bespoke producer
+ * sentence (too_many_rows, date_format_ambiguous, empty, parse_error, the
+ * sentinels) that already reads in plain words and renders verbatim.
+ */
+const PANDERA_BUILT_MESSAGE = /failed rule '/i;
+const isPanderaBuilt = (message: string) =>
+  typeof message === "string" && PANDERA_BUILT_MESSAGE.test(message);
+
+/**
+ * 170.1-02 / R-3 — "Row {row}, column {column}: {label}." and its three
+ * degradations. `{column}` is the schema's name off the wire, never cell
+ * content; a period is added only when the label lacks one.
+ */
+function composeRuleLine(e: {
+  rule: string;
+  row: number;
+  column?: string;
+}): string {
+  const raw = csvRuleLabel(e.rule);
+  const label = raw.endsWith(".") ? raw : `${raw}.`;
+  const column = typeof e.column === "string" ? e.column.trim() : "";
+  const hasRow = e.row >= 1;
+  if (hasRow && column) return `Row ${e.row}, column ${column}: ${label}`;
+  if (hasRow) return `Row ${e.row}: ${label}`;
+  if (column) return `Column ${column}: ${label}`;
+  return label;
+}
+
 export function CsvValidationEnvelope({
   envelope,
   format,
@@ -200,11 +234,11 @@ export function CsvValidationEnvelope({
     // Phase 17 / DESIGN-05: "Across {n} rule categories: {labels}." — the keys
     // are humanized via CSV_RULE_LABELS first (this surface joins
     // human-readable labels rather than raw rule keys).
-    const humanizedKeys = ruleKeys.map((r) => CSV_RULE_LABELS[r] ?? r);
+    const humanizedKeys = ruleKeys.map((r) => csvRuleLabel(r));
     causeText = `Across ${ruleCount} rule categories: ${humanizedKeys.join(", ")}.`;
   } else if (ruleCount === 1 && errors.length > 0) {
     const onlyRule = ruleKeys[0];
-    const human = CSV_RULE_LABELS[onlyRule] ?? onlyRule;
+    const human = csvRuleLabel(onlyRule);
     causeText =
       realRowCount > 0
         ? formatCsvRuleCauseSingle(human)
@@ -252,7 +286,7 @@ export function CsvValidationEnvelope({
       {Object.entries(byRule).map(([rule, list]) => (
         <details key={rule} className="mt-2 text-caption">
           <summary className="cursor-pointer text-text-secondary">
-            {CSV_RULE_LABELS[rule] ?? rule}
+            {csvRuleLabel(rule)}
             {/* 166.1 WR-01: a row count only when this rule failed on real rows. */}
             {list.some(isRealRow) ? ` (${list.filter(isRealRow).length} rows)` : ""}
           </summary>
@@ -294,6 +328,8 @@ export function CsvValidationEnvelope({
               <li key={i}>
                 {e.rule === "column_in_dataframe" ? (
                   <MissingColumnLine column={e.column} />
+                ) : isPanderaBuilt(e.message) ? (
+                  composeRuleLine(e)
                 ) : e.row >= 1 ? (
                   `Row ${e.row}: ${e.message}`
                 ) : (

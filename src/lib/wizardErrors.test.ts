@@ -16,6 +16,7 @@ import {
   CSV_SUBMIT_STEP_HEADINGS,
   formatCsvRuleCauseSingle,
   csvFormatHintApplies,
+  csvRuleLabel,
   CSV_FORMAT_HINT,
   type WizardErrorCode,
   type WizardErrorContext,
@@ -6681,5 +6682,33 @@ describe("[170.1-02 / R-2] csvFormatHintApplies", () => {
   it("an unknown format (including an Object.prototype key) never gets the hint", () => {
     expect(csvFormatHintApplies("parquet", ["x"])).toBe(false);
     expect(csvFormatHintApplies("constructor", ["x"])).toBe(false);
+  });
+});
+
+// 170.1-02 / R-3 — the three pandera-built rule keys that printed raw now have
+// labels, and a miss never answers with the raw key.
+describe("[170.1-02 / R-3] csvRuleLabel", () => {
+  it("labels not_nullable, coerce_dtype and dtype", () => {
+    expect(csvRuleLabel("not_nullable")).toBe("A required value is blank");
+    expect(csvRuleLabel("coerce_dtype")).toBe("A value is not a valid date or number");
+    expect(csvRuleLabel("dtype")).toBe("A value has the wrong type for its column");
+  });
+
+  it("strips a trailing parenthesised dtype before the lookup", () => {
+    expect(csvRuleLabel("coerce_dtype('datetime64[ns]')")).toBe(
+      "A value is not a valid date or number",
+    );
+    expect(csvRuleLabel("dtype('float64')")).toBe(
+      "A value has the wrong type for its column",
+    );
+  });
+
+  it("an existing label is unchanged", () => {
+    expect(csvRuleLabel("monotonic_dates")).toBe("Dates must be strictly increasing");
+  });
+
+  it("a rule with no label answers the fallback sentence, never the raw key", () => {
+    expect(csvRuleLabel("mystery_rule")).toBe("This value does not pass a format check");
+    expect(csvRuleLabel("constructor")).toBe("This value does not pass a format check");
   });
 });

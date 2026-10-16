@@ -6447,7 +6447,29 @@ export const CSV_RULE_LABELS: Readonly<Record<string, string>> = {
   // friendly per-rule label here matches what the user sees.
   daily_return_dollar_form_sentinel:
     "Daily return values look like dollar PnL, not decimal returns",
+  // 170.1-02 / R-3 — the three PANDERA-built rule keys that had no label and so
+  // printed raw. Each states what is wrong with the value, in the sentence-case
+  // voice of the labels above. `coerce_dtype` and `dtype` arrive with their
+  // argument attached ("coerce_dtype('datetime64[ns]')"); `csvRuleLabel` strips
+  // the parenthesised part before the lookup, so one key covers every dtype.
+  not_nullable: "A required value is blank",
+  coerce_dtype: "A value is not a valid date or number",
+  dtype: "A value has the wrong type for its column",
 } as const;
+
+/**
+ * 170.1-02 / R-3 — the ONE way a rule key becomes words. Strips a trailing
+ * parenthesised argument (`coerce_dtype('datetime64[ns]')` -> `coerce_dtype`)
+ * before the lookup, and answers a miss with a plain sentence rather than the
+ * raw key: a rule identifier never reaches the user. Own-property lookup, so a
+ * key like `constructor` is a miss, not `Object`'s function.
+ */
+export function csvRuleLabel(rule: string): string {
+  const key = rule.replace(/\([^)]*\)\s*$/, "").trim();
+  return Object.prototype.hasOwnProperty.call(CSV_RULE_LABELS, key)
+    ? CSV_RULE_LABELS[key]
+    : "This value does not pass a format check";
+}
 
 /**
  * Format the single-rule cause sentence emitted by
