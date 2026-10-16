@@ -5263,6 +5263,16 @@ Split out of Phase 167.1.2.1 RECONMARKER by founder decision D-01 (2026-10-13, s
 
 Each item is fixed with a test that fails on the old behaviour, or closed by a recorded founder decision. Any grouping change moves Python `account_groups`, TS `accountIdentityTokens`/`keyAccountOf`, `one_key_per_account_day`/`oneKeyPerAccountDay` and the `queries.ts` reader together (167.1.2.1 re-measure, item (5) WR-03).
 
+**Founder decisions 2026-10-16 (discuss, every answer the recommended option; full text in `167.1.2.1.1-CONTEXT.md`):**
+- **D-01 (SC-4):** the day's snapshot write is held while a never-polled account has a working key. A never-polled account whose keys all fail is left out with a named count and a Sentry event.
+- **D-02 (SC-5):** a 7-day carry cap. Past it the write is held, with a Sentry event naming the count and the age.
+- **D-03 (SC-2/3/6):** blocking.
+  - SC-2 only when the failing key's series stops before the book's last day.
+  - SC-3 only when the members' flows disagree on an owned day.
+  - SC-6 under `account_identity_pending`, with the refresh holding its write.
+- **D-04 (SC-1):** the writer stores the refusal token, and the reader maps it to its existing lines (no new copy).
+- **D-05 (SC-9):** research first. The tolerance is never loosened, and if the stored data is right the measurement goes back to the founder.
+
 Plans:
 - [ ] TBD — plans not listed yet
 
