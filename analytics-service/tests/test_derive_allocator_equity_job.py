@@ -1888,13 +1888,25 @@ def _refusal_case_compose_empty_new_book() -> dict[str, Any]:
     return {"fake": fake, "alloc": alloc, "token": "compose_empty", "outcome": "DONE"}
 
 
-def _new_book_beside_omitted_key(alloc: str, reason: str) -> dict[str, Any]:
+def _new_book_beside_omitted_key(
+    alloc: str, reason: str, *, with_returns: bool = False
+) -> dict[str, Any]:
     """MR-FR-01: a brand-new anchored key beside a key the compose OMITS without a drop
-    (null anchor, reason ``dust`` / ``native_unit``). The omitted key is in
-    ``anchors_by_key`` as None but adds no ``dropped_key``, so the new key alone is the
-    blocking cause and it is still a wait: ``compose_empty``."""
+    (null anchor, reason ``dust`` / ``native_unit`` / ``native_unpriced``). The omitted
+    key is in ``anchors_by_key`` as None but adds no ``dropped_key``, so the new key
+    alone is the blocking cause and it is still a wait: ``compose_empty``.
+
+    MR-R2-01: a native key is omitted by name WHETHER OR NOT it has return rows (legacy
+    rows written before the skip, a priced key whose close went missing), so
+    ``with_returns`` gives it history and the verdict is unchanged. A DUST key is not
+    omitted by name: with returns the compose drops it (``dropped_key``), so the new
+    key is no longer the only blocking cause and the verdict is ``compose_empty_blocked``."""
+    csv = [
+        {"api_key_id": "key-Z", "allocator_id": alloc, "date": day, "daily_return": 0.0}
+        for day in ("2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04")
+    ] if with_returns else []
     fake = _FakeSupabase({
-        "csv_daily_returns": [],
+        "csv_daily_returns": csv,
         DERIVED_TABLE: [
             {"allocator_id": alloc, "kind": "key_inputs:key-A",
              "payload": {"flows": [], "anchor_usd": 50_000.0, "venue": "binance"}},
@@ -1909,7 +1921,13 @@ def _new_book_beside_omitted_key(alloc: str, reason: str) -> dict[str, Any]:
             _gate_key("key-Z", alloc, venue_account_id="acct-Z"),
         ],
     })
-    return {"fake": fake, "alloc": alloc, "token": "compose_empty", "outcome": "DONE"}
+    case: dict[str, Any] = {
+        "fake": fake, "alloc": alloc, "token": "compose_empty", "outcome": "DONE",
+    }
+    if with_returns and reason == "dust":
+        case["token"] = "compose_empty_blocked"
+        case["blocking"] = ["dropped_key"]
+    return case
 
 
 def _refusal_case_compose_empty_new_book_beside_dust() -> dict[str, Any]:
@@ -1918,6 +1936,28 @@ def _refusal_case_compose_empty_new_book_beside_dust() -> dict[str, Any]:
 
 def _refusal_case_compose_empty_new_book_beside_native_unit() -> dict[str, Any]:
     return _new_book_beside_omitted_key("alloc-empty-new-book-native", "native_unit")
+
+
+def _refusal_case_compose_empty_new_book_beside_native_unpriced() -> dict[str, Any]:
+    return _new_book_beside_omitted_key("alloc-empty-new-book-unpriced", "native_unpriced")
+
+
+def _refusal_case_compose_empty_new_book_beside_native_unit_with_returns() -> dict[str, Any]:
+    return _new_book_beside_omitted_key(
+        "alloc-empty-new-book-native-ret", "native_unit", with_returns=True
+    )
+
+
+def _refusal_case_compose_empty_new_book_beside_native_unpriced_with_returns() -> dict[str, Any]:
+    return _new_book_beside_omitted_key(
+        "alloc-empty-new-book-unpriced-ret", "native_unpriced", with_returns=True
+    )
+
+
+def _refusal_case_compose_empty_blocked_new_book_beside_dust_with_returns() -> dict[str, Any]:
+    return _new_book_beside_omitted_key(
+        "alloc-blocked-new-book-dust-ret", "dust", with_returns=True
+    )
 
 
 def _refusal_case_compose_empty_blocked() -> dict[str, Any]:
@@ -1961,6 +2001,10 @@ def _refusal_case_compose_refused() -> dict[str, Any]:
         _refusal_case_compose_empty_new_book,
         _refusal_case_compose_empty_new_book_beside_dust,
         _refusal_case_compose_empty_new_book_beside_native_unit,
+        _refusal_case_compose_empty_new_book_beside_native_unpriced,
+        _refusal_case_compose_empty_new_book_beside_native_unit_with_returns,
+        _refusal_case_compose_empty_new_book_beside_native_unpriced_with_returns,
+        _refusal_case_compose_empty_blocked_new_book_beside_dust_with_returns,
         _refusal_case_compose_empty_blocked,
         _refusal_case_compose_refused,
     ],
