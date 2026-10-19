@@ -1573,3 +1573,127 @@ def test_validate_csv_never_raises_and_no_error_text_carries_a_cell(
     # Case-insensitive: header lower-casing must not hide a leak.
     assert MARKER.lower() not in _error_surface(envelope).lower()
     assert MARKER.lower() not in caplog.text.lower()
+
+
+# Final-hunt F1 (HIGH, data integrity) and F2 (MEDIUM, user-facing). `dayfirst=True`
+# flips a year-first cell (`2024-01-02` is read as 2024-02-01), so in a day-first
+# column one such cell made the day-first reading non-monotonic, the detector took
+# "month-first is the only valid reading", and pandera read EVERY cell month-first:
+# twelve days of January came back as twelve months of 2024 with no error.
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_one_year_first_cell_in_a_day_first_column_does_not_move_the_whole_column_to_month_first(
+    fmt: str,
+) -> None:
+    """Twelve days of January 2024 with the second spelled `2024-01-02`. Every
+    component is 12 or less, so the day order cannot be told (the file is rejected
+    as ambiguous, as it is without the year-first cell). It must not be ACCEPTED,
+    and certainly not with a range that ends in December."""
+    dates = [f"{day:02d}/01/24" for day in range(1, 13)]
+    dates[1] = "2024-01-02"
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False, envelope["preview"]
+    assert _rules_and_rows(envelope) == [("date_format_ambiguous", 0)], envelope["errors"]
+    assert envelope.get("daily_returns_series") in (None, []), "a rejected file carries no series"
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_year_first_cell_among_unambiguous_day_first_cells_is_accepted_with_the_right_range(
+    fmt: str,
+) -> None:
+    """F2: before the last round this file was accepted; the last round rejected it
+    at the year-first cell. 40 days, one of them spelled `2024-01-21` (row 21)."""
+    dates = _day_first_days(40)
+    dates[20] = "2024-01-21"
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert envelope["preview"]["date_range"] == ["2024-01-01", "2024-02-09"], envelope["preview"]
+
+
+# Final-hunt F3 (MEDIUM, user-facing). When both day/month readings agree (every day
+# is over 12) a cell neither reads was written as NaT, so pandera reported a
+# footer as `not_nullable` ("blank") and the preview showed `NaT`. The day-first
+# branch already hands such a cell to pandera as the uncoercible placeholder,
+# which gives `coerce_dtype` at its row and the user's own text in the preview.
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_total_footer_under_dates_both_readings_agree_on_is_a_date_error_not_a_blank(
+    fmt: str,
+) -> None:
+    envelope = validate_csv(_daily_file(fmt, ["13/01/2024", "14/01/2024", "Total"]), fmt)
+
+    assert envelope["ok"] is False
+    assert _rules_and_rows(envelope) == [(rule, 3) for rule in ONLY_THE_DATE_ERROR], envelope["errors"]
+    assert "not_nullable" not in {e["rule"] for e in envelope["errors"]}
+    assert envelope["preview"]["last_rows"][-1]["date"] == "Total", envelope["preview"]
+    assert "0000-00-00" not in json.dumps(envelope["preview"], default=str)
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_blank_date_under_dates_both_readings_agree_on_is_still_reported_as_blank(fmt: str) -> None:
+    """Control: a blank cell is not an unreadable date, it is a missing one."""
+    envelope = validate_csv(_daily_file(fmt, ["13/01/2024", "14/01/2024", ""]), fmt)
+
+    assert envelope["ok"] is False
+    assert [(rule, row) for rule, row in _rules_and_rows(envelope) if rule == "not_nullable"] == [
+        ("not_nullable", 3)
+    ], envelope["errors"]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_differently_spelled_first_cell_reports_the_later_rows_as_date_errors_with_their_text(
+    fmt: str,
+) -> None:
+    """Pandas infers the one format from the FIRST cell, so `13-01-2024` first makes
+    the `/` cells unreadable. The file is rejected at those rows (not read in the
+    other calendar, not shown as blank), each shown as the user wrote it."""
+    envelope = validate_csv(_daily_file(fmt, ["13-01-2024", "14/01/2024", "15/01/2024"]), fmt)
+
+    assert envelope["ok"] is False
+    assert [(rule, row) for rule, row in _rules_and_rows(envelope) if rule.startswith(COERCE_RULE_PREFIX)] == [
+        (ONLY_THE_DATE_ERROR[0], 2),
+        (ONLY_THE_DATE_ERROR[0], 3),
+    ], envelope["errors"]
+    assert "not_nullable" not in {e["rule"] for e in envelope["errors"]}
+    assert [r["date"] for r in envelope["preview"]["last_rows"][1:]] == ["14/01/2024", "15/01/2024"]
+
+
+# Final-hunt F4 (HIGH, data integrity, not from 170.1). A date column of all digits
+# (`20230305`) is read by pandas as int64, and pandera reads an integer as
+# nanoseconds since the epoch: a 60-day file was ACCEPTED with every date on
+# 1970-01-01.
+def _yyyymmdd_days(count: int) -> list[str]:
+    import datetime as dt
+
+    return [(dt.date(2023, 3, 5) + dt.timedelta(i)).strftime("%Y%m%d") for i in range(count)]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_an_all_digit_yyyymmdd_date_column_is_read_as_dates_not_as_epoch_nanoseconds(fmt: str) -> None:
+    envelope = validate_csv(_daily_file(fmt, _yyyymmdd_days(60)), fmt)
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert envelope["preview"]["date_range"] == ["2023-03-05", "2023-05-03"], envelope["preview"]
+    if fmt == "daily_returns":
+        series = [row["date"] for row in envelope["daily_returns_series"]]
+        assert series[0] == "2023-03-05" and series[-1] == "2023-05-03" and len(series) == 60
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+@pytest.mark.parametrize(
+    "dates",
+    [
+        pytest.param([str(45000 + i) for i in range(30)], id="excel-serial"),
+        pytest.param([str(1700000000 + 86400 * i) for i in range(30)], id="unix-seconds"),
+        pytest.param(_yyyymmdd_days(30)[:9] + ["20231340"] + _yyyymmdd_days(30)[10:], id="invalid-yyyymmdd-cell"),
+    ],
+)
+def test_an_all_digit_date_column_that_is_not_yyyymmdd_is_rejected_at_its_rows_never_read_as_1970(
+    fmt: str, dates: list[str]
+) -> None:
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert envelope["preview"]["date_range"][0] != "1970-01-01", envelope["preview"]
+    assert (ONLY_THE_DATE_ERROR[0], 10 if "20231340" in dates else 1) in _rules_and_rows(envelope), envelope["errors"]
+    assert "0000-00-00" not in json.dumps(envelope["preview"], default=str)
