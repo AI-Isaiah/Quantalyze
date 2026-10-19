@@ -1746,6 +1746,72 @@ describe("derived-row outcomes — the reason says why there is no series", () =
     expect(untrusted([], { flags: ["shared_account_no_working_key"] })).toBe(
       "derivation_rejected",
     );
+    // 167.1.2.1.1 SC-1 (D-04): a derive refusal persists its token and the reader
+    // maps it onto a line the owner already has (the full table is
+    // analytics-service/tests/fixtures/derive_refusal_rows.json, asserted in
+    // src/lib/__tests__/derive-refusal-rows.test.ts; these are the negative controls).
+    expect(untrusted(["account_duplicate"])).toBe("duplicate_account");
+    expect(untrusted(["account_identity_collision"])).toBe("duplicate_account");
+    expect(untrusted(["compose_incomplete"])).toBe("awaiting_derivation");
+    expect(untrusted(["compose_empty"])).toBe("awaiting_derivation");
+    for (const token of [
+      "returns_read_cap",
+      "input_corrupt",
+      "compose_refused",
+      "compose_empty_blocked",
+    ]) {
+      expect(untrusted([token])).toBe("derivation_rejected");
+    }
+    // A wait token is a wait only ALONE: next to another token it is a refusal.
+    expect(untrusted(["compose_incomplete", "dropped_key"])).toBe("derivation_rejected");
+    // Precedence: the owner-fixable cause wins, whatever the array order.
+    expect(untrusted(["account_duplicate", "shared_account_no_working_key"])).toBe(
+      "shared_account_no_working_key",
+    );
+    expect(untrusted(["shared_account_history_truncated", "account_identity_collision"])).toBe(
+      "duplicate_account",
+    );
+    // 167.1.2.1.1 SC-2 (D-03/D-04): a lone failing key whose series ended early reads
+    // the SAME existing line as a shared account with no working key (no new copy).
+    expect(untrusted(["failing_key_series_ended"])).toBe("shared_account_no_working_key");
+    // It shares the first precedence slot, so it beats the truncated-history line
+    // whatever the array order.
+    expect(
+      untrusted(["failing_key_series_ended", "shared_account_history_truncated"]),
+    ).toBe("shared_account_no_working_key");
+    expect(
+      untrusted(["shared_account_history_truncated", "failing_key_series_ended"]),
+    ).toBe("shared_account_no_working_key");
+    // 167.1.2.1.1 SC-3 (D-03/D-04): stitched members that disagree about an owned day's
+    // flows read the existing truncated-history line (no new copy), and the
+    // owner-fixable and duplicate causes still outrank it.
+    expect(untrusted(["shared_account_flows_disagree"])).toBe("shared_account_history_truncated");
+    expect(untrusted(["dropped_key", "shared_account_flows_disagree"])).toBe(
+      "shared_account_history_truncated",
+    );
+    expect(untrusted(["shared_account_flows_disagree", "shared_account_no_working_key"])).toBe(
+      "shared_account_no_working_key",
+    );
+    expect(untrusted(["shared_account_flows_disagree", "account_duplicate"])).toBe(
+      "duplicate_account",
+    );
+    expect(untrusted([], { flags: ["shared_account_flows_disagree"] })).toBe("derivation_rejected");
+    // 167.1.2.1.1 SC-6 (D-03/D-04): two unknown working keys on one stamping venue read
+    // the EXISTING identity-pending line. It sits after a duplicate and before the
+    // truncated-history line, and the owner-fixable no-working-key cause outranks it.
+    expect(untrusted(["account_identity_pending"])).toBe("account_identity_pending");
+    expect(untrusted(["account_identity_pending", "shared_account_history_truncated"])).toBe(
+      "account_identity_pending",
+    );
+    expect(untrusted(["account_duplicate", "account_identity_pending"])).toBe("duplicate_account");
+    expect(untrusted(["account_identity_pending", "shared_account_no_working_key"])).toBe(
+      "shared_account_no_working_key",
+    );
+    expect(untrusted([], { flags: ["account_identity_pending"] })).toBe("derivation_rejected");
+    // The token in `flags` only, or in a non-array, keeps the generic line.
+    expect(untrusted([], { flags: ["failing_key_series_ended"] })).toBe("derivation_rejected");
+    expect(untrusted([], { flags: ["account_identity_collision"] })).toBe("derivation_rejected");
+    expect(untrusted("account_duplicate")).toBe("derivation_rejected");
     // Only the writer's untrustworthy verdict is read this way: a pre-v2 row
     // waits, and a malformed v2 row stays derivation_rejected.
     expect(

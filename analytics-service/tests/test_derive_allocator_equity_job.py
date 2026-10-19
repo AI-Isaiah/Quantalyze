@@ -499,9 +499,11 @@ async def test_pin_fourthbucket_dust_null_anchor_sibling_omitted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pin_f2_permanent_failure_deletes_stale_curve() -> None:
+async def test_pin_f2_permanent_failure_records_refusal_for_stale_curve() -> None:
     """F2: a poison structural input → permanent FAILED → the stale equity_curve
-    row is DELETED (degrade to legacy), never left rendering as trustworthy."""
+    row is REPLACED by a refusal record, never left rendering as trustworthy.
+    167.1.2.1.1 D-04: it used to be deleted, which let the reader say the history
+    is recomputed daily; the row now names ``compose_refused``."""
     from services.job_worker import run_derive_allocator_equity_job
 
     fake = _FakeSupabase(_seed_poison_with_stale_curve())
@@ -514,19 +516,13 @@ async def test_pin_f2_permanent_failure_deletes_stale_curve() -> None:
 
     assert result.outcome.name == "FAILED"
     assert result.error_kind == "permanent"
-    curve_deletes = [
-        d for d in fake.deletes
-        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
-        and d[1].get("allocator_id") == "alloc-poison"
-    ]
-    assert len(curve_deletes) == 1, (
-        f"a permanent failure must delete the stale equity_curve row (F2); got {fake.deletes!r}"
-    )
+    _assert_refusal_recorded(fake, "alloc-poison", "compose_refused")
 
 
 @pytest.mark.asyncio
-async def test_pin_f2_corrupt_input_permanent_deletes_stale_curve() -> None:
-    """F2: the M3 corrupt-input permanent disposition also deletes the stale row."""
+async def test_pin_f2_corrupt_input_permanent_records_refusal() -> None:
+    """F2: the M3 corrupt-input permanent disposition also replaces the stale row
+    (167.1.2.1.1 D-04: with an ``input_corrupt`` refusal record, not a delete)."""
     from services.job_worker import run_derive_allocator_equity_job
 
     seed = _seed_poison_with_stale_curve()
@@ -542,13 +538,7 @@ async def test_pin_f2_corrupt_input_permanent_deletes_stale_curve() -> None:
 
     assert result.outcome.name == "FAILED"
     assert result.error_kind == "permanent"
-    curve_deletes = [
-        d for d in fake.deletes
-        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
-    ]
-    assert len(curve_deletes) == 1, (
-        f"the M3 corrupt-input permanent path must delete the stale row; got {fake.deletes!r}"
-    )
+    _assert_refusal_recorded(fake, "alloc-poison", "input_corrupt")
 
 
 @pytest.mark.asyncio
@@ -622,8 +612,9 @@ def _seed_partial_backfill() -> dict[str, list[dict]]:
 async def test_pin_f1b_partial_backfill_refuses_and_degrades() -> None:
     """F1(b): an allocator with 2 eligible keys where one key is absent from BOTH
     the returns and key_inputs maps (backfill window) → the compose is INCOMPLETE
-    and must refuse: delete the equity_curve row (degrade to legacy), NEVER compose
-    a trustworthy 1-of-2-capital curve."""
+    and must refuse: replace the equity_curve row with a ``compose_incomplete``
+    refusal record (167.1.2.1.1 D-04; it used to be deleted), NEVER compose a
+    trustworthy 1-of-2-capital curve."""
     from services.job_worker import run_derive_allocator_equity_job
 
     fake = _FakeSupabase(_seed_partial_backfill())
@@ -639,15 +630,8 @@ async def test_pin_f1b_partial_backfill_refuses_and_degrades() -> None:
     assert [u for u in fake.upserts if _is_equity_curve_upsert(u[1])] == [], (
         f"a partial (incomplete) compose must NOT upsert a curve; got {fake.upserts!r}"
     )
-    # The stale equity_curve row is deleted → legacy fallback.
-    curve_deletes = [
-        d for d in fake.deletes
-        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
-        and d[1].get("allocator_id") == "alloc-partial"
-    ]
-    assert len(curve_deletes) == 1, (
-        f"an incomplete compose must delete the stale equity_curve row; got {fake.deletes!r}"
-    )
+    # The stale equity_curve row is replaced by the refusal record, not deleted.
+    _assert_refusal_recorded(fake, "alloc-partial", "compose_incomplete")
 
 
 @pytest.mark.asyncio
@@ -783,12 +767,15 @@ def _seed_zero_anchored_with_stale_curve() -> dict[str, list[dict]]:
 
 
 @pytest.mark.asyncio
-async def test_pin_b2_empty_compose_deletes_stale_curve_no_upsert() -> None:
+async def test_pin_b2_empty_compose_records_refusal_no_curve() -> None:
     """B2 (root cause): a zero-anchored-keys / empty-curve compose must NOT upsert
-    an empty equity_curve row and MUST delete any existing one, so the dashboard
-    degrades to the clean no-row legacy fallback (never a blank chart labeled
-    'derived', never a stale trustworthy row surviving a structurally-empty
-    recompute — this also closes L1)."""
+    an empty equity_curve CURVE row and MUST replace any existing one (never a
+    blank chart labeled 'derived', never a stale trustworthy row surviving a
+    structurally-empty recompute — this also closes L1). 167.1.2.1.1 D-04: it is
+    replaced by a refusal record, not deleted. This seed has no key_inputs row, so
+    the job stops at F1b and the token is ``compose_incomplete``; the B2 tokens
+    themselves (``compose_empty``, ``compose_empty_blocked``) are pinned by
+    ``test_every_refusal_path_persists_a_reason_row``."""
     from services.job_worker import run_derive_allocator_equity_job
 
     fake = _FakeSupabase(_seed_zero_anchored_with_stale_curve())
@@ -808,15 +795,8 @@ async def test_pin_b2_empty_compose_deletes_stale_curve_no_upsert() -> None:
     assert curve_upserts == [], (
         f"empty compose must NOT upsert an equity_curve row; got {fake.upserts!r}"
     )
-    # The stale equity_curve row was deleted (scoped to this allocator + kind).
-    curve_deletes = [
-        d for d in fake.deletes
-        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
-        and d[1].get("allocator_id") == "alloc-empty"
-    ]
-    assert len(curve_deletes) == 1, (
-        f"empty compose must DELETE the stale equity_curve row; got {fake.deletes!r}"
-    )
+    # The stale equity_curve row was replaced (scoped to this allocator + kind).
+    _assert_refusal_recorded(fake, "alloc-empty", "compose_incomplete")
 
 
 def _seed_malformed_daily_return() -> dict[str, list[dict]]:
@@ -931,8 +911,10 @@ async def test_pin_structural_refusal_permanent_scrubbed_failed() -> None:
     # No raw USD anchor magnitude (100000 / 50000) leaked into the message.
     assert "100000" not in (result.error_message or "")
     assert "50000" not in (result.error_message or "")
-    # No poison equity_curve upsert on a structural failure.
+    # No poison equity_curve upsert on a structural failure; the row holds the
+    # refusal record instead (167.1.2.1.1 D-04).
     assert [u for u in fake.upserts if _is_equity_curve_upsert(u[1])] == []
+    _assert_refusal_recorded(fake, "alloc-1", "compose_refused")
 
 
 @pytest.mark.asyncio
@@ -1502,6 +1484,32 @@ def _curve_upserts(fake: _FakeSupabase) -> list:
     ]
 
 
+def _refusal_upserts(fake: _FakeSupabase) -> list:
+    """The ``equity_curve`` upserts that are a derive REFUSAL (SC-1, D-04): the
+    payload's ``refusal`` is a token string. ``_curve_upserts`` excludes them.
+    Each entry is ``(table, row, on_conflict)`` with ``row`` the single upserted
+    row."""
+    return [
+        (table, row, on_conflict)
+        for table, payload, on_conflict in fake.upserts
+        if table == DERIVED_TABLE
+        for row in _rows_of(payload)
+        if row.get("kind") == "equity_curve"
+        and isinstance(row.get("payload"), dict)
+        and isinstance(row["payload"].get("refusal"), str)
+    ]
+
+
+def _assert_refusal_recorded(fake: _FakeSupabase, alloc: str, token: str) -> None:
+    """167.1.2.1.1 SC-1 (D-04): the refusal is ONE atomic upsert of the
+    ``equity_curve`` row naming ``token``, no curve is written, nothing is deleted."""
+    refusals = _refusal_upserts(fake)
+    assert [r["payload"]["refusal"] for _, r, _ in refusals] == [token], fake.upserts
+    assert refusals[0][1]["allocator_id"] == alloc
+    assert _curve_upserts(fake) == []
+    assert _curve_deletes(fake, alloc) == [], fake.deletes
+
+
 def _curve_deletes(fake: _FakeSupabase, alloc: str) -> list:
     return [
         d for d in fake.deletes
@@ -1586,10 +1594,11 @@ def test_account_identity_collisions_intervals() -> None:
 
 
 @pytest.mark.asyncio
-async def test_duplicate_with_working_holder_deletes_curve(caplog: pytest.LogCaptureFixture) -> None:
+async def test_duplicate_with_working_holder_records_refusal(caplog: pytest.LogCaptureFixture) -> None:
     """A marked duplicate whose holder is still connected is not counted on its
     own. The marker alone refuses the curve — the two keys need not share a
-    venue id — and the log is the token plus counts, never an id."""
+    venue id — and the log is the token plus counts, never an id. 167.1.2.1.1
+    D-04: the refusal is recorded in the row (``account_duplicate``), not deleted."""
     import logging
 
     alloc = "alloc-dup"
@@ -1612,8 +1621,7 @@ async def test_duplicate_with_working_holder_deletes_curve(caplog: pytest.LogCap
     })
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
-    assert _curve_upserts(fake) == []
-    assert len(_curve_deletes(fake, alloc)) == 1
+    _assert_refusal_recorded(fake, alloc, "account_duplicate")
     assert "account_duplicate" in caplog.text
     assert "account_identity_collision" not in caplog.text
     assert "key-D" not in caplog.text
@@ -1646,7 +1654,11 @@ async def test_duplicate_with_revoked_holder_is_a_collision(caplog: pytest.LogCa
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
     assert _curve_upserts(fake) == []
-    assert len(_curve_deletes(fake, alloc)) == 1
+    # 167.1.2.1.1 SC-1 (D-04): the refusal is recorded, not deleted.
+    assert [r["payload"]["refusal"] for _, r, _ in _refusal_upserts(fake)] == [
+        "account_identity_collision"
+    ]
+    assert _curve_deletes(fake, alloc) == []
     assert "account_identity_collision" in caplog.text
     assert "account_duplicate" not in caplog.text
     assert "key-D" not in caplog.text
@@ -1721,7 +1733,8 @@ async def test_duplicate_with_revoked_holder_counts_when_alone() -> None:
 @pytest.mark.asyncio
 async def test_two_keys_same_venue_without_marker_collide(caplog: pytest.LogCaptureFixture) -> None:
     """No duplicate marker, but two eligible keys share (exchange, venue id).
-    Open intervals overlap, so the curve is deleted with the collision token."""
+    Open intervals overlap, so the curve is refused with the collision token
+    (167.1.2.1.1 SC-1, D-04: the refusal is recorded in the row, not deleted)."""
     import logging
 
     alloc = "alloc-collide"
@@ -1738,10 +1751,305 @@ async def test_two_keys_same_venue_without_marker_collide(caplog: pytest.LogCapt
     result = await _run_gate(fake, alloc)
     assert result.outcome.name == "DONE"
     assert _curve_upserts(fake) == []
-    assert len(_curve_deletes(fake, alloc)) == 1
+    # 167.1.2.1.1 SC-1 (D-04): the refusal is recorded, not deleted.
+    assert [r["payload"]["refusal"] for _, r, _ in _refusal_upserts(fake)] == [
+        "account_identity_collision"
+    ]
+    assert _curve_deletes(fake, alloc) == []
     assert "account_identity_collision" in caplog.text
     assert "key-A" not in caplog.text
     assert "venue-shared" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_identity_collision_persists_its_refusal_reason() -> None:
+    """Phase 167.1.2.1.1 SC-1 (D-04). Two unmarked keys on one venue collide, and
+    the derive refuses the curve. It used to DELETE the row, so the reader fell
+    back to "recomputed daily" for a book the derive refuses every day. It now
+    replaces the row in ONE atomic upsert with a version-2 refusal payload that
+    names the token, so no stale trustworthy curve survives and the reason is on
+    disk. Nothing is deleted."""
+    alloc = "alloc-collide-persist"
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key("key-A", alloc, venue_account_id="venue-shared"),
+            _gate_key("key-B", alloc, venue_account_id="venue-shared"),
+        ],
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [_stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    result = await _run_gate(fake, alloc)
+    assert result.outcome.name == "DONE"
+    refusals = _refusal_upserts(fake)
+    assert len(refusals) == 1, "one atomic upsert of the refusal row"
+    table, rows, on_conflict = refusals[0]
+    assert table == DERIVED_TABLE
+    assert on_conflict == "allocator_id,kind"
+    assert rows["allocator_id"] == alloc and rows["kind"] == "equity_curve"
+    payload = rows["payload"]
+    assert payload["version"] == 2
+    assert payload["is_trustworthy"] is False
+    assert payload["curve"] == [] and payload["returns"] == []
+    assert payload["refusal"] == "account_identity_collision"
+    assert "account_identity_collision" in payload["degrade_reasons"]
+    assert _curve_upserts(fake) == [], "a refusal row is not a curve"
+    assert _curve_deletes(fake, alloc) == [], "the refusal replaces the row; nothing is deleted"
+
+
+def _refusal_case_returns_read_cap() -> dict[str, Any]:
+    rows, _first, _last = _seed_long_history()
+    rows[DERIVED_TABLE].append(_stale_curve(_LONG_ALLOC))
+    return {
+        "fake": _FakeSupabase(rows),
+        "alloc": _LONG_ALLOC,
+        "token": "returns_read_cap",
+        "outcome": "FAILED",
+        "truncate_returns": True,
+    }
+
+
+def _refusal_case_duplicate() -> dict[str, Any]:
+    alloc = "alloc-refusal-dup"
+    csv, ki = _series_rows(alloc, "key-D", 1_000.0)
+    _, holder_ki = _series_rows(alloc, "key-H", 1_000.0)
+    fake = _FakeSupabase({
+        "api_keys": [
+            _gate_key(
+                "key-D", alloc,
+                venue_account_id="venue-dup",
+                account_share_kind="duplicate",
+                account_shared_with_api_key_id="key-H",
+            ),
+            _gate_key("key-H", alloc, venue_account_id="venue-holder"),
+        ],
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: [ki, holder_ki, _stale_curve(alloc)],
+        LEGACY_TABLE: [],
+    })
+    return {"fake": fake, "alloc": alloc, "token": "account_duplicate", "outcome": "DONE"}
+
+
+def _refusal_case_input_corrupt() -> dict[str, Any]:
+    seed = _seed_poison_with_stale_curve()
+    # A NULL daily_return: float(None) raises, the M3 permanent disposition.
+    seed["csv_daily_returns"][1]["daily_return"] = None
+    return {
+        "fake": _FakeSupabase(seed), "alloc": "alloc-poison",
+        "token": "input_corrupt", "outcome": "FAILED",
+    }
+
+
+def _refusal_case_compose_incomplete() -> dict[str, Any]:
+    return {
+        "fake": _FakeSupabase(_seed_partial_backfill()), "alloc": "alloc-partial",
+        "token": "compose_incomplete", "outcome": "DONE",
+    }
+
+
+def _refusal_case_compose_empty() -> dict[str, Any]:
+    """B2 with a TRUSTWORTHY empty compose. The only key has a key_inputs row (so
+    it is visible and F1b does not refuse) whose anchor is NULL for the benign
+    reason ``dust``, and no returns: the compose omits it, composes nothing and
+    stays trustworthy. (``_seed_zero_anchored_with_stale_curve`` has NO key_inputs
+    row, so it stops earlier, at F1b, as ``compose_incomplete``.)"""
+    alloc = "alloc-empty-dust"
+    fake = _FakeSupabase({
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [
+            {"allocator_id": alloc, "kind": "key_inputs:key-Z",
+             "payload": {"flows": [], "anchor_usd": None, "venue": "binance",
+                         "anchor_null_reason": "dust"}},
+            _stale_curve(alloc),
+        ],
+        LEGACY_TABLE: [],
+        "api_keys": [_gate_key("key-Z", alloc)],
+    })
+    return {"fake": fake, "alloc": alloc, "token": "compose_empty", "outcome": "DONE"}
+
+
+def _refusal_case_compose_empty_new_book() -> dict[str, Any]:
+    """MR-01: a brand-new book. The only key has a REAL anchor and no return day yet
+    (the <2-day idle key), so the compose drops it as DROPPED_KEY and comes back empty
+    and untrustworthy. That is a wait, not a blocker: the key gains a return day on the
+    next daily derive. It persists ``compose_empty`` (the reader's "being rebuilt"
+    line), not the held-back ``compose_empty_blocked``."""
+    alloc = "alloc-empty-new-book"
+    fake = _FakeSupabase({
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [
+            {"allocator_id": alloc, "kind": "key_inputs:key-Z",
+             "payload": {"flows": [], "anchor_usd": 50_000.0, "venue": "binance"}},
+            _stale_curve(alloc),
+        ],
+        LEGACY_TABLE: [],
+        "api_keys": [_gate_key("key-Z", alloc)],
+    })
+    return {"fake": fake, "alloc": alloc, "token": "compose_empty", "outcome": "DONE"}
+
+
+def _new_book_beside_omitted_key(
+    alloc: str, reason: str, *, with_returns: bool = False
+) -> dict[str, Any]:
+    """MR-FR-01: a brand-new anchored key beside a key the compose OMITS without a drop
+    (null anchor, reason ``dust`` / ``native_unit`` / ``native_unpriced``). The omitted
+    key is in ``anchors_by_key`` as None but adds no ``dropped_key``, so the new key
+    alone is the blocking cause and it is still a wait: ``compose_empty``.
+
+    MR-R2-01: a native key is omitted by name WHETHER OR NOT it has return rows (legacy
+    rows written before the skip, a priced key whose close went missing), so
+    ``with_returns`` gives it history and the verdict is unchanged. A DUST key is not
+    omitted by name: with returns the compose drops it (``dropped_key``), so the new
+    key is no longer the only blocking cause and the verdict is ``compose_empty_blocked``."""
+    csv = [
+        {"api_key_id": "key-Z", "allocator_id": alloc, "date": day, "daily_return": 0.0}
+        for day in ("2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04")
+    ] if with_returns else []
+    fake = _FakeSupabase({
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: [
+            {"allocator_id": alloc, "kind": "key_inputs:key-A",
+             "payload": {"flows": [], "anchor_usd": 50_000.0, "venue": "binance"}},
+            {"allocator_id": alloc, "kind": "key_inputs:key-Z",
+             "payload": {"flows": [], "anchor_usd": None, "venue": "binance",
+                         "anchor_null_reason": reason}},
+            _stale_curve(alloc),
+        ],
+        LEGACY_TABLE: [],
+        "api_keys": [
+            _gate_key("key-A", alloc, venue_account_id="acct-A"),
+            _gate_key("key-Z", alloc, venue_account_id="acct-Z"),
+        ],
+    })
+    case: dict[str, Any] = {
+        "fake": fake, "alloc": alloc, "token": "compose_empty", "outcome": "DONE",
+    }
+    if with_returns and reason == "dust":
+        case["token"] = "compose_empty_blocked"
+        case["blocking"] = ["dropped_key"]
+    return case
+
+
+def _refusal_case_compose_empty_new_book_beside_dust() -> dict[str, Any]:
+    return _new_book_beside_omitted_key("alloc-empty-new-book-dust", "dust")
+
+
+def _refusal_case_compose_empty_new_book_beside_native_unit() -> dict[str, Any]:
+    return _new_book_beside_omitted_key("alloc-empty-new-book-native", "native_unit")
+
+
+def _refusal_case_compose_empty_new_book_beside_native_unpriced() -> dict[str, Any]:
+    return _new_book_beside_omitted_key("alloc-empty-new-book-unpriced", "native_unpriced")
+
+
+def _refusal_case_compose_empty_new_book_beside_native_unit_with_returns() -> dict[str, Any]:
+    return _new_book_beside_omitted_key(
+        "alloc-empty-new-book-native-ret", "native_unit", with_returns=True
+    )
+
+
+def _refusal_case_compose_empty_new_book_beside_native_unpriced_with_returns() -> dict[str, Any]:
+    return _new_book_beside_omitted_key(
+        "alloc-empty-new-book-unpriced-ret", "native_unpriced", with_returns=True
+    )
+
+
+def _refusal_case_compose_empty_blocked_new_book_beside_dust_with_returns() -> dict[str, Any]:
+    return _new_book_beside_omitted_key(
+        "alloc-blocked-new-book-dust-ret", "dust", with_returns=True
+    )
+
+
+def _refusal_case_compose_empty_blocked() -> dict[str, Any]:
+    """The only key has NO anchor (its live read failed: ``balance_error``) and no
+    returns: the compose drops it as DROPPED_KEY (blocking), so the compose is empty
+    AND untrustworthy, and a real cause that is not a wait."""
+    alloc = "alloc-empty-blocked"
+    fake = _FakeSupabase({
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [
+            {"allocator_id": alloc, "kind": "key_inputs:key-Z",
+             "payload": {"flows": [], "anchor_usd": None, "venue": "binance",
+                         "anchor_null_reason": "balance_error"}},
+            _stale_curve(alloc),
+        ],
+        LEGACY_TABLE: [],
+        "api_keys": [_gate_key("key-Z", alloc)],
+    })
+    return {
+        "fake": fake, "alloc": alloc, "token": "compose_empty_blocked",
+        "outcome": "DONE", "blocking": ["dropped_key"],
+    }
+
+
+def _refusal_case_compose_refused() -> dict[str, Any]:
+    return {
+        "fake": _FakeSupabase(_seed_poison_with_stale_curve()), "alloc": "alloc-poison",
+        "token": "compose_refused", "outcome": "FAILED",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "build",
+    [
+        _refusal_case_returns_read_cap,
+        _refusal_case_duplicate,
+        _refusal_case_input_corrupt,
+        _refusal_case_compose_incomplete,
+        _refusal_case_compose_empty,
+        _refusal_case_compose_empty_new_book,
+        _refusal_case_compose_empty_new_book_beside_dust,
+        _refusal_case_compose_empty_new_book_beside_native_unit,
+        _refusal_case_compose_empty_new_book_beside_native_unpriced,
+        _refusal_case_compose_empty_new_book_beside_native_unit_with_returns,
+        _refusal_case_compose_empty_new_book_beside_native_unpriced_with_returns,
+        _refusal_case_compose_empty_blocked_new_book_beside_dust_with_returns,
+        _refusal_case_compose_empty_blocked,
+        _refusal_case_compose_refused,
+    ],
+    ids=lambda b: b.__name__.removeprefix("_refusal_case_"),
+)
+async def test_every_refusal_path_persists_a_reason_row(build: Any) -> None:
+    """Phase 167.1.2.1.1 SC-1 (D-04): every derive refusal path used to DELETE the
+    allocator's equity_curve row, so the reader fell back to "recomputed daily"
+    for a book the derive refuses every day. Each now replaces the row in ONE
+    atomic upsert with a version-2 payload that names the token, and deletes
+    nothing. The stale trustworthy curve is gone either way (T-167.1.2.1.1-01):
+    the upsert replaces it. The job outcome of each path is unchanged."""
+    from contextlib import ExitStack
+    from unittest.mock import patch
+
+    from services.db import PaginatedSelectTruncated
+
+    case = build()
+    fake, alloc = case["fake"], case["alloc"]
+    with ExitStack() as stack:
+        if case.get("truncate_returns"):
+            def _boom(*_a: Any, **_kw: Any) -> list[dict]:
+                raise PaginatedSelectTruncated(page_count=1000, page_size=1000, hint="probe")
+
+            stack.enter_context(
+                patch("services.job_worker._load_allocator_daily_returns", side_effect=_boom)
+            )
+        result = await _run_gate(fake, alloc)
+
+    assert result.outcome.name == case["outcome"], result
+    if case["outcome"] == "FAILED":
+        assert result.error_kind == "permanent", result.error_kind
+    refusals = _refusal_upserts(fake)
+    assert len(refusals) == 1, f"one atomic refusal upsert, got {fake.upserts!r}"
+    _table, row, on_conflict = refusals[0]
+    assert on_conflict == "allocator_id,kind"
+    assert row["allocator_id"] == alloc and row["kind"] == "equity_curve"
+    payload = row["payload"]
+    assert payload["refusal"] == case["token"]
+    assert payload["version"] == 2
+    assert payload["is_trustworthy"] is False
+    assert payload["curve"] == [] and payload["returns"] == []
+    assert payload["degrade_reasons"] == sorted([case["token"], *case.get("blocking", [])])
+    assert _curve_upserts(fake) == [], "a refusal row is not a curve"
+    assert _curve_deletes(fake, alloc) == [], "nothing is deleted; the row is replaced"
 
 
 @pytest.mark.asyncio
@@ -2000,9 +2308,10 @@ async def test_shared_account_with_no_working_key_is_counted_once_and_loudly(
 async def test_identity_refusal_is_a_warning_not_info(
     caplog: pytest.LogCaptureFixture, keys: list[dict[str, Any]], token: str
 ) -> None:
-    """C2 silent-failure SFH-07: the identity refusal deletes the allocator's
-    curve and ends the job DONE. At INFO nobody can find out from the logs why
-    the curve keeps disappearing. It logs at WARNING: token and counts only."""
+    """C2 silent-failure SFH-07: the identity refusal replaces the allocator's
+    curve with a refusal record and ends the job DONE. At INFO nobody can find out
+    from the logs why the curve keeps disappearing. It logs at WARNING: token and
+    counts only."""
     import logging
 
     alloc = "alloc-refuse"
@@ -2014,7 +2323,8 @@ async def test_identity_refusal_is_a_warning_not_info(
         LEGACY_TABLE: [],
     })
     assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
-    assert len(_curve_deletes(fake, alloc)) == 1
+    # 167.1.2.1.1 SC-1 (D-04): recorded in the row, not deleted.
+    _assert_refusal_recorded(fake, alloc, token)
     refusals = [r for r in caplog.records if token in r.getMessage()]
     assert refusals, caplog.text
     assert all(r.levelno == logging.WARNING for r in refusals), [
@@ -2328,12 +2638,12 @@ async def test_a_working_key_with_no_returns_yet_is_not_stitched_and_the_book_is
 async def test_duplicate_whose_marked_key_fails_behind_a_working_holder_still_refuses() -> None:
     """Reader parity (queries.ts countsAsDuplicate): an ELIGIBLE duplicate-marked
     key whose holder is working is a duplicate, whatever the marked key's own
-    status. The curve is refused, as before."""
+    status. The curve is refused, as before (167.1.2.1.1 D-04: the refusal is
+    recorded in the row, not deleted)."""
     alloc = "alloc-dup-marked-failing"
     fake = _shared_pair(alloc, "duplicate", holder={}, marked={"sync_status": "error"})
     assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
-    assert _curve_upserts(fake) == []
-    assert len(_curve_deletes(fake, alloc)) == 1
+    _assert_refusal_recorded(fake, alloc, "account_duplicate")
 
 
 @pytest.mark.asyncio
@@ -2384,7 +2694,16 @@ def _rows_of(payload: Any) -> list[dict]:
 
 
 def _is_equity_curve_upsert(payload: Any) -> bool:
-    return any(r.get("kind") == "equity_curve" for r in _rows_of(payload))
+    # A derive REFUSAL row (SC-1, D-04: ``payload.refusal`` is a token string) is
+    # an ``equity_curve`` row but not a curve. ``_refusal_upserts`` counts those.
+    return any(
+        r.get("kind") == "equity_curve"
+        and not (
+            isinstance(r.get("payload"), dict)
+            and isinstance(r["payload"].get("refusal"), str)
+        )
+        for r in _rows_of(payload)
+    )
 
 
 def _extract_payload(payload: Any) -> dict:
@@ -2489,11 +2808,12 @@ async def test_sfh_r3_07_returns_read_drains_past_the_response_cap() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sfh_r3_07_returns_read_truncation_is_permanent_and_deletes_curve() -> None:
+async def test_sfh_r3_07_returns_read_truncation_is_permanent_and_records_refusal() -> None:
     """A returns read past the read's hard cap raises
     PaginatedSelectTruncated. Retrying re-reads the same rows, so the job must
-    end permanent FAILED (not the classifier's retrying `unknown`), delete the
-    stale equity_curve row, and never compose from partial data. The message
+    end permanent FAILED (not the classifier's retrying `unknown`), replace the
+    stale equity_curve row with a ``returns_read_cap`` refusal record (167.1.2.1.1
+    D-04; it used to delete it), and never compose from partial data. The message
     carries no allocator id (the hint is a log-only triage string)."""
     from unittest.mock import patch
 
@@ -2517,13 +2837,7 @@ async def test_sfh_r3_07_returns_read_truncation_is_permanent_and_deletes_curve(
     assert result.outcome.name == "FAILED", result
     assert result.error_kind == "permanent", result.error_kind
     assert _LONG_ALLOC not in (result.error_message or ""), result.error_message
-    curve_deletes = [
-        d for d in fake.deletes
-        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
-        and d[1].get("allocator_id") == _LONG_ALLOC
-    ]
-    assert len(curve_deletes) == 1, fake.deletes
-    assert not [u for u in fake.upserts if _is_equity_curve_upsert(u[1])], fake.upserts
+    _assert_refusal_recorded(fake, _LONG_ALLOC, "returns_read_cap")
 
 
 # ---------------------------------------------------------------------------
@@ -4188,13 +4502,18 @@ async def test_no_capital_exit_dust_sized_final_days_still_exit() -> None:
 
 @pytest.mark.asyncio
 async def test_no_capital_exit_inception_residual_stays_dropped() -> None:
-    """(c) PROD book 1's MT5 dust key: the founder's "stays blocked, unchanged". Its opening flows
-    do not reconcile with its first return day's level (the capital implied before them is 0.15%
-    of that level, against a 0.01% band), a fact in the writer's stored data that no exit rule may
-    paper over (D-02: the gate is not loosened). Routed by the founder to Phase 167.1.2.1.1
-    WRITERRESIDUALS as SC-9. Until that is fixed the key keeps today's named ``dropped_key``: the
+    """(c) A key whose opening flows do not reconcile with its first return day's level (here the
+    capital implied before them is 0.15% of that level, against a 0.01% band) is a fact in the
+    writer's stored data that no exit rule may paper over (D-02: the gate is not loosened). This
+    test pins that a genuine unreconciled opening flow keeps today's named ``dropped_key``: the
     candidate falls back before its blocked curve can enter the book, so ``inception_unreconciled``
-    is NOT what the book says, the key is not named as exited, and the book is untrustworthy."""
+    is NOT what the book says, the key is not named as exited, and the book is untrustworthy.
+
+    SC-9 (Phase 167.1.2.1.1 WRITERRESIDUALS) is no longer open. The 0.15% residual was measured on
+    PROD book 1's MT5 key before the 164.6.6.2.3 recompute; it was re-measured clean on PROD on
+    2026-10-16 (no equity-curve row carries ``inception_unreconciled``, book 1 is trustworthy,
+    every connected MT5 key replays clean on its stored writer basis, far inside the band), and SC-9
+    is closed by recorded decision (D-11, founder 2026-10-16), not by a code change."""
     d = _BTC_DAYS
     book = _nc_assemble([
         _nc_candidate(
@@ -4303,11 +4622,11 @@ async def test_no_capital_exit_compose_refusal_reverts_the_candidates_and_keeps_
 
 
 @pytest.mark.asyncio
-async def test_no_capital_exit_refusal_without_a_candidate_still_deletes_the_row() -> None:
+async def test_no_capital_exit_refusal_without_a_candidate_still_replaces_the_row() -> None:
     """T-166.3.1-39. The re-compose exists only for candidates. A compose that refuses with none in
-    play is today's permanent failure and deletes the stale row (F2); and when the re-compose
-    itself refuses, the same path runs, so the job never loops and never keeps a row it cannot
-    stand behind."""
+    play is today's permanent failure and replaces the stale row with a refusal record (F2;
+    167.1.2.1.1 D-04, it used to delete it); and when the re-compose itself refuses, the same path
+    runs, so the job never loops and never keeps a row it cannot stand behind."""
     from unittest.mock import patch
 
     from services.job_worker import run_derive_allocator_equity_job
@@ -4331,9 +4650,7 @@ async def test_no_capital_exit_refusal_without_a_candidate_still_deletes_the_row
         ):
             result = await run_derive_allocator_equity_job(job)
         assert result.outcome.name == "FAILED" and result.error_kind == "permanent"
-        assert [
-            x for x in fake.deletes if x[0] == DERIVED_TABLE and x[1].get("kind") == "equity_curve"
-        ], fake.deletes
+        _assert_refusal_recorded(fake, _NOCAP_ALLOC, "compose_refused")
 
 
 @pytest.mark.asyncio
@@ -4379,3 +4696,323 @@ async def test_no_capital_exit_two_candidates_each_leave_on_their_own_day() -> N
         {"api_key_id": "key-B", "reason": "dust", "day": d[2]},
         {"api_key_id": "key-D", "reason": "dust", "day": d[4]},
     ]
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2.1.1 WRITERRESIDUALS plan 02, SC-2 (decision D-03): a single FAILING key
+# whose series ends before the book's last day.
+#
+# WHY. Such a key is counted, but its series stopped the day it began to fail and
+# the compose carries it flat at r = 0 (the benign ``stale_mark_carry``) while the
+# rest of the book moves. The book's return is diluted by frozen capital and the
+# curve still read "ready". A shared account with no working key already raises
+# ``shared_account_no_working_key`` for the same dilution; a LONE failing key did
+# not. A key that works but ends early, a failing key that reaches the book's last
+# day, and a key that leaves the book on purpose (a no-capital exit) dilute nothing
+# and raise nothing.
+# ---------------------------------------------------------------------------
+
+_SC2_ALLOC = "alloc-sc2"
+_SC2_DAYS = [f"2026-06-{n:02d}" for n in range(1, 6)]  # 06-01 .. 06-05
+
+
+def _sc2_book(
+    *,
+    a_status: str,
+    a_days: list[str],
+    b_days: list[str] | None = None,
+    a_returns: bool = True,
+    alloc: str = _SC2_ALLOC,
+) -> _FakeSupabase:
+    """Two single-key accounts: A (``a_status``, series over ``a_days``) and a
+    working B (series over ``b_days``, default the whole span). Distinct stamped
+    venue ids, so neither the identity gate nor SC-6 is in play."""
+    b_days = _SC2_DAYS if b_days is None else b_days
+    keys = [
+        _gate_key("key-A", alloc, venue_account_id="venue-a", sync_status=a_status),
+        _gate_key("key-B", alloc, venue_account_id="venue-b"),
+    ]
+    csv: list[dict] = []
+    derived: list[dict] = [_stale_curve(alloc)]
+    for key_id, days, anchor in (
+        ("key-A", a_days if a_returns else [], 40_000.0),
+        ("key-B", b_days, 60_000.0),
+    ):
+        csv += [
+            {"api_key_id": key_id, "allocator_id": alloc, "date": day, "daily_return": 0.0}
+            for day in days
+        ]
+        derived.append({
+            "allocator_id": alloc,
+            "kind": f"key_inputs:{key_id}",
+            "payload": {
+                "flows": [], "anchor_usd": anchor,
+                "anchor_asof": (days or _SC2_DAYS)[-1], "venue": "binance",
+            },
+        })
+    return _FakeSupabase({
+        "api_keys": keys, "csv_daily_returns": csv, DERIVED_TABLE: derived, LEGACY_TABLE: [],
+    })
+
+
+@pytest.mark.asyncio
+async def test_sc2_failing_single_key_ending_early_blocks() -> None:
+    """A is failing (``error``) and its returns end two days before B's. The book
+    carries A flat for those two days, so the curve is untrustworthy under
+    ``failing_key_series_ended``. This is the derive half; the reader line is
+    pinned by the writer_residual_resolution parity fixture."""
+    fake = _sc2_book(a_status="error", a_days=_SC2_DAYS[:3])
+    assert (await _run_gate(fake, _SC2_ALLOC)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "failing_key_series_ended" in payload["degrade_reasons"], payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+
+
+@pytest.mark.asyncio
+async def test_sc2_failing_key_that_reaches_the_books_last_day_dilutes_nothing() -> None:
+    """The same failing A, but its series reaches B's last day: no frozen capital
+    is carried, so nothing is raised and the curve stays trustworthy."""
+    fake = _sc2_book(a_status="error", a_days=_SC2_DAYS)
+    assert (await _run_gate(fake, _SC2_ALLOC)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "failing_key_series_ended" not in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_sc2_working_key_ending_early_raises_only_the_benign_carry() -> None:
+    """A WORKING key that ends early is a sync lag, which the daily recompute
+    answers; D-03 names a FAILING key. Only the benign ``stale_mark_carry`` shows."""
+    fake = _sc2_book(a_status="connected", a_days=_SC2_DAYS[:3])
+    assert (await _run_gate(fake, _SC2_ALLOC)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "failing_key_series_ended" not in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_sc2_failing_key_that_leaves_the_book_on_purpose_raises_nothing() -> None:
+    """RESEARCH Pitfall 7. A failing key in ``departed_end_by_key`` (here a
+    no-capital exit: a Deribit dust key that is composed through its terminal day
+    and then LEAVES the book) carries no frozen capital past that day, so ending
+    early is its intended shape and not dilution."""
+    seed = _no_capital_book()
+    seed["api_keys"][1]["sync_status"] = "error"  # key-B: failing, ends on day 3 of 5
+    payload = await _compose_no_capital_book(seed)
+    assert "failing_key_series_ended" not in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert payload["no_capital_exited_keys"], "the key must really have exited"
+
+
+@pytest.mark.asyncio
+async def test_sc2_failing_key_recovering_clears_the_token() -> None:
+    """RESEARCH Pitfall 6. No grace is added: the token is a property of this
+    derive's inputs. The same book with A back to working on the next derive
+    carries no token."""
+    failing = _sc2_book(a_status="error", a_days=_SC2_DAYS[:3])
+    assert (await _run_gate(failing, _SC2_ALLOC)).outcome.name == "DONE"
+    assert "failing_key_series_ended" in _composed_payload(failing)["degrade_reasons"]
+    recovered = _sc2_book(a_status="connected", a_days=_SC2_DAYS[:3])
+    assert (await _run_gate(recovered, _SC2_ALLOC)).outcome.name == "DONE"
+    assert "failing_key_series_ended" not in _composed_payload(recovered)["degrade_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_sc2_failing_key_with_inputs_but_no_returns_raises_no_keyerror() -> None:
+    """A failing single key with a ``key_inputs`` row and no csv return rows has no
+    last return day. SC-2 must not index ``last_return_day`` blindly (KeyError) and
+    must not flag it: the compose already classifies it anchored-without-returns,
+    which is the blocking ``dropped_key``, so the key is not silent."""
+    fake = _sc2_book(a_status="error", a_days=[], a_returns=False)
+    assert (await _run_gate(fake, _SC2_ALLOC)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "failing_key_series_ended" not in payload["degrade_reasons"]
+    assert "dropped_key" in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2.1.1 WRITERRESIDUALS plan 02, SC-3 (decision D-03): the members of a
+# stitched shared account disagree about the flows of a day the older one owns.
+#
+# WHY. The stitch keeps the owner's flows for a day and discards the newer key's
+# (taking both would double a transfer the two crawls both list). If the newer key
+# lists a DIFFERENT total, the curve is built on flows the account's own keys do
+# not agree on, and it read "ready". The stitch itself is unchanged: the curve is
+# withheld by the blocking token.
+# ---------------------------------------------------------------------------
+
+_SC3_MAY_DEPOSIT = {"utc_day_iso": "2026-05-15", "usd_signed": 10_000.0}
+
+
+@pytest.mark.asyncio
+async def test_sc3_flows_disagree_blocks() -> None:
+    """M lists the May deposit AND a second 4000 deposit on 2026-05-20, a day H
+    owns and lists nothing on. The two keys disagree on that day, so the book is
+    untrustworthy under ``shared_account_flows_disagree``. The stitch is unchanged
+    (the history still starts on H's first day, one counted key)."""
+    alloc = "alloc-sc3-disagree"
+    fake = _rotation_pair(
+        alloc, "duplicate",
+        old_flows=[_SC3_MAY_DEPOSIT],
+        new_flows=[_SC3_MAY_DEPOSIT, {"utc_day_iso": "2026-05-20", "usd_signed": 4_000.0}],
+    )
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "shared_account_flows_disagree" in payload["degrade_reasons"], payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+    assert payload["curve"][0]["date"] == "2026-05-01"
+    assert payload["inputs"]["n_keys"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sc3_flows_agree_keeps_the_stitch() -> None:
+    """Both keys list the same May deposit: nothing disagrees, the stitch is
+    today's (``shared_account_history_stitched``, trustworthy)."""
+    alloc = "alloc-sc3-agree"
+    fake = _rotation_pair(
+        alloc, "duplicate",
+        old_flows=[_SC3_MAY_DEPOSIT],
+        new_flows=[_SC3_MAY_DEPOSIT],
+    )
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "shared_account_flows_disagree" not in payload["degrade_reasons"]
+    assert "shared_account_history_stitched" in payload["flags"]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_sc3_a_newer_key_that_lists_nothing_is_silence() -> None:
+    """The newer key's crawl does not reach back over H's days, so it lists none of
+    H's flows. That is silence, not disagreement, and the book stays trustworthy."""
+    alloc = "alloc-sc3-silence"
+    fake = _rotation_pair(alloc, "duplicate", old_flows=[_SC3_MAY_DEPOSIT], new_flows=[])
+    assert (await _run_gate(fake, alloc)).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "shared_account_flows_disagree" not in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2.1.1 WRITERRESIDUALS plan 02, SC-6 (decision D-03): two or more eligible
+# WORKING keys on one stamping venue whose account is still UNKNOWN.
+#
+# WHY. Until the stamper reads a venue account id, the derive cannot tell whether two
+# such keys read one exchange account (counted twice) or two. The reader already holds
+# the book for any unknown key; the derive raised nothing, so the stored curve read
+# "ready" to every consumer that does not go through the reader. The check reads the
+# grouping and changes none of it (the four-way coupling rule is not triggered).
+# ---------------------------------------------------------------------------
+
+
+def _pending_key(key_id: str, **extra: Any) -> dict[str, Any]:
+    """An eligible working key on a stamping venue with no account id yet."""
+    return _gate_key(key_id, "alloc-pending", **{"exchange": "okx", **extra})
+
+
+def test_identity_pending_venues_counts_venues_with_two_unknown_working_keys() -> None:
+    from services.allocator_equity_derive import identity_pending_venues
+
+    stamping = frozenset({"okx", "bybit", "binance", "deribit"})
+    two = [_pending_key("k1"), _pending_key("k2")]
+    assert identity_pending_venues(two, stamping) == 1
+    assert identity_pending_venues(two[:1], stamping) == 0, "one unknown key is no pair"
+    # Case and padding of the exchange do not hide the venue.
+    assert identity_pending_venues(
+        [_pending_key("k1", exchange=" OKX "), _pending_key("k2")], stamping
+    ) == 1
+    # Two venues with two keys each are counted as two.
+    both = two + [
+        _pending_key("k3", exchange="bybit"),
+        _pending_key("k4", exchange="bybit"),
+    ]
+    assert identity_pending_venues(both, stamping) == 2
+    # Keys on different venues never pair up.
+    assert identity_pending_venues(
+        [_pending_key("k1"), _pending_key("k2", exchange="bybit")], stamping
+    ) == 0
+
+
+def test_identity_pending_venues_ignores_every_key_that_cannot_be_a_pair_member() -> None:
+    from services.allocator_equity_derive import identity_pending_venues
+
+    stamping = frozenset({"okx", "bybit", "binance", "deribit"})
+    # MT5 is not a stamping venue: its keys are exempt.
+    assert identity_pending_venues(
+        [_pending_key("k1", exchange="mt5"), _pending_key("k2", exchange="mt5")], stamping
+    ) == 0
+    # A marked key knows its account (the holder's), and so does the holder.
+    assert identity_pending_venues(
+        [
+            _pending_key("k1"),
+            _pending_key(
+                "k2", account_share_kind="duplicate", account_shared_with_api_key_id="k1"
+            ),
+        ],
+        stamping,
+    ) == 0
+    # A stamped key is known.
+    assert identity_pending_venues(
+        [_pending_key("k1", venue_account_id="v-1"), _pending_key("k2")], stamping
+    ) == 0
+    # A failing key is not WORKING: it is no candidate (the reader names it key_not_syncing).
+    assert identity_pending_venues(
+        [_pending_key("k1"), _pending_key("k2", sync_status="error")], stamping
+    ) == 0
+    # A disconnected or revoked key is not eligible at all.
+    assert identity_pending_venues(
+        [_pending_key("k1"), _pending_key("k2", disconnected_at="2026-06-01T00:00:00+00:00")],
+        stamping,
+    ) == 0
+    assert identity_pending_venues(
+        [_pending_key("k1"), _pending_key("k2", sync_status="revoked")], stamping
+    ) == 0
+    assert identity_pending_venues([], stamping) == 0
+
+
+def _sc6_book(keys: list[dict[str, Any]], alloc: str = "alloc-pending") -> _FakeSupabase:
+    csv: list[dict] = []
+    derived: list[dict] = [_stale_curve(alloc)]
+    for index, key in enumerate(keys):
+        rows, ki = _series_rows(alloc, key["id"], 10_000.0 * (index + 1))
+        csv += rows
+        ki["payload"]["venue"] = key["exchange"]
+        derived.append(ki)
+    return _FakeSupabase({
+        "api_keys": keys, "csv_daily_returns": csv, DERIVED_TABLE: derived, LEGACY_TABLE: [],
+    })
+
+
+@pytest.mark.asyncio
+async def test_sc6_unknown_working_keys_block_the_derive() -> None:
+    """Two unknown working okx keys: the book may count one account twice, so the
+    curve is untrustworthy under ``account_identity_pending``."""
+    fake = _sc6_book([_pending_key("key-A"), _pending_key("key-B")])
+    assert (await _run_gate(fake, "alloc-pending")).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "account_identity_pending" in payload["degrade_reasons"], payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "keys",
+    [
+        pytest.param([_pending_key("key-A"), _pending_key("key-B", venue_account_id="v-b")], id="one-unknown"),
+        pytest.param(
+            [_pending_key("key-A", exchange="mt5"), _pending_key("key-B", exchange="mt5")],
+            id="mt5-pair",
+        ),
+        pytest.param(
+            [_pending_key("key-A"), _pending_key("key-B", sync_status="error")], id="one-failing"
+        ),
+    ],
+)
+async def test_sc6_a_book_that_is_not_a_pair_of_unknown_working_keys_raises_nothing(
+    keys: list[dict[str, Any]],
+) -> None:
+    fake = _sc6_book(keys)
+    assert (await _run_gate(fake, "alloc-pending")).outcome.name == "DONE"
+    payload = _composed_payload(fake)
+    assert "account_identity_pending" not in payload["degrade_reasons"]

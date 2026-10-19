@@ -10096,6 +10096,145 @@ parented jobs (census 2026-10-16: 0 of 2332).
 seconds without a re-run. Not worth building before a caller passes parents.
 **Owner / Trigger:** the first caller that enqueues with parents, or any `mark_failed_lock_bound` event in the worker logs.
 
+## Phase 167.1.2.1.1 (WRITERRESIDUALS) — routed review items (logged 2026-10-16)
+
+Round-1 review (gsd-code-reviewer and silent-failure-hunter) found 0 HIGH or CRITICAL and 4 MEDIUM. The founder ruled
+on 2026-10-16: "no more fix round for mediums". All four are booked here unfixed. Reports:
+`.planning/phases/167.1.2.1.1-*/167.1.2.1.1-REVIEW.md` (MR-01) and `167.1.2.1.1-REVIEW-SFH.md` (M-1..M-3).
+
+⭐ **2026-10-19 fix round.** The founder ruled: "you can finalize and phase complete those". All four MEDIUMs went
+through one minimal fix round (fix-round rule: "For fix rounds minimal fix only, no new abstractions or defensive
+checks"), and the re-review is in `167.1.2.1.1-REVIEW-FIXROUND.md`. Three entries below are closed and one is narrowed.
+Three entries are new: one known limit (CONTEXT D-16) and two residuals from the re-review.
+
+### 167.1.2.1.1-NEWBOOK-HELD-BACK-LINE — a brand-new book's first days read "held back" instead of "being rebuilt" (booked 2026-10-16, code review MR-01, MEDIUM, USER-FACING, introduced by this phase) — ✅ CLOSED IN CODE 2026-10-19 by the WRITERRESIDUALS fix round; ⚠️ NOT live until its PR merges and deploys
+
+✅ **CLOSED 2026-10-19.** The fix landed in three commits on the phase branch:
+- `b70f9b0af` (MR-01) stores `compose_empty` when the only blocking token is `dropped_key` and every key is anchored with no returns.
+- `e72caff18` (MR-FR-01) covers a key the compose omits without a drop: a null anchor with reason `dust`, `native_unit` or `native_unpriced` and no returns.
+- `8c2493405` (MR-R2-01, CONTEXT D-15) covers a null-anchor `native_unit` or `native_unpriced` key that has returns.
+
+The remaining case, a key that never yields two usable NAV days, reads the wait with no end. It is a founder-accepted
+known limit: see `167.1.2.1.1-NEWBOOK-WAIT-UNBOUNDED`. The block below is kept as lineage.
+
+**Failure scenario.**
+- A key with fewer than 2 days of history writes a `key_inputs` row with a real anchor and no return rows.
+- The compose marks it anchored-without-returns, which is the blocking `dropped_key`, and comes back empty.
+- SC-1 stores `['compose_empty_blocked', 'dropped_key']`.
+- The reader maps that to `derivation_rejected`: "We are holding back your equity history … did not pass its checks".
+- Before this phase the row was deleted, and the Overview said "being rebuilt … recomputed once a day". That line is true here: the book composes as soon as the key has a return day.
+- It hits single-key or all-new books on their first day or two, i.e. onboarding.
+
+**Fix.**
+- In `run_derive_allocator_equity_job`'s B2 split, store `compose_empty` (a wait) when the ONLY blocking token is `dropped_key` and every dropped key has a non-null anchor and no return rows.
+- Keep `compose_empty_blocked` otherwise.
+- Add a `derive_refusal_rows.json` row so the TS reader and the census pin the line.
+
+**Owner / Trigger:** before or with the WRITERRESIDUALS ship; at the latest, the next allocator-onboarding phase.
+
+### 167.1.2.1.1-HOLD-SENTRY-LEADER — the refresh hold's Sentry event can silently never fire (booked 2026-10-16, SFH M-1 + code review LR-01, MEDIUM, data-integrity visibility) — ✅ CLOSED IN CODE 2026-10-19 by the WRITERRESIDUALS fix round; ⚠️ NOT live until its PR merges and deploys
+
+✅ **CLOSED 2026-10-19 by `e6d151b5c`.**
+- The leader is now the smallest WORKING eligible key (`working_holder_predicate`). With no working key, the smallest eligible key leads.
+- `test_the_leader_is_elected_among_working_keys_not_failing_ones` pins it.
+- The audit-row idempotency read was not built (fix-round rule).
+- Two residuals are booked below: `167.1.2.1.1-FALLBACK-LEADER-PREFLIGHT` and `167.1.2.1.1-LEADER-STATUS-FLIP`.
+- The never-enqueued strategy-linked leader (LR-01) stays as written below.
+
+The block below is kept as lineage.
+
+**Failure scenario.**
+- Only the job for the smallest eligible key id (failing keys included) raises the hold and left-out Sentry events.
+- Several cases stop that job before it raises anything:
+  - the job defers on the circuit breaker;
+  - it fails its preflight (decrypt or client build);
+  - it is never enqueued (a strategy-linked key).
+- In each of those cases the hold is audit-only. A failing key is the likeliest to fail its preflight.
+
+**Fix.** Make the event idempotent per (allocator, day, outcome), e.g. the first job that finds no `refresh_held` row for today raises it, or pick the leader from WORKING keys. Add a test where the smallest-id job fails at preflight.
+
+**Owner / Trigger:** the next phase touching `run_refresh_allocator_equity_daily_job`.
+
+### 167.1.2.1.1-LEFTOUT-SENTRY-NO-WRITE — the `left_out_*` Sentry events never fire when no day is written (booked 2026-10-16, SFH M-2, MEDIUM, data-integrity visibility) — ✅ CLOSED IN CODE 2026-10-19 by the WRITERRESIDUALS fix round; ⚠️ NOT live until its PR merges and deploys
+
+✅ **CLOSED 2026-10-19 by `65f176af2`.**
+- The left-out loop now runs right after the hold branch, before the `no_holdings_today` and `refresh_held_for_reconstruct` returns.
+- `test_an_all_failing_book_still_raises_the_left_out_event` and `test_a_left_out_account_is_raised_when_the_day_waits_on_a_reconstruct` pin it.
+- Known side effect (review LOW): the event now fires before the persist, so a persist failure that is retried raises it again.
+
+The block below is kept as lineage.
+
+**Failure scenario.**
+- The D-01 and D-12 left-out events are emitted only after `persist_equity_snapshots`.
+- A book whose only accounts are never-polled-failing or over-age-failing has no holdings and takes the `no_holdings_today` early return (and `refresh_held_for_reconstruct` returns early too).
+- That book gets an audit row and no Sentry event: the worst left-out case is the quiet one.
+
+**Fix.** Raise the left-out events before those early returns. Add an all-failing-book test.
+
+**Owner / Trigger:** with 167.1.2.1.1-HOLD-SENTRY-LEADER.
+
+### 167.1.2.1.1-IDENTITY-HOLD-DERIBIT — the identity-pending refresh hold has no bound (booked 2026-10-16, SFH M-3 + code review LR-03/LR-06, MEDIUM; narrowed 2026-10-19 to the escalation half)
+
+⭐ **NARROWED 2026-10-19.**
+- **Fixed:** the Deribit half, by `482313287`. The refresh's call is `identity_pending_venues(key_rows, VENUES_WITH_ACCOUNT_ID - {"deribit"})`, and the derive's call is unchanged. `test_unstamped_working_deribit_keys_do_not_hold_the_refresh` pins it, with an OKX control.
+- **Still open:** the hold still has no bound. If the stamper never stamps, the hold repeats daily with one warning and no escalation, and the missed days stay missing (first-writer-wins). The fix is to escalate after N consecutive held days. It was not built in the fix round because it is a new detection mechanism.
+
+The block below is kept as lineage.
+
+**Failure scenario.**
+- `identity_pending_venues` counts Deribit, which is in `VENUES_WITH_ACCOUNT_ID`.
+- The refresh adds $0 for Deribit, and the never-polled and over-age holds both exempt it.
+- So two unstamped working Deribit keys hold the snapshot write, and those days stay missing for `/compare` and the dashboard per-holding returns (first-writer-wins).
+- If the stamper never stamps (e.g. a Bybit UTA parse miss), the hold repeats daily with one warning and no escalation.
+- Affected on PROD 2026-10-16: 0 keys.
+
+**Fix.**
+- Exclude Deribit from the REFRESH's call only; the derive's call stays.
+- Escalate after N consecutive held days.
+- Add a test with two unstamped Deribit keys.
+
+**Owner / Trigger:** the next phase touching the refresh holds, or 167.1.2.1.2 HISTORYREADER (Bybit parse miss).
+
+### 167.1.2.1.1-NEWBOOK-WAIT-UNBOUNDED — a key that never yields two usable NAV days reads "being rebuilt" with no end (booked 2026-10-19, fix-round review MR-FR-02 + SFH #3, MEDIUM, USER-FACING, KNOWN LIMIT by founder decision)
+
+**Founder decision 2026-10-19 (CONTEXT D-16): "Accept as known limit".** No code.
+
+**Scenario.**
+- The MR-01 wait (`compose_empty`, "being rebuilt … recomputed once a day") applies to any book whose keys are all anchored with no return days.
+- A brand-new key leaves that state on its next derive.
+- A funded key whose venue never yields two usable NAV days does not leave it (the `<2`-day key-mode short-circuit in `run_derive_broker_dailies_job`), so its book reads the wait with no end.
+- An idle account that only holds assets still gets daily NAV values and is not affected.
+- Before this phase the row was deleted and the same line showed, so this is not a regression.
+
+**Fix if triggered.** Treat the state as a wait only while the key is younger than N days (`api_keys.created_at`), then map it to a line that names the cause.
+
+**Owner / Trigger:** a user report of a permanent "being rebuilt" panel, or the next phase touching the derive's refusal mapping.
+
+### 167.1.2.1.1-FALLBACK-LEADER-PREFLIGHT — an all-failing book's fallback leader can die before its Sentry event (booked 2026-10-19, fix-round SFH #1, MEDIUM, data-integrity visibility)
+
+**Scenario.**
+- With no working eligible key, the M-1 fallback makes the smallest eligible (failing) key the leader.
+- That job can return early in `_allocator_key_preflight`: it can defer on the breaker or fail on decrypt or client build.
+- If it does, the left-out event that M-2 moved ahead of `no_holdings_today` never fires for exactly the all-failing book.
+- The audit row from every other job remains.
+
+**Fix.** Make the event idempotent per (allocator, day, outcome) from whichever job runs, instead of tying it to one key.
+
+**Owner / Trigger:** the next phase touching `run_refresh_allocator_equity_daily_job`, together with `167.1.2.1.1-LEADER-STATUS-FLIP`.
+
+### 167.1.2.1.1-LEADER-STATUS-FLIP — the refresh leader follows a mutable `sync_status`, so one fan-out can raise zero events (booked 2026-10-19, fix-round SFH #2, MEDIUM per SFH / LOW per code review, data-integrity visibility, introduced by the M-1 fix)
+
+**Scenario.**
+- Each refresh job re-elects the leader from `api_keys.sync_status` at its own run time.
+- Take keys A < B, both working, with a real hold. B's job runs first and sees A as the leader, so it stays silent.
+- A's status then flips to error before A's job runs. A's job now elects B, so it stays silent too.
+- No event fires. The reverse flip gives two events, which is only noise.
+- No number or user-facing line changes. The audit rows remain.
+
+**Fix.** Same as `167.1.2.1.1-FALLBACK-LEADER-PREFLIGHT`: an event idempotent per (allocator, day, outcome).
+
+**Owner / Trigger:** with `167.1.2.1.1-FALLBACK-LEADER-PREFLIGHT`.
+
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
 - **"Do NOT implement" landmines (keep documented, do not touch):** bridge-scoring precompute;
