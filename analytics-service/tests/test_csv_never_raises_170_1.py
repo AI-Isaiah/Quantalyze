@@ -1609,3 +1609,50 @@ def test_a_year_first_cell_among_unambiguous_day_first_cells_is_accepted_with_th
 
     assert envelope["ok"] is True, envelope["errors"]
     assert envelope["preview"]["date_range"] == ["2024-01-01", "2024-02-09"], envelope["preview"]
+
+
+# Final-hunt F3 (MEDIUM, user-facing). When both day/month readings agree (every day
+# is over 12) a cell neither reads was written as NaT, so pandera reported a
+# footer as `not_nullable` ("blank") and the preview showed `NaT`. The day-first
+# branch already hands such a cell to pandera as the uncoercible placeholder,
+# which gives `coerce_dtype` at its row and the user's own text in the preview.
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_total_footer_under_dates_both_readings_agree_on_is_a_date_error_not_a_blank(
+    fmt: str,
+) -> None:
+    envelope = validate_csv(_daily_file(fmt, ["13/01/2024", "14/01/2024", "Total"]), fmt)
+
+    assert envelope["ok"] is False
+    assert _rules_and_rows(envelope) == [(rule, 3) for rule in ONLY_THE_DATE_ERROR], envelope["errors"]
+    assert "not_nullable" not in {e["rule"] for e in envelope["errors"]}
+    assert envelope["preview"]["last_rows"][-1]["date"] == "Total", envelope["preview"]
+    assert "0000-00-00" not in json.dumps(envelope["preview"], default=str)
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_blank_date_under_dates_both_readings_agree_on_is_still_reported_as_blank(fmt: str) -> None:
+    """Control: a blank cell is not an unreadable date, it is a missing one."""
+    envelope = validate_csv(_daily_file(fmt, ["13/01/2024", "14/01/2024", ""]), fmt)
+
+    assert envelope["ok"] is False
+    assert [(rule, row) for rule, row in _rules_and_rows(envelope) if rule == "not_nullable"] == [
+        ("not_nullable", 3)
+    ], envelope["errors"]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_differently_spelled_first_cell_reports_the_later_rows_as_date_errors_with_their_text(
+    fmt: str,
+) -> None:
+    """Pandas infers the one format from the FIRST cell, so `13-01-2024` first makes
+    the `/` cells unreadable. The file is rejected at those rows (not read in the
+    other calendar, not shown as blank), each shown as the user wrote it."""
+    envelope = validate_csv(_daily_file(fmt, ["13-01-2024", "14/01/2024", "15/01/2024"]), fmt)
+
+    assert envelope["ok"] is False
+    assert [(rule, row) for rule, row in _rules_and_rows(envelope) if rule.startswith(COERCE_RULE_PREFIX)] == [
+        (ONLY_THE_DATE_ERROR[0], 2),
+        (ONLY_THE_DATE_ERROR[0], 3),
+    ], envelope["errors"]
+    assert "not_nullable" not in {e["rule"] for e in envelope["errors"]}
+    assert [r["date"] for r in envelope["preview"]["last_rows"][1:]] == ["14/01/2024", "15/01/2024"]

@@ -882,17 +882,25 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     # pandera's coerce nor the date-range computation below re-parses the raw
     # strings (which would re-emit pandas' dayfirst warning), but stay silent
     # — there was nothing to disambiguate.
+    #
+    # A cell neither reading reads (a footer such as `Total`, a blank, `garbage`, a
+    # zone NAME) is no evidence for either, and left in it made BOTH readings
+    # "unusable", so the column stayed text and the order check then read it
+    # month-first from its first cell (review LR-2). A non-blank one is handed to
+    # pandera as the uncoercible placeholder, so it is reported at its row and
+    # shown as the user wrote it, never as a blank; a blank stays blank and still
+    # reports `not_nullable`. (Review LF-1, and F3 for the equal-parse path.)
+    readable = parsed_mf.notna() | parsed_df.notna()
+    blank = df["date"].isna() | (df["date"].astype(str).str.strip() == "")
+    leftover = df["date"].where(blank, _UNSUPPORTED_ZONE_TOKEN)
     if parsed_mf.equals(parsed_df):
         if not parsed_mf.isna().all():
-            df["date"] = parsed_mf
+            df["date"] = (
+                parsed_mf if readable.all() else parsed_mf.astype(object).where(readable, leftover)
+            )
         return None
 
-    # The reading is chosen on the cells at least one reading can read. A cell
-    # neither reads (a footer such as `Total`, a blank, `garbage`, a zone NAME) is
-    # no evidence for either, and left in it made BOTH readings "unusable", so the
-    # column stayed text and the order check then read it month-first from its
-    # first cell (review LR-2).
-    readable = parsed_mf.notna() | parsed_df.notna()
+    # The reading is chosen on the cells at least one reading can read.
     mf_ok = _date_parse_is_usable(parsed_mf[readable])
     df_ok = _date_parse_is_usable(parsed_df[readable])
     # Only day-first reads every readable cell: month-first leaves a NaT in one.
@@ -909,11 +917,7 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
         # neither reading could read (each reading infers ONE format from the
         # first cell, so `05/04/24` or `05-04-2024` is unreadable to both) may
         # still be read by pandera in the other day/month order, so it is never
-        # handed back as text: a non-blank one becomes the uncoercible
-        # placeholder and pandera reports it at its row. A blank stays blank, so
-        # it still reports `not_nullable`. (Review LF-1.)
-        blank = df["date"].isna() | (df["date"].astype(str).str.strip() == "")
-        leftover = df["date"].where(blank, _UNSUPPORTED_ZONE_TOKEN)
+        # handed back as text (`leftover`, above). (Review LF-1.)
         df["date"] = (
             parsed_df if readable.all() else parsed_df.astype(object).where(readable, leftover)
         )
