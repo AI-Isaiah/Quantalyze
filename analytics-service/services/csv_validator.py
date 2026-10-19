@@ -21,9 +21,7 @@ Cross-AI revision 2026-04-30 — TWO behavior changes vs iteration 1:
 """
 from __future__ import annotations
 
-import csv
 import io
-import itertools
 import logging
 import re
 import warnings
@@ -921,47 +919,44 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     return None  # neither reading is a clean ascending series — let pandera raise
 
 
-def _raw_header_names(raw_bytes: bytes, header_row: int) -> list[str]:
+def _raw_header_names(raw_bytes: bytes, header_row: int, width: int) -> list[str]:
     """The header cells exactly as written in the file.
 
     `pd.read_csv` renames a repeated header (`x,x` -> `x`, `x.1`) before the
     frame exists, so a repeat can only be seen on the raw row. `header_row` is
-    0 for a normal file and 1 when the Excel blank first row was skipped.
+    0 for a normal file and 1 when the Excel blank first row was skipped, and
+    `width` is the frame's column count.
 
-    The stdlib `csv` reader is used, not `pd.read_csv(header=None)`: pandas fixes
-    the field count from the FIRST line, so a blank first row narrower than the
-    header (`,` above `date,x,x`) made that read raise (review R-1). Empty records
-    are skipped the way pandas skips blank lines, so `header_row` counts the same
-    records the frame read counted.
+    This is a pandas read with the frame read's own options, so both reads apply
+    the same rules for which line is the header (blank, whitespace-only and
+    quoted-empty lines, bare carriage returns, a BOM, quoted line breaks) and
+    agree by construction. A second parser did not: it disagreed with pandas
+    three times (review R-1, TR-1 and TR-2, LR-1), each a header taken from the
+    wrong line. `header=None` keeps the names unrenamed; `names=range(width)`
+    stops pandas fixing the field count from a first line narrower than the
+    header (`,` above `date,x,x`, review R-1); `index_col=False` drops the extra
+    fields of a wider blank row (`,,,,` above a two-column header), and the
+    warning pandas gives for that is not a defect of the file.
 
-    Two details keep this read aligned with the frame's (review TR-1 and TR-2):
-      - pandas also skips a line made only of spaces and tabs, which the stdlib
-        reader returns as a one-field record (`[' ']`). It is skipped here too;
-        keeping it made `header_row` point one record too early, so the "header"
-        was that line and a repeated column went unseen.
-      - the text is wrapped with `newline=""`, as the `csv` docs require. Without
-        it only a line feed ends a line, so a file whose lines end in a bare
-        carriage return (Excel for Mac, "CSV (Macintosh)") reached the reader as
-        one line and was rejected with a Python hint, although pandas reads it.
-    The caller also checks that the width read here equals the frame's, so any
-    future drift between the two readers rejects loudly instead of silently.
-
-    FAIL CLOSED: a header that cannot be read RAISES (`csv.Error`, or
-    `UnicodeDecodeError`). There is no fallback to the frame's own names; they are
-    the renamed ones, which would restore the defect this function exists to
-    remove. The caller turns the exception into a `parse_error`.
+    FAIL CLOSED: a header that cannot be read RAISES (a `ValueError` from
+    pandas, which covers `UnicodeDecodeError`). There is no fallback to the
+    frame's own names; they are the renamed ones, which would restore the defect
+    this function exists to remove. The caller turns the exception into a
+    `parse_error`.
     """
-    text = raw_bytes.decode("utf-8-sig")
-    records = (
-        record
-        for record in csv.reader(io.StringIO(text, newline=""))
-        if record and not (len(record) == 1 and not record[0].strip(" \t"))
-    )
-    taken = list(itertools.islice(records, header_row + 1))
-    if len(taken) <= header_row:
-        # pandas' own sentence for this shape, which it raises before we get here.
-        raise csv.Error(f"Passed header={header_row} but only {len(taken)} lines in file")
-    return taken[header_row]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # ParserWarning for the dropped fields
+        raw = pd.read_csv(
+            io.BytesIO(raw_bytes),
+            encoding="utf-8-sig",
+            header=None,
+            names=range(width),
+            dtype=str,
+            keep_default_na=False,
+            nrows=header_row + 1,
+            index_col=False,
+        )
+    return raw.iloc[header_row].tolist()
 
 
 def _row_longer_than_header() -> dict[str, Any]:
@@ -1106,8 +1101,8 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # undeclared too.
     normalized_columns = [str(c).strip().lower() for c in df.columns]
     try:
-        header_names = _raw_header_names(raw_bytes, header_row)
-    except (csv.Error, UnicodeDecodeError) as e:
+        header_names = _raw_header_names(raw_bytes, header_row, len(df.columns))
+    except ValueError as e:
         # Fail closed: a header the raw read cannot parse is rejected, never
         # replaced by the frame's renamed names. Same sentence shape as the two
         # other parse failures above, and the same logger discipline.

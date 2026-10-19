@@ -917,13 +917,25 @@ def test_a_good_header_under_a_blank_first_row_of_any_width_is_still_accepted(bl
     assert [r["daily_return"] for r in envelope["daily_returns_series"]] == [0.001, 0.002, -0.001]
 
 
-def test_a_header_record_the_raw_read_cannot_parse_is_rejected_not_waved_through() -> None:
+def test_a_header_record_the_raw_read_cannot_parse_is_rejected_not_waved_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """FAIL CLOSED. The raw-header read used to fall back to pandas' renamed
     columns when it failed, which restores the exact defect it exists to remove.
-    A header cell over the stdlib reader's field limit (131072 characters) is a
-    file pandas reads and the raw read cannot: it must be rejected, with the
-    existing `Could not parse CSV: ...` sentence, and echo no cell."""
+    The raw read is pandas now (review LR-1), so a file it cannot parse is a file
+    the frame read cannot either; this forces the failure the way pandas reports
+    one, a `ParserError`, and pins what the caller does with it: the existing
+    `Could not parse CSV: ...` sentence, and no cell echoed."""
+    import pandas as pd
+
+    import services.csv_validator as csv_validator
+
     big = "x" * 200_000
+
+    def _cannot_parse(*_args: object, **_kwargs: object) -> list[str]:
+        raise pd.errors.ParserError("Error tokenizing data")
+
+    monkeypatch.setattr(csv_validator, "_raw_header_names", _cannot_parse)
     raw = f"date,daily_return,{big}\n2024-03-10,0.001,a\n2024-03-11,0.002,b\n".encode()
     envelope = validate_csv(raw, "daily_returns")
 
@@ -1090,14 +1102,18 @@ def test_crlf_bom_quoted_comma_and_quoted_newline_headers_still_behave() -> None
         ], dup
 
 
-def test_a_raw_header_the_frame_read_disagrees_with_is_rejected_not_checked() -> None:
-    """The guard against the two readers drifting apart (review TR-1). A leading
-    bare carriage return makes pandas drop the empty first field of the next line
-    (header `date`, `daily_return`) where the raw read sees a three-field record.
-    Neither can be trusted to name a column, so the file is rejected with the
-    existing wrong-width sentence, never raised and never validated against a
+def test_a_raw_header_the_frame_read_disagrees_with_is_rejected_not_checked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard against the two readers drifting apart (review TR-1). Both reads
+    are pandas now (review LR-1), so they cannot disagree on a real file; this
+    forces a raw header of the wrong width and pins that the file is rejected with
+    the existing wrong-width sentence, never raised and never validated against a
     header that may be the wrong line."""
-    raw = b"\r,date,daily_return\n2024-03-10,0.001\n2024-03-11,0.002\n"
+    import services.csv_validator as csv_validator
+
+    monkeypatch.setattr(csv_validator, "_raw_header_names", lambda *_a, **_k: ["date", "daily_return", "x"])
+    raw = b"date,daily_return\n2024-03-10,0.001\n2024-03-11,0.002\n"
     envelope = validate_csv(raw, "daily_returns")  # must not raise
 
     assert envelope["ok"] is False, envelope
@@ -1106,6 +1122,38 @@ def test_a_raw_header_the_frame_read_disagrees_with_is_rejected_not_checked() ->
     assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
         ("parse_error", 0, "Could not parse CSV: a data row has more fields than the header row.")
     ]
+
+
+# Review LR-1 (last round, HIGH). A quoted-empty first line (`""`, what a one-cell
+# blank row looks like from a quote-all exporter) is a header cell to pandas, so
+# the blank-row re-read takes line 2 as the header. The stdlib reader the raw
+# header read used dropped it as blank, took the FIRST DATA ROW as the "header",
+# and the width guard passed when that row was as wide as the header. The raw read
+# is now pandas with the frame read's own options, so both agree on the header.
+@pytest.mark.parametrize(
+    "header,body",
+    [
+        pytest.param("date,daily_return,daily_return", _DUP_BODY, id="exact-repeat"),
+        pytest.param("date,Date,daily_return", _DUP_BODY_DATE_DATE, id="date-Date"),
+        pytest.param("date,daily_return,Daily_Return", _DUP_BODY, id="case-collision"),
+    ],
+)
+def test_a_quoted_empty_first_line_does_not_hide_a_repeated_column(header: str, body: str) -> None:
+    envelope = validate_csv(f'""\n{header}\n{body}'.encode(), "daily_returns")  # must not raise
+
+    assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", 0, DUPLICATE_HEADER_MESSAGE)
+    ]
+    assert envelope["ok"] is False and envelope["preview"] is None
+
+
+def test_a_good_header_with_a_trailing_comma_under_a_quoted_empty_line_is_accepted() -> None:
+    """Control: the file has no over-long data row, and must not be told it has."""
+    raw = '""\ndate,daily_return,\n2024-03-10,0.001\n2024-03-11,0.002\n2024-03-12,-0.001\n'.encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert [r["daily_return"] for r in envelope["daily_returns_series"]] == [0.001, 0.002, -0.001]
 
 
 # Security re-audit T-170.1-51 (availability, validator half). The per-cell zone
