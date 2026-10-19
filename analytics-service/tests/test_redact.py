@@ -61,7 +61,7 @@ def test_scrub_pii_recursive():
 
 def test_scrub_pii_jwt_whole_string():
     # Whole-string JWT: 3 base64url segments, anchored.
-    jwt = "aaaaaaaaaa.bbbbbbbbbb.cccccccccc"
+    jwt = "eyJaaaaaaa.eyJbbbbbbb.cccccccccc"
     assert scrub_pii(jwt) == REDACTED_JWT
 
 
@@ -535,8 +535,9 @@ def test_scrub_freeform_string_passes_non_strings_unchanged():
 
 
 def test_jwt_shape_compiled_correctly():
-    assert JWT_SHAPE.match("aaa.bbb.ccc") is not None
+    assert JWT_SHAPE.match("eyJ.bbb.ccc") is not None
     assert JWT_SHAPE.match("aaa.bbb") is None
+    assert JWT_SHAPE.match("api.example.com") is None  # dotted host, not a JWT
     assert JWT_SHAPE.match("not-a-jwt") is None
 
 
