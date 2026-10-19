@@ -1868,15 +1868,37 @@ def _refusal_case_compose_empty() -> dict[str, Any]:
     return {"fake": fake, "alloc": alloc, "token": "compose_empty", "outcome": "DONE"}
 
 
-def _refusal_case_compose_empty_blocked() -> dict[str, Any]:
-    """The only key has an anchor and NO returns: the compose drops it as
-    DROPPED_KEY (blocking), so the compose is empty AND untrustworthy."""
-    alloc = "alloc-empty-blocked"
+def _refusal_case_compose_empty_new_book() -> dict[str, Any]:
+    """MR-01: a brand-new book. The only key has a REAL anchor and no return day yet
+    (the <2-day idle key), so the compose drops it as DROPPED_KEY and comes back empty
+    and untrustworthy. That is a wait, not a blocker: the key gains a return day on the
+    next daily derive. It persists ``compose_empty`` (the reader's "being rebuilt"
+    line), not the held-back ``compose_empty_blocked``."""
+    alloc = "alloc-empty-new-book"
     fake = _FakeSupabase({
         "csv_daily_returns": [],
         DERIVED_TABLE: [
             {"allocator_id": alloc, "kind": "key_inputs:key-Z",
              "payload": {"flows": [], "anchor_usd": 50_000.0, "venue": "binance"}},
+            _stale_curve(alloc),
+        ],
+        LEGACY_TABLE: [],
+        "api_keys": [_gate_key("key-Z", alloc)],
+    })
+    return {"fake": fake, "alloc": alloc, "token": "compose_empty", "outcome": "DONE"}
+
+
+def _refusal_case_compose_empty_blocked() -> dict[str, Any]:
+    """The only key has NO anchor (its live read failed: ``balance_error``) and no
+    returns: the compose drops it as DROPPED_KEY (blocking), so the compose is empty
+    AND untrustworthy, and a real cause that is not a wait."""
+    alloc = "alloc-empty-blocked"
+    fake = _FakeSupabase({
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [
+            {"allocator_id": alloc, "kind": "key_inputs:key-Z",
+             "payload": {"flows": [], "anchor_usd": None, "venue": "binance",
+                         "anchor_null_reason": "balance_error"}},
             _stale_curve(alloc),
         ],
         LEGACY_TABLE: [],
@@ -1904,6 +1926,7 @@ def _refusal_case_compose_refused() -> dict[str, Any]:
         _refusal_case_input_corrupt,
         _refusal_case_compose_incomplete,
         _refusal_case_compose_empty,
+        _refusal_case_compose_empty_new_book,
         _refusal_case_compose_empty_blocked,
         _refusal_case_compose_refused,
     ],
