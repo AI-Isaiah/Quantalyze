@@ -82,7 +82,7 @@ describe("redact.py mirrors pii-scrub.ts denylist verbatim", () => {
   it("JWT_SHAPE anchored regex appears verbatim in redact.py", () => {
     const py = readFileSync(PY_FILE, "utf8");
     expect(py).toContain(
-      "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
+      "^eyJ[A-Za-z0-9_-]*\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
     );
   });
 

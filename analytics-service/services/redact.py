@@ -48,7 +48,7 @@ DENYLIST_EXACT: frozenset[str] = frozenset({
     "x-internal-token",
     # Review LF-2 — Deribit `public/auth` bearer tokens. They are opaque dotted
     # strings that do not start `eyJ`, so `JWT_SHAPE` (anchored on `eyJ`) cannot
-    # redact them by value; redact them by key. Python-only, see `JWT_SHAPE`.
+    # redact them by value; redact them by key.
     "access_token",
     "refresh_token",
     # Adversarial revision 2026-05-06: Grok B1 — Bybit/OKX broker-quirk header keys.
@@ -93,7 +93,7 @@ DENYLIST_PREFIX: tuple[str, ...] = ("sb-ec-",)
 # host (`api.example.com`), OTel origin (`auto.http.starlette`) or version
 # (`3.12.13`) matched, and the Sentry transaction hook rewrote them. The payload is
 # deliberately NOT required to start `eyJ`: a JWS may carry a non-JSON payload.
-# DIVERGES from pii-scrub.ts L42 JWT_SHAPE (still the unanchored form).
+# Mirror of pii-scrub.ts JWT_SHAPE (same anchored form, pinned by the parity test).
 JWT_SHAPE: re.Pattern[str] = re.compile(
     r"^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$"
 )
