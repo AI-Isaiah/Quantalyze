@@ -1775,3 +1775,38 @@ def test_a_yyyymm_month_column_is_rejected_at_its_rows_not_read_as_january(fmt: 
     date_rows = {row for rule, row in _rules_and_rows(envelope) if rule == ONLY_THE_DATE_ERROR[0]}
     assert date_rows == set(range(1, 25)), envelope["errors"]
     assert envelope["preview"]["date_range"] != ["2023-01-01", "2024-01-02"], envelope["preview"]
+
+
+# Last-round review WR-03 (MEDIUM, user-facing). A month-first (US) column with one
+# year-first cell chose month-first correctly, then returned without writing its
+# reading, so pandera re-parsed the raw text from the first cell's format and named
+# no row (`coerce_dtype` at row 0). The day-first column with the same cell was
+# accepted.
+def _month_first_days(count: int) -> list[str]:
+    import datetime as dt
+
+    return [(dt.date(2024, 1, 1) + dt.timedelta(i)).strftime("%m/%d/%Y") for i in range(count)]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_year_first_cell_in_a_month_first_column_is_accepted_with_the_right_range(fmt: str) -> None:
+    dates = _month_first_days(20)
+    dates[13] = "2024-01-14"
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert envelope["preview"]["date_range"] == ["2024-01-01", "2024-01-20"], envelope["preview"]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_an_unreadable_cell_beside_a_year_first_cell_in_a_month_first_column_is_reported_at_its_row(
+    fmt: str,
+) -> None:
+    dates = _month_first_days(20)
+    dates[13] = "2024-01-14"
+    dates[15] = "garbage"
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert _rules_and_rows(envelope) == [(rule, 16) for rule in ONLY_THE_DATE_ERROR], envelope["errors"]
+    assert "0000-00-00" not in json.dumps(envelope["preview"], default=str)

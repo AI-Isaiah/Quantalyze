@@ -929,7 +929,14 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     day_first_only = bool(parsed_df[readable].notna().all() and parsed_mf[readable].isna().any())
 
     if mf_ok and not df_ok:
-        return None  # month-first is the only valid reading — unchanged
+        if not iso_like.any() and readable.all():
+            return None  # month-first is the only valid reading — unchanged
+        # A year-first or unreadable cell: pandera would infer ONE format from the
+        # first cell and name no row, so hand it the month-first reading. (WR-03.)
+        df["date"] = (
+            parsed_mf if readable.all() else parsed_mf.astype(object).where(readable, leftover)
+        )
+        return None
 
     if day_first_only or (df_ok and not mf_ok):
         # Day-first is the ONLY valid reading (e.g. a day > 12 rules out
