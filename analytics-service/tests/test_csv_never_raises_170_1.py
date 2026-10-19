@@ -1573,3 +1573,39 @@ def test_validate_csv_never_raises_and_no_error_text_carries_a_cell(
     # Case-insensitive: header lower-casing must not hide a leak.
     assert MARKER.lower() not in _error_surface(envelope).lower()
     assert MARKER.lower() not in caplog.text.lower()
+
+
+# Final-hunt F1 (HIGH, data integrity) and F2 (MEDIUM, user-facing). `dayfirst=True`
+# flips a year-first cell (`2024-01-02` is read as 2024-02-01), so in a day-first
+# column one such cell made the day-first reading non-monotonic, the detector took
+# "month-first is the only valid reading", and pandera read EVERY cell month-first:
+# twelve days of January came back as twelve months of 2024 with no error.
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_one_year_first_cell_in_a_day_first_column_does_not_move_the_whole_column_to_month_first(
+    fmt: str,
+) -> None:
+    """Twelve days of January 2024 with the second spelled `2024-01-02`. Every
+    component is 12 or less, so the day order cannot be told (the file is rejected
+    as ambiguous, as it is without the year-first cell). It must not be ACCEPTED,
+    and certainly not with a range that ends in December."""
+    dates = [f"{day:02d}/01/24" for day in range(1, 13)]
+    dates[1] = "2024-01-02"
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False, envelope["preview"]
+    assert _rules_and_rows(envelope) == [("date_format_ambiguous", 0)], envelope["errors"]
+    assert envelope.get("daily_returns_series") in (None, []), "a rejected file carries no series"
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_year_first_cell_among_unambiguous_day_first_cells_is_accepted_with_the_right_range(
+    fmt: str,
+) -> None:
+    """F2: before the last round this file was accepted; the last round rejected it
+    at the year-first cell. 40 days, one of them spelled `2024-01-21` (row 21)."""
+    dates = _day_first_days(40)
+    dates[20] = "2024-01-21"
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert envelope["preview"]["date_range"] == ["2024-01-01", "2024-02-09"], envelope["preview"]

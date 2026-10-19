@@ -859,14 +859,22 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     # YYYY-DD-MM (2023-01-02) — a wrong-but-monotonic parse that would
     # manufacture a phantom day-first/month-first ambiguity for every ISO
     # upload. Year-first inputs have no day/month ambiguity to resolve.
-    iso_like = s.str.match(r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}")
-    if iso_like.fillna(False).all():
+    iso_like = s.str.match(r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}").fillna(False).astype(bool)
+    if iso_like.all():
         return None
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # silence pandas' per-row inference warnings
         parsed_mf = _parse_dates(s, dayfirst=False)
         parsed_df = _parse_dates(s, dayfirst=True)
+        # `dayfirst=True` flips a year-first cell (`2024-01-02` is read as
+        # 2024-02-01), which made the day-first reading non-monotonic and sent the
+        # whole column to month-first. A column that starts `dd/mm/yyyy` reads such
+        # a cell as NaT under BOTH flags. A year-first cell has no day/month
+        # ambiguity, so both readings take it from a parse of those cells alone.
+        year_first = _parse_dates(s.where(iso_like), dayfirst=False)
+        parsed_mf = parsed_mf.where(~iso_like, year_first)
+        parsed_df = parsed_df.where(~iso_like, year_first)
 
     # Identical under both flags → no day/month ambiguity to resolve (e.g.
     # every first component > 12, so pandas can only read it day-first). ISO
