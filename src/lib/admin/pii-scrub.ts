@@ -33,6 +33,10 @@ const DENYLIST_EXACT = new Set<string>([
   // on the seam to FastAPI; outbound HTTP breadcrumbs would otherwise
   // capture it).
   "x-internal-token",
+  // Review LF-2 — Deribit `public/auth` bearer tokens, redacted by KEY: the Python
+  // runtime's JWT value shape is anchored on `eyJ` and cannot catch them.
+  "access_token",
+  "refresh_token",
   // Phase 18 / FIX-04 — Adversarial revision 2026-05-06 (Grok B1):
   // Bybit v5 + OKX broker-quirk header keys promoted to the canonical
   // denylist so both runtimes (TS + Python redact.py) share the same

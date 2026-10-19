@@ -84,6 +84,17 @@ class TestRedactBeforeSend:
         assert result["extra"]["auth_token"] == "[REDACTED_JWT]"
         assert result["extra"]["user_id"] == "preserved"
 
+    def test_redacts_dotted_bearer_tokens_by_key_in_extra_and_contexts(self):
+        # Review LF-2: not `eyJ`-headed, so only the key can redact them.
+        tokens = {
+            "access_token": "1700000000000.AbCd-E_4.QWERTYuiop12345",
+            "refresh_token": "1700000000000.XyZ.abc",
+        }
+        event = {"extra": {"result": dict(tokens)}, "contexts": {"auth": dict(tokens)}}
+        result = sentry_init._redact_before_send(event, None)
+        for where in (result["extra"]["result"], result["contexts"]["auth"]):
+            assert where == {"access_token": "[REDACTED]", "refresh_token": "[REDACTED]"}
+
     def test_redacts_sb_ec_prefixed_cookie_keys(self):
         # FIX 7: prefix match against pii-scrub.ts L27 DENYLIST_PREFIX.
         event = {"request": {"cookies": {"sb-ec-session": "value", "harmless": "ok"}}}

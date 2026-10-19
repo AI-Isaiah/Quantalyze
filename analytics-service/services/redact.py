@@ -46,6 +46,11 @@ DENYLIST_EXACT: frozenset[str] = frozenset({
     "x-mbx-apikey",
     "ok-access-sign",
     "x-internal-token",
+    # Review LF-2 — Deribit `public/auth` bearer tokens. They are opaque dotted
+    # strings that do not start `eyJ`, so `JWT_SHAPE` (anchored on `eyJ`) cannot
+    # redact them by value; redact them by key. Python-only, see `JWT_SHAPE`.
+    "access_token",
+    "refresh_token",
     # Adversarial revision 2026-05-06: Grok B1 — Bybit/OKX broker-quirk header keys.
     "x-bapi-apikey",
     "x-bapi-sign",
