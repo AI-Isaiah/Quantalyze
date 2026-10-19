@@ -854,11 +854,19 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     # an integer as nanoseconds since the epoch: every date came out 1970-01-01. The
     # only integer spelling of a date is YYYYMMDD, so read it as that; any other
     # integer (an Excel serial, a Unix time) is not a date and becomes the
-    # uncoercible placeholder, reported at its row and shown as written.
-    if pd.api.types.is_integer_dtype(df["date"]):
-        parsed = _parse_dates(df["date"].astype(str), format="%Y%m%d")
+    # uncoercible placeholder, reported at its row and shown as written. Only an
+    # 8-digit non-negative whole number is YYYYMMDD: strptime takes a one- or
+    # two-digit month and day, so `2024121` would be split by guess, and a
+    # negative one parses to a year below zero that the preview then raises on.
+    # A spreadsheet export spells the same date as a float (`20230305.0`), which
+    # pandas also reads as epoch nanoseconds; a whole-number float is read by its
+    # integer text, a fractional one is the placeholder, and a blank stays blank.
+    if pd.api.types.is_integer_dtype(df["date"]) or pd.api.types.is_float_dtype(df["date"]):
+        col = df["date"]
+        txt = (col.where(col % 1 == 0).astype("Int64") if pd.api.types.is_float_dtype(col) else col).astype(str)
+        parsed = _parse_dates(txt.where(txt.str.fullmatch(r"[0-9]{8}")), format="%Y%m%d")
         df["date"] = parsed if parsed.notna().all() else parsed.astype(object).where(
-            parsed.notna(), _UNSUPPORTED_ZONE_TOKEN
+            parsed.notna(), col.where(col.isna(), _UNSUPPORTED_ZONE_TOKEN)
         )
         return None
 
