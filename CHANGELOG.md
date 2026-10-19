@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.132.5.0] - 2026-10-19 — WRITERRESIDUALS 167.1.2.1.1: the allocator equity writer says why it refused a curve and never dilutes or drops a key silently
+
+Phase 167.1.2.1.1. The allocator equity writer (derive, stitch and the daily refresh) now persists the reason it refused a curve, flags a failing or never-polled key instead of carrying it flat, and counts each account once. No migration.
+
+### Fixed
+- **Every derive refusal persists its reason (SC-1).** The refusal paths of `run_derive_allocator_equity_job` used to delete the curve row and store nothing, so Overview could only show a generic line. Each path now stores its token, and the reader (`src/lib/queries.ts`) maps every token onto an existing Overview line. An identity collision reads as `duplicate_account`.
+- **A lone failing key whose series ends early blocks the curve (SC-2).** `no_working_groups` fired only for groups of two or more keys, so a single failing key was carried flat inside a "ready" book. It is now `failing_key_series_ended`.
+- **Stitched members that disagree about an owned day's flows block the curve (SC-3).** Before, a deposit listed only by the newer key, on a day the older key owned, was dropped and the curve stayed trusted. It is now `shared_account_flows_disagree`.
+- **A never-polled working account holds the day's snapshot write (SC-4).** It used to add $0 to the day's persisted total. The hold is recorded as the audit action `allocator.equity.refresh_held`.
+- **A carried balance older than 7 days holds the day for a working key, and a dead key is left out (SC-5, founder D-12).**
+- **Two working keys on one account that the stamper has not reached yet are no longer counted twice (SC-6).** The derive stores `account_identity_pending` and the refresh holds its write. Deribit is excluded from the refresh's count because its keys add $0 there.
+- **A departed account whose history is unavailable reaches Sentry as an event with a count (SC-7),** written in `job_worker.py`, instead of only a breadcrumb.
+- **A brand-new book reads "being rebuilt", not "held back" (fix rounds, founder D-15).** A book whose keys have an anchor and no return day yet now stores `compose_empty`. That also holds beside a dust, native-unit or native-unpriced key the compose omits, including a native-unit key that already has history.
+- **The refresh's Sentry hold event comes from the smallest working key, not a failing one,** and the left-out Sentry events fire on every outcome that is not a hold.
+
+### Tests
+- New: `test_derive_refusal_rows.py`, `test_writer_residual_parity.py`, `test_stitch_flow_agreement.py` and `test_allocator_equity_departed.py`, plus the shared fixtures `derive_refusal_rows.json` and `writer_residual_resolution.json`.
+- TS twins: `derive-refusal-rows.test.ts` and `writer-residual-parity.test.ts`, so the Python writer and the TS reader agree on every token.
+- Larger suites for the derive job and the refresh carry-forward.
+- `scripts/accounttruth-census.mjs` mirrors the new tokens and is pinned by `accounttruth-census.test.ts`.
+- Every fix was RED first and went RED again when neutered.
+
+### Notes
+- **Deploy timing (SC-8):** this change must land outside 03:30–06:45 UTC (poll 04:00, refresh 05:00, derive 05:30). A deploy between the poll and the refresh writes one stale row per emptied account.
+- **A held refresh day is a permanent gap** in `allocator_equity_snapshots`, by design.
+- **`v2_rows_fresh` in `docs/runbooks/derivecron-go-live.md` now also counts refusal rows.** Filter it on `is_trustworthy`.
+- **SC-9 (the MT5 BTC-unit inception residual)** is closed as cleared (founder D-11).
+- **TODOS:**
+  - Closed: `167.1.2.1.1-NEWBOOK-HELD-BACK-LINE`, `-HOLD-SENTRY-LEADER` and `-LEFTOUT-SENTRY-NO-WRITE`.
+  - Narrowed: `-IDENTITY-HOLD-DERIBIT`, to its escalation half.
+  - Booked: `-NEWBOOK-WAIT-UNBOUNDED`, the known limit the founder accepted (D-16). A funded key whose venue never yields 2 usable NAV days reads "being rebuilt" with no end, which is the line it showed before this phase.
+  - Booked: `-FALLBACK-LEADER-PREFLIGHT` and `-LEADER-STATUS-FLIP`, both observability only.
+- Verification passed 9/9; security SECURED 20/20.
+
 ## [0.132.4.1] - 2026-10-16 — RECORDS: close BRIDGERETURNS 167.1.1.1 (verification passed, SECURED 23/23, PROD readings as expected)
 
 Records only: `.planning`, `TODOS.md`, and this release.
