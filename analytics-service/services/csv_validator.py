@@ -879,16 +879,30 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
             df["date"] = parsed_mf
         return None
 
-    mf_ok = _date_parse_is_usable(parsed_mf)
-    df_ok = _date_parse_is_usable(parsed_df)
+    # The reading is chosen on the cells at least one reading can read. A cell
+    # neither reads (a footer such as `Total`, a blank, `garbage`, a zone NAME) is
+    # no evidence for either, and left in it made BOTH readings "unusable", so the
+    # column stayed text and the order check then read it month-first from its
+    # first cell (review LR-2).
+    readable = parsed_mf.notna() | parsed_df.notna()
+    mf_ok = _date_parse_is_usable(parsed_mf[readable])
+    df_ok = _date_parse_is_usable(parsed_df[readable])
+    # Only day-first reads every readable cell: month-first leaves a NaT in one.
+    # That settles the reading even when the dates are out of order, so the order
+    # check, not the format guess, reports the disorder.
+    day_first_only = bool(parsed_df[readable].notna().all() and parsed_mf[readable].isna().any())
 
     if mf_ok and not df_ok:
         return None  # month-first is the only valid reading — unchanged
 
-    if df_ok and not mf_ok:
+    if day_first_only or (df_ok and not mf_ok):
         # Day-first is the ONLY valid reading (e.g. a day > 12 rules out
-        # month-first). Unambiguous — normalize in place and flag it.
-        df["date"] = parsed_df
+        # month-first). Unambiguous — normalize in place and flag it. A cell
+        # neither reading could read keeps what the file (or the zone guard) put
+        # there, so pandera reports it at its row as it does in an ISO column.
+        df["date"] = (
+            parsed_df if readable.all() else parsed_df.astype(object).where(readable, df["date"])
+        )
         return {
             "rule": "date_format_normalized",
             "detected_format": "day_first",
