@@ -642,6 +642,90 @@ def test_the_day_first_named_zone_error_has_the_shape_the_iso_file_gets(fmt: str
     assert _all_errors(day_first) == _all_errors(iso), (day_first["errors"], iso["errors"])
 
 
+# Review LR-2 (last round, MEDIUM, user-facing). TR-3 was fixed only where pandera
+# had parsed the column. A day-first file with one unreadable cell reached the
+# order check as text, and the check read it month-first from the first cell, so a
+# file whose dates increase was told "dates must be strictly increasing" (and a
+# real disorder could be hidden). Every TR-3 specimen above uses days 13 to 17,
+# which no month-first reading can parse; a real day-first file has days 1 to 12.
+def _daily_file(fmt: str, dates: list[str]) -> bytes:
+    value = (lambda i: f"0.00{i % 9 + 1}") if fmt == "daily_returns" else (lambda i: str(100 + i))
+    rows = [f"{d},{value(i)}" for i, d in enumerate(dates)]
+    return (HEADER[fmt] + "\n" + "\n".join(rows) + "\n").encode()
+
+
+def _day_first_days(count: int) -> list[str]:
+    import datetime as dt
+
+    return [(dt.date(2024, 1, 1) + dt.timedelta(i)).strftime("%d/%m/%Y") for i in range(count)]
+
+
+def _rules_and_rows(envelope: dict) -> list[tuple[str, int]]:
+    return [(e["rule"], e["row"]) for e in envelope["errors"]]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_total_footer_under_a_day_first_file_gets_only_its_own_date_error(fmt: str) -> None:
+    dates = _day_first_days(60)  # 01/01/2024 ... 29/02/2024
+    raw = _daily_file(fmt, dates) + b"Total,0.05\n"
+    envelope = validate_csv(raw, fmt)
+
+    assert envelope["ok"] is False
+    assert _rules_and_rows(envelope) == [(rule, 61) for rule in ONLY_THE_DATE_ERROR], envelope["errors"]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_blank_date_footer_under_a_day_first_file_has_no_order_error(fmt: str) -> None:
+    raw = _daily_file(fmt, _day_first_days(60)) + b",0.05\n"
+    envelope = validate_csv(raw, fmt)
+
+    assert envelope["ok"] is False
+    assert "monotonic_dates" not in {e["rule"] for e in envelope["errors"]}, envelope["errors"]
+    assert {row for _, row in _rules_and_rows(envelope)} == {61}, envelope["errors"]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_ten_day_steps_day_first_with_one_garbage_cell_get_only_the_date_error(fmt: str) -> None:
+    import datetime as dt
+
+    # 05/01, 15/01, 25/01, 04/02, 14/02, 24/02, 05/03 ...: days 1 to 12 included.
+    dates = [(dt.date(2024, 1, 5) + dt.timedelta(10 * i)).strftime("%d/%m/%Y") for i in range(12)]
+    dates[4] = "garbage"
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert _rules_and_rows(envelope) == [(rule, 5) for rule in ONLY_THE_DATE_ERROR], envelope["errors"]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_day_first_file_with_a_bad_zone_and_two_rows_swapped_still_reports_the_order(fmt: str) -> None:
+    """Control: the readable cells are judged on the detector's day-first reading,
+    so a real disorder is not hidden by the unreadable cell beside it."""
+    dates = [f"{day:02d}/01/2024 10:00 +01:00" for day in range(1, 21)]
+    dates[2] = "03/01/2024 10:00 EST"
+    dates[16], dates[17] = dates[17], dates[16]  # rows 17 and 18
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    rules = {e["rule"] for e in envelope["errors"]}
+    assert envelope["ok"] is False
+    assert "monotonic_dates" in rules, envelope["errors"]
+    assert set(ONLY_THE_DATE_ERROR) <= rules, envelope["errors"]
+
+
+def test_an_ambiguous_day_first_file_with_a_footer_still_reports_the_footer_cell() -> None:
+    """Every readable day is 12 or less, so the format cannot be told (the file
+    is rejected as ambiguous, as it is without the footer). The footer's own date
+    error must still be there beside it."""
+    dates = ["01/01/2024", "01/02/2024", "01/03/2024", "Total"]
+    envelope = validate_csv(_daily_file("daily_returns", dates), "daily_returns")
+
+    assert envelope["ok"] is False
+    assert _rules_and_rows(envelope) == [
+        ("date_format_ambiguous", 0),
+        *[(rule, 4) for rule in ONLY_THE_DATE_ERROR],
+    ], envelope["errors"]
+
+
 def test_the_repro_from_the_review_gives_coerce_dtype_at_row_3() -> None:
     """Five rows, `daily_returns`, one `EST` among `+01:00` rows (SFH-R2)."""
     dates = [
@@ -917,13 +1001,25 @@ def test_a_good_header_under_a_blank_first_row_of_any_width_is_still_accepted(bl
     assert [r["daily_return"] for r in envelope["daily_returns_series"]] == [0.001, 0.002, -0.001]
 
 
-def test_a_header_record_the_raw_read_cannot_parse_is_rejected_not_waved_through() -> None:
+def test_a_header_record_the_raw_read_cannot_parse_is_rejected_not_waved_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """FAIL CLOSED. The raw-header read used to fall back to pandas' renamed
     columns when it failed, which restores the exact defect it exists to remove.
-    A header cell over the stdlib reader's field limit (131072 characters) is a
-    file pandas reads and the raw read cannot: it must be rejected, with the
-    existing `Could not parse CSV: ...` sentence, and echo no cell."""
+    The raw read is pandas now (review LR-1), so a file it cannot parse is a file
+    the frame read cannot either; this forces the failure the way pandas reports
+    one, a `ParserError`, and pins what the caller does with it: the existing
+    `Could not parse CSV: ...` sentence, and no cell echoed."""
+    import pandas as pd
+
+    import services.csv_validator as csv_validator
+
     big = "x" * 200_000
+
+    def _cannot_parse(*_args: object, **_kwargs: object) -> list[str]:
+        raise pd.errors.ParserError("Error tokenizing data")
+
+    monkeypatch.setattr(csv_validator, "_raw_header_names", _cannot_parse)
     raw = f"date,daily_return,{big}\n2024-03-10,0.001,a\n2024-03-11,0.002,b\n".encode()
     envelope = validate_csv(raw, "daily_returns")
 
@@ -1090,14 +1186,18 @@ def test_crlf_bom_quoted_comma_and_quoted_newline_headers_still_behave() -> None
         ], dup
 
 
-def test_a_raw_header_the_frame_read_disagrees_with_is_rejected_not_checked() -> None:
-    """The guard against the two readers drifting apart (review TR-1). A leading
-    bare carriage return makes pandas drop the empty first field of the next line
-    (header `date`, `daily_return`) where the raw read sees a three-field record.
-    Neither can be trusted to name a column, so the file is rejected with the
-    existing wrong-width sentence, never raised and never validated against a
+def test_a_raw_header_the_frame_read_disagrees_with_is_rejected_not_checked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard against the two readers drifting apart (review TR-1). Both reads
+    are pandas now (review LR-1), so they cannot disagree on a real file; this
+    forces a raw header of the wrong width and pins that the file is rejected with
+    the existing wrong-width sentence, never raised and never validated against a
     header that may be the wrong line."""
-    raw = b"\r,date,daily_return\n2024-03-10,0.001\n2024-03-11,0.002\n"
+    import services.csv_validator as csv_validator
+
+    monkeypatch.setattr(csv_validator, "_raw_header_names", lambda *_a, **_k: ["date", "daily_return", "x"])
+    raw = b"date,daily_return\n2024-03-10,0.001\n2024-03-11,0.002\n"
     envelope = validate_csv(raw, "daily_returns")  # must not raise
 
     assert envelope["ok"] is False, envelope
@@ -1106,6 +1206,38 @@ def test_a_raw_header_the_frame_read_disagrees_with_is_rejected_not_checked() ->
     assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
         ("parse_error", 0, "Could not parse CSV: a data row has more fields than the header row.")
     ]
+
+
+# Review LR-1 (last round, HIGH). A quoted-empty first line (`""`, what a one-cell
+# blank row looks like from a quote-all exporter) is a header cell to pandas, so
+# the blank-row re-read takes line 2 as the header. The stdlib reader the raw
+# header read used dropped it as blank, took the FIRST DATA ROW as the "header",
+# and the width guard passed when that row was as wide as the header. The raw read
+# is now pandas with the frame read's own options, so both agree on the header.
+@pytest.mark.parametrize(
+    "header,body",
+    [
+        pytest.param("date,daily_return,daily_return", _DUP_BODY, id="exact-repeat"),
+        pytest.param("date,Date,daily_return", _DUP_BODY_DATE_DATE, id="date-Date"),
+        pytest.param("date,daily_return,Daily_Return", _DUP_BODY, id="case-collision"),
+    ],
+)
+def test_a_quoted_empty_first_line_does_not_hide_a_repeated_column(header: str, body: str) -> None:
+    envelope = validate_csv(f'""\n{header}\n{body}'.encode(), "daily_returns")  # must not raise
+
+    assert [(e["rule"], e["row"], e["message"]) for e in envelope["errors"]] == [
+        ("parse_error", 0, DUPLICATE_HEADER_MESSAGE)
+    ]
+    assert envelope["ok"] is False and envelope["preview"] is None
+
+
+def test_a_good_header_with_a_trailing_comma_under_a_quoted_empty_line_is_accepted() -> None:
+    """Control: the file has no over-long data row, and must not be told it has."""
+    raw = '""\ndate,daily_return,\n2024-03-10,0.001\n2024-03-11,0.002\n2024-03-12,-0.001\n'.encode()
+    envelope = validate_csv(raw, "daily_returns")
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert [r["daily_return"] for r in envelope["daily_returns_series"]] == [0.001, 0.002, -0.001]
 
 
 # Security re-audit T-170.1-51 (availability, validator half). The per-cell zone
