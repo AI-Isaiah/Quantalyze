@@ -850,6 +850,18 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     if "date" not in df.columns or pd.api.types.is_datetime64_any_dtype(df["date"]):
         return None
 
+    # An all-digit column (`20230305`) is read by pandas as int64, and pandera reads
+    # an integer as nanoseconds since the epoch: every date came out 1970-01-01. The
+    # only integer spelling of a date is YYYYMMDD, so read it as that; any other
+    # integer (an Excel serial, a Unix time) is not a date and becomes the
+    # uncoercible placeholder, reported at its row and shown as written.
+    if pd.api.types.is_integer_dtype(df["date"]):
+        parsed = _parse_dates(df["date"].astype(str), format="%Y%m%d")
+        df["date"] = parsed if parsed.notna().all() else parsed.astype(object).where(
+            parsed.notna(), _UNSUPPORTED_ZONE_TOKEN
+        )
+        return None
+
     s = df["date"].astype(str).str.strip()
 
     # ISO-family (year-first: YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD) is

@@ -1656,3 +1656,44 @@ def test_a_differently_spelled_first_cell_reports_the_later_rows_as_date_errors_
     ], envelope["errors"]
     assert "not_nullable" not in {e["rule"] for e in envelope["errors"]}
     assert [r["date"] for r in envelope["preview"]["last_rows"][1:]] == ["14/01/2024", "15/01/2024"]
+
+
+# Final-hunt F4 (HIGH, data integrity, not from 170.1). A date column of all digits
+# (`20230305`) is read by pandas as int64, and pandera reads an integer as
+# nanoseconds since the epoch: a 60-day file was ACCEPTED with every date on
+# 1970-01-01.
+def _yyyymmdd_days(count: int) -> list[str]:
+    import datetime as dt
+
+    return [(dt.date(2023, 3, 5) + dt.timedelta(i)).strftime("%Y%m%d") for i in range(count)]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_an_all_digit_yyyymmdd_date_column_is_read_as_dates_not_as_epoch_nanoseconds(fmt: str) -> None:
+    envelope = validate_csv(_daily_file(fmt, _yyyymmdd_days(60)), fmt)
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert envelope["preview"]["date_range"] == ["2023-03-05", "2023-05-03"], envelope["preview"]
+    if fmt == "daily_returns":
+        series = [row["date"] for row in envelope["daily_returns_series"]]
+        assert series[0] == "2023-03-05" and series[-1] == "2023-05-03" and len(series) == 60
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+@pytest.mark.parametrize(
+    "dates",
+    [
+        pytest.param([str(45000 + i) for i in range(30)], id="excel-serial"),
+        pytest.param([str(1700000000 + 86400 * i) for i in range(30)], id="unix-seconds"),
+        pytest.param(_yyyymmdd_days(30)[:9] + ["20231340"] + _yyyymmdd_days(30)[10:], id="invalid-yyyymmdd-cell"),
+    ],
+)
+def test_an_all_digit_date_column_that_is_not_yyyymmdd_is_rejected_at_its_rows_never_read_as_1970(
+    fmt: str, dates: list[str]
+) -> None:
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert envelope["preview"]["date_range"][0] != "1970-01-01", envelope["preview"]
+    assert (ONLY_THE_DATE_ERROR[0], 10 if "20231340" in dates else 1) in _rules_and_rows(envelope), envelope["errors"]
+    assert "0000-00-00" not in json.dumps(envelope["preview"], default=str)
