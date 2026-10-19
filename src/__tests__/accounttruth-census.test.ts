@@ -972,6 +972,80 @@ describe("(6) the census SQL, executed on a throwaway local PostgreSQL cluster (
   // Each case gets its own owner. Synthetic ids map to uuids in the TS
   // comparator's order (departed-history.ts sorts ids with `<`), so the D-09 id
   // tie-break orders them the same way under COLLATE "C".
+  // ---- (e): the untrustworthy reason, over the SAME rows the reader is asserted on ----
+  //
+  // 167.1.2.1.1 SC-1 (D-04). The census CASE (`untrustworthy_reason`, in the
+  // `judged` CTE of section (e)) is a SQL mirror of `untrustworthyRebuildReason`
+  // in src/lib/queries.ts. A mirror held by a comment drifts, so this seeds each
+  // row of analytics-service/tests/fixtures/derive_refusal_rows.json as an
+  // equity_curve payload for a lone owner with one eligible key (mt5, so its
+  // account identity is never pending) and runs section (e) itself. The state it
+  // prints must be the reader's line: src/lib/__tests__/derive-refusal-rows.test.ts
+  // asserts the same fixture against the TypeScript. Either side drifting reddens CI.
+  it("(e) the untrustworthy reason: every refusal, blocking and precedence row lands on the reader's line", () => {
+    type RefusalRow = { token: string; reader_reason: string; payload: Record<string, unknown> };
+    const table: {
+      refusals: RefusalRow[];
+      blocking: { token: string; reader_reason: string }[];
+      precedence: { degrade_reasons: string[]; reader_reason: string }[];
+    } = JSON.parse(
+      readFileSync(join(REPO, "analytics-service", "tests", "fixtures", "derive_refusal_rows.json"), "utf8"),
+    );
+    const base = table.refusals[0].payload;
+    const withTokens = (degrade_reasons: string[]) => ({ ...base, degrade_reasons });
+    const cases: Array<{ name: string; payload: unknown; reason: string }> = [
+      ...table.refusals.map((r) => ({ name: r.token, payload: r.payload, reason: r.reader_reason })),
+      ...table.blocking.map((b) => ({ name: b.token, payload: withTokens([b.token]), reason: b.reader_reason })),
+      ...table.precedence.flatMap((p) => [
+        { name: p.degrade_reasons.join(" + "), payload: withTokens(p.degrade_reasons), reason: p.reader_reason },
+        {
+          name: [...p.degrade_reasons].reverse().join(" + "),
+          payload: withTokens([...p.degrade_reasons].reverse()),
+          reason: p.reader_reason,
+        },
+      ]),
+    ];
+    // The population must not be empty: a fixture that lost its arrays would
+    // otherwise pass on nothing.
+    expect(table.refusals.length).toBeGreaterThanOrEqual(8);
+    expect(table.blocking.length).toBeGreaterThanOrEqual(9);
+    expect(table.precedence.length).toBeGreaterThanOrEqual(7);
+
+    const sqlE = (SECTIONS as ReadonlyArray<{ letter: string; sql: string }>).find((x) => x.letter === "e")!.sql;
+    const stateFor = (payload: unknown): Map<string, number> => {
+      psql(
+        RESET_SQL +
+          insertKeys([{ id: id(1), user_id: A, exchange: "mt5" }]) +
+          `INSERT INTO public.allocator_equity_derived (allocator_id, kind, payload) VALUES (${lit(A)}, 'equity_curve', ${lit(JSON.stringify(payload))}::jsonb);\n`,
+      );
+      return counts(sqlE);
+    };
+
+    // Calibration: the same harness reads a good trustworthy row as ready, so a
+    // "rebuilding" below is the CASE speaking and not a harness that is always red.
+    const good = stateFor({
+      version: 2,
+      is_trustworthy: true,
+      curve: [{ date: "2026-03-10", equity_usd: 100 }],
+      returns: [{ date: "2026-03-10", r: 0.01 }],
+    });
+    expect(good.get("ready")).toBe(1);
+
+    const wrong: string[] = [];
+    for (const c of cases) {
+      const got = stateFor(c.payload);
+      const want = new Map<string, number>([
+        ["owners_with_eligible_keys", 1],
+        ["ready", 0],
+        [`rebuilding:${c.reason}`, 1],
+      ]);
+      if (JSON.stringify([...got].sort()) !== JSON.stringify([...want].sort())) {
+        wrong.push(`${c.name}: want rebuilding:${c.reason}, census printed ${JSON.stringify([...got])}`);
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
   // ⚠️ One case is not replayed, by name: a timestamptz column cannot hold an
   // unreadable disconnected_at.
   const D09_NOT_REPLAYABLE = new Set(["20_an_unreadable_disconnected_at_ends_on_the_last_returns_day_in_both_languages"]);

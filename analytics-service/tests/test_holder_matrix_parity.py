@@ -33,6 +33,7 @@ from tests.test_derive_allocator_equity_job import (
     _extract_payload,
     _FakeSupabase,
     _gate_key,
+    _refusal_upserts,
     _run_gate,
     _stale_curve,
 )
@@ -108,7 +109,11 @@ async def test_the_derive_resolves_each_cell_as_the_table_says(cell: dict[str, A
     expected = cell["derive"]
     if expected["outcome"] == "refuse":
         assert _curve_upserts(fake) == [], "the table says the curve is refused"
-        assert len(_curve_deletes(fake, alloc)) == 1
+        # 167.1.2.1.1 SC-1 (D-04): a refusal is RECORDED in the row, not deleted.
+        # Exactly one refusal upsert, and it names the duplicate.
+        refusals = _refusal_upserts(fake)
+        assert [r["payload"]["refusal"] for _, r, _ in refusals] == ["account_duplicate"]
+        assert _curve_deletes(fake, alloc) == []
         return
     upserts = _curve_upserts(fake)
     assert len(upserts) == 1, f"expected a composed curve, got {len(upserts)}"

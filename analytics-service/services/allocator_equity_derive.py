@@ -151,6 +151,31 @@ class DegradeReason(str, Enum):
     # ``dropped_day_pnl_ignored_days``; blocking because the curve is suspect, not
     # because any one number is wrong.
     KEY_INPUTS_MISMATCH = "key_inputs_mismatch"
+    # 167.1.2.1.1 SC-2 (D-03, 2026-10-16): a single eligible key that is FAILING (not
+    # ``working_holder_predicate``) and whose last return day is before the book's last
+    # return day. It stays counted, but its series stopped the day it began to fail and
+    # the compose carries it flat at r = 0 (the benign ``stale_mark_carry``) while the
+    # rest of the book moves, so the book's return is diluted by frozen capital. The
+    # shared-account case already had ``shared_account_no_working_key`` for the same
+    # dilution; a lone failing key did not, and the book read "ready". The reader maps
+    # it onto that same existing line (D-04: no new copy).
+    FAILING_KEY_SERIES_ENDED = "failing_key_series_ended"
+    # 167.1.2.1.1 SC-3 (D-03, 2026-10-16): the members of a stitched shared account list
+    # DIFFERENT flow totals for a day the older member owns (see
+    # ``stitch_flow_disagreement_days``). The stitch keeps the owner's flows and discards
+    # the newer key's, so the curve is built on flows the account's own keys do not agree
+    # on, and it read "ready". Blocking; the stitch itself is unchanged (D-03 asks for a
+    # blocking reason, not a different join). The reader maps it onto the existing
+    # truncated-history line (D-04: no new copy).
+    SHARED_ACCOUNT_FLOWS_DISAGREE = "shared_account_flows_disagree"
+    # 167.1.2.1.1 SC-6 (D-03, 2026-10-16): two or more eligible WORKING keys on one
+    # venue that stamps an account id, all still identity-unknown (see
+    # ``identity_pending_venues``). Until the stamper reads their account ids the derive
+    # cannot tell whether they read one account (counted twice) or two, so the book may be
+    # double-counted. The reader already holds such a book from the key list; this makes
+    # the STORED curve say so too. Blocking; it reads grouping and changes none of it. The
+    # reader maps it onto the existing ``account_identity_pending`` line (D-04).
+    ACCOUNT_IDENTITY_PENDING = "account_identity_pending"
 
 
 # The BLOCKING subset: any of these present -> ``is_trustworthy`` is False.
@@ -165,6 +190,9 @@ _BLOCKING_REASONS: frozenset[DegradeReason] = frozenset(
         DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED,
         DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY,
         DegradeReason.KEY_INPUTS_MISMATCH,
+        DegradeReason.FAILING_KEY_SERIES_ENDED,
+        DegradeReason.SHARED_ACCOUNT_FLOWS_DISAGREE,
+        DegradeReason.ACCOUNT_IDENTITY_PENDING,
     }
 )
 
@@ -173,6 +201,82 @@ def _is_trustworthy(reasons: frozenset[DegradeReason]) -> bool:
     """True iff NO blocking degradation reason is present (a benign window-truncation
     / stale-mark / honest-empty does NOT block; a suspect number does)."""
     return not (reasons & _BLOCKING_REASONS)
+
+
+def blocking_degrade_tokens(tokens: Sequence[str]) -> list[str]:
+    """The members of ``tokens`` that are BLOCKING ``DegradeReason`` values, sorted.
+    The derive job uses it to carry a compose's own blocking causes onto a refusal row
+    (``compose_empty_blocked``); a benign or unknown token is not carried."""
+    blocking = {reason.value for reason in _BLOCKING_REASONS}
+    return sorted({str(t) for t in tokens if str(t) in blocking})
+
+
+class DeriveRefusal(str, Enum):
+    """167.1.2.1.1 SC-1 (D-04): the CLOSED set of reasons the allocator equity derive
+    REFUSES to publish a curve at all. A sibling of ``DegradeReason``, deliberately not
+    folded into it: a ``DegradeReason`` describes a curve that WAS composed (and how far
+    to trust it), while these describe "no curve". The value of each member is its
+    lower-case name, and it is the token ``refusal_payload`` stores and the reader
+    (``untrustworthyRebuildReason`` in src/lib/queries.ts) maps onto a line it already
+    has.
+    """
+
+    # The allocator's daily returns exceed the read's hard cap; nothing was composed.
+    RETURNS_READ_CAP = "returns_read_cap"
+    # A marked duplicate behind a working holder: the account would be summed twice.
+    ACCOUNT_DUPLICATE = "account_duplicate"
+    # Two live keys read one exchange account with no marker between them.
+    ACCOUNT_IDENTITY_COLLISION = "account_identity_collision"
+    # A persisted value is corrupt (a NULL return, a non-numeric or non-finite flow).
+    INPUT_CORRUPT = "input_corrupt"
+    # F1b: an eligible key has neither returns nor a key_inputs row yet (backfill window).
+    COMPOSE_INCOMPLETE = "compose_incomplete"
+    # B2: the compose came back with no curve and nothing blocking it (nothing to draw yet).
+    COMPOSE_EMPTY = "compose_empty"
+    # B2: the compose came back with no curve AND a blocking cause. Its own token so the
+    # wait mapping of ``compose_empty`` cannot swallow a cause the owner is not waiting out.
+    COMPOSE_EMPTY_BLOCKED = "compose_empty_blocked"
+    # The compose refused a structural input (the core's loud asserts).
+    COMPOSE_REFUSED = "compose_refused"
+
+
+def refusal_payload(
+    token: str,
+    *,
+    composed_at: str,
+    extra_reasons: Sequence[str] = (),
+) -> dict[str, Any]:
+    """167.1.2.1.1 SC-1 (D-04): the ``equity_curve`` row payload for a derive REFUSAL.
+
+    The refusal is persisted in the SAME ``(allocator_id, 'equity_curve')`` row the
+    reader already reads, in one atomic upsert, so a stale trustworthy curve is
+    replaced rather than deleted and the reason survives on disk. Nothing in it can
+    render as a curve, by three guards the reader relies on, each of which holds on its
+    own: ``version`` is 2 (so the reader treats it as a current-contract row, not a
+    pre-v2 one it would wait out), ``is_trustworthy`` is False, and ``curve`` and
+    ``returns`` are empty.
+
+    ``degrade_reasons`` is the sorted set of the token plus ``extra_reasons`` (the
+    compose's own blocking tokens on ``compose_empty_blocked``), so the reader's
+    token precedence reads one list. ``refusal`` repeats the token as a string, which is
+    also how a test tells a refusal row from a curve row. Counts and closed-enum tokens
+    only: no key id, venue id or USD figure (T-167.1.2-22, D-09).
+    """
+    # An Enum member's ``str()`` is "Class.MEMBER"; the stored token is its value.
+    def _value(raw: Any) -> str:
+        return raw.value if isinstance(raw, Enum) else str(raw)
+
+    return {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": sorted({_value(token), *(_value(r) for r in extra_reasons)}),
+        "is_trustworthy": False,
+        "refusal": _value(token),
+        "scalars": {"mwr": None, "dietz": None, "computable": False},
+        "inputs": {"n_keys": 0, "anchor_asof": None, "composed_at": composed_at},
+    }
 
 
 # Backwards-compatible aliases (the enum members ARE these strings).
@@ -388,6 +492,44 @@ def account_identity_tokens(
     }
 
 
+def identity_pending_venues(
+    key_rows: Sequence[Mapping[str, Any]],
+    stamping_venues: frozenset[str],
+) -> int:
+    """How many stamping venues hold two or more unknown working keys.
+
+    167.1.2.1.1 SC-6 (D-03). A candidate is an ELIGIBLE (``eligible_key_predicate``),
+    WORKING (``working_holder_predicate``) key on a venue in ``stamping_venues`` whose
+    account is still unknown (``account_identity_tokens(key_rows)[id] is None``: no
+    venue account id and no marker link either way). Two such keys on one venue may read
+    ONE exchange account, which the book would then count twice, so the number of venues
+    with two or more candidates is the count the blocking
+    ``DegradeReason.ACCOUNT_IDENTITY_PENDING`` is raised on. A failing key is no
+    candidate (the stamper only runs after a successful poll, and the reader names it
+    ``key_not_syncing``), an MT5 key is no candidate (MT5 is not in the set), and a
+    marked key or its holder is known.
+
+    ``stamping_venues`` is an argument, not an import of
+    ``services.account_identity.VENUES_WITH_ACCOUNT_ID``, so this pure module stays free
+    of the exchange adapters (ccxt, httpx); callers pass that set. Called by BOTH
+    allocator writers (the derive here, and the daily refresh's hold, plan 03), so they
+    cannot disagree. It reads the grouping helpers and changes none of them. Returns a
+    count only, never a key id or a venue."""
+    tokens = account_identity_tokens(key_rows)
+    candidates: dict[str, int] = defaultdict(int)
+    for row in key_rows:
+        exchange = row.get("exchange")
+        venue = exchange.strip().lower() if isinstance(exchange, str) else ""
+        if (
+            venue in stamping_venues
+            and eligible_key_predicate(row)
+            and working_holder_predicate(row)
+            and tokens.get(str(row["id"])) is None
+        ):
+            candidates[venue] += 1
+    return sum(1 for count in candidates.values() if count >= 2)
+
+
 class HoldingsUpdatedAtError(ValueError):
     """A holdings row's ``updated_at`` is missing, null or not an ISO instant.
 
@@ -494,6 +636,70 @@ def one_key_per_account_day(rows: Sequence[_Row]) -> list[_Row]:
     ]
 
 
+def _stitch_owned_window(firsts: Sequence[str], index: int) -> tuple[str | None, str | None]:
+    """THE ownership rule of a stitched shared account, in one place.
+
+    ``firsts`` is each member's first return day, in stitch order (oldest first, the
+    counted member last). Member ``index`` owns the half-open day window
+    ``[lower, upper)``: ``lower`` is its own first return day, except that the FIRST
+    member also owns every earlier day (``None``, a key's pre-window flow), and
+    ``upper`` is the next member's first return day (``None`` for the last member,
+    which owns every day from its own first on). ``stitch_shared_account`` takes a
+    day's series values and flows only from the member that owns it, and
+    ``stitch_flow_disagreement_days`` compares the owner against the later members
+    over the same window, so the stitch and the check cannot drift (167.1.2.1.1 SC-3)."""
+    lower = None if index == 0 else firsts[index]
+    upper = None if index == len(firsts) - 1 else firsts[index + 1]
+    return lower, upper
+
+
+def _owns_day(window: tuple[str | None, str | None], day: str) -> bool:
+    lower, upper = window
+    return (lower is None or day >= lower) and (upper is None or day < upper)
+
+
+def stitch_flow_disagreement_days(
+    links: Sequence[tuple[pd.Series, Sequence[Any]]],
+) -> int:
+    """How many owned days of a stitched shared account its members disagree on.
+
+    167.1.2.1.1 SC-3 (D-03). ``links`` has the shape ``stitch_shared_account`` takes
+    (oldest first, the counted member last). For every day an earlier member OWNS
+    (``_stitch_owned_window``), the owner's per-day flow total is compared with that of
+    every LATER member that LISTS the day; a total that differs beyond
+    ``math.isclose(rel_tol=1e-9, abs_tol=0.01)`` counts the day once. A later member
+    that lists nothing on the day is silence, not disagreement (a newer crawl that does
+    not reach back lists none of the older key's flows, which is the normal case), and a
+    day the LAST member owns has nobody to disagree with. Tolerance is RESEARCH
+    assumption A1: one cent absolute, so a venue's own rounding passes and a second
+    transfer does not. Returns a count only, never a day or an amount. Pure."""
+    if len(links) < 2:
+        return 0
+    firsts: list[str] = []
+    for series, _flows in links:
+        if len(series) == 0:
+            return 0
+        firsts.append(min(str(d) for d in series.index))
+    totals: list[dict[str, float]] = []
+    for _series, flows in links:
+        by_day: dict[str, float] = defaultdict(float)
+        for flow in flows or ():
+            by_day[str(flow[0])] += float(flow[1])
+        totals.append(by_day)
+    disagreeing: set[str] = set()
+    for index in range(len(links) - 1):
+        window = _stitch_owned_window(firsts, index)
+        for later in totals[index + 1 :]:
+            for day, listed in later.items():
+                if not _owns_day(window, day):
+                    continue
+                if not math.isclose(
+                    totals[index].get(day, 0.0), listed, rel_tol=1e-9, abs_tol=0.01
+                ):
+                    disagreeing.add(day)
+    return len(disagreeing)
+
+
 def stitch_shared_account(
     links: Sequence[tuple[pd.Series, Sequence[Any]]],
 ) -> tuple[pd.Series, list[Any]] | None:
@@ -530,9 +736,8 @@ def stitch_shared_account(
     values: list[float] = []
     flows_out: list[Any] = []
     for index, (series, flows) in enumerate(links):
-        own_first = firsts[index]
-        is_last = index == len(links) - 1
-        next_first = None if is_last else firsts[index + 1]
+        window = _stitch_owned_window(firsts, index)
+        next_first = window[1]
         if next_first is not None:
             day_before = (date.fromisoformat(next_first) - timedelta(days=1)).isoformat()
             if max(str(d) for d in series.index) < day_before:
@@ -540,15 +745,14 @@ def stitch_shared_account(
         for day, value in sorted(
             ((str(d), float(v)) for d, v in series.items()), key=lambda item: item[0]
         ):
-            if day < own_first or (next_first is not None and day >= next_first):
+            # A series has no day before its own first one, so the first member's
+            # unbounded lower edge changes nothing here.
+            if not _owns_day(window, day):
                 continue
             days.append(day)
             values.append(value)
         for flow in flows or ():
-            flow_day = str(flow[0])
-            if next_first is not None and flow_day >= next_first:
-                continue
-            if index > 0 and flow_day < own_first:
+            if not _owns_day(window, str(flow[0])):
                 continue
             flows_out.append(flow)
     return pd.Series(values, index=days, dtype="float64"), flows_out

@@ -264,6 +264,12 @@ AuditAction = Literal[
     # Metadata carries counts only. Kept in the TS union too
     # (test_action_literal_matches_ts_union).
     "allocator.equity.refresh_held_for_reconstruct",
+    # --- Phase 167.1.2.1.1 D-14 (2026-10-16): the daily refresh held the day's
+    # snapshot write instead of persisting a short, stale or double-counted
+    # total. metadata.reason is never_polled_working, carry_over_age or
+    # identity_pending; counts only. The allocator.equity.% prefix is already
+    # worker-only (log_audit_event), so no migration.
+    "allocator.equity.refresh_held",
     # --- Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint ----------
     "debug_key_flow.invoke",
     # --- audit-2026-05-07 P700: break-glass ADMIN_EMAIL fallback grant ------

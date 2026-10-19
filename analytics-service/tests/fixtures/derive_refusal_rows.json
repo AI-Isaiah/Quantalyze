@@ -1,0 +1,366 @@
+{
+  "notes": "Phase 167.1.2.1.1 WRITERRESIDUALS, SC-1 (decision D-04). ONE table for three consumers, so the Python writer, the TS reader and the SQL census mirror cannot drift apart silently. When the allocator equity derive REFUSES to publish a curve it no longer deletes the (allocator_id, 'equity_curve') row: it upserts a version-2 refusal row (is_trustworthy false, curve [], returns [], degrade_reasons carrying the token, refusal set to the token) that says why. `refusals` has one row per DeriveRefusal member: `payload` is exactly what refusal_payload(token, composed_at=composed_at, extra_reasons=extra_reasons) returns, and `reader_reason` is the EquityHistoryRebuildReason untrustworthyRebuildReason (src/lib/queries.ts) maps that row to. The reader maps each token onto a line the owner already sees; no new copy exists for any of them. analytics-service/tests/test_derive_refusal_rows.py asserts the payloads, src/lib/__tests__/derive-refusal-rows.test.ts asserts the reader, and src/__tests__/accounttruth-census.test.ts evaluates the census CASE arms (scripts/accounttruth-census.mjs, untrustworthy_reason) over the same rows. `blocking` has one row per DegradeReason in _BLOCKING_REASONS (an untrustworthy composed curve carrying that single token) and the line the reader gives it: the two shared-account tokens keep their own line, failing_key_series_ended (167.1.2.1.1 SC-2) reads shared_account_no_working_key, shared_account_flows_disagree (SC-3) reads shared_account_history_truncated, account_identity_pending (SC-6) reads account_identity_pending, every other value reads derivation_rejected. `precedence` holds multi-token degrade_reasons arrays whose order the reader must not depend on: the most actionable cause wins (shared_account_no_working_key or failing_key_series_ended, then a duplicate or identity collision, then account_identity_pending, then shared_account_history_truncated or shared_account_flows_disagree), and compose_incomplete or compose_empty reads as a wait (awaiting_derivation) ONLY when it is the sole token, so a wait token next to dropped_key is a refusal. A brand-new book (every key anchored, none with a return day yet) persists the bare compose_empty row, not compose_empty_blocked (MR-01), so it reads as the wait it is.",
+  "composed_at": "2026-10-16T00:00:00+00:00",
+  "refusals": [
+    {
+      "token": "returns_read_cap",
+      "extra_reasons": [],
+      "reader_reason": "derivation_rejected",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "returns_read_cap"
+        ],
+        "is_trustworthy": false,
+        "refusal": "returns_read_cap",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    },
+    {
+      "token": "account_duplicate",
+      "extra_reasons": [],
+      "reader_reason": "duplicate_account",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "account_duplicate"
+        ],
+        "is_trustworthy": false,
+        "refusal": "account_duplicate",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    },
+    {
+      "token": "account_identity_collision",
+      "extra_reasons": [],
+      "reader_reason": "duplicate_account",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "account_identity_collision"
+        ],
+        "is_trustworthy": false,
+        "refusal": "account_identity_collision",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    },
+    {
+      "token": "input_corrupt",
+      "extra_reasons": [],
+      "reader_reason": "derivation_rejected",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "input_corrupt"
+        ],
+        "is_trustworthy": false,
+        "refusal": "input_corrupt",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    },
+    {
+      "token": "compose_incomplete",
+      "extra_reasons": [],
+      "reader_reason": "awaiting_derivation",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "compose_incomplete"
+        ],
+        "is_trustworthy": false,
+        "refusal": "compose_incomplete",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    },
+    {
+      "token": "compose_empty",
+      "extra_reasons": [],
+      "reader_reason": "awaiting_derivation",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "compose_empty"
+        ],
+        "is_trustworthy": false,
+        "refusal": "compose_empty",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    },
+    {
+      "token": "compose_empty_blocked",
+      "extra_reasons": [
+        "dropped_key"
+      ],
+      "reader_reason": "derivation_rejected",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "compose_empty_blocked",
+          "dropped_key"
+        ],
+        "is_trustworthy": false,
+        "refusal": "compose_empty_blocked",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    },
+    {
+      "token": "compose_refused",
+      "extra_reasons": [],
+      "reader_reason": "derivation_rejected",
+      "payload": {
+        "curve": [],
+        "returns": [],
+        "version": 2,
+        "flags": [],
+        "degrade_reasons": [
+          "compose_refused"
+        ],
+        "is_trustworthy": false,
+        "refusal": "compose_refused",
+        "scalars": {
+          "mwr": null,
+          "dietz": null,
+          "computable": false
+        },
+        "inputs": {
+          "n_keys": 0,
+          "anchor_asof": null,
+          "composed_at": "2026-10-16T00:00:00+00:00"
+        }
+      }
+    }
+  ],
+  "blocking": [
+    {
+      "token": "account_identity_pending",
+      "reader_reason": "account_identity_pending"
+    },
+    {
+      "token": "dropped_key",
+      "reader_reason": "derivation_rejected"
+    },
+    {
+      "token": "exclusive_fill",
+      "reader_reason": "derivation_rejected"
+    },
+    {
+      "token": "failing_key_series_ended",
+      "reader_reason": "shared_account_no_working_key"
+    },
+    {
+      "token": "inception_unreconciled",
+      "reader_reason": "derivation_rejected"
+    },
+    {
+      "token": "key_inputs_mismatch",
+      "reader_reason": "derivation_rejected"
+    },
+    {
+      "token": "nonfinite_return",
+      "reader_reason": "derivation_rejected"
+    },
+    {
+      "token": "out_of_window_flow",
+      "reader_reason": "derivation_rejected"
+    },
+    {
+      "token": "shared_account_flows_disagree",
+      "reader_reason": "shared_account_history_truncated"
+    },
+    {
+      "token": "shared_account_history_truncated",
+      "reader_reason": "shared_account_history_truncated"
+    },
+    {
+      "token": "shared_account_no_working_key",
+      "reader_reason": "shared_account_no_working_key"
+    },
+    {
+      "token": "unclassified_rotation",
+      "reader_reason": "derivation_rejected"
+    }
+  ],
+  "precedence": [
+    {
+      "degrade_reasons": [
+        "account_identity_collision",
+        "compose_empty_blocked"
+      ],
+      "reader_reason": "duplicate_account"
+    },
+    {
+      "degrade_reasons": [
+        "account_duplicate",
+        "shared_account_no_working_key"
+      ],
+      "reader_reason": "shared_account_no_working_key"
+    },
+    {
+      "degrade_reasons": [
+        "account_duplicate",
+        "shared_account_history_truncated"
+      ],
+      "reader_reason": "duplicate_account"
+    },
+    {
+      "degrade_reasons": [
+        "dropped_key",
+        "shared_account_history_truncated"
+      ],
+      "reader_reason": "shared_account_history_truncated"
+    },
+    {
+      "degrade_reasons": [
+        "compose_incomplete",
+        "dropped_key"
+      ],
+      "reader_reason": "derivation_rejected"
+    },
+    {
+      "degrade_reasons": [
+        "compose_empty",
+        "shared_account_history_truncated"
+      ],
+      "reader_reason": "shared_account_history_truncated"
+    },
+    {
+      "degrade_reasons": [
+        "compose_empty"
+      ],
+      "reader_reason": "awaiting_derivation"
+    },
+    {
+      "degrade_reasons": [
+        "failing_key_series_ended",
+        "shared_account_history_truncated"
+      ],
+      "reader_reason": "shared_account_no_working_key"
+    },
+    {
+      "degrade_reasons": [
+        "dropped_key",
+        "shared_account_flows_disagree"
+      ],
+      "reader_reason": "shared_account_history_truncated"
+    },
+    {
+      "degrade_reasons": [
+        "account_duplicate",
+        "shared_account_flows_disagree"
+      ],
+      "reader_reason": "duplicate_account"
+    },
+    {
+      "degrade_reasons": [
+        "shared_account_flows_disagree",
+        "shared_account_no_working_key"
+      ],
+      "reader_reason": "shared_account_no_working_key"
+    },
+    {
+      "degrade_reasons": [
+        "account_identity_pending",
+        "shared_account_history_truncated"
+      ],
+      "reader_reason": "account_identity_pending"
+    },
+    {
+      "degrade_reasons": [
+        "account_duplicate",
+        "account_identity_pending"
+      ],
+      "reader_reason": "duplicate_account"
+    },
+    {
+      "degrade_reasons": [
+        "account_identity_pending",
+        "shared_account_no_working_key"
+      ],
+      "reader_reason": "shared_account_no_working_key"
+    }
+  ]
+}
