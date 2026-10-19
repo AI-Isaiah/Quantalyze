@@ -4523,6 +4523,13 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       **Owner:** unrouted. The next phase that touches the analytics writer's completion path takes
       it.
 
+- [ ] **[164.6.6.3.6-MT5SERVERLEARN-NEXT-MILESTONE] — learn an MT5 broker server on its first successful validation, instead of hand-listing it (retired from v1.20 2026-10-16).**
+  The founder retired Phase 164.6.6.3.6 MT5SERVERLEARN from v1.20 on 2026-10-16: "We will do it in the next milestone (maybe)".
+  Nothing shipped. Until then, servers stay hand-listed in `MT5_KNOWN_SERVERS`, using the Step 2d runbook from Phase 164.6.6.3.
+  The work done so far is on branch `feat/164.6.6.3.6-mt5serverlearn` (pushed): CONTEXT, RESEARCH, PATTERNS, VALIDATION, BROKER-SERVERS, plan 01 (the criterion-1 gate, a founder-run headless-resolution measurement) and the gate protocol S0-S9.
+  The ROADMAP section stays as the spec.
+  **Owner / Trigger:** the next milestone's planning, if the founder takes it up. The gate needs the founder's MT5 accounts.
+
 ## Phase 164.9 (TESTISOLATION) — ids booked at planning time (logged 2026-09-21)
 
 - [x] **`[164.9-SHARED-TEST-TRANSPORT-FLAKE]` a shared-TEST run needed THREE attempts to go
@@ -9853,6 +9860,12 @@ repository when the remove runs. A red from this is a flake, not a verdict on th
 to the helper's `g()` so no background gc runs in a throwaway repository. Prove it with a loop of self-test runs.
 **Owner / Trigger:** the next phase touching `scripts/classify-changed-paths.mjs`; or the second occurrence.
 
+### CI-LOCALSTACK-DB-PORT-IN-USE — the local-stack lane's database container fails to bind its port on the runner (booked 2026-10-16)
+
+**Failure scenario.** Main's CI run `38865344350` (merge commit of #1070) failed in `frontend-local-stack` only: `failed to start docker container "supabase_db_quantalyze": … driver failed programming external connectivity on endpoint supabase_db_quantalyze … address already in use`. Every other job, and every later main commit, was green. First occurrence. Suspected cause, not measured: another process or a leftover container on the hosted runner already holds the lane's database port when `scripts/local-stack/run.sh up` starts the stack. A red from this is a runner flake, not a verdict on the SHA.
+**Fix (candidates).** Before `up`, have `run.sh` name the process or container holding the port and fail with that name, then decide between a free-port pick and a stop-and-retry from what the second occurrence shows.
+**Owner / Trigger:** the second occurrence, or the next phase touching `scripts/local-stack/run.sh`.
+
 ## Phase 170.6.1.1 (ANONKEYID) — routed review items, PR-A (logged 2026-10-14)
 
 Five MEDIUM findings from the PR-A review army (plan 03), booked rather than fixed because none is
@@ -10057,6 +10070,31 @@ phase makes the NEW column `former_match_decision_id` trigger-owned but leaves `
 **Fix.** Measure first. If it reproduces, extend the sync trigger to `UPDATE OF original_holding_ref` (or revoke the
 column UPDATE from `authenticated`).
 **Owner / Trigger:** the next phase touching the sync trigger.
+
+### 164.9.3.1-FL8-SEAM-RESTORE — the FL8 arm renames the lock helper and restores it in a DO block, so an error before the restore leaves the wrapper installed (booked 2026-10-16, FANINGRAPH round-4 review, accepted by the founder brief)
+
+**Failure scenario.** `supabase/tests/test_fan_in_lock_order_race.sql` arm FL8 renames `_fan_in_lock_rows` and installs a
+wrapper to force the 10-attempt bound, then restores the original in a later `DO` block. Three paths leave the wrapper
+installed: a `FL8-SETUP` RAISE in the race block, a failed `dblink_connect`, and a failure between the top-level
+`ALTER ... RENAME` and the `CREATE FUNCTION` (two separate autocommit statements). `psql -v ON_ERROR_STOP=1` stops the
+file at that statement and FL8 is the last arm, so no later arm runs. The file is LANE-ONLY and every lane is a
+throwaway cluster, so nothing persists today.
+**Fix.** If the file is ever run against a persistent database, wrap rename, wrapper and restore in one transaction or
+restore from an `EXCEPTION` handler. Until then there is nothing to fix.
+**Owner / Trigger:** the first change that runs `test_fan_in_lock_order_race.sql` against a database that outlives the
+lane, or moves it out of the LANE-ONLY set.
+
+### 164.9.3.1-55P03-RECOVERY-LATENCY — a cascade that hits the 10-attempt lock bound leaves the job running until the watchdog reclaims it (booked 2026-10-16, FANINGRAPH round-4 review, latent)
+
+**Failure scenario.** `mark_compute_job_failed` raises 55P03 after 10 consecutive attempts in which an enqueue commits a
+new descendant inside the lock window. The worker leaves the job `running` (`_is_lock_bound_failure`, no second mark
+call), and `reset_stalled_compute_jobs` reclaims it after the stall window (10 minutes by default). Meanwhile the
+strategy reads `computing`. There is no hard cap on reclaim cycles, but only a workload that commits children under the
+same closure at sub-millisecond spacing on every cycle can repeat it, and nothing in the tree does. Latent: PROD holds no
+parented jobs (census 2026-10-16: 0 of 2332).
+**Fix.** A bounded in-worker retry of the same `_mark_failed` call (the claim token is still valid) would recover in
+seconds without a re-run. Not worth building before a caller passes parents.
+**Owner / Trigger:** the first caller that enqueues with parents, or any `mark_failed_lock_bound` event in the worker logs.
 
 ## Phase 167.1.2.1.1 (WRITERRESIDUALS) — routed review items (logged 2026-10-16)
 

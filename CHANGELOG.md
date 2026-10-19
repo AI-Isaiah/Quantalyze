@@ -1,5 +1,92 @@
 # Changelog
 
+## [0.132.4.1] - 2026-10-16 — RECORDS: close BRIDGERETURNS 167.1.1.1 (verification passed, SECURED 23/23, PROD readings as expected)
+
+Records only: `.planning`, `TODOS.md`, and this release.
+
+### Added
+- The BRIDGERETURNS phase directory joins the tracked tree: 10 plans and summaries, CONTEXT, RESEARCH, PATTERNS, VALIDATION, the review and review-fix rounds, `SECURITY.md` (SECURED, 23 of 23), `UAT.md` (3 of 3 passed) and `VERIFICATION.md` (status passed).
+- `VERIFICATION.md` gains "Human items resolved (2026-10-16)" with the three post-deploy readings.
+- `TODOS.md` books `CI-LOCALSTACK-DB-PORT-IN-USE`, a first occurrence: main's CI run on #1070's merge commit failed only in `frontend-local-stack` because the runner's Docker could not bind the lane database's port ("address already in use"). Later main commits are green. Fix on the second occurrence.
+
+### Changed
+- `.planning/ROADMAP.md`: the BRIDGERETURNS overview bullet is ticked with its outcome (v0.132.3.0 #1070, gap closure v0.132.4.0 #1074), its ten plan rows replace the `TBD` stub, and its Progress-table row reads Complete with the outcome prose.
+- `.planning/STATE.md` and `.planning/state.json`: progress moves to 110 of 118 phases. The current position stays on 166.5 COMPUTEDATSTAMP, and the Status line records the founder's hold to 2026-10-20 on 170.1 COPY, 167.1.2.1.1 WRITERRESIDUALS and 167.1.1.2 AUMBASIS.
+
+### Notes
+- PROD readings, read-only with the marker query first, counts only:
+  - **SC4 after (engine v2.4.0, every allocator re-scored by 14:00Z):** 213 holding-flag entries, each withheld holding named by reason (`too_few_priced_days` 111, `derivative_out_of_book` 75, `option_premium` 9, `account_balance` 8, `fixed_price` 7, `too_few_adjacent_returns` 1), and 0 correlation or max-weight breaches. Portfolio fit is computed for 3 of 5 personalized candidates; before the phase it was 0 of 8.
+  - **GAP-01:** the remaining 2 candidates read `overlap_below_min` with 8 and 9 shared days, a minimum of 30 and `data_completeness` null. Computed candidates and screening rows carry none of the marker keys.
+- The v2.4.0 re-score does not happen in one cron run: the cron works through allocators a page per hourly tick with its saved cursor, so it took two ticks (13:00Z and 14:00Z).
+- 375px derivative caption: PROD's only derivative holding has 7 priced days, so the basis caption was measured by writing it into the live caption element at 375px. It wraps to 8 lines inside the card with no horizontal scroll.
+- `RESEARCH.md` named the CI skip-trailer tokens literally in a rule line. It now describes them in words.
+
+## [0.132.4.0] - 2026-10-16 — BRIDGERETURNS gap 01: a Bridge candidate's missing portfolio fit says why (engine v2.4.0)
+
+Gap closure for Phase 167.1.1.1 BRIDGERETURNS (plan 10). The SC4 after-deploy reading on PROD found 2 of 5 personalized candidates with an empty portfolio fit and nothing saying why. Both are one strategy whose 25-point curve shares 8 and 9 days with each book's priced holding, under the 30-day minimum. The empty fit is correct; the silence was the defect.
+
+### Fixed
+- `analytics-service/services/match_engine.py`: a candidate that shares fewer than 30 days with the book now persists `fit_unavailable_reason: "overlap_below_min"`, `fit_overlap_days` and `fit_min_overlap_days` in `score_breakdown.raw`. A personalized candidate with no returns series at all persists `no_candidate_returns` with 0 days. Computed fits and screening rows carry none of these keys.
+- `data_completeness` is now null on the short-overlap path. It measures the book's own join and read 1.0 ("complete") beside a fit that was never computed.
+- The admin candidate view (`src/components/admin/CandidateDetail.tsx`) shows the cause under the Portfolio fit bar, e.g. "Portfolio fit not computed: only 8 shared days with the book (needs 30)."
+
+### Changed
+- `ENGINE_VERSION` v2.3.0 → v2.4.0, because the persisted `raw` shape changed. **Every cached match batch is re-scored on the first cron run after deploy.** `WEIGHTS_VERSION` stays v2.0.0; no weight or score changed. Both golden fixtures change only in `engine_version`.
+- One constant, `PORTFOLIO_FIT_MIN_OVERLAP_DAYS = 30`, feeds the engine's overlap check, the persisted minimum and `routers/match.py` `_BOOK_JOIN_MIN_DAYS`, so the book-level D-22 marker and the candidate-level marker cannot disagree.
+
+### Tests
+- New `analytics-service/tests/test_match_candidate_fit_overlap_marker.py`, 9 arms: 8 shared days, exactly 30 (no reason key), 29 at the boundary, screening, the one-constant check, absent or empty candidate series, and an empty book series. Each arm was RED before its fix and was neutered back to RED and restored.
+- New `src/components/admin/CandidateDetail.test.tsx` pins the admin sentence and pins that `reasons` stays unchanged.
+
+### Notes
+- The cause is deliberately kept out of `reasons`: `reasons[0]` is the allocator's headline on /recommendations and pre-fills the intro note, so an admin caveat there would reach the allocator.
+- Review: two rounds. Round 1 fixed one silent-failure MEDIUM (the no-returns candidate); round 2 added a test for the empty-book guard. LOW items stay in the phase review files, not fixed by policy. Security SECURED 23/23.
+- After deploy and the re-score, the two PROD candidates are read again (read-only) to confirm they carry `overlap_below_min` with 8 and 9 days.
+
+## [0.132.3.3] - 2026-10-16 — RECORDS: close FANINGRAPH 164.9.3.1 (verification passed 8/8, SECURED 27/27, post-merge items confirmed)
+
+Records only: `.planning`, `TODOS.md`, and this release. One commit.
+
+### Added
+- The FANINGRAPH phase directory joins the tracked tree: 11 plans and summaries, CONTEXT, RESEARCH, PATTERNS, VALIDATION, `REVIEW.md` with rounds 2 to 4, `REVIEW-FIX.md`, `SECURITY.md` (SECURED, 27 of 27 threats closed) and `VERIFICATION.md` (status passed, 8 of 8).
+- `VERIFICATION.md` gains a dated section, "Post-merge items resolved (2026-10-16)", with all seven post-merge items confirmed and the evidence for each. Status stays passed.
+
+### Changed
+- `.planning/ROADMAP.md`: the FANINGRAPH overview bullet is ticked with its outcome (v0.132.1.0 #1059, re-dump #1061, ratchet-row follow-up #1064), its eleven plan rows replace the `TBD` stub and are ticked, and its Progress-table row reads Complete with the outcome prose.
+- `.planning/STATE.md` and `.planning/state.json`: progress counts and the last-activity lines move to 2026-10-16. The current position stays on 166.5 COMPUTEDATSTAMP, and the Status line now says FANINGRAPH is closed.
+
+### Notes
+- Read-only PROD readings taken for the post-merge items (marker query first, counts and booleans only): the ledger rows for `20261023120000` and `20261024120000` are present; `_fan_in_lock_rows` and `bridge_outcomes_sync_holding_ref` exist; `_fan_in_lock_rows` is executable by service_role only, matching the migration's REVOKE; the D-04 census reads 0 parented `compute_jobs` rows and 0 `done_pending_children` of 2332.
+- Main at the merge commit was red on the baseline content-drift gate by construction until the re-dump (#1061). The separate snapshot-drift workflow went red one commit later on the stale `_fan_in_lock_rows` ratchet row, and #1064 deleted it. Both are green now.
+- Two review residuals were not yet in `TODOS.md` and are booked: `164.9.3.1-FL8-SEAM-RESTORE` (lane-only, founder-accepted) and `164.9.3.1-55P03-RECOVERY-LATENCY` (latent, no caller passes parents). The earlier three entries (`REAPER-STRAND`, `VOLUNTARY-REMOVE-23514`, `HOLDING-REF-DIRECT-UPDATE`) were already booked.
+- STATE's Status line is rewritten to match today: 170.1 COPY and WRITERRESIDUALS are in flight. BRIDGERETURNS (#1070) and OKXHISTORY (#1067) are shipped and waiting on readings or founder steps. FANINGRAPH, RECONMARKER and PYXDIST are closed, and MT5SERVERLEARN is retired.
+- SECURITY.md's T-24 row now describes the secret-scan pattern in words. It was written as a literal URL with a user and password, which the push-time credential scanner refused.
+
+## [0.132.3.2] - 2026-10-16 — RECORDS: retire MT5SERVERLEARN 164.6.6.3.6 from v1.20 (founder: next milestone, maybe)
+
+Records only; no code changes.
+
+### Removed
+- **Phase 164.6.6.3.6 MT5SERVERLEARN is retired from v1.20, by founder decision on 2026-10-16: "We will do it in the next milestone (maybe)".** It never shipped. Broker servers stay hand-listed in `MT5_KNOWN_SERVERS`, and the Step 2d runbook from 164.6.6.3 applies.
+  - The ROADMAP marks the phase retired, in the same style as 165, 165.1 and 165.2. Its section stays as the spec, and its Progress row reads RETIRED.
+  - STATE no longer lists it as waiting on the founder's MT5 accounts.
+  - The work done so far (CONTEXT, RESEARCH, PATTERNS, VALIDATION, BROKER-SERVERS, plan 01 and the S0-S9 gate protocol) is kept on the pushed branch `feat/164.6.6.3.6-mt5serverlearn`.
+- TODOS gains `[164.6.6.3.6-MT5SERVERLEARN-NEXT-MILESTONE]`, which carries the phase to the next milestone's planning.
+
+## [0.132.3.1] - 2026-10-16 — RECORDS: close RECONMARKER 167.1.2.1 (D-11 day-0/day-1 reads as-expected, verification passed, SECURED 33/33)
+
+### Added
+- `167.1.2.1-SECURITY.md`: audit of Phase 167.1.2.1 RECONMARKER by gsd-security-auditor at head `f590cdf42`, read-only, no database touched. Verdict SECURED, 33 of 33 registered threats closed, `threats_open: 0`. Four accepted risks are logged (T-02 column SELECT for authenticated only, T-07 stale curve on disconnect-then-add, T-20 widened projection, T-SC no package installed).
+- `167.1.2.1-VERIFICATION.md` (status passed, 7 of 7 success criteria) and `167.1.2.1-10-SUMMARY.md` (the D-11 day-0 and day-1 PROD reads, counts only, founder acknowledged 2026-10-16) join the tracked phase directory.
+
+### Changed
+- `.planning/ROADMAP.md`: the RECONMARKER overview bullet is ticked with its outcome (PR 1 v0.131.3.0 #1022, PR 2 v0.131.8.0 #1033), its ten plan rows are ticked, and its Progress-table row reads Complete with the outcome prose rather than the bare word.
+- `.planning/STATE.md` and `.planning/state.json`: progress counts and the last-activity lines move to 2026-10-16. The current position stays on 166.5 COMPUTEDATSTAMP, and the Status line now says RECONMARKER is closed.
+
+### Notes
+- One finding the audit flagged as an unregistered WARNING is closed in code: `log_audit_event` let a signed-in user write `allocator.equity.reconstruct_*` rows. Migration 20261014120100 refuses that prefix to non-service_role callers (SQLSTATE 22023) and the backfill joins on `a.user_id = ak.user_id`. Rows forged before that migration applied can only affect the forger's own key.
+- Two residuals stay open and non-blocking, booked in `TODOS.md`: `167.1.2.1-TRANSIENT-NEVER-CAPS` and `167.1.2.1-TWIN-STALE-DEFINITION`. `TODOS.md` itself is unchanged here; no entry said it was waiting on the D-11 reading.
+- Observation, low severity: the Sentry read-failure branch in `job_worker.py` calls `capture_exception` without the `_read_failure_text` scrub, and the global `before_send` scrubber was not verified.
 ## [0.132.3.0] - 2026-10-16 — BRIDGERETURNS: the Bridge matcher's per-holding returns come from each holding's daily mark price
 
 Phase 167.1.1.1 (plans 01-09 and three review rounds plus one narrow round). The branch has 67 non-merge commits since `origin/main` plus per-plan worktree merges and one merge of `origin/main`. 28 of the 67 touch paths outside `.planning`, and this entry maps every one of them. The other 39 are planning and records commits: CONTEXT with founder decisions D-01..D-25, research, the UI spec, the pattern map, 9 plans and their summaries, four review rounds, verification and the security audit. Closes TODOS `[167.1.1-BRIDGE-DOLLAR-RATIO-RETURNS]` (`77b639a4b`). No migration.
