@@ -1593,6 +1593,35 @@ async def test_a_key_list_that_cannot_double_count_does_not_hold(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("venue", "holds"),
+    [
+        pytest.param("deribit", False, id="deribit-adds-zero-so-no-double-count"),
+        pytest.param("okx", True, id="control-okx-pair-still-holds"),
+    ],
+)
+async def test_unstamped_working_deribit_keys_do_not_hold_the_refresh(
+    monkeypatch: pytest.MonkeyPatch, venue: str, holds: bool
+) -> None:
+    """SFH M-3 (167.1.2.1.1). The refresh skips Deribit rows when it sums, so
+    two unstamped working Deribit keys cannot double-count anything in its
+    total, and holding the day's write for them froze the snapshot store for
+    nothing. The derive keeps counting Deribit (its own call is unchanged). The
+    okx pair is the control: the same setup on a venue that adds to the total
+    does hold."""
+    fake = FakeSupabaseClient()
+    _seed_two_keys_on_one_venue(fake, venue=venue)
+
+    audit = await _run_refresh(monkeypatch, fake, API_KEY_ID_1)
+
+    if holds:
+        assert _held_metadata(audit)["reason"] == "identity_pending"
+        return
+    assert HELD_ACTION not in _audit_actions(audit)
+    assert _refresh_complete_metadata(audit)["identity_pending_venues"] == 0
+
+
+@pytest.mark.asyncio
 async def test_hold_reason_precedence_names_never_polled_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

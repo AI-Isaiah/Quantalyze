@@ -2071,8 +2071,9 @@ class _LatestHoldings:
     over_age_excluded_venue_accounts: int = 0
     # 167.1.2.1.1 SC-6 / D-03: stamping venues holding two or more eligible
     # WORKING keys whose account is still unknown (``identity_pending_venues``,
-    # the helper the derive blocks on too). Two such keys may read one account,
-    # which the grouping below would count twice, so the caller holds the day.
+    # the helper the derive blocks on too), Deribit excepted here (its rows add
+    # $0 to the refresh total). Two such keys may read one account, which the
+    # grouping below would count twice, so the caller holds the day.
     identity_pending_venues: int = 0
 
 
@@ -2220,7 +2221,12 @@ async def _fetch_latest_holdings_per_eligible_key(
         getattr(await db_execute(_sel_keys), "data", None) or []
     )
     eligible_keys = sum(1 for r in key_rows if eligible_key_predicate(r))
-    pending_venues = identity_pending_venues(key_rows, VENUES_WITH_ACCOUNT_ID)
+    # SFH M-3: Deribit is not counted here. The refresh skips its rows (they add
+    # $0), so two unstamped Deribit keys cannot double-count anything in this
+    # total; the derive's own call keeps the full set.
+    pending_venues = identity_pending_venues(
+        key_rows, VENUES_WITH_ACCOUNT_ID - {"deribit"}
+    )
     eligible_rows = [r for r in key_rows if r.get("id") and eligible_key_predicate(r)]
     # SFH M-1: the leader is the smallest WORKING eligible key. A failing key's
     # job is the likeliest to die in the preflight or defer on the breaker, and
