@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.132.5.1] - 2026-10-19 — RECORDS: close WRITERRESIDUALS 167.1.2.1.1 (verification passed 9/9, SECURED 20/20)
+
+Records only: `.planning` and this release.
+
+### Added
+- The WRITERRESIDUALS phase directory joins the tracked tree: four plans and summaries, CONTEXT (D-01 to D-05, D-11 to D-16), RESEARCH, PATTERNS, VALIDATION, the review reports and fix-round record, the SC-8 deploy note, `SECURITY.md` (SECURED, 20 of 20) and `VERIFICATION.md` (status passed, 9 of 9).
+
+### Changed
+- `.planning/ROADMAP.md`: the WRITERRESIDUALS overview bullet and Progress-table row carry the outcome: v0.132.5.0 (#1079), deployed 2026-10-19 at 20:33Z, outside the 03:30–06:45 UTC window that SC-8 forbids. The phase section records founder decisions D-15 ("Yes, one clause + test") and D-16 ("Accept as known limit").
+- `.planning/STATE.md` and `.planning/state.json`: progress moves to 111 phases complete. The current position stays on 166.5 COMPUTEDATSTAMP. The Status line says WRITERRESIDUALS is closed and 170.1 COPY is in its final round.
+
+### Notes
+- The live proof that the change works on PROD is the first derive after deploy, at 05:30Z on 2026-10-20, where a composed book reads `is_trustworthy`. It is read after this PR merges.
+
 ## [0.132.5.0] - 2026-10-19 — WRITERRESIDUALS 167.1.2.1.1: the allocator equity writer says why it refused a curve and never dilutes or drops a key silently
 
 Phase 167.1.2.1.1. The allocator equity writer (derive, stitch and the daily refresh) now persists the reason it refused a curve, flags a failing or never-polled key instead of carrying it flat, and counts each account once. No migration.
