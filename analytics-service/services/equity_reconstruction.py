@@ -4361,6 +4361,27 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                     )
             return DispatchResult(outcome=DispatchOutcome.DONE)
 
+        if latest.job_key_is_leader:
+            # D-01 / D-12 / SFH M-2: an account left out of the day is raised
+            # once per kind, by the leader only, on every outcome that is not a
+            # hold (including the early returns below, which write no row: an
+            # all-failing book is the worst case of "left out"). Static
+            # messages, no id.
+            for left_out, outcome in (
+                (latest.never_polled_failing_accounts, "left_out_never_polled_failing"),
+                (latest.over_age_failing_accounts, "left_out_carry_over_age_failing"),
+            ):
+                if left_out > 0:
+                    with sentry_sdk.new_scope() as scope:
+                        scope.set_tag("compute_job_id", str(job.get("id")))
+                        scope.set_tag("refresh_outcome", outcome)
+                        sentry_sdk.capture_message(
+                            f"refresh_allocator_equity_daily: {outcome}, an "
+                            "account whose keys all fail was left out of today's "
+                            "legacy snapshot",
+                            level="warning",
+                        )
+
         # Compute single-day equity from holdings' value_usd fan-in.
         #
         # /investigate 2026-04-24: perp derivative rows must contribute
@@ -4555,23 +4576,6 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
         count = await persist_equity_snapshots(
             ctx.supabase, [row], allocator_id, depth_months,
         )
-        if latest.job_key_is_leader:
-            # D-01 / D-12: an account left out of a day that IS written is
-            # raised once per kind, by the leader only. Static messages, no id.
-            for left_out, outcome in (
-                (latest.never_polled_failing_accounts, "left_out_never_polled_failing"),
-                (latest.over_age_failing_accounts, "left_out_carry_over_age_failing"),
-            ):
-                if left_out > 0:
-                    with sentry_sdk.new_scope() as scope:
-                        scope.set_tag("compute_job_id", str(job.get("id")))
-                        scope.set_tag("refresh_outcome", outcome)
-                        sentry_sdk.capture_message(
-                            f"refresh_allocator_equity_daily: {outcome}, an "
-                            "account whose keys all fail was left out of today's "
-                            "legacy snapshot",
-                            level="warning",
-                        )
         if book_emptied:
             # SFH-R2-02: rare, and it zeroes the book's legacy series, so it is
             # loud. Counts only (no key id, no USD).

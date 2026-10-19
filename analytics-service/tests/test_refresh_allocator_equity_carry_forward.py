@@ -1413,6 +1413,61 @@ async def test_the_leader_is_elected_among_working_keys_not_failing_ones(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("job_key", "raises"), [(API_KEY_ID_1, True), (API_KEY_ID_2, False)]
+)
+async def test_an_all_failing_book_still_raises_the_left_out_event(
+    monkeypatch: pytest.MonkeyPatch, job_key: str, raises: bool
+) -> None:
+    """SFH M-2 (167.1.2.1.1). Every account of the book is never-polled and
+    failing, so there are no holdings and the job takes ``no_holdings_today``:
+    no snapshot is written at all, the worst case of "left out". The event used
+    to sit after the snapshot write and never fired here. With no working key
+    the smallest eligible key leads (the fallback)."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="error", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="error", venue_account_id="b-1")
+
+    audit, sentry = await _run_with_sentry(monkeypatch, fake, job_key)
+
+    _no_today_row(fake)
+    metadata = _refresh_complete_metadata(audit)
+    assert metadata["reason"] == "no_holdings_today"
+    assert metadata["never_polled_failing_accounts"] == 2
+    calls = _sentry_calls(sentry)
+    assert len(calls) == (1 if raises else 0), calls
+    if raises:
+        message, tags = calls[0]
+        assert tags["refresh_outcome"] == "left_out_never_polled_failing"
+        for secret in (API_KEY_ID_1, API_KEY_ID_2, ALLOCATOR_ID, "o-1", "b-1", "bybit", "okx"):
+            assert secret not in message
+
+
+@pytest.mark.asyncio
+async def test_a_left_out_account_is_raised_when_the_day_waits_on_a_reconstruct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SFH M-2 (167.1.2.1.1), the second early return. A zero-snapshot book whose
+    working key still owes its history reconstruct returns
+    ``refresh_held_for_reconstruct`` before any write; the failing account the
+    day leaves out is raised all the same."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="complete", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="bybit", sync_status="error", venue_account_id="b-1")
+    _seed_holding(fake, API_KEY_ID_1, "okx", "USDT", TODAY, HOLDER_USD)
+    for key_id in (API_KEY_ID_1, API_KEY_ID_2):
+        fake.store[("api_keys", (key_id,))].update(
+            {"history_reconstructed_at": None, "history_reconstruct_attempts": 1}
+        )
+
+    audit, sentry = await _run_with_sentry(monkeypatch, fake, API_KEY_ID_1)
+
+    assert "allocator.equity.refresh_held_for_reconstruct" in _audit_actions(audit)
+    ((_, tags),) = _sentry_calls(sentry)
+    assert tags["refresh_outcome"] == "left_out_never_polled_failing"
+
+
+@pytest.mark.asyncio
 async def test_a_proven_empty_old_account_is_exempt_from_the_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
