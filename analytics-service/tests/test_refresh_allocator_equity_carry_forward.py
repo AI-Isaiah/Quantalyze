@@ -1233,8 +1233,8 @@ async def test_hold_sentry_is_raised_by_the_leader_only(
 ) -> None:
     """D-14 (167.1.2.1.1). A book with N keys runs N refresh jobs a day, and all
     N reach the same hold. Every job writes its own audit row, but only the
-    LEADER (the smallest eligible key id of the allocator) raises the Sentry
-    event, so one hold is one event, not N. The message is static and carries
+    LEADER (the smallest working eligible key id of the allocator) raises the
+    Sentry event, so one hold is one event, not N. The message is static and carries
     no key id, allocator id, venue id or USD (D-09)."""
     from unittest.mock import patch
 
@@ -1381,6 +1381,35 @@ async def test_never_polled_failing_account_is_left_out_not_held(
         assert tags["refresh_outcome"] == "left_out_never_polled_failing"
         for secret in (API_KEY_ID_1, API_KEY_ID_2, ALLOCATOR_ID, "b-1", "bybit"):
             assert secret not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("job_key", "raises"),
+    [(API_KEY_ID_1, False), (API_KEY_ID_2, True), (API_KEY_ID_3, False)],
+)
+async def test_the_leader_is_elected_among_working_keys_not_failing_ones(
+    monkeypatch: pytest.MonkeyPatch, job_key: str, raises: bool
+) -> None:
+    """SFH M-1 (167.1.2.1.1). The smallest eligible key id used to lead, failing
+    keys included, and a failing key's job is the likeliest to die in the
+    preflight (decrypt, client build) or defer on the breaker, so the hold's
+    one Sentry event never fired. The leader is now the smallest WORKING key.
+    Key 1 fails (smallest id, not working); key 2 works and leads; key 3 works
+    but never polled, which is the hold. Exactly one event, from key 2's job."""
+    fake = FakeSupabaseClient()
+    _seed_key(fake, API_KEY_ID_1, exchange="okx", sync_status="error", venue_account_id="o-1")
+    _seed_key(fake, API_KEY_ID_2, exchange="okx", sync_status="complete", venue_account_id="o-2")
+    _seed_key(fake, API_KEY_ID_3, exchange="bybit", sync_status="complete", venue_account_id="b-1")
+    _seed_holding(fake, API_KEY_ID_2, "okx", "USDT", TODAY, HOLDER_USD)
+
+    audit, sentry = await _run_with_sentry(monkeypatch, fake, job_key)
+
+    assert _held_metadata(audit)["reason"] == "never_polled_working"
+    calls = _sentry_calls(sentry)
+    assert len(calls) == (1 if raises else 0), calls
+    if raises:
+        assert calls[0][1]["refresh_outcome"] == "held_never_polled"
 
 
 @pytest.mark.asyncio

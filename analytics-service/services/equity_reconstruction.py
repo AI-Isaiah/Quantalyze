@@ -2055,8 +2055,9 @@ class _LatestHoldings:
     never_polled_failing_accounts: int = 0
     polled_no_rows_accounts: int = 0
     # True when the job that asked is the allocator's LEADER (its key is the
-    # smallest eligible key id), so one hold raises one Sentry event instead of
-    # one per key. A bool: the "no key id leaves this object" contract holds.
+    # smallest WORKING eligible key id, or the smallest eligible key id when none
+    # works), so one hold raises one Sentry event instead of one per key. A bool:
+    # the "no key id leaves this object" contract holds.
     job_key_is_leader: bool = False
     # 167.1.2.1.1 D-02 / D-12: accounts whose latest day is older than
     # CARRY_AGE_CAP_DAYS and so are not carried. ``over_age_accounts`` have a
@@ -2220,11 +2221,16 @@ async def _fetch_latest_holdings_per_eligible_key(
     )
     eligible_keys = sum(1 for r in key_rows if eligible_key_predicate(r))
     pending_venues = identity_pending_venues(key_rows, VENUES_WITH_ACCOUNT_ID)
-    eligible_ids = sorted(
-        str(r["id"]) for r in key_rows if r.get("id") and eligible_key_predicate(r)
-    )
+    eligible_rows = [r for r in key_rows if r.get("id") and eligible_key_predicate(r)]
+    # SFH M-1: the leader is the smallest WORKING eligible key. A failing key's
+    # job is the likeliest to die in the preflight or defer on the breaker, and
+    # the event fires only from the leader's job. With no working key the
+    # smallest eligible key leads, so an all-failing book still has one.
+    leader_ids = sorted(
+        str(r["id"]) for r in eligible_rows if working_holder_predicate(r)
+    ) or sorted(str(r["id"]) for r in eligible_rows)
     job_key_is_leader = bool(
-        job_api_key_id and eligible_ids and str(job_api_key_id) == eligible_ids[0]
+        job_api_key_id and leader_ids and str(job_api_key_id) == leader_ids[0]
     )
 
     # R2-WR-01: one read of every key's native-unpriced marker, before the loop.
