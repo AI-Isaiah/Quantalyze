@@ -1888,6 +1888,38 @@ def _refusal_case_compose_empty_new_book() -> dict[str, Any]:
     return {"fake": fake, "alloc": alloc, "token": "compose_empty", "outcome": "DONE"}
 
 
+def _new_book_beside_omitted_key(alloc: str, reason: str) -> dict[str, Any]:
+    """MR-FR-01: a brand-new anchored key beside a key the compose OMITS without a drop
+    (null anchor, reason ``dust`` / ``native_unit``). The omitted key is in
+    ``anchors_by_key`` as None but adds no ``dropped_key``, so the new key alone is the
+    blocking cause and it is still a wait: ``compose_empty``."""
+    fake = _FakeSupabase({
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [
+            {"allocator_id": alloc, "kind": "key_inputs:key-A",
+             "payload": {"flows": [], "anchor_usd": 50_000.0, "venue": "binance"}},
+            {"allocator_id": alloc, "kind": "key_inputs:key-Z",
+             "payload": {"flows": [], "anchor_usd": None, "venue": "binance",
+                         "anchor_null_reason": reason}},
+            _stale_curve(alloc),
+        ],
+        LEGACY_TABLE: [],
+        "api_keys": [
+            _gate_key("key-A", alloc, venue_account_id="acct-A"),
+            _gate_key("key-Z", alloc, venue_account_id="acct-Z"),
+        ],
+    })
+    return {"fake": fake, "alloc": alloc, "token": "compose_empty", "outcome": "DONE"}
+
+
+def _refusal_case_compose_empty_new_book_beside_dust() -> dict[str, Any]:
+    return _new_book_beside_omitted_key("alloc-empty-new-book-dust", "dust")
+
+
+def _refusal_case_compose_empty_new_book_beside_native_unit() -> dict[str, Any]:
+    return _new_book_beside_omitted_key("alloc-empty-new-book-native", "native_unit")
+
+
 def _refusal_case_compose_empty_blocked() -> dict[str, Any]:
     """The only key has NO anchor (its live read failed: ``balance_error``) and no
     returns: the compose drops it as DROPPED_KEY (blocking), so the compose is empty
@@ -1927,6 +1959,8 @@ def _refusal_case_compose_refused() -> dict[str, Any]:
         _refusal_case_compose_incomplete,
         _refusal_case_compose_empty,
         _refusal_case_compose_empty_new_book,
+        _refusal_case_compose_empty_new_book_beside_dust,
+        _refusal_case_compose_empty_new_book_beside_native_unit,
         _refusal_case_compose_empty_blocked,
         _refusal_case_compose_refused,
     ],

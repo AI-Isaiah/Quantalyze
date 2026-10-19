@@ -13676,7 +13676,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     #      is ``compose_empty_blocked`` and carries the compose's own blocking
     #      tokens, so the wait mapping of ``compose_empty`` cannot swallow a blocking
     #      cause. The one exception is a brand-new book (MR-01): every key has a
-    #      real anchor and no return day yet, so ``dropped_key`` is the only blocking
+    #      real anchor and no return day yet (a key the compose omits without a drop,
+    #      a null anchor with reason dust / native_unit / native_unpriced, does not
+    #      count against it, MR-FR-01), so ``dropped_key`` is the only blocking
     #      token and the next daily derive gives each key its first return day. That
     #      is a wait, so it is ``compose_empty`` too. The frontend
     #      extractTrustworthyDerivedCurve is the paired last-line defense (B2a). ──
@@ -13685,7 +13687,11 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         if payload.get("is_trustworthy") or (
             _blocking == [DegradeReason.DROPPED_KEY.value]
             and all(
-                a is not None and k not in returns_by_key
+                k not in returns_by_key
+                and (
+                    a is not None
+                    or null_anchor_reasons.get(k) in ("dust", "native_unit", "native_unpriced")
+                )
                 for k, a in anchors_by_key.items()
             )
         ):
