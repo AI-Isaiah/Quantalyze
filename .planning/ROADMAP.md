@@ -166,7 +166,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.1.1.2: AUMBASIS — scenario commit sizing counts a derivative at its unrealized P&L, never its notional, and a missing P&L is stored as missing, never as 0** (INSERTED 2026-10-15) — not yet planned (data integrity; founder decision during 167.1.1.1 discuss)
 - [x] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — verified 2026-10-11 (completed 2026-10-11)
 - [x] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — 10 plans, shipped as PR 1 v0.131.3.0 (#1022) and PR 2 v0.131.8.0 (#1033); D-11 day-0 and day-1 PROD reads as expected (capped_events 0), founder acknowledged 2026-10-16; verification passed 7/7; security SECURED 33/33 (completed 2026-10-16)
-- [ ] **Phase 167.1.2.1.1: WRITERRESIDUALS — the allocator equity writer persists why a curve was refused and never dilutes or drops a key silently** (INSERTED) — not yet planned (data integrity; split from 167.1.2.1 by D-01, 2026-10-13)
+- [x] **Phase 167.1.2.1.1: WRITERRESIDUALS — the allocator equity writer persists why a curve was refused and never dilutes or drops a key silently** (INSERTED) — 4 plans plus three minimal fix rounds, shipped as v0.132.5.0 (#1079), deployed 2026-10-19 20:33Z outside 03:30–06:45 UTC (SC-8); verification passed 9/9; security SECURED 20/20 (completed 2026-10-19)
 - [ ] **Phase 167.1.2.1.2: HISTORYREADER — Open Positions, Exchanges and the Overview show a departed or stale key's history truthfully** (INSERTED) — not yet planned (data integrity and user-facing; split from 167.1.2.1 by D-01, 2026-10-13)
 - [x] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — planned 2026-10-07, 9 plans (completed 2026-10-11)
 - [x] **Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital** (INSERTED 2026-10-08) — 8 plans, two PRs (#991, PR-2); closed 2026-10-12, SC-4 trustworthy clause routed to NAVBREACH (completed 2026-10-12)
@@ -5301,7 +5301,7 @@ Plans:
 **Priority:** data integrity (founder priority rule, 2026-09-27).
 **Requirements**: success criteria below
 **Depends on:** Phase 167.1.2.1
-**Plans:** 0 plans
+**Plans:** 4/4 plans complete (3 waves: W1 01 · W2 02 · W3 03, 04)
 
 Split out of Phase 167.1.2.1 RECONMARKER by founder decision D-01 (2026-10-13, smart discuss "Accept all"; `167.1.2.1-CONTEXT.md`). Every item was re-measured LIVE at `origin/main` `c85c938e1` on 2026-10-13, by reading code, symbols cited by name. The founder calls marked below are asked in this phase's own discuss (D-03).
 
@@ -5320,8 +5320,33 @@ Split out of Phase 167.1.2.1 RECONMARKER by founder decision D-01 (2026-10-13, s
 
 Each item is fixed with a test that fails on the old behaviour, or closed by a recorded founder decision. Any grouping change moves Python `account_groups`, TS `accountIdentityTokens`/`keyAccountOf`, `one_key_per_account_day`/`oneKeyPerAccountDay` and the `queries.ts` reader together (167.1.2.1 re-measure, item (5) WR-03).
 
+**Founder decisions 2026-10-16 (discuss, every answer the recommended option; full text in `167.1.2.1.1-CONTEXT.md`):**
+- **D-01 (SC-4):** the day's snapshot write is held while a never-polled account has a working key. A never-polled account whose keys all fail is left out with a named count and a Sentry event.
+- **D-02 (SC-5):** a 7-day carry cap. Past it the write is held, with a Sentry event naming the count and the age.
+- **D-03 (SC-2/3/6):** blocking.
+  - SC-2 only when the failing key's series stops before the book's last day.
+  - SC-3 only when the members' flows disagree on an owned day.
+  - SC-6 under `account_identity_pending`, with the refresh holding its write.
+- **D-04 (SC-1):** the writer stores the refusal token, and the reader maps it to its existing lines (no new copy).
+- **D-05 (SC-9):** research first. The tolerance is never loosened, and if the stored data is right the measurement goes back to the founder.
+- **D-11 (SC-9, "Close as cleared"):** the residual was cleared upstream by the 164.6.6.2.3 recompute and re-measured clean on PROD (8/8 MT5 keys replay clean, book 1 trustworthy). No writer change, and the band is untouched. Plan 04 re-runs the read-only measurement.
+- **D-12 (D-02, "Same split"):** an over-age account whose keys all fail is left out with a count and a Sentry event. An over-age account with a working key holds.
+- **D-15 (MR-R2-01, founder 2026-10-19 "Yes, one clause + test"):** one more minimal fixer round. A null-anchor `native_unit` or `native_unpriced` key passes the MR-01 "being rebuilt" wait whether or not it has returns; a `dust` key keeps the no-returns requirement.
+- **D-16 (MR-FR-02, founder 2026-10-19 "Accept as known limit"):** no code. A funded key whose venue never yields two usable NAV days reads "being rebuilt" with no end, as it did before this phase. Booked as `167.1.2.1.1-NEWBOOK-WAIT-UNBOUNDED` in `TODOS.md`.
+
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+
+- [x] 167.1.2.1.1-01-PLAN.md — a derive refusal persists its reason in the equity_curve row; the reader maps each token to an existing line; census mirror (SC-1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 167.1.2.1.1-02-PLAN.md — blocking tokens for a failing key's stopped series, disagreeing shared-account flows and unstamped working keys; departed_history_unavailable Sentry event and count (SC-2, SC-3, SC-6, SC-7)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 167.1.2.1.1-03-PLAN.md — refresh holds for a never-polled working account, a carry over 7 days and pending identity; the refresh_held audit action (SC-4, SC-5, SC-6)
+- [x] 167.1.2.1.1-04-PLAN.md — SC-9 read-only PROD re-measure and the SC-8 deploy note (SC-8, SC-9)
 
 ### Phase 167.1.2.1.2: HISTORYREADER — Open Positions, Exchanges and the Overview show a departed or stale key's history truthfully (INSERTED)
 
@@ -6306,7 +6331,7 @@ kept verbatim.
 | 167.1.1.2 AUMBASIS | 0/? | Queued — data integrity; founder decision 2026-10-15 | - |
 | 167.1.2 ACCOUNTTRUTH | PR A, B, C1–C5 shipped | Complete | 2026-10-11 |
 | 167.1.2.1 RECONMARKER | 10/10 | Complete — D-11 day-0 and day-1 PROD reads as expected, capped_events 0; verification passed, SECURED 33/33 | 2026-10-16 · v0.131.3.0 · #1022, v0.131.8.0 · #1033 |
-| 167.1.2.1.1 WRITERRESIDUALS | 0/? | Queued — data integrity; split from 167.1.2.1 (D-01), after it | - |
+| 167.1.2.1.1 WRITERRESIDUALS | 4/4 | Complete — VERIFICATION passed 9/9, SECURED 20/20; three minimal fix rounds (D-15), new-book wait accepted as a known limit (D-16); deployed 20:33Z outside the 03:30–06:45 window | 2026-10-19 · v0.132.5.0 · #1079 |
 | 167.1.2.1.2 HISTORYREADER | 0/? | Queued — data integrity and user-facing; split from 167.1.2.1 (D-01), after it | - |
 | 167.1.2.2 DERIVECRON | 9/9 | Complete | 2026-10-11 |
 | 167.1.2.2.1 DERIBITWEDGE | 8/8 | Complete | 2026-10-12 |
