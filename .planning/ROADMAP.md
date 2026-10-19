@@ -5331,6 +5331,8 @@ Each item is fixed with a test that fails on the old behaviour, or closed by a r
 - **D-05 (SC-9):** research first. The tolerance is never loosened, and if the stored data is right the measurement goes back to the founder.
 - **D-11 (SC-9, "Close as cleared"):** the residual was cleared upstream by the 164.6.6.2.3 recompute and re-measured clean on PROD (8/8 MT5 keys replay clean, book 1 trustworthy). No writer change, and the band is untouched. Plan 04 re-runs the read-only measurement.
 - **D-12 (D-02, "Same split"):** an over-age account whose keys all fail is left out with a count and a Sentry event. An over-age account with a working key holds.
+- **D-15 (MR-R2-01, founder 2026-10-19 "Yes, one clause + test"):** one more minimal fixer round. A null-anchor `native_unit` or `native_unpriced` key passes the MR-01 "being rebuilt" wait whether or not it has returns; a `dust` key keeps the no-returns requirement.
+- **D-16 (MR-FR-02, founder 2026-10-19 "Accept as known limit"):** no code. A funded key whose venue never yields two usable NAV days reads "being rebuilt" with no end, as it did before this phase. Booked as `167.1.2.1.1-NEWBOOK-WAIT-UNBOUNDED` in `TODOS.md`.
 
 Plans:
 **Wave 1**
