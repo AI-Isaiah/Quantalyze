@@ -181,3 +181,42 @@ def test_a_transaction_spans_data_is_scrubbed_by_key() -> None:
     assert out["spans"][0]["data"]["authorization"] == "[REDACTED]"
     assert out["spans"][0]["data"]["http.method"] == "GET"
     assert out["spans"][1] == {"op": "other"}
+
+
+def test_a_transaction_keeps_dotted_hosts_and_versions_but_still_redacts_a_real_jwt() -> None:
+    """LR-JWT: the redactor now runs on every sampled transaction, and the value-shape
+    scan used to treat ANY three dot-separated base64url segments as a JWT. A span's
+    `server.address` / `net.peer.name` host, `contexts.trace.origin` and a runtime
+    version are all of that shape, so they were rewritten to a redaction marker. Only
+    a real JWT (header = base64url of a JSON object, so it starts `eyJ`) is redacted."""
+    real_jwt = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ"
+        ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+    )
+    event = {
+        "type": "transaction",
+        "contexts": {
+            "trace": {"origin": "auto.http.starlette"},
+            "runtime": {"name": "CPython", "version": "3.12.13"},
+        },
+        "spans": [
+            {
+                "op": "http.client",
+                "data": {
+                    "server.address": "api.example.com",
+                    "net.peer.name": "api.example.com",
+                    "leaked": real_jwt,
+                },
+            }
+        ],
+    }
+
+    out = sentry_init._redact_before_send(event, None)
+
+    data = out["spans"][0]["data"]
+    assert data["server.address"] == "api.example.com"
+    assert data["net.peer.name"] == "api.example.com"
+    assert out["contexts"]["runtime"]["version"] == "3.12.13"
+    assert out["contexts"]["trace"]["origin"] == "auto.http.starlette"
+    assert data["leaked"] == "[REDACTED_JWT]"

@@ -113,10 +113,11 @@ _PII_KEYS: frozenset[str] = frozenset({
 # Mirror of src/lib/admin/pii-scrub.ts L27 DENYLIST_PREFIX. Case-insensitive.
 _PII_KEY_PREFIXES: tuple[str, ...] = ("sb-ec-",)
 
-# Mirror of src/lib/admin/pii-scrub.ts L31 JWT_SHAPE.
-# Detects bearer-shaped strings: three base64url segments separated by dots.
+# Detects bearer-shaped strings: three base64url segments separated by dots, header
+# starting `eyJ` (same shape as `services.redact.JWT_SHAPE`, see the reason there:
+# dotted hosts and versions on a transaction event are not JWTs).
 _JWT_SHAPE: re.Pattern[str] = re.compile(
-    r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$"
+    r"^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$"
 )
 
 _REDACTED = "[REDACTED]"

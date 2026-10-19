@@ -83,9 +83,14 @@ DENYLIST_EXACT: frozenset[str] = frozenset({
 # Mirror of pii-scrub.ts L38 DENYLIST_PREFIX.
 DENYLIST_PREFIX: tuple[str, ...] = ("sb-ec-",)
 
-# Mirror of pii-scrub.ts L42 JWT_SHAPE — anchored 3-segment base64url.
+# Anchored 3-segment base64url whose header starts `eyJ` (base64url of `{"`, i.e.
+# a JSON-object header, which every JWT has). Without the `eyJ` anchor any dotted
+# host (`api.example.com`), OTel origin (`auto.http.starlette`) or version
+# (`3.12.13`) matched, and the Sentry transaction hook rewrote them. The payload is
+# deliberately NOT required to start `eyJ`: a JWS may carry a non-JSON payload.
+# DIVERGES from pii-scrub.ts L42 JWT_SHAPE (still the unanchored form).
 JWT_SHAPE: re.Pattern[str] = re.compile(
-    r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$"
+    r"^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$"
 )
 
 # Mirror of pii-scrub.ts L49-50 JWT_SUBSTRING — embedded 3-segment, 10+ char floor.

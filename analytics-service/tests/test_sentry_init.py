@@ -48,6 +48,10 @@ class TestPIIDenylist:
         )
         assert sentry_init._JWT_SHAPE.match(sample) is not None
 
+    def test_jwt_shape_rejects_dotted_hosts_and_versions(self):
+        for sample in ("api.example.com", "auto.http.starlette", "3.12.13"):
+            assert sentry_init._JWT_SHAPE.match(sample) is None
+
 
 class TestRedactBeforeSend:
     def test_redacts_authorization_header_case_insensitive(self):
