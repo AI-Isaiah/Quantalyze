@@ -166,7 +166,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.1.1.2: AUMBASIS — scenario commit sizing counts a derivative at its unrealized P&L, never its notional, and a missing P&L is stored as missing, never as 0** (INSERTED 2026-10-15) — not yet planned (data integrity; founder decision during 167.1.1.1 discuss)
 - [x] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — verified 2026-10-11 (completed 2026-10-11)
 - [x] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — 10 plans, shipped as PR 1 v0.131.3.0 (#1022) and PR 2 v0.131.8.0 (#1033); D-11 day-0 and day-1 PROD reads as expected (capped_events 0), founder acknowledged 2026-10-16; verification passed 7/7; security SECURED 33/33 (completed 2026-10-16)
-- [x] **Phase 167.1.2.1.1: WRITERRESIDUALS — the allocator equity writer persists why a curve was refused and never dilutes or drops a key silently** (INSERTED) — verified 2026-10-16, 4/4 plans, VERIFICATION passed 9/9; ship pending (data integrity; split from 167.1.2.1 by D-01, 2026-10-13)
+- [x] **Phase 167.1.2.1.1: WRITERRESIDUALS — the allocator equity writer persists why a curve was refused and never dilutes or drops a key silently** (INSERTED) — 4 plans plus three minimal fix rounds, shipped as v0.132.5.0 (#1079), deployed 2026-10-19 20:33Z outside 03:30–06:45 UTC (SC-8); verification passed 9/9; security SECURED 20/20 (completed 2026-10-19)
 - [ ] **Phase 167.1.2.1.2: HISTORYREADER — Open Positions, Exchanges and the Overview show a departed or stale key's history truthfully** (INSERTED) — not yet planned (data integrity and user-facing; split from 167.1.2.1 by D-01, 2026-10-13)
 - [x] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — planned 2026-10-07, 9 plans (completed 2026-10-11)
 - [x] **Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital** (INSERTED 2026-10-08) — 8 plans, two PRs (#991, PR-2); closed 2026-10-12, SC-4 trustworthy clause routed to NAVBREACH (completed 2026-10-12)
@@ -5301,7 +5301,7 @@ Plans:
 **Priority:** data integrity (founder priority rule, 2026-09-27).
 **Requirements**: success criteria below
 **Depends on:** Phase 167.1.2.1
-**Plans:** 4 plans (3 waves: W1 01 · W2 02 · W3 03, 04)
+**Plans:** 4/4 plans complete (3 waves: W1 01 · W2 02 · W3 03, 04)
 
 Split out of Phase 167.1.2.1 RECONMARKER by founder decision D-01 (2026-10-13, smart discuss "Accept all"; `167.1.2.1-CONTEXT.md`). Every item was re-measured LIVE at `origin/main` `c85c938e1` on 2026-10-13, by reading code, symbols cited by name. The founder calls marked below are asked in this phase's own discuss (D-03).
 
@@ -6331,7 +6331,7 @@ kept verbatim.
 | 167.1.1.2 AUMBASIS | 0/? | Queued — data integrity; founder decision 2026-10-15 | - |
 | 167.1.2 ACCOUNTTRUTH | PR A, B, C1–C5 shipped | Complete | 2026-10-11 |
 | 167.1.2.1 RECONMARKER | 10/10 | Complete — D-11 day-0 and day-1 PROD reads as expected, capped_events 0; verification passed, SECURED 33/33 | 2026-10-16 · v0.131.3.0 · #1022, v0.131.8.0 · #1033 |
-| 167.1.2.1.1 WRITERRESIDUALS | 4/4 | Complete — verified 2026-10-16 (VERIFICATION passed 9/9, SECURITY SECURED); four MEDIUMs booked in TODOS.md; ship pending | - |
+| 167.1.2.1.1 WRITERRESIDUALS | 4/4 | Complete — VERIFICATION passed 9/9, SECURED 20/20; three minimal fix rounds (D-15), new-book wait accepted as a known limit (D-16); deployed 20:33Z outside the 03:30–06:45 window | 2026-10-19 · v0.132.5.0 · #1079 |
 | 167.1.2.1.2 HISTORYREADER | 0/? | Queued — data integrity and user-facing; split from 167.1.2.1 (D-01), after it | - |
 | 167.1.2.2 DERIVECRON | 9/9 | Complete | 2026-10-11 |
 | 167.1.2.2.1 DERIBITWEDGE | 8/8 | Complete | 2026-10-12 |
