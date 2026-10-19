@@ -898,10 +898,16 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     if day_first_only or (df_ok and not mf_ok):
         # Day-first is the ONLY valid reading (e.g. a day > 12 rules out
         # month-first). Unambiguous — normalize in place and flag it. A cell
-        # neither reading could read keeps what the file (or the zone guard) put
-        # there, so pandera reports it at its row as it does in an ISO column.
+        # neither reading could read (each reading infers ONE format from the
+        # first cell, so `05/04/24` or `05-04-2024` is unreadable to both) may
+        # still be read by pandera in the other day/month order, so it is never
+        # handed back as text: a non-blank one becomes the uncoercible
+        # placeholder and pandera reports it at its row. A blank stays blank, so
+        # it still reports `not_nullable`. (Review LF-1.)
+        blank = df["date"].isna() | (df["date"].astype(str).str.strip() == "")
+        leftover = df["date"].where(blank, _UNSUPPORTED_ZONE_TOKEN)
         df["date"] = (
-            parsed_df if readable.all() else parsed_df.astype(object).where(readable, df["date"])
+            parsed_df if readable.all() else parsed_df.astype(object).where(readable, leftover)
         )
         return {
             "rule": "date_format_normalized",
@@ -1213,6 +1219,7 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # _detect_and_normalize_date_column.
     # 170.1 / D-14 amendment: offsets stripped (or rejected) before any parse.
     zone_offsets, zone_rejected, zone_named = _normalise_date_zones(df, fmt)
+    date_text = df["date"].copy() if "date" in df.columns else None
     date_result = _detect_and_normalize_date_column(df)
     if (zone_rejected or zone_named) and pd.api.types.is_datetime64_any_dtype(df["date"]):
         # The detector rewrote the column and wrote a NaT where it could not read
@@ -1408,8 +1415,13 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             date_max = str(dates.max().date())
         # Give the preview back the text the user wrote in a cell whose zone was
         # rejected; the placeholder was only for the parse above.
-        if zone_rejected and not pd.api.types.is_datetime64_any_dtype(df["date"]):
-            df.loc[list(zone_rejected), "date"] = list(zone_rejected.values())
+        if not pd.api.types.is_datetime64_any_dtype(df["date"]):
+            # The day-first detector uses the same placeholder for a cell neither
+            # reading reads (LF-1); the user gets back what they wrote there.
+            placeholder = df["date"].map(lambda v: isinstance(v, str) and v == _UNSUPPORTED_ZONE_TOKEN)
+            df.loc[placeholder, "date"] = date_text[placeholder]
+            if zone_rejected:
+                df.loc[list(zone_rejected), "date"] = list(zone_rejected.values())
 
     # Cross-AI revision 2026-04-30: redact preview rows. Underlying
     # validation already ran on the unredacted df; only the preview

@@ -712,6 +712,36 @@ def test_a_day_first_file_with_a_bad_zone_and_two_rows_swapped_still_reports_the
     assert set(ONLY_THE_DATE_ERROR) <= rules, envelope["errors"]
 
 
+# Review LF-1 (HIGH, data integrity, introduced by the LR-2 fix). A cell spelled
+# differently from the first cell is unreadable under BOTH readings (each reading
+# infers one format from the first cell). It was handed back to pandera as text,
+# and pandera read it month-first without an error: the last row of an in-order
+# day-first file was stored as 2024-05-04 for `05/04/24`, which is 2024-04-05.
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+@pytest.mark.parametrize("last", ["05/04/24", "05-04-2024", "05.04.2024", "12/03/2024 00:00", "05/04/2024 10:00"])
+def test_a_differently_spelled_last_cell_in_a_day_first_file_is_rejected_at_its_row(
+    fmt: str, last: str
+) -> None:
+    import datetime as dt
+
+    dates = [(dt.date(2024, 3, 1) + dt.timedelta(i)).strftime("%d/%m/%Y") for i in range(35)]
+    dates.append(last)  # row 36
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False, "a date in another spelling was accepted and read in the other calendar"
+    assert (ONLY_THE_DATE_ERROR[0], 36) in _rules_and_rows(envelope), envelope["errors"]
+
+
+@pytest.mark.parametrize("last", ["Total", "05/04/24"])
+def test_the_preview_of_a_rejected_day_first_file_shows_the_text_of_the_bad_cell(last: str) -> None:
+    """The placeholder stands in for the cell only while pandera runs (LF-1)."""
+    dates = _day_first_days(60) + [last]
+    envelope = validate_csv(_daily_file("daily_returns", dates), "daily_returns")
+
+    assert envelope["ok"] is False
+    assert envelope["preview"]["last_rows"][-1]["date"] == last, envelope["preview"]
+
+
 def test_an_ambiguous_day_first_file_with_a_footer_still_reports_the_footer_cell() -> None:
     """Every readable day is 12 or less, so the format cannot be told (the file
     is rejected as ambiguous, as it is without the footer). The footer's own date
