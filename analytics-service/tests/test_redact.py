@@ -65,6 +65,16 @@ def test_scrub_pii_jwt_whole_string():
     assert scrub_pii(jwt) == REDACTED_JWT
 
 
+def test_scrub_pii_redacts_dotted_bearer_tokens_by_key():
+    # Review LF-2: the JWT shape is anchored on `eyJ`, so an opaque dotted token
+    # (Deribit `public/auth`) is no longer caught by value. It is caught by key.
+    out = scrub_pii({"result": {
+        "access_token": "1700000000000.AbCd-E_4.QWERTYuiop12345",
+        "refresh_token": "1700000000000.XyZ.abc",
+    }})
+    assert out == {"result": {"access_token": REDACTED, "refresh_token": REDACTED}}
+
+
 def test_scrub_pii_passes_non_jwt_string():
     assert scrub_pii("Mary Smith") == "Mary Smith"
 
