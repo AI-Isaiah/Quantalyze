@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import {
   AnalyticsTimeoutError,
@@ -190,6 +191,38 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       // identity is what would have let `tenantId` stay optional.
       { userId: user.id },
     );
+    // 170.1.2 / D-01 — name the ids the dashboard shows. Two explicit-column
+    // reads; ONLY the two name strings are added to a row (display_name and
+    // name, never any other profile column), and a failed read throws into the
+    // terminal arm below rather than shipping bare ids.
+    const missed = (data as { missed?: unknown } | null)?.missed;
+    if (Array.isArray(missed) && missed.length > 0) {
+      const rows = missed as Array<{ allocator_id: string; strategy_id: string }>;
+      const admin = createAdminClient();
+      const [profiles, strategies] = await Promise.all([
+        admin
+          .from("profiles")
+          .select("id, display_name")
+          .in("id", [...new Set(rows.map((r) => r.allocator_id))]),
+        admin
+          .from("strategies")
+          .select("id, name")
+          .in("id", [...new Set(rows.map((r) => r.strategy_id))]),
+      ]);
+      if (profiles.error) throw profiles.error;
+      if (strategies.error) throw strategies.error;
+      const allocatorNames = new Map<string, string | null>(
+        (profiles.data ?? []).map((p) => [p.id, p.display_name]),
+      );
+      const strategyNames = new Map<string, string | null>(
+        (strategies.data ?? []).map((s) => [s.id, s.name]),
+      );
+      (data as { missed: unknown[] }).missed = rows.map((r) => ({
+        ...r,
+        allocator_name: allocatorNames.get(r.allocator_id) || "Unknown allocator",
+        strategy_name: strategyNames.get(r.strategy_id) || "Unnamed strategy",
+      }));
+    }
     return NextResponse.json(data, { headers: NO_STORE_HEADERS });
   } catch (err) {
     // Phase 140 / SEAM-04 — typed arms BEFORE the generic one.

@@ -431,6 +431,84 @@ describe("<AllocatorMatchQueue> — @container parent/child structural guard", (
 });
 
 /**
+ * 170.1.2 / D-01 — the decision history reads in words, and a missing allocator
+ * name reads "Unknown allocator". The DOM text is what is pinned (CSS
+ * `uppercase` may still shout it), and every raw decision value is covered so a
+ * value that falls through to a snake_case replace would show.
+ */
+describe("<AllocatorMatchQueue> — 170.1.2 D-01: decision labels and Unknown allocator", () => {
+  function decisionRow(id: string, decision: string) {
+    return {
+      id,
+      strategy_id: "strat-1",
+      decision,
+      founder_note: null,
+      contact_request_id: null,
+      created_at: new Date().toISOString(),
+      strategies: {
+        id: "strat-1",
+        name: "Alpha One",
+        codename: "alpha",
+        disclosure_tier: "named" as const,
+      },
+    };
+  }
+
+  function mountPayload(payload: unknown) {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    return render(
+      <AllocatorMatchQueue
+        allocatorId={ALLOCATOR_ID}
+        forceReadOnly={true}
+        sourceApiPath="/api/demo/match"
+      />,
+    );
+  }
+
+  it("renders each decision as its sentence-case label, never the raw value", async () => {
+    mountPayload({
+      ...buildPayload(),
+      decisions: [
+        decisionRow("d1", "thumbs_up"),
+        decisionRow("d2", "thumbs_down"),
+        decisionRow("d3", "sent_as_intro"),
+        decisionRow("d4", "snoozed"),
+        decisionRow("d5", "something_new"),
+      ],
+    });
+    await screen.findAllByText(/alpha/);
+    fireEvent.click(screen.getByText(/Decision history/));
+
+    const cells = Array.from(document.querySelectorAll("tbody td")).map(
+      (td) => td.firstChild?.textContent ?? "",
+    );
+    for (const label of ["Kept", "Skipped", "Intro sent", "Snoozed", "Other decision"]) {
+      expect(cells, `decision history is missing "${label}"`).toContain(label);
+    }
+    const text = document.body.textContent ?? "";
+    expect(text).not.toContain("sent as intro");
+    expect(text).not.toContain("thumbs");
+    expect(text).not.toContain("something new");
+  });
+
+  it("a profile with no display_name heads the queue 'Unknown allocator', not '(unknown)'", async () => {
+    mountPayload({
+      ...buildPayload(),
+      profile: { ...buildPayload().profile, display_name: null },
+    });
+    expect(await screen.findByRole("heading", { level: 1 })).toHaveTextContent(
+      "Unknown allocator",
+    );
+    expect(document.body.textContent).not.toContain("(unknown)");
+  });
+});
+
+/**
  * Phase 140.3 plan 08 / SEAMUX-05 (B-05 / B-17) — `handleRecompute` must observe
  * the HTTP outcome before it does anything with the body.
  *
