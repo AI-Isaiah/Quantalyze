@@ -185,7 +185,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 169.5: BENCHCOMPARE — a factsheet's BTC comparator is read from the database through 169.2's reader, paired over the same interval as the strategy** (INSERTED) — verification: passed (completed 2026-10-04, PR #908)
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
 - [x] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — 8 plans plus review and fix rounds (CSV validation hardening, Sentry redaction of x-service-key and x-tenant-claim), shipped as v0.132.6.0 (#1082); SC-5 390px/640px passed on the seeded local stack; verification passed; security SECURED (completed 2026-10-20)
-- [ ] **Phase 170.1.1: TITLES — every page has its own tab title and a sentence-case heading** (INSERTED 2026-10-15) — not yet planned (split from 170.1 by founder decision; after 170.1)
+- [x] **Phase 170.1.1: TITLES — every page has its own tab title and a sentence-case heading** (INSERTED 2026-10-15) — 9 plans plus two review fix rounds (failed title reads give a neutral title and report to Sentry; the page-title census covers every title shape), shipped as v0.132.9.0 (#1093); SC-4 read on production at 367 CSS px; verification passed; security SECURED (completed 2026-10-20)
 - [ ] **Phase 170.1.2: LABELS — every page shows names and readable labels instead of ids and internal values** (INSERTED 2026-10-15) — not yet planned (split from 170.1 by founder decision; after 170.1)
 - [x] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned — shipped v0.129.11.0 (#997); closed 2026-10-12 after the founder phone re-check (completed 2026-10-12)
 - [x] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 3 plans (completed 2026-10-11)
@@ -6099,19 +6099,19 @@ Plans:
 3. `/referral` is gone: the page, its sidebar link and its route-contract manifest entry are removed in one commit. The `/strategy/[id]/v2` tab title no longer says "v2". No "Coming soon" default tooltip remains (170.1 SC-2, D-02, D-04).
 4. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom after deploy, by the orchestrator.
 
-**Plans:** 9 plans
+**Plans:** 9/9 plans complete
 
 Plans:
 
-- [ ] 170.1.1-01: root title template, auth titles, marketing suffix normalisation (wave 1)
-- [ ] 170.1.1-02: public product page titles, no "v2" in the strategy tab, factsheet-share title (wave 1)
-- [ ] 170.1.1-03: dashboard page titles and the /profile H1 (wave 1)
-- [ ] 170.1.1-04: admin page titles, two client-page layouts, Admin dashboard anchor (wave 1)
-- [ ] 170.1.1-05: /referral removed with its manifest entry and sidebar link, sidebar "My allocation", no "Coming soon" default (wave 1)
-- [ ] 170.1.1-06: "My allocation" and "Compare strategies" H1s, breadcrumb and prose, with moved e2e anchors (wave 1)
-- [ ] 170.1.1-07: titles and sentence-case H1s for the label-plan admin pages and /portfolios/[id]/manage, admin-gated (wave 1)
-- [ ] 170.1.1-08: /strategies H1 and title "Strategies", e2e anchors (wave 2)
-- [ ] 170.1.1-09: page-title census, phase gate, SC-3 sweep; SC-4 orchestrator-owned (wave 3)
+- [x] 170.1.1-01: root title template, auth titles, marketing suffix normalisation (wave 1)
+- [x] 170.1.1-02: public product page titles, no "v2" in the strategy tab, factsheet-share title (wave 1)
+- [x] 170.1.1-03: dashboard page titles and the /profile H1 (wave 1)
+- [x] 170.1.1-04: admin page titles, two client-page layouts, Admin dashboard anchor (wave 1)
+- [x] 170.1.1-05: /referral removed with its manifest entry and sidebar link, sidebar "My allocation", no "Coming soon" default (wave 1)
+- [x] 170.1.1-06: "My allocation" and "Compare strategies" H1s, breadcrumb and prose, with moved e2e anchors (wave 1)
+- [x] 170.1.1-07: titles and sentence-case H1s for the label-plan admin pages and /portfolios/[id]/manage, admin-gated (wave 1)
+- [x] 170.1.1-08: /strategies H1 and title "Strategies", e2e anchors (wave 2)
+- [x] 170.1.1-09: page-title census, phase gate, SC-3 sweep; SC-4 orchestrator-owned (wave 3)
 
 ---
 
@@ -6386,7 +6386,7 @@ kept verbatim.
 | 169.5 BENCHCOMPARE (split from 169 2026-09-27) | 5/5 | Complete    | 2026-10-04 |
 | 170. LAYOUT | 20/20 | Complete | verification passed (ROADMAP phase list: completed 2026-10-01; this row read `In Progress` until 2026-10-04) |
 | 170.1 COPY | 8/8 | Complete — CSV never raises or stores a wrong date (grids 135→0, 489→0); Sentry header redaction; SC-5 passed; SECURED | 2026-10-20 · v0.132.6.0 · #1082 |
-| 170.1.1 TITLES | 0/? | Queued — split from 170.1 (founder 2026-10-15), after 170.1 | - |
+| 170.1.1 TITLES | 9/9 | Complete — own tab title on every route under one template; sentence-case headings; /referral removed; SC-4 passed on production; SECURED | 2026-10-20 · v0.132.9.0 · #1093 |
 | 170.1.2 LABELS | 0/? | Queued — split from 170.1 (founder 2026-10-15), after 170.1 | - |
 | 170.2 PROBEFIXES | 11/11 | Complete | 2026-10-12 |
 | 170.3 OGPUBLIC | 3/3 | Complete | 2026-10-11 |
