@@ -896,8 +896,14 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
         # a cell as NaT under BOTH flags. A year-first cell has no day/month
         # ambiguity, so both readings take it from a parse of those cells alone.
         year_first = _parse_dates(s.where(iso_like), dayfirst=False)
-        parsed_mf = parsed_mf.where(~iso_like, year_first)
-        parsed_df = parsed_df.where(~iso_like, year_first)
+        # One text cell makes pandas read a YYYYMMDD column as text, so the gate
+        # above never ran: an all-digit cell is still YYYYMMDD only at 8 digits.
+        # Any other is the placeholder in the column too, which pandera and the
+        # preview re-read when no reading is written back below.
+        odd_digits = s.str.fullmatch(r"[+-]?[0-9]+") & ~s.str.fullmatch(r"[0-9]{8}")
+        df["date"] = df["date"].mask(odd_digits, _UNSUPPORTED_ZONE_TOKEN)
+        parsed_mf = parsed_mf.where(~iso_like, year_first).mask(odd_digits)
+        parsed_df = parsed_df.where(~iso_like, year_first).mask(odd_digits)
 
     # Identical under both flags → no day/month ambiguity to resolve (e.g.
     # every first component > 12, so pandas can only read it day-first). ISO

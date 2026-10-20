@@ -1829,3 +1829,53 @@ def test_a_float_date_cell_past_the_int64_range_returns_an_envelope_with_the_err
     assert envelope["ok"] is False
     assert (ONLY_THE_DATE_ERROR[0], 2) in _rules_and_rows(envelope), envelope["errors"]
     assert "0000-00-00" not in json.dumps(envelope["preview"], default=str)
+
+
+# Measured-fix round WR-02 (MEDIUM, data integrity and never-raises). One ISO cell
+# makes pandas read a YYYYMMDD column as text, so the integer gate above never ran:
+# both day/month readings inferred `%Y%m%d` and split a 7-digit typo by guess
+# (`2024121` ACCEPTED as 2024-12-01), and a negative cell parsed to a year below
+# zero that the preview raised on.
+def _yyyymmdd_text_column_ending(last: str) -> list[str]:
+    dates = [f"202401{day:02d}" for day in range(1, 21)] + [last]
+    dates[5] = "2024-01-06"
+    return dates
+
+
+@pytest.mark.parametrize("fmt", list(HEADER))
+def test_a_seven_digit_cell_in_a_yyyymmdd_text_column_is_rejected_at_its_row(fmt: str) -> None:
+    envelope = validate_csv(_daily_file(fmt, _yyyymmdd_text_column_ending("2024121")), fmt)
+
+    assert envelope["ok"] is False
+    assert (ONLY_THE_DATE_ERROR[0], 21) in _rules_and_rows(envelope), envelope["errors"]
+    assert envelope["preview"]["date_range"][1] != "2024-12-01", envelope["preview"]
+
+
+@pytest.mark.parametrize("fmt", list(HEADER))
+def test_a_negative_cell_in_a_yyyymmdd_text_column_returns_an_envelope_with_the_error_at_its_row(
+    fmt: str,
+) -> None:
+    envelope = validate_csv(_daily_file(fmt, _yyyymmdd_text_column_ending("-20240121")), fmt)
+
+    assert envelope["ok"] is False
+    assert (ONLY_THE_DATE_ERROR[0], 21) in _rules_and_rows(envelope), envelope["errors"]
+    assert "0000-00-00" not in json.dumps(envelope["preview"], default=str)
+
+
+# The same negative cell in a column the detector leaves as text (no reading is
+# usable, or the readings are ambiguous): pandera and the preview re-read the raw
+# column, so the cell has to be the placeholder there too, not only in the readings.
+@pytest.mark.parametrize("fmt", list(HEADER))
+@pytest.mark.parametrize(
+    "dates",
+    [["Total", "-20241216"], ["20241204.0", "-20241216", "01/03/2025"]],
+    ids=["beside-a-footer", "beside-a-float-and-a-day-first-cell"],
+)
+def test_a_negative_cell_in_a_text_column_left_unread_returns_an_envelope_with_the_error_at_its_row(
+    fmt: str, dates: list[str]
+) -> None:
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert (ONLY_THE_DATE_ERROR[0], 2) in _rules_and_rows(envelope), envelope["errors"]
+    assert "0000-00-00" not in json.dumps(envelope["preview"], default=str)
