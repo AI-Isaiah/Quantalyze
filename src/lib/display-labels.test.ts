@@ -280,8 +280,13 @@ describe("wrappers: a real value reads its label", () => {
     expect(BREACH_REASON_EMPTY_LABEL).toBe("Composite score above threshold");
     expect(matchMissReasonLabel("not_in_top_3")).toBe("Ranked below top 3");
     expect(matchMissReasonLabel("no_prior_batch")).toBe("No earlier match batch");
-    // match_eval.py emits exactly these two reasons for a missed intro.
-    expect(Object.keys(MATCH_MISS_REASON_LABELS).sort()).toEqual(["no_prior_batch", "not_in_top_3"]);
+    // The map covers exactly the `"reason":` literals match_eval.py emits for a missed intro.
+    const emitted = [
+      ...readFileSync(join(REPO_ROOT, "analytics-service", "services", "match_eval.py"), "utf8")
+        .matchAll(/"reason":\s*([^\n]*)/g),
+    ].flatMap((m) => [...m[1].matchAll(/"([a-z0-9_]+)"/g)].map((x) => x[1]));
+    expect(emitted.length, "no reason literal found in match_eval.py").toBeGreaterThan(0);
+    expect(Object.keys(MATCH_MISS_REASON_LABELS).sort()).toEqual([...new Set(emitted)].sort());
     expect(Object.keys(BREACH_REASON_LABELS).sort()).toEqual(["correlation_ceiling", "max_weight"]);
   });
 
