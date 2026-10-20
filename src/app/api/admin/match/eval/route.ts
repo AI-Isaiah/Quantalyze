@@ -180,6 +180,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const lookback = url.searchParams.get("lookback_days") || "28";
   const partnerTag = url.searchParams.get("partner_tag") ?? undefined;
 
+  // Which step threw, so a name-read outage is not reported as an upstream one.
+  let failedStep: "upstream-error" | "name-read" = "upstream-error";
   try {
     const data = await evalMatch(
       {
@@ -192,27 +194,36 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       { userId: user.id },
     );
     // 170.1.2 / D-01 — name the ids the dashboard shows. Two explicit-column
-    // reads; ONLY the two name strings are added to a row (display_name and
-    // name, never any other profile column), and a failed read throws into the
-    // terminal arm below rather than shipping bare ids.
+    // reads; ONLY the two name strings are added to a row (the allocator's
+    // display_name / company / email chain and the strategy name, never a
+    // separate profile column), and a failed read throws into the terminal arm
+    // below rather than shipping bare ids.
     const missed = (data as { missed?: unknown } | null)?.missed;
     if (Array.isArray(missed) && missed.length > 0) {
       const rows = missed as Array<{ allocator_id: string; strategy_id: string }>;
+      failedStep = "name-read";
       const admin = createAdminClient();
       const [profiles, strategies] = await Promise.all([
         admin
           .from("profiles")
-          .select("id, display_name")
+          .select("id, display_name, company, email")
           .in("id", [...new Set(rows.map((r) => r.allocator_id))]),
         admin
           .from("strategies")
           .select("id, name")
           .in("id", [...new Set(rows.map((r) => r.strategy_id))]),
       ]);
-      if (profiles.error) throw profiles.error;
-      if (strategies.error) throw strategies.error;
+      // A PostgrestError is not guaranteed to be an Error (no stack), so wrap it.
+      if (profiles.error) {
+        throw new Error(`profiles name read failed: ${profiles.error.message}`);
+      }
+      if (strategies.error) {
+        throw new Error(`strategies name read failed: ${strategies.error.message}`);
+      }
       const allocatorNames = new Map<string, string | null>(
-        (profiles.data ?? []).map((p) => [p.id, p.display_name]),
+        // The same chain the admin intros page uses; a profile with no
+        // display_name still has a company or an email to name it by.
+        (profiles.data ?? []).map((p) => [p.id, p.display_name || p.company || p.email]),
       );
       const strategyNames = new Map<string, string | null>(
         (strategies.data ?? []).map((s) => [s.id, s.name]),
@@ -343,11 +354,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     // list and the env-name list in `seam-redaction.ts` is the whole defence.
     // (`verify-strategy` is the contrast — it names three.)
     captureToSentry(err, {
-      tags: { surface: "admin-match-eval", step: "upstream-error" },
+      tags: { surface: "admin-match-eval", step: failedStep },
       extra: { lookback_days: lookback },
     });
+    const failedLabel = failedStep === "name-read" ? "name read" : "upstream";
     console.error(
-      "[api/admin/match/eval] upstream error:",
+      `[api/admin/match/eval] ${failedLabel} error:`,
       scrubSeamError(err),
     );
     // 161-08 / WIZERR-06 — THE CODE CROSSES; THE MESSAGE STILL DOES NOT.

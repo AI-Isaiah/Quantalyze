@@ -192,7 +192,7 @@ describe("<MatchEvalDashboard> — 170.1.2 D-01: missed intros name their alloca
           strategy_name,
           created_at: "2026-10-01T00:00:00Z",
           rank_if_any: 7,
-          reason: "Outside the top 3",
+          reason: "not_in_top_3",
         },
       ],
     };
@@ -215,6 +215,14 @@ describe("<MatchEvalDashboard> — 170.1.2 D-01: missed intros name their alloca
       expect(screen.getByText("Jane Allocator")).toBeInTheDocument();
     });
     expect(screen.getByText("Alpha")).toBeInTheDocument();
+  });
+
+  it("reads the miss reason as a sentence, never the raw code", async () => {
+    mountMissed(missedPayload("Jane Allocator", "Alpha"));
+    await waitFor(() => {
+      expect(screen.getByText("Ranked below top 3")).toBeInTheDocument();
+    });
+    expect(document.body.textContent).not.toContain("not_in_top_3");
   });
 
   it("shows the locked fallbacks as given and never an id fragment", async () => {

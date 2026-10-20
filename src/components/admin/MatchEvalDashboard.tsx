@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ScopedBanner } from "@/components/ui/ScopedBanner";
 import { venueOutageMessage } from "@/components/admin/match/venueOutageCopy";
+import { matchMissReasonLabel } from "@/lib/display-labels";
 
 interface WeeklyRow {
   week_start: string;
@@ -306,7 +307,9 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
                   <td className="py-2 text-caption text-right font-mono text-text-primary">
                     {m.rank_if_any ?? "—"}
                   </td>
-                  <td className="py-2 text-caption text-text-muted">{m.reason}</td>
+                  <td className="py-2 text-caption text-text-muted">
+                    {matchMissReasonLabel(m.reason)}
+                  </td>
                 </tr>
               ))}
             </tbody>

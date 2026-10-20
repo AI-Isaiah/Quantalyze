@@ -943,7 +943,7 @@ describe("[170.1.2 / D-01] GET /api/admin/match/eval — allocator and strategy 
     expect(adminDb.reads).toHaveLength(2);
     const profiles = adminDb.reads.find((r) => r.table === "profiles");
     const strategies = adminDb.reads.find((r) => r.table === "strategies");
-    expect(profiles?.columns).toBe("id, display_name");
+    expect(profiles?.columns).toBe("id, display_name, company, email");
     expect(profiles?.ids.sort()).toEqual([ALLOCATOR, OTHER_ALLOCATOR].sort());
     expect(strategies?.columns).toBe("id, name");
     expect(strategies?.ids.sort()).toEqual([STRATEGY, OTHER_STRATEGY].sort());
@@ -970,6 +970,35 @@ describe("[170.1.2 / D-01] GET /api/admin/match/eval — allocator and strategy 
     }
   });
 
+  it("names an allocator with no display_name by company, then email, before 'Unknown allocator'", async () => {
+    const THIRD = "55555555-5555-4555-8555-555555555555";
+    evalState.result = {
+      missed: [
+        missedRow(ALLOCATOR, STRATEGY),
+        missedRow(OTHER_ALLOCATOR, STRATEGY),
+        missedRow(THIRD, STRATEGY),
+      ],
+    };
+    adminDb.tables = {
+      profiles: [
+        { id: ALLOCATOR, display_name: null, company: "Acme Capital", email: "a@acme.test" },
+        { id: OTHER_ALLOCATOR, display_name: "", company: null, email: "b@acme.test" },
+        { id: THIRD, display_name: null, company: null, email: null },
+      ],
+      strategies: [{ id: STRATEGY, name: "Alpha" }],
+    };
+    const { GET } = await import("./route");
+    const body = await (await GET(makeReq())).json();
+    expect(body.missed.map((r: { allocator_name: string }) => r.allocator_name)).toEqual([
+      "Acme Capital",
+      "b@acme.test",
+      "Unknown allocator",
+    ]);
+    // Only the composed name rides along; company and email do not.
+    expect(Object.keys(body.missed[0])).not.toContain("email");
+    expect(Object.keys(body.missed[0])).not.toContain("company");
+  });
+
   it("a failing name read answers the route's existing 500, not a payload of bare ids", async () => {
     evalState.result = { missed: [missedRow(ALLOCATOR, STRATEGY)] };
     adminDb.errors = { profiles: { message: "permission denied for table profiles" } };
@@ -980,6 +1009,27 @@ describe("[170.1.2 / D-01] GET /api/admin/match/eval — allocator and strategy 
     expect(JSON.parse(raw).error).toBe(GENERIC_COPY);
     expect(raw).not.toContain(ALLOCATOR);
     expect(raw).not.toContain("permission denied");
+  });
+
+  it("a failing name read is captured as its own step, as an Error, never as an upstream error", async () => {
+    sentryState.captured.length = 0;
+    evalState.result = { missed: [missedRow(ALLOCATOR, STRATEGY)] };
+    adminDb.errors = { strategies: { message: "permission denied for table strategies" } };
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(500);
+
+    await vi.waitFor(() => expect(sentryState.captured.length).toBeGreaterThan(0));
+    const { err, options } = sentryState.captured[sentryState.captured.length - 1];
+    expect(options.tags?.surface).toBe("admin-match-eval");
+    expect(options.tags?.step).toBe("name-read");
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("permission denied for table strategies");
+    // The operator log names the name read, not the analytics service.
+    const logged = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain("name read error");
+    expect(logged).not.toContain("upstream error");
   });
 
   it("a payload with no missed rows makes no name read at all", async () => {

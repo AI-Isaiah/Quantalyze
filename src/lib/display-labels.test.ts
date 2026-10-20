@@ -8,10 +8,12 @@
  * parses `supabase/schema/baseline.sql` and fails when a vocabulary's key set
  * differs from its CHECK set, in either direction, naming the constraint.
  *
- * The census reads the committed baseline dump, so a migration newer than the
- * dump is invisible to it. The last test in this file closes that gap: it fails
- * when a migration the dump does not carry touches a constraint under test, and
- * the fix is to re-dump the baseline (or extend the vocabulary) in that commit.
+ * The census resolves each CHECK newest-wins: the committed baseline dump,
+ * overridden by the newest `ADD CONSTRAINT <name> CHECK (...)` in a migration
+ * the dump does not carry (the same precedence
+ * `src/__tests__/contracts/check-zod-db-check-parity.test.ts` uses). A new
+ * migration is judged on the values it admits, never on its existence: it goes
+ * red only when it widens a CHECK and the label map was not extended.
  */
 import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
@@ -32,6 +34,7 @@ import {
   INTRO_SNAPSHOT_STATUS_LABELS,
   INTRO_SOURCE_LABELS,
   MATCH_DECISION_LABELS,
+  MATCH_MISS_REASON_LABELS,
   ORG_MEMBER_ROLE_LABELS,
   PROFILE_STATUS_LABELS,
   RELATIONSHIP_STATUS_LABELS,
@@ -49,6 +52,7 @@ import {
   introSourceLabel,
   labelOf,
   matchDecisionLabel,
+  matchMissReasonLabel,
   orgMemberRoleLabel,
   profileRoleLabel,
   profileStatusLabel,
@@ -70,10 +74,56 @@ const BASELINE = stripSqlComments(
 );
 
 /**
+ * Migrations the dump does not carry (filename order, oldest first). The dump
+ * is taken from PROD after the apply, so a migration newer than
+ * `baseline-carried-migrations.txt` is the normal case, not a red.
+ */
+const UNCARRIED_MIGRATIONS: Array<{ name: string; sql: string }> = (() => {
+  const carried = readFileSync(
+    join(REPO_ROOT, "supabase", "schema", "baseline-carried-migrations.txt"),
+    "utf8",
+  )
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^\d{14}_.*\.sql$/.test(l))
+    .sort();
+  const lastCarried = carried[carried.length - 1];
+  if (!lastCarried) throw new Error("baseline-carried-migrations.txt lists no migration");
+  const migrationsDir = join(REPO_ROOT, "supabase", "migrations");
+  return readdirSync(migrationsDir)
+    .filter((f) => /^\d{14}_.*\.sql$/.test(f))
+    .filter((f) => f > lastCarried)
+    .sort()
+    .map((name) => ({
+      name,
+      sql: stripSqlComments(readFileSync(join(migrationsDir, name), "utf8")),
+    }));
+})();
+
+/**
+ * The newest `ADD CONSTRAINT <name> CHECK (...)` value list in a migration the
+ * dump does not carry, or null when none re-declares it.
+ */
+function newestUncarriedCheckSet(constraintName: string): string[] | null {
+  const re = new RegExp(
+    `ADD\\s+CONSTRAINT\\s+"?${constraintName}"?\\s+CHECK\\s*\\(([\\s\\S]*?)\\)\\s*;`,
+    "gi",
+  );
+  for (let i = UNCARRIED_MIGRATIONS.length - 1; i >= 0; i--) {
+    const hits = [...UNCARRIED_MIGRATIONS[i].sql.matchAll(re)];
+    if (hits.length > 0) {
+      return [...hits[hits.length - 1][1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+    }
+  }
+  return null;
+}
+
+/**
  * The value list of `CONSTRAINT "<name>" CHECK (("<col>" = ANY (ARRAY[...])))`
- * in the baseline dump, with the `::"text"` casts dropped. Throws unless the
- * constraint appears exactly once, so a rename or a second declaration fails
- * loud instead of comparing against nothing.
+ * in the baseline dump, with the `::"text"` casts dropped, unless a newer
+ * migration re-declares the constraint (newest wins). Throws unless the
+ * constraint appears exactly once in the dump, so a rename or a second
+ * declaration fails loud instead of comparing against nothing.
  */
 function checkSet(constraintName: string): string[] {
   const re = new RegExp(
@@ -86,7 +136,8 @@ function checkSet(constraintName: string): string[] {
       `${constraintName}: expected exactly 1 ARRAY check in baseline.sql, found ${matches.length}`,
     );
   }
-  const values = [...matches[0][1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  const newer = newestUncarriedCheckSet(constraintName);
+  const values = newer ?? [...matches[0][1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
   expect(values.length, `${constraintName} captured no values`).toBeGreaterThan(0);
   return values;
 }
@@ -171,6 +222,10 @@ describe("wrappers: a real value reads its label", () => {
     expect(breachReasonLabel("max_weight")).toBe("Above max weight");
     expect(breachReasonLabel("correlation_ceiling")).toBe("Above correlation ceiling");
     expect(BREACH_REASON_EMPTY_LABEL).toBe("Composite score above threshold");
+    expect(matchMissReasonLabel("not_in_top_3")).toBe("Ranked below top 3");
+    expect(matchMissReasonLabel("no_prior_batch")).toBe("No earlier match batch");
+    // match_eval.py emits exactly these two reasons for a missed intro.
+    expect(Object.keys(MATCH_MISS_REASON_LABELS).sort()).toEqual(["no_prior_batch", "not_in_top_3"]);
     expect(Object.keys(BREACH_REASON_LABELS).sort()).toEqual(["correlation_ceiling", "max_weight"]);
   });
 
@@ -215,6 +270,7 @@ describe("wrappers: a value outside the closed set reads the fallback, never the
     ["allocationEventTypeLabel", allocationEventTypeLabel, "Other event"],
     ["matchDecisionLabel", matchDecisionLabel, "Other decision"],
     ["breachReasonLabel", breachReasonLabel, "Other mandate breach"],
+    ["matchMissReasonLabel", matchMissReasonLabel, "Other reason"],
     ["orgMemberRoleLabel", orgMemberRoleLabel, "Unknown role"],
     ["profileRoleLabel", profileRoleLabel, "Unknown role"],
     ["appRoleLabel", appRoleLabel, "Unknown role"],
@@ -289,41 +345,5 @@ describe("Badge statusLabelMap", () => {
       },
       "Badge statusLabelMap and the strategy/contact-request status CHECK sets differ",
     ).toEqual({ onlyInSql: [], onlyInTs: [] });
-  });
-});
-
-describe("census freshness", () => {
-  it("no migration newer than the baseline touches a constraint under test", () => {
-    const carried = readFileSync(
-      join(REPO_ROOT, "supabase", "schema", "baseline-carried-migrations.txt"),
-      "utf8",
-    )
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => /^\d{14}_.*\.sql$/.test(l))
-      .sort();
-    const lastCarried = carried[carried.length - 1];
-    expect(lastCarried, "baseline-carried-migrations.txt lists no migration").toBeTruthy();
-
-    const migrationsDir = join(REPO_ROOT, "supabase", "migrations");
-    const newer = readdirSync(migrationsDir)
-      .filter((f) => /^\d{14}_.*\.sql$/.test(f))
-      .filter((f) => f > lastCarried)
-      .sort();
-    const offenders: string[] = [];
-    for (const f of newer) {
-      const sql = stripSqlComments(readFileSync(join(migrationsDir, f), "utf8"));
-      for (const constraint of [
-        ...CENSUS.map(([c]) => c),
-        "strategies_status_check",
-        "contact_requests_status_check",
-      ]) {
-        if (sql.includes(constraint)) offenders.push(`${f} mentions ${constraint}`);
-      }
-    }
-    expect(
-      offenders,
-      "a migration newer than baseline.sql changes a constraint whose label map the census checks against the dump; re-dump the baseline in that commit, or the census compares a stale set",
-    ).toEqual([]);
   });
 });

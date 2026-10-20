@@ -518,7 +518,11 @@ export function AllocatorMatchQueue({
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
             <h1 className="text-h3 font-display text-text-primary">
-              {profile.display_name || "Unknown allocator"}
+              {/* Email only off the public read-only demo, as the breadcrumb above does. */}
+              {profile.display_name ||
+                profile.company ||
+                (!forceReadOnly && profile.email) ||
+                "Unknown allocator"}
             </h1>
             {profile.company && (
               <p className="text-small text-text-secondary mt-0.5">{profile.company}</p>

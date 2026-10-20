@@ -496,10 +496,39 @@ describe("<AllocatorMatchQueue> — 170.1.2 D-01: decision labels and Unknown al
     expect(text).not.toContain("something new");
   });
 
+  it("a profile with no display_name is headed by its company, then (admin only) its email", async () => {
+    const noName = { ...buildPayload().profile, display_name: null };
+    const { unmount } = mountPayload({ ...buildPayload(), profile: noName });
+    expect(await screen.findByRole("heading", { level: 1 })).toHaveTextContent("Demo Capital");
+    unmount();
+
+    // Admin view (not read-only): no name, no company -> the email.
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ ...buildPayload(), profile: { ...noName, company: null } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    expect(await screen.findByRole("heading", { level: 1 })).toHaveTextContent(
+      "demo@example.com",
+    );
+  });
+
+  it("the public read-only demo never falls back to the email in the heading", async () => {
+    mountPayload({
+      ...buildPayload(),
+      profile: { ...buildPayload().profile, display_name: null, company: null },
+    });
+    const heading = await screen.findByRole("heading", { level: 1 });
+    expect(heading).toHaveTextContent("Unknown allocator");
+    expect(document.body.textContent).not.toContain("demo@example.com");
+  });
+
   it("a profile with no display_name heads the queue 'Unknown allocator', not '(unknown)'", async () => {
     mountPayload({
       ...buildPayload(),
-      profile: { ...buildPayload().profile, display_name: null },
+      profile: { ...buildPayload().profile, display_name: null, company: null },
     });
     expect(await screen.findByRole("heading", { level: 1 })).toHaveTextContent(
       "Unknown allocator",
