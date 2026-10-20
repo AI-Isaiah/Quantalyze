@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.132.6.1] - 2026-10-20 — deps: GitHub Actions minor/patch group (#1013)
+
+### Changed
+- `actions/setup-node` 7.0.0 → 7.1.0 (SHA `949feb24…`), `actions/upload-artifact` 7.0.1 → 7.0.2 (SHA `cf430e03…`) and `actions/download-artifact` 8.0.1 → 8.0.2 (SHA `9000827c…`), at every pinned step across ten workflow files (49 pins). No input this repo passes changed. setup-node 7.1.0 adds a Node-version validation and a manifest-fetch retry.
+- Applied to current `origin/main` rather than merging Dependabot's branch, so the pin set is complete as of this head.
+
+### Notes
+- Dependabot's own run was red on `version-gate` (no VERSION/CHANGELOG) and on the Migration Drift Check `check` and `test-db-drift` jobs, which fail hard by design when their repo secrets are absent; Dependabot-triggered runs get none. None of the reds was the update itself.
+- `sql-mutation-nightly.yml` and `ci.yml` move to the same setup-node SHA, so the nightly parity pin stays byte-equal.
+
+## [0.132.6.0] - 2026-10-20 — COPY 170.1: page copy reads clean, and a CSV upload never stores a wrong date or shows a raw error
+
+Phase 170.1 COPY. It started as a copy pass and grew a CSV-validation hardening track through its review rounds. Titles (170.1.1) and labels (170.1.2) were split into their own phases.
+
+### Changed
+- **CSV upload messages name the problem in plain words.** A missing column reads "Your file has no {column} column." Every rule line is composed from labels, so no raw rule name reaches the page. The format hint fires on the routed specimen. A repeated header reads "Could not parse CSV: two columns have the same name."
+- **Status copy is in the active voice.** This covers the share card, the key-status lines (KCS09 finished and unreadable), the key-card slow and finish notes, and the composite fallback. `chain_unreadable` tells the user to reload and start the sync again.
+- **/strategies tells the truth about a submitted strategy.** It says it was submitted when the wizard submitted it, and picks the "finished but not built" note from the compute state. The owner's factsheet banner gives the body's instruction for a finished job.
+- **Wizard edge cases.** A duplicate wizard submit that returns 2xx follows the success path. The status line stops saying "listed below" when the list could not be read.
+- **Scenario KPI deltas name their baseline:** "vs current book".
+- **A chart with no comparator prints an empty subtitle,** never "vs None".
+
+### Fixed
+- **`validate_csv` never raises.** It covers a DST offset change, colliding headers, a quoted-empty or whitespace-only first line, bare-CR "CSV (Macintosh)" files, huge or negative numbers in a date column, and an over-long date cell. Each returns the error at its row. CSV callers never send or log exception text, and internal faults are locatable in the log and in Sentry without echoing a cell.
+- **The raw header is read by pandas with the frame's own options,** so the two cannot disagree about which line is the header. This was the root cause of three successive header regressions during review.
+- **Dates are never accepted wrong:**
+  - A year-first (ISO) cell in a day-first column no longer flips the whole column to month-first.
+  - A US month-first column with one ISO cell is accepted with the right range.
+  - Day-first is chosen on the cells that can be read.
+  - An unreadable cell is reported at its row, never passed on as text or as a blank.
+  - An all-digit `YYYYMMDD` column, integer or float, reads as dates instead of 1970-01-01. Only an 8-digit non-negative whole number is read that way; a 6- or 7-digit number is a date error at its row.
+  - A trades file is read as UTC instants, so a DST fall-back file validates.
+- **No spurious "dates not in order"** is reported beside an unreadable cell.
+- **CSV validation runs off the event loop** on a one-worker executor. A worst-case file inside the 64-character date-cell cap takes about 3.3 s; the event loop's worst stall is now about 0.2 s, where before every route stalled.
+
+### Fixed (data)
+- CSV uploads whose date column carries a UTC offset with a time now store the calendar date the file shows. Before this release, a single-offset daily file (for example `T00:00:00+02:00`) could be stored one day off while the upload preview showed the written dates. Daily formats keep the wall-clock date, and trade files read each timestamp as a UTC instant. A zone the validator cannot read is rejected at its row instead of being converted.
+
+### Security
+- **The analytics shared secret header (`x-service-key`) and the tenant claim header (`x-tenant-claim`) are redacted before reaching Sentry,** in error and transaction events. They are listed in `redact.py`, `sentry_init.py` and `pii-scrub.ts`, pinned by a parity row and a test that was RED first. Error events carried the service key in cleartext before this phase. The key was not rotated (founder decision).
+- **The Sentry redactor now also runs on transaction events,** so about 10% of small uploads no longer reach Sentry performance data unredacted.
+- **Deribit `access_token` and `refresh_token` are redacted by key.**
+- **The JWT value-shape scan matches only `eyJ`-headed tokens,** so host names and version strings survive in Sentry. Every analytics event used to show its Python version as `[REDACTED_JWT]`.
+
+### Notes
+- **Existing data:** the original uploads are not kept, so a past date shift cannot be proven. PROD reading 2026-10-16: 27 CSV strategies, none published, 9 with a daily series. 2 of those are weekday-only and unshifted; 7 are seven-day series where a shift cannot be seen. A re-upload stores the written dates. Booked as TODOS `[170.1-CSV-OFFSET-DATE-SHIFT-PROD]`.
+- **Accepted residuals:**
+  - The one-worker validation queue has no bound (T-170.1-53). Callers are authenticated and rate-limited.
+  - A non-`eyJ` dotted token under a key that is not denylisted passes the scrub (T-170.1-55).
+  - A month-name date cell in a numeric-date column stays a loud row rejection by choice.
+- **Review:** several minimal fix rounds under the founder's rule "For fix rounds minimal fix only, no new abstractions or defensive checks". Date-grid wrong acceptances went from 135 to 0 on the 11,808-file grid and from 489 to 0 on the numeric fuzz, with 0 raises. Verification: every code-level item verified; the 390px and 200% zoom check (SC-5) runs after deploy. Security SECURED, 0 open.
+
 ## [0.132.5.1] - 2026-10-19 — RECORDS: close WRITERRESIDUALS 167.1.2.1.1 (verification passed 9/9, SECURED 20/20)
 
 Records only: `.planning` and this release.

@@ -184,7 +184,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 169.4.1: OGSHARPE — the OG share card's Sharpe reads the one shared sharpe() (166.2)** (INSERTED) — verification: passed (completed 2026-10-04, PR #907)
 - [x] **Phase 169.5: BENCHCOMPARE — a factsheet's BTC comparator is read from the database through 169.2's reader, paired over the same interval as the strategy** (INSERTED) — verification: passed (completed 2026-10-04, PR #908)
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
-- [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
+- [x] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — 8 plans plus review and fix rounds (CSV validation hardening, Sentry redaction of x-service-key and x-tenant-claim), shipped as v0.132.6.0 (#1082); SC-5 390px/640px passed on the seeded local stack; verification passed; security SECURED (completed 2026-10-20)
 - [ ] **Phase 170.1.1: TITLES — every page has its own tab title and a sentence-case heading** (INSERTED 2026-10-15) — not yet planned (split from 170.1 by founder decision; after 170.1)
 - [ ] **Phase 170.1.2: LABELS — every page shows names and readable labels instead of ids and internal values** (INSERTED 2026-10-15) — not yet planned (split from 170.1 by founder decision; after 170.1)
 - [x] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned — shipped v0.129.11.0 (#997); closed 2026-10-12 after the founder phone re-check (completed 2026-10-12)
@@ -6051,22 +6051,22 @@ Plans:
 
 **Founder decisions, 2026-10-15 (recorded in `170.1-CONTEXT.md`):** the CSV wizard's "Check the file format you selected" hint shows when every required column of the chosen format other than `date` is missing (R-2, option 1; `date` is required in every format, so the literal reading could never fire). The factsheet's `QSF · <id8> · <date>` document stamp stays as it is (R-5, option 1; a document reference, not a label standing in for a name). An exploratory-tier strategy whose real name is withheld keeps its `Strategy #<8-char id>` handle (D-13).
 
-**Plans:** 8 plans
+**Plans:** 8/8 plans complete
 
 Plans:
 **Wave 1**
-- [ ] 170.1-01: CSV producer names the missing column; column field through the projection (wave 1)
-- [ ] 170.1-02: CSV envelope in plain words, format hint, rule labels (wave 1)
-- [ ] 170.1-03: no "vs None" chart subtitle; KPI delta "vs current book" (wave 1)
-- [ ] 170.1-04: key-card timing and passive strings (wave 1)
-- [ ] 170.1-05: status-surface strings and the finished_not_built note kind (wave 1)
+- [x] 170.1-01: CSV producer names the missing column; column field through the projection (wave 1)
+- [x] 170.1-02: CSV envelope in plain words, format hint, rule labels (wave 1)
+- [x] 170.1-03: no "vs None" chart subtitle; KPI delta "vs current book" (wave 1)
+- [x] 170.1-04: key-card timing and passive strings (wave 1)
+- [x] 170.1-05: status-surface strings and the finished_not_built note kind (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 170.1-06: /strategies status line and finished-not-built list note (wave 2)
-- [ ] 170.1-07: duplicate-with-ok is success; owner banner agrees with the body (wave 2)
+- [x] 170.1-06: /strategies status line and finished-not-built list note (wave 2)
+- [x] 170.1-07: duplicate-with-ok is success; owner banner agrees with the body (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 170.1-08: phase gate, routed-findings sweep; SC-5 orchestrator-owned (wave 3)
+- [x] 170.1-08: phase gate, routed-findings sweep; SC-5 orchestrator-owned (wave 3)
 
 ---
 
@@ -6385,7 +6385,7 @@ kept verbatim.
 | 169.4.1 OGSHARPE | 2/2 | Complete    | 2026-10-04 |
 | 169.5 BENCHCOMPARE (split from 169 2026-09-27) | 5/5 | Complete    | 2026-10-04 |
 | 170. LAYOUT | 20/20 | Complete | verification passed (ROADMAP phase list: completed 2026-10-01; this row read `In Progress` until 2026-10-04) |
-| 170.1 COPY | 0/? | Queued — feature, after 170 | - |
+| 170.1 COPY | 8/8 | Complete — CSV never raises or stores a wrong date (grids 135→0, 489→0); Sentry header redaction; SC-5 passed; SECURED | 2026-10-20 · v0.132.6.0 · #1082 |
 | 170.1.1 TITLES | 0/? | Queued — split from 170.1 (founder 2026-10-15), after 170.1 | - |
 | 170.1.2 LABELS | 0/? | Queued — split from 170.1 (founder 2026-10-15), after 170.1 | - |
 | 170.2 PROBEFIXES | 11/11 | Complete | 2026-10-12 |

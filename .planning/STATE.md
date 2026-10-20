@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: "166.5"
 current_phase_name: COMPUTEDATSTAMP
 status: executing
-stopped_at: 167.1.2.1.1 WRITERRESIDUALS closed; 170.1 COPY final round in progress
-last_updated: "2026-10-19T20:57:26.504Z"
-last_activity: 2026-10-19
-last_activity_desc: "167.1.2.1.1 WRITERRESIDUALS closed (v0.132.5.0 #1079 deployed 20:33Z; verification passed 9/9; SECURED 20/20)"
-state_head: d7c86105ab56a0283ca195fc0e3da7256c3c2731
+stopped_at: 170.1 COPY closed; 167.1.1.2 AUMBASIS and 167.1.2.1.2 HISTORYREADER in flight
+last_updated: "2026-10-20T13:55:37.085Z"
+last_activity: 2026-10-20
+last_activity_desc: "170.1 COPY closed (v0.132.6.0 #1082; SC-5 passed; verification passed; SECURED)"
+state_head: eedca35ea17842c2cf1872d4a56d3e8d2bd91120
 progress:
   total_phases: 118
-  completed_phases: 111
-  total_plans: 797
-  completed_plans: 790
-  percent: 94
+  completed_phases: 112
+  total_plans: 824
+  completed_plans: 798
+  percent: 95
 ---
 
 ## ⭐ STATE lineage
@@ -174,9 +174,9 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: 166.5 (COMPUTEDATSTAMP) — EXECUTING
 Plan: 9 of 9
-Status: Executing — several phases in parallel. 166.5 COMPUTEDATSTAMP is the current one: both PRs merged and applied on PROD (#1047, #1050); plan 09 done 2026-10-16, verification waits on the Wave 5 consolidated recompute (D-05). 170.1 COPY: final minimal fix round in progress (founder 2026-10-19 "finalize"). Waiting on founder steps: 167.1.2.2.2.1 OKXHISTORY (PR-A #1067, plans 12-15). Not started, held: 167.1.1.2 AUMBASIS. 167.1.2.1.1 WRITERRESIDUALS closed 2026-10-19 (v0.132.5.0 #1079, deployed 20:33Z outside 03:30-06:45 UTC; verification passed 9/9, SECURED 20/20). 167.1.1.1 BRIDGERETURNS closed 2026-10-16 (#1070, #1074, records #1075).
-Last activity: 2026-10-19 — 167.1.2.1.1 WRITERRESIDUALS closed (v0.132.5.0 #1079 deployed 20:33Z; verification passed 9/9; SECURED 20/20)
-Progress: [█████████░] 94%
+Status: Executing — several phases in parallel. 166.5 COMPUTEDATSTAMP is the current one: both PRs merged and applied on PROD (#1047, #1050); plan 09 done 2026-10-16, verification waits on the Wave 5 consolidated recompute (D-05). Started 2026-10-20 (founder "start the two 167.x phases"): 167.1.1.2 AUMBASIS and 167.1.2.1.2 HISTORYREADER, discuss answered, planning and executing. Waiting on founder steps: 167.1.2.2.2.1 OKXHISTORY (PR-A #1067, plans 12-15). Next after COPY: 170.1.1 TITLES, then 170.1.2 LABELS (plans already written). 170.1 COPY closed 2026-10-20 (v0.132.6.0 #1082; SC-5 passed at 390/640px; verification passed; SECURED). 167.1.2.1.1 WRITERRESIDUALS closed 2026-10-19 (#1079, records #1080). 167.1.1.1 BRIDGERETURNS closed 2026-10-16.
+Last activity: 2026-10-20 — 170.1 COPY closed (v0.132.6.0 #1082; SC-5 passed; verification passed; SECURED)
+Progress: [█████████░] 95%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
