@@ -1450,6 +1450,8 @@ describe("[CR-03] MultiKeyConnectStep — a draft-carried MT5 panel keeps its br
     expect(pass).toHaveAttribute("type", "password");
     expect(within(panel0).getByLabelText("OKX Passphrase")).toBe(pass);
     expect(pass).toHaveAttribute("placeholder", "Paste the OKX passphrase");
+    // The nickname placeholder shows the display label, never the raw code.
+    expect(within(panel0).getByPlaceholderText("e.g. OKX · prod")).toBeInTheDocument();
     expect(panel0).toHaveTextContent(
       "OKX requires a passphrase in addition to key and secret.",
     );

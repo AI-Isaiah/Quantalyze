@@ -2496,7 +2496,7 @@ function KeyPanel({
                 label="Key nickname (optional)"
                 value={p.nickname}
                 onChange={(e) => onUpdate(index, { nickname: e.target.value })}
-                placeholder={`e.g. ${p.exchange} · prod`}
+                placeholder={`e.g. ${venueLabel(p.exchange)} · prod`}
                 autoComplete="off"
                 data-testid={`key-${index}-nickname`}
               />
