@@ -31,6 +31,7 @@ import {
   COMPUTE_JOB_KIND_LABELS,
   COMPUTE_JOB_STATUS_LABELS,
   DISCLOSURE_TIER_LABELS,
+  HOLDING_SIDE_LABELS,
   INTRO_SNAPSHOT_STATUS_LABELS,
   INTRO_SOURCE_LABELS,
   MATCH_DECISION_LABELS,
@@ -230,6 +231,7 @@ const CENSUS: Array<[constraint: string, keys: string[]]> = [
   ["strategy_analytics_computation_status_check", Object.keys(ANALYTICS_STATUS_LABELS)],
   ["strategies_disclosure_tier_check", Object.keys(DISCLOSURE_TIER_LABELS)],
   ["strategies_source_check", Object.keys(STRATEGY_SOURCE_LABELS)],
+  ["allocator_holdings_side_check", Object.keys(HOLDING_SIDE_LABELS)],
 ];
 
 describe("labelOf", () => {
