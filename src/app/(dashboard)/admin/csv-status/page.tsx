@@ -5,6 +5,8 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import type { Metadata } from "next";
 import { PageHeader } from "@/components/layout/PageHeader";
+import { TrustTierLabel, type TrustTier } from "@/components/strategy/TrustTierLabel";
+import { verificationStatusLabel } from "@/lib/display-labels";
 
 export const metadata: Metadata = {
   title: "CSV submissions",
@@ -17,7 +19,7 @@ export const metadata: Metadata = {
  * Cross-AI revision 2026-04-30 (BLOCKER #4): the prior "queryable rows
  * only" scope was insufficient — the founder needs visibility during
  * Phase 15's 48-hour customer-onboarding window. This page surfaces
- * all flow_type='csv' strategy_verifications rows joined to the
+ * all CSV-flow strategy_verifications rows joined to the
  * submitting team's email and strategy name.
  *
  * Admin-gated (mirrors admin/compute-jobs/page.tsx auth pattern).
@@ -77,7 +79,7 @@ export default async function CsvStatusPage() {
     <>
       <PageHeader
         title="CSV submissions"
-        description="Track-record uploads from quant teams (flow_type='csv', most recent first)."
+        description="Track-record uploads from quant teams, most recent first."
       />
 
       <div className="bg-white border border-border rounded-lg overflow-hidden">
@@ -139,8 +141,9 @@ export default async function CsvStatusPage() {
                     <td className="px-3 py-2">
                       <StatusBadge status={row.status} />
                     </td>
-                    <td className="px-3 py-2 text-caption text-text-secondary font-metric tabular-nums">
-                      {row.trust_tier}
+                    <td className="px-3 py-2">
+                      {/* The column is CHECK-constrained to the three TrustTier values. */}
+                      <TrustTierLabel trustTier={row.trust_tier as TrustTier} />
                     </td>
                     <td className="px-3 py-2 text-caption text-text-muted font-metric">
                       {submittedAt}
@@ -206,7 +209,7 @@ function StatusBadge({ status }: { status: string }) {
         styles[status] ?? "bg-gray-50 text-text-muted"
       }`}
     >
-      {status}
+      {verificationStatusLabel(status)}
     </span>
   );
 }

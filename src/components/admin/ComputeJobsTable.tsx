@@ -14,6 +14,7 @@ import {
   TableRow,
 } from "@/components/ui/Table";
 import { cn } from "@/lib/utils";
+import { computeJobKindLabel, computeJobStatusLabel } from "@/lib/display-labels";
 import { formatRelativeTime } from "@/lib/utils";
 import { useCrossTabStorage } from "@/lib/storage/cross-tab";
 import { rawStringCodec } from "@/lib/storage/codecs";
@@ -49,11 +50,10 @@ function statusBadgeClass(status: string): string {
 
 const STATUS_OPTIONS = [
   { value: "", label: "All statuses" },
-  { value: "pending", label: "Pending" },
-  { value: "running", label: "Running" },
-  { value: "done", label: "Done" },
-  { value: "failed_retry", label: "Retry" },
-  { value: "failed_final", label: "Failed" },
+  ...["pending", "running", "done", "failed_retry", "failed_final"].map((value) => ({
+    value,
+    label: computeJobStatusLabel(value),
+  })),
 ];
 
 // D-07: the kinds themselves are not listed here. They come from the facet read
@@ -199,7 +199,7 @@ export function ComputeJobsTable() {
     ALL_KINDS_OPTION,
     ...Array.from(new Set(kindFilter ? [...kinds, kindFilter] : kinds))
       .sort()
-      .map((kind) => ({ value: kind, label: kind })),
+      .map((kind) => ({ value: kind, label: computeJobKindLabel(kind) })),
   ];
 
   const now = Date.now();
@@ -298,8 +298,16 @@ export function ComputeJobsTable() {
           </TableHead>
           <TableBody>
             {jobs.map((job) => {
+              // D-01: a name, else a plain "Unnamed ..." (the lookup missed), else
+              // a dash. Never a raw id; ids stay legal as the React key only.
               const target =
-                job.strategy_name ?? job.portfolio_name ?? job.strategy_id ?? job.portfolio_id ?? "—";
+                job.strategy_name ??
+                job.portfolio_name ??
+                (job.strategy_id
+                  ? "Unnamed strategy"
+                  : job.portfolio_id
+                    ? "Unnamed portfolio"
+                    : "—");
               const errorText = job.last_error
                 ? job.last_error.length > 60
                   ? job.last_error.slice(0, 60) + "..."
@@ -309,7 +317,7 @@ export function ComputeJobsTable() {
               return (
                 <TableRow key={job.id} className="h-11">
                   <TableCell className="px-3 py-2 font-metric text-caption text-text-primary">
-                    {job.kind}
+                    {computeJobKindLabel(job.kind)}
                     {/* Narrow-container relocation of the collapsed Attempts +
                         Age columns — the REAL values, not a fabricated dash. */}
                     <span className="mt-0.5 block font-mono tabular-nums text-micro text-text-muted @2xl:hidden">
@@ -330,7 +338,7 @@ export function ComputeJobsTable() {
                         statusBadgeClass(job.status),
                       )}
                     >
-                      {job.status}
+                      {computeJobStatusLabel(job.status)}
                     </span>
                   </TableCell>
                   <TableCell
