@@ -51,6 +51,10 @@ vi.mock("@/lib/sanitize-filename", () => ({
 const pdfBytes = Buffer.from("%PDF-1.4 fake");
 const closeSpy = vi.fn(async () => undefined);
 const releaseSpy = vi.fn();
+// What `page.goto` resolves with. Puppeteer resolves a navigation with the main
+// response, and a non-2xx one is NOT a rejection, so the route has to look.
+const gotoSpy = vi.fn(async (): Promise<unknown> => ({ ok: () => true, status: () => 200 }));
+const pdfSpy = vi.fn(async () => pdfBytes);
 vi.mock("@/lib/puppeteer", () => ({
   PDF_QUEUE_TIMEOUT_MESSAGE: "PDF concurrency queue timeout",
   acquirePdfSlot: vi.fn(async () => releaseSpy),
@@ -59,8 +63,8 @@ vi.mock("@/lib/puppeteer", () => ({
       setDefaultNavigationTimeout: () => {},
       setDefaultTimeout: () => {},
       setViewport: async () => {},
-      goto: async () => {},
-      pdf: async () => pdfBytes,
+      goto: gotoSpy,
+      pdf: pdfSpy,
     }),
     close: closeSpy,
   })),
@@ -108,6 +112,8 @@ describe("GET /api/demo/portfolio-pdf/[id] (H-0260)", () => {
     verifySpy.mockReset();
     closeSpy.mockClear();
     releaseSpy.mockClear();
+    pdfSpy.mockClear();
+    gotoSpy.mockClear();
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
@@ -181,6 +187,27 @@ describe("GET /api/demo/portfolio-pdf/[id] (H-0260)", () => {
     // The token was verified against the SAME id being downloaded.
     expect(verifySpy).toHaveBeenCalledWith(ALLOWLISTED, "valid-token");
     // The Puppeteer slot was acquired and released (no leak).
+    expect(releaseSpy).toHaveBeenCalledTimes(1);
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("(5) returns the 500 error response, not a PDF, when the render page answers non-ok", async () => {
+    // The render page throws on a failed read and Next serves its error screen
+    // with HTTP 500. Puppeteer's `goto` resolves with that response rather than
+    // rejecting, so without a status check `page.pdf()` prints the error
+    // screen and the user receives it as a 200 PDF.
+    verifySpy.mockReturnValue(true);
+    gotoSpy.mockResolvedValueOnce({ ok: () => false, status: () => 500 });
+    const { GET } = await import("./route");
+    const res = await GET(
+      makeReq(
+        `http://localhost/api/demo/portfolio-pdf/${ALLOWLISTED}?token=valid-token`,
+      ),
+      makeParams(ALLOWLISTED),
+    );
+    expect(res.status).toBe(500);
+    expect(res.headers.get("Content-Type")).not.toBe("application/pdf");
+    expect(pdfSpy).not.toHaveBeenCalled();
     expect(releaseSpy).toHaveBeenCalledTimes(1);
     expect(closeSpy).toHaveBeenCalledTimes(1);
   });

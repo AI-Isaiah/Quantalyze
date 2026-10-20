@@ -71,10 +71,14 @@ export async function GET(
     await page.setViewport({ width: 800, height: 1100 });
 
     const renderToken = signPdfRenderToken(id);
-    await page.goto(`${APP_URL}/portfolio-pdf/${id}?renderToken=${renderToken}`, {
+    const resp = await page.goto(`${APP_URL}/portfolio-pdf/${id}?renderToken=${renderToken}`, {
       waitUntil: "networkidle0",
       timeout: 25000,
     });
+    // A failed render page still navigates: Next serves its error screen with a
+    // 500 and `goto` resolves with it. Printing that would hand the user the
+    // error screen as a PDF, so a non-ok answer takes the catch arm below.
+    if (!resp || !resp.ok()) throw new Error(`portfolio-pdf render ${resp?.status()}`);
 
     const pdfBuffer = await page.pdf({
       format: "A4",
