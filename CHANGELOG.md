@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.132.8.3] - 2026-10-20 — deps: @sparticuz/chromium 149.0.0 → 153.0.0 (#1017)
+
+### Changed
+- `@sparticuz/chromium` 149.0.0 → 153.0.0, the serverless Chromium every server-PDF route boots through `src/lib/puppeteer.ts`. The installed `puppeteer-core` 25.x targets Chrome 154, so 153 narrows the browser/protocol gap that 149 left. The two APIs used (`chromium.args`, `chromium.executablePath()`) are unchanged in 153, and its engine range (`^22.17.0 || >=24.0.0`) is the same as 149's.
+
+### Root cause
+- Dependabot's branch failed `npm ci` in every frontend job (`Missing: proxy-agent@8.0.2 from lock file`), because its lockfile was written by an npm that prunes the optional-peer `proxy-agent@8` under `puppeteer-core/node_modules/`, and CI's npm 10 (Node 22) then rejects the lock. Here `package-lock.json` changes only the four lines of the chromium entry and its root range, which npm 10.9.4 on Node 22 reproduces byte for byte. Running `npm install` with npm 11 regenerates the broken lock.
+
+### Tests
+- Local, Node 22 / npm 10: `npm ci` clean, `npm run typecheck` clean, and the PDF-route and `puppeteer` vitest files (53 tests) pass. They mock Chromium, so a real Chromium launch is only checked on the Vercel deploy.
+
 ## [0.132.8.2] - 2026-10-20 — OKXHISTORY: the preflight reads OKX's real bill-subtype list
 
 ### Fixed
