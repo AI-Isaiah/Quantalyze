@@ -324,6 +324,50 @@ async def test_a_caller_that_sends_no_key_at_all_produces_no_capture(
 
 
 @pytest.mark.asyncio
+async def test_the_prod_probers_deliberate_wrong_key_is_refused_without_capture(
+    monkeypatch: pytest.MonkeyPatch, sentry_spy: _FakeSentry
+) -> None:
+    """The prober sends a known wrong key every hour to prove the comparison
+    still refuses. That is our own check, not a misconfigured caller: before
+    this, it was the only source of QUANTALYZE-18 for weeks on a healthy key,
+    hiding any real mismatch inside the same group. It must still get a 401.
+    """
+    import pathlib
+    import re
+
+    import main
+
+    prober = pathlib.Path(__file__).resolve().parents[2] / (
+        "scripts/prod-prober/arms/pyapi06.mjs"
+    )
+    m = re.search(r'export const WRONG_KEY = "([^"]+)"', prober.read_text())
+    assert m, "pyapi06.mjs no longer declares WRONG_KEY as a string literal"
+    probe_key = m.group(1)
+
+    monkeypatch.setattr(main, "SERVICE_KEY", _SERVICE_KEY_CANARY)
+    async with _client() as client:
+        probe = await client.post(
+            _GUARDED_PATH, json={}, headers={"X-Service-Key": probe_key}
+        )
+        assert sentry_spy.captures == [], (
+            f"the prober's own probe was captured: {sentry_spy.captures}"
+        )
+        # The capture throttle is per fault; clear it so the real wrong key
+        # below is judged on its own, not suppressed by the probe.
+        main._secret_capture_last_at.clear()
+        real = await client.post(
+            _GUARDED_PATH, json={}, headers={"X-Service-Key": _WRONG_SERVICE_KEY}
+        )
+
+    assert probe.status_code == 401
+    assert real.status_code == 401
+    faults = [c["tags"]["config_fault"] for c in sentry_spy.captures]
+    assert faults == ["mismatched"], (
+        f"only the real wrong key may be captured. Got {sentry_spy.captures}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_process_key_unset_and_mismatched_token_are_captured_distinctly(
     monkeypatch: pytest.MonkeyPatch, sentry_spy: _FakeSentry
 ) -> None:

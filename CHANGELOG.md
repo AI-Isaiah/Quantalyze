@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.132.9.3] - 2026-10-20 — fix: the prober's own wrong-key check no longer pages as a SERVICE_KEY mismatch
+
+### Root cause
+- Sentry `QUANTALYZE-18` ("Platform secret SERVICE_KEY is mismatched") kept firing about 5 times a day long after the 2026-09-01 cron key repair. Every event in the last 7 days lines up to the second with a scheduled `prod-prober.yml` run. The prober's PYAPI-06 arm sends a deliberately wrong key each run to prove the comparison still refuses, and `verify_service_key` captured that request as a real mismatch. The keyed request in the same run is accepted, so the deployed key and the GitHub copy agree; there was no live mismatch.
+
+### Fixed
+- `analytics-service/main.py`: `verify_service_key` still refuses the prober's known wrong key with a 401, but no longer logs or captures it. Any other non-empty wrong key is captured as before, so a real mismatch now gets its own events in `QUANTALYZE-18` instead of hiding among the prober's.
+
+### Tests
+- `tests/test_secret_misconfig_signal.py`: the probe key is refused without a capture, a real wrong key is still captured, and the literal is read from `scripts/prod-prober/arms/pyapi06.mjs` so the two cannot drift apart. RED on the old `main.py`.
+
 ## [0.132.9.2] - 2026-10-20 — roadmap: book SENTRYTRIAGE 166.5.1
 
 ### Notes
