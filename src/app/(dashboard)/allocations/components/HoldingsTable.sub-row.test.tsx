@@ -34,8 +34,8 @@ vi.mock("next/navigation", () => ({
  *      as a non-expanded inline banner — present in the DOM regardless of
  *      whether the row is currently expanded.
  *   9. (D-14) bridgeCandidate=false rows do NOT render BridgeOutcomeBanner.
- *  10. (C1 accepted) OutcomeForm Modified option is present with
- *      aria-disabled="true" and clicking it does NOT change action state.
+ *  10. (D-03) OutcomeForm offers only Allocated and Rejected; the Modified
+ *      placeholder is gone.
  */
 
 // Mock Phase 08 note primitives so the test focuses on tab routing.
@@ -317,7 +317,7 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("10: C1 accepted — OutcomeForm Modified option is aria-disabled and clicking does NOT change action", () => {
+  it("10: D-03 — the Record outcome tab offers only Allocated and Rejected (no Modified placeholder)", () => {
     const row = makeRow({
       bridgeCandidate: true,
       id: "holding:binance:BTC:spot",
@@ -336,17 +336,11 @@ describe("HoldingsTable design-mode sub-row (09.1-08)", () => {
     );
     fireEvent.click(screen.getByText("Test Strategy"));
     fireEvent.click(screen.getByRole("tab", { name: "Record outcome" }));
-    const modifiedBtn = screen.getByRole("button", {
-      name: /Modified \(coming soon\)/,
-    });
-    expect(modifiedBtn).toHaveAttribute("aria-disabled", "true");
-    expect(modifiedBtn).toBeDisabled();
-    // Initial action is "allocated" — verify Allocated is pressed.
+    expect(
+      screen.queryByRole("button", { name: /Modified/ }),
+    ).not.toBeInTheDocument();
     const allocatedBtn = screen.getByRole("button", { name: "Allocated" });
     expect(allocatedBtn.getAttribute("aria-pressed")).toBe("true");
-    // Click the disabled Modified button — action state must not change.
-    fireEvent.click(modifiedBtn);
-    expect(allocatedBtn.getAttribute("aria-pressed")).toBe("true");
-    expect(modifiedBtn.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: "Rejected" })).toBeInTheDocument();
   });
 });
