@@ -943,7 +943,7 @@ describe("[170.1.2 / D-01] GET /api/admin/match/eval — allocator and strategy 
     expect(adminDb.reads).toHaveLength(2);
     const profiles = adminDb.reads.find((r) => r.table === "profiles");
     const strategies = adminDb.reads.find((r) => r.table === "strategies");
-    expect(profiles?.columns).toBe("id, display_name");
+    expect(profiles?.columns).toBe("id, display_name, company, email");
     expect(profiles?.ids.sort()).toEqual([ALLOCATOR, OTHER_ALLOCATOR].sort());
     expect(strategies?.columns).toBe("id, name");
     expect(strategies?.ids.sort()).toEqual([STRATEGY, OTHER_STRATEGY].sort());
@@ -968,6 +968,35 @@ describe("[170.1.2 / D-01] GET /api/admin/match/eval — allocator and strategy 
       expect(row.allocator_name).toBe("Unknown allocator");
       expect(row.strategy_name).toBe("Unnamed strategy");
     }
+  });
+
+  it("names an allocator with no display_name by company, then email, before 'Unknown allocator'", async () => {
+    const THIRD = "55555555-5555-4555-8555-555555555555";
+    evalState.result = {
+      missed: [
+        missedRow(ALLOCATOR, STRATEGY),
+        missedRow(OTHER_ALLOCATOR, STRATEGY),
+        missedRow(THIRD, STRATEGY),
+      ],
+    };
+    adminDb.tables = {
+      profiles: [
+        { id: ALLOCATOR, display_name: null, company: "Acme Capital", email: "a@acme.test" },
+        { id: OTHER_ALLOCATOR, display_name: "", company: null, email: "b@acme.test" },
+        { id: THIRD, display_name: null, company: null, email: null },
+      ],
+      strategies: [{ id: STRATEGY, name: "Alpha" }],
+    };
+    const { GET } = await import("./route");
+    const body = await (await GET(makeReq())).json();
+    expect(body.missed.map((r: { allocator_name: string }) => r.allocator_name)).toEqual([
+      "Acme Capital",
+      "b@acme.test",
+      "Unknown allocator",
+    ]);
+    // Only the composed name rides along; company and email do not.
+    expect(Object.keys(body.missed[0])).not.toContain("email");
+    expect(Object.keys(body.missed[0])).not.toContain("company");
   });
 
   it("a failing name read answers the route's existing 500, not a payload of bare ids", async () => {

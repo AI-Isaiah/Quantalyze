@@ -194,9 +194,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       { userId: user.id },
     );
     // 170.1.2 / D-01 — name the ids the dashboard shows. Two explicit-column
-    // reads; ONLY the two name strings are added to a row (display_name and
-    // name, never any other profile column), and a failed read throws into the
-    // terminal arm below rather than shipping bare ids.
+    // reads; ONLY the two name strings are added to a row (the allocator's
+    // display_name / company / email chain and the strategy name, never a
+    // separate profile column), and a failed read throws into the terminal arm
+    // below rather than shipping bare ids.
     const missed = (data as { missed?: unknown } | null)?.missed;
     if (Array.isArray(missed) && missed.length > 0) {
       const rows = missed as Array<{ allocator_id: string; strategy_id: string }>;
@@ -205,7 +206,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       const [profiles, strategies] = await Promise.all([
         admin
           .from("profiles")
-          .select("id, display_name")
+          .select("id, display_name, company, email")
           .in("id", [...new Set(rows.map((r) => r.allocator_id))]),
         admin
           .from("strategies")
@@ -220,7 +221,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         throw new Error(`strategies name read failed: ${strategies.error.message}`);
       }
       const allocatorNames = new Map<string, string | null>(
-        (profiles.data ?? []).map((p) => [p.id, p.display_name]),
+        // The same chain the admin intros page uses; a profile with no
+        // display_name still has a company or an email to name it by.
+        (profiles.data ?? []).map((p) => [p.id, p.display_name || p.company || p.email]),
       );
       const strategyNames = new Map<string, string | null>(
         (strategies.data ?? []).map((s) => [s.id, s.name]),

@@ -97,7 +97,7 @@ export default async function PartnerPilotPage({
   if (managerIds.length > 0) {
     const { data: managerRows, error: managerError } = await admin
       .from("profiles")
-      .select("id, display_name")
+      .select("id, display_name, company, email")
       .in("id", managerIds);
     if (managerError) {
       console.error("[admin/partner-pilot] managerNames query failed", {
@@ -107,7 +107,8 @@ export default async function PartnerPilotPage({
       throw new Error("Partner pilot: managerNames query failed");
     }
     for (const row of managerRows ?? []) {
-      if (row.display_name) managerNameById.set(row.id, row.display_name);
+      const name = row.display_name || row.company || row.email;
+      if (name) managerNameById.set(row.id, name);
     }
   }
 

@@ -7,7 +7,7 @@
  * (Phase 170.1.1); this file does not touch generateMetadata.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 
 const ALLOCATOR_ID = "aaaaaaaa-1111-4222-8333-444444444444";
 const STRATEGY_ID = "bbbbbbbb-1111-4222-8333-444444444444";
@@ -130,7 +130,20 @@ describe("/admin/partner-pilot/[partner_tag] labels and names", () => {
   it("names the strategy's manager from profiles, with explicit columns", async () => {
     const { container } = render(await PartnerPilotPage({ params }));
     expect(container.textContent).toContain("Mia Manager");
-    expect(state.managerSelects).toEqual(["id, display_name"]);
+    expect(state.managerSelects).toEqual(["id, display_name, company, email"]);
+    expect(container.textContent).not.toContain("Unknown manager");
+  });
+
+  it("names a manager with no display_name by company, then email, not Unknown manager", async () => {
+    state.managerRows = [{ id: MANAGER_ID, display_name: "", company: "Mia Capital", email: "mia@example.test" }];
+    let { container } = render(await PartnerPilotPage({ params }));
+    expect(container.textContent).toContain("Mia Capital");
+    expect(container.textContent).not.toContain("Unknown manager");
+    cleanup();
+
+    state.managerRows = [{ id: MANAGER_ID, display_name: null, company: null, email: "mia@example.test" }];
+    ({ container } = render(await PartnerPilotPage({ params })));
+    expect(container.textContent).toContain("mia@example.test");
     expect(container.textContent).not.toContain("Unknown manager");
   });
 
