@@ -11,6 +11,12 @@ describe("venueOutageMessage", () => {
     expect(venueOutageMessage("binance")).toMatch(/^Binance isn't responding right now\./);
   });
 
+  it("keeps the name of a slug outside the display table, capitalised", () => {
+    expect(venueOutageMessage("mt5-gateway")).toMatch(
+      /^Mt5-gateway isn't responding right now\./,
+    );
+  });
+
   it("names no venue when the wire carried none", () => {
     expect(venueOutageMessage(null)).toMatch(/^An exchange isn't responding right now\./);
   });
