@@ -4834,6 +4834,89 @@ describe("getMyAllocationDashboard — Open Positions reads each key's own lates
     ]);
   });
 
+  // 167.1.2.1.2 plan 01 (D-02, SC-2). A position closed and polled empty on the rows' OWN
+  // day: the strict clean-poll rule cannot see it (same day), and the writer only upserts,
+  // so the morning rows stay. The dashboard payload is the oracle: holdingsSummary, the live
+  // AUM and the fingerprint rows all derive from the one per-key read, so one hide rule must
+  // move all three. Every expected figure is typed by hand from the fixture below.
+  describe("D-02: a key whose newest poll read nothing on the rows' own day is dropped from the payload", () => {
+    const D = "2026-09-27";
+    const event = (keyId: string, createdAt: string, metadata: Record<string, unknown>) => ({
+      user_id: "user-1",
+      action: "allocator.holdings.sync_completed",
+      entity_type: "api_key",
+      entity_id: keyId,
+      created_at: createdAt,
+      metadata,
+      "metadata->>final_status": metadata.final_status ?? null,
+    });
+    const seed = () => {
+      state.portfolios = [P7_PORTFOLIO];
+      state.apiKeys = [key("key-a", "binance"), key("key-b", "okx")];
+      state.allocatorHoldings = [
+        // key-a held BTC 500 and ETH 100 this morning; both rows are the day's upserts.
+        holding("key-a", "binance", D, "BTC", 500),
+        holding("key-a", "binance", D, "ETH", 100),
+        holding("key-b", "okx", D, "SOL", 40),
+      ];
+    };
+
+    it("drops key-a from holdingsSummary, the live AUM and the fingerprint rows; key-b stays; two audit reads per key", async () => {
+      // WHY: the closed position must stop showing the day it is polled empty, on every
+      // surface that reads this array, and the fingerprint row set must lose the same tokens
+      // the SQL twin (plan 05) drops or a book-mode commit is refused as stale.
+      seed();
+      state.auditLog = [
+        event("key-a", `${D}T04:00:05+00:00`, { final_status: "complete", row_count: 2, asof: D }),
+        event("key-a", `${D}T11:00:00+00:00`, { final_status: "complete", row_count: 0, asof: D }),
+      ];
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(
+        result.holdingsSummary.map((h) => `${h.api_key_id}:${h.symbol}:${h.value_usd}`),
+      ).toEqual(["key-b:SOL:40"]);
+      expect(result.liveBaselineMetrics.aum).toBe(40);
+      expect(result.holdingsFingerprintRows).toEqual([
+        { symbol: "SOL", venue: "okx", holding_type: "spot" },
+      ]);
+
+      // No third read: exactly two audit_log reads per key, each owner- and key-scoped.
+      const pollReads = chainAudit.entries.filter((e) => e.table === "audit_log");
+      expect(pollReads).toHaveLength(4);
+      for (const keyId of ["key-a", "key-b"]) {
+        const mine = pollReads.filter((e) =>
+          e.eqs.some((q) => q.column === "entity_id" && q.value === keyId),
+        );
+        expect(mine).toHaveLength(2);
+        for (const read of mine) {
+          expect(read.eqs).toContainEqual({ column: "user_id", value: "user-1" });
+        }
+      }
+    });
+
+    it("control: with the empty poll absent (or followed by a warnings poll) both keys stay", async () => {
+      // WHY: the event is what changes the read; a later warnings poll is the second condition.
+      seed();
+      state.auditLog = [
+        event("key-a", `${D}T04:00:05+00:00`, { final_status: "complete", row_count: 0, asof: D }),
+        event("key-a", `${D}T11:00:00+00:00`, {
+          final_status: "complete_with_warnings",
+          row_count: 2,
+          asof: D,
+        }),
+      ];
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+
+      expect(
+        result.holdingsSummary.map((h) => `${h.api_key_id}:${h.symbol}:${h.value_usd}`).sort(),
+      ).toEqual(["key-a:BTC:500", "key-a:ETH:100", "key-b:SOL:40"]);
+      expect(result.liveBaselineMetrics.aum).toBe(640);
+      expect(result.holdingsFingerprintRows).toHaveLength(3);
+    });
+  });
+
   // 164.6.6.2.1 CR-01 (D-02, D-08, D-17). A BTC account's row is priced at the close of
   // the day BEFORE its poll. When a later poll finds that close missing it writes NO row
   // (allocator_holdings.value_usd is NOT NULL) and records the fact in a SERVICE-written

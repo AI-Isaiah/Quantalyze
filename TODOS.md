@@ -10234,6 +10234,7 @@ The block below is kept as lineage.
 - Add a test with two unstamped Deribit keys.
 
 **Owner / Trigger:** the next phase touching the refresh holds, or 167.1.2.1.2 HISTORYREADER (Bybit parse miss).
+⭐ 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER, D-03): item (3) was closed by decision, no code. A Bybit key's identity comes from /v5/user/query-api result.userID, not the UTA wallet parse, and an unstamped key is already flagged by the stamper's no_id outcome, escalate_if_unchecked after UNSTAMPED_ESCALATION_DAYS, and the Overview's account_identity_pending hold. This entry's unbounded-hold half stays open under its first trigger.
 
 ### 167.1.2.1.1-NEWBOOK-WAIT-UNBOUNDED — a key that never yields two usable NAV days reads "being rebuilt" with no end (booked 2026-10-19, fix-round review MR-FR-02 + SFH #3, MEDIUM, USER-FACING, KNOWN LIMIT by founder decision)
 
@@ -13063,3 +13064,19 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 **Failure scenario.** `src/components/ui/Modal.tsx` calls the dialog's native `close()` from a passive `useEffect([open])`. When `open` turns false in a commit that is not a sync lane (for example after an `await`, as on a successful share revoke), React schedules that effect as a separate task. A browser can then paint one frame where the dialog shows its title and Close button with its body already unmounted. Nothing gets stuck: close always runs once, and the top layer and inert state clear when it does.
 **Fix.** Run the close in `useLayoutEffect`, so it lands in the same commit, and re-run every Modal consumer's tests.
 **Owner:** the next phase touching `Modal.tsx`.
+
+## Phase 167.1.2.1.2 (HISTORYREADER) — routed items (logged 2026-10-20)
+
+### 167.1.2.1.2-DEPARTED-UNLINKED-KEY — a departed key with no account identity can show older rows beside a live key on the same exchange (booked 2026-10-20, 167.1.2.1.2 D-01, USER-FACING, KNOWN LIMIT by founder decision)
+
+**Founder decision 2026-10-20 (CONTEXT D-01): "Close by decision + TODO (Recommended)".** No code.
+
+**Scenario.**
+- A departed key that was never stamped with `venue_account_id` and never marked is not grouped with its account by `accountIdentityTokens` (`src/lib/departed-history.ts`).
+- So a live key's newer reading on the same account does not supersede that key's rows, and both can show.
+- Counts-only reading, 2026-10-20: 5 departed Bybit keys carry no identity and still have `allocator_holdings` rows; 0 of them have a live key of the same owner on the same exchange; 2 sit beside another departed Bybit key with rows.
+- What already discloses them: the rows are struck through with the key's disconnected chip, held out of the totals as untrusted, derivative rows are dated by the read-day note, and spot rows are dated by this phase's D-05 line.
+
+**Fix if triggered.** Group the key (stamp or mark it) or hide its rows as superseded. Any grouping change moves Python `account_groups`, TS `accountIdentityTokens`/`keyAccountOf`, `one_key_per_account_day`/`oneKeyPerAccountDay` and the `queries.ts` reader together (167.1.2.1 WR-03).
+
+**Owner / Trigger:** a departed key with no identity beside a live key on the same exchange (re-measure with a counts-only read before acting).

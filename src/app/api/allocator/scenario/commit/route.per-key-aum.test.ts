@@ -406,8 +406,10 @@ describe("170.4 T-170.4-31: the figure rests on service-written evidence only", 
 
   it("KNOWN LIMIT: the same event written by the service itself is not honoured either, so the commit can exceed the dashboard total", async () => {
     // The dashboard would drop this key (a clean empty poll newer than its
-    // rows). The commit cannot tell that event from a forged one, so it keeps
-    // the key's rows until the key's next written rows (T-170.4-37, accepted).
+    // rows, or, since D-02, a clean empty poll on the rows' own day that is the
+    // key's newest poll). The commit reads no audit evidence at all, by choice:
+    // the stored figure rests on rows and markers, so it keeps the key's rows
+    // until the key's next written rows (T-170.4-37, accepted difference).
     oneKey();
     forgedAuditFixture = [
       {
