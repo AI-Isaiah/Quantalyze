@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.132.9.5] - 2026-10-20 — records: close COMPUTEDATSTAMP 166.5
+
+### Notes
+- Phase 166.5 COMPUTEDATSTAMP is closed. It shipped as v0.131.13.0 (#1047, the runner stamps `strategy_analytics.computed_at` from the database clock) and v0.131.13.1 (#1050, the status bridge stops writing the date; the migration applied on TEST and PROD, and the baseline re-dump followed as #1051). Verification passed (`status: passed`), and the security audit is SECURED (36/36 threats closed).
+- The Wave 5 forced recompute (D-05) ran on PROD on 2026-10-20, 20:30Z to 21:42Z, by the product's own `enqueue_compute_job` path, one strategy at a time, with no hand SQL on `strategy_analytics`. 42 rows were enqueued: 23 reached `done` and 19 reached `failed_final`. All 23 runner finishes carry their own stamp (`dates_stamped_by_runner` 23 of `runner_done_since` 23), no date sits within 60 s of a later side-job finish (0), and too-new dates read 0 before and 0 after.
+- The 19 failures kept their old dates (`failed_rows_date_moved_no_runner` 0), which is D-04 working as designed. 18 are archived keyless CSV strategies failing `Insufficient CSV history`. One is a composite whose Deribit member key the venue refuses with `invalid_credentials`; it went `complete_with_warnings` to `failed` with its date held at its last good compute. Both classes are booked as `166.5-RECOMPUTE-RESIDUAL-19` in `TODOS.md`, a founder decision (leave or retire the 18 rows; re-enter or disconnect the key), counts and classes only.
+- The hand-off read the migration's presence from the newest three ledger versions, which no longer holds once later migrations apply. The reading used a direct count of that version instead (1). Recorded in `166.5-VERIFICATION.md` for the next reader.
+- The phase directory (9 plans with summaries, context, research, patterns, validation, two review rounds with their fix report, security audit, the three counts-only measurement SQL files and verification) lands on `main`; until now it held only a `.gitkeep`. ROADMAP lists the 9 plans and replaces the placeholder goal with the verified one. STATE moves its current phase to 170.1.2 LABELS, because several phases run in parallel.
+
 ## [0.132.9.4] - 2026-10-20 — records: close HISTORYREADER 167.1.2.1.2
 
 ### Notes
