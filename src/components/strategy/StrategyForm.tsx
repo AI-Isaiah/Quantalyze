@@ -11,6 +11,7 @@ import { Card } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { STRATEGY_NAMES, STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES } from "@/lib/constants";
 import type { Strategy } from "@/lib/types";
+import { venueLabel } from "@/lib/display-labels";
 import {
   readCredentialInput,
   CREDENTIAL_KEY_INPUT_PROPS,
@@ -184,10 +185,9 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
           // `attested_venue` from the venue its own validateKey call
           // authenticated against, and returns `{ api_key_id }` with NO
           // ciphertext. The label moves into the body because the server now
-          // composes the row; the template is this component's pre-existing
-          // default, preserved verbatim.
+          // composes the row; it names the venue by display name, not wire code.
           persist: true,
-          label: `${exchangeCanonical} key`,
+          label: `${venueLabel(exchangeCanonical)} key`,
         }),
       });
       if (!res.ok) {
