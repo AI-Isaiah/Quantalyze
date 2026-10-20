@@ -158,7 +158,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds** (INSERTED) — 10 plans (plan 03 absorbed into DERIBITWEDGE, D-07), shipped in #1020 with re-dump #1021 (completed 2026-10-15); verification passed (D-13 closes SC-1)
 - [x] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [x] **Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly** (INSERTED) — 4 plans; closed 2026-10-14 (records PR) (verification passed, PROD glance taken 2026-10-14)
-- [ ] **Phase 166.5: COMPUTEDATSTAMP — the analytics runner stamps computed_at on a real finish** (INSERTED 2026-10-03) — not yet planned
+- [x] **Phase 166.5: COMPUTEDATSTAMP — the analytics runner stamps computed_at on a real finish** (INSERTED 2026-10-03) — 9 plans, shipped as v0.131.13.0 (#1047, the runner stamp) and v0.131.13.1 (#1050, the status bridge stops writing the date; migration applied on TEST and PROD); the Wave 5 forced recompute on PROD 2026-10-20 enqueued 42, 23 done each carrying its own runner stamp, 0 too-new dates, 19 failed with their dates held (18 archived keyless CSV strategies, 1 composite with a refused Deribit key, routed to the founder); verification passed; security SECURED (completed 2026-10-20)
 - [ ] **Phase 166.5.1: SENTRYTRIAGE — the three unbooked production Sentry groups are fixed at their root cause or silenced with a stated reason** (INSERTED 2026-10-20) — not yet planned (founder 2026-10-20; demo-allocator cron warning, worker ReadTimeouts, job-state race)
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [x] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed (completed 2026-10-04)
@@ -4531,13 +4531,21 @@ Plans:
 
 ### Phase 166.5: COMPUTEDATSTAMP — the analytics runner stamps strategy_analytics.computed_at itself when a recompute really finishes, so the freshness chip and PDF vintage never lag a real recompute (with 164.5.2.1's hold-the-date rule the bridge keeps the old date while a sibling job is in flight; founder 2026-10-03: keep the hold, book this fix). (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
+**Goal:** `strategy_analytics.computed_at` means "when these metrics were really computed": the runner stamps it from the database clock in the write that stores the metrics, and the status bridge never writes it.
 **Requirements**: TBD
 **Depends on:** Phase 166
-**Plans:** 0 plans
+**Plans:** 9/9 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 166.5-01: the runner stamps `computed_at` from the database clock on the CSV and composite finishes, plus the live PostgREST probe (wave 1)
+- [x] 166.5-02: the status bridge stops writing `computed_at` on every branch, new gate with a twin per arm (wave 2)
+- [x] 166.5-03: one side-kind flag in the bridge, so a successful side job never blanks a sentence or heals a failed row (wave 3)
+- [x] 166.5-04: both refresh-marker retractions (Python and TypeScript) leave a finished job alone (wave 2)
+- [x] 166.5-05: migration reviewable and reversible, comments corrected, function snapshot and VAC-04 acknowledgement (wave 4)
+- [x] 166.5-06: the existing gate arms that asserted the bridge's date stamp are re-specified (wave 5)
+- [x] 166.5-07: merged-tree gates, reader comments, mixed-vintage window measured, floors and censuses from one run (wave 6)
+- [x] 166.5-08: PROD before-reading, the Wave 5 hand-off, rollback and the release commit (wave 7)
+- [x] 166.5-09: PROD after-reading, ordering proof and the in-product freshness check (wave 8); the Wave 5 forced recompute (D-05) ran 2026-10-20
 
 ⚠️ **Routed in from 164.6.6.3.4 STATUSBRIDGE (review round 4, 2026-10-08):** a SUCCESSFUL side-kind job whose sibling side job is still in flight takes the bridge's branch (a) and stamps `computed_at = now()` over stale analytics (and blanks the sentence); a later sibling failure then keeps that stamp under the D-09 hold. Same class as the successful-side-job stamp this phase owns. Also from that review: no gate arm pins the equal boundary of STATUSBRIDGE's D-09 release (`updated_at > computed_at`), and the marker retractions (`long_fetch.py`, `src/lib/ledger-refresh-marker.ts`) update a job by id with no status guard, which can bump a done row's `updated_at`.
 
@@ -6395,7 +6403,7 @@ kept verbatim.
 | 166.3.1 NAVBREACH | 10/10 | Complete | 2026-10-15 |
 | 166.4 BENCHALIGN | 4/4 | Complete | v0.108.0.0 · #892 · (verification passed 7/7) |
 | 166.4.1 PORTFOLIOANALYTICS | 4/4 | Complete | 2026-10-14 |
-| 166.5 COMPUTEDATSTAMP | 0/? | Queued — user-facing, booked 2026-10-03 | - |
+| 166.5 COMPUTEDATSTAMP | 9/9 | Complete — the runner stamps `computed_at` from the database clock and the bridge never writes it; Wave 5 forced recompute on PROD: 42 enqueued, 23 done each with its own stamp, 0 too-new dates, 19 failed with dates held (18 archived CSV, 1 refused Deribit key, founder items); verification passed; SECURED | 2026-10-20 · v0.131.13.0 · #1047, v0.131.13.1 · #1050 |
 | 166.5.1 SENTRYTRIAGE | 0/? | Queued — booked 2026-10-20 (founder) | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Complete    | 2026-10-04 |

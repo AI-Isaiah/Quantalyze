@@ -13081,3 +13081,15 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 **Fix if triggered.** Group the key (stamp or mark it) or hide its rows as superseded. Any grouping change moves Python `account_groups`, TS `accountIdentityTokens`/`keyAccountOf`, `one_key_per_account_day`/`oneKeyPerAccountDay` and the `queries.ts` reader together (167.1.2.1 WR-03).
 
 **Owner / Trigger:** a departed key with no identity beside a live key on the same exchange (re-measure with a counts-only read before acting).
+
+## Phase 166.5 (COMPUTEDATSTAMP) — routed items (logged 2026-10-20)
+
+### 166.5-RECOMPUTE-RESIDUAL-19 — 19 strategy rows the Wave 5 forced recompute could not finish, 18 CSV and 1 composite (booked 2026-10-20, 166.5 D-04 residual, USER-FACING, FOUNDER DECISION)
+
+**Reading.** The Wave 5 forced recompute on PROD, 2026-10-20 20:30Z to 21:42Z, enqueued 42 rows. 23 reached `done`, each carrying its own runner stamp, with 0 too-new dates. 19 reached `failed_final`, all error class `permanent`. Every one of the 19 kept its old date (`failed_rows_date_moved_no_runner` 0), which is the D-04 rule working. They are counts and classes only; the ordinal-to-strategy mapping lived in the session scratchpad. The reading is in `166.5-VERIFICATION.md`, section "Wave 5 forced recompute reading (D-05), 2026-10-20".
+
+**Class 1: 18 archived keyless CSV strategies.** Each fails with `400: Insufficient CSV history` (fewer than 2 data points). A recompute cannot succeed until CSV history exists. Their dates are old (May to August 2026) and none is too new. **Founder call: leave them as they are, or retire the rows.**
+
+**Class 2: 1 composite whose Deribit member key is refused.** The venue answers `invalid_credentials` (`invalid nonce`). The row went `complete_with_warnings` to `failed`, and its date is held at its last good compute (2026-10-15). The member key is not marked `revoked` or `sign_in_failed`, so the hand-off's untrusted-member filter did not exclude it. **Founder action: re-enter the key, or disconnect it.** The row reads `failed` until then.
+
+**Owner / Trigger:** founder decision. Closed when the founder has decided the 18 CSV rows (leave or retire) and acted on the composite's key (re-entered or disconnected). No code change is needed for either class.

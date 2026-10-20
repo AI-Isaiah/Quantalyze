@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: "166.5"
-current_phase_name: COMPUTEDATSTAMP
+current_phase: "170.1.2"
+current_phase_name: LABELS
 status: executing
-stopped_at: 167.1.2.1.2 HISTORYREADER closed; 170.1.2 LABELS executing; AUMBASIS records pending
-last_updated: "2026-10-20T20:47:56.451Z"
+stopped_at: 166.5 COMPUTEDATSTAMP closed; 170.1.2 LABELS in review and verification; AUMBASIS records pending
+last_updated: "2026-10-20T21:48:42.531Z"
 last_activity: 2026-10-20
-last_activity_desc: "167.1.2.1.2 HISTORYREADER closed (v0.132.8.0 #1089; 375/390 px backstops passed; verification passed; SECURED)"
-state_head: c9dfaba94f01da60b53aab3e8608331feec15433
+last_activity_desc: "166.5 COMPUTEDATSTAMP closed (v0.131.13.0 #1047, v0.131.13.1 #1050; Wave 5 forced recompute read on PROD; verification passed)"
+state_head: 42730765f67f1c2b3a86b46c3415d387b09cdc2e
 progress:
   total_phases: 119
-  completed_phases: 114
-  total_plans: 831
-  completed_plans: 814
-  percent: 96
+  completed_phases: 115
+  total_plans: 840
+  completed_plans: 823
+  percent: 97
 ---
 
 ## ⭐ STATE lineage
@@ -172,11 +172,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 166.5 (COMPUTEDATSTAMP) — EXECUTING
-Plan: 9 of 9
-Status: Executing — several phases in parallel. 166.5 COMPUTEDATSTAMP is the current one: both PRs merged and applied on PROD (#1047, #1050); plan 09 done 2026-10-16, verification waits on the Wave 5 consolidated recompute (D-05). 170.1.2 LABELS executing (started 2026-10-20, founder "now you can start new phases"). 167.1.1.2 AUMBASIS (#1087) shipped; its records PR is pending. 167.1.2.2.2.1 OKXHISTORY: the first preflight (plan 12) stopped on a parser defect fixed by #1091; it re-runs once Railway builds resume (Railway outage 2026-10-20 from 17:03Z). 167.1.2.1.2 HISTORYREADER closed 2026-10-20 (v0.132.8.0 #1089; 375/390 px backstops passed on a seeded local stack; verification passed; SECURED). 170.1.1 TITLES closed 2026-10-20 (#1093). 170.1 COPY closed 2026-10-20 (#1082).
-Last activity: 2026-10-20 — 167.1.2.1.2 HISTORYREADER closed (v0.132.8.0 #1089; 375/390 px backstops passed; verification passed; SECURED)
-Progress: [█████████░] 96%
+Phase: 170.1.2 (LABELS) — EXECUTING
+Plan: 10 of 10
+Status: Executing — several phases in parallel. 170.1.2 LABELS is the current one: all 10 plans are written and it is in review and verification. 167.1.1.2 AUMBASIS (#1087) shipped; its records PR is pending. 167.1.2.2.2.1 OKXHISTORY is at plan 13 (the first preflight, plan 12, stopped on a parser defect fixed by #1091). 166.5.1 SENTRYTRIAGE is booked and 170.1.3 NARROWCHARTS is being booked (#1098 open); neither is planned yet. 166.5 COMPUTEDATSTAMP closed 2026-10-20 (v0.131.13.0 #1047, v0.131.13.1 #1050; the Wave 5 forced recompute on PROD: 42 enqueued, 23 done each with its own runner stamp, 0 too-new dates, 19 failed with dates held and routed to the founder as `166.5-RECOMPUTE-RESIDUAL-19`; verification passed). 167.1.2.1.2 HISTORYREADER closed 2026-10-20 (#1089). 170.1.1 TITLES closed 2026-10-20 (#1093). 170.1 COPY closed 2026-10-20 (#1082).
+Last activity: 2026-10-20 — 166.5 COMPUTEDATSTAMP closed (v0.131.13.0 #1047, v0.131.13.1 #1050; Wave 5 forced recompute read on PROD; verification passed)
+Progress: [█████████░] 97%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
