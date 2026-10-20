@@ -130,6 +130,21 @@ export function breachReasonLabel(value: unknown): string {
   return labelOf(BREACH_REASON_LABELS, value, "Other mandate breach");
 }
 
+/**
+ * Why a shipped intro was missed by the match engine, from
+ * `analytics-service/services/match_eval.py` (`reason` on a `missed` row). A
+ * Python string set with no CHECK, so the census cannot guard it: those two
+ * values are the producer's whole set.
+ */
+export const MATCH_MISS_REASON_LABELS = {
+  not_in_top_3: "Ranked below top 3",
+  no_prior_batch: "No earlier match batch",
+} as const;
+
+export function matchMissReasonLabel(value: unknown): string {
+  return labelOf(MATCH_MISS_REASON_LABELS, value, "Other reason");
+}
+
 /** BridgeDrawer's label when a candidate lists no breach reasons. */
 export const BREACH_REASON_EMPTY_LABEL = "Composite score above threshold";
 

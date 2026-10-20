@@ -34,6 +34,7 @@ import {
   INTRO_SNAPSHOT_STATUS_LABELS,
   INTRO_SOURCE_LABELS,
   MATCH_DECISION_LABELS,
+  MATCH_MISS_REASON_LABELS,
   ORG_MEMBER_ROLE_LABELS,
   PROFILE_STATUS_LABELS,
   RELATIONSHIP_STATUS_LABELS,
@@ -51,6 +52,7 @@ import {
   introSourceLabel,
   labelOf,
   matchDecisionLabel,
+  matchMissReasonLabel,
   orgMemberRoleLabel,
   profileRoleLabel,
   profileStatusLabel,
@@ -220,6 +222,10 @@ describe("wrappers: a real value reads its label", () => {
     expect(breachReasonLabel("max_weight")).toBe("Above max weight");
     expect(breachReasonLabel("correlation_ceiling")).toBe("Above correlation ceiling");
     expect(BREACH_REASON_EMPTY_LABEL).toBe("Composite score above threshold");
+    expect(matchMissReasonLabel("not_in_top_3")).toBe("Ranked below top 3");
+    expect(matchMissReasonLabel("no_prior_batch")).toBe("No earlier match batch");
+    // match_eval.py emits exactly these two reasons for a missed intro.
+    expect(Object.keys(MATCH_MISS_REASON_LABELS).sort()).toEqual(["no_prior_batch", "not_in_top_3"]);
     expect(Object.keys(BREACH_REASON_LABELS).sort()).toEqual(["correlation_ceiling", "max_weight"]);
   });
 
@@ -264,6 +270,7 @@ describe("wrappers: a value outside the closed set reads the fallback, never the
     ["allocationEventTypeLabel", allocationEventTypeLabel, "Other event"],
     ["matchDecisionLabel", matchDecisionLabel, "Other decision"],
     ["breachReasonLabel", breachReasonLabel, "Other mandate breach"],
+    ["matchMissReasonLabel", matchMissReasonLabel, "Other reason"],
     ["orgMemberRoleLabel", orgMemberRoleLabel, "Unknown role"],
     ["profileRoleLabel", profileRoleLabel, "Unknown role"],
     ["appRoleLabel", appRoleLabel, "Unknown role"],
