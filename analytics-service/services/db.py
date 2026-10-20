@@ -275,7 +275,7 @@ Row = dict[str, Any]
 
 
 # ``APIResponse``/``SingleAPIResponse`` are NON-generic on the postgrest pinned
-# by ``requirements.txt`` (supabase==2.31.0 -> postgrest 2.31.0), which is what
+# by ``requirements.txt`` (supabase==2.33.0 -> postgrest 2.33.0), which is what
 # CI and prod install — they take no type argument, and ``.data`` is the raw
 # PostgREST JSON union (``list[JSON]`` / ``JSON``). Narrowing that union into a
 # typed row shape is exactly what these accessors exist for; we do not model
