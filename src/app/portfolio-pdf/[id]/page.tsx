@@ -202,11 +202,23 @@ export default async function PortfolioPdfPage({
       .from("strategies")
       .select("id, name")
       .in("id", missingIds);
-    if (departedError) throw new Error(departedError.message);
+    if (departedError) {
+      throw new Error(
+        `correlation names read failed for portfolio ${id}: ${departedError.message}`,
+      );
+    }
     for (const r of departed ?? []) {
       if (r.name) strategyNameById.set(r.id, r.name);
     }
   }
+  // Two unresolved keys under one label would print identical headers; number
+  // them only then, so the common single miss still reads "Unnamed strategy".
+  const unresolvedKeys = correlationKeys.filter((k) => !strategyNameById.has(k));
+  const correlationLabel = (k: string) =>
+    strategyNameById.get(k) ??
+    (unresolvedKeys.length > 1
+      ? `Unnamed strategy ${unresolvedKeys.indexOf(k) + 1}`
+      : "Unnamed strategy");
 
   return (
     <div className="max-w-[800px] mx-auto p-8 bg-white print:p-4">
@@ -340,7 +352,7 @@ export default async function PortfolioPdfPage({
                     key={k}
                     className="text-right py-1 px-1 font-medium text-text-muted"
                   >
-                    {strategyNameById.get(k) ?? "Unnamed strategy"}
+                    {correlationLabel(k)}
                   </th>
                 ))}
               </tr>
@@ -349,7 +361,7 @@ export default async function PortfolioPdfPage({
               {correlationKeys.map((rowKey) => (
                 <tr key={rowKey} className="border-b border-border/30">
                   <td className="py-1 px-1 font-medium text-text-primary">
-                    {strategyNameById.get(rowKey) ?? "Unnamed strategy"}
+                    {correlationLabel(rowKey)}
                   </td>
                   {correlationKeys.map((colKey) => {
                     const val = correlationMatrix[rowKey]?.[colKey];

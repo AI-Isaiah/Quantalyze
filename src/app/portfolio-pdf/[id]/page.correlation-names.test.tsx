@@ -146,6 +146,29 @@ describe("CR-02 · portfolio PDF correlation matrix names", () => {
     await expect(renderPdf()).rejects.toThrow("boom");
   });
 
+  it("the lookup failure names the operation and the portfolio, so the error page is traceable", async () => {
+    seeded.strategiesError = { message: "boom" };
+    await expect(renderPdf()).rejects.toThrow(
+      `correlation names read failed for portfolio ${PORTFOLIO_ID}: boom`,
+    );
+  });
+
+  it("numbers the unresolved strategies when more than one is unresolved, so headers stay distinct", async () => {
+    seeded.strategies = [];
+    seeded.portfolioAnalytics = {
+      ...(seeded.portfolioAnalytics as object),
+      correlation_matrix: {
+        [DEPARTED_ID]: { [DEPARTED_ID]: 1, [GHOST_ID]: 0.1 },
+        [GHOST_ID]: { [DEPARTED_ID]: 0.1, [GHOST_ID]: 1 },
+      },
+    };
+    await renderPdf();
+
+    expect(screen.getAllByText("Unnamed strategy 1").length).toBe(2);
+    expect(screen.getAllByText("Unnamed strategy 2").length).toBe(2);
+    expect(screen.queryByText("Unnamed strategy")).toBeNull();
+  });
+
   it("a member row whose strategy embed is missing reads 'Unnamed strategy', not 'Unknown'", async () => {
     seeded.constituents = [
       { strategy_id: GHOST_ID, current_weight: 1, strategies: null },
