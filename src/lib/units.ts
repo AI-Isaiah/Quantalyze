@@ -45,11 +45,11 @@
  *    NEW-C04-03, now live in the pure `@/lib/scenario` module — moved there
  *    so the server-rendered scenario-share page can call `toWealth()` without
  *    tripping the RSC client-boundary error; import them from `@/lib/scenario`.)
- *  - `holdingEquityContribution` from queries.ts (NEW-C03-01). queries.ts
- *    is `server-only` (Next.js server-component-only), so re-exporting
- *    from a utility module would forbid client-side imports of `units`.
- *    Consumers needing the helper import it from `@/lib/queries` directly
- *    in server-only code paths.
+ *  - `holdingEquityContribution` (NEW-C03-01). Since Phase 167.1.1.2 D-04 it
+ *    lives in the pure, import-free module `@/lib/holding-equity`, which client
+ *    and server code import directly (queries.ts re-exports it for existing
+ *    server importers). `units` still does not re-export it; nothing about
+ *    its behaviour changes here.
  */
 
 import type { Usd, Ratio, Fraction } from "./types";

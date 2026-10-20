@@ -68,9 +68,11 @@ function perKeyStrategies(
   const equity = new Map<string, number>();
   for (const h of payload.holdingsSummary ?? []) {
     if (!h.api_key_id) continue;
+    // 167.1.1.2 D-06: an unreported derivative P&L is `null`; its weight stays
+    // 0 (`?? 0`), because weights are not disclosed totals.
     equity.set(
       h.api_key_id,
-      (equity.get(h.api_key_id) ?? 0) + holdingEquityContributionLocal(h),
+      (equity.get(h.api_key_id) ?? 0) + (holdingEquityContributionLocal(h) ?? 0),
     );
   }
   const contributing = new Set(payload.contributingApiKeyIds ?? []);

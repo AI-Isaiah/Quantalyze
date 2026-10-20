@@ -518,7 +518,12 @@ _BREAKDOWN_TOP_N: int = 20
 # STARTING_BALANCE holds the anchor offset that reconciles the breakdown to
 # value_usd; __truncated__ is the sentinel signalling a capped breakdown.
 # Both are popped out before the top-N selection so they can never be evicted.
-_BREAKDOWN_PROTECTED_KEYS: tuple[str, ...] = ("STARTING_BALANCE", "__truncated__")
+#
+# 167.1.1.2 D-07: "__pnl_missing__" is a STRUCTURED record ({count, symbols}) of
+# the derivatives the daily refresh left out because their unrealized P&L is
+# NULL. It must never enter the numeric top-N sort below (a dict value raises
+# TypeError in `float(...)`) and must never be evicted by it.
+_BREAKDOWN_PROTECTED_KEYS: tuple[str, ...] = ("STARTING_BALANCE", "__truncated__", "__pnl_missing__")
 
 
 def _cap_breakdown(breakdown: dict[str, Any]) -> dict[str, Any]:
@@ -4520,7 +4525,13 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 allocator_id, api_key_id,
                 "allocator.equity.refresh_complete",
                 {
-                    "reason": "no_holdings_today",
+                    # SFH M-1: derivatives that all report no P&L are holdings,
+                    # not "no holdings".
+                    "reason": (
+                        "derivative_pnl_unreported"
+                        if perp_upnl_missing_total > 0
+                        else "no_holdings_today"
+                    ),
                     "venue": venue,
                     **_refresh_audit_counts(latest),
                 },
@@ -4563,7 +4574,24 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
         # sum(capped_bd.values()) — see _compute_daily_equity for rationale.
         # Truncation via _cap_breakdown drops symbols and adds a sentinel key;
         # using the capped sum would undercount equity for large portfolios.
-        capped_bd = _cap_breakdown(breakdown)
+        #
+        # 167.1.1.2 D-07: stamp the derivatives the loop left out (NULL
+        # unrealized P&L) onto the snapshot's own breakdown, so the stored
+        # curve discloses its gap, not only the audit event. Placement is
+        # deliberate: AFTER the empty-book gate above (a book of only NULL-P&L
+        # derivatives must still write no snapshot, RESEARCH Pitfall 3) and
+        # BEFORE _cap_breakdown (the key is protected there, Pitfall 2). The
+        # lowercase dunder cannot collide with an upper-cased symbol key or a
+        # ":PERP" key. `breakdown` keeps its numeric `dict[str, float]` type;
+        # only this copy carries the record, and value_usd below is computed
+        # from `total`, so no refresh code ever reads the record as a number.
+        breakdown_to_store: dict[str, Any] = dict(breakdown)
+        if perp_upnl_missing_total > 0:
+            breakdown_to_store["__pnl_missing__"] = {
+                "count": perp_upnl_missing_total,
+                "symbols": list(perp_upnl_missing_symbols),
+            }
+        capped_bd = _cap_breakdown(breakdown_to_store)
         row = {
             "asof": today_iso,
             "value_usd": round(total, 2),

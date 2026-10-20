@@ -1,7 +1,8 @@
-"""Phase 167.1.1.1 plan 02 (D-15, D-16, D-18): the Python half of the matcher's AUM basis,
-replayed against the case table the TypeScript twins read too
+"""Phase 167.1.1.1 plan 02 (D-15, D-16, D-18) and Phase 167.1.1.2 D-06: the Python half of
+the AUM basis, replayed against the case table the TypeScript functions read too
 (``tests/fixtures/holding_equity_contribution_cases.json``;
-``holdingEquityContribution`` in ``src/lib/queries.ts``).
+``holdingEquityContribution`` in ``src/lib/holding-equity.ts``). Each case carries ONE
+``expected`` that both runtimes must return.
 
 Every figure in that file is hand-typed. Nothing here derives an expectation from the
 code under test.
@@ -42,18 +43,22 @@ def _row(case: dict[str, Any]) -> dict[str, Any]:
 @pytest.mark.parametrize("case", _SPEC["cases"], ids=lambda c: c["name"])
 def test_holding_equity_contribution_matches_the_shared_table(case: dict[str, Any]) -> None:
     got = holding_equity_contribution(_row(case))
-    if case["expected_py"] is None:
+    if case["expected"] is None:
         assert got is None
     else:
-        assert got == case["expected_py"]
+        assert got == case["expected"]
 
 
-def test_python_diverges_from_typescript_only_on_the_d18_case() -> None:
-    """D-18 allows exactly one behavioural difference from ``holdingEquityContribution``:
-    a derivative with a NULL P&L is withheld here and counted 0 there. A second
-    divergence, or the loss of this one, fails here."""
-    diverging = {c["name"] for c in _SPEC["cases"] if c["expected_py"] != c["expected_ts"]}
-    assert diverging == {"derivative_null_pnl_is_withheld"}
+def test_one_expectation_for_both_runtimes() -> None:
+    """Since 167.1.1.2 D-06 there is no divergence: a case carries ONE ``expected`` and the
+    two retired per-runtime keys cannot return. A NULL derivative P&L is withheld in both
+    runtimes."""
+    for case in _SPEC["cases"]:
+        assert "expected" in case, case["name"]
+        assert "expected_ts" not in case, case["name"]
+        assert "expected_py" not in case, case["name"]
+    by_name = {c["name"]: c for c in _SPEC["cases"]}
+    assert by_name["derivative_null_pnl_is_withheld"]["expected"] is None
 
 
 def test_fixture_pins_the_edges_the_rule_names() -> None:

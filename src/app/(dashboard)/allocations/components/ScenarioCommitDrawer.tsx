@@ -458,8 +458,9 @@ export function ScenarioCommitDrawer({
           // coherent with the percent that just shipped. When the user
           // didn't touch the percent, keep the composer-time size; when
           // `scenarioAum` is not finite or non-positive, fall back to
-          // the composer-time size rather than emit 0 (which would
-          // trigger the server's daily-delta divide-by-zero gate).
+          // the composer-time size rather than emit 0 (a decision with no
+          // magnitude; 167.1.1.2 P-01: the size is recorded only in
+          // `audit_log.metadata` and nothing reads it after the commit).
           //
           // Code-reviewer follow-up (2026-05-28): also bail on
           // `percent_allocated <= 0`. allFilled() accepts percent >= 0,
@@ -467,8 +468,7 @@ export function ScenarioCommitDrawer({
           // `size_at_decision_usd: 0` even though the composer's
           // size>0 gate would have caught the same case before the
           // drawer opened. Fall back to the composer-time size in that
-          // edge so the wire row keeps a non-zero size — the server's
-          // daily-delta divide-by-zero gate stays satisfied while the
+          // edge so the wire row keeps a non-zero size while the
           // user-supplied percent is still forwarded.
           const overrideSize =
             r.percent_allocated !== undefined &&

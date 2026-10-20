@@ -25,6 +25,10 @@
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { buildHoldingRef } from "./holding-outcome-adapter";
 import {
+  holdingEquityContribution,
+  holdingEquityIsReported,
+} from "@/lib/holding-equity";
+import {
   keyNeedsAttention,
   UNKNOWN_KEY_STATUS_SET_NOUN,
   UNTRUSTED_KEY_SET_NOUN,
@@ -96,43 +100,31 @@ export function holdingsByRef(
 /**
  * DSRC-02 (D2) — per-holding equity contribution, the per-key WEIGHT source.
  *
- * Mirrors the SSR `holdingEquityContribution` (`src/lib/queries.ts`) EXACTLY:
+ * Phase 167.1.1.2 D-04: this is the SAME function object as the SSR
+ * `holdingEquityContribution` (`src/lib/queries.ts` re-exports it), both read
+ * from the pure module `@/lib/holding-equity`. The client and the server read
+ * one definition; there is no second copy to keep in step.
  *   - derivative → `unrealized_pnl_usd` (the actual equity at stake; `value_usd`
  *     is the leveraged NOTIONAL contract size, which would inflate the weight by
- *     the leverage factor), null/non-finite → 0.
+ *     the leverage factor); a non-finite P&L → 0; a null / absent P&L → `null`
+ *     (D-06, withheld: a SUM skips and counts it, a WEIGHT reads `?? 0`).
  *   - spot       → `value_usd` (marked fair value = the equity contribution),
  *     non-finite → 0.
  *
- * Phase 167.1 moved this function here from `ScenarioComposer.tsx`, body
- * unchanged, so the composer's `equityByApiKeyId` memo and
- * `summarizeLiveHoldings` below read ONE definition. It is still a local copy
- * of the SSR helper rather than an import of it: `@/lib/queries` is
- * `server-only`, so importing its export into the "use client" composer would
- * cross the client/server boundary (and the per-key adapter sibling already
- * duplicates the per-key loop locally for the same reason). Keep this in
- * lockstep with the SSR helper so the client weight matches the server's.
+ * Phase 167.1 moved this function here from `ScenarioComposer.tsx` so the
+ * composer's `equityByApiKeyId` memo and `summarizeLiveHoldings` below read ONE
+ * definition.
  */
-export function holdingEquityContributionLocal(h: DashboardHolding): number {
-  if (h.holding_type === "derivative") {
-    const pnl = h.unrealized_pnl_usd ?? 0;
-    return Number.isFinite(pnl) ? pnl : 0;
-  }
-  return Number.isFinite(h.value_usd) ? h.value_usd : 0;
-}
+export const holdingEquityContributionLocal = holdingEquityContribution;
 
 /**
  * Review WR-03 — whether `holdingEquityContributionLocal` returned a REPORTED
- * figure, or the 0 it substitutes for a missing one (a derivative with a null
- * or non-finite `unrealized_pnl_usd`, a spot holding with a non-finite
- * `value_usd`). Same branches as that function, so the two cannot disagree
+ * figure, or the 0 / null it substitutes for a missing one (a derivative with a
+ * null or non-finite `unrealized_pnl_usd`, a spot holding with a non-finite
+ * `value_usd`). Re-exported from the pure module so the two cannot disagree
  * about which holdings were defaulted. It never changes the sum.
  */
-export function holdingEquityIsReported(h: DashboardHolding): boolean {
-  if (h.holding_type === "derivative") {
-    return h.unrealized_pnl_usd != null && Number.isFinite(h.unrealized_pnl_usd);
-  }
-  return Number.isFinite(h.value_usd);
-}
+export { holdingEquityIsReported };
 
 /** A disclosed part of the live-holdings total. */
 export interface LiveHoldingsPart {
@@ -149,8 +141,20 @@ export interface LiveHoldingsPart {
 /** The composer's live-holdings total and its untrusted-key parts. */
 export interface LiveHoldingsSummary {
   /** The live-holdings total. Byte-identical to the composer's pre-167.1
-   *  `liveHoldingsSum`: same walk, same filters, same accumulation order. */
+   *  `liveHoldingsSum`: same walk, same filters, same accumulation order.
+   *  167.1.1.2 D-06: a derivative whose P&L was not reported added 0 before and
+   *  adds nothing now (it is counted in `pnlMissing` instead), so no number
+   *  moved. */
   total: number;
+  /** 167.1.1.2 D-06 (UI-SPEC U-05 / 167.1 D-04). Toggled-on rows that would have
+   *  entered `total` but are derivatives whose P&L was not reported
+   *  (`holdingEquityIsReported` false: null, absent or non-finite). Counted per
+   *  ROW, in the same pass as `total`. Such a row is in neither `total` nor any
+   *  includes part (`untrusted`, `unknownStatus`), so a disclosure can never
+   *  present it as a known figure. Spot rows are never counted here. A row the
+   *  narrowing already dropped stays in its `excluded*` part, with
+   *  `unavailable` incremented, and is not counted here (UI-SPEC rule 5). */
+  pnlMissing: number;
   /** The part of `total` from holdings whose key needs attention
    *  (`keyNeedsAttention`: an untrusted sync status, or since 167.1.1 D-02 a
    *  soft-disconnected key whatever its status).
@@ -341,6 +345,7 @@ export function summarizeLiveHoldings(args: {
   const narrowToModelledBook = contributing.size > 0;
   const out: LiveHoldingsSummary = {
     total: 0,
+    pnlMissing: 0,
     untrusted: { amount: 0, count: 0, unavailable: 0 },
     unknownStatus: { amount: 0, count: 0, unavailable: 0 },
     excludedUntrusted: { amount: 0, count: 0, unavailable: 0 },
@@ -364,6 +369,7 @@ export function summarizeLiveHoldings(args: {
       // E1 — the SAME per-holding equity definition `equityByApiKeyId` (and
       // therefore `totalBookEquity`, and therefore every NOTIONAL cell) uses.
       // Never `h.value_usd`: on a derivative that is notional, not equity.
+      // 167.1.1.2 D-06: `null` is a derivative whose P&L was not reported.
       const equity = holdingEquityContributionLocal(h);
       // ⛔ The shared predicate is the ONLY membership test (167 D-16). A local
       // equality on the status column is the defect that rule exists to prevent.
@@ -379,23 +385,35 @@ export function summarizeLiveHoldings(args: {
         // Phase 167.1.2 SC-4: every branch below lands the holding in a part, so
         // no toggled-on dollar leaves this loop unaccounted for.
         if (managerSide.has(h.api_key_id)) {
-          addTo(out.excludedManagerSide, h, equity);
+          addTo(out.excludedManagerSide, h, equity ?? 0);
         } else if (untrusted) {
-          addTo(out.excludedUntrusted, h, equity);
+          addTo(out.excludedUntrusted, h, equity ?? 0);
         } else if (!args.statusByKeyId.has(h.api_key_id)) {
           // Review round 3 WR-01: an ABSENT status is unknown, not trusted,
           // on the excludes side too (the WR-05 `.has` rule).
-          addTo(out.excludedUnknownStatus, h, equity);
+          addTo(out.excludedUnknownStatus, h, equity ?? 0);
         } else if (eligible !== null && !eligible.has(h.api_key_id)) {
           // Review C2 WR-03: in the key list, status not untrusted, but not
           // eligible: the key is disconnected or inactive, not "connected with
           // no return history yet".
-          addTo(out.excludedNotConnected, h, equity);
+          addTo(out.excludedNotConnected, h, equity ?? 0);
         } else {
           // Trusted, not contributing, not manager-side: a key with no return
           // series yet. Before 167.1.2 this fell through to `continue` unnamed.
-          addTo(out.excludedTrusted, h, equity);
+          addTo(out.excludedTrusted, h, equity ?? 0);
         }
+        continue;
+      }
+      // 167.1.1.2 D-06 (PD-05): a derivative whose P&L was not reported (null,
+      // absent or non-finite) is counted and left out of the total AND of every
+      // includes part, so a disclosure cannot present it as a known figure.
+      // Spot rows never reach this branch: their equity is never null and a
+      // non-finite spot value keeps the WR-03 `unavailable` path.
+      if (
+        equity === null ||
+        (h.holding_type === "derivative" && !holdingEquityIsReported(h))
+      ) {
+        out.pnlMissing += 1;
         continue;
       }
       out.total += equity;
@@ -549,6 +567,32 @@ export function buildKeyTrustClause(
     return `includes ${render.amount(untrusted.amount)} and excludes ${render.amount(excluded.amount)} from ${UNTRUSTED_KEY_SET_NOUN}`;
   }
   return `includes ${parts.join(" and ")}, and excludes ${excludedParts.join(" and ")}`;
+}
+
+/**
+ * Phase 167.1.1.2 D-06 (UI-SPEC P0) — the ONE sentence that says how many
+ * derivatives the live-holdings total left out because the venue reported no
+ * unrealized P&L for them, e.g. `2 derivatives without reported P&L left out.`
+ *
+ * One builder for every surface, as `buildKeyTrustClause` is for key trust: the
+ * composer's AUM hint and the Open Positions footer render the same words. The
+ * wording is the founder's (CONTEXT D-06, Q5: "N derivatives without reported
+ * P&L left out"); the only adjustments are the terminal period, because the
+ * sentence stands alone wherever it renders, and the singular for 1.
+ *
+ * - The count is interpolated RAW (no thousands separator), as
+ *   `buildKeyTrustClause` interpolates `part.count`.
+ * - A count below 1 returns the empty string, so a 0-count sentence ("0
+ *   derivatives ...") can never render on any branch (UI-SPEC "Empty state
+ *   heading"); a caller renders the sentence only when this is non-empty.
+ * - It carries no symbol, venue, key label or amount (U-08): a count and a
+ *   constant phrase.
+ *
+ * Client-safe: it imports nothing `server-only`.
+ */
+export function pnlMissingSentence(count: number): string {
+  if (!(count >= 1)) return "";
+  return `${count} ${count === 1 ? "derivative" : "derivatives"} without reported P&L left out.`;
 }
 
 /** Sentence-cases a clause built above, for the standalone sentence form. */

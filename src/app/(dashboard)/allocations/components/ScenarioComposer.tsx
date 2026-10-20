@@ -165,6 +165,7 @@ import {
   holdingsByRef,
   keyStateMapsOf,
   managerSideKeyIds,
+  pnlMissingSentence,
   summarizeLiveHoldings,
   type LiveHoldingsSummary,
 } from "../lib/live-holdings-summary";
@@ -1160,8 +1161,11 @@ export function ScenarioComposer({
   );
   // Inline error surfaced for two distinct rejection paths:
   //   (a) the commit pipeline refuses to open — either scenarioAum<=0 with
-  //       voluntary_adds present (division-by-zero downstream in the daily
-  //       delta cron), or any computed size_at_decision_usd lands non-finite
+  //       voluntary_adds present (a row with no magnitude), or any computed
+  //       size_at_decision_usd lands non-finite. 167.1.1.2 P-01: the size is
+  //       recorded only in `audit_log.metadata` and nothing reads it after the
+  //       commit; the gate refuses because such a row would record a decision
+  //       with no magnitude.
   //   (b) the weight input received a non-finite value (Infinity, NaN from
   //       a paste). Controlled inputs don't auto-snap-back when the change
   //       handler short-circuits, so a silent drop leaves the user with a
@@ -3053,12 +3057,14 @@ export function ScenarioComposer({
   // api_key_id (mirror queries.ts:2207-2215). Uses the EXPORTED contribution
   // helper — never re-derives equity from value_usd (derivative notional ≠
   // equity). This is the RAW weight source; the engine renormalizes (Pitfall 1).
+  // 167.1.1.2 D-06: a derivative whose P&L was not reported is `null` there;
+  // its weight stays 0 (`?? 0`), because weights are not disclosed totals.
   const equityByApiKeyId = useMemo(() => {
     const out: Record<string, number> = {};
     for (const h of rawHoldingsSummary) {
       if (!h.api_key_id) continue;
       out[h.api_key_id] =
-        (out[h.api_key_id] ?? 0) + holdingEquityContributionLocal(h);
+        (out[h.api_key_id] ?? 0) + (holdingEquityContributionLocal(h) ?? 0);
     }
     return out;
   }, [rawHoldingsSummary]);
@@ -4764,10 +4770,11 @@ export function ScenarioComposer({
     const diffs: ComposerProducedDiff[] = [];
 
     // Refuse the commit when scenarioAum<=0 with voluntary_adds present:
-    // every add row would land with size_at_decision_usd:0 and the
-    // downstream daily-delta cron divides realized PnL by that size →
-    // division-by-zero. The setWeightOverride clamp + this gate together
-    // guarantee a finite, non-negative product below.
+    // every add row would land with size_at_decision_usd:0, a decision
+    // recorded with no magnitude. (167.1.1.2 P-01: the size is recorded only
+    // in `audit_log.metadata` and nothing reads it after the commit, so this
+    // is not guarding a downstream divide.) The setWeightOverride clamp + this
+    // gate together guarantee a finite, non-negative product below.
     const hasVoluntaryAdds = scenario.draft.addedStrategies.length > 0;
     if (hasVoluntaryAdds && (!Number.isFinite(scenarioAum) || scenarioAum <= 0)) {
       // Phase 151 AUM-03 — name only affordances that EXIST on this screen. The
@@ -4782,9 +4789,9 @@ export function ScenarioComposer({
     for (const a of scenario.draft.addedStrategies) {
       const weight = scenario.draft.weightOverrides[a.id] ?? 0;
       // NEW-C18-05: per-row size gate — reject a voluntary_add whose computed
-      // size is zero or non-finite. The existing scenarioAum>0 guard prevents
-      // division-by-zero in the cron, but a weight=0 add still lands with
-      // size:0. Gate on the product to close that specific gap.
+      // size is zero or non-finite. The existing scenarioAum>0 guard does not
+      // stop a weight=0 add, which would still land with size:0 (a decision
+      // recorded with no magnitude). Gate on the product to close that gap.
       const size = weight * scenarioAum;
       if (!Number.isFinite(size) || size <= 0) {
         setCommitError(
@@ -5000,6 +5007,18 @@ export function ScenarioComposer({
       liveHoldingsSummary.excludedTrusted.count > 0 ||
       liveHoldingsSummary.excludedNotConnected.count > 0) &&
     (fieldShowsLive || overrideNoteShowsLive || fieldBlankHintShows);
+  // Phase 167.1.1.2 D-06 (UI-SPEC P1) — how many derivatives the live-holdings
+  // total LEFT OUT because the venue reported no unrealized P&L for them. It is
+  // counted by `summarizeLiveHoldings` in the same pass as `total`, so the
+  // sentence can never describe a different set of rows than the total skipped.
+  // Book mode only: in blank mode `holdingsSummary` is not read, so the count
+  // is 0 by construction (the guard just says so). Placement reuses the three
+  // flags above, so it follows the COMMITTED `sanitizedManualAum` exactly as the
+  // key-trust marker does, and state 7 (a manual value with a live total <= 0,
+  // none of the three flags) shows nothing: no figure on screen holds the live
+  // total there, so the sentence would qualify the allocator's own number.
+  const pnlMissingCount =
+    entryMode === "book" ? liveHoldingsSummary.pnlMissing : 0;
   // Review WR-02 — the note that qualifies the field's value is its accessible
   // description, so a screen-reader user who tabs to PORTFOLIO AUM hears the
   // qualification with the number and not only in linear reading order.
@@ -5011,13 +5030,20 @@ export function ScenarioComposer({
   // D-18 REOPENED: in state 4 the blank field's description is the hint that
   // now names the live total and its untrusted part (only when it does, so a
   // plain hint stays undescribed, as before).
+  // Phase 167.1.1.2 D-06 (UI-SPEC U-07): State A also names the left-out
+  // derivatives note, after the untrusted one when both render; State C's
+  // hint names the live total when the marker shows OR the count is 1 or more,
+  // so it is the field's description under the same widening.
   const aumInputDescribedBy =
     [
       showUntrustedMarker && fieldShowsLive
         ? "scenario-aum-untrusted-note"
         : null,
+      pnlMissingCount > 0 && fieldShowsLive
+        ? "scenario-aum-pnl-missing-note"
+        : null,
       overrideNoteShowsLive ? "scenario-aum-override-note" : null,
-      showUntrustedMarker && fieldBlankHintShows
+      (showUntrustedMarker || pnlMissingCount > 0) && fieldBlankHintShows
         ? "scenario-aum-required-note"
         : null,
     ]
@@ -5283,13 +5309,37 @@ export function ScenarioComposer({
             {capitalizeFirst(buildUntrustedAumClause(liveHoldingsSummary))}.
           </span>
         )}
+        {/* Phase 167.1.1.2 D-06 (UI-SPEC P1) — State A: the field shows the live
+            total, and some derivatives were LEFT OUT of it because the venue
+            reported no P&L for them. The sentence comes from the ONE builder
+            (`pnlMissingSentence`) the Open Positions footer also calls, and
+            sits after the untrusted note when that renders, before the modelled
+            note. Muted like its siblings: no role, no aria-live, no glyph, no
+            link (nothing the allocator does makes a venue report P&L). A count
+            of 0 renders nothing. */}
+        {pnlMissingCount > 0 && fieldShowsLive && (
+          <span
+            id="scenario-aum-pnl-missing-note"
+            data-testid="scenario-aum-pnl-missing-note"
+            className="text-xs text-text-muted"
+          >
+            {pnlMissingSentence(pnlMissingCount)}
+          </span>
+        )}
         {/* Phase 167.1 AUMTRUST — State C (D-18 REOPENED 2026-09-24, review
             WR-04): the field is blank because the live total is <= 0. Before
             the reopen the marker vanished here, so a non-positive total driven
             by keys needing attention read as an unexplained blank. With a
             marker, the hint names the live total and carries the clause on it,
             the State B construction; without one it is byte-identical to
-            before. The nested span has no class, as in State B (D-09). */}
+            before. The nested span has no class, as in State B (D-09).
+
+            Phase 167.1.1.2 D-06 (UI-SPEC P1 State C, U-07): the hint ALSO names
+            the live total when at least one derivative was left out of it, with
+            or without a marker, so a $0 total produced only by left-out
+            derivatives is explained instead of reading as an unexplained blank.
+            Without the marker the live-total sentence ends in a period; the
+            left-out sentence (`pnlMissingSentence`) follows it. */}
         {fieldBlankHintShows && (
           <span
             id="scenario-aum-required-note"
@@ -5297,14 +5347,26 @@ export function ScenarioComposer({
             className="text-xs text-text-muted"
           >
             Required to size and commit.
-            {showUntrustedMarker && (
+            {(showUntrustedMarker || pnlMissingCount > 0) && (
               <>
-                {" "}The live-holdings total is {formatUsd(liveHoldingsSum)},
-                which{" "}
-                <span data-testid="scenario-aum-untrusted-note">
-                  {buildUntrustedAumClause(liveHoldingsSummary)}
-                </span>
+                {" "}The live-holdings total is {formatUsd(liveHoldingsSum)}
+                {showUntrustedMarker && (
+                  <>
+                    , which{" "}
+                    <span data-testid="scenario-aum-untrusted-note">
+                      {buildUntrustedAumClause(liveHoldingsSummary)}
+                    </span>
+                  </>
+                )}
                 .
+              </>
+            )}
+            {pnlMissingCount > 0 && (
+              <>
+                {" "}
+                <span data-testid="scenario-aum-pnl-missing-note">
+                  {pnlMissingSentence(pnlMissingCount)}
+                </span>
               </>
             )}
           </span>
@@ -5318,7 +5380,12 @@ export function ScenarioComposer({
             field shows the live total, so one number never carries two markers
             (D-08). The nested span has no class: it inherits this note's muted
             voice (D-09). With no untrusted holding the text is byte-identical
-            to before: `Overrides live-holdings total $X.` */}
+            to before: `Overrides live-holdings total $X.`
+
+            Phase 167.1.1.2 D-06 (UI-SPEC P1 State B): when derivatives were
+            left out of the live total, `pnlMissingSentence` follows the closing
+            period, so "left out" reads as being about the total this note
+            quotes and never about the allocator's typed number. */}
         {overrideNoteShowsLive && (
           <span
             id="scenario-aum-override-note"
@@ -5335,6 +5402,14 @@ export function ScenarioComposer({
               </>
             )}
             .
+            {pnlMissingCount > 0 && (
+              <>
+                {" "}
+                <span data-testid="scenario-aum-pnl-missing-note">
+                  {pnlMissingSentence(pnlMissingCount)}
+                </span>
+              </>
+            )}
           </span>
         )}
         {/* Review round 2 F2 — the DISCLOSURE that pays for the narrowing above.

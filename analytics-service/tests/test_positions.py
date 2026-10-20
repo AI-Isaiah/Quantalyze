@@ -729,3 +729,191 @@ class TestFetchPositionsDeribit:
             assert positions_mod._normalize_ccxt_positions([{"info": {}}], "deribit") == []
         finally:
             positions_mod._normalize_ccxt_position = original  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# Test: unrealized P&L is NULL when the venue reports none (167.1.1.2 D-05)
+# ---------------------------------------------------------------------------
+#
+# A derivative writer that coerces "the venue said nothing" to 0.0 fabricates a
+# real zero that no reader can tell from a reported one. Every site below must
+# return None for absent / null / blank and keep a REPORTED zero as 0.0. All
+# inputs and expected values are typed by hand (never derived from the code
+# under test).
+
+
+class TestReportedPnlHelper:
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            (None, None),
+            ("", None),
+            ("   ", None),
+            (0, 0.0),
+            (0.0, 0.0),
+            ("0", 0.0),
+            ("-12.5", -12.5),
+            (42.5, 42.5),
+        ],
+    )
+    def test_reported_versus_not_reported(self, raw, expected) -> None:
+        from services.positions import reported_pnl
+
+        got = reported_pnl(raw)
+        assert got == expected
+        assert (got is None) == (expected is None)
+
+    def test_non_numeric_string_still_fails_loud(self) -> None:
+        from services.positions import reported_pnl
+
+        with pytest.raises(ValueError):
+            reported_pnl("abc")
+
+
+class TestBybitV5ReportedPnl:
+    @staticmethod
+    def _response(pnl_fields: dict) -> dict:
+        item = {
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "size": "0.1",
+            "positionValue": "6100",
+            "avgPrice": "60000",
+            "markPrice": "61000",
+            **pnl_fields,
+        }
+        return {"retCode": 0, "result": {"list": [item]}}
+
+    @pytest.mark.parametrize(
+        "pnl_fields, expected",
+        [
+            ({}, None),                          # key absent
+            ({"unrealisedPnl": ""}, None),       # blank (was ValueError, aborted the batch)
+            ({"unrealisedPnl": "0"}, 0.0),       # reported zero
+            ({"unrealisedPnl": "100"}, 100.0),
+        ],
+        ids=["absent", "empty", "zero", "number"],
+    )
+    def test_unrealised_pnl(self, pnl_fields, expected) -> None:
+        from services.positions import _parse_bybit_v5_positions
+
+        result = _parse_bybit_v5_positions(self._response(pnl_fields))
+        assert len(result) == 1
+        assert result[0]["unrealized_pnl"] == expected
+        assert (result[0]["unrealized_pnl"] is None) == (expected is None)
+
+    async def test_ccxt_none_still_routes_to_v5_and_v5_zero_is_a_real_zero(self) -> None:
+        """RESEARCH finding 1: ccxt's Bybit parser nulls an exact-zero P&L, so a
+        CCXT None must still take the raw V5 fallback, and the V5 string "0" is
+        the only source that can say "reported zero" -> 0.0, not None."""
+        from services.positions import fetch_positions
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.fetch_positions.return_value = BYBIT_CCXT_INCOMPLETE
+        mock_exchange.private_get_v5_position_list.return_value = self._response(
+            {"unrealisedPnl": "0"}
+        )
+
+        result = await fetch_positions("bybit", mock_exchange)
+
+        mock_exchange.private_get_v5_position_list.assert_awaited_once()
+        assert len(result) == 1
+        assert result[0]["unrealized_pnl"] == 0.0
+        assert result[0]["unrealized_pnl"] is not None
+
+
+class TestCcxtUnifiedReportedPnl:
+    @pytest.mark.parametrize(
+        "pnl_fields, expected",
+        [
+            ({}, None),                          # key absent
+            ({"unrealizedPnl": None}, None),     # null
+            ({"unrealizedPnl": 0}, 0.0),         # reported zero
+            ({"unrealizedPnl": 42.5}, 42.5),
+        ],
+        ids=["absent", "null", "zero", "number"],
+    )
+    def test_binance_okx_shape(self, pnl_fields, expected) -> None:
+        from services.positions import _normalize_ccxt_position
+
+        pos = {
+            "symbol": "BTC/USDT:USDT",
+            "side": "long",
+            "contracts": 0.5,
+            "contractSize": 1,
+            "notional": 30000.0,
+            "entryPrice": 60000.0,
+            "markPrice": 61000.0,
+            **pnl_fields,
+        }
+        out = _normalize_ccxt_position(pos, "binance")
+        assert out is not None
+        assert out["unrealized_pnl"] == expected
+        assert (out["unrealized_pnl"] is None) == (expected is None)
+
+
+class TestDeribitReportedPnl:
+    @staticmethod
+    def _info(instrument: str, pnl_fields: dict) -> dict:
+        return {
+            "instrument_name": instrument,
+            "kind": "future",
+            "direction": "sell",
+            "size": -10000,
+            "size_currency": -0.2,
+            "average_price": 48000.0,
+            "mark_price": 49900.0,
+            "index_price": 50000.0,
+            **pnl_fields,
+        }
+
+    @pytest.mark.parametrize(
+        "pnl_fields, expected",
+        [
+            ({}, None),
+            ({"floating_profit_loss": None}, None),
+            ({"floating_profit_loss": ""}, None),
+            ({"floating_profit_loss": 0}, 0.0),
+            ({"floating_profit_loss": 0.05}, 2500.0),   # 0.05 BTC x 50000
+        ],
+        ids=["absent", "null", "empty", "zero", "reported-btc"],
+    )
+    async def test_coin_settled_branch(self, pnl_fields, expected) -> None:
+        from services.positions import fetch_positions
+
+        info = self._info("BTC-PERPETUAL", pnl_fields)
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "deribit"
+        mock_exchange.fetch_positions.return_value = [_deribit_ccxt_position(info, "BTC/USD:BTC")]
+
+        result = await fetch_positions("deribit", mock_exchange)
+        assert len(result) == 1
+        assert result[0]["unrealized_pnl"] == expected
+        assert (result[0]["unrealized_pnl"] is None) == (expected is None)
+
+    @pytest.mark.parametrize(
+        "pnl_fields, expected",
+        [
+            ({}, None),
+            ({"floating_profit_loss": None}, None),
+            ({"floating_profit_loss": ""}, None),
+            ({"floating_profit_loss": 0}, 0.0),
+            ({"floating_profit_loss": 120.0}, 120.0),
+        ],
+        ids=["absent", "null", "empty", "zero", "reported-usdc"],
+    )
+    async def test_linear_branch(self, pnl_fields, expected) -> None:
+        from services.positions import fetch_positions
+
+        info = self._info("BTC_USDC-PERPETUAL", pnl_fields)
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "deribit"
+        mock_exchange.fetch_positions.return_value = [
+            _deribit_ccxt_position(info, "BTC/USDC:USDC")
+        ]
+
+        result = await fetch_positions("deribit", mock_exchange)
+        assert len(result) == 1
+        assert result[0]["unrealized_pnl"] == expected
+        assert (result[0]["unrealized_pnl"] is None) == (expected is None)

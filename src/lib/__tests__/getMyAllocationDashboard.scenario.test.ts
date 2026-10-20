@@ -159,7 +159,7 @@ describe("NEW-C03-01 — holdingEquityContribution: derivatives use unrealized_p
     expect(holdingEquityContribution(h)).not.toBe(5_000_000);
   });
 
-  it("derivative with unrealized_pnl_usd=null: returns 0 (not notional)", () => {
+  it("derivative with unrealized_pnl_usd=null: the contribution is withheld (null), not 0 and not notional (167.1.1.2 D-06)", () => {
     const h: H = {
       symbol: "ETH",
       venue: "okx",
@@ -172,7 +172,7 @@ describe("NEW-C03-01 — holdingEquityContribution: derivatives use unrealized_p
       side: "short",
       entry_price: 3100,
     };
-    expect(holdingEquityContribution(h)).toBe(0);
+    expect(holdingEquityContribution(h)).toBeNull();
   });
 
   it("spot holding with NaN value_usd: returns 0", () => {

@@ -721,7 +721,11 @@ async def _fetch_derivative_rows(exchange_name: str, exchange: Any) -> list[dict
             "value_usd": float(s.get("size_usd") or 0),
             "entry_price": entry,
             "mark_price": float(s.get("mark_price") or 0),
-            "unrealized_pnl_usd": float(s.get("unrealized_pnl") or 0),
+            # 167.1.1.2 D-05: None means the venue reported no P&L (readers
+            # withhold it by name); a reported 0 stays 0.0.
+            "unrealized_pnl_usd": (
+                float(pnl_raw) if (pnl_raw := s.get("unrealized_pnl")) is not None else None
+            ),
             "cost_basis_usd": cost_basis,
             "raw_payload": _cap_raw_payload(s),
         })

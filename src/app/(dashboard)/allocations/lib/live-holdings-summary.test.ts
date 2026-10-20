@@ -35,6 +35,7 @@ import {
   holdingsByRef,
   keyStateMapsOf,
   managerSideKeyIds,
+  pnlMissingSentence,
   summarizeLiveHoldings,
 } from "./live-holdings-summary";
 
@@ -164,8 +165,9 @@ const H_SIGN_IN_FAILED_OUTSIDE = buildHolding({
   api_key_id: KEY_SIGN_IN_FAILED_OUTSIDE,
 });
 
-/** A derivative whose unrealized P&L the venue did not report: it sums as 0,
- *  and that 0 is not a known figure (review WR-03). */
+/** A derivative whose unrealized P&L the venue did not report: since 167.1.1.2
+ *  D-06 it is withheld (null contribution), counted in `pnlMissing`, and left
+ *  out of the total and of every includes part (review WR-03, UI-SPEC U-05). */
 const H_SIGN_IN_FAILED_NO_PNL = buildHolding({
   venue: "venue-g",
   symbol: "AUMTRUST-G-PERP",
@@ -338,15 +340,19 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     expect(s.excludedUntrusted).toEqual({ amount: 3_210, count: 1, unavailable: 0 });
   });
 
-  it("review WR-03: an untrusted holding whose equity the venue did not report sums as 0 and is COUNTED as unavailable, so the disclosure never presents that 0 as a known figure", () => {
+  it("review WR-03 (moved by 167.1.1.2 D-06 / U-05): an untrusted derivative whose P&L the venue did not report is COUNTED in pnlMissing and left out of the total AND of the untrusted part, so the disclosure never presents it as a known figure", () => {
     const s = summarize({
       holdings: [H_TRUSTED, H_SIGN_IN_FAILED, H_SIGN_IN_FAILED_NO_PNL],
       contributing: [KEY_TRUSTED, KEY_SIGN_IN_FAILED, KEY_SIGN_IN_FAILED_NO_PNL],
     });
-    // D-03: the total is unchanged — the null P&L still sums as 0, and the
-    // 800,000 notional never leaks in.
+    // D-03: the total is unchanged — 480,000 + 12,345 = 492,345. The null-P&L
+    // derivative added 0 before and adds nothing now, and the 800,000 notional
+    // never leaks in.
     expect(s.total).toBe(492_345);
-    expect(s.untrusted).toEqual({ amount: 12_345, count: 2, unavailable: 1 });
+    // Only the 12,345 spot is in the untrusted part. The derivative is in
+    // neither the part nor its `unavailable` count (it was count 2, unavailable 1).
+    expect(s.untrusted).toEqual({ amount: 12_345, count: 1, unavailable: 0 });
+    expect(s.pnlMissing).toBe(1);
   });
 
   it("review WR-05: a summed holding whose key is missing from apiKeys is status UNKNOWN, not trusted — it stays in the total and is counted in unknownStatus, never in untrusted", () => {
@@ -486,18 +492,19 @@ describe("managerSideKeyIds — the keys the payload names as manager-side (D-20
 
 describe("holdingEquityIsReported — in lockstep with holdingEquityContributionLocal (review round 2 WR-02)", () => {
   // Hand-listed. `substituted` is true exactly where the contribution helper
-  // puts its 0 in place of a figure the venue did not report. The lockstep
+  // puts its 0 (or, for a null derivative P&L since 167.1.1.2 D-06, its null)
+  // in place of a figure the venue did not report. The lockstep
   // claim is that `holdingEquityIsReported` answers false on exactly those
   // rows, so a disclosure never presents a defaulted 0 as a known figure.
   const ROWS: Array<{
     label: string;
     holding: DashboardHolding;
-    contribution: number;
+    contribution: number | null;
     substituted: boolean;
   }> = [
     { label: "derivative, P&L 250", holding: buildHolding({ holding_type: "derivative", value_usd: 900_000, unrealized_pnl_usd: 250 }), contribution: 250, substituted: false },
     { label: "derivative, P&L 0 (a known zero)", holding: buildHolding({ holding_type: "derivative", value_usd: 900_000, unrealized_pnl_usd: 0 }), contribution: 0, substituted: false },
-    { label: "derivative, P&L null", holding: buildHolding({ holding_type: "derivative", value_usd: 900_000, unrealized_pnl_usd: null }), contribution: 0, substituted: true },
+    { label: "derivative, P&L null", holding: buildHolding({ holding_type: "derivative", value_usd: 900_000, unrealized_pnl_usd: null }), contribution: null, substituted: true },
     { label: "derivative, P&L NaN", holding: buildHolding({ holding_type: "derivative", value_usd: 900_000, unrealized_pnl_usd: Number.NaN }), contribution: 0, substituted: true },
     { label: "derivative, P&L +Infinity", holding: buildHolding({ holding_type: "derivative", value_usd: 900_000, unrealized_pnl_usd: Number.POSITIVE_INFINITY }), contribution: 0, substituted: true },
     { label: "derivative, P&L -Infinity", holding: buildHolding({ holding_type: "derivative", value_usd: 900_000, unrealized_pnl_usd: Number.NEGATIVE_INFINITY }), contribution: 0, substituted: true },
@@ -513,7 +520,7 @@ describe("holdingEquityIsReported — in lockstep with holdingEquityContribution
     expect(holdingEquityIsReported(holding)).toBe(!substituted);
   });
 
-  it("summarizeLiveHoldings counts an untrusted derivative with a NaN P&L and an untrusted spot holding with a NaN value as unavailable, and the total is unchanged", () => {
+  it("summarizeLiveHoldings (167.1.1.2 D-06): a NaN-P&L derivative is counted in pnlMissing and left out of the untrusted part, an untrusted spot with a NaN value stays in it as unavailable, and the total is unchanged", () => {
     const nanDeriv = buildHolding({
       venue: "venue-n1",
       symbol: "AUMTRUST-N1-PERP",
@@ -532,10 +539,139 @@ describe("holdingEquityIsReported — in lockstep with holdingEquityContribution
       holdings: [H_TRUSTED, H_SIGN_IN_FAILED, nanDeriv, nanSpot],
       contributing: [KEY_TRUSTED, KEY_SIGN_IN_FAILED, KEY_SIGN_IN_FAILED_DERIV],
     });
-    // D-03: 480,000 + 12,345 + 0 + 0 = 492,345, and the 700,000 notional
-    // never leaks in.
+    // D-03: 480,000 + 12,345 + 0 (NaN spot) = 492,345, and the 700,000
+    // notional never leaks in. The NaN derivative adds nothing.
     expect(s.total).toBe(492_345);
-    expect(s.untrusted).toEqual({ amount: 12_345, count: 3, unavailable: 2 });
+    // H_SIGN_IN_FAILED plus the NaN spot stay (count 2, the spot unavailable 1);
+    // the NaN derivative is no longer in the part (it was count 3, unavailable 2).
+    expect(s.untrusted).toEqual({ amount: 12_345, count: 2, unavailable: 1 });
+    expect(s.pnlMissing).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 167.1.1.2 D-06 — pnlMissing: what the pass left out, counted per row
+// ---------------------------------------------------------------------------
+
+describe("summarizeLiveHoldings — [167.1.1.2 D-06] pnlMissing", () => {
+  const spotBtc = (key: string, venue = "venue-p1") =>
+    buildHolding({ venue, symbol: "BTC", value_usd: 1_000, api_key_id: key });
+  const perpNullPnl = (key: string, venue = "venue-p2") =>
+    buildHolding({
+      venue,
+      symbol: "ETH-PERP",
+      holding_type: "derivative",
+      value_usd: 600_000,
+      unrealized_pnl_usd: null,
+      side: "long",
+      api_key_id: key,
+    });
+
+  it("a trusted key's spot 1,000 plus a null-P&L perp: total 1,000, pnlMissing 1, nothing untrusted", () => {
+    const s = summarize({
+      holdings: [spotBtc(KEY_TRUSTED), perpNullPnl(KEY_TRUSTED)],
+      contributing: [KEY_TRUSTED],
+    });
+    expect(s.total).toBe(1_000);
+    expect(s.pnlMissing).toBe(1);
+    expect(s.untrusted.count).toBe(0);
+  });
+
+  it("the same book on a key needing attention: the spot is the only untrusted row, so the part reads 1,000 over 1 holding, never 2", () => {
+    const s = summarize({
+      holdings: [spotBtc(KEY_SIGN_IN_FAILED), perpNullPnl(KEY_SIGN_IN_FAILED)],
+      contributing: [KEY_SIGN_IN_FAILED],
+    });
+    expect(s.total).toBe(1_000);
+    expect(s.pnlMissing).toBe(1);
+    expect(s.untrusted).toEqual({ amount: 1_000, count: 1, unavailable: 0 });
+  });
+
+  it("a NaN-P&L derivative is left out too (total unchanged, pnlMissing 1), but a NaN spot value is NOT counted (rule 3: spot is never pnlMissing)", () => {
+    const nanPerp = buildHolding({
+      venue: "venue-p3",
+      symbol: "SOL-PERP",
+      holding_type: "derivative",
+      value_usd: 50_000,
+      unrealized_pnl_usd: Number.NaN,
+      api_key_id: KEY_TRUSTED,
+    });
+    const nanSpot = buildHolding({
+      venue: "venue-p4",
+      symbol: "DOGE",
+      value_usd: Number.NaN,
+      api_key_id: KEY_TRUSTED,
+    });
+    const s = summarize({
+      holdings: [spotBtc(KEY_TRUSTED), nanPerp],
+      contributing: [KEY_TRUSTED],
+    });
+    expect(s.total).toBe(1_000);
+    expect(s.pnlMissing).toBe(1);
+    const t = summarize({
+      holdings: [spotBtc(KEY_TRUSTED), nanSpot],
+      contributing: [KEY_TRUSTED],
+    });
+    expect(t.total).toBe(1_000);
+    expect(t.pnlMissing).toBe(0);
+  });
+
+  it("counts per ROW: two keys each holding a null-P&L ETH-PERP give pnlMissing 2", () => {
+    const s = summarize({
+      holdings: [
+        perpNullPnl(KEY_TRUSTED, "venue-p5"),
+        perpNullPnl(KEY_SIGN_IN_FAILED, "venue-p6"),
+      ],
+      contributing: [KEY_TRUSTED, KEY_SIGN_IN_FAILED],
+    });
+    expect(s.total).toBe(0);
+    expect(s.pnlMissing).toBe(2);
+    expect(s.untrusted.count).toBe(0);
+  });
+
+  it("rule 5: a null-P&L derivative the narrowing already dropped stays in its excluded part (unavailable 1, amount 0) and is NOT pnlMissing", () => {
+    const s = summarize({
+      holdings: [spotBtc(KEY_SIGN_IN_FAILED), perpNullPnl(KEY_TRUSTED)],
+      contributing: [KEY_SIGN_IN_FAILED],
+    });
+    expect(s.total).toBe(1_000);
+    expect(s.pnlMissing).toBe(0);
+    expect(s.excludedTrusted).toEqual({ amount: 0, count: 1, unavailable: 1 });
+  });
+
+  it("a toggled-OFF null-P&L derivative is not counted", () => {
+    const perp = perpNullPnl(KEY_TRUSTED);
+    const s = summarize({
+      holdings: [perp],
+      contributing: [KEY_TRUSTED],
+      toggles: { [ref(perp)]: false },
+    });
+    expect(s.pnlMissing).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 167.1.1.2 D-06 — the one sentence builder (UI-SPEC P0)
+// ---------------------------------------------------------------------------
+
+describe("pnlMissingSentence — [167.1.1.2 D-06, UI-SPEC P0] the sentence both surfaces render", () => {
+  // Every expected string is typed literally, never produced by the builder.
+  it("1 is singular, with the terminal period", () => {
+    expect(pnlMissingSentence(1)).toBe("1 derivative without reported P&L left out.");
+  });
+
+  it("2 is plural", () => {
+    expect(pnlMissingSentence(2)).toBe("2 derivatives without reported P&L left out.");
+  });
+
+  it("288 interpolates the raw integer, no thousands separator", () => {
+    expect(pnlMissingSentence(288)).toBe("288 derivatives without reported P&L left out.");
+    expect(pnlMissingSentence(1_234)).toBe("1234 derivatives without reported P&L left out.");
+  });
+
+  it("0 and a negative count are the empty string, so no surface can render a 0-count sentence", () => {
+    expect(pnlMissingSentence(0)).toBe("");
+    expect(pnlMissingSentence(-1)).toBe("");
   });
 });
 
@@ -583,6 +719,12 @@ describe("buildKeyTrustClause — D-06 (b) excludes $Y from keys needing attenti
   it("D-06 (b) / D-07: the excluded part renders on its COUNT — a counted $0 still reads 'excludes $0', never nothing", () => {
     expect(buildKeyTrustClause(NONE, NONE, RENDER, part(0, 1))).toBe(
       "excludes $0 from keys needing attention",
+    );
+  });
+
+  it("IN-01 / IN-05 ordering intent (moved here by 167.1.1.2): an unreported count follows ITS OWN part, so a left-out derivative cannot make the count read as qualifying the unknown-status amount", () => {
+    expect(buildKeyTrustClause(part(0, 1, 1), part(4_444, 1), RENDER)).toBe(
+      "includes 1 holding from keys needing attention (value unavailable for 1 holding) and $4444 from keys with an unknown sync status",
     );
   });
 
@@ -829,11 +971,12 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
   ]);
   const partAmount = (p: { amount: number } | undefined) => p?.amount ?? 0;
 
-  it("for every generated book: Σ toggled-on equity = total + excludedUntrusted + excludedUnknownStatus + excludedTrusted + excludedManagerSide", () => {
+  it("for every generated book: each toggled-on row is in exactly one of the total, an excluded part or pnlMissing, and the amounts match an independent inline rule", () => {
     const rand = lcg(1672);
     const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(rand() * xs.length)];
     let casesWithTrustedExclusion = 0;
     let casesWithNotConnectedExclusion = 0;
+    let casesWithPnlMissing = 0;
     for (let c = 0; c < 256; c += 1) {
       const nHoldings = 1 + Math.floor(rand() * 8);
       const holdings: DashboardHolding[] = [];
@@ -883,25 +1026,60 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
         eligibleApiKeyIds: eligible,
       });
       if (s.excludedNotConnected.count > 0) casesWithNotConnectedExclusion += 1;
-      // The oracle is the plain sum of the equity of every toggled-on holding,
-      // with the equity definition the total itself uses.
-      let expected = 0;
+      // The oracle is an INDEPENDENT inline rule (not the code under test):
+      // spot = finite value else 0; derivative = finite P&L, or skipped when
+      // null / non-finite. A toggled-on row on a narrowed-out key sits in an
+      // excluded part (a left-out derivative adds 0 there); any other row is in
+      // the total, or, when a derivative with no reported P&L, in pnlMissing.
+      const narrowed = (k: string) => contributing.length > 0 && !contributing.includes(k);
+      const rule = (h: DashboardHolding): number | null => {
+        if (h.holding_type === "derivative") {
+          const p = h.unrealized_pnl_usd;
+          return typeof p === "number" && Number.isFinite(p) ? p : null;
+        }
+        return Number.isFinite(h.value_usd) ? h.value_usd : 0;
+      };
+      let expectedTotal = 0;
+      let expectedExcluded = 0;
+      let expectedMissing = 0;
+      let totalRows = 0;
+      let excludedRows = 0;
+      let toggledOnRows = 0;
       for (const h of holdings) {
-        if (toggles[ref(h)]) expected += holdingEquityContributionLocal(h);
+        if (!toggles[ref(h)]) continue;
+        toggledOnRows += 1;
+        const v = rule(h);
+        if (narrowed(h.api_key_id)) {
+          excludedRows += 1;
+          expectedExcluded += v ?? 0;
+        } else if (v === null) {
+          expectedMissing += 1;
+        } else {
+          totalRows += 1;
+          expectedTotal += v;
+        }
       }
-      const accounted =
-        s.total +
+      const excludedAmount =
         partAmount(s.excludedUntrusted) +
         partAmount(s.excludedUnknownStatus) +
-        partAmount((s as { excludedTrusted?: { amount: number } }).excludedTrusted) +
+        partAmount(s.excludedTrusted) +
         partAmount(s.excludedNotConnected) +
-        partAmount(
-          (s as { excludedManagerSide?: { amount: number } }).excludedManagerSide,
-        );
-      expect(
-        accounted,
-        `case ${c}: ${JSON.stringify({ contributing, managerSide })}`,
-      ).toBeCloseTo(expected, 6);
+        partAmount(s.excludedManagerSide);
+      const excludedCount =
+        s.excludedUntrusted.count +
+        s.excludedUnknownStatus.count +
+        s.excludedTrusted.count +
+        s.excludedNotConnected.count +
+        s.excludedManagerSide.count;
+      const label = `case ${c}: ${JSON.stringify({ contributing, managerSide })}`;
+      expect(s.total, label).toBeCloseTo(expectedTotal, 6);
+      expect(excludedAmount, label).toBeCloseTo(expectedExcluded, 6);
+      expect(s.pnlMissing, label).toBe(expectedMissing);
+      // Row conservation: every toggled-on row is in exactly one of the total,
+      // an excluded part, or pnlMissing.
+      expect(excludedCount, label).toBe(excludedRows);
+      expect(totalRows + excludedCount + s.pnlMissing, label).toBe(toggledOnRows);
+      if (expectedMissing > 0) casesWithPnlMissing += 1;
       if (
         holdings.some(
           (h) =>
@@ -910,7 +1088,7 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
             !contributing.includes(h.api_key_id) &&
             !managerSide.includes(h.api_key_id) &&
             (h.api_key_id === KEY_TRUSTED || h.api_key_id === KEY_ERROR) &&
-            holdingEquityContributionLocal(h) !== 0,
+            (holdingEquityContributionLocal(h) ?? 0) !== 0,
         )
       ) {
         casesWithTrustedExclusion += 1;
@@ -920,6 +1098,8 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
     expect(casesWithTrustedExclusion).toBeGreaterThan(20);
     // ...and the not-connected case review C2 WR-03 closes.
     expect(casesWithNotConnectedExclusion).toBeGreaterThan(20);
+    // ...and the left-out derivative 167.1.1.2 D-06 counts.
+    expect(casesWithPnlMissing).toBeGreaterThan(20);
   });
 });
 

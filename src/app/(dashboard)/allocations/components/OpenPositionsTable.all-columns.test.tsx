@@ -191,7 +191,7 @@ describe("[169 M-4] the footer total over rows with no P&L", () => {
     expect(total.textContent).toBe("—");
     expect(total.getAttribute("style") ?? "").not.toContain("color");
     expect(getByTestId("open-positions-pnl-unavailable-note").textContent).toBe(
-      "P&L unavailable for 2 of 2 positions.",
+      "2 derivatives without reported P&L left out.",
     );
   });
 
@@ -201,11 +201,11 @@ describe("[169 M-4] the footer total over rows with no P&L", () => {
     );
     expect(footerTotalCell(container).textContent).toBe("—");
     expect(getByTestId("open-positions-pnl-unavailable-note").textContent).toBe(
-      "P&L unavailable for 1 of 1 position.",
+      "1 derivative without reported P&L left out.",
     );
   });
 
-  it("some P&L missing: the total sums the reported rows and is labelled partial", () => {
+  it("some P&L missing: the total sums the reported rows and the note names the left-out rows", () => {
     const { container, getByTestId } = render(
       <OpenPositionsTable
         rows={[
@@ -220,10 +220,79 @@ describe("[169 M-4] the footer total over rows with no P&L", () => {
     expect(total.textContent).toBe("+$1,300.00");
     expect(total.getAttribute("style") ?? "").toContain("var(--color-positive)");
     const note = getByTestId("open-positions-pnl-unavailable-note");
-    expect(note.textContent).toBe("Partial total: P&L unavailable for 1 of 3 positions.");
+    expect(note.textContent).toBe("1 derivative without reported P&L left out.");
     // Muted caption, the key-trust note's tone (D-09).
     expect(note.className).toContain("text-text-muted");
     expect(note.getAttribute("colspan")).toBe("7");
+  });
+
+  it("167.1.1.2 D-06: five rows, two with no reported P&L: the total is the three reported rows and the note says 2 derivatives", () => {
+    const { container, getByTestId } = render(
+      <OpenPositionsTable
+        rows={[
+          makeRow({ id: "a", unrealized_pnl_usd: 100 }),
+          makeRow({ id: "b", unrealized_pnl_usd: -40 }),
+          makeRow({ id: "c", unrealized_pnl_usd: 10 }),
+          makeRow({ id: "d", unrealized_pnl_usd: null }),
+          makeRow({ id: "e", unrealized_pnl_usd: null }),
+        ]}
+      />,
+    );
+    // 100 - 40 + 10 = 70, hand-summed over the three reported rows.
+    expect(footerTotalCell(container).textContent).toBe("+$70.00");
+    expect(getByTestId("open-positions-pnl-unavailable-note").textContent).toBe(
+      "2 derivatives without reported P&L left out.",
+    );
+  });
+
+  it("167.1.1.2 D-06: five rows, none with a reported P&L: the total is the em-dash and the note says 5 derivatives", () => {
+    const { container, getByTestId } = render(
+      <OpenPositionsTable
+        rows={[
+          makeRow({ id: "a", unrealized_pnl_usd: null }),
+          makeRow({ id: "b", unrealized_pnl_usd: null }),
+          makeRow({ id: "c", unrealized_pnl_usd: null }),
+          makeRow({ id: "d", unrealized_pnl_usd: null }),
+          makeRow({ id: "e", unrealized_pnl_usd: null }),
+        ]}
+      />,
+    );
+    const total = footerTotalCell(container);
+    expect(total.textContent).toBe("—");
+    expect(total.getAttribute("style") ?? "").not.toContain("color");
+    expect(getByTestId("open-positions-pnl-unavailable-note").textContent).toBe(
+      "5 derivatives without reported P&L left out.",
+    );
+  });
+
+  it("167.1.1.2 D-06: a NaN P&L is counted like a null, and the old partial-total wording never renders", () => {
+    const { container, getByTestId } = render(
+      <OpenPositionsTable
+        rows={[
+          makeRow({ id: "a", unrealized_pnl_usd: 250 }),
+          makeRow({ id: "b", unrealized_pnl_usd: Number.NaN }),
+        ]}
+      />,
+    );
+    expect(footerTotalCell(container).textContent).toBe("+$250.00");
+    const note = getByTestId("open-positions-pnl-unavailable-note");
+    expect(note.textContent).toBe("1 derivative without reported P&L left out.");
+    expect(container.textContent).not.toContain("Partial total");
+    expect(container.textContent).not.toContain("0 derivatives without reported");
+  });
+
+  it("167.1.1.2 D-06: counting is per row — two keys holding the same perp with no reported P&L count as 2", () => {
+    const { getByTestId } = render(
+      <OpenPositionsTable
+        rows={[
+          makeRow({ id: "k1-btc", symbol: "BTC-PERP", api_key_id: "key-1", unrealized_pnl_usd: null }),
+          makeRow({ id: "k2-btc", symbol: "BTC-PERP", api_key_id: "key-2", unrealized_pnl_usd: null }),
+        ]}
+      />,
+    );
+    expect(getByTestId("open-positions-pnl-unavailable-note").textContent).toBe(
+      "2 derivatives without reported P&L left out.",
+    );
   });
 
   it("control: every P&L reported, including a real zero, carries no note", () => {

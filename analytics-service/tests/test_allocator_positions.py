@@ -727,6 +727,69 @@ async def test_deribit_renders_derivatives_spot_deferred(monkeypatch):
     mock_exchange.fetch_balance.assert_not_called()
 
 
+def _deribit_linear_perp(floating_profit_loss: object, *, include_pnl: bool = True) -> dict:
+    """A CCXT-unified Deribit linear (USDC) perp position as the REAL
+    ``fetch_positions`` / ``_normalize_deribit_position`` consume it. The
+    normaliser reads ``info`` directly; the top-level unified fields are the
+    shape ccxt emits and are deliberately not what the result is built from."""
+    info: dict = {
+        "instrument_name": "BTC_USDC-PERPETUAL",
+        "kind": "future",
+        "direction": "buy",
+        "size": 30000,
+        "size_currency": 0.6,
+        "average_price": 49800.0,
+        "mark_price": 50000.0,
+        "index_price": 50000.0,
+    }
+    if include_pnl:
+        info["floating_profit_loss"] = floating_profit_loss
+    return {
+        "symbol": "BTC/USDC:USDC",
+        "contracts": info["size"],
+        "contractSize": None,
+        "notional": info["size_currency"],
+        "entryPrice": info["average_price"],
+        "markPrice": info["mark_price"],
+        "unrealizedPnl": info.get("floating_profit_loss"),
+        "side": "long",
+        "info": info,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "position, expected",
+    [
+        # 167.1.1.2 D-05: the venue said nothing -> NULL, never a fabricated 0.0.
+        (_deribit_linear_perp(None, include_pnl=False), None),
+        (_deribit_linear_perp(None), None),
+        (_deribit_linear_perp(""), None),
+        # A REPORTED zero is a real zero and stays 0.0.
+        (_deribit_linear_perp(0), 0.0),
+        (_deribit_linear_perp("0"), 0.0),
+        (_deribit_linear_perp(120.0), 120.0),
+    ],
+    ids=["key-absent", "null", "empty-string", "int-zero", "string-zero", "reported-number"],
+)
+async def test_deribit_unreported_pnl_reaches_the_row_as_none_end_to_end(position, expected):
+    """Tracer (167.1.1.2 plan 02, D-05). NO monkeypatch of ``fetch_positions``:
+    the real Deribit normaliser and the real row builder both run, so a
+    zero-default at EITHER layer turns this RED."""
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "deribit"
+    mock_exchange.fetch_balance = AsyncMock(return_value={"total": {}})
+    mock_exchange.fetch_positions = AsyncMock(return_value=[position])
+
+    rows, warning = await fetch_allocator_holdings("deribit", mock_exchange)
+
+    assert warning is None
+    deriv = [r for r in rows if r["holding_type"] == "derivative"]
+    assert len(deriv) == 1
+    assert deriv[0]["unrealized_pnl_usd"] == expected
+    assert (deriv[0]["unrealized_pnl_usd"] is None) == (expected is None)
+
+
 def test_deribit_error_class_removed():
     """f3 Path B is lifted — the allocator-side DeribitNotSupportedError no
     longer exists (its only purpose was to defer Deribit spot by raising).

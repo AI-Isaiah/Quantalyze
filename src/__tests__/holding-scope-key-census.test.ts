@@ -247,8 +247,8 @@ export const CLASSIFICATION: Classification = {
     M1: {
       count: 2,
       verdict: "merges-on-purpose",
-      symbols: ["holdingValueByRef"],
-      reason: "The import and the audit recompute's `holdingValueByRef`: it sums value per scope ref over rows that are already one-key-per-account-day (oneKeyPerAccountDay), the same per-ref line the Scenario draft carries. Two keys on one ref are two summands, not one overwritten entry.",
+      symbols: ["holdingEquityByRef"],
+      reason: "The import and the audit recompute's `holdingEquityByRef`: it sums each row's equity contribution (167.1.1.2 D-04) per scope ref over rows that are already one-key-per-account-day (oneKeyPerAccountDay), the same per-ref line the Scenario draft carries. Two keys on one ref are two summands, not one overwritten entry.",
     },
     M7: {
       count: 1,

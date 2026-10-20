@@ -1984,9 +1984,9 @@ describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
   // row from custody and stamped a flat `server_aum` — recording $20,000 for a
   // decision made at $500,000 — and `manual_aum_usd` appeared NOWHERE in the
   // metadata, so the divergence was not detectable after the fact.
-  // `size_at_decision_usd` is the denominator the daily-delta cron divides
-  // realized PnL by, so an undetectable 25× error in it is an undetectable 25×
-  // error in every derived return.
+  // The figure lives in `audit_log.metadata` only (167.1.1.2 P-01: nothing in the
+  // repo reads it after the commit), so an undetectable 25× gap in it is an
+  // audit record of a financial decision that misstates its magnitude.
   // ─────────────────────────────────────────────────────────────────────────
 
   /** The founder-shaped conflict: a $40,000 custody book, a $1,000,000 manual
@@ -2158,28 +2158,32 @@ describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // 151 red-team G3 — ONE BASIS ON BOTH SIDES OF THE CONFLICT TEST.
+  // 151 red-team G3 — ONE BASIS ON BOTH SIDES OF THE CONFLICT TEST; 167.1.1.2
+  // D-04 — AND THE SAME BASIS SIZES THE ROW.
   //
-  // The two sides were measuring different things. `serverAumUsd` sums
-  // `value_usd` over spot + derivative — a NOTIONAL basis — while the client's
-  // figure is an EQUITY one (`liveHoldingsSum` sums
-  // `holdingEquityContributionLocal`: derivative → `unrealized_pnl_usd`), and
-  // the manual field is SEEDED from exactly that number. On a leveraged
-  // derivatives book — the founder's production book is Deribit — the two are a
-  // leverage factor apart, so an allocator who typed back the very figure the
-  // composer had just shown them landed ~10× outside a 1% tolerance and
+  // The two sides of the conflict test were measuring different things. The
+  // server summed `value_usd` over spot + derivative — a NOTIONAL basis — while
+  // the client's figure is an EQUITY one (`liveHoldingsSum` sums
+  // `holdingEquityContribution`: derivative → `unrealized_pnl_usd`), and the
+  // manual field is SEEDED from exactly that number. On a leveraged derivatives
+  // book — the founder's production book is Deribit — the two are a leverage
+  // factor apart, so an allocator who typed back the very figure the composer
+  // had just shown them landed ~10× outside a 1% tolerance and
   // `server_aum_manual_conflict` stamped EVERY audit row of a wholly legitimate
   // commit. The sentinel encoded "this book is leveraged", not "there is a
   // conflict".
   //
-  // ⚠️ THE SIZED FIGURE IS DELIBERATELY UNCHANGED. `size_at_decision_usd` is
-  // documented as the denominator the downstream daily-delta cron divides
-  // realized PnL by, so this fix touches only what the audit SAYS, never what
-  // it sizes — the pair below pins both halves.
+  // 167.1.1.2 D-04: since this phase BOTH sides AND the recorded size are on the
+  // equity basis, through the one shared `holdingEquityContribution`. G3 used to
+  // leave the size on the notional basis; that is retired. The figure is
+  // recorded in `audit_log.metadata` only (P-01: nothing in the repo reads it
+  // after the commit), so the size is the magnitude the allocator was shown, not
+  // an input to any later computation.
   //
   // A LEVERAGED book, hand-computed:
-  //   notional  Σ value_usd            = 400,000  ← still sizes the row
+  //   notional  Σ value_usd            = 400,000  ← no longer enters any figure
   //   equity    Σ unrealized_pnl_usd   =  40,000  ← what the composer displays
+  //                                                 AND what sizes the row
   //   i.e. 10× leverage, the shape the founder's Deribit book has.
   // ─────────────────────────────────────────────────────────────────────────
   function leveragedDerivativesBook() {
@@ -2197,7 +2201,7 @@ describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
     holdingsErrorFixture = null;
   }
 
-  it("G3: on a LEVERAGED book, typing back the equity figure the composer displayed is NOT a conflict — and the row is still sized by server notional truth", async () => {
+  it("G3: on a LEVERAGED book, typing back the equity figure the composer displayed is NOT a conflict — and the row is sized on that same equity basis", async () => {
     leveragedDerivativesBook();
     okAdd();
 
@@ -2218,11 +2222,10 @@ describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
     // so this read "server_aum_manual_conflict" on a commit with no conflict in
     // it — on every row, for the founder's whole book.
     expect(meta._size_source).toBe("server_aum");
-    // …and the SIZING basis did not move with the comparison basis:
-    // 50% × 400,000 (notional) = 200,000, hand-computed. If this ever reads
-    // 20,000 (= 50% × the 40,000 equity total) the daily-delta cron's PnL
-    // denominator has been silently changed — a founder decision, not this one.
-    expect(meta.size_at_decision_usd).toBe(200_000);
+    // …and the SIZING basis is the comparison basis (167.1.1.2 D-04):
+    // 50% × 40,000 (equity, Σ unrealized_pnl_usd) = 20,000, hand-computed.
+    // Never 50% × 400,000 = 200,000: a derivative's notional enters no figure.
+    expect(meta.size_at_decision_usd).toBe(20_000);
     expect(meta.client_manual_aum_usd).toBe(40_000);
   });
 
@@ -2245,8 +2248,32 @@ describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
 
     const meta = getAuditMetadata(0);
     expect(meta._size_source).toBe("server_aum_manual_conflict");
-    expect(meta.size_at_decision_usd).toBe(200_000);
+    // 50% × 40,000 equity = 20,000 (hand-computed), same as the no-conflict row.
+    expect(meta.size_at_decision_usd).toBe(20_000);
     expect(meta.client_manual_aum_usd).toBe(1_000_000);
+  });
+
+  it("167.1.1.2 notional invariance: the same book at a 4,000,000 notional (P&L still 40,000) records the same 20,000", async () => {
+    // A derivative's contribution is its P&L, so ten times the notional moves
+    // nothing. 50% × 40,000 = 20,000, hand-computed. Under the old notional sum
+    // this book read 50% × 4,000,000 = 2,000,000.
+    leveragedDerivativesBook();
+    holdingsFixture[0].value_usd = 4_000_000;
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 50, size_at_decision_usd: 20_000 },
+        ],
+        manual_aum_usd: 40_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("server_aum");
+    expect(meta.size_at_decision_usd).toBe(20_000);
   });
 
   it("F3: precedence is intact — a FAILED lookup still outranks everything, and the client value rides along without promoting itself", async () => {
