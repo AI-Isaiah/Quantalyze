@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.132.9.1] - 2026-10-20 — records: close TITLES 170.1.1
+
+### Notes
+- Phase 170.1.1 TITLES is closed. It shipped as v0.132.9.0 (#1093). Verification passed (4/4), and the security audit is SECURED (16/16 threats closed).
+- SC-4 was read on production after the deploy, at 367 CSS px. That is the tab's 400% zoom, stricter than both 390 px and the 640 CSS px of desktop 200% zoom. Every measured page has its own "<page> — Quantalyze" tab title and its sentence-case heading, and nothing scrolls sideways. `/referral` returns "Page not found". The reading is in `170.1.1-VERIFICATION.md`.
+- The phase directory (9 plan summaries, review with two fix rounds, verification, security audit) lands on `main`. ROADMAP and STATE record the close.
+- One review MEDIUM (observability, not user-facing) is booked as `[170.1.1-PDF-TITLE-SINGLE-NOISE]` in TODOS.md, with the two LOWs (wizard H1 title case, untitled `/scenario-share/[token]`) noted in the same entry. The `/portfolio-pdf` title read uses `.single()`, so a deleted portfolio is captured as a Sentry error.
+
 ## [0.132.9.0] - 2026-10-20 — TITLES: every page has its own tab title and a sentence-case heading (Phase 170.1.1)
 
 ### Added
