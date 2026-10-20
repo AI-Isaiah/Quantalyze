@@ -31,6 +31,7 @@ import {
   COMPUTE_JOB_KIND_LABELS,
   COMPUTE_JOB_STATUS_LABELS,
   DISCLOSURE_TIER_LABELS,
+  HOLDING_SIDE_LABELS,
   INTRO_SNAPSHOT_STATUS_LABELS,
   INTRO_SOURCE_LABELS,
   MATCH_DECISION_LABELS,
@@ -104,13 +105,18 @@ const UNCARRIED_MIGRATIONS: Array<{ name: string; sql: string }> = (() => {
  * The newest `ADD CONSTRAINT <name> CHECK (...)` value list in a migration the
  * dump does not carry, or null when none re-declares it.
  */
-function newestUncarriedCheckSet(constraintName: string): string[] | null {
+function newestUncarriedCheckSet(
+  constraintName: string,
+  migrations: Array<{ name: string; sql: string }> = UNCARRIED_MIGRATIONS,
+): string[] | null {
+  // The clause ends at `;` or `,` (a multi-clause ALTER TABLE), optionally
+  // after `NOT VALID` (the repo's own idiom, 20260510181440_trades_side_check_constraint.sql).
   const re = new RegExp(
-    `ADD\\s+CONSTRAINT\\s+"?${constraintName}"?\\s+CHECK\\s*\\(([\\s\\S]*?)\\)\\s*;`,
+    `ADD\\s+CONSTRAINT\\s+"?${constraintName}"?\\s+CHECK\\s*\\(([\\s\\S]*?)\\)\\s*(?:NOT\\s+VALID\\s*)?[;,]`,
     "gi",
   );
-  for (let i = UNCARRIED_MIGRATIONS.length - 1; i >= 0; i--) {
-    const hits = [...UNCARRIED_MIGRATIONS[i].sql.matchAll(re)];
+  for (let i = migrations.length - 1; i >= 0; i--) {
+    const hits = [...migrations[i].sql.matchAll(re)];
     if (hits.length > 0) {
       return [...hits[hits.length - 1][1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
     }
@@ -141,6 +147,55 @@ function checkSet(constraintName: string): string[] {
   expect(values.length, `${constraintName} captured no values`).toBeGreaterThan(0);
   return values;
 }
+
+describe("newestUncarriedCheckSet (the newest-wins resolver, on fixture text)", () => {
+  it("reads the plain form", () => {
+    const m = [{ name: "a.sql", sql: "ALTER TABLE t ADD CONSTRAINT c_check CHECK (k IN ('x', 'y'));" }];
+    expect(newestUncarriedCheckSet("c_check", m)).toEqual(["x", "y"]);
+  });
+
+  it("reads the = ANY (ARRAY[...]) form with casts", () => {
+    const m = [
+      {
+        name: "a.sql",
+        sql: `ALTER TABLE t ADD CONSTRAINT "c_check" CHECK (("k" = ANY (ARRAY['x'::text, 'y'::text])));`,
+      },
+    ];
+    expect(newestUncarriedCheckSet("c_check", m)).toEqual(["x", "y"]);
+  });
+
+  it("stops at NOT VALID and does not read RAISE literals that follow", () => {
+    const m = [
+      {
+        name: "a.sql",
+        sql: `DO $$ BEGIN
+          ALTER TABLE t ADD CONSTRAINT c_check CHECK (k IN ('x', 'y')) NOT VALID;
+          IF n > 0 THEN RAISE NOTICE 'not yet validated (%)', n; END IF;
+        END $$;`,
+      },
+    ];
+    expect(newestUncarriedCheckSet("c_check", m)).toEqual(["x", "y"]);
+  });
+
+  it("stops at a comma in a multi-clause ALTER TABLE", () => {
+    const m = [
+      {
+        name: "a.sql",
+        sql: "ALTER TABLE t ADD CONSTRAINT c_check CHECK (k IN ('x', 'y')), ADD COLUMN z text DEFAULT 'q';",
+      },
+    ];
+    expect(newestUncarriedCheckSet("c_check", m)).toEqual(["x", "y"]);
+  });
+
+  it("the newest migration wins; null when none re-declares it", () => {
+    const m = [
+      { name: "1.sql", sql: "ALTER TABLE t ADD CONSTRAINT c_check CHECK (k IN ('old'));" },
+      { name: "2.sql", sql: "ALTER TABLE t ADD CONSTRAINT c_check CHECK (k IN ('new'));" },
+    ];
+    expect(newestUncarriedCheckSet("c_check", m)).toEqual(["new"]);
+    expect(newestUncarriedCheckSet("other_check", m)).toBeNull();
+  });
+});
 
 function expectSameSet(constraint: string, keys: string[]) {
   const sql = checkSet(constraint);
@@ -176,6 +231,7 @@ const CENSUS: Array<[constraint: string, keys: string[]]> = [
   ["strategy_analytics_computation_status_check", Object.keys(ANALYTICS_STATUS_LABELS)],
   ["strategies_disclosure_tier_check", Object.keys(DISCLOSURE_TIER_LABELS)],
   ["strategies_source_check", Object.keys(STRATEGY_SOURCE_LABELS)],
+  ["allocator_holdings_side_check", Object.keys(HOLDING_SIDE_LABELS)],
 ];
 
 describe("labelOf", () => {
@@ -224,8 +280,13 @@ describe("wrappers: a real value reads its label", () => {
     expect(BREACH_REASON_EMPTY_LABEL).toBe("Composite score above threshold");
     expect(matchMissReasonLabel("not_in_top_3")).toBe("Ranked below top 3");
     expect(matchMissReasonLabel("no_prior_batch")).toBe("No earlier match batch");
-    // match_eval.py emits exactly these two reasons for a missed intro.
-    expect(Object.keys(MATCH_MISS_REASON_LABELS).sort()).toEqual(["no_prior_batch", "not_in_top_3"]);
+    // The map covers exactly the `"reason":` literals match_eval.py emits for a missed intro.
+    const emitted = [
+      ...readFileSync(join(REPO_ROOT, "analytics-service", "services", "match_eval.py"), "utf8")
+        .matchAll(/"reason":\s*([^\n]*)/g),
+    ].flatMap((m) => [...m[1].matchAll(/"([a-z0-9_]+)"/g)].map((x) => x[1]));
+    expect(emitted.length, "no reason literal found in match_eval.py").toBeGreaterThan(0);
+    expect(Object.keys(MATCH_MISS_REASON_LABELS).sort()).toEqual([...new Set(emitted)].sort());
     expect(Object.keys(BREACH_REASON_LABELS).sort()).toEqual(["correlation_ceiling", "max_weight"]);
   });
 
