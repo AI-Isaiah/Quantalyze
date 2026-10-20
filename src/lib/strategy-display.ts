@@ -20,7 +20,7 @@ export interface DisplayableStrategy {
 export function displayStrategyName(
   strategy: DisplayableStrategy | null | undefined,
 ): string {
-  if (!strategy) return "(strategy)";
+  if (!strategy) return "Unnamed strategy";
   if (strategy.codename) return strategy.codename;
   if (strategy.disclosure_tier === "institutional" && strategy.name) {
     return strategy.name;

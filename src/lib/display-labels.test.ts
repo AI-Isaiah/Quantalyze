@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { EXCHANGE_DISPLAY } from "@/lib/closed-sets";
+import { statusLabelMap } from "@/components/ui/Badge";
 import { ROLE_META } from "@/lib/auth-types";
 import { ROLES } from "@/lib/types";
 import {
@@ -272,6 +273,25 @@ describe("supportedExchangeLabel (free-text exchange lists)", () => {
   });
 });
 
+describe("Badge statusLabelMap", () => {
+  it("covers exactly strategies_status_check union contact_requests_status_check", () => {
+    const union = [
+      ...new Set([
+        ...checkSet("strategies_status_check"),
+        ...checkSet("contact_requests_status_check"),
+      ]),
+    ];
+    const keys = Object.keys(statusLabelMap);
+    expect(
+      {
+        onlyInSql: union.filter((v) => !keys.includes(v)),
+        onlyInTs: keys.filter((k) => !union.includes(k)),
+      },
+      "Badge statusLabelMap and the strategy/contact-request status CHECK sets differ",
+    ).toEqual({ onlyInSql: [], onlyInTs: [] });
+  });
+});
+
 describe("census freshness", () => {
   it("no migration newer than the baseline touches a constraint under test", () => {
     const carried = readFileSync(
@@ -293,7 +313,11 @@ describe("census freshness", () => {
     const offenders: string[] = [];
     for (const f of newer) {
       const sql = stripSqlComments(readFileSync(join(migrationsDir, f), "utf8"));
-      for (const [constraint] of CENSUS) {
+      for (const constraint of [
+        ...CENSUS.map(([c]) => c),
+        "strategies_status_check",
+        "contact_requests_status_check",
+      ]) {
         if (sql.includes(constraint)) offenders.push(`${f} mentions ${constraint}`);
       }
     }
