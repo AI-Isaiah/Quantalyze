@@ -176,3 +176,55 @@ describe("<MatchEvalDashboard> — TS-18: a 424 is the caller's venue, named", (
     ).not.toBeInTheDocument();
   });
 });
+
+describe("<MatchEvalDashboard> — 170.1.2 D-01: missed intros name their allocator and strategy", () => {
+  const ALLOCATOR_ID = "a1b2c3d4-0000-4000-8000-000000000001";
+  const STRATEGY_ID = "e5f6a7b8-0000-4000-8000-000000000002";
+
+  function missedPayload(allocator_name: string, strategy_name: string) {
+    return {
+      ...buildMetrics(),
+      missed: [
+        {
+          allocator_id: ALLOCATOR_ID,
+          strategy_id: STRATEGY_ID,
+          allocator_name,
+          strategy_name,
+          created_at: "2026-10-01T00:00:00Z",
+          rank_if_any: 7,
+          reason: "Outside the top 3",
+        },
+      ],
+    };
+  }
+
+  function mountMissed(payload: unknown) {
+    mountWith(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+  }
+
+  it("renders the allocator and strategy names the route returned", async () => {
+    mountMissed(missedPayload("Jane Allocator", "Alpha"));
+    await waitFor(() => {
+      expect(screen.getByText("Jane Allocator")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Alpha")).toBeInTheDocument();
+  });
+
+  it("shows the locked fallbacks as given and never an id fragment", async () => {
+    mountMissed(missedPayload("Unknown allocator", "Unnamed strategy"));
+    await waitFor(() => {
+      expect(screen.getByText("Unknown allocator")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Unnamed strategy")).toBeInTheDocument();
+    // The 8-character id slices this table used to print.
+    expect(document.body.textContent).not.toContain(ALLOCATOR_ID.slice(0, 8));
+    expect(document.body.textContent).not.toContain(STRATEGY_ID.slice(0, 8));
+  });
+});

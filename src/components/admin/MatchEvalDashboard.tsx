@@ -19,6 +19,8 @@ interface WeeklyRow {
 interface MissedRow {
   allocator_id: string;
   strategy_id: string;
+  allocator_name: string;
+  strategy_name: string;
   created_at: string;
   rank_if_any: number | null;
   reason: string;
@@ -295,11 +297,11 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
                   <td className="py-2 text-caption font-mono text-text-muted">
                     {new Date(m.created_at).toLocaleDateString()}
                   </td>
-                  <td className="py-2 text-caption font-mono text-text-secondary">
-                    {m.allocator_id.slice(0, 8)}
+                  <td className="py-2 text-caption text-text-secondary">
+                    {m.allocator_name}
                   </td>
-                  <td className="py-2 text-caption font-mono text-text-secondary">
-                    {m.strategy_id.slice(0, 8)}
+                  <td className="py-2 text-caption text-text-secondary">
+                    {m.strategy_name}
                   </td>
                   <td className="py-2 text-caption text-right font-mono text-text-primary">
                     {m.rank_if_any ?? "—"}

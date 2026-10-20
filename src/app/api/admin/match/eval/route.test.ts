@@ -87,6 +87,30 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
+// 170.1.2 / D-01 — the name reads. `reads` records every (table, columns, ids)
+// the route asks for; `tables` is what each table returns; `errors` makes one
+// table's read fail.
+const adminDb = vi.hoisted(() => ({
+  reads: [] as Array<{ table: string; columns: string; ids: string[] }>,
+  tables: {} as Record<string, Array<Record<string, unknown>>>,
+  errors: {} as Record<string, { message: string } | undefined>,
+}));
+
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    from: (table: string) => ({
+      select: (columns: string) => ({
+        in: async (_col: string, ids: string[]) => {
+          adminDb.reads.push({ table, columns, ids });
+          const error = adminDb.errors[table];
+          if (error) return { data: null, error };
+          return { data: adminDb.tables[table] ?? [], error: null };
+        },
+      }),
+    }),
+  }),
+}));
+
 vi.mock("@/lib/admin", () => ({
   isAdminUser: async () => adminFlag.isAdmin,
 }));
@@ -833,5 +857,136 @@ describe("[146-01 / RATE-02] GET /api/admin/match/eval — deny arms through the
     expect(res.headers.get("Retry-After")).toBe("60");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(evalState.lastArgs).toBeNull();
+  });
+});
+
+/**
+ * 170.1.2 / D-01 — the route names the ids it returns, so the dashboard never
+ * has to print an id fragment. Only two strings are added to a row, and a
+ * failed name read is the route's existing 500, never a payload of bare ids.
+ */
+describe("[170.1.2 / D-01] GET /api/admin/match/eval — allocator and strategy names", () => {
+  const ALLOCATOR = "11111111-1111-4111-8111-111111111111";
+  const OTHER_ALLOCATOR = "22222222-2222-4222-8222-222222222222";
+  const STRATEGY = "33333333-3333-4333-8333-333333333333";
+  const OTHER_STRATEGY = "44444444-4444-4444-8444-444444444444";
+
+  function missedRow(allocator_id: string, strategy_id: string) {
+    return {
+      allocator_id,
+      strategy_id,
+      created_at: "2026-10-01T00:00:00Z",
+      rank_if_any: 4,
+      reason: "Outside top 3",
+    };
+  }
+
+  beforeEach(() => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    evalState.lastArgs = null;
+    evalState.throwValue = null;
+    adminDb.reads.length = 0;
+    adminDb.tables = {};
+    adminDb.errors = {};
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("adds allocator_name and strategy_name from the display_name and name columns", async () => {
+    evalState.result = {
+      intros_shipped: 2,
+      missed: [missedRow(ALLOCATOR, STRATEGY)],
+    };
+    adminDb.tables = {
+      profiles: [{ id: ALLOCATOR, display_name: "Jane Allocator" }],
+      strategies: [{ id: STRATEGY, name: "Alpha" }],
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.intros_shipped).toBe(2);
+    expect(body.missed).toHaveLength(1);
+    expect(body.missed[0].allocator_name).toBe("Jane Allocator");
+    expect(body.missed[0].strategy_name).toBe("Alpha");
+    // The ids stay on the row (the dashboard keys on them) and nothing else
+    // about the allocator rides along: the row gains exactly two keys.
+    expect(Object.keys(body.missed[0]).sort()).toEqual(
+      [
+        "allocator_id",
+        "allocator_name",
+        "created_at",
+        "rank_if_any",
+        "reason",
+        "strategy_id",
+        "strategy_name",
+      ].sort(),
+    );
+  });
+
+  it("reads explicit columns only, once per table, over the distinct ids (T-170.1.2-07)", async () => {
+    evalState.result = {
+      missed: [
+        missedRow(ALLOCATOR, STRATEGY),
+        missedRow(ALLOCATOR, OTHER_STRATEGY),
+        missedRow(OTHER_ALLOCATOR, STRATEGY),
+      ],
+    };
+    const { GET } = await import("./route");
+    await GET(makeReq());
+    expect(adminDb.reads).toHaveLength(2);
+    const profiles = adminDb.reads.find((r) => r.table === "profiles");
+    const strategies = adminDb.reads.find((r) => r.table === "strategies");
+    expect(profiles?.columns).toBe("id, display_name");
+    expect(profiles?.ids.sort()).toEqual([ALLOCATOR, OTHER_ALLOCATOR].sort());
+    expect(strategies?.columns).toBe("id, name");
+    expect(strategies?.ids.sort()).toEqual([STRATEGY, OTHER_STRATEGY].sort());
+  });
+
+  it("falls back to 'Unknown allocator' / 'Unnamed strategy' on a miss or a blank name, never an id", async () => {
+    evalState.result = {
+      missed: [
+        missedRow(ALLOCATOR, STRATEGY),
+        missedRow(OTHER_ALLOCATOR, OTHER_STRATEGY),
+      ],
+    };
+    adminDb.tables = {
+      // ALLOCATOR has a profile with a null display_name; OTHER_ALLOCATOR and
+      // OTHER_STRATEGY have no row at all; STRATEGY's name is blank.
+      profiles: [{ id: ALLOCATOR, display_name: null }],
+      strategies: [{ id: STRATEGY, name: "" }],
+    };
+    const { GET } = await import("./route");
+    const body = await (await GET(makeReq())).json();
+    for (const row of body.missed) {
+      expect(row.allocator_name).toBe("Unknown allocator");
+      expect(row.strategy_name).toBe("Unnamed strategy");
+    }
+  });
+
+  it("a failing name read answers the route's existing 500, not a payload of bare ids", async () => {
+    evalState.result = { missed: [missedRow(ALLOCATOR, STRATEGY)] };
+    adminDb.errors = { profiles: { message: "permission denied for table profiles" } };
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(500);
+    const raw = await res.text();
+    expect(JSON.parse(raw).error).toBe(GENERIC_COPY);
+    expect(raw).not.toContain(ALLOCATOR);
+    expect(raw).not.toContain("permission denied");
+  });
+
+  it("a payload with no missed rows makes no name read at all", async () => {
+    evalState.result = { intros_shipped: 0, missed: [] };
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(200);
+    expect(adminDb.reads).toEqual([]);
   });
 });
