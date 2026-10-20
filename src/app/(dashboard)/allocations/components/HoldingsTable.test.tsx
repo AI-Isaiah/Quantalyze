@@ -697,3 +697,31 @@ describe("HoldingsTable — native-unit account row (164.6.6.2.1 / D-01, D-17, D
     expect(cells[VALUE].hasAttribute("title")).toBe(false);
   });
 });
+
+describe("HoldingsTable — venue reads its display name (170.1.2 / D-01)", () => {
+  function renderOne(venue: string) {
+    render(
+      <HoldingsTable
+        holdings={[makeHolding({ id: "v1", venue, symbol: "BTC" })]}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+  }
+
+  it("a holding on venue okx reads 'OKX · BTC', never 'Okx'", () => {
+    renderOne("okx");
+    expect(screen.getByText("OKX · BTC")).toBeInTheDocument();
+    expect(screen.queryByText(/Okx/)).not.toBeInTheDocument();
+  });
+
+  it("a holding on sfox reads 'sFOX · BTC'", () => {
+    renderOne("sfox");
+    expect(screen.getByText("sFOX · BTC")).toBeInTheDocument();
+  });
+
+  it("a holding on a venue outside the closed set reads 'Other venue · BTC'", () => {
+    renderOne("kraken");
+    expect(screen.getByText("Other venue · BTC")).toBeInTheDocument();
+  });
+});
