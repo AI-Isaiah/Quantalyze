@@ -73,6 +73,12 @@ describe("redact.py mirrors pii-scrub.ts denylist verbatim", () => {
     }
   });
 
+  it("the service key and tenant claim headers are denylisted in redact.py (170.1)", () => {
+    const py = readFileSync(PY_FILE, "utf8");
+    expect(py).toContain('"x-service-key"');
+    expect(py).toContain('"x-tenant-claim"');
+  });
+
   it("DENYLIST_PREFIX (sb-ec-) appears verbatim in redact.py", () => {
     const py = readFileSync(PY_FILE, "utf8");
     // Adversarial revision W3 — quote-style insensitive.
@@ -82,7 +88,7 @@ describe("redact.py mirrors pii-scrub.ts denylist verbatim", () => {
   it("JWT_SHAPE anchored regex appears verbatim in redact.py", () => {
     const py = readFileSync(PY_FILE, "utf8");
     expect(py).toContain(
-      "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
+      "^eyJ[A-Za-z0-9_-]*\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
     );
   });
 

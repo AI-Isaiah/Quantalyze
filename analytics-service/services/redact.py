@@ -46,6 +46,16 @@ DENYLIST_EXACT: frozenset[str] = frozenset({
     "x-mbx-apikey",
     "ok-access-sign",
     "x-internal-token",
+    # 170.1 security re-audit — the shared analytics service key and the tenant
+    # claim (`<uuid>.<exp>.<hmac>`, not `eyJ`-headed) reached Sentry as request
+    # headers in cleartext; redact them by key.
+    "x-service-key",
+    "x-tenant-claim",
+    # Review LF-2 — Deribit `public/auth` bearer tokens. They are opaque dotted
+    # strings that do not start `eyJ`, so `JWT_SHAPE` (anchored on `eyJ`) cannot
+    # redact them by value; redact them by key.
+    "access_token",
+    "refresh_token",
     # Adversarial revision 2026-05-06: Grok B1 — Bybit/OKX broker-quirk header keys.
     "x-bapi-apikey",
     "x-bapi-sign",
@@ -83,9 +93,14 @@ DENYLIST_EXACT: frozenset[str] = frozenset({
 # Mirror of pii-scrub.ts L38 DENYLIST_PREFIX.
 DENYLIST_PREFIX: tuple[str, ...] = ("sb-ec-",)
 
-# Mirror of pii-scrub.ts L42 JWT_SHAPE — anchored 3-segment base64url.
+# Anchored 3-segment base64url whose header starts `eyJ` (base64url of `{"`, i.e.
+# a JSON-object header, which every JWT has). Without the `eyJ` anchor any dotted
+# host (`api.example.com`), OTel origin (`auto.http.starlette`) or version
+# (`3.12.13`) matched, and the Sentry transaction hook rewrote them. The payload is
+# deliberately NOT required to start `eyJ`: a JWS may carry a non-JSON payload.
+# Mirror of pii-scrub.ts JWT_SHAPE (same anchored form, pinned by the parity test).
 JWT_SHAPE: re.Pattern[str] = re.compile(
-    r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$"
+    r"^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$"
 )
 
 # Mirror of pii-scrub.ts L49-50 JWT_SUBSTRING — embedded 3-segment, 10+ char floor.

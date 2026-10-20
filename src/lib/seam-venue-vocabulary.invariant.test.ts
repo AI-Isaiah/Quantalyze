@@ -765,6 +765,9 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   "BENCHMARK_REFRESH_FAILED",
   "CSV_FORMAT_UNSUPPORTED",
   "CSV_TOO_LARGE",
+  // 170.1 D-14 — csv_adapter.py emits it when validate_csv raises
+  // unexpectedly; reasoned row in VENUE_WIRE_CODES_WITHOUT_VERDICT.
+  "CSV_UPSTREAM_FAIL",
   "CSV_VALIDATION_FAILED",
   "CURSOR_UNAVAILABLE",
   "DDOS_PROTECTION",

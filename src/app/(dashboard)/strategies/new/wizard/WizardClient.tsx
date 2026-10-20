@@ -1116,8 +1116,8 @@ export function WizardClient({
       // so newly-submitted strategies 404 there. The list at /strategies
       // is what the user actually wants — their just-submitted strategy
       // appears in "My Strategies" with its pending badge. The
-      // ?wizard_submitted=1 query param is reserved for a future success
-      // toast on that page; harmless if unconsumed.
+      // ?wizard_submitted=1 query param drives the status line on that page
+      // ("Strategy submitted. It is listed below as pending review.").
       router.push(`/strategies?wizard_submitted=1`);
       router.refresh();
     },

@@ -104,7 +104,7 @@ const RELOAD = "Reload this page to see the latest status.";
 const CONTACT_CHECK = "Use the contact form to have it checked.";
 const RETRY_READ = "Reload this page to try again.";
 const UNREADABLE_LINE =
-  "The computation status for this strategy could not be read.";
+  "We could not read this strategy's computation status.";
 const FAIL_TRANSIENT =
   "The last computation stopped after its automatic retries ran out.";
 const SHAPE_SINGLE =
@@ -537,7 +537,7 @@ const STATE_ROWS: ReadonlyArray<{
   {
     id: "KCS09-FINISHED",
     rows: [chainJob("compute_analytics_from_csv", "done")],
-    line: "The last computation finished, but the factsheet could not be built from its results.",
+    line: "The last computation finished, but we could not build the factsheet from its results.",
     tone: "text-warning",
     remedy: CONTACT_CHECK,
   },
@@ -898,7 +898,7 @@ const NEVER_LINE = "No computation is running for this strategy, and none is on 
 // 167.2.1-REVIEW-R2 WR-03, typed as literals: the jobs finished, the owner
 // build could not read the row. KCS09-FINISHED would claim a build outcome.
 const FINISHED_LINE =
-  "The last computation finished, but the factsheet could not be built from its results.";
+  "The last computation finished, but we could not build the factsheet from its results.";
 const FINISHED_UNREADABLE_LINE =
   "The last computation finished. We could not read its results to build the factsheet.";
 const SHARE_NOTE_CLASS = "mt-2 text-fixed-12 text-text-muted";
@@ -1206,8 +1206,10 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
 // `failed`. Typed out from UI-SPEC section 4, never imported.
 const ANALYTICS_FAILED_LINE =
   "Analytics couldn't be computed from this data. We've logged the error.";
+const SHARE_FINISHED_NOT_BUILT =
+  "Right now, a private link to this strategy shows that its factsheet is not available. The last computation finished, but we could not build the factsheet from its results. Use the contact form to have it checked.";
 const SHARE_ANALYTICS_FAILED =
-  "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy yet.";
+  "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy. Use the contact form to have it resolved.";
 
 describe("164.6.6.3.3 D-08 — a finished job whose analytics failed", () => {
   it("B23 KCS09-FINISHED-ANALYTICS-FAILED: the red line and the permanent contact remedy, not the generic 'could not be built' line", async () => {
@@ -1239,17 +1241,40 @@ describe("164.6.6.3.3 D-08 — a finished job whose analytics failed", () => {
     expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
   });
 
-  it("a computing row keeps KCS09-FINISHED and its generic note: only `failed` sets the fact", async () => {
+  // 170.1 D-08 / R-1 — RE-POINTED. This case used to pin "a computing row keeps
+  // KCS09-FINISHED and its generic note", where the banner was the arm-derived
+  // KCS12-MINT-B ("not available yet ... once a computation succeeds"). For a
+  // job that FINISHED without a built factsheet that wait never ends, and the
+  // body's state line and remedy already said "have it checked". The banner now
+  // gives the same instruction. Strings typed by hand from the UI-SPEC row.
+  it("D-08 a finished job on a computing row: the banner, state line and remedy all end 'Use the contact form to have it checked.'", async () => {
     givenOwnerPendingDraft();
     STATE.adminRow = adminRowWith({ computation_status: "computing" });
     givenJobs([chainJob("compute_analytics_from_csv", "done")]);
 
     const { container, stateLine, remedyLine } = await renderOwnerPending();
+    const banner = panelOf(container).lastElementChild as HTMLElement;
 
     expect(stateLine!.textContent).toBe(FINISHED_LINE);
     expect(stateLine!.className).toBe("mt-6 text-fixed-13 text-warning");
     expect(remedyLine!.textContent).toBe(CONTACT_CHECK);
-    expect(panelOf(container).lastElementChild!.textContent).not.toContain("Analytics are not available");
+    expect(banner.textContent).toBe(SHARE_FINISHED_NOT_BUILT);
+    expect(banner.textContent!.endsWith(CONTACT_CHECK)).toBe(true);
+    expect(banner.className).toBe(SHARE_NOTE_CLASS);
+    expect(container.textContent).not.toContain("once a computation succeeds");
+    expect(banner.textContent).not.toContain("Analytics are not available");
+  });
+
+  it("D-08 a running job on a computing row keeps KCS12-MINT-A (the wait is real)", async () => {
+    givenOwnerPendingDraft();
+    STATE.adminRow = adminRowWith({ computation_status: "computing" });
+    givenJobs([chainJob("process_key_long", "running")]);
+
+    const { container } = await renderOwnerPending();
+    const banner = panelOf(container).lastElementChild as HTMLElement;
+
+    expect(banner.textContent).toBe(MINT_A);
+    expect(banner.textContent).not.toContain("have it checked");
   });
 
   it("a running recompute on a failed row keeps KCS12-MINT-A and states the running job", async () => {

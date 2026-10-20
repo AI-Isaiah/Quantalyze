@@ -90,7 +90,7 @@ export function formatBoundDuration(ms: number): string {
  * replaces "Usually takes 15–30 seconds" and "Large accounts can take up to
  * 2 minutes", both estimates the phase's evidence contradicts.
  */
-export const SYNC_SLOW_NOTE = `Large accounts can take longer. This panel checks for ${formatBoundDuration(
+export const SYNC_SLOW_NOTE = `This panel checks for ${formatBoundDuration(
   POLL_MAX_ATTEMPTS * POLL_INTERVAL_MS,
 )}; the sync may still be running after that.`;
 
@@ -215,7 +215,7 @@ export const PANEL_STOP_COPY = {
   chain_unreadable: {
     label: "Sync not started",
     detail:
-      "This sync did not start: we could not check whether a sync for this strategy is still running. Try again in a moment.",
+      "This sync did not start: we could not check whether a sync for this strategy is still running. Reload this page, then start the sync again.",
   },
   // Review fix round 2 (167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1): the route's
   // DETERMINISTIC degrade causes. "Try again in a moment" is false there, so
@@ -311,7 +311,7 @@ export function deleteCompositeWarning(
     .map((c) =>
       c.name && c.name.trim() !== ""
         ? '"{name}"'.replace("{name}", () => c.name as string)
-        : "a composite whose name could not be read",
+        : "a composite whose name we could not read",
     )
     .join(", ");
   const head = `This key is part of ${n} composite ${n === 1 ? "strategy" : "strategies"}: ${listed}.`;
@@ -339,4 +339,4 @@ export const DELETE_MEMBERSHIP_UNCHECKED_COPY =
  * key. Shown once the panel is idle, and kept until the next attempt.
  */
 export const FINISH_UNVERIFIED_NOTE =
-  "This sync finished, but the key list could not be re-read to confirm the key's status. Reload this page to see it.";
+  "This sync finished, but we could not re-read the key list to confirm the key's status. Reload this page to see it.";

@@ -30,9 +30,12 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from services.csv_fault import report_csv_internal_fault
+from services.csv_offload import run_csv_validation
 from services.ingestion.adapter import (
     Fingerprint,
     KeySubmissionRequest,
@@ -42,6 +45,7 @@ from services.ingestion.adapter import (
     ValidationResult,
 )
 
+logger = logging.getLogger("quantalyze.analytics")
 
 # 2026-05-27 (H1, security) — byte ceiling on the /process-key CSV path. The
 # unified-backbone endpoint has no upstream size cap (unlike the TS edge route
@@ -125,15 +129,44 @@ class CsvAdapter:
             )
         fmt = req.context["fmt"]
 
-        try:
-            envelope = csv_validator.validate_csv(raw_bytes, fmt)
-        except ValueError as exc:
-            # validate_csv raises ValueError for an unknown fmt.
+        # 170.1 / D-10 — an unsupported fmt is rejected HERE with a fixed
+        # sentence, not by catching `validate_csv`'s ValueError and sending
+        # `str(exc)`: that text echoes whatever the caller sent as `fmt`, and a
+        # ValueError from anywhere ELSE in the validator (the over-long-row
+        # `int("<a date>")` one carried a cell) was being reported as an
+        # unsupported format.
+        if fmt not in csv_validator.SCHEMAS:
             return ValidationResult(
                 valid=False,
                 read_only=None,
                 error_code="CSV_FORMAT_UNSUPPORTED",
-                human_message=str(exc),
+                human_message=csv_validator.UNSUPPORTED_FMT_MESSAGE,
+                debug_context=None,
+            )
+
+        try:
+            # Off the event loop (T-170.1-51): see services/csv_offload.py.
+            envelope = await run_csv_validation(csv_validator.validate_csv, raw_bytes, fmt)
+        except Exception as exc:  # noqa: BLE001 — classified, never echoed
+            # `validate_csv` is contracted to return an envelope for any file
+            # content (`tests/test_csv_never_raises_170_1.py` pins that over a
+            # hostile corpus), so an exception here is an internal fault. Before
+            # this arm only ValueError was caught, so any other type left
+            # `/process-key` as a bodyless 500 whose traceback (server log, error
+            # tracker) carries the exception text, and that text can be a cell.
+            #
+            # 170.1 / D-14 (SFH-L1) — log the type and the INNERMOST FRAME and
+            # capture to Sentry with the exception text, frame locals and request
+            # body (this path's body IS the upload) withheld; never the text. See
+            # services/csv_fault.py. The code and sentence are the legacy
+            # router's own CSV_UPSTREAM_FAIL, which the wizard already maps to
+            # its own copy.
+            report_csv_internal_fault(exc, source="csv-adapter")
+            return ValidationResult(
+                valid=False,
+                read_only=None,
+                error_code="CSV_UPSTREAM_FAIL",
+                human_message="CSV validation failed. Please retry.",
                 debug_context=None,
             )
 

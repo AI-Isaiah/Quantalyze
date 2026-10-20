@@ -59,17 +59,17 @@ describe("scrubPii — denylist samples", () => {
     },
     {
       name: "JWT embedded in payload.token",
-      input: { token: "abc.def.ghijk_MNO123" },
+      input: { token: "eyJabc.def.ghijk_MNO123" },
       expectJwtRedacted: true,
     },
     {
       name: "JWT in array element",
-      input: ["harmless", "xxx.yyy.zzz", 42],
+      input: ["harmless", "eyJxxx.yyy.zzz", 42],
       expectJwtRedacted: true,
     },
     {
       name: "JWT nested inside array of objects",
-      input: [{ bearer: "AAA.BBB.CCC" }],
+      input: [{ bearer: "eyJAAA.BBB.CCC" }],
       expectJwtRedacted: true,
     },
     {

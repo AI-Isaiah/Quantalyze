@@ -731,3 +731,73 @@ describe("CsvSubmitStep — 146.2-08 the echo is readable before it is dismissab
     await waitFor(() => expect(notice).toHaveFocus());
   });
 });
+
+// 170.1-02 / R-2 (checker W1, twin) — CsvSubmitStep must hand its `fmt` to the
+// envelope. A `CSV_INVALID_FORMAT` finalize body forwards `debug_context`
+// unchanged into the panel, so the same five rows reach the hint decision.
+describe("CsvSubmitStep — 170.1-02 R-2 the format hint follows fmt", () => {
+  const HINT = "Check the file format you selected.";
+  const FIVE_MISSING = ["side", "qty", "price", "symbol", "currency"].map(
+    (column) => ({
+      rule: "column_in_dataframe",
+      row: 0,
+      message: `Your file has no ${column} column.`,
+      column,
+    }),
+  );
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: false,
+          code: "CSV_INVALID_FORMAT",
+          human_message: "Your file did not pass validation.",
+          debug_context: { pandera_errors: FIVE_MISSING },
+          correlation_id: null,
+        },
+        400,
+      ),
+    );
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    cleanup();
+  });
+
+  function mountWith(fmt: "trades" | "daily_returns") {
+    render(
+      <CsvSubmitStep
+        wizardSessionId="22222222-2222-2222-2222-222222222222"
+        fmt={fmt}
+        strategyName="hint path"
+        preview={PREVIEW}
+        dailyReturnsSeries={SERIES}
+        metadata={META}
+        onSubmitted={() => {}}
+        onStartNewStrategy={() => {}}
+        onBack={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("wizard-csv-submit-cta"));
+  }
+
+  it("🔴 fmt=trades: the hint renders exactly once beside the five plain lines", async () => {
+    mountWith("trades");
+    await screen.findByTestId("wizard-csv-error");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(screen.queryAllByText(HINT)).toHaveLength(1);
+    expect(
+      screen.getByTestId("wizard-csv-error").querySelectorAll("li"),
+    ).toHaveLength(5);
+  });
+
+  it("fmt=daily_returns: the same rows give no hint (the prop is the step's own fmt)", async () => {
+    mountWith("daily_returns");
+    await screen.findByTestId("wizard-csv-error");
+
+    expect(screen.queryByText(HINT)).toBeNull();
+  });
+});

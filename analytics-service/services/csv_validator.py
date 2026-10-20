@@ -38,6 +38,13 @@ logger = logging.getLogger("quantalyze.analytics")
 SHARPE_SENTINEL_DAILY = 10.0
 DEFAULT_RISK_FREE_DAILY = 0.0
 
+# 170.1 / D-10 — the ONE sentence every layer uses for an unsupported `fmt`.
+# `validate_csv` raises ValueError for it, and the exception text must never
+# reach a client or a log: a caller that put `str(exc)` on the wire would echo
+# whatever the caller sent as `fmt`. The router's pre-check and the CSV adapter
+# send this fixed sentence instead. It is the router's long-standing wording.
+UNSUPPORTED_FMT_MESSAGE = "fmt must be one of daily_returns, daily_nav, trades."
+
 # QA report 2026-05-21 ISSUE-008: an uploaded series where the user
 # pasted raw dollar PnL into the `daily_return` column slipped through.
 # The values (-3.29, +1.71, …) sit well within the wide -100.0..+inf
@@ -110,7 +117,24 @@ _PII_COLUMN_PATTERN = re.compile(
 # UI label says "Dates must be strictly increasing"; the prior
 # `is_monotonic_increasing`-only check accepted equal consecutive
 # dates which would silently double-count days downstream.
+#
+# The order is judged on the cells that READ AS A DATE (review TR-3). When pandera
+# cannot coerce a cell (a zone the validator does not read, the placeholder
+# standing in for one, plain garbage) the column reaches this check UN-coerced,
+# as text or as a mix of timestamps and text, and the old check then compared
+# those: a file whose dates increase also reported "dates must be strictly
+# increasing" beside the real date error at the unreadable row. So an un-coerced
+# column is read cell by cell here, an unreadable cell becomes NaT and is left
+# out of the order. That cell is always reported by its own rule (`coerce_dtype`
+# and `dtype`, or `not_nullable`), so leaving it out accepts nothing new, and a
+# file whose readable dates are out of order or repeated still fails this rule.
+# A column pandera DID coerce arrives as datetime64 and takes the old path.
 def _strictly_increasing(s: pd.Series) -> bool:
+    if not pd.api.types.is_datetime64_any_dtype(s):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # pandas' per-value inference warnings
+            s = _parse_dates(s)
+    s = s.dropna()
     return bool(s.is_monotonic_increasing and s.is_unique)
 
 
@@ -223,9 +247,19 @@ SCHEMAS: dict[str, pa.DataFrameSchema] = {
 # Sharpe-sentinel post-check (run AFTER pandera; dataset-level not row-level).
 # ---------------------------------------------------------------------------
 
+def _has_numeric_daily_return(df: pd.DataFrame) -> bool:
+    """True when `df` carries a `daily_return` column the sentinels can do float
+    maths on. Pandera's `coerce=True` makes it float on a file that passes the
+    schema; on the SchemaErrors fallback the frame is the unvalidated read and a
+    non-numeric cell leaves the column as strings (170.1 / D-10)."""
+    return "daily_return" in df.columns and pd.api.types.is_numeric_dtype(
+        df["daily_return"]
+    )
+
+
 def _check_sharpe_sentinel(df: pd.DataFrame, fmt: str) -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
-    if fmt == "daily_returns" and "daily_return" in df.columns and len(df) >= 2:
+    if fmt == "daily_returns" and _has_numeric_daily_return(df) and len(df) >= 2:
         r = df["daily_return"].dropna()
         if len(r) >= 2:
             sd = r.std(ddof=1)
@@ -298,7 +332,7 @@ def _check_dollar_form_sentinel(df: pd.DataFrame, fmt: str) -> list[dict[str, An
     PERCENT_FORM_AUTO_NORM_LOWER comment block for the prod incident.
     """
     errors: list[dict[str, Any]] = []
-    if fmt == "daily_returns" and "daily_return" in df.columns and len(df) >= 2:
+    if fmt == "daily_returns" and _has_numeric_daily_return(df) and len(df) >= 2:
         r = df["daily_return"].dropna()
         # 2026-05-25 fix: prefer the non-zero subset so zero-padded
         # files don't drag the median to 0. Fall back to all-rows if
@@ -551,6 +585,247 @@ def _coerce_numeric_string(value: object) -> object:
 # unambiguous day-first case emits a `date_format_normalized` info-flag.
 # ---------------------------------------------------------------------------
 
+# 170.1 / D-14 (WR-A, amended 2026-10-16) - A UTC OFFSET IS NOT PART OF THE DATE
+# THE USER WROTE, AND A ZONE WE CANNOT READ IS A DATE ERROR, NEVER A SHIFTED DATE.
+#
+# A local-time broker export carries the offset in force on each row, and the
+# offset changes across a daylight-saving boundary (`...T00:00:00+01:00` then
+# `...T00:00:00+02:00`). `pd.to_datetime` refuses a column with more than one
+# offset ("Mixed timezones detected") and it raised out of `validate_csv`, so an
+# ordinary file came back as CSV_UPSTREAM_FAIL ("our side, try again") and a
+# retry could never help.
+#
+# Converting to UTC stops the raise but moves the DAY: local midnight at +02:00 is
+# the previous evening in UTC. So nothing here converts a date silently
+# (`utc=True` is gone from the parser). The recognised spellings below are
+# handled explicitly, per format, and every other zone is rejected:
+#   - `daily_returns` / `daily_nav`: the offset is removed and the WALL CLOCK is
+#     parsed, so the calendar date the user wrote is the date stored.
+#   - `trades`: a trade timestamp is an instant, and the worker reads it as one
+#     (`services/ingestion/_timestamps.py` `coerce_to_aware_utc`), so each
+#     timestamp is converted to a UTC-naive instant. See `_apply_trade_offsets`.
+#   - any zone that survives the strip is a `coerce_dtype` date error at the
+#     row's real position, the line the wizard already renders as "A value is
+#     not a valid date or number". See `_normalise_date_zones`.
+#
+# What is recognised: `Z`, `UTC`, `GMT` (no number), and a numeric offset of the
+# form `+HH`, `+HHMM`, `+HH:MM` with an optional `UTC` in front, hours 00-23 and
+# minutes 00-59. What is NOT recognised, on purpose, and so rejected:
+#   - `GMT+1`, `GMT-5`, `GMT+02:00`: dateutil reads the sign of a `GMT+N`
+#     spelling INVERTED (the POSIX convention), so `GMT+1` means UTC-1. The sign
+#     is not guessed; the file is rejected.
+#   - a single-digit hour (`+2`, `+2:00`) and a name after the offset
+#     (`+01:00 (CET)`): pandas reads them as zones, so they must not slip through
+#     the strip's `$` anchor and be converted later.
+_UTC_OFFSET_SUFFIX_RE = re.compile(
+    r"(?P<time>\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?)"  # the wall-clock time, kept
+    r"\s*(?:[Zz]|UTC|GMT"
+    r"|(?:UTC)?(?P<sign>[+-])(?P<hh>\d{2})(?::?(?P<mm>\d{2}))?)\s*$",  # the offset, dropped
+    re.ASCII,
+)
+
+# A value of exactly this shape is digits and separators, an optional time, and
+# nothing else: it cannot carry a zone, so the (slower) per-value zone check
+# skips it. Anything else, a month name, a `PM`, a stray suffix, gets the check.
+_ZONE_FREE_SHAPE_RE = re.compile(
+    r"\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}"
+    r"(?:[T ]\s*\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?)?",
+    re.ASCII,
+)
+
+# What a zone-bearing cell is replaced with while the date column is parsed. It
+# is not a date under any reading (month 00), so pandera reports the cell through
+# its own `coerce_dtype` rule at the cell's row. It is year-first on purpose:
+# `_detect_and_normalize_date_column` leaves an all-ISO column to pandera, where a
+# token of another shape would make it rewrite the column and turn this cell into
+# a NaT, which pandera reports as `not_nullable` instead. The user never sees it:
+# the preview gets the original text back (see `validate_csv`), and no error
+# message ever carries a cell.
+_UNSUPPORTED_ZONE_TOKEN = "0000-00-00"
+
+# The longest date cell, measured without its padding, that is read at all (security
+# re-audit T-170.1-51). The longest honest spelling is a date, a time to the
+# nanosecond and a zone (`2024-03-31 00:00:00.123456789 UTC+02:00`, 39 characters),
+# so 64 leaves room for any real export. A longer cell is NOT handed to pandas or to
+# a zone regex: both cost grows with the cell on a hostile shape (repeated `1:11 `
+# took 40 s or more for a 10 MB file), and the row cap and body cap do not bound a
+# cell. It is replaced by the placeholder, so it is the same `coerce_dtype` date
+# error at its row as any other unreadable zone.
+MAX_DATE_CELL_CHARS = 64
+
+
+def _split_zone(value: str) -> tuple[str, int | None]:
+    """Split a recognised trailing zone off `value`: `(wall_clock_text, offset)`.
+
+    `offset` is the UTC offset in seconds (0 for `Z`/`UTC`/`GMT`), or None when
+    `value` carries no recognised zone (including an offset that is not a real
+    one, such as `+99:99`), in which case `value` comes back unchanged.
+    """
+    m = _UTC_OFFSET_SUFFIX_RE.search(value)
+    if m is None:
+        return value, None
+    seconds = 0
+    if m.group("sign") is not None:
+        hours, minutes = int(m.group("hh")), int(m.group("mm") or 0)
+        if hours > 23 or minutes > 59:
+            return value, None
+        seconds = (hours * 3600 + minutes * 60) * (-1 if m.group("sign") == "-" else 1)
+    return value[: m.end("time")], seconds
+
+
+def _carries_zone(value: str) -> bool:
+    """True when pandas reads `value` as a zone-AWARE timestamp.
+
+    This is the test for "a zone survived the strip". A value pandas cannot read
+    at all is not this case: it stays as it is and pandera reports it.
+    """
+    if _ZONE_FREE_SHAPE_RE.fullmatch(value.strip()):
+        return False
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+    except (ValueError, OverflowError, TypeError):
+        return False
+    return parsed is not pd.NaT and getattr(parsed, "tzinfo", None) is not None
+
+
+# A capitalised zone NAME (`EST`, `CEST`, `AEST`) after a wall-clock time. pandas
+# reads such a value as NaT under every reading, so `_carries_zone` cannot see it
+# and, in a day-first column, the day/month detector would turn the cell into a
+# blank (`not_nullable`) instead of the date error it is (review SFH-R2).
+_TRAILING_ZONE_NAME_RE = re.compile(
+    r"(?P<rest>.*\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?)\s*[A-Z]{2,5}",
+    re.ASCII,
+)
+
+
+def _names_an_unread_zone(value: str) -> bool:
+    """True when `value` is a readable date and time followed by a zone NAME that
+    pandas will not read (so the whole value is NaT).
+
+    A value pandas reads as it stands (`10:00 PM`, where `PM` is a meridian and
+    not a zone) is not this case, and neither is one whose date part is not
+    readable either: that stays for pandera to report as it always has.
+    """
+    m = _TRAILING_ZONE_NAME_RE.fullmatch(value.strip())
+    if m is None:
+        return False
+    try:
+        if pd.to_datetime(value, errors="coerce") is not pd.NaT:
+            return False
+        rest = m.group("rest")
+        return any(
+            pd.to_datetime(rest, errors="coerce", dayfirst=dayfirst) is not pd.NaT
+            for dayfirst in (False, True)
+        )
+    except (ValueError, OverflowError, TypeError):
+        return False
+
+
+def _normalise_date_zones(
+    df: pd.DataFrame, fmt: str
+) -> tuple[list[int | None] | None, dict[int, str], dict[int, str]]:
+    """Strip every recognised trailing UTC offset from `df["date"]` (in place,
+    keeping the wall clock) and fail closed on any zone left over.
+
+    Returns `(offsets, rejected, named)`:
+      - `offsets`: per row, the stripped offset in seconds or None, or None
+        overall when no row had one. A column with no offsets is left
+        byte-for-byte unchanged.
+      - `rejected`: row position -> the cell as written, for every cell that
+        still carries a zone after the strip, and every cell longer than
+        `MAX_DATE_CELL_CHARS` (which is never parsed). Each is replaced in `df` by
+        `_UNSUPPORTED_ZONE_TOKEN`, so pandera reports it as a date error at its
+        real row. The caller restores the original text for the preview.
+      - `named`: row position -> the cell as written, for every cell that is a
+        readable date and time followed by a zone NAME pandas will not read
+        (`_names_an_unread_zone`). These cells are NOT touched in `df`: left as
+        they are, pandera already reports them as a date error. They are
+        reported here only so `validate_csv` can put them back when the
+        day-first detector rewrites the column and turns them into blanks.
+
+    Only a string that ends in a TIME followed by an offset is stripped, so a
+    plain date such as `2024-03-30` (whose `-30` is a day, not an offset) is
+    never altered.
+    """
+    if "date" not in df.columns:
+        return None, {}, {}
+    col = df["date"]
+    if not (pd.api.types.is_string_dtype(col) or pd.api.types.is_object_dtype(col)):
+        return None, {}, {}
+
+    cleaned: list[Any] = []
+    offsets: list[int | None] = []
+    rejected: dict[int, str] = {}
+    named: dict[int, str] = {}
+    changed = False
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # dateutil's per-value zone warnings
+        for position, value in enumerate(col.tolist()):
+            wall, offset = value, None
+            if isinstance(value, str) and len(value.strip()) > MAX_DATE_CELL_CHARS:
+                rejected[position] = value
+                wall = _UNSUPPORTED_ZONE_TOKEN
+                changed = True
+            elif isinstance(value, str) and not _ZONE_FREE_SHAPE_RE.fullmatch(value.strip()):
+                wall, offset = _split_zone(value)
+                if _carries_zone(wall):
+                    rejected[position] = value
+                    wall, offset = _UNSUPPORTED_ZONE_TOKEN, None
+                elif offset is None and _names_an_unread_zone(wall):
+                    named[position] = value
+                changed = changed or wall is not value
+            cleaned.append(wall)
+            offsets.append(offset)
+    if changed:
+        df["date"] = pd.Series(cleaned, index=df.index, dtype=col.dtype)
+    return (offsets if any(o is not None for o in offsets) else None), rejected, named
+
+
+def _apply_trade_offsets(df: pd.DataFrame, offsets: list[int | None]) -> None:
+    """`trades` only: turn the wall-clock `date` column into UTC-naive instants.
+
+    A trade timestamp is a moment, and the worker reads it as one
+    (`services/ingestion/_timestamps.py` `coerce_to_aware_utc`: the offset is
+    kept, a naive value is taken as UTC). So a recognised offset is subtracted
+    from the parsed wall clock, which is the same instant, and a value with no
+    offset stays as it is (UTC). The offset is applied AFTER the date column is
+    parsed, because the day/month reading of a `13/01/2024 10:00 +01:00` file is
+    deduced from the whole column, not from one cell.
+
+    The column is converted only when every value parsed. If any did not, the
+    file is rejected by pandera at those rows anyway and the text is left for it.
+
+    This is why the strict-increase check is correct across a daylight-saving
+    fall-back: `01:45-04:00` then `01:10-05:00` is 05:45Z then 06:10Z.
+    """
+    col = df["date"]
+    if not pd.api.types.is_datetime64_any_dtype(col):
+        col = _parse_dates(col)
+    if col.isna().any():
+        return
+    shift = pd.to_timedelta([o or 0 for o in offsets], unit="s")
+    df["date"] = col - pd.Series(shift, index=df.index)
+
+
+def _parse_dates(values: pd.Series, **kwargs: Any) -> pd.Series:
+    """`pd.to_datetime(errors="coerce")` that fails CLOSED on a zone.
+
+    No accepted file reaches this with a zone on a value: `_normalise_date_zones`
+    has already stripped or rejected every one. If one ever did, converting it
+    would move the calendar date silently (the D-14 amendment forbids that), and
+    pandas raises on a column of mixed offsets (which the callers report as "our
+    side, try again"). So a zone-aware result, or the mixed-offset raise, comes
+    back as all-NaT: every row is then a date error, and none is a date.
+    """
+    try:
+        parsed = pd.to_datetime(values, errors="coerce", **kwargs)
+    except ValueError:  # "Mixed timezones detected"
+        return pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
+    if parsed.dt.tz is not None:
+        return pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
+    return parsed
+
+
 def _date_parse_is_usable(parsed: pd.Series) -> bool:
     """True when every value parsed (no NaT) AND the series is monotonic
     non-decreasing.
@@ -575,6 +850,29 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     if "date" not in df.columns or pd.api.types.is_datetime64_any_dtype(df["date"]):
         return None
 
+    # An all-digit column (`20230305`) is read by pandas as int64, and pandera reads
+    # an integer as nanoseconds since the epoch: every date came out 1970-01-01. The
+    # only integer spelling of a date is YYYYMMDD, so read it as that; any other
+    # integer (an Excel serial, a Unix time) is not a date and becomes the
+    # uncoercible placeholder, reported at its row and shown as written. Only an
+    # 8-digit non-negative whole number is YYYYMMDD: strptime takes a one- or
+    # two-digit month and day, so `2024121` would be split by guess, and a
+    # negative one parses to a year below zero that the preview then raises on.
+    # A spreadsheet export spells the same date as a float (`20230305.0`), which
+    # pandas also reads as epoch nanoseconds; a whole-number float is read by its
+    # integer text, a fractional one is the placeholder, and a blank stays blank.
+    if pd.api.types.is_integer_dtype(df["date"]) or pd.api.types.is_float_dtype(df["date"]):
+        col = df["date"]
+        txt = (
+            col.where((col % 1 == 0) & col.between(0, 99_999_999)).astype("Int64")
+            if pd.api.types.is_float_dtype(col) else col
+        ).astype(str)
+        parsed = _parse_dates(txt.where(txt.str.fullmatch(r"[0-9]{8}")), format="%Y%m%d")
+        df["date"] = parsed if parsed.notna().all() else parsed.astype(object).where(
+            parsed.notna(), col.where(col.isna(), _UNSUPPORTED_ZONE_TOKEN)
+        )
+        return None
+
     s = df["date"].astype(str).str.strip()
 
     # ISO-family (year-first: YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD) is
@@ -584,14 +882,28 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     # YYYY-DD-MM (2023-01-02) — a wrong-but-monotonic parse that would
     # manufacture a phantom day-first/month-first ambiguity for every ISO
     # upload. Year-first inputs have no day/month ambiguity to resolve.
-    iso_like = s.str.match(r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}")
-    if iso_like.fillna(False).all():
+    iso_like = s.str.match(r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}").fillna(False).astype(bool)
+    if iso_like.all():
         return None
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # silence pandas' per-row inference warnings
-        parsed_mf = pd.to_datetime(s, dayfirst=False, errors="coerce")
-        parsed_df = pd.to_datetime(s, dayfirst=True, errors="coerce")
+        parsed_mf = _parse_dates(s, dayfirst=False)
+        parsed_df = _parse_dates(s, dayfirst=True)
+        # `dayfirst=True` flips a year-first cell (`2024-01-02` is read as
+        # 2024-02-01), which made the day-first reading non-monotonic and sent the
+        # whole column to month-first. A column that starts `dd/mm/yyyy` reads such
+        # a cell as NaT under BOTH flags. A year-first cell has no day/month
+        # ambiguity, so both readings take it from a parse of those cells alone.
+        year_first = _parse_dates(s.where(iso_like), dayfirst=False)
+        # One text cell makes pandas read a YYYYMMDD column as text, so the gate
+        # above never ran: an all-digit cell is still YYYYMMDD only at 8 digits.
+        # Any other is the placeholder in the column too, which pandera and the
+        # preview re-read when no reading is written back below.
+        odd_digits = s.str.fullmatch(r"[+-]?[0-9]+") & ~s.str.fullmatch(r"[0-9]{8}")
+        df["date"] = df["date"].mask(odd_digits, _UNSUPPORTED_ZONE_TOKEN)
+        parsed_mf = parsed_mf.where(~iso_like, year_first).mask(odd_digits)
+        parsed_df = parsed_df.where(~iso_like, year_first).mask(odd_digits)
 
     # Identical under both flags → no day/month ambiguity to resolve (e.g.
     # every first component > 12, so pandas can only read it day-first). ISO
@@ -599,21 +911,52 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     # pandera's coerce nor the date-range computation below re-parses the raw
     # strings (which would re-emit pandas' dayfirst warning), but stay silent
     # — there was nothing to disambiguate.
+    #
+    # A cell neither reading reads (a footer such as `Total`, a blank, `garbage`, a
+    # zone NAME) is no evidence for either, and left in it made BOTH readings
+    # "unusable", so the column stayed text and the order check then read it
+    # month-first from its first cell (review LR-2). A non-blank one is handed to
+    # pandera as the uncoercible placeholder, so it is reported at its row and
+    # shown as the user wrote it, never as a blank; a blank stays blank and still
+    # reports `not_nullable`. (Review LF-1, and F3 for the equal-parse path.)
+    readable = parsed_mf.notna() | parsed_df.notna()
+    blank = df["date"].isna() | (df["date"].astype(str).str.strip() == "")
+    leftover = df["date"].where(blank, _UNSUPPORTED_ZONE_TOKEN)
     if parsed_mf.equals(parsed_df):
         if not parsed_mf.isna().all():
-            df["date"] = parsed_mf
+            df["date"] = (
+                parsed_mf if readable.all() else parsed_mf.astype(object).where(readable, leftover)
+            )
         return None
 
-    mf_ok = _date_parse_is_usable(parsed_mf)
-    df_ok = _date_parse_is_usable(parsed_df)
+    # The reading is chosen on the cells at least one reading can read.
+    mf_ok = _date_parse_is_usable(parsed_mf[readable])
+    df_ok = _date_parse_is_usable(parsed_df[readable])
+    # Only day-first reads every readable cell: month-first leaves a NaT in one.
+    # That settles the reading even when the dates are out of order, so the order
+    # check, not the format guess, reports the disorder.
+    day_first_only = bool(parsed_df[readable].notna().all() and parsed_mf[readable].isna().any())
 
     if mf_ok and not df_ok:
-        return None  # month-first is the only valid reading — unchanged
+        if not iso_like.any() and readable.all():
+            return None  # month-first is the only valid reading — unchanged
+        # A year-first or unreadable cell: pandera would infer ONE format from the
+        # first cell and name no row, so hand it the month-first reading. (WR-03.)
+        df["date"] = (
+            parsed_mf if readable.all() else parsed_mf.astype(object).where(readable, leftover)
+        )
+        return None
 
-    if df_ok and not mf_ok:
+    if day_first_only or (df_ok and not mf_ok):
         # Day-first is the ONLY valid reading (e.g. a day > 12 rules out
-        # month-first). Unambiguous — normalize in place and flag it.
-        df["date"] = parsed_df
+        # month-first). Unambiguous — normalize in place and flag it. A cell
+        # neither reading could read (each reading infers ONE format from the
+        # first cell, so `05/04/24` or `05-04-2024` is unreadable to both) may
+        # still be read by pandera in the other day/month order, so it is never
+        # handed back as text (`leftover`, above). (Review LF-1.)
+        df["date"] = (
+            parsed_df if readable.all() else parsed_df.astype(object).where(readable, leftover)
+        )
         return {
             "rule": "date_format_normalized",
             "detected_format": "day_first",
@@ -644,6 +987,67 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     return None  # neither reading is a clean ascending series — let pandera raise
 
 
+def _raw_header_names(raw_bytes: bytes, header_row: int, width: int) -> list[str]:
+    """The header cells exactly as written in the file.
+
+    `pd.read_csv` renames a repeated header (`x,x` -> `x`, `x.1`) before the
+    frame exists, so a repeat can only be seen on the raw row. `header_row` is
+    0 for a normal file and 1 when the Excel blank first row was skipped, and
+    `width` is the frame's column count.
+
+    This is a pandas read with the frame read's own options, so both reads apply
+    the same rules for which line is the header (blank, whitespace-only and
+    quoted-empty lines, bare carriage returns, a BOM, quoted line breaks) and
+    agree by construction. A second parser did not: it disagreed with pandas
+    three times (review R-1, TR-1 and TR-2, LR-1), each a header taken from the
+    wrong line. `header=None` keeps the names unrenamed; `names=range(width)`
+    stops pandas fixing the field count from a first line narrower than the
+    header (`,` above `date,x,x`, review R-1); `index_col=False` drops the extra
+    fields of a wider blank row (`,,,,` above a two-column header), and the
+    warning pandas gives for that is not a defect of the file.
+
+    FAIL CLOSED: a header that cannot be read RAISES (a `ValueError` from
+    pandas, which covers `UnicodeDecodeError`). There is no fallback to the
+    frame's own names; they are the renamed ones, which would restore the defect
+    this function exists to remove. The caller turns the exception into a
+    `parse_error`.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # ParserWarning for the dropped fields
+        raw = pd.read_csv(
+            io.BytesIO(raw_bytes),
+            encoding="utf-8-sig",
+            header=None,
+            names=range(width),
+            dtype=str,
+            keep_default_na=False,
+            nrows=header_row + 1,
+            index_col=False,
+        )
+    return raw.iloc[header_row].tolist()
+
+
+def _row_longer_than_header() -> dict[str, Any]:
+    """The `parse_error` envelope for a file whose header row and data rows do not
+    line up in width. It is the one sentence for two paths: pandas promoted the
+    first column to the index because a data row is longer than the header, and
+    the raw header read (`_raw_header_names`) came out a different width than the
+    frame (review TR-1, a guard against the two readers drifting apart). It names
+    the problem and never a cell."""
+    return {
+        "ok": False,
+        "preview": None,
+        "errors": [{
+            "rule": "parse_error",
+            "row": 0,
+            # One literal, on one line: the WR-01 parity test greps the
+            # producer source for this exact sentence.
+            "message": "Could not parse CSV: a data row has more fields than the header row.",
+        }],
+        "correlation_id": None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # validate_csv — public API used by the FastAPI router AND (Phase 19) by
 # the worker. Pure logic; no I/O beyond pd.read_csv on the in-memory bytes.
@@ -656,6 +1060,8 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     Raises ValueError if fmt is not one of the three supported formats.
     """
     if fmt not in SCHEMAS:
+        # The text is for a developer reading a traceback; no caller may send it
+        # to a client or a log (see UNSUPPORTED_FMT_MESSAGE).
         raise ValueError(f"Unsupported fmt: {fmt}")
 
     if not raw_bytes:
@@ -694,11 +1100,13 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # which makes every column "Unnamed: N" and the actual headers slip
     # into row 0 of the data. Re-parse with header=1 once we detect this
     # so the founder doesn't have to hand-clean their export.
+    header_row = 0
     looks_like_blank_header = (
         len(df.columns) > 0
         and all(str(c).startswith("Unnamed:") for c in df.columns)
     )
     if looks_like_blank_header:
+        header_row = 1
         try:
             df = pd.read_csv(io.BytesIO(raw_bytes), encoding="utf-8-sig", header=1)
         except Exception as e:
@@ -714,6 +1122,21 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
                 "correlation_id": None,
             }
 
+    # 170.1 / D-10 — A DATA ROW LONGER THAN THE HEADER IS A NAMED REJECTION.
+    # When a data row has more fields than the header, pandas does not raise: it
+    # promotes the FIRST column to the frame's INDEX and shifts every other
+    # column left. Everything below assumes the positional RangeIndex that a
+    # normal read gives. The row-number step in the SchemaErrors loop does
+    # `int(failure.index) + 1`, and with a date index that is `int("<a date>")`,
+    # a ValueError whose text carries a cell. The tokenizer error already
+    # reported for a LATER over-long row says the same thing in the same rule, so
+    # this shape gets the same rule with a fixed sentence: it names the problem,
+    # never a cell. (`RangeIndex` is the only index a read gives when pandas did
+    # NOT promote a column, including for a header-only file.)
+    if not isinstance(df.index, pd.RangeIndex):
+        logger.warning("[csv-validator] data row longer than header")
+        return _row_longer_than_header()
+
     # 2026-05-07 — case-insensitive header normalization. Real-world CSVs
     # ship headers like "Date,Daily_Return" or "DATE,DAILY_RETURN". Pandera
     # column matching is case-sensitive, so without this pass the schema
@@ -722,7 +1145,74 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # _redact_preview / Sharpe sentinel / preview accessors all expect.
     # Trailing/leading whitespace is also stripped because Excel and
     # certain accounting tools sometimes emit "  date  ,  daily_return  ".
-    df.columns = [str(c).strip().lower() for c in df.columns]
+    #
+    # 170.1 / D-14 (WR-A, amended 2026-10-16) - TWO HEADERS WITH THE SAME NAME ARE
+    # A NAMED REJECTION. `date,Date,daily_return` leaves two columns called `date`,
+    # so `df["date"]` is a two-column FRAME and the date detector raised
+    # AttributeError ('DataFrame' has no attribute 'str'); `Daily_Return` beside
+    # `daily_return` raised TypeError in the percent normaliser. Either escape
+    # reached the callers as CSV_UPSTREAM_FAIL, "our side, try again", for a
+    # deterministic file defect. The sentence is founder-approved (D-14) and names
+    # no header: the header text is the user's own and is not echoed.
+    #
+    # The collision is counted on the RAW header row, not on `df.columns`: pandas
+    # renames an exact repeat (`daily_return,daily_return` -> `daily_return`,
+    # `daily_return.1`) before the frame exists, and `strict="filter"` then drops
+    # the copy, so the file was accepted using only the first column and the
+    # user's second one was silently ignored. Counting the raw names covers an
+    # exact repeat and a case or padding difference alike.
+    #
+    # Only a collision on a column the schema DECLARES is rejected (D-14
+    # amendment). An undeclared pair (`Notes,notes`, `notes,notes`) is dropped by
+    # `strict="filter"` without being read: that file validated before and still
+    # must. A literal `daily_return.1` is a different name, not a repeat, and is
+    # undeclared too.
+    normalized_columns = [str(c).strip().lower() for c in df.columns]
+    try:
+        header_names = _raw_header_names(raw_bytes, header_row, len(df.columns))
+    except ValueError as e:
+        # Fail closed: a header the raw read cannot parse is rejected, never
+        # replaced by the frame's renamed names. Same sentence shape as the two
+        # other parse failures above, and the same logger discipline.
+        logger.warning("[csv-validator] raw header parse failure")
+        return {
+            "ok": False,
+            "preview": None,
+            "errors": [{
+                "rule": "parse_error",
+                "row": 0,
+                "message": f"Could not parse CSV: {e}",
+            }],
+            "correlation_id": None,
+        }
+    if len(header_names) != len(df.columns):
+        # The raw read and the frame read disagree about which record is the
+        # header (review TR-1). Neither can be trusted to name a column, so the
+        # file is rejected rather than checked against a header that may be the
+        # wrong line. Fixed text, no cell.
+        logger.warning("[csv-validator] raw header and frame disagree on width")
+        return _row_longer_than_header()
+    normalized_header = [str(c).strip().lower() for c in header_names]
+    declared = SCHEMAS[fmt].columns.keys()
+    if any(
+        normalized_header.count(name) > 1
+        for name in declared
+        if name in normalized_header
+    ):
+        logger.warning("[csv-validator] two columns have the same declared name")
+        return {
+            "ok": False,
+            "preview": None,
+            "errors": [{
+                "rule": "parse_error",
+                "row": 0,
+                # One literal, on one line: the WR-01 parity test greps the
+                # producer source for this exact sentence.
+                "message": "Could not parse CSV: two columns have the same name.",
+            }],
+            "correlation_id": None,
+        }
+    df.columns = normalized_columns
 
     # 2026-05-07 — currency / percent / thousands-separator scrub on the
     # numeric schema columns. Excel + accounting tools love to format
@@ -775,7 +1265,22 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # a `date_format_ambiguous` error when the format genuinely can't be
     # determined (validate_csv rejects rather than guess). See
     # _detect_and_normalize_date_column.
+    # 170.1 / D-14 amendment: offsets stripped (or rejected) before any parse.
+    zone_offsets, zone_rejected, zone_named = _normalise_date_zones(df, fmt)
+    date_text = df["date"].copy() if "date" in df.columns else None
     date_result = _detect_and_normalize_date_column(df)
+    if (zone_rejected or zone_named) and pd.api.types.is_datetime64_any_dtype(df["date"]):
+        # The detector rewrote the column and wrote a NaT where it could not read
+        # the placeholder, or a zone NAME it will not read; put the placeholder
+        # back so pandera reports the cell through `coerce_dtype`, as it does in a
+        # file the detector leaves alone, and not as a blank (`not_nullable`).
+        # (Review SFH-R2: a named zone is only ever in this state after a rewrite.)
+        zone_rejected = {**zone_rejected, **zone_named}
+        restored = df["date"].astype(object)
+        restored.iloc[list(zone_rejected)] = _UNSUPPORTED_ZONE_TOKEN
+        df["date"] = restored
+    elif fmt == "trades" and zone_offsets is not None:
+        _apply_trade_offsets(df, zone_offsets)  # instants, like the worker reads them
     date_flag: dict[str, Any] | None = None
     date_error: dict[str, Any] | None = None
     if date_result is not None:
@@ -859,7 +1364,21 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             column_raw = row.get("column")
             has_column = column_raw is not None and not pd.isna(column_raw)
             column_name = str(column_raw).strip() if has_column else ""
-            if column_name and has_row:
+            #
+            # 170.1-01 / D-10 — A MISSING COLUMN IS NAMED IN PLAIN WORDS.
+            # For `column_in_dataframe` ONLY, pandera reports `column=None`,
+            # `index=None` and `failure_case=<the SCHEMA's expected column
+            # name>` (measured, not the file's header and not a cell), so it is
+            # safe to read here and nowhere else: for every other rule
+            # `failure_case` IS the raw cell. ⛔ Never widen this branch.
+            expected_column = ""
+            if rule_name == "column_in_dataframe":
+                failure_case_raw = row.get("failure_case")
+                if failure_case_raw is not None and not pd.isna(failure_case_raw):
+                    expected_column = str(failure_case_raw).strip()
+            if expected_column:
+                message = f"Your file has no {expected_column} column."
+            elif column_name and has_row:
                 message = (
                     f"Column '{column_name}' failed rule "
                     f"'{rule_name}' at row {row_idx}."
@@ -870,11 +1389,19 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
                 message = f"Failed rule '{rule_name}' at row {row_idx}."
             else:
                 message = f"Failed rule '{rule_name}'."
-            all_errors.append({
+            error: dict[str, Any] = {
                 "rule": rule_name,
                 "row": row_idx,
                 "message": message,
-            })
+            }
+            if expected_column:
+                error["column"] = expected_column
+            elif column_name:
+                # Every other rule: pandera's `column` is the SCHEMA key the
+                # check is attached to. `failure_case` (the raw cell) is never
+                # consulted here.
+                error["column"] = column_name
+            all_errors.append(error)
         df_validated = df
 
     # 2026-05-25 prod incident hotfix — auto-normalize percent-form
@@ -899,6 +1426,23 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     if norm_flag is not None:
         info_flags.append(norm_flag)
 
+    # 170.1 / D-10 — THE DATASET-LEVEL SENTINELS NEED A NUMERIC `daily_return`
+    # COLUMN, AND THEY NOW CHECK FOR ONE. On the SchemaErrors fallback
+    # `df_validated = df` is the UNVALIDATED, uncoerced frame, so a non-numeric
+    # `daily_return` cell leaves the whole column as strings and both sentinels
+    # did float maths on it. The result was a TypeError out of `r.std(...)`
+    # whose text carries the cell, escaping `validate_csv` instead of the
+    # `coerce_dtype` row pandera had already emitted for that cell (measured at
+    # HEAD 712c47eea). The precondition lives in `_has_numeric_daily_return`, so
+    # a rejected file reports its pandera rows and never raises.
+    #
+    # ⚠️ This is NOT `if schema_validation_ok`, the guard the auto-normalize step
+    # above uses, and the difference is deliberate. A dollar-PnL upload with a
+    # negative day (-329) ALSO fails the schema (`daily_return_lower_bound`), yet
+    # its column is numeric and the sentinel's actionable "looks like dollar PnL,
+    # convert each row" message is exactly what that user needs
+    # (`test_dollar_form_daily_return_caught_by_sentinel`). Gating on schema
+    # success would have replaced it with a bare row-0 bound rule.
     all_errors.extend(_check_sharpe_sentinel(df_validated, fmt))
     all_errors.extend(_check_dollar_form_sentinel(df_validated, fmt))
     # _check_trading_window REMOVED 2026-04-30 (crypto trades 24/7)
@@ -912,11 +1456,20 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
         # (ISO / month-first / rejected paths) rather than a redundant pass.
         date_col = df["date"]
         if not pd.api.types.is_datetime64_any_dtype(date_col):
-            date_col = pd.to_datetime(date_col, errors="coerce")
+            date_col = _parse_dates(date_col)
         dates = date_col.dropna()
         if not dates.empty:
             date_min = str(dates.min().date())
             date_max = str(dates.max().date())
+        # Give the preview back the text the user wrote in a cell whose zone was
+        # rejected; the placeholder was only for the parse above.
+        if not pd.api.types.is_datetime64_any_dtype(df["date"]):
+            # The day-first detector uses the same placeholder for a cell neither
+            # reading reads (LF-1); the user gets back what they wrote there.
+            placeholder = df["date"].map(lambda v: isinstance(v, str) and v == _UNSUPPORTED_ZONE_TOKEN)
+            df.loc[placeholder, "date"] = date_text[placeholder]
+            if zone_rejected:
+                df.loc[list(zone_rejected), "date"] = list(zone_rejected.values())
 
     # Cross-AI revision 2026-04-30: redact preview rows. Underlying
     # validation already ran on the unredacted df; only the preview

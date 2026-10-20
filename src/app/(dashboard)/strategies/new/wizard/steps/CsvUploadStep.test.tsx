@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { CsvUploadStep } from "./CsvUploadStep";
 
 // Regression coverage for the post-mount initialStrategyName prop-sync.
@@ -74,5 +74,80 @@ describe("CsvUploadStep — initialStrategyName prop sync", () => {
     expect(
       (screen.getByTestId("csv-strategy-name") as HTMLInputElement).value,
     ).toBe("User-typed-name");
+  });
+});
+
+// 170.1-02 / R-2 (checker W1) — the `format` wiring, proven through the REAL
+// caller. The envelope's own tests pass `format` by hand; only a test that
+// enters through CsvUploadStep can see the prop dropped from the call site.
+// `vi.spyOn` + `vi.restoreAllMocks`, never `vi.stubGlobal` (DEF-16-1).
+describe("[170.1-02 R-2] CsvUploadStep — the hint follows the SELECTED format", () => {
+  const HINT = "Check the file format you selected.";
+  const FIVE_MISSING = ["side", "qty", "price", "symbol", "currency"].map(
+    (column) => ({
+      rule: "column_in_dataframe",
+      row: 0,
+      message: `Your file has no ${column} column.`,
+      column,
+    }),
+  );
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      // The genuine verdict: 200 + ok:false, rows on `errors`.
+      new Response(
+        JSON.stringify({
+          ok: false,
+          code: "CSV_VALIDATION_FAILED",
+          human_message: "Your file did not pass validation.",
+          errors: FIVE_MISSING,
+          correlation_id: null,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    cleanup();
+  });
+
+  function chooseFileAndValidate(trades: boolean) {
+    render(<CsvUploadStep {...baseProps} initialStrategyName="Aurora" />);
+    if (trades) fireEvent.click(screen.getByTestId("wizard-csv-fmt-trades"));
+    const file = new File(["date,daily_return\n2024-01-01,0.01\n"], "track.csv", {
+      type: "text/csv",
+    });
+    fireEvent.change(screen.getByTestId("wizard-csv-file-input"), {
+      target: { files: [file] },
+    });
+    fireEvent.click(screen.getByTestId("wizard-csv-validate-submit"));
+  }
+
+  it("🔴 Trade list selected: the routed specimen shows the hint exactly once, beside five plain lines", async () => {
+    chooseFileAndValidate(true);
+    await screen.findByTestId("wizard-csv-error");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(screen.queryAllByText(HINT)).toHaveLength(1);
+    const lines = [
+      ...screen.getByTestId("wizard-csv-error").querySelectorAll("li"),
+    ].map((li) => li.textContent);
+    expect(lines).toEqual([
+      "Your file has no side column.",
+      "Your file has no qty column.",
+      "Your file has no price column.",
+      "Your file has no symbol column.",
+      "Your file has no currency column.",
+    ]);
+  });
+
+  it("the default Daily returns selection: the same five rows give NO hint (the prop carries the selection)", async () => {
+    chooseFileAndValidate(false);
+    await screen.findByTestId("wizard-csv-error");
+
+    expect(screen.queryByText(HINT)).toBeNull();
+    expect(screen.getByText(/Rule violated/)).toBeInTheDocument(); // the panel is real
   });
 });
