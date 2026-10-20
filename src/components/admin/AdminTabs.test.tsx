@@ -227,7 +227,7 @@ describe("AdminTabs — Strategy Review reject surfaces the server error (M-0378
 /**
  * R169-(c) / R169-(d) (170-06, AD-08). Two owners who share a display name
  * must read differently, by email, with no short id. The count uses the
- * same word as the Intro Made filter.
+ * same word as the Intro made filter.
  */
 describe("AdminTabs — owner line and intro-made count (170-06)", () => {
   function row(
@@ -370,5 +370,72 @@ describe("AdminTabs — a never-computed row is not 'Computed <just now>' (166.5
       { cagr: 0.2, sharpe: 1.5, max_drawdown: -0.1, computation_status: "computing", computed_at: "2025-01-02T00:00:00Z" },
     ]);
     expect(line).not.toMatch(/Computed —$/);
+  });
+});
+
+/**
+ * Phase 170.1.2 / plan 08 (D-01) — the strategy source badge, the analytics
+ * status line and the intro-made wording read as words, not stored values.
+ * Expected strings are hand-typed so a label edit in display-labels.ts has to
+ * be mirrored here on purpose.
+ *
+ * Neuter to redden: render `Analytics: {analytics.computation_status}` (the
+ * pre-170.1.2 line) and the "Analytics computing" case fails.
+ */
+describe("AdminTabs — labels, not stored values (170.1.2-08)", () => {
+  async function openStrategyTab(strategy: PendingStrategyRow) {
+    const user = userEvent.setup();
+    render(
+      <AdminTabs
+        introRequests={[]}
+        pendingStrategies={[strategy]}
+        pendingAllocators={[]}
+        pendingManagers={[]}
+      />,
+    );
+    await user.click(screen.getByRole("tab", { name: /Strategy Review/ }));
+  }
+
+  it.each([
+    ["okx", "OKX"],
+    ["admin_import", "Import"],
+    ["wizard", "Wizard"],
+    ["not_a_source", "Other source"],
+  ])("source %s reads %s on the badge", async (source, label) => {
+    await openStrategyTab({ ...STRAT, source });
+    expect(screen.getByTestId("admin-source-badge").textContent).toBe(label);
+  });
+
+  it("an absent source keeps today's Legacy default", async () => {
+    await openStrategyTab({ ...STRAT, source: undefined as unknown as string });
+    expect(screen.getByTestId("admin-source-badge").textContent).toBe("Legacy");
+  });
+
+  it.each([
+    ["computing", "Analytics computing"],
+    ["pending", "Analytics pending"],
+    ["failed", "Analytics failed"],
+    ["something_else", "Analytics status unknown"],
+  ])("computation_status %s reads %s", async (status, line) => {
+    await openStrategyTab({
+      ...STRAT,
+      strategy_analytics: [
+        { cagr: null, sharpe: null, max_drawdown: null, computation_status: status, computed_at: "2025-01-02T00:00:00Z" },
+      ],
+    });
+    expect(screen.getByText(line)).toBeTruthy();
+    expect(screen.queryByText(/^Analytics: /)).toBeNull();
+  });
+
+  it("a complete analytics row renders no analytics line", async () => {
+    await openStrategyTab(STRAT);
+    expect(screen.queryByText(/^Analytics /)).toBeNull();
+  });
+
+  it("the intro filter option and the pending-row action read 'Intro made'", () => {
+    renderTabs();
+    // filter option + the pending row's action button
+    // (accessible-name string matching is exact and case-sensitive)
+    expect(screen.getAllByRole("button", { name: "Intro made" })).toHaveLength(2);
   });
 });
