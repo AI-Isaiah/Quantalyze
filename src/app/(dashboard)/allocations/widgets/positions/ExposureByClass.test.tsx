@@ -185,11 +185,11 @@ describe("<ExposureByClass> — drilldown table", () => {
     const rows = table.querySelectorAll("tbody tr");
     expect(rows).toHaveLength(2);
     // binance spot $300K sorts before deribit derivative $100K
-    expect(rows[0].textContent).toContain("binance");
-    expect(rows[1].textContent).toContain("deribit");
+    expect(rows[0].textContent).toContain("Binance");
+    expect(rows[1].textContent).toContain("Deribit");
   });
 
-  it("renders Type as Spot/Deriv, lowercase muted Side, and signed Net without color", () => {
+  it("renders Type as Spot/Deriv, muted Side, and signed Net without color", () => {
     render(<ExposureByClass snapshot={HEDGED} />);
     const rows = screen.getByRole("table").querySelectorAll("tbody tr");
     // spot row
@@ -197,11 +197,26 @@ describe("<ExposureByClass> — drilldown table", () => {
     // derivative short row
     const shortRow = rows[1] as HTMLElement;
     expect(within(shortRow).getByText("Deriv")).toBeTruthy();
-    const sideCell = within(shortRow).getByText("short");
+    const sideCell = within(shortRow).getByText("Short");
     expect(sideCell.className).toContain("text-caption");
     expect(sideCell.className).toContain("text-text-secondary");
     const netCell = within(shortRow).getByText("-$100K");
     expect(netCell.className).not.toContain("text-negative");
+  });
+
+  it("prints venue display names and a capitalised side, never the raw codes (170.1.2 WR-02)", () => {
+    const raw = snap([
+      { holdingType: "spot", venue: "okx", symbol: "BTC", side: "long", valueUsd: 300000, signedValueUsd: 300000 },
+      { holdingType: "derivative", venue: "sfox", symbol: "ETH-PERP", side: "short", valueUsd: 100000, signedValueUsd: -100000 },
+    ]);
+    render(<ExposureByClass snapshot={raw} />);
+    const rows = screen.getByRole("table").querySelectorAll("tbody tr");
+    const cells0 = rows[0].querySelectorAll("td");
+    const cells1 = rows[1].querySelectorAll("td");
+    expect(cells0[0].textContent).toBe("OKX");
+    expect(cells0[4].textContent).toBe("Long");
+    expect(cells1[0].textContent).toBe("sFOX");
+    expect(cells1[4].textContent).toBe("Short");
   });
 
   // 2026-10-09 Phase 170.2 H-3: the cap moved onto the ResponsiveTable region.

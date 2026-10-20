@@ -52,6 +52,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 // undefined binding throws.
 import { keyRouteFailureHeaders } from "@/lib/api/seam-retry-after";
 import type { User } from "@supabase/supabase-js";
+import { venueLabel } from "@/lib/display-labels";
 
 /**
  * POST /api/strategies/composite/add-key — the multi-key wizard's per-key
@@ -350,7 +351,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const labelOrDefault =
     typeof label === "string" && label.trim().length > 0
       ? label.trim()
-      : `${exchangeNormalized} key`;
+      : `${venueLabel(exchangeNormalized)} key`;
 
   // validate + encrypt are TOCTOU-safe back-to-back on the server side.
   try {

@@ -22,6 +22,21 @@ vi.mock("recharts", async () => {
   };
 });
 
+// The tooltip formatter is the only caller of the per-venue USD lookup, and
+// recharts never invokes it under jsdom (no pointer). Capture the props the
+// component hands the tooltip so a test can call the formatter directly.
+const captured = vi.hoisted(() => ({
+  formatter: null as
+    | null
+    | ((v: unknown, name: unknown, item: unknown) => [string, string]),
+}));
+vi.mock("@/components/charts/TouchTooltip", () => ({
+  TouchTooltip: (props: { formatter: NonNullable<typeof captured.formatter> }) => {
+    captured.formatter = props.formatter;
+    return null;
+  },
+}));
+
 const utc = (iso: string) => {
   const [y, m, d] = iso.split("-").map(Number);
   return Date.UTC(y, m - 1, d);
@@ -209,5 +224,21 @@ describe("AllocationOverTime — header + a11y", () => {
     ).toBeTruthy();
     expect(screen.getByText("Allocation over time")).toBeTruthy();
     expect(screen.getByText("as of 2026-03-02")).toBeTruthy();
+  });
+});
+
+describe("AllocationOverTime — tooltip formatter (170.1.2 M3)", () => {
+  // The series carries the DISPLAY name ("OKX") while the USD map is keyed by the
+  // RAW venue code, which only `dataKey` ("v:okx") still holds. A lookup that
+  // used `name` would miss and print "—" beside a real weight.
+  it("renders a real dollar string for an okx point, not the em-dash", () => {
+    render(<AllocationOverTime points={ALLOC_POINTS} gaps={[]} />);
+    const [line, label] = captured.formatter!(0.4, "OKX", {
+      dataKey: vk("okx"),
+      payload: { asofMs: utc("2026-03-01") },
+    });
+    expect(line).toBe("40.0% ($400K)");
+    expect(line).not.toContain("—");
+    expect(label).toBe("OKX");
   });
 });

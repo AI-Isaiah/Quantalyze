@@ -287,8 +287,11 @@ describe("[ONB-01] MultiKeyConnectStep — per-key validate", () => {
     expect(body.api_secret).toBe("SECRET_key2");
     expect(body.exchange).toBe("binance");
     expect(body.wizard_session_id).toBe(SESSION);
+    // 170.1.2 WR-04: no nickname typed → the venue DISPLAY name, never the code.
+    expect(body.label).toBe("Binance key");
 
     const summary = screen.getByTestId("key-1-summary");
+    expect(summary).toHaveTextContent("Binance key");
     expect(summary).toHaveTextContent("Binance");
     expect(summary).toHaveTextContent("2024-01-01");
     const pill = within(summary).getByTestId("trust-tier-label");

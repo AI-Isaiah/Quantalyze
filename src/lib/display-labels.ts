@@ -308,3 +308,16 @@ export function supportedExchangeLabel(value: string): string {
   const trimmed = value.trim();
   return labelOf(EXCHANGE_DISPLAY, trimmed.toLowerCase(), trimmed);
 }
+
+// --- Holdings ---------------------------------------------------------------
+
+/** `allocator_holdings_side_check`. */
+export const HOLDING_SIDE_LABELS = {
+  long: "Long",
+  short: "Short",
+  flat: "Flat",
+} as const;
+
+export function holdingSideLabel(value: unknown): string {
+  return labelOf(HOLDING_SIDE_LABELS, value, "Other side");
+}
