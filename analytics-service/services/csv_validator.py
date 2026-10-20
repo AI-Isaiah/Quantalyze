@@ -25,7 +25,7 @@ import io
 import logging
 import re
 import warnings
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 import pandera as pa
@@ -1024,7 +1024,7 @@ def _raw_header_names(raw_bytes: bytes, header_row: int, width: int) -> list[str
             nrows=header_row + 1,
             index_col=False,
         )
-    return raw.iloc[header_row].tolist()
+    return cast(list[str], raw.iloc[header_row].tolist())
 
 
 def _row_longer_than_header() -> dict[str, Any]:
@@ -1467,7 +1467,8 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             # The day-first detector uses the same placeholder for a cell neither
             # reading reads (LF-1); the user gets back what they wrote there.
             placeholder = df["date"].map(lambda v: isinstance(v, str) and v == _UNSUPPORTED_ZONE_TOKEN)
-            df.loc[placeholder, "date"] = date_text[placeholder]
+            # date_text is set whenever a "date" column exists, which this branch reads.
+            df.loc[placeholder, "date"] = cast(pd.Series, date_text)[placeholder]
             if zone_rejected:
                 df.loc[list(zone_rejected), "date"] = list(zone_rejected.values())
 
