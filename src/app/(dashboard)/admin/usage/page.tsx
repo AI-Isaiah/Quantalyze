@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -24,6 +25,9 @@ import {
  */
 
 export const dynamic = "force-dynamic"; // PostHog data must not be ISR'd
+export const metadata: Metadata = {
+  title: "Usage analytics",
+};
 
 function NoticeBox({ message }: { message: string }) {
   return (
@@ -78,7 +82,7 @@ export default async function AdminUsagePage() {
   return (
     <>
       <PageHeader
-        title="Usage Analytics"
+        title="Usage analytics"
         description="Allocator engagement funnel sourced from PostHog. session_count is mirrored server-side in user_metadata."
       />
 

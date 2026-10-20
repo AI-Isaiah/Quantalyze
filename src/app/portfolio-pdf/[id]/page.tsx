@@ -1,4 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { extractAnalytics } from "@/lib/queries";
 import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { formatCurrency, formatPercent, formatNumber } from "@/lib/utils";
@@ -24,14 +25,19 @@ export async function generateMetadata({
     return { title: "Unauthorized", robots: "noindex" };
   }
   const admin = createAdminClient();
-  const { data } = await admin
+  const { data, error } = await admin
     .from("portfolios")
     .select("name")
     .eq("id", id)
     .single();
-  const name = (data as { name?: string } | null)?.name ?? "Portfolio";
+  if (error) {
+    captureToSentry(new Error(error.message), {
+      tags: { route: "portfolio-pdf/[id]/page", stage: "generate-metadata" },
+    });
+  }
+  const name = (data as { name?: string } | null)?.name;
   return {
-    title: `${name} — Quantalyze Portfolio Report`,
+    title: name ? `${name} portfolio report` : "Portfolio report",
     robots: "noindex",
   };
 }

@@ -23,7 +23,7 @@ import { parseContactPrefill } from "@/lib/contact";
  */
 
 export const metadata: Metadata = {
-  title: "Contact — Quantalyze",
+  title: "Contact",
   alternates: {
     canonical: "/contact",
   },

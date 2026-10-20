@@ -38,7 +38,7 @@ import { ForQuantsCtas } from "./ForQuantsCtas";
  */
 
 export const metadata: Metadata = {
-  title: "For Crypto Quant Teams | Quantalyze",
+  title: "For Crypto Quant Teams",
   description:
     "List a verified track record without exposing trading permissions. Read-only exchange API keys, codename anonymization, founder-routed allocator intros.",
   alternates: {

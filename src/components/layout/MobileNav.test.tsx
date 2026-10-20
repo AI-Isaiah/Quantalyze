@@ -15,7 +15,7 @@ import { MobileNav } from "./MobileNav";
  *     allocator never gets manager-only destinations and vice-versa, and a
  *     bare is_admin fixture surfaces only Profile (T-45-01
  *     information-disclosure mitigation in the plan threat register);
- *   - the SC#1 allocator head — My Allocation / Risk / Bridge with DISTINCT
+ *   - the SC#1 allocator head — My allocation / Risk / Bridge with DISTINCT
  *     hrefs (there is no /bridge route, verified in 45-RESEARCH Pitfall 1;
  *     Bridge deep-links the Scenario tab `/allocations?tab=scenario`, where the
  *     composer's "Open Bridge" card → BridgeDrawer lives — see buildPrimaryMobileNav
@@ -35,7 +35,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
-  it("allocator-only: heads with My Allocation, Risk, Bridge (distinct hrefs), <=5", () => {
+  it("allocator-only: heads with My allocation, Risk, Bridge (distinct hrefs), <=5", () => {
     const items = buildPrimaryMobileNav({ isAllocator: true });
     const hrefs = items.map((i) => i.href);
     expect(items.length).toBeLessThanOrEqual(5);
@@ -43,7 +43,7 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     expect(hrefs).toContain("/allocations");
     expect(hrefs).toContain("/allocations?tab=risk");
     expect(hrefs).toContain("/allocations?tab=scenario");
-    // The SC#1 trio leads the list (My Allocation, Risk, Bridge in order).
+    // The SC#1 trio leads the list (My allocation, Risk, Bridge in order).
     expect(hrefs.slice(0, 3)).toEqual([
       "/allocations",
       "/allocations?tab=risk",
@@ -53,7 +53,7 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     expect(new Set(hrefs).size).toBe(hrefs.length);
     // Labels match the buildNavSections copy verbatim.
     const labels = items.map((i) => i.label);
-    expect(labels).toContain("My Allocation");
+    expect(labels).toContain("My allocation");
     expect(labels).toContain("Risk");
     expect(labels).toContain("Bridge");
     // Profile is always present (ACCOUNT).
@@ -108,7 +108,7 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     // The allocator head lights (NOT the pre-fix !isAllocator short-circuit),
     // via pure role. Pin the EXACT set + ORDER so a reorder of the priority
     // array can't silently change which destination is dropped at the <=5 cap
-    // (WR-02): budget = CAP(5) - 1 reserved for Profile = 4 → [My Allocation,
+    // (WR-02): budget = CAP(5) - 1 reserved for Profile = 4 → [My allocation,
     // Risk, Bridge, Strategies] then Profile; Portfolios + Discovery overflow
     // to the hamburger drawer (the full nav) by design.
     expect(hrefs).toEqual([
@@ -150,7 +150,7 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     ).toBe("add-strategy");
     // The SC#1 trio still leads — the action is a filler, not a primary.
     expect(items.slice(0, 3).map((i) => i.label)).toEqual([
-      "My Allocation",
+      "My allocation",
       "Risk",
       "Bridge",
     ]);
@@ -166,7 +166,7 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     expect(items.find((i) => i.label === "Add a Strategy")).toBeUndefined();
   });
 
-  it("My Allocation carries the flaggedCount badge when > 0", () => {
+  it("My allocation carries the flaggedCount badge when > 0", () => {
     const withBadge = buildPrimaryMobileNav({ isAllocator: true, flaggedCount: 3 });
     const myAlloc = withBadge.find((i) => i.href === "/allocations");
     expect(myAlloc?.badge).toBe(3);
@@ -188,7 +188,7 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     expect(hrefs).toContain("/allocations");
     expect(hrefs).toContain("/allocations?tab=risk");
     expect(hrefs).toContain("/allocations?tab=scenario");
-    expect(within(nav).getByText("My Allocation")).toBeInTheDocument();
+    expect(within(nav).getByText("My allocation")).toBeInTheDocument();
     expect(within(nav).getByText("Bridge")).toBeInTheDocument();
     expect(within(nav).getByText("Risk")).toBeInTheDocument();
   });
@@ -215,14 +215,14 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     expect(within(nav).queryByText("Portfolios")).toBeNull();
     // The old role-blind stub surfaced Discovery to everyone — it must be gone
     // for a manager (Discovery is the allocator's browse surface).
-    expect(within(nav).queryByText("My Allocation")).toBeNull();
+    expect(within(nav).queryByText("My allocation")).toBeNull();
   });
 
   it("marks the active item with aria-current=page (pathname-prefix match)", () => {
     pathnameMock.mockReturnValue("/allocations");
     render(<MobileNav isAllocator />);
     const nav = screen.getByRole("navigation", { name: "Primary mobile" });
-    const myAlloc = within(nav).getByText("My Allocation").closest("a");
+    const myAlloc = within(nav).getByText("My allocation").closest("a");
     expect(myAlloc).toHaveAttribute("aria-current", "page");
     // The inactive branch (aria-current={active ? "page" : undefined}): the
     // Risk and Bridge cells keep the query string in their hrefs, which the
@@ -279,7 +279,7 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
   it("D-08: the label wraps whole and centred", () => {
     pathnameMock.mockReturnValue("/allocations");
     render(<MobileNav isAllocator />);
-    const label = screen.getByText("My Allocation");
+    const label = screen.getByText("My allocation");
     const t = tokens(label);
     expect(t).toContain("text-center");
     // 1.25 line height keeps two 10px lines inside the 64px bar reservation.
@@ -296,12 +296,12 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     for (const cell of navCells()) {
       expect(tokens(cell).filter(clipping), `${cell.textContent} clips`).toEqual([]);
     }
-    for (const label of within(nav).getAllByText(/^(My Allocation|Risk|Bridge|Add a Strategy|Profile)$/)) {
+    for (const label of within(nav).getAllByText(/^(My allocation|Risk|Bridge|Add a Strategy|Profile)$/)) {
       expect(tokens(label).filter(clipping), `${label.textContent} label clips`).toEqual([]);
     }
   });
 
-  it("renders the My Allocation flagged badge when flaggedCount > 0", () => {
+  it("renders the My allocation flagged badge when flaggedCount > 0", () => {
     pathnameMock.mockReturnValue("/allocations");
     render(<MobileNav isAllocator flaggedCount={2} />);
     expect(screen.getByLabelText("2 flagged holdings")).toBeInTheDocument();

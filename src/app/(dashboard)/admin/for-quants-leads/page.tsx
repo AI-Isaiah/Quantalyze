@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
@@ -7,6 +8,10 @@ import {
 } from "@/lib/for-quants-leads-admin";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { ForQuantsLeadsTable } from "@/components/admin/ForQuantsLeadsTable";
+
+export const metadata: Metadata = {
+  title: "Request-a-call leads",
+};
 
 // Founder CRM triage for /api/for-quants-lead submissions.
 export default async function ForQuantsLeadsPage({
@@ -32,7 +37,7 @@ export default async function ForQuantsLeadsPage({
     // tables keep the wide measure; the shell regex is CONTEXT-locked.
     <div className="mx-auto max-w-[1100px]">
       <PageHeader
-        title="Request-a-Call leads"
+        title="Request-a-call leads"
         description="Public /for-quants submissions. Mark as processed once you've reached out."
       />
       {error ? (

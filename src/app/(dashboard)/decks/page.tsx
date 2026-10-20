@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { getDecks } from "@/lib/queries";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -5,6 +6,10 @@ import { Card } from "@/components/ui/Card";
 import { DeckCard } from "@/components/deck/DeckCard";
 import { redirect } from "next/navigation";
 import { requireRolePage } from "@/lib/auth/requireRolePage";
+
+export const metadata: Metadata = {
+  title: "Decks",
+};
 
 export default async function DecksPage() {
   const supabase = await createClient();

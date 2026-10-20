@@ -293,7 +293,7 @@ function FactsheetWarmupNote({ curveDays }: { curveDays: number }) {
       <p className="mt-3 text-sm text-text-secondary">
         Aggregated factsheet panels appear once at least three days of
         blended equity history are available. The data flows from
-        the API keys you connect on the My Allocation page.
+        the API keys you connect on the My allocation page.
       </p>
       {curveDays > 0 && (
         <p className="mt-2 text-fixed-11 text-text-muted">

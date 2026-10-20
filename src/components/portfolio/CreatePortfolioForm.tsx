@@ -113,7 +113,7 @@ export function CreatePortfolioForm() {
             />
             <p className="text-caption text-text-muted">
               Saved as a test/scenario portfolio for comparison. Your real
-              allocations live on the My Allocation page.
+              allocations live on the My allocation page.
             </p>
           </div>
           {error && <p className="text-small text-negative mt-3">{error}</p>}

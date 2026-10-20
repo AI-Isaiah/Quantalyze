@@ -31,7 +31,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Quantalyze",
+  // The one place the brand suffix and the separator are written (Phase
+  // 170.1.1 D-06). Child segments export a bare `title`; never `title.absolute`.
+  title: { template: "%s — Quantalyze", default: "Quantalyze" },
   description: "Verified quantitative strategy marketplace",
 };
 

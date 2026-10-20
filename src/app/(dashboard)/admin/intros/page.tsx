@@ -2,10 +2,15 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import type { Metadata } from "next";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { scrubPii } from "@/lib/admin/pii-scrub";
 import { formatNumber, formatPercent } from "@/lib/utils";
 import { PortfolioSnapshotSchema, type PortfolioSnapshotJSON } from "@/lib/intro/snapshot";
+
+export const metadata: Metadata = {
+  title: "Intro requests",
+};
 
 /**
  * /admin/intros — founder triage for contact_requests (intro requests).
@@ -121,7 +126,7 @@ export default async function AdminIntrosPage() {
   return (
     <>
       <PageHeader
-        title="Intro Requests"
+        title="Intro requests"
         description="Allocator → manager introductions. Bridge-sourced rows include replacement context."
       />
 

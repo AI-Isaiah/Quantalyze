@@ -4,7 +4,7 @@ import { contactHref } from "@/lib/contact";
 const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
 
 export const metadata = {
-  title: `Privacy Policy — ${PLATFORM_NAME}`,
+  title: "Privacy Policy",
 };
 
 /**

@@ -1,6 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { redirect } from "next/navigation";
 import Link from "next/link";
+import type { Metadata } from "next";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { AllocationEventForm } from "@/components/portfolio/AllocationEventForm";
@@ -15,6 +17,32 @@ const statusStyles: Record<string, string> = {
   paused: "bg-badge-market-neutral/10 text-badge-market-neutral",
   exited: "bg-negative/10 text-negative",
 };
+
+/**
+ * Tab title. Reads only the portfolio `name` through the request's RLS server
+ * client; a miss or a read error falls back to a fixed neutral title, never
+ * the id, and a read error is captured.
+ */
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("portfolios")
+    .select("name")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) {
+    captureToSentry(new Error(error.message), {
+      tags: { route: "portfolios/[id]/manage/page", stage: "generate-metadata" },
+    });
+  }
+  if (error || !data?.name) return { title: "Manage portfolio" };
+  return { title: `Manage ${data.name}` };
+}
 
 export default async function ManagePortfolioPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;

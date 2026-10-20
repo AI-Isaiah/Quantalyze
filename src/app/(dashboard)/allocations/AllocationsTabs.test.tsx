@@ -274,6 +274,19 @@ describe("AllocationsTabs — Phase 170 item (a) narrow header strip", () => {
     }
   });
 
+  // WHY (170.1.1 D-06): DESIGN.md Voice is sentence case, and the sidebar
+  // label, breadcrumb and e2e h1 anchors all key on "My allocation". The
+  // string is hand-typed and case-sensitive so a title-case revert fails here.
+  it("[170.1.1-D06] the page H1 reads 'My allocation' in sentence case", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const h1 = screen.getByRole("heading", { level: 1 });
+    expect(h1.textContent?.startsWith("My allocation")).toBe(true);
+    for (const heading of screen.getAllByRole("heading")) {
+      expect(heading.textContent).not.toContain("My Allocation");
+    }
+  });
+
   // WHY: JOURNEY-03 / axe aria-required-children. Re-nesting the tabs under
   // a scroll wrapper is a critical violation; the scroller IS the tablist.
   it("[JOURNEY-03] the tablist's direct children are the role=tab buttons", () => {

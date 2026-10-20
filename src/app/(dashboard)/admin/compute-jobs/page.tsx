@@ -2,7 +2,12 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { redirect } from "next/navigation";
+import type { Metadata } from "next";
 import { PageHeader } from "@/components/layout/PageHeader";
+
+export const metadata: Metadata = {
+  title: "Compute jobs",
+};
 
 export default async function ComputeJobsPage() {
   const supabase = await createClient();
@@ -73,7 +78,7 @@ export default async function ComputeJobsPage() {
 
   return (
     <>
-      <PageHeader title="Compute Jobs" description="Job queue monitoring and fill health" />
+      <PageHeader title="Compute jobs" description="Job queue monitoring and fill health" />
 
       {/* Fill health indicators */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">

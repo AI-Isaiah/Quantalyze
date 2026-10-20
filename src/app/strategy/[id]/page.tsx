@@ -29,7 +29,7 @@ export async function generateMetadata({
   const result = await getStrategyDetail(id);
 
   if (!result) {
-    return { title: "Strategy Not Found | Quantalyze" };
+    return { title: "Strategy not found" };
   }
 
   const { strategy, analytics } = result;
@@ -44,7 +44,7 @@ export async function generateMetadata({
     : `${strategy.name} -- Verified quantitative strategy on Quantalyze.`;
 
   return {
-    title: `${strategy.name} | Quantalyze`,
+    title: strategy.name,
     description,
     openGraph: {
       title: `${strategy.name} | Quantalyze`,

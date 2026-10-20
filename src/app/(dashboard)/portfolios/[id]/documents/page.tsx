@@ -1,9 +1,35 @@
 import { createClient } from "@/lib/supabase/server";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DocumentUpload } from "@/components/portfolio/DocumentUpload";
 import { DocumentList } from "@/components/portfolio/DocumentList";
 import { getPortfolioDetail, getPortfolioStrategies } from "@/lib/queries";
+import type { Metadata } from "next";
+
+// Tab title names the portfolio. A name-only read through the request's RLS
+// client; an error and a missing row both give "Documents", never the id, and
+// a read error is captured.
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("portfolios")
+    .select("name")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) {
+    captureToSentry(new Error(error.message), {
+      tags: { route: "portfolios/[id]/documents/page", stage: "generate-metadata" },
+    });
+  }
+  if (error || !data?.name) return { title: "Documents" };
+  return { title: `Documents for ${data.name}` };
+}
 
 export default async function PortfolioDocumentsPage({
   params,

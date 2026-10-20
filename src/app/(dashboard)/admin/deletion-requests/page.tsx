@@ -3,6 +3,7 @@
 // pagination (Sprint 7). The 90-day terminal-state cleanup cron referenced
 // in the design note below is NOT yet implemented in migration 056 — also
 // Sprint 7 (see ADR-0024 "Open questions / Sprint 7").
+import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
@@ -11,6 +12,10 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { DeletionRequestActions } from "@/components/admin/DeletionRequestActions";
+
+export const metadata: Metadata = {
+  title: "Deletion requests",
+};
 
 /** Map a row's (completed_at, rejected_at) terminal timestamps to a
  * human-readable status label. A row has at most one terminal timestamp

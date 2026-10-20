@@ -52,6 +52,7 @@ import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
 import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
+import type { Metadata } from "next";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
@@ -381,6 +382,9 @@ function captureProbeThrows(throws: readonly unknown[]): void {
 interface StrategiesPageProps {
   searchParams: Promise<{ wizard_submitted?: string | string[] }>;
 }
+
+// 170.1.1 D-06: distinct from /my-strategies ("My strategies" tab title, "My Strategies" H1).
+export const metadata: Metadata = { title: "Strategies" };
 
 export default async function StrategiesPage({ searchParams }: StrategiesPageProps) {
   // D-07 / T-170.1-19: only the exact string "1" shows the status line. The
@@ -894,7 +898,7 @@ export default async function StrategiesPage({ searchParams }: StrategiesPagePro
   return (
     <>
       <PageHeader
-        title="My Strategies"
+        title="Strategies"
         actions={
           <Link href="/strategies/new">
             <Button>New Strategy</Button>
