@@ -31,6 +31,7 @@ import {
 } from "@/app/(dashboard)/compare/lib/holding-compare-adapter";
 import { formatRatio, formatUnsignedPercent } from "@/lib/factsheet/display-sign";
 import { formatNumber } from "@/lib/utils";
+import { venueLabel } from "@/lib/display-labels";
 
 function fmtPct(v: number | null): string {
   if (v === null || !Number.isFinite(v)) return "—";
@@ -125,7 +126,7 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
           </span>
           <h3 className="font-display text-2xl text-text-primary">{symbol}</h3>
           <p className="text-sm text-text-secondary">
-            {venue} · {holding_type}
+            {venueLabel(venue)} · {holding_type}
           </p>
         </div>
       </div>

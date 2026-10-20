@@ -127,7 +127,22 @@ describe("AllocationOverTime — single-venue book", () => {
     expect(rows.find((r) => r.asofMs === utc("2026-01-01"))![vk("binance")]).toBe(1);
     render(<AllocationOverTime points={points} gaps={[]} />);
     // getByText throws on >1 match — proves exactly one legend chip.
-    expect(screen.getByText("binance")).toBeTruthy();
+    expect(screen.getByText("Binance")).toBeTruthy();
+  });
+
+  it("names a venue by its display name in the legend while the dataKey keeps the raw code (170.1.2 / D-01)", () => {
+    const points = [
+      ap("2026-01-01", [venue("okx", 100, 0.6), venue("sfox", 100, 0.4)]),
+      ap("2026-01-02", [venue("okx", 100, 0.6), venue("sfox", 100, 0.4)]),
+    ];
+    const { venues, rows } = buildAllocationChartData(points, []);
+    expect(venues).toEqual(["okx", "sfox"]);
+    expect(rows[0][vk("okx")]).toBe(0.6);
+    render(<AllocationOverTime points={points} gaps={[]} />);
+    expect(screen.getByText("OKX")).toBeTruthy();
+    expect(screen.getByText("sFOX")).toBeTruthy();
+    expect(screen.queryByText("okx")).toBeNull();
+    expect(screen.queryByText("Okx")).toBeNull();
   });
 });
 
