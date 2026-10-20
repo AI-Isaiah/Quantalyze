@@ -35,6 +35,7 @@ import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
 // (ScenarioFlaggedHoldingsList.test.tsx) which mocks `global.fetch`
 // continues to see the same call signature.
 import { sendBridgeIntro } from "@/lib/bridge/send-intro";
+import { breachReasonLabel, venueLabel } from "@/lib/display-labels";
 
 export interface ScenarioFlaggedHoldingsListProps {
   flaggedHoldings: FlaggedHolding[];
@@ -244,7 +245,7 @@ export function ScenarioFlaggedHoldingsList({
                       {h.symbol}
                     </span>
                     <span className="ml-1 text-xs text-text-muted">
-                      {h.venue}
+                      {venueLabel(h.venue)}
                     </span>
                   </td>
                   <td className="py-3 pr-4 text-text-secondary">
@@ -261,9 +262,9 @@ export function ScenarioFlaggedHoldingsList({
                       {h.breach_reasons.map((reason) => (
                         <span
                           key={reason}
-                          className="rounded bg-surface-muted px-1.5 py-0.5 text-fixed-10 uppercase tracking-wider text-text-muted"
+                          className="rounded bg-surface-muted px-1.5 py-0.5 text-fixed-10 tracking-wider text-text-muted"
                         >
-                          {reason}
+                          {breachReasonLabel(reason)}
                         </span>
                       ))}
                     </div>
