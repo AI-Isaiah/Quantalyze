@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.132.6.2] - 2026-10-20 — deps: pyarrow 25.0.1 → 26.0.0 in analytics-service dev requirements (#1016)
+
+### Changed
+- `pyarrow` 25.0.1 → 26.0.0 in `analytics-service/requirements-dev.txt`. pyarrow is test-only here (H-0537): it loads the golden parquet fixture in `tests/conftest.py` and writes it in `tests/fixtures/regen_golden.py`. The Railway image installs only `requirements.txt`, so nothing deployed changes.
+
+### Notes
+- Dependabot's own run was red on `version-gate`, on `test-db-drift` (which fails hard without repo secrets, and Dependabot-triggered runs get none) and on one `frontend-test` shard of its 2026-10-13 base, which this change cannot reach. The `python` job was green on it.
+
+### Tests
+- Local, Python 3.12 venv on `requirements.txt` + `requirements-dev.txt` with pyarrow 26.0.0 and pandas 3.0.3: the full `pytest` from `analytics-service/` passes, 11986 passed and 91 skipped, golden-parquet parity tests included.
+
 ## [0.132.6.1] - 2026-10-20 — deps: GitHub Actions minor/patch group (#1013)
 
 ### Changed
