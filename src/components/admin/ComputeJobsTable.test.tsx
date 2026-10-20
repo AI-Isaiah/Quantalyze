@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, act, waitFor, within } from "@testing-library/react";
 import { ComputeJobsTable } from "./ComputeJobsTable";
 
 /**
@@ -382,6 +382,12 @@ describe("ComputeJobsTable — the Kind filter lists the kinds that have jobs (D
     return Array.from(select.options).map((o) => o.textContent ?? "");
   }
 
+  // The option VALUES are what the page read filters on; labels are display only.
+  function kindOptionValues(): string[] {
+    const select = screen.getByLabelText("Kind") as HTMLSelectElement;
+    return Array.from(select.options).map((o) => o.value);
+  }
+
   function urlsRequested(mock: ReturnType<typeof stubFetch>): string[] {
     return mock.mock.calls.map((c) => String(c[0]));
   }
@@ -395,8 +401,14 @@ describe("ComputeJobsTable — the Kind filter lists the kinds that have jobs (D
     });
 
     await waitFor(() =>
-      expect(kindOptionLabels()).toEqual(["All kinds", "derive_allocator_equity", "sync_trades"]),
+      expect(kindOptionLabels()).toEqual([
+        "All kinds",
+        "Allocator equity derivation",
+        "Trade sync",
+      ]),
     );
+    // D-01: the label is display only. The value the filter sends stays raw.
+    expect(kindOptionValues()).toEqual(["", "derive_allocator_equity", "sync_trades"]);
 
     await act(async () => {
       fireEvent.change(screen.getByLabelText("Kind"), {
@@ -434,7 +446,11 @@ describe("ComputeJobsTable — the Kind filter lists the kinds that have jobs (D
         "derive_allocator_equity",
       ),
     );
-    expect(kindOptionLabels()).toEqual(["All kinds", "derive_allocator_equity", "sync_trades"]);
+    expect(kindOptionLabels()).toEqual([
+      "All kinds",
+      "Allocator equity derivation",
+      "Trade sync",
+    ]);
   });
 
   it("K3: a failed facet read is said, not hidden, and the jobs list is unaffected", async () => {
@@ -503,7 +519,7 @@ describe("ComputeJobsTable — the Kind filter lists the kinds that have jobs (D
       fireEvent.change(screen.getByLabelText("Status"), { target: { value: "done" } });
     });
     await waitFor(() => expect(screen.queryByTestId(FACETS_ERROR_ID)).toBeNull());
-    expect(kindOptionLabels()).toEqual(["All kinds", "sync_trades"]);
+    expect(kindOptionLabels()).toEqual(["All kinds", "Trade sync"]);
   });
 
   it("K5: a failed re-read keeps the previous good list and sets only the error line", async () => {
@@ -516,7 +532,7 @@ describe("ComputeJobsTable — the Kind filter lists the kinds that have jobs (D
       render(<ComputeJobsTable />);
     });
     await waitFor(() =>
-      expect(kindOptionLabels()).toEqual(["All kinds", "derive_allocator_equity", "sync_trades"]),
+      expect(kindOptionLabels()).toEqual(["All kinds", "Allocator equity derivation", "Trade sync"]),
     );
 
     // A status-filter change re-reads the facet; this read fails.
@@ -528,7 +544,7 @@ describe("ComputeJobsTable — the Kind filter lists the kinds that have jobs (D
     expect(line.textContent).toBe("Could not load the job kinds (HTTP 403).");
     // WHY: one transient failure must not take away the filter the admin was
     // already using. The list that was good stays good.
-    expect(kindOptionLabels()).toEqual(["All kinds", "derive_allocator_equity", "sync_trades"]);
+    expect(kindOptionLabels()).toEqual(["All kinds", "Allocator equity derivation", "Trade sync"]);
   });
 
   it("K6: a failed facet read is logged with its cause, not swallowed", async () => {
@@ -601,14 +617,14 @@ describe("ComputeJobsTable — the Kind filter lists the kinds that have jobs (D
     await act(async () => {
       fireEvent.change(screen.getByLabelText("Status"), { target: { value: "done" } });
     });
-    await waitFor(() => expect(kindOptionLabels()).toEqual(["All kinds", "sync_trades"]));
+    await waitFor(() => expect(kindOptionLabels()).toEqual(["All kinds", "Trade sync"]));
 
     await act(async () => {
       release({ ok: false, status: 500, body: { error: "late failure" } });
     });
 
     expect(screen.queryByTestId(FACETS_ERROR_ID)).toBeNull();
-    expect(kindOptionLabels()).toEqual(["All kinds", "sync_trades"]);
+    expect(kindOptionLabels()).toEqual(["All kinds", "Trade sync"]);
   });
 
   it("K7b: an older good read that lands after a newer one does not overwrite the list", async () => {
@@ -619,13 +635,13 @@ describe("ComputeJobsTable — the Kind filter lists the kinds that have jobs (D
     await act(async () => {
       fireEvent.change(screen.getByLabelText("Status"), { target: { value: "done" } });
     });
-    await waitFor(() => expect(kindOptionLabels()).toEqual(["All kinds", "sync_trades"]));
+    await waitFor(() => expect(kindOptionLabels()).toEqual(["All kinds", "Trade sync"]));
 
     await act(async () => {
       release({ ok: true, body: { kinds: ["stale_kind"] } });
     });
 
-    expect(kindOptionLabels()).toEqual(["All kinds", "sync_trades"]);
+    expect(kindOptionLabels()).toEqual(["All kinds", "Trade sync"]);
   });
 
   it("reads the facet on mount and on filter change, never on Load more or the auto-refresh tick", async () => {
@@ -673,6 +689,118 @@ describe("ComputeJobsTable — the Kind filter lists the kinds that have jobs (D
       await waitFor(() => expect(facetCount()).toBe(facetsAfterMount + 1));
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * Phase 170.1.2 plan 02 (D-01) — the table shows words and names. Kind and
+ * status render as labels, the Status filter says "Retrying" (one vocabulary
+ * with the cells), and the Target cell never falls through to a raw id.
+ */
+describe("ComputeJobsTable — labels and targets (D-01)", () => {
+  const ID = {
+    job: ["aaaa1111-0000-4000-8000-000000000001", "bbbb2222-0000-4000-8000-000000000002"],
+    strategy: "ccccdddd-1111-4111-8111-111111111111",
+    portfolio: "eeeeffff-2222-4222-8222-222222222222",
+  };
+
+  function jobRow(overrides: Record<string, unknown>): Record<string, unknown> {
+    return {
+      id: "job-x",
+      strategy_id: null,
+      portfolio_id: null,
+      strategy_name: null,
+      portfolio_name: null,
+      kind: "sync_trades",
+      status: "done",
+      attempts: 1,
+      max_attempts: 3,
+      last_error: null,
+      error_kind: null,
+      exchange: null,
+      trade_count: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+
+  async function renderWith(rows: unknown[]): Promise<HTMLElement> {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => ({
+        ok: true,
+        status: 200,
+        json: async () => (String(url).includes("facets=kinds") ? { kinds: [] } : rows),
+      })) as unknown as typeof fetch,
+    );
+    await act(async () => {
+      render(<ComputeJobsTable />);
+    });
+    return screen.findByRole("table", { name: /compute jobs/i });
+  }
+
+  /** Target is the second cell of each body row. */
+  function targetCells(): HTMLElement[] {
+    return screen
+      .getAllByRole("row")
+      .slice(1)
+      .map((row) => within(row).getAllByRole("cell")[1]);
+  }
+
+  it("the Status filter reads Retrying for failed_retry, with the value unchanged", async () => {
+    await renderWith([]);
+    const select = screen.getByLabelText("Status") as HTMLSelectElement;
+    const options = Array.from(select.options);
+    expect(options.map((o) => o.textContent)).toEqual([
+      "All statuses",
+      "Pending",
+      "Running",
+      "Done",
+      "Retrying",
+      "Failed",
+    ]);
+    expect(options.find((o) => o.textContent === "Retrying")?.value).toBe("failed_retry");
+  });
+
+  it("renders the kind and status cells as labels, not raw values", async () => {
+    const table = await renderWith([
+      jobRow({ id: "j1", kind: "derive_allocator_equity", status: "failed_retry" }),
+    ]);
+    const row = within(table).getAllByRole("row")[1];
+    expect(row.textContent).toContain("Allocator equity derivation");
+    expect(row.textContent).toContain("Retrying");
+    expect(row.textContent).not.toMatch(/derive_allocator_equity|failed_retry/);
+  });
+
+  it("Target: a name, else Unnamed strategy / Unnamed portfolio, else an em dash; text and title agree", async () => {
+    await renderWith([
+      jobRow({ id: ID.job[0], strategy_id: ID.strategy, strategy_name: "Alpha" }),
+      jobRow({ id: ID.job[1], strategy_id: ID.strategy }),
+      jobRow({ id: "j3", portfolio_id: ID.portfolio }),
+      jobRow({ id: "j4" }),
+      jobRow({ id: "j5", portfolio_id: ID.portfolio, portfolio_name: "Core book" }),
+    ]);
+
+    const cells = targetCells();
+    const expected = ["Alpha", "Unnamed strategy", "Unnamed portfolio", "—", "Core book"];
+    expect(cells.map((c) => c.textContent)).toEqual(expected);
+    // The tooltip carries the same words as the cell.
+    expect(cells.map((c) => c.getAttribute("title"))).toEqual(expected);
+  });
+
+  it("Target: no job, strategy or portfolio id appears in the table, whole or as an 8-character slice", async () => {
+    const table = await renderWith([
+      jobRow({ id: ID.job[0], strategy_id: ID.strategy }),
+      jobRow({ id: ID.job[1], portfolio_id: ID.portfolio }),
+    ]);
+
+    // innerHTML covers cell text and every attribute, title included.
+    const html = table.innerHTML;
+    for (const id of [...ID.job, ID.strategy, ID.portfolio]) {
+      expect(html).not.toContain(id);
+      expect(html).not.toContain(id.slice(0, 8));
     }
   });
 });
