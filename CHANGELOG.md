@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.132.7.1] - 2026-10-20 — deps: Python pip-minor-patch group (#1078)
+
+### Changed
+- Dependabot's pip-minor-patch group (8 updates) in `analytics-service/requirements.in`: fastapi 0.142.2 → 0.143.2, ccxt 4.5.85 → 4.5.88, numpy 2.5.3 → 2.5.4, pydantic 2.13.5 → 2.14.1, supabase 2.31.0 → 2.33.0, pandera 0.33.1 → 0.34.1, sentry-sdk 2.71.0 → 2.72.0; and aiohttp 3.14.3 → 3.14.5 in the lock (the manifest keeps `aiohttp<3.15`). Transitives that move with them: pydantic-core 2.46.5 → 2.50.1, postgrest / realtime / storage3 / supabase-auth / supabase-functions 2.31.0 → 2.33.0, multidict 6.7.1 → 6.9.1, yarl 1.24.2 → 1.25.1, typing-inspection 0.4.2 → 0.4.4.
+- `analytics-service/requirements.txt` is regenerated with the canonical `make lock` command (`uv pip compile --universal`), with `--upgrade-package aiohttp --upgrade-package yarl` to take the two lock-only moves, and not shipped in Dependabot's format. Dependabot's lock dropped the environment markers and folded extras into the pins (`psycopg[binary]`, `httpx[http2]`, `uvicorn[standard]`, `pyjwt[crypto]`); the regenerated lock keeps the repo's format, so the only lines that change are the versions above.
+- `services/db.py`: the comment naming the postgrest pin now says 2.33.0. `APIResponse` is still a non-generic pydantic model at 2.33.0, so the accessor it explains is unchanged.
+
+### Notes
+- Dependabot's own run was red only on `version-gate` and on `test-db-drift`, which fails hard without repo secrets (Dependabot-triggered runs get none). The `python` job was green on it.
+
+### Tests
+- Local, Python 3.12 venv on the regenerated lock plus `requirements-dev.txt`: full `pytest` from `analytics-service/` 11986 passed, 91 skipped; the CI strict `mypy` line is clean on 121 source files.
+
 ## [0.132.7.0] - 2026-10-20 — AUMBASIS 167.1.1.2: a derivative counts toward a book's size at its unrealized P&L, and a missing P&L is stored and shown as missing
 
 Phase 167.1.1.2. No migration.
