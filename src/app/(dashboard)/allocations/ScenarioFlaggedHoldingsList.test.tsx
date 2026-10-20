@@ -63,7 +63,27 @@ describe("ScenarioFlaggedHoldingsList", () => {
     expect(screen.getByText("BTC")).toBeInTheDocument();
     expect(screen.getByText(/Momentum-BTC-L/)).toBeInTheDocument();
     expect(screen.getByText(/72/)).toBeInTheDocument();
-    expect(screen.getByText(/max_weight/i)).toBeInTheDocument();
+    expect(screen.getByText("Above max weight")).toBeInTheDocument();
+  });
+
+  it("renders the venue and every breach reason as labels, never raw keys", () => {
+    render(
+      <ScenarioFlaggedHoldingsList
+        flaggedHoldings={[
+          {
+            ...FLAGGED[0],
+            venue: "okx",
+            breach_reasons: ["correlation_ceiling", "max_weight"],
+          },
+        ]}
+        matchDecisionsByHoldingRef={{}}
+        existingOutcomesByHoldingRef={{}}
+      />,
+    );
+    expect(screen.getByText("OKX")).toBeInTheDocument();
+    expect(screen.getByText("Above correlation ceiling")).toBeInTheDocument();
+    expect(screen.getByText("Above max weight")).toBeInTheDocument();
+    expect(screen.queryByText(/correlation_ceiling|max_weight/)).toBeNull();
   });
 
   it("one-open-at-a-time: expanding row 2 collapses row 1", () => {
