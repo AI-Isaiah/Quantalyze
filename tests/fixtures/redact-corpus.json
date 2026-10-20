@@ -57,7 +57,7 @@
     },
     {
       "name": "JWT whole string",
-      "input": "aaaaaaaaaaaa.bbbbbbbbbbbb.cccccccccccc",
+      "input": "eyJaaaaaaaaa.eyJbbbbbbbbb.cccccccccccc",
       "expectJwtRedacted": true
     },
     {
@@ -92,7 +92,7 @@
     },
     {
       "name": "JWT in nested string-only field",
-      "input": {"freeform": "abcdefghij.klmnopqrst.uvwxyzabcd"},
+      "input": {"freeform": "eyJabcdefgh.eyJklmnopqr.uvwxyzabcd"},
       "expectFreeformJwtRedacted": true
     },
     {

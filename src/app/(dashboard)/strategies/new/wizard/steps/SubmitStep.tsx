@@ -517,6 +517,12 @@ export function SubmitStep({
             // and the user would not learn their strategy was submitted.
             // RECOVERABLE: the Retry replays the finalize and re-dispatches.
             "SUBMITTED_ANALYTICS_NOT_QUEUED",
+            // 170.1 D-07 — a 2xx WIZARD_DUPLICATE is success (no branch below
+            // the `!res.ok` block any more). This member keeps its copy
+            // reachable for a NON-2xx reply that still carries the code, which
+            // would otherwise collapse to UNKNOWN. The route does not mint that
+            // shape today; the entry stays so a future one renders its own copy.
+            "WIZARD_DUPLICATE",
           ],
         );
         // 140.4-12 / SEAMRIM-08 — EACH LIST OWNS ITS OWN VOCABULARY, AND
@@ -624,22 +630,12 @@ export function SubmitStep({
         return;
       }
 
-      // CT-5 (army2) — even on a 200 OK, the upstream may emit
-      // `code: 'WIZARD_DUPLICATE'` + `idempotent: true` to signal that
-      // the strategy_verifications row pre-existed (BACKBONE-08
-      // wizard_session_id idempotency). Surface the WIZARD_DUPLICATE
-      // copy from wizardErrors.ts so the user sees the resume
-      // affordance instead of a silent re-submit.
-      if (data.code === "WIZARD_DUPLICATE") {
-        setErrorCode("WIZARD_DUPLICATE");
-        trackForQuantsEventClient("wizard_error", {
-          wizard_session_id: wizardSessionId,
-          step: "submit",
-          code: "WIZARD_DUPLICATE",
-        });
-        setSubmitting(false);
-        return;
-      }
+      // 170.1 D-07 — a 2xx `code: 'WIZARD_DUPLICATE'` + `idempotent: true`
+      // (BACKBONE-08 wizard_session_id idempotency) is a SUCCESS: the server
+      // already holds this submission, so a lost-response retry must read
+      // "submitted", not "already submitted". Deliberately no `data.ok`
+      // requirement and no branch here: it falls through to `onSubmitted`.
+      // The WIZARD_DUPLICATE copy stays in wizardErrors.ts for non-2xx replies.
 
       // 151 review E8 — the finalize SUCCEEDED; only the capital mark was
       // dropped. Hold the completion so the notice can be read, then hand over

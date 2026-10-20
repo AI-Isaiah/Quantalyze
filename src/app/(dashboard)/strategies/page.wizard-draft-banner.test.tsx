@@ -224,7 +224,13 @@ vi.mock("@/lib/supabase/server", () => ({
 async function renderPage(): Promise<HTMLElement> {
   const { default: StrategiesPage } = await import("./page");
   // server component returns a Promise<JSX>
-  const jsx = await (StrategiesPage as unknown as () => Promise<React.ReactElement>)();
+  // 170.1 D-07: the page reads `searchParams` (a Promise in Next 16), so every
+  // render passes the empty query a plain /strategies visit carries.
+  const jsx = await (
+    StrategiesPage as unknown as (props: {
+      searchParams: Promise<Record<string, string | string[] | undefined>>;
+    }) => Promise<React.ReactElement>
+  )({ searchParams: Promise.resolve({}) });
   const { container } = render(jsx);
   return container;
 }

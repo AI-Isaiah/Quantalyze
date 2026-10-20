@@ -50,7 +50,7 @@ interface ValidationEnvelope {
   code: string;
   human_message: string;
   debug_context: {
-    pandera_errors?: { rule: string; row: number; message: string }[];
+    pandera_errors?: { rule: string; row: number; message: string; column?: string }[];
   };
   correlation_id: string | null;
 }
@@ -485,7 +485,7 @@ export function CsvSubmitStep({
         code?: string;
         human_message?: string;
         debug_context?: {
-          pandera_errors?: { rule: string; row: number; message: string }[];
+          pandera_errors?: { rule: string; row: number; message: string; column?: string }[];
         };
         correlation_id?: string | null;
         error?: string;
@@ -730,6 +730,7 @@ export function CsvSubmitStep({
               debug_context: envelope.debug_context,
               correlation_id: envelope.correlation_id,
             }}
+            format={fmt}
             /* ⭐ 146.2-08 / B1 — the refusal's clickable remedy, INSIDE the
                shell because DESIGN.md's Error Envelope contract puts the CTA
                there ("`Button size='sm'`, BELOW the body and ABOVE the

@@ -33,6 +33,15 @@ const DENYLIST_EXACT = new Set<string>([
   // on the seam to FastAPI; outbound HTTP breadcrumbs would otherwise
   // capture it).
   "x-internal-token",
+  // 170.1 security re-audit — the shared analytics service key and the tenant
+  // claim (`<uuid>.<exp>.<hmac>`, not `eyJ`-headed) reached Sentry as request
+  // headers in cleartext; redact them by key.
+  "x-service-key",
+  "x-tenant-claim",
+  // Review LF-2 — Deribit `public/auth` bearer tokens, redacted by KEY: the
+  // JWT value shape is anchored on `eyJ` and cannot catch them.
+  "access_token",
+  "refresh_token",
   // Phase 18 / FIX-04 — Adversarial revision 2026-05-06 (Grok B1):
   // Bybit v5 + OKX broker-quirk header keys promoted to the canonical
   // denylist so both runtimes (TS + Python redact.py) share the same
@@ -58,9 +67,11 @@ const DENYLIST_EXACT = new Set<string>([
 
 const DENYLIST_PREFIX = ["sb-ec-"];
 
-// JWT shape: three base64url segments separated by dots. Not a signature
-// check — just pattern recognition for the shape we know is bearer-ish.
-const JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+// JWT shape: three base64url segments separated by dots, the header starting
+// `eyJ` (base64url of `{"`, a JSON-object header, which every JWT has). Not a
+// signature check. Without the `eyJ` anchor any dotted host or version matched
+// (170.1). ⛔ Mirrored verbatim by `analytics-service/services/redact.py`.
+const JWT_SHAPE = /^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 
 // JWT-shaped substring detector for freeform strings. The 10-char minimum
 // per segment keeps the false-positive rate low (e.g., `a.b.c` is not a
@@ -142,7 +153,7 @@ function scrubString(value: string): string {
  * with `[REDACTED]` and sibling scrubbing continues — partial-scrub fail
  * mode.
  *
- * **Cross-language asymmetry (Claude adv round-2 conf 6):** the Python
+ * **Cross-language asymmetry (Claude adv round-2 conf 6):** the
  * mirror RAISES `RecursionError` on overflow; the upstream
  * `_redact_processor` catches and returns the FULL UNSCRUBBED document
  * (fail-OPEN). The TS side here returns a partially-scrubbed document
