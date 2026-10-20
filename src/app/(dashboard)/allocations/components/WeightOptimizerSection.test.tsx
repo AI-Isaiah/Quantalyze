@@ -89,6 +89,27 @@ describe("WeightOptimizerSection", () => {
     expect(onApply).toHaveBeenCalledWith({ a: 0.7, b: 0.3 });
   });
 
+  it("a weight row whose strategy has no name reads 'Unnamed strategy', never its id (D-01)", async () => {
+    mockFetchOnce({
+      ok: true,
+      objective: "min_vol",
+      n: 180,
+      k: 2,
+      weights: { "abcdef12-0000-4000-8000-000000000001": 0.7, b: 0.3 },
+      in_sample: true,
+      reason: "ok",
+    });
+    // A strategy row that reached the section without a name (a lookup miss).
+    const unnamed = strat("abcdef12-0000-4000-8000-000000000001", "x");
+    (unnamed as { name?: string }).name = undefined;
+    render(<WeightOptimizerSection strategies={[unnamed, strat("b", "Beta")]} onApply={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /Suggest weights/ }));
+    await waitFor(() => expect(screen.getByTestId("optimizer-result")).toBeInTheDocument());
+    const row = screen.getByTestId("optimizer-weight-abcdef12-0000-4000-8000-000000000001");
+    expect(row).toHaveTextContent("Unnamed strategy");
+    expect(row.textContent).not.toContain("abcdef12");
+  });
+
   it("ok:false (below-sample-gate) ⇒ honest empty state, NEVER fabricated weights", async () => {
     mockFetchOnce({
       ok: false,

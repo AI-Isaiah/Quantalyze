@@ -188,6 +188,29 @@ describe("<CorrelationHeatmap>", () => {
     expect(screen.getAllByText("Beta").length).toBeGreaterThanOrEqual(2);
   });
 
+  it("D-01: a strategy with no name reads 'Unnamed strategy' in text, title and aria-label, never an id slice", () => {
+    const { container } = render(
+      <CorrelationHeatmap
+        correlationMatrix={{
+          "abcdef12-0000-4000-8000-000000000001": {
+            "abcdef12-0000-4000-8000-000000000001": 1,
+            "abcdef12-0000-4000-8000-000000000002": 0.3,
+          },
+          "abcdef12-0000-4000-8000-000000000002": {
+            "abcdef12-0000-4000-8000-000000000001": 0.3,
+            "abcdef12-0000-4000-8000-000000000002": 1,
+          },
+        }}
+        strategyNames={{}}
+      />,
+    );
+    // Two unnamed strategies both read the locked string (not numbered); they
+    // stay distinct by React key and position. Column + row headers: 4 copies.
+    expect(screen.getAllByText("Unnamed strategy").length).toBeGreaterThanOrEqual(4);
+    expect(container.innerHTML).not.toContain("abcdef12");
+    expect(container.querySelector('[aria-label*="Unnamed strategy and Unnamed strategy"]')).not.toBeNull();
+  });
+
   it("renders each cell's correlation value", () => {
     render(
       <CorrelationHeatmap
