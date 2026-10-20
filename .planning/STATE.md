@@ -6,16 +6,16 @@ current_phase: "166.5"
 current_phase_name: COMPUTEDATSTAMP
 status: executing
 stopped_at: 170.1.1 TITLES closed; 170.1.2 LABELS executing; AUMBASIS and HISTORYREADER records pending
-last_updated: "2026-10-20T19:51:55.411Z"
+last_updated: "2026-10-20T20:28:25.868Z"
 last_activity: 2026-10-20
 last_activity_desc: "170.1.1 TITLES closed (v0.132.9.0 #1093; SC-4 passed on production; verification passed; SECURED)"
-state_head: 40b5281f8109c25423014b7ea7862b617104d409
+state_head: b8a3a12b78887819739540362cb9226ecca84003
 progress:
-  total_phases: 118
+  total_phases: 119
   completed_phases: 113
   total_plans: 824
   completed_plans: 807
-  percent: 96
+  percent: 95
 ---
 
 ## ⭐ STATE lineage
@@ -176,7 +176,7 @@ Phase: 166.5 (COMPUTEDATSTAMP) — EXECUTING
 Plan: 9 of 9
 Status: Executing — several phases in parallel. 166.5 COMPUTEDATSTAMP is the current one: both PRs merged and applied on PROD (#1047, #1050); plan 09 done 2026-10-16, verification waits on the Wave 5 consolidated recompute (D-05). 170.1.2 LABELS executing (started 2026-10-20, founder "now you can start new phases"). 167.1.1.2 AUMBASIS (#1087) and 167.1.2.1.2 HISTORYREADER (#1089) shipped; their records PRs are pending. 167.1.2.2.2.1 OKXHISTORY: the first preflight (plan 12) stopped on a parser defect fixed by #1091; it re-runs once Railway builds resume (Railway outage 2026-10-20 from 17:03Z). 170.1.1 TITLES closed 2026-10-20 (v0.132.9.0 #1093; SC-4 passed on production; verification passed; SECURED). 170.1 COPY closed 2026-10-20 (#1082).
 Last activity: 2026-10-20 — 170.1.1 TITLES closed (v0.132.9.0 #1093; SC-4 passed on production; verification passed; SECURED)
-Progress: [█████████░] 96%
+Progress: [█████████░] 95%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -633,6 +633,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 170.1.1 inserted after Phase 170.1: TITLES: every page has its own tab title and a sentence-case heading (founder 2026-10-15, "Split into 3 phases")
 - Phase 170.1.2 inserted after Phase 170.1: LABELS: names and readable labels instead of ids and internal values (founder 2026-10-15, "Split into 3 phases")
 - Phase 167.1.1.2 inserted after Phase 167.1.1: AUMBASIS: commit sizing counts derivative unrealized P&L not notional; missing P&L stored as missing (founder 2026-10-15)
+- Phase 166.5.1 inserted after Phase 166.5: SENTRYTRIAGE — demo-allocator cron warning (QUANTALYZE-Z), worker ReadTimeouts (2B-2G), job-state race (2A, A); founder 2026-10-20
 
 ### Decisions
 

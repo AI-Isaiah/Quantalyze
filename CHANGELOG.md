@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.132.9.2] - 2026-10-20 — roadmap: book SENTRYTRIAGE 166.5.1
+
+### Notes
+- Booked Phase 166.5.1 SENTRYTRIAGE (founder 2026-10-20: "yes, book a phase for the sentry items"). It owns the three production Sentry groups no phase owned:
+  - the match_engine cron's hourly demo-allocator warning (QUANTALYZE-Z, 170 events in 14 days);
+  - six ReadTimeout groups in the worker's claim, select and reset reads and the cron recompute route (QUANTALYZE-2B to 2G, 37 events);
+  - a job-state race where `mark_compute_job_done` / `failed` finds a job back at `pending` while its runner still finishes (QUANTALYZE-2A and A).
+- The ROADMAP section carries the evidence, the out-of-scope groups owned elsewhere, and four success criteria. STATE records the insertion.
+
 ## [0.132.9.1] - 2026-10-20 — records: close TITLES 170.1.1
 
 ### Notes
