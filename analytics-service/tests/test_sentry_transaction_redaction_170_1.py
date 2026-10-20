@@ -220,3 +220,24 @@ def test_a_transaction_keeps_dotted_hosts_and_versions_but_still_redacts_a_real_
     assert out["contexts"]["runtime"]["version"] == "3.12.13"
     assert out["contexts"]["trace"]["origin"] == "auto.http.starlette"
     assert data["leaked"] == "[REDACTED_JWT]"
+
+
+def test_the_service_key_and_tenant_claim_headers_are_redacted_on_error_and_transaction_events() -> None:
+    """170.1 security re-audit: `X-Service-Key` (the shared secret the Next.js server
+    sends on every analytics call) and `X-Tenant-Claim` (`<uuid>.<exp>.<hmac>`, no
+    longer caught by the `eyJ`-anchored value scan) were on no denylist, so both
+    reached Sentry in cleartext. They are redacted by KEY, whatever the casing, on an
+    error event and on a transaction event alike."""
+    headers = {
+        "X-Service-Key": "svc-secret-value",
+        "x-tenant-claim": "00000000-0000-0000-0000-000000000000.1700000000.abcdef0123456789",
+        "User-Agent": "kept",
+    }
+    for event_type in (None, "transaction"):
+        event = {"request": {"headers": dict(headers)}}
+        if event_type:
+            event["type"] = event_type
+        out = sentry_init._redact_before_send(event, None)
+        assert out["request"]["headers"]["X-Service-Key"] == "[REDACTED]", event_type
+        assert out["request"]["headers"]["x-tenant-claim"] == "[REDACTED]", event_type
+        assert out["request"]["headers"]["User-Agent"] == "kept", event_type

@@ -33,6 +33,11 @@ const DENYLIST_EXACT = new Set<string>([
   // on the seam to FastAPI; outbound HTTP breadcrumbs would otherwise
   // capture it).
   "x-internal-token",
+  // 170.1 security re-audit — the shared analytics service key and the tenant
+  // claim (`<uuid>.<exp>.<hmac>`, not `eyJ`-headed) reached Sentry as request
+  // headers in cleartext; redact them by key.
+  "x-service-key",
+  "x-tenant-claim",
   // Review LF-2 — Deribit `public/auth` bearer tokens, redacted by KEY: the
   // JWT value shape is anchored on `eyJ` and cannot catch them.
   "access_token",

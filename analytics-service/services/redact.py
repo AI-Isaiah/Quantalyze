@@ -46,6 +46,11 @@ DENYLIST_EXACT: frozenset[str] = frozenset({
     "x-mbx-apikey",
     "ok-access-sign",
     "x-internal-token",
+    # 170.1 security re-audit — the shared analytics service key and the tenant
+    # claim (`<uuid>.<exp>.<hmac>`, not `eyJ`-headed) reached Sentry as request
+    # headers in cleartext; redact them by key.
+    "x-service-key",
+    "x-tenant-claim",
     # Review LF-2 — Deribit `public/auth` bearer tokens. They are opaque dotted
     # strings that do not start `eyJ`, so `JWT_SHAPE` (anchored on `eyJ`) cannot
     # redact them by value; redact them by key.

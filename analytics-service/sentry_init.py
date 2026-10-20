@@ -72,6 +72,10 @@ _PII_KEYS: frozenset[str] = frozenset({
     # Next.js → FastAPI seam; redact in case it surfaces in HTTP
     # breadcrumbs or response-context dicts.
     "x-internal-token",
+    # --- 170.1 security re-audit — the shared analytics service key and the
+    # tenant claim reached Sentry as request headers in cleartext.
+    "x-service-key",
+    "x-tenant-claim",
     # --- Bybit v5 signing scheme (FIX 7) ---
     "x-bapi-api-key",
     "x-bapi-sign",
