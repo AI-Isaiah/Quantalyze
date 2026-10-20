@@ -863,7 +863,10 @@ def _detect_and_normalize_date_column(df: pd.DataFrame) -> dict[str, Any] | None
     # integer text, a fractional one is the placeholder, and a blank stays blank.
     if pd.api.types.is_integer_dtype(df["date"]) or pd.api.types.is_float_dtype(df["date"]):
         col = df["date"]
-        txt = (col.where(col % 1 == 0).astype("Int64") if pd.api.types.is_float_dtype(col) else col).astype(str)
+        txt = (
+            col.where((col % 1 == 0) & col.between(0, 99_999_999)).astype("Int64")
+            if pd.api.types.is_float_dtype(col) else col
+        ).astype(str)
         parsed = _parse_dates(txt.where(txt.str.fullmatch(r"[0-9]{8}")), format="%Y%m%d")
         df["date"] = parsed if parsed.notna().all() else parsed.astype(object).where(
             parsed.notna(), col.where(col.isna(), _UNSUPPORTED_ZONE_TOKEN)

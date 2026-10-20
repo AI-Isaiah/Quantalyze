@@ -649,7 +649,10 @@ def test_the_day_first_named_zone_error_has_the_shape_the_iso_file_gets(fmt: str
 # real disorder could be hidden). Every TR-3 specimen above uses days 13 to 17,
 # which no month-first reading can parse; a real day-first file has days 1 to 12.
 def _daily_file(fmt: str, dates: list[str]) -> bytes:
-    value = (lambda i: f"0.00{i % 9 + 1}") if fmt == "daily_returns" else (lambda i: str(100 + i))
+    value = {
+        "daily_returns": lambda i: f"0.00{i % 9 + 1}",
+        "trades": lambda i: "buy,1,10,BTC,USD",
+    }.get(fmt, lambda i: str(100 + i))
     rows = [f"{d},{value(i)}" for i, d in enumerate(dates)]
     return (HEADER[fmt] + "\n" + "\n".join(rows) + "\n").encode()
 
@@ -1809,4 +1812,20 @@ def test_an_unreadable_cell_beside_a_year_first_cell_in_a_month_first_column_is_
 
     assert envelope["ok"] is False
     assert _rules_and_rows(envelope) == [(rule, 16) for rule in ONLY_THE_DATE_ERROR], envelope["errors"]
+    assert "0000-00-00" not in json.dumps(envelope["preview"], default=str)
+
+
+# Measured-fix round WR-01 (MEDIUM, never-raises). A whole-number float at or past
+# 2^63 (`1e19`, `1e30`) passed the `% 1 == 0` test, and the cast to Int64 raised
+# `TypeError`, which the router reports as "our side, try again" for a file that
+# fails the same way every time. Such a cell is no YYYYMMDD date either.
+@pytest.mark.parametrize("fmt", list(HEADER))
+@pytest.mark.parametrize("cell", ["1e30", "1e19", "9.3e18", "-1e30", "1e300"])
+def test_a_float_date_cell_past_the_int64_range_returns_an_envelope_with_the_error_at_its_row(
+    fmt: str, cell: str
+) -> None:
+    envelope = validate_csv(_daily_file(fmt, ["20230305.0", cell, "20230307.0"]), fmt)
+
+    assert envelope["ok"] is False
+    assert (ONLY_THE_DATE_ERROR[0], 2) in _rules_and_rows(envelope), envelope["errors"]
     assert "0000-00-00" not in json.dumps(envelope["preview"], default=str)
