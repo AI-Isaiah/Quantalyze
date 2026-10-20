@@ -523,11 +523,6 @@ const MEMBER_STATUS_CHIP_CLASS: Record<MemberProgressStatus, string> = {
   degraded: "text-warning",
 };
 
-/** Title-case a lowercase exchange slug for the per-key identity fallback. */
-function capitalizeExchange(exchange: string): string {
-  return exchange.charAt(0).toUpperCase() + exchange.slice(1);
-}
-
 /**
  * OWN-04 — the route from the wizard preview to the real factsheet.
  *
@@ -3127,7 +3122,7 @@ export function SyncPreviewStep({
                 .map((m) => {
                   const identity =
                     m.label ??
-                    (m.exchange ? capitalizeExchange(m.exchange) : null);
+                    (m.exchange ? venueLabel(m.exchange) : null);
                   return (
                     <li
                       key={m.seq}
