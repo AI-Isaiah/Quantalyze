@@ -787,6 +787,10 @@ def _gate_process_key(request: Request) -> JSONResponse | None:
     return None
 
 
+# Public literal, not a credential: see the mismatch branch below.
+_PROBER_WRONG_KEY = "prod-prober-deliberately-wrong-key"
+
+
 @app.middleware("http")
 async def verify_service_key(
     request: Request, call_next: RequestResponseEndpoint
@@ -908,7 +912,11 @@ async def verify_service_key(
         # unauthenticated prober — internet background noise — and capturing it
         # would make the signal meaningless. The response is unchanged either
         # way: this is additive observability, not a new refusal.
-        if provided:
+        # The prod-prober's deliberate wrong-key request (scripts/prod-prober/
+        # arms/pyapi06.mjs WRONG_KEY) is our own hourly check that the
+        # comparison still refuses; the prober reports its own verdict. Capturing
+        # it kept QUANTALYZE-18 open on a healthy key, ~5 events a day.
+        if provided and provided != _PROBER_WRONG_KEY:
             # M-14: `warning` matches the `process_key.auth.token_mismatch`
             # sibling at :620 — a mismatched credential is a rotation mid-flight
             # or an attacker, not the operator-must-act-now fault an unset
