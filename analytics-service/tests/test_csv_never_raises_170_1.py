@@ -1697,3 +1697,116 @@ def test_an_all_digit_date_column_that_is_not_yyyymmdd_is_rejected_at_its_rows_n
     assert envelope["preview"]["date_range"][0] != "1970-01-01", envelope["preview"]
     assert (ONLY_THE_DATE_ERROR[0], 10 if "20231340" in dates else 1) in _rules_and_rows(envelope), envelope["errors"]
     assert "0000-00-00" not in json.dumps(envelope["preview"], default=str)
+
+
+# Last-round review (WR-01, WR-02, SF-1, SF-2, SF-3). F4 read an integer date column
+# as `%Y%m%d`, but strptime takes a one- or two-digit month and day, so a 6- or
+# 7-digit integer was read by a guessed split (`2024121` as 2024-12-01) and a
+# negative one parsed to a year below zero (`-20230305` is year -2023), which
+# `validate_csv` then raised on at the preview. A float column (`20230305.0`, a
+# spreadsheet export) skipped the branch and every date was read as 1970-01-01.
+# Only an 8-digit non-negative whole number is a YYYYMMDD date; anything else in
+# an integer or whole-number float column is reported at its own row.
+def _yyyymmdd_with_a_seven_digit_typo() -> list[str]:
+    return [f"202401{day:02d}" for day in range(1, 21)] + ["2024121"]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_whole_number_float_yyyymmdd_column_is_read_as_dates_not_as_1970(fmt: str) -> None:
+    """`20230305.0` is how a spreadsheet export spells the same date."""
+    envelope = validate_csv(_daily_file(fmt, [f"{d}.0" for d in _yyyymmdd_days(60)]), fmt)
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert envelope["preview"]["date_range"] == ["2023-03-05", "2023-05-03"], envelope["preview"]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_non_whole_float_in_a_yyyymmdd_column_is_a_date_error_at_its_row(fmt: str) -> None:
+    dates = [f"{d}.0" for d in _yyyymmdd_days(59)] + ["20230505.5"]
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert envelope["preview"]["date_range"][0] != "1970-01-01", envelope["preview"]
+    assert (ONLY_THE_DATE_ERROR[0], 60) in _rules_and_rows(envelope), envelope["errors"]
+    assert "0000-00-00" not in json.dumps(envelope["preview"], default=str)
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_blank_in_a_float_yyyymmdd_column_is_still_reported_as_blank(fmt: str) -> None:
+    """Control: a blank cell is a missing date, not an unreadable one."""
+    dates = [f"{d}.0" for d in _yyyymmdd_days(59)] + [""]
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert ("not_nullable", 60) in _rules_and_rows(envelope), envelope["errors"]
+    assert ONLY_THE_DATE_ERROR[0] not in {e["rule"] for e in envelope["errors"]}
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_seven_digit_date_among_yyyymmdd_dates_is_rejected_at_its_row(fmt: str) -> None:
+    """`2024121` (a typo for `20240121`) was accepted as 2024-12-01."""
+    envelope = validate_csv(_daily_file(fmt, _yyyymmdd_with_a_seven_digit_typo()), fmt)
+
+    assert envelope["ok"] is False
+    assert (ONLY_THE_DATE_ERROR[0], 21) in _rules_and_rows(envelope), envelope["errors"]
+    assert envelope["preview"]["date_range"][1] != "2024-12-01", envelope["preview"]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+@pytest.mark.parametrize("row", [1, 6])
+def test_a_negative_yyyymmdd_cell_returns_an_envelope_with_the_error_at_its_row(fmt: str, row: int) -> None:
+    """`-20230305` parsed to year -2023 and `validate_csv` raised on it (a 500)."""
+    dates = _yyyymmdd_days(10)
+    dates[row - 1] = "-" + dates[row - 1]
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert (ONLY_THE_DATE_ERROR[0], row) in _rules_and_rows(envelope), envelope["errors"]
+    assert "0000-00-00" not in json.dumps(envelope["preview"], default=str)
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_yyyymm_month_column_is_rejected_at_its_rows_not_read_as_january(fmt: str) -> None:
+    """`202411` and `202412` were read as 1 and 2 January 2024."""
+    dates = [f"{year}{month:02d}" for year in (2023, 2024) for month in range(1, 13)]
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    date_rows = {row for rule, row in _rules_and_rows(envelope) if rule == ONLY_THE_DATE_ERROR[0]}
+    assert date_rows == set(range(1, 25)), envelope["errors"]
+    assert envelope["preview"]["date_range"] != ["2023-01-01", "2024-01-02"], envelope["preview"]
+
+
+# Last-round review WR-03 (MEDIUM, user-facing). A month-first (US) column with one
+# year-first cell chose month-first correctly, then returned without writing its
+# reading, so pandera re-parsed the raw text from the first cell's format and named
+# no row (`coerce_dtype` at row 0). The day-first column with the same cell was
+# accepted.
+def _month_first_days(count: int) -> list[str]:
+    import datetime as dt
+
+    return [(dt.date(2024, 1, 1) + dt.timedelta(i)).strftime("%m/%d/%Y") for i in range(count)]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_a_year_first_cell_in_a_month_first_column_is_accepted_with_the_right_range(fmt: str) -> None:
+    dates = _month_first_days(20)
+    dates[13] = "2024-01-14"
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is True, envelope["errors"]
+    assert envelope["preview"]["date_range"] == ["2024-01-01", "2024-01-20"], envelope["preview"]
+
+
+@pytest.mark.parametrize("fmt", DAILY_FORMATS)
+def test_an_unreadable_cell_beside_a_year_first_cell_in_a_month_first_column_is_reported_at_its_row(
+    fmt: str,
+) -> None:
+    dates = _month_first_days(20)
+    dates[13] = "2024-01-14"
+    dates[15] = "garbage"
+    envelope = validate_csv(_daily_file(fmt, dates), fmt)
+
+    assert envelope["ok"] is False
+    assert _rules_and_rows(envelope) == [(rule, 16) for rule in ONLY_THE_DATE_ERROR], envelope["errors"]
+    assert "0000-00-00" not in json.dumps(envelope["preview"], default=str)
