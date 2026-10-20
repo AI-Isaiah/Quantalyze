@@ -1,3 +1,4 @@
+import { notFound } from "next/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { extractAnalytics } from "@/lib/queries";
@@ -64,9 +65,9 @@ export default async function PortfolioPdfPage({
   const renderToken = typeof sp.renderToken === "string" ? sp.renderToken : null;
 
   if (!verifyPdfRenderToken(id, renderToken)) {
-    return (
-      <div className="p-8 text-center text-text-muted">Unauthorized.</div>
-    );
+    // Non-2xx so the PDF route's status guard refuses it; a 200 "Unauthorized."
+    // div would be printed and delivered as the report.
+    notFound();
   }
 
   const admin = createAdminClient();
@@ -92,13 +93,28 @@ export default async function PortfolioPdfPage({
       .order("added_at", { ascending: false }),
   ]);
 
+  // A failed read must fail the render: swallowing it prints an empty report
+  // as a 200 PDF. Each message names the read and the portfolio.
+  if (portfolioRes.error) {
+    throw new Error(
+      `portfolio read failed for portfolio ${id}: ${portfolioRes.error.message}`,
+    );
+  }
+  if (analyticsRes.error) {
+    throw new Error(
+      `portfolio analytics read failed for portfolio ${id}: ${analyticsRes.error.message}`,
+    );
+  }
+  if (strategiesRes.error) {
+    throw new Error(
+      `portfolio strategies read failed for portfolio ${id}: ${strategiesRes.error.message}`,
+    );
+  }
+
   const { data: portfolio } = portfolioRes;
   if (!portfolio) {
-    return (
-      <div className="p-8 text-center text-text-muted">
-        Portfolio not found.
-      </div>
-    );
+    // Non-2xx for the same reason as the token gate above.
+    notFound();
   }
 
   // Route ALL portfolio_analytics reads through the adapter so malformed

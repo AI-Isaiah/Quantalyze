@@ -60,6 +60,8 @@ export async function GET(
 
   let browser: Browser | null = null;
   let release: (() => void) | null = null;
+  // Separates a non-ok render page from a Chromium crash in Sentry.
+  let step = "pdf_generation";
 
   try {
     release = await acquirePdfSlot();
@@ -78,7 +80,12 @@ export async function GET(
     // A failed render page still navigates: Next serves its error screen with a
     // 500 and `goto` resolves with it. Printing that would hand the user the
     // error screen as a PDF, so a non-ok answer takes the catch arm below.
-    if (!resp || !resp.ok()) throw new Error(`portfolio-pdf render ${resp?.status()}`);
+    if (!resp || !resp.ok()) {
+      step = "render_status";
+      throw new Error(
+        `portfolio-pdf render answered ${resp?.status() ?? "no response"} for portfolio ${id}`,
+      );
+    }
 
     const pdfBuffer = await page.pdf({
       format: "A4",
@@ -108,11 +115,13 @@ export async function GET(
     // loader failures — all previously invisible to Sentry.
     console.error("[portfolio-pdf] Generation failed:", err);
     captureToSentry(err, {
-      tags: { area: "portfolio-pdf", step: "pdf_generation" },
+      tags: { area: "portfolio-pdf", step },
       level: "error",
     });
-    return NextResponse.json(
-      { error: "PDF generation failed" },
+    // The only callers are plain links that open this URL in a tab, so the
+    // user reads this body directly: say what to do, not a JSON envelope.
+    return new NextResponse(
+      "We couldn't generate this PDF. Close this tab and try again.",
       { status: 500 },
     );
   } finally {

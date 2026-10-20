@@ -24,7 +24,8 @@ vi.mock("@/lib/pdf-render-token", () => ({
 vi.mock("@/lib/sanitize-filename", () => ({
   sanitizeFilename: (raw: string, fallback: string) => raw || fallback,
 }));
-vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+const captureSpy = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureSpy }));
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: { getUser: async () => ({ data: { user: { id: "user-1" } } }) },
@@ -67,6 +68,7 @@ describe("GET /api/portfolio-pdf/[id]", () => {
     releaseSpy.mockClear();
     pdfSpy.mockClear();
     gotoSpy.mockClear();
+    captureSpy.mockClear();
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
@@ -92,5 +94,36 @@ describe("GET /api/portfolio-pdf/[id]", () => {
     expect(pdfSpy).not.toHaveBeenCalled();
     expect(releaseSpy).toHaveBeenCalledTimes(1);
     expect(closeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("captures a non-ok render with the status, the portfolio id and its own step tag", async () => {
+    gotoSpy.mockResolvedValueOnce({ ok: () => false, status: () => 404 });
+    const { GET } = await import("./route");
+    await GET(makeReq(), { params: Promise.resolve({ id: ID }) });
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    const [err, ctx] = captureSpy.mock.calls[0];
+    expect((err as Error).message).toContain("404");
+    expect((err as Error).message).toContain(ID);
+    expect(ctx.tags).toEqual({ area: "portfolio-pdf", step: "render_status" });
+  });
+
+  it("keeps the pdf_generation tag for a crash that is not a bad render status", async () => {
+    gotoSpy.mockRejectedValueOnce(new Error("Target closed"));
+    const { GET } = await import("./route");
+    await GET(makeReq(), { params: Promise.resolve({ id: ID }) });
+    expect(captureSpy.mock.calls[0][1].tags).toEqual({
+      area: "portfolio-pdf",
+      step: "pdf_generation",
+    });
+  });
+
+  it("the 500 body is a sentence the user can act on, not a JSON envelope", async () => {
+    gotoSpy.mockResolvedValueOnce({ ok: () => false, status: () => 500 });
+    const { GET } = await import("./route");
+    const res = await GET(makeReq(), { params: Promise.resolve({ id: ID }) });
+    expect(res.status).toBe(500);
+    expect(await res.text()).toBe(
+      "We couldn't generate this PDF. Close this tab and try again.",
+    );
   });
 });

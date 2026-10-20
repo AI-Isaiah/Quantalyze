@@ -38,6 +38,9 @@ vi.mock("@/lib/ratelimit", () => ({
   getClientIp: () => "1.2.3.4",
 }));
 
+const captureSpy = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureSpy }));
+
 // pdf-render-token / sanitize-filename are incidental to the auth ladder.
 vi.mock("@/lib/pdf-render-token", () => ({
   signPdfRenderToken: () => "render-token",
@@ -114,6 +117,7 @@ describe("GET /api/demo/portfolio-pdf/[id] (H-0260)", () => {
     releaseSpy.mockClear();
     pdfSpy.mockClear();
     gotoSpy.mockClear();
+    captureSpy.mockClear();
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
@@ -210,5 +214,54 @@ describe("GET /api/demo/portfolio-pdf/[id] (H-0260)", () => {
     expect(pdfSpy).not.toHaveBeenCalled();
     expect(releaseSpy).toHaveBeenCalledTimes(1);
     expect(closeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("(6) captures a non-ok render with the status, the portfolio id and its own step tag", async () => {
+    verifySpy.mockReturnValue(true);
+    gotoSpy.mockResolvedValueOnce({ ok: () => false, status: () => 404 });
+    const { GET } = await import("./route");
+    await GET(
+      makeReq(
+        `http://localhost/api/demo/portfolio-pdf/${ALLOWLISTED}?token=valid-token`,
+      ),
+      makeParams(ALLOWLISTED),
+    );
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    const [err, ctx] = captureSpy.mock.calls[0];
+    expect((err as Error).message).toContain("404");
+    expect((err as Error).message).toContain(ALLOWLISTED);
+    expect(ctx.tags).toEqual({ area: "demo-portfolio-pdf", step: "render_status" });
+  });
+
+  it("(7) captures a crash under the pdf_generation tag", async () => {
+    verifySpy.mockReturnValue(true);
+    gotoSpy.mockRejectedValueOnce(new Error("Target closed"));
+    const { GET } = await import("./route");
+    await GET(
+      makeReq(
+        `http://localhost/api/demo/portfolio-pdf/${ALLOWLISTED}?token=valid-token`,
+      ),
+      makeParams(ALLOWLISTED),
+    );
+    expect(captureSpy.mock.calls[0][1].tags).toEqual({
+      area: "demo-portfolio-pdf",
+      step: "pdf_generation",
+    });
+  });
+
+  it("(8) the 500 body is a sentence the user can act on, not a JSON envelope", async () => {
+    verifySpy.mockReturnValue(true);
+    gotoSpy.mockResolvedValueOnce({ ok: () => false, status: () => 500 });
+    const { GET } = await import("./route");
+    const res = await GET(
+      makeReq(
+        `http://localhost/api/demo/portfolio-pdf/${ALLOWLISTED}?token=valid-token`,
+      ),
+      makeParams(ALLOWLISTED),
+    );
+    expect(res.status).toBe(500);
+    expect(await res.text()).toBe(
+      "We couldn't generate this PDF. Close this tab and try again.",
+    );
   });
 });
