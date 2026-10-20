@@ -1509,14 +1509,14 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     const res = await POST(makeReq(persistBody({ label: undefined })));
 
     expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts[0].label).toBe("okx key");
+    expect(PERSIST_STATE.inserts[0].label).toBe("OKX key");
   });
 
   it("falls back to the server default when the label is whitespace-only", async () => {
     const { POST } = await import("./route");
     await POST(makeReq(persistBody({ label: "   " })));
 
-    expect(PERSIST_STATE.inserts[0].label).toBe("okx key");
+    expect(PERSIST_STATE.inserts[0].label).toBe("OKX key");
   });
 
   it("CAPS an over-long label at 120 chars rather than failing an already-validated connect", async () => {
@@ -1533,7 +1533,7 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     const { POST } = await import("./route");
     await POST(makeReq(persistBody({ label: { evil: true } })));
 
-    expect(PERSIST_STATE.inserts[0].label).toBe("okx key");
+    expect(PERSIST_STATE.inserts[0].label).toBe("OKX key");
   });
 });
 

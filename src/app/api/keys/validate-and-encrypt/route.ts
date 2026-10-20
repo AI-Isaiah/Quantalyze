@@ -44,6 +44,7 @@ import type { User } from "@supabase/supabase-js";
 
 import { getCorrelationId } from "@/lib/correlation-id";
 import { isSfoxEnabledServer, isMt5EnabledServer } from "@/lib/closed-sets";
+import { venueLabel } from "@/lib/display-labels";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; declared counterpart of this
@@ -657,7 +658,7 @@ async function legacyValidateAndEncryptHandler(args: {
     const labelOrDefault =
       labelTrimmed.length > 0
         ? labelTrimmed.slice(0, MAX_KEY_LABEL_LENGTH)
-        : `${exchangeNormalized} key`;
+        : `${venueLabel(exchangeNormalized)} key`;
 
     // `createAdminClient()` THROWS when SUPABASE_SERVICE_ROLE_KEY is absent.
     // Caught HERE rather than left to the terminal arm below, which would

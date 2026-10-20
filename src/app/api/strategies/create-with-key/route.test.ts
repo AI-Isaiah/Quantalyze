@@ -746,6 +746,23 @@ describe("POST /api/strategies/create-with-key — envelope-encryption shape", (
     expect(assetClassUpdateMock).toHaveBeenCalledWith({ asset_class: "crypto" });
   });
 
+  it("170.1.2 WR-04: a blank label is stored with the venue display name, never the lowercase code", async () => {
+    encryptKeyMock.mockResolvedValue({
+      api_key_encrypted: "encrypted-blob-base64",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: null,
+      nonce: null,
+      kek_version: 1,
+    });
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, label: "   " }));
+
+    expect(res.status).toBe(200);
+    const [, rpcArgs] = rpcMock.mock.calls[0];
+    expect((rpcArgs as Record<string, unknown>).p_label).toBe("OKX key");
+  });
+
   it("still 502s when api_key_encrypted itself is missing", async () => {
     encryptKeyMock.mockResolvedValue({
       api_key_encrypted: undefined,

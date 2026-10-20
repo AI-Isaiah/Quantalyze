@@ -474,6 +474,8 @@ describe("Phase 122 — sFOX wizard card (flag ON, SFOX-08)", () => {
     expect(body.api_key).toBe("SFOX_TOKEN_xxx");
     expect(body.api_secret).toBe("");
     expect(body.passphrase).toBeNull();
+    // 170.1.2 WR-04: no nickname typed → the venue DISPLAY name, never "sfox key".
+    expect(body.label).toBe("sFOX key");
   });
 
   // WR-01: sFOX's per-exchange #sfox-readonly SubAnchor is server-flag-gated
