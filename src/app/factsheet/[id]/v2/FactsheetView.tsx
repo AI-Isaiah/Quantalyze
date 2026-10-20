@@ -140,6 +140,7 @@ function PanelSkeleton({ h }: { h: number }) {
     />
   );
 }
+import { venueLabel as venueDisplayName } from "@/lib/display-labels";
 import { resolvePalette, paletteToCssVars } from "./palette";
 import { trackFactsheetEvent } from "./factsheet-analytics";
 import { CHART_CONFIGS, applyChartUnit } from "./chart-configs";
@@ -2121,7 +2122,7 @@ function KpiStrip() {
           }}
         >
           ⚠ {payload.dataQuality!.degradedMembers!
-            .map((d) => `Key ${d.seq} (${d.venue})`)
+            .map((d) => `Key ${d.seq} (${venueDisplayName(d.venue)})`)
             .join(", ")}{" "}
           could not be included — {payload.dataQuality!.degradedMembers!.length > 1 ? "their" : "its"} data is excluded from this track record.
         </p>
