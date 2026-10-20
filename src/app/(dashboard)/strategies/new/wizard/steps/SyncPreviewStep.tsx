@@ -53,6 +53,7 @@ import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { parseIsoDay, utcEpoch } from "@/lib/dateday";
 import { drainById } from "@/lib/drain-by-id";
+import { venueLabel } from "@/lib/display-labels";
 import type {
   SyncProgressResponse,
   MemberProgressStatus,
@@ -431,7 +432,7 @@ export function formatCagr(value: number | null): string {
 
 /**
  * Human name for a composite member row: the nickname when present, else the
- * `Key {seq} · {exchange}` fallback (mirrors the multi-key summary chip). Pure
+ * `Key {seq} · {venue display name}` fallback (mirrors the multi-key summary chip). Pure
  * — shared by the coverage gantt and the attribution table so both label a
  * member identically.
  */
@@ -440,7 +441,7 @@ function memberDisplayName(
   label: string | null,
   exchange: string | null,
 ): string {
-  return label ?? `Key ${seq} · ${exchange ?? "unknown"}`;
+  return label ?? `Key ${seq} · ${venueLabel(exchange)}`;
 }
 
 /**
@@ -2884,7 +2885,7 @@ export function SyncPreviewStep({
                   {hasDegradedMembers && (
                     <p>
                       {composite.degradedMembers
-                        .map((d) => `Key ${d.seq} (${d.venue})`)
+                        .map((d) => `Key ${d.seq} (${venueLabel(d.venue)})`)
                         .join(", ")}{" "}
                       could not be included —{" "}
                       {composite.degradedMembers.length > 1 ? "their" : "its"} data

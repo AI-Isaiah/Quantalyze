@@ -788,7 +788,7 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
 
 // Gantt members supplied DELIBERATELY out of seq order (seq 2 first) so a
 // forgotten sort at the render layer is falsifiable. seq 2 has NO label →
-// exercises the `Key {seq} · {exchange}` fallback; seq 1 has a label.
+// exercises the `Key {seq} · {venue display name}` fallback; seq 1 has a label.
 const GANTT_MEMBERS: MemberRow[] = [
   {
     api_key_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -904,14 +904,14 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
 
   // Pin 1 — GANTT ROWS BY SEQ. The reused CoverageTimeline renders one row per
   // member; rows follow ascending seq even when the mock supplies them out of
-  // order (falsifies a forgotten sort). The label / `Key {seq} · {exchange}`
+  // order (falsifies a forgotten sort). The label / `Key {seq} · {venue display name}`
   // fallback both render.
   it("renders the coverage gantt with one row per member ordered by seq", async () => {
     await renderPassed({ members: GANTT_MEMBERS });
 
     const body = screen.getByTestId("scenario-coverage-timeline-body");
     const seq1 = within(body).getByText("Alpha Key");
-    const seq2 = within(body).getByText("Key 2 · deribit");
+    const seq2 = within(body).getByText("Key 2 · Deribit");
     // seq 1 (Alpha Key) must precede seq 2 in DOM despite the out-of-order mock.
     expect(
       seq1.compareDocumentPosition(seq2) & Node.DOCUMENT_POSITION_FOLLOWING,
@@ -920,6 +920,26 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     expect(
       within(body).getAllByTestId(/^coverage-bar-/).length,
     ).toBe(2);
+  });
+
+  // D-01 (170.1.2) — a member with no label and no exchange reads
+  // "Key {seq} · Other venue", never the lowercase word "unknown".
+  it("names a member with no label and no exchange 'Key 1 · Other venue'", async () => {
+    await renderPassed({
+      members: [
+        {
+          api_key_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          window_start: "2025-01-01",
+          window_end: "2025-01-06",
+          seq: 1,
+          api_keys: { exchange: null, label: null },
+        },
+      ],
+    });
+
+    const body = screen.getByTestId("scenario-coverage-timeline-body");
+    expect(within(body).getByText("Key 1 · Other venue")).toBeInTheDocument();
+    expect(within(body).queryByText(/unknown/)).toBeNull();
   });
 
   // Pin 2 — GAP FROM SERVER (falsifiable). The gaps block renders the server
@@ -1127,7 +1147,7 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     });
 
     expect(
-      screen.getByText(/Key 2 \(bybit\)/),
+      screen.getByText(/Key 2 \(Bybit\)/),
     ).toBeInTheDocument();
     expect(
       screen.getByText(/data is excluded from this composite/),
@@ -1155,7 +1175,7 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     });
 
     expect(screen.getByText(/Data quality/)).toBeInTheDocument();
-    expect(screen.getByText(/Key 3 \(okx\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Key 3 \(OKX\)/)).toBeInTheDocument();
   });
 
   it("strict-coerces malformed degraded_members to nothing (T-93-03-02)", async () => {
