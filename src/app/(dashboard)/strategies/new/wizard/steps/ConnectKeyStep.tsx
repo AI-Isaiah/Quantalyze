@@ -1976,7 +1976,7 @@ export function ConnectKeyStep({
             label="Key nickname (optional)"
             value={nickname}
             onChange={(e) => setNickname(e.target.value)}
-            placeholder={`e.g. ${exchange} · prod`}
+            placeholder={`e.g. ${venueLabel(exchange)} · prod`}
             autoComplete="off"
           />
           <p className="mt-1 text-micro text-text-muted">

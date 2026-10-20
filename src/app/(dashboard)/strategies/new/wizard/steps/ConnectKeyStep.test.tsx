@@ -373,6 +373,11 @@ describe("Phase 69 — Deribit wizard card (UX-01)", () => {
       screen.getByPlaceholderText("Paste the Deribit Client Secret"),
     ).toBeInTheDocument();
 
+    // The nickname placeholder names the venue by its display label, never
+    // the raw wire code.
+    fireEvent.click(screen.getByTestId("wizard-exchange-okx"));
+    expect(screen.getByPlaceholderText("e.g. OKX · prod")).toBeInTheDocument();
+
     // Revert direction: back to binance restores the generic labels.
     fireEvent.click(screen.getByTestId("wizard-exchange-binance"));
     expect(screen.getByLabelText("API Key")).toBeInTheDocument();
