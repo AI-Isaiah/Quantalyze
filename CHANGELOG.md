@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.132.6.3] - 2026-10-20 — RECORDS: close COPY 170.1 (SC-5 passed, verification passed, SECURED)
+
+Records, plus one test bound: `.planning`, `TODOS.md`, a timing test and this release.
+
+### Added
+- The COPY phase directory joins the tracked tree: eight plans and summaries, CONTEXT (including every founder decision from the review rounds), RESEARCH, PATTERNS, VALIDATION, the review and fix-round record, `SECURITY.md` (SECURED, 0 open) and `VERIFICATION.md` (status passed).
+- The 170.1.1 TITLES and 170.1.2 LABELS phase directories, with their CONTEXT and plans. These phases were split out of COPY and are ready to execute.
+- `TODOS.md` books `[170.1-SC5-SCENARIO-NARROW-DEFECTS]`. The SC-5 measurement found four defects outside its named lines:
+  - at 390 px, the scenario commit bar's change summary runs under the Reset button;
+  - chart axis labels are cut by 3–4 px by their own SVG;
+  - at 640 px, the "vs current book" suffix overhangs its row by about 1.5 px;
+  - the CSV summary reads "(1 rows)".
+
+### Changed
+- `.planning/ROADMAP.md`: the COPY overview bullet and Progress row carry the outcome, v0.132.6.0 (#1082). The TITLES and LABELS sections list their plans.
+- `.planning/STATE.md` and `.planning/state.json`: progress moves to 112 phases complete. The current position stays on 166.5 COMPUTEDATSTAMP. The Status line records AUMBASIS and HISTORYREADER as started on 2026-10-20.
+
+### Tests
+- `test_a_10mb_file_of_very_long_date_cells_is_rejected_in_bounded_time` gets a 20 s bound instead of 5 s. The fixed path took 6.1 s on CI under coverage and xdist (run 39436648739) against under 1 s locally; the regression it guards takes 40 to 59 s, so the test still fails it.
+
+### Notes
+- **SC-5 (390 px and 640 px, the desktop 200% zoom width) passed on all five surfaces.** Playwright measured them on the seeded local stack: the scenario KPI strip, the `/strategies` submitted line and its list-read-failed variant, the CSV error envelopes, a scenario chart with no benchmark, and the owner's finished-not-built factsheet. Page width always equals the viewport, nothing on the named lines is clipped, and the signed KPI figure never breaks across lines.
+- On PROD, `/strategies?wizard_submitted=1` was also measured at 390 px and passed. The scenario deltas cannot render on PROD while its scenario has 0 overlapping days.
 ## [0.132.6.2] - 2026-10-20 — deps: pyarrow 25.0.1 → 26.0.0 in analytics-service dev requirements (#1016)
 
 ### Changed

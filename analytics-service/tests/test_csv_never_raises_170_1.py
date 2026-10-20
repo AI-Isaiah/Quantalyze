@@ -1280,10 +1280,11 @@ def test_a_good_header_with_a_trailing_comma_under_a_quoted_empty_line_is_accept
 # D-14, 58.8 s in the audit's own run) on a synchronous call in a single-process
 # service. A date cell longer than 64 characters is now unreadable without a call
 # into pandas or a zone regex: it is the same `coerce_dtype` date error at its
-# row. The bound below is generous on purpose, 5 s against a measured fraction of
-# one, so a slow CI runner cannot flake it; the shape it replaces takes 40 s.
+# row. The bound below is generous on purpose: the fixed path measures under 1 s
+# locally but 6.1 s on CI under coverage and xdist (run 39436648739), while the
+# shape it replaces takes 40 to 59 s, so 20 s still fails that regression hard.
 MAX_DATE_CELL_CHARS = 64  # hand-typed: the cap the audit asked for, pinned here
-TIME_BOUND_SECONDS = 5.0
+TIME_BOUND_SECONDS = 20.0
 
 
 def _long_cell(size: int) -> str:
