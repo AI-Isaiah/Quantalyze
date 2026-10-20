@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.132.8.4] - 2026-10-20 — deps: npm minor/patch group, 21 of 22 (#1077); eslint-config-next held at 16.3.8
+
+### Changed
+- 21 of the 22 updates in Dependabot's npm-minor-patch group. Runtime: `@radix-ui/react-tabs` 1.1.21 → 1.2.1, `@sentry/nextjs` 11.2.0 → 11.8.0, `@supabase/supabase-js` 2.117.2 → 2.118.0, `next` 16.3.8 → 16.4.2, `posthog-js` 1.435.6 → 1.438.12, `posthog-node` 5.55.0 → 5.56.1, `puppeteer-core` 25.12.0 → 25.14.0, `react` / `react-dom` 19.3.0 → 19.3.1, `resend` 6.32.0 → 6.33.0, `svix` 2.6.2 → 2.8.0, `zod` 4.6.5 → 4.6.7. Dev: `@axe-core/playwright` 4.13.0 → 4.14.0, `@playwright/test` 1.63.0 → 1.64.1, `@testing-library/user-event` 14.6.7 → 14.6.8, `@types/node` 26.6.4 → 26.6.5, `@vitejs/plugin-react` 6.1.1 → 6.1.2, `@vitest/coverage-v8` and `vitest` 5.0.3 → 5.0.5, `jsdom` 30.1.1 → 30.1.3, `knip` 6.39.0 → 6.41.0. Spec styles (exact vs caret) are Dependabot's; `vitest` and `@types/node` move in the lock only, as Dependabot left them.
+
+### Notes
+- **Held back: `eslint-config-next` stays at 16.3.8.** 16.4.2 requires `eslint-plugin-react-hooks` ^7.1.0, and 7.1.1 turns on React Compiler rules (`set-state-in-effect`, `refs`, `preserve-manual-memoization`, `immutability`, `purity`, `error-boundaries`) that report 64 errors in 26 files under `npm run lint`. That is a code migration, not a dependency bump. Dependabot will re-propose it. `next` 16.4.2 does not depend on the config version.
+
+### Root cause
+- Dependabot's branch failed `npm ci` in every frontend job (`Missing: proxy-agent@8.0.2 from lock file`), so the contracts, lint, typecheck, test, build and knip reds were one failure. Its lockfile was written by an npm that prunes the optional-peer `proxy-agent@8` under `puppeteer-core/node_modules/`, and CI's npm 10 (Node 22) rejects such a lock. This lock is resolved with npm 10.9.4 on Node 22, the npm CI runs, and `npm ci` accepts it with no invalid peers. The lock's root `version` field is left at main's value.
+
+### Tests
+- Local, Node 22 / npm 10: `npm ci` clean, `npm run typecheck` clean, `npm run lint` clean (2 pre-existing warnings). The full vitest suite was run twice locally. Each run had a handful of failures and the two sets did not overlap. All 12 files involved pass in isolation on this branch and on main (323/323), so the failures were load on the shared machine, and CI's sharded run is the reading.
+
 ## [0.132.8.3] - 2026-10-20 — deps: @sparticuz/chromium 149.0.0 → 153.0.0 (#1017)
 
 ### Changed
