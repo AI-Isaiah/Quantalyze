@@ -795,12 +795,17 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   // `allocator_holdings` rows and their `updated_at`, the
   // `allocator_equity_derived` native-unpriced markers (owner SELECT only) and
   // the `api_keys` identity columns (INSERT and UPDATE revoked from
-  // authenticated). The audit log is NEVER read: `log_audit_event` lets the owner
-  // write any event for their own keys, so the reader runs with audit
-  // evidence switched off (its `auditEvidence` option). KNOWN LIMIT, pinned by a test: the dashboard lets a
-  // newer clean empty poll supersede a key's older rows; this figure cannot, so
-  // on such a book the commit's AUM can exceed the Holdings total until the key's
-  // next written rows. The display may supersede; the persisted figure may not.
+  // authenticated). The audit log is NEVER read here, by deliberate choice: the
+  // reader runs with audit evidence switched off (its `auditEvidence` option), so
+  // the stored figure rests on rows and markers only. Since migration
+  // 20261014120100 (Phase 167.1.2.1 D-18) `log_audit_event` refuses the poll
+  // actions to every caller but the service role, so the poll events are
+  // service-written; it still records other actions for the caller. KNOWN LIMIT,
+  // pinned by a test: the dashboard lets a newer clean empty poll supersede a key's
+  // older rows, and lets a clean empty poll on the rows' own day (the key's newest
+  // poll) do the same (D-02, Phase 167.1.2.1.2); this figure cannot, so on such a
+  // book the commit's AUM can exceed the Holdings total until the key's next
+  // written rows. The display may supersede; the persisted figure may not.
   //
   // Skipped on cached replays (the original commit already emitted the
   // server-side number; replays produce no new audit rows).
@@ -882,7 +887,8 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
     }
     // 164.6.6.2.1 CR-01 (D-02, D-08, D-17): the reader drops a native-unit account the
     // poll declared unpriced, from the poll's SERVICE-written record (never the audit
-    // log, which the owner can write). A failed read of that record keeps the sum as it
+    // log, which this figure does not read; see migration 20261014120100 above). A
+    // failed read of that record keeps the sum as it
     // was before the check and says so; it never fails the commit, whose data layer
     // already landed.
     if (read.markerReadError) {

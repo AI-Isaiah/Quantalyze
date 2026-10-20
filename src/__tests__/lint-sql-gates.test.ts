@@ -1165,7 +1165,8 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): MEASURED on the merged tree, `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 103 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`.
     // ⭐ CURRENCY 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): 99 -> 100, the okx archive rebuild gate file (test_okx_archive_rebuild.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 100 file(s); 0…' to match /scanned 99 file/`, and `node scripts/lint-sql-gates.mjs` printed `scanned 100 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
     // ⭐ CURRENCY MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): MEASURED on the merged tree, `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 104 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).` (main's 103 plus test_okx_archive_rebuild.sql).
-    expect(res.out).toMatch(/scanned 104 file/);
+    // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): 104 -> 105, the same-day-empty fingerprint gate file (test_commit_scenario_batch_fingerprint_sameday_empty.sql). MEASURED: this pin read `expected 'lint-sql-gates: scanned 105 file(s); …' to match /scanned 104 file/`, and `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 105 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
+    expect(res.out).toMatch(/scanned 105 file/);
     expect(res.status, res.out).toBe(0);
   });
 

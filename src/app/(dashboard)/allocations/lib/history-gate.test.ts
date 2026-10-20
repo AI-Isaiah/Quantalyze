@@ -39,15 +39,19 @@ describe("historyGate", () => {
       },
       "no_eligible_key",
     ],
+    // Phase 167.1.2.1.2 D-04 (2026-10-20, founder: "Show curve + factsheet"):
+    // this row used to expect the connected-but-empty state. A ready history of
+    // an all-closed book now renders figures, because the Risk tab already did
+    // and the two tabs must agree for the same payload.
     [
-      "eligible key, empty book, not syncing, ready",
+      "eligible key, empty book, not syncing, ready (D-04: figures, not the empty card)",
       {
         hasConnectedKeys: true,
         holdingsSummary: [],
         hasSyncing: false,
         equityHistoryState: "ready",
       },
-      "connected_empty",
+      "ready",
     ],
     [
       "eligible key, empty book, syncing, rebuilding",

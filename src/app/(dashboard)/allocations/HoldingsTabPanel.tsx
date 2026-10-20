@@ -121,6 +121,58 @@ export function openPositionReadDayNotes(
   apiKeys: ReadonlyArray<{ id: string; exchange: string; label: string | null }>,
   today: string,
 ): string[] {
+  const keysById = new Map(apiKeys.map((k) => [k.id, k]));
+  return staleReadGroups(derivativeRows, allRows, today).map(({ keyId, asof, venue, symbols }) => {
+    const phrase = keyPhrase(keysById.get(keyId), venue);
+    return `Positions from ${phrase} are as last read on ${asof}: ${symbols.join(", ")}.`;
+  });
+}
+
+/**
+ * Phase 167.1.2.1.2 D-05 (SC-5): the same note for the spot Holdings table.
+ * One sentence per key whose spot rows were read on a day older than the dating
+ * reference, in the form of the Open Positions note (D-08) and by the same
+ * reference: both call `staleReadGroups` with `allRows` = the whole book, spot
+ * and derivative, so the two lines can never date one key's read differently.
+ * The noun is "Spot holdings" (UI-SPEC): the line sits under a table headed
+ * Holdings, whose own copy says "No spot holdings.". The Holdings table has no
+ * date column, so without this line a spot balance carried from an old read
+ * looks current.
+ */
+export function spotHoldingReadDayNotes(
+  spotRows: ReadonlyArray<{
+    api_key_id: string;
+    symbol: string;
+    venue: string;
+    asof?: string;
+  }>,
+  allRows: ReadonlyArray<{ asof?: string }>,
+  apiKeys: ReadonlyArray<{ id: string; exchange: string; label: string | null }>,
+  today: string,
+): string[] {
+  const keysById = new Map(apiKeys.map((k) => [k.id, k]));
+  return staleReadGroups(spotRows, allRows, today).map(({ keyId, asof, venue, symbols }) => {
+    const phrase = keyPhrase(keysById.get(keyId), venue);
+    return `Spot holdings from ${phrase} are as last read on ${asof}: ${symbols.join(", ")}.`;
+  });
+}
+
+/**
+ * The shared half of the two read-day notes: the dated rows, grouped per key in
+ * first-appearance order. A row is dated when its read day is older than the
+ * newest read across `allRows`, or older than yesterday (UTC), whichever is
+ * later (SFH-R2-03). Rows without a read day (legacy payloads) are skipped.
+ */
+function staleReadGroups(
+  rows: ReadonlyArray<{
+    api_key_id: string;
+    symbol: string;
+    venue: string;
+    asof?: string;
+  }>,
+  allRows: ReadonlyArray<{ asof?: string }>,
+  today: string,
+): Array<{ keyId: string; asof: string; venue: string; symbols: string[] }> {
   let newest = "";
   for (const r of allRows) {
     if (typeof r.asof === "string" && r.asof > newest) newest = r.asof;
@@ -131,17 +183,13 @@ export function openPositionReadDayNotes(
   const datedBefore = yesterday > newest ? yesterday : newest;
   if (datedBefore === "") return [];
   const byKey = new Map<string, { asof: string; venue: string; symbols: string[] }>();
-  for (const r of derivativeRows) {
+  for (const r of rows) {
     if (typeof r.asof !== "string" || r.asof >= datedBefore) continue;
     const entry = byKey.get(r.api_key_id);
     if (entry) entry.symbols.push(r.symbol);
     else byKey.set(r.api_key_id, { asof: r.asof, venue: r.venue, symbols: [r.symbol] });
   }
-  const keysById = new Map(apiKeys.map((k) => [k.id, k]));
-  return Array.from(byKey.entries()).map(([keyId, { asof, venue, symbols }]) => {
-    const phrase = keyPhrase(keysById.get(keyId), venue);
-    return `Positions from ${phrase} are as last read on ${asof}: ${symbols.join(", ")}.`;
-  });
+  return Array.from(byKey.entries()).map(([keyId, group]) => ({ keyId, ...group }));
 }
 
 /**
@@ -443,6 +491,12 @@ export function HoldingsTabPanel(
     () => openPositionReadDayNotes(derivativeHoldings, holdingsSummary, apiKeys, today),
     [derivativeHoldings, holdingsSummary, apiKeys, today],
   );
+  // D-05 (SC-5): the spot rows' read-day lines. Computed over ALL spot rows,
+  // not the rows after the show-revoked toggle, as the Open Positions note is.
+  const spotReadDayNotes = useMemo(
+    () => spotHoldingReadDayNotes(spotHoldings, holdingsSummary, apiKeys, today),
+    [spotHoldings, holdingsSummary, apiKeys, today],
+  );
 
   const partialPositionReads = useMemo(
     () => props.partialPositionReads ?? [],
@@ -569,6 +623,15 @@ export function HoldingsTabPanel(
           showRevoked={showRevoked}
           onShowRevokedChange={setShowRevoked}
         />
+        {spotReadDayNotes.map((note) => (
+          <p
+            key={note}
+            data-testid="holdings-read-day-note"
+            className="text-xs text-text-muted [overflow-wrap:anywhere]"
+          >
+            {note}
+          </p>
+        ))}
         <OpenPositionsTable rows={openPositionRows} />
         {partialReadNotes.map((note) => (
           <p

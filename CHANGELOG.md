@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.132.8.0] - 2026-10-20 — HISTORYREADER 167.1.2.1.2: Open Positions, Exchanges and Overview show a departed or stale key's history truthfully
+
+Phase 167.1.2.1.2. **Includes migration `20261027120000`,** which applies to TEST and then PROD automatically on merge.
+
+### Fixed
+- **A position closed and polled empty on the same day disappears that day, not the next (D-02).** `fetchLatestHoldingsPerKey` hides a key's rows when the key's newest poll, of any outcome, is a clean poll that read zero rows on the same day as those rows. A later poll that finished with warnings never hides rows.
+- **The scenario commit's fingerprint check runs the same rule in SQL.** Migration `20261027120000_commit_scenario_batch_fingerprint_sameday_empty.sql` re-bases `commit_scenario_batch` on its latest definition. A rollback is in `down/`. Without it, every book-mode commit on an affected book would have been refused with a 409. A parity test ties the SQL rule byte-for-byte to the TS reader, and a new 6-arm SQL gate covers it, including a hidden key's same-account sibling with older rows.
+- **Overview shows a ready history on an all-closed book (D-04).** It shows the curve and factsheet instead of "No positions to analyze yet.", so Overview and the Risk tab agree. The no-key and rebuilding states are unchanged (170.4 D-09 kept).
+- **Stale spot balances are dated (D-05).** Under the Exchanges spot table, one muted line per stale key reads "Spot holdings from {key} are as last read on {date}: {symbols}." It uses the same dating rule as the existing Open Positions note.
+
+### Tests
+- `FILES_FLOOR` 78 and `ARMS_FLOOR` 777, each seen red at its old value first. `WAIVED_CEILING` stays 0. A full mutation run gave 777/777 biting arms with no defects.
+- 31 of the phase's tests fail on the previous main and pass here. Each rule was neutered back to RED and restored.
+
+### Notes
+- **Closed by decision (D-01, D-03):**
+  - A departed key that was never identified keeps its struck-through, disclosed rows. PROD has 0 cases next to a live key on the same exchange. It is booked as `167.1.2.1.2-DEPARTED-UNLINKED-KEY`, with the trigger "a departed key with no identity beside a live key on the same exchange".
+  - The roadmap's "Bybit UTA parse-miss" item rested on a wrong premise. A Bybit key's identity comes from `query-api` `userID`, and an unstamped key is already flagged three ways.
+- **Deploy order (review IN-01):** the migration applies to PROD before the Vercel deploy lands. In that window a same-day-emptied book could get a 409 on commit until the new reader is live.
+- **Accepted limit (D-02, IN-04):** a Bybit UTA parse-miss now hides a funded account on the same day instead of the next.
+- **Reviews:** migration-reviewer and rls-policy-auditor clean. Code review round 2 and the silent-failure hunt clean. Security SECURED 17/17. The 375/390 px checks are post-deploy.
+
 ## [0.132.7.1] - 2026-10-20 — deps: Python pip-minor-patch group (#1078)
 
 ### Changed

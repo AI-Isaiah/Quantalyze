@@ -1282,7 +1282,16 @@
 // sections 15 / judged 15 / annotated 15 / waived 0 / biting 15`. The stale-low direction was observed first (`RATCHET STALE: 77 of 104
 // gate files are now annotated but FILES_FLOOR is still 76`; `The corpus declares 771 twin(s) ... ARMS_FLOOR is 756`). A confirming
 // clean run of the committed merge is recorded in the merge commit. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 77;
+// RAISED 77 -> 78 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): +1 file, test_commit_scenario_batch_fingerprint_sameday_empty.sql
+// (migration 20261027120000, five arms), so 78 of 105 files. MEASURED by ONE full `node scripts/mutation-runner/run.mjs`, no file edited during
+// it, exit 0: `scope: FULL 78/78 annotated files`, `lane-concurrency: 4`, `coverage: files 78/105`, `arms: 776/776/0`, `biting: 776`,
+// `lane-invocations: 776 ... plus 78 baseline / 78 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron
+// AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean 3.6s over 776 arm run(s)`, `No defects. Every annotated arm bit its own arm first.`
+// Per-file lines: `test_commit_scenario_batch_fingerprint_sameday_empty.sql: sections 5 / judged 5 / annotated 5 / waived 0 / biting 5`,
+// `test_commit_scenario_batch_fingerprint_unpriced.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2` (unchanged count, retargeted
+// to the new migration). The stale-low direction was observed first: `RATCHET STALE: 78 of 105 gate files are now annotated but FILES_FLOOR is
+// still 77.` WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 78;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3235,7 +3244,20 @@ export const FILES_FLOOR = 77;
 // MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): OKXHISTORY raised ARMS_FLOOR 723 -> 738
 // and main 723 -> 756 from the same base; 771 is read off the same single run recorded under FILES_FLOOR (`arms: 771/771/0`,
 // `biting: 771`, `lane-invocations: 771`), not by adding the moves. WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 771;
+// RAISED 771 -> 776 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): +5 biting arms, the five arms of the NEW gate
+// test_commit_scenario_batch_fingerprint_sameday_empty.sql (migration 20261027120000: sameday-empty-dropped, sameday-nonempty-kept,
+// later-warnings-poll-kept, warnings-empty-kept, older-empty-day-kept). MEASURED by the same single run recorded under FILES_FLOOR:
+// `arms: 776/776/0`, `biting: 776`, `lane-invocations: 776`; per-file `test_commit_scenario_batch_fingerprint_sameday_empty.sql: sections 5 /
+// judged 5 / annotated 5 / waived 0 / biting 5`, `test_commit_scenario_batch_fingerprint_unpriced.sql: sections 2 / judged 2 / annotated 2 /
+// waived 0 / biting 2`. The stale-low direction was observed first: `The corpus declares 776 twin(s) of which 0 are waivers, so a green run
+// bites 776. ARMS_FLOOR is 771.` WAIVED_CEILING stays 0 - no waiver was added.
+// RAISED 776 -> 777 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER review fix WR-01): +1 biting arm, `sameday-empty-sibling-older` in
+// test_commit_scenario_batch_fingerprint_sameday_empty.sql (5 -> 6 arms; the emptied key's same-account sibling a day older). MEASURED by ONE full
+// run of the committed tree: `scope: FULL 78/78 annotated files`, `coverage: files 78/105`, `arms: 777/777/0`, `biting: 777`, `lane-invocations: 777`,
+// `unreachable: 27`, `lane-blocked: 0`, `No defects`, exit 0; per-file `test_commit_scenario_batch_fingerprint_sameday_empty.sql: sections 6 / judged 6 /
+// annotated 6 / waived 0 / biting 6`. The stale-low direction was observed first: `The corpus declares 777 twin(s) of which 0 are waivers, so a green run
+// bites 777. ARMS_FLOOR is 776.` FILES_FLOOR stays 78 (no file joined). WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 777;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

@@ -154,6 +154,26 @@ export function cleanPollDay(metadata: unknown): string | null {
 }
 
 /**
+ * Phase 167.1.2.1.2 D-02 (SC-2). The day a CLEAN poll read the key on AND read
+ * nothing (`row_count` exactly 0), or null when `metadata` is not one. It is
+ * `cleanPollDay` plus the empty count, so every guard there (an object, a clean
+ * final status, a whole non-negative `row_count`, an ISO `asof`) holds here too.
+ *
+ * It mirrors the `empty_day` the SQL twin computes in `commit_scenario_batch`
+ * (plan 05), so the dashboard fingerprint and the RPC hide the same key.
+ *
+ * `row_count` 0 means "this poll read nothing", not "the account holds no
+ * money": `row_count` is `len(holdings)`, so a Bybit UTA parse-miss reads a funded
+ * account as empty (the Known limit in the header of `fetchLatestHoldingsPerKey`).
+ * The caller uses this for display only and deletes no row.
+ */
+export function cleanEmptyPollDay(metadata: unknown): string | null {
+  const day = cleanPollDay(metadata);
+  if (day === null) return null;
+  return (metadata as Record<string, unknown>).row_count === 0 ? day : null;
+}
+
+/**
  * Review C4 round 2 WR-R2-03. The day a poll that could NOT read the key's open
  * positions stamped its rows with, or null when `metadata` is not such a poll.
  * On a ccxt venue `complete_with_warnings` has one cause: the derivative-side
@@ -176,13 +196,18 @@ export function partialPollDay(metadata: unknown): string | null {
  * by this module's test.
  *
  * WHY THIS TABLE AND NOT THE AUDIT LOG. The evidence must be something the owner cannot
- * write. `audit_log` is not: `public.log_audit_event` is SECURITY DEFINER, granted to
- * `authenticated`, and records ANY action, entity and metadata under the caller's own
- * user id, so an owner could forge a poll event for their own key and shape what the
- * dashboard, the AUM and the commit audit count. `allocator_equity_derived` has one
- * write policy, `allocator_equity_derived_service_all` (service role); the owner has
- * SELECT only (`allocator_equity_derived_owner_select`). The table-level INSERT/UPDATE
- * grants to `authenticated` do not matter: row-level security refuses every such write.
+ * write. When this record was designed, `audit_log` was not such a thing:
+ * `public.log_audit_event` is SECURITY DEFINER, granted to `authenticated`, and recorded
+ * ANY action, entity and metadata under the caller's own user id, so an owner could
+ * forge a poll event for their own key. Since migration 20261014120100 (Phase 167.1.2.1
+ * D-18) it refuses `allocator.holdings.sync_completed`, `sync_failed` and
+ * `persist_failed` (and `allocator.equity.%`) to every caller but the service role, so
+ * the poll events the display read trusts are service-written; `log_audit_event` still
+ * records other actions for the caller. The marker stays in `allocator_equity_derived`
+ * all the same: it has one write policy, `allocator_equity_derived_service_all`
+ * (service role); the owner has SELECT only (`allocator_equity_derived_owner_select`).
+ * The table-level INSERT/UPDATE grants to `authenticated` do not matter: row-level
+ * security refuses every such write.
  */
 export const NATIVE_UNPRICED_KIND_PREFIX = "native_unpriced:";
 
@@ -274,17 +299,22 @@ export function nativeUnpricedDay(payload: unknown): string | null {
  *
  * Phase 170.4 plan 12 (D-08, D-10, T-170.4-31): `opts.auditEvidence` (default true,
  * the dashboard's reading). The scenario commit PERSISTS the figure it sums
- * (`size_at_decision_usd`), and `audit_log` is owner-writable through
- * `log_audit_event`, so that caller passes `{ auditEvidence: false }`: neither
+ * (`size_at_decision_usd`), so that caller passes `{ auditEvidence: false }`: neither
  * audit read is issued, so a clean empty poll cannot supersede a key's rows and no
- * partial-read day is named (`partialReads` is `[]`). What remains rests on
+ * partial-read day is named (`partialReads` is `[]`). This is a deliberate,
+ * test-pinned choice and not a workaround: the persisted figure rests on rows and
+ * markers only. Since migration 20261014120100 the poll events themselves are
+ * service-written (see the note above `NATIVE_UNPRICED_KIND_PREFIX`), so the choice
+ * is no longer forced by a forgeable poll event; it keeps the stored
+ * figure independent of an inference from an event. What remains rests on
  * evidence the service writes: `allocator_holdings` rows and their `updated_at`,
  * the `allocator_equity_derived` native-unpriced markers (owner SELECT only) and the
  * `api_keys` identity columns (INSERT and UPDATE revoked from authenticated).
  * ACCEPTED DIFFERENCE, pinned by a test: on the dashboard a newer clean empty poll
- * ends a key's older rows; in the commit's mode it cannot, so the commit's figure
- * can exceed the Holdings total until the key's next written rows. The display may
- * supersede; the persisted figure may not.
+ * ends a key's older rows, and so does the key's newest poll when it is a clean empty
+ * one on the rows' own day (D-02, Phase 167.1.2.1.2); in the commit's mode neither
+ * can, so the commit's figure can exceed the Holdings total until the key's next
+ * written rows. The display may supersede; the persisted figure may not.
  * `markerReadError` carries the message of the first failed native-unpriced
  * record read (the key keeps its rows; the caller decides whether to say so).
  *
@@ -432,6 +462,26 @@ export async function fetchLatestHoldingsPerKey(
           // SFH-C4-02: the key's newest clean poll read it after these rows.
           return {
             reading: { day: cleanPollAsof, hasRows: false },
+            partialDay: null,
+            error: null,
+            markerError,
+          };
+        }
+        // D-02 (167.1.2.1.2): a position closed and polled empty on the rows' OWN
+        // day. persist_allocator_holdings only upserts, so that day's earlier rows
+        // are still there and the strict `>` above cannot see the poll. Two
+        // conditions, both required: the key's newest poll of ANY outcome (the
+        // read behind `partialDay`) is a clean poll that read zero rows, and it is
+        // dated the rows' own day. The second stops a later poll that finished with
+        // warnings and wrote spot rows from being hidden. The key keeps day
+        // `latestAsof` (no rows), exactly as the SQL `key_day` does, so a sibling
+        // key on the same account still counts at that day. Display only.
+        if (
+          latestAsof !== null &&
+          cleanEmptyPollDay(newestPollRes.data?.[0]?.metadata ?? null) === latestAsof
+        ) {
+          return {
+            reading: { day: latestAsof, hasRows: false },
             partialDay: null,
             error: null,
             markerError,
