@@ -6002,6 +6002,8 @@ Plans:
 
 **⭐ Founder decision 2026-10-20 (AskUserQuestion), verbatim: "Apply the measured fix, then ship".** After the F1-F4 round's re-review left a float-typed YYYYMMDD column read as 1970-01-01 (HIGH), 6- and 7-digit integers read as guessed dates and a negative integer that raises (MEDIUM, introduced), and a US column with one ISO cell rejected without a row (MEDIUM), one last fixer round applies exactly the reviewers' scratch-measured fix; anything its re-review finds is booked in TODOS, not looped, and a HIGH introduced by that round reverts that one fix commit.
 
+**⭐ Founder decisions 2026-10-20 (AskUserQuestion), verbatim: "Fix both before ship"** (add `x-service-key` and `x-tenant-claim` to the redaction denylists of both runtimes before 170.1 ships, after the security re-audit measured both headers reaching Sentry in cleartext) **and, on rotating the service key already in PROD Sentry events: "Don't rotate".**
+
 ### Phase 170.1.1: TITLES — every page has its own tab title and a sentence-case heading (INSERTED)
 
 **Goal:** Every page names itself: a tab title of its own on every dashboard, admin and auth route, under one "%s — Quantalyze" template with "—" as the one separator, and sentence-case page headings per DESIGN.md. No placeholder page or internal label stays reachable from the navigation. Split from Phase 170.1 COPY on 2026-10-15 by founder decision ("Split into 3 phases"): this phase carries 170.1's titles topic (D-02, D-04, D-06, R-6), with the plans, decisions and approved design contract already made there. It is not re-discussed.
