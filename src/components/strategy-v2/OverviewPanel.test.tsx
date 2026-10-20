@@ -71,6 +71,29 @@ describe("OverviewPanel — en-US locale pin (M-1148)", () => {
     expect(dto?.textContent).toContain("—");
   });
 
+  it("lists supported exchange codes by their display names (170.1.2 / D-01)", () => {
+    render(
+      <OverviewPanel
+        panel1={panel1({ supported_exchanges: ["okx", "mt5"] })}
+        history_days={365}
+      />,
+    );
+    const cell = screen.getByText("Supported exchanges").closest("div");
+    expect(cell?.textContent).toContain("OKX, MT5");
+  });
+
+  it("keeps an exchange name outside the closed set verbatim, never 'Other venue' (checker W2)", () => {
+    render(
+      <OverviewPanel
+        panel1={panel1({ supported_exchanges: ["okx", "Kraken"] })}
+        history_days={365}
+      />,
+    );
+    const cell = screen.getByText("Supported exchanges").closest("div");
+    expect(cell?.textContent).toContain("OKX, Kraken");
+    expect(cell?.textContent).not.toContain("Other venue");
+  });
+
   it("source pins toLocaleString to the en-US locale (MA-6 second-tier defense)", () => {
     const src = readFileSync(
       resolve(process.cwd(), "src/components/strategy-v2/OverviewPanel.tsx"),

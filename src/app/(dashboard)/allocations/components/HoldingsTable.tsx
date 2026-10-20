@@ -42,6 +42,7 @@ import {
 } from "@/components/notes/HoldingNoteRow";
 import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
 import { formatNumber, formatPercent } from "@/lib/utils";
+import { venueLabel } from "@/lib/display-labels";
 import { nativeAmount, parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 // Phase 150: `formatUsd` was module-private here; it is now the ONE money
 // formatter for this surface (shared with the Phase-150 mark/allocate
@@ -113,11 +114,6 @@ function nativeValueBasis(h: HoldingRow, unit: string | null): string | null {
 function formatDays(n: number | null): string {
   if (n == null || !Number.isFinite(n)) return "—";
   return `${n}d`;
-}
-
-function venueLabel(v: string): string {
-  if (!v) return "";
-  return v.charAt(0).toUpperCase() + v.slice(1);
 }
 
 // ──────────────────────────────────────────────────────────────── legacy types
