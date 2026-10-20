@@ -22,6 +22,11 @@
 import { useEffect, useRef, useState } from "react";
 import { sendBridgeIntro } from "@/lib/bridge/send-intro";
 import {
+  BREACH_REASON_EMPTY_LABEL,
+  breachReasonLabel,
+  venueLabel,
+} from "@/lib/display-labels";
+import {
   buildHoldingRef,
   type FlaggedHolding,
 } from "../lib/holding-outcome-adapter";
@@ -359,10 +364,10 @@ export function BridgeDrawer({
                 <ul className="mt-2 grid gap-1 text-sm text-text-primary">
                   {flaggedHoldings.map((h) => (
                     <li key={buildHoldingRef(h)}>
-                      • {h.symbol} ({h.venue}):{" "}
+                      • {h.symbol} ({venueLabel(h.venue)}):{" "}
                       {h.breach_reasons.length > 0
-                        ? h.breach_reasons.join(", ")
-                        : "composite threshold"}
+                        ? h.breach_reasons.map(breachReasonLabel).join(", ")
+                        : BREACH_REASON_EMPTY_LABEL}
                     </li>
                   ))}
                 </ul>
@@ -396,7 +401,7 @@ export function BridgeDrawer({
                         data-testid={`bridge-candidate-${ref}`}
                       >
                         <div className="text-sm font-medium text-text-primary">
-                          {h.symbol} ({h.venue})
+                          {h.symbol} ({venueLabel(h.venue)})
                         </div>
                         <div className="text-xs text-text-muted">
                           candidate: {h.top_candidate_name}
@@ -441,7 +446,7 @@ export function BridgeDrawer({
               <div>
                 <div className="text-xs uppercase text-text-muted">From</div>
                 <div className="text-base font-medium text-text-primary">
-                  {selected.symbol} ({selected.venue})
+                  {selected.symbol} ({venueLabel(selected.venue)})
                 </div>
                 <div
                   className="text-sm text-text-secondary"

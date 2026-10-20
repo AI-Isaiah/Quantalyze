@@ -369,6 +369,9 @@ describe("BridgeWidget — active-breach state preserved", () => {
       screen.getByRole("region", { name: /bridge recommendations/i }),
     ).toBeTruthy();
     expect(screen.getByText(/Bridge flagged/i)).toBeTruthy();
+    // The venue reads as a label, never the raw exchange code.
+    expect(screen.getByText(/BTC \(OKX\)/)).toBeTruthy();
+    expect(screen.queryByText(/\(okx\)/)).toBeNull();
     // Empty-state copy must NOT render when there are active breaches
     expect(screen.queryByText("All clear")).toBeNull();
   });

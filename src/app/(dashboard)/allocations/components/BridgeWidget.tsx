@@ -29,6 +29,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { BridgeDrawer } from "./BridgeDrawer";
+import { venueLabel } from "@/lib/display-labels";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
 import type { OutcomeRow } from "@/lib/queries";
 
@@ -341,7 +342,7 @@ export function BridgeWidget({
         <ul className="mt-3 grid gap-1 text-sm text-text-secondary">
           {flaggedHoldings.slice(0, 3).map((h) => (
             <li key={`${h.venue}:${h.symbol}:${h.holding_type}`}>
-              • {h.symbol} ({h.venue}) — composite{" "}
+              • {h.symbol} ({venueLabel(h.venue)}) — composite{" "}
               <span
                 style={{ fontFamily: "var(--font-mono, 'Geist Mono', monospace)" }}
               >
