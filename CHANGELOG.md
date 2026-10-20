@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.132.9.4] - 2026-10-20 — records: close HISTORYREADER 167.1.2.1.2
+
+### Notes
+- Phase 167.1.2.1.2 HISTORYREADER is closed. It shipped as v0.132.8.0 (#1089), and its migration was applied on TEST and PROD; the baseline re-dump followed as v0.132.8.1 (#1090). Verification passed (10/10), and the security audit is SECURED (17/17 threats closed).
+- The two 375/390 px backstops were measured with Playwright on a seeded local stack at 375x812 and 390x844. A ready, all-closed book shows the Overview curve and factsheet, not the empty card, and the page does not scroll sideways (scrollWidth equals clientWidth at both widths). A stale MT5 key's spot read-day line, with a long unbroken `ACCOUNT-<hex>` symbol and three more symbols, wraps onto 4 lines and its right edge equals the section's (335 at 375, 350 at 390). The reading is in `167.1.2.1.2-VERIFICATION.md`.
+- Two observations outside the checks, both pre-existing and the same for a book with open positions: the Overview's equity chart has a 400 px minimum width, so its card cuts the right-hand axis labels at phone width; and a few SVG axis ticks are cut 3-4 px by their own SVG, the class already booked as `[170.1-SC5-SCENARIO-NARROW-DEFECTS]`.
+- The phase directory (7 plan summaries, review with one fix round, verification, security audit) lands on `main`. ROADMAP records the 7 plans, quotes the founder decisions that closed SC-1 (D-01) and SC-3 (D-03) from the phase CONTEXT, and records the item (3) premise correction. STATE records the close.
+
 ## [0.132.9.3] - 2026-10-20 — fix: the prober's own wrong-key check no longer pages as a SERVICE_KEY mismatch
 
 ### Root cause

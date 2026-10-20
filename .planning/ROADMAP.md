@@ -168,7 +168,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — verified 2026-10-11 (completed 2026-10-11)
 - [x] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — 10 plans, shipped as PR 1 v0.131.3.0 (#1022) and PR 2 v0.131.8.0 (#1033); D-11 day-0 and day-1 PROD reads as expected (capped_events 0), founder acknowledged 2026-10-16; verification passed 7/7; security SECURED 33/33 (completed 2026-10-16)
 - [x] **Phase 167.1.2.1.1: WRITERRESIDUALS — the allocator equity writer persists why a curve was refused and never dilutes or drops a key silently** (INSERTED) — 4 plans plus three minimal fix rounds, shipped as v0.132.5.0 (#1079), deployed 2026-10-19 20:33Z outside 03:30–06:45 UTC (SC-8); verification passed 9/9; security SECURED 20/20 (completed 2026-10-19)
-- [ ] **Phase 167.1.2.1.2: HISTORYREADER — Open Positions, Exchanges and the Overview show a departed or stale key's history truthfully** (INSERTED) — not yet planned (data integrity and user-facing; split from 167.1.2.1 by D-01, 2026-10-13)
+- [x] **Phase 167.1.2.1.2: HISTORYREADER — Open Positions, Exchanges and the Overview show a departed or stale key's history truthfully** (INSERTED) — 7 plans plus one review fix round (a same-day clean empty poll hides the key's rows on the display read and in `commit_scenario_batch`'s SQL twin; a ready all-closed book shows the Overview curve and factsheet; a stale key's spot rows get a dated line; SC-1 and SC-3 closed by founder decision), shipped as v0.132.8.0 (#1089), migration applied on TEST and PROD; the 375/390 px backstops measured on a seeded local stack; verification passed 10/10; security SECURED (completed 2026-10-20)
 - [x] **Phase 167.1.2.2: DERIVECRON — the daily allocator derive and compose runs on PROD again, so My Allocation's equity history leaves being rebuilt** (INSERTED) — planned 2026-10-07, 9 plans (completed 2026-10-11)
 - [x] **Phase 167.1.2.2.1: DERIBITWEDGE — a Deribit account's cash-basis NAV carries no phantom balance from an open option book, and an emptied account composes as zero capital** (INSERTED 2026-10-08) — 8 plans, two PRs (#991, PR-2); closed 2026-10-12, SC-4 trustworthy clause routed to NAVBREACH (completed 2026-10-12)
 - [x] **Phase 167.1.2.2.2: TRADESYNC — live strategy keys ingest trades daily again** (INSERTED 2026-10-09) — 22 plans (18 deferred), shipped #1009 and #1012 (completed 2026-10-13)
@@ -5378,7 +5378,7 @@ Plans:
 **Priority:** data integrity and user-facing (founder priority rule, 2026-09-27).
 **Requirements**: success criteria below
 **Depends on:** Phase 167.1.2.1 (and 167.1.2.1.1 where a reader consumes a writer field it adds)
-**Plans:** 0 plans
+**Plans:** 7/7 plans complete
 
 Split out of Phase 167.1.2.1 RECONMARKER by founder decision D-01 (2026-10-13, smart discuss "Accept all"; `167.1.2.1-CONTEXT.md`). Items (1)-(3) are the 167.1.2 C4 D-16 gaps the founder chose to book (2026-09-29). Every item was re-measured at `origin/main` `c85c938e1` on 2026-10-13. The founder call marked below is asked in this phase's own discuss (D-03).
 
@@ -5392,8 +5392,20 @@ Split out of Phase 167.1.2.1 RECONMARKER by founder decision D-01 (2026-10-13, s
 
 Each item is fixed with a test that fails on the old behaviour, or closed by a recorded founder decision. Any grouping change moves Python `account_groups`, TS `accountIdentityTokens`/`keyAccountOf`, `one_key_per_account_day`/`oneKeyPerAccountDay` and the `queries.ts` reader together (167.1.2.1 re-measure, item (5) WR-03).
 
+**Closed by founder decision (2026-10-20, quoted from `167.1.2.1.2-CONTEXT.md`):**
+- SC-1, item (1): "**D-01 (SC-1, item (1), founder "Close by decision + TODO (Recommended)"):** no code. Item (1) is closed by recorded decision. A `TODOS.md` entry is booked with the trigger "a departed key with no identity beside a live key on the same exchange", carrying the 2026-10-20 counts (5 departed Bybit keys, 0 with a live same-exchange sibling). Reason: the harmful shape has 0 PROD occurrences, and the rows are already disclosed (struck through, disconnected chip, out of the totals, dated)." The entry is `167.1.2.1.2-DEPARTED-UNLINKED-KEY`.
+- SC-3, item (3): "**D-03 (SC-3, item (3), founder "Close as already flagged (Recommended)"):** no code. The roadmap premise is corrected (see the domain block): the identity read is `query-api` `userID`, not the UTA parse. A miss is already flagged by three existing paths: (1) the stamper's `no_id` outcome, (2) `escalate_if_unchecked` / `UNSTAMPED_ESCALATION_DAYS` = 3 in `account_identity.py`, which logs at ERROR (Sentry) once an unstamped key is older than 3 days, and (3) the Overview's `account_identity_pending` hold for every eligible unstamped ccxt key (`identityStillPending`, `src/lib/queries.ts`). A departed unstamped key falls under D-01."
+
+**Item (3) premise corrected (2026-10-20, quoted from `167.1.2.1.2-CONTEXT.md`; SC-3 above is kept as written, as lineage):** "a Bybit key's identity is read from `/v5/user/query-api` → `result.userID` (`analytics-service/services/account_identity.py`, `venue_account_id_from`), NOT from the UTA wallet parse. "UTA parse-miss" is a holdings-parse class (`_extract_bybit_unified_walletbalances`, allocator_positions.py), not an identity one. 0 live keys on any stamped venue (okx, bybit, binance, deribit, mt5) are unstamped on PROD."
+
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 167.1.2.1.2-01: D-02 same-day clean-empty hide, TypeScript half of the display read (wave 1)
+- [x] 167.1.2.1.2-02: a ready, all-closed book shows the Overview curve and factsheet; `connected_empty` removed from `historyGate` (wave 1)
+- [x] 167.1.2.1.2-03: one muted read-day line per stale key under the spot Holdings table (wave 1)
+- [x] 167.1.2.1.2-04: records-only closure of SC-1 (D-01, TODOS entry) and SC-3 (D-03) (wave 1)
+- [x] 167.1.2.1.2-05: D-02 SQL twin in `commit_scenario_batch`, a migration re-based on the latest definition, tracer arm and parity binding (wave 2)
+- [x] 167.1.2.1.2-06: keep arms, rollback, regenerated snapshot and PROD body acknowledgement (wave 3)
+- [x] 167.1.2.1.2-07: mutation floors and gate censuses from one measured run, phase gate (wave 4)
 
 ### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
 
@@ -6393,7 +6405,7 @@ kept verbatim.
 | 167.1.2 ACCOUNTTRUTH | PR A, B, C1–C5 shipped | Complete | 2026-10-11 |
 | 167.1.2.1 RECONMARKER | 10/10 | Complete — D-11 day-0 and day-1 PROD reads as expected, capped_events 0; verification passed, SECURED 33/33 | 2026-10-16 · v0.131.3.0 · #1022, v0.131.8.0 · #1033 |
 | 167.1.2.1.1 WRITERRESIDUALS | 4/4 | Complete — VERIFICATION passed 9/9, SECURED 20/20; three minimal fix rounds (D-15), new-book wait accepted as a known limit (D-16); deployed 20:33Z outside the 03:30–06:45 window | 2026-10-19 · v0.132.5.0 · #1079 |
-| 167.1.2.1.2 HISTORYREADER | 0/? | Queued — data integrity and user-facing; split from 167.1.2.1 (D-01), after it | - |
+| 167.1.2.1.2 HISTORYREADER | 7/7 | Complete — same-day clean empty poll hides the key's rows (display read and SQL twin); ready all-closed book shows the curve; stale spot rows dated; SC-1/SC-3 closed by decision; 375/390 px passed; SECURED | 2026-10-20 · v0.132.8.0 · #1089 |
 | 167.1.2.2 DERIVECRON | 9/9 | Complete | 2026-10-11 |
 | 167.1.2.2.1 DERIBITWEDGE | 8/8 | Complete | 2026-10-12 |
 | 167.1.2.2.2 TRADESYNC | 21/21 (plan 18 deferred) | Complete | 2026-10-13 |
