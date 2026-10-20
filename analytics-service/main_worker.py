@@ -368,6 +368,12 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # so its handler timeout is 20 minutes. Watchdog must be strictly greater;
     # 30 minutes mirrors the derive/sync_trades 15→30 headroom pairing.
     "stitch_composite": "30 minutes",  # handler timeout = 20 minutes
+    # Phase 167.1.2.2.2.1 / OKXHISTORY (D-04) — handler timeout = 15 minutes (one claim:
+    # preflight, status read, download and parse, or live crawl and reconcile). The wait
+    # for OKX's file is defer_compute_job, which leaves the row 'pending' and so is not
+    # the watchdog's (it resets only 'running'). Watchdog strictly greater, mirroring the
+    # derive/sync_trades 15→30 pairing. The kind is deliberately NOT in BACKFILL_KINDS.
+    "okx_archive_rebuild": "30 minutes",  # handler timeout = 15 minutes
 }
 
 

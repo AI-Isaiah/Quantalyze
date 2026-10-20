@@ -389,10 +389,14 @@ REFDATA_EXTRACTOR="${REFDATA_EXTRACTOR:-scripts/extract-reference-inserts.mjs}"
 # ⚠️ THE CHECK'S AUTHORITY IS THE SHIPPED CONSTRAINT, NOT A MIGRATION PICKED AT
 # RANDOM. Five migrations re-declare `compute_jobs_kind_check` with
 # `ALTER TABLE compute_jobs ADD CONSTRAINT …`, and this repo's re-base rule says
-# the LATEST declaration wins. MEASURED 2026-09-09: latest is
-# supabase/migrations/20260717233529_allocator_equity_derived_surface.sql:140 and
-# the shipped shape is supabase/schema/baseline.sql:1334, carrying SIXTEEN kinds
-# (… 'stitch_composite', 'derive_allocator_equity'). This comment cited
+# the LATEST declaration wins. MEASURED 2026-10-15 (Phase 167.1.2.2.2.1
+# OKXHISTORY): latest is supabase/migrations/20261026120000_okx_archive_rebuild.sql:98,
+# carrying SEVENTEEN kinds (… 'derive_allocator_equity', 'okx_archive_rebuild'), and
+# the registry INSERT for the 17th is the same file at :91-92. The shipped shape,
+# supabase/schema/baseline.sql:1334, still carries SIXTEEN until the post-apply
+# baseline re-dump. Until 2026-10-15 the latest was
+# supabase/migrations/20260717233529_allocator_equity_derived_surface.sql:140 (SIXTEEN
+# kinds, … 'stitch_composite', 'derive_allocator_equity'). This comment cited
 # 20260710130000_stitch_composite_kind.sql:53 until 2026-09-09; that declaration
 # was SUPERSEDED and carries FIFTEEN — one short — so a reader checking the leg
 # against it would have measured the wrong list.
@@ -1628,8 +1632,9 @@ TXN_REFDATA_TAIL
   # rows exceed its statements absorbs that many lost rows before the floor bites,
   # and a statement inserting zero NEW rows is invisible to it in both directions.
   # Both shapes are live in the real allowlist. MEASURED 2026-09-09:
-  # public.compute_job_kinds is pinned at 15 statements and yields 16 distinct
-  # kind names, so ROWS EXCEED STATEMENTS there and the floor absorbs one lost
+  # public.compute_job_kinds is pinned at 16 statements and yields 17 distinct
+  # kind names (15 and 16 until 2026-10-15, Phase 167.1.2.2.2.1 OKXHISTORY added
+  # 20261026120000_okx_archive_rebuild.sql), so ROWS EXCEED STATEMENTS there and the floor absorbs one lost
   # row before it bites. One of those statements (20260510175507) is a deliberate
   # ON CONFLICT DO NOTHING duplicate of a row an earlier migration already
   # inserts, so it contributes no new row at all and is invisible to the floor in

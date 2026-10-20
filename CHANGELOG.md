@@ -1,5 +1,305 @@
 # Changelog
 
+## [0.132.5.1] - 2026-10-19 — RECORDS: close WRITERRESIDUALS 167.1.2.1.1 (verification passed 9/9, SECURED 20/20)
+
+Records only: `.planning` and this release.
+
+### Added
+- The WRITERRESIDUALS phase directory joins the tracked tree: four plans and summaries, CONTEXT (D-01 to D-05, D-11 to D-16), RESEARCH, PATTERNS, VALIDATION, the review reports and fix-round record, the SC-8 deploy note, `SECURITY.md` (SECURED, 20 of 20) and `VERIFICATION.md` (status passed, 9 of 9).
+
+### Changed
+- `.planning/ROADMAP.md`: the WRITERRESIDUALS overview bullet and Progress-table row carry the outcome: v0.132.5.0 (#1079), deployed 2026-10-19 at 20:33Z, outside the 03:30–06:45 UTC window that SC-8 forbids. The phase section records founder decisions D-15 ("Yes, one clause + test") and D-16 ("Accept as known limit").
+- `.planning/STATE.md` and `.planning/state.json`: progress moves to 111 phases complete. The current position stays on 166.5 COMPUTEDATSTAMP. The Status line says WRITERRESIDUALS is closed and 170.1 COPY is in its final round.
+
+### Notes
+- The live proof that the change works on PROD is the first derive after deploy, at 05:30Z on 2026-10-20, where a composed book reads `is_trustworthy`. It is read after this PR merges.
+
+## [0.132.5.0] - 2026-10-19 — WRITERRESIDUALS 167.1.2.1.1: the allocator equity writer says why it refused a curve and never dilutes or drops a key silently
+
+Phase 167.1.2.1.1. The allocator equity writer (derive, stitch and the daily refresh) now persists the reason it refused a curve, flags a failing or never-polled key instead of carrying it flat, and counts each account once. No migration.
+
+### Fixed
+- **Every derive refusal persists its reason (SC-1).** The refusal paths of `run_derive_allocator_equity_job` used to delete the curve row and store nothing, so Overview could only show a generic line. Each path now stores its token, and the reader (`src/lib/queries.ts`) maps every token onto an existing Overview line. An identity collision reads as `duplicate_account`.
+- **A lone failing key whose series ends early blocks the curve (SC-2).** `no_working_groups` fired only for groups of two or more keys, so a single failing key was carried flat inside a "ready" book. It is now `failing_key_series_ended`.
+- **Stitched members that disagree about an owned day's flows block the curve (SC-3).** Before, a deposit listed only by the newer key, on a day the older key owned, was dropped and the curve stayed trusted. It is now `shared_account_flows_disagree`.
+- **A never-polled working account holds the day's snapshot write (SC-4).** It used to add $0 to the day's persisted total. The hold is recorded as the audit action `allocator.equity.refresh_held`.
+- **A carried balance older than 7 days holds the day for a working key, and a dead key is left out (SC-5, founder D-12).**
+- **Two working keys on one account that the stamper has not reached yet are no longer counted twice (SC-6).** The derive stores `account_identity_pending` and the refresh holds its write. Deribit is excluded from the refresh's count because its keys add $0 there.
+- **A departed account whose history is unavailable reaches Sentry as an event with a count (SC-7),** written in `job_worker.py`, instead of only a breadcrumb.
+- **A brand-new book reads "being rebuilt", not "held back" (fix rounds, founder D-15).** A book whose keys have an anchor and no return day yet now stores `compose_empty`. That also holds beside a dust, native-unit or native-unpriced key the compose omits, including a native-unit key that already has history.
+- **The refresh's Sentry hold event comes from the smallest working key, not a failing one,** and the left-out Sentry events fire on every outcome that is not a hold.
+
+### Tests
+- New: `test_derive_refusal_rows.py`, `test_writer_residual_parity.py`, `test_stitch_flow_agreement.py` and `test_allocator_equity_departed.py`, plus the shared fixtures `derive_refusal_rows.json` and `writer_residual_resolution.json`.
+- TS twins: `derive-refusal-rows.test.ts` and `writer-residual-parity.test.ts`, so the Python writer and the TS reader agree on every token.
+- Larger suites for the derive job and the refresh carry-forward.
+- `scripts/accounttruth-census.mjs` mirrors the new tokens and is pinned by `accounttruth-census.test.ts`.
+- Every fix was RED first and went RED again when neutered.
+
+### Notes
+- **Deploy timing (SC-8):** this change must land outside 03:30–06:45 UTC (poll 04:00, refresh 05:00, derive 05:30). A deploy between the poll and the refresh writes one stale row per emptied account.
+- **A held refresh day is a permanent gap** in `allocator_equity_snapshots`, by design.
+- **`v2_rows_fresh` in `docs/runbooks/derivecron-go-live.md` now also counts refusal rows.** Filter it on `is_trustworthy`.
+- **SC-9 (the MT5 BTC-unit inception residual)** is closed as cleared (founder D-11).
+- **TODOS:**
+  - Closed: `167.1.2.1.1-NEWBOOK-HELD-BACK-LINE`, `-HOLD-SENTRY-LEADER` and `-LEFTOUT-SENTRY-NO-WRITE`.
+  - Narrowed: `-IDENTITY-HOLD-DERIBIT`, to its escalation half.
+  - Booked: `-NEWBOOK-WAIT-UNBOUNDED`, the known limit the founder accepted (D-16). A funded key whose venue never yields 2 usable NAV days reads "being rebuilt" with no end, which is the line it showed before this phase.
+  - Booked: `-FALLBACK-LEADER-PREFLIGHT` and `-LEADER-STATUS-FLIP`, both observability only.
+- Verification passed 9/9; security SECURED 20/20.
+
+## [0.132.4.1] - 2026-10-16 — RECORDS: close BRIDGERETURNS 167.1.1.1 (verification passed, SECURED 23/23, PROD readings as expected)
+
+Records only: `.planning`, `TODOS.md`, and this release.
+
+### Added
+- The BRIDGERETURNS phase directory joins the tracked tree: 10 plans and summaries, CONTEXT, RESEARCH, PATTERNS, VALIDATION, the review and review-fix rounds, `SECURITY.md` (SECURED, 23 of 23), `UAT.md` (3 of 3 passed) and `VERIFICATION.md` (status passed).
+- `VERIFICATION.md` gains "Human items resolved (2026-10-16)" with the three post-deploy readings.
+- `TODOS.md` books `CI-LOCALSTACK-DB-PORT-IN-USE`, a first occurrence: main's CI run on #1070's merge commit failed only in `frontend-local-stack` because the runner's Docker could not bind the lane database's port ("address already in use"). Later main commits are green. Fix on the second occurrence.
+
+### Changed
+- `.planning/ROADMAP.md`: the BRIDGERETURNS overview bullet is ticked with its outcome (v0.132.3.0 #1070, gap closure v0.132.4.0 #1074), its ten plan rows replace the `TBD` stub, and its Progress-table row reads Complete with the outcome prose.
+- `.planning/STATE.md` and `.planning/state.json`: progress moves to 110 of 118 phases. The current position stays on 166.5 COMPUTEDATSTAMP, and the Status line records the founder's hold to 2026-10-20 on 170.1 COPY, 167.1.2.1.1 WRITERRESIDUALS and 167.1.1.2 AUMBASIS.
+
+### Notes
+- PROD readings, read-only with the marker query first, counts only:
+  - **SC4 after (engine v2.4.0, every allocator re-scored by 14:00Z):** 213 holding-flag entries, each withheld holding named by reason (`too_few_priced_days` 111, `derivative_out_of_book` 75, `option_premium` 9, `account_balance` 8, `fixed_price` 7, `too_few_adjacent_returns` 1), and 0 correlation or max-weight breaches. Portfolio fit is computed for 3 of 5 personalized candidates; before the phase it was 0 of 8.
+  - **GAP-01:** the remaining 2 candidates read `overlap_below_min` with 8 and 9 shared days, a minimum of 30 and `data_completeness` null. Computed candidates and screening rows carry none of the marker keys.
+- The v2.4.0 re-score does not happen in one cron run: the cron works through allocators a page per hourly tick with its saved cursor, so it took two ticks (13:00Z and 14:00Z).
+- 375px derivative caption: PROD's only derivative holding has 7 priced days, so the basis caption was measured by writing it into the live caption element at 375px. It wraps to 8 lines inside the card with no horizontal scroll.
+- `RESEARCH.md` named the CI skip-trailer tokens literally in a rule line. It now describes them in words.
+
+## [0.132.4.0] - 2026-10-16 — BRIDGERETURNS gap 01: a Bridge candidate's missing portfolio fit says why (engine v2.4.0)
+
+Gap closure for Phase 167.1.1.1 BRIDGERETURNS (plan 10). The SC4 after-deploy reading on PROD found 2 of 5 personalized candidates with an empty portfolio fit and nothing saying why. Both are one strategy whose 25-point curve shares 8 and 9 days with each book's priced holding, under the 30-day minimum. The empty fit is correct; the silence was the defect.
+
+### Fixed
+- `analytics-service/services/match_engine.py`: a candidate that shares fewer than 30 days with the book now persists `fit_unavailable_reason: "overlap_below_min"`, `fit_overlap_days` and `fit_min_overlap_days` in `score_breakdown.raw`. A personalized candidate with no returns series at all persists `no_candidate_returns` with 0 days. Computed fits and screening rows carry none of these keys.
+- `data_completeness` is now null on the short-overlap path. It measures the book's own join and read 1.0 ("complete") beside a fit that was never computed.
+- The admin candidate view (`src/components/admin/CandidateDetail.tsx`) shows the cause under the Portfolio fit bar, e.g. "Portfolio fit not computed: only 8 shared days with the book (needs 30)."
+
+### Changed
+- `ENGINE_VERSION` v2.3.0 → v2.4.0, because the persisted `raw` shape changed. **Every cached match batch is re-scored on the first cron run after deploy.** `WEIGHTS_VERSION` stays v2.0.0; no weight or score changed. Both golden fixtures change only in `engine_version`.
+- One constant, `PORTFOLIO_FIT_MIN_OVERLAP_DAYS = 30`, feeds the engine's overlap check, the persisted minimum and `routers/match.py` `_BOOK_JOIN_MIN_DAYS`, so the book-level D-22 marker and the candidate-level marker cannot disagree.
+
+### Tests
+- New `analytics-service/tests/test_match_candidate_fit_overlap_marker.py`, 9 arms: 8 shared days, exactly 30 (no reason key), 29 at the boundary, screening, the one-constant check, absent or empty candidate series, and an empty book series. Each arm was RED before its fix and was neutered back to RED and restored.
+- New `src/components/admin/CandidateDetail.test.tsx` pins the admin sentence and pins that `reasons` stays unchanged.
+
+### Notes
+- The cause is deliberately kept out of `reasons`: `reasons[0]` is the allocator's headline on /recommendations and pre-fills the intro note, so an admin caveat there would reach the allocator.
+- Review: two rounds. Round 1 fixed one silent-failure MEDIUM (the no-returns candidate); round 2 added a test for the empty-book guard. LOW items stay in the phase review files, not fixed by policy. Security SECURED 23/23.
+- After deploy and the re-score, the two PROD candidates are read again (read-only) to confirm they carry `overlap_below_min` with 8 and 9 days.
+
+## [0.132.3.3] - 2026-10-16 — RECORDS: close FANINGRAPH 164.9.3.1 (verification passed 8/8, SECURED 27/27, post-merge items confirmed)
+
+Records only: `.planning`, `TODOS.md`, and this release. One commit.
+
+### Added
+- The FANINGRAPH phase directory joins the tracked tree: 11 plans and summaries, CONTEXT, RESEARCH, PATTERNS, VALIDATION, `REVIEW.md` with rounds 2 to 4, `REVIEW-FIX.md`, `SECURITY.md` (SECURED, 27 of 27 threats closed) and `VERIFICATION.md` (status passed, 8 of 8).
+- `VERIFICATION.md` gains a dated section, "Post-merge items resolved (2026-10-16)", with all seven post-merge items confirmed and the evidence for each. Status stays passed.
+
+### Changed
+- `.planning/ROADMAP.md`: the FANINGRAPH overview bullet is ticked with its outcome (v0.132.1.0 #1059, re-dump #1061, ratchet-row follow-up #1064), its eleven plan rows replace the `TBD` stub and are ticked, and its Progress-table row reads Complete with the outcome prose.
+- `.planning/STATE.md` and `.planning/state.json`: progress counts and the last-activity lines move to 2026-10-16. The current position stays on 166.5 COMPUTEDATSTAMP, and the Status line now says FANINGRAPH is closed.
+
+### Notes
+- Read-only PROD readings taken for the post-merge items (marker query first, counts and booleans only): the ledger rows for `20261023120000` and `20261024120000` are present; `_fan_in_lock_rows` and `bridge_outcomes_sync_holding_ref` exist; `_fan_in_lock_rows` is executable by service_role only, matching the migration's REVOKE; the D-04 census reads 0 parented `compute_jobs` rows and 0 `done_pending_children` of 2332.
+- Main at the merge commit was red on the baseline content-drift gate by construction until the re-dump (#1061). The separate snapshot-drift workflow went red one commit later on the stale `_fan_in_lock_rows` ratchet row, and #1064 deleted it. Both are green now.
+- Two review residuals were not yet in `TODOS.md` and are booked: `164.9.3.1-FL8-SEAM-RESTORE` (lane-only, founder-accepted) and `164.9.3.1-55P03-RECOVERY-LATENCY` (latent, no caller passes parents). The earlier three entries (`REAPER-STRAND`, `VOLUNTARY-REMOVE-23514`, `HOLDING-REF-DIRECT-UPDATE`) were already booked.
+- STATE's Status line is rewritten to match today: 170.1 COPY and WRITERRESIDUALS are in flight. BRIDGERETURNS (#1070) and OKXHISTORY (#1067) are shipped and waiting on readings or founder steps. FANINGRAPH, RECONMARKER and PYXDIST are closed, and MT5SERVERLEARN is retired.
+- SECURITY.md's T-24 row now describes the secret-scan pattern in words. It was written as a literal URL with a user and password, which the push-time credential scanner refused.
+
+## [0.132.3.2] - 2026-10-16 — RECORDS: retire MT5SERVERLEARN 164.6.6.3.6 from v1.20 (founder: next milestone, maybe)
+
+Records only; no code changes.
+
+### Removed
+- **Phase 164.6.6.3.6 MT5SERVERLEARN is retired from v1.20, by founder decision on 2026-10-16: "We will do it in the next milestone (maybe)".** It never shipped. Broker servers stay hand-listed in `MT5_KNOWN_SERVERS`, and the Step 2d runbook from 164.6.6.3 applies.
+  - The ROADMAP marks the phase retired, in the same style as 165, 165.1 and 165.2. Its section stays as the spec, and its Progress row reads RETIRED.
+  - STATE no longer lists it as waiting on the founder's MT5 accounts.
+  - The work done so far (CONTEXT, RESEARCH, PATTERNS, VALIDATION, BROKER-SERVERS, plan 01 and the S0-S9 gate protocol) is kept on the pushed branch `feat/164.6.6.3.6-mt5serverlearn`.
+- TODOS gains `[164.6.6.3.6-MT5SERVERLEARN-NEXT-MILESTONE]`, which carries the phase to the next milestone's planning.
+
+## [0.132.3.1] - 2026-10-16 — RECORDS: close RECONMARKER 167.1.2.1 (D-11 day-0/day-1 reads as-expected, verification passed, SECURED 33/33)
+
+### Added
+- `167.1.2.1-SECURITY.md`: audit of Phase 167.1.2.1 RECONMARKER by gsd-security-auditor at head `f590cdf42`, read-only, no database touched. Verdict SECURED, 33 of 33 registered threats closed, `threats_open: 0`. Four accepted risks are logged (T-02 column SELECT for authenticated only, T-07 stale curve on disconnect-then-add, T-20 widened projection, T-SC no package installed).
+- `167.1.2.1-VERIFICATION.md` (status passed, 7 of 7 success criteria) and `167.1.2.1-10-SUMMARY.md` (the D-11 day-0 and day-1 PROD reads, counts only, founder acknowledged 2026-10-16) join the tracked phase directory.
+
+### Changed
+- `.planning/ROADMAP.md`: the RECONMARKER overview bullet is ticked with its outcome (PR 1 v0.131.3.0 #1022, PR 2 v0.131.8.0 #1033), its ten plan rows are ticked, and its Progress-table row reads Complete with the outcome prose rather than the bare word.
+- `.planning/STATE.md` and `.planning/state.json`: progress counts and the last-activity lines move to 2026-10-16. The current position stays on 166.5 COMPUTEDATSTAMP, and the Status line now says RECONMARKER is closed.
+
+### Notes
+- One finding the audit flagged as an unregistered WARNING is closed in code: `log_audit_event` let a signed-in user write `allocator.equity.reconstruct_*` rows. Migration 20261014120100 refuses that prefix to non-service_role callers (SQLSTATE 22023) and the backfill joins on `a.user_id = ak.user_id`. Rows forged before that migration applied can only affect the forger's own key.
+- Two residuals stay open and non-blocking, booked in `TODOS.md`: `167.1.2.1-TRANSIENT-NEVER-CAPS` and `167.1.2.1-TWIN-STALE-DEFINITION`. `TODOS.md` itself is unchanged here; no entry said it was waiting on the D-11 reading.
+- Observation, low severity: the Sentry read-failure branch in `job_worker.py` calls `capture_exception` without the `_read_failure_text` scrub, and the global `before_send` scrubber was not verified.
+## [0.132.3.0] - 2026-10-16 — BRIDGERETURNS: the Bridge matcher's per-holding returns come from each holding's daily mark price
+
+Phase 167.1.1.1 (plans 01-09 and three review rounds plus one narrow round). The branch has 67 non-merge commits since `origin/main` plus per-plan worktree merges and one merge of `origin/main`. 28 of the 67 touch paths outside `.planning`, and this entry maps every one of them. The other 39 are planning and records commits: CONTEXT with founder decisions D-01..D-25, research, the UI spec, the pattern map, 9 plans and their summaries, four review rounds, verification and the security audit. Closes TODOS `[167.1.1-BRIDGE-DOLLAR-RATIO-RETURNS]` (`77b639a4b`). No migration.
+
+### Root cause
+- ⛔ **A LIVE PRODUCTION DEFECT THAT PREDATES THIS PHASE: portfolio-fit has been null on PROD for every book that holds a holding.** The matcher indexed each holding's return series by plain `YYYY-MM-DD` strings, while every candidate series reaches the engine with a `DatetimeIndex`. A string never equals a timestamp, so the engine's date join found no shared day. The portfolio-fit axis (`sharpe_lift`, `dd_improvement`, `corr_reduction`, `corr_with_portfolio`, 40% of the personalized score) came back null for every such book, a strategies-plus-holdings book skipped every correlation-ceiling test, and the phase's own tests could not see it because each built its candidate with a string index too. Found in review round 2 (CR-01). Fixed in `b5d829711`, pinned end to end through the real loaders in `22b34cd8b`.
+  - Holding series are now built with `records_to_series`, the converter the candidate side uses.
+  - `SeriesIndexError` / `assert_uniform_datetime_index` run before scoring and in the book-join marker, so a mixed index fails the batch loudly (a logged `SCORING_FAILED` with a correlation id) instead of scoring a silent null.
+  - Measured on a production-shaped book (BTC 6,000 and ETH 4,000, 120 adjacent marked days, one candidate, the real `score_candidates`):
+
+    | component | before (string index) | after (DatetimeIndex) |
+    |---|---|---|
+    | sharpe_lift | None | -0.3397 |
+    | dd_improvement | None | 0.0277 |
+    | corr_reduction | None | 0.0068 |
+    | corr_with_portfolio | None | 0.9235 |
+
+  - PROD reading before deploy (2026-10-16, read-only, counts only): of the latest batch per allocator, the personalized books that hold holdings have 8 candidates, and all 8 carry null `sharpe_lift`, `dd_improvement` and `corr_with_portfolio`. The after reading is taken once the first v2.3.0 recompute runs.
+
+### Added
+- **Spot mark-price rule in Python and TypeScript** (`analytics-service/services/holding_marks.py`, `classifySpotMarks` in `holding-compare-adapter.ts`; `ecfc7c43e`, `1708fb23e`). One mark per day (latest `updated_at`, ties to the smallest lowercase `api_key_id`), a mark at or below zero is a gap, returns only between adjacent calendar days, and at least 30 priced days or the holding is withheld `too_few_priced_days`. Fixed-mark and account-balance holdings are withheld by name. Both runtimes replay one shared fixture, `holding_mark_returns_cases.json`, whose tracer case is a purchase at a constant mark that must not read as a return.
+- **Signed derivative rule in both runtimes** (`classify_derivative_marks` / `classifyDerivativeMarks`, `analyzeSignedReturns`; `a2fdda38f`, `3e55ae256`). The direction on day i-1 signs the move from i-1 to i; a flat or mixed day is a gap; returns are floored at -100%; options are withheld `option_premium` (D-10). Every derivative edge is in the shared fixture with independent invariants.
+- **One matcher AUM basis, pinned to the dashboard's** (`analytics-service/services/holding_equity.py`, `holding_equity_contribution_cases.json`, `src/lib/holding-equity-contribution.parity.test.ts`; `7d9268328`, `68b516cf4`). Spot counts its `value_usd`, a derivative counts only its signed `unrealized_pnl_usd`, never its notional (D-15..D-19). A NULL P&L is withheld `pnl_missing`, never 0 (D-18); the one divergence from `holdingEquityContribution` is pinned as such.
+- **`holding_flags` names every holding the matcher could not use** (`b7e58e473`, `14a47c587`, `ac7718044`). Withheld spot (`too_few_priced_days`, `too_few_adjacent_returns` under D-20, fixed-mark and account-balance reasons) and every derivative (by reason) get an entry with `flagged: false`. Withheld spot stays in AUM, weights and the max-weight test (D-01).
+- **Book-level entries in `holding_flags`** (`kind: "book"`, `holding_ref: null`, `flagged: false`; the dashboard reader ignores them):
+  - `book_join_too_short` with the shared-day count when the book's shared-days join is under 30 days; no holding is withheld for it (D-22, `577ce672d`).
+  - `add_weight_fallback` naming the sizing the engine actually used when the AUM could not size the ticket (`96779045e`, `d7ba54c97`): `aum_not_positive_ceiling_0_5` (D-23), `aum_not_positive_screening_default_0_10` (D-25), `aum_unknown_default_0_10` (D-24). Each has its own named WARNING.
+
+### Changed
+- **The matcher's per-holding returns come from each holding's daily mark price** (`analytics-service/routers/match.py`; `02dff2195`, `30b60228a`). One paginated history read, filtered by `allocator_id`, over a 730-day window and capped by `_HOLDINGS_HISTORY_MAX_PAGES`; overflow raises `HoldingsReadTruncated` instead of truncating. Buying, selling or moving an asset no longer reads as a gain or loss. A spot holding with fewer than 30 adjacent one-day returns is withheld from the join by name (D-20). The neighbour tests moved to the mark-history read.
+- **Matcher AUM is the allocator's AUM** on the basis above, and scoring weights are separated from the AUM share: scoring weights cover only the series the engine joins, while the AUM share (the max-weight denominator) covers the whole D-16 AUM (`14a47c587`, `5aab1256c`).
+- **`/compare` reads a derivative as a signed return** (`holding-compare-adapter.ts`, `HoldingFactsheet.tsx`; `229024bc9`, `363f18316`). The "rebuilding" state is gone; UI-SPEC states RD, ND and OP render, with a derivative gap note. `/compare` spot is unchanged by D-20.
+- **`ENGINE_VERSION` v2.2.0 → v2.3.0** (`551caf304`), so the hourly cron recomputes every allocator. The goldens change only `engine_version` (D-12); two comments in `allocator_equity_derive.py` and `feedback_engine.py` follow the version and the deleted read.
+
+### Fixed
+- **Scoring weights inflated by withheld value** (review round 1 CR-01, `5aab1256c`): withheld value no longer dilutes the joined set's weights.
+- **A non-positive matcher AUM** (derivative losses larger than spot) persists a null weight and names the skipped test `aum_not_positive` in `breach_skipped`, never a 0.0 weight (SFH-01, D-21, `a82156f8b`). A tiny positive AUM flags every holding on max weight, accepted and pinned (`8bef9e2a2`).
+- **Ticket sizing when the AUM is at or below zero** (`96779045e`, `cdc804f1d`): in personalized mode the ticket is sized at the 0.5 add-weight ceiling, never the engine's 0.10 default (D-23), so such a book never scores better on max weight or total than a book with an AUM of +$100.
+- **The sizing record told the truth only in personalized mode** (review round 3 CR-01 / SFH-R3-01, `d7ba54c97`): the `add_weight_fallback` entry is now decided after scoring from the engine's own mode and candidates, and nothing is recorded when no candidate was returned.
+
+### Removed
+- **`reconstruct_symbol_returns`**, the dollar-ratio per-symbol read that turned purchases and transfers into returns, with its golden tests and its import (`608a4f30d`, `a339e528c`). 0 code references remain.
+
+### Tests
+- One shared pytest PostgREST fake, proven against the real `paginated_select`, carries the matcher AUM and history tests (`91aa9fde9`, `a0dd464a6`).
+- New matcher suites: holding returns, book-join overlap, scoring weights, book-join marker, book-join end to end, AUM-not-positive sizing. Each key gate was neutered and seen RED; the sizing gates and entries each go RED when removed (`REVIEW-FIX-R3`).
+- Holdings-scope census counts for `match.py` updated by measurement; `queries.audit-2026-05-07` arms added.
+- On the merged tree: the full Python suite with the CI command, 10817 passed, 91 skipped, coverage 93.83%; `tsc` clean; vitest over `src/__tests__` and the touched files, 4519 passed, 279 skipped.
+
+### Notes
+- Founder decisions recorded during review: D-20 (thin spot series withheld `too_few_adjacent_returns`), D-21 (the max-weight denominator stays the D-16 AUM; an AUM at or below zero persists a null weight), D-22 (`book_join_too_short` marker, no holding withheld), D-23 (0.5 ceiling when AUM ≤ 0, amended to personalized mode only), D-24 (unknown AUM keeps 0.10, named), D-25 (screening mode with AUM ≤ 0 keeps 0.10, named).
+- Known limits:
+  - Screening-mode books (no strategy and no priced spot holding) are sized at 0.10 whatever their AUM (D-25); the batch says so.
+  - D-24 logs one WARNING per batch for every strategies-only allocator with no allocated amount.
+  - Options' returns are withheld (`option_premium`); their P&L still counts toward AUM.
+  - `pnl_missing` fires on 0 rows today: the writers still coerce a missing P&L to 0. That coercion and the scenario commit route's notional sizing are out of scope here by founder decision D-17 and owned by a separately booked phase.
+- After deploy: the PROD `holding_flags` and portfolio-fit "after" reading at v2.3.0, and a 375px check of the derivative caption on the holding factsheet.
+
+## [0.132.2.1] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of f5dc21b3
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38817173974`, after the PROD apply of merge `f5dc21b3`: sha256 `19cedd5e…` → `8d428d8a…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 131 → 132, distinct function names 129 → 130, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261026120000_okx_archive_rebuild.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-15` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.132.2.0 → 0.132.2.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=305 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 132 — MATCH 129, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+- The `apply_okx_archive_rebuild` `snapshot-only` row in `NAME_SET_RATCHET` (`scripts/dump-sql-functions.ts`) is DELETED on this re-dump, its own clearing condition. With the row gone, `tsx scripts/dump-sql-functions.ts --check` reads `baseline 130 name(s) vs migration-replay 130 name(s) — agree, with 0 ratcheted disagreement(s) carried`, and `baseline-content-drift` reads `findings 0`. Deleting it in the same PR keeps the snapshot ratchet from turning `main` red, which happened after the previous re-dump (#1061, fixed by #1064).
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38817173974` succeeded, and this entry was composed by the `redump-pr` job. Run `38817173974` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.132.2.0] - 2026-10-15 — OKXHISTORY: an OKX strategy's days older than the 3-month bills window can be rebuilt from OKX's quarterly bills archive (PR-A, code only)
+
+Phase 167.1.2.2.2.1, PR-A (plans 01-10 and 16). The branch has 74 non-merge commits since `origin/main` plus 17 merge commits (per-plan worktree merges and three merges of `origin/main`). 51 of the 73 touch paths outside `.planning`, and this entry maps every one of them. The other 23 are planning and records commits: CONTEXT with founder decisions D-01..D-13, research, the pattern map, 16 plans, SUMMARYs, three review rounds, verification and the security audit. Those are not shipped here. **Nothing is rebuilt on PROD by this release.** The allow-list for the archive download host ships empty on purpose, so every real download is refused until PR-B (plan 13) adds the host measured by the founder's preflight (plan 12). Calibrate (plan 14) and the PROD apply (plan 15) are founder steps that come after it.
+
+### Added
+- **Migration `20261026120000_okx_archive_rebuild.sql`.**
+  - It registers the compute_jobs kind `okx_archive_rebuild`. The kind is api_key-scoped only, and both kind CHECKs are re-based byte-identical to their prior definitions plus one new arm.
+  - It adds the atomic RPC `public.apply_okx_archive_rebuild(uuid, jsonb, jsonb, jsonb)`: SECURITY INVOKER, `service_role` only, with a pinned search_path.
+  - The RPC is a compare-and-set on the strategy's stored gaps. It refuses a row outside every gap (`row_outside_gap`), a changed gap list (`gaps_changed`) and a recomputed gap list that disagrees (`gaps_after_mismatch`).
+  - It inserts with `ON CONFLICT DO NOTHING`, so a live-derived day always wins (D-12).
+  - In the same call it records `series_provenance.reconstructed_ranges` with source `okx_bills_history_archive` (D-05).
+  - The migration carries an in-migration `$verify$` block, and a manual rollback lives in `supabase/migrations/down/`.
+- **Archive parse, classify and reconcile** (`okx_archive_files.py`, `okx_archive_classify.py`, `okx_archive_reconcile.py`).
+  - Parsing: the 28-column header is pinned. The file must fall inside its quarter. Duplicate, missing and unparseable bills stop the job.
+  - Classification: a committed subType table covers realized, funding, flow and non-external bills. Transfers are external flows (D-08). An unknown subtype with a nonzero effect fails loud, and so does a non-USD currency.
+  - Completeness: one balance chain runs across adjacent quarters, with a pairs floor.
+  - Reconciliation: archive versus live-derived on the overlap days, at `TOLERANCE_USD = Decimal("0.01")` per day and over the window total. The tolerance is a fixed module constant (D-09/D-10).
+- **Safe archive downloader** (`okx_archive_download.py`).
+  - Request: https only, an exact-host allow-list held in a code constant, no userinfo, port or fragment.
+  - Address checks: every DNS answer is vetted (private and non-global addresses are refused), and the connection dials the vetted IP with SNI.
+  - Transport: no proxy, cookies or redirects.
+  - Size: 64 MiB compressed, 512 MiB decompressed and a 100:1 ratio, checked per chunk. Inflation happens in memory only, from a zip with exactly one member or a single gzip member.
+  - Logs: only the link's scheme and host are logged.
+- **Rebuild core** (`okx_archive_rebuild.py`).
+  - Archive days go through the live P&L core, with the identity asserted on every run.
+  - A row is emitted only for a covered day inside a stored gap, before the first full live day.
+  - A day in an uningested quarter stays missing and named (SC-4).
+- **The durable job**, wired in `job_worker.py` and `main_worker.py`.
+  - Modes: preflight, calibrate and apply.
+  - Before any archive call it refuses: a disconnected, revoked, non-OKX or inactive key; a uid mismatch; a key without the read-only permission; and subtype drift (D-02).
+  - It writes a v1 result shape, with readings that are information only.
+  - Calibrate fingerprints what it evaluated, and apply writes only a fingerprint the founder approved. Every stop is raised before the first RPC, so a miss writes nothing (D-10). Apply resumes per target.
+- **Stateless wait on the OKX archive** (plan 16).
+  - Each claim re-applies and re-reads status, and waits through `defer_compute_job` for at most 3600 s. It gives up 8 h after OKX's own `ts`, and a 24 h backstop counts from the job's `created_at`.
+  - A 403 or 410 gets one fresh status read and one retry, then ends as the transient `link_expired`.
+  - A lost link never yields a partial result (SC-1).
+- **Factsheet and tear sheet line (D-06).**
+  - `parseReconstructedRanges`/`readReconstructedRanges` put `reconstructedRanges` on the payload.
+  - Each range prints "{from} – {to}: rebuilt from OKX's quarterly account statement, not the live feed." on both surfaces.
+  - A malformed record goes to Sentry, and the page says the record is unavailable.
+  - Rebuilt days count in Sharpe, CAGR and drawdown (D-07).
+- **Operator runbook `docs/runbooks/okxhistory-go-live.md`.**
+  - It has guarded SQL forms for enqueue, readback, before/after, survival and rollback.
+  - The marker is read from the cron manifest, and every write form refuses on a NULL or mismatched marker.
+  - The DRY render strips every write.
+  - Strategies are named by ordinal only.
+
+### Changed
+- The factsheet payload cache key is bumped `factsheet-v2-payload-v18` to `v19` for the new `reconstructedRanges` field.
+
+### Fixed (review rounds 1-3, before this release)
+- The archive realized leg is pnl + fee of every bill the live aggregator sums (WR-01).
+- The archive owns every day before the first FULL live day, and the archive and live flow sources never overlap (CR-01, F4).
+- A quarter file must prove it is whole before a day with no bills counts as a quiet 0.0 (F1). One gated balance chain now spans adjacent quarters, with a pairs floor and a positive proof in the result.
+- Agreement over a short or quiet overlap window no longer authenticates the archive (F3).
+- A failed or capped live crawl is a stop or a deferral, never an empty series (F2/WR-03).
+- A target with nothing to apply is a named stop, not an `already_applied` success (F6/WR-05).
+- Every wait ends at 24 h from the job's own `created_at` (F7/WR-04). One claim fits its handler timeout, and an overlong claim ends in the named transient `claim_budget_exceeded` (WR-06).
+- The flow readings are measured around the real flow seam.
+- A malformed `reconstructed_ranges` reaches Sentry and the page says so (F5/IN-01).
+- The runbook's after and rollback forms refuse when an ordinal no longer names the described strategy (F8). The runbook reads the shipped result keys and names every transient class, the give-up stop and the readings Step 3 reads.
+- The module docstrings now say what they cover: the job's names the 24 h backstop and the claim budget, and `okx_archive_files`'s names what `archive_incomplete` covers.
+
+### Tests
+- New suites:
+  - Python: `test_okx_archive_{download,parse,reconcile,rebuild,apply,job,derive_survival}.py`.
+  - SQL: the fifteen-arm gate `supabase/tests/test_okx_archive_rebuild.sql`, all 15 arms annotated and biting under the mutation runner.
+  - TS: the provenance reader, both D-06 surfaces and a SQL/TS literal pin of the source string.
+- Census moves, re-measured on the tree merged with `origin/main` and never added by hand:
+  - sql-tests `SENTINEL_FLOOR` 22 and `ARMS_FLOOR` 347.
+  - Mutation `FILES_FLOOR` 77 and `ARMS_FLOOR` 771, from one full runner run: `coverage: files 77/104`, `arms: 771/771/0`, `No defects`.
+  - Baseline `COMPARED_FLOOR` 132; `lint-sql-gates` scans 104 files; the annotation-parser pins read 771 arms and 887 needles.
+  - The restore refdata allowlist gains the `compute_job_kinds` row, and the restore script's INSERT-entry pin follows `ENTRY_COUNT` 22 -> 23. The D-05 scoped-update pin counts the gate's one scoped UPDATE.
+- Pins over existing code: the live derive's reach (its delete is bounded to its own span, so rebuilt rows survive it) and the analytics runner's inclusion of rebuilt rows. Covered-quiet zeros and an uncovered quarter are pinned too.
+- The no-link-in-logs capture is pinned to the emitting loggers. It had been order-dependent, and it was seen RED, then GREEN.
+- The q3 fixture now chains from q2's last balance.
+- A comment in `okx_archive_job.py` is reworded so that gitleaks' `generic-api-key` rule does not read the identifier `stamp_api_key_429` as a secret. A scan of this branch's range with `--log-opts` found it, and the push-to-main scan would have found it too. The identifier itself is unchanged.
+- Full python suite on the merged tree: 10669 passed, 93.73% coverage.
+
+- **The userinfo refusal fixture in `test_okx_archive_download.py` is no longer a URL literal.** The push-time credential scanner read the synthetic `user:pw` fixture as a basic-auth leak and refused the push. The row now builds the same URL from `FAKE_USERINFO`, and the file passes 108/108. (`f91580d66`)
+
+### Security
+- 33 of 33 threats in plans 01-10 and 16 are closed (24 mitigated, 9 accepted). The SSRF, bomb, link-leak, grant and wrong-database threats are mitigated as listed under Added.
+
+### Notes
+- **Known limits, recorded rather than fixed here:**
+  - The download allow-list is empty until PR-B.
+  - `baseline-content-drift` reports one expected `SNAPSHOT_MISSING apply_okx_archive_rebuild/4` until plan 11's post-apply re-dump deletes its ratchet row.
+  - The review-round-3 survivors (TODOS `[167.1.2.2.2.1-REVIEW-R3-SURVIVORS]`, WR-01..WR-04) are owned by plan 13 Task 2b and must land before the founder reads plan 14's calibrate. WR-01 is the `MIN_CHAINED_PAIRS` floor, which also counts currencies the rebuild never sums.
+  - The two pre-existing `compute.conventions.test.ts` snapshot failures (fixtures B and C) are not from this phase.
+- **Founder decision D-13 ("Decide after calibrate"):** `info.realized_balance_vs_rolled_nav.diff` and `info.flow_seam.diff` stay readings, not gates. The founder sets any limit at plan 15's checkpoint.
+- Booked in TODOS: `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`. Live `fetch_daily_pnl` sums every bill currency at face value. Calibrate's `census.by_ccy` is the measurement, and a non-USD row is a founder stop. Also booked: the Wave 5 recompute hand-off.
 ## [0.132.1.9] - 2026-10-15 — Test fix: the changed-path classifier's throwaway git repositories start no background maintenance, so their cleanup cannot race it
 
 ### Root cause

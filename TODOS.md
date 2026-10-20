@@ -1434,7 +1434,7 @@ true for 146 and half of 142–145, and **false for 141**.
 
 - **[170.1-STRATEGIES-NOTE-WAIT-WORDING]** (logged 2026-10-16, Phase 170.1 COPY plan 06 follow-up, coordinator decision the same day; owner: Phase 170.1.2 LABELS, or the next phase that touches the `/strategies` share notes). D-08 ("notes follow the body") was scoped deliberately to two kinds: `analytics_failed`, and `finished_not_built` for a job that FINISHED without a buildable factsheet. Every other unpublished row whose recipient arm is `not_available` still gets the KCS12-MINT-B note, `MINT_TOKEN_NOTES.not_available` in `src/lib/status-surface-copy.ts`: "Right now, a private link to this strategy shows that its factsheet is not available yet. The numbers appear there once a computation succeeds." **Trigger:** an unpublished strategy on `/strategies` whose compute state is `failed`, `stalled` or `never_started` (all three map to the `not_available` arm in `recipientArm`), without the `analytics_failed` embed. For those rows "not available yet … once a computation succeeds" tells the owner to wait, while nothing is running and nothing will succeed without an action. **Closed when:** each of the three states gets a note that names what the owner can do (or the founder rules the wait wording correct for one of them), with a `page.key-pill.test.tsx` case per state asserting the rendered sentence, and the `it.each` over those states in that file re-pointed rather than deleted.
 
-- **[167.1.1-BRIDGE-DOLLAR-RATIO-RETURNS]** (logged 2026-10-15, HOLDINGKEYSCOPE, founder decision D-06; owner: the follow-up phase the orchestrator books via `/gsd-phase --insert`). `reconstruct_symbol_returns` in `analytics-service/routers/match.py` builds each holding's daily return as a day-over-day ratio of dollar values from `allocator_equity_snapshots.breakdown`, so buying, selling or moving more of an asset reads as a gain or loss. It feeds the Bridge matcher's per-holding pseudo-strategy returns: correlation-ceiling holding flags and portfolio context. Phase 167.1.1 retired the same dollar-ratio read on `/compare` (D-03: per-holding metrics from each holding's daily mark price, adjacent calendar days only, gaps never zero, fixed-mark and account-balance holdings withheld). SC 4 kept the analytics service out of scope there. Done when the matcher's per-holding returns come from a source that removes purchases, sales and transfers (e.g. the same mark-price rule as `holding-compare-adapter.ts`), with a test that goes RED on the dollar-ratio read. Trigger: the booked phase.
+- **[167.1.1-BRIDGE-DOLLAR-RATIO-RETURNS]** (logged 2026-10-15, HOLDINGKEYSCOPE, founder decision D-06; owner: the follow-up phase the orchestrator books via `/gsd-phase --insert`). `reconstruct_symbol_returns` in `analytics-service/routers/match.py` builds each holding's daily return as a day-over-day ratio of dollar values from `allocator_equity_snapshots.breakdown`, so buying, selling or moving more of an asset reads as a gain or loss. It feeds the Bridge matcher's per-holding pseudo-strategy returns: correlation-ceiling holding flags and portfolio context. Phase 167.1.1 retired the same dollar-ratio read on `/compare` (D-03: per-holding metrics from each holding's daily mark price, adjacent calendar days only, gaps never zero, fixed-mark and account-balance holdings withheld). SC 4 kept the analytics service out of scope there. Done when the matcher's per-holding returns come from a source that removes purchases, sales and transfers (e.g. the same mark-price rule as `holding-compare-adapter.ts`), with a test that goes RED on the dollar-ratio read. Trigger: the booked phase. ✅ **CLOSED 2026-10-16 by Phase 167.1.1.1 BRIDGERETURNS** (founder decision 167.1.1 D-06). `reconstruct_symbol_returns` is deleted (0 code references). The matcher reads each holding's `mark_price` history through an allocator-scoped, page-capped read and builds returns with the same rule as `/compare`: one mark per day, adjacent calendar days only, gaps never zero, fixed-mark and account-balance holdings withheld by name, and derivatives on the signed long/short rule (options withheld). Python and TypeScript replay one shared fixture, and feeding `value_usd` in place of `mark_price` turns `test_a_purchase_at_a_constant_mark_is_not_a_return` RED. `ENGINE_VERSION` moves to v2.3.0. The PROD before/after reading is recorded in the phase VERIFICATION; the after half is taken after the first recompute post-deploy.
 
 - **[166.5-PDF-MIXED-VINTAGE-WINDOW]** (logged 2026-10-15, Phase 166.5 COMPUTEDATSTAMP plan 07, Pitfall 6; owner: a FOUNDER decision; trigger: a factsheet PDF that disagrees with its own lazy panels). The analytics runner now stamps `computed_at` in the same upsert as the metrics, and writes the sibling series (the rolling, drawdown, grid and log-return kinds the lazy panels read) AFTER it through `upsert_strategy_analytics_series_batch`. The factsheet payload cache (`unstable_cache`, keyed on `computed_at`) is NOT exposed: it builds only from the metrics row and the cash, MTM and smoothed-MTM series, all written BEFORE the stamp. The PDF route (`src/app/api/factsheet/[id]/pdf/route.ts`) IS exposed: it renders the page with puppeteer `networkidle0`, so the lazy panels fetch the sibling series, and a render that lands between the stamp and the sibling write shows NEW scalars beside the PREVIOUS run's lazy panels. That PDF carries ETag `id:computed_at` under the NEW date, `Cache-Control: public, s-maxage=3600, stale-while-revalidate=86400`, and answers `If-None-Match` with 304, so the CDN can serve it for up to 3600 s (stale up to 86400 s more) and a revalidating client keeps it 304-valid until the next real recompute moves `computed_at`. Before this phase the bridge stamped AFTER the siblings, so such a render carried the OLD date and was replaced on revalidation. **Window width, measured 2026-10-15 on the local stack:** one `upsert_strategy_analytics_series_batch` round trip through PostgREST as the service role, 12 kinds, 560 034 bytes (real `compute_all_metrics` output over 1 100 daily points plus two synthetic kinds), 5 calls: median 24.1 ms, max 41.6 ms. A LOWER BOUND for PROD (no network hop). Only a PDF requested inside that interval is affected, and the sibling write is skipped entirely for a strategy with no sibling kinds. **Closing option:** write the sibling series BEFORE the success write, as the cash series already is (`_persist_cash_series` before `_mark_complete`), folding a sibling failure into that write's flags (`sibling_kinds_failed`) instead of the current after-the-fact flag upsert. That moves the stamp to be the last write of a good compute again. **Closed when:** a test proves a sibling-series write never lands after the date moves (the order of the two writes is asserted in both the CSV runner and the composite stitch), or the founder accepts the window and this entry is struck with the width above recorded.
 
@@ -1546,6 +1546,36 @@ through `stitch_composite` after NAVBREACH, run it once, inside that recompute; 
   retired: on 2026-10-15 no guard-only row exists.
 - **Closed by:** the Wave 5 consolidated run and the orchestrator's single-key recompute. Phase 164.6.6.3.3's
   VERIFICATION keeps this as its one open human item until both have run. ✅ Both ran on 2026-10-15 (see the CLOSED note at the top of this entry).
+
+### 167.1.2.2.2.1-WAVE5-RECOMPUTE — the two rebuilt OKX strategies' headlines move when the Wave 5 recompute reads the rebuilt rows (booked 2026-10-15, Phase 167.1.2.2.2.1 plan 10)
+
+**Why it is open.** Phase 167.1.2.2.2.1 OKXHISTORY rebuilds the days two OKX strategies lost beyond the
+3-month `bills-archive` reach from OKX's quarterly `bills-history-archive`, and the rebuilt days COUNT in
+headline metrics (D-07). The `apply` job writes `csv_daily_returns` rows and `series_provenance`
+(`reconstructed_ranges`, narrower `unrecovered_gaps`); it deliberately enqueues no analytics (the job writes
+only what the reconciliation proved). Until an analytics compute reads the new rows, each strategy's stored
+`headline_since` and metrics still describe the shorter series. Ordinal 2's published `headline_since` moves
+from 2026-08-02 toward 2026-02-23, and ordinal 1's toward about 2026-05-24.
+
+**The set (counts only, ordinals of the non-archived OKX strategies ordered by status then id).** 2 strategies:
+ordinal 1 (`pending_review`, a 70-day gap) and ordinal 2 (`published`, an 87-day gap). Ordinal 3 (disconnected
+key, D-02) and ordinal 4 (read-only zero-check, D-03) are not in the set.
+
+**Trigger.** The `apply` job is `done` for both ordinals (runbook `docs/runbooks/okxhistory-go-live.md`,
+Step 4) and the analytics service carrying the rebuilt-range reader is deployed.
+
+**Order.** The recompute runs inside the Wave 5 consolidated PROD recompute, through the product's own
+paths (`enqueue_compute_job` for `compute_analytics_from_csv`). The daily 04:30Z tick's derive-then-compute
+chain recomputes the same rows anyway, so the timing of `apply` relative to the consolidated run is the
+founder's decision (Step 3 of the runbook, plan 15): apply just before the consolidated run to review the
+changed headline first, or apply early and let the next tick publish it.
+
+**Acceptance reading (per ordinal 1 and 2).** `headline_since` and `unrecovered_gaps` read back through the
+runbook's `worklist` form (`headline_since` earlier than before; `unrecovered_gaps` equal to the apply
+result's `gaps_after`), `reconstructed_ranges` present, and the runbook's `survival` form reads 0 days
+without a row for every ordinal (also re-read after the next 04:30Z tick).
+
+**Owner: the Wave 5 consolidated PROD recompute** (run by the orchestrator, founder-authorized).
 
 ### 164.6.6.3.3-COMPARE-SPAN-SOURCE — /compare names its "Measured since" span from the stored cash series, the factsheet from `headline_since` (booked 2026-10-10, Phase 164.6.6.3.3 release)
 
@@ -4530,6 +4560,13 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       `PROBE_CONCURRENCY` computed strategies, or a pooler-saturation event traced to this page.
       **Owner:** unrouted. The next phase that touches the analytics writer's completion path takes
       it.
+
+- [ ] **[164.6.6.3.6-MT5SERVERLEARN-NEXT-MILESTONE] — learn an MT5 broker server on its first successful validation, instead of hand-listing it (retired from v1.20 2026-10-16).**
+  The founder retired Phase 164.6.6.3.6 MT5SERVERLEARN from v1.20 on 2026-10-16: "We will do it in the next milestone (maybe)".
+  Nothing shipped. Until then, servers stay hand-listed in `MT5_KNOWN_SERVERS`, using the Step 2d runbook from Phase 164.6.6.3.
+  The work done so far is on branch `feat/164.6.6.3.6-mt5serverlearn` (pushed): CONTEXT, RESEARCH, PATTERNS, VALIDATION, BROKER-SERVERS, plan 01 (the criterion-1 gate, a founder-run headless-resolution measurement) and the gate protocol S0-S9.
+  The ROADMAP section stays as the spec.
+  **Owner / Trigger:** the next milestone's planning, if the founder takes it up. The gate needs the founder's MT5 accounts.
 
 ## Phase 164.9 (TESTISOLATION) — ids booked at planning time (logged 2026-09-21)
 
@@ -9441,6 +9478,17 @@ reads an unpublished row's value. (5) plan 05's red-first test on a `computing` 
 ## Phase 167.1.2.2.2 (TRADESYNC) — routed items (logged 2026-10-10)
 
 - **[167.1.2.2.2-OKX-PERSISTENT-TRUNCATION]** (logged 2026-10-11, PR-B fix round SFH-H2; owner: Phase 167.1.2.2.2.1 OKXHISTORY). A truncated window is now degraded: nothing stored, no stamp, key `error`. An OKX first window above the page cap (10k bills per inst type over ~157 days) therefore truncates on every tick and reports `error` daily instead of leaving a silent hole. Done when the OKX fetch is chunked or windowed so a large first window completes.
+  ⭐ **2026-10-15 (Phase 167.1.2.2.2.1 plan 10, RESEARCH Section 11): measured, not fixed, stays open.** The live
+  walk is 100 pages of 100 per instrument type (`OKX_BILLS_PAGE_CAP = 100`); a capped walk drops the oldest days
+  and records `daily_pnl_truncated_okx`. Evidence today: the 2026-10-12 rehearsal tick reported no `partial`,
+  `fetch_degraded`, `results_truncated` or key `error`; the stored `data_quality_flags` of ordinals 1, 2 and 4
+  carry no `daily_pnl_truncated_okx` key; ordinal 4's stored series is flat 2026-06-08 to 2026-08-01; the
+  heaviest stored account holds a few thousand fills over several months, far from 10,000 bills per instrument
+  type in 90 days. Reading: the first live row of 2026-08-02 for ordinals 1 and 2 is consistent with a flat
+  account, not with the page cap. NOT proven until the Q3 archive file shows no activity in 2026-07-17 to
+  2026-08-01. The OKXHISTORY reconciliation is the detector (`info.archive_only_in_live_reach` in the job result:
+  archive activity on a day inside live reach with no live row). **Trigger (narrowed 2026-10-15):** an OKX
+  derive sets `daily_pnl_truncated_okx` or the OKXHISTORY reconciliation reports an archive-only day inside live reach.
 - **[167.1.2.2.2-BINANCE-INCOME-PAGINATION]** (logged 2026-10-11, PR-B fix round; owner: the next phase that ships a Binance strategy key). The Binance income call uses `limit=1000` with no pagination and no truncation flag, so a capped Binance window is still invisible. No Binance key on PROD today. Done when it paginates or stamps `daily_pnl_truncated_binance`.
 - **[167.1.2.2.2-INCOME-FALLBACK-PRODUCER-PIN]** (logged 2026-10-11, PR-B review round 3 R3-ME-01, MEDIUM, confidence 5; owner: the next phase that ships a Binance strategy key). The cron reads `daily_pnl_binance_income_fallback` through its own string constant in `routers/cron.py`, and the fetcher writes it as a separate literal in `services/exchange.py`. The round-3 tests hand the flag to the cron through a patched buffer, so a rename on the fetcher side would silently reopen R2-ME-01 (Binance spot fills stored over daily P&L). Done when one test runs the real `fetch_daily_pnl` with the income call failing and the spot call succeeding and asserts `_fetch_degradation` names the flag, or when both sides import one constant. Dormant until a Binance strategy key exists on PROD. Also correct the comment beside the cron constant: nothing in the tree reads the flag by name for an admin health card.
 - **[167.1.2.2.2-GAP-RECORD-SILENT-PARSE]** (logged 2026-10-11, PR-B SFH round 2 NEW-3 / review R2-LO-04, MEDIUM, confidence 6; owner: Phase 164.6.6.3.3 FACTSHEETTRUTH). `parseUnrecoveredGaps` in `src/lib/factsheet/trade-fetch-provenance.ts` returns `[]` on a malformed `series_provenance` with only a `console.warn`, so the public, printable tear sheet reads as having no unrecovered gaps and nothing reaches Sentry. PR-B fixed the same pattern for the fetch stamp (`TradeFetchUnavailableLine`) but not for the gap record. Done when a malformed record reports to Sentry and the tear sheet shows an unavailable state for gaps, with a test that goes RED on today's code.
@@ -9850,6 +9898,12 @@ repository when the remove runs. A red from this is a flake, not a verdict on th
 to the helper's `g()` so no background gc runs in a throwaway repository. Prove it with a loop of self-test runs.
 **Owner / Trigger:** the next phase touching `scripts/classify-changed-paths.mjs`; or the second occurrence.
 
+### CI-LOCALSTACK-DB-PORT-IN-USE — the local-stack lane's database container fails to bind its port on the runner (booked 2026-10-16)
+
+**Failure scenario.** Main's CI run `38865344350` (merge commit of #1070) failed in `frontend-local-stack` only: `failed to start docker container "supabase_db_quantalyze": … driver failed programming external connectivity on endpoint supabase_db_quantalyze … address already in use`. Every other job, and every later main commit, was green. First occurrence. Suspected cause, not measured: another process or a leftover container on the hosted runner already holds the lane's database port when `scripts/local-stack/run.sh up` starts the stack. A red from this is a runner flake, not a verdict on the SHA.
+**Fix (candidates).** Before `up`, have `run.sh` name the process or container holding the port and fail with that name, then decide between a free-port pick and a stop-and-retry from what the second occurrence shows.
+**Owner / Trigger:** the second occurrence, or the next phase touching `scripts/local-stack/run.sh`.
+
 ## Phase 170.6.1.1 (ANONKEYID) — routed review items, PR-A (logged 2026-10-14)
 
 Five MEDIUM findings from the PR-A review army (plan 03), booked rather than fixed because none is
@@ -9943,6 +9997,48 @@ message (but not the `code` tag). The landing helper has the same shape.
 **Owner / Trigger:** fixed together with 170.6.1.1-LANDING-CAPTURE-THROTTLE; or the first Sentry event seen
 without its `code` tag.
 
+## Phase 167.1.2.2.2.1 (OKXHISTORY) — routed items (logged 2026-10-15)
+
+- **[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]** (logged 2026-10-15, OKXHISTORY discuss; founder instruction
+  to book it). `fetch_daily_pnl` in `analytics-service/services/exchange.py` (OKX branch) sums
+  `pnl + fee` per UTC day across every bill regardless of `ccy`, with no currency conversion. A bill in
+  BTC (a coin-margined position, a fee charged in the base coin) is added to USDT P&L at face value, so the
+  daily P&L, the NAV roll-back and every metric built on it would be wrong for any account with a non-USDT
+  bill. Exposure is UNMEASURED for the live strategies. **Owner:** Phase 167.1.2.2.2.1 OKXHISTORY research
+  measures whether the in-scope account's bills (live and archive) are all USDT; if they are not, it is a
+  planning input of that phase, and the fix owner is routed by founder decision. **Trigger:** the first
+  OKX bill with `ccy` other than USDT in any strategy's window, or OKXHISTORY research finding one.
+  **Done when** a non-USDT bill is converted at a stated rate or fails loud, with a test that goes RED on
+  today's code.
+  ⭐ **2026-10-15 (Phase 167.1.2.2.2.1 plan 10): the calibrate census is the measurement step; stays open.** Stored
+  OKX rows are all SWAP and USDT (406 OKX-format raw fills, all SWAP, fee currency USDT; 568 funding rows, all
+  USDT), which covers fills and funding only. Bill classes stored nowhere (SPOT, MARGIN, FUTURES, OPTION,
+  transfers, interest, rebates) are unmeasured. The `calibrate` job over the 2026 Q2 and Q3 files settles it for
+  the in-scope account: its `census.by_ccy` is the currency count (runbook `docs/runbooks/okxhistory-go-live.md`,
+  Step 2). A non-USD row is the stop class `non_usd_ccy` and a founder STOP; the fix owner is routed by founder
+  decision then.
+
+- **[167.1.2.2.2.1-REVIEW-R3-SURVIVORS]** (logged 2026-10-15, review round 3, after three fixer rounds; owner:
+  Phase 167.1.2.2.2.1 plan 13 (PR-B), which MUST land them before plan 14's calibrate is read by the founder).
+  Four MEDIUMs on founder-facing readings and one false-stop risk survived round 3
+  (`.planning/phases/167.1.2.2.2.1-okxhistory-an-okx-strategy-s-days-older-than-the-3-month-bil/167.1.2.2.2.1-REVIEW.md`
+  round 3 plus the silent-failure hunt):
+  (1) the `MIN_CHAINED_PAIRS` floor applies to every currency with any nonzero pnl/fee/balChg, including excluded
+  classes the aggregate never sums (one coin-margined OKX option bill stops the job `too_few_pairs`); scope it to
+  currencies whose money the aggregate sums, keep the break check on all;
+  (2) `flow_totals_overlap` opens 7 days before the flow seam where the live side is always empty, so a double
+  count reads as agreement; start it at the seam and correct the runbook sentence;
+  (3) the runbook's `flow_seam` no-go rule "both sides nonzero" fires on any active account; make `diff` the
+  signal;
+  (4) the `flow_seam` after-window is not clamped to the last covered archive day, so a late re-run reports a
+  spurious `diff`; clamp it, or report the reading unmeasurable with a reason.
+  **Trigger:** plan 13 execution. **Done when** each has a test that goes RED on today's code and the runbook
+  Step 3 reads the corrected signals. Also open for the founder (not a defect): whether to bound
+  `info.realized_balance_vs_rolled_nav.diff` and `info.flow_seam.diff` (readings only today).
+  ⭐ **2026-10-15:** items (1)-(4) are now bound in plan 13's PLAN file as Task 2b (WR-01..WR-04), each with a
+  RED-first test, so the binding no longer lives only here. The founder question is DECIDED: "Decide after
+  calibrate" (CONTEXT D-13). Both diffs stay readings, and the founder sets any limit at plan 15's checkpoint.
+
 ## Phase 164.9.3.1 (FANINGRAPH) — routed items (logged 2026-10-15)
 
 Found by the phase research on 2026-10-15 while reproducing the four fan-in defects. None of the four is fixed by
@@ -10012,6 +10108,170 @@ phase makes the NEW column `former_match_decision_id` trigger-owned but leaves `
 **Fix.** Measure first. If it reproduces, extend the sync trigger to `UPDATE OF original_holding_ref` (or revoke the
 column UPDATE from `authenticated`).
 **Owner / Trigger:** the next phase touching the sync trigger.
+
+### 164.9.3.1-FL8-SEAM-RESTORE — the FL8 arm renames the lock helper and restores it in a DO block, so an error before the restore leaves the wrapper installed (booked 2026-10-16, FANINGRAPH round-4 review, accepted by the founder brief)
+
+**Failure scenario.** `supabase/tests/test_fan_in_lock_order_race.sql` arm FL8 renames `_fan_in_lock_rows` and installs a
+wrapper to force the 10-attempt bound, then restores the original in a later `DO` block. Three paths leave the wrapper
+installed: a `FL8-SETUP` RAISE in the race block, a failed `dblink_connect`, and a failure between the top-level
+`ALTER ... RENAME` and the `CREATE FUNCTION` (two separate autocommit statements). `psql -v ON_ERROR_STOP=1` stops the
+file at that statement and FL8 is the last arm, so no later arm runs. The file is LANE-ONLY and every lane is a
+throwaway cluster, so nothing persists today.
+**Fix.** If the file is ever run against a persistent database, wrap rename, wrapper and restore in one transaction or
+restore from an `EXCEPTION` handler. Until then there is nothing to fix.
+**Owner / Trigger:** the first change that runs `test_fan_in_lock_order_race.sql` against a database that outlives the
+lane, or moves it out of the LANE-ONLY set.
+
+### 164.9.3.1-55P03-RECOVERY-LATENCY — a cascade that hits the 10-attempt lock bound leaves the job running until the watchdog reclaims it (booked 2026-10-16, FANINGRAPH round-4 review, latent)
+
+**Failure scenario.** `mark_compute_job_failed` raises 55P03 after 10 consecutive attempts in which an enqueue commits a
+new descendant inside the lock window. The worker leaves the job `running` (`_is_lock_bound_failure`, no second mark
+call), and `reset_stalled_compute_jobs` reclaims it after the stall window (10 minutes by default). Meanwhile the
+strategy reads `computing`. There is no hard cap on reclaim cycles, but only a workload that commits children under the
+same closure at sub-millisecond spacing on every cycle can repeat it, and nothing in the tree does. Latent: PROD holds no
+parented jobs (census 2026-10-16: 0 of 2332).
+**Fix.** A bounded in-worker retry of the same `_mark_failed` call (the claim token is still valid) would recover in
+seconds without a re-run. Not worth building before a caller passes parents.
+**Owner / Trigger:** the first caller that enqueues with parents, or any `mark_failed_lock_bound` event in the worker logs.
+
+## Phase 167.1.2.1.1 (WRITERRESIDUALS) — routed review items (logged 2026-10-16)
+
+Round-1 review (gsd-code-reviewer and silent-failure-hunter) found 0 HIGH or CRITICAL and 4 MEDIUM. The founder ruled
+on 2026-10-16: "no more fix round for mediums". All four are booked here unfixed. Reports:
+`.planning/phases/167.1.2.1.1-*/167.1.2.1.1-REVIEW.md` (MR-01) and `167.1.2.1.1-REVIEW-SFH.md` (M-1..M-3).
+
+⭐ **2026-10-19 fix round.** The founder ruled: "you can finalize and phase complete those". All four MEDIUMs went
+through one minimal fix round (fix-round rule: "For fix rounds minimal fix only, no new abstractions or defensive
+checks"), and the re-review is in `167.1.2.1.1-REVIEW-FIXROUND.md`. Three entries below are closed and one is narrowed.
+Three entries are new: one known limit (CONTEXT D-16) and two residuals from the re-review.
+
+### 167.1.2.1.1-NEWBOOK-HELD-BACK-LINE — a brand-new book's first days read "held back" instead of "being rebuilt" (booked 2026-10-16, code review MR-01, MEDIUM, USER-FACING, introduced by this phase) — ✅ CLOSED IN CODE 2026-10-19 by the WRITERRESIDUALS fix round; ⚠️ NOT live until its PR merges and deploys
+
+✅ **CLOSED 2026-10-19.** The fix landed in three commits on the phase branch:
+- `b70f9b0af` (MR-01) stores `compose_empty` when the only blocking token is `dropped_key` and every key is anchored with no returns.
+- `e72caff18` (MR-FR-01) covers a key the compose omits without a drop: a null anchor with reason `dust`, `native_unit` or `native_unpriced` and no returns.
+- `8c2493405` (MR-R2-01, CONTEXT D-15) covers a null-anchor `native_unit` or `native_unpriced` key that has returns.
+
+The remaining case, a key that never yields two usable NAV days, reads the wait with no end. It is a founder-accepted
+known limit: see `167.1.2.1.1-NEWBOOK-WAIT-UNBOUNDED`. The block below is kept as lineage.
+
+**Failure scenario.**
+- A key with fewer than 2 days of history writes a `key_inputs` row with a real anchor and no return rows.
+- The compose marks it anchored-without-returns, which is the blocking `dropped_key`, and comes back empty.
+- SC-1 stores `['compose_empty_blocked', 'dropped_key']`.
+- The reader maps that to `derivation_rejected`: "We are holding back your equity history … did not pass its checks".
+- Before this phase the row was deleted, and the Overview said "being rebuilt … recomputed once a day". That line is true here: the book composes as soon as the key has a return day.
+- It hits single-key or all-new books on their first day or two, i.e. onboarding.
+
+**Fix.**
+- In `run_derive_allocator_equity_job`'s B2 split, store `compose_empty` (a wait) when the ONLY blocking token is `dropped_key` and every dropped key has a non-null anchor and no return rows.
+- Keep `compose_empty_blocked` otherwise.
+- Add a `derive_refusal_rows.json` row so the TS reader and the census pin the line.
+
+**Owner / Trigger:** before or with the WRITERRESIDUALS ship; at the latest, the next allocator-onboarding phase.
+
+### 167.1.2.1.1-HOLD-SENTRY-LEADER — the refresh hold's Sentry event can silently never fire (booked 2026-10-16, SFH M-1 + code review LR-01, MEDIUM, data-integrity visibility) — ✅ CLOSED IN CODE 2026-10-19 by the WRITERRESIDUALS fix round; ⚠️ NOT live until its PR merges and deploys
+
+✅ **CLOSED 2026-10-19 by `e6d151b5c`.**
+- The leader is now the smallest WORKING eligible key (`working_holder_predicate`). With no working key, the smallest eligible key leads.
+- `test_the_leader_is_elected_among_working_keys_not_failing_ones` pins it.
+- The audit-row idempotency read was not built (fix-round rule).
+- Two residuals are booked below: `167.1.2.1.1-FALLBACK-LEADER-PREFLIGHT` and `167.1.2.1.1-LEADER-STATUS-FLIP`.
+- The never-enqueued strategy-linked leader (LR-01) stays as written below.
+
+The block below is kept as lineage.
+
+**Failure scenario.**
+- Only the job for the smallest eligible key id (failing keys included) raises the hold and left-out Sentry events.
+- Several cases stop that job before it raises anything:
+  - the job defers on the circuit breaker;
+  - it fails its preflight (decrypt or client build);
+  - it is never enqueued (a strategy-linked key).
+- In each of those cases the hold is audit-only. A failing key is the likeliest to fail its preflight.
+
+**Fix.** Make the event idempotent per (allocator, day, outcome), e.g. the first job that finds no `refresh_held` row for today raises it, or pick the leader from WORKING keys. Add a test where the smallest-id job fails at preflight.
+
+**Owner / Trigger:** the next phase touching `run_refresh_allocator_equity_daily_job`.
+
+### 167.1.2.1.1-LEFTOUT-SENTRY-NO-WRITE — the `left_out_*` Sentry events never fire when no day is written (booked 2026-10-16, SFH M-2, MEDIUM, data-integrity visibility) — ✅ CLOSED IN CODE 2026-10-19 by the WRITERRESIDUALS fix round; ⚠️ NOT live until its PR merges and deploys
+
+✅ **CLOSED 2026-10-19 by `65f176af2`.**
+- The left-out loop now runs right after the hold branch, before the `no_holdings_today` and `refresh_held_for_reconstruct` returns.
+- `test_an_all_failing_book_still_raises_the_left_out_event` and `test_a_left_out_account_is_raised_when_the_day_waits_on_a_reconstruct` pin it.
+- Known side effect (review LOW): the event now fires before the persist, so a persist failure that is retried raises it again.
+
+The block below is kept as lineage.
+
+**Failure scenario.**
+- The D-01 and D-12 left-out events are emitted only after `persist_equity_snapshots`.
+- A book whose only accounts are never-polled-failing or over-age-failing has no holdings and takes the `no_holdings_today` early return (and `refresh_held_for_reconstruct` returns early too).
+- That book gets an audit row and no Sentry event: the worst left-out case is the quiet one.
+
+**Fix.** Raise the left-out events before those early returns. Add an all-failing-book test.
+
+**Owner / Trigger:** with 167.1.2.1.1-HOLD-SENTRY-LEADER.
+
+### 167.1.2.1.1-IDENTITY-HOLD-DERIBIT — the identity-pending refresh hold has no bound (booked 2026-10-16, SFH M-3 + code review LR-03/LR-06, MEDIUM; narrowed 2026-10-19 to the escalation half)
+
+⭐ **NARROWED 2026-10-19.**
+- **Fixed:** the Deribit half, by `482313287`. The refresh's call is `identity_pending_venues(key_rows, VENUES_WITH_ACCOUNT_ID - {"deribit"})`, and the derive's call is unchanged. `test_unstamped_working_deribit_keys_do_not_hold_the_refresh` pins it, with an OKX control.
+- **Still open:** the hold still has no bound. If the stamper never stamps, the hold repeats daily with one warning and no escalation, and the missed days stay missing (first-writer-wins). The fix is to escalate after N consecutive held days. It was not built in the fix round because it is a new detection mechanism.
+
+The block below is kept as lineage.
+
+**Failure scenario.**
+- `identity_pending_venues` counts Deribit, which is in `VENUES_WITH_ACCOUNT_ID`.
+- The refresh adds $0 for Deribit, and the never-polled and over-age holds both exempt it.
+- So two unstamped working Deribit keys hold the snapshot write, and those days stay missing for `/compare` and the dashboard per-holding returns (first-writer-wins).
+- If the stamper never stamps (e.g. a Bybit UTA parse miss), the hold repeats daily with one warning and no escalation.
+- Affected on PROD 2026-10-16: 0 keys.
+
+**Fix.**
+- Exclude Deribit from the REFRESH's call only; the derive's call stays.
+- Escalate after N consecutive held days.
+- Add a test with two unstamped Deribit keys.
+
+**Owner / Trigger:** the next phase touching the refresh holds, or 167.1.2.1.2 HISTORYREADER (Bybit parse miss).
+
+### 167.1.2.1.1-NEWBOOK-WAIT-UNBOUNDED — a key that never yields two usable NAV days reads "being rebuilt" with no end (booked 2026-10-19, fix-round review MR-FR-02 + SFH #3, MEDIUM, USER-FACING, KNOWN LIMIT by founder decision)
+
+**Founder decision 2026-10-19 (CONTEXT D-16): "Accept as known limit".** No code.
+
+**Scenario.**
+- The MR-01 wait (`compose_empty`, "being rebuilt … recomputed once a day") applies to any book whose keys are all anchored with no return days.
+- A brand-new key leaves that state on its next derive.
+- A funded key whose venue never yields two usable NAV days does not leave it (the `<2`-day key-mode short-circuit in `run_derive_broker_dailies_job`), so its book reads the wait with no end.
+- An idle account that only holds assets still gets daily NAV values and is not affected.
+- Before this phase the row was deleted and the same line showed, so this is not a regression.
+
+**Fix if triggered.** Treat the state as a wait only while the key is younger than N days (`api_keys.created_at`), then map it to a line that names the cause.
+
+**Owner / Trigger:** a user report of a permanent "being rebuilt" panel, or the next phase touching the derive's refusal mapping.
+
+### 167.1.2.1.1-FALLBACK-LEADER-PREFLIGHT — an all-failing book's fallback leader can die before its Sentry event (booked 2026-10-19, fix-round SFH #1, MEDIUM, data-integrity visibility)
+
+**Scenario.**
+- With no working eligible key, the M-1 fallback makes the smallest eligible (failing) key the leader.
+- That job can return early in `_allocator_key_preflight`: it can defer on the breaker or fail on decrypt or client build.
+- If it does, the left-out event that M-2 moved ahead of `no_holdings_today` never fires for exactly the all-failing book.
+- The audit row from every other job remains.
+
+**Fix.** Make the event idempotent per (allocator, day, outcome) from whichever job runs, instead of tying it to one key.
+
+**Owner / Trigger:** the next phase touching `run_refresh_allocator_equity_daily_job`, together with `167.1.2.1.1-LEADER-STATUS-FLIP`.
+
+### 167.1.2.1.1-LEADER-STATUS-FLIP — the refresh leader follows a mutable `sync_status`, so one fan-out can raise zero events (booked 2026-10-19, fix-round SFH #2, MEDIUM per SFH / LOW per code review, data-integrity visibility, introduced by the M-1 fix)
+
+**Scenario.**
+- Each refresh job re-elects the leader from `api_keys.sync_status` at its own run time.
+- Take keys A < B, both working, with a real hold. B's job runs first and sees A as the leader, so it stays silent.
+- A's status then flips to error before A's job runs. A's job now elects B, so it stays silent too.
+- No event fires. The reverse flip gives two events, which is only noise.
+- No number or user-facing line changes. The audit rows remain.
+
+**Fix.** Same as `167.1.2.1.1-FALLBACK-LEADER-PREFLIGHT`: an event idempotent per (allocator, day, outcome).
+
+**Owner / Trigger:** with `167.1.2.1.1-FALLBACK-LEADER-PREFLIGHT`.
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 

@@ -1268,7 +1268,21 @@
 // MERGE 2026-10-15 (Phase 164.9.3.1 FANINGRAPH merged with origin/main 4ca0931b1, Phase 166.5 COMPUTEDATSTAMP): both phases raised FILES_FLOOR from the same base, 72 -> 73
 // (166.5) and 72 -> 75 (FANINGRAPH). MEASURED by ONE full `node scripts/mutation-runner/run.mjs` on the merged tree, exit 0:
 // `scope: FULL 76/76 annotated files`, `lane-concurrency: 4`, `coverage: files 76/103`, `arms: 752/752/0`, `biting: 752`, `lane-invocations: 752 ... plus 76 baseline / 76 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean 3.0s over 752 arm run(s)`, `No defects. Every annotated arm bit its own arm first.` So 76 of 103 files: the three FANINGRAPH gates and 166.5's runner-only gate together. The stale-low direction was observed first: `RATCHET STALE: 76 of 103 gate files are now annotated but FILES_FLOOR is still 75.` WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 76;
+// RAISED 72 -> 73 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY plan 09): +1 file, test_okx_archive_rebuild.sql (migration
+// 20261026120000), so 73 of 100 files. MEASURED by ONE full `node scripts/mutation-runner/run.mjs`, no file edited during it, exit 0:
+// `lane-concurrency: 4`, `coverage: files 73/100`, `arms: 738/738/0`, `biting: 738`, `lane-invocations: 738 ... plus 73 baseline / 73
+// restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane
+// time: mean 2.5s over 738 arm run(s)`, `No defects. Every annotated arm bit its own arm first.` Per-file line: `test_okx_archive_rebuild.sql:
+// sections 15 / judged 15 / annotated 15 / waived 0 / biting 15`. WAIVED_CEILING stays 0.
+// MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): OKXHISTORY raised FILES_FLOOR 72 -> 73
+// and main 72 -> 76 from the same base; the floor is 77 by measurement, not by adding the two moves. MEASURED by ONE full `node scripts/mutation-runner/run.mjs` on the merged
+// tree: `scope: FULL 77/77 annotated files`, `lane-concurrency: 4`, `coverage: files 77/104`, `arms: 771/771/0`, `biting: 771`,
+// `lane-invocations: 771 ... plus 77 baseline / 77 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`, `lane-probe:
+// pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean 1.9s over 771 arm run(s)`; per-file `test_okx_archive_rebuild.sql:
+// sections 15 / judged 15 / annotated 15 / waived 0 / biting 15`. The stale-low direction was observed first (`RATCHET STALE: 77 of 104
+// gate files are now annotated but FILES_FLOOR is still 76`; `The corpus declares 771 twin(s) ... ARMS_FLOOR is 756`). A confirming
+// clean run of the committed merge is recorded in the merge commit. WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 77;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -3215,7 +3229,13 @@ export const FILES_FLOOR = 76;
 // leg(s)`, `lane-blocked: 0`, `unreachable: 27`, `per-arm lane time: mean 2.1s over 756 arm run(s)`, `No defects`, exit 0; per-file
 // `test_fan_in_lock_order_race.sql ... biting 8`. The stale-low direction was observed first: `The corpus declares 756 twin(s) of which 0 are waivers, so a
 // green run bites 756. ARMS_FLOOR is 755.` FILES_FLOOR stays 76 (no file joined). WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 756;
+// RAISED 723 -> 738 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY plan 09): +15 biting arms, the okx_archive_rebuild gate's arms 0-14
+// (`test_okx_archive_rebuild.sql: sections 15 / judged 15 / annotated 15 / waived 0 / biting 15`). MEASURED by the same single run recorded
+// under FILES_FLOOR: `arms: 738/738/0`, `biting: 738`, `lane-invocations: 738`. WAIVED_CEILING stays 0 - no waiver was added.
+// MERGE 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY merged with origin/main 8dca598c5): OKXHISTORY raised ARMS_FLOOR 723 -> 738
+// and main 723 -> 756 from the same base; 771 is read off the same single run recorded under FILES_FLOOR (`arms: 771/771/0`,
+// `biting: 771`, `lane-invocations: 771`), not by adding the moves. WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 771;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

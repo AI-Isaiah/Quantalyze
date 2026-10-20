@@ -45,6 +45,7 @@ from services.allocator_positions import read_native_unpriced_days
 from services.allocator_equity_derive import (
     account_groups,
     eligible_key_predicate,
+    identity_pending_venues,
     one_key_per_account_day,
     working_holder_predicate,
 )
@@ -2009,11 +2010,16 @@ _REFRESH_HOLDINGS_COLUMNS = (
 )
 
 # C2 silent-failure SFH-09: a carried account contributes its value_usd from its
-# last poll, priced at THAT day's marks, and D-07 sets no horizon. A carry older
-# than this many days logs a WARNING. It is a LOG threshold only: capping or
-# dropping an old carry changes the persisted number and is a founder call, not
-# a default for the code to pick.
+# last poll, priced at THAT day's marks. A carry older than CARRY_AGE_WARN_DAYS
+# logs a WARNING; that threshold stays a LOG threshold only.
 CARRY_AGE_WARN_DAYS = 3
+
+# 167.1.2.1.1 D-02 / SC-5 (founder): the cap D-07 left open. A carry older than
+# this many days is not carried: past a week an account's last marks no longer
+# describe the book, and the snapshot is first-writer-wins. The check is
+# strictly "older than" (age 7 is carried, age 8 is not). What the refusal DOES
+# is D-12's split, in ``_over_age_account_holds``.
+CARRY_AGE_CAP_DAYS = 7
 
 
 @dataclass(frozen=True)
@@ -2040,10 +2046,43 @@ class _LatestHoldings:
     identity_unknown_not_carried: int
     # R2-WR-01: accounts left out because a poll declared their latest completed day unpriced.
     native_unpriced_accounts: int
+    # 167.1.2.1.1 D-01 / D-13: ACCOUNTS (not keys) eligible but with no holdings
+    # row for any of their keys. Split by the poll record: a working key that
+    # was never read (this holds the day's write), a never-read account whose
+    # keys all fail (left out with a count), and an account whose poll completed
+    # and wrote no rows (neither held nor carried, PROD has Deribit books so).
+    never_polled_working_accounts: int = 0
+    never_polled_failing_accounts: int = 0
+    polled_no_rows_accounts: int = 0
+    # True when the job that asked is the allocator's LEADER (its key is the
+    # smallest WORKING eligible key id, or the smallest eligible key id when none
+    # works), so one hold raises one Sentry event instead of one per key. A bool:
+    # the "no key id leaves this object" contract holds.
+    job_key_is_leader: bool = False
+    # 167.1.2.1.1 D-02 / D-12: accounts whose latest day is older than
+    # CARRY_AGE_CAP_DAYS and so are not carried. ``over_age_accounts`` have a
+    # WORKING eligible key (the caller holds the day), ``over_age_failing_accounts``
+    # do not (left out with a count), ``over_age_excluded_venue_accounts`` are
+    # Deribit-only (their rows add $0, so neither). ``oldest_over_age_days`` is
+    # the largest age among ``over_age_accounts``.
+    over_age_accounts: int = 0
+    over_age_failing_accounts: int = 0
+    oldest_over_age_days: int = 0
+    over_age_excluded_venue_accounts: int = 0
+    # 167.1.2.1.1 SC-6 / D-03: stamping venues holding two or more eligible
+    # WORKING keys whose account is still unknown (``identity_pending_venues``,
+    # the helper the derive blocks on too), Deribit excepted here (its rows add
+    # $0 to the refresh total). Two such keys may read one account, which the
+    # grouping below would count twice, so the caller holds the day.
+    identity_pending_venues: int = 0
 
 
 async def _fetch_latest_holdings_per_eligible_key(
-    supabase: Any, allocator_id: str, today_iso: str
+    supabase: Any,
+    allocator_id: str,
+    today_iso: str,
+    *,
+    job_api_key_id: str | None = None,
 ) -> _LatestHoldings:
     """Phase 167.1.2 D-07: every counted exchange account at its latest
     ``asof`` on or before ``today_iso``.
@@ -2052,9 +2091,14 @@ async def _fetch_latest_holdings_per_eligible_key(
     ``asof = today``: a key that had not polled yet today contributed $0, so
     the legacy snapshot showed the book losing that key's whole balance, and
     first-writer-wins on (allocator_id, asof) then kept whichever patchwork of
-    keys the first job saw. There is no staleness horizon: an account is
+    keys the first job saw. An account is
     carried for as long as one of its keys passes ``eligible_key_predicate``,
     and drops out the day its last eligible key is revoked or disconnected.
+    167.1.2.1.1 D-02 added the one horizon: a latest day older than
+    ``CARRY_AGE_CAP_DAYS`` is not carried (``over_age_accounts`` when an
+    eligible key is working, so the caller holds the day;
+    ``over_age_failing_accounts`` when none is, left out with a count;
+    ``_over_age_account_holds`` is the one place that decides).
 
     Grain: per ACCOUNT, not per key (C2 review CR-03). Keys that read one
     exchange account form a group (``account_groups``: a holder plus every key
@@ -2140,6 +2184,22 @@ async def _fetch_latest_holdings_per_eligible_key(
     The latest ``asof`` is reduced with ``max()`` in Python, so correctness
     never rests on the order a read returns.
 
+    A NEVER-POLLED account (no ``allocator_holdings`` row for any key of the
+    group) is split by the poll's own record (167.1.2.1.1 D-01, D-13): an
+    ``allocator.holdings.sync_completed`` audit event for a key of the group
+    means the account WAS read and wrote no rows (``polled_no_rows_accounts``;
+    PROD has five Deribit keys so), which neither holds nor carries. With no
+    such event, an account with a WORKING eligible key is
+    ``never_polled_working_accounts`` (the caller holds the day's write: a
+    total missing a working account is short, and the snapshot is
+    first-writer-wins), and one whose eligible keys all fail is
+    ``never_polled_failing_accounts`` (left out with a count: a dead key must
+    not freeze the owner's snapshot store). A Deribit-only account is neither:
+    its rows add $0 to the refresh total.
+
+    ``job_api_key_id`` is the key the asking job runs for; with it the result
+    says whether that key is the allocator's leader (``job_key_is_leader``).
+
     A failed read RAISES. Swallowing it per account would persist a total
     missing that account, and first-writer-wins would keep the short total for
     the day: the $0 defect again. The job's own ``except`` turns the raise into
@@ -2161,6 +2221,23 @@ async def _fetch_latest_holdings_per_eligible_key(
         getattr(await db_execute(_sel_keys), "data", None) or []
     )
     eligible_keys = sum(1 for r in key_rows if eligible_key_predicate(r))
+    # SFH M-3: Deribit is not counted here. The refresh skips its rows (they add
+    # $0), so two unstamped Deribit keys cannot double-count anything in this
+    # total; the derive's own call keeps the full set.
+    pending_venues = identity_pending_venues(
+        key_rows, VENUES_WITH_ACCOUNT_ID - {"deribit"}
+    )
+    eligible_rows = [r for r in key_rows if r.get("id") and eligible_key_predicate(r)]
+    # SFH M-1: the leader is the smallest WORKING eligible key. A failing key's
+    # job is the likeliest to die in the preflight or defer on the breaker, and
+    # the event fires only from the leader's job. With no working key the
+    # smallest eligible key leads, so an all-failing book still has one.
+    leader_ids = sorted(
+        str(r["id"]) for r in eligible_rows if working_holder_predicate(r)
+    ) or sorted(str(r["id"]) for r in eligible_rows)
+    job_key_is_leader = bool(
+        job_api_key_id and leader_ids and str(job_api_key_id) == leader_ids[0]
+    )
 
     # R2-WR-01: one read of every key's native-unpriced marker, before the loop.
     all_key_ids = [str(r.get("id")) for r in key_rows if r.get("id")]
@@ -2177,6 +2254,14 @@ async def _fetch_latest_holdings_per_eligible_key(
     max_carry_age = 0
     identity_unknown_not_carried = 0
     native_unpriced_accounts = 0
+    never_polled_working = 0
+    never_polled_failing = 0
+    polled_no_rows = 0
+    over_age = 0
+    over_age_failing = 0
+    oldest_over_age = 0
+    over_age_excluded_venue = 0
+    today_date = date.fromisoformat(today_iso)
     for group in account_groups(key_rows):
         eligible = [r for r in group if eligible_key_predicate(r)]
         if not eligible:
@@ -2200,12 +2285,41 @@ async def _fetch_latest_holdings_per_eligible_key(
         asof_rows = getattr(await db_execute(_sel_latest_asof), "data", None) or []
         asofs = [str(r["asof"]) for r in asof_rows if r.get("asof")]
         if not asofs:
-            # Eligible but never polled: nothing to carry. C2 silent-failure
-            # SFH-08 — the day is written without this account (holding the
-            # write for it, as the plan 12 hold does for a zero-snapshot book,
-            # is a design call not taken here), and never_polled_keys says so,
-            # so a next-day step of that account's whole balance is explained.
+            # Eligible but no row for any key of the account: nothing to carry.
+            # 167.1.2.1.1 D-01 / D-13 (replacing C2 SFH-08, which wrote the day
+            # without the account): whether that is "never read" or "read, and
+            # empty" is the poll's own record, so ask for it. never_polled_keys
+            # keeps counting every such key; the three account counts split it.
             never_polled += len(eligible)
+            if all(
+                str(r.get("exchange") or "").strip().lower() == "deribit" for r in eligible
+            ):
+                # Deribit rows add $0 to the refresh total (the job skips the
+                # venue), so an unread Deribit account cannot make it short.
+                continue
+
+            def _sel_polled(group_ids: list[str] = group_ids) -> Any:
+                return (
+                    supabase.table("audit_log")
+                    .select("entity_id")
+                    # D-18 / T-10: the service-role client bypasses RLS, so the
+                    # owner filter lives here, as in _polled_empty_since.
+                    .eq("user_id", allocator_id)
+                    .eq("action", _POLL_COMPLETED_ACTION)
+                    .eq("entity_type", "api_key")
+                    .in_("entity_id", group_ids)
+                    .limit(1)
+                    .execute()
+                )
+
+            # NOT wrapped: a failed read raises (T-13) rather than guessing.
+            polled_rows = getattr(await db_execute(_sel_polled), "data", None) or []
+            if polled_rows:
+                polled_no_rows += 1
+            elif any(working_holder_predicate(r) for r in eligible):
+                never_polled_working += 1
+            else:
+                never_polled_failing += 1
             continue
         latest = max(asofs)
 
@@ -2240,6 +2354,24 @@ async def _fetch_latest_holdings_per_eligible_key(
                 emptied += 1
                 continue
             latest = max(recheck)
+
+        age_days = (today_date - date.fromisoformat(latest)).days
+        if age_days > CARRY_AGE_CAP_DAYS:
+            # D-02: not carried. After the emptiness proof, which is about value
+            # (a proven-empty account adds $0 at any age), and before the rows
+            # read, which this account no longer needs.
+            if all(
+                str(r.get("exchange") or "").strip().lower() == "deribit" for r in eligible
+            ):
+                # D-13 (technical choice): Deribit rows add $0 to the refresh
+                # total, so a stale Deribit carry cannot make the total stale.
+                over_age_excluded_venue += 1
+            elif _over_age_account_holds(eligible):
+                over_age += 1
+                oldest_over_age = max(oldest_over_age, age_days)
+            else:
+                over_age_failing += 1
+            continue
 
         def _sel_rows(group_ids: list[str] = group_ids, latest: str = latest) -> Any:
             return (
@@ -2278,7 +2410,27 @@ async def _fetch_latest_holdings_per_eligible_key(
         max_carry_age_days=max_carry_age,
         identity_unknown_not_carried=identity_unknown_not_carried,
         native_unpriced_accounts=native_unpriced_accounts,
+        never_polled_working_accounts=never_polled_working,
+        never_polled_failing_accounts=never_polled_failing,
+        polled_no_rows_accounts=polled_no_rows,
+        job_key_is_leader=job_key_is_leader,
+        over_age_accounts=over_age,
+        over_age_failing_accounts=over_age_failing,
+        oldest_over_age_days=oldest_over_age,
+        over_age_excluded_venue_accounts=over_age_excluded_venue,
+        identity_pending_venues=pending_venues,
     )
+
+
+def _over_age_account_holds(eligible: Sequence[Mapping[str, Any]]) -> bool:
+    """D-12 (founder-confirmed 2026-10-16, "Same split"): does an account over
+    ``CARRY_AGE_CAP_DAYS`` hold the day's write? Only when one of its eligible
+    keys is WORKING, the same split D-01 uses for a never-polled account: a
+    working key that has not produced rows in a week is a fault worth stopping
+    the day for, a dead key is not (T-11, it would freeze the snapshot store).
+    The ONLY place that decides this. Reverting to D-02 as originally worded
+    ("any over-age account holds") is this line returning True."""
+    return any(working_holder_predicate(r) for r in eligible)
 
 
 def _identity_unknown_and_not_working(
@@ -3173,7 +3325,7 @@ def _mt5_rows_from_levels(
     * ``breakdown`` is nullable JSONB and NULL here: MT5 is single-currency with
       no per-symbol decomposition. ⛔ Do not fabricate a single-key breakdown.
       VERIFIED against every reader before relying on it — the Python
-      ``reconstruct_symbol_returns`` (``snap.get("breakdown") or {}``), the
+      per-symbol breakdown readers (``snap.get("breakdown") or {}``), the
       TypeScript ``holding-compare-adapter`` (``s.breakdown?.[symbol]`` with a
       null guard), and migration 073's ``extract_symbol_value_at``
       (``NULLIF((breakdown ->> p_symbol)::NUMERIC, 0)``, NULL-propagating, and
@@ -4094,6 +4246,52 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+# 167.1.2.1.1 D-14: the Sentry ``refresh_outcome`` of each hold reason. A closed
+# set, so the message built from it carries no id and no figure.
+_HOLD_SENTRY_OUTCOME: Final[dict[str, str]] = {
+    "never_polled_working": "held_never_polled",
+    "carry_over_age": "held_carry_over_age",
+    "identity_pending": "held_identity_pending",
+}
+
+
+def _refresh_hold_reason(latest: _LatestHoldings) -> str | None:
+    """The reason the day's snapshot write is held, or None to write it.
+    Precedence is the order of the checks; every count rides in the audit."""
+    if latest.never_polled_working_accounts > 0:
+        return "never_polled_working"
+    if latest.over_age_accounts > 0:
+        return "carry_over_age"
+    if latest.identity_pending_venues > 0:
+        return "identity_pending"
+    return None
+
+
+def _refresh_audit_counts(latest: _LatestHoldings) -> dict[str, int]:
+    """Every count the refresh audit carries (D-07, D-09: counts only, never a
+    USD figure or an id). One dict, so a hold and the written day cannot report
+    different fields."""
+    return {
+        "eligible_keys": latest.eligible_keys,
+        "carried_keys": latest.carried_keys,
+        "excluded_shared_keys": latest.excluded_shared_keys,
+        "no_working_accounts": latest.no_working_accounts,
+        "emptied_accounts": latest.emptied_accounts,
+        "never_polled_keys": latest.never_polled_keys,
+        "max_carry_age_days": latest.max_carry_age_days,
+        "identity_unknown_not_carried": latest.identity_unknown_not_carried,
+        "native_unpriced_accounts": latest.native_unpriced_accounts,
+        "never_polled_working_accounts": latest.never_polled_working_accounts,
+        "never_polled_failing_accounts": latest.never_polled_failing_accounts,
+        "polled_no_rows_accounts": latest.polled_no_rows_accounts,
+        "over_age_accounts": latest.over_age_accounts,
+        "over_age_failing_accounts": latest.over_age_failing_accounts,
+        "oldest_over_age_days": latest.oldest_over_age_days,
+        "over_age_excluded_venue_accounts": latest.over_age_excluded_venue_accounts,
+        "identity_pending_venues": latest.identity_pending_venues,
+    }
+
+
 async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> DispatchResult:
     """Incremental one-day delta. KEY-SCOPED per VOICES-ACCEPTED f1.
 
@@ -4117,7 +4315,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
         # (populated by Phase 06 poll_allocator_positions), so a key that has
         # not polled yet today is carried, never counted as $0.
         latest = await _fetch_latest_holdings_per_eligible_key(
-            ctx.supabase, allocator_id, today_iso
+            ctx.supabase, allocator_id, today_iso, job_api_key_id=str(api_key_id)
         )
         holdings = latest.rows
         if latest.max_carry_age_days > CARRY_AGE_WARN_DAYS:
@@ -4129,6 +4327,66 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 allocator_id, latest.carried_keys, latest.max_carry_age_days,
                 CARRY_AGE_WARN_DAYS,
             )
+
+        # 167.1.2.1.1 D-01 / D-14: a total that cannot be right is not written.
+        # The snapshot is first-writer-wins, so a day persisted short would stay
+        # short. The hold sits before the breakdown loop, so the write below is
+        # never reached; the job ends DONE (nothing to retry, the next day's
+        # job re-reads), and every job writes its own audit row.
+        hold_reason = _refresh_hold_reason(latest)
+        if hold_reason is not None:
+            logger.warning(
+                "refresh_allocator_equity_daily: held for allocator=%s reason=%s "
+                "(never_polled_working_accounts=%d, over_age_accounts=%d, "
+                "identity_pending_venues=%d, eligible_keys=%d)",
+                allocator_id, hold_reason, latest.never_polled_working_accounts,
+                latest.over_age_accounts, latest.identity_pending_venues,
+                latest.eligible_keys,
+            )
+            _emit_audit(
+                allocator_id, api_key_id,
+                "allocator.equity.refresh_held",
+                {"reason": hold_reason, "venue": venue, **_refresh_audit_counts(latest)},
+            )
+            if latest.job_key_is_leader:
+                # One event per hold, from the leader job only (D-14). The
+                # message is a closed token; no key id, allocator id, venue id
+                # or USD figure (D-09).
+                outcome = _HOLD_SENTRY_OUTCOME[hold_reason]
+                with sentry_sdk.new_scope() as scope:
+                    scope.set_tag("compute_job_id", str(job.get("id")))
+                    scope.set_tag("refresh_outcome", outcome)
+                    if hold_reason == "carry_over_age":
+                        # D-02: the count and the age, as integer tags only.
+                        scope.set_tag("over_age_accounts", latest.over_age_accounts)
+                        scope.set_tag("oldest_over_age_days", latest.oldest_over_age_days)
+                    sentry_sdk.capture_message(
+                        f"refresh_allocator_equity_daily: {outcome}, the day's "
+                        "legacy snapshot write was held",
+                        level="warning",
+                    )
+            return DispatchResult(outcome=DispatchOutcome.DONE)
+
+        if latest.job_key_is_leader:
+            # D-01 / D-12 / SFH M-2: an account left out of the day is raised
+            # once per kind, by the leader only, on every outcome that is not a
+            # hold (including the early returns below, which write no row: an
+            # all-failing book is the worst case of "left out"). Static
+            # messages, no id.
+            for left_out, outcome in (
+                (latest.never_polled_failing_accounts, "left_out_never_polled_failing"),
+                (latest.over_age_failing_accounts, "left_out_carry_over_age_failing"),
+            ):
+                if left_out > 0:
+                    with sentry_sdk.new_scope() as scope:
+                        scope.set_tag("compute_job_id", str(job.get("id")))
+                        scope.set_tag("refresh_outcome", outcome)
+                        sentry_sdk.capture_message(
+                            f"refresh_allocator_equity_daily: {outcome}, an "
+                            "account whose keys all fail was left out of today's "
+                            "legacy snapshot",
+                            level="warning",
+                        )
 
         # Compute single-day equity from holdings' value_usd fan-in.
         #
@@ -4264,15 +4522,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 {
                     "reason": "no_holdings_today",
                     "venue": venue,
-                    "eligible_keys": latest.eligible_keys,
-                    "carried_keys": latest.carried_keys,
-                    "excluded_shared_keys": latest.excluded_shared_keys,
-                    "no_working_accounts": latest.no_working_accounts,
-                    "emptied_accounts": latest.emptied_accounts,
-                    "never_polled_keys": latest.never_polled_keys,
-                    "max_carry_age_days": latest.max_carry_age_days,
-                    "identity_unknown_not_carried": latest.identity_unknown_not_carried,
-                    "native_unpriced_accounts": latest.native_unpriced_accounts,
+                    **_refresh_audit_counts(latest),
                 },
             )
             return DispatchResult(outcome=DispatchOutcome.DONE)
@@ -4366,15 +4616,7 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
                 "history_depth_months": depth_months,
                 "venue": venue,
                 # D-07 / T-167.1.2-32: counts only, never a USD figure.
-                "eligible_keys": latest.eligible_keys,
-                "carried_keys": latest.carried_keys,
-                "excluded_shared_keys": latest.excluded_shared_keys,
-                "no_working_accounts": latest.no_working_accounts,
-                "emptied_accounts": latest.emptied_accounts,
-                "never_polled_keys": latest.never_polled_keys,
-                "max_carry_age_days": latest.max_carry_age_days,
-                "identity_unknown_not_carried": latest.identity_unknown_not_carried,
-                "native_unpriced_accounts": latest.native_unpriced_accounts,
+                **_refresh_audit_counts(latest),
             },
         )
         logger.info(
@@ -4429,69 +4671,6 @@ async def run_refresh_allocator_equity_daily_job(job: dict[str, Any]) -> Dispatc
             await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup
             pass
-
-
-# ---------------------------------------------------------------------------
-# Phase 09 / D-01 + LIVE-01: per-symbol returns reconstruction helper
-# ---------------------------------------------------------------------------
-
-
-def reconstruct_symbol_returns(
-    snapshots: list[dict[str, Any]],
-    symbol: str,
-) -> "pd.Series | None":
-    """Phase 09 / D-01 + D-02. Reconstruct a per-symbol daily-return Series
-    from allocator_equity_snapshots rows.
-
-    Algorithm:
-    - Extract (asof, breakdown.get(symbol)) from each snapshot (ordered ASC by asof).
-    - Drop entries where the symbol is absent OR zero (matches migration 073's
-      extract_symbol_value_at NULLIF + (breakdown IS NULL OR value = 0) semantics).
-      Rationale per RESEARCH Pitfall 2: partial days are treated as missing, NOT
-      forward-filled — a deposit arriving on day N means the symbol's series
-      legitimately starts at day N.
-    - pct_change().dropna() over the remaining values.
-    - Return None if fewer than 2 symbol-present data points exist (cannot compute
-      any return).
-
-    Callers apply a further >= 30-day warm-up gate on the returned series per
-    Phase 07 D-03 analog (see _load_holding_portfolio_context in routers/match.py).
-
-    Args:
-        snapshots: List of allocator_equity_snapshots rows, each with
-                   ``asof`` (DATE string, ISO format) and
-                   ``breakdown`` (dict mapping symbol -> value_usd float).
-                   Must already be ordered ascending by asof.
-        symbol: The CCXT-stripped uppercase symbol to extract (e.g. "BTC").
-
-    Returns:
-        pd.Series of daily percentage returns indexed by asof strings,
-        or None if insufficient data exists for the symbol.
-    """
-    pairs: list[tuple[str, float]] = []
-    for snap in snapshots:
-        bd = snap.get("breakdown") or {}
-        raw = bd.get(symbol)
-        if raw is None:
-            continue
-        try:
-            val = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if val == 0:
-            continue
-        pairs.append((snap["asof"], val))
-
-    if len(pairs) < 2:
-        return None
-
-    asofs = [p[0] for p in pairs]
-    values = [p[1] for p in pairs]
-    series = pd.Series(values, index=asofs, name=symbol)
-    returns = series.pct_change().dropna()
-    if len(returns) == 0:
-        return None
-    return returns
 
 
 # ---------------------------------------------------------------------------

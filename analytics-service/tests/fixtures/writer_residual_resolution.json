@@ -1,0 +1,196 @@
+{
+  "notes": "Phase 167.1.2.1.1 WRITERRESIDUALS plan 02 (decision D-03). ONE table for two consumers, so the derive's blocking token and the reader's line cannot drift apart. Each cell is a key list plus what the allocator equity derive does with it and what the reader (derivePhase07Fields in src/lib/queries.ts) shows for the row the derive leaves. `keys[].days` is how many of the leading `days` the key has return rows for, `anchor` is its live USD anchor. `derive.blocking_tokens` is the exact set of BLOCKING DegradeReason values the composed curve carries (benign tokens such as stale_mark_carry are not listed), and `derive.trustworthy` is the row's is_trustworthy. `reader` is the verdict for that row: `state` and `reason` are equityHistoryState and equityHistoryRebuildReason. The tokens are mapped onto EXISTING owner-facing lines only (D-04): failing_key_series_ended reads shared_account_no_working_key, because a lone dead key diluting the book is the same fact the shared-account token states and the same owner action fixes it. analytics-service/tests/test_writer_residual_parity.py runs the derive over every cell, src/lib/__tests__/writer-residual-parity.test.ts runs the reader over the same cell. SC-6 (account_identity_pending, D-03): the derive raises it only for TWO OR MORE eligible working keys on one stamping venue whose account is unknown (they may be one account counted twice), while the reader holds a book for ONE unknown key too, from the key list alone and before the series is read, so a single unknown key is a derive-trustworthy book the reader still holds; an MT5 pair is exempt in both, and a failing key is no candidate for the derive and reads key_not_syncing in the reader. The fixture is loaded in place, never copied.",
+  "days": [
+    "2026-06-01",
+    "2026-06-02",
+    "2026-06-03",
+    "2026-06-04",
+    "2026-06-05"
+  ],
+  "cells": [
+    {
+      "id": "sc2-failing-key-ends-two-days-early",
+      "sc": "SC-2",
+      "keys": [
+        {
+          "id": "key-A",
+          "exchange": "binance",
+          "sync_status": "error",
+          "venue_account_id": "venue-a",
+          "days": 3,
+          "anchor": 40000.0
+        },
+        {
+          "id": "key-B",
+          "exchange": "binance",
+          "sync_status": "connected",
+          "venue_account_id": "venue-b",
+          "days": 5,
+          "anchor": 60000.0
+        }
+      ],
+      "derive": {
+        "blocking_tokens": [
+          "failing_key_series_ended"
+        ],
+        "trustworthy": false
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "shared_account_no_working_key"
+      }
+    },
+    {
+      "id": "sc2-failing-key-reaches-the-last-day",
+      "sc": "SC-2",
+      "keys": [
+        {
+          "id": "key-A",
+          "exchange": "binance",
+          "sync_status": "error",
+          "venue_account_id": "venue-a",
+          "days": 5,
+          "anchor": 40000.0
+        },
+        {
+          "id": "key-B",
+          "exchange": "binance",
+          "sync_status": "connected",
+          "venue_account_id": "venue-b",
+          "days": 5,
+          "anchor": 60000.0
+        }
+      ],
+      "derive": {
+        "blocking_tokens": [],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "id": "sc6-two-unstamped-working-okx-keys",
+      "sc": "SC-6",
+      "keys": [
+        {
+          "id": "key-A",
+          "exchange": "okx",
+          "sync_status": "connected",
+          "venue_account_id": null,
+          "days": 5,
+          "anchor": 40000.0
+        },
+        {
+          "id": "key-B",
+          "exchange": "okx",
+          "sync_status": "connected",
+          "venue_account_id": null,
+          "days": 5,
+          "anchor": 60000.0
+        }
+      ],
+      "derive": {
+        "blocking_tokens": [
+          "account_identity_pending"
+        ],
+        "trustworthy": false
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "account_identity_pending"
+      }
+    },
+    {
+      "id": "sc6-one-unstamped-working-okx-key",
+      "sc": "SC-6",
+      "keys": [
+        {
+          "id": "key-A",
+          "exchange": "okx",
+          "sync_status": "connected",
+          "venue_account_id": null,
+          "days": 5,
+          "anchor": 40000.0
+        },
+        {
+          "id": "key-B",
+          "exchange": "okx",
+          "sync_status": "connected",
+          "venue_account_id": "venue-b",
+          "days": 5,
+          "anchor": 60000.0
+        }
+      ],
+      "derive": {
+        "blocking_tokens": [],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "account_identity_pending"
+      }
+    },
+    {
+      "id": "sc6-two-unstamped-mt5-keys-are-exempt",
+      "sc": "SC-6",
+      "keys": [
+        {
+          "id": "key-A",
+          "exchange": "mt5",
+          "sync_status": "connected",
+          "venue_account_id": null,
+          "days": 5,
+          "anchor": 40000.0
+        },
+        {
+          "id": "key-B",
+          "exchange": "mt5",
+          "sync_status": "connected",
+          "venue_account_id": null,
+          "days": 5,
+          "anchor": 60000.0
+        }
+      ],
+      "derive": {
+        "blocking_tokens": [],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "ready",
+        "reason": null
+      }
+    },
+    {
+      "id": "sc6-two-unstamped-keys-one-failing",
+      "sc": "SC-6",
+      "keys": [
+        {
+          "id": "key-A",
+          "exchange": "okx",
+          "sync_status": "connected",
+          "venue_account_id": null,
+          "days": 5,
+          "anchor": 40000.0
+        },
+        {
+          "id": "key-B",
+          "exchange": "okx",
+          "sync_status": "error",
+          "venue_account_id": null,
+          "days": 5,
+          "anchor": 60000.0
+        }
+      ],
+      "derive": {
+        "blocking_tokens": [],
+        "trustworthy": true
+      },
+      "reader": {
+        "state": "rebuilding",
+        "reason": "key_not_syncing"
+      }
+    }
+  ]
+}

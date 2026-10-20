@@ -14,6 +14,7 @@ Supported kinds:
   reconcile_strategy     -> run_reconcile_strategy_job      (5-minute timeout)
   compute_intro_snapshot -> run_compute_intro_snapshot_job  (2-minute timeout)
   process_key_long       -> run_process_key_long_job        (30-minute timeout) [Phase 19 / BACKBONE-09]
+  okx_archive_rebuild    -> run_okx_archive_rebuild_job     (15-minute timeout) [Phase 167.1.2.2.2.1 / OKXHISTORY]
 
 Error classification table — drives mark_compute_job_failed's retry-vs-final
 decision:
@@ -672,6 +673,17 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "derive_broker_dailies": 15 * 60,  # full-history realized PnL + funding fetch (mirrors sync_trades envelope)
     "stitch_composite": 20 * 60,  # Phase 86 / COMP-02 — N-member fan-out (worst case 2× crawl per key when MTM open)
     "derive_allocator_equity": 5 * 60,  # Phase 115.1 / RD-3 Option B — pure DB + math, no exchange I/O (5 min < 10 min watchdog floor → no override needed)
+    # Phase 167.1.2.2.2.1 / OKXHISTORY (D-04) — the 2-3 h wait for OKX to generate a
+    # quarterly file is NOT this timeout: it is defer_compute_job, which returns the row to
+    # pending between claims. But ONE calibrate or apply claim does ALL of the rest in
+    # sequence: two apply POSTs paced >= 11 s apart, status reads, up to two downloads
+    # (okx_archive_download.TOTAL_TIMEOUT_S = 300 s each), the parse, six live crawls (each up
+    # to _BROKER_CRAWL_TIMEOUT_S = 810 s), the rebuild and the RPCs. Their bounds SUM to far
+    # more than this timeout, so the handler gives itself a claim budget of this value less
+    # okx_archive_job.CLAIM_RESERVE_S, bounds each step by what is left of it, and ends an
+    # overlong claim as the named transient `claim_budget_exceeded` (WR-06). Keep this <= 30
+    # min: main_worker's watchdog override for the kind (30 minutes) must stay above it.
+    "okx_archive_rebuild": 15 * 60,
 }
 
 # ---------------------------------------------------------------------------
@@ -1604,6 +1616,9 @@ AllocatorEquityAction = Literal[
     # Phase 167.1.2 plan 12, review SFH-R2-01: the daily refresh held a
     # zero-snapshot book's first row while its reconstruct was in flight.
     "allocator.equity.refresh_held_for_reconstruct",
+    # Phase 167.1.2.1.1 D-14: the daily refresh held the day's snapshot write
+    # (never-polled working account, carry over the age cap, identity pending).
+    "allocator.equity.refresh_held",
 ]
 
 
@@ -12395,15 +12410,21 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         FULL_HISTORY_VENUES,
         SHARED_ACCOUNT_KINDS,
         DegradeReason,
+        DeriveRefusal,
         account_groups,
+        blocking_degrade_tokens,
         eligible_key_predicate,
+        identity_pending_venues,
         read_dropped_day_pnl,
         read_realized_terminal,
         read_writer_basis,
+        refusal_payload,
         stitch_dropped_day_pnl,
+        stitch_flow_disagreement_days,
         stitch_shared_account,
         working_holder_predicate,
     )
+    from services.account_identity import VENUES_WITH_ACCOUNT_ID
     from services.equity_reconstruction import _NO_CAPITAL_ANCHOR_REASONS
     from services.external_flows import ExternalFlow, validate_flow_shape
     from services.nav_twr import DUST_NAV_FLOOR, NavReconstructionError
@@ -12412,19 +12433,33 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     allocator_id = job["allocator_id"]
     supabase = get_supabase()
 
-    async def _delete_equity_curve_row() -> None:
-        # Leave NO row, so the reader renders its rebuilding panel (Phase
-        # 167.1.2 plan 11 removed the legacy-curve fallback: a missing row is no
-        # longer drawn from allocator_equity_snapshots). Shared by the identity
-        # refusal, the empty-compose (B2), incomplete-compose (F1b), and
-        # permanent-failure (F2) paths so a structurally-failed / partial / empty
-        # recompute can never leave a STALE trustworthy row rendering as "derived".
-        def _del() -> None:
-            supabase.table("allocator_equity_derived").delete().eq(
-                "allocator_id", allocator_id
-            ).eq("kind", "equity_curve").execute()
+    async def _persist_refusal(
+        token: str, *, extra_reasons: Sequence[str] = ()
+    ) -> None:
+        # 167.1.2.1.1 SC-1 (D-04): a refusal REPLACES the (allocator_id,
+        # 'equity_curve') row with a version-2 payload that names why, in ONE atomic
+        # upsert with the call shape of ``_upsert_curve``. Deleting the row left the
+        # reader with nothing to read, so it told the owner the history is
+        # "recomputed daily" for a book the derive refuses every day. The payload is
+        # untrustworthy with an empty curve and empty returns, so it can never
+        # render as a curve (``refusal_payload``). Counts and a closed token only.
+        row = {
+            "allocator_id": allocator_id,
+            "kind": "equity_curve",
+            "payload": refusal_payload(
+                token,
+                composed_at=datetime.now(timezone.utc).isoformat(),
+                extra_reasons=extra_reasons,
+            ),
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+        }
 
-        await db_execute(_del)
+        def _upsert() -> None:
+            supabase.table("allocator_equity_derived").upsert(
+                row, on_conflict="allocator_id,kind"
+            ).execute()
+
+        await db_execute(_upsert)
 
     # ── 1. Eligible key set — the ONE predicate, never inlined. ──────────────
     def _load_keys() -> list[dict[str, Any]]:
@@ -12526,25 +12561,26 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # rows, and this exception would otherwise reach classify_exception's
         # catch-all as a retrying `unknown` forever (the T-74-02 class), so it
         # ends permanent. Nothing is composed from a partial read, and the stale
-        # curve row is deleted as on every other permanent path (F2), so the book
-        # shows the rebuilding panel. The hint (with the allocator id) goes to the
-        # operator log only; the job's message carries the row cap alone.
+        # curve row is replaced by a refusal record as on every other permanent
+        # path (F2, 167.1.2.1.1 D-04), so the book shows the rebuilding panel and
+        # the reason. The hint (with the allocator id) goes to the operator log
+        # only; the job's message carries the row cap alone.
         logger.error(
             "derive_allocator_equity: csv_daily_returns read for allocator %s hit "
-            "the pagination cap (page_count=%d, page_size=%d, hint=%s) — deleted "
-            "any stale equity_curve row; nothing was composed",
+            "the pagination cap (page_count=%d, page_size=%d, hint=%s) — recorded "
+            "the refusal in the equity_curve row; nothing was composed",
             allocator_id,
             trunc.page_count,
             trunc.page_size,
             trunc.hint or "n/a",
         )
-        await _delete_equity_curve_row()
+        await _persist_refusal(DeriveRefusal.RETURNS_READ_CAP.value)
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=(
                 "derive_allocator_equity: the allocator's daily returns exceed "
                 f"{trunc.page_count * trunc.page_size:,} rows; nothing was "
-                "composed and the stale equity curve was removed"
+                "composed and the stale equity curve was replaced by a refusal"
             ),
             error_kind="permanent",
         )
@@ -12724,11 +12760,17 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         ]
     )
     if duplicate_keys or collisions:
-        await _delete_equity_curve_row()
+        reason = (
+            DeriveRefusal.ACCOUNT_DUPLICATE.value
+            if duplicate_keys
+            else DeriveRefusal.ACCOUNT_IDENTITY_COLLISION.value
+        )
+        await _persist_refusal(reason)
         # Reason token + counts only. No key id, no venue id, no USD (T-167.1.2-22).
-        # C2 silent-failure SFH-07: WARNING, not INFO. The refusal deletes the
-        # curve and ends DONE, so this line is the only trace of why the book
-        # renders "rebuilding". An audit action for it needs a member in BOTH
+        # C2 silent-failure SFH-07: WARNING, not INFO. The refusal replaces the
+        # curve with a refusal record and ends DONE, so this line (and the record's
+        # token) is the trace of why the book renders "rebuilding". An audit action
+        # for it needs a member in BOTH
         # services/audit.py and src/lib/audit.ts (test_action_literal_matches_ts_union),
         # and this derive has no api_key to anchor it on; recorded in the
         # 167.1.2 REVIEW-FIX report rather than half-added here.
@@ -12737,22 +12779,19 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # the refusal is also captured explicitly, once, at level warning:
         # tagged with the job and the token, one static message per token so
         # Sentry groups them, and no key id, venue id or USD figure.
-        reason = (
-            "account_duplicate" if duplicate_keys else "account_identity_collision"
-        )
         with sentry_sdk.new_scope() as scope:
             scope.set_tag("compute_job_id", str(job.get("id")))
             scope.set_tag("derive_refusal", reason)
             sentry_sdk.capture_message(
                 f"derive_allocator_equity: {reason} — the equity curve was "
-                "refused and deleted; the book shows the rebuilding panel",
+                "refused and recorded; the book shows the rebuilding panel",
                 level="warning",
             )
         logger.warning(
             "derive_allocator_equity: %s for allocator %s "
             "(counted_keys=%d duplicate_keys=%d colliding_groups=%d) — "
-            "deleted any stale equity_curve row; the book shows the rebuilding "
-            "panel until the keys are resolved",
+            "recorded the refusal in the equity_curve row; the book shows the "
+            "rebuilding panel until the keys are resolved",
             reason,
             allocator_id,
             len(counted_rows),
@@ -12789,10 +12828,10 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # DB row FOREVER as transient `unknown` (the T-74-02 class). Dispose it as a
         # permanent scrubbed FAILED so the admin sees a terminal state, not an
         # infinite poison-retry. Scrubbed for defence in depth (no raw value leak).
-        # F2: DELETE the stale equity_curve row first so a structurally-failed
-        # recompute leaves no row (the book shows "rebuilding") instead of a
-        # stale trustworthy row.
-        await _delete_equity_curve_row()
+        # F2: replace the stale equity_curve row first (167.1.2.1.1 D-04: with a
+        # refusal record, not a delete) so a structurally-failed recompute can
+        # never leave a stale trustworthy row rendering as "derived".
+        await _persist_refusal(DeriveRefusal.INPUT_CORRUPT.value)
         import re
 
         # F4b: the corrupt-input ValueError/TypeError echoes the raw value
@@ -13118,6 +13157,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # SFH-R2-03: join each stitched account's older members onto its kept key.
     stitched_accounts = 0
     truncated_accounts = 0
+    # 167.1.2.1.1 SC-3: stitched accounts whose members list different flow totals for a
+    # day the older member owns. Counted per account; the stitch itself is unchanged.
+    flows_disagree_accounts = 0
     # D-06: the stitched kept keys, and the writer basis of those accounts whose EVERY member
     # carries one (a stitched series is one account, so its basis is the members' bases joined
     # by the same day ownership the stitch applies to flows and dropped-day P&L).
@@ -13143,14 +13185,17 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         if kept_series is None:
             continue  # the kept key's returns vanished between the two reads
         stitched = None
+        stitch_links: list[tuple[pd.Series, Sequence[Any]]] = []
         if all(k in source_returns and k in source_flows for k in source_ids):
-            stitched = stitch_shared_account(
-                [(source_returns[k], source_flows[k]) for k in source_ids]
-                + [(kept_series, flows_by_key.get(kept_id, []))]
-            )
+            stitch_links = [(source_returns[k], source_flows[k]) for k in source_ids] + [
+                (kept_series, flows_by_key.get(kept_id, []))
+            ]
+            stitched = stitch_shared_account(stitch_links)
         if stitched is None:
             truncated_accounts += 1
             continue
+        if stitch_flow_disagreement_days(stitch_links):
+            flows_disagree_accounts += 1
         # D-15: the dropped days follow the same ownership as the flows.
         dropped_pnl_by_key[kept_id] = stitch_dropped_day_pnl(
             [source_returns[k] for k in source_ids] + [kept_series],
@@ -13180,6 +13225,16 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         stitched_kept.add(kept_id)
         returns_by_key[kept_id], flows_by_key[kept_id] = stitched
         stitched_accounts += 1
+    if flows_disagree_accounts:
+        # Counts only (no key id, no venue id, no day, no USD - T-167.1.2-22).
+        logger.warning(
+            "derive_allocator_equity: %d stitched shared account(s) for allocator %s "
+            "have members that list different flow totals for a day the older member "
+            "owns - the stitch keeps the owner's flows and the curve is untrustworthy (%s)",
+            flows_disagree_accounts,
+            allocator_id,
+            DegradeReason.SHARED_ACCOUNT_FLOWS_DISAGREE.value,
+        )
     if truncated_accounts:
         # Counts only (no key id, no venue id, no USD — T-167.1.2-22).
         logger.warning(
@@ -13318,9 +13373,73 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             allocator_id,
         )
 
+    # 167.1.2.1.1 SC-2 (D-03): a SINGLE eligible key that is failing (not
+    # ``working_holder_predicate``) and whose series ends before the book's last return
+    # day. It is still counted, so the compose carries it flat at r = 0 (the benign
+    # ``stale_mark_carry``) while the rest of the book moves, and the book's return is
+    # diluted by frozen capital. Decided HERE, after the no-capital exit rule has run,
+    # because that rule puts a key in ``departed_end_by_key``: such a key leaves the
+    # book on purpose after its end day and carries nothing past it, so ending early is
+    # its intended shape (RESEARCH Pitfall 7). A WORKING key that ends early is a sync
+    # lag the daily recompute answers; a failing key that reaches the book's last day
+    # dilutes nothing. A key with no return day at all (a ``key_inputs`` row and no csv
+    # rows) is NOT flagged: the compose already classifies it anchored-without-returns,
+    # which is the blocking ``dropped_key``, so it is not silent and ``last_return_day``
+    # has no entry to index. A shared group (two or more eligible members) is
+    # ``shared_account_no_working_key``'s concern, not this one's. The derive does not
+    # test that the account id is known; a failing key with an unknown id is named
+    # earlier by the reader as ``key_not_syncing``, so this flag is a harmless superset
+    # of D-03's wording. Counts only (no key id, no day, no USD - T-167.1.2-22).
+    failing_series_ended_keys = 0
+    _book_last_days = [last_return_day[k] for k in counted_ids if k in last_return_day]
+    if _book_last_days:
+        _book_last_day = max(_book_last_days)
+        for _group in account_groups(key_rows):
+            _eligible_members = [row for row in _group if row["id"] in eligible_ids]
+            if len(_eligible_members) != 1:
+                continue
+            _member = _eligible_members[0]
+            _member_id = _member["id"]
+            if _member_id not in counted_ids or _member_id in departed_end_by_key:
+                continue
+            if working_holder_predicate(_member):
+                continue
+            _member_last = last_return_day.get(_member_id)
+            if _member_last is not None and _member_last < _book_last_day:
+                failing_series_ended_keys += 1
+    if failing_series_ended_keys:
+        logger.warning(
+            "derive_allocator_equity: %d failing key(s) of allocator %s stopped "
+            "returning before the book's last day - each is carried flat while the "
+            "rest of the book moves; the curve is untrustworthy (%s)",
+            failing_series_ended_keys,
+            allocator_id,
+            DegradeReason.FAILING_KEY_SERIES_ENDED.value,
+        )
+
+    # 167.1.2.1.1 SC-6 (D-03): venues holding two or more eligible WORKING keys whose
+    # account is still unknown. They may read one account, counted twice, so the stored
+    # curve is untrustworthy until the stamper reads their ids. Reads the grouping and
+    # changes none of it. Counts only (no key id, no venue - T-167.1.2-22).
+    identity_pending_venue_count = identity_pending_venues(key_rows, VENUES_WITH_ACCOUNT_ID)
+    if identity_pending_venue_count:
+        logger.warning(
+            "derive_allocator_equity: %d venue(s) of allocator %s hold two or more "
+            "working keys whose exchange account is still unknown - they may read one "
+            "account counted twice; the curve is untrustworthy until the stamper reads "
+            "their ids (%s)",
+            identity_pending_venue_count,
+            allocator_id,
+            DegradeReason.ACCOUNT_IDENTITY_PENDING.value,
+        )
+
     # A departed key the rule includes but whose inputs are gone was left out of
     # departed_end_by_key before the rule's end days were used (WR-R2-02), so it
     # never reached the returns, the flows or the collision gate.
+    # 167.1.2.1.1 SC-7 (D-06): the same counts the WARNING below states, kept for the
+    # payload and one Sentry event. Empty (and absent from the payload) when nothing is
+    # unavailable.
+    departed_unavailable_counts: dict[str, int] = {}
     if departed_unavailable:
         # Counts only (no key id, no venue id, no USD — T-167.1.2-22). A key
         # whose row was deleted and a key whose last balance read failed are
@@ -13331,6 +13450,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 reason_token = departed_null_anchor_reasons[k]
                 null_anchor_counts[reason_token] = null_anchor_counts.get(reason_token, 0) + 1
         null_anchor_total = sum(null_anchor_counts.values())
+        departed_no_inputs_total = len(departed_unavailable) - null_anchor_total
         logger.warning(
             "derive_allocator_equity: %d departed key(s) for allocator %s are "
             "included by the history rule but have no usable anchor: %d with no "
@@ -13338,7 +13458,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             "their history is left out of the book (%s)",
             len(departed_unavailable),
             allocator_id,
-            len(departed_unavailable) - null_anchor_total,
+            departed_no_inputs_total,
             null_anchor_total,
             ", ".join(
                 f"{token}={count}" for token, count in sorted(null_anchor_counts.items())
@@ -13346,6 +13466,11 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             or "none",
             "departed_history_unavailable",
         )
+        departed_unavailable_counts = {
+            "departed_history_unavailable_keys": len(departed_unavailable),
+            "departed_history_unavailable_no_inputs_keys": departed_no_inputs_total,
+            "departed_history_unavailable_no_anchor_keys": null_anchor_total,
+        }
 
     # A key with returns but no key_inputs row → anchor None (compose honestly
     # DROPS it, exactly as an unanchored key). Never fabricate an anchor.
@@ -13368,22 +13493,22 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # so composing now would emit a TRUSTWORTHY curve over a SUBSET of the
     # allocator's capital (a transient 1-of-N-capital curve rendered as ready).
     # If ANY eligible key is
-    # absent from BOTH maps the compose is INCOMPLETE → refuse: delete the
-    # equity_curve row (the book shows "rebuilding") rather than compose a silently-partial
-    # trustworthy curve. A key WITH a key_inputs row but no returns is NOT missing
+    # absent from BOTH maps the compose is INCOMPLETE → refuse: replace the
+    # equity_curve row with a refusal record (the book shows "rebuilding") rather than
+    # compose a silently-partial trustworthy curve. A key WITH a key_inputs row but no returns is NOT missing
     # here — it is visible to the compose core, which classifies it
     # anchored-without-returns → DROPPED_KEY → untrustworthy (B3). This gate is for
     # the strictly-invisible key (no returns AND no key_inputs — its derive has not
     # run yet). Self-healing: each sibling derive re-enqueues the compose.
     missing_ids = counted_ids - (set(returns_by_key) | key_inputs_ids)
     if missing_ids:
-        await _delete_equity_curve_row()
+        await _persist_refusal(DeriveRefusal.COMPOSE_INCOMPLETE.value)
         logger.info(
             "derive_allocator_equity: INCOMPLETE compose for allocator %s "
             "(eligible_keys=%d returns_keys=%d key_inputs_keys=%d missing=%d) — "
             "an eligible key has neither returns nor key_inputs (backfill window); "
-            "deleted any stale equity_curve row; the book shows the rebuilding "
-            "panel until every sibling derives (self-healing)",
+            "recorded the refusal in the equity_curve row; the book shows the "
+            "rebuilding panel until every sibling derives (self-healing)",
             allocator_id, len(eligible_ids), len(returns_by_key),
             len(key_inputs_ids), len(missing_ids),
         )
@@ -13418,6 +13543,9 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 for reason, raised in (
                     (DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED, truncated_accounts > 0),
                     (DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY, no_working_groups > 0),
+                    (DegradeReason.FAILING_KEY_SERIES_ENDED, failing_series_ended_keys > 0),
+                    (DegradeReason.SHARED_ACCOUNT_FLOWS_DISAGREE, flows_disagree_accounts > 0),
+                    (DegradeReason.ACCOUNT_IDENTITY_PENDING, identity_pending_venue_count > 0),
                 )
                 if raised
             ]
@@ -13457,11 +13585,11 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # unpriceable flow, a ≤−100% liquidation day). Retrying cannot help →
         # permanent FAILED with a scrubbed message (the T-74-02 DoS class; the core
         # errors carry counts/day-indices only, still scrubbed for defence in
-        # depth). F2: DELETE the stale equity_curve row first — otherwise a
+        # depth). F2: replace the stale equity_curve row first — otherwise a
         # post-liquidation poison input would leave the frozen pre-liquidation curve
-        # rendering as trustworthy FOREVER; leave no row (the book shows
-        # "rebuilding") instead.
-        await _delete_equity_curve_row()
+        # rendering as trustworthy FOREVER; the refusal record (167.1.2.1.1 D-04)
+        # holds the row instead and the book shows "rebuilding" with its reason.
+        await _persist_refusal(DeriveRefusal.COMPOSE_REFUSED.value)
         scrubbed = str(scrub_freeform_string(str(exc)))
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
@@ -13508,6 +13636,24 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         except NavReconstructionError as exc_again:
             return await _compose_refused(exc_again)
 
+    if departed_unavailable_counts:
+        # SC-7 (D-06): the left-out departed history is a count in the payload, beside
+        # the benign flag the reader reads, and ONE Sentry warning event. A WARNING log
+        # reaches Sentry only as a breadcrumb, and the benign flag is invisible there, so
+        # a book silently shorter than its history read like every healthy one. Static
+        # message, tags are the job and the outcome token only, no key id, allocator id,
+        # venue id or USD figure (D-09). A healthy payload carries none of these keys.
+        payload["inputs"].update(departed_unavailable_counts)
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("compute_job_id", str(job.get("id")))
+            scope.set_tag("derive_outcome", "departed_history_unavailable")
+            sentry_sdk.capture_message(
+                "derive_allocator_equity: departed_history_unavailable, a departed "
+                "key's history that the rule includes could not be levelled and was "
+                "left out of the book",
+                level="warning",
+            )
+
     if absent_stitched_accounts:
         # SFH-02: counts only (no key id, no USD). Both are absent when every stitched
         # account took the joined basis, so a healthy payload is unchanged.
@@ -13522,15 +13668,42 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     #      empty shapes degrade the same. Upserting it would render a blank
     #      chart as the book's history, and a later
     #      structurally-empty recompute would leave a STALE trustworthy row (L1).
-    #      Instead DELETE any existing equity_curve row → no row, which the
-    #      reader renders as the rebuilding panel (plan 11). The frontend
+    #      Instead REPLACE any existing equity_curve row with a refusal record
+    #      (167.1.2.1.1 D-04), which the reader renders as the rebuilding panel
+    #      (plan 11). The compose payload itself is never persisted with an empty
+    #      curve (the reader would call it malformed): a trustworthy empty compose
+    #      is ``compose_empty`` (nothing to draw yet, a wait); an untrustworthy one
+    #      is ``compose_empty_blocked`` and carries the compose's own blocking
+    #      tokens, so the wait mapping of ``compose_empty`` cannot swallow a blocking
+    #      cause. The one exception is a brand-new book (MR-01): every key has a
+    #      real anchor and no return day yet (a key the compose omits without a drop
+    #      does not count against it, MR-FR-01: a null anchor with reason native_unit /
+    #      native_unpriced, whether or not it has return rows, or a dust one with none,
+    #      MR-R2-01), so ``dropped_key`` is the only blocking
+    #      token and the next daily derive gives each key its first return day. That
+    #      is a wait, so it is ``compose_empty`` too. The frontend
     #      extractTrustworthyDerivedCurve is the paired last-line defense (B2a). ──
     if not (payload.get("curve") or []):
-        await _delete_equity_curve_row()
+        _blocking = blocking_degrade_tokens(payload.get("degrade_reasons") or [])
+        if payload.get("is_trustworthy") or (
+            _blocking == [DegradeReason.DROPPED_KEY.value]
+            and all(
+                (a is not None and k not in returns_by_key)
+                or (a is None and null_anchor_reasons.get(k) in ("native_unit", "native_unpriced"))
+                or (a is None and k not in returns_by_key and null_anchor_reasons.get(k) == "dust")
+                for k, a in anchors_by_key.items()
+            )
+        ):
+            await _persist_refusal(DeriveRefusal.COMPOSE_EMPTY.value)
+        else:
+            await _persist_refusal(
+                DeriveRefusal.COMPOSE_EMPTY_BLOCKED.value,
+                extra_reasons=_blocking,
+            )
         logger.info(
             "derive_allocator_equity: empty compose for allocator %s "
-            "(eligible_keys=%d returns_keys=%d orphans_cleaned=%d) — deleted any "
-            "stale equity_curve row; the book shows the rebuilding panel",
+            "(eligible_keys=%d returns_keys=%d orphans_cleaned=%d) — recorded the "
+            "refusal in the equity_curve row; the book shows the rebuilding panel",
             allocator_id, len(eligible_ids), len(returns_by_key), len(orphan_kinds),
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
@@ -13823,6 +13996,14 @@ async def dispatch(job: dict[str, Any]) -> DispatchResult:
         # don't want to load on workers that never see this kind.
         from services.ingestion.long_fetch import run_process_key_long_job
         handler = run_process_key_long_job
+    elif kind == "okx_archive_rebuild":
+        # Phase 167.1.2.2.2.1 / OKXHISTORY (D-04) — durable OKX quarterly-archive
+        # job. Lazy import for the same reason as the arms above: the module
+        # imports this one, and a worker that never sees the kind should not load
+        # the archive modules. NOT a BACKFILL kind (main_worker): it is claimed by
+        # the interactive loop, enqueues nothing, and is nobody's follow-on.
+        from services.okx_archive_job import run_okx_archive_rebuild_job
+        handler = run_okx_archive_rebuild_job
     else:
         handler = None
 

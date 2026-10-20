@@ -156,6 +156,24 @@ def _seed_snapshot(fake: FakeSupabaseClient, asof: date) -> None:
     }
 
 
+def _seed_polled_no_rows(fake: FakeSupabaseClient, key_id: str) -> None:
+    """A key whose holdings poll COMPLETED and wrote no rows. Since 167.1.2.1.1
+    D-01 a working key with no row AND no poll record is "never polled" and holds
+    the day's write before the reconstruct probe is reached; these tests are
+    about the reconstruct hold, so the key without holdings is one that was read
+    (D-13: polled_no_rows neither holds nor carries)."""
+    event_id = f"audit-{key_id}-polled"
+    fake.store[("audit_log", (event_id,))] = {
+        "id": event_id,
+        "user_id": ALLOCATOR_ID,
+        "action": "allocator.holdings.sync_completed",
+        "entity_type": "api_key",
+        "entity_id": key_id,
+        "metadata": {"row_count": 0, "final_status": "complete", "asof": "2026-09-26"},
+        "created_at": "2026-09-26T04:03:00+00:00",
+    }
+
+
 def _book(
     *,
     holding_keys: tuple[str, ...] = (API_KEY_ID_1,),
@@ -166,6 +184,9 @@ def _book(
         _seed_key(fake, key_id, **(key_fields or {}).get(key_id, {}))
     for key_id in holding_keys:
         _seed_holding(fake, key_id, 1000.0)
+    for key_id in (API_KEY_ID_1, API_KEY_ID_2):
+        if key_id not in holding_keys:
+            _seed_polled_no_rows(fake, key_id)
     return fake
 
 

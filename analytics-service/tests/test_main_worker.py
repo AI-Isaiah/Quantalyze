@@ -1383,9 +1383,14 @@ class TestReaperThresholdInvariant:
         # and never to JOB_CHAIN_FOLLOW_ON could therefore never raise the
         # ceiling. Pinning the registry SIZE to a literal (not to len() of the
         # table under test) converts that silent gap into a forced decision.
-        assert len(TIMEOUT_PER_KIND) == 15, (
+        # 16 since Phase 167.1.2.2.2.1 / OKXHISTORY: `okx_archive_rebuild` is
+        # CHAIN-TERMINAL by decision (api_key-scoped, enqueues nothing, nobody's
+        # follow-on, claimed by the interactive loop; it never holds a
+        # strategy_analytics row 'computing'), so JOB_CHAIN_FOLLOW_ON and the
+        # reaper ceiling are unchanged.
+        assert len(TIMEOUT_PER_KIND) == 16, (
             f"TIMEOUT_PER_KIND now has {len(TIMEOUT_PER_KIND)} kinds, not the "
-            "pinned 15 — a job kind was added/removed. Decide consciously "
+            "pinned 16 — a job kind was added/removed. Decide consciously "
             "whether it joins JOB_CHAIN_FOLLOW_ON (it is a chain edge: some "
             "handler enqueues it, or it enqueues a follow-on) or is "
             "chain-terminal, re-derive STRATEGY_ANALYTICS_REAP_THRESHOLD if the "

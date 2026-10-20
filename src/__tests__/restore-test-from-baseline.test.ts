@@ -2798,9 +2798,11 @@ describe("restore-test-from-baseline.sh — 164.9.2 W6: REFDATA_ENTRY_N counts I
     expect(run(line, ONLY_C5), "a C5-only allowlist must read 0 so the ZERO-entries refusal fires").toBe("0");
   });
 
-  it("the real allowlist reads 22 INSERT entries and the fixture 2, although they hold C5 lines", () => {
+  it("the real allowlist reads 23 INSERT entries and the fixture 2, although they hold C5 lines", () => {
     const line = liveLine(SRC);
-    expect(run(line, read("scripts/restore-test-refdata-allowlist.txt"))).toBe("22");
+    // 23, not 22, since 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): the okx_archive_rebuild
+    // kind's compute_job_kinds INSERT line. MEASURED: this pin read `expected '23' to be '22'`.
+    expect(run(line, read("scripts/restore-test-refdata-allowlist.txt"))).toBe("23");
     // 2, not 1, since the merge of Phase 164.9.1 (2026-09-26): its plan 05 added
     // the fixture's public.system_settings INSERT entry. The fixture's update:1
     // and decline:1 lines are still not counted; with them the count reads 4.
