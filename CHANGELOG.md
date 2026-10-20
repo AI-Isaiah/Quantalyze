@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.132.8.2] - 2026-10-20 — OKXHISTORY: the preflight reads OKX's real bill-subtype list
+
+### Fixed
+- The OKX archive preflight's subtype census (`_parse_live_subtypes` in `analytics-service/services/okx_archive_job.py`) now reads each bill type's subtypes under `subTypeDetails`, the key OKX's v5 "Get bill types" endpoint (`GET /api/v5/account/subtypes`) documents. It looked under `subTypes` and `subType`, guesses written before the first real call.
+
+### Root cause
+- The first real preflight on PROD (2026-10-20) stopped as `subtype_map_drift` with 0 live subtypes and an empty drift list. The account checks had passed (same account on every target, read-only key). The census reads an unparseable body as a stop by design, so the guessed key failed loud: no archive was requested and nothing was written.
+
+### Tests
+- The `account/subtypes` fixtures in `tests/test_okx_archive_job.py` now use OKX's documented shape. Against the old parser the preflight tracer test goes RED; with the fix the OKX suite is green (705 passed, 2 skipped).
+
+### Notes
+- Next: once this is deployed, the preflight runs again (Phase 167.1.2.2.2.1 plan 12). Its subtype census then feeds plan 13's transfer-class decision.
+
 ## [0.132.8.1] - 2026-10-20 — BASELINE: automated re-dump after the PROD apply of 0848bd77
 
 ### Changed

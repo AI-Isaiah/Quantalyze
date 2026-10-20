@@ -100,11 +100,11 @@ def _subtypes_answer(extra: list[dict[str, Any]] | None = None) -> dict[str, Any
         "code": "0",
         "data": [
             {"type": "1", "typeDesc": "Transfer",
-             "subTypes": [{"subType": "11"}, {"subType": "12"}]},
+             "subTypeDetails": [{"subType": "11"}, {"subType": "12"}]},
             {"type": "2", "typeDesc": "Trade",
-             "subTypes": [{"subType": "1"}, {"subType": "2"}, {"subType": "9999"}]},
+             "subTypeDetails": [{"subType": "1"}, {"subType": "2"}, {"subType": "9999"}]},
             {"type": "8", "typeDesc": "Funding",
-             "subTypes": [{"subType": "173"}, {"subType": "174"}]},
+             "subTypeDetails": [{"subType": "173"}, {"subType": "174"}]},
             *(extra or []),
         ],
     }
@@ -738,8 +738,8 @@ class TestRefusals:
         Stops after account/config and account/subtypes, and the result names the subtype."""
         world = _happy(monkeypatch)
         world.answers[SUBTYPES] = {"code": "0", "data": [
-            {"type": "2", "subTypes": [{"subType": "173"}, {"subType": "174"}]},
-            {"type": "1", "subTypes": [{"subType": "11"}]},
+            {"type": "2", "subTypeDetails": [{"subType": "173"}, {"subType": "174"}]},
+            {"type": "1", "subTypeDetails": [{"subType": "11"}]},
         ]}
         outcome = await dispatch(_job())
         result = _assert_refused(
@@ -759,7 +759,7 @@ class TestRefusals:
     ) -> None:
         world = _happy(monkeypatch)
         world.answers[SUBTYPES] = {"code": "0", "data": [
-            {"type": live_type, "subTypes": [{"subType": sub_type}]}
+            {"type": live_type, "subTypeDetails": [{"subType": sub_type}]}
         ]}
         outcome = await dispatch(_job())
         result = _assert_refused(

@@ -762,10 +762,10 @@ def _malformed_or(value: object) -> str:
 
 def _parse_live_subtypes(raw: object) -> dict[str, str] | None:
     """``subType -> type`` from the ``account/subtypes`` body, or None when the body has no
-    recognisable entry. The exact response shape is unmeasured until the first real call
-    (RESEARCH Section 3 quotes only an example), so both nestings are accepted: a ``type``
-    entry carrying a list of ``{subType: ...}`` objects (under ``subTypes`` or ``subType``)
-    or a flat ``{type, subType}`` entry."""
+    recognisable entry. OKX nests each ``type`` entry's list of ``{subType: ...}`` objects
+    under ``subTypeDetails`` (OKX v5 docs, "Get bill types"; the first real preflight, run
+    2026-10-20, read 0 entries while this looked for ``subTypes``). A flat ``{type, subType}``
+    entry is still accepted."""
     if not isinstance(raw, Mapping):
         return None
     data = raw.get("data")
@@ -777,7 +777,7 @@ def _parse_live_subtypes(raw: object) -> dict[str, str] | None:
             continue
         type_raw = item.get("type")
         nested = next(
-            (item[k] for k in ("subTypes", "subType") if isinstance(item.get(k), list)), None
+            (item[k] for k in ("subTypeDetails",) if isinstance(item.get(k), list)), None
         )
         pairs: list[tuple[object, object]] = []
         if nested is not None:
