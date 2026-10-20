@@ -159,6 +159,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [x] **Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly** (INSERTED) — 4 plans; closed 2026-10-14 (records PR) (verification passed, PROD glance taken 2026-10-14)
 - [ ] **Phase 166.5: COMPUTEDATSTAMP — the analytics runner stamps computed_at on a real finish** (INSERTED 2026-10-03) — not yet planned
+- [ ] **Phase 166.5.1: SENTRYTRIAGE — the three unbooked production Sentry groups are fixed at their root cause or silenced with a stated reason** (INSERTED 2026-10-20) — not yet planned (founder 2026-10-20; demo-allocator cron warning, worker ReadTimeouts, job-state race)
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [x] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — verified 2026-10-15 (completed 2026-10-15)
@@ -4540,6 +4541,29 @@ Plans:
 
 ⚠️ **Routed in from 164.6.6.3.4 STATUSBRIDGE (review round 4, 2026-10-08):** a SUCCESSFUL side-kind job whose sibling side job is still in flight takes the bridge's branch (a) and stamps `computed_at = now()` over stale analytics (and blanks the sentence); a later sibling failure then keeps that stamp under the D-09 hold. Same class as the successful-side-job stamp this phase owns. Also from that review: no gate arm pins the equal boundary of STATUSBRIDGE's D-09 release (`updated_at > computed_at`), and the marker retractions (`long_fetch.py`, `src/lib/ledger-refresh-marker.ts`) update a job by id with no status guard, which can bump a done row's `updated_at`.
 
+### Phase 166.5.1: SENTRYTRIAGE — the three unbooked production Sentry groups are fixed at their root cause or silenced with a stated reason (INSERTED)
+
+**Goal:** The three production Sentry groups no phase owns are fixed at their root cause, or silenced with a stated reason, so Sentry shows only real failures.
+**Booked:** founder 2026-10-20 ("yes, book a phase for the sentry items"). Data integrity (C) and operational noise (A, B).
+**Evidence (Sentry org metaworld-fund-ltd, unresolved, last 14 days, read 2026-10-20):**
+- **(A) QUANTALYZE-Z**, 170 events, last seen 1 h before the reading, at `/api/match/cron-recompute`. The match_engine cron warns on every run that the demo allocator seed row appears in the allocators list (role IN allocator/both) and skips it "to preserve demo boundary" (`analytics-service/routers/match.py`, the `demo allocator %s appeared in allocators list` log). Either the seed row lacks `profiles.is_example = true` on PROD, or the allocator query does not filter it.
+- **(B) ReadTimeout** ("The read operation timed out"), six groups, 37 events: QUANTALYZE-2C (18, `main_worker` `_claim_priority`), 2E (8, `services.job_worker` `_sel`), 2B (7, `main_worker` `_reset`), and 2F, 2G, 2D (4, `/api/match/cron-recompute`). The worker reads go through `db_read_with_retry` (`analytics-service/services/db.py`), which retries only gateway-timeout-shaped exceptions, so an httpx ReadTimeout propagates on the first attempt.
+- **(C) QUANTALYZE-2A and QUANTALYZE-A**, 2 + 2 events. `mark_compute_job_done` and `mark_compute_job_failed` find the job back at `pending` instead of `running` (P0002): a job's claim was reset or reclaimed while its runner was still finishing. That job-state race can lose a finished result.
+- **Out of scope, owned elsewhere:** QUANTALYZE-18 (SERVICE_KEY mismatch, booked); the `account_duplicate` refusals (QUANTALYZE-23 and 2H, expected since 167.1.2.1.1 WRITERRESIDUALS); benchmark refresh "no BTC series" (1M, 1N, 1P); the Bybit unmatched-IP funding fetch (21).
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 166.5
+
+**Success Criteria** (what must be TRUE):
+1. QUANTALYZE-Z: the root cause is measured on PROD (read-only, marker first) and fixed so the cron no longer sees the demo allocator, or the warning is downgraded with a recorded founder decision. A test pins the filter.
+2. ReadTimeout: each call site's timeout is classified as a transient read to retry within the gateway budget or a real stall to surface. Reads that are safe to retry are retried under the existing bounded budget, and a test goes RED on the old first-attempt propagation. No retry is added to a write.
+3. Job-state race: the sequence that returns a running job to `pending` while its runner still finishes is reproduced in a test and fixed at its source (claim, reset or lease), so a finished job is never lost or run twice. The mark functions' refusals stay loud.
+4. After deploy, each group's event rate is read from Sentry over 48 h, and the fixed groups are resolved there.
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ### Phase 166.1: ENGINEFLOOR — every Python ratio site reads the one dispersion floor, so a constant yield never produces a fabricated ratio (INSERTED)
 
 **Goal:** Every Python site outside `services/metrics.py` that divides by a standard deviation (the exact-zero guards S1-S8) or correlates a leg (C1-C8) reads Phase 166's relative dispersion floor from ONE module, `services/dispersion.py`, so a compounding-NAV constant yield produces exactly what an all-zero series produces at that site, each proven by a red test; one release commit ships it.
@@ -6360,6 +6384,7 @@ kept verbatim.
 | 166.4 BENCHALIGN | 4/4 | Complete | v0.108.0.0 · #892 · (verification passed 7/7) |
 | 166.4.1 PORTFOLIOANALYTICS | 4/4 | Complete | 2026-10-14 |
 | 166.5 COMPUTEDATSTAMP | 0/? | Queued — user-facing, booked 2026-10-03 | - |
+| 166.5.1 SENTRYTRIAGE | 0/? | Queued — booked 2026-10-20 (founder) | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Complete    | 2026-10-04 |
 | 167.1.1 HOLDINGKEYSCOPE | 5/5 | Complete | v0.132.0.0 · #1053; 375px follow-up v0.132.0.1 · #1056 |
