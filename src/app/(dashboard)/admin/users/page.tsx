@@ -7,6 +7,7 @@ import type { Metadata } from "next";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
+import { appRoleLabel, profileRoleLabel } from "@/lib/display-labels";
 
 export const metadata: Metadata = {
   title: "Users",
@@ -111,9 +112,9 @@ export default async function AdminUsersPage() {
                         {p.email ?? "—"}
                       </td>
                       <td className="px-4 py-3 text-text-secondary text-caption">
-                        {p.role}
+                        {profileRoleLabel(p.role)}
                         {p.is_admin && (
-                          <Badge label="legacy admin" className="ml-2" />
+                          <Badge label="Legacy admin" className="ml-2" />
                         )}
                       </td>
                       <td className="px-4 py-3">
@@ -124,7 +125,7 @@ export default async function AdminUsersPage() {
                         ) : (
                           <div className="flex flex-wrap gap-1">
                             {appRoles.map((r) => (
-                              <Badge key={r} label={r} />
+                              <Badge key={r} label={appRoleLabel(r)} />
                             ))}
                           </div>
                         )}
