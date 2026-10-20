@@ -8,6 +8,8 @@ import { isValidPartnerTag } from "@/lib/partner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { Badge, statusLabelMap } from "@/components/ui/Badge";
+import { disclosureTierLabel, labelOf } from "@/lib/display-labels";
 import { ScopedBanner } from "@/components/ui/ScopedBanner";
 import type { Profile, Strategy, Role } from "@/lib/types";
 
@@ -88,12 +90,31 @@ export default async function PartnerPilotPage({
   const strategies = (strategiesRes.data ?? []) as StrategyLite[];
   const introsCount = contactsRes.count ?? 0;
 
+  // Manager display names for the strategies' owners, read by id so a manager
+  // whose profile is not tagged to this pilot still resolves to a name.
+  const managerIds = Array.from(new Set(strategies.map((s) => s.user_id)));
+  const managerNameById = new Map<string, string>();
+  if (managerIds.length > 0) {
+    const { data: managerRows, error: managerError } = await admin
+      .from("profiles")
+      .select("id, display_name")
+      .in("id", managerIds);
+    if (managerError) {
+      console.error("[admin/partner-pilot] managerNames query failed", {
+        code: managerError.code,
+        message: managerError.message,
+      });
+      throw new Error("Partner pilot: managerNames query failed");
+    }
+    for (const row of managerRows ?? []) {
+      if (row.display_name) managerNameById.set(row.id, row.display_name);
+    }
+  }
+
   // Role union narrows the strings below — any future value added to Role in
   // types.ts that isn't handled here will surface as a TypeScript error.
   const ALLOCATOR_ROLES: Role[] = ["allocator", "both"];
-  const MANAGER_ROLES: Role[] = ["manager", "both"];
   const allocators = profiles.filter((p) => ALLOCATOR_ROLES.includes(p.role));
-  const managers = profiles.filter((p) => MANAGER_ROLES.includes(p.role));
 
   const potentialIntros = allocators.length * strategies.length;
 
@@ -181,9 +202,9 @@ export default async function PartnerPilotPage({
                     <div className="min-w-0 flex-1">
                       <p
                         className="text-small font-medium text-text-primary truncate"
-                        title={a.display_name || a.email || a.id.slice(0, 8)}
+                        title={a.display_name || a.email || "Unknown allocator"}
                       >
-                        {a.display_name || a.email || a.id.slice(0, 8)}
+                        {a.display_name || a.email || "Unknown allocator"}
                       </p>
                       {a.email && (
                         // The email is a mid-clip on narrow cards; title= makes
@@ -227,8 +248,10 @@ export default async function PartnerPilotPage({
               <ul className="divide-y divide-border -mx-2">
                 {strategies.map((s) => {
                   const managerName =
-                    managers.find((m) => m.id === s.user_id)?.display_name ||
-                    s.user_id.slice(0, 8);
+                    managerNameById.get(s.user_id) ?? "Unknown manager";
+                  const tierLabel = s.disclosure_tier
+                    ? disclosureTierLabel(s.disclosure_tier)
+                    : "—";
                   return (
                     <li key={s.id} className="px-2 py-2.5">
                       <p
@@ -239,13 +262,11 @@ export default async function PartnerPilotPage({
                       </p>
                       <p
                         className="text-caption text-text-muted truncate"
-                        title={`${s.status} · ${s.disclosure_tier ?? "—"} · ${managerName}`}
+                        title={`${labelOf(statusLabelMap, s.status, "Unknown status")} · ${tierLabel} · ${managerName}`}
                       >
-                        <span className="font-mono">{s.status}</span>
+                        <Badge type="status" label={s.status} />
                         {" · "}
-                        <span className="font-mono">
-                          {s.disclosure_tier ?? "—"}
-                        </span>
+                        {tierLabel}
                         {" · "}
                         {managerName}
                       </p>
