@@ -51,6 +51,7 @@ import {
 // Phase 169 review round 1 IN-04: the balance is an amount, so it renders
 // through the ONE money module in whole dollars (DESIGN.md Currency row).
 import { formatUsd } from "@/lib/dollar-validation";
+import { venueLabel } from "@/lib/display-labels";
 import {
   formatCloseDay,
   nativeAmount,
@@ -1423,7 +1424,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                   <div
                     className="flex h-10 w-10 items-center justify-center rounded-md font-metric text-xs font-bold tabular-nums"
                     style={{ backgroundColor: tag.bg, color: tag.fg }}
-                    aria-label={key.exchange}
+                    aria-label={venueLabel(key.exchange)}
                   >
                     {tag.label}
                   </div>
@@ -1432,7 +1433,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                       {key.label}
                     </p>
                     <p className="text-fixed-10 text-text-muted uppercase tracking-wider mt-0.5">
-                      {key.exchange} · Read-only
+                      {venueLabel(key.exchange)} · Read-only
                       {showBalance ? balanceSegment(key) : null}
                     </p>
                     {/* Founder D-74: this account's balance is on another
@@ -1488,7 +1489,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     <Button
                       variant="primary"
                       disabled={key.sync_status === "syncing"}
-                      aria-label={`Sync ${key.exchange} now`}
+                      aria-label={`Sync ${venueLabel(key.exchange)} now`}
                       title={
                         key.sync_status === "syncing"
                           ? "Sync in progress"
@@ -1501,7 +1502,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     {key.exchange === "mt5" && (
                       <Button
                         variant="secondary"
-                        aria-label={`Update password for ${key.exchange} key`}
+                        aria-label={`Update password for ${venueLabel(key.exchange)} key`}
                         onClick={() => setUpdatingKeyId(key.id)}
                       >
                         Update password
@@ -1509,7 +1510,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     )}
                     <Button
                       variant="secondary"
-                      aria-label={`Disconnect ${key.exchange} key`}
+                      aria-label={`Disconnect ${venueLabel(key.exchange)} key`}
                       onClick={() => openDeleteConfirm(key.id)}
                     >
                       Disconnect
@@ -1549,7 +1550,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                   <div
                     className="flex h-10 w-10 items-center justify-center rounded-md font-metric text-xs font-bold tabular-nums"
                     style={{ backgroundColor: tag.bg, color: tag.fg }}
-                    aria-label={key.exchange}
+                    aria-label={venueLabel(key.exchange)}
                   >
                     {tag.label}
                   </div>
@@ -1558,7 +1559,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                       {key.label}
                     </p>
                     <p className="text-fixed-10 text-text-muted uppercase tracking-wider mt-0.5">
-                      {key.exchange} · Disconnected{" "}
+                      {venueLabel(key.exchange)} · Disconnected{" "}
                       {formatRelative(key.disconnected_at)}
                     </p>
                     {/* Round-1 review (HIGH-1): a disconnected row carries a
@@ -1599,7 +1600,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     <Button
                       variant="primary"
                       disabled={key.sync_status === "syncing"}
-                      aria-label={`Reconnect ${key.exchange} key`}
+                      aria-label={`Reconnect ${venueLabel(key.exchange)} key`}
                       title={
                         key.sync_status === "syncing"
                           ? "Reconnect in progress"
@@ -1612,7 +1613,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
                     {key.exchange === "mt5" && (
                       <Button
                         variant="secondary"
-                        aria-label={`Update password for ${key.exchange} key`}
+                        aria-label={`Update password for ${venueLabel(key.exchange)} key`}
                         onClick={() => setUpdatingKeyId(key.id)}
                       >
                         Update password
@@ -1679,17 +1680,12 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
       ) : null}
 
       {(() => {
-        // Derive venue label from the row being confirmed. Reuses key.exchange
-        // (already the identifier used in EXCHANGE_TAGS + aria-labels) and
-        // capitalises via a simple first-letter-upper transform. No new
-        // mapping table — the row already carries the canonical string.
+        // The venue name in the title comes from the shared venueLabel, applied
+        // to the row being confirmed; empty when no row is selected.
         const confirmRow = confirmDeleteId
           ? keys.find((k) => k.id === confirmDeleteId)
           : null;
-        const venueLabel = confirmRow
-          ? confirmRow.exchange.charAt(0).toUpperCase() +
-            confirmRow.exchange.slice(1)
-          : "";
+        const confirmVenue = confirmRow ? venueLabel(confirmRow.exchange) : "";
         return (
           <Modal
             open={!!confirmDeleteId}
@@ -1700,7 +1696,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
               setDeleteHoldingsCount(null);
               setCascadeHoldings(false);
             }}
-            title={`Disconnect ${venueLabel}?`}
+            title={`Disconnect ${confirmVenue}?`}
           >
             <p className="text-sm text-text-secondary">
               We&apos;ll stop syncing this key. Your historical holdings stay

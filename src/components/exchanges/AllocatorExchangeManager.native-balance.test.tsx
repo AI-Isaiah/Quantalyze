@@ -113,7 +113,7 @@ describe("AllocatorExchangeManager — a native BTC key's balance (D-07, D-17)",
     ]);
     const el = line("Deribit BTC");
     expect(el.textContent).toBe(
-      "deribit · Read-only · Balance 0.4213 BTC · ≈ $26,100 at Oct 8 close",
+      "Deribit · Read-only · Balance 0.4213 BTC · ≈ $26,100 at Oct 8 close",
     );
     const titled = titledIn(el);
     expect(titled).toHaveLength(1);
@@ -132,7 +132,7 @@ describe("AllocatorExchangeManager — a native BTC key's balance (D-07, D-17)",
       }),
     ]);
     const el = line("Deribit BTC");
-    expect(el.textContent).toBe("deribit · Read-only · Balance 0.4213 BTC");
+    expect(el.textContent).toBe("Deribit · Read-only · Balance 0.4213 BTC");
     expect(el.textContent).not.toMatch(/[≈$—]/);
     const titled = titledIn(el);
     expect(titled).toHaveLength(1);
@@ -150,7 +150,7 @@ describe("AllocatorExchangeManager — a native BTC key's balance (D-07, D-17)",
       }),
     ]);
     const el = line("Deribit BTC");
-    expect(el.textContent).toBe("deribit · Read-only · Balance 0.4213 BTC");
+    expect(el.textContent).toBe("Deribit · Read-only · Balance 0.4213 BTC");
     expect(el.textContent).not.toMatch(/[≈$]|close/);
     expect(titledIn(el)[0].getAttribute("title")).toBe(
       "No USD value yet: the latest daily BTC close is not stored.",
@@ -165,7 +165,7 @@ describe("AllocatorExchangeManager — a native BTC key's balance (D-07, D-17)",
         account_balance_usdt_close_date: "2026-10-08",
       }),
     ]);
-    expect(line("Deribit BTC").textContent).toBe("deribit · Read-only · Balance 0.4213 BTC");
+    expect(line("Deribit BTC").textContent).toBe("Deribit · Read-only · Balance 0.4213 BTC");
   });
 
   it("the date shown is the stored one, not yesterday's by the viewer's clock", () => {
@@ -182,7 +182,7 @@ describe("AllocatorExchangeManager — a native BTC key's balance (D-07, D-17)",
       ]);
       const el = line("Deribit BTC");
       expect(el.textContent).toBe(
-        "deribit · Read-only · Balance 1.50 BTC · ≈ $90,000 at Oct 8 close",
+        "Deribit · Read-only · Balance 1.50 BTC · ≈ $90,000 at Oct 8 close",
       );
       expect(el.textContent).not.toContain("Dec");
     } finally {
@@ -193,7 +193,7 @@ describe("AllocatorExchangeManager — a native BTC key's balance (D-07, D-17)",
   it("no native balance read: `Balance —` with no title", () => {
     renderKeys([makeKey({ account_balance_native: null })]);
     const el = line("Deribit BTC");
-    expect(el.textContent).toBe("deribit · Read-only · Balance —");
+    expect(el.textContent).toBe("Deribit · Read-only · Balance —");
     expect(titledIn(el)).toHaveLength(0);
   });
 
@@ -206,7 +206,7 @@ describe("AllocatorExchangeManager — a native BTC key's balance (D-07, D-17)",
       }),
     ]);
     expect(line("Deribit BTC").textContent).toBe(
-      "deribit · Read-only · Balance 0.4213 BTC · ≈ $26,100 at Oct 8 close",
+      "Deribit · Read-only · Balance 0.4213 BTC · ≈ $26,100 at Oct 8 close",
     );
   });
 });
@@ -219,7 +219,7 @@ describe("AllocatorExchangeManager — USD-family keys keep today's line (D-02)"
   ])("%s: ` · Balance $12,345`, no title on any span", (_name, extra) => {
     renderKeys([makeKey({ account_balance_usdt: 12_345, ...extra })]);
     const el = line("Deribit BTC");
-    expect(el.textContent).toBe("deribit · Read-only · Balance $12,345");
+    expect(el.textContent).toBe("Deribit · Read-only · Balance $12,345");
     expect(titledIn(el)).toHaveLength(0);
     expect(el.querySelector("span")).toBeNull();
   });
@@ -228,7 +228,7 @@ describe("AllocatorExchangeManager — USD-family keys keep today's line (D-02)"
     renderKeys([
       makeKey({ account_currency: null, account_balance_native: null, account_balance_usdt: null }),
     ]);
-    expect(line("Deribit BTC").textContent).toBe("deribit · Read-only · Balance —");
+    expect(line("Deribit BTC").textContent).toBe("Deribit · Read-only · Balance —");
   });
 });
 
@@ -259,14 +259,14 @@ describe("AllocatorExchangeManager — an unpriced day never moves the balance (
   it("A (native balance, USD null) stays the bearer, exactly as when A is priced", () => {
     const { unmount } = renderKeys([A(26_099.54), B]);
     expect(line("Key A").textContent).toBe(
-      "deribit · Read-only · Balance 0.4213 BTC · ≈ $26,100 at Oct 8 close",
+      "Deribit · Read-only · Balance 0.4213 BTC · ≈ $26,100 at Oct 8 close",
     );
-    expect(line("Key B").textContent).toBe("deribit · Read-only");
+    expect(line("Key B").textContent).toBe("Deribit · Read-only");
     unmount();
 
     renderKeys([A(null), B]);
-    expect(line("Key A").textContent).toBe("deribit · Read-only · Balance 0.4213 BTC");
-    expect(line("Key B").textContent).toBe("deribit · Read-only");
+    expect(line("Key A").textContent).toBe("Deribit · Read-only · Balance 0.4213 BTC");
+    expect(line("Key B").textContent).toBe("Deribit · Read-only");
     expect(screen.getByTestId("balance-shown-elsewhere").textContent).toBe(
       "Balance shown on Key A",
     );
@@ -276,8 +276,8 @@ describe("AllocatorExchangeManager — an unpriced day never moves the balance (
   it("a native key with neither a native nor a USD balance ranks as no balance (unchanged)", () => {
     renderKeys([{ ...A(null), account_balance_native: null }, B]);
     // B alone holds a balance, so B bears it; A names it.
-    expect(line("Key B").textContent).toBe("deribit · Read-only · Balance $5,000");
-    expect(line("Key A").textContent).toBe("deribit · Read-only");
+    expect(line("Key B").textContent).toBe("Deribit · Read-only · Balance $5,000");
+    expect(line("Key A").textContent).toBe("Deribit · Read-only");
     expect(screen.getByTestId("balance-shown-elsewhere").textContent).toBe(
       "Balance shown on Key B",
     );
