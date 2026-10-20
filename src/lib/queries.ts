@@ -76,6 +76,7 @@ import type {
 } from "./types";
 import { SUPPORTED_EXCHANGES, type SupportedExchange } from "./utils";
 import { holdingScopeKey } from "./keys";
+import { holdingEquityContribution } from "@/lib/holding-equity";
 import { oneKeyPerAccountDay } from "./holdings-account-day";
 import {
   fetchLatestHoldingsPerKey,
@@ -3764,32 +3765,16 @@ export function partitionTrustworthyEquitySnapshots<
 /**
  * NEW-C03-01: Equity contribution by holding type.
  *
- *   - Spot: `value_usd` (marked fair value — this IS the equity contribution).
- *   - Derivative: `unrealized_pnl_usd` (the actual equity contribution).
- *     `value_usd` on a derivative is the NOTIONAL contract size — e.g. a 10x
- *     perp with $5M notional has ~$500k of margin/equity at stake, not $5M.
- *     Using notional inflates AUM by the leverage factor and dominates the
- *     per-holding weights used by computeScenario.
- *
- * Shorts: unrealized_pnl_usd is negative for a losing short. We include the
- * full signed value so the short's equity impact is reflected in the weight
- * (a deeply-negative short has near-zero positive weight, which is correct).
- * We don't clamp to 0 here — callers that need a non-negative weight for the
- * scenario can normalise after the fact.
+ * Phase 167.1.1.2 D-04: the definition now lives in the pure module
+ * `@/lib/holding-equity` (the client and the commit route import it directly;
+ * this file is `server-only`). It is re-exported here under the same name so
+ * every existing importer keeps working; the client alias
+ * `holdingEquityContributionLocal` is the SAME function object. D-06: it
+ * returns null for a derivative whose P&L was not reported; sums here skip it.
  *
  * @internal Exported for unit testing only (NEW-C03-01 regression).
  */
-export function holdingEquityContribution(h: MyAllocationDashboardPayload["holdingsSummary"][number]): number {
-  if (h.holding_type === "derivative") {
-    // unrealized_pnl_usd is required-but-nullable (never absent in production
-    // payloads; null for spot rows or when the sync worker has not yet written
-    // a P&L value). Fall back to 0 rather than notional when null — better
-    // to exclude a derivative than to treat notional as equity.
-    const pnl = h.unrealized_pnl_usd ?? 0;
-    return Number.isFinite(pnl) ? pnl : 0;
-  }
-  return Number.isFinite(h.value_usd) ? h.value_usd : 0;
-}
+export { holdingEquityContribution };
 
 /**
  * Phase 63 ENGINE-04 — the honest gate=false SSR live baseline. AUM is
@@ -3812,8 +3797,11 @@ export function emptyLiveBaselineMetrics(
 ): MyAllocationDashboardPayload["liveBaselineMetrics"] {
   // NEW-C03-01: AUM uses equity contribution (not notional), identical to the
   // per-key baseline's D2 rule so the AUM is byte-consistent across branches.
+  // 167.1.1.2 D-06: `liveBaselineMetrics.aum` is not rendered (UI-SPEC row
+  // "queries.ts liveBaselineMetrics.aum"), so a derivative whose P&L was not
+  // reported adds nothing (`?? 0`) and needs no count here; it added 0 before.
   const totalAum = holdingsSummary.reduce(
-    (s, h) => s + holdingEquityContribution(h),
+    (s, h) => s + (holdingEquityContribution(h) ?? 0),
     0,
   );
   return {
@@ -3875,7 +3863,7 @@ export function liveBaselineMetricsFromPerKeyDailies(
   // D2: AUM is unchanged — summed from holdings equity contribution, identical
   // to the gate=false emptyDefault branch (`emptyLiveBaselineMetrics`).
   const totalAum = holdingsSummary.reduce(
-    (s, h) => s + holdingEquityContribution(h),
+    (s, h) => s + (holdingEquityContribution(h) ?? 0),
     0,
   );
   const emptyDefault: MyAllocationDashboardPayload["liveBaselineMetrics"] = {
@@ -3897,7 +3885,8 @@ export function liveBaselineMetricsFromPerKeyDailies(
     if (!keyId) continue;
     equityByApiKeyId.set(
       keyId,
-      (equityByApiKeyId.get(keyId) ?? 0) + holdingEquityContribution(h),
+      // A key whose rows are all left out keeps weight 0, as before (D-06).
+      (equityByApiKeyId.get(keyId) ?? 0) + (holdingEquityContribution(h) ?? 0),
     );
   }
 
@@ -4409,20 +4398,45 @@ export type MissingSeriesReason = Extract<
   EquityHistoryRebuildReason,
   | "awaiting_derivation"
   | "derivation_rejected"
+  | "duplicate_account"
+  | "account_identity_pending"
   | "shared_account_no_working_key"
   | "shared_account_history_truncated"
   | "history_read_failed"
 >;
 
 /**
- * Review C2 round 3 R3-WR-03 / SFH-R3-04. The reason for a v2 row the writer
- * marked untrustworthy. Two of the writer's blocking tokens (job_worker's
- * compose call puts them in `degrade_reasons`, never in `flags`) have a cause
- * the owner can be told, so they get their own line instead of "did not pass
- * its checks". When both are present, `shared_account_no_working_key` wins
- * because it is the one the owner can fix; the writer sorts the tokens, so
- * array order must not decide. Every other token, and a payload with no
- * readable tokens, keeps `derivation_rejected`.
+ * Review C2 round 3 R3-WR-03 / SFH-R3-04, widened by 167.1.2.1.1 SC-1 (D-04).
+ * The reason for a v2 row the writer marked untrustworthy. The tokens are read
+ * from `degrade_reasons` (where job_worker puts them, never in `flags`), and the
+ * most actionable cause wins, so the writer's sorted array order never decides:
+ *
+ *   1. `shared_account_no_working_key`: the one the owner can fix. 167.1.2.1.1
+ *      SC-2 (D-03, D-04): `failing_key_series_ended` (a lone failing key whose series
+ *      stopped before the book's last day) shares this slot and this line, since it is
+ *      the same fact and the same owner action.
+ *   2. `account_duplicate` / `account_identity_collision`: the derive refused
+ *      the book over two keys reading one exchange account (SC-1 persists the
+ *      refusal instead of deleting the row), the line the key list already
+ *      gives a marked duplicate: `duplicate_account`.
+ *   2b. `account_identity_pending` (167.1.2.1.1 SC-6, D-03/D-04): two or more unknown
+ *      working keys on one stamping venue may be one account counted twice. The
+ *      existing identity-pending line, after a duplicate and before the history lines.
+ *   3. `shared_account_history_truncated`. 167.1.2.1.1 SC-3 (D-03, D-04):
+ *      `shared_account_flows_disagree` (stitched members list different flows for an
+ *      owned day) reads this same existing line.
+ *   4. `compose_incomplete` / `compose_empty` ALONE: the derive is waiting on
+ *      its siblings or has nothing to draw yet, which the daily recompute does
+ *      answer: `awaiting_derivation`. Next to ANY other token (for example
+ *      `dropped_key`) it is not a wait, so it falls through. `compose_empty_blocked`
+ *      is a different token, so a blocking cause cannot be swallowed by the wait.
+ *   5. Every other token, and a payload with no readable tokens, keeps
+ *      `derivation_rejected` (`returns_read_cap`, `input_corrupt`,
+ *      `compose_refused`, `compose_empty_blocked`, every other blocker).
+ *
+ * No new line exists for any refusal token: each maps onto one the owner already
+ * sees. The table both runtimes and the census assert is
+ * analytics-service/tests/fixtures/derive_refusal_rows.json.
  *
  * Residual (recorded): alongside another blocker (for example `dropped_key`)
  * the named line is still true, but fixing the key alone may not unlock the
@@ -4432,18 +4446,41 @@ function untrustworthyRebuildReason(
   payload: unknown,
 ): Extract<
   MissingSeriesReason,
-  "derivation_rejected" | "shared_account_no_working_key" | "shared_account_history_truncated"
+  | "awaiting_derivation"
+  | "derivation_rejected"
+  | "duplicate_account"
+  | "account_identity_pending"
+  | "shared_account_no_working_key"
+  | "shared_account_history_truncated"
 > {
   const tokens =
     payload !== null && typeof payload === "object"
       ? (payload as Record<string, unknown>).degrade_reasons
       : undefined;
   if (!Array.isArray(tokens)) return "derivation_rejected";
-  if (tokens.includes("shared_account_no_working_key")) {
+  if (
+    tokens.includes("shared_account_no_working_key") ||
+    tokens.includes("failing_key_series_ended")
+  ) {
     return "shared_account_no_working_key";
   }
-  if (tokens.includes("shared_account_history_truncated")) {
+  if (tokens.includes("account_duplicate") || tokens.includes("account_identity_collision")) {
+    return "duplicate_account";
+  }
+  if (tokens.includes("account_identity_pending")) {
+    return "account_identity_pending";
+  }
+  if (
+    tokens.includes("shared_account_history_truncated") ||
+    tokens.includes("shared_account_flows_disagree")
+  ) {
     return "shared_account_history_truncated";
+  }
+  if (
+    tokens.length === 1 &&
+    (tokens[0] === "compose_incomplete" || tokens[0] === "compose_empty")
+  ) {
+    return "awaiting_derivation";
   }
   return "derivation_rejected";
 }

@@ -24,7 +24,7 @@ import { contactHref } from "@/lib/contact";
  */
 
 export const metadata: Metadata = {
-  title: "Security — Quantalyze",
+  title: "Security",
   description:
     "How Quantalyze handles your exchange API keys, portfolio data, and compliance posture.",
   alternates: {

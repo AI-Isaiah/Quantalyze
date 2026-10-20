@@ -232,6 +232,15 @@ test.describe("/strategies/new/wizard?source=csv (Phase 15 / CSV-01..CSV-03)", (
       timeout: 15_000,
     });
 
+    // 13b. 170.1 D-07 — the redirect param drives a status line on the list,
+    //      and a submit the server accepted reads "submitted" (a duplicate-ok
+    //      reply follows the same path). The line is rendered by
+    //      src/app/(dashboard)/strategies/page.tsx (plan 170.1-06). Typed as a
+    //      literal on purpose: the assertion must fail if the wording drifts.
+    await expect(page.getByTestId("wizard-submitted-status")).toHaveText(
+      "Strategy submitted. It is listed below as pending review.",
+    );
+
     // 14. CSV-03 verification: the just-submitted strategy appears in the
     //     owner's list under the user-typed name (own-seed assertion — the
     //     name was minted by THIS test).

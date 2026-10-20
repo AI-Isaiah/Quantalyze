@@ -40,7 +40,7 @@ import { contactHref } from "@/lib/contact";
  */
 
 export const metadata: Metadata = {
-  title: "Application under review | Quantalyze",
+  title: "Application under review",
   description: "Your Quantalyze application is being reviewed by our team.",
   robots: { index: false, follow: false },
 };

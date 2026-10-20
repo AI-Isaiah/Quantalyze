@@ -3199,7 +3199,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // -------------------------------------------------------------------------
   // T_C_P1933 — P1933 CRITICAL: empty-state add flow + commit must refuse
   //   when scenarioAum=0 (every voluntary_add row would land with
-  //   size_at_decision_usd:0 → division-by-zero downstream).
+  //   size_at_decision_usd:0, a decision recorded with no magnitude).
   //
   // Phase 151 / AUM-03 (Tests 10 + 12) — REWRITTEN, not replaced: the refusal
   // SEMANTICS below (no drawer, no callback) are the original guard and are
@@ -4009,7 +4009,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // NEW-C18-05 regression — per-row size gate: a voluntary_add with weight=0
   // (positive AUM, non-zero scenarioAum) must be refused with a named error.
   // Before this fix, a weight-0 add passed the global AUM>0 guard and committed
-  // size_at_decision_usd:0, causing a division-by-zero in the daily-delta cron.
+  // size_at_decision_usd:0, a decision recorded with no magnitude. (167.1.1.2
+  // P-01: the size is recorded only in `audit_log.metadata` and nothing reads
+  // it after the commit, so no downstream divide was ever at stake.)
   // -------------------------------------------------------------------------
   it("NEW-C18-05: voluntary_add with weight=0 and positive AUM → named error, no commit", () => {
     // Payload with live holdings so scenarioAum > 0.
@@ -17088,9 +17090,10 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     expect(note?.hasAttribute("aria-live")).toBe(false);
   });
 
-  it("AUMTRUST review WR-03: an untrusted derivative with no reported P&L is disclosed as unavailable, never as a known $0 — in State A and inside the override note", () => {
+  it("AUMTRUST review WR-03 (167.1.1.2 D-06): an untrusted derivative with no reported P&L is left out of the total and of the untrusted part, named by the left-out sentence and never shown as a known $0 — in State A and inside the override note", () => {
     // trusted spot 37,655 + sign_in_failed spot 12,345 + sign_in_failed
-    // derivative with a null P&L (sums as 0) = 50,000, unchanged (D-03).
+    // derivative with a null P&L (left out of the total AND of every includes
+    // part, 167.1.1.2 D-06 / UI-SPEC U-05) = 50,000, unchanged (D-03).
     const payload = atBook([
       {
         id: AT_KEY_TRUSTED,
@@ -17121,14 +17124,25 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     const stateA = screen.getAllByTestId("scenario-aum-untrusted-note");
     expect(stateA).toHaveLength(1);
     expect(stateA[0].textContent).toBe(
-      "Includes $12,345 from keys needing attention (value unavailable for 1 holding).",
+      "Includes $12,345 from keys needing attention.",
     );
+    // 167.1.1.2 D-06: the derivative is named, once, by the founder's sentence.
+    const missingA = screen.getAllByTestId("scenario-aum-pnl-missing-note");
+    expect(missingA).toHaveLength(1);
+    expect(missingA[0].textContent).toBe(
+      "1 derivative without reported P&L left out.",
+    );
+    expect(
+      stateA[0].compareDocumentPosition(missingA[0]) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
 
     commitAum("75000");
     expect(screen.getByTestId("scenario-aum-override-note").textContent).toBe(
-      "Overrides live-holdings total $50,000, which includes $12,345 from keys needing attention (value unavailable for 1 holding).",
+      "Overrides live-holdings total $50,000, which includes $12,345 from keys needing attention. 1 derivative without reported P&L left out.",
     );
     expect(screen.getAllByTestId("scenario-aum-untrusted-note")).toHaveLength(1);
+    expect(screen.getAllByTestId("scenario-aum-pnl-missing-note")).toHaveLength(1);
   });
 
   // ── THE MISSING-KEY BOOK (review WR-05) ──────────────────────────────────
@@ -17268,9 +17282,13 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     ).toHaveLength(0);
   });
 
-  it("AUMTRUST review round 2 IN-01 / IN-05: with both parts present, \"(value unavailable for N …)\" follows the part it belongs to — an untrusted holding's missing P&L never reads as qualifying the unknown-status amount", () => {
+  it("AUMTRUST review round 2 IN-01 / IN-05 (167.1.1.2 D-06): a derivative with no reported P&L on an untrusted key does not open the untrusted part, so the marker names only the unknown-status amount", () => {
     // The untrusted key's one holding is a derivative whose P&L the venue did
-    // not report (sums as 0). Live total: 480,000 + 0 + 4,444 = 484,444.
+    // not report: left out of the total and of every includes part (167.1.1.2
+    // D-06, UI-SPEC U-05). Live total: 480,000 + 4,444 = 484,444. The
+    // "(value unavailable for N …)" ordering intent this test used to pin is
+    // now pinned at the builder level (live-holdings-summary.test.ts,
+    // buildKeyTrustClause).
     const base = atMissingKeyBook("sign_in_failed");
     const payload: MyAllocationDashboardPayload = {
       ...base,
@@ -17294,15 +17312,284 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
       expect(aumField().value).toBe("484444");
       const markers = screen.getAllByTestId("scenario-aum-untrusted-note");
       expect(markers).toHaveLength(1);
-      // 169 review round 2 IN-R2-05 / SFH R2-5: a part whose every row is unavailable has
-      // no known amount (the 0 is the sum of nothing), so it names its count, never
-      // "$0". The "(… unavailable for N …)" count is unchanged.
+      // The untrusted part is empty, so the marker no longer opens "Includes
+      // ... from keys needing attention".
       expect(markers[0].textContent).toBe(
-        "Includes 1 holding from keys needing attention (value unavailable for 1 holding) and $4,444 from keys with an unknown sync status.",
+        "Includes $4,444 from keys with an unknown sync status.",
+      );
+      // 167.1.1.2 D-06: the left-out derivative is named by the sentence.
+      const missing = screen.getAllByTestId("scenario-aum-pnl-missing-note");
+      expect(missing).toHaveLength(1);
+      expect(missing[0].textContent).toBe(
+        "1 derivative without reported P&L left out.",
       );
     } finally {
       errSpy.mockRestore();
     }
+  });
+
+  // ── 167.1.1.2 D-06 / UI-SPEC P1 — "N derivatives without reported P&L left
+  //    out." beside the live-holdings total ───────────────────────────────────
+  // Every expected string is typed literally from the UI-SPEC tables; none is
+  // produced by calling the builder under test. A derivative with
+  // `derivPnlUsd: null` is one the venue reported no P&L for.
+  const AT_KEY_C = "aumtrust-key-c";
+  const AT_KEY_E = "aumtrust-key-e";
+  const AT_KEY_F = "aumtrust-key-f";
+  const MISSING_ID = "scenario-aum-pnl-missing-note";
+
+  /** trusted spot 50,000 + `leftOut` trusted derivatives with no reported P&L.
+   *  Live total stays 50,000 (a left-out row adds nothing). */
+  function atLeftOutBook(leftOut: 1 | 2): MyAllocationDashboardPayload {
+    return atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "binance", symbol: "AUMTRUST-A", spotUsd: 50_000 },
+      { id: AT_KEY_C, status: null, venue: "deribit", symbol: "AUMTRUST-C-PERP", derivPnlUsd: null },
+      ...(leftOut === 2
+        ? [{ id: AT_KEY_E, status: null, venue: "bybit", symbol: "AUMTRUST-E-PERP", derivPnlUsd: null }]
+        : []),
+    ]);
+  }
+
+  /** A book whose live total is exactly 0 because EVERY holding is a
+   *  derivative with no reported P&L (3 of them). */
+  function atAllLeftOutBook(): MyAllocationDashboardPayload {
+    return atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "deribit", symbol: "AUMTRUST-A-PERP", derivPnlUsd: null },
+      { id: AT_KEY_C, status: null, venue: "bybit", symbol: "AUMTRUST-C-PERP", derivPnlUsd: null },
+      { id: AT_KEY_E, status: null, venue: "okx", symbol: "AUMTRUST-E-PERP", derivPnlUsd: null },
+    ]);
+  }
+
+  it("167.1.1.2 State A, many: two left-out derivatives render the plural sentence right after the input, and the input's description names it", () => {
+    const payload = atLeftOutBook(2);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe("50000");
+    const notes = screen.getAllByTestId(MISSING_ID);
+    expect(notes).toHaveLength(1);
+    expect(notes[0].textContent).toBe(
+      "2 derivatives without reported P&L left out.",
+    );
+    expect(notes[0].id).toBe(MISSING_ID);
+    expect(notes[0].className).toContain("text-xs");
+    expect(notes[0].className).toContain("text-text-muted");
+    expect(notes[0].hasAttribute("role")).toBe(false);
+    expect(notes[0].hasAttribute("aria-live")).toBe(false);
+    expect(
+      aumField().compareDocumentPosition(notes[0]) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(aumField().getAttribute("aria-describedby")).toBe(MISSING_ID);
+    expect(aumField()).toHaveAccessibleDescription(
+      "2 derivatives without reported P&L left out.",
+    );
+    // Nothing else in the row claims the key-trust voice.
+    expect(screen.queryByTestId("scenario-aum-untrusted-note")).toBeNull();
+  });
+
+  it("167.1.1.2 State A, one: a single left-out derivative uses the singular noun", () => {
+    renderAt(atLeftOutBook(1));
+    expect(screen.getByTestId(MISSING_ID).textContent).toBe(
+      "1 derivative without reported P&L left out.",
+    );
+  });
+
+  it("167.1.1.2 State A with the key-trust marker: two flex items in order — 'Includes $12,345 …' then the sentence — and the description lists the untrusted note id first", () => {
+    const payload = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "binance", symbol: "AUMTRUST-A", spotUsd: AT_B_TRUSTED_USD },
+      { id: AT_KEY_SIGN_IN_FAILED, status: "sign_in_failed", venue: "okx", symbol: "AUMTRUST-B", spotUsd: AT_B_UNTRUSTED_USD },
+      { id: AT_KEY_C, status: null, venue: "deribit", symbol: "AUMTRUST-C-PERP", derivPnlUsd: null },
+      { id: AT_KEY_E, status: null, venue: "bybit", symbol: "AUMTRUST-E-PERP", derivPnlUsd: null },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe(String(AT_B_LIVE_TOTAL));
+    const marker = screen.getByTestId("scenario-aum-untrusted-note");
+    const missing = screen.getByTestId(MISSING_ID);
+    expect(marker.textContent).toBe("Includes $12,345 from keys needing attention.");
+    expect(missing.textContent).toBe("2 derivatives without reported P&L left out.");
+    expect(marker.parentElement).toBe(missing.parentElement);
+    expect(
+      marker.compareDocumentPosition(missing) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(aumField().getAttribute("aria-describedby")).toBe(
+      "scenario-aum-untrusted-note scenario-aum-pnl-missing-note",
+    );
+    expect(aumField()).toHaveAccessibleDescription(
+      "Includes $12,345 from keys needing attention. 2 derivatives without reported P&L left out.",
+    );
+  });
+
+  it("167.1.1.2 State A sits BEFORE the modelled-book note", () => {
+    const payload = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "binance", symbol: "AUMTRUST-A", spotUsd: 50_000 },
+      { id: AT_KEY_C, status: null, venue: "deribit", symbol: "AUMTRUST-C-PERP", derivPnlUsd: null },
+      { id: AT_KEY_SIGN_IN_FAILED, status: null, venue: "okx", symbol: "AUMTRUST-B", spotUsd: 1_000, contributing: false },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    const missing = screen.getByTestId(MISSING_ID);
+    const modelled = screen.getByTestId("scenario-aum-modelled-note");
+    expect(missing.textContent).toBe("1 derivative without reported P&L left out.");
+    expect(
+      missing.compareDocumentPosition(modelled) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("167.1.1.2 State B: a committed manual value moves the sentence INTO the override note, after its period — exactly one element carries the id, and it has no class of its own", () => {
+    renderAt(atLeftOutBook(1));
+    commitAum("40000");
+    expect(atManualAumOnWire()).toBe(40_000);
+
+    const note = screen.getByTestId("scenario-aum-override-note");
+    expect(note.textContent).toBe(
+      "Overrides live-holdings total $50,000. 1 derivative without reported P&L left out.",
+    );
+    const nested = screen.getAllByTestId(MISSING_ID);
+    expect(nested).toHaveLength(1);
+    expect(nested[0].closest('[data-testid="scenario-aum-override-note"]')).toBe(note);
+    expect(nested[0].hasAttribute("class")).toBe(false);
+    expect(nested[0].hasAttribute("id")).toBe(false);
+    // The override note is already the field's description; the sentence is inside it.
+    expect(aumField().getAttribute("aria-describedby")).toBe("scenario-aum-override-note");
+    expect(aumField()).toHaveAccessibleDescription(
+      "Overrides live-holdings total $50,000. 1 derivative without reported P&L left out.",
+    );
+  });
+
+  it("167.1.1.2 State C: a live total of $0 produced only by left-out derivatives is explained — hint, sentence, and the input is described by the hint", () => {
+    const payload = atAllLeftOutBook();
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe("");
+    const hint = screen.getByTestId("scenario-aum-required-note");
+    expect(hint.textContent).toBe(
+      "Required to size and commit. The live-holdings total is $0. 3 derivatives without reported P&L left out.",
+    );
+    const nested = screen.getAllByTestId(MISSING_ID);
+    expect(nested).toHaveLength(1);
+    expect(nested[0].closest('[data-testid="scenario-aum-required-note"]')).toBe(hint);
+    expect(nested[0].hasAttribute("class")).toBe(false);
+    expect(aumField().getAttribute("aria-describedby")).toBe("scenario-aum-required-note");
+    expect(aumField()).toHaveAccessibleDescription(
+      "Required to size and commit. The live-holdings total is $0. 3 derivatives without reported P&L left out.",
+    );
+  });
+
+  it("167.1.1.2 State C with the key-trust marker and one left-out derivative: the sentence follows the clause's closing period", () => {
+    const base = atNonPositiveBook();
+    const payload = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "deribit", symbol: "AUMTRUST-A-PERP", derivPnlUsd: -5_000 },
+      { id: AT_KEY_SIGN_IN_FAILED, status: "sign_in_failed", venue: "okx", symbol: "AUMTRUST-B", spotUsd: 1_000 },
+      { id: AT_KEY_C, status: null, venue: "bybit", symbol: "AUMTRUST-C-PERP", derivPnlUsd: null },
+    ]);
+    // Fixture self-proof: the same book as the live <= 0 book plus one row.
+    expect(payload.holdingsSummary).toHaveLength(base.holdingsSummary.length + 1);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+
+    expect(aumField().value).toBe("");
+    expect(screen.getByTestId("scenario-aum-required-note").textContent).toBe(
+      "Required to size and commit. The live-holdings total is -$4,000, which includes $1,000 from keys needing attention. 1 derivative without reported P&L left out.",
+    );
+    expect(screen.getAllByTestId(MISSING_ID)).toHaveLength(1);
+    expect(screen.getAllByTestId("scenario-aum-untrusted-note")).toHaveLength(1);
+  });
+
+  it("167.1.1.2 state 7: a manual value with a live total at or below 0 shows NO sentence — nothing on screen holds the live total", () => {
+    const payload = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "deribit", symbol: "AUMTRUST-A-PERP", derivPnlUsd: -5_000 },
+      { id: AT_KEY_SIGN_IN_FAILED, status: "sign_in_failed", venue: "okx", symbol: "AUMTRUST-B", spotUsd: 1_000 },
+      { id: AT_KEY_C, status: null, venue: "bybit", symbol: "AUMTRUST-C-PERP", derivPnlUsd: null },
+      { id: AT_KEY_E, status: null, venue: "okx", symbol: "AUMTRUST-E-PERP", derivPnlUsd: null },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    // Non-vacuity: before the commit the hint DOES carry the sentence (count 2).
+    expect(screen.getByTestId(MISSING_ID).textContent).toBe(
+      "2 derivatives without reported P&L left out.",
+    );
+
+    commitAum("75000");
+    expect(atManualAumOnWire()).toBe(75_000);
+    expect(screen.queryByTestId(MISSING_ID)).toBeNull();
+    expect(screen.queryByTestId("scenario-aum-override-note")).toBeNull();
+    expect(screen.queryByText(/without reported P&L/)).toBeNull();
+  });
+
+  it("167.1.1.2 count 0: no sentence element and no '0 derivatives' text in any state, and the plain hint stays undescribed", () => {
+    renderAt(atStateBBook(null));
+    expect(screen.queryByTestId(MISSING_ID)).toBeNull();
+    commitAum("75000");
+    expect(screen.queryByTestId(MISSING_ID)).toBeNull();
+    expect(document.body.textContent).not.toContain("without reported P&L");
+
+    cleanup();
+    const base = atNonPositiveBook();
+    renderAt({
+      ...base,
+      apiKeys: base.apiKeys.map((k) => ({ ...k, sync_status: null })),
+    });
+    expect(screen.getByTestId("scenario-aum-required-note").textContent).toBe(
+      "Required to size and commit.",
+    );
+    expect(screen.queryByTestId(MISSING_ID)).toBeNull();
+    expect(aumField().hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("167.1.1.2 blank slate: no sentence — the AUM is the allocator's own and holdingsSummary is not read", () => {
+    renderAt(atLeftOutBook(2));
+    // Non-vacuity: the same book in book mode carries the sentence.
+    expect(screen.getByTestId(MISSING_ID).textContent).toBe(
+      "2 derivatives without reported P&L left out.",
+    );
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(screen.queryByTestId(MISSING_ID)).toBeNull();
+  });
+
+  it("167.1.1.2 non-finite P&L is counted like a null, and a spot row is never counted", () => {
+    const payload = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "binance", symbol: "AUMTRUST-A", spotUsd: 50_000 },
+      { id: AT_KEY_C, status: null, venue: "deribit", symbol: "AUMTRUST-C-PERP", derivPnlUsd: Number.NaN },
+      { id: AT_KEY_E, status: null, venue: "bybit", symbol: "AUMTRUST-E-PERP", derivPnlUsd: Number.POSITIVE_INFINITY },
+      { id: AT_KEY_F, status: null, venue: "okx", symbol: "AUMTRUST-F", spotUsd: Number.NaN },
+    ]);
+    expectDistinctTriples(payload);
+    renderAt(payload);
+    expect(screen.getByTestId(MISSING_ID).textContent).toBe(
+      "2 derivatives without reported P&L left out.",
+    );
+  });
+
+  it("167.1.1.2 counting is per row: two keys holding the SAME perp with no reported P&L count as 2", () => {
+    const payload = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "binance", symbol: "AUMTRUST-A", spotUsd: 50_000 },
+      { id: AT_KEY_C, status: null, venue: "deribit", symbol: "AUMTRUST-SHARED-PERP", derivPnlUsd: null },
+      { id: AT_KEY_E, status: null, venue: "deribit", symbol: "AUMTRUST-SHARED-PERP", derivPnlUsd: null },
+    ]);
+    // Fixture self-proof: the two derivative rows share ONE triple.
+    expect(new Set(payload.holdingsSummary.map(buildHoldingRef)).size).toBe(2);
+    expect(payload.holdingsSummary).toHaveLength(3);
+    renderAt(payload);
+    expect(screen.getByTestId(MISSING_ID).textContent).toBe(
+      "2 derivatives without reported P&L left out.",
+    );
+  });
+
+  it("167.1.1.2 a left-out derivative on a key the modelled-book narrowing dropped is NOT counted here", () => {
+    const payload = atBook([
+      { id: AT_KEY_TRUSTED, status: null, venue: "binance", symbol: "AUMTRUST-A", spotUsd: 50_000 },
+      { id: AT_KEY_C, status: null, venue: "deribit", symbol: "AUMTRUST-C-PERP", derivPnlUsd: null, contributing: false },
+    ]);
+    expectDistinctTriples(payload);
+    expect(payload.contributingApiKeyIds).not.toContain(AT_KEY_C);
+    renderAt(payload);
+    expect(aumField().value).toBe("50000");
+    expect(screen.queryByTestId(MISSING_ID)).toBeNull();
   });
 
   it("AUMTRUST review WR-05: a missing-key holding alone (every listed key trusted) still renders the marker — the gate counts unknown-status holdings too", () => {

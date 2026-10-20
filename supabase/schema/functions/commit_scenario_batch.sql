@@ -2,9 +2,9 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261011120100_commit_scenario_batch_fingerprint_unpriced.sql
+-- source migration: 20261027120000_commit_scenario_batch_fingerprint_sameday_empty.sql
 -- --------------------------------------------------------------------------
--- STEP 1: re-install the 5-arg body with the native-unpriced arm in the recompute
+-- STEP 1: re-install the 5-arg body with the same-day-empty arm in the recompute
 -- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.commit_scenario_batch(
   p_allocator_id uuid,
@@ -172,7 +172,11 @@ BEGIN
   --      non-negative whole number and asof is a YYYY-MM-DD string
   --      (cleanPollDay). When its day is STRICTLY after the key's latest rows,
   --      the key's reading is that day with no rows (SFH-C4-02); otherwise it
-  --      is the latest asof with rows;
+  --      is the latest asof with rows, UNLESS the key's newest event of ANY outcome
+  --      (newest_meta, no final_status filter) is a clean poll whose row_count is
+  --      exactly 0 and whose asof IS the key's latest rows' day: then the reading
+  --      is that day with no rows (Phase 167.1.2.1.2 D-02, empty_day and
+  --      same_day_empty below);
   --   3. keys grouped by exchange account (accountIdentityTokens, the D-09
   --      identity: a shared non-blank venue_account_id on one exchange, or an
   --      account_shared_with_api_key_id marker of a shared kind, joined
@@ -193,7 +197,10 @@ BEGIN
   -- supabase/tests/test_commit_scenario_batch_fingerprint_precondition.sql
   -- tests 10-14 and supabase/tests/test_commit_scenario_batch_fingerprint_unpriced.sql
   -- (the native-unpriced arm, bound to the TypeScript side by
-  -- src/lib/fingerprint-unpriced-parity.test.ts).
+  -- src/lib/fingerprint-unpriced-parity.test.ts) and
+  -- supabase/tests/test_commit_scenario_batch_fingerprint_sameday_empty.sql (the
+  -- D-02 same-day-empty arm, bound to the TypeScript side by
+  -- src/lib/fingerprint-sameday-empty-parity.test.ts).
   --
   -- The token format MIRRORS computeHoldingsFingerprint (scenario-state.ts):
   -- symbol-first "symbol:venue:holding_type", and NO value_usd filter (the
@@ -275,6 +282,17 @@ BEGIN
                  AND al.metadata->>'final_status' = 'complete'
                ORDER BY al.created_at DESC
                LIMIT 1) AS poll_meta,
+             -- Phase 167.1.2.1.2 D-02: the key's newest poll event of ANY outcome
+             -- (no final_status filter), the read behind the reader's partialDay.
+             (SELECT al.metadata
+                FROM audit_log al
+               WHERE al.user_id     = p_allocator_id
+                 AND al.action      = 'allocator.holdings.sync_completed'
+                 AND al.entity_type = 'api_key'
+                 AND al.entity_id   = k.id
+               -- D-02: no final_status filter: the newest poll of ANY outcome
+               ORDER BY al.created_at DESC
+               LIMIT 1) AS newest_meta,
              -- 170.4 WR-02: the positions poll's service-written record that it
              -- found a native-unit account UNPRICED (allocator_equity_derived has
              -- one row per (allocator_id, kind); the owner has SELECT only).
@@ -311,7 +329,23 @@ BEGIN
                WHEN jsonb_typeof(e.unpriced_meta->'asof') IS DISTINCT FROM 'string' THEN NULL
                WHEN (e.unpriced_meta->>'asof') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN NULL
                ELSE e.unpriced_meta->>'asof'
-             END AS unpriced_day
+             END AS unpriced_day,
+             -- D-02 (cleanEmptyPollDay). The poll_day guard ladder applied to the
+             -- newest poll of ANY outcome, plus: the poll must be clean
+             -- (final_status 'complete') and must have read nothing (row_count 0).
+             CASE
+               WHEN e.newest_meta IS NULL THEN NULL
+               WHEN jsonb_typeof(e.newest_meta) <> 'object' THEN NULL
+               WHEN e.newest_meta->>'final_status' IS DISTINCT FROM 'complete' THEN NULL
+               WHEN jsonb_typeof(e.newest_meta->'row_count') IS DISTINCT FROM 'number' THEN NULL
+               WHEN (e.newest_meta->>'row_count')::numeric < 0 THEN NULL
+               WHEN (e.newest_meta->>'row_count')::numeric
+                    <> trunc((e.newest_meta->>'row_count')::numeric) THEN NULL
+               WHEN (e.newest_meta->>'row_count')::numeric <> 0 THEN NULL
+               WHEN jsonb_typeof(e.newest_meta->'asof') IS DISTINCT FROM 'string' THEN NULL
+               WHEN (e.newest_meta->>'asof') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN NULL
+               ELSE e.newest_meta->>'asof'
+             END AS empty_day
         FROM key_evidence e
     ),
     key_reading AS (
@@ -322,13 +356,18 @@ BEGIN
                    OR p.poll_day COLLATE "C" > p.latest_day COLLATE "C")) AS polled_after_rows,
              (p.unpriced_day IS NOT NULL
               AND (p.latest_day IS NULL
-                   OR p.unpriced_day COLLATE "C" > p.latest_day COLLATE "C")) AS unpriced_after_rows
+                   OR p.unpriced_day COLLATE "C" > p.latest_day COLLATE "C")) AS unpriced_after_rows,
+             -- D-02: the newest poll read nothing on the rows' OWN day. Equality,
+             -- not "after": the strict arms above cannot see this poll.
+             (p.empty_day IS NOT NULL
+              AND p.latest_day IS NOT NULL
+              AND p.empty_day COLLATE "C" = p.latest_day COLLATE "C") AS same_day_empty
         FROM key_poll p
     ),
     key_day AS (
       SELECT r.id,
              r.latest_asof,
-             NOT (r.unpriced_after_rows OR r.polled_after_rows) AS has_rows,
+             NOT (r.unpriced_after_rows OR r.polled_after_rows OR r.same_day_empty) AS has_rows,
              CASE WHEN r.unpriced_after_rows THEN p.unpriced_day
                   WHEN r.polled_after_rows THEN p.poll_day
                   ELSE p.latest_day END AS day

@@ -372,6 +372,26 @@ describe("Overview / Risk history parity matrix (D-04, D-07, D-09)", () => {
     expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
   });
 
+  // Phase 167.1.2.1.2 D-04 (2026-10-20): a ready history of an all-closed book.
+  // Risk already rendered its widgets for it; the Overview said "No positions
+  // to analyze yet." over the same payload. Both tabs now show figures.
+  it("ready history, eligible key, all-closed book: Risk renders its six widgets and Overview its curve (D-04)", () => {
+    const p = payload({
+      hasConnectedKeys: true,
+      holdingsSummary: [],
+      hasSyncing: false,
+      equityHistoryState: "ready",
+    });
+    const { container } = render(<RiskTabPanel {...p} />);
+    expect(container.querySelectorAll("[data-widget-id]")).toHaveLength(6);
+    expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
+    cleanup();
+    render(<AllocationDashboardV2 {...p} />);
+    expect(screen.getByTestId("overview-equity-curve")).toBeInTheDocument();
+    expect(screen.queryByText("No positions to analyze yet.")).toBeNull();
+    expect(screen.queryByTestId("overview-equity-rebuilding")).toBeNull();
+  });
+
   it.each([
     ["a missing state", undefined],
     ["null", null],

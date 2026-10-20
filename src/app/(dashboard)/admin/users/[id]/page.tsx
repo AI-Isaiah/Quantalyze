@@ -1,12 +1,48 @@
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { redirect, notFound } from "next/navigation";
+import type { Metadata } from "next";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { UserRolesPanel } from "@/components/admin/UserRolesPanel";
 import type { AppRole } from "@/lib/auth";
+
+/**
+ * Tab title. The display name is read with the service-role client, so the
+ * page's own admin gate (`isAdminUser`) runs first: a signed-out or non-admin
+ * caller gets the fixed title and causes no profile read. Only `display_name`
+ * is selected, never the email. A miss or read error falls back to "User", and
+ * a read error is captured.
+ */
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user || !(await isAdminUser(supabase, user))) return { title: "User" };
+
+  const { data, error } = await createAdminClient()
+    .from("profiles")
+    .select("display_name")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) {
+    captureToSentry(new Error(error.message), {
+      tags: { route: "admin/users/[id]/page", stage: "generate-metadata" },
+    });
+  }
+  if (error || !data?.display_name) return { title: "User" };
+  return { title: `User: ${data.display_name}` };
+}
 
 /**
  * /admin/users/[id] — role-provisioning detail page for a single user.

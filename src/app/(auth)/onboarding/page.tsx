@@ -1,7 +1,12 @@
+import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { isProfileApproved } from "@/lib/approval";
 import { OnboardingWizard } from "@/components/auth/OnboardingWizard";
+
+export const metadata: Metadata = {
+  title: "Welcome",
+};
 
 export const dynamic = "force-dynamic";
 

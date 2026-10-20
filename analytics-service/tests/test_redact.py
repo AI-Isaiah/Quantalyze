@@ -61,8 +61,18 @@ def test_scrub_pii_recursive():
 
 def test_scrub_pii_jwt_whole_string():
     # Whole-string JWT: 3 base64url segments, anchored.
-    jwt = "aaaaaaaaaa.bbbbbbbbbb.cccccccccc"
+    jwt = "eyJaaaaaaa.eyJbbbbbbb.cccccccccc"
     assert scrub_pii(jwt) == REDACTED_JWT
+
+
+def test_scrub_pii_redacts_dotted_bearer_tokens_by_key():
+    # Review LF-2: the JWT shape is anchored on `eyJ`, so an opaque dotted token
+    # (Deribit `public/auth`) is no longer caught by value. It is caught by key.
+    out = scrub_pii({"result": {
+        "access_token": "1700000000000.AbCd-E_4.QWERTYuiop12345",
+        "refresh_token": "1700000000000.XyZ.abc",
+    }})
+    assert out == {"result": {"access_token": REDACTED, "refresh_token": REDACTED}}
 
 
 def test_scrub_pii_passes_non_jwt_string():
@@ -535,8 +545,9 @@ def test_scrub_freeform_string_passes_non_strings_unchanged():
 
 
 def test_jwt_shape_compiled_correctly():
-    assert JWT_SHAPE.match("aaa.bbb.ccc") is not None
+    assert JWT_SHAPE.match("eyJ.bbb.ccc") is not None
     assert JWT_SHAPE.match("aaa.bbb") is None
+    assert JWT_SHAPE.match("api.example.com") is None  # dotted host, not a JWT
     assert JWT_SHAPE.match("not-a-jwt") is None
 
 

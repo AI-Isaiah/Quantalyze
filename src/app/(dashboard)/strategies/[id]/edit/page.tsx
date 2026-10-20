@@ -15,6 +15,35 @@ import { readOwnerCompositeHistory } from "@/lib/compute-jobs-read";
 import { captureToSentry } from "@/lib/sentry-capture";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { redirect } from "next/navigation";
+import type { Metadata } from "next";
+
+// Tab title = the name the H1 shows. The page serves the owner's own strategy
+// only (`.eq("user_id", user.id)`), so the read mirrors that predicate; no
+// user, an error or a missing row all give "Edit strategy", never the id, and
+// a read error is captured.
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return { title: "Edit strategy" };
+  const { data, error } = await supabase
+    .from("strategies")
+    .select("name")
+    .eq("id", id)
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (error) {
+    captureToSentry(new Error(error.message), {
+      tags: { route: "strategies/[id]/edit/page", stage: "generate-metadata" },
+    });
+  }
+  if (error || !data?.name) return { title: "Edit strategy" };
+  return { title: `Edit: ${data.name}` };
+}
 
 export default async function EditStrategyPage({
   params,

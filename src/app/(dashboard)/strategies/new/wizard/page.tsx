@@ -26,7 +26,7 @@ import { WizardClient } from "./WizardClient";
  */
 
 export const metadata: Metadata = {
-  title: "Connect Your Strategy | Quantalyze",
+  title: "Connect your strategy",
   description:
     "Connect a read-only exchange API key to verify your strategy and list it for allocators.",
   robots: { index: false, follow: false },

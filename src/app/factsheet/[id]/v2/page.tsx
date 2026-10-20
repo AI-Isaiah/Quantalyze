@@ -283,7 +283,7 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { id } = await params;
   const supabase = await createClient();
-  const { data } = await withPublishedOnly(
+  const { data, error } = await withPublishedOnly(
     supabase
       .from("strategies")
       // Phase 164.6.6.2 plan 07: `data_quality_flags` joins the probe for ONE
@@ -294,6 +294,11 @@ export async function generateMetadata({
       .eq("id", id),
   )
     .maybeSingle();
+  if (error) {
+    captureToSentry(new Error(error.message), {
+      tags: { route: "factsheet/[id]/v2/page", stage: "generate-metadata" },
+    });
+  }
   // Factsheet is a full-identity context: prefer the real name in the
   // <title> tag too, not just the H1. displayStrategyName redacts
   // exploratory-tier names to "Strategy #<hex>", which is correct for
@@ -306,7 +311,7 @@ export async function generateMetadata({
     disclosure_tier: data.disclosure_tier as DisclosureTier | null,
   }) : "Strategy");
   const description = (data?.description ?? "Institutional strategy factsheet on Quantalyze.").slice(0, 200);
-  const title = `${name} — Quantalyze Factsheet`;
+  const socialTitle = `${name} — Quantalyze Factsheet`;
   // Dynamic OG image — uses the strategy-id-derived endpoint so social shares
   // get a meaningful preview card without baking PNGs at deploy time.
   //
@@ -325,18 +330,18 @@ export async function generateMetadata({
   );
   const ogImage = `/api/og/factsheet/${id}${unit == null ? "" : `?u=${encodeURIComponent(unit)}`}`;
   return {
-    title,
+    title: `${name} factsheet`,
     description,
     robots: "noindex",
     openGraph: {
-      title,
+      title: socialTitle,
       description,
       type: "article",
       images: [{ url: ogImage, width: 1200, height: 630, alt: name }],
     },
     twitter: {
       card: "summary_large_image",
-      title,
+      title: socialTitle,
       description,
       images: [ogImage],
     },
@@ -681,7 +686,14 @@ export default async function FactsheetV2Page({
     // reaches the payload or the cached wrapper.
     const ownerBuildability =
       ownerBuild && ownerBuild.reason !== null
-        ? ownerBuildabilityOf(id, ownerBuild.reason, ownerBuild)
+        ? ownerBuildabilityOf(id, ownerBuild.reason, {
+            analyticsFailed: ownerBuild.analyticsFailed,
+            // 170.1 D-08 / R-1: jobs that finished without a built factsheet
+            // give the banner the body's instruction (finished_not_built)
+            // instead of a "once a computation succeeds" wait that will not
+            // end. A running or pending job keeps the arm-derived note.
+            jobsFinished: ownerStatus?.state.state === "finished",
+          })
         : null;
     // 167.2.1-REVIEW-R2 WR-03: the state line is about the compute JOBS, the
     // share note about the owner BUILD. When the build could not read the row,
@@ -1035,7 +1047,7 @@ async function readOwnerPendingStatus(
 function ownerBuildabilityOf(
   id: string,
   reason: NotBuildableReason,
-  detail?: Pick<NotBuildableDetail, "analyticsFailed">,
+  detail?: Pick<NotBuildableDetail, "analyticsFailed"> & { jobsFinished?: boolean },
 ): { unreadable: boolean; kind: UnbuildableNoteKind | null } {
   if (reason === "read_error") return { unreadable: true, kind: null };
   if (reason === "not_visible") {

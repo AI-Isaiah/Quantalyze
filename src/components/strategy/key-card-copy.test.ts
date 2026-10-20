@@ -13,6 +13,7 @@
  * agree with whatever the module says.
  */
 import { describe, it, expect } from "vitest";
+import * as keyCardCopy from "./key-card-copy";
 import {
   addKeyBlockedReason,
   formatBoundDuration,
@@ -130,7 +131,7 @@ describe("formatBoundDuration: the durations the sentences state", () => {
 describe("KCS-SLOW (167.2-REVIEW WR-07): the in-flight panel names its own limit, never a sync duration", () => {
   it("KCS-SLOW: the line and the poll budget it states", () => {
     expect(SYNC_SLOW_NOTE).toBe(
-      "Large accounts can take longer. This panel checks for 2 minutes; the sync may still be running after that.",
+      "This panel checks for 2 minutes; the sync may still be running after that.",
     );
   });
 });
@@ -166,7 +167,7 @@ describe("Review-fix round 2 (2026-09-24, founder decision): the Delete confirm'
         { name: "Synthetic Composite P", status: "published" },
       ]),
     ).toBe(
-      'This key is part of 3 composite strategies: "Synthetic Composite A", a composite whose name could not be read, "Synthetic Composite P". Deleting it removes the key from every composite listed, and a composite with no other key left becomes unlinked. A key used by a published composite cannot be deleted: use the contact form to change that composite\'s keys.',
+      'This key is part of 3 composite strategies: "Synthetic Composite A", a composite whose name we could not read, "Synthetic Composite P". Deleting it removes the key from every composite listed, and a composite with no other key left becomes unlinked. A key used by a published composite cannot be deleted: use the contact form to change that composite\'s keys.',
     );
   });
 
@@ -192,7 +193,7 @@ describe("KCS-GATE (167.2-REVIEW CR-01 / WR-06): the pre-attempt job-state gate 
   it("KCS-GATE-UNREADABLE: label and detail", () => {
     expect(PANEL_STOP_COPY.chain_unreadable.label).toBe("Sync not started");
     expect(PANEL_STOP_COPY.chain_unreadable.detail).toBe(
-      "This sync did not start: we could not check whether a sync for this strategy is still running. Try again in a moment.",
+      "This sync did not start: we could not check whether a sync for this strategy is still running. Reload this page, then start the sync again.",
     );
   });
 
@@ -246,7 +247,7 @@ describe("KCS-LATE-STARTED (167.2-REVIEW-SFH M-1): the enqueue answered after it
 describe("KCS-FINISH-UNVERIFIED (167.2-REVIEW-SFH L-1)", () => {
   it("the note a success withheld for an unverified list leaves", () => {
     expect(FINISH_UNVERIFIED_NOTE).toBe(
-      "This sync finished, but the key list could not be re-read to confirm the key's status. Reload this page to see it.",
+      "This sync finished, but we could not re-read the key list to confirm the key's status. Reload this page to see it.",
     );
   });
 });
@@ -282,5 +283,42 @@ describe("Phase 164.6.6.3.5 DOMAINONE: the key card points at the contact form a
     expect(deleteCompositeWarning([{ name: "Synthetic Composite A", status: "draft" }])).not.toContain(
       "contact form",
     );
+  });
+});
+
+describe("Phase 170.1 D-09: no key-card string carries a passive 'could not be', a retry-timing promise or a duration promise", () => {
+  // Walks the module's EXPORTED VALUES, never its source: comments legitimately
+  // quote the retired phrases as lineage. A function export (addKeyBlockedReason,
+  // formatBoundDuration, deleteCompositeWarning) is exercised with sample input.
+  const FORBIDDEN = ["could not be", "Try again in a moment", "Try again later", "Large accounts"];
+
+  function strings(value: unknown, out: string[] = []): string[] {
+    if (typeof value === "string") out.push(value);
+    else if (value && typeof value === "object") {
+      for (const v of Object.values(value)) strings(v, out);
+    }
+    return out;
+  }
+
+  const walked = [
+    ...strings(keyCardCopy),
+    deleteCompositeWarning([{ name: null, status: null }]),
+    deleteCompositeWarning([{ name: "Synthetic Composite P", status: "published" }]),
+    addKeyBlockedReason(null),
+    addKeyBlockedReason("Synthetic Key A"),
+  ];
+
+  it("reaches the copy it claims to police (anti-vacuity)", () => {
+    expect(walked.length).toBeGreaterThan(15);
+    expect(walked).toContain(keyCardCopy.SYNC_SLOW_NOTE);
+    expect(walked).toContain(keyCardCopy.PANEL_STOP_COPY.chain_unreadable.detail);
+  });
+
+  it.each(FORBIDDEN)("no exported key-card string contains %j", (phrase) => {
+    expect(walked.filter((t) => t.includes(phrase))).toEqual([]);
+  });
+
+  it("chain_in_flight keeps its retry sentence (it is true: the in-flight job ends)", () => {
+    expect(PANEL_STOP_COPY.chain_in_flight.detail).toContain("Try again once it has finished.");
   });
 });

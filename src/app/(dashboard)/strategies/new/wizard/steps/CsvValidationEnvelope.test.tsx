@@ -27,13 +27,24 @@ import { describe, it, expect, afterEach } from "vitest";
 import { cleanup } from "@testing-library/react";
 import { CsvValidationEnvelope } from "./CsvValidationEnvelope";
 import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
+import {
+  BESPOKE_SPECIMENS,
+  DATE_FORMAT_AMBIGUOUS,
+  EMPTY_NO_FILE,
+  PARSE_ERROR,
+  TOO_MANY_ROWS,
+  UNKNOWN_PANDERA_RULE_FALLBACK,
+} from "./CsvValidationEnvelope.producer-specimens";
 
 afterEach(() => cleanup());
+
+type TestRow = { rule: string; row: number; message: string; column?: string };
 
 function renderEnvelope(
   code: string,
   human_message: string,
-  pandera_errors?: { rule: string; row: number; message: string }[],
+  pandera_errors?: TestRow[],
+  format?: string,
 ) {
   render(
     <CsvValidationEnvelope
@@ -43,6 +54,7 @@ function renderEnvelope(
         debug_context: pandera_errors ? { pandera_errors } : {},
         correlation_id: null,
       }}
+      format={format}
     />,
   );
 }
@@ -134,7 +146,9 @@ describe("[140.4-16 / CR-02] CsvValidationEnvelope — no duplicated sentence", 
 
     expect(screen.queryAllByText("2 rows failed validation")).toHaveLength(1);
     // The per-rule <details> region — the thing the panel exists for.
-    expect(screen.getByText(/Failing values \(2 rows\)|not_nullable \(2 rows\)/)).toBeInTheDocument();
+    // 170.1-02 / R-3: the <summary> reads the rule's label, never the raw key.
+    expect(screen.getByText(/A required value is blank \(2 rows\)/)).toBeInTheDocument();
+    expect(panelText()).not.toContain("not_nullable");
   });
 
   // ── 140.5-05 — the CONTRADICTION guard, found by a negative control ────────
@@ -211,7 +225,7 @@ function renderWire(envelope: unknown) {
           code: string;
           human_message: string;
           debug_context: {
-            pandera_errors?: { rule: string; row: number; message: string }[];
+            pandera_errors?: TestRow[];
           };
           correlation_id: string | null;
         }
@@ -239,7 +253,7 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
     ).toHaveLength(0);
   });
 
-  it("each row renders its rule, its row index and its message", () => {
+  it("each row renders its rule label, its row index and its column in plain words", () => {
     renderWire({
       code: "CSV_VALIDATION_FAILED",
       human_message: "ignored — rows win the heading",
@@ -250,11 +264,13 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
             row: 4,
             message:
               "Column 'daily_return' failed rule 'daily_return_lower_bound' at row 4.",
+            column: "daily_return",
           },
           {
             rule: "monotonic_dates",
             row: 9,
             message: "Column 'date' failed rule 'monotonic_dates' at row 9.",
+            column: "date",
           },
         ],
       },
@@ -265,16 +281,17 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
     // The rule — via its human label, which is what the <summary> carries.
     expect(text).toContain("Daily return cannot be ≤ -100%");
     expect(text).toContain("Dates must be strictly increasing");
-    // The row index, on the row itself.
-    expect(text).toContain("Row 4:");
-    expect(text).toContain("Row 9:");
-    // The message.
+    // 170.1-02 / R-3: the line is composed from the label, the row and the
+    // schema column; the producer's "failed rule '<key>'" sentence is not shown.
     expect(text).toContain(
-      "Column 'daily_return' failed rule 'daily_return_lower_bound' at row 4.",
+      "Row 4, column daily_return: Daily return cannot be ≤ -100%.",
     );
     expect(text).toContain(
-      "Column 'date' failed rule 'monotonic_dates' at row 9.",
+      "Row 9, column date: Dates must be strictly increasing.",
     );
+    expect(text).not.toContain("failed rule");
+    expect(text).not.toContain("daily_return_lower_bound");
+    expect(text).not.toContain("monotonic_dates");
   });
 
   it("🔴 the COLUMN-LESS producer shape renders cleanly — no 'nan', no dangling clause", () => {
@@ -306,7 +323,11 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
 
     const text = panelText();
     expect(text.length).toBeGreaterThan(20); // the haystack is real
-    expect(text).toContain("Failed rule 'column_in_dataframe'.");
+    // 170.1 / D-10: a row persisted before the producer carried `column` reads
+    // the rule's label, never the raw producer sentence or a hole in a sentence.
+    expect(text).toContain("Your CSV is missing a required column.");
+    expect(text).not.toContain("Failed rule");
+    expect(text).not.toContain("column_in_dataframe");
     expect(
       text.toLowerCase(),
       "the panel named a column called 'nan' — the float NaN pandera reports " +
@@ -353,9 +374,10 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
 
     const text = panelText();
     expect(text.length).toBeGreaterThan(20); // the haystack is real
-    // The message itself still renders — "suppress the prefix" must not be
-    // satisfied by dropping the row.
-    expect(text).toContain("Failed rule 'column_in_dataframe'.");
+    // The line itself still renders — "suppress the prefix" must not be
+    // satisfied by dropping the row. 170.1 / D-10: the label stands in for the
+    // raw producer sentence.
+    expect(text).toContain("Your CSV is missing a required column.");
     expect(
       text,
       "the panel prefixed a row number onto a failure that has no row — the " +
@@ -412,6 +434,7 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
             row: 3,
             message:
               "Column 'currency' failed rule 'currency_usd_or_blank' at row 3.",
+            column: "currency",
             // The key the wire shape does not have — present here on purpose.
             failure_case: CELL,
           },
@@ -433,16 +456,17 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
     ).not.toContain(CELL);
     // …and the row it belongs to DID render, so the pin is not satisfied by
     // the panel dropping the row wholesale.
-    expect(text).toContain("Row 3:");
     expect(text).toContain(
-      "Column 'currency' failed rule 'currency_usd_or_blank' at row 3.",
+      "Row 3, column currency: Currency must be USD or left blank.",
     );
   });
 
-  it("LONG-TEXT BACKSTOP: a long rule name and message do not cost the row index", () => {
+  it("LONG-TEXT BACKSTOP: a long unlabelled rule never prints raw and does not cost the row index", () => {
     // jsdom cannot measure wrapping, so what is pinned is the thing a truncation
-    // would take first: the row index sits BEFORE the message and is the only
-    // part of the row a user can act on.
+    // would take first: the row index sits BEFORE the sentence and is the only
+    // part of the row a user can act on. 170.1-02 / R-3: a rule with no label
+    // reads the fallback sentence; the raw key is in NO slot (summary, cause
+    // line, list line).
     const LONG_RULE = "an_extremely_long_and_unlabelled_rule_key_".repeat(3);
     const LONG_MESSAGE =
       "Column 'daily_return' failed rule 'an_extremely_long_and_unlabelled_rule_key' at row 12 — " +
@@ -459,11 +483,33 @@ describe("[161-03 / WIZERR-13] CsvValidationEnvelope — the per-row data half",
     });
 
     const text = panelText();
-    expect(text).toContain("Row 12:");
-    // The unlabelled rule key falls through to itself in the <summary> — the
-    // panel does not silently drop a rule it has no label for.
-    expect(text).toContain(LONG_RULE);
-    expect(text).toContain(LONG_MESSAGE);
+    expect(text).toContain("Row 12: This value does not pass a format check.");
+    expect(text).not.toContain("an_extremely_long_and_unlabelled_rule_key");
+    expect(text).not.toContain("failed rule");
+  });
+
+  it("LONG-TEXT BACKSTOP: a long BESPOKE producer message renders verbatim in its summary and its list item", () => {
+    // `parse_error` is emitted at row 0 only (csv_validator.py), so the
+    // absent-row shape is the one under test.
+    const LONG_BESPOKE =
+      "Could not parse CSV: " +
+      "the parser explains at length exactly which of the many fields is wrong ".repeat(
+        4,
+      ).trim();
+    renderWire({
+      code: "CSV_VALIDATION_FAILED",
+      human_message: "Your file did not pass validation.",
+      debug_context: {
+        pandera_errors: [{ rule: "parse_error", row: 0, message: LONG_BESPOKE }],
+      },
+      correlation_id: null,
+    });
+
+    const panel = screen.getByTestId("wizard-csv-error");
+    expect(panel.querySelector("summary")?.textContent).toBe(LONG_BESPOKE);
+    expect([...panel.querySelectorAll("li")].map((li) => li.textContent)).toEqual([
+      LONG_BESPOKE,
+    ]);
   });
 });
 
@@ -525,5 +571,345 @@ describe("[166.1 WR-01] CsvValidationEnvelope — a file-level rule names no row
     const text = screen.getByTestId("wizard-csv-error").textContent ?? "";
     expect(text).toContain("1 row failed validation");
     expect(text).not.toContain("2 rows failed validation");
+  });
+});
+
+/**
+ * 170.1 / D-10 (UI-SPEC "Copy - CSV errors"): a `column_in_dataframe` row that
+ * carries the schema's `column` reads "Your file has no {column} column." with
+ * the column in the data voice, and no raw pandera rule name reaches the DOM.
+ *
+ * ⚠️ Expected strings are HAND-TYPED. The `<li>` text is read through
+ * `textContent` because the column sits inside its own `<span>`.
+ */
+describe("[170.1 D-10] CsvValidationEnvelope — a missing column is named in plain words", () => {
+  const MISSING = [
+    { rule: "column_in_dataframe", row: 0, message: "Your file has no side column.", column: "side" },
+    { rule: "column_in_dataframe", row: 0, message: "Your file has no qty column.", column: "qty" },
+  ];
+
+  const lineTexts = () =>
+    [...screen.getByTestId("wizard-csv-error").querySelectorAll("li")].map(
+      (li) => li.textContent,
+    );
+
+  it("🔴 each row with a column renders one sentence, the column in font-metric", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", MISSING, "trades");
+
+    expect(lineTexts()).toEqual([
+      "Your file has no side column.",
+      "Your file has no qty column.",
+    ]);
+    const mono = [
+      ...screen.getByTestId("wizard-csv-error").querySelectorAll("li .font-metric"),
+    ].map((el) => el.textContent);
+    expect(mono, "the column name must sit in Geist Mono (font-metric)").toEqual(["side", "qty"]);
+  });
+
+  it("no raw pandera rule name or producer sentence anywhere in the DOM, titles included", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", MISSING, "trades");
+
+    const panel = screen.getByTestId("wizard-csv-error");
+    const titles = [...panel.querySelectorAll("[title]")].map((el) => el.getAttribute("title"));
+    const haystack = `${panel.textContent}\n${titles.join("\n")}`;
+    expect(haystack.length).toBeGreaterThan(20);
+    expect(haystack).not.toContain("column_in_dataframe");
+    expect(haystack).not.toContain("Failed rule");
+  });
+
+  it("the column is React text, never HTML", () => {
+    renderEnvelope(
+      "CSV_VALIDATION_FAILED",
+      "Your file did not pass validation.",
+      [{ rule: "column_in_dataframe", row: 0, message: "x", column: "<b>side</b>" }],
+      "trades",
+    );
+    const panel = screen.getByTestId("wizard-csv-error");
+    expect(panel.querySelector("li b")).toBeNull();
+    expect(lineTexts()).toEqual(["Your file has no <b>side</b> column."]);
+  });
+
+  it("a row persisted before the producer carried `column` reads the label, not a sentence with a hole", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      { rule: "column_in_dataframe", row: 0, message: "Failed rule 'column_in_dataframe'." },
+    ]);
+    expect(lineTexts()).toEqual(["Your CSV is missing a required column."]);
+    expect(panelText()).not.toMatch(/no\s+column/);
+  });
+});
+
+/**
+ * 170.1-02 / R-2 (founder decision 2026-10-15, option 1; UI-SPEC "zero-one-many"
+ * row): "Check the file format you selected." renders exactly once, directly
+ * after the cause line, when every required column of the selected format other
+ * than `date` is missing.
+ */
+describe("[170.1-02 R-2] CsvValidationEnvelope — the format hint", () => {
+  const HINT = "Check the file format you selected.";
+  const missing = (...cols: string[]): TestRow[] =>
+    cols.map((column) => ({
+      rule: "column_in_dataframe",
+      row: 0,
+      message: `Your file has no ${column} column.`,
+      column,
+    }));
+
+  it("🔴 the routed specimen (date,daily_return under Trade list) shows the hint exactly once, after the cause line", () => {
+    renderEnvelope(
+      "CSV_VALIDATION_FAILED",
+      "Your file did not pass validation.",
+      missing("side", "qty", "price", "symbol", "currency"),
+      "trades",
+    );
+    expect(screen.queryAllByText(HINT)).toHaveLength(1);
+    // Five lines, one hint: it is per envelope, never per column.
+    expect(
+      screen.getByTestId("wizard-csv-error").querySelectorAll("li"),
+    ).toHaveLength(5);
+    const hint = screen.getByText(HINT);
+    expect(hint.previousElementSibling?.textContent).toContain("Rule violated:");
+  });
+
+  it("a Trade list file missing only some non-date columns shows no hint", () => {
+    renderEnvelope(
+      "CSV_VALIDATION_FAILED",
+      "Your file did not pass validation.",
+      missing("side", "qty"),
+      "trades",
+    );
+    expect(screen.queryByText(HINT)).toBeNull();
+    expect(panelText()).toContain("Your file has no side column.");
+  });
+
+  it("no format prop, no hint", () => {
+    renderEnvelope(
+      "CSV_VALIDATION_FAILED",
+      "Your file did not pass validation.",
+      missing("side", "qty", "price", "symbol", "currency"),
+    );
+    expect(screen.queryByText(HINT)).toBeNull();
+  });
+
+  it("legacy rows without `column` give the hint nothing to read", () => {
+    renderEnvelope(
+      "CSV_VALIDATION_FAILED",
+      "Your file did not pass validation.",
+      [{ rule: "column_in_dataframe", row: 0, message: "Failed rule 'column_in_dataframe'." }],
+      "daily_returns",
+    );
+    expect(screen.queryByText(HINT)).toBeNull();
+  });
+});
+
+/**
+ * 170.1-02 / R-3 — other rules are composed from CSV_RULE_LABELS for
+ * PANDERA-BUILT rows only; bespoke producer messages render verbatim; no raw
+ * rule identifier reaches any slot.
+ *
+ * ⚠️ Every expected line is HAND-TYPED.
+ */
+describe("[170.1-02 R-3] CsvValidationEnvelope — other-rule lines from labels", () => {
+  const lines = () =>
+    [...screen.getByTestId("wizard-csv-error").querySelectorAll("li")].map(
+      (li) => li.textContent,
+    );
+  const titleAttrs = () =>
+    [...screen.getByTestId("wizard-csv-error").querySelectorAll("[title]")].map(
+      (el) => el.getAttribute("title"),
+    );
+  const render1 = (row: TestRow) =>
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [row]);
+
+  it("🔴 not_nullable with a row and a column: 'Row 3, column daily_return: <label>.'", () => {
+    render1({
+      rule: "not_nullable",
+      row: 3,
+      column: "daily_return",
+      message: "Column 'daily_return' failed rule 'not_nullable' at row 3.",
+    });
+    expect(lines()).toEqual(["Row 3, column daily_return: A required value is blank."]);
+    expect(panelText()).not.toContain("not_nullable");
+  });
+
+  it("the other three shapes: row only, column only, neither", () => {
+    render1({ rule: "not_nullable", row: 3, message: "Failed rule 'not_nullable' at row 3." });
+    expect(lines()).toEqual(["Row 3: A required value is blank."]);
+    cleanup();
+    render1({ rule: "not_nullable", row: 0, column: "qty", message: "Column 'qty' failed rule 'not_nullable'." });
+    expect(lines()).toEqual(["Column qty: A required value is blank."]);
+    cleanup();
+    render1({ rule: "not_nullable", row: 0, message: "Failed rule 'not_nullable'." });
+    expect(lines()).toEqual(["A required value is blank."]);
+  });
+
+  it("🔴 the producer's capital-F form 'Failed rule ...' is composed too and never renders raw (checker I2)", () => {
+    render1({
+      rule: "not_nullable",
+      row: 3,
+      column: "daily_return",
+      message: "Failed rule 'not_nullable' at row 3.",
+    });
+    expect(lines()).toEqual(["Row 3, column daily_return: A required value is blank."]);
+    expect(panelText()).not.toContain("Failed rule");
+    expect(panelText()).not.toContain("failed rule");
+  });
+
+  it("coerce_dtype('...') resolves the coerce_dtype label in every slot", () => {
+    render1({
+      rule: "coerce_dtype('datetime64[ns]')",
+      row: 2,
+      column: "date",
+      message: "Column 'date' failed rule 'coerce_dtype('datetime64[ns]')' at row 2.",
+    });
+    expect(lines()).toEqual(["Row 2, column date: A value is not a valid date or number."]);
+    const text = panelText();
+    expect(text).toContain("A value is not a valid date or number (1 rows)");
+    expect(text).not.toContain("coerce_dtype");
+    expect(text).not.toContain("datetime64");
+  });
+
+  it("dtype('...') resolves the dtype label", () => {
+    render1({
+      rule: "dtype('float64')",
+      row: 5,
+      message: "Failed rule 'dtype('float64')' at row 5.",
+    });
+    expect(lines()).toEqual(["Row 5: A value has the wrong type for its column."]);
+    expect(panelText()).not.toContain("float64");
+  });
+
+  it("🔴 a rule with no label reads the fallback sentence; the raw name is in no slot", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      { rule: "mystery_rule", row: 4, message: "Column 'x' failed rule 'mystery_rule' at row 4." },
+      { rule: "other_mystery", row: 6, message: "Column 'y' failed rule 'other_mystery' at row 6." },
+    ]);
+    const text = panelText();
+    expect(lines()).toEqual([
+      "Row 4: This value does not pass a format check.",
+      "Row 6: This value does not pass a format check.",
+    ]);
+    // summary, multi-rule cause line, list line and every title attribute
+    expect(text).toContain("Across 2 rule categories:");
+    expect(text).not.toContain("mystery_rule");
+    expect(text).not.toContain("other_mystery");
+    expect(titleAttrs().join("\n")).not.toContain("mystery");
+  });
+
+  it("two bespoke producer messages render byte for byte in the list", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      TOO_MANY_ROWS,
+      DATE_FORMAT_AMBIGUOUS,
+    ]);
+    expect(lines()).toEqual([TOO_MANY_ROWS.message, DATE_FORMAT_AMBIGUOUS.message]);
+  });
+});
+
+/**
+ * 170.1 round-1 WR-01 + WR-02. The producer itself emits four rules that have
+ * no `CSV_RULE_LABELS` entry (`too_many_rows`, `empty`, `parse_error`,
+ * `date_format_ambiguous`). The UI-SPEC fallback "This value does not pass a
+ * format check" is written for an unknown PANDERA rule and is FALSE for them: a
+ * 7300-row upload used to read "Rule violated: This value does not pass a
+ * format check. We checked the whole file, so no single row is at fault."
+ *
+ * Specimens are the producer's real messages (see the specimens module). For
+ * each rule the whole panel is pinned: headline, cause line (absent), summary
+ * and list item. No new copy: the only words are the producer's own.
+ */
+describe("[170.1 round-1 WR-01/WR-02] CsvValidationEnvelope — bespoke producer rules never read the pandera fallback", () => {
+  const paragraphs = () =>
+    [...screen.getByTestId("wizard-csv-error").querySelectorAll("p")].map(
+      (p) => p.textContent,
+    );
+
+  it.each(BESPOKE_SPECIMENS.map((s) => [`${s.rule}: ${s.message.slice(0, 40)}`, s] as const))(
+    "🔴 %s: headline, no cause line, producer sentence as summary and list item",
+    (_name, specimen) => {
+      renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+        specimen,
+      ]);
+      const panel = screen.getByTestId("wizard-csv-error");
+
+      // headline, then ONLY the correlation marker: no cause line claims a label
+      expect(paragraphs()).toEqual(["Your file failed validation", "correlation_id: —"]);
+      expect(panel.querySelector("summary")?.textContent).toBe(specimen.message);
+      expect([...panel.querySelectorAll("li")].map((li) => li.textContent)).toEqual([
+        specimen.message,
+      ]);
+
+      const text = panel.textContent ?? "";
+      expect(text, "the unknown-pandera-rule fallback is false for a producer rule").not.toContain(
+        UNKNOWN_PANDERA_RULE_FALLBACK,
+      );
+      expect(text).not.toContain("Rule violated");
+      expect(text).not.toContain(specimen.rule);
+    },
+  );
+
+  it("the 7300-row specimen reads the row limit and nothing about a format check", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      TOO_MANY_ROWS,
+    ]);
+    expect(screen.getByTestId("wizard-csv-error").textContent).toContain(
+      "CSV exceeds the 5000-row limit (got 7300 rows).",
+    );
+  });
+
+  it("a bespoke message with no text falls back rather than rendering a blank summary", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      { rule: "parse_error", row: 0, message: "   " },
+    ]);
+    expect(screen.getByTestId("wizard-csv-error").querySelector("summary")?.textContent).toBe(
+      UNKNOWN_PANDERA_RULE_FALLBACK,
+    );
+  });
+
+  it("a genuinely unknown PANDERA rule keeps the UI-SPEC fallback in cause line and summary", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      { rule: "mystery_rule", row: 4, message: "Column 'x' failed rule 'mystery_rule' at row 4." },
+    ]);
+    const panel = screen.getByTestId("wizard-csv-error");
+    expect(paragraphs()[1]).toBe(
+      "Rule violated: This value does not pass a format check. Expand below for the row-level breakdown.",
+    );
+    expect(panel.querySelector("summary")?.textContent).toBe(
+      "This value does not pass a format check (1 rows)",
+    );
+  });
+
+  it("🔴 two unlabelled pandera rules are named once in the multi-rule line, never 'X, X'", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      { rule: "mystery_rule", row: 4, message: "Column 'x' failed rule 'mystery_rule' at row 4." },
+      { rule: "other_mystery", row: 6, message: "Column 'y' failed rule 'other_mystery' at row 6." },
+    ]);
+    expect(paragraphs()[1]).toBe(
+      "Across 2 rule categories: This value does not pass a format check.",
+    );
+  });
+
+  it("a bespoke rule beside a labelled rule names each by its own words in the multi-rule line", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      DATE_FORMAT_AMBIGUOUS,
+      { rule: "monotonic_dates", row: 5, message: "Column 'date' failed rule 'monotonic_dates' at row 5." },
+    ]);
+    const panel = screen.getByTestId("wizard-csv-error");
+    expect(paragraphs()[1]).toBe(
+      "Across 2 rule categories: Could not determine the date format — these dates are ambiguous (each could be DD/MM/YYYY or MM/DD/YYYY). Please re-upload with ISO dates in YYYY-MM-DD format, Dates must be strictly increasing.",
+    );
+    expect(panel.textContent).not.toContain(UNKNOWN_PANDERA_RULE_FALLBACK);
+    expect([...panel.querySelectorAll("summary")].map((s) => s.textContent)).toEqual([
+      DATE_FORMAT_AMBIGUOUS.message,
+      "Dates must be strictly increasing (1 rows)",
+    ]);
+  });
+
+  it("an empty upload and a parse failure each read their own sentence", () => {
+    renderEnvelope("CSV_VALIDATION_FAILED", "Your file did not pass validation.", [
+      EMPTY_NO_FILE,
+      PARSE_ERROR,
+    ]);
+    expect(paragraphs()[1]).toBe(
+      "Across 2 rule categories: No file uploaded, Could not parse CSV: Error tokenizing data. C error: Expected 2 fields in line 3, saw 4.",
+    );
   });
 });

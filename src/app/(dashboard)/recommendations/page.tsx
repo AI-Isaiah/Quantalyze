@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { unstable_noStore as noStore } from "next/cache";
 import { redirect } from "next/navigation";
@@ -14,6 +15,8 @@ import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { deriveMandateIsSet } from "@/lib/queries";
 import type { AllocatorOwnPreferences } from "@/lib/preferences";
+
+export const metadata: Metadata = { title: "Recommendations" };
 
 /**
  * Phase 169.3 D-73 (founder ruling 2026-09-30, WR-01): the allocator_preferences
@@ -346,7 +349,7 @@ export default async function RecommendationsPage() {
               ? "Strategies from the daily match engine. Set your mandate to see yours."
               : "Strategies from the daily match engine."
         }
-        breadcrumb={[{ label: "My Allocation", href: "/allocations" }, { label: "Recommendations" }]}
+        breadcrumb={[{ label: "My allocation", href: "/allocations" }, { label: "Recommendations" }]}
         meta={
           batch?.computed_at ? (
             <FreshnessBadge

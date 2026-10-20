@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { redirect } from "next/navigation";
+import type { Metadata } from "next";
 import { PageHeader } from "@/components/layout/PageHeader";
 import {
   AdminTabs,
@@ -10,6 +11,8 @@ import {
   type PendingProfileRow,
   type PendingManagerRow,
 } from "@/components/admin/AdminTabs";
+
+export const metadata: Metadata = { title: "Admin dashboard" };
 
 export default async function AdminPage() {
   const supabase = await createClient();
@@ -85,7 +88,7 @@ export default async function AdminPage() {
 
   return (
     <>
-      <PageHeader title="Admin Dashboard" />
+      <PageHeader title="Admin dashboard" />
       <AdminTabs
         introRequests={introRequests.data ?? []}
         pendingStrategies={pendingStrategies.data ?? []}

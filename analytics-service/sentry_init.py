@@ -72,6 +72,10 @@ _PII_KEYS: frozenset[str] = frozenset({
     # Next.js → FastAPI seam; redact in case it surfaces in HTTP
     # breadcrumbs or response-context dicts.
     "x-internal-token",
+    # --- 170.1 security re-audit — the shared analytics service key and the
+    # tenant claim reached Sentry as request headers in cleartext.
+    "x-service-key",
+    "x-tenant-claim",
     # --- Bybit v5 signing scheme (FIX 7) ---
     "x-bapi-api-key",
     "x-bapi-sign",
@@ -94,15 +98,30 @@ _PII_KEYS: frozenset[str] = frozenset({
     "_proxy",
     "_egress_proxy",
     "worker_egress_proxy_url",
+    # --- 170.1 / D-14 (SFH-L1) — the CSV upload itself. `/process-key` carries the
+    # whole file as `context.raw_bytes_base64` (legacy callers: `raw_bytes`) in its
+    # JSON body, and the request integration attaches that body to EVERY event
+    # raised during the request. The file's cells are user data that can hold PII,
+    # and neither key was on the denylist, so a small upload shipped to Sentry
+    # base64-encoded on any error event from that request (measured). Swept at any
+    # depth by `_broker_quirk_sweep`, like the other local extras.
+    # This held for ERROR events only until T-170.1-45: the SDK does not run
+    # `before_send` on transaction events, so a sampled `/process-key` transaction
+    # carried the same body unredacted. `init_sentry` now registers this hook as
+    # `before_send_transaction` too; `tests/test_sentry_transaction_redaction_170_1.py`
+    # drives a real sampled request to prove the upload reaches neither event type.
+    "raw_bytes_base64",
+    "raw_bytes",
 })
 
 # Mirror of src/lib/admin/pii-scrub.ts L27 DENYLIST_PREFIX. Case-insensitive.
 _PII_KEY_PREFIXES: tuple[str, ...] = ("sb-ec-",)
 
-# Mirror of src/lib/admin/pii-scrub.ts L31 JWT_SHAPE.
-# Detects bearer-shaped strings: three base64url segments separated by dots.
+# Detects bearer-shaped strings: three base64url segments separated by dots, header
+# starting `eyJ` (same shape as `services.redact.JWT_SHAPE`, see the reason there:
+# dotted hosts and versions on a transaction event are not JWTs).
 _JWT_SHAPE: re.Pattern[str] = re.compile(
-    r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$"
+    r"^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$"
 )
 
 _REDACTED = "[REDACTED]"
@@ -228,6 +247,11 @@ def _redact_before_send(event: Event, hint: Hint | None) -> Event:
         variables in the failing frame — wizard creds may live here as Pydantic
         model fields or local 'creds' dicts).
 
+    170.1 / T-170.1-45 — this same function is also registered as
+    `before_send_transaction` (the SDK does not run `before_send` on transaction
+    events). A transaction event has the same `request` / `extra` / `contexts` /
+    `breadcrumbs` shapes plus `spans[*].data`, which is scrubbed below.
+
     Phase 19 / H-6 — defense-in-depth: stamp event["environment"] from the same
     fallback chain as init_sentry(). The init-time argument is authoritative for
     the SDK; the per-event stamp guards against captures that take place before
@@ -259,6 +283,15 @@ def _redact_before_send(event: Event, hint: Hint | None) -> Event:
             event["extra"] = _scrub(event["extra"])
         if isinstance(event.get("contexts"), dict):
             event["contexts"] = _scrub(event["contexts"])
+        # Transaction events only: each span's `data` (outbound-call attributes).
+        # No span carries the CSV upload, but this hook is now the only redactor a
+        # transaction passes through, so it must cover the one shape a transaction
+        # has that an error event does not.
+        spans = event.get("spans")
+        if isinstance(spans, list):
+            for span in spans:
+                if isinstance(span, dict) and isinstance(span.get("data"), dict):
+                    span["data"] = _scrub(span["data"])
         # Breadcrumbs — every category may carry data. http breadcrumbs from
         # outbound fetch() include headers + body; user breadcrumbs include
         # form values. Scrub all of them.
@@ -370,5 +403,10 @@ def init_sentry() -> None:
         include_local_variables=False,
         integrations=[StarletteIntegration(), FastApiIntegration()],
         before_send=_redact_before_send,
+        # 170.1 / T-170.1-45 — the SDK does NOT run `before_send` on transaction
+        # events. A sampled `/process-key` CSV request's transaction carries the
+        # same `request.data` body as an error event (the upload, base64), so the
+        # one redactor must be registered for both. See `_redact_before_send`.
+        before_send_transaction=_redact_before_send,
         environment=_resolve_environment(),
     )

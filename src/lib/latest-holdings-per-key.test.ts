@@ -6,6 +6,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import {
+  cleanEmptyPollDay,
   fetchLatestHoldingsPerKey,
   HOLDINGS_ROW_CAP,
   latestHoldingsPerKey,
@@ -382,10 +383,9 @@ describe("fetchLatestHoldingsPerKey: a later clean poll supersedes older rows (S
       "an event written before the poll recorded its day (no asof)",
       { final_status: "complete", row_count: 0 },
     ],
-    [
-      "a poll on the rows' own day",
-      { final_status: "complete", row_count: 0, asof: "2026-09-26" },
-    ],
+    // (the "poll on the rows' own day" row moved to the D-02 describe below: a
+    // clean EMPTY poll on the rows' own day now hides the key when it is the
+    // key's newest poll)
     [
       "a malformed row_count",
       { final_status: "complete", row_count: "0", asof: "2026-09-27" },
@@ -434,6 +434,230 @@ describe("fetchLatestHoldingsPerKey: a later clean poll supersedes older rows (S
     const client = fakeClient(deribit, expired, undefined, [foreign]);
     const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
     expect(res.data).toHaveLength(2);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2.1.2 plan 01 (D-02, SC-2). The strict `>` of SFH-C4-02 leaves a
+// position closed and polled empty on the SAME UTC day showing until tomorrow
+// (persist_allocator_holdings only upserts, so the morning's rows stay). D-02
+// hides the key's rows on a day when a clean poll read nothing on the rows' own
+// day AND that poll is the key's newest poll of ANY outcome. Display only.
+// ---------------------------------------------------------------------------
+describe("cleanEmptyPollDay (D-02)", () => {
+  it("reads the day from a clean poll that read zero rows", () => {
+    // WHY: row_count 0 is the poll's own record that it read nothing.
+    expect(
+      cleanEmptyPollDay({ final_status: "complete", row_count: 0, asof: "2026-10-10" }),
+    ).toBe("2026-10-10");
+  });
+
+  it.each([
+    ["a non-empty clean poll", { final_status: "complete", row_count: 1, asof: "2026-10-10" }],
+    ["a poll with warnings (a read failed, so empty proves nothing)", { final_status: "complete_with_warnings", row_count: 0, asof: "2026-10-10" }],
+    ["a string row_count", { final_status: "complete", row_count: "0", asof: "2026-10-10" }],
+    ["a fractional row_count", { final_status: "complete", row_count: 0.5, asof: "2026-10-10" }],
+    ["a missing asof", { final_status: "complete", row_count: 0 }],
+    ["a non-ISO asof", { final_status: "complete", row_count: 0, asof: "Oct 10" }],
+    ["null", null],
+    ["an array", [{ final_status: "complete", row_count: 0, asof: "2026-10-10" }]],
+    ["a string", "complete"],
+  ])("is null for %s", (_label, metadata) => {
+    // WHY: each guard stops a malformed or weaker event from hiding a key's rows.
+    expect(cleanEmptyPollDay(metadata)).toBeNull();
+  });
+});
+
+describe("fetchLatestHoldingsPerKey: a same-day clean empty newest poll hides the key (D-02)", () => {
+  const D = "2026-10-10";
+  const deribit = [{ id: "key-d", user_id: "user-1", exchange: "deribit" }];
+  const morningRows = [h("key-d", D, "BTC-PERP"), h("key-d", D, "ETH-PERP")];
+  // `asof: null` builds an event with no recorded day (a default parameter would
+  // swallow `undefined`).
+  const cleanRc = (createdAt: string, rowCount: unknown, asof: string | null = D) =>
+    poll("key-d", createdAt, {
+      final_status: "complete",
+      row_count: rowCount,
+      ...(asof === null ? {} : { asof }),
+    });
+  const EMPTY = { data: [], error: null, partialReads: [], accountByKey: {}, markerReadError: null };
+
+  it("Case A: a clean poll with rows, then a LATER clean empty poll on the same day, hides the key", async () => {
+    // WHY: a closed position must stop showing the day it is polled empty, not tomorrow.
+    const client = fakeClient(deribit, morningRows, undefined, [
+      cleanRc("2026-10-10T04:00:05+00:00", 2),
+      cleanRc("2026-10-10T11:00:00+00:00", 0),
+    ]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res).toEqual(EMPTY);
+  });
+
+  it("Case A2: the same-day clean empty poll as the key's only event hides it too", async () => {
+    // WHY: the rule is about the newest poll, not about an earlier non-empty one existing.
+    const client = fakeClient(deribit, morningRows, undefined, [
+      cleanRc("2026-10-10T04:00:05+00:00", 0),
+    ]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res).toEqual(EMPTY);
+  });
+
+  it("Case B: a non-empty clean poll on the rows' day keeps the rows (the strict rule is unchanged)", async () => {
+    // WHY: row_count above 0 means the poll read the key and wrote its rows.
+    const client = fakeClient(deribit, morningRows, undefined, [
+      cleanRc("2026-10-10T04:00:05+00:00", 2),
+    ]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[]).sort()).toEqual([
+      "key-d:2026-10-10:BTC-PERP",
+      "key-d:2026-10-10:ETH-PERP",
+    ]);
+  });
+
+  it("Case C: a clean empty poll followed by a LATER warnings poll keeps the rows (second condition)", async () => {
+    // WHY: the later warnings poll may have written spot rows; the newest poll of any
+    // outcome is not clean, so nothing proves the key is empty.
+    const client = fakeClient(deribit, morningRows, undefined, [
+      cleanRc("2026-10-10T04:00:05+00:00", 0),
+      poll("key-d", "2026-10-10T11:00:00+00:00", {
+        final_status: "complete_with_warnings",
+        row_count: 2,
+        asof: D,
+      }),
+    ]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[]).sort()).toEqual([
+      "key-d:2026-10-10:BTC-PERP",
+      "key-d:2026-10-10:ETH-PERP",
+    ]);
+    expect(res.partialReads).toEqual([{ api_key_id: "key-d", asof: D }]);
+  });
+
+  it("Case D: a warnings poll that read zero rows keeps the rows", async () => {
+    // WHY: with warnings a read failed, so what it did not write proves nothing.
+    const client = fakeClient(deribit, morningRows, undefined, [
+      poll("key-d", "2026-10-10T11:00:00+00:00", {
+        final_status: "complete_with_warnings",
+        row_count: 0,
+        asof: D,
+      }),
+    ]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.data).toHaveLength(2);
+  });
+
+  it.each([
+    ["no recorded day", () => cleanRc("2026-10-10T11:00:00+00:00", 0, null)],
+    ["a string row_count", () => cleanRc("2026-10-10T11:00:00+00:00", "0")],
+    ["a fractional row_count", () => cleanRc("2026-10-10T11:00:00+00:00", 0.5)],
+  ])("Case E: a clean poll with %s is no evidence and keeps the rows", async (_label, make) => {
+    // WHY: a malformed or undated event binds to no rows (the guards cleanPollDay already has).
+    const client = fakeClient(deribit, morningRows, undefined, [make()]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.data).toHaveLength(2);
+  });
+
+  it("Case F: a clean empty poll dated BEFORE the rows keeps them", async () => {
+    // WHY: the empty read is older than the rows, so the rows are newer evidence.
+    const client = fakeClient(deribit, morningRows, undefined, [
+      cleanRc("2026-10-09T04:00:05+00:00", 0, "2026-10-09"),
+    ]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.data).toHaveLength(2);
+  });
+
+  it("Case G: an unpriced marker dated after the rows still wins first, with its own day", async () => {
+    // WHY: the order of the branches is the contract. If D-02 ran first the emptied key
+    // would sit at day D and its same-account sibling's rows at D would survive; the
+    // marker's later day (D+1) must supersede them.
+    const sameAcct = (id: string) => ({
+      id,
+      user_id: "user-1",
+      exchange: "mt5",
+      venue_account_id: "acct-1",
+    });
+    const client = fakeClient(
+      [sameAcct("key-a"), sameAcct("key-b")],
+      [h("key-a", D, "ACCOUNT-a"), h("key-b", D, "ACCOUNT-b")],
+      undefined,
+      [poll("key-a", "2026-10-10T11:00:00+00:00", { final_status: "complete", row_count: 0, asof: D })],
+      [record("key-a", "2026-10-11")],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res).toEqual(EMPTY);
+  });
+
+  it("Case H: another user's clean empty poll for the same key id is never read", async () => {
+    // WHY: the audit read filters user_id; a foreign tenant must not hide this user's rows.
+    const foreign = { ...cleanRc("2026-10-10T11:00:00+00:00", 0), user_id: "user-2" };
+    const client = fakeClient(deribit, morningRows, undefined, [foreign]);
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res.data).toHaveLength(2);
+  });
+
+  it("Case I: on one account, the emptied key contributes nothing and does not hold back its sibling", async () => {
+    // WHY: the emptied key still enters the account grouping at day D with no rows (as the
+    // SQL twin's key_day does), the same shape the SFH-C4-02 branch produces.
+    const sameAcct = (id: string) => ({
+      id,
+      user_id: "user-1",
+      exchange: "binance",
+      venue_account_id: "acct-1",
+    });
+    const client = fakeClient(
+      [sameAcct("key-a"), sameAcct("key-b")],
+      [h("key-a", D, "BTC"), h("key-b", D, "ETH")],
+      undefined,
+      [
+        poll("key-a", "2026-10-10T11:00:00+00:00", {
+          final_status: "complete",
+          row_count: 0,
+          asof: D,
+        }),
+      ],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[])).toEqual(["key-b:2026-10-10:ETH"]);
+    expect(res.accountByKey).toEqual({ "key-b": "account:key-a" });
+  });
+
+  it("Case I2: on one account, the emptied key's day D supersedes a sibling whose rows are a day older", async () => {
+    // WHY: the emptied key keeps its own day D in the account grouping (as the SQL twin's
+    // key_day does), so the account's newest day is D and the sibling's D-1 rows must drop
+    // out. If the emptied key lost its day, the sibling's D-1 rows would survive here while
+    // the server still counted them, and every book-mode commit would be refused stale.
+    const sameAcct = (id: string) => ({
+      id,
+      user_id: "user-1",
+      exchange: "binance",
+      venue_account_id: "acct-1",
+    });
+    const client = fakeClient(
+      [sameAcct("key-a"), sameAcct("key-b")],
+      [h("key-a", D, "BTC"), h("key-b", "2026-10-09", "ETH")],
+      undefined,
+      [
+        poll("key-a", "2026-10-10T11:00:00+00:00", {
+          final_status: "complete",
+          row_count: 0,
+          asof: D,
+        }),
+      ],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(res).toEqual(EMPTY);
+  });
+
+  it("only the emptied key is hidden: another key's rows are untouched", async () => {
+    // WHY: the hide is per key; a quiet or non-empty neighbour keeps its book.
+    const client = fakeClient(
+      [...deribit, { id: "key-o", user_id: "user-1", exchange: "okx" }],
+      [...morningRows, h("key-o", D, "SOL-PERP")],
+      undefined,
+      [cleanRc("2026-10-10T11:00:00+00:00", 0)],
+    );
+    const res = await fetchLatestHoldingsPerKey(client, "user-1", COLS);
+    expect(ids(res.data as Row[])).toEqual(["key-o:2026-10-10:SOL-PERP"]);
   });
 });
 
@@ -836,9 +1060,9 @@ describe("fetchLatestHoldingsPerKey: a native key the newest poll left unpriced 
 
 // ---------------------------------------------------------------------------
 // Phase 170.4 plan 12 (D-08, D-10, T-170.4-31). The scenario commit's server AUM
-// is PERSISTED, so it may rest on service-written evidence only. `audit_log` is
-// owner-writable (log_audit_event), so `{ auditEvidence: false }` reads no audit
-// row at all: no clean-poll supersession, no partial-read day.
+// is PERSISTED, so it rests on rows and markers only. `{ auditEvidence: false }` reads
+// no audit row at all, by choice (the poll events have been service-written since
+// migration 20261014120100): no clean-poll supersession, no partial-read day.
 // ---------------------------------------------------------------------------
 describe("fetchLatestHoldingsPerKey: { auditEvidence: false } (170.4 plan 12)", () => {
   const deribit = [{ id: "key-d", user_id: "user-1", exchange: "deribit" }];
@@ -880,6 +1104,32 @@ describe("fetchLatestHoldingsPerKey: { auditEvidence: false } (170.4 plan 12)", 
       { auditEvidence: false },
     );
     expect(ids(commit.data as Row[])).toEqual(["key-d:2026-10-10:BTC-PERP"]);
+  });
+
+  it("KNOWN LIMIT, same day (D-02): a clean empty poll on the rows' own day hides the key on the dashboard and cannot in the commit's mode", async () => {
+    // WHY: the display may supersede, the persisted figure may not, and D-02 widened the
+    // display side to the rows' own day. The commit's mode reads no audit evidence, so the
+    // same key keeps its rows there until its next written rows.
+    const sameDayEmptyPoll = poll("key-d", "2026-10-10T11:00:00+00:00", {
+      final_status: "complete",
+      row_count: 0,
+      asof: "2026-10-10",
+    });
+    // The commit's mode is asserted first: it holds on today's code and with D-02 alike,
+    // so a red run of the next assertion is the dashboard half alone.
+    const commit = await fetchLatestHoldingsPerKey(
+      fakeClient(deribit, rows, undefined, [sameDayEmptyPoll]),
+      "user-1",
+      COLS,
+      { auditEvidence: false },
+    );
+    expect(ids(commit.data as Row[])).toEqual(["key-d:2026-10-10:BTC-PERP"]);
+    const dashboard = await fetchLatestHoldingsPerKey(
+      fakeClient(deribit, rows, undefined, [sameDayEmptyPoll]),
+      "user-1",
+      COLS,
+    );
+    expect(dashboard.data).toEqual([]);
   });
 
   it("names no partial read even when a partial poll event wrote the rows' day", async () => {

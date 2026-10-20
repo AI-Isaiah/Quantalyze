@@ -132,10 +132,10 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   );
 
   // Phase 170.4 plan 04 (D-04, D-09): this early return no longer shadows the
-  // rebuilding state. With an eligible key the rebuilding panel wins over the
-  // connected-but-empty card ("rebuilding" falls through to the render below);
-  // with none, the connect-a-key card shows whatever the history state.
-  if (gate === "no_eligible_key" || gate === "connected_empty") {
+  // rebuilding state. With an eligible key the rebuilding panel wins ("rebuilding"
+  // falls through to the render below); with none, the connect-a-key card shows
+  // whatever the history state.
+  if (gate === "no_eligible_key") {
     return (
       <div data-ui-v2-shell="true">
         {/* CL9 / NEW-C01-11: holdingsSummary (allocator_holdings) and
@@ -156,15 +156,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             credential-revoked (sync_status='revoked') key would wrongly read
             as "connected — no positions synced yet". Using the honest signal,
             an allocator who disconnected their only key sees the "Connect a
-            key" CTA; one with a live key but no synced positions sees the
-            connected-but-empty copy. Phase 170.4 (D-04, D-09): `historyGate`
-            reads that same flag, and the rebuilding state now takes
-            precedence over the connected-but-empty card, so this branch is
-            reached with a connected key only once the history is ready. */}
-        <EmptyState
-          hasSyncing={false}
-          hasConnectedKeys={gate === "connected_empty"}
-        />
+            key" CTA. Phase 170.4 (D-04, D-09): `historyGate` reads that same
+            flag. */}
+        <EmptyState hasSyncing={false} hasConnectedKeys={false} />
       </div>
     );
   }
@@ -299,7 +293,7 @@ function FactsheetWarmupNote({ curveDays }: { curveDays: number }) {
       <p className="mt-3 text-sm text-text-secondary">
         Aggregated factsheet panels appear once at least three days of
         blended equity history are available. The data flows from
-        the API keys you connect on the My Allocation page.
+        the API keys you connect on the My allocation page.
       </p>
       {curveDays > 0 && (
         <p className="mt-2 text-fixed-11 text-text-muted">

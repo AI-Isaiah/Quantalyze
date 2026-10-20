@@ -4,9 +4,9 @@ interface SegmentedOption {
   id: string;
   label: string;
   disabled?: boolean;
-  /** Optional per-option disabled tooltip. Defaults to "Coming soon" so every
-   *  existing call site stays byte-identical (Phase 90 FS-03 passes the mapped
-   *  MTM-gated reason copy here). */
+  /** Optional per-option disabled tooltip. Shown only when a reason is passed;
+   *  there is no default, so a disabled option without one renders no title
+   *  attribute (Phase 90 FS-03 passes the mapped MTM-gated reason copy here). */
   disabledReason?: string;
 }
 
@@ -22,7 +22,7 @@ interface SegmentedControlProps {
  *
  * Button-group with disabled-state support. Disabled buttons render
  * `aria-disabled="true"` (NOT the native `disabled` attribute — keeps them
- * focusable for screen-reader announcement of the "coming-soon" tooltip)
+ * focusable for screen-reader announcement of the disabled-reason tooltip)
  * and short-circuit click handlers via `e.preventDefault()`.
  *
  * Active button: 1px accent border + accent-color label
@@ -47,7 +47,7 @@ export function SegmentedControl({
               key={opt.id}
               type="button"
               aria-disabled="true"
-              title={opt.disabledReason ?? "Coming soon"}
+              title={opt.disabledReason}
               onClick={(e) => e.preventDefault()}
               className="cursor-not-allowed rounded-md border border-border bg-surface px-3 py-1.5 text-xs font-normal text-text-muted opacity-60"
             >

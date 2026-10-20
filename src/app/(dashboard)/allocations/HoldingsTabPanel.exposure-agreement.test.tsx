@@ -855,3 +855,120 @@ describe("167.1.1 SC-1: two keys, one venue and asset, in the AUM, Open Position
     // are dropped by the derive, so the count above falls 2 -> 0.
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2.1.2 plan 01 (D-02, SC-2, UI-SPEC E3). A key polled clean and
+// empty on the rows' OWN day, as its newest poll, leaves all three surfaces
+// together. The three read one array, so one hide rule at the reader moves all
+// three; this pins it from the fixture to the DOM. Figures are typed by hand.
+// ---------------------------------------------------------------------------
+describe("a same-day clean empty newest poll removes the key from all three surfaces (D-02)", () => {
+  const MORNING = "2026-10-03T04:00:00+00:00";
+  const NOON = "2026-10-03T11:00:00+00:00";
+  const cleanPoll = (keyId: string, createdAt: string, rowCount: number) =>
+    poll(keyId, createdAt, { final_status: "complete", row_count: rowCount, asof: DAY_3 });
+
+  const BETA = key("key-binance", "binance", "Beta", { venue_account_id: "acct-B" });
+  const ALPHA = key("key-okx", "okx", "Alpha", { venue_account_id: "acct-O" });
+
+  it("the emptied key's spot and derivative rows leave Holdings, Open Positions and Exposure; the other key's stay", async () => {
+    // WHY: a closed position must stop showing the day it is polled empty, on every
+    // surface that reads the one array, and the three must agree on the total.
+    const book = await readBook({
+      keys: [ALPHA, BETA],
+      holdings: [
+        // Alpha closed everything this afternoon; its morning rows are still upserted.
+        spot("key-okx", "okx", DAY_3, MORNING, "ETH", 7000),
+        deriv("key-okx", "okx", DAY_3, MORNING, "BTC-USDT-SWAP", "short", 30000),
+        // Beta is untouched.
+        spot("key-binance", "binance", DAY_3, MORNING, "BTC", 40000),
+        deriv("key-binance", "binance", DAY_3, MORNING, "BTC-PERP", "long", 20000),
+      ],
+      audit: [
+        cleanPoll("key-okx", MORNING, 2),
+        cleanPoll("key-okx", NOON, 0),
+        cleanPoll("key-binance", MORNING, 2),
+      ],
+    });
+    renderPanel(book);
+    const s = readSurfaces();
+
+    expect(s.holdings).toEqual(["Binance — Beta|binance|BTC|spot"]);
+    expect(s.positions).toEqual(["Binance — Beta|binance|BTC-PERP|derivative"]);
+    expect(s.exposure).toEqual([
+      "Binance — Beta|binance|BTC-PERP|derivative",
+      "Binance — Beta|binance|BTC|spot",
+    ]);
+    expect(s.exposure).toEqual(union(s.holdings, s.positions));
+    // Spot 40000 only.
+    expect(s.holdingsTotal).toBe(40000);
+    // The one remaining swap's notional.
+    expect(s.positionsTotal).toBe(20000);
+    // 40000 + 20000.
+    expect(s.gross?.value).toBe(60000);
+    expect(s.gross?.value).toBe(s.holdingsTotal + s.positionsTotal);
+
+    const everything = document.body.textContent ?? "";
+    for (const gone of ["ETH", "BTC-USDT-SWAP"]) {
+      expect(everything).not.toContain(gone);
+    }
+  });
+
+  it("E3: when the emptied key held the book's only derivative rows, Open Positions renders its existing empty state and the other key's spot rows still render", async () => {
+    // WHY: UI-SPEC E3 adds no element; the hidden rows leave the derivative table empty
+    // and the empty state that already exists is the whole message.
+    const book = await readBook({
+      keys: [DERIBIT_KEY, BETA],
+      holdings: [
+        ...deribitBook(),
+        spot("key-binance", "binance", DAY_3, T_3, "BTC", 40000),
+        spot("key-binance", "binance", DAY_3, T_3, "ETH", 7000),
+      ],
+      audit: [cleanPoll("key-deribit", T_3, 3), cleanPoll("key-deribit", NOON, 0)],
+    });
+    renderPanel(book);
+    const s = readSurfaces();
+
+    expect(s.positions).toEqual([]);
+    expect(section("Open Positions").textContent).toContain("No open derivative positions.");
+    expect(s.holdings).toEqual([
+      "Binance — Beta|binance|BTC|spot",
+      "Binance — Beta|binance|ETH|spot",
+    ]);
+    // 40000 + 7000; the 185100 of Deribit is gone.
+    expect(s.holdingsTotal).toBe(47000);
+    expect(s.gross?.value).toBe(47000);
+    expect(s.positionsTotal).toBe(0);
+    expect(document.body.textContent ?? "").not.toContain("BTC-PERP");
+  });
+
+  it("a LATER warnings poll keeps the emptied key's rows on all three surfaces (the second condition)", async () => {
+    // WHY: a warnings poll after the empty one may have written spot rows; the newest poll
+    // of any outcome is not clean, so nothing proves the key is flat.
+    const book = await readBook({
+      keys: [DERIBIT_KEY, BETA],
+      holdings: [
+        ...deribitBook(),
+        spot("key-binance", "binance", DAY_3, T_3, "BTC", 40000),
+      ],
+      audit: [
+        cleanPoll("key-deribit", T_3, 0),
+        poll("key-deribit", NOON, {
+          final_status: "complete_with_warnings",
+          row_count: 3,
+          asof: DAY_3,
+        }),
+      ],
+    });
+    renderPanel(book);
+    const s = readSurfaces();
+
+    expect(s.positions).toEqual([
+      "Deribit — Main|deribit|BTC-27DEC26-60000-C|derivative",
+      "Deribit — Main|deribit|BTC-PERP|derivative",
+      "Deribit — Main|deribit|ETH-PERP|derivative",
+    ]);
+    // 40000 spot + 185100 of Deribit notional.
+    expect(s.gross?.value).toBe(225100);
+  });
+});

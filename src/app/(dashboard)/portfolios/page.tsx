@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { getUserPortfolios } from "@/lib/queries";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -20,6 +21,10 @@ import { redirect } from "next/navigation";
  * managers" note was wrong — no manager has ever owned a portfolio.
  * CreatePortfolioForm is still available for manual (is_test) creation.
  */
+export const metadata: Metadata = {
+  title: "Portfolios",
+};
+
 export default async function PortfoliosPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();

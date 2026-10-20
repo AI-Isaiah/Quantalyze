@@ -788,7 +788,7 @@ export function AllocationsTabs(
               to Instrument Serif by default and flips to DM Sans when the
               user picks Sans via the Tweaks panel — see globals.css. */}
           <h1 className="font-display text-fixed-28 leading-none tracking-tight text-text-primary">
-            My Allocation
+            My allocation
           </h1>
         </div>
         {/* JOURNEY-03 (a11y) — the row holds the tablist AND two action

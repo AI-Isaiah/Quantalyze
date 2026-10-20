@@ -37,9 +37,10 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from functools import partial
-from typing import Annotated, Any
+from typing import Annotated, Any, Final
 from uuid import UUID, uuid4
 
 import pandas as pd
@@ -58,15 +59,19 @@ from services.db import (
     db_read_with_retry,
     get_supabase,
     one,
+    paginated_select,
     rows,
 )
-from services.equity_reconstruction import reconstruct_symbol_returns
 # PYAPI-05 — every deliberate error in this file's seam-reachable arms goes
 # through service_error so the four status classes cannot drift apart
 # site-by-site. Contract: analytics-service/docs/STATUS_CONTRACT.md.
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
+from services.holding_equity import holding_equity_contribution
+from services.holding_marks import classify_derivative_marks, classify_spot_marks
+from services.match_defaults import merge_with_defaults
 from services.match_engine import (
     ENGINE_VERSION,
+    PORTFOLIO_FIT_MIN_OVERLAP_DAYS,
     WEIGHTS_VERSION,
     score_candidates,
 )
@@ -75,7 +80,7 @@ from services.match_eval import (
 )
 from services.native_to_usd import UsdSeriesConverter, native_units_by_id
 from services.rate_limit import limiter, tenant_or_platform_key
-from services.wealth_returns import daily_returns_from_row
+from services.wealth_returns import daily_returns_from_row, records_to_series
 
 router = APIRouter(prefix="/api/match", tags=["match"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -572,6 +577,111 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
 # src/lib/latest-holdings-per-key.ts, which fails loud the same way.
 _HOLDINGS_ROW_CAP = 1000
 
+# The per-holding mark history the matcher reads is bounded the way /compare's is
+# (HOLDING_COMPARE_WINDOW_DAYS and HOLDING_COMPARE_MAX_PAGES in
+# src/app/(dashboard)/compare/lib/holding-compare-adapter.ts): 730 days, and at most 50
+# pages of ``_HOLDINGS_ROW_CAP`` rows. A read that fills every page raises instead of
+# returning a partial series.
+_HOLDINGS_HISTORY_WINDOW_DAYS = 730
+_HOLDINGS_HISTORY_MAX_PAGES = 50
+
+
+# D-20 (founder, 167.1.1.1): the fewest ADJACENT one-day returns a spot holding needs to join
+# the matcher's return signal. The shared price rule (``MIN_PRICED_DAYS``, D-03) admits a
+# holding by how many days it is priced, and 30 priced days that are not adjacent have no
+# one-day return at all. ``score_candidates`` joins the book on the days every series carries
+# a return, so one such series would empty that join, null the portfolio-fit axis and silence
+# every correlation-ceiling test for the allocator. The old dollar-ratio gate counted 30
+# returns, not 30 days. This is a MATCHER constant on purpose and a distinct cause from
+# ``too_few_priced_days``: /compare and the shared rule are unchanged, and a false cause is
+# the defect class this repo avoids.
+_MATCHER_MIN_ADJACENT_RETURNS: Final[int] = 30
+
+# D-22 (founder, 167.1.1.1): the fewest days the book's shared-days join must span for the
+# portfolio-fit axis to compute. It IS the engine's ``PORTFOLIO_FIT_MIN_OVERLAP_DAYS`` (the same
+# constant feeds the candidate-level marker, so the two cannot disagree); a book whose join is
+# shorter is NAMED with ``book_join_marker`` and no holding is withheld to fit it.
+_BOOK_JOIN_MIN_DAYS: Final[int] = PORTFOLIO_FIT_MIN_OVERLAP_DAYS
+
+# D-23 (founder, 167.1.1.1 round 2): a book whose matcher AUM is zero or below sizes the ticket
+# at the engine's add-weight CEILING, ``_clamp(ticket / aum, 0.01, 0.5)`` at its top, consistent
+# with D-21 (a tiny positive AUM). ``score_candidates`` reads ``portfolio_aum=None`` as
+# "cold-start or unknown AUM" and sizes at a fixed 0.10, which would score a LOSING book better
+# on max weight than a book with $100. ``_AUM_NOT_POSITIVE_SCORING_AUM`` is the AUM handed to the
+# engine instead: positive and so small that any positive ticket divided by it clamps to the
+# ceiling. It exists only for that call; the persisted AUM share stays null.
+_ADD_WEIGHT_CEILING: Final[float] = 0.5
+_AUM_NOT_POSITIVE_SCORING_AUM: Final[float] = 1e-6
+
+# D-24, D-25 (founder, 167.1.1.1 round 3): the engine sizes ``add_weight`` from the ticket and the
+# AUM in PERSONALIZED mode only; everywhere else, and for an unknown AUM, it uses the fixed
+# default below (``match_engine`` ``add_weight = 0.10``). Those cases are not changed, only
+# NAMED on the batch, so a reader can tell a default from a measured sizing.
+_ADD_WEIGHT_DEFAULT: Final[float] = 0.10
+_FALLBACK_AUM_NOT_POSITIVE_CEILING: Final[str] = "aum_not_positive_ceiling_0_5"
+_FALLBACK_AUM_NOT_POSITIVE_SCREENING: Final[str] = "aum_not_positive_screening_default_0_10"
+_FALLBACK_AUM_UNKNOWN: Final[str] = "aum_unknown_default_0_10"
+
+
+def _holdings_history_window_start() -> str:
+    """The first ``asof`` (YYYY-MM-DD, UTC) the holdings history read asks for.
+
+    A function, not a constant, so a test with a fixed fixture calendar can pin it."""
+    start = datetime.now(timezone.utc).date() - timedelta(days=_HOLDINGS_HISTORY_WINDOW_DAYS)
+    return start.isoformat()
+
+
+class SeriesIndexError(RuntimeError):
+    """The return series handed to the matcher's scoring do not share ONE index type
+    (CR-01, round 2). pandas treats a string day and a ``Timestamp`` (or a tz-naive and a
+    tz-aware day) as different labels, so a mixed set joins to ZERO shared days without any
+    error: the portfolio-fit axis goes null, every correlation-ceiling test is skipped, and
+    the D-22 marker blames an overlap that is fine. Raised before scoring so that can never be
+    silent."""
+
+
+def assert_uniform_datetime_index(
+    groups: dict[str, dict[str, pd.Series]], *, allocator_id: str
+) -> None:
+    """Raise :class:`SeriesIndexError` unless every non-empty series across ``groups``
+    (``{label: {series_id: Series}}``, e.g. the book and the candidates) is indexed by a
+    ``DatetimeIndex`` of ONE tz-awareness, the shape ``records_to_series`` gives every
+    strategy, candidate and holding series. Names the group, the series ids and the offending
+    index types, never a value. An empty series has no day to join and is skipped."""
+    not_datetime: list[str] = []
+    naive: list[str] = []
+    aware: list[str] = []
+    for label, series_by_id in groups.items():
+        for sid, series in series_by_id.items():
+            if len(series) == 0:
+                continue
+            index = series.index
+            ref = f"{label}:{sid}"
+            if not isinstance(index, pd.DatetimeIndex):
+                not_datetime.append(f"{ref} ({type(index).__name__})")
+            elif index.tz is None:
+                naive.append(ref)
+            else:
+                aware.append(ref)
+    if not_datetime or (naive and aware):
+        parts: list[str] = []
+        if not_datetime:
+            parts.append(f"{len(not_datetime)} not DatetimeIndex-indexed: {_sample(not_datetime)}")
+        if naive and aware:
+            parts.append(
+                f"{len(naive)} tz-naive ({_sample(naive)}) beside {len(aware)} tz-aware "
+                f"({_sample(aware)})"
+            )
+        raise SeriesIndexError(
+            f"allocator {allocator_id}: the scored series must all share one DatetimeIndex "
+            f"type (the shape records_to_series produces), but " + "; ".join(parts)
+        )
+
+
+def _sample(refs: list[str], limit: int = 3) -> str:
+    more = f", and {len(refs) - limit} more" if len(refs) > limit else ""
+    return ", ".join(refs[:limit]) + more
+
 
 class HoldingsReadTruncated(RuntimeError):
     """A holdings or key read reached ``_HOLDINGS_ROW_CAP`` rows, so it may be a
@@ -581,8 +691,9 @@ class HoldingsReadTruncated(RuntimeError):
 
 
 def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
-    """Phase 09 / D-01 + D-16. Load allocator_holdings and reconstruct per-symbol
-    returns from allocator_equity_snapshots.breakdown.
+    """Phase 09 / D-01 + D-16, rewritten by 167.1.1.1 (BRIDGERETURNS). Load
+    allocator_holdings and build each spot holding's return series from its daily MARK
+    PRICE.
 
     Phase 170.4 D-08 / D-10 (Phase 167.1.1 R-15-1, R-15-2): one API key is one
     strategy, so the AUM is the sum over EVERY live key's position, and keys that
@@ -598,22 +709,78 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
     commit (``oneKeyPerAccountDay``); both are replayed against one case table.
     Only service-written evidence enters: ``allocator_holdings`` rows and
     ``updated_at``, the native-unpriced markers and the owner's ``api_keys``
-    identity columns. No audit-log read is added. Applies the Phase 07 D-03 warm-up
-    gate: holdings whose per-symbol series has fewer than 30 daily returns are
-    excluded from portfolio math entirely (not flagged, not compared).
+    identity columns. No audit-log read is added.
+
+    Returns come from MARKS, not dollars (D-03, D-07): one tenant-filtered, capped
+    history read of the allocator's holdings (D-05), grouped per (venue, symbol,
+    holding_type) (D-08), then ``classify_spot_marks`` for each spot holding. The change
+    of a holding's dollar value is never read as a return, so a purchase, a sale or a
+    transfer is not a gain or a loss. A mark that breaks the read contract, or an
+    unusable ``updated_at``, raises (``HoldingMarkContractError``,
+    ``HoldingsUpdatedAtError``) and is deliberately not caught here: the scorer's
+    caller logs it under a correlation id.
+
+    What is in and out of the book (D-01, spot only in this function):
+
+    ===========================  ========  ==================  ==================  ==================
+    spot holding                 AUM       AUM share, max-wt   scoring weights     returns, eligible
+    ===========================  ========  ==================  ==================  ==================
+    priced (30+ priced days and  in        in                  in                  in
+    30+ adjacent returns)
+    withheld (account_balance,   in        in                  out (no series)     out (named)
+    fixed_price, no_price,
+    too_few_priced_days,
+    too_few_adjacent_returns)
+    ===========================  ========  ==================  ==================  ==================
+
+    Two weight notions, kept apart on purpose (review CR-01). The AUM share
+    (``aum_contribution_usd`` over the full matcher AUM, withheld spot and derivative P&L
+    included) is what ``holding_flags`` persists and what the max-weight test reads (D-01,
+    D-16); ``compute_holding_flags`` derives it from ``portfolio_aum``. The SCORING weights
+    (``portfolio_weights``) are what ``match_engine`` blends the joined series with, so they
+    cover exactly the series it joins and sum to 1: a withheld holding has no series and
+    must not sit in their denominator, or the candidate's add_weight is inflated.
+
+    ``too_few_adjacent_returns`` (D-20) is a matcher-only reason: a holding with 30 or more
+    priced days whose marks give fewer than ``_MATCHER_MIN_ADJACENT_RETURNS`` adjacent
+    one-day returns. It keeps the price rule's reasons below 30 priced days.
+
+    The AUM is the allocator's own (D-15, D-16): every collapsed holding, spot priced,
+    spot withheld and derivative, adds ``aum_contribution_usd``, which is
+    ``holding_equity_contribution`` summed over the holding's counted rows (spot: its
+    finite ``value_usd``; derivative: its signed unrealized P&L, never its notional). A
+    derivative is in the AUM and in NEITHER the weights, the max-weight test nor the
+    returns (D-19, D-09). A derivative whose counted rows reported no P&L (D-18)
+    contributes nothing and carries ``pnl_missing`` True with ``aum_contribution_usd``
+    None: it is never counted as 0.0.
 
     This helper is SYNC (plain def) — called from _load_allocator_context which is
     itself sync and invoked via asyncio.to_thread. Per finding f1: MUST NOT be
     converted to async def.
 
     Returns dict with:
-      portfolio_strategies: list[dict]  (pseudo-strategy dicts, strategy_id = "holding:V:S:T")
-      portfolio_weights:    dict[str, float]  (value_usd / total_eligible_value, sums to 1.0)
-      portfolio_returns:    dict[str, pd.Series]  (one Series per eligible holding)
-      portfolio_aum:        float  (sum of eligible holding value_usd)
-      holdings_rows_eligible: list[dict]  (one row per pseudo-strategy that passed the warm-up
-                                           gate, ``value_usd`` summed over the counted keys,
-                                           for compute_holding_flags consumption in Task 3)
+      portfolio_strategies: list[dict]  (priced spot only; strategy_id = "holding:V:S:T")
+      portfolio_weights:    dict[str, float]  (SCORING weights: aum_contribution_usd over
+                                               the sum of the PRICED spot holdings only, so
+                                               they sum to 1.0 over the series
+                                               match_engine joins; withheld spot and
+                                               derivatives are not in them)
+      portfolio_returns:    dict[str, pd.Series]  (one Series per priced spot holding)
+      portfolio_aum:        float  (sum of aum_contribution_usd over every collapsed
+                                    holding: spot priced, spot withheld, derivative)
+      holdings_rows_eligible: list[dict]  (one row per priced spot pseudo-strategy,
+                                           ``value_usd`` summed over the counted keys,
+                                           for compute_holding_flags consumption)
+      holdings_rows_withheld: list[dict]  (one row per withheld spot holding, the same
+                                           shape plus ``withheld_reason``)
+      holdings_rows_derivative: list[dict]  (one row per collapsed derivative holding, with
+                                           ``aum_contribution_usd`` (float | None),
+                                           ``pnl_missing`` and ``withheld_reason``: the
+                                           reason it is out of the book, ``pnl_missing`` >
+                                           the price rule's > ``derivative_out_of_book``)
+
+    Every collapsed row carries ``aum_contribution_usd`` (float | None: None only for a
+    derivative none of whose counted rows had a P&L) and ``pnl_missing`` (bool).
     """
     supabase = get_supabase()
 
@@ -658,7 +825,10 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
             continue
         day_rows = rows(
             supabase.table("allocator_holdings")
-            .select("api_key_id, venue, symbol, holding_type, value_usd, asof, updated_at")
+            .select(
+                "api_key_id, venue, symbol, holding_type, value_usd, "
+                "unrealized_pnl_usd, asof, updated_at"
+            )
             .eq("allocator_id", allocator_id)
             .eq("api_key_id", key_id)
             .eq("asof", latest[0]["asof"])
@@ -736,18 +906,42 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
 
     # One pseudo-strategy per (venue, symbol, holding_type): the counted keys'
     # values are summed into it (D-08), the eligible row carries the total once.
+    #
+    # Each counted row also goes through ``holding_equity_contribution`` (D-15, D-16), the
+    # dashboard's AUM rule, so the matcher's AUM is the AUM the allocator sees. The collapsed
+    # row's ``aum_contribution_usd`` is the sum of the contributions that exist, or None
+    # when none did (only a derivative with no P&L returns None, D-18); ``pnl_missing``
+    # records that at least one counted derivative row had no P&L. The missing P&L is
+    # never represented as 0.0, and a derivative's notional ``value_usd`` never feeds it.
     holdings_map: dict[tuple[str, str, str], Row] = {}
     for account_rows in day_rows_by_account.values():
         for counted in one_key_per_account_day(account_rows):
             key = (counted["venue"], counted["symbol"], counted["holding_type"])
+            contribution = holding_equity_contribution(counted)
+            row_pnl_missing = contribution is None
             if key in holdings_map:
+                held = holdings_map[key]
+                held_contribution: float | None = held["aum_contribution_usd"]
+                merged_contribution: float | None
+                if held_contribution is None:
+                    merged_contribution = contribution
+                elif contribution is None:
+                    merged_contribution = held_contribution
+                else:
+                    merged_contribution = held_contribution + contribution
                 holdings_map[key] = {
-                    **holdings_map[key],
-                    "value_usd": float(holdings_map[key].get("value_usd") or 0.0)
+                    **held,
+                    "value_usd": float(held.get("value_usd") or 0.0)
                     + float(counted.get("value_usd") or 0.0),
+                    "aum_contribution_usd": merged_contribution,
+                    "pnl_missing": bool(held["pnl_missing"]) or row_pnl_missing,
                 }
             else:
-                holdings_map[key] = dict(counted)
+                holdings_map[key] = {
+                    **counted,
+                    "aum_contribution_usd": contribution,
+                    "pnl_missing": row_pnl_missing,
+                }
     collapsed = list(holdings_map.values())
 
     if not collapsed:
@@ -757,72 +951,184 @@ def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
             "portfolio_returns": {},
             "portfolio_aum": 0.0,
             "holdings_rows_eligible": [],
+            "holdings_rows_withheld": [],
+            "holdings_rows_derivative": [],
         }
 
-    # --- Step 3: fetch equity snapshots ordered ASC (needed for pct_change) ---
-    snapshots_result = (
-        supabase.table("allocator_equity_snapshots")
-        .select("asof, breakdown")
-        .eq("allocator_id", allocator_id)
-        .order("asof", desc=False)
-        .execute()
-    )
-    snapshots = rows(snapshots_result)
+    # --- Step 3: the holdings' mark history, one tenant-filtered, capped read ---
+    # The service role bypasses RLS, so ``.eq("allocator_id", ...)`` IS the tenant
+    # boundary (T-167.1.1.1-05). The read applies neither the account rule nor the
+    # native-unpriced marker: a price does not depend on whose account holds the asset
+    # (MT5 and sFOX holdings are withheld before any mark is read). It is bounded to the
+    # window and to ``_HOLDINGS_HISTORY_MAX_PAGES`` pages; a read that fills the ceiling
+    # raises, because a partial series would be reported as a complete one.
+    try:
+        history_rows = paginated_select(
+            supabase.table("allocator_holdings")
+            .select("asof, venue, symbol, holding_type, side, mark_price, updated_at, api_key_id")
+            .eq("allocator_id", allocator_id)
+            .gte("asof", _holdings_history_window_start()),
+            order_by=(("asof", False), ("id", False)),
+            page_size=_HOLDINGS_ROW_CAP,
+            hard_cap_pages=_HOLDINGS_HISTORY_MAX_PAGES,
+            truncation_hint="holdings history",
+        )
+    except PaginatedSelectTruncated as err:
+        raise HoldingsReadTruncated(
+            f"allocator_holdings history read reached the {_HOLDINGS_HISTORY_MAX_PAGES}-page "
+            f"ceiling for allocator {allocator_id}"
+        ) from err
 
-    # --- Step 4: reconstruct per-symbol returns + apply 30-day warm-up gate ---
+    # One list of rows per (venue, symbol, holding_type), only for the holdings that
+    # survived the account rule above (D-08: a venue's marks never feed another
+    # venue's series, and no read is keyed by bare symbol). Rows of different keys on
+    # one holding stay together on purpose: ``classify_spot_marks`` keeps ONE mark per
+    # day across them, so two keys holding an asset never double a day.
+    counted_refs = set(holdings_map)
+    marks_by_ref: dict[tuple[str, str, str], list[Row]] = {}
+    for hist in history_rows:
+        hist_ref = (hist["venue"], hist["symbol"], hist["holding_type"])
+        if hist_ref in counted_refs:
+            marks_by_ref.setdefault(hist_ref, []).append(hist)
+
+    # --- Step 4: each spot holding's returns from its marks (D-03, D-07) ---
     portfolio_strategies: list[dict[str, Any]] = []
     portfolio_returns: dict[str, pd.Series] = {}
     holdings_rows_eligible: list[Row] = []
-    raw_values: dict[str, float] = {}  # pseudo_id -> value_usd (for weight computation)
-    warm_up_dropped = 0  # NEW-C08-05: count excluded holdings for observability
+    holdings_rows_withheld: list[Row] = []
+    holdings_rows_derivative: list[Row] = []
+    # pseudo_id -> aum_contribution_usd (priced AND withheld spot; never a derivative)
+    raw_values: dict[str, float] = {}
+    # D-15, D-16: the AUM is every collapsed holding's contribution, derivative P&L included.
+    # A None (a derivative with no P&L, D-18) adds nothing; it is skipped here, not coerced.
+    total_aum = 0.0
+    withheld_counts: dict[str, int] = {}
+    derivative_counts: dict[str, int] = {}
 
     for row in collapsed:
         venue = row["venue"]
         symbol = row["symbol"]
         holding_type = row["holding_type"]
+        contribution = row["aum_contribution_usd"]
+        if contribution is not None:
+            total_aum += contribution
+        if holding_type != "spot":
+            # D-19, D-09: a derivative is in the AUM (its P&L, above) and nowhere else in
+            # the book: no weight, no max-weight test, no return series. It is NAMED in
+            # holding_flags with a reason (D-02), chosen in this precedence order:
+            #   1. ``pnl_missing`` (D-18): a counted row had no P&L, so its AUM
+            #      contribution is not a full figure; this outranks any price-rule reason;
+            #   2. the price rule's reason (``option_premium`` D-10, ``no_price``,
+            #      ``no_direction``, ``too_few_priced_days``);
+            #   3. ``derivative_out_of_book`` (D-09): the signed series is usable, but a
+            #      derivative never joins the book's return signal.
+            # The marks are always classified, so a row that breaks the read contract
+            # raises here exactly as a spot one does, whatever the P&L says.
+            derivative_marks = classify_derivative_marks(
+                marks_by_ref.get((venue, symbol, holding_type), []), symbol=symbol
+            )
+            if row["pnl_missing"]:
+                derivative_reason = "pnl_missing"
+            elif derivative_marks.withheld_reason is not None:
+                derivative_reason = derivative_marks.withheld_reason
+            else:
+                derivative_reason = "derivative_out_of_book"
+            holdings_rows_derivative.append({**row, "withheld_reason": derivative_reason})
+            derivative_counts[derivative_reason] = derivative_counts.get(derivative_reason, 0) + 1
+            continue
         pseudo_id = f"holding:{venue}:{symbol}:{holding_type}"
-        value_usd = float(row.get("value_usd") or 0.0)
+        # A spot row's contribution is never None (only a derivative can be); its finite
+        # value is its weight basis, so a NaN value weighs 0 rather than poisoning the AUM.
+        value_usd = float(contribution) if contribution is not None else 0.0
 
-        series = reconstruct_symbol_returns(snapshots, symbol)
-        if series is None or len(series) < 30:
-            # Warm-up gate: insufficient history — exclude entirely (Phase 07 D-03 analog).
-            # NEW-C08-05: count and log so the caller can distinguish empty-book
-            # from freshly-funded (portfolio_aum=0 with warm_up_dropped>0 means
-            # the allocator has holdings but they're all too new to score, not
-            # that there are genuinely no holdings).
-            warm_up_dropped += 1
+        marks = classify_spot_marks(
+            marks_by_ref.get((venue, symbol, holding_type), []), venue=venue, symbol=symbol
+        )
+        # D-01: priced or withheld, a spot holding keeps its dollars in the AUM and
+        # its weight. Only a priced one carries a return series.
+        raw_values[pseudo_id] = value_usd
+        # D-20: a holding the price rule ADMITTED but whose series has fewer than
+        # ``_MATCHER_MIN_ADJACENT_RETURNS`` adjacent one-day returns cannot join the book's
+        # return signal; the price rule's own reason always wins when it fired.
+        withheld_reason = marks.withheld_reason
+        if withheld_reason is None and len(marks.returns) < _MATCHER_MIN_ADJACENT_RETURNS:
+            withheld_reason = "too_few_adjacent_returns"
+        if withheld_reason is not None:
+            holdings_rows_withheld.append({**row, "withheld_reason": withheld_reason})
+            withheld_counts[withheld_reason] = withheld_counts.get(withheld_reason, 0) + 1
             continue
 
         portfolio_strategies.append({"strategy_id": pseudo_id})
-        portfolio_returns[pseudo_id] = series
+        # CR-01 (round 2): the SAME converter the strategy and candidate series go through
+        # (``daily_returns_from_row`` reaches ``records_to_series``), so a holding's days are
+        # a tz-naive ``DatetimeIndex`` like theirs. A plain "YYYY-MM-DD" string index never
+        # equals a ``Timestamp``, so the engine's date joins found no shared day with any
+        # candidate or strategy in production.
+        holding_series = records_to_series(
+            [{"date": day, "value": ret} for day, ret in marks.returns], name=pseudo_id
+        )
+        if holding_series is None:
+            # Unreachable for a finite return: the rule floors each signed return at -100% and
+            # a price is positive, so every adjacent return is a finite float. Fail loud
+            # rather than carry a holding with no usable series into the book.
+            raise SeriesIndexError(
+                f"allocator {allocator_id}: a priced spot holding's mark returns produced "
+                f"no usable date-indexed series"
+            )
+        portfolio_returns[pseudo_id] = holding_series
         holdings_rows_eligible.append(row)
-        raw_values[pseudo_id] = value_usd
 
-    if warm_up_dropped > 0:
+    if withheld_counts:
+        # Counts per reason only: no symbol, value or key id (T-167.1.1.1-08).
         logger.info(
-            "match: holdings warm-up gate dropped %d/%d holding(s) for allocator %s "
-            "(< 30 reconstructable daily returns) — these are excluded from portfolio "
-            "math and flag computation",
-            warm_up_dropped, len(collapsed), allocator_id,
+            "match: %d spot holding(s) withheld from the return signal for allocator %s "
+            "(by reason: %s); they stay in the AUM and the weights",
+            len(holdings_rows_withheld), allocator_id,
+            ", ".join(f"{reason}={n}" for reason, n in sorted(withheld_counts.items())),
         )
 
-    # --- Step 5: compute weights (value_usd / total_eligible_value) ---
-    total_eligible_value = sum(raw_values.values())
+    if derivative_counts:
+        # Counts per reason only: no symbol, value or key id (T-167.1.1.1-08).
+        logger.info(
+            "match: %d derivative holding(s) named in holding_flags for allocator %s "
+            "(by reason: %s); each adds only its P&L to the AUM",
+            len(holdings_rows_derivative), allocator_id,
+            ", ".join(f"{reason}={n}" for reason, n in sorted(derivative_counts.items())),
+        )
+
+    # --- Step 5: SCORING weights over the series match_engine will join (CR-01) ---
+    # The denominator is the sum of the PRICED spot holdings only. A withheld holding has
+    # no series, and a derivative's P&L is never a weight, so neither may sit in the
+    # denominator: match_engine blends exactly the joined series, and a denominator that
+    # includes dollars with no series would make the candidate's add_weight a/(S(1-a)+a)
+    # with S < 1 instead of a. The AUM share that D-01 and D-16 keep over the full AUM
+    # (withheld spot and derivative P&L included) is not built here; compute_holding_flags
+    # derives it from ``portfolio_aum``.
+    scoring_values = {pid: raw_values[pid] for pid in portfolio_returns}
+    scoring_total = sum(scoring_values.values())
     portfolio_weights: dict[str, float] = {}
-    if total_eligible_value > 0:
-        for pid, val in raw_values.items():
-            portfolio_weights[pid] = val / total_eligible_value
-    else:
-        # All values zero — equal weight as fallback
-        for pid in raw_values:
-            portfolio_weights[pid] = 1.0 / len(raw_values) if raw_values else 0.0
+    if scoring_total > 0:
+        for pid, val in scoring_values.items():
+            portfolio_weights[pid] = val / scoring_total
+    elif scoring_values:
+        # Every priced holding has a zero value: equal weights over the priced set, the
+        # fallback that predates this phase. Named, never silent.
+        logger.warning(
+            "match: scoring_weights_equal_fallback: the %d priced spot holding(s) of "
+            "allocator %s sum to a non-positive value, so they are scored at equal weights",
+            len(scoring_values), allocator_id,
+        )
+        for pid in scoring_values:
+            portfolio_weights[pid] = 1.0 / len(scoring_values)
 
     return {
         "portfolio_strategies": portfolio_strategies,
         "portfolio_weights": portfolio_weights,
         "portfolio_returns": portfolio_returns,
-        "portfolio_aum": total_eligible_value,
+        "portfolio_aum": total_aum,
         "holdings_rows_eligible": holdings_rows_eligible,
+        "holdings_rows_withheld": holdings_rows_withheld,
+        "holdings_rows_derivative": holdings_rows_derivative,
     }
 
 
@@ -988,37 +1294,76 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     holding_returns = holdings_ctx["portfolio_returns"]
     holding_aum = holdings_ctx["portfolio_aum"]
     holdings_rows_eligible = holdings_ctx["holdings_rows_eligible"]
+    # D-01: a withheld spot holding stays in the AUM and the weights; only its returns
+    # are left out of portfolio_returns (it is not in holding_strategies).
+    holdings_rows_withheld = holdings_ctx.get("holdings_rows_withheld", [])
+    holdings_rows_derivative = holdings_ctx.get("holdings_rows_derivative", [])
 
     # Merge strategies + holdings into combined dicts
     portfolio_strategies.extend(holding_strategies)
     portfolio_returns.update(holding_returns)
 
-    # Combined AUM
+    # Matcher AUM: the allocator's own figure (D-15, D-16), strategy allocations plus every
+    # holding's contribution (withheld spot and derivative P&L included). It sizes the
+    # ticket (add_weight) and is the denominator of the AUM share that holding_flags
+    # persists and the max-weight test reads (D-01). It is NOT the scoring denominator.
     combined_aum = strategy_aum + holding_aum
 
-    # Renormalize weights across the combined set so they sum to 1.0 (D-16).
+    # SCORING weights (CR-01): normalised over the series match_engine joins, that is the
+    # book's strategies (allocated_amount) and the priced holdings, nothing else. A
+    # withheld holding has no series and a derivative's P&L is not a weight, so neither
+    # is in this denominator, exactly as before this phase. Keep this notion apart from
+    # the AUM share above: put withheld dollars back in here and the candidate's
+    # add_weight a becomes a/(S(1-a)+a) with S < 1, inflating sharpe_lift and
+    # dd_improvement.
     # Strategy side: use allocated_amount as the value basis.
-    # Holdings side: use value_usd (already in holdings_ctx["portfolio_weights"] as fractions
-    #   of the holdings total, but we need absolute values for combined renorm).
-    # Reconstruct absolute values for holding side from their individual value_usd.
+    # Holdings side: the priced holdings' aum_contribution_usd (their finite value).
     holding_abs_values: dict[str, float] = {}
     for row in holdings_rows_eligible:
         pseudo_id = f"holding:{row['venue']}:{row['symbol']}:{row['holding_type']}"
-        holding_abs_values[pseudo_id] = float(row.get("value_usd") or 0.0)
+        spot_contribution = row["aum_contribution_usd"]
+        # A spot row's contribution is never None (only a derivative with no P&L is).
+        holding_abs_values[pseudo_id] = (
+            float(spot_contribution) if spot_contribution is not None else 0.0
+        )
+    scoring_denominator = sum(strategy_raw_values.values()) + sum(holding_abs_values.values())
 
-    if combined_aum > 0:
+    if scoring_denominator > 0:
         # Strategies side
         for sid, val in strategy_raw_values.items():
-            portfolio_weights[sid] = val / combined_aum
+            portfolio_weights[sid] = val / scoring_denominator
         # Holdings side
         for pid, val in holding_abs_values.items():
-            portfolio_weights[pid] = val / combined_aum
+            portfolio_weights[pid] = val / scoring_denominator
     elif holding_strategies or portfolio_strategies:
-        # Fall back: equal weights when no AUM data available
+        # Fall back: equal weights over the scored set when its values sum to nothing
+        # (predates 167.1.1.1; the sign of the matcher AUM plays no part in it). Named.
         all_ids = [ps["strategy_id"] for ps in portfolio_strategies]
         eq_w = 1.0 / len(all_ids) if all_ids else 0.0
+        logger.warning(
+            "match: scoring_weights_equal_fallback: the %d scored series of allocator %s "
+            "carry no positive value, so they are scored at equal weights",
+            len(all_ids), allocator_id,
+        )
         for pid in all_ids:
             portfolio_weights[pid] = eq_w
+
+    aum_not_positive = combined_aum <= 0 and bool(
+        holdings_rows_eligible or holdings_rows_withheld or holdings_rows_derivative
+    )
+    if aum_not_positive:
+        # SFH-01: a non-positive matcher AUM is real (derivative losses can exceed spot), not
+        # "no AUM data". The scoring weights do not depend on it; the AUM share and the
+        # max-weight test cannot be computed, so holding_flags names that (weight None,
+        # breach_skipped). The ticket sizing this implies (D-23, D-25) depends on the mode the
+        # engine runs in, so it is named after scoring, by ``add_weight_fallback_entry``.
+        logger.warning(
+            "match: aum_not_positive: the matcher AUM of allocator %s is not positive "
+            "(derivative P&L exceeds the spot and strategy value), so holding weights are "
+            "persisted as null and the max-weight test is skipped; scoring weights are "
+            "unaffected",
+            allocator_id,
+        )
 
     # Thumbs-down history
     td_result = (
@@ -1037,10 +1382,34 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         "portfolio_returns": portfolio_returns,
         "native_units": native_units,
         "portfolio_aum": combined_aum if combined_aum > 0 else None,
+        # D-23: True when the AUM is at or below zero for a book that holds holdings; the
+        # engine's own ``portfolio_aum=None`` reading ("unknown AUM", 0.10 sizing) must not
+        # apply to it.
+        "aum_not_positive": aum_not_positive,
         "thumbs_down_ids": thumbs_down_ids,
         # Internal-use: passed to compute_holding_flags in _score_one_allocator (Task 3)
         "_holdings_rows_eligible": holdings_rows_eligible,
+        # D-01: spot held out of the return signal by name; plan 05 names them in holding_flags.
+        "_holdings_rows_withheld": holdings_rows_withheld,
+        # D-02, D-19: every derivative in the book, named in holding_flags by reason and
+        # P&L contribution, never weighed, never max-weight tested, never in the returns.
+        "_holdings_rows_derivative": holdings_rows_derivative,
     }
+
+
+def _flag_value_usd(row: dict[str, Any]) -> float:
+    """The dollar figure a SPOT holding's flag entry carries and weighs on.
+
+    The collapsed row's ``aum_contribution_usd`` when it has one (the AUM basis: a finite
+    value, so a NaN ``value_usd`` weighs 0 rather than producing a NaN weight), else its
+    ``value_usd`` as before. A derivative's notional never reaches this function: a
+    derivative row is refused here, so a future caller cannot weigh or print a notional."""
+    if row.get("holding_type") == "derivative":
+        raise ValueError("_flag_value_usd is for spot rows; a derivative has no flag value")
+    contribution = row.get("aum_contribution_usd")
+    if contribution is not None:
+        return float(contribution)
+    return float(row.get("value_usd") or 0.0)
 
 
 def compute_holding_flags(
@@ -1051,10 +1420,14 @@ def compute_holding_flags(
     portfolio_aum: float | None,
     allocator_preferences: dict[str, Any],
     scored_candidates_by_slot: dict[str, list[Any]],
+    holdings_rows_withheld: list[dict[str, Any]] | None = None,
+    holdings_rows_derivative: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Phase 09 / finding f5. Per-holding flag rows persisted into match_batches.holding_flags.
 
-    Returns list[dict] — one entry per eligible holding (those present in portfolio_returns).
+    Returns list[dict] — one entry per eligible holding (those present in portfolio_returns),
+    then (167.1.1.1 D-04, D-12) one per withheld SPOT holding in ``holdings_rows_withheld``,
+    then (D-02, D-19) one per DERIVATIVE holding in ``holdings_rows_derivative``.
     Applies D-04 (breach + candidate-exists gate) + D-05 (max_weight + correlation_ceiling)
     + D-06 (FLAG_COMPOSITE_THRESHOLD=50 gate on top candidate composite score).
 
@@ -1062,12 +1435,58 @@ def compute_holding_flags(
         {
             "holding_ref":              "holding:{venue}:{symbol}:{holding_type}",
             "value_usd":                float,
-            "weight":                   float,       # value_usd / portfolio_aum
+            "weight":                   float | None, # the AUM SHARE: value_usd / portfolio_aum,
+                                                      # over the full matcher AUM (D-01, D-16),
+                                                      # NOT the scoring weight; None (JSON null)
+                                                      # when the AUM is not positive (SFH-01)
             "breach_reasons":           list[str],   # "max_weight" | "correlation_ceiling"
             "top_candidate_strategy_id": str | None,
             "top_candidate_composite":  float | None,
             "flagged":                  bool,        # True iff breach + candidate_composite >= 50
+            "breach_skipped":           ["aum_not_positive"],  # ONLY present when the matcher
+                                                      # AUM is not positive and the allocator set
+                                                      # a max_weight: the max-weight test could
+                                                      # not run (weight is null). Absent
+                                                      # otherwise; never in ``breach_reasons``.
         }
+
+    The weight persisted here is the AUM share, a different notion from the scoring weights
+    ``match_engine`` blends the joined series with (``portfolio_weights``, which sum to 1
+    over the joined series only). A non-positive ``portfolio_aum`` (derivative losses can
+    exceed the spot value) never produces a weight: it is null, never 0.0 (SFH-01).
+
+    A withheld spot holding (its price is not a market price, or its series is too thin to
+    join the book's returns) gets the same shape plus ``withheld_reason``, one of
+    ``account_balance`` | ``fixed_price`` | ``no_price`` | ``too_few_priced_days`` |
+    ``too_few_adjacent_returns``. It stays in the AUM and the weights (D-01), so the
+    max-weight test runs and a breach is recorded in ``breach_reasons``; but
+    ``flagged`` is forced False (D-12), ``top_candidate_*`` are None (no candidate is
+    picked for it) and no correlation test runs (it has no return series). The dashboard
+    reader keeps only ``flagged`` entries with a candidate, so such an entry is not shown.
+
+    A DERIVATIVE holding (D-02, D-09, D-19) is named with a different shape: it is in the AUM
+    through its signed unrealized P&L only, never its notional, and it has no weight.
+    ::
+
+        {
+            "holding_ref":              "holding:{venue}:{symbol}:derivative",
+            "value_usd":                None,        # never the notional (D-15)
+            "aum_contribution_usd":     float | None,# the P&L it added to the AUM (D-16);
+                                                     # None (JSON null) when no counted row
+                                                     # had a P&L, never 0.0 (D-18)
+            "weight":                   None,        # a derivative has no weight (D-19)
+            "breach_reasons":           [],          # no max-weight, no correlation test
+            "top_candidate_strategy_id": None,
+            "top_candidate_composite":  None,
+            "flagged":                  False,
+            "withheld_reason":          str,         # pnl_missing | option_premium | no_price
+                                                     # | no_direction | too_few_priced_days
+                                                     # | derivative_out_of_book
+        }
+
+    ``pnl_missing`` (D-18) outranks the price rule's reasons, which outrank
+    ``derivative_out_of_book`` (D-09: a usable signed series still never joins the book's
+    return signal). The row's ``aum_contribution_usd`` is copied as it is, never coerced.
 
     This is a synchronous plain `def` per finding f1.
     """
@@ -1075,7 +1494,11 @@ def compute_holding_flags(
 
     max_weight_pref = allocator_preferences.get("max_weight")
     corr_ceiling = allocator_preferences.get("correlation_ceiling")
+    # The AUM share's denominator. None means "not positive" (the context returns None
+    # for a non-positive matcher AUM): no share can be computed, so every spot entry gets
+    # weight None and the max-weight test is skipped BY NAME, never as a silent 0.0.
     aum = float(portfolio_aum) if portfolio_aum and float(portfolio_aum) > 0 else None
+    max_weight_skipped = max_weight_pref is not None and aum is None
 
     flags: list[dict[str, Any]] = []
 
@@ -1087,12 +1510,12 @@ def compute_holding_flags(
         if pseudo_id not in portfolio_returns:
             continue
 
-        value = float(row.get("value_usd") or 0.0)
-        weight = value / aum if aum else 0.0
+        value = _flag_value_usd(row)
+        aum_share = value / aum if aum is not None else None
         breaches: list[str] = []
 
         # D-05 max_weight breach
-        if max_weight_pref is not None and aum is not None and weight > float(max_weight_pref):
+        if max_weight_pref is not None and aum_share is not None and aum_share > float(max_weight_pref):
             breaches.append("max_weight")
 
         # D-05 correlation_ceiling breach via _compute_corr_with_portfolio
@@ -1136,17 +1559,194 @@ def compute_holding_flags(
 
         flagged = bool(breaches) and top_id is not None
 
-        flags.append({
+        entry: dict[str, Any] = {
             "holding_ref": pseudo_id,
             "value_usd": value,
-            "weight": weight,
+            "weight": aum_share,
             "breach_reasons": breaches,
             "top_candidate_strategy_id": top_id,
             "top_candidate_composite": top_composite,
             "flagged": flagged,
+        }
+        if max_weight_skipped:
+            entry["breach_skipped"] = ["aum_not_positive"]
+        flags.append(entry)
+
+    # 167.1.1.1 D-04, D-12: a withheld SPOT holding is named, with its max-weight breach
+    # (D-01: it is in the AUM and the weights) and never flagged.
+    for row in holdings_rows_withheld or []:
+        value = _flag_value_usd(row)
+        aum_share = value / aum if aum is not None else None
+        withheld_breaches: list[str] = []
+        if max_weight_pref is not None and aum_share is not None and aum_share > float(max_weight_pref):
+            withheld_breaches.append("max_weight")
+        withheld_entry: dict[str, Any] = {
+            "holding_ref": f"holding:{row['venue']}:{row['symbol']}:{row['holding_type']}",
+            "value_usd": value,
+            "weight": aum_share,
+            "breach_reasons": withheld_breaches,
+            "top_candidate_strategy_id": None,
+            "top_candidate_composite": None,
+            "flagged": False,
+            "withheld_reason": row["withheld_reason"],
+        }
+        if max_weight_skipped:
+            withheld_entry["breach_skipped"] = ["aum_not_positive"]
+        flags.append(withheld_entry)
+
+    # 167.1.1.1 D-02, D-19: every derivative is named, with its P&L contribution to the AUM
+    # (D-16) and the reason it is out of the book. No max-weight test (it has no weight:
+    # value_usd and weight are None, never the notional, D-15), no correlation test, no
+    # candidate, never flagged. ``aum_contribution_usd`` is copied as it is, so a derivative
+    # with no P&L at all persists as JSON null and not as a 0.0 it never reported (D-18).
+    for row in holdings_rows_derivative or []:
+        flags.append({
+            "holding_ref": f"holding:{row['venue']}:{row['symbol']}:{row['holding_type']}",
+            "value_usd": None,
+            "aum_contribution_usd": row["aum_contribution_usd"],
+            "weight": None,
+            "breach_reasons": [],
+            "top_candidate_strategy_id": None,
+            "top_candidate_composite": None,
+            "flagged": False,
+            "withheld_reason": row["withheld_reason"],
         })
 
     return flags
+
+
+def book_join_marker(
+    portfolio_returns: dict[str, pd.Series], *, allocator_id: str
+) -> dict[str, Any] | None:
+    """D-22 (WR-02). A book-level entry for ``match_batches.holding_flags`` when the shared-days
+    join of the series actually passed to scoring (the ``.dropna()`` window) spans fewer than
+    ``_BOOK_JOIN_MIN_DAYS`` days, else None.
+
+    No holding is withheld to fit the overlap: every holding stays named in its own entry. The
+    portfolio-fit axis and the correlation-ceiling tests do go null for such a book, and this
+    marker is how that is named instead of silent. A WARNING with the allocator id and the
+    count is logged as well.
+
+    No series at all returns None: an empty book has no join to be too short (the engine
+    scores it in cold-start mode and ``holding_flags`` is empty).
+
+    Shape (distinguishable from a holding entry by ``kind`` and a null ``holding_ref``; the
+    dashboard reader keeps only ``flagged`` entries with a candidate, so it ignores this one)::
+
+        {
+            "kind":                "book",
+            "holding_ref":         None,
+            "book_join_too_short": True,
+            "shared_days":         int,   # days on which EVERY series carries a return
+            "min_days":            30,    # the engine's min_overlap_days
+            "flagged":             False,
+        }
+    """
+    if not portfolio_returns:
+        return None
+    # The same guarantee as the scoring call: a mixed index would read as shared_days 0 and
+    # persist a false cause. ``_score_one_allocator`` has already checked this book.
+    assert_uniform_datetime_index({"book": portfolio_returns}, allocator_id=allocator_id)
+    shared_days = len(pd.DataFrame(portfolio_returns).dropna())
+    if shared_days >= _BOOK_JOIN_MIN_DAYS:
+        return None
+    logger.warning(
+        "match: book_join_too_short: the %d series scored for allocator %s share %d day(s) "
+        "(< %d), so the portfolio-fit axis and the correlation-ceiling tests cannot compute; "
+        "no holding is withheld for it",
+        len(portfolio_returns), allocator_id, shared_days, _BOOK_JOIN_MIN_DAYS,
+    )
+    return {
+        "kind": "book",
+        "holding_ref": None,
+        "book_join_too_short": True,
+        "shared_days": shared_days,
+        "min_days": _BOOK_JOIN_MIN_DAYS,
+        "flagged": False,
+    }
+
+
+def _engine_ticket_is_positive(ctx: dict[str, Any]) -> bool:
+    """True when the engine's effective ``target_ticket_size_usd`` is positive.
+
+    The engine reads the ticket after ``merge_with_defaults``: a missing or null ticket is the
+    50,000 default there, so ask the same function rather than the raw preference. An explicit
+    zero ticket sizes at the 0.10 default whatever the AUM, so no AUM substitution or AUM
+    fallback changes anything for it."""
+    ticket = merge_with_defaults(ctx.get("preferences")).get("target_ticket_size_usd")
+    return not isinstance(ticket, bool) and isinstance(ticket, (int, float)) and ticket > 0
+
+
+def add_weight_fallback_entry(
+    ctx: dict[str, Any], result: Mapping[str, Any], *, allocator_id: str
+) -> dict[str, Any] | None:
+    """D-23, D-24, D-25. The book-level ``holding_flags`` entry naming the add-weight sizing the
+    engine actually used when the AUM could not size it, else None. Decided AFTER
+    ``score_candidates`` returns, from its own ``result["mode"]`` and ``result["candidates"]``,
+    so the record never claims a sizing that did not happen.
+
+    Nothing is recorded when the engine returned no candidate: no candidate was sized. Otherwise:
+
+    - AUM <= 0 for a book of holdings (``ctx["aum_not_positive"]``), PERSONALIZED mode, positive
+      effective ticket: ``aum_not_positive_ceiling_0_5`` (D-23, ``add_weight`` 0.5, the
+      ``_AUM_NOT_POSITIVE_SCORING_AUM`` substitution made before the call).
+    - AUM <= 0, SCREENING mode (no strategy and no priced spot holding, so the engine never
+      reads the AUM): ``aum_not_positive_screening_default_0_10`` (D-25, ``add_weight`` 0.1,
+      the sizing every screening book gets; the ticket plays no part in it).
+    - AUM unknown (``ctx["portfolio_aum"]`` None and not ``aum_not_positive``), PERSONALIZED
+      mode, positive effective ticket: ``aum_unknown_default_0_10`` (D-24, ``add_weight`` 0.1,
+      the engine's cold-start default, unchanged). An unknown AUM in screening mode is a book
+      with nothing to size against, so it records nothing.
+
+    Same family as :func:`book_join_marker`: ``kind`` "book", a null ``holding_ref`` and
+    ``flagged`` false, so the dashboard reader (which keeps only flagged entries that carry a
+    candidate) ignores it. Shape::
+
+        {
+            "kind":                "book",
+            "holding_ref":         None,
+            "add_weight_fallback": "aum_not_positive_ceiling_0_5",
+            "add_weight":          0.5,
+            "flagged":             False,
+        }
+    """
+    if not result["candidates"]:
+        return None
+    personalized = result["mode"] == "personalized"
+    if ctx.get("aum_not_positive"):
+        if not personalized:
+            fallback, add_weight = _FALLBACK_AUM_NOT_POSITIVE_SCREENING, _ADD_WEIGHT_DEFAULT
+            detail = (
+                "has a non-positive matcher AUM but the engine ran in screening mode, so the "
+                "candidate keeps the screening default add-weight of %s (D-25)"
+            )
+        elif _engine_ticket_is_positive(ctx):
+            fallback, add_weight = _FALLBACK_AUM_NOT_POSITIVE_CEILING, _ADD_WEIGHT_CEILING
+            detail = (
+                "has a non-positive matcher AUM and a ticket, so the candidate is sized at the "
+                "%s add-weight ceiling (D-23), not the engine's 0.10 default"
+            )
+        else:
+            return None
+    elif personalized and ctx.get("portfolio_aum") is None and _engine_ticket_is_positive(ctx):
+        fallback, add_weight = _FALLBACK_AUM_UNKNOWN, _ADD_WEIGHT_DEFAULT
+        detail = (
+            "has no known matcher AUM (no allocated amount on any strategy), so the candidate "
+            "keeps the engine's default add-weight of %s (D-24)"
+        )
+    else:
+        return None
+    logger.warning(
+        "match: add_weight_fallback: %s: allocator %s " + detail,
+        fallback, allocator_id, add_weight,
+    )
+    return {
+        "kind": "book",
+        "holding_ref": None,
+        "add_weight_fallback": fallback,
+        "add_weight": add_weight,
+        "flagged": False,
+    }
 
 
 class _ScoredProxy:
@@ -1253,6 +1853,23 @@ async def _score_one_allocator(
             candidate_returns, universe.get("native_units") or {}
         )
 
+        # D-23: an AUM at or below zero must not read as "unknown AUM" (the engine's fixed 0.10
+        # sizing). Hand it a positive AUM that clamps a ticket to the 0.5 ceiling instead.
+        # The engine reads the AUM only in personalized mode, so the substitution is harmless in
+        # screening mode; whether it was USED is decided from the result below.
+        scoring_aum = ctx["portfolio_aum"]
+        if ctx.get("aum_not_positive") and _engine_ticket_is_positive(ctx):
+            scoring_aum = _AUM_NOT_POSITIVE_SCORING_AUM
+
+        # CR-01 (round 2): every joined series must share ONE index type. A string-indexed
+        # holding beside Timestamp-indexed candidates joins to zero days with no error, so
+        # check the converted book and the converted candidates here, before anything joins
+        # them (the D-22 marker and compute_holding_flags below read the same book).
+        assert_uniform_datetime_index(
+            {"book": portfolio_returns, "candidate": candidate_returns},
+            allocator_id=allocator_id,
+        )
+
         # score_candidates runs pandas/numpy heavy work (DataFrame builds,
         # correlation calcs, min-max normalization across the candidate
         # universe). Off-load so we don't block the event loop per allocator.
@@ -1266,10 +1883,13 @@ async def _score_one_allocator(
             candidate_strategies=candidate_strategies,
             candidate_returns=candidate_returns,
             thumbs_down_ids=ctx["thumbs_down_ids"],
-            portfolio_aum=ctx["portfolio_aum"],
+            portfolio_aum=scoring_aum,
         )
 
         latency_ms = int((time.monotonic() - start) * 1000)
+
+        # D-23, D-24, D-25: name the add-weight sizing only from what the engine actually did.
+        add_weight_fallback = add_weight_fallback_entry(ctx, result, allocator_id=allocator_id)
 
         # Per-holding flag rows persisted into match_batches.holding_flags
         # for SSR consumption. Every holding slot receives the same ranked
@@ -1292,12 +1912,20 @@ async def _score_one_allocator(
         holding_flags_list = await asyncio.to_thread(
             compute_holding_flags,
             holdings_rows_eligible=holdings_eligible,
+            holdings_rows_withheld=ctx.get("_holdings_rows_withheld") or [],
+            holdings_rows_derivative=ctx.get("_holdings_rows_derivative") or [],
             portfolio_returns=portfolio_returns,  # D-23: the converted book
             portfolio_weights=ctx["portfolio_weights"],
             portfolio_aum=ctx["portfolio_aum"],
             allocator_preferences=ctx["preferences"] or {},
             scored_candidates_by_slot=scored_by_slot,
         )
+        # D-22: name a book whose shared-days join is too short (no holding is withheld for it).
+        book_marker = book_join_marker(portfolio_returns, allocator_id=allocator_id)
+        if book_marker is not None:
+            holding_flags_list.append(book_marker)
+        if add_weight_fallback is not None:
+            holding_flags_list.append(add_weight_fallback)
 
         # Persist: one match_batches row, N match_candidates rows.
         supabase = get_supabase()

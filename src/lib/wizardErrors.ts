@@ -58,6 +58,11 @@ import {
   venueIsSubstitutable,
   type SupportedExchange,
 } from "./closed-sets";
+// 170.1-02 / R-2 — the per-format required columns, mirrored from the
+// analytics service's `SCHEMAS`. `analytics-service/tests/
+// test_csv_required_columns_parity.py` fails when this file and the schemas
+// disagree, so the hint below cannot drift from the producer.
+import csvRequiredColumns from "./csv-required-columns.json";
 
 export type WizardErrorCode =
   // Key validation (ConnectKeyStep)
@@ -5322,6 +5327,18 @@ export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
         "the route vocabulary, never by the key-validation classifier.",
     ],
     [
+      "CSV_UPSTREAM_FAIL",
+      "CSV-surface code (170.1 D-14): `services/ingestion/csv_adapter.py` emits " +
+        "it when `validate_csv` raises an unexpected exception, on the " +
+        "/process-key validate-only path. That reply is a 200 `ok:false` " +
+        "envelope; `postProcessKey` passes it through as a transport success " +
+        "and the csv-validate route returns that body unchanged, so " +
+        "CsvValidationEnvelope renders " +
+        "WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL. The route already emits the same " +
+        "code for its own unclassified residue. Never seen by the key-validation " +
+        "classifier.",
+    ],
+    [
       "CSV_VALIDATION_FAILED",
       "CSV-surface code AND the static fallback of the DYNAMIC emitter below. " +
         "Rendered by CsvValidationEnvelope through WIZARD_ERROR_COPY, never by " +
@@ -6442,7 +6459,42 @@ export const CSV_RULE_LABELS: Readonly<Record<string, string>> = {
   // friendly per-rule label here matches what the user sees.
   daily_return_dollar_form_sentinel:
     "Daily return values look like dollar PnL, not decimal returns",
+  // 170.1-02 / R-3 — the three PANDERA-built rule keys that had no label and so
+  // printed raw. Each states what is wrong with the value, in the sentence-case
+  // voice of the labels above. `coerce_dtype` and `dtype` arrive with their
+  // argument attached ("coerce_dtype('datetime64[ns]')"); `csvRuleLabel` strips
+  // the parenthesised part before the lookup, so one key covers every dtype.
+  not_nullable: "A required value is blank",
+  coerce_dtype: "A value is not a valid date or number",
+  dtype: "A value has the wrong type for its column",
 } as const;
+
+/**
+ * 170.1-02 / R-3 — the ONE way a rule key becomes words. Strips a trailing
+ * parenthesised argument (`coerce_dtype('datetime64[ns]')` -> `coerce_dtype`)
+ * before the lookup, and answers a miss with a plain sentence rather than the
+ * raw key: a rule identifier never reaches the user. Own-property lookup, so a
+ * key like `constructor` is a miss, not `Object`'s function.
+ */
+export function csvRuleLabel(rule: string): string {
+  return hasCsvRuleLabel(rule)
+    ? CSV_RULE_LABELS[csvRuleKey(rule)]
+    : "This value does not pass a format check";
+}
+
+const csvRuleKey = (rule: string): string =>
+  rule.replace(/\([^)]*\)\s*$/, "").trim();
+
+/**
+ * 170.1 round-1 WR-01 — does `rule` have a `CSV_RULE_LABELS` entry? The
+ * envelope must tell a LABELLED rule from one that falls to the
+ * {@link csvRuleLabel} fallback: that fallback is written for an unknown
+ * PANDERA rule and is false for a producer-authored (bespoke) rule such as
+ * `too_many_rows`, which carries its own sentence instead.
+ */
+export function hasCsvRuleLabel(rule: string): boolean {
+  return Object.prototype.hasOwnProperty.call(CSV_RULE_LABELS, csvRuleKey(rule));
+}
 
 /**
  * Format the single-rule cause sentence emitted by
@@ -6472,6 +6524,42 @@ export function formatCsvRuleCauseFileLevel(humanLabel: string): string {
  * "failed validation", which `e2e/csv-upload-flow.spec.ts` matches.
  */
 export const CSV_FILE_LEVEL_HEADLINE = "Your file failed validation";
+
+/**
+ * 170.1-02 / D-10 + R-2 — the one hint line `CsvValidationEnvelope` shows when
+ * the user most likely picked the wrong file format. Locked wording
+ * (170.1-UI-SPEC "Copy - CSV errors").
+ */
+export const CSV_FORMAT_HINT = "Check the file format you selected.";
+
+/**
+ * 170.1-02 / R-2 (FOUNDER DECISION 2026-10-15, option 1) — does
+ * {@link CSV_FORMAT_HINT} apply?
+ *
+ * True when every required column of `format` OTHER THAN `date` is among
+ * `missingColumns`. `date` is excluded because every format requires it, so the
+ * literal reading ("every required column is missing") could never fire on the
+ * routed specimen: a `date,daily_return` file under Trade list misses five of
+ * six required columns and `date` is not one of them.
+ *
+ * A format with no required column beyond `date`, or one this table does not
+ * know, never shows the hint. The whole reading lives here and nowhere else.
+ */
+export function csvFormatHintApplies(
+  format: string,
+  missingColumns: readonly string[],
+): boolean {
+  const table: Readonly<Record<string, readonly string[] | undefined>> =
+    csvRequiredColumns;
+  const required = Object.prototype.hasOwnProperty.call(table, format)
+    ? table[format]
+    : undefined;
+  if (required === undefined) return false;
+  const nonDate = required.filter((c) => c !== "date");
+  if (nonDate.length === 0) return false;
+  const missing = new Set(missingColumns);
+  return nonDate.every((c) => missing.has(c));
+}
 
 /*
  * ⚰️ REMOVED 161-REVIEW / CR-02 — `formatColumnInDataframeMessage(raw)`.

@@ -674,3 +674,45 @@ Every dependent pin was seen RED at the old value first: the parser read `expect
 race row as 8 against 7; the synthetic green log read `the per-file rows sum to 755 biting arm(s) but the aggregate
 'biting:' line reports 756` until its race row moved. It supersedes the 755 reading above as the latest dated one and is
 itself not a live constant: read `FILES_FLOOR`, `ARMS_FLOOR`, `SENTINEL_FLOOR` and the anti-skip `ARMS_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER, plans 05 to 07): the gate file
+`supabase/tests/test_commit_scenario_batch_fingerprint_sameday_empty.sql` (migration 20261027120000:
+the D-02 same-day empty rule in `commit_scenario_batch`'s fingerprint recompute) arrived with five
+arms, `sameday-empty-dropped`, `sameday-nonempty-kept`, `later-warnings-poll-kept`,
+`warnings-empty-kept` and `older-empty-day-kept`, each on an `edit` step of the new migration, none
+waived. The unpriced gate `test_commit_scenario_batch_fingerprint_unpriced.sql` was retargeted to
+the same migration (decision O-2: its three `edit` fields now name the new body and its apply list
+ends with it), with its two arms and its step count unchanged. A DATED reading of one full
+`node scripts/mutation-runner/run.mjs` on that branch, no file edited during it:
+`scope: FULL 78/78 annotated files`, `coverage: files 78/105`, `arms: 776/776/0`, `biting: 776`,
+`lane-invocations: 776` plus 78 baseline / 78 restore legs, `unreachable: 27`, `lane-blocked: 0`,
+per-file `sections 5 / judged 5 / annotated 5 / waived 0 / biting 5` for the new gate and
+`sections 2 / judged 2 / annotated 2 / waived 0 / biting 2` for the unpriced one, `No defects.`,
+exit 0. Every dependent pin was seen RED at the old value first: the parser read
+`expected 776 to be 771` (armsSeen), `expected 892 to be 887` (stepsSeen and the needle count),
+`expected 105 to be 104` (filesTotal) and `expected 78 to be 77` (filesAnnotated); the ratchets read
+`RATCHET STALE: 78 of 105 gate files are now annotated but FILES_FLOOR is still 77` and
+`The corpus declares 776 twin(s) ... ARMS_FLOOR is 771`; `node scripts/lint-sql-gates.mjs` printed
+`scanned 105 file(s)` against a pin of 104; the synthetic green log's counts followed the run.
+Not a live constant: read `FILES_FLOOR` and `ARMS_FLOOR` by SYMBOL.
+
+⚠️ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER, review fix WR-01): the same gate file gained
+a sixth arm, `sameday-empty-sibling-older`, with its TypeScript twins (Case I2 in
+`latest-holdings-per-key.test.ts` and the sibling case in `fingerprint-sameday-empty-parity.test.ts`).
+Two keys share one exchange account (a `duplicate` marker); the emptied key's rows and its clean empty
+newest poll are dated D, the sibling's only rows D-1. The account's newest day must stay D, so the
+sibling's rows drop out. Before the arm, adding `WHEN r.same_day_empty THEN NULL` to `key_day.day` or
+filtering `account_newest` to `has_rows` passed every gate. Its twin is the first of those two edits
+(`ELSE p.latest_day END AS day`, occurrences 1); the second was also run by hand and reddened the same
+arm. The new TypeScript cases were seen RED with the reader's emptied-key reading set to null, while
+Case I and the five other arms stayed green. A DATED reading of one full
+`node scripts/mutation-runner/run.mjs`, no file edited during it: `scope: FULL 78/78 annotated files`,
+`coverage: files 78/105`, `arms: 777/777/0`, `biting: 777`, `lane-invocations: 777` plus 78 baseline /
+78 restore legs, `unreachable: 27`, `lane-blocked: 0`, per-file `sections 6 / judged 6 / annotated 6 /
+waived 0 / biting 6` for the sameday_empty gate, `No defects.`, exit 0. `ARMS_FLOOR` 776 -> 777
+(`FILES_FLOOR` stays 78, `WAIVED_CEILING` stays 0). Every dependent pin was seen RED at the old value
+first: the parser read `expected 777 to be 776` (armsSeen) and `expected 893 to be 892` (stepsSeen and
+the needle count); the ratchets read `The corpus declares 777 twin(s) ... ARMS_FLOOR is 776` and
+`expected 777 to be 776` (totalAnchored); `gate-family-meta` read the new `ARMS_FLOOR=777` as an
+unregistered threshold site; the synthetic green log's counts followed the run. Not a live constant:
+read `ARMS_FLOOR` by SYMBOL.

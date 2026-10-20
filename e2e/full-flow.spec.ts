@@ -212,12 +212,12 @@ test.describe("Authenticated flows", () => {
 
   test("my strategies page shows strategies", async ({ page }) => {
     await page.goto("/strategies");
-    await expect(page.locator("h1")).toContainText("My Strategies");
+    await expect(page.locator("h1")).toContainText("Strategies");
   });
 
   test("allocations page loads", async ({ page }) => {
     await page.goto("/allocations");
-    await expect(page.locator("h1")).toContainText("My Allocations");
+    await expect(page.locator("h1")).toContainText("My allocation");
   });
 
   test("strategy detail shows hero metrics", async ({ page }) => {
@@ -281,7 +281,7 @@ test.describe("Admin flows", () => {
     await page.goto("/admin");
     // May redirect if not admin, or show dashboard
     const isAdmin = await page
-      .locator("text=Admin Dashboard")
+      .locator("text=Admin dashboard")
       .isVisible()
       .catch(() => false);
     const isRedirected = page.url().includes("/discovery");

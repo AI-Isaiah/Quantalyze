@@ -3,7 +3,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { redirect } from "next/navigation";
 import Link from "next/link";
+import type { Metadata } from "next";
 import { PageHeader } from "@/components/layout/PageHeader";
+
+export const metadata: Metadata = {
+  title: "CSV submissions",
+};
 
 /**
  * Phase 15 / CSV-01: founder-facing per-team status surface for the
@@ -71,7 +76,7 @@ export default async function CsvStatusPage() {
   return (
     <>
       <PageHeader
-        title="CSV Submissions"
+        title="CSV submissions"
         description="Track-record uploads from quant teams (flow_type='csv', most recent first)."
       />
 

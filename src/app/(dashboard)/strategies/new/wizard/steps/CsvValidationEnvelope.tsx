@@ -3,9 +3,13 @@
 import { type ReactNode } from "react";
 import {
   CSV_FILE_LEVEL_HEADLINE,
+  CSV_FORMAT_HINT,
   CSV_RULE_LABELS,
   WIZARD_ERROR_COPY,
   formatCsvRuleCauseFileLevel,
+  csvFormatHintApplies,
+  csvRuleLabel,
+  hasCsvRuleLabel,
   formatCsvRuleCauseSingle,
 } from "@/lib/wizardErrors";
 
@@ -98,10 +102,24 @@ interface CsvValidationEnvelopeProps {
     code: string;
     human_message: string;
     debug_context: {
-      pandera_errors?: { rule: string; row: number; message: string }[];
+      pandera_errors?: {
+        rule: string;
+        row: number;
+        message: string;
+        /**
+         * 170.1 / D-10 — the SCHEMA's expected column name (never CSV cell
+         * content). Absent on envelopes persisted before the producer emitted it.
+         */
+        column?: string;
+      }[];
     };
     correlation_id: string | null;
   };
+  /**
+   * 170.1 / D-10 — the format the user selected (`daily_returns` | `daily_nav`
+   * | `trades`). Lets the panel tell a wrong-format pick from a wrong file.
+   */
+  format?: string;
   /**
    * 146.2-08 / B1 — an optional remedy CTA, rendered BELOW the body and ABOVE
    * the per-rule accordion. That position is DESIGN.md's Error Envelope
@@ -117,8 +135,82 @@ interface CsvValidationEnvelopeProps {
   action?: ReactNode;
 }
 
+/**
+ * 170.1 / D-10 — one `column_in_dataframe` row. The column is the schema's
+ * expected name, rendered as React text in the data voice (`font-metric`), with
+ * no quotes or backticks. A row persisted before the producer carried `column`
+ * has no name to print, so it reads the rule's label instead of a sentence with
+ * a hole in it.
+ */
+function MissingColumnLine({ column }: { column: string | undefined }) {
+  const name = typeof column === "string" ? column.trim() : "";
+  if (name === "") return <>{CSV_RULE_LABELS.column_in_dataframe}.</>;
+  return (
+    <>
+      Your file has no <span className="font-metric">{name}</span> column.
+    </>
+  );
+}
+
+/**
+ * 170.1-02 / R-3 — a row is PANDERA-BUILT when the producer composed its
+ * message from the generic "failed rule '<name>'" template (the capital-F form
+ * "Failed rule '<name>'." is the same template with no column clause, so the
+ * match is case-insensitive). Those sentences carry the raw rule key and are
+ * recomposed from `CSV_RULE_LABELS`. Every other message is a bespoke producer
+ * sentence (too_many_rows, date_format_ambiguous, empty, parse_error, the
+ * sentinels) that already reads in plain words and renders verbatim.
+ */
+const PANDERA_BUILT_MESSAGE = /failed rule '/i;
+const isPanderaBuilt = (message: string) =>
+  typeof message === "string" && PANDERA_BUILT_MESSAGE.test(message);
+
+/**
+ * 170.1 round-1 WR-01 — the producer's own sentence for a BESPOKE rule, or
+ * `null` when the rule is not bespoke. A rule is bespoke when it has no
+ * `CSV_RULE_LABELS` entry AND none of its rows is pandera-built, i.e. the
+ * producer authored the sentence itself (too_many_rows, empty, parse_error,
+ * date_format_ambiguous). The unknown-pandera-rule fallback is false for such a
+ * rule ("This value does not pass a format check" when the file is too long),
+ * so every slot that would show a label shows this sentence instead, and the
+ * single-rule cause line claims no label at all. A genuinely unknown PANDERA
+ * rule (its rows are pandera-built) keeps the fallback.
+ */
+function bespokeRuleMessage(
+  rule: string,
+  list: readonly { message: string }[],
+): string | null {
+  if (hasCsvRuleLabel(rule)) return null;
+  if (list.some((e) => isPanderaBuilt(e.message))) return null;
+  const own = list.find(
+    (e) => typeof e.message === "string" && e.message.trim() !== "",
+  );
+  return own === undefined ? null : own.message.trim();
+}
+
+/**
+ * 170.1-02 / R-3 — "Row {row}, column {column}: {label}." and its three
+ * degradations. `{column}` is the schema's name off the wire, never cell
+ * content; a period is added only when the label lacks one.
+ */
+function composeRuleLine(e: {
+  rule: string;
+  row: number;
+  column?: string;
+}): string {
+  const raw = csvRuleLabel(e.rule);
+  const label = raw.endsWith(".") ? raw : `${raw}.`;
+  const column = typeof e.column === "string" ? e.column.trim() : "";
+  const hasRow = e.row >= 1;
+  if (hasRow && column) return `Row ${e.row}, column ${column}: ${label}`;
+  if (hasRow) return `Row ${e.row}: ${label}`;
+  if (column) return `Column ${column}: ${label}`;
+  return label;
+}
+
 export function CsvValidationEnvelope({
   envelope,
+  format,
   action,
 }: CsvValidationEnvelopeProps) {
   const errors = envelope.debug_context?.pandera_errors ?? [];
@@ -166,18 +258,41 @@ export function CsvValidationEnvelope({
     // Phase 17 / DESIGN-05: "Across {n} rule categories: {labels}." — the keys
     // are humanized via CSV_RULE_LABELS first (this surface joins
     // human-readable labels rather than raw rule keys).
-    const humanizedKeys = ruleKeys.map((r) => CSV_RULE_LABELS[r] ?? r);
+    // 170.1 round-1 WR-01: a bespoke rule reads the producer's sentence (minus
+    // its closing period, the line adds its own), and two rules that read the
+    // same are named once, never "X, X".
+    const humanizedKeys = [
+      ...new Set(
+        ruleKeys.map((r) =>
+          (bespokeRuleMessage(r, byRule[r]) ?? csvRuleLabel(r)).replace(/\.$/, ""),
+        ),
+      ),
+    ];
     causeText = `Across ${ruleCount} rule categories: ${humanizedKeys.join(", ")}.`;
   } else if (ruleCount === 1 && errors.length > 0) {
     const onlyRule = ruleKeys[0];
-    const human = CSV_RULE_LABELS[onlyRule] ?? onlyRule;
+    // 170.1 round-1 WR-01: a bespoke rule has no label to claim, so it has no
+    // cause line; its own sentence is the `<summary>` below.
     causeText =
-      realRowCount > 0
-        ? formatCsvRuleCauseSingle(human)
-        : formatCsvRuleCauseFileLevel(human);
+      bespokeRuleMessage(onlyRule, byRule[onlyRule]) !== null
+        ? null
+        : realRowCount > 0
+          ? formatCsvRuleCauseSingle(csvRuleLabel(onlyRule))
+          : formatCsvRuleCauseFileLevel(csvRuleLabel(onlyRule));
   } else {
     causeText = authoredCause ?? null;
   }
+
+  // 170.1-02 / R-2 — the format hint. The missing columns are the schema's own
+  // names off the wire (never cell content); the reading of "every required
+  // column missing" lives in `csvFormatHintApplies`. Once per envelope.
+  const missingColumns = errors.flatMap((e) =>
+    e.rule === "column_in_dataframe" && typeof e.column === "string"
+      ? [e.column.trim()]
+      : [],
+  );
+  const showFormatHint =
+    format !== undefined && csvFormatHintApplies(format, missingColumns);
 
   return (
     <div
@@ -196,6 +311,9 @@ export function CsvValidationEnvelope({
       {causeText !== null && (
         <p className="mt-1 text-caption text-text-secondary">{causeText}</p>
       )}
+      {showFormatHint && (
+        <p className="mt-1 text-caption text-text-secondary">{CSV_FORMAT_HINT}</p>
+      )}
       {action !== undefined && action !== null && (
         <div className="mt-3" data-testid="wizard-csv-error-action">
           {action}
@@ -204,7 +322,7 @@ export function CsvValidationEnvelope({
       {Object.entries(byRule).map(([rule, list]) => (
         <details key={rule} className="mt-2 text-caption">
           <summary className="cursor-pointer text-text-secondary">
-            {CSV_RULE_LABELS[rule] ?? rule}
+            {bespokeRuleMessage(rule, list) ?? csvRuleLabel(rule)}
             {/* 166.1 WR-01: a row count only when this rule failed on real rows. */}
             {list.some(isRealRow) ? ` (${list.filter(isRealRow).length} rows)` : ""}
           </summary>
@@ -244,7 +362,15 @@ export function CsvValidationEnvelope({
             */}
             {list.map((e, i) => (
               <li key={i}>
-                {e.row >= 1 ? `Row ${e.row}: ${e.message}` : e.message}
+                {e.rule === "column_in_dataframe" ? (
+                  <MissingColumnLine column={e.column} />
+                ) : isPanderaBuilt(e.message) ? (
+                  composeRuleLine(e)
+                ) : e.row >= 1 ? (
+                  `Row ${e.row}: ${e.message}`
+                ) : (
+                  e.message
+                )}
               </li>
             ))}
           </ul>

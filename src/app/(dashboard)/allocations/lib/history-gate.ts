@@ -20,9 +20,10 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
  *   explicit `"ready"` (missing, null, "", an unknown or mis-cased state)
  *   reads as rebuilding, so no curve, KPI or risk widget renders over a
  *   history the producer withholds.
- * - `connected_empty`: history is ready, the book is empty and nothing is
- *   syncing. The Overview shows its honest connected-but-empty card.
- * - `ready`: the tab renders its figures.
+ * - `ready`: the tab renders its figures. A ready history renders them
+ *   whether or not the book holds positions (167.1.2.1.2 D-04, 2026-10-20): a
+ *   book whose positions are all closed still has a history worth drawing, and
+ *   the Overview and the Risk tab must agree for one payload.
  *
  * D-07: "has an eligible key" is the payload's `hasConnectedKeys`, the
  * server-side `apiKeys.some(isPerKeyDailiesEligibleKey)` (src/lib/queries.ts).
@@ -33,7 +34,6 @@ import type { MyAllocationDashboardPayload } from "@/lib/queries";
 export type HistoryGate =
   | "no_eligible_key"
   | "rebuilding"
-  | "connected_empty"
   | "ready";
 
 export type HistoryGateInput = Partial<
@@ -48,7 +48,6 @@ export function historyGate(payload: HistoryGateInput): HistoryGate {
   const empty = bookEmpty && !(payload.hasSyncing ?? false);
   if (empty && payload.hasConnectedKeys !== true) return "no_eligible_key";
   if (payload.equityHistoryState !== "ready") return "rebuilding";
-  if (empty) return "connected_empty";
   return "ready";
 }
 

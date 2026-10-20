@@ -14,8 +14,10 @@
  *    StrategyTable name cell links `/factsheet/<id>`).
  *
  * ── Selector discipline (DEF-149-B) ────────────────────────────────────────
- * /strategies and /my-strategies BOTH render an h1 reading "My Strategies",
- * so nothing here selects by heading text. Navigation is scoped by href
+ * /strategies and /my-strategies now render DISTINCT h1s ("Strategies" vs
+ * "My Strategies"; 170.1.1 D-06), but "Strategies" is a substring of "My
+ * Strategies", so a text match would still hit both. Nothing here selects by
+ * heading text. Navigation is scoped by href
  * (`a[href="/my-strategies"]`, the Sidebar precedent) and row assertions by
  * link role + accessible name + href attribute.
  *
@@ -135,7 +137,7 @@ test.describe("Phase 149 — /my-strategies (NAV-01)", () => {
 
     // ── Case 1: navigate via the sidebar link (the NAV-01 surface), scoped
     // by href — NEVER by the "My Strategies" heading text (DEF-149-B:
-    // /strategies renders the same h1).
+    // the h1s are now distinct, but "Strategies" is a substring of both).
     const navLink = page.locator('a[href="/my-strategies"]');
     await expect(navLink).toBeVisible({ timeout: 15_000 });
     await navLink.click();

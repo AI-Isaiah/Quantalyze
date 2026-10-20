@@ -369,7 +369,7 @@ export function KpiStrip({
   //  - Avg |ρ|: prefer analytics.avg_correlation, then fall back to
   //    metrics.avg_pairwise_correlation (review-pass P2 fix — parallel to
   //    Plan 10's `metricKey: "avg_pairwise_correlation"` scenario-mode
-  //    lookup, so the tooltip "Live: X" pill in scenario mode reads the
+  //    lookup, so the tooltip "Current book: X" pill in scenario mode reads the
   //    same value the live-mode strip displayed). The production payload
   //    doesn't carry analytics.avg_correlation yet; the metrics fallback
   //    surfaces the engine-computed value when present, otherwise both
@@ -574,11 +574,20 @@ export function KpiStrip({
                 invariants verbatim. */}
             {showDeltaPill ? (
               <div
-                className={`mt-1 font-mono text-xs tabular-nums ${deltaPillClass(delta, direction, noiseFloor)}`}
-                title={`Live: ${formatLiveValue(liveImpossible ? null : liveVal, metricKey!)}`}
-                aria-label={`${label} delta: ${formatSignedDelta(delta, metricKey!)} (${sign})`}
+                className="mt-1 flex flex-wrap items-baseline gap-x-1 font-mono text-xs tabular-nums"
+                title={`Current book: ${formatLiveValue(liveImpossible ? null : liveVal, metricKey!)}`}
+                aria-label={`${label} delta vs current book: ${formatSignedDelta(delta, metricKey!)} (${sign})`}
               >
-                {formatSignedDelta(delta, metricKey!)}
+                {/* Phase 170.1 (D-11, UI-SPEC V-2): the baseline is named on the
+                    line itself. Both spans are whitespace-nowrap so a signed
+                    figure never wraps mid-number at 390 px; only the suffix may
+                    drop to its own line. The tone stays on the figure alone. */}
+                <span
+                  className={`whitespace-nowrap ${deltaPillClass(delta, direction, noiseFloor)}`}
+                >
+                  {formatSignedDelta(delta, metricKey!)}
+                </span>
+                <span className="whitespace-nowrap text-text-muted">vs current book</span>
               </div>
             ) : null}
             {sub ? (

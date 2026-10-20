@@ -8,6 +8,7 @@
  * query name, and throws so `./error.tsx` renders the load-error state.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen } from "@testing-library/react";
 
 const failing = vi.hoisted(() => ({ table: null as string | null }));
 
@@ -23,6 +24,12 @@ vi.mock("@/lib/supabase/server", () => ({
       getUser: async () => ({ data: { user: { id: "admin-1" } }, error: null }),
     },
   })),
+}));
+
+// The tab shell is a client component with its own suite; this file only
+// needs the page's own heading, so the shell renders as an inert stub.
+vi.mock("@/components/admin/AdminTabs", () => ({
+  AdminTabs: () => null,
 }));
 
 vi.mock("@/lib/admin", () => ({
@@ -84,5 +91,14 @@ describe("AdminPage queue reads", () => {
   it("renders when every query succeeds", async () => {
     await expect(AdminPage()).resolves.toBeTruthy();
     expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  // D-06 (Phase 170.1.1): PageHeader titles are sentence case (DESIGN.md Voice).
+  // A string name is a case-sensitive exact match, so "Admin Dashboard" fails.
+  it("renders the heading in sentence case", async () => {
+    render(await AdminPage());
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Admin dashboard" }),
+    ).toBeTruthy();
   });
 });

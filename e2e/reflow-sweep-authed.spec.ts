@@ -25,7 +25,7 @@
  * (Pitfall 5: a too-generic anchor would false-green against a login page).
  *
  * Each route is anchored on a route-specific VISIBLE content element (the
- * allocations "My Allocation" <h1> is rendered above the tab-panel switch on
+ * allocations "My allocation" <h1> is rendered above the tab-panel switch on
  * every tab; the wizard's "Connect your exchange" <h2>; /security's <main h1>)
  * so assertNoReflow fails loud on a 404 / login / unseeded-chrome page rather
  * than measuring against nothing (the W-02 lesson).
@@ -86,16 +86,16 @@ const AUTHED_ROUTES: {
   degenerate?: boolean;
   headerCheck?: boolean;
 }[] = [
-  // Allocations + every tab. The "My Allocation" <h1> sits above the tab-panel
+  // Allocations + every tab. The "My allocation" <h1> sits above the tab-panel
   // switch (AllocationsTabs.tsx) so it is present on every ?tab= value — a
   // route-specific anchor that fails loud on a login/404 page.
-  { path: "/allocations", anchor: 'h1:has-text("My Allocation")', label: "allocations (default)" },
-  { path: "/allocations?tab=overview", anchor: 'h1:has-text("My Allocation")', label: "allocations Overview" },
-  { path: "/allocations?tab=holdings", anchor: 'h1:has-text("My Allocation")', label: "allocations Holdings" },
-  { path: "/allocations?tab=outcomes", anchor: 'h1:has-text("My Allocation")', label: "allocations Outcomes" },
-  { path: "/allocations?tab=mandate", anchor: 'h1:has-text("My Allocation")', label: "allocations Mandate" },
-  { path: "/allocations?tab=risk", anchor: 'h1:has-text("My Allocation")', label: "allocations Risk" },
-  { path: "/allocations?tab=scenario", anchor: 'h1:has-text("My Allocation")', label: "allocations Scenario composer" },
+  { path: "/allocations", anchor: 'h1:has-text("My allocation")', label: "allocations (default)" },
+  { path: "/allocations?tab=overview", anchor: 'h1:has-text("My allocation")', label: "allocations Overview" },
+  { path: "/allocations?tab=holdings", anchor: 'h1:has-text("My allocation")', label: "allocations Holdings" },
+  { path: "/allocations?tab=outcomes", anchor: 'h1:has-text("My allocation")', label: "allocations Outcomes" },
+  { path: "/allocations?tab=mandate", anchor: 'h1:has-text("My allocation")', label: "allocations Mandate" },
+  { path: "/allocations?tab=risk", anchor: 'h1:has-text("My allocation")', label: "allocations Risk" },
+  { path: "/allocations?tab=scenario", anchor: 'h1:has-text("My allocation")', label: "allocations Scenario composer" },
   // Manager-gated standalone onboarding wizard (Phase 109 ROLE-04) — reached
   // here via the seeded role='both' user. The default ?source=api flow renders
   // ConnectKeyStep's "Connect your exchange" <h2 id=…>.
@@ -252,8 +252,8 @@ test.describe("rotate-stability (SC#4) — /allocations EquityChart, authed", ()
       );
     }
     // Fail loud on an unhydrated/login page (Pitfall 4) — anchor on the
-    // route-specific "My Allocation" <h1> the seeded allocator always renders.
-    await expect(page.locator('h1:has-text("My Allocation")')).toBeVisible({
+    // route-specific "My allocation" <h1> the seeded allocator always renders.
+    await expect(page.locator('h1:has-text("My allocation")')).toBeVisible({
       timeout: 10_000,
     });
 
@@ -285,7 +285,7 @@ test.describe("rotate-stability (SC#4) — /allocations EquityChart, authed", ()
       await page.waitForTimeout(250);
       // Keep the chart in view across the cycle (it must stay mounted for the
       // ResizeObserver to keep firing — a leaked observer would compound here).
-      await expect(page.locator('h1:has-text("My Allocation")')).toBeVisible();
+      await expect(page.locator('h1:has-text("My allocation")')).toBeVisible();
     }
 
     // SC#4 core assertion: NO ResizeObserver-loop error in console OR as an
@@ -344,7 +344,7 @@ test.describe("rotate-stability (SC#4) — /allocations EquityChart, authed", ()
 // Each anchor is a route-specific VISIBLE content node a freshly-seeded
 // allocator reliably renders (Pitfall 5 / W-02 false-green guard) — never a
 // bare body/main chrome anchor — so a 404 / login / unhydrated page fails loud
-// instead of measuring against nothing. The "My Allocation" <h1> sits above the
+// instead of measuring against nothing. The "My allocation" <h1> sits above the
 // tab-panel switch (AllocationsTabs.tsx) so it is present on every ?tab= value;
 // /compare with no ?ids= renders the empty-selection PageHeader <h1> ("Compare
 // Strategies"), which a seeded allocator with no compare selection always hits.
@@ -354,7 +354,7 @@ test.describe("rotate-stability (SC#4) — /allocations EquityChart, authed", ()
 // extra seed) reliably renders with a stable VISIBLE anchor — the same
 // reachability the 320px AUTHED_ROUTES sweep above already proves. Added rows:
 //   - the remaining /allocations tabs (overview/holdings/outcomes/mandate) — the
-//     "My Allocation" <h1> sits above the tab-panel switch on every ?tab= value;
+//     "My allocation" <h1> sits above the tab-panel switch on every ?tab= value;
 //   - the manager-gated onboarding wizard (API + CSV entries) — its step
 //     <h2 id=…> anchors, mirroring the 320px sweep. The standalone
 //     /strategies/new/wizard route is manager-gated (Phase 109 ROLE-04,
@@ -369,17 +369,17 @@ test.describe("rotate-stability (SC#4) — /allocations EquityChart, authed", ()
 // freshly-seeded user hits the category empty-state, not a stable
 // content-bearing layout to gate on (the axe spec seeds a bridge for that).
 const ULTRAWIDE_ROUTES: { path: string; anchor: string; label: string }[] = [
-  { path: "/allocations", anchor: 'h1:has-text("My Allocation")', label: "allocations (default)" },
-  { path: "/allocations?tab=overview", anchor: 'h1:has-text("My Allocation")', label: "allocations Overview" },
-  { path: "/allocations?tab=holdings", anchor: 'h1:has-text("My Allocation")', label: "allocations Holdings" },
-  { path: "/allocations?tab=outcomes", anchor: 'h1:has-text("My Allocation")', label: "allocations Outcomes" },
-  { path: "/allocations?tab=mandate", anchor: 'h1:has-text("My Allocation")', label: "allocations Mandate" },
-  { path: "/allocations?tab=risk", anchor: 'h1:has-text("My Allocation")', label: "allocations Risk" },
-  { path: "/allocations?tab=scenario", anchor: 'h1:has-text("My Allocation")', label: "allocations Scenario composer" },
+  { path: "/allocations", anchor: 'h1:has-text("My allocation")', label: "allocations (default)" },
+  { path: "/allocations?tab=overview", anchor: 'h1:has-text("My allocation")', label: "allocations Overview" },
+  { path: "/allocations?tab=holdings", anchor: 'h1:has-text("My allocation")', label: "allocations Holdings" },
+  { path: "/allocations?tab=outcomes", anchor: 'h1:has-text("My allocation")', label: "allocations Outcomes" },
+  { path: "/allocations?tab=mandate", anchor: 'h1:has-text("My allocation")', label: "allocations Mandate" },
+  { path: "/allocations?tab=risk", anchor: 'h1:has-text("My allocation")', label: "allocations Risk" },
+  { path: "/allocations?tab=scenario", anchor: 'h1:has-text("My allocation")', label: "allocations Scenario composer" },
   { path: "/strategies/new/wizard", anchor: "#wizard-connect-key-heading", label: "onboarding wizard API entry (manager-gated route, role=both)" },
   { path: "/strategies/new/wizard?source=csv", anchor: "#wizard-csv-upload-heading", label: "onboarding wizard CSV entry (manager-gated route, role=both)" },
   { path: "/security", anchor: "main h1", label: "security (authed)" },
-  { path: "/compare", anchor: 'h1:has-text("Compare Strategies")', label: "compare (empty-selection)" },
+  { path: "/compare", anchor: 'h1:has-text("Compare strategies")', label: "compare (empty-selection)" },
 ];
 
 test.describe("reflow sweep @ 2560px ultra-wide — authed", () => {

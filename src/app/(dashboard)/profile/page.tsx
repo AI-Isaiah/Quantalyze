@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -9,6 +10,10 @@ import type { ExchangesTabContentProps } from "@/components/exchanges/ExchangesT
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Profile settings",
+};
 
 export default async function ProfilePage() {
   const supabase = await createClient();
@@ -93,7 +98,7 @@ export default async function ProfilePage() {
   return (
     <>
       <PageHeader
-        title="Profile Settings"
+        title="Profile settings"
         description="Manage your account, organizations, and allocation mandate."
         actions={<SignOutButton />}
       />

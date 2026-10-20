@@ -1,5 +1,603 @@
 # Changelog
 
+## [0.132.9.4] - 2026-10-20 — records: close HISTORYREADER 167.1.2.1.2
+
+### Notes
+- Phase 167.1.2.1.2 HISTORYREADER is closed. It shipped as v0.132.8.0 (#1089), and its migration was applied on TEST and PROD; the baseline re-dump followed as v0.132.8.1 (#1090). Verification passed (10/10), and the security audit is SECURED (17/17 threats closed).
+- The two 375/390 px backstops were measured with Playwright on a seeded local stack at 375x812 and 390x844. A ready, all-closed book shows the Overview curve and factsheet, not the empty card, and the page does not scroll sideways (scrollWidth equals clientWidth at both widths). A stale MT5 key's spot read-day line, with a long unbroken `ACCOUNT-<hex>` symbol and three more symbols, wraps onto 4 lines and its right edge equals the section's (335 at 375, 350 at 390). The reading is in `167.1.2.1.2-VERIFICATION.md`.
+- Two observations outside the checks, both pre-existing and the same for a book with open positions: the Overview's equity chart has a 400 px minimum width, so its card cuts the right-hand axis labels at phone width; and a few SVG axis ticks are cut 3-4 px by their own SVG, the class already booked as `[170.1-SC5-SCENARIO-NARROW-DEFECTS]`.
+- The phase directory (7 plan summaries, review with one fix round, verification, security audit) lands on `main`. ROADMAP records the 7 plans, quotes the founder decisions that closed SC-1 (D-01) and SC-3 (D-03) from the phase CONTEXT, and records the item (3) premise correction. STATE records the close.
+
+## [0.132.9.3] - 2026-10-20 — fix: the prober's own wrong-key check no longer pages as a SERVICE_KEY mismatch
+
+### Root cause
+- Sentry `QUANTALYZE-18` ("Platform secret SERVICE_KEY is mismatched") kept firing about 5 times a day long after the 2026-09-01 cron key repair. Every event in the last 7 days lines up to the second with a scheduled `prod-prober.yml` run. The prober's PYAPI-06 arm sends a deliberately wrong key each run to prove the comparison still refuses, and `verify_service_key` captured that request as a real mismatch. The keyed request in the same run is accepted, so the deployed key and the GitHub copy agree; there was no live mismatch.
+
+### Fixed
+- `analytics-service/main.py`: `verify_service_key` still refuses the prober's known wrong key with a 401, but no longer logs or captures it. Any other non-empty wrong key is captured as before, so a real mismatch now gets its own events in `QUANTALYZE-18` instead of hiding among the prober's.
+
+### Tests
+- `tests/test_secret_misconfig_signal.py`: the probe key is refused without a capture, a real wrong key is still captured, and the literal is read from `scripts/prod-prober/arms/pyapi06.mjs` so the two cannot drift apart. RED on the old `main.py`.
+
+## [0.132.9.2] - 2026-10-20 — roadmap: book SENTRYTRIAGE 166.5.1
+
+### Notes
+- Booked Phase 166.5.1 SENTRYTRIAGE (founder 2026-10-20: "yes, book a phase for the sentry items"). It owns the three production Sentry groups no phase owned:
+  - the match_engine cron's hourly demo-allocator warning (QUANTALYZE-Z, 170 events in 14 days);
+  - six ReadTimeout groups in the worker's claim, select and reset reads and the cron recompute route (QUANTALYZE-2B to 2G, 37 events);
+  - a job-state race where `mark_compute_job_done` / `failed` finds a job back at `pending` while its runner still finishes (QUANTALYZE-2A and A).
+- The ROADMAP section carries the evidence, the out-of-scope groups owned elsewhere, and four success criteria. STATE records the insertion.
+
+## [0.132.9.1] - 2026-10-20 — records: close TITLES 170.1.1
+
+### Notes
+- Phase 170.1.1 TITLES is closed. It shipped as v0.132.9.0 (#1093). Verification passed (4/4), and the security audit is SECURED (16/16 threats closed).
+- SC-4 was read on production after the deploy, at 367 CSS px. That is the tab's 400% zoom, stricter than both 390 px and the 640 CSS px of desktop 200% zoom. Every measured page has its own "<page> — Quantalyze" tab title and its sentence-case heading, and nothing scrolls sideways. `/referral` returns "Page not found". The reading is in `170.1.1-VERIFICATION.md`.
+- The phase directory (9 plan summaries, review with two fix rounds, verification, security audit) lands on `main`. ROADMAP and STATE record the close.
+- One review MEDIUM (observability, not user-facing) is booked as `[170.1.1-PDF-TITLE-SINGLE-NOISE]` in TODOS.md, with the two LOWs (wizard H1 title case, untitled `/scenario-share/[token]`) noted in the same entry. The `/portfolio-pdf` title read uses `.single()`, so a deleted portfolio is captured as a Sentry error.
+
+## [0.132.9.0] - 2026-10-20 — TITLES: every page has its own tab title and a sentence-case heading (Phase 170.1.1)
+
+### Added
+- A root `title.template` `"%s — Quantalyze"` (default `"Quantalyze"`) in `src/app/layout.tsx`. Every page now exports a bare segment, and the brand suffix is added exactly once, with "—" as the one separator (D-06).
+- Tab titles for every auth route: Sign in, Create your account, Reset your password, Set a new password, Welcome, Application under review.
+- Tab titles for the dashboard: Decks, My allocation, My strategies, Portfolios, Profile settings, Connect your strategy, Recommendations, Strategies, Compare strategies. Name-bearing titles come from `generateMetadata` on `/portfolios/[id]` (plus `/documents` and `/manage`), `/discovery/[slug]`, `/discovery/[slug]/[strategyId]` and `/strategies/[id]/edit`.
+- Tab titles for the admin pages: Admin dashboard, Usage analytics, Request-a-call leads, Deletion requests, Match queue, Match engine eval, Compute jobs, CSV submissions, Users and Intro requests. New pass-through layouts title Partner ROI simulator and Partner pilot import. `User: {name}`, `Partner pilot: {tag}` and `Match queue for {name}` are read only after the admin check.
+- `src/__tests__/page-titles.test.ts`: a repo-wide census over every `page.tsx` and `layout.tsx` under `src/app`. It checks:
+  - the root template is in place;
+  - no tab title carries "Quantalyze" or "|" (social-card titles are exempt);
+  - no object-form title appears outside the root layout;
+  - every dashboard, admin and auth page is titled, and every titled file can actually be scanned;
+  - `/strategies` reads "Strategies" while `/my-strategies` keeps "My Strategies".
+  Synthetic offenders prove each check can fail.
+
+### Changed
+- Headings move to sentence case:
+  - `/strategies` reads "Strategies" (`/my-strategies` keeps "My Strategies");
+  - `/allocations`, the sidebar, the mobile nav and the `/recommendations` breadcrumb read "My allocation";
+  - `/compare` reads "Compare strategies";
+  - `/admin` reads "Admin dashboard";
+  - `/profile` reads "Profile settings";
+  - admin pages read Usage analytics, Request-a-call leads, Compute jobs, CSV submissions and Intro requests.
+  The e2e anchors keyed on the old text moved in the same commits (`full-flow`, `layout-narrow`, `my-strategies`, `no-clip-sweep`, `reflow-sweep-authed`).
+- Public pages drop their embedded brand suffix:
+  - the strategy tab is the bare name, with no "v2" (D-04);
+  - other titles read `{name} factsheet`, `{name} institutional tear sheet` and `{name} portfolio report`;
+  - browse pages and the marketing and legal pages are bare segments;
+  - the factsheet share link reads the static "Factsheet".
+  openGraph and twitter titles are unchanged.
+- `SegmentedControl` no longer shows a "Coming soon" tooltip by default. A disabled option shows a title only when it passes `disabledReason`.
+
+### Removed
+- The placeholder `/referral` page, its sidebar link (and the now-unused `GiftIcon`) and its route-contract manifest entry, in one commit (D-02).
+
+### Fixed (review rounds)
+- A failed read inside a title's `generateMetadata` now gives a neutral title and reports to Sentry (`captureToSentry`, tags `route` and `stage: generate-metadata`). Before, it gave a false one ("Match queue for Unknown allocator", "Unnamed portfolio") and recorded nothing. Neutral titles: Match queue, User, Portfolio, Manage portfolio, Documents, Strategy, Edit strategy, Portfolio report. The factsheet v2 fallback was already neutral and now reports its read error the same way. The portfolio report fallback no longer reads "Portfolio portfolio report".
+- The census catches shorthand and variable titles, arrow-form and generic `generateMetadata`, object-form titles with any key order, and titled files it cannot scan.
+
+### Tests
+- Metadata tests pin each data-reading title: a found row, a miss with no capture, and an error with a capture. They cover `/portfolios/[id]`, `/manage`, `/documents`, `/strategies/[id]/edit`, `/discovery/[slug]/[strategyId]`, `/admin/users/[id]`, `/admin/match/[allocator_id]`, `/portfolio-pdf/[id]` and `/factsheet/[id]/v2`. The admin tests assert that a non-admin or signed-out caller causes no service-role read.
+- Heading pins on `/admin`, `/allocations`, `/compare` and `/strategies`. Sidebar tests show the ACCOUNT group is `/profile` only. `SegmentedControl` has no title without a reason. Each was seen RED against the old code.
+
+### Notes
+- Known limits, booked rather than fixed: the `/portfolio-pdf/[id]` title read uses `.single()`, so a portfolio deleted between token mint and render is captured as an error (Sentry noise, correct title). The wizard H1 "Connect Your Strategy" stays title case (LOW). `/scenario-share/[token]` has no title of its own (outside SC-1's scope).
+- SC-4, the 390 px and 200% zoom re-check, runs after deploy.
+
+## [0.132.8.4] - 2026-10-20 — deps: npm minor/patch group, 21 of 22 (#1077); eslint-config-next held at 16.3.8
+
+### Changed
+- 21 of the 22 updates in Dependabot's npm-minor-patch group. Runtime: `@radix-ui/react-tabs` 1.1.21 → 1.2.1, `@sentry/nextjs` 11.2.0 → 11.8.0, `@supabase/supabase-js` 2.117.2 → 2.118.0, `next` 16.3.8 → 16.4.2, `posthog-js` 1.435.6 → 1.438.12, `posthog-node` 5.55.0 → 5.56.1, `puppeteer-core` 25.12.0 → 25.14.0, `react` / `react-dom` 19.3.0 → 19.3.1, `resend` 6.32.0 → 6.33.0, `svix` 2.6.2 → 2.8.0, `zod` 4.6.5 → 4.6.7. Dev: `@axe-core/playwright` 4.13.0 → 4.14.0, `@playwright/test` 1.63.0 → 1.64.1, `@testing-library/user-event` 14.6.7 → 14.6.8, `@types/node` 26.6.4 → 26.6.5, `@vitejs/plugin-react` 6.1.1 → 6.1.2, `@vitest/coverage-v8` and `vitest` 5.0.3 → 5.0.5, `jsdom` 30.1.1 → 30.1.3, `knip` 6.39.0 → 6.41.0. Spec styles (exact vs caret) are Dependabot's; `vitest` and `@types/node` move in the lock only, as Dependabot left them.
+
+### Notes
+- **Held back: `eslint-config-next` stays at 16.3.8.** 16.4.2 requires `eslint-plugin-react-hooks` ^7.1.0, and 7.1.1 turns on React Compiler rules (`set-state-in-effect`, `refs`, `preserve-manual-memoization`, `immutability`, `purity`, `error-boundaries`) that report 64 errors in 26 files under `npm run lint`. That is a code migration, not a dependency bump. Dependabot will re-propose it. `next` 16.4.2 does not depend on the config version.
+
+### Root cause
+- Dependabot's branch failed `npm ci` in every frontend job (`Missing: proxy-agent@8.0.2 from lock file`), so the contracts, lint, typecheck, test, build and knip reds were one failure. Its lockfile was written by an npm that prunes the optional-peer `proxy-agent@8` under `puppeteer-core/node_modules/`, and CI's npm 10 (Node 22) rejects such a lock. This lock is resolved with npm 10.9.4 on Node 22, the npm CI runs, and `npm ci` accepts it with no invalid peers. The lock's root `version` field is left at main's value.
+
+### Tests
+- Local, Node 22 / npm 10: `npm ci` clean, `npm run typecheck` clean, `npm run lint` clean (2 pre-existing warnings). The full vitest suite was run twice locally. Each run had a handful of failures and the two sets did not overlap. All 12 files involved pass in isolation on this branch and on main (323/323), so the failures were load on the shared machine, and CI's sharded run is the reading.
+
+## [0.132.8.3] - 2026-10-20 — deps: @sparticuz/chromium 149.0.0 → 153.0.0 (#1017)
+
+### Changed
+- `@sparticuz/chromium` 149.0.0 → 153.0.0, the serverless Chromium every server-PDF route boots through `src/lib/puppeteer.ts`. The installed `puppeteer-core` 25.x targets Chrome 154, so 153 narrows the browser/protocol gap that 149 left. The two APIs used (`chromium.args`, `chromium.executablePath()`) are unchanged in 153, and its engine range (`^22.17.0 || >=24.0.0`) is the same as 149's.
+
+### Root cause
+- Dependabot's branch failed `npm ci` in every frontend job (`Missing: proxy-agent@8.0.2 from lock file`), because its lockfile was written by an npm that prunes the optional-peer `proxy-agent@8` under `puppeteer-core/node_modules/`, and CI's npm 10 (Node 22) then rejects the lock. Here `package-lock.json` changes only the four lines of the chromium entry and its root range, which npm 10.9.4 on Node 22 reproduces byte for byte. Running `npm install` with npm 11 regenerates the broken lock.
+
+### Tests
+- Local, Node 22 / npm 10: `npm ci` clean, `npm run typecheck` clean, and the PDF-route and `puppeteer` vitest files (53 tests) pass. They mock Chromium, so a real Chromium launch is only checked on the Vercel deploy.
+
+## [0.132.8.2] - 2026-10-20 — OKXHISTORY: the preflight reads OKX's real bill-subtype list
+
+### Fixed
+- The OKX archive preflight's subtype census (`_parse_live_subtypes` in `analytics-service/services/okx_archive_job.py`) now reads each bill type's subtypes under `subTypeDetails`, the key OKX's v5 "Get bill types" endpoint (`GET /api/v5/account/subtypes`) documents. It looked under `subTypes` and `subType`, guesses written before the first real call.
+
+### Root cause
+- The first real preflight on PROD (2026-10-20) stopped as `subtype_map_drift` with 0 live subtypes and an empty drift list. The account checks had passed (same account on every target, read-only key). The census reads an unparseable body as a stop by design, so the guessed key failed loud: no archive was requested and nothing was written.
+
+### Tests
+- The `account/subtypes` fixtures in `tests/test_okx_archive_job.py` now use OKX's documented shape. Against the old parser the preflight tracer test goes RED; with the fix the OKX suite is green (705 passed, 2 skipped).
+
+### Notes
+- Next: once this is deployed, the preflight runs again (Phase 167.1.2.2.2.1 plan 12). Its subtype census then feeds plan 13's transfer-class decision.
+
+## [0.132.8.1] - 2026-10-20 — BASELINE: automated re-dump after the PROD apply of 0848bd77
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `39466416794`, after the PROD apply of merge `0848bd77`: sha256 `8d428d8a…` → `4fffa63f…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 132 → 132, distinct function names 130 → 130, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261027120000_commit_scenario_batch_fingerprint_sameday_empty.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-20` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.132.8.0 → 0.132.8.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=306 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 132 — MATCH 129, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `39466416794` succeeded, and this entry was composed by the `redump-pr` job. Run `39466416794` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.132.8.0] - 2026-10-20 — HISTORYREADER 167.1.2.1.2: Open Positions, Exchanges and Overview show a departed or stale key's history truthfully
+
+Phase 167.1.2.1.2. **Includes migration `20261027120000`,** which applies to TEST and then PROD automatically on merge.
+
+### Fixed
+- **A position closed and polled empty on the same day disappears that day, not the next (D-02).** `fetchLatestHoldingsPerKey` hides a key's rows when the key's newest poll, of any outcome, is a clean poll that read zero rows on the same day as those rows. A later poll that finished with warnings never hides rows.
+- **The scenario commit's fingerprint check runs the same rule in SQL.** Migration `20261027120000_commit_scenario_batch_fingerprint_sameday_empty.sql` re-bases `commit_scenario_batch` on its latest definition. A rollback is in `down/`. Without it, every book-mode commit on an affected book would have been refused with a 409. A parity test ties the SQL rule byte-for-byte to the TS reader, and a new 6-arm SQL gate covers it, including a hidden key's same-account sibling with older rows.
+- **Overview shows a ready history on an all-closed book (D-04).** It shows the curve and factsheet instead of "No positions to analyze yet.", so Overview and the Risk tab agree. The no-key and rebuilding states are unchanged (170.4 D-09 kept).
+- **Stale spot balances are dated (D-05).** Under the Exchanges spot table, one muted line per stale key reads "Spot holdings from {key} are as last read on {date}: {symbols}." It uses the same dating rule as the existing Open Positions note.
+
+### Tests
+- `FILES_FLOOR` 78 and `ARMS_FLOOR` 777, each seen red at its old value first. `WAIVED_CEILING` stays 0. A full mutation run gave 777/777 biting arms with no defects.
+- 31 of the phase's tests fail on the previous main and pass here. Each rule was neutered back to RED and restored.
+
+### Notes
+- **Closed by decision (D-01, D-03):**
+  - A departed key that was never identified keeps its struck-through, disclosed rows. PROD has 0 cases next to a live key on the same exchange. It is booked as `167.1.2.1.2-DEPARTED-UNLINKED-KEY`, with the trigger "a departed key with no identity beside a live key on the same exchange".
+  - The roadmap's "Bybit UTA parse-miss" item rested on a wrong premise. A Bybit key's identity comes from `query-api` `userID`, and an unstamped key is already flagged three ways.
+- **Deploy order (review IN-01):** the migration applies to PROD before the Vercel deploy lands. In that window a same-day-emptied book could get a 409 on commit until the new reader is live.
+- **Accepted limit (D-02, IN-04):** a Bybit UTA parse-miss now hides a funded account on the same day instead of the next.
+- **Reviews:** migration-reviewer and rls-policy-auditor clean. Code review round 2 and the silent-failure hunt clean. Security SECURED 17/17. The 375/390 px checks are post-deploy.
+
+## [0.132.7.1] - 2026-10-20 — deps: Python pip-minor-patch group (#1078)
+
+### Changed
+- Dependabot's pip-minor-patch group (8 updates) in `analytics-service/requirements.in`: fastapi 0.142.2 → 0.143.2, ccxt 4.5.85 → 4.5.88, numpy 2.5.3 → 2.5.4, pydantic 2.13.5 → 2.14.1, supabase 2.31.0 → 2.33.0, pandera 0.33.1 → 0.34.1, sentry-sdk 2.71.0 → 2.72.0; and aiohttp 3.14.3 → 3.14.5 in the lock (the manifest keeps `aiohttp<3.15`). Transitives that move with them: pydantic-core 2.46.5 → 2.50.1, postgrest / realtime / storage3 / supabase-auth / supabase-functions 2.31.0 → 2.33.0, multidict 6.7.1 → 6.9.1, yarl 1.24.2 → 1.25.1, typing-inspection 0.4.2 → 0.4.4.
+- `analytics-service/requirements.txt` is regenerated with the canonical `make lock` command (`uv pip compile --universal`), with `--upgrade-package aiohttp --upgrade-package yarl` to take the two lock-only moves, and not shipped in Dependabot's format. Dependabot's lock dropped the environment markers and folded extras into the pins (`psycopg[binary]`, `httpx[http2]`, `uvicorn[standard]`, `pyjwt[crypto]`); the regenerated lock keeps the repo's format, so the only lines that change are the versions above.
+- `services/db.py`: the comment naming the postgrest pin now says 2.33.0. `APIResponse` is still a non-generic pydantic model at 2.33.0, so the accessor it explains is unchanged.
+
+### Notes
+- Dependabot's own run was red only on `version-gate` and on `test-db-drift`, which fails hard without repo secrets (Dependabot-triggered runs get none). The `python` job was green on it.
+
+### Tests
+- Local, Python 3.12 venv on the regenerated lock plus `requirements-dev.txt`: full `pytest` from `analytics-service/` 11986 passed, 91 skipped; the CI strict `mypy` line is clean on 121 source files.
+
+## [0.132.7.0] - 2026-10-20 — AUMBASIS 167.1.1.2: a derivative counts toward a book's size at its unrealized P&L, and a missing P&L is stored and shown as missing
+
+Phase 167.1.1.2. No migration.
+
+### Fixed
+- **Scenario commit sizing uses the equity basis (D-01 to D-03).** The commit route summed `value_usd`, which is a derivative's full notional. It now sizes on each holding's equity contribution, so a derivative counts at its unrealized P&L. Every audit row records the outcome by name:
+  - When the equity AUM is zero or below, the size is null with `server_aum_not_positive`.
+  - A derivative with no reported P&L is left out by name, with `server_holding_pnl_missing`, `aum_left_out_count` and `aum_left_out_refs` (capped at 50).
+  - A book holding only such derivatives is audited as `derivative_pnl_unreported`, not `no_holdings_today`.
+  - A `voluntary_remove` of a derivative is sized at its signed unrealized P&L.
+- **"No P&L reported" is stored as NULL, not 0 (D-04, D-05).** The five writer sites now go through one `reported_pnl()`: the Bybit V5, Deribit (two paths) and CCXT normalisers in `services/positions.py`, and the remap in `services/allocator_positions.py`. A reported 0 stays 0.0, and a non-numeric value still raises. This also reaches the strategy-side `position_snapshots`, whose column is nullable.
+- **One shared definition of a holding's equity contribution (D-06).** It lives in `src/lib/holding-equity.ts`, and TS and Python agree on one fixture. A derivative with a NULL P&L returns null instead of 0, and every caller skips it and counts it.
+  - The composer's AUM row says "N derivatives without reported P&L left out."
+  - That sentence also replaces the Open Positions footer's "Partial total" wording.
+- **The daily equity snapshot records what it left out (D-07).** `refresh_allocator_equity_daily` already skipped a NULL-P&L derivative. It now also writes the left-out symbols and count to the snapshot's existing `breakdown` field, protected from truncation.
+- **Corrected a false comment:** the route claimed a daily-delta cron reads `size_at_decision_usd`. Nothing reads it after the commit (premise P-01).
+
+### Tests
+- TS/Python parity on the shared equity-contribution fixture.
+- Writer tests: absent, null or blank P&L stores None; a reported 0 stores 0.0.
+- Commit-route oracles moved to the equity basis, e.g. 9500 → 6620.
+- Tests for each named outcome and for the unrealized-P&L column in the route's select.
+- Every rule was RED first and went RED again when neutered.
+
+### Notes
+- **PROD before (read-only, 2026-10-20):** 288 current derivative rows, with 0 NULL P&L and 0 exactly zero. 17,036 historic rows, with 0 NULL and 15 exactly zero. 7 books hold derivatives, all with a positive equity AUM. Their equity AUM is 60–64% of their notional AUM on most books and 21% on the Deribit-only book.
+- **Past data is not rewritten (D-08, D-09).** No past commit row carries a size (premise P-02). The 15 exact-zero historic rows cannot be told apart from real zeros.
+- **Post-deploy items:** the SC-4 AFTER reading on PROD, and the composer AUM hint at 375px and 200% zoom.
+- Code review and the silent-failure hunt are clean on round 2. Security SECURED 21/21.
+
+## [0.132.6.3] - 2026-10-20 — RECORDS: close COPY 170.1 (SC-5 passed, verification passed, SECURED)
+
+Records, plus one test bound: `.planning`, `TODOS.md`, a timing test and this release.
+
+### Added
+- The COPY phase directory joins the tracked tree: eight plans and summaries, CONTEXT (including every founder decision from the review rounds), RESEARCH, PATTERNS, VALIDATION, the review and fix-round record, `SECURITY.md` (SECURED, 0 open) and `VERIFICATION.md` (status passed).
+- The 170.1.1 TITLES and 170.1.2 LABELS phase directories, with their CONTEXT and plans. These phases were split out of COPY and are ready to execute.
+- `TODOS.md` books `[170.1-SC5-SCENARIO-NARROW-DEFECTS]`. The SC-5 measurement found four defects outside its named lines:
+  - at 390 px, the scenario commit bar's change summary runs under the Reset button;
+  - chart axis labels are cut by 3–4 px by their own SVG;
+  - at 640 px, the "vs current book" suffix overhangs its row by about 1.5 px;
+  - the CSV summary reads "(1 rows)".
+
+### Changed
+- `.planning/ROADMAP.md`: the COPY overview bullet and Progress row carry the outcome, v0.132.6.0 (#1082). The TITLES and LABELS sections list their plans.
+- `.planning/STATE.md` and `.planning/state.json`: progress moves to 112 phases complete. The current position stays on 166.5 COMPUTEDATSTAMP. The Status line records AUMBASIS and HISTORYREADER as started on 2026-10-20.
+
+### Tests
+- `test_a_10mb_file_of_very_long_date_cells_is_rejected_in_bounded_time` gets a 20 s bound instead of 5 s. The fixed path took 6.1 s on CI under coverage and xdist (run 39436648739) against under 1 s locally; the regression it guards takes 40 to 59 s, so the test still fails it.
+
+### Notes
+- **SC-5 (390 px and 640 px, the desktop 200% zoom width) passed on all five surfaces.** Playwright measured them on the seeded local stack: the scenario KPI strip, the `/strategies` submitted line and its list-read-failed variant, the CSV error envelopes, a scenario chart with no benchmark, and the owner's finished-not-built factsheet. Page width always equals the viewport, nothing on the named lines is clipped, and the signed KPI figure never breaks across lines.
+- On PROD, `/strategies?wizard_submitted=1` was also measured at 390 px and passed. The scenario deltas cannot render on PROD while its scenario has 0 overlapping days.
+## [0.132.6.2] - 2026-10-20 — deps: pyarrow 25.0.1 → 26.0.0 in analytics-service dev requirements (#1016)
+
+### Changed
+- `pyarrow` 25.0.1 → 26.0.0 in `analytics-service/requirements-dev.txt`. pyarrow is test-only here (H-0537): it loads the golden parquet fixture in `tests/conftest.py` and writes it in `tests/fixtures/regen_golden.py`. The Railway image installs only `requirements.txt`, so nothing deployed changes.
+
+### Notes
+- Dependabot's own run was red on `version-gate`, on `test-db-drift` (which fails hard without repo secrets, and Dependabot-triggered runs get none) and on one `frontend-test` shard of its 2026-10-13 base, which this change cannot reach. The `python` job was green on it.
+
+### Tests
+- Local, Python 3.12 venv on `requirements.txt` + `requirements-dev.txt` with pyarrow 26.0.0 and pandas 3.0.3: the full `pytest` from `analytics-service/` passes, 11986 passed and 91 skipped, golden-parquet parity tests included.
+
+## [0.132.6.1] - 2026-10-20 — deps: GitHub Actions minor/patch group (#1013)
+
+### Changed
+- `actions/setup-node` 7.0.0 → 7.1.0 (SHA `949feb24…`), `actions/upload-artifact` 7.0.1 → 7.0.2 (SHA `cf430e03…`) and `actions/download-artifact` 8.0.1 → 8.0.2 (SHA `9000827c…`), at every pinned step across ten workflow files (49 pins). No input this repo passes changed. setup-node 7.1.0 adds a Node-version validation and a manifest-fetch retry.
+- Applied to current `origin/main` rather than merging Dependabot's branch, so the pin set is complete as of this head.
+
+### Notes
+- Dependabot's own run was red on `version-gate` (no VERSION/CHANGELOG) and on the Migration Drift Check `check` and `test-db-drift` jobs, which fail hard by design when their repo secrets are absent; Dependabot-triggered runs get none. None of the reds was the update itself.
+- `sql-mutation-nightly.yml` and `ci.yml` move to the same setup-node SHA, so the nightly parity pin stays byte-equal.
+
+## [0.132.6.0] - 2026-10-20 — COPY 170.1: page copy reads clean, and a CSV upload never stores a wrong date or shows a raw error
+
+Phase 170.1 COPY. It started as a copy pass and grew a CSV-validation hardening track through its review rounds. Titles (170.1.1) and labels (170.1.2) were split into their own phases.
+
+### Changed
+- **CSV upload messages name the problem in plain words.** A missing column reads "Your file has no {column} column." Every rule line is composed from labels, so no raw rule name reaches the page. The format hint fires on the routed specimen. A repeated header reads "Could not parse CSV: two columns have the same name."
+- **Status copy is in the active voice.** This covers the share card, the key-status lines (KCS09 finished and unreadable), the key-card slow and finish notes, and the composite fallback. `chain_unreadable` tells the user to reload and start the sync again.
+- **/strategies tells the truth about a submitted strategy.** It says it was submitted when the wizard submitted it, and picks the "finished but not built" note from the compute state. The owner's factsheet banner gives the body's instruction for a finished job.
+- **Wizard edge cases.** A duplicate wizard submit that returns 2xx follows the success path. The status line stops saying "listed below" when the list could not be read.
+- **Scenario KPI deltas name their baseline:** "vs current book".
+- **A chart with no comparator prints an empty subtitle,** never "vs None".
+
+### Fixed
+- **`validate_csv` never raises.** It covers a DST offset change, colliding headers, a quoted-empty or whitespace-only first line, bare-CR "CSV (Macintosh)" files, huge or negative numbers in a date column, and an over-long date cell. Each returns the error at its row. CSV callers never send or log exception text, and internal faults are locatable in the log and in Sentry without echoing a cell.
+- **The raw header is read by pandas with the frame's own options,** so the two cannot disagree about which line is the header. This was the root cause of three successive header regressions during review.
+- **Dates are never accepted wrong:**
+  - A year-first (ISO) cell in a day-first column no longer flips the whole column to month-first.
+  - A US month-first column with one ISO cell is accepted with the right range.
+  - Day-first is chosen on the cells that can be read.
+  - An unreadable cell is reported at its row, never passed on as text or as a blank.
+  - An all-digit `YYYYMMDD` column, integer or float, reads as dates instead of 1970-01-01. Only an 8-digit non-negative whole number is read that way; a 6- or 7-digit number is a date error at its row.
+  - A trades file is read as UTC instants, so a DST fall-back file validates.
+- **No spurious "dates not in order"** is reported beside an unreadable cell.
+- **CSV validation runs off the event loop** on a one-worker executor. A worst-case file inside the 64-character date-cell cap takes about 3.3 s; the event loop's worst stall is now about 0.2 s, where before every route stalled.
+
+### Fixed (data)
+- CSV uploads whose date column carries a UTC offset with a time now store the calendar date the file shows. Before this release, a single-offset daily file (for example `T00:00:00+02:00`) could be stored one day off while the upload preview showed the written dates. Daily formats keep the wall-clock date, and trade files read each timestamp as a UTC instant. A zone the validator cannot read is rejected at its row instead of being converted.
+
+### Security
+- **The analytics shared secret header (`x-service-key`) and the tenant claim header (`x-tenant-claim`) are redacted before reaching Sentry,** in error and transaction events. They are listed in `redact.py`, `sentry_init.py` and `pii-scrub.ts`, pinned by a parity row and a test that was RED first. Error events carried the service key in cleartext before this phase. The key was not rotated (founder decision).
+- **The Sentry redactor now also runs on transaction events,** so about 10% of small uploads no longer reach Sentry performance data unredacted.
+- **Deribit `access_token` and `refresh_token` are redacted by key.**
+- **The JWT value-shape scan matches only `eyJ`-headed tokens,** so host names and version strings survive in Sentry. Every analytics event used to show its Python version as `[REDACTED_JWT]`.
+
+### Notes
+- **Existing data:** the original uploads are not kept, so a past date shift cannot be proven. PROD reading 2026-10-16: 27 CSV strategies, none published, 9 with a daily series. 2 of those are weekday-only and unshifted; 7 are seven-day series where a shift cannot be seen. A re-upload stores the written dates. Booked as TODOS `[170.1-CSV-OFFSET-DATE-SHIFT-PROD]`.
+- **Accepted residuals:**
+  - The one-worker validation queue has no bound (T-170.1-53). Callers are authenticated and rate-limited.
+  - A non-`eyJ` dotted token under a key that is not denylisted passes the scrub (T-170.1-55).
+  - A month-name date cell in a numeric-date column stays a loud row rejection by choice.
+- **Review:** several minimal fix rounds under the founder's rule "For fix rounds minimal fix only, no new abstractions or defensive checks". Date-grid wrong acceptances went from 135 to 0 on the 11,808-file grid and from 489 to 0 on the numeric fuzz, with 0 raises. Verification: every code-level item verified; the 390px and 200% zoom check (SC-5) runs after deploy. Security SECURED, 0 open.
+
+## [0.132.5.1] - 2026-10-19 — RECORDS: close WRITERRESIDUALS 167.1.2.1.1 (verification passed 9/9, SECURED 20/20)
+
+Records only: `.planning` and this release.
+
+### Added
+- The WRITERRESIDUALS phase directory joins the tracked tree: four plans and summaries, CONTEXT (D-01 to D-05, D-11 to D-16), RESEARCH, PATTERNS, VALIDATION, the review reports and fix-round record, the SC-8 deploy note, `SECURITY.md` (SECURED, 20 of 20) and `VERIFICATION.md` (status passed, 9 of 9).
+
+### Changed
+- `.planning/ROADMAP.md`: the WRITERRESIDUALS overview bullet and Progress-table row carry the outcome: v0.132.5.0 (#1079), deployed 2026-10-19 at 20:33Z, outside the 03:30–06:45 UTC window that SC-8 forbids. The phase section records founder decisions D-15 ("Yes, one clause + test") and D-16 ("Accept as known limit").
+- `.planning/STATE.md` and `.planning/state.json`: progress moves to 111 phases complete. The current position stays on 166.5 COMPUTEDATSTAMP. The Status line says WRITERRESIDUALS is closed and 170.1 COPY is in its final round.
+
+### Notes
+- The live proof that the change works on PROD is the first derive after deploy, at 05:30Z on 2026-10-20, where a composed book reads `is_trustworthy`. It is read after this PR merges.
+
+## [0.132.5.0] - 2026-10-19 — WRITERRESIDUALS 167.1.2.1.1: the allocator equity writer says why it refused a curve and never dilutes or drops a key silently
+
+Phase 167.1.2.1.1. The allocator equity writer (derive, stitch and the daily refresh) now persists the reason it refused a curve, flags a failing or never-polled key instead of carrying it flat, and counts each account once. No migration.
+
+### Fixed
+- **Every derive refusal persists its reason (SC-1).** The refusal paths of `run_derive_allocator_equity_job` used to delete the curve row and store nothing, so Overview could only show a generic line. Each path now stores its token, and the reader (`src/lib/queries.ts`) maps every token onto an existing Overview line. An identity collision reads as `duplicate_account`.
+- **A lone failing key whose series ends early blocks the curve (SC-2).** `no_working_groups` fired only for groups of two or more keys, so a single failing key was carried flat inside a "ready" book. It is now `failing_key_series_ended`.
+- **Stitched members that disagree about an owned day's flows block the curve (SC-3).** Before, a deposit listed only by the newer key, on a day the older key owned, was dropped and the curve stayed trusted. It is now `shared_account_flows_disagree`.
+- **A never-polled working account holds the day's snapshot write (SC-4).** It used to add $0 to the day's persisted total. The hold is recorded as the audit action `allocator.equity.refresh_held`.
+- **A carried balance older than 7 days holds the day for a working key, and a dead key is left out (SC-5, founder D-12).**
+- **Two working keys on one account that the stamper has not reached yet are no longer counted twice (SC-6).** The derive stores `account_identity_pending` and the refresh holds its write. Deribit is excluded from the refresh's count because its keys add $0 there.
+- **A departed account whose history is unavailable reaches Sentry as an event with a count (SC-7),** written in `job_worker.py`, instead of only a breadcrumb.
+- **A brand-new book reads "being rebuilt", not "held back" (fix rounds, founder D-15).** A book whose keys have an anchor and no return day yet now stores `compose_empty`. That also holds beside a dust, native-unit or native-unpriced key the compose omits, including a native-unit key that already has history.
+- **The refresh's Sentry hold event comes from the smallest working key, not a failing one,** and the left-out Sentry events fire on every outcome that is not a hold.
+
+### Tests
+- New: `test_derive_refusal_rows.py`, `test_writer_residual_parity.py`, `test_stitch_flow_agreement.py` and `test_allocator_equity_departed.py`, plus the shared fixtures `derive_refusal_rows.json` and `writer_residual_resolution.json`.
+- TS twins: `derive-refusal-rows.test.ts` and `writer-residual-parity.test.ts`, so the Python writer and the TS reader agree on every token.
+- Larger suites for the derive job and the refresh carry-forward.
+- `scripts/accounttruth-census.mjs` mirrors the new tokens and is pinned by `accounttruth-census.test.ts`.
+- Every fix was RED first and went RED again when neutered.
+
+### Notes
+- **Deploy timing (SC-8):** this change must land outside 03:30–06:45 UTC (poll 04:00, refresh 05:00, derive 05:30). A deploy between the poll and the refresh writes one stale row per emptied account.
+- **A held refresh day is a permanent gap** in `allocator_equity_snapshots`, by design.
+- **`v2_rows_fresh` in `docs/runbooks/derivecron-go-live.md` now also counts refusal rows.** Filter it on `is_trustworthy`.
+- **SC-9 (the MT5 BTC-unit inception residual)** is closed as cleared (founder D-11).
+- **TODOS:**
+  - Closed: `167.1.2.1.1-NEWBOOK-HELD-BACK-LINE`, `-HOLD-SENTRY-LEADER` and `-LEFTOUT-SENTRY-NO-WRITE`.
+  - Narrowed: `-IDENTITY-HOLD-DERIBIT`, to its escalation half.
+  - Booked: `-NEWBOOK-WAIT-UNBOUNDED`, the known limit the founder accepted (D-16). A funded key whose venue never yields 2 usable NAV days reads "being rebuilt" with no end, which is the line it showed before this phase.
+  - Booked: `-FALLBACK-LEADER-PREFLIGHT` and `-LEADER-STATUS-FLIP`, both observability only.
+- Verification passed 9/9; security SECURED 20/20.
+
+## [0.132.4.1] - 2026-10-16 — RECORDS: close BRIDGERETURNS 167.1.1.1 (verification passed, SECURED 23/23, PROD readings as expected)
+
+Records only: `.planning`, `TODOS.md`, and this release.
+
+### Added
+- The BRIDGERETURNS phase directory joins the tracked tree: 10 plans and summaries, CONTEXT, RESEARCH, PATTERNS, VALIDATION, the review and review-fix rounds, `SECURITY.md` (SECURED, 23 of 23), `UAT.md` (3 of 3 passed) and `VERIFICATION.md` (status passed).
+- `VERIFICATION.md` gains "Human items resolved (2026-10-16)" with the three post-deploy readings.
+- `TODOS.md` books `CI-LOCALSTACK-DB-PORT-IN-USE`, a first occurrence: main's CI run on #1070's merge commit failed only in `frontend-local-stack` because the runner's Docker could not bind the lane database's port ("address already in use"). Later main commits are green. Fix on the second occurrence.
+
+### Changed
+- `.planning/ROADMAP.md`: the BRIDGERETURNS overview bullet is ticked with its outcome (v0.132.3.0 #1070, gap closure v0.132.4.0 #1074), its ten plan rows replace the `TBD` stub, and its Progress-table row reads Complete with the outcome prose.
+- `.planning/STATE.md` and `.planning/state.json`: progress moves to 110 of 118 phases. The current position stays on 166.5 COMPUTEDATSTAMP, and the Status line records the founder's hold to 2026-10-20 on 170.1 COPY, 167.1.2.1.1 WRITERRESIDUALS and 167.1.1.2 AUMBASIS.
+
+### Notes
+- PROD readings, read-only with the marker query first, counts only:
+  - **SC4 after (engine v2.4.0, every allocator re-scored by 14:00Z):** 213 holding-flag entries, each withheld holding named by reason (`too_few_priced_days` 111, `derivative_out_of_book` 75, `option_premium` 9, `account_balance` 8, `fixed_price` 7, `too_few_adjacent_returns` 1), and 0 correlation or max-weight breaches. Portfolio fit is computed for 3 of 5 personalized candidates; before the phase it was 0 of 8.
+  - **GAP-01:** the remaining 2 candidates read `overlap_below_min` with 8 and 9 shared days, a minimum of 30 and `data_completeness` null. Computed candidates and screening rows carry none of the marker keys.
+- The v2.4.0 re-score does not happen in one cron run: the cron works through allocators a page per hourly tick with its saved cursor, so it took two ticks (13:00Z and 14:00Z).
+- 375px derivative caption: PROD's only derivative holding has 7 priced days, so the basis caption was measured by writing it into the live caption element at 375px. It wraps to 8 lines inside the card with no horizontal scroll.
+- `RESEARCH.md` named the CI skip-trailer tokens literally in a rule line. It now describes them in words.
+
+## [0.132.4.0] - 2026-10-16 — BRIDGERETURNS gap 01: a Bridge candidate's missing portfolio fit says why (engine v2.4.0)
+
+Gap closure for Phase 167.1.1.1 BRIDGERETURNS (plan 10). The SC4 after-deploy reading on PROD found 2 of 5 personalized candidates with an empty portfolio fit and nothing saying why. Both are one strategy whose 25-point curve shares 8 and 9 days with each book's priced holding, under the 30-day minimum. The empty fit is correct; the silence was the defect.
+
+### Fixed
+- `analytics-service/services/match_engine.py`: a candidate that shares fewer than 30 days with the book now persists `fit_unavailable_reason: "overlap_below_min"`, `fit_overlap_days` and `fit_min_overlap_days` in `score_breakdown.raw`. A personalized candidate with no returns series at all persists `no_candidate_returns` with 0 days. Computed fits and screening rows carry none of these keys.
+- `data_completeness` is now null on the short-overlap path. It measures the book's own join and read 1.0 ("complete") beside a fit that was never computed.
+- The admin candidate view (`src/components/admin/CandidateDetail.tsx`) shows the cause under the Portfolio fit bar, e.g. "Portfolio fit not computed: only 8 shared days with the book (needs 30)."
+
+### Changed
+- `ENGINE_VERSION` v2.3.0 → v2.4.0, because the persisted `raw` shape changed. **Every cached match batch is re-scored on the first cron run after deploy.** `WEIGHTS_VERSION` stays v2.0.0; no weight or score changed. Both golden fixtures change only in `engine_version`.
+- One constant, `PORTFOLIO_FIT_MIN_OVERLAP_DAYS = 30`, feeds the engine's overlap check, the persisted minimum and `routers/match.py` `_BOOK_JOIN_MIN_DAYS`, so the book-level D-22 marker and the candidate-level marker cannot disagree.
+
+### Tests
+- New `analytics-service/tests/test_match_candidate_fit_overlap_marker.py`, 9 arms: 8 shared days, exactly 30 (no reason key), 29 at the boundary, screening, the one-constant check, absent or empty candidate series, and an empty book series. Each arm was RED before its fix and was neutered back to RED and restored.
+- New `src/components/admin/CandidateDetail.test.tsx` pins the admin sentence and pins that `reasons` stays unchanged.
+
+### Notes
+- The cause is deliberately kept out of `reasons`: `reasons[0]` is the allocator's headline on /recommendations and pre-fills the intro note, so an admin caveat there would reach the allocator.
+- Review: two rounds. Round 1 fixed one silent-failure MEDIUM (the no-returns candidate); round 2 added a test for the empty-book guard. LOW items stay in the phase review files, not fixed by policy. Security SECURED 23/23.
+- After deploy and the re-score, the two PROD candidates are read again (read-only) to confirm they carry `overlap_below_min` with 8 and 9 days.
+
+## [0.132.3.3] - 2026-10-16 — RECORDS: close FANINGRAPH 164.9.3.1 (verification passed 8/8, SECURED 27/27, post-merge items confirmed)
+
+Records only: `.planning`, `TODOS.md`, and this release. One commit.
+
+### Added
+- The FANINGRAPH phase directory joins the tracked tree: 11 plans and summaries, CONTEXT, RESEARCH, PATTERNS, VALIDATION, `REVIEW.md` with rounds 2 to 4, `REVIEW-FIX.md`, `SECURITY.md` (SECURED, 27 of 27 threats closed) and `VERIFICATION.md` (status passed, 8 of 8).
+- `VERIFICATION.md` gains a dated section, "Post-merge items resolved (2026-10-16)", with all seven post-merge items confirmed and the evidence for each. Status stays passed.
+
+### Changed
+- `.planning/ROADMAP.md`: the FANINGRAPH overview bullet is ticked with its outcome (v0.132.1.0 #1059, re-dump #1061, ratchet-row follow-up #1064), its eleven plan rows replace the `TBD` stub and are ticked, and its Progress-table row reads Complete with the outcome prose.
+- `.planning/STATE.md` and `.planning/state.json`: progress counts and the last-activity lines move to 2026-10-16. The current position stays on 166.5 COMPUTEDATSTAMP, and the Status line now says FANINGRAPH is closed.
+
+### Notes
+- Read-only PROD readings taken for the post-merge items (marker query first, counts and booleans only): the ledger rows for `20261023120000` and `20261024120000` are present; `_fan_in_lock_rows` and `bridge_outcomes_sync_holding_ref` exist; `_fan_in_lock_rows` is executable by service_role only, matching the migration's REVOKE; the D-04 census reads 0 parented `compute_jobs` rows and 0 `done_pending_children` of 2332.
+- Main at the merge commit was red on the baseline content-drift gate by construction until the re-dump (#1061). The separate snapshot-drift workflow went red one commit later on the stale `_fan_in_lock_rows` ratchet row, and #1064 deleted it. Both are green now.
+- Two review residuals were not yet in `TODOS.md` and are booked: `164.9.3.1-FL8-SEAM-RESTORE` (lane-only, founder-accepted) and `164.9.3.1-55P03-RECOVERY-LATENCY` (latent, no caller passes parents). The earlier three entries (`REAPER-STRAND`, `VOLUNTARY-REMOVE-23514`, `HOLDING-REF-DIRECT-UPDATE`) were already booked.
+- STATE's Status line is rewritten to match today: 170.1 COPY and WRITERRESIDUALS are in flight. BRIDGERETURNS (#1070) and OKXHISTORY (#1067) are shipped and waiting on readings or founder steps. FANINGRAPH, RECONMARKER and PYXDIST are closed, and MT5SERVERLEARN is retired.
+- SECURITY.md's T-24 row now describes the secret-scan pattern in words. It was written as a literal URL with a user and password, which the push-time credential scanner refused.
+
+## [0.132.3.2] - 2026-10-16 — RECORDS: retire MT5SERVERLEARN 164.6.6.3.6 from v1.20 (founder: next milestone, maybe)
+
+Records only; no code changes.
+
+### Removed
+- **Phase 164.6.6.3.6 MT5SERVERLEARN is retired from v1.20, by founder decision on 2026-10-16: "We will do it in the next milestone (maybe)".** It never shipped. Broker servers stay hand-listed in `MT5_KNOWN_SERVERS`, and the Step 2d runbook from 164.6.6.3 applies.
+  - The ROADMAP marks the phase retired, in the same style as 165, 165.1 and 165.2. Its section stays as the spec, and its Progress row reads RETIRED.
+  - STATE no longer lists it as waiting on the founder's MT5 accounts.
+  - The work done so far (CONTEXT, RESEARCH, PATTERNS, VALIDATION, BROKER-SERVERS, plan 01 and the S0-S9 gate protocol) is kept on the pushed branch `feat/164.6.6.3.6-mt5serverlearn`.
+- TODOS gains `[164.6.6.3.6-MT5SERVERLEARN-NEXT-MILESTONE]`, which carries the phase to the next milestone's planning.
+
+## [0.132.3.1] - 2026-10-16 — RECORDS: close RECONMARKER 167.1.2.1 (D-11 day-0/day-1 reads as-expected, verification passed, SECURED 33/33)
+
+### Added
+- `167.1.2.1-SECURITY.md`: audit of Phase 167.1.2.1 RECONMARKER by gsd-security-auditor at head `f590cdf42`, read-only, no database touched. Verdict SECURED, 33 of 33 registered threats closed, `threats_open: 0`. Four accepted risks are logged (T-02 column SELECT for authenticated only, T-07 stale curve on disconnect-then-add, T-20 widened projection, T-SC no package installed).
+- `167.1.2.1-VERIFICATION.md` (status passed, 7 of 7 success criteria) and `167.1.2.1-10-SUMMARY.md` (the D-11 day-0 and day-1 PROD reads, counts only, founder acknowledged 2026-10-16) join the tracked phase directory.
+
+### Changed
+- `.planning/ROADMAP.md`: the RECONMARKER overview bullet is ticked with its outcome (PR 1 v0.131.3.0 #1022, PR 2 v0.131.8.0 #1033), its ten plan rows are ticked, and its Progress-table row reads Complete with the outcome prose rather than the bare word.
+- `.planning/STATE.md` and `.planning/state.json`: progress counts and the last-activity lines move to 2026-10-16. The current position stays on 166.5 COMPUTEDATSTAMP, and the Status line now says RECONMARKER is closed.
+
+### Notes
+- One finding the audit flagged as an unregistered WARNING is closed in code: `log_audit_event` let a signed-in user write `allocator.equity.reconstruct_*` rows. Migration 20261014120100 refuses that prefix to non-service_role callers (SQLSTATE 22023) and the backfill joins on `a.user_id = ak.user_id`. Rows forged before that migration applied can only affect the forger's own key.
+- Two residuals stay open and non-blocking, booked in `TODOS.md`: `167.1.2.1-TRANSIENT-NEVER-CAPS` and `167.1.2.1-TWIN-STALE-DEFINITION`. `TODOS.md` itself is unchanged here; no entry said it was waiting on the D-11 reading.
+- Observation, low severity: the Sentry read-failure branch in `job_worker.py` calls `capture_exception` without the `_read_failure_text` scrub, and the global `before_send` scrubber was not verified.
+## [0.132.3.0] - 2026-10-16 — BRIDGERETURNS: the Bridge matcher's per-holding returns come from each holding's daily mark price
+
+Phase 167.1.1.1 (plans 01-09 and three review rounds plus one narrow round). The branch has 67 non-merge commits since `origin/main` plus per-plan worktree merges and one merge of `origin/main`. 28 of the 67 touch paths outside `.planning`, and this entry maps every one of them. The other 39 are planning and records commits: CONTEXT with founder decisions D-01..D-25, research, the UI spec, the pattern map, 9 plans and their summaries, four review rounds, verification and the security audit. Closes TODOS `[167.1.1-BRIDGE-DOLLAR-RATIO-RETURNS]` (`77b639a4b`). No migration.
+
+### Root cause
+- ⛔ **A LIVE PRODUCTION DEFECT THAT PREDATES THIS PHASE: portfolio-fit has been null on PROD for every book that holds a holding.** The matcher indexed each holding's return series by plain `YYYY-MM-DD` strings, while every candidate series reaches the engine with a `DatetimeIndex`. A string never equals a timestamp, so the engine's date join found no shared day. The portfolio-fit axis (`sharpe_lift`, `dd_improvement`, `corr_reduction`, `corr_with_portfolio`, 40% of the personalized score) came back null for every such book, a strategies-plus-holdings book skipped every correlation-ceiling test, and the phase's own tests could not see it because each built its candidate with a string index too. Found in review round 2 (CR-01). Fixed in `b5d829711`, pinned end to end through the real loaders in `22b34cd8b`.
+  - Holding series are now built with `records_to_series`, the converter the candidate side uses.
+  - `SeriesIndexError` / `assert_uniform_datetime_index` run before scoring and in the book-join marker, so a mixed index fails the batch loudly (a logged `SCORING_FAILED` with a correlation id) instead of scoring a silent null.
+  - Measured on a production-shaped book (BTC 6,000 and ETH 4,000, 120 adjacent marked days, one candidate, the real `score_candidates`):
+
+    | component | before (string index) | after (DatetimeIndex) |
+    |---|---|---|
+    | sharpe_lift | None | -0.3397 |
+    | dd_improvement | None | 0.0277 |
+    | corr_reduction | None | 0.0068 |
+    | corr_with_portfolio | None | 0.9235 |
+
+  - PROD reading before deploy (2026-10-16, read-only, counts only): of the latest batch per allocator, the personalized books that hold holdings have 8 candidates, and all 8 carry null `sharpe_lift`, `dd_improvement` and `corr_with_portfolio`. The after reading is taken once the first v2.3.0 recompute runs.
+
+### Added
+- **Spot mark-price rule in Python and TypeScript** (`analytics-service/services/holding_marks.py`, `classifySpotMarks` in `holding-compare-adapter.ts`; `ecfc7c43e`, `1708fb23e`). One mark per day (latest `updated_at`, ties to the smallest lowercase `api_key_id`), a mark at or below zero is a gap, returns only between adjacent calendar days, and at least 30 priced days or the holding is withheld `too_few_priced_days`. Fixed-mark and account-balance holdings are withheld by name. Both runtimes replay one shared fixture, `holding_mark_returns_cases.json`, whose tracer case is a purchase at a constant mark that must not read as a return.
+- **Signed derivative rule in both runtimes** (`classify_derivative_marks` / `classifyDerivativeMarks`, `analyzeSignedReturns`; `a2fdda38f`, `3e55ae256`). The direction on day i-1 signs the move from i-1 to i; a flat or mixed day is a gap; returns are floored at -100%; options are withheld `option_premium` (D-10). Every derivative edge is in the shared fixture with independent invariants.
+- **One matcher AUM basis, pinned to the dashboard's** (`analytics-service/services/holding_equity.py`, `holding_equity_contribution_cases.json`, `src/lib/holding-equity-contribution.parity.test.ts`; `7d9268328`, `68b516cf4`). Spot counts its `value_usd`, a derivative counts only its signed `unrealized_pnl_usd`, never its notional (D-15..D-19). A NULL P&L is withheld `pnl_missing`, never 0 (D-18); the one divergence from `holdingEquityContribution` is pinned as such.
+- **`holding_flags` names every holding the matcher could not use** (`b7e58e473`, `14a47c587`, `ac7718044`). Withheld spot (`too_few_priced_days`, `too_few_adjacent_returns` under D-20, fixed-mark and account-balance reasons) and every derivative (by reason) get an entry with `flagged: false`. Withheld spot stays in AUM, weights and the max-weight test (D-01).
+- **Book-level entries in `holding_flags`** (`kind: "book"`, `holding_ref: null`, `flagged: false`; the dashboard reader ignores them):
+  - `book_join_too_short` with the shared-day count when the book's shared-days join is under 30 days; no holding is withheld for it (D-22, `577ce672d`).
+  - `add_weight_fallback` naming the sizing the engine actually used when the AUM could not size the ticket (`96779045e`, `d7ba54c97`): `aum_not_positive_ceiling_0_5` (D-23), `aum_not_positive_screening_default_0_10` (D-25), `aum_unknown_default_0_10` (D-24). Each has its own named WARNING.
+
+### Changed
+- **The matcher's per-holding returns come from each holding's daily mark price** (`analytics-service/routers/match.py`; `02dff2195`, `30b60228a`). One paginated history read, filtered by `allocator_id`, over a 730-day window and capped by `_HOLDINGS_HISTORY_MAX_PAGES`; overflow raises `HoldingsReadTruncated` instead of truncating. Buying, selling or moving an asset no longer reads as a gain or loss. A spot holding with fewer than 30 adjacent one-day returns is withheld from the join by name (D-20). The neighbour tests moved to the mark-history read.
+- **Matcher AUM is the allocator's AUM** on the basis above, and scoring weights are separated from the AUM share: scoring weights cover only the series the engine joins, while the AUM share (the max-weight denominator) covers the whole D-16 AUM (`14a47c587`, `5aab1256c`).
+- **`/compare` reads a derivative as a signed return** (`holding-compare-adapter.ts`, `HoldingFactsheet.tsx`; `229024bc9`, `363f18316`). The "rebuilding" state is gone; UI-SPEC states RD, ND and OP render, with a derivative gap note. `/compare` spot is unchanged by D-20.
+- **`ENGINE_VERSION` v2.2.0 → v2.3.0** (`551caf304`), so the hourly cron recomputes every allocator. The goldens change only `engine_version` (D-12); two comments in `allocator_equity_derive.py` and `feedback_engine.py` follow the version and the deleted read.
+
+### Fixed
+- **Scoring weights inflated by withheld value** (review round 1 CR-01, `5aab1256c`): withheld value no longer dilutes the joined set's weights.
+- **A non-positive matcher AUM** (derivative losses larger than spot) persists a null weight and names the skipped test `aum_not_positive` in `breach_skipped`, never a 0.0 weight (SFH-01, D-21, `a82156f8b`). A tiny positive AUM flags every holding on max weight, accepted and pinned (`8bef9e2a2`).
+- **Ticket sizing when the AUM is at or below zero** (`96779045e`, `cdc804f1d`): in personalized mode the ticket is sized at the 0.5 add-weight ceiling, never the engine's 0.10 default (D-23), so such a book never scores better on max weight or total than a book with an AUM of +$100.
+- **The sizing record told the truth only in personalized mode** (review round 3 CR-01 / SFH-R3-01, `d7ba54c97`): the `add_weight_fallback` entry is now decided after scoring from the engine's own mode and candidates, and nothing is recorded when no candidate was returned.
+
+### Removed
+- **`reconstruct_symbol_returns`**, the dollar-ratio per-symbol read that turned purchases and transfers into returns, with its golden tests and its import (`608a4f30d`, `a339e528c`). 0 code references remain.
+
+### Tests
+- One shared pytest PostgREST fake, proven against the real `paginated_select`, carries the matcher AUM and history tests (`91aa9fde9`, `a0dd464a6`).
+- New matcher suites: holding returns, book-join overlap, scoring weights, book-join marker, book-join end to end, AUM-not-positive sizing. Each key gate was neutered and seen RED; the sizing gates and entries each go RED when removed (`REVIEW-FIX-R3`).
+- Holdings-scope census counts for `match.py` updated by measurement; `queries.audit-2026-05-07` arms added.
+- On the merged tree: the full Python suite with the CI command, 10817 passed, 91 skipped, coverage 93.83%; `tsc` clean; vitest over `src/__tests__` and the touched files, 4519 passed, 279 skipped.
+
+### Notes
+- Founder decisions recorded during review: D-20 (thin spot series withheld `too_few_adjacent_returns`), D-21 (the max-weight denominator stays the D-16 AUM; an AUM at or below zero persists a null weight), D-22 (`book_join_too_short` marker, no holding withheld), D-23 (0.5 ceiling when AUM ≤ 0, amended to personalized mode only), D-24 (unknown AUM keeps 0.10, named), D-25 (screening mode with AUM ≤ 0 keeps 0.10, named).
+- Known limits:
+  - Screening-mode books (no strategy and no priced spot holding) are sized at 0.10 whatever their AUM (D-25); the batch says so.
+  - D-24 logs one WARNING per batch for every strategies-only allocator with no allocated amount.
+  - Options' returns are withheld (`option_premium`); their P&L still counts toward AUM.
+  - `pnl_missing` fires on 0 rows today: the writers still coerce a missing P&L to 0. That coercion and the scenario commit route's notional sizing are out of scope here by founder decision D-17 and owned by a separately booked phase.
+- After deploy: the PROD `holding_flags` and portfolio-fit "after" reading at v2.3.0, and a 375px check of the derivative caption on the holding factsheet.
+
+## [0.132.2.1] - 2026-10-15 — BASELINE: automated re-dump after the PROD apply of f5dc21b3
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `38817173974`, after the PROD apply of merge `f5dc21b3`: sha256 `19cedd5e…` → `8d428d8a…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 131 → 132, distinct function names 129 → 130, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261026120000_okx_archive_rebuild.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-15` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.132.2.0 → 0.132.2.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=305 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 132 — MATCH 129, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+- The `apply_okx_archive_rebuild` `snapshot-only` row in `NAME_SET_RATCHET` (`scripts/dump-sql-functions.ts`) is DELETED on this re-dump, its own clearing condition. With the row gone, `tsx scripts/dump-sql-functions.ts --check` reads `baseline 130 name(s) vs migration-replay 130 name(s) — agree, with 0 ratcheted disagreement(s) carried`, and `baseline-content-drift` reads `findings 0`. Deleting it in the same PR keeps the snapshot ratchet from turning `main` red, which happened after the previous re-dump (#1061, fixed by #1064).
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `38817173974` succeeded, and this entry was composed by the `redump-pr` job. Run `38817173974` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.132.2.0] - 2026-10-15 — OKXHISTORY: an OKX strategy's days older than the 3-month bills window can be rebuilt from OKX's quarterly bills archive (PR-A, code only)
+
+Phase 167.1.2.2.2.1, PR-A (plans 01-10 and 16). The branch has 74 non-merge commits since `origin/main` plus 17 merge commits (per-plan worktree merges and three merges of `origin/main`). 51 of the 73 touch paths outside `.planning`, and this entry maps every one of them. The other 23 are planning and records commits: CONTEXT with founder decisions D-01..D-13, research, the pattern map, 16 plans, SUMMARYs, three review rounds, verification and the security audit. Those are not shipped here. **Nothing is rebuilt on PROD by this release.** The allow-list for the archive download host ships empty on purpose, so every real download is refused until PR-B (plan 13) adds the host measured by the founder's preflight (plan 12). Calibrate (plan 14) and the PROD apply (plan 15) are founder steps that come after it.
+
+### Added
+- **Migration `20261026120000_okx_archive_rebuild.sql`.**
+  - It registers the compute_jobs kind `okx_archive_rebuild`. The kind is api_key-scoped only, and both kind CHECKs are re-based byte-identical to their prior definitions plus one new arm.
+  - It adds the atomic RPC `public.apply_okx_archive_rebuild(uuid, jsonb, jsonb, jsonb)`: SECURITY INVOKER, `service_role` only, with a pinned search_path.
+  - The RPC is a compare-and-set on the strategy's stored gaps. It refuses a row outside every gap (`row_outside_gap`), a changed gap list (`gaps_changed`) and a recomputed gap list that disagrees (`gaps_after_mismatch`).
+  - It inserts with `ON CONFLICT DO NOTHING`, so a live-derived day always wins (D-12).
+  - In the same call it records `series_provenance.reconstructed_ranges` with source `okx_bills_history_archive` (D-05).
+  - The migration carries an in-migration `$verify$` block, and a manual rollback lives in `supabase/migrations/down/`.
+- **Archive parse, classify and reconcile** (`okx_archive_files.py`, `okx_archive_classify.py`, `okx_archive_reconcile.py`).
+  - Parsing: the 28-column header is pinned. The file must fall inside its quarter. Duplicate, missing and unparseable bills stop the job.
+  - Classification: a committed subType table covers realized, funding, flow and non-external bills. Transfers are external flows (D-08). An unknown subtype with a nonzero effect fails loud, and so does a non-USD currency.
+  - Completeness: one balance chain runs across adjacent quarters, with a pairs floor.
+  - Reconciliation: archive versus live-derived on the overlap days, at `TOLERANCE_USD = Decimal("0.01")` per day and over the window total. The tolerance is a fixed module constant (D-09/D-10).
+- **Safe archive downloader** (`okx_archive_download.py`).
+  - Request: https only, an exact-host allow-list held in a code constant, no userinfo, port or fragment.
+  - Address checks: every DNS answer is vetted (private and non-global addresses are refused), and the connection dials the vetted IP with SNI.
+  - Transport: no proxy, cookies or redirects.
+  - Size: 64 MiB compressed, 512 MiB decompressed and a 100:1 ratio, checked per chunk. Inflation happens in memory only, from a zip with exactly one member or a single gzip member.
+  - Logs: only the link's scheme and host are logged.
+- **Rebuild core** (`okx_archive_rebuild.py`).
+  - Archive days go through the live P&L core, with the identity asserted on every run.
+  - A row is emitted only for a covered day inside a stored gap, before the first full live day.
+  - A day in an uningested quarter stays missing and named (SC-4).
+- **The durable job**, wired in `job_worker.py` and `main_worker.py`.
+  - Modes: preflight, calibrate and apply.
+  - Before any archive call it refuses: a disconnected, revoked, non-OKX or inactive key; a uid mismatch; a key without the read-only permission; and subtype drift (D-02).
+  - It writes a v1 result shape, with readings that are information only.
+  - Calibrate fingerprints what it evaluated, and apply writes only a fingerprint the founder approved. Every stop is raised before the first RPC, so a miss writes nothing (D-10). Apply resumes per target.
+- **Stateless wait on the OKX archive** (plan 16).
+  - Each claim re-applies and re-reads status, and waits through `defer_compute_job` for at most 3600 s. It gives up 8 h after OKX's own `ts`, and a 24 h backstop counts from the job's `created_at`.
+  - A 403 or 410 gets one fresh status read and one retry, then ends as the transient `link_expired`.
+  - A lost link never yields a partial result (SC-1).
+- **Factsheet and tear sheet line (D-06).**
+  - `parseReconstructedRanges`/`readReconstructedRanges` put `reconstructedRanges` on the payload.
+  - Each range prints "{from} – {to}: rebuilt from OKX's quarterly account statement, not the live feed." on both surfaces.
+  - A malformed record goes to Sentry, and the page says the record is unavailable.
+  - Rebuilt days count in Sharpe, CAGR and drawdown (D-07).
+- **Operator runbook `docs/runbooks/okxhistory-go-live.md`.**
+  - It has guarded SQL forms for enqueue, readback, before/after, survival and rollback.
+  - The marker is read from the cron manifest, and every write form refuses on a NULL or mismatched marker.
+  - The DRY render strips every write.
+  - Strategies are named by ordinal only.
+
+### Changed
+- The factsheet payload cache key is bumped `factsheet-v2-payload-v18` to `v19` for the new `reconstructedRanges` field.
+
+### Fixed (review rounds 1-3, before this release)
+- The archive realized leg is pnl + fee of every bill the live aggregator sums (WR-01).
+- The archive owns every day before the first FULL live day, and the archive and live flow sources never overlap (CR-01, F4).
+- A quarter file must prove it is whole before a day with no bills counts as a quiet 0.0 (F1). One gated balance chain now spans adjacent quarters, with a pairs floor and a positive proof in the result.
+- Agreement over a short or quiet overlap window no longer authenticates the archive (F3).
+- A failed or capped live crawl is a stop or a deferral, never an empty series (F2/WR-03).
+- A target with nothing to apply is a named stop, not an `already_applied` success (F6/WR-05).
+- Every wait ends at 24 h from the job's own `created_at` (F7/WR-04). One claim fits its handler timeout, and an overlong claim ends in the named transient `claim_budget_exceeded` (WR-06).
+- The flow readings are measured around the real flow seam.
+- A malformed `reconstructed_ranges` reaches Sentry and the page says so (F5/IN-01).
+- The runbook's after and rollback forms refuse when an ordinal no longer names the described strategy (F8). The runbook reads the shipped result keys and names every transient class, the give-up stop and the readings Step 3 reads.
+- The module docstrings now say what they cover: the job's names the 24 h backstop and the claim budget, and `okx_archive_files`'s names what `archive_incomplete` covers.
+
+### Tests
+- New suites:
+  - Python: `test_okx_archive_{download,parse,reconcile,rebuild,apply,job,derive_survival}.py`.
+  - SQL: the fifteen-arm gate `supabase/tests/test_okx_archive_rebuild.sql`, all 15 arms annotated and biting under the mutation runner.
+  - TS: the provenance reader, both D-06 surfaces and a SQL/TS literal pin of the source string.
+- Census moves, re-measured on the tree merged with `origin/main` and never added by hand:
+  - sql-tests `SENTINEL_FLOOR` 22 and `ARMS_FLOOR` 347.
+  - Mutation `FILES_FLOOR` 77 and `ARMS_FLOOR` 771, from one full runner run: `coverage: files 77/104`, `arms: 771/771/0`, `No defects`.
+  - Baseline `COMPARED_FLOOR` 132; `lint-sql-gates` scans 104 files; the annotation-parser pins read 771 arms and 887 needles.
+  - The restore refdata allowlist gains the `compute_job_kinds` row, and the restore script's INSERT-entry pin follows `ENTRY_COUNT` 22 -> 23. The D-05 scoped-update pin counts the gate's one scoped UPDATE.
+- Pins over existing code: the live derive's reach (its delete is bounded to its own span, so rebuilt rows survive it) and the analytics runner's inclusion of rebuilt rows. Covered-quiet zeros and an uncovered quarter are pinned too.
+- The no-link-in-logs capture is pinned to the emitting loggers. It had been order-dependent, and it was seen RED, then GREEN.
+- The q3 fixture now chains from q2's last balance.
+- A comment in `okx_archive_job.py` is reworded so that gitleaks' `generic-api-key` rule does not read the identifier `stamp_api_key_429` as a secret. A scan of this branch's range with `--log-opts` found it, and the push-to-main scan would have found it too. The identifier itself is unchanged.
+- Full python suite on the merged tree: 10669 passed, 93.73% coverage.
+
+- **The userinfo refusal fixture in `test_okx_archive_download.py` is no longer a URL literal.** The push-time credential scanner read the synthetic `user:pw` fixture as a basic-auth leak and refused the push. The row now builds the same URL from `FAKE_USERINFO`, and the file passes 108/108. (`f91580d66`)
+
+### Security
+- 33 of 33 threats in plans 01-10 and 16 are closed (24 mitigated, 9 accepted). The SSRF, bomb, link-leak, grant and wrong-database threats are mitigated as listed under Added.
+
+### Notes
+- **Known limits, recorded rather than fixed here:**
+  - The download allow-list is empty until PR-B.
+  - `baseline-content-drift` reports one expected `SNAPSHOT_MISSING apply_okx_archive_rebuild/4` until plan 11's post-apply re-dump deletes its ratchet row.
+  - The review-round-3 survivors (TODOS `[167.1.2.2.2.1-REVIEW-R3-SURVIVORS]`, WR-01..WR-04) are owned by plan 13 Task 2b and must land before the founder reads plan 14's calibrate. WR-01 is the `MIN_CHAINED_PAIRS` floor, which also counts currencies the rebuild never sums.
+  - The two pre-existing `compute.conventions.test.ts` snapshot failures (fixtures B and C) are not from this phase.
+- **Founder decision D-13 ("Decide after calibrate"):** `info.realized_balance_vs_rolled_nav.diff` and `info.flow_seam.diff` stay readings, not gates. The founder sets any limit at plan 15's checkpoint.
+- Booked in TODOS: `[167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY]`. Live `fetch_daily_pnl` sums every bill currency at face value. Calibrate's `census.by_ccy` is the measurement, and a non-USD row is a founder stop. Also booked: the Wave 5 recompute hand-off.
+## [0.132.1.9] - 2026-10-15 — Test fix: the changed-path classifier's throwaway git repositories start no background maintenance, so their cleanup cannot race it
+
+### Root cause
+- `scripts/classify-changed-paths.mjs` self-test builds throwaway git repositories and removes them after each row. Every `git commit` spawns `git maintenance run --auto`, and since git 2.47 (`maintenance.autoDetach`, on by default) that child runs in the background. On the runner's git 2.55 it could still be writing into `.git` when the row's `rmSync` ran, which failed with `ENOTEMPTY`. Seen twice: once on 2026-10-14, and on PR #1060's Contracts run `38809136016`, where the mutated-classifier calibration crashed in cleanup before printing its banner.
+
+### Fixed
+- Both scratch-repo helpers now pass `-c maintenance.auto=false` (`SCRATCH_GIT_CONFIG`), so no maintenance child starts. The cause is removed rather than retried: the `rmSync` has no retry.
+
+### Tests
+- A new self-test row checks with `GIT_TRACE2_EVENT` that a scratch commit starts no `git maintenance` child. Its calibration arm shows an unpinned commit does start one. Neutering the flag turned the row RED; restored from a byte backup (`cmp` clean). The self-test now has 25 rows and passes, and `ci-docs-path-filter.contract.test.ts` passes 67/67.
+- TODOS `CI-CLASSIFY-SCRATCHREPO-ENOTEMPTY` is closed with the measurement.
+
 ## [0.132.1.8] - 2026-10-15 — RECORDS: close PYXDIST 164.9.8.1 (soak 20/20 and wall time read from CI)
 
 Records only; no code changes. One commit on this branch.

@@ -825,6 +825,10 @@ async def _compose(keys: dict[str, Stretch]) -> dict:
         api_keys.append({
             "id": key_id, "user_id": alloc, "is_active": True, "sync_status": "connected",
             "disconnected_at": None, "exchange": "deribit",
+            # 167.1.2.1.1 SC-6: each key reads its own, stamped account. Two unstamped
+            # working keys on one stamping venue now block the curve
+            # (account_identity_pending), which is not what this file tests.
+            "venue_account_id": f"acct-{key_id}",
         })
         csv_rows += [
             {"api_key_id": key_id, "allocator_id": alloc, "date": d, "daily_return": r}

@@ -402,7 +402,7 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
     );
   });
 
-  it("null P&L on an untrusted row still renders (D-07), and says the P&L is unavailable rather than claiming a known zero (review WR-03)", () => {
+  it("167.1.1.2 U-05: null P&L on an untrusted row is named by the left-out sentence and opens NO includes part (it is not in the total)", () => {
     render(
       <OpenPositionsTable
         rows={[
@@ -413,15 +413,48 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
         ]}
       />,
     );
-    // 169 review round 2 IN-R2-05 / SFH R2-5: a part whose every row is unavailable has
-    // no known amount (the 0 is the sum of nothing), so it names its count, never
-    // "$0". The "(… unavailable for N …)" count is unchanged.
-    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
-      "Includes 1 position from keys needing attention (P&L unavailable for 1 position).",
-    );
+    // Before 167.1.1.2 the untrusted note read "Includes 1 position from keys
+    // needing attention (P&L unavailable for 1 position)." — claiming a row the
+    // total does not contain. A left-out row is named once, by the sentence.
+    expect(
+      screen.queryByTestId("open-positions-untrusted-note"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("open-positions-pnl-unavailable-note").textContent,
+    ).toBe("1 derivative without reported P&L left out.");
   });
 
-  it("review WR-03: a known untrusted P&L beside unknown ones keeps its amount and names how many rows had none — NaN counts as unavailable too, and a trusted null row does not", () => {
+  it("167.1.1.2 U-05: a left-out row on a key needing attention beside a reported 50 on the same key: the includes part holds the $50.00 only, with no unavailable sub-clause, and the row keeps its chip and strike-through", () => {
+    const { container } = render(
+      <OpenPositionsTable
+        rows={[
+          makePosition({
+            id: "pos-u-null",
+            unrealized_pnl_usd: null,
+            api_key_id: "key-u",
+            source_key_sync_status: "revoked",
+          }),
+          makePosition({
+            id: "pos-u-50",
+            unrealized_pnl_usd: 50,
+            api_key_id: "key-u",
+            source_key_sync_status: "revoked",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
+      "Includes +$50.00 from keys needing attention.",
+    );
+    expect(
+      screen.getByTestId("open-positions-pnl-unavailable-note").textContent,
+    ).toBe("1 derivative without reported P&L left out.");
+    const tbody = container.querySelector("tbody")!;
+    expect(within(tbody).getAllByText("Key revoked")).toHaveLength(2);
+    expect(tbody.querySelectorAll(".line-through").length).toBeGreaterThan(0);
+  });
+
+  it("review WR-03 (167.1.1.2 U-05): a known untrusted P&L beside unknown ones keeps its amount; the rows with no P&L (null, NaN, trusted or not) are named only by the left-out sentence", () => {
     const { container } = render(
       <OpenPositionsTable
         rows={[
@@ -444,17 +477,19 @@ describe("[167.1] AUMTRUST — OpenPositionsTable footer qualifier", () => {
         ]}
       />,
     );
-    // D-03: the total is unchanged — the unknown rows still sum as 0.
+    // D-03: the total is unchanged — the unknown rows add nothing to it.
     expect(footerTotal(container)).toBe("+$300.00");
+    // 167.1.1.2 U-05: the two untrusted rows with no P&L are in the total NOT
+    // at all, so the includes part holds the one reported row and carries no
+    // "(P&L unavailable ...)" sub-clause.
     expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
-      "Includes +$300.00 from keys needing attention (P&L unavailable for 2 positions).",
+      "Includes +$300.00 from keys needing attention.",
     );
-    // 2026-09-29, Phase 169 review round 1 SFH M-4: the TRUSTED null row is in
-    // no key-trust part, so the total itself says it is partial, counting
-    // every row with no P&L (3 of 4, whatever its key's status).
+    // All three rows with no P&L (trusted null, untrusted null, untrusted NaN)
+    // are named once, by the founder's sentence.
     expect(
       screen.getByTestId("open-positions-pnl-unavailable-note").textContent,
-    ).toBe("Partial total: P&L unavailable for 3 of 4 positions.");
+    ).toBe("3 derivatives without reported P&L left out.");
   });
 
   it("review WR-03: a known zero untrusted P&L is a real zero and carries no unavailable note", () => {
@@ -559,7 +594,7 @@ describe("[167.1 R2 WR-05] a holding whose key is missing from the key list", ()
     );
   });
 
-  it("OpenPositionsTable: both parts, each with its own unavailable count", () => {
+  it("OpenPositionsTable: a left-out row on a missing key opens no unknown-status part; the other part keeps its amount (167.1.1.2 U-05)", () => {
     render(
       <OpenPositionsTable
         rows={[
@@ -574,12 +609,14 @@ describe("[167.1 R2 WR-05] a holding whose key is missing from the key list", ()
         ]}
       />,
     );
-    // 169 review round 2 IN-R2-05 / SFH R2-5: a part whose every row is unavailable has
-    // no known amount (the 0 is the sum of nothing), so it names its count, never
-    // "$0". The "(… unavailable for N …)" count is unchanged.
+    // The missing-key row has no reported P&L, so it is in no includes part:
+    // the unknown-status part would otherwise claim a row the total lacks.
     expect(screen.getByTestId("open-positions-untrusted-note").textContent).toBe(
-      "Includes +$300.00 from keys needing attention and 1 position from keys with an unknown sync status (P&L unavailable for 1 position).",
+      "Includes +$300.00 from keys needing attention.",
     );
+    expect(
+      screen.getByTestId("open-positions-pnl-unavailable-note").textContent,
+    ).toBe("1 derivative without reported P&L left out.");
   });
 
   it("control: a present key with a null status is trusted — no marker and no footer note", () => {

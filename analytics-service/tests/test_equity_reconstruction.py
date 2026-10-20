@@ -5453,6 +5453,207 @@ async def test_spec_sfh4_refresh_perp_upnl_missing_is_aggregated(monkeypatch):
     assert meta["missing_count"] == 3, meta
 
 
+# ---- 167.1.1.2 D-07: the snapshot discloses the derivatives it left out ----
+
+async def _run_refresh_for_pnl_missing(monkeypatch, rows, job_id):
+    """Run the daily refresh over ``rows`` (symbol, holding_type, value_usd,
+    unrealized_pnl_usd, venue) for one OKX key; returns (fake client, audit
+    mock, result). Reuses the sfh4 harness shape: fake audit, fake preflight,
+    fixed clock."""
+    fake_supabase = FakeSupabaseClient()
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    today = date(2026, 4, 15)
+    today_iso = today.isoformat()
+    for sym, htype, value_usd, upnl, venue in rows:
+        fake_supabase.store[
+            ("allocator_holdings", (ALLOCATOR_ID, venue, sym, today_iso))
+        ] = {
+            "updated_at": "2026-09-20T04:00:00+00:00",
+            "allocator_id": ALLOCATOR_ID, "api_key_id": API_KEY_ID_1,
+            "venue": venue, "symbol": sym, "asof": today_iso,
+            "holding_type": htype, "value_usd": value_usd,
+            "unrealized_pnl_usd": upnl,
+        }
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    mock_exchange.close = AsyncMock()
+    _install_fake_preflight(monkeypatch, "okx", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    _seed_eligible_keys_for_holdings(fake_supabase)
+    result = await run_refresh_allocator_equity_daily_job(
+        {"id": job_id, "kind": "refresh_allocator_equity_daily",
+         "api_key_id": API_KEY_ID_1}
+    )
+    return fake_supabase, audit_mock, result
+
+
+def _upnl_missing_events(audit_mock):
+    return [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action") == "allocator.equity.perp_upnl_missing"
+    ]
+
+
+def _snapshot_rows_for_day(fake_supabase):
+    return [
+        r for r in fake_supabase.rows_for("allocator_equity_snapshots")
+        if r["asof"] == "2026-04-15"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pnl_missing_record_is_stamped_on_the_snapshot_breakdown(monkeypatch):
+    """167.1.1.2 D-07 (tracer): two derivatives with no reported P&L are left
+    out of the day's equity. The stored snapshot must say so itself, not only
+    the audit event: breakdown["__pnl_missing__"] = {count, symbols}.
+
+    Hand-computed oracle: value = spot USDT 50.0 + nothing for the two
+    left-out derivatives (their notional of 1000.0 each is NOT equity)."""
+    fake_supabase, audit_mock, result = await _run_refresh_for_pnl_missing(
+        monkeypatch,
+        [
+            ("USDT", "spot", 50.0, None, "okx"),
+            ("BTCUSDT", "derivative", 1000.0, None, "okx"),
+            ("ETHUSDT", "derivative", 1000.0, None, "okx"),
+        ],
+        "d07-record",
+    )
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    written = _snapshot_rows_for_day(fake_supabase)
+    assert len(written) == 1, written
+    assert written[0]["value_usd"] == 50.0
+    brk = written[0]["breakdown"]
+    assert brk["USDT"] == 50.0, brk
+    record = brk["__pnl_missing__"]
+    assert record["count"] == 2, record
+    assert sorted(record["symbols"]) == ["BTCUSDT", "ETHUSDT"], record
+
+    events = _upnl_missing_events(audit_mock)
+    assert len(events) == 1, events
+    assert events[0].kwargs["metadata"]["missing_count"] == 2
+
+
+def test_pnl_missing_record_survives_cap_breakdown_truncation():
+    """167.1.1.2 D-07: a 150-symbol breakdown is truncated to the top-N by
+    absolute value. The structured record is NOT a number: unprotected it
+    would reach `float(...)` in the sort and raise TypeError, which would
+    fail the refresh job for exactly the large books that need the record.
+    Protected, it is carried through untouched and every other kept key stays
+    numeric."""
+    from services.equity_reconstruction import _cap_breakdown, _BREAKDOWN_TOP_N
+
+    record = {"count": 3, "symbols": ["A", "B", "C"]}
+    breakdown: dict[str, Any] = {
+        f"LONGSYMBOLNAME{i:04d}/USDT:USDT": float(100000 + i) for i in range(150)
+    }
+    breakdown["__pnl_missing__"] = dict(record)
+
+    capped = _cap_breakdown(breakdown)
+
+    assert "__truncated__" in capped, "expected truncation to fire on >cap breakdown"
+    assert capped["__pnl_missing__"] == record, capped.get("__pnl_missing__")
+    numeric = {
+        k: v for k, v in capped.items()
+        if k not in ("__pnl_missing__", "__truncated__")
+    }
+    assert len(numeric) == _BREAKDOWN_TOP_N
+    assert all(isinstance(v, float) for v in numeric.values()), numeric
+
+
+@pytest.mark.asyncio
+async def test_pnl_missing_record_is_absent_when_pnl_is_a_reported_zero(monkeypatch):
+    """167.1.1.2 D-07: a derivative whose P&L is a reported 0.0 is not left
+    out (it is a real zero, H-1161). No record, the :PERP entry stays at 0.0,
+    and no perp_upnl_missing audit event fires, so every existing exact-
+    equality breakdown assertion keeps its shape."""
+    fake_supabase, audit_mock, result = await _run_refresh_for_pnl_missing(
+        monkeypatch,
+        [
+            ("USDT", "spot", 50.0, None, "okx"),
+            ("BTCUSDT", "derivative", 1000.0, 0.0, "okx"),
+        ],
+        "d07-zero",
+    )
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    written = _snapshot_rows_for_day(fake_supabase)
+    assert len(written) == 1, written
+    brk = written[0]["breakdown"]
+    assert "__pnl_missing__" not in brk, brk
+    assert brk.get("BTC:USDT:PERP") == 0.0, brk
+    assert written[0]["value_usd"] == 50.0
+    assert _upnl_missing_events(audit_mock) == []
+
+
+@pytest.mark.asyncio
+async def test_pnl_missing_only_null_derivatives_still_writes_no_snapshot(monkeypatch):
+    """167.1.1.2 D-07 / RESEARCH Pitfall 3: the record is added AFTER the
+    empty-book gate. A book whose only holding is a NULL-P&L derivative has an
+    empty numeric breakdown and must still write NO snapshot (a record-only
+    breakdown would otherwise make it non-empty and write a $0 day). The
+    audit event still says what was left out."""
+    fake_supabase, audit_mock, result = await _run_refresh_for_pnl_missing(
+        monkeypatch,
+        [("BTCUSDT", "derivative", 1000.0, None, "okx")],
+        "d07-only-null",
+    )
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    assert _snapshot_rows_for_day(fake_supabase) == []
+    events = _upnl_missing_events(audit_mock)
+    assert len(events) == 1, events
+    assert events[0].kwargs["metadata"]["missing_count"] == 1
+    # SFH M-1: holdings exist but report no P&L, so the refresh_complete
+    # audit must not claim the book has no holdings.
+    complete = [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action") == "allocator.equity.refresh_complete"
+    ]
+    assert len(complete) == 1, complete
+    assert complete[0].kwargs["metadata"]["reason"] == "derivative_pnl_unreported"
+
+
+@pytest.mark.asyncio
+async def test_pnl_missing_record_ignores_deribit_rows(monkeypatch):
+    """167.1.1.2 D-07: Deribit equity is deferred (Phase 71) and its rows are
+    skipped BEFORE the NULL-P&L counting, so a Deribit derivative with no P&L
+    is not a "left out" derivative and must not reach the record."""
+    fake_supabase, audit_mock, result = await _run_refresh_for_pnl_missing(
+        monkeypatch,
+        [
+            ("USDT", "spot", 50.0, None, "okx"),
+            ("BTC-PERPETUAL", "derivative", 1000.0, None, "deribit"),
+        ],
+        "d07-deribit",
+    )
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    written = _snapshot_rows_for_day(fake_supabase)
+    assert len(written) == 1, written
+    assert "__pnl_missing__" not in written[0]["breakdown"], written[0]["breakdown"]
+    assert _upnl_missing_events(audit_mock) == []
+
+
 # ---- L-0065 - _cap_breakdown cardinality short-circuit -------------------
 
 def test_l0065_cap_breakdown_skips_serialise_for_small_breakdown(monkeypatch):

@@ -1,8 +1,13 @@
+import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { MatchQueueIndex } from "@/components/admin/MatchQueueIndex";
+
+export const metadata: Metadata = {
+  title: "Match queue",
+};
 
 // /admin/match — triage-first allocator list for the founder match queue.
 // Admin-only. Regular allocators bounce back to discovery.

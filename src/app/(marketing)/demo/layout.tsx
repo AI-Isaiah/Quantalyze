@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 export const metadata: Metadata = {
-  title: "Quantalyze — Live demo",
+  title: "Live demo",
   description:
     "Live product demo with simulated allocator data. Institutional strategy marketplace.",
 };

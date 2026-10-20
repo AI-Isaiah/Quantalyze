@@ -2,12 +2,14 @@ import { describe, it, expect } from "vitest";
 import type { ComputeState } from "./compute-state";
 import {
   KCS10_PUBLIC_SENTENCE,
+  KEY_STATUS_UNREADABLE_NOTE,
   ownerRemedy,
   ownerStateLine,
   probeUnreadableShareNote,
   recipientShareNote,
   recipientShareNoteFor,
   SHARE_CARD_COPY,
+  STRATEGIES_LIST_UNREADABLE,
   unbuildableNoteKindOf,
   untrustedKeyCaption,
   type OwnerRemedy,
@@ -45,9 +47,9 @@ describe("S6 — KCS-09 owner state lines", () => {
     ["KCS09-FAIL-ORPHANED", { state: "failed", errorKind: "orphaned" }, "The last computation stopped before it finished because the process running it went away.", "amber"],
     ["KCS09-FAIL-UNKNOWN", { state: "failed", errorKind: "unknown" }, "The last computation stopped, and the service could not tell why.", "amber"],
     ["KCS09-FAIL-OTHER", { state: "failed", errorKind: null }, "The last computation did not finish.", "amber"],
-    ["KCS09-FINISHED", { state: "finished" }, "The last computation finished, but the factsheet could not be built from its results.", "amber"],
+    ["KCS09-FINISHED", { state: "finished" }, "The last computation finished, but we could not build the factsheet from its results.", "amber"],
     ["KCS09-NEVER", { state: "never_started" }, "No computation is running for this strategy, and none is on record.", "muted"],
-    ["KCS09-UNREADABLE", { state: "unreadable" }, "The computation status for this strategy could not be read.", "muted"],
+    ["KCS09-UNREADABLE", { state: "unreadable" }, "We could not read this strategy's computation status.", "muted"],
   ];
   for (const [id, state, text, tone] of cases) {
     it(`${id}: text and tone`, () => {
@@ -329,14 +331,14 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     }
   });
 
-  // 164.6.6.3.3 D-08 (UI-SPEC section 4.2): the analytics row failed. Typed out,
-  // never imported. The second sentence is D-08's public sentence verbatim.
+  // 164.6.6.3.3 D-08 (UI-SPEC section 4.2), 170.1 D-08: the analytics row
+  // failed. Typed out, never imported. The tail tells the owner to act.
   const ANALYTICS_FAILED =
-    "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy yet.";
+    "Right now, a private link to this strategy opens a page without its factsheet. Analytics are not available for this strategy. Use the contact form to have it resolved.";
   const ANALYTICS_FAILED_UNREADABLE =
-    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. Analytics are not available for this strategy yet.";
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. Analytics are not available for this strategy. Use the contact form to have it resolved.";
   const PUBLIC_ANALYTICS_FAILED =
-    "Right now, this strategy's factsheet link opens a page without the numbers. Analytics are not available for this strategy yet.";
+    "Right now, this strategy's factsheet link opens a page without the numbers. Analytics are not available for this strategy. Use the contact form to have it resolved.";
 
   it("KCS12-UNBUILDABLE-ANALYTICS-FAILED: private link, arm not_available", () => {
     expect(recipientShareNoteFor("mint-token", "not_available", "analytics_failed")).toBe(
@@ -358,6 +360,41 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     }
   });
 
+  // 170.1 D-08 / R-1: the jobs finished but no factsheet was built. Typed out
+  // from 170.1-UI-SPEC.md "Finished job, factsheet not built", never imported.
+  const FINISHED_NOT_BUILT =
+    "Right now, a private link to this strategy shows that its factsheet is not available. The last computation finished, but we could not build the factsheet from its results. Use the contact form to have it checked.";
+  const FINISHED_NOT_BUILT_UNREADABLE =
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. The last computation finished, but we could not build the factsheet from its results. Use the contact form to have it checked.";
+  const PUBLIC_FINISHED_NOT_BUILT =
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. The last computation finished, but we could not build the factsheet from its results. Use the contact form to have it checked.";
+
+  it("KCS12-FINISHED-NOT-BUILT: private link, arm not_available, ends with the body's contact-check instruction", () => {
+    expect(recipientShareNoteFor("mint-token", "not_available", "finished_not_built")).toBe(
+      FINISHED_NOT_BUILT,
+    );
+  });
+
+  it("KCS12-FINISHED-NOT-BUILT: private link, arm unreadable (type-forced row)", () => {
+    expect(recipientShareNoteFor("mint-token", "unreadable", "finished_not_built")).toBe(
+      FINISHED_NOT_BUILT_UNREADABLE,
+    );
+  });
+
+  it("KCS12-PUBLIC-FINISHED-NOT-BUILT: public URL, any arm", () => {
+    for (const arm of ARMS) {
+      expect(recipientShareNoteFor("public-url", arm, "finished_not_built")).toBe(
+        PUBLIC_FINISHED_NOT_BUILT,
+      );
+    }
+  });
+
+  it("a running recompute keeps KCS12-MINT-A for a finished-not-built row (in_progress is not this state)", () => {
+    expect(recipientShareNoteFor("mint-token", "in_progress", "finished_not_built")).toBe(
+      "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.",
+    );
+  });
+
   it("a running recompute keeps KCS12-MINT-A for an analytics-failed row", () => {
     expect(recipientShareNoteFor("mint-token", "in_progress", "analytics_failed")).toBe(
       "Right now, a private link to this strategy shows that its factsheet is being prepared. The numbers appear there once a computation succeeds.",
@@ -368,10 +405,10 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     for (const mode of ["mint-token", "public-url"] as const) {
       for (const arm of ["not_available", "unreadable"] as const) {
         const note = recipientShareNoteFor(mode, arm, "analytics_failed").toLowerCase();
-        for (const word of ["computation", "computing", "failed", "pending", "job", "error", "stored results"]) {
+        for (const word of ["computation", "computing", "failed", "pending", "job", "error", "stored results", "yet"]) {
           expect(note).not.toContain(word);
         }
-        expect(note.endsWith("analytics are not available for this strategy yet.")).toBe(true);
+        expect(note.endsWith("use the contact form to have it resolved.")).toBe(true);
       }
     }
   });
@@ -419,7 +456,7 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     // The row's computation DID succeed; waiting for one changes nothing.
     for (const mode of ["mint-token", "public-url"] as const) {
       for (const arm of ARMS) {
-        for (const kind of ["too_short", "cannot_build", "analytics_failed"] as const) {
+        for (const kind of ["too_short", "cannot_build", "analytics_failed", "finished_not_built"] as const) {
           if (mode === "mint-token" && arm === "in_progress") continue; // MINT-A, D-02
           expect(recipientShareNoteFor(mode, arm, kind)).not.toContain(
             "once a computation succeeds",
@@ -451,6 +488,18 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
     // The detail never changes a reason it does not belong to.
     expect(unbuildableNoteKindOf("too_few_points", { analyticsFailed: true })).toBe("too_short");
     expect(unbuildableNoteKindOf("read_error", { analyticsFailed: true })).toBeNull();
+  });
+
+  it("unbuildableNoteKindOf: not_computed is finished_not_built only with jobsFinished, and analyticsFailed wins (170.1 D-08, T-170.1-18)", () => {
+    expect(unbuildableNoteKindOf("not_computed", { jobsFinished: true })).toBe("finished_not_built");
+    expect(unbuildableNoteKindOf("not_computed", { analyticsFailed: true, jobsFinished: true })).toBe(
+      "analytics_failed",
+    );
+    expect(unbuildableNoteKindOf("not_computed", { jobsFinished: false })).toBeNull();
+    expect(unbuildableNoteKindOf("not_computed", {})).toBeNull();
+    // jobsFinished never changes a reason it does not belong to.
+    expect(unbuildableNoteKindOf("too_few_points", { jobsFinished: true })).toBe("too_short");
+    expect(unbuildableNoteKindOf("read_error", { jobsFinished: true })).toBeNull();
   });
 
   it("L-1 EXHAUSTIVE: a reason the switch does not list fails loud instead of reading as 'no kind'", () => {
@@ -550,7 +599,7 @@ describe("S9 — KCS-11 share page arms", () => {
   it("KCS11-A: in progress", () => {
     expect(SHARE_CARD_COPY.in_progress).toEqual({
       heading: "This factsheet isn't ready yet",
-      body: "The link works — the strategy's performance data is being prepared. Try again later.",
+      body: "The link works — the strategy's performance data is being prepared. This page shows the factsheet once it is ready.",
     });
   });
 
@@ -683,5 +732,99 @@ describe("Phase 164.6.6.3.5 DOMAINONE — no status surface names an address", (
         }
       }
     }
+  });
+});
+
+describe("170.1 D-09 — grep invariant: no rendered status-surface string carries a passive or timing phrase", () => {
+  // UI-SPEC "Grep invariant after the phase": none of status-surface-copy.ts's
+  // RENDERED strings contains these. The module's tables are private on
+  // purpose, so the walk reaches them through the public functions, over every
+  // input that selects a different row, and then through the exported
+  // constants. A phrase re-introduced into a private table turns this RED.
+  //
+  // `untrustedKeyCaption` is excluded: it echoes exchange display names, it is
+  // not authored copy.
+  const FORBIDDEN = ["could not be", "Try again in a moment", "Try again later", "Large accounts"] as const;
+  // Measured at write time (see the 170.1-05 SUMMARY); equals the design count
+  // of 17 state lines + 8 remedies + 4 arm notes + 12 unbuildable notes + 2
+  // probe notes + 7 exported constant strings. Never lower it to fit.
+  const DISTINCT_FLOOR = 50;
+
+  const MODES = ["mint-token", "public-url"] as const;
+  const ARMS = ["in_progress", "not_available", "unreadable"] as const;
+  const KINDS = ["too_short", "cannot_build", "analytics_failed", "finished_not_built"] as const;
+  const SHAPES = ["single", "unlinked", "composite", "csv", "unknown"] as const;
+  const VARIANTS: ComputeState[] = [
+    { state: "queued" },
+    { state: "retrying" },
+    { state: "running", phase: "fetch" },
+    { state: "running", phase: "fetch", memberOf: { n: 1, m: 1 } },
+    { state: "running", phase: "compute" },
+    { state: "running", phase: "unknown" },
+    { state: "stalled" },
+    { state: "failed", errorKind: "permanent" },
+    { state: "failed", errorKind: "transient" },
+    { state: "failed", errorKind: "orphaned" },
+    { state: "failed", errorKind: "unknown" },
+    { state: "failed", errorKind: null },
+    { state: "finished" },
+    { state: "never_started" },
+    { state: "unreadable" },
+  ];
+  // `finished` is the only state whose line and remedy depend on build facts.
+  const BUILDS = [undefined, { buildUnreadable: true }, { buildUnreadable: false, analyticsFailed: true }] as const;
+
+  function leaves(value: unknown): string[] {
+    if (typeof value === "string") return [value];
+    if (value && typeof value === "object") return Object.values(value).flatMap(leaves);
+    return [];
+  }
+
+  function everyRenderedString(): Set<string> {
+    const out = new Set<string>();
+    for (const state of VARIANTS) {
+      for (const build of BUILDS) {
+        out.add(ownerStateLine(state, build).text);
+        for (const shape of SHAPES) out.add(rendered(ownerRemedy(state, shape, SID, build)));
+      }
+    }
+    for (const mode of MODES) {
+      for (const arm of ARMS) {
+        out.add(recipientShareNote(mode, arm));
+        out.add(recipientShareNoteFor(mode, arm, null));
+        for (const kind of KINDS) out.add(recipientShareNoteFor(mode, arm, kind));
+      }
+      out.add(probeUnreadableShareNote(mode));
+    }
+    for (const text of [
+      ...leaves(SHARE_CARD_COPY),
+      KCS10_PUBLIC_SENTENCE,
+      STRATEGIES_LIST_UNREADABLE,
+      KEY_STATUS_UNREADABLE_NOTE,
+    ]) {
+      out.add(text);
+    }
+    return out;
+  }
+
+  it("no rendered string contains a forbidden phrase", () => {
+    for (const text of everyRenderedString()) {
+      for (const phrase of FORBIDDEN) {
+        expect(text, `"${phrase}" in: ${text}`).not.toContain(phrase);
+      }
+    }
+  });
+
+  it("the walk reached the private tables: the distinct-string count meets the design floor", () => {
+    // Anti-vacuity: an enumeration that stops reaching a table passes the test
+    // above trivially. The floor makes that a failure instead.
+    expect(everyRenderedString().size).toBeGreaterThanOrEqual(DISTINCT_FLOOR);
+  });
+
+  it("the D-09 locked strings render where the constants are read", () => {
+    expect(STRATEGIES_LIST_UNREADABLE).toBe("We could not load your strategies. Reload this page to try again.");
+    expect(KEY_STATUS_UNREADABLE_NOTE).toBe(
+      "We could not check key status right now. Open a strategy to see its keys.",
+    );
   });
 });

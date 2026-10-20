@@ -11,6 +11,19 @@ import {
 } from "@/lib/queries";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
+import type { Metadata } from "next";
+
+// Tab title = the category name the H1 shows. It comes from a static map, so
+// there is no read; an unknown slug shows the slug, exactly as the H1 does.
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ slug: string }>;
+}): Promise<Metadata> {
+  const { slug } = await params;
+  const cat = DISCOVERY_CATEGORIES.find((c) => c.slug === slug);
+  return { title: cat?.name ?? slug };
+}
 
 export default async function DiscoveryPage({
   params,
