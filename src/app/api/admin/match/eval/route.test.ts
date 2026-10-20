@@ -982,6 +982,27 @@ describe("[170.1.2 / D-01] GET /api/admin/match/eval — allocator and strategy 
     expect(raw).not.toContain("permission denied");
   });
 
+  it("a failing name read is captured as its own step, as an Error, never as an upstream error", async () => {
+    sentryState.captured.length = 0;
+    evalState.result = { missed: [missedRow(ALLOCATOR, STRATEGY)] };
+    adminDb.errors = { strategies: { message: "permission denied for table strategies" } };
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(500);
+
+    await vi.waitFor(() => expect(sentryState.captured.length).toBeGreaterThan(0));
+    const { err, options } = sentryState.captured[sentryState.captured.length - 1];
+    expect(options.tags?.surface).toBe("admin-match-eval");
+    expect(options.tags?.step).toBe("name-read");
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("permission denied for table strategies");
+    // The operator log names the name read, not the analytics service.
+    const logged = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain("name read error");
+    expect(logged).not.toContain("upstream error");
+  });
+
   it("a payload with no missed rows makes no name read at all", async () => {
     evalState.result = { intros_shipped: 0, missed: [] };
     const { GET } = await import("./route");

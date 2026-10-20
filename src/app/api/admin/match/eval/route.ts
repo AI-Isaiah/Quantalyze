@@ -180,6 +180,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const lookback = url.searchParams.get("lookback_days") || "28";
   const partnerTag = url.searchParams.get("partner_tag") ?? undefined;
 
+  // Which step threw, so a name-read outage is not reported as an upstream one.
+  let failedStep: "upstream-error" | "name-read" = "upstream-error";
   try {
     const data = await evalMatch(
       {
@@ -198,6 +200,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const missed = (data as { missed?: unknown } | null)?.missed;
     if (Array.isArray(missed) && missed.length > 0) {
       const rows = missed as Array<{ allocator_id: string; strategy_id: string }>;
+      failedStep = "name-read";
       const admin = createAdminClient();
       const [profiles, strategies] = await Promise.all([
         admin
@@ -209,8 +212,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           .select("id, name")
           .in("id", [...new Set(rows.map((r) => r.strategy_id))]),
       ]);
-      if (profiles.error) throw profiles.error;
-      if (strategies.error) throw strategies.error;
+      // A PostgrestError is not guaranteed to be an Error (no stack), so wrap it.
+      if (profiles.error) {
+        throw new Error(`profiles name read failed: ${profiles.error.message}`);
+      }
+      if (strategies.error) {
+        throw new Error(`strategies name read failed: ${strategies.error.message}`);
+      }
       const allocatorNames = new Map<string, string | null>(
         (profiles.data ?? []).map((p) => [p.id, p.display_name]),
       );
@@ -343,11 +351,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     // list and the env-name list in `seam-redaction.ts` is the whole defence.
     // (`verify-strategy` is the contrast — it names three.)
     captureToSentry(err, {
-      tags: { surface: "admin-match-eval", step: "upstream-error" },
+      tags: { surface: "admin-match-eval", step: failedStep },
       extra: { lookback_days: lookback },
     });
+    const failedLabel = failedStep === "name-read" ? "name read" : "upstream";
     console.error(
-      "[api/admin/match/eval] upstream error:",
+      `[api/admin/match/eval] ${failedLabel} error:`,
       scrubSeamError(err),
     );
     // 161-08 / WIZERR-06 — THE CODE CROSSES; THE MESSAGE STILL DOES NOT.
