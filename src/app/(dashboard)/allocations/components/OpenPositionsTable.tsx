@@ -35,8 +35,13 @@ import {
 import {
   buildKeyTrustClause,
   capitalizeFirst,
+  pnlMissingSentence,
   type LiveHoldingsPart,
 } from "../lib/live-holdings-summary";
+// Phase 167.1.1.2 D-06 — "was this row's P&L reported" is answered by the ONE
+// shared predicate the composer's total counts with, so the two surfaces count
+// the same rows.
+import { holdingEquityIsReported } from "@/lib/holding-equity";
 // Phase 169 D-50 — money renders through the ONE money module. The private
 // whole-dollar formatter this file carried showed a $0.42 price as "$0", and
 // its P&L formatter picked the sign before rounding, so -0.0001 read "−$0" in
@@ -131,35 +136,42 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
   // two loops with two filters can drift, and then the footer states a part
   // the whole does not contain (D-04). The pass DISCLOSES, it never subtracts:
   // an untrusted row's P&L stays in `totalUnrealized` (D-03, "keep the total
-  // and flag it"). Same finite-else-0 rule for both sums, and the untrusted
-  // test is the shared predicate the row chip answers, never a local equality.
-  //
-  // Review WR-03: a null or non-finite P&L still sums as 0 (the total is
-  // unchanged), but an untrusted row whose P&L was defaulted is COUNTED, so the
-  // qualifier says the P&L is unavailable instead of presenting that 0 as a
-  // known figure.
+  // and flag it"). The untrusted test is the shared predicate the row chip
+  // answers, never a local equality. (Review WR-03's unavailable count for an
+  // untrusted row with no P&L is superseded by 167.1.1.2 U-05, below.)
   //
   // Review round 2 WR-05: a row whose key is missing from the key list is
   // counted as a SEPARATE unknown-status part, never folded into the untrusted
   // one, and named in the composer's wording.
   //
-  // Phase 169 review round 1 SFH M-4 (2026-09-29): the 0 a missing P&L sums
-  // as must not present the TOTAL as an exact figure either. The key-trust
-  // parts above only count untrusted and unknown-status rows, so a trusted
-  // row's missing P&L was disclosed nowhere, and an all-missing table read
-  // "$0.00" in the neutral colour. `reported` counts every row whose P&L is
-  // known, whatever its key's status: none reported makes the total the
-  // em-dash, some missing keeps the sum of the reported rows and a note calls
-  // it partial. The sum itself is unchanged (D-03).
+  // Phase 169 review round 1 SFH M-4 (2026-09-29): a total over rows with no
+  // reported P&L must not present as an exact figure. `reported` counts every
+  // row whose P&L is known, whatever its key's status: none reported makes the
+  // total the em-dash, and some missing keeps the sum of the reported rows.
+  //
+  // Phase 167.1.1.2 D-06 (UI-SPEC P2, U-05): a row WITHOUT a reported P&L is
+  // LEFT OUT of the total, and out of the key-trust parts too. An includes
+  // part must be a strict subset of the total it qualifies (167.1 D-04), so a
+  // left-out row opens no part and adds no "(P&L unavailable ...)" count; it is
+  // named once, by the founder's sentence (`pnlMissingSentence`) in the note
+  // below. `buildKeyTrustClause`'s unavailable branch stays because the
+  // composer's spot path still reaches it. Every Open Positions row is a
+  // derivative (the Holdings tab builds this list from its derivative rows), so
+  // the predicate is asked as one.
   let totalUnrealized = 0;
   let reported = 0;
   const untrusted: LiveHoldingsPart = { amount: 0, count: 0, unavailable: 0 };
   const unknownStatus: LiveHoldingsPart = { amount: 0, count: 0, unavailable: 0 };
   for (const r of rows) {
-    const known = Number.isFinite(r.unrealized_pnl_usd ?? NaN);
-    const pnl = known ? (r.unrealized_pnl_usd as number) : 0;
+    const known = holdingEquityIsReported({
+      holding_type: "derivative",
+      value_usd: r.notional_usd,
+      unrealized_pnl_usd: r.unrealized_pnl_usd,
+    });
+    if (!known) continue;
+    const pnl = r.unrealized_pnl_usd as number;
     totalUnrealized += pnl;
-    if (known) reported += 1;
+    reported += 1;
     const part = keyNeedsAttention({
       sync_status: r.source_key_sync_status,
       disconnected_at: r.source_key_disconnected_at,
@@ -171,7 +183,6 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
     if (part !== null) {
       part.amount += pnl;
       part.count += 1;
-      if (!known) part.unavailable += 1;
     }
   }
   const pnlUnavailable = rows.length - reported;
@@ -307,9 +318,11 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                 {formatUsdSigned(footerTotal)}
               </td>
             </tr>
-            {/* Phase 169 review round 1 SFH M-4: says the total is partial, or
-                why it is the em-dash, whenever a row reports no P&L. Same
-                muted caption as the key-trust note below (D-09). */}
+            {/* Phase 169 review round 1 SFH M-4 / Phase 167.1.1.2 D-06: says
+                how many rows the total left out, which is also why it is the
+                em-dash when none reported. The words come from the ONE
+                builder the composer uses. Same muted caption as the
+                key-trust note below (D-09). */}
             {pnlUnavailable > 0 ? (
               <tr className="bg-page/40">
                 <td
@@ -317,9 +330,7 @@ export function OpenPositionsTable({ rows }: OpenPositionsTableProps) {
                   data-testid="open-positions-pnl-unavailable-note"
                   className="px-4 pb-2 text-xs text-text-muted"
                 >
-                  {reported > 0 ? "Partial total: " : ""}P&amp;L unavailable
-                  for {pnlUnavailable} of {rows.length}{" "}
-                  {rows.length === 1 ? "position" : "positions"}.
+                  {pnlMissingSentence(pnlUnavailable)}
                 </td>
               </tr>
             ) : null}

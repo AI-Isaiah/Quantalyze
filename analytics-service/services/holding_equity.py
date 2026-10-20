@@ -2,12 +2,13 @@
 
 Phase 167.1.1.1 D-15 / D-16: the matcher sizes on the same AUM the allocator sees,
 so this is NOT a third definition. The canonical rule is ``holdingEquityContribution``
-in ``src/lib/queries.ts`` (its client-side lockstep copy is
-``holdingEquityContributionLocal`` in
+in ``src/lib/holding-equity.ts`` (re-exported by ``src/lib/queries.ts`` and aliased on
+the client as ``holdingEquityContributionLocal`` in
 ``src/app/(dashboard)/allocations/lib/live-holdings-summary.ts``). Python cannot
 import TypeScript, so the pin is the shared fixture
-``tests/fixtures/holding_equity_contribution_cases.json``, which vitest replays
-against both TS functions and pytest replays against this one.
+``tests/fixtures/holding_equity_contribution_cases.json``, which carries ONE
+``expected`` value per case; vitest replays it against the TypeScript functions and
+pytest replays it against this one.
 
 The rule:
 
@@ -19,12 +20,12 @@ The rule:
 * a value that is not a finite number contributes 0.0 (a bool, a string, NaN and
   +/-Infinity count as not finite, exactly as ``Number.isFinite`` reads them).
 
-D-18, the ONLY divergence from ``holdingEquityContribution``: a derivative whose
-``unrealized_pnl_usd`` IS None returns None here, where the TypeScript function
-counts 0. The caller withholds that holding from the AUM by name (``pnl_missing``);
-a missing P&L is never invented as 0 and never replaced by notional. The fixture
-pins the divergence explicitly (``expected_ts`` 0, ``expected_py`` null) and a test
-asserts it is the only one.
+A derivative whose ``unrealized_pnl_usd`` IS None returns None here, and the
+TypeScript function returns null for the same input (Phase 167.1.1.2 D-06; there is
+no divergence between the runtimes any more). The caller withholds that holding from
+the AUM by name (``pnl_missing``); a missing P&L is never invented as 0 and never
+replaced by notional. The fixture pins it (``derivative_null_pnl_is_withheld``
+expects null) and a test asserts every case carries a single ``expected``.
 
 This module reads a row and returns a number. It imports nothing from the writers
 (``allocator_positions``, ``positions``) and changes none of them (D-17).

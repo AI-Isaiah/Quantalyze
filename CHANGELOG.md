@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.132.7.0] - 2026-10-20 — AUMBASIS 167.1.1.2: a derivative counts toward a book's size at its unrealized P&L, and a missing P&L is stored and shown as missing
+
+Phase 167.1.1.2. No migration.
+
+### Fixed
+- **Scenario commit sizing uses the equity basis (D-01 to D-03).** The commit route summed `value_usd`, which is a derivative's full notional. It now sizes on each holding's equity contribution, so a derivative counts at its unrealized P&L. Every audit row records the outcome by name:
+  - When the equity AUM is zero or below, the size is null with `server_aum_not_positive`.
+  - A derivative with no reported P&L is left out by name, with `server_holding_pnl_missing`, `aum_left_out_count` and `aum_left_out_refs` (capped at 50).
+  - A book holding only such derivatives is audited as `derivative_pnl_unreported`, not `no_holdings_today`.
+  - A `voluntary_remove` of a derivative is sized at its signed unrealized P&L.
+- **"No P&L reported" is stored as NULL, not 0 (D-04, D-05).** The five writer sites now go through one `reported_pnl()`: the Bybit V5, Deribit (two paths) and CCXT normalisers in `services/positions.py`, and the remap in `services/allocator_positions.py`. A reported 0 stays 0.0, and a non-numeric value still raises. This also reaches the strategy-side `position_snapshots`, whose column is nullable.
+- **One shared definition of a holding's equity contribution (D-06).** It lives in `src/lib/holding-equity.ts`, and TS and Python agree on one fixture. A derivative with a NULL P&L returns null instead of 0, and every caller skips it and counts it.
+  - The composer's AUM row says "N derivatives without reported P&L left out."
+  - That sentence also replaces the Open Positions footer's "Partial total" wording.
+- **The daily equity snapshot records what it left out (D-07).** `refresh_allocator_equity_daily` already skipped a NULL-P&L derivative. It now also writes the left-out symbols and count to the snapshot's existing `breakdown` field, protected from truncation.
+- **Corrected a false comment:** the route claimed a daily-delta cron reads `size_at_decision_usd`. Nothing reads it after the commit (premise P-01).
+
+### Tests
+- TS/Python parity on the shared equity-contribution fixture.
+- Writer tests: absent, null or blank P&L stores None; a reported 0 stores 0.0.
+- Commit-route oracles moved to the equity basis, e.g. 9500 → 6620.
+- Tests for each named outcome and for the unrealized-P&L column in the route's select.
+- Every rule was RED first and went RED again when neutered.
+
+### Notes
+- **PROD before (read-only, 2026-10-20):** 288 current derivative rows, with 0 NULL P&L and 0 exactly zero. 17,036 historic rows, with 0 NULL and 15 exactly zero. 7 books hold derivatives, all with a positive equity AUM. Their equity AUM is 60–64% of their notional AUM on most books and 21% on the Deribit-only book.
+- **Past data is not rewritten (D-08, D-09).** No past commit row carries a size (premise P-02). The 15 exact-zero historic rows cannot be told apart from real zeros.
+- **Post-deploy items:** the SC-4 AFTER reading on PROD, and the composer AUM hint at 375px and 200% zoom.
+- Code review and the silent-failure hunt are clean on round 2. Security SECURED 21/21.
+
 ## [0.132.6.3] - 2026-10-20 — RECORDS: close COPY 170.1 (SC-5 passed, verification passed, SECURED)
 
 Records, plus one test bound: `.planning`, `TODOS.md`, a timing test and this release.

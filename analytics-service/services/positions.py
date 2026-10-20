@@ -27,6 +27,22 @@ from services.db import db_execute
 logger = logging.getLogger("quantalyze.analytics.positions")
 
 
+def reported_pnl(raw: Any) -> float | None:
+    """Return a venue's unrealized P&L as a float, or None when it reported none.
+
+    167.1.1.2 D-05: a venue that says nothing about P&L (key absent, null, or a
+    blank string) must NOT be stored as 0.0 -- that fabricates a real zero and
+    readers could never tell the two apart. None means "the venue reported no
+    P&L"; readers withhold it by name. A REPORTED zero (0, 0.0, "0") stays 0.0,
+    and a non-empty non-numeric string still raises ValueError (fail loud).
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str) and not raw.strip():
+        return None
+    return float(raw)
+
+
 # ---------------------------------------------------------------------------
 # Bybit V5 raw response parser
 # ---------------------------------------------------------------------------
@@ -79,7 +95,7 @@ def _parse_bybit_v5_positions(raw_response: dict[str, Any]) -> list[dict[str, An
             "size_usd": float(item.get("positionValue", 0)),
             "entry_price": float(item.get("avgPrice", 0)),
             "mark_price": float(item.get("markPrice", 0)),
-            "unrealized_pnl": float(item.get("unrealisedPnl", 0)),
+            "unrealized_pnl": reported_pnl(item.get("unrealisedPnl")),
             "exchange": "bybit",
         })
 
@@ -172,11 +188,12 @@ def _normalize_deribit_position(pos: dict[str, Any]) -> dict[str, Any] | None:
                 "deribit inverse position: no usable index_price for coin→USD "
                 f"conversion (index={index_price}, mark={mark_price})"
             )
-        unrealized_pnl = float(info.get("floating_profit_loss") or 0) * rate
+        coin_pnl = reported_pnl(info.get("floating_profit_loss"))
+        unrealized_pnl = coin_pnl * rate if coin_pnl is not None else None
     else:
         # Linear (USDC-settled): PnL already ≈ USD.
         rate = 0.0
-        unrealized_pnl = float(info.get("floating_profit_loss") or 0)
+        unrealized_pnl = reported_pnl(info.get("floating_profit_loss"))
 
     if option_style:
         # Options: `size` is the base-ccy contract count; mark/average are the
@@ -250,11 +267,15 @@ def _normalize_ccxt_position(pos: dict[str, Any], exchange_name: str) -> dict[st
         "size_usd": float(pos.get("notional") or 0),
         "entry_price": float(pos.get("entryPrice") or 0),
         "mark_price": float(pos.get("markPrice") or 0),
-        "unrealized_pnl": float(pos.get("unrealizedPnl") or 0),
+        "unrealized_pnl": reported_pnl(pos.get("unrealizedPnl")),
         "exchange": exchange_name,
     }
 
 
+# ccxt's Bybit parser nulls an exact-zero P&L (omit_zero), so a CCXT None is
+# ambiguous between "absent" and "zero". That is why ANY None here routes to
+# the raw V5 string, the only Bybit source that can say "reported 0" versus
+# "not reported" (167.1.1.2 RESEARCH finding 1). Do not relax this check.
 def _bybit_ccxt_has_critical_fields(positions: list[dict[str, Any]]) -> bool:
     """Check if Bybit CCXT positions have all critical fields populated.
 

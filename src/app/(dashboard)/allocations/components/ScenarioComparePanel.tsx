@@ -15,6 +15,7 @@ import {
   type ScenarioDraft,
 } from "../lib/scenario-state";
 import { sanitizeLeverageMap } from "@/lib/leverage";
+import { holdingEquityContribution } from "@/lib/holding-equity";
 import {
   ScenarioCompareTable,
   type ScenarioColumn,
@@ -204,24 +205,16 @@ function deriveCompareInputs(
     };
   }
 
-  // P61-BUG-2 — per-key equity shares, grouped by api_key_id. Mirrors the
-  // composer's `equityByApiKeyId` memo (and the SSR holdingEquityContribution,
-  // queries.ts): derivative → unrealized_pnl_usd (value_usd is leveraged
-  // NOTIONAL), spot → value_usd; non-finite → 0. Local copy per the
-  // established duplication precedent (queries.ts is server-only).
+  // P61-BUG-2 — per-key equity shares, grouped by api_key_id. The panel reads
+  // the ONE shared definition (167.1.1.2 D-04): derivative → unrealized_pnl_usd
+  // (value_usd is leveraged NOTIONAL), spot → value_usd. An unreported
+  // derivative P&L is withheld (null) there and its weight stays 0 (`?? 0`),
+  // so no figure on the panel moves (UI-SPEC U-01).
   const equityByApiKeyId: Record<string, number> = {};
   for (const h of payload.holdingsSummary) {
     if (!h.api_key_id) continue;
-    const contribution =
-      h.holding_type === "derivative"
-        ? Number.isFinite(h.unrealized_pnl_usd ?? 0)
-          ? (h.unrealized_pnl_usd ?? 0)
-          : 0
-        : Number.isFinite(h.value_usd)
-          ? h.value_usd
-          : 0;
     equityByApiKeyId[h.api_key_id] =
-      (equityByApiKeyId[h.api_key_id] ?? 0) + contribution;
+      (equityByApiKeyId[h.api_key_id] ?? 0) + (holdingEquityContribution(h) ?? 0);
   }
 
   return {

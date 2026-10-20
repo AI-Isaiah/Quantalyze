@@ -76,6 +76,7 @@ import type {
 } from "./types";
 import { SUPPORTED_EXCHANGES, type SupportedExchange } from "./utils";
 import { holdingScopeKey } from "./keys";
+import { holdingEquityContribution } from "@/lib/holding-equity";
 import { oneKeyPerAccountDay } from "./holdings-account-day";
 import {
   fetchLatestHoldingsPerKey,
@@ -3764,32 +3765,16 @@ export function partitionTrustworthyEquitySnapshots<
 /**
  * NEW-C03-01: Equity contribution by holding type.
  *
- *   - Spot: `value_usd` (marked fair value — this IS the equity contribution).
- *   - Derivative: `unrealized_pnl_usd` (the actual equity contribution).
- *     `value_usd` on a derivative is the NOTIONAL contract size — e.g. a 10x
- *     perp with $5M notional has ~$500k of margin/equity at stake, not $5M.
- *     Using notional inflates AUM by the leverage factor and dominates the
- *     per-holding weights used by computeScenario.
- *
- * Shorts: unrealized_pnl_usd is negative for a losing short. We include the
- * full signed value so the short's equity impact is reflected in the weight
- * (a deeply-negative short has near-zero positive weight, which is correct).
- * We don't clamp to 0 here — callers that need a non-negative weight for the
- * scenario can normalise after the fact.
+ * Phase 167.1.1.2 D-04: the definition now lives in the pure module
+ * `@/lib/holding-equity` (the client and the commit route import it directly;
+ * this file is `server-only`). It is re-exported here under the same name so
+ * every existing importer keeps working; the client alias
+ * `holdingEquityContributionLocal` is the SAME function object. D-06: it
+ * returns null for a derivative whose P&L was not reported; sums here skip it.
  *
  * @internal Exported for unit testing only (NEW-C03-01 regression).
  */
-export function holdingEquityContribution(h: MyAllocationDashboardPayload["holdingsSummary"][number]): number {
-  if (h.holding_type === "derivative") {
-    // unrealized_pnl_usd is required-but-nullable (never absent in production
-    // payloads; null for spot rows or when the sync worker has not yet written
-    // a P&L value). Fall back to 0 rather than notional when null — better
-    // to exclude a derivative than to treat notional as equity.
-    const pnl = h.unrealized_pnl_usd ?? 0;
-    return Number.isFinite(pnl) ? pnl : 0;
-  }
-  return Number.isFinite(h.value_usd) ? h.value_usd : 0;
-}
+export { holdingEquityContribution };
 
 /**
  * Phase 63 ENGINE-04 — the honest gate=false SSR live baseline. AUM is
@@ -3812,8 +3797,11 @@ export function emptyLiveBaselineMetrics(
 ): MyAllocationDashboardPayload["liveBaselineMetrics"] {
   // NEW-C03-01: AUM uses equity contribution (not notional), identical to the
   // per-key baseline's D2 rule so the AUM is byte-consistent across branches.
+  // 167.1.1.2 D-06: `liveBaselineMetrics.aum` is not rendered (UI-SPEC row
+  // "queries.ts liveBaselineMetrics.aum"), so a derivative whose P&L was not
+  // reported adds nothing (`?? 0`) and needs no count here; it added 0 before.
   const totalAum = holdingsSummary.reduce(
-    (s, h) => s + holdingEquityContribution(h),
+    (s, h) => s + (holdingEquityContribution(h) ?? 0),
     0,
   );
   return {
@@ -3875,7 +3863,7 @@ export function liveBaselineMetricsFromPerKeyDailies(
   // D2: AUM is unchanged — summed from holdings equity contribution, identical
   // to the gate=false emptyDefault branch (`emptyLiveBaselineMetrics`).
   const totalAum = holdingsSummary.reduce(
-    (s, h) => s + holdingEquityContribution(h),
+    (s, h) => s + (holdingEquityContribution(h) ?? 0),
     0,
   );
   const emptyDefault: MyAllocationDashboardPayload["liveBaselineMetrics"] = {
@@ -3897,7 +3885,8 @@ export function liveBaselineMetricsFromPerKeyDailies(
     if (!keyId) continue;
     equityByApiKeyId.set(
       keyId,
-      (equityByApiKeyId.get(keyId) ?? 0) + holdingEquityContribution(h),
+      // A key whose rows are all left out keeps weight 0, as before (D-06).
+      (equityByApiKeyId.get(keyId) ?? 0) + (holdingEquityContribution(h) ?? 0),
     );
   }
 
