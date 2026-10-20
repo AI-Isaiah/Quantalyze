@@ -147,7 +147,7 @@ export default async function PortfolioPdfPage({
     // Weight comes from portfolio_strategies, TWR from the strategy's own analytics.
     return {
       strategy_id: ps.strategy_id,
-      name: s?.name ?? "Unknown",
+      name: s?.name ?? "Unnamed strategy",
       weight: ps.current_weight ?? null,
       twr: a?.cagr ?? null,
       sharpe: a?.sharpe ?? null,
@@ -193,6 +193,20 @@ export default async function PortfolioPdfPage({
       .filter((s) => s.strategies)
       .map((s) => [s.strategy_id, s.strategies!.name] as const),
   );
+  // A stored matrix can still carry a strategy that has since left the
+  // portfolio. Its name exists in `strategies`; read it rather than print an id
+  // fragment into a document that leaves the platform.
+  const missingIds = correlationKeys.filter((k) => !strategyNameById.has(k));
+  if (missingIds.length > 0) {
+    const { data: departed, error: departedError } = await admin
+      .from("strategies")
+      .select("id, name")
+      .in("id", missingIds);
+    if (departedError) throw new Error(departedError.message);
+    for (const r of departed ?? []) {
+      if (r.name) strategyNameById.set(r.id, r.name);
+    }
+  }
 
   return (
     <div className="max-w-[800px] mx-auto p-8 bg-white print:p-4">
@@ -326,7 +340,7 @@ export default async function PortfolioPdfPage({
                     key={k}
                     className="text-right py-1 px-1 font-medium text-text-muted"
                   >
-                    {(strategyNameById.get(k) ?? k).slice(0, 10)}
+                    {strategyNameById.get(k) ?? "Unnamed strategy"}
                   </th>
                 ))}
               </tr>
@@ -335,7 +349,7 @@ export default async function PortfolioPdfPage({
               {correlationKeys.map((rowKey) => (
                 <tr key={rowKey} className="border-b border-border/30">
                   <td className="py-1 px-1 font-medium text-text-primary">
-                    {(strategyNameById.get(rowKey) ?? rowKey).slice(0, 14)}
+                    {strategyNameById.get(rowKey) ?? "Unnamed strategy"}
                   </td>
                   {correlationKeys.map((colKey) => {
                     const val = correlationMatrix[rowKey]?.[colKey];
