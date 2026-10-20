@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.132.6.1] - 2026-10-20 — deps: GitHub Actions minor/patch group (#1013)
+
+### Changed
+- `actions/setup-node` 7.0.0 → 7.1.0 (SHA `949feb24…`), `actions/upload-artifact` 7.0.1 → 7.0.2 (SHA `cf430e03…`) and `actions/download-artifact` 8.0.1 → 8.0.2 (SHA `9000827c…`), at every pinned step across ten workflow files (49 pins). No input this repo passes changed. setup-node 7.1.0 adds a Node-version validation and a manifest-fetch retry.
+- Applied to current `origin/main` rather than merging Dependabot's branch, so the pin set is complete as of this head.
+
+### Notes
+- Dependabot's own run was red on `version-gate` (no VERSION/CHANGELOG) and on the Migration Drift Check `check` and `test-db-drift` jobs, which fail hard by design when their repo secrets are absent; Dependabot-triggered runs get none. None of the reds was the update itself.
+- `sql-mutation-nightly.yml` and `ci.yml` move to the same setup-node SHA, so the nightly parity pin stays byte-equal.
+
 ## [0.132.6.0] - 2026-10-20 — COPY 170.1: page copy reads clean, and a CSV upload never stores a wrong date or shows a raw error
 
 Phase 170.1 COPY. It started as a copy pass and grew a CSV-validation hardening track through its review rounds. Titles (170.1.1) and labels (170.1.2) were split into their own phases.
