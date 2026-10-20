@@ -1,7 +1,7 @@
 const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
 
 export const metadata = {
-  title: `Terms of Service — ${PLATFORM_NAME}`,
+  title: "Terms of Service",
 };
 
 /**

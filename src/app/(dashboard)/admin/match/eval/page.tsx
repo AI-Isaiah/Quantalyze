@@ -1,9 +1,14 @@
+import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
 import { isValidPartnerTag } from "@/lib/partner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { MatchEvalDashboard } from "@/components/admin/MatchEvalDashboard";
+
+export const metadata: Metadata = {
+  title: "Match engine eval",
+};
 
 export default async function MatchEvalPage({
   searchParams,

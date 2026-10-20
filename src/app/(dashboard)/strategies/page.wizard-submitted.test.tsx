@@ -242,9 +242,11 @@ describe("StrategiesPage — the wizard-submitted status line (170.1 D-07, UI-SP
     expect(plain.textContent).toContain("No strategies yet.");
   });
 
-  it("leaves the PageHeader title alone (the heading belongs to Phase 170.1.1 TITLES)", async () => {
+  it("the H1 reads \"Strategies\" (170.1.1 D-06), so it differs from /my-strategies' \"My Strategies\"", async () => {
     const container = await renderPage({ wizard_submitted: "1" });
 
-    expect(container.querySelector('[data-testid="page-header"]')!.textContent).toBe("My Strategies");
+    // Typed by hand and case-sensitive: the pin that stops /strategies and
+    // /my-strategies sharing one H1 again.
+    expect(container.querySelector('[data-testid="page-header"]')!.textContent).toBe("Strategies");
   });
 });

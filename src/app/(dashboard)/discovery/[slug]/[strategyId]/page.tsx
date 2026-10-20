@@ -6,14 +6,50 @@ import { AddToPortfolio } from "@/components/portfolio/AddToPortfolio";
 import { FactsheetView } from "@/app/factsheet/[id]/v2/FactsheetView";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategyDetail } from "@/lib/queries";
-import { displayStrategyName } from "@/lib/strategy-display";
+import {
+  displayStrategyName,
+  type DisplayableStrategy,
+} from "@/lib/strategy-display";
 import { KCS10_PUBLIC_SENTENCE } from "@/lib/status-surface-copy";
 import { createClient } from "@/lib/supabase/server";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { fetchAndBuildPayloadWithReason } from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
 import { withTrustTier } from "@/lib/factsheet/with-trust-tier";
 import { withPublishedOnly } from "@/lib/visibility";
 import { notFound, redirect } from "next/navigation";
+import type { Metadata } from "next";
+
+// Tab title = the strategy label through the same helper the breadcrumb uses,
+// so a withheld exploratory name never reaches a <title>. `getStrategyDetail`
+// is not wrapped in cache() and would repeat its whole embed, so this is a
+// name-only read through the request's RLS client with the same published-only
+// gate; a read error and a missing row both give the fixed neutral "Strategy"
+// (an error is also captured). A found row reads through displayStrategyName,
+// which can itself return `Strategy #<8 chars>` for a withheld name.
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ slug: string; strategyId: string }>;
+}): Promise<Metadata> {
+  const { strategyId } = await params;
+  const supabase = await createClient();
+  const { data, error } = await withPublishedOnly(
+    supabase
+      .from("strategies")
+      .select("id, name, codename, disclosure_tier")
+      .eq("id", strategyId),
+  ).maybeSingle();
+  if (error) {
+    captureToSentry(new Error(error.message), {
+      tags: { route: "discovery/[slug]/[strategyId]/page", stage: "generate-metadata" },
+    });
+  }
+  if (error || !data) return { title: "Strategy" };
+  // The generated row type widens `disclosure_tier` to string; the column
+  // is the DisclosureTier enum (as `readDisclosureTier` in queries.ts assumes).
+  return { title: displayStrategyName(data as DisplayableStrategy) };
+}
 
 /**
  * 169-REVIEW-SFH H-3: what this page says when a factsheet series read FAILS.

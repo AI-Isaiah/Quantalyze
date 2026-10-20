@@ -194,7 +194,7 @@ async function loginViaForm(
 
 // Curated authed route floor — each anchor is a route-specific VISIBLE content
 // node the freshly-seeded user reliably renders (never generic chrome). The
-// "My Allocation" <h1> sits above the tab-panel switch (AllocationsTabs.tsx) so
+// "My allocation" <h1> sits above the tab-panel switch (AllocationsTabs.tsx) so
 // it is present on every ?tab= value. This sweep spans BOTH the allocator
 // surfaces AND the standalone /strategies/new/wizard route, which is
 // manager-gated (Phase 109 ROLE-04, strategies/layout.tsx — allocators
@@ -205,13 +205,13 @@ async function loginViaForm(
 // non-admin → a false-green (reflow-sweep-authed.spec.ts:26-31). Admin clip
 // coverage rides the public routes + the static admin-width test (Plan 54-03).
 const AUTHED_ROUTES: { path: string; anchor: string; label: string }[] = [
-  { path: "/allocations", anchor: 'h1:has-text("My Allocation")', label: "allocations (default)" },
-  { path: "/allocations?tab=overview", anchor: 'h1:has-text("My Allocation")', label: "allocations Overview" },
-  { path: "/allocations?tab=holdings", anchor: 'h1:has-text("My Allocation")', label: "allocations Holdings" },
-  { path: "/allocations?tab=outcomes", anchor: 'h1:has-text("My Allocation")', label: "allocations Outcomes" },
-  { path: "/allocations?tab=mandate", anchor: 'h1:has-text("My Allocation")', label: "allocations Mandate" },
-  { path: "/allocations?tab=risk", anchor: 'h1:has-text("My Allocation")', label: "allocations Risk" },
-  { path: "/allocations?tab=scenario", anchor: 'h1:has-text("My Allocation")', label: "allocations Scenario composer" },
+  { path: "/allocations", anchor: 'h1:has-text("My allocation")', label: "allocations (default)" },
+  { path: "/allocations?tab=overview", anchor: 'h1:has-text("My allocation")', label: "allocations Overview" },
+  { path: "/allocations?tab=holdings", anchor: 'h1:has-text("My allocation")', label: "allocations Holdings" },
+  { path: "/allocations?tab=outcomes", anchor: 'h1:has-text("My allocation")', label: "allocations Outcomes" },
+  { path: "/allocations?tab=mandate", anchor: 'h1:has-text("My allocation")', label: "allocations Mandate" },
+  { path: "/allocations?tab=risk", anchor: 'h1:has-text("My allocation")', label: "allocations Risk" },
+  { path: "/allocations?tab=scenario", anchor: 'h1:has-text("My allocation")', label: "allocations Scenario composer" },
   { path: "/strategies/new/wizard", anchor: "#wizard-connect-key-heading", label: "onboarding wizard API entry" },
   { path: "/strategies/new/wizard?source=csv", anchor: "#wizard-csv-upload-heading", label: "onboarding wizard CSV entry" },
   { path: "/security", anchor: "main h1", label: "security (authed)" },

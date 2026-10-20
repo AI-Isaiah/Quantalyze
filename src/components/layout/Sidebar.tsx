@@ -116,7 +116,7 @@ function buildNavSections(
   const workspaceItems: NavItem[] = [];
   if (showsAllocatorWorkspace) {
     workspaceItems.push({
-      label: "My Allocation",
+      label: "My allocation",
       href: "/allocations",
       icon: PortfolioIcon,
       badge: flaggedCount,
@@ -231,16 +231,8 @@ function buildNavSections(
       : []),
     {
       heading: "ACCOUNT",
-      // Phase 51 NAV-01 — /referral ("Earn rewards by referring asset managers
-      // and allocators") is an account-level affordance owned by allocators AND
-      // managers (RESEARCH orphan inventory). ACCOUNT is the role-neutral section
-      // (Profile is shown to every role), so a referral entry here is reachable
-      // by both owning roles without leaking a workspace-specific surface — it is
-      // not gated by the allocator/manager OR-logic and therefore cannot regress
-      // the T-45-01 role-leak pin.
       items: [
         { label: "Profile", href: "/profile", icon: UserIcon },
-        { label: "Referral", href: "/referral", icon: GiftIcon },
       ],
     },
   ];
@@ -300,7 +292,7 @@ export function buildPrimaryMobileNav(p: {
   if (showsAllocatorWorkspace) {
     // SC#1 trio leads the allocator set, in order, with distinct hrefs.
     primary.push(
-      { label: "My Allocation", href: "/allocations", icon: PortfolioIcon, badge: p.flaggedCount },
+      { label: "My allocation", href: "/allocations", icon: PortfolioIcon, badge: p.flaggedCount },
       { label: "Risk", href: "/allocations?tab=risk", icon: ShieldIcon },
       { label: "Bridge", href: "/allocations?tab=scenario", icon: BridgeIcon },
     );
@@ -666,17 +658,6 @@ function DeckIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <rect x="4" y="2" width="9" height="11" rx="1.5" />
       <path d="M2 4.5v7.5A1.5 1.5 0 003.5 13.5H11" />
-    </svg>
-  );
-}
-
-function GiftIcon({ className }: { className?: string }) {
-  // A gift/reward — the referral "earn rewards" affordance.
-  return (
-    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="2.5" y="6" width="11" height="7.5" rx="1" />
-      <path d="M2 6h12M8 6v7.5" />
-      <path d="M8 6S6.5 2.5 4.75 3.25 6.5 6 8 6zM8 6s1.5-3.5 3.25-2.75S9.5 6 8 6z" />
     </svg>
   );
 }

@@ -1,9 +1,7 @@
 import Link from "next/link";
 
-const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
-
 export const metadata = {
-  title: `Legal — ${PLATFORM_NAME}`,
+  title: "Legal",
 };
 
 const TABS = [

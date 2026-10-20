@@ -769,12 +769,12 @@ describe("ComparePage — zero, one and many ids (N-CMP)", () => {
     mockHoldingError = null;
   });
 
-  it("with no ids, keeps Compare Strategies and names the factsheet control", async () => {
+  it("with no ids, keeps Compare strategies and names the factsheet control", async () => {
     const ComparePage = await getComparePage();
     const Page = await ComparePage({ searchParams: Promise.resolve({}) });
     render(Page as React.ReactElement);
     expect(
-      screen.getByRole("heading", { name: "Compare Strategies" }),
+      screen.getByRole("heading", { name: "Compare strategies" }),
     ).toBeInTheDocument();
     expect(screen.getByText(EMPTY_COMPARE)).toBeInTheDocument();
     expect(screen.queryByText(/checkboxes/i)).toBeNull();

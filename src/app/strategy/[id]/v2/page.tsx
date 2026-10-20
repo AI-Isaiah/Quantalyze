@@ -12,10 +12,10 @@ export async function generateMetadata({
   const { id } = await params;
   const result = await getStrategyDetailV2(id);
   if (!result) {
-    return { title: "Strategy Not Found | Quantalyze" };
+    return { title: "Strategy not found" };
   }
   return {
-    title: `${result.strategy.name} — v2 | Quantalyze`,
+    title: result.strategy.name,
     description: `${result.strategy.name} — Verified quantitative strategy on Quantalyze.`,
   };
 }

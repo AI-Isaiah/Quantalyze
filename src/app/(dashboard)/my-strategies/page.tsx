@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { unstable_noStore as noStore } from "next/cache";
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -33,6 +34,10 @@ const NULL_COPY =
   "Percentile ranks appear once 5 strategies are published in the comparison set. Private and draft rows are visible only to you.";
 
 const kSentence = (k: number) => `${k} of your keys have no strategy yet.`;
+
+export const metadata: Metadata = {
+  title: "My strategies",
+};
 
 export default async function MyStrategiesPage() {
   // C-0016 precedent, re-targeted: this page renders ONE owner's private and

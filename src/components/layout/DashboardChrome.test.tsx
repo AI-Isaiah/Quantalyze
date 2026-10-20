@@ -186,19 +186,19 @@ describe("DashboardChrome — standard vs full-bleed layout (M-0410)", () => {
     expect(main).toContainElement(screen.getByTestId("page-body"));
   });
 
-  it("standard layout renders the desktop Sidebar (My Allocation visible for allocators)", () => {
+  it("standard layout renders the desktop Sidebar (My allocation visible for allocators)", () => {
     navState.pathname = "/allocations";
     render(
       <DashboardChrome isAllocator={true} populatedSlugs={[]}>
         <div>page</div>
       </DashboardChrome>,
     );
-    // Phase 45: the role-aware MobileNav ALSO surfaces "My Allocation" now, so
+    // Phase 45: the role-aware MobileNav ALSO surfaces "My allocation" now, so
     // scope the assertion to the desktop Sidebar's <nav aria-label="Primary">
     // (the bottom nav is <nav aria-label="Primary mobile">). Its presence there
     // proves the desktop sidebar subtree mounted (not the full-bleed branch).
     const desktopNav = screen.getByRole("navigation", { name: "Primary" });
-    expect(within(desktopNav).getByText("My Allocation")).toBeInTheDocument();
+    expect(within(desktopNav).getByText("My allocation")).toBeInTheDocument();
   });
 
   it("full-bleed route (/admin/match/[id]) drops the 'Dashboard content' main + desktop sidebar", () => {

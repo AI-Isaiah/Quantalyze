@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { Metadata } from "next";
 import { redirect, notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -32,6 +33,21 @@ type StrategyLite = Pick<
   Strategy,
   "id" | "name" | "status" | "disclosure_tier" | "user_id"
 >;
+
+// Tab title. The tag is echoed only after it passes `isValidPartnerTag`; no data
+// is read here.
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ partner_tag: string }>;
+}): Promise<Metadata> {
+  const { partner_tag } = await params;
+  return {
+    title: isValidPartnerTag(partner_tag)
+      ? `Partner pilot: ${partner_tag}`
+      : "Partner pilot",
+  };
+}
 
 export default async function PartnerPilotPage({
   params,

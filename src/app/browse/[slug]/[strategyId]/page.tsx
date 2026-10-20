@@ -22,7 +22,7 @@ export async function generateMetadata({
   const result = await getPublicStrategyDetail(strategyId);
   const name = result ? displayStrategyName(result.strategy) : "Strategy";
   return {
-    title: `${name} — Quantalyze`,
+    title: name,
     description: `Exchange-verified performance data for ${name}.`,
   };
 }

@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { requireRolePage } from "@/lib/auth/requireRolePage";
 import { withPublishedOnly } from "@/lib/visibility";
@@ -19,6 +20,8 @@ import {
   fetchHoldingCompareItem,
   type HoldingCompareItem,
 } from "./lib/holding-compare-adapter";
+
+export const metadata: Metadata = { title: "Compare strategies" };
 
 // Phase 51 NAV-02 — the back-path crumb is identical across all three render
 // branches (empty-selection, not-available, results), so it lives in one place.
@@ -47,13 +50,13 @@ export default async function ComparePage({
       <>
         {/* 52-UI-SPEC copy contract: the empty-selection state names what is
             missing + what to do (honest absence, neutral muted card — never a
-            fabricated zero/count-up; STATE-02). The "Compare Strategies"
+            fabricated zero/count-up; STATE-02). The "Compare strategies"
             PageHeader title is preserved verbatim — it is the 52-01 e2e
-            reflow-sweep anchor (h1:has-text("Compare Strategies")).
+            reflow-sweep anchor (h1:has-text("Compare strategies")).
             Phase 170, 2026-09-27: the old sentence named a control that does
             not exist. */}
         <PageHeader
-          title="Compare Strategies"
+          title="Compare strategies"
           breadcrumb={COMPARE_BREADCRUMB}
         />
         <p className="text-sm text-text-muted text-center py-16">

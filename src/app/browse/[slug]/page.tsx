@@ -15,7 +15,7 @@ export async function generateMetadata({
   const cat = DISCOVERY_CATEGORIES.find((c) => c.slug === slug);
   const name = cat?.name ?? slug;
   return {
-    title: `${name} — Browse Verified Strategies — Quantalyze`,
+    title: `${name} — Browse Verified Strategies`,
     description: cat?.description ?? "Exchange-verified quant strategies.",
   };
 }

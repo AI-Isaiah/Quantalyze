@@ -1,4 +1,6 @@
+import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { redirect } from "next/navigation";
 import dynamic from "next/dynamic";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -610,6 +612,33 @@ function DashboardContent({
       />
     </div>
   );
+}
+
+/* ---------- Metadata ---------- */
+
+// Tab title = the portfolio name the H1 shows. A name-only read through the
+// request's RLS client; an error and a missing row both fall back to a fixed
+// neutral string, never the id (the page itself redirects on a miss). A read
+// error is also captured.
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("portfolios")
+    .select("name")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) {
+    captureToSentry(new Error(error.message), {
+      tags: { route: "portfolios/[id]/page", stage: "generate-metadata" },
+    });
+  }
+  if (error || !data?.name) return { title: "Portfolio" };
+  return { title: data.name };
 }
 
 /* ---------- Page ---------- */

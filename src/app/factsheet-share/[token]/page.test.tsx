@@ -852,7 +852,7 @@ describe("SL-1d — the token lane ships no OG image and stays noindex", () => {
     const mod = await import("./page");
     // A <title> is fetched by unauthenticated crawlers and cached by third
     // parties. It must be a constant, never the private strategy's name.
-    expect(mod.metadata.title).toBe("Factsheet — Quantalyze");
+    expect(mod.metadata.title).toBe("Factsheet");
     expect(mod.metadata.openGraph).toBeUndefined();
     expect(mod.metadata.twitter).toBeUndefined();
   });

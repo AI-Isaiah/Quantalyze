@@ -261,11 +261,6 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
       "Allocator recommendations — session-gated, reachable via the mandate CTA.",
   },
   {
-    route: "/referral",
-    class: "private",
-    notes: "Allocator/manager referral surface — session-gated.",
-  },
-  {
     route: "/scenarios",
     class: "exception",
     redirectFrom: "/scenarios",

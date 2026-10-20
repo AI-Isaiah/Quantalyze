@@ -56,7 +56,7 @@ const VIEWPORTS: { id: string; width: number; height: number }[] = [
 const FOOTER = '[role="region"][aria-label="Scenario draft summary and actions"]';
 const COMMIT = '[data-testid="scenario-footer-commit"]';
 const NAV = 'nav[aria-label="Primary mobile"]';
-const ALLOC_ANCHOR = 'h1:has-text("My Allocation")';
+const ALLOC_ANCHOR = 'h1:has-text("My allocation")';
 const TABLIST = '[role="tablist"][aria-label="Allocation surfaces"]';
 const TWEAKS_TOGGLE = "[data-tweaks-toggle]";
 const TWEAKS_PANEL = '[role="dialog"][aria-label="Tweaks"]';
@@ -1191,11 +1191,11 @@ test.describe("/compare — N-CMP", () => {
     const allocator = await seedTestAllocator();
     await loginViaForm(page, allocator.email, allocator.password);
     await page.goto("/compare");
-    await expect(page.locator('h1:has-text("Compare Strategies")')).toBeVisible({
+    await expect(page.locator('h1:has-text("Compare strategies")')).toBeVisible({
       timeout: 15_000,
     });
     await expect(page.getByText(/checkboxes/i)).toHaveCount(0);
-    await assertNoReflow(page, 'h1:has-text("Compare Strategies")');
+    await assertNoReflow(page, 'h1:has-text("Compare strategies")');
   });
 
   test("V390: one id shows the one-strategy note", async ({ page }) => {

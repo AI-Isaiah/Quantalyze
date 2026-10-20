@@ -9,10 +9,21 @@
  *   - the shell is `/security`'s: one `<main>`, one `<h1>`, the spec's copy.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ContactPage, { metadata } from "./page";
+import { metadata as rootMetadata } from "../../layout";
+
+// The root layout loads three next/font/google faces at module scope and
+// imports server-only code; jsdom has neither, so stub both. Only the exported
+// `metadata` is read here.
+vi.mock("server-only", () => ({}));
+vi.mock("next/font/google", () => ({
+  DM_Sans: () => ({ variable: "" }),
+  Instrument_Serif: () => ({ variable: "" }),
+  Geist_Mono: () => ({ variable: "" }),
+}));
 
 type Params = Record<string, string | string[] | undefined>;
 
@@ -36,7 +47,8 @@ describe("/contact page shell", () => {
   });
 
   it("is public and indexable with /contact as canonical", () => {
-    expect(metadata.title).toBe("Contact — Quantalyze");
+    // A bare segment: the root template adds "— Quantalyze" exactly once.
+    expect(metadata.title).toBe("Contact");
     expect(metadata.alternates?.canonical).toBe("/contact");
     expect(metadata.robots).toEqual({ index: true, follow: true });
   });
@@ -56,6 +68,15 @@ describe("/contact page shell", () => {
     const { container } = await renderPage({});
     expect(container.querySelector("form")?.closest("[class*='shadow']")).toBeNull();
     expect(container.querySelector("[autofocus]")).toBeNull();
+  });
+});
+
+describe("root title template (Phase 170.1.1 D-06)", () => {
+  it("is the one place the brand suffix is written", () => {
+    expect(rootMetadata.title).toEqual({
+      template: "%s — Quantalyze",
+      default: "Quantalyze",
+    });
   });
 });
 

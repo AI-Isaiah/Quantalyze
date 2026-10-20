@@ -249,7 +249,7 @@ export async function generateMetadata({
   const result = await getFactsheetDetail(id);
   const name = result ? displayStrategyName(result.strategy) : "Strategy";
   return {
-    title: `${name} — Institutional Tear Sheet`,
+    title: `${name} institutional tear sheet`,
     robots: "noindex",
   };
 }

@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
@@ -46,6 +47,10 @@ export const dynamic = "force-dynamic";
  * moved the "Connect Exchange" key-management flow to `/profile?tab=exchanges`;
  * the inline exchange-manager widget no longer lives on this page.
  */
+export const metadata: Metadata = {
+  title: "My allocation",
+};
+
 export default async function MyAllocationPage() {
   const supabase = await createClient();
   const {

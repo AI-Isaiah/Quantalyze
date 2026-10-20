@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.132.9.0] - 2026-10-20 — TITLES: every page has its own tab title and a sentence-case heading (Phase 170.1.1)
+
+### Added
+- A root `title.template` `"%s — Quantalyze"` (default `"Quantalyze"`) in `src/app/layout.tsx`. Every page now exports a bare segment, and the brand suffix is added exactly once, with "—" as the one separator (D-06).
+- Tab titles for every auth route: Sign in, Create your account, Reset your password, Set a new password, Welcome, Application under review.
+- Tab titles for the dashboard: Decks, My allocation, My strategies, Portfolios, Profile settings, Connect your strategy, Recommendations, Strategies, Compare strategies. Name-bearing titles come from `generateMetadata` on `/portfolios/[id]` (plus `/documents` and `/manage`), `/discovery/[slug]`, `/discovery/[slug]/[strategyId]` and `/strategies/[id]/edit`.
+- Tab titles for the admin pages: Admin dashboard, Usage analytics, Request-a-call leads, Deletion requests, Match queue, Match engine eval, Compute jobs, CSV submissions, Users and Intro requests. New pass-through layouts title Partner ROI simulator and Partner pilot import. `User: {name}`, `Partner pilot: {tag}` and `Match queue for {name}` are read only after the admin check.
+- `src/__tests__/page-titles.test.ts`: a repo-wide census over every `page.tsx` and `layout.tsx` under `src/app`. It checks:
+  - the root template is in place;
+  - no tab title carries "Quantalyze" or "|" (social-card titles are exempt);
+  - no object-form title appears outside the root layout;
+  - every dashboard, admin and auth page is titled, and every titled file can actually be scanned;
+  - `/strategies` reads "Strategies" while `/my-strategies` keeps "My Strategies".
+  Synthetic offenders prove each check can fail.
+
+### Changed
+- Headings move to sentence case:
+  - `/strategies` reads "Strategies" (`/my-strategies` keeps "My Strategies");
+  - `/allocations`, the sidebar, the mobile nav and the `/recommendations` breadcrumb read "My allocation";
+  - `/compare` reads "Compare strategies";
+  - `/admin` reads "Admin dashboard";
+  - `/profile` reads "Profile settings";
+  - admin pages read Usage analytics, Request-a-call leads, Compute jobs, CSV submissions and Intro requests.
+  The e2e anchors keyed on the old text moved in the same commits (`full-flow`, `layout-narrow`, `my-strategies`, `no-clip-sweep`, `reflow-sweep-authed`).
+- Public pages drop their embedded brand suffix:
+  - the strategy tab is the bare name, with no "v2" (D-04);
+  - other titles read `{name} factsheet`, `{name} institutional tear sheet` and `{name} portfolio report`;
+  - browse pages and the marketing and legal pages are bare segments;
+  - the factsheet share link reads the static "Factsheet".
+  openGraph and twitter titles are unchanged.
+- `SegmentedControl` no longer shows a "Coming soon" tooltip by default. A disabled option shows a title only when it passes `disabledReason`.
+
+### Removed
+- The placeholder `/referral` page, its sidebar link (and the now-unused `GiftIcon`) and its route-contract manifest entry, in one commit (D-02).
+
+### Fixed (review rounds)
+- A failed read inside a title's `generateMetadata` now gives a neutral title and reports to Sentry (`captureToSentry`, tags `route` and `stage: generate-metadata`). Before, it gave a false one ("Match queue for Unknown allocator", "Unnamed portfolio") and recorded nothing. Neutral titles: Match queue, User, Portfolio, Manage portfolio, Documents, Strategy, Edit strategy, Portfolio report. The factsheet v2 fallback was already neutral and now reports its read error the same way. The portfolio report fallback no longer reads "Portfolio portfolio report".
+- The census catches shorthand and variable titles, arrow-form and generic `generateMetadata`, object-form titles with any key order, and titled files it cannot scan.
+
+### Tests
+- Metadata tests pin each data-reading title: a found row, a miss with no capture, and an error with a capture. They cover `/portfolios/[id]`, `/manage`, `/documents`, `/strategies/[id]/edit`, `/discovery/[slug]/[strategyId]`, `/admin/users/[id]`, `/admin/match/[allocator_id]`, `/portfolio-pdf/[id]` and `/factsheet/[id]/v2`. The admin tests assert that a non-admin or signed-out caller causes no service-role read.
+- Heading pins on `/admin`, `/allocations`, `/compare` and `/strategies`. Sidebar tests show the ACCOUNT group is `/profile` only. `SegmentedControl` has no title without a reason. Each was seen RED against the old code.
+
+### Notes
+- Known limits, booked rather than fixed: the `/portfolio-pdf/[id]` title read uses `.single()`, so a portfolio deleted between token mint and render is captured as an error (Sentry noise, correct title). The wizard H1 "Connect Your Strategy" stays title case (LOW). `/scenario-share/[token]` has no title of its own (outside SC-1's scope).
+- SC-4, the 390 px and 200% zoom re-check, runs after deploy.
+
 ## [0.132.8.4] - 2026-10-20 — deps: npm minor/patch group, 21 of 22 (#1077); eslint-config-next held at 16.3.8
 
 ### Changed

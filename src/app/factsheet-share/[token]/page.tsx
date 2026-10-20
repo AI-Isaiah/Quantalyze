@@ -109,7 +109,7 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
  * link is indexable by default.)
  */
 export const metadata: Metadata = {
-  title: "Factsheet — Quantalyze",
+  title: "Factsheet",
   description: "A privately shared strategy factsheet.",
   robots: "noindex",
 };

@@ -6,16 +6,16 @@ import { Sidebar } from "./Sidebar";
  * Sidebar workspace-items regression tests.
  *
  * 2026-05-20 simplification: the allocator workspace collapsed to a
- * single entry "My Allocation". Scenarios and Recommendations used to
+ * single entry "My allocation". Scenarios and Recommendations used to
  * be top-level routes but were folded — Scenarios into a TAB inside the
- * My Allocation page, Recommendations dropped from the nav.
+ * My allocation page, Recommendations dropped from the nav.
  *
  * 51-REVIEW override (2026-06-28): the user OVERRODE the Recommendations
  * half of that decision. Recommendations is again a top-level allocator
  * nav item (alongside Compare + Decks) so the daily match output is not a
  * dead-end. Scenarios stays a tab (its top-level route is a redirect-stub).
  *
- *   Allocator view: My Allocation + Recommendations + Compare + Decks.
+ *   Allocator view: My allocation + Recommendations + Compare + Decks.
  *     (Discovery + Account handle the rest. No Strategies, no Portfolios,
  *     no Scenarios top-level entry.)
  *
@@ -39,10 +39,10 @@ vi.mock("next/navigation", () => ({
 }));
 
 describe("Sidebar workspace — allocator view", () => {
-  it("renders 'My Allocation' as the first workspace entry", () => {
+  it("renders 'My allocation' as the first workspace entry", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    expect(screen.getByText("My Allocation")).toBeInTheDocument();
-    const link = screen.getByText("My Allocation").closest("a");
+    expect(screen.getByText("My allocation")).toBeInTheDocument();
+    const link = screen.getByText("My allocation").closest("a");
     expect(link).toHaveAttribute("href", "/allocations");
   });
 
@@ -54,9 +54,9 @@ describe("Sidebar workspace — allocator view", () => {
     expect(screen.queryByText("Connections")).toBeNull();
   });
 
-  it("does NOT render 'Scenarios' as a top-level entry (it's a tab inside My Allocation)", () => {
+  it("does NOT render 'Scenarios' as a top-level entry (it's a tab inside My allocation)", () => {
     // 2026-05-20: Scenarios used to be a top-level sidebar entry pointing
-    // at /scenarios, but the actual surface is a tab inside My Allocation
+    // at /scenarios, but the actual surface is a tab inside My allocation
     // (AllocationsTabs scenario panel). The top-level entry was duplication.
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
     expect(screen.queryByText("Scenarios")).toBeNull();
@@ -89,7 +89,7 @@ describe("Sidebar workspace — allocator view", () => {
   it("does NOT render a top-level 'Allocations' label for allocators", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
     // The old label was "Allocations" (plural). It was renamed to
-    // "My Allocation" (singular) in the v0.4.0 pivot.
+    // "My allocation" (singular) in the v0.4.0 pivot.
     expect(screen.queryByText(/^Allocations$/)).toBeNull();
   });
 });
@@ -99,7 +99,7 @@ describe("Sidebar workspace — allocator view", () => {
  * RETIRED. The standalone SURF-02/03 Sandbox entry was removed when the
  * example-universe Sandbox was absorbed into the unified composer (Phase 29)
  * and /scenarios was converted to a 307 redirect to /allocations?tab=scenario.
- * The allocator now has ONE discoverable nav entry ("My Allocation" →
+ * The allocator now has ONE discoverable nav entry ("My allocation" →
  * /allocations). The retirement is pinned durably by
  * src/__tests__/phase-32-frozen-spine-guards.test.ts (no "/scenarios" in
  * Sidebar.tsx). This block asserts no role flavour resurrects the item.
@@ -128,7 +128,7 @@ describe("Sidebar Strategy Sandbox nav item is retired (FLOW-03)", () => {
 
   it("a dual-role admin+allocator does NOT see a 'Strategy Sandbox' link", () => {
     render(<Sidebar populatedSlugs={[]} isAdmin={true} isAllocator={true} />);
-    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.getByText("My allocation")).toBeInTheDocument();
     expect(screen.queryByText("Strategy Sandbox")).toBeNull();
   });
 
@@ -154,7 +154,7 @@ describe("Sidebar workspace — manager / crypto-team view", () => {
     render(
       <Sidebar populatedSlugs={[]} isAllocator={false} isManager={true} />,
     );
-    expect(screen.queryByText("My Allocation")).toBeNull();
+    expect(screen.queryByText("My allocation")).toBeNull();
     expect(screen.queryByText("Connections")).toBeNull();
     expect(screen.queryByText("Scenarios")).toBeNull();
     // 51-REVIEW override: Recommendations is now a top-level ALLOCATOR nav item
@@ -193,7 +193,7 @@ describe("Sidebar workspace — dual-role (manager + allocator)", () => {
         isManager={true}
       />,
     );
-    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.getByText("My allocation")).toBeInTheDocument();
     expect(screen.getByText("Strategies")).toBeInTheDocument();
     // Portfolios is a deep-link allocator surface — in no workspace nav.
     expect(screen.queryByText("Portfolios")).toBeNull();
@@ -203,22 +203,22 @@ describe("Sidebar workspace — dual-role (manager + allocator)", () => {
 describe("Sidebar workspace — admin view (Phase 109 role-only)", () => {
   it("a bare is_admin fixture renders NO workspace items (ops-overlay, not a persona)", () => {
     // ROLE-03: is_admin no longer OR-s into the workspace flags. An admin with
-    // no allocator/manager role sees only the Admin section — no My Allocation,
+    // no allocator/manager role sees only the Admin section — no My allocation,
     // no Strategies/Portfolios. Re-introducing `|| isAdmin` would fail this.
     render(<Sidebar populatedSlugs={[]} isAdmin={true} />);
     expect(screen.getByText("ADMIN")).toBeInTheDocument();
-    expect(screen.queryByText("My Allocation")).toBeNull();
+    expect(screen.queryByText("My allocation")).toBeNull();
     expect(screen.queryByText("Strategies")).toBeNull();
     expect(screen.queryByText("Portfolios")).toBeNull();
   });
 
   it("admin + allocator sees the allocator workspace + Admin, NOT the manager surface", () => {
-    // isAllocator lights My Allocation; the manager surface requires isManager,
+    // isAllocator lights My allocation; the manager surface requires isManager,
     // which is unset here, so Strategies/Portfolios must be absent (ROLE-02).
     render(
       <Sidebar populatedSlugs={[]} isAdmin={true} isAllocator={true} />,
     );
-    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.getByText("My allocation")).toBeInTheDocument();
     expect(screen.getByText("ADMIN")).toBeInTheDocument();
     expect(screen.queryByText("Strategies")).toBeNull();
     expect(screen.queryByText("Portfolios")).toBeNull();
@@ -232,7 +232,7 @@ describe("Sidebar workspace — admin view (Phase 109 role-only)", () => {
     expect(screen.queryByText("Portfolios")).toBeNull();
     expect(screen.getByText("ADMIN")).toBeInTheDocument();
     // Allocator surface requires the allocator role (or role='both'), not is_admin.
-    expect(screen.queryByText("My Allocation")).toBeNull();
+    expect(screen.queryByText("My allocation")).toBeNull();
   });
 
   it("a role='both' admin (staff after backfill) sees BOTH workspaces + Admin (ROLE-05)", () => {
@@ -247,7 +247,7 @@ describe("Sidebar workspace — admin view (Phase 109 role-only)", () => {
         isManager={true}
       />,
     );
-    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.getByText("My allocation")).toBeInTheDocument();
     expect(screen.getByText("Strategies")).toBeInTheDocument();
     // Portfolios is a deep-link allocator surface — in no workspace nav.
     expect(screen.queryByText("Portfolios")).toBeNull();
@@ -319,7 +319,7 @@ describe("Sidebar workspace — My Strategies entry (Phase 149 NAV-01)", () => {
  * M-0414 (audit-2026-05-07) — the ADMIN nav section itself.
  *
  * Prior tests pass isAdmin={true} only to assert the workspace surfaces
- * (My Allocation + Strategies + Portfolios). None of them assert the
+ * (My allocation + Strategies + Portfolios). None of them assert the
  * admin-only section spread on Sidebar.tsx:89-100 (`...(isAdmin ? [...]
  * : [])`). A regression that flips that guard to `!isAdmin` — leaking
  * admin routes to every user, or hiding them from admins — would slip
@@ -366,13 +366,13 @@ describe("Sidebar ADMIN section RBAC gate (M-0414)", () => {
     expect(screen.queryByText("Deletion requests")).toBeNull();
   });
 
-  it("an admin who is also an allocator still gets My Allocation AND the ADMIN section", () => {
+  it("an admin who is also an allocator still gets My allocation AND the ADMIN section", () => {
     // The isAdmin+isAllocator combination must light up both the allocator
     // workspace and the admin section — neither flag suppresses the other.
     render(
       <Sidebar populatedSlugs={[]} isAdmin={true} isAllocator={true} />,
     );
-    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.getByText("My allocation")).toBeInTheDocument();
     expect(screen.getByText("ADMIN")).toBeInTheDocument();
     expect(screen.getByText("Deletion requests")).toBeInTheDocument();
   });
@@ -501,7 +501,7 @@ describe("Sidebar workspace — no role flags (defense-in-depth)", () => {
     // surfaced manager links to anyone whose isAllocator was falsy —
     // including unauthenticated and pre-onboarding users.
     render(<Sidebar populatedSlugs={[]} />);
-    expect(screen.queryByText("My Allocation")).toBeNull();
+    expect(screen.queryByText("My allocation")).toBeNull();
     expect(screen.queryByText("Strategies")).toBeNull();
     expect(screen.queryByText("Portfolios")).toBeNull();
   });
@@ -588,7 +588,7 @@ describe("Sidebar Discovery sub-groups", () => {
  * gaps.
  *
  * The module-scope usePathname mock returns "/allocations", so the
- * "My Allocation" entry (href "/allocations") is the ACTIVE item in every
+ * "My allocation" entry (href "/allocations") is the ACTIVE item in every
  * render below.
  *
  * RED CONTRACT (plan 51-01): today's NavItemLink (Sidebar.tsx L301-334) has NO
@@ -602,14 +602,14 @@ describe("Sidebar Discovery sub-groups", () => {
 describe("Sidebar NavItemLink a11y (NAV-02, RED until 51-03)", () => {
   it("marks the ACTIVE nav link with aria-current=page", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    // usePathname() === "/allocations" → My Allocation is active.
-    const active = screen.getByText("My Allocation").closest("a");
+    // usePathname() === "/allocations" → My allocation is active.
+    const active = screen.getByText("My allocation").closest("a");
     expect(active).toHaveAttribute("aria-current", "page");
   });
 
   it("gives the nav link a WCAG-AA-contrast focus ring on the LIGHT rail (accent, not white)", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    const link = screen.getByText("My Allocation").closest("a");
+    const link = screen.getByText("My allocation").closest("a");
     expect(link).not.toBeNull();
     const className = link?.getAttribute("class") ?? "";
     // Keyboard-only focus affordance via focus-visible (never bare focus:). The
@@ -633,14 +633,14 @@ describe("Sidebar NavItemLink a11y (NAV-02, RED until 51-03)", () => {
  * GREEN NOW (it pins live-correct behavior, NOT a future implementation):
  * Phase 109 made the derivations pure-role — `showsAllocatorWorkspace =
  * isAllocator` / `showsManagerWorkspace = isManager` in buildNavSections
- * (is_admin no longer OR-s in) — so "My Allocation" (allocator surface) and
+ * (is_admin no longer OR-s in) — so "My allocation" (allocator surface) and
  * "Strategies" (manager surface) gate strictly on their own role
  * flag. The mobile twin (buildPrimaryMobileNav) is already pinned by
  * MobileNav.test.tsx; this is the DESKTOP-render pin for the same security
  * property.
  */
 describe("Sidebar role OR-logic pin — T-45-01 (GREEN, must not regress)", () => {
-  it("a manager-only user does NOT see the allocator-only 'My Allocation' entry", () => {
+  it("a manager-only user does NOT see the allocator-only 'My allocation' entry", () => {
     render(
       <Sidebar populatedSlugs={[]} isManager={true} isAllocator={false} />,
     );
@@ -649,14 +649,14 @@ describe("Sidebar role OR-logic pin — T-45-01 (GREEN, must not regress)", () =
     // Portfolios is a deep-link allocator surface — not in the manager nav.
     expect(screen.queryByText("Portfolios")).toBeNull();
     // ...but the allocator-only workspace entry must NOT leak to a manager.
-    expect(screen.queryByText("My Allocation")).toBeNull();
+    expect(screen.queryByText("My allocation")).toBeNull();
   });
 
-  it("an allocator DOES see 'My Allocation' but NOT the manager-only entries", () => {
+  it("an allocator DOES see 'My allocation' but NOT the manager-only entries", () => {
     render(
       <Sidebar populatedSlugs={[]} isAllocator={true} isManager={false} />,
     );
-    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.getByText("My allocation")).toBeInTheDocument();
     // The manager surface must NOT leak to a pure allocator.
     expect(screen.queryByText("Strategies")).toBeNull();
     expect(screen.queryByText("Portfolios")).toBeNull();
@@ -719,11 +719,33 @@ describe("Sidebar 'Add a Strategy' action entry (CONTRIB-01)", () => {
     expect(screen.getByText("Add a Strategy")).toBeInTheDocument();
   });
 
-  it("does NOT break the href items — 'My Allocation' is still a link", () => {
+  it("does NOT break the href items — 'My allocation' is still a link", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    expect(screen.getByText("My Allocation").closest("a")).toHaveAttribute(
+    expect(screen.getByText("My allocation").closest("a")).toHaveAttribute(
       "href",
       "/allocations",
     );
+  });
+});
+
+/**
+ * Phase 170.1.1 D-02 — the placeholder /referral page is gone, so the ACCOUNT
+ * group must not link to it. A dead nav link to a 404 is the failure this pins.
+ */
+describe("Sidebar ACCOUNT group — Profile only (Phase 170.1.1 D-02)", () => {
+  it.each([
+    ["allocator", { isAllocator: true }],
+    ["manager", { isManager: true }],
+    ["admin", { isAdmin: true }],
+    ["no roles", {}],
+  ])("lists Profile as the only ACCOUNT link for %s", (_name, flags) => {
+    render(<Sidebar populatedSlugs={[]} {...flags} />);
+    const account = screen.getByText("ACCOUNT").parentElement as HTMLElement;
+    const hrefs = within(account)
+      .getAllByRole("link")
+      .map((a) => a.getAttribute("href"));
+    expect(hrefs).toEqual(["/profile"]);
+    expect(document.querySelector('a[href="/referral"]')).toBeNull();
+    expect(screen.queryByText("Referral")).toBeNull();
   });
 });

@@ -4,7 +4,7 @@ import { getPopulatedCategorySlugs } from "@/lib/queries";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Browse Verified Strategies — Quantalyze",
+  title: "Browse Verified Strategies",
   description:
     "Explore exchange-verified quant strategies. Performance data sourced directly from exchange APIs.",
 };
