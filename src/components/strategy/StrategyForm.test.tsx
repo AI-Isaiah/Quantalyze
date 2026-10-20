@@ -315,13 +315,49 @@ describe("StrategyForm — 160-03 server-side persist (no client api_keys INSERT
     // every connect from this surface fails outright.
     expect(body.persist).toBe(true);
     // Default select value is "binance" (lowercase). The label is the
-    // component's pre-existing default template, now carried in the request
-    // body because the SERVER composes the row.
+    // component's default template, now carried in the request body because
+    // the SERVER composes the row. It names the venue by its display name,
+    // never by its wire code.
     expect(body.exchange).toBe("binance");
-    expect(body.label).toBe("binance key");
+    expect(body.label).toBe("Binance key");
 
     // ⭐ The load-bearing negative: zero browser-composed inserts.
     expect(apiKeysInsertArg).toBeNull();
+  });
+
+  it("labels the saved key with the venue's display name, not its wire code", async () => {
+    // The key is stored with this label and shown back on the strategy page, so
+    // "okx key" would persist the lowercase code the user never sees elsewhere.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          api_key_id: "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+          valid: true,
+          read_only: true,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    render(<StrategyForm mode="create" />);
+    fireEvent.click(screen.getByRole("button", { name: /connect api key/i }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(dialog.querySelector("select")!, { target: { value: "okx" } });
+    fireEvent.change(screen.getByPlaceholderText(/your read-only api key/i), {
+      target: { value: "kkkkkkkk" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/your api secret/i), {
+      target: { value: "ssssssss" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/okx passphrase/i), {
+      target: { value: "pppppppp" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Connect Key" }));
+    await screen.findByText("Read-only API key verified and connected.");
+
+    const body = validateBody(fetchSpy);
+    expect(body.exchange).toBe("okx");
+    expect(body.label).toBe("OKX key");
   });
 
   it("fails LOUDLY when a 2xx carries no api_key_id — never reports a key as connected", async () => {
