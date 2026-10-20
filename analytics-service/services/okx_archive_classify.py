@@ -41,7 +41,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Final, Mapping, Sequence
+from typing import AbstractSet, Any, Final, Mapping, Sequence
 
 from services.okx_archive_files import ArchiveFile, ArchiveParseError, ArchiveRow
 
@@ -66,8 +66,9 @@ LIVE_REALIZED_INST_TYPES: Final[tuple[str, ...]] = ("SWAP", "FUTURES", "SPOT", "
 # on a counted row is a permanent stop (founder must-settle: currency).
 ARCHIVE_USD_FAMILY: Final[frozenset[str]] = frozenset({"USDT", "USDC", "USD"})
 
-# The completeness floor of ``verify_bal_chain``: a currency that carries money (a nonzero
-# pnl, fee or balChg on any bill) must have at least this many chained pairs, i.e. at least
+# The completeness floor of ``verify_bal_chain``: a currency whose money the aggregate SUMS
+# (``ArchiveAggregate.summed_ccys``: a nonzero pnl, fee or balChg on a bill that reaches the
+# realized, funding, flow or non-external leg) must have at least this many chained pairs, i.e. at least
 # three bills whose running ``bal`` agrees with their ``balChg``. One pair is a single link
 # between two neighbouring bills: it says nothing about whether the weeks around them are
 # present, and zero pairs (a lone bill) was never evaluated at all, so a chain that "passed"
@@ -126,6 +127,12 @@ class ArchiveAggregate:
     census: dict[str, Any]
     unknown_zero_effect: int
     covered_days: frozenset[str]
+    #: The currencies whose money the legs above actually add up: a USD-family currency with a
+    #: nonzero effect on a bill that reached the realized, funding, flow or non-external sum.
+    #: This is the scope of ``verify_bal_chain``'s ``MIN_CHAINED_PAIRS`` floor (WR-01): a
+    #: currency the aggregate never sums (a coin-margined option) has no published figure
+    #: resting on its completeness.
+    summed_ccys: frozenset[str]
 
 
 def _bill_order_key(row: ArchiveRow) -> tuple[bool, int, str]:
@@ -151,7 +158,9 @@ def _adjacent_runs(files: Sequence[ArchiveFile]) -> list[list[int]]:
     return runs
 
 
-def verify_bal_chain(files: Sequence[ArchiveFile]) -> dict[str, Any]:
+def verify_bal_chain(
+    files: Sequence[ArchiveFile], summed_ccys: AbstractSet[str]
+) -> dict[str, Any]:
     """F1 / WR-01: prove the requested quarter files are the COMPLETE ledger, or stop.
 
     The job reads a quarter file as complete: a covered day with no bill becomes an explicit
@@ -169,8 +178,11 @@ def verify_bal_chain(files: Sequence[ArchiveFile]) -> dict[str, Any]:
     * ``bal_chain_break``: any pair breaks anywhere. The detail names, per ccy, the breaks,
       how many of them sit on a pair that crosses two files (``seam_breaks``) and the day of
       the first, and each file's ts range.
-    * ``too_few_pairs``: a ccy that carries money has fewer than ``MIN_CHAINED_PAIRS`` pairs,
-      so its completeness cannot be proven. A break is reported before this.
+    * ``too_few_pairs``: a ccy in ``summed_ccys`` (the currencies whose money the aggregate adds
+      up, ``ArchiveAggregate.summed_ccys``) has fewer than ``MIN_CHAINED_PAIRS`` pairs, so its
+      completeness cannot be proven. A currency outside that set (a coin-margined option) is
+      not floored, because no published figure rests on its completeness, but its breaks above
+      still stop the job and it still appears in the reading. A break is reported before this.
 
     On success it returns the reading the job records in ``info.bal_chain``:
     ``{"ccys": {ccy: {pairs_checked, first_day, last_day}}, "total_pairs": n}``.
@@ -191,7 +203,6 @@ def verify_bal_chain(files: Sequence[ArchiveFile]) -> dict[str, Any]:
         )
     runs = _adjacent_runs(files)
     ccys: dict[str, dict[str, Any]] = {}
-    carries_money: set[str] = set()
     for run in runs:
         unique: dict[str, tuple[ArchiveRow, int]] = {}
         for index in run:
@@ -210,8 +221,6 @@ def verify_bal_chain(files: Sequence[ArchiveFile]) -> dict[str, Any]:
             )
             entry["first_day"] = min(entry["first_day"], row.day)
             entry["last_day"] = max(entry["last_day"], row.day)
-            if row.pnl != 0 or row.fee != 0 or row.bal_chg != 0:
-                carries_money.add(row.ccy)
             prior = previous.get(row.ccy)
             if prior is not None:
                 entry["pairs_checked"] += 1
@@ -225,7 +234,9 @@ def verify_bal_chain(files: Sequence[ArchiveFile]) -> dict[str, Any]:
     ccys = dict(sorted(ccys.items()))
     total_pairs = sum(entry["pairs_checked"] for entry in ccys.values())
     starved = sorted(
-        ccy for ccy in carries_money if ccys[ccy]["pairs_checked"] < MIN_CHAINED_PAIRS
+        ccy
+        for ccy in summed_ccys
+        if ccys.get(ccy, {}).get("pairs_checked", 0) < MIN_CHAINED_PAIRS
     )
     broken = any(entry["breaks"] for entry in ccys.values())
     if broken or starved:
@@ -293,6 +304,7 @@ def aggregate_archive(
     map_drift: dict[str, int] = defaultdict(int)
     non_usd_rows: dict[str, int] = defaultdict(int)
     non_usd_months: dict[str, set[str]] = defaultdict(set)
+    summed: set[str] = set()
 
     for row in rows:
         bucket = SUBTYPE_BUCKETS.get(row.sub_type, Bucket.UNKNOWN)
@@ -334,6 +346,8 @@ def aggregate_archive(
                     non_usd_months[row.ccy or _BLANK].add(month)
                 continue
             non_external[row.day] += row.bal_chg
+            if nonzero:
+                summed.add(row.ccy)
             if in_live_set:
                 realized[row.day] += row.pnl + row.fee
             elif row.pnl + row.fee != 0:
@@ -359,6 +373,8 @@ def aggregate_archive(
                 non_usd_months[row.ccy or _BLANK].add(month)
             continue
 
+        if nonzero:
+            summed.add(row.ccy)
         if bucket is Bucket.REALIZED:
             realized[row.day] += row.pnl + row.fee
         elif bucket is Bucket.FUNDING:
@@ -399,4 +415,5 @@ def aggregate_archive(
         census=census,
         unknown_zero_effect=unknown_zero,
         covered_days=frozenset().union(*(f.covered_days for f in files)),
+        summed_ccys=frozenset(summed),
     )

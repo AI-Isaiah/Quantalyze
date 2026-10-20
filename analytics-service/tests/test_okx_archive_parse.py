@@ -87,6 +87,15 @@ def _stop(callable_, *args, **kwargs) -> ArchiveParseError:
     return info.value
 
 
+def _chain(files, summed_ccys=None):
+    """``verify_bal_chain`` as the job calls it: the floor is scoped to the currencies the
+    aggregate sums, so the aggregate is built first (``_census_of``) and its ``summed_ccys``
+    passed. Pass ``summed_ccys`` explicitly to pin a floor scope without classifying."""
+    if summed_ccys is None:
+        summed_ccys = aggregate_archive(files, None).summed_ccys
+    return verify_bal_chain(files, summed_ccys)
+
+
 def _row_kwargs(bill_id: str, sub: str, when: str, **overrides: str) -> dict[str, str]:
     base = {
         "instType": "SWAP",
@@ -646,7 +655,7 @@ class TestBalChainCompleteness:
         return parse_archive_csv(_emit(header, rows), year=2026, quarter=quarter)
 
     def test_a_chaining_file_passes_and_returns_its_reading(self):
-        reading = verify_bal_chain([self._file("q2_like.csv", quarter="Q2")])
+        reading = _chain([self._file("q2_like.csv", quarter="Q2")])
         # q2_like.csv carries 14 USDT bills: 13 consecutive pairs, first bill 04-01, last 06-30.
         assert reading == {
             "ccys": {"USDT": {"pairs_checked": 13, "first_day": "2026-04-01", "last_day": "2026-06-30"}},
@@ -654,7 +663,7 @@ class TestBalChainCompleteness:
         }
 
     def test_the_q3_fixture_chains_with_the_floor_met_by_each_of_its_ccys(self):
-        reading = verify_bal_chain([self._file()])
+        reading = _chain([self._file()])
         # 19 USDT bills -> 18 pairs; 3 USDC bills -> 2 pairs, exactly the floor.
         assert reading["ccys"]["USDT"]["pairs_checked"] == 18
         assert reading["ccys"]["USDC"]["pairs_checked"] == MIN_CHAINED_PAIRS == 2
@@ -662,7 +671,7 @@ class TestBalChainCompleteness:
 
     def test_an_interior_row_dropped_from_the_file_is_archive_incomplete(self):
         # 700000007 (a 7.47 trade) is removed: the next bill's bal no longer follows.
-        err = _stop(verify_bal_chain, [self._file(drop={"700000007"})])
+        err = _stop(_chain, [self._file(drop={"700000007"})])
         assert err.stop_class == "archive_incomplete"
         assert err.detail["reason"] == "bal_chain_break"
         usdt = err.detail["ccys"]["USDT"]
@@ -672,7 +681,7 @@ class TestBalChainCompleteness:
         assert usdt["seam_breaks"] == 0
 
     def test_the_stop_carries_counts_and_dates_never_an_amount(self):
-        err = _stop(verify_bal_chain, [self._file(drop={"700000007"})])
+        err = _stop(_chain, [self._file(drop={"700000007"})])
         text = _detail_text(err)
         for amount in ("3915.45", "3942.45", "7.47", "27.00", "3945.45"):
             assert amount not in text, f"an amount leaked into the stop detail: {amount}"
@@ -682,13 +691,13 @@ class TestBalChainCompleteness:
         # completeness only (plus the seam between adjacent quarters). The head of the
         # earliest file and the tail of the latest are what ts_min_day / ts_max_day and the
         # longest bill-less run are for; this test records the limit instead of hiding it.
-        verify_bal_chain([self._file(drop={"700000020"})])
+        _chain([self._file(drop={"700000020"})])
 
     def test_a_row_with_no_ccy_cannot_be_chained_and_stops_rather_than_assuming(self):
         def blank_ccy(header, rows):
             rows[3][header.index("ccy")] = ""
 
-        err = _stop(verify_bal_chain, [self._file(edit=blank_ccy)])
+        err = _stop(verify_bal_chain, [self._file(edit=blank_ccy)], frozenset())
         assert err.stop_class == "archive_incomplete"
         assert err.detail["reason"] == "unchainable_row"
 
@@ -696,7 +705,7 @@ class TestBalChainCompleteness:
         def odd_id(header, rows):
             rows[3][header.index("billId")] = "abc-3"
 
-        err = _stop(verify_bal_chain, [self._file(edit=odd_id)])
+        err = _stop(verify_bal_chain, [self._file(edit=odd_id)], frozenset())
         assert err.stop_class == "archive_incomplete"
         assert err.detail["reason"] == "unchainable_row"
 
@@ -743,7 +752,7 @@ class TestBalChainCrossesTheQuarterSeam:
 
     def test_two_adjacent_quarters_that_chain_across_the_seam_pass(self):
         (h2, r2), (h3, r3) = _q2_q3_ledgers()
-        reading = verify_bal_chain([_parsed(h2, r2, "Q2"), _parsed(h3, r3, "Q3")])
+        reading = _chain([_parsed(h2, r2, "Q2"), _parsed(h3, r3, "Q3")])
         # 8 bills in one USDT chain: 7 pairs, one of them the seam pair (06-29 -> 07-02).
         assert reading == {
             "ccys": {"USDT": {"pairs_checked": 7, "first_day": "2026-04-02", "last_day": "2026-09-01"}},
@@ -753,8 +762,8 @@ class TestBalChainCrossesTheQuarterSeam:
     def test_a_q2_file_missing_its_last_rows_stops_at_the_seam(self):
         (h2, r2), (h3, r3) = _q2_q3_ledgers()
         truncated = r2[:3]  # the 06-29 bill is gone; Q2 still chains on its own (2 pairs)
-        verify_bal_chain([_parsed(h2, truncated, "Q2")])
-        err = _stop(verify_bal_chain, [_parsed(h2, truncated, "Q2"), _parsed(h3, r3, "Q3")])
+        _chain([_parsed(h2, truncated, "Q2")])
+        err = _stop(_chain, [_parsed(h2, truncated, "Q2"), _parsed(h3, r3, "Q3")])
         assert err.stop_class == "archive_incomplete" and err.detail["reason"] == "bal_chain_break"
         usdt = err.detail["ccys"]["USDT"]
         assert (usdt["breaks"], usdt["seam_breaks"], usdt["first_break_day"]) == (1, 1, "2026-07-02")
@@ -762,15 +771,15 @@ class TestBalChainCrossesTheQuarterSeam:
     def test_a_q3_file_missing_its_first_rows_stops_at_the_seam(self):
         (h2, r2), (h3, r3) = _q2_q3_ledgers()
         truncated = r3[1:]  # the 07-02 bill is gone; Q3 still chains on its own (2 pairs)
-        verify_bal_chain([_parsed(h3, truncated, "Q3")])
-        err = _stop(verify_bal_chain, [_parsed(h2, r2, "Q2"), _parsed(h3, truncated, "Q3")])
+        _chain([_parsed(h3, truncated, "Q3")])
+        err = _stop(_chain, [_parsed(h2, r2, "Q2"), _parsed(h3, truncated, "Q3")])
         assert err.stop_class == "archive_incomplete"
         usdt = err.detail["ccys"]["USDT"]
         assert (usdt["breaks"], usdt["seam_breaks"], usdt["first_break_day"]) == (1, 1, "2026-07-15")
 
     def test_the_order_the_files_are_passed_in_does_not_matter(self):
         (h2, r2), (h3, r3) = _q2_q3_ledgers()
-        err = _stop(verify_bal_chain, [_parsed(h3, r3[1:], "Q3"), _parsed(h2, r2, "Q2")])
+        err = _stop(_chain, [_parsed(h3, r3[1:], "Q3"), _parsed(h2, r2, "Q2")])
         assert err.detail["ccys"]["USDT"]["seam_breaks"] == 1
 
     def test_quarters_that_are_not_adjacent_are_never_chained_to_each_other(self):
@@ -781,18 +790,18 @@ class TestBalChainCrossesTheQuarterSeam:
             "Q4", [("2026-10-05 10:00:00", "2"), ("2026-11-05 10:00:00", "3"), ("2026-12-05 10:00:00", "4")],
             opening="9000", first_id=300,
         )
-        reading = verify_bal_chain([_parsed(h2, r2, "Q2"), _parsed(h4, r4, "Q4")])
+        reading = _chain([_parsed(h2, r2, "Q2"), _parsed(h4, r4, "Q4")])
         assert reading["ccys"]["USDT"]["pairs_checked"] == 3 + 2
 
     def test_a_break_inside_one_file_is_still_found_and_not_called_a_seam_break(self):
         (h2, r2), (h3, r3) = _q2_q3_ledgers()
-        err = _stop(verify_bal_chain, [_parsed(h2, r2, "Q2"), _parsed(h3, r3[:1] + r3[2:], "Q3")])
+        err = _stop(_chain, [_parsed(h2, r2, "Q2"), _parsed(h3, r3[:1] + r3[2:], "Q3")])
         usdt = err.detail["ccys"]["USDT"]
         assert (usdt["breaks"], usdt["seam_breaks"], usdt["first_break_day"]) == (1, 0, "2026-08-10")
 
     def test_the_stop_names_each_file_range_for_the_founder(self):
         (h2, r2), (h3, r3) = _q2_q3_ledgers()
-        err = _stop(verify_bal_chain, [_parsed(h2, r2[:2], "Q2"), _parsed(h3, r3, "Q3")])
+        err = _stop(_chain, [_parsed(h2, r2[:2], "Q2"), _parsed(h3, r3, "Q3")])
         assert err.detail["files"] == [
             {"ts_min_day": "2026-04-02", "ts_max_day": "2026-05-10"},
             {"ts_min_day": "2026-07-02", "ts_max_day": "2026-09-01"},
@@ -816,17 +825,17 @@ class TestBalChainFloor:
 
     def test_one_pair_for_a_ccy_with_money_on_it_is_too_few(self):
         # 700000010 (3.33 pnl) and 700000021: two bills, ONE pair.
-        err = _stop(verify_bal_chain, [self._with_usdc(keep={"700000010", "700000021"})])
+        err = _stop(_chain, [self._with_usdc(keep={"700000010", "700000021"})])
         assert err.stop_class == "archive_incomplete" and err.detail["reason"] == "too_few_pairs"
         assert err.detail["starved"] == ["USDC"]
         assert err.detail["ccys"]["USDC"]["pairs_checked"] == 1
 
     def test_a_lone_row_with_money_on_it_has_no_pair_at_all(self):
-        err = _stop(verify_bal_chain, [self._with_usdc(keep={"700000010"})])
+        err = _stop(_chain, [self._with_usdc(keep={"700000010"})])
         assert err.detail["reason"] == "too_few_pairs" and err.detail["starved"] == ["USDC"]
 
     def test_exactly_two_pairs_meets_the_floor(self):
-        verify_bal_chain([self._with_usdc(keep={"700000010", "700000021", "700000022"})])
+        _chain([self._with_usdc(keep={"700000010", "700000021", "700000022"})])
 
     def test_a_ccy_whose_every_bill_is_zero_effect_needs_no_proof(self):
         header, rows = _read_fixture("q3_like.csv")
@@ -835,14 +844,71 @@ class TestBalChainFloor:
             _new_row(header, instType="SWAP", billId="700000030", subType="2", ts=_ms("2026-08-03 10:00:00"),
                      balChg="0", bal="50", ccy="USD", pnl="0", fee="0")
         )
-        reading = verify_bal_chain([parse_archive_csv(_emit(header, rows), year=2026, quarter="Q3")])
+        reading = _chain([parse_archive_csv(_emit(header, rows), year=2026, quarter="Q3")])
         assert reading["ccys"]["USD"]["pairs_checked"] == 0
 
     def test_a_chain_break_is_reported_before_the_floor(self):
         header, rows = _read_fixture("q3_like.csv")
         rows = [r for r in rows if r[header.index("billId")] not in {"700000007", "700000021", "700000022"}]
-        err = _stop(verify_bal_chain, [parse_archive_csv(_emit(header, rows), year=2026, quarter="Q3")])
+        err = _stop(_chain, [parse_archive_csv(_emit(header, rows), year=2026, quarter="Q3")])
         assert err.detail["reason"] == "bal_chain_break"
+
+
+class TestBalChainFloorScope:
+    """WR-01 (review round 3). The ``MIN_CHAINED_PAIRS`` floor proves the files are complete
+    for the money the rebuild SUMS. A currency whose rows the aggregate never sums (a
+    coin-margined option settles in BTC; a USD-family OPTION bill is reported per month and
+    class, never added to the realized leg) has no published figure resting on its
+    completeness, so a lone bill of it must not stop the job. The BREAK check is a different
+    question - a break anywhere means a truncated file - and still runs on every currency."""
+
+    @staticmethod
+    def _q3_plus(*extra: dict[str, str]):
+        return parse_archive_csv(_q3_with(*extra), year=2026, quarter="Q3")
+
+    @staticmethod
+    def _btc_option(bill_id: str, when: str, *, chg: str, bal: str) -> dict[str, str]:
+        return dict(instType="OPTION", billId=bill_id, subType="2", ts=_ms(when), balChg=chg,
+                    bal=bal, ccy="BTC", pnl=chg, fee="0")
+
+    def test_summed_ccys_names_exactly_the_currencies_whose_money_the_aggregate_adds(self):
+        file = self._q3_plus(
+            self._btc_option("700000040", "2026-09-20 10:00:00", chg="0.5", bal="0.5"),
+            dict(instType="OPTION", billId="700000041", subType="2", ts=_ms("2026-09-21 10:00:00"),
+                 balChg="3", bal="3", ccy="USDC", pnl="3", fee="0"),
+        )
+        aggregate = aggregate_archive([file], None)
+        # The fixture's USDT and USDC bills reach the realized/funding/flow legs; the BTC
+        # option bill is counted in excluded_non_usd_rows and the USDC OPTION bill is only
+        # reported under excluded_by_month. USDC stays because the fixture's own USDC bills sum.
+        assert aggregate.summed_ccys == frozenset({"USDT", "USDC"})
+        assert aggregate.census["excluded_non_usd_rows"] == 1
+
+    def test_a_lone_coin_margined_option_bill_passes_the_floor_and_is_still_reported(self):
+        file = self._q3_plus(self._btc_option("700000040", "2026-09-20 10:00:00", chg="0.5", bal="0.5"))
+        reading = _chain([file])
+        assert reading["ccys"]["BTC"] == {"pairs_checked": 0, "first_day": "2026-09-20", "last_day": "2026-09-20"}
+
+    def test_a_lone_usdc_realized_bill_still_stops_the_floor(self):
+        # The USD family IS summed, so a lone bill of it is unprovable and must stop.
+        err = _stop(_chain, [TestBalChainFloor()._with_usdc(keep={"700000010"})])
+        assert err.detail["reason"] == "too_few_pairs" and err.detail["starved"] == ["USDC"]
+
+    def test_a_break_inside_an_unsummed_currency_still_stops(self):
+        file = self._q3_plus(
+            self._btc_option("700000040", "2026-09-20 10:00:00", chg="0.5", bal="0.5"),
+            self._btc_option("700000041", "2026-09-21 10:00:00", chg="0.25", bal="0.75"),
+            # a missing bill between: bal jumps by 1.0 while balChg says 0.25
+            self._btc_option("700000042", "2026-09-22 10:00:00", chg="0.25", bal="1.75"),
+        )
+        err = _stop(_chain, [file])
+        assert err.detail["reason"] == "bal_chain_break"
+        assert err.detail["ccys"]["BTC"]["breaks"] == 1
+
+    def test_the_floor_is_applied_to_the_summed_set_it_is_given(self):
+        file = self._q3_plus(self._btc_option("700000040", "2026-09-20 10:00:00", chg="0.5", bal="0.5"))
+        err = _stop(_chain, [file], frozenset({"BTC"}))
+        assert err.detail["reason"] == "too_few_pairs" and err.detail["starved"] == ["BTC"]
 
 
 class TestLongestBilllessRun:

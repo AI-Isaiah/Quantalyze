@@ -27,6 +27,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -999,8 +1000,8 @@ class TestFlowSeamReading:
             "live_from_seam_used": "0",
             "diff": "400",
         }
-        # The overlap totals open at the seam window too, so the 08-02 transfer is inside them
-        # (the reconcile window opens 08-03 and never saw it).
+        # The overlap totals open at the seam, so the 08-02 transfer is inside them (the
+        # reconcile window opens 08-03 and never saw it).
         assert info["flow_totals_overlap"] == {"archive": "400", "live": "0"}
 
     @pytest.mark.asyncio
@@ -1020,11 +1021,35 @@ class TestFlowSeamReading:
         outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
 
         assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
-        seam = world.result()["info"]["flow_seam"]
+        info = world.result()["info"]
+        seam = info["flow_seam"]
         assert seam["archive_before_seam_used"] == "-200"
         assert seam["live_from_seam_used"] == "-200"
         assert seam["archive_from_seam_discarded"] == "0"
         assert seam["diff"] == "200"
+        # WR-02. The totals open AT the seam, so they compare only days both sources can
+        # carry: the archive's 07-30 bill is before it, the live 07-31 flow is on it. The
+        # double-counted 200 must read as the disagreement it is, never as "-200 == -200".
+        assert info["flow_totals_overlap"] == {"archive": "0", "live": "-200"}
+
+    @pytest.mark.asyncio
+    async def test_an_archive_transfer_before_the_seam_is_not_in_the_overlap_totals(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WR-02. The live side cannot carry a day before the seam (its flows start there), so
+        an archive transfer on 07-27 would read as a one-sided "disagreement" the runbook then
+        explains wrongly. It belongs to ``flow_seam.archive_before_seam_used`` and nowhere in
+        the totals."""
+        both = _standard_bills().flow("2026-07-27", "300").bytes()
+        db = _db_with((STRATEGY_ID, GAP_A))
+        world = _install(monkeypatch, db, _standard_live(), q3=both)
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        info = world.result()["info"]
+        assert info["flow_seam"]["archive_before_seam_used"] == "300"
+        assert info["flow_totals_overlap"] == {"archive": "0", "live": "0"}
 
     @pytest.mark.asyncio
     async def test_a_quiet_seam_reads_all_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1051,6 +1076,100 @@ class TestFlowSeamReading:
 
         assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
         assert world.result()["info"]["flow_seam"]["diff"] == "400000"
+
+
+def _seam_inputs(
+    *, seam: str, covered_through: str, covered_from: str = "2026-07-01",
+    archive: dict[str, str] | None = None, live: dict[str, str] | None = None,
+) -> tuple[Any, Any]:
+    """``_flow_readings``' two inputs, reduced to the fields it reads: the archive's per-day
+    flows and covered days, and the live flows with their seam."""
+    first, last = date.fromisoformat(covered_from), date.fromisoformat(covered_through)
+    days = frozenset(
+        (first + timedelta(days=i)).isoformat() for i in range((last - first).days + 1)
+    )
+    aggregate = SimpleNamespace(
+        flows_by_day={d: Decimal(v) for d, v in (archive or {}).items()}, covered_days=days
+    )
+    live_ref = SimpleNamespace(
+        flow_window_first_day=seam,
+        flows=[SimpleNamespace(utc_day_iso=d, usd_signed=float(v)) for d, v in (live or {}).items()],
+    )
+    return aggregate, live_ref
+
+
+class TestFlowSeamAfterWindowIsClamped:
+    """WR-04 (review round 3, IN-02). The after-window ran ``seam + 6`` whatever the archive
+    covered. On a late re-run (Q3 the last quarter, run date after about 12-23) it outran the
+    archive: the live side counted days the archive CANNOT carry, so ``diff`` came out nonzero
+    for an account with no discrepancy at all. A reading that is wrong without a defect behind
+    it sends the founder looking for one."""
+
+    def test_the_after_window_ends_at_the_last_covered_archive_day(self) -> None:
+        aggregate, live = _seam_inputs(
+            seam="2026-09-27", covered_through="2026-09-30", live={"2026-10-02": "250"}
+        )
+        _, seam = okx_archive_job._flow_readings(aggregate, live, set())
+        assert seam is not None
+        # 10-02 is past the archive's last day: no archive bill could ever be there, so a
+        # live flow on it is not a disagreement and must not enter the comparison.
+        assert seam["window"]["to"] == "2026-09-30"
+        assert seam["live_from_seam_used"] == "0"
+        assert seam["diff"] == "0"
+
+    def test_a_full_week_after_the_seam_is_unchanged_when_the_archive_covers_it(self) -> None:
+        aggregate, live = _seam_inputs(
+            seam="2026-07-31", covered_through="2026-09-30",
+            archive={"2026-08-02": "400"}, live={},
+        )
+        _, seam = okx_archive_job._flow_readings(aggregate, live, set())
+        assert seam is not None
+        assert seam["window"] == {"from": "2026-07-24", "to": "2026-08-06"}
+        assert seam["diff"] == "400"
+
+    def test_an_archive_that_ends_before_the_seam_is_unmeasurable_not_zero(self) -> None:
+        aggregate, live = _seam_inputs(
+            seam="2026-08-15", covered_through="2026-06-30", covered_from="2026-04-01",
+            live={"2026-08-16": "75"},
+        )
+        _, seam = okx_archive_job._flow_readings(aggregate, live, set())
+        assert seam is not None
+        assert seam["diff"] is None, "no archive day on or after the seam: nothing to compare"
+        assert seam["unmeasurable"] == "archive_ends_before_the_seam"
+        assert seam["archive_from_seam_discarded"] is None and seam["live_from_seam_used"] is None
+
+
+class TestRunbookFlowSeamSignal:
+    """WR-03 (review round 3, IN-02). The runbook's no-go was "``archive_before_seam_used`` and
+    ``live_from_seam_used`` both nonzero". That is true of any account with an ordinary deposit
+    in the week before the seam and another in the week after, so it manufactured no-gos with no
+    defect behind them. ``diff`` is the one number that says the two sources disagree after the
+    seam; the founder judges it against the movements he knows, and no limit is written down
+    (D-13)."""
+
+    RUNBOOK = Path(__file__).resolve().parents[2] / "docs" / "runbooks" / "okxhistory-go-live.md"
+
+    def _item(self) -> str:
+        text = self.RUNBOOK.read_text(encoding="utf-8")
+        start = text.index("- `info.flow_seam` and `info.flow_totals_overlap`")
+        return text[start : text.index("- `info.live_from`", start)]
+
+    def test_both_nonzero_is_no_longer_a_no_go(self) -> None:
+        text = self.RUNBOOK.read_text(encoding="utf-8")
+        assert "both nonzero" not in text and "both sides nonzero" not in text
+
+    def test_diff_is_the_signal_and_no_limit_is_written(self) -> None:
+        item = self._item()
+        assert "`diff` the founder cannot match to one movement" in item
+        assert not re.search(r"(?i)\b(limit|threshold|tolerance)\s*(of|is|:)?\s*\$?\d", item)
+
+    def test_the_totals_window_is_described_as_starting_at_the_seam(self) -> None:
+        item = self._item()
+        assert "from the seam to the end of the archive" in item
+        assert "a week before the seam" not in item
+
+    def test_an_unmeasurable_seam_reading_is_explained(self) -> None:
+        assert "archive_ends_before_the_seam" in self._item()
 
 
 class TestLiveCrawlFlags:
@@ -1992,10 +2111,11 @@ class TestArchiveCompleteness:
 
     def test_the_helper_file_chains_before_a_row_is_dropped(self) -> None:
         # Guard the guard: the file the tests below mutilate is itself a valid chaining file.
-        from services.okx_archive_classify import verify_bal_chain
+        from services.okx_archive_classify import aggregate_archive, verify_bal_chain
         from services.okx_archive_files import parse_archive_csv
 
-        verify_bal_chain([parse_archive_csv(_standard_bills().bytes(), year=2026, quarter="Q3")])
+        files = [parse_archive_csv(_standard_bills().bytes(), year=2026, quarter="Q3")]
+        verify_bal_chain(files, aggregate_archive(files, None).summed_ccys)
 
     @pytest.mark.parametrize("mode", ["calibrate", "apply"])
     @pytest.mark.asyncio
@@ -2080,6 +2200,27 @@ class TestArchiveCompleteness:
         assert info["floor"] == 2
         assert db.apply_calls == 0
         _no_writes_but_progress(world, db)
+
+    @pytest.mark.asyncio
+    async def test_a_lone_coin_margined_option_bill_does_not_stop_the_floor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WR-01 (review round 3). A BTC-margined OPTION bill settles in the coin, which is
+        ordinary on OKX, and a currency touched once in six months has no pairs. The aggregate
+        never sums it (``excluded_non_usd_rows``), so its completeness is not something the
+        published figures rest on, and stopping the whole job ``too_few_pairs`` on it would be a
+        permanent false stop that only a code change clears. The floor is for currencies whose
+        money the rebuild SUMS; the break check still runs on every currency."""
+        db = _db_with((STRATEGY_ID, GAP_A))
+        bills = _standard_bills().realized("2026-09-20", "5", inst="OPTION", ccy="BTC")
+        world = _install(monkeypatch, db, _standard_live(), q3=bills.bytes())
+
+        outcome = await _run(_meta("calibrate", [STRATEGY_ID]))
+
+        assert outcome.outcome == DispatchOutcome.DONE, outcome.error_message
+        chain = world.result()["info"]["bal_chain"]
+        assert chain["ccys"]["BTC"] == {"pairs_checked": 0, "first_day": "2026-09-20", "last_day": "2026-09-20"}
+        assert chain["ccys"]["USDT"]["pairs_checked"] == 10
 
     QUARTERS_Q2_Q3 = [{"year": 2026, "quarter": "Q2"}, {"year": 2026, "quarter": "Q3"}]
 
