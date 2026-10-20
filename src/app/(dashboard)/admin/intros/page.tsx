@@ -6,6 +6,7 @@ import type { Metadata } from "next";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { scrubPii } from "@/lib/admin/pii-scrub";
 import { formatNumber, formatPercent } from "@/lib/utils";
+import { introSnapshotStatusLabel, introSourceLabel } from "@/lib/display-labels";
 import { PortfolioSnapshotSchema, type PortfolioSnapshotJSON } from "@/lib/intro/snapshot";
 
 export const metadata: Metadata = {
@@ -167,10 +168,10 @@ export default async function AdminIntrosPage() {
                   profile?.display_name ||
                   profile?.company ||
                   profile?.email ||
-                  row.allocator_id;
-                const strategyName = strategyMap.get(row.strategy_id) ?? row.strategy_id;
+                  "Unknown allocator";
+                const strategyName = strategyMap.get(row.strategy_id) ?? "Unnamed strategy";
                 const replacementName = row.replacement_for
-                  ? strategyMap.get(row.replacement_for) ?? row.replacement_for
+                  ? strategyMap.get(row.replacement_for) ?? "Unnamed strategy"
                   : null;
 
                 // Scrub the snapshot server-side BEFORE render, then validate
@@ -212,7 +213,7 @@ export default async function AdminIntrosPage() {
                             : "text-text-muted text-caption uppercase tracking-wider"
                         }
                       >
-                        {source}
+                        {introSourceLabel(source)}
                       </span>
                     </td>
                     <td className="py-3 pr-4 text-caption text-text-secondary">
@@ -221,7 +222,7 @@ export default async function AdminIntrosPage() {
                     <td className="py-3 pr-4">
                       <div className="space-y-0.5 text-caption">
                         <div className="text-micro uppercase tracking-wider text-text-muted">
-                          {snapshotStatus}
+                          {introSnapshotStatusLabel(snapshotStatus)}
                         </div>
                         <div className="text-text-primary font-metric tabular-nums">
                           Sharpe {formatNumber(sharpe)}
