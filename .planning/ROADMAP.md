@@ -188,6 +188,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — 8 plans plus review and fix rounds (CSV validation hardening, Sentry redaction of x-service-key and x-tenant-claim), shipped as v0.132.6.0 (#1082); SC-5 390px/640px passed on the seeded local stack; verification passed; security SECURED (completed 2026-10-20)
 - [x] **Phase 170.1.1: TITLES — every page has its own tab title and a sentence-case heading** (INSERTED 2026-10-15) — 9 plans plus two review fix rounds (failed title reads give a neutral title and report to Sentry; the page-title census covers every title shape), shipped as v0.132.9.0 (#1093); SC-4 read on production at 367 CSS px; verification passed; security SECURED (completed 2026-10-20)
 - [ ] **Phase 170.1.2: LABELS — every page shows names and readable labels instead of ids and internal values** (INSERTED 2026-10-15) — not yet planned (split from 170.1 by founder decision; after 170.1)
+- [ ] **Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole** (INSERTED 2026-10-20) — not yet planned (founder 2026-10-20; equity chart 400 px floor, clipped axis labels)
 - [x] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned — shipped v0.129.11.0 (#997); closed 2026-10-12 after the founder phone re-check (completed 2026-10-12)
 - [x] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 3 plans (completed 2026-10-11)
 - [x] **Phase 170.4: ALLOCHOLDINGS — the /allocations tabs agree with each other** (INSERTED 2026-10-03) — 14 plans, two PRs (#1003, #1006) (completed 2026-10-11)
@@ -6190,6 +6191,25 @@ Plans:
 
 ---
 
+### Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole (INSERTED)
+
+**Goal:** On a 390 px phone (iPhone 12, the narrowest supported viewport per the founder decision of 2026-09-27 under Phase 170 LAYOUT), the /allocations Overview equity chart fits inside its card with every axis label visible, and no axis tick label on the Overview or the scenario composer is cut by its own SVG. Desktop rendering is unchanged.
+**Booked 2026-10-20 by founder decision ("Book as a Small Phase").**
+**Evidence**, measured 2026-10-20 by the Phase 167.1.2.1.2 HISTORYREADER post-deploy check on a seeded local stack (375x812 and 390x844, DPR 3):
+- **(1) The equity chart has a 400 px floor.** `src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx` floors its measured width with `Math.max(400, …)`, so the SVG is always at least 400 px wide. Its card clips it at 319 px (375) and 334 px (390), which hides the right-hand axis labels ("0%" to "-3.5%", "Oct"). The page itself does not scroll sideways. A book with open positions shows the same.
+- **(2) Axis tick labels are cut 3-4 px by their own `<svg>`**: "2025" reads "025", "P95 +0.1%", "10-20". This is item (2) of TODOS `[170.1-SC5-SCENARIO-NARROW-DEFECTS]`, which this phase takes over. Items (1), (3) and (4) of that entry stay where they are.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 170.1
+**Success Criteria** (what must be TRUE):
+1. At 390 px the Overview equity chart's SVG is no wider than its card's content box and all of its axis labels are visible. A test goes RED on the 400 px floor.
+2. At 390 px no axis tick label on the /allocations Overview or the scenario composer is clipped by its SVG: each measured label box lies inside its SVG box.
+3. Desktop rendering is unchanged, shown by a desktop-width measurement before and after.
+4. After deploy, a 390 px and a 640 px measurement in the logged-in browser are recorded in the phase VERIFICATION.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ### Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity (INSERTED)
 
 **Goal:** Six user-facing items are fixed (the sixth, the Discovery page's phone overflow, routed 2026-10-08), four from Phase 170's post-deploy pass and one from Phase 166.3's recompute. The Allocations Holdings tab never scrolls sideways. The daily BTC benchmark refresh still lands a day when Binance fails. The /compare equity chart shows each strategy's real cumulative return. A CSV-ingested strategy's factsheet masthead states its venue as self-reported. Every benchmark-relative metric is measured over the strategy's full history wherever BTC prices exist.
@@ -6433,6 +6453,7 @@ kept verbatim.
 | 170.1 COPY | 8/8 | Complete — CSV never raises or stores a wrong date (grids 135→0, 489→0); Sentry header redaction; SC-5 passed; SECURED | 2026-10-20 · v0.132.6.0 · #1082 |
 | 170.1.1 TITLES | 9/9 | Complete — own tab title on every route under one template; sentence-case headings; /referral removed; SC-4 passed on production; SECURED | 2026-10-20 · v0.132.9.0 · #1093 |
 | 170.1.2 LABELS | 0/? | Queued — split from 170.1 (founder 2026-10-15), after 170.1 | - |
+| 170.1.3 NARROWCHARTS | 0/? | Queued — booked 2026-10-20 (founder) | - |
 | 170.2 PROBEFIXES | 11/11 | Complete | 2026-10-12 |
 | 170.3 OGPUBLIC | 3/3 | Complete | 2026-10-11 |
 | 170.4 ALLOCHOLDINGS | 14/14 | Complete | 2026-10-11 |
