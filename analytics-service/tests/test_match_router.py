@@ -6196,9 +6196,10 @@ class TestShouldSkipAllocatorRetriesReadTimeout:
         assert await _should_skip_allocator("alloc-2f", force=False) is False
         assert executes["n"] == 2, "the match_batches read was retried exactly once"
 
-    async def test_second_read_stays_single_attempt(self, monkeypatch):
-        """The mandate_edited_at read is not one of the four named reads (D-02a): a
-        ReadTimeout there is NOT retried, and propagates as before."""
+    async def test_second_read_retries_a_read_timeout(self, monkeypatch):
+        """SFH M-3: the mandate_edited_at read sits outside the cron loop's per-allocator
+        try, like the latest-batch read, so an unretried ReadTimeout there aborts the cron
+        and starves every later allocator. One slow response must cost one retry."""
         import httpx
 
         from routers.match import ENGINE_VERSION, _should_skip_allocator
@@ -6213,7 +6214,9 @@ class TestShouldSkipAllocatorRetriesReadTimeout:
 
         def _prefs_execute() -> Any:
             prefs_executes["n"] += 1
-            raise httpx.ReadTimeout("The read operation timed out")
+            if prefs_executes["n"] == 1:
+                raise httpx.ReadTimeout("The read operation timed out")
+            return MagicMock(data={"mandate_edited_at": None})
 
         sb = MagicMock()
         sb.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
@@ -6222,9 +6225,8 @@ class TestShouldSkipAllocatorRetriesReadTimeout:
         sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.side_effect = _prefs_execute
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
 
-        with pytest.raises(httpx.ReadTimeout):
-            await _should_skip_allocator("alloc-2f-second", force=False)
-        assert prefs_executes["n"] == 1
+        assert await _should_skip_allocator("alloc-2f-second", force=False) is True
+        assert prefs_executes["n"] == 2, "the allocator_preferences read was retried exactly once"
 
 
 class _CountingChain:

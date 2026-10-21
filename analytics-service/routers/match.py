@@ -2189,7 +2189,8 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
         return False
     supabase = get_supabase()
     # QUANTALYZE-2F (Phase 166.5.1, D-02a): this latest-batch read retries a transient
-    # ReadTimeout; the second read below stays: Sentry did not name it.
+    # ReadTimeout, and so does the mandate_edited_at read below (SFH M-3): both sit
+    # outside the cron loop's per-allocator try, so an unretried one aborts the run.
     result = await db_read_with_retry(
         lambda: supabase.table("match_batches")
         .select("computed_at, engine_version")
@@ -2232,7 +2233,7 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
     # Trigger 3: mandate_edited_at > computed_at — mandate edit invalidates
     # the cached batch. One extra query against allocator_preferences
     # (indexed by user_id PK, O(1) lookup), only on the SKIP path.
-    prefs_result = await asyncio.to_thread(
+    prefs_result = await db_read_with_retry(
         lambda: supabase.table("allocator_preferences")
         .select("mandate_edited_at")
         .eq("user_id", allocator_id)
