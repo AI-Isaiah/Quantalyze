@@ -219,6 +219,50 @@ class TestKillSwitchFailClosed:
             "kill_switch_unavailable" in rec.getMessage() for rec in caplog.records
         ), "the outage must log ERROR naming kill_switch_unavailable"
 
+    def test_kill_switch_stops_cron_on_exhausted_read_timeout(
+        self, client, monkeypatch, caplog
+    ):
+        """Phase 166.5.1 (D-02a): an httpx ReadTimeout on every attempt is
+        retried DB_READ_MAX_RETRIES times, then the engine STOPS fail-closed
+        (KILL_SWITCH_UNAVAILABLE) exactly as for an exhausted gateway 504. The
+        ERROR log must name the real class ("transient timeout"), never
+        "non-retryable": an operator reading Sentry would otherwise conclude
+        the retry seam ignored a timeout it in fact retried three times."""
+        import httpx
+
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        call_count = {"n": 0}
+
+        def _raise_read_timeout(*_a, **_k):
+            call_count["n"] += 1
+            raise httpx.ReadTimeout("The read operation timed out")
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.side_effect = (
+            _raise_read_timeout
+        )
+        monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            r = client.post("/api/match/cron-recompute")
+
+        assert r.status_code == 200
+        assert r.json()["status"] == "kill_switch_unavailable"
+        assert call_count["n"] == 3, (
+            "db_read_with_retry must attempt exactly DB_READ_MAX_RETRIES=3 "
+            "times on an exhausted ReadTimeout"
+        )
+        failed = [
+            rec.getMessage()
+            for rec in caplog.records
+            if "kill switch check FAILED" in rec.getMessage()
+        ]
+        assert failed, "the outage must log the kill-switch ERROR"
+        assert "transient timeout, retries exhausted" in failed[0], failed[0]
+        assert "non-retryable" not in failed[0], failed[0]
+
     def test_kill_switch_unavailable_is_distinct_from_founder_disabled(
         self, client, monkeypatch
     ):
@@ -953,7 +997,7 @@ class TestCronPartialFailure:
     def test_one_allocator_failure_does_not_abort_cron(self, client, monkeypatch):
         """3 allocators, second raises → processed=2, failed=1, cron returns 200."""
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -998,7 +1042,7 @@ class TestCronPartialFailure:
         (the cache freshness logic is covered separately)."""
         monkeypatch.setattr("routers.match.KILL_SWITCH_CACHE_TTL_S", 0.0)
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1055,7 +1099,7 @@ class TestCronPartialFailure:
         # within this run and would keep reading the seeded ON value.
         monkeypatch.setattr("routers.match.KILL_SWITCH_CACHE_TTL_S", 3600.0)
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}, {"id": "a4"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1105,7 +1149,7 @@ class TestCronPartialFailure:
         """Per-allocator retention failures must not abort the sweep loop.
         Verify total retention is still summed across the surviving allocators."""
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1177,7 +1221,7 @@ class TestCronResponseShape:
     def test_no_allocators_branch_has_full_shape(self, client, monkeypatch):
         monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1191,7 +1235,7 @@ class TestCronResponseShape:
     def test_empty_universe_branch_has_full_shape(self, client, monkeypatch):
         monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1592,23 +1636,26 @@ class TestCronResponseShape:
         assert self._REQUIRED_KEYS <= set(body)
 
     @pytest.mark.asyncio
-    async def test_cron_batch_boundary_with_nothing_handled_leaves_cursor_alone(
+    async def test_cron_query_excludes_demo_allocator_so_a_demo_first_page_handles_the_next_allocator(
         self, monkeypatch
     ):
-        """WR-01 — a `partial` run must never write the WRAP marker.
+        """D-01 (QUANTALYZE-Z) — the cron's own allocator query must exclude
+        the demo allocator, so a keyset page never spends a slot on it.
 
-        The `if not allocators` guard runs BEFORE the demo-allocator filter,
-        so a page whose only non-trimmed member is the demo allocator
-        reaches the batch boundary with `last_handled_id is None`. Writing
-        that None is writing the wrap marker: the response becomes
-        `{"status": "partial", "next_cursor": null}` — "resume after
-        nothing" — and the pass restarts at the beginning while it has just
-        MEASURED that more allocators exist. Every allocator ordered after
-        that page is then never reached, forever.
+        Before D-01 the query only filtered by role, and the demo allocator
+        shares that role. With the demo id sorting first and a batch size of
+        one, the page was the demo id ALONE: a post-fetch filter dropped it,
+        nothing was handled, the cursor was left unwritten and the cron
+        logged an ERROR on every run (87 events in 7 days) — advising a
+        check of a `profiles` column PROD does not have. The ERROR was not a
+        guard firing on a real breach; the query simply never excluded the
+        id.
 
-        The correct disposition is the one the mid-run kill-switch abort
-        already takes: write nothing, leave the resume point where it was,
-        and say so at ERROR.
+        Now the page is [zz1] (plus the one-row has-more probe), so one
+        allocator is handled, the cursor advances to it, and the demo id was
+        never fetched. Asserting the recorded `neq` call as well as the
+        outcome pins WHICH mechanism does it: an exclusion applied after the
+        fetch would still handle nothing on this page.
         """
         from routers import match as match_mod
 
@@ -1619,6 +1666,29 @@ class TestCronResponseShape:
         monkeypatch.setattr(match_mod, "CRON_BATCH_SIZE", 1)
         self._install_batching_doubles(monkeypatch, match_mod, all_ids)
         store = self._install_cursor_store(monkeypatch, match_mod)
+
+        tables_read: list[str] = []
+        profiles_fakes: list[_FakeProfilesQuery] = []
+
+        def _table(name: str):
+            tables_read.append(name)
+            if name == "profiles":
+                fake = _FakeProfilesQuery(all_ids)
+                profiles_fakes.append(fake)
+                return fake
+            return MagicMock()
+
+        sb = MagicMock()
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        scored: list[str] = []
+
+        async def _score(allocator_id, universe):
+            scored.append(allocator_id)
+            return {}
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score)
 
         write_calls: list[Any] = []
         _real_write = match_mod._write_cron_cursor
@@ -1631,13 +1701,19 @@ class TestCronResponseShape:
 
         body = await match_mod.cron_recompute()
 
-        assert body["status"] == "partial"
-        assert body["processed"] + body["skipped"] + body["failed"] == 0
-        assert write_calls == [], (
-            "a batch boundary that handled NOTHING must not write the "
-            f"cursor — it wrote {write_calls!r}"
+        assert tables_read.count("profiles") == 1, (
+            "the allocator page must be read through exactly one profiles "
+            f"builder; tables read: {tables_read!r}"
         )
-        assert store["value"] is None, "the resume point must be untouched"
+        assert profiles_fakes[0].neq_calls == [("id", demo)], (
+            "the cron's query must exclude the demo allocator itself"
+        )
+        assert scored == ["zz1"], f"exactly the next allocator is scored: {scored!r}"
+        assert body["status"] == "partial"
+        assert body["processed"] == 1
+        assert body["next_cursor"] == "zz1"
+        assert write_calls == ["zz1"]
+        assert store["value"] == "zz1"
         assert self._REQUIRED_KEYS <= set(body)
 
     @pytest.mark.asyncio
@@ -1705,7 +1781,7 @@ class TestCronTotalFailureLogging:
         missing, supabase down). Must emit logger.error so Sentry alerts
         fire — would otherwise be silently 200-OK."""
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1752,7 +1828,7 @@ class TestCronTotalFailureLogging:
         fail, the response must surface 'degraded' so monitoring can
         differentiate partial-success from healthy."""
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -4164,25 +4240,32 @@ class TestForceThrottleLockAtomicity:
 
 
 # ---------------------------------------------------------------------------
-# M-3 (red-team) — cron skips demo allocator if it appears in allocators list
+# D-01 (QUANTALYZE-Z) — the cron never fetches the demo allocator
 # ---------------------------------------------------------------------------
 
 
 class TestCronSkipsDemoAllocator:
-    """M-3 (red-team): the cron must log at ERROR and filter out the demo
-    allocator if it appears in the role IN ('allocator','both') query result.
-    The demo allocator must never be processed with the full (non-demo-filtered)
-    universe."""
+    """D-01 (QUANTALYZE-Z): the cron's allocator query excludes the demo
+    allocator itself, so the cron never fetches it and logs nothing about it.
+
+    This replaces M-3, which fetched the demo allocator, dropped it after the
+    fact and logged an ERROR on every run (87 events in 7 days). That ERROR
+    reported no breach: the query never excluded the id, and its advice named
+    a `profiles` column PROD does not have. The demo allocator must still
+    never be scored with the full (non-demo-filtered) universe, and now the
+    query guarantees it before any row comes back."""
 
     @pytest.mark.asyncio
-    async def test_demo_allocator_filtered_from_cron_with_error_log(
+    async def test_demo_allocator_never_fetched_or_scored_and_nothing_logged_at_error(
         self, monkeypatch, caplog
     ):
         from routers import match as match_mod
 
+        match_mod._reset_kill_switch_cache()
         demo_id = match_mod._DEMO_ALLOCATOR_ID
         real_id = str(uuid4())
-        scored = []
+        profiles_fakes: list[_FakeProfilesQuery] = []
+        scored: list[str] = []
 
         async def _mock_score(aid, universe):
             scored.append(aid)
@@ -4190,18 +4273,26 @@ class TestCronSkipsDemoAllocator:
         async def _no_skip(allocator_id, force):
             return False
 
-        def _make_allocator_sb(ids):
-            sb = MagicMock()
-            sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
-                data=[{"id": i} for i in ids]
-            )
-            sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
-                data={"enabled": True}
-            )
-            return sb
+        async def _no_cursor():
+            return None
+
+        async def _write_cursor(value):
+            return None
+
+        def _table(name: str):
+            if name == "profiles":
+                fake = _FakeProfilesQuery([demo_id, real_id])
+                profiles_fakes.append(fake)
+                return fake
+            return MagicMock()
+
+        sb = MagicMock()
+        sb.table.side_effect = _table
 
         monkeypatch.setattr(match_mod, "_engine_is_enabled", _async_engine_state(True))
-        monkeypatch.setattr(match_mod, "get_supabase", lambda: _make_allocator_sb([demo_id, real_id]))
+        monkeypatch.setattr(match_mod, "_read_cron_cursor", _no_cursor)
+        monkeypatch.setattr(match_mod, "_write_cron_cursor", _write_cursor)
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
         monkeypatch.setattr(
             match_mod, "_load_candidate_universe",
             lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
@@ -4210,20 +4301,23 @@ class TestCronSkipsDemoAllocator:
         monkeypatch.setattr(match_mod, "_score_one_allocator", _mock_score)
         monkeypatch.setattr(match_mod, "_retention_sweep", lambda *_: 0)
 
-        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
-            result = await match_mod.cron_recompute()
+        with caplog.at_level("ERROR"):
+            await match_mod.cron_recompute()
 
-        # Demo allocator must NOT have been scored
-        assert demo_id not in scored, (
-            "demo allocator must be filtered from cron scoring when it appears "
-            "in the allocators list"
+        # The demo allocator must NOT have been scored; the real one is.
+        assert scored == [real_id], (
+            "only the real allocator may be scored; the demo allocator must "
+            f"never reach the cron's scoring loop: {scored!r}"
         )
-        # Must log at ERROR to surface the invariant violation
-        assert any(
+        # The Sentry symptom itself: no ERROR about the demo allocator.
+        assert not any(
             "demo allocator" in rec.getMessage().lower()
             and rec.levelname == "ERROR"
             for rec in caplog.records
-        ), "demo allocator in cron list must log at ERROR (M-3)"
+        ), "the cron must log nothing at ERROR about the demo allocator (D-01)"
+        # The mechanism: the query excluded the id, it was not filtered later.
+        assert len(profiles_fakes) == 1
+        assert profiles_fakes[0].neq_calls == [("id", demo_id)]
 
 
 # ---------------------------------------------------------------------------
@@ -4289,7 +4383,7 @@ class TestCronRetentionSweepScopedToScoredAllocators:
 
         match_mod._reset_kill_switch_cache()
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a-ok"}, {"id": "a-skip"}, {"id": "a-fail"}])
         )
         monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
@@ -5244,7 +5338,7 @@ class TestCronBatchBoundsInvariants:
 
 class _FakeProfilesQuery:
     """Minimal in-memory stand-in for the profiles keyset-paginated query
-    chain (.select().in_().gt().order().limit().execute()), backed by a
+    chain (.select().in_().neq().gt().order().limit().execute()), backed by a
     plain sorted list of ids. Exercises REAL keyset semantics (cursor
     filter, order, limit) rather than a brittle mock-chain attribute path —
     the id ordering and the has-more/trim arithmetic are the actual thing
@@ -5254,11 +5348,19 @@ class _FakeProfilesQuery:
         self._all_ids = list(all_ids)
         self._cursor: str | None = None
         self._limit: int | None = None
+        # D-01: every (column, value) the cron excluded via .neq(). Recorded
+        # so a test can assert WHICH exclusion the query asked for, not only
+        # that the demo id happened to be absent from the result.
+        self.neq_calls: list[tuple[str, Any]] = []
 
     def select(self, *_a, **_k):
         return self
 
     def in_(self, *_a, **_k):
+        return self
+
+    def neq(self, col, value):
+        self.neq_calls.append((col, value))
         return self
 
     def gt(self, _col, value):
@@ -5274,6 +5376,10 @@ class _FakeProfilesQuery:
 
     def execute(self):
         ids = sorted(self._all_ids)
+        # Only the profile key is modelled: the cron excludes by "id".
+        for col, value in self.neq_calls:
+            assert col == "id", f"fake only models neq on id, got {col!r}"
+            ids = [i for i in ids if i != value]
         if self._cursor is not None:
             ids = [i for i in ids if i > self._cursor]
         if self._limit is not None:
@@ -6046,3 +6152,143 @@ class TestCandidateUniverseIsScoredOnDailyReturnsFromTheStoredCurve:
             assert series.loc[d2] == pytest.approx(0.144, abs=1e-12)
             assert len(series) == 2
         assert closes_mock.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 166.5.1 plan 04 (D-02a): the two match.py reads Sentry named retry a
+# transient httpx ReadTimeout. Only those reads: a retry is attached to the
+# single select, never to the function around it, so a retry cannot re-run the
+# dozen other reads in _load_allocator_context or add one to a read Sentry did
+# not name.
+# ---------------------------------------------------------------------------
+
+
+def _zero_read_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+    monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+
+class TestShouldSkipAllocatorRetriesReadTimeout:
+    async def test_should_skip_allocator_retries_a_read_timeout_on_the_latest_batch_read(
+        self, monkeypatch
+    ):
+        """QUANTALYZE-2F: the latest match_batches read raised an httpx ReadTimeout and, with
+        no retry, the skip check threw into the cron loop (the skip-check is outside its
+        per-allocator try), failing the run. One slow response must cost one retry."""
+        import httpx
+
+        from routers.match import _should_skip_allocator
+
+        _zero_read_backoff(monkeypatch)
+        stale_engine = {"computed_at": "2026-01-01T00:00:00Z", "engine_version": "v0-older"}
+        executes = {"n": 0}
+
+        def _execute() -> Any:
+            executes["n"] += 1
+            if executes["n"] == 1:
+                raise httpx.ReadTimeout("The read operation timed out")
+            return MagicMock(data=[stale_engine])
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.side_effect = _execute
+        monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
+
+        assert await _should_skip_allocator("alloc-2f", force=False) is False
+        assert executes["n"] == 2, "the match_batches read was retried exactly once"
+
+    async def test_second_read_retries_a_read_timeout(self, monkeypatch):
+        """SFH M-3: the mandate_edited_at read sits outside the cron loop's per-allocator
+        try, like the latest-batch read, so an unretried ReadTimeout there aborts the cron
+        and starves every later allocator. One slow response must cost one retry."""
+        import httpx
+
+        from routers.match import ENGINE_VERSION, _should_skip_allocator
+
+        _zero_read_backoff(monkeypatch)
+        one_hour_ago = (
+            (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=1))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        prefs_executes = {"n": 0}
+
+        def _prefs_execute() -> Any:
+            prefs_executes["n"] += 1
+            if prefs_executes["n"] == 1:
+                raise httpx.ReadTimeout("The read operation timed out")
+            return MagicMock(data={"mandate_edited_at": None})
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[{"computed_at": one_hour_ago, "engine_version": ENGINE_VERSION}]
+        )
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.side_effect = _prefs_execute
+        monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
+
+        assert await _should_skip_allocator("alloc-2f-second", force=False) is True
+        assert prefs_executes["n"] == 2, "the allocator_preferences read was retried exactly once"
+
+
+class _CountingChain:
+    """A chainable stand-in for a postgrest query: any builder method returns itself and
+    `execute()` answers an empty page, counting executes per table in `reads`."""
+
+    def __init__(self, name: str, reads: dict[str, int], prefs_script: list[Any]) -> None:
+        self._name = name
+        self._reads = reads
+        self._prefs_script = prefs_script
+
+    def __getattr__(self, _attr: str) -> Any:
+        return lambda *a, **k: self
+
+    def execute(self) -> Any:
+        self._reads[self._name] = self._reads.get(self._name, 0) + 1
+        if self._name == "allocator_preferences":
+            item = self._prefs_script.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+        return MagicMock(data=[])
+
+
+class TestLoadAllocatorContextRetriesPreferencesRead:
+    @staticmethod
+    def _run(monkeypatch: pytest.MonkeyPatch, prefs_script: list[Any]) -> tuple[dict[str, Any], dict[str, int]]:
+        from routers import match as match_mod
+
+        reads: dict[str, int] = {}
+        sb = MagicMock()
+        sb.table.side_effect = lambda name: _CountingChain(name, reads, prefs_script)
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+        return match_mod._load_allocator_context("alloc-2d"), reads
+
+    def test_load_allocator_context_retries_a_read_timeout_on_the_preferences_read(
+        self, monkeypatch
+    ):
+        """QUANTALYZE-2D: the allocator_preferences maybe_single read raised an httpx
+        ReadTimeout and failed the whole scoring of that allocator. One slow response must
+        cost one retry of THAT read only: every other table is read exactly as often as in a
+        run with no timeout (measured as a control, not assumed to be once)."""
+        import httpx
+
+        _zero_read_backoff(monkeypatch)
+        prefs_row = {"user_id": "alloc-2d", "target_ticket_size_usd": 250000}
+
+        control_ctx, control_reads = self._run(monkeypatch, [MagicMock(data=prefs_row)])
+        ctx, reads = self._run(
+            monkeypatch,
+            [httpx.ReadTimeout("The read operation timed out"), MagicMock(data=prefs_row)],
+        )
+
+        assert ctx["preferences"] == prefs_row == control_ctx["preferences"]
+        assert control_reads["allocator_preferences"] == 1
+        assert reads["allocator_preferences"] == 2, "the preferences read was retried once"
+        others = {t: n for t, n in reads.items() if t != "allocator_preferences"}
+        control_others = {t: n for t, n in control_reads.items() if t != "allocator_preferences"}
+        assert others == control_others, "no other read in the function was retried"
+
+    def test_a_prefs_read_that_returns_none_still_yields_no_preferences(self, monkeypatch):
+        """The maybe_single() None guard still holds under the retry wrapper."""
+        ctx, reads = self._run(monkeypatch, [None])
+        assert ctx["preferences"] is None
+        assert reads["allocator_preferences"] == 1

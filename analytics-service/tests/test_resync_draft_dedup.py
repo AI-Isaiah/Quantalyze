@@ -700,6 +700,67 @@ def test_resync_chain_read_gateway_timeout_is_retried(
     assert "enqueue_compute_job" not in sb.rpc_calls
 
 
+def test_resync_chain_read_read_timeout_is_attempted_once(
+    full_stack_client: TestClient, _no_retry_sleep: None
+) -> None:
+    """166.5.1 D-06: the resync button's guard read retries a gateway 504 only.
+    A ReadTimeout there is ONE attempt (a retry would hold the user's click for
+    up to ~6 minutes at the 120 s client read timeout), so the guard is skipped
+    and the resync takes the pre-guard path. Were it retried, the second attempt
+    would succeed, find the running chain and answer WIZARD_DUPLICATE."""
+    import httpx
+
+    sb = make_supabase(_STRATEGY_A)
+    _seed_advanced_session(sb, _STRATEGY_A, job_kind="sync_trades", job_status="running")
+    sb.select_failures["compute_jobs"] = [httpx.ReadTimeout("The read operation timed out")]
+    with (
+        patch("routers.process_key.get_supabase", return_value=sb),
+        patch("routers.process_key.sentry_sdk.capture_exception"),
+        patch("routers.process_key.sentry_sdk.capture_message"),
+    ):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    assert r.status_code == 200, r.text
+    assert r.json().get("code") != "WIZARD_DUPLICATE", r.json()
+    assert "enqueue_compute_job" in sb.rpc_calls
+
+
+def test_resync_verification_read_read_timeout_is_attempted_once(
+    full_stack_client: TestClient, _no_retry_sleep: None
+) -> None:
+    """166.5.1 D-06: the guard's verification read also retries a gateway 504
+    only. One ReadTimeout leaves the reply a duplicate with no verification
+    status; a retry would have found the job's own 'validated' verification."""
+    import httpx
+
+    sb = make_supabase(_STRATEGY_A)
+    _seed_advanced_session(
+        sb,
+        _STRATEGY_A,
+        job_kind="sync_trades",
+        job_status="running",
+        metadata={"verification_id": "ver-advanced"},
+    )
+    # The first strategy_verifications read is the draft pre-check, which finds
+    # nothing; the failure lands on the guard's verification read.
+    sb.select_failures["strategy_verifications"] = [
+        None,
+        httpx.ReadTimeout("The read operation timed out"),
+    ]
+    with (
+        patch("routers.process_key.get_supabase", return_value=sb),
+        patch("routers.process_key.sentry_sdk.capture_exception"),
+        patch("routers.process_key.sentry_sdk.capture_message"),
+    ):
+        r = _post(full_stack_client, _resync_body(_STRATEGY_A))
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload.get("code") == "WIZARD_DUPLICATE", payload
+    assert payload["status"] is None, payload
+    assert "enqueue_compute_job" not in sb.rpc_calls
+
+
 def test_resync_verification_read_failure_still_refuses_the_second_chain(
     full_stack_client: TestClient,
 ) -> None:

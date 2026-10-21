@@ -363,6 +363,27 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # minutes (full-history realized PnL + funding fetch); watchdog must be
     # strictly greater. Mirrors the sync_trades 15→30 pairing.
     "derive_broker_dailies": "30 minutes",  # handler timeout = 15 minutes
+    # Phase 166.5.1 / SENTRYTRIAGE (D-03) — QUANTALYZE-2A / QUANTALYZE-A. Handler timeout
+    # = 5 minutes (TIMEOUT_PER_KIND), yet PROD claim-to-done is longer: over the 14 days to
+    # 2026-10-21, 110 jobs, p95 = 8:14.8 and max = 10:03.9, which put the 10-minute default
+    # inside the runtime envelope. The watchdog then flipped a still-working run back to
+    # 'pending' and the runner's own done/failed mark was then refused (P0002).
+    # Why claim-to-done exceeds the handler timeout: the claim RPC stamps claimed_at on the
+    # whole batch (p_batch_size 5 in _claim_priority) and dispatch_tick runs the claimed jobs
+    # one after another, so a job's staleness clock includes its batch-mates' runtime. On the
+    # backfill worker those are BACKFILL_KINDS (derive_broker_dailies, 15-minute handler,
+    # and this kind). The 10:03.9 / 606 s figures are measurements of WHOLE batches and are
+    # capped by the old 10-minute reset: a batch past 600 s was reset and is seen only as
+    # its re-run, so they are a floor, not the tail. 20 minutes is twice that 600 s ceiling
+    # and exactly 4x the handler timeout (the cap in
+    # test_watchdog_threshold_has_sane_upper_bound); a larger window would leave a
+    # genuinely stuck derive job unreclaimed for longer. RESIDUAL (founder D-05, SC-3
+    # partly met): a run that waits behind slow batch-mates (a 15-minute
+    # derive_broker_dailies each) can still exceed 20 minutes and be reset. The structural
+    # close is a lease/heartbeat renewing claimed_at (founder deferred it; TODOS
+    # [166.5.1-DERIVE-BATCH-RESET-RESIDUAL]). The mark refusals stay loud, so a
+    # recurrence surfaces as 2A / A.
+    "derive_allocator_equity": "20 minutes",  # handler timeout = 5 minutes
     # Phase 86 (COMP-02) — the composite fans out over N member keys and, when
     # MTM is admissible, crawls each Deribit member TWICE (cash + mark_to_market),
     # so its handler timeout is 20 minutes. Watchdog must be strictly greater;
@@ -787,7 +808,10 @@ async def dispatch_tick(worker_id: str) -> None:
             # [164.5.1-GATEWAY-CEILING-INVERSION]: the Supabase API gateway
             # cuts off and answers 504 before Postgres reports anything, so a
             # transient gateway timeout on this claim read is retried rather
-            # than costing the worker a whole tick.
+            # than costing the worker a whole tick. Phase 166.5.1 (D-02a,
+            # QUANTALYZE-2C): an httpx ReadTimeout is retried too. A timed-out
+            # claim cannot double-claim: its batch waits for the watchdog, as
+            # today.
             claim_result = await db_read_with_retry(_claim_priority)
         except Exception as exc:  # noqa: BLE001
             if _is_undefined_function(exc):
@@ -1155,7 +1179,8 @@ async def watchdog_tick() -> None:
         ).execute()
 
     # [164.5.1-GATEWAY-CEILING-INVERSION]: retry a transient Supabase gateway
-    # timeout on this watchdog write rather than losing a whole tick. The
+    # timeout on this watchdog write rather than losing a whole tick. Phase
+    # 166.5.1 (D-02a, QUANTALYZE-2B): an httpx ReadTimeout is retried too. The
     # seam is named for reads; this call site is idempotent-by-filter (see
     # above), which is what makes consuming it legitimate here.
     result = await db_read_with_retry(_reset)
@@ -1165,12 +1190,13 @@ async def watchdog_tick() -> None:
         # here from one delivered before it, so `reset_count` is a LOWER
         # BOUND, not a measurement. Log unconditionally at WARNING — a
         # silent zero would make "reclaimed nothing" and "reclaimed, then
-        # lost the receipt to a post-commit gateway timeout" look identical.
+        # lost the receipt to a post-commit transient timeout" look identical.
         logger.warning(
             "Watchdog reclaimed at least %d stalled jobs (count is a LOWER "
             "BOUND: the reset RPC was retried across %d attempts after a "
-            "gateway timeout, and an attempt that committed before timing "
-            "out no longer matches the staleness filter)",
+            "transient timeout (gateway 504 or read timeout), and an attempt "
+            "that committed before timing out no longer matches the "
+            "staleness filter)",
             reset_count,
             attempts,
         )

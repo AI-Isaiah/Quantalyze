@@ -53,10 +53,11 @@ from services.benchmark import get_btc_closes
 from services.db import (
     PaginatedSelectTruncated,
     Row,
-    _is_gateway_timeout,
+    _is_transient_read_error,
     chunked_in_query,
     db_execute,
     db_read_with_retry,
+    db_read_with_retry_sync,
     get_supabase,
     one,
     paginated_select,
@@ -299,8 +300,9 @@ async def _engine_is_enabled() -> str:
 
     Fail-CLOSED contract (Phase 164.5.1 criterion 8, superseding the former
     fail-open one): the Supabase read goes through `db_read_with_retry`,
-    which retries ONLY a gateway-timeout-shaped exception
-    (`_is_gateway_timeout`) up to DB_READ_MAX_RETRIES times. After retries
+    which retries ONLY a transient-timeout-shaped exception
+    (`_is_transient_read_error`: a gateway 504 or an httpx ReadTimeout) up to
+    DB_READ_MAX_RETRIES times. After retries
     are exhausted — or on any other exception — the engine STOPS:
     KILL_SWITCH_UNAVAILABLE is returned and logged at ERROR so Sentry fires.
     There is no surviving fail-open arm; a transient DB blip that outlasts
@@ -328,14 +330,17 @@ async def _engine_is_enabled() -> str:
         # lines of branch between two messages differing by a parenthetical.
         # The two arms shared their prefix and their suffix, no test could
         # tell them apart, and the branch was therefore unexercised in the
-        # direction that mattered. `_is_gateway_timeout` is `services.db`'s
+        # direction that mattered. `_is_transient_read_error` is `services.db`'s
         # own retry predicate — the classification is only ever a log
         # adjective here; both arms stop the engine FAIL-CLOSED identically.
+        # Phase 166.5.1 (T-166.5.1-08): the predicate widened to ReadTimeout,
+        # so an exhausted ReadTimeout reads "transient timeout", not
+        # "non-retryable".
         logger.error(
             "match_engine: kill switch check FAILED (%s) — engine STOPPED "
             "(kill_switch_unavailable): %s",
-            "gateway timeout, retries exhausted"
-            if _is_gateway_timeout(err)
+            "transient timeout, retries exhausted"
+            if _is_transient_read_error(err)
             else "non-retryable",
             err,
         )
@@ -1145,9 +1150,14 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     supabase = get_supabase()
 
     # Preferences
-    prefs_result = supabase.table("allocator_preferences").select("*").eq(
-        "user_id", allocator_id
-    ).maybe_single().execute()
+    # QUANTALYZE-2D (Phase 166.5.1, D-02a): only this select retries a transient
+    # ReadTimeout (synchronous twin: this function runs in a worker thread).
+    # None of the reads below move.
+    prefs_result = db_read_with_retry_sync(
+        lambda: supabase.table("allocator_preferences").select("*").eq(
+            "user_id", allocator_id
+        ).maybe_single().execute()
+    )
     # postgrest maybe_single().execute() returns None (not an APIResponse with
     # data=None) when no allocator_preferences row exists. Guard the None before
     # .data; _score_one_allocator already normalizes None preferences to {}.
@@ -2178,7 +2188,10 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
     if force:
         return False
     supabase = get_supabase()
-    result = await asyncio.to_thread(
+    # QUANTALYZE-2F (Phase 166.5.1, D-02a): this latest-batch read retries a transient
+    # ReadTimeout, and so does the mandate_edited_at read below (SFH M-3): both sit
+    # outside the cron loop's per-allocator try, so an unretried one aborts the run.
+    result = await db_read_with_retry(
         lambda: supabase.table("match_batches")
         .select("computed_at, engine_version")
         .eq("allocator_id", allocator_id)
@@ -2220,7 +2233,7 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
     # Trigger 3: mandate_edited_at > computed_at — mandate edit invalidates
     # the cached batch. One extra query against allocator_preferences
     # (indexed by user_id PK, O(1) lookup), only on the SKIP path.
-    prefs_result = await asyncio.to_thread(
+    prefs_result = await db_read_with_retry(
         lambda: supabase.table("allocator_preferences")
         .select("mandate_edited_at")
         .eq("user_id", allocator_id)
@@ -3190,6 +3203,13 @@ async def cron_recompute() -> dict[str, Any]:
         supabase.table("profiles")
         .select("id")
         .in_("role", ["allocator", "both"])
+        # D-01 (QUANTALYZE-Z): the demo allocator shares the allocator role, so
+        # the role filter alone returned it on every run. Excluding it here, in
+        # the keyset page itself, means the cron never fetches it and a page
+        # never spends a slot on it. The scoring-time is_example filter in
+        # _score_one_allocator stays the boundary for the endpoint the anon
+        # demo can reach.
+        .neq("id", _DEMO_ALLOCATOR_ID)
     )
     if cursor is not None:
         allocators_query = allocators_query.gt("id", cursor)
@@ -3197,7 +3217,7 @@ async def cron_recompute() -> dict[str, Any]:
         allocators_query.order("id").limit(CRON_BATCH_SIZE + 1).execute()
     )
     _fetched_page = rows(allocators_result)
-    # has_more is computed from the RAW fetch (before trimming/demo-filter):
+    # has_more is computed from the RAW fetch (before trimming to the page):
     # CRON_BATCH_SIZE + 1 rows came back means at least one more exists
     # beyond this page.
     has_more = len(_fetched_page) > CRON_BATCH_SIZE
@@ -3227,27 +3247,6 @@ async def cron_recompute() -> dict[str, Any]:
             return _early_return("no_allocators", wrapped=True)
         logger.info("match_engine cron: no allocators found")
         return _early_return("no_allocators")
-
-    # M-3 (red-team): confirm the demo allocator (is_example profile) is never
-    # returned by the role IN ('allocator','both') query. The demo allocator uses
-    # the same role value as real allocators, so the only structural guarantee
-    # that it is excluded is that the seeded profile has is_example=true. If that
-    # ever changes (e.g., a migration resets the flag), the cron would process the
-    # demo allocator with the full (non-demo-filtered) universe, silently exposing
-    # real strategies. Log at ERROR so Sentry fires; continue processing the
-    # remaining allocators (removing the demo allocator from the batch is safer
-    # than aborting the entire cron run).
-    demo_ids_in_batch = [
-        p["id"] for p in allocators if p["id"] == _DEMO_ALLOCATOR_ID
-    ]
-    if demo_ids_in_batch:
-        logger.error(
-            "match_engine cron: demo allocator %s appeared in allocators list "
-            "(role IN allocator/both) — skipping to preserve demo boundary. "
-            "Verify profiles.is_example=true for the demo seed row.",
-            _DEMO_ALLOCATOR_ID,
-        )
-        allocators = [p for p in allocators if p["id"] != _DEMO_ALLOCATOR_ID]
 
     # Load universe ONCE for the whole cron run.
     # NEW-C08-09 note: the cron loads the FULL (non-demo-only) universe so all
@@ -3421,29 +3420,20 @@ async def cron_recompute() -> dict[str, Any]:
         # decides on, never conflated with it. Persist the cursor so the
         # NEXT tick resumes strictly after the last COMPLETED allocator.
         #
-        # WR-01: last_handled_id is None when the loop body never ran — the
-        # `if not allocators` guard above fires BEFORE the demo-allocator
-        # filter, so a page whose only non-trimmed member is the demo
-        # allocator reaches here with nothing handled. Writing None there
-        # would write the WRAP MARKER while `has_more` says more allocators
-        # exist: `{"status": "partial", "next_cursor": null}` is a
-        # self-contradiction (partial means "resume after next_cursor"),
-        # and the pass would loop over the same prefix forever, never
-        # reaching anything ordered after it. Writing a half-page id would
-        # skip the rest. So write NOTHING and say so loudly — the next tick
-        # re-attempts this same slice from the same starting cursor, which
-        # is the identical disposition the mid-run kill-switch abort takes.
+        # A batch boundary is reached only after at least one allocator was
+        # handled: the query excludes the demo allocator (D-01), so a
+        # non-empty page always reaches the loop, whose first iteration
+        # either aborts on the mid-run kill switch (that path returns above)
+        # or sets last_handled_id. Writing None here would write the WRAP
+        # marker while `has_more` says more allocators exist, so an
+        # impossible state fails loud rather than being logged as routine.
         if last_handled_id is None:
-            logger.error(
-                "match_engine cron: batch boundary reached with NOTHING "
-                "handled (has_more=%s budget_exhausted=%s) — cursor left "
-                "unwritten so the next tick re-attempts this slice. The "
-                "usual cause is a page trimmed to empty by the demo-allocator "
-                "filter; check the preceding demo-boundary ERROR.",
-                has_more, budget_exhausted,
+            raise RuntimeError(
+                "match_engine cron: batch boundary reached with nothing "
+                "handled — a batch boundary is reached only after at least "
+                "one allocator was handled"
             )
-        else:
-            await _write_cron_cursor(last_handled_id)
+        await _write_cron_cursor(last_handled_id)
         logger.info(
             "match_engine cron: batch boundary reached (has_more=%s "
             "budget_exhausted=%s) — next_cursor=%s processed=%d skipped=%d "
@@ -3458,10 +3448,7 @@ async def cron_recompute() -> dict[str, Any]:
             "failed": failed,
             "retention_deleted": retention_total,
             "duration_s": duration_s,
-            # WR-01: when nothing was handled the cursor was left unwritten
-            # (above), so the truthful resume point is the cursor this tick
-            # STARTED from — never a null, which reads as "start over".
-            "next_cursor": last_handled_id if last_handled_id is not None else cursor,
+            "next_cursor": last_handled_id,
         }
 
     # The set was exhausted in this pass (no has-more flag, no budget trip):

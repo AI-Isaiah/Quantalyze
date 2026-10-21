@@ -479,6 +479,79 @@ class TestWatchdogTick:
         assert overrides["sync_trades"] == "30 minutes"
         assert overrides["poll_positions"] == "5 minutes"
         assert overrides["compute_portfolio"] == "15 minutes"
+        # 166.5.1 / D-03: derive_allocator_equity runs past the 10-minute
+        # default in PROD (max 10:03.9 claim-to-done), so it needs its own.
+        assert overrides["derive_allocator_equity"] == "20 minutes"
+
+    @pytest.mark.asyncio
+    async def test_derive_allocator_equity_run_at_measured_claim_age_is_not_reset_under_the_runner(
+        self,
+    ) -> None:
+        """QUANTALYZE-2A / QUANTALYZE-A reproduction (166.5.1 CONTEXT root cause C, D-05).
+
+        A derive_allocator_equity run whose claim age is BATCH_CLAIM_AGE_FLOOR_S
+        (twice the 600 s ceiling the PROD sample was capped at; the sample is
+        MEASURED_WHOLE_BATCH_MAX_S = 606 s, see the constants above) and which
+        its runner is still working must stay 'running'. That age is past the
+        old 10-minute default, which reset the run to 'pending' and made the
+        runner's mark refuse (P0002): the finished result was lost or run
+        twice. It is also well past a bare 11-minute override, so an override
+        below the measured batch bound fails here.
+
+        WHAT THIS MODELS. It runs the real ``watchdog_tick()`` against a
+        mocked rpc and captures ``p_stale_threshold`` / ``p_per_kind_overrides``
+        exactly as sent. It then applies the threshold-selection rule of
+        ``reset_stalled_compute_jobs`` as defined in migration
+        20260516104201_compute_jobs_audit_2026_05_07_residual.sql: a per-kind
+        pass when the kind key is in ``p_per_kind_overrides`` (threshold =
+        the override), otherwise the default pass (threshold =
+        ``p_stale_threshold``), each matching ``status = 'running' AND
+        claimed_at < now() - threshold``. It also models the mark functions'
+        refusal of a row that is no longer 'running'.
+
+        WHAT THIS DOES NOT COVER. It does not execute the SQL, so a later
+        migration that changes the selection rule is not caught here. It does
+        not cover a claim age above BATCH_CLAIM_AGE_FLOOR_S: a run behind slow
+        15-minute derive_broker_dailies batch-mates can still pass 20 minutes
+        (SC-3 is partly met, TODOS ``[166.5.1-DERIVE-BATCH-RESET-RESIDUAL]``).
+        It does not cover the mark RPCs' own SQL or the claim-token 55006 fence.
+        """
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=0)
+        mock_supabase.rpc.return_value = chain
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            await watchdog_tick()
+
+        params = mock_supabase.rpc.call_args.args[1]
+        default_threshold = params["p_stale_threshold"]
+        overrides = params["p_per_kind_overrides"]
+
+        row = {"kind": "derive_allocator_equity", "status": "running"}
+        claim_age_seconds = BATCH_CLAIM_AGE_FLOOR_S
+
+        # The age must be one the old default would have reset, or the test
+        # proves nothing about the override.
+        assert claim_age_seconds > _watchdog_seconds(default_threshold)
+
+        threshold = overrides.get(row["kind"], default_threshold)
+        if claim_age_seconds > _watchdog_seconds(threshold):
+            row["status"] = "pending"
+
+        # The runner finishes and marks. The mark is accepted only while the
+        # row is still 'running' (otherwise P0002 is raised).
+        mark_accepted = row["status"] == "running"
+
+        assert mark_accepted and row["status"] == "running", (
+            "QUANTALYZE-2A/A: a derive_allocator_equity run claimed "
+            f"{claim_age_seconds}s ago was reset to {row['status']!r} by the "
+            f"watchdog (threshold {threshold!r}) while its runner was still "
+            "working, so the runner's mark would be refused (P0002). Give the "
+            "kind a WATCHDOG_PER_KIND_OVERRIDES entry of at least "
+            f"{BATCH_CLAIM_AGE_FLOOR_S}s (twice the {OLD_RESET_CEILING_S}s "
+            f"ceiling of the {MEASURED_WHOLE_BATCH_MAX_S}s PROD sample)."
+        )
 
     @pytest.mark.asyncio
     async def test_overrides_encode_as_jsonb_object_not_scalar(self) -> None:
@@ -1068,6 +1141,21 @@ _INTERVAL_UNIT_SECONDS: dict[str, int] = {
 }
 
 
+# 166.5.1 / D-05 (WR-01). PROD, read-only, measured 2026-10-21 over the last 14
+# days: 110 derive_allocator_equity jobs, median claim age 5.8 s, max 604 s.
+# Whole 5-job batches that contained one finished within 606 s, the longest
+# observed. 2 jobs had attempts=2, both re-runs (2026-10-15 and 2026-10-18).
+# ⚠️ That 606 s is CENSORED: the 10-minute default reset any run past 600 s, so a
+# batch longer than that shows up only as its re-run. The margin is therefore
+# applied to the 600 s ceiling the sample was capped at, not to 606 s (twice
+# 606 s is 1212 s, 12 s above the 20 minutes the founder kept in D-05).
+MEASURED_WHOLE_BATCH_MAX_S = 606
+OLD_RESET_CEILING_S = 600
+# An override must outlive twice the ceiling: a claim age the old default reset
+# and the measured sample could never show.
+BATCH_CLAIM_AGE_FLOOR_S = 2 * OLD_RESET_CEILING_S
+
+
 def _watchdog_seconds(s: str) -> float:
     """Convert a single-term Postgres INTERVAL string ('30 seconds',
     '15 minutes', '1 hour') to total seconds, matching the unit semantics of
@@ -1118,7 +1206,10 @@ class TestWatchdogInvariant:
         default, reproducing the wizard-hang for allocator equity
         backfill. This test iterates TIMEOUT_PER_KIND (source of truth)
         and asserts every kind has watchdog headroom, including ones
-        that take the default."""
+        that take the default. It cannot see the backfill case, where the
+        claim-age clock outruns the handler timeout (derive_allocator_equity
+        passed it at 600s > 300s while still racing): see
+        test_every_backfill_kind_has_an_explicit_watchdog_override."""
         from main_worker import WATCHDOG_PER_KIND_OVERRIDES
         from services.job_worker import TIMEOUT_PER_KIND
 
@@ -1141,6 +1232,42 @@ class TestWatchdogInvariant:
                 f"value greater than {handler_seconds:.0f} seconds — "
                 "otherwise the watchdog reclaims the still-running job "
                 "and any caller polling for terminal status hangs."
+            )
+
+    def test_every_backfill_kind_has_an_explicit_watchdog_override(self) -> None:
+        """166.5.1 / D-03 (QUANTALYZE-2A / QUANTALYZE-A): BACKFILL_KINDS run on
+        the dedicated backfill worker. The claim RPC stamps claimed_at on a
+        whole batch and dispatch_tick runs the claimed jobs one after another,
+        so a job's claim-age clock includes its batch-mates' runtime. The
+        10-minute default is sized for neither, and the headroom invariant
+        above (handler timeout vs. default) passed for derive_allocator_equity
+        while PROD runs reached 10:03.9 claim-to-done and were reset under
+        their runner. Membership in BACKFILL_KINDS names that mechanism
+        (serial batches on the dedicated worker) instead of a runtime threshold
+        that would drift, so each such kind must carry an explicit override, and
+        (D-05) one of at least BATCH_CLAIM_AGE_FLOOR_S, not just any key."""
+        from main_worker import BACKFILL_KINDS, WATCHDOG_PER_KIND_OVERRIDES
+
+        # An empty tuple would make the loop below pass vacuously.
+        assert BACKFILL_KINDS, "BACKFILL_KINDS is empty; the invariant would pass vacuously"
+
+        for kind in BACKFILL_KINDS:
+            assert kind in WATCHDOG_PER_KIND_OVERRIDES, (
+                f"Backfill kind {kind!r} has no WATCHDOG_PER_KIND_OVERRIDES entry. "
+                "Backfill kinds are claimed in batches of 5 and dispatched "
+                "serially, so the claim-age clock includes batch-mates' runtime "
+                "and the 10-minute default is sized for neither: the watchdog "
+                "resets a still-working run and its mark is refused (P0002), "
+                "the QUANTALYZE-2A/A race. Add an override sized from the "
+                "kind's measured claim-to-done."
+            )
+            override_seconds = _watchdog_seconds(WATCHDOG_PER_KIND_OVERRIDES[kind])
+            assert override_seconds >= BATCH_CLAIM_AGE_FLOOR_S, (
+                f"Backfill kind {kind!r}: override {override_seconds:.0f}s is below "
+                f"{BATCH_CLAIM_AGE_FLOOR_S}s, twice the {OLD_RESET_CEILING_S}s ceiling "
+                f"of the {MEASURED_WHOLE_BATCH_MAX_S}s whole-batch PROD maximum "
+                "(166.5.1 D-05). A claim-age clock that covers a whole batch of 5 "
+                "outruns a bare handler-timeout margin."
             )
 
     def test_watchdog_threshold_has_sane_upper_bound(self) -> None:
@@ -1955,6 +2082,44 @@ class TestWorkerGatewayTimeoutRetry:
         )
 
     @pytest.mark.asyncio
+    async def test_claim_site_retries_read_timeout_then_succeeds(
+        self, monkeypatch
+    ) -> None:
+        """QUANTALYZE-2C (D-02a): an httpx ReadTimeout at the priority claim RPC
+        is retried like a gateway 504. One slow response must not cost the
+        worker a claim tick. A timed-out claim cannot double-claim: its batch
+        waits for the watchdog, as before. The legacy fallback is never reached
+        and the permanent latch stays False."""
+        import httpx
+
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        read_timeout = httpx.ReadTimeout("The read operation timed out")
+        mock_supabase = MagicMock()
+        priority_chain = MagicMock()
+        priority_chain.execute.side_effect = [read_timeout, MagicMock(data=[])]
+        legacy_chain = MagicMock()
+        legacy_chain.execute.return_value = MagicMock(data=[])
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return priority_chain
+            return legacy_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            await dispatch_tick("worker-read-timeout-retry")
+
+        assert priority_chain.execute.call_count == 2, (
+            "a ReadTimeout must be retried once and then succeed"
+        )
+        called_rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert "claim_compute_jobs" not in called_rpc_names
+        assert main_worker._FALLBACK_CLAIM_RPC is False
+
+    @pytest.mark.asyncio
     async def test_claim_site_structured_42883_is_not_retried_as_gateway_timeout(
         self, monkeypatch
     ) -> None:
@@ -2027,6 +2192,37 @@ class TestWorkerGatewayTimeoutRetry:
             "the WARNING must report the count from the SUCCESSFUL retry "
             "attempt, hedged as a LOWER BOUND because an earlier attempt may "
             "have committed before its gateway timeout (WR-10)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_watchdog_reset_retries_read_timeout_then_succeeds(
+        self, monkeypatch, caplog
+    ) -> None:
+        """QUANTALYZE-2B (D-02a): an httpx ReadTimeout at the watchdog reset RPC
+        is retried (the reset is idempotent by its staleness filter). The count
+        comes from the SUCCESSFUL attempt and, because a retry occurred, is
+        still hedged as a lower bound."""
+        import httpx
+
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        read_timeout = httpx.ReadTimeout("The read operation timed out")
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.side_effect = [read_timeout, MagicMock(data=3)]
+        mock_supabase.rpc.return_value = chain
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            with caplog.at_level(logging.WARNING):
+                await watchdog_tick()
+
+        assert chain.execute.call_count == 2, (
+            "a ReadTimeout must be retried once and then succeed"
+        )
+        assert any(
+            "Watchdog reclaimed at least 3 stalled jobs" in rec.getMessage()
+            for rec in caplog.records
         )
 
     @pytest.mark.asyncio
