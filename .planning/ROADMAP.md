@@ -4560,6 +4560,8 @@ Plans:
 - **(C) QUANTALYZE-2A and QUANTALYZE-A**, 2 + 2 events. `mark_compute_job_done` and `mark_compute_job_failed` find the job back at `pending` instead of `running` (P0002): a job's claim was reset or reclaimed while its runner was still finishing. That job-state race can lose a finished result.
 - **Out of scope, owned elsewhere:** QUANTALYZE-18 (SERVICE_KEY mismatch, booked); the `account_duplicate` refusals (QUANTALYZE-23 and 2H, expected since 167.1.2.1.1 WRITERRESIDUALS); benchmark refresh "no BTC series" (1M, 1N, 1P); the Bybit unmatched-IP funding fetch (21).
 **Founder decision 2026-10-21 (AskUserQuestion, "A: helper + move 4 reads (Recommended)"):** ReadTimeout is retried wherever the read-retry helper is already used, the job claim included, and the four pure reads Sentry named for 2D, 2E, 2F and 2G move onto the helper (CONTEXT D-02a).
+**Founder decision 2026-10-21 (AskUserQuestion, "Keep 20 min, book gap (Recommended)", D-05):** the 20-minute `derive_allocator_equity` watchdog override stays; its tests are made able to fail; SC-3 is PARTLY met (a run behind slow 5-job batch-mates can still pass 20 minutes), and the remainder is routed to the deferred heartbeat/lease work (TODOS `[166.5.1-DERIVE-BATCH-RESET-RESIDUAL]`).
+**Founder decision 2026-10-21 (AskUserQuestion, "No retry on resync (Recommended)", D-06):** the resync button's two reads in `routers/process_key.py` go back to a single attempt on a ReadTimeout; a gateway 504 keeps its retry there. The four Sentry-named reads, the claim and the stuck-job reset keep their ReadTimeout retries.
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 166.5
 
