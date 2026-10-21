@@ -2488,7 +2488,7 @@ function compareDesktopReading(baselinePath: string, surface: Surface, after: Re
     const b = before[i];
     const a = after[i];
     const who = `${surface} svg#${i} ${b.label ?? ""}`;
-    if (Math.abs(b.width - a.width) > DESKTOP_SLOP_PX) problems.push(`${who}: width ${b.width} -> ${a.width}`);
+    if (differs(b.width, a.width)) problems.push(`${who}: width ${b.width} -> ${a.width}`);
     const bt = b.texts.map((t) => t.text);
     const at = a.texts.map((t) => t.text);
     if (JSON.stringify(bt) !== JSON.stringify(at)) {
@@ -2616,7 +2616,7 @@ test.describe("/allocations charts — NARROWCHARTS", () => {
   });
 
   // WR-01: the rolling charts' end-date label must not land on the label before it. The tick list
-  // is arithmetic (`fitXTickValues`, swept over 60 to 400 days in src/lib/chart-ticks.test.ts);
+  // is arithmetic (`fitXTickValues`, swept over 2 to 400 days in src/lib/chart-ticks.test.ts);
   // this case is the real-browser check of one window. 260 days was RED against the old end flip.
   for (const vp of [NARROW_VIEWPORTS[0], NARROW_VIEWPORTS[1]]) {
     test(`${vp.id} composer: rolling x labels do not overlap`, async ({ page }) => {
