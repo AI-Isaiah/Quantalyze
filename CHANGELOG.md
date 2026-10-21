@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.132.10.4] - 2026-10-22 — roadmap: book UPNLVENUES 167.2.1.1, NAVMTM 167.2.1.1.1 and MARKSOURCE 167.2.1.1.1.1
+
+### Notes
+- Booked three data-integrity phases after 167.2.1 FACTSHEETBUILDABLE, each depending on the one before it. Founder decisions, 2026-10-22: "Book it." / "Also, when we actually ingest and store data, remember NAV + unrealized profit. So we would have the most accurate figures" / "Book a phase for all the mentioned items and fixes for this" / "Or several phases".
+- Phase 167.2.1.1 UPNLVENUES: Bybit and Binance account equity is read one way everywhere, and open-position profit is neither double-counted nor dropped. `exchange.py` treats ccxt `total` as realized-basis walletBalance with a 0.0 uPnL wedge while `equity_reconstruction.py` treats it as equity-inclusive, and for Binance the reconstruct anchor adds position uPnL on top of a derive that sets it to 0. Success needs a recorded Bybit V5 and Binance balance response that settles the reading, one reading on every path with a RED-capable test, and a PROD census of Bybit/Binance keys.
+- Phase 167.2.1.1.1 NAVMTM: every ingest stores the account's marked-to-market NAV (equity including unrealized profit), the unrealized amount and the mark time, per key and venue, so the strategy return series and the allocator equity curve use real marks from the day storage begins, with a visible boundary and no fabricated past marks. Data-integrity and user-facing. Depends on UPNLVENUES.
+- Phase 167.2.1.1.1.1 MARKSOURCE: open positions are valued with one stated price rule everywhere (venue mark for derivatives, a stated close for spot history), `allocator_equity_snapshots` and `allocator_equity_derived` agree within a stated tolerance while positions are open (or the legacy curve is retired), and `EquityCurveBuilder`'s one-day last-bar uPnL spike is gone. Depends on NAVMTM.
+- The numbers follow the booking procedure: each phase was inserted after the previous one's number, so they nest (167.2.1.1, then 167.2.1.1.1, then 167.2.1.1.1.1). The ROADMAP sections carry the evidence and success criteria, and STATE records the three insertions. No product code changed.
+
 ## [0.132.10.3] - 2026-10-21 — NARROWCHARTS: the /allocations charts fit a 390 px phone and every axis label is drawn whole (Phase 170.1.3)
 
 ### Fixed

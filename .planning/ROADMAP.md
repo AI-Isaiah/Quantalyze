@@ -175,6 +175,9 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.1.2.2.2.1: OKXHISTORY — an OKX strategy's days older than the 3-month bills window are rebuilt from OKX's quarterly bills archive** (INSERTED 2026-10-09) — not yet planned (founder, split from TRADESYNC D-01)
 - [x] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
+- [ ] **Phase 167.2.1.1: UPNLVENUES — Bybit and Binance account equity is read one way everywhere, and open-position profit is neither double-counted nor dropped** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; data-integrity)
+- [ ] **Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after UPNLVENUES)
+- [ ] **Phase 167.2.1.1.1.1: MARKSOURCE — open positions are valued with one stated price rule everywhere, and the two allocator equity curves agree while positions are open** (INSERTED 2026-10-22) — not yet planned (founder 2026-10-22; after NAVMTM)
 - [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
 - [x] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified (completed 2026-10-04)
 - [x] **Phase 169.1: ZOOMKPIS — the KPI strip and metrics rail follow the zoom window, and every windowed figure follows the engine's conventions** (INSERTED) — verification: passed (completed 2026-10-01, PR #913, v0.117.0.0)
@@ -5478,6 +5481,68 @@ Plans:
 
 **Founder decision 2026-09-27 (recorded via `/gsd-phase --edit`):** the narrowest supported viewport is 390 px (iPhone 12) plus desktop at 200% zoom, so this phase's "320px" verification check is replaced by a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser (full decision under Phase 170 LAYOUT).
 
+### Phase 167.2.1.1: UPNLVENUES — Bybit and Binance account equity is read one way everywhere, and open-position profit is neither double-counted nor dropped (INSERTED)
+
+**Goal:** UPNLVENUES — Bybit and Binance account equity is read one way everywhere, and open-position profit is neither double-counted nor dropped.
+**Booked 2026-10-22 by founder decision** ("Book it." / "Book a phase for all the mentioned items and fixes for this" / "Or several phases"). Data-integrity. Founder-booked 2026-10-22.
+**Evidence** (code at main, 2026-10-22):
+- (1) `analytics-service/services/exchange.py` ~3110 says the Bybit/Binance anchor is realized-basis walletBalance and hard-codes the uPnL wedge to 0.0, while `analytics-service/services/equity_reconstruction.py` ~3060 says Bybit V5 `fetch_balance['total']` is equity-inclusive; both read ccxt `total`, so one is wrong;
+- (2) Binance: the derive sets uPnL 0 (`exchange.py` ~3133) but the reconstruct anchor adds position uPnL on top (`equity_reconstruction.py` ~3093-3101);
+- (3) `allocator_positions.py` ~399-401 also calls Bybit walletBalance pre-uPnL;
+- (4) the docstring at `exchange.py` ~3081-3083 says 'account equity' while ~3111 says realized-basis.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 167.2.1
+**Success Criteria** (what must be TRUE):
+1. A recorded real or ccxt-fixture Bybit V5 and Binance (spot and futures) balance response settles whether `total` includes uPnL.
+2. Every path (derive anchor, reconstruct anchor, holdings) reads it the same way, with a test that goes RED on the wrong reading.
+3. A PROD census says whether any connected key is Bybit or Binance, and any stored series built on the wrong reading is recomputed or recorded.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 167.2.1.1.1: NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history (INSERTED)
+
+**Goal:** NAVMTM — every ingest stores the account's marked-to-market NAV (equity including unrealized profit) and the unrealized amount itself, so curves use real marks from now on instead of realized-basis history.
+**Booked 2026-10-22 by founder decision:** "when we actually ingest and store data, remember NAV + unrealized profit. So we would have the most accurate figures". Data-integrity and user-facing.
+**Today** (code at main, 2026-10-22):
+- `nav_twr.py` ~1306-1324 subtracts open uPnL from the anchor and rolls history backward realized-basis, because historical marks are not retrievable on read-only keys, so the factsheet history never carries open-position profit;
+- `allocator_equity_derive.py` ~1343-1360 puts the live total only on the last day, a step;
+- the legacy snapshot reconstruct marks perps daily at the close.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 167.2.1.1 (UPNLVENUES)
+**Success Criteria** (what must be TRUE):
+1. Each daily sync, per key and venue, persists NAV-incl-uPnL plus uPnL plus the mark time, for OKX, Deribit, MT5, sFOX, and Bybit/Binance after UPNLVENUES.
+2. The strategy return series and the allocator equity curve use the stored marked NAV for every day it exists, and realized-basis only for days before storage began, with the boundary visible and no fabricated past marks.
+3. A test proves a day with stored marks reproduces the marked NAV.
+4. A PROD reading after a week shows stored marks accumulating per key.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
+### Phase 167.2.1.1.1.1: MARKSOURCE — open positions are valued with one stated price rule everywhere, and the two allocator equity curves agree while positions are open (INSERTED)
+
+**Goal:** MARKSOURCE — open positions are valued with one stated price rule everywhere, and the two allocator equity curves agree while positions are open.
+**Booked 2026-10-22 by founder decision** ("Book a phase for all the mentioned items and fixes for this" / "Or several phases"). Data-integrity.
+**Evidence** (code at main, 2026-10-22):
+- the legacy reconstruct marks at the last daily close on or before the day, with CoinGecko as fallback (`equity_reconstruction.py` ~963-980, ~1230-1256);
+- the holdings poll values spot at ticker `last` (`allocator_positions.py` ~676-683);
+- derivatives use the venue mark;
+- Deribit inverse positions use the index price (`positions.py` ~180-192);
+- `allocator_equity_snapshots` (marked daily) and `allocator_equity_derived` (realized-basis plus a last-day step) differ whenever positions are open;
+- `EquityCurveBuilder` books all open uPnL as a one-day spike on the last bar (`equity_reconstruction.py` ~4993-5004).
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 167.2.1.1.1 (NAVMTM)
+**Success Criteria** (what must be TRUE):
+1. One documented mark rule (venue mark for derivatives, a stated close for spot history) applied by every path, with a test per path.
+2. The two curves agree within a stated tolerance on a book with open positions, or the legacy curve is retired with every reader moved.
+3. The last-bar spike is gone.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ### Phase 168: DRBOPTIONS — a Deribit options account ingests end to end
 
 **Goal:** Classify Deribit's `assignment` transaction-log type **against a captured row census rather than a guess**, so an options account ingests end to end and the realized-cash series it feeds is neither silently dropped nor double-counted.
@@ -6445,6 +6510,9 @@ kept verbatim.
 | 167.1.2.2.2.1 OKXHISTORY | 0/? | Queued — booked 2026-10-09 (founder, split from TRADESYNC D-01) | - |
 | 167.2 KEYCARDSYNC | 10/10 | Complete    | 2026-10-04 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
+| 167.2.1.1 UPNLVENUES | 0/? | Queued — booked 2026-10-22 (founder) | - |
+| 167.2.1.1.1 NAVMTM | 0/? | Queued — booked 2026-10-22 (founder), after UPNLVENUES | - |
+| 167.2.1.1.1.1 MARKSOURCE | 0/? | Queued — booked 2026-10-22 (founder), after NAVMTM | - |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |
 | 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 7/7 | Complete    | 2026-10-04 |
 | 169.1 ZOOMKPIS | 9/9 | Complete    | 2026-10-01 |
