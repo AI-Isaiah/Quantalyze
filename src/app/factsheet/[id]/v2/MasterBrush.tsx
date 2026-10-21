@@ -6,6 +6,7 @@ import { usePayload, useXRange } from "./factsheet-context";
 import { useBasisSeriesView, useRangeGesture } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
+import { fitTickLabel } from "@/lib/chart-ticks";
 
 /**
  * Master brush — a mini equity-curve overview pinned above the chart stack.
@@ -333,28 +334,34 @@ export function MasterBrush() {
           stroke="var(--color-text)"
           strokeWidth={1}
         />
-        {yearTicks(payload.dates).map(t => (
-          <g key={`y-${t.idx}`}>
-            <line
-              x1={idxToX(t.idx)}
-              x2={idxToX(t.idx)}
-              y1={PAD.top + PLOT_H}
-              y2={PAD.top + PLOT_H + 3}
-              stroke="var(--color-text-muted)"
-              strokeWidth={1}
-            />
-            <text
-              x={idxToX(t.idx)}
-              y={PAD.top + PLOT_H + 12}
-              textAnchor="middle"
-              fontSize={yearTickFont}
-              fontFamily="var(--font-mono)"
-              fill="var(--color-text-muted)"
-            >
-              {t.label}
-            </text>
-          </g>
-        ))}
+        {yearTicks(payload.dates).map(t => {
+          // Phase 170.1.3 (D-02, D-03a): a year tick on the viewBox's edge anchors inward so
+          // its box stays inside the svg ("2025" was drawn "025"). A tick that fits keeps
+          // "middle" and its x. The tick mark itself stays on the date.
+          const label = fitTickLabel(idxToX(t.idx), t.label, yearTickFont, 0, VB_W);
+          return (
+            <g key={`y-${t.idx}`}>
+              <line
+                x1={idxToX(t.idx)}
+                x2={idxToX(t.idx)}
+                y1={PAD.top + PLOT_H}
+                y2={PAD.top + PLOT_H + 3}
+                stroke="var(--color-text-muted)"
+                strokeWidth={1}
+              />
+              <text
+                x={label.x}
+                y={PAD.top + PLOT_H + 12}
+                textAnchor={label.textAnchor}
+                fontSize={yearTickFont}
+                fontFamily="var(--font-mono)"
+                fill="var(--color-text-muted)"
+              >
+                {t.label}
+              </text>
+            </g>
+          );
+        })}
       </ResponsiveChartFrame>
     </section>
   );
