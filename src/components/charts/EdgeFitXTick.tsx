@@ -103,7 +103,8 @@ export function RollingXAxis({ dates }: { dates: string[] }) {
     chartWidth !== undefined && plot !== undefined
       ? fitXTickValues(
           dates,
-          estLabelWidth(label(dates[0]), CHART_TICK_STYLE.fontSize),
+          // A date label is always "MM-DD" wide; reading dates[0] threw on an empty series.
+          estLabelWidth("MM-DD", CHART_TICK_STYLE.fontSize),
           plot.x,
           plot.x + plot.width,
           chartWidth,
