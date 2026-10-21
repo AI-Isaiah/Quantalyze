@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import random
+import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -294,6 +295,47 @@ async def db_read_with_retry(fn: Callable[[], _T]) -> _T:
             )
             await asyncio.sleep(delay)
     raise RuntimeError("unreachable: db_read_with_retry")
+
+
+def db_read_with_retry_sync(fn: Callable[[], _T]) -> _T:
+    """Synchronous twin of `db_read_with_retry` (Phase 166.5.1 plan 04, D-02a).
+
+    `db_read_with_retry` is async and cannot be awaited inside a function that
+    already runs in a worker thread (`asyncio.to_thread`, `db_execute`). Two of
+    the reads Sentry named live in such functions
+    (`_load_allocator_context`, `read_native_unpriced_days`), so they get this
+    twin: the same loop over `DB_READ_MAX_RETRIES`, the same
+    `_is_transient_read_error` predicate, the same delay formula and the same
+    bare re-raise of the original exception, but it calls `fn()` directly and
+    sleeps with `time.sleep`.
+
+    ⛔ Never call this on the event loop: it BLOCKS for the whole backoff. Its
+    worst case equals the async helper's (an exhausted ReadTimeout costs about
+    6 minutes at the 120 s client read timeout; see `db_read_with_retry`).
+
+    Wrap only the single read that needs it, never a whole function: a retry
+    re-runs everything inside `fn`.
+    """
+    for attempt in range(DB_READ_MAX_RETRIES):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 — re-raised unchanged below
+            if not _is_transient_read_error(exc) or attempt == DB_READ_MAX_RETRIES - 1:
+                raise
+            delay = DB_READ_BACKOFF_BASE_S * (2 ** attempt) + random.uniform(
+                0, DB_READ_JITTER_MAX_S
+            )
+            logger.warning(
+                "db_read_with_retry (sync): transient timeout %s (attempt %d/%d) — "
+                "backing off %.2fs, retrying: %s",
+                type(exc).__name__,
+                attempt + 1,
+                DB_READ_MAX_RETRIES,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+    raise RuntimeError("unreachable: db_read_with_retry_sync")
 
 
 # ---------------------------------------------------------------------------

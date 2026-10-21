@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 
 from services.allocator_positions import (
@@ -106,3 +107,45 @@ def test_a_failed_read_raises_rather_than_reporting_no_markers() -> None:
     client = _Client([], error=RuntimeError("down"))
     with pytest.raises(RuntimeError, match="down"):
         read_native_unpriced_days(client, ALLOCATOR, [KEY_A])  # type: ignore[arg-type]
+
+
+class _FlakyOnceQuery(_Query):
+    """Raises ``first_error`` on the first ``execute`` of the whole client, then answers."""
+
+    def __init__(self, rows: list[dict[str, Any]], owner: "_FlakyOnceClient") -> None:
+        super().__init__(rows, None)
+        self._owner = owner
+
+    def execute(self) -> Any:
+        self._owner.executes += 1
+        if self._owner.executes == 1:
+            raise self._owner.first_error
+        return super().execute()
+
+
+class _FlakyOnceClient:
+    def __init__(self, rows: list[dict[str, Any]], first_error: Exception) -> None:
+        self._rows = rows
+        self.first_error = first_error
+        self.executes = 0
+
+    def table(self, name: str) -> _Query:
+        assert name == "allocator_equity_derived"
+        return _FlakyOnceQuery(self._rows, self)
+
+
+def test_a_read_timeout_on_the_marker_read_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """QUANTALYZE-2G (Phase 166.5.1, D-02a): one slow marker read must not drop the holdings
+    correction (request-time reader) or fail the daily refresh job (it raises on any failed
+    read), so a single httpx ReadTimeout costs one retry, not the caller's result."""
+    monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+    monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+    client = _FlakyOnceClient(
+        [_row(KEY_A, {"native_unpriced": True, "asof": "2026-10-10"})],
+        httpx.ReadTimeout("The read operation timed out"),
+    )
+
+    got = read_native_unpriced_days(client, ALLOCATOR, [KEY_A])  # type: ignore[arg-type]
+
+    assert got == {KEY_A: "2026-10-10"}
+    assert client.executes == 2
