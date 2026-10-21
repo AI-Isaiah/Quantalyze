@@ -6204,6 +6204,7 @@ Plans:
 - **(1) The equity chart has a 400 px floor.** `src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx` floors its measured width with `Math.max(400, …)`, so the SVG is always at least 400 px wide. Its card clips it at 319 px (375) and 334 px (390), which hides the right-hand axis labels ("0%" to "-3.5%", "Oct"). The page itself does not scroll sideways. A book with open positions shows the same.
 - **(2) Axis tick labels are cut 3-4 px by their own `<svg>`**: "2025" reads "025", "P95 +0.1%", "10-20". This is item (2) of TODOS `[170.1-SC5-SCENARIO-NARROW-DEFECTS]`, which this phase takes over. Items (1), (3) and (4) of that entry stay where they are.
 **Requirements**: TBD (phase-local SC ids)
+**Founder decision 2026-10-21 (AskUserQuestion, "Fix shared once (Recommended)"):** the composer's cut labels come from chart components shared with `/factsheet/[id]/v2`; they are fixed once in the shared component, so the factsheet page also stops cutting those labels (CONTEXT D-03a).
 **Depends on:** Phase 170.1
 **Success Criteria** (what must be TRUE):
 1. At 390 px the Overview equity chart's SVG is no wider than its card's content box and all of its axis labels are visible. A test goes RED on the 400 px floor.
