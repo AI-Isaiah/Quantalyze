@@ -187,7 +187,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
 - [x] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — 8 plans plus review and fix rounds (CSV validation hardening, Sentry redaction of x-service-key and x-tenant-claim), shipped as v0.132.6.0 (#1082); SC-5 390px/640px passed on the seeded local stack; verification passed; security SECURED (completed 2026-10-20)
 - [x] **Phase 170.1.1: TITLES — every page has its own tab title and a sentence-case heading** (INSERTED 2026-10-15) — 9 plans plus two review fix rounds (failed title reads give a neutral title and report to Sentry; the page-title census covers every title shape), shipped as v0.132.9.0 (#1093); SC-4 read on production at 367 CSS px; verification passed; security SECURED (completed 2026-10-20)
-- [ ] **Phase 170.1.2: LABELS — every page shows names and readable labels instead of ids and internal values** (INSERTED 2026-10-15) — not yet planned (split from 170.1 by founder decision; after 170.1)
+- [x] **Phase 170.1.2: LABELS — every page shows names and readable labels instead of ids and internal values** (INSERTED 2026-10-15) — 10 plans plus three review fix rounds (the portfolio PDF names departed strategies and refuses to print a failed render; the wizard and Exposure table read venue display names; the match-eval route names allocators and strategies server-side; key nicknames no longer default to a raw code), shipped as v0.132.10.0 (#1101); SC-4 PROD correction read 0 mismatches of 3 and the WR-04 label rename read 6 "Deribit key", 1 "OKX key", 0 old-style on PROD 2026-10-21; SC-5 passed at 390 px and 640 CSS px on a seeded local stack, no overflow and no clipped label; verification passed (completed 2026-10-21)
 - [ ] **Phase 170.1.3: NARROWCHARTS — the /allocations charts fit a 390 px phone: the Overview equity chart is never wider than its card and every axis label is drawn whole** (INSERTED 2026-10-20) — not yet planned (founder 2026-10-20; equity chart 400 px floor, clipped axis labels)
 - [x] **Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity** (INSERTED) — not yet planned — shipped v0.129.11.0 (#997); closed 2026-10-12 after the founder phone re-check (completed 2026-10-12)
 - [x] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — planned 2026-10-11, 3 plans (completed 2026-10-11)
@@ -6179,20 +6179,20 @@ Plans:
 4. The listed exchange matches the linked key's venue for every published strategy (TODOS `[170.1-LISTED-EXCHANGE-VS-KEY-VENUE]`), or the entry is re-routed by founder decision.
 5. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom after deploy, by the orchestrator.
 
-**Plans:** 10 plans
+**Plans:** 10/10 plans complete
 
 Plans:
 
-- [ ] 170.1.2-01: shared label module with the baseline CHECK census, Badge sentence case, Unnamed strategy null arm (wave 1)
-- [ ] 170.1.2-02: compute-jobs and CSV submissions admin labels and names (wave 2)
-- [ ] 170.1.2-03: users, intros and partner-pilot admin labels and names (wave 2)
-- [ ] 170.1.2-04: match eval names, decision labels, Unknown allocator (wave 2)
-- [ ] 170.1.2-05: venue display names on allocator and strategy surfaces (wave 2)
-- [ ] 170.1.2-06: breach-reason and venue labels on bridge surfaces; OutcomeForm placeholder removed (wave 2)
-- [ ] 170.1.2-07: Unnamed strategy for every lookup miss; event-type and relationship-status labels (wave 2)
-- [ ] 170.1.2-08: AdminTabs source, analytics and intro labels; OrganizationTab role (wave 2)
-- [ ] 170.1.2-09: venue display names in the degraded-member lines and wizard member names (wave 2)
-- [ ] 170.1.2-10: phase gate, label and id sweep; SC-4 and SC-5 orchestrator-owned (wave 3)
+- [x] 170.1.2-01: shared label module with the baseline CHECK census, Badge sentence case, Unnamed strategy null arm (wave 1)
+- [x] 170.1.2-02: compute-jobs and CSV submissions admin labels and names (wave 2)
+- [x] 170.1.2-03: users, intros and partner-pilot admin labels and names (wave 2)
+- [x] 170.1.2-04: match eval names, decision labels, Unknown allocator (wave 2)
+- [x] 170.1.2-05: venue display names on allocator and strategy surfaces (wave 2)
+- [x] 170.1.2-06: breach-reason and venue labels on bridge surfaces; OutcomeForm placeholder removed (wave 2)
+- [x] 170.1.2-07: Unnamed strategy for every lookup miss; event-type and relationship-status labels (wave 2)
+- [x] 170.1.2-08: AdminTabs source, analytics and intro labels; OrganizationTab role (wave 2)
+- [x] 170.1.2-09: venue display names in the degraded-member lines and wizard member names (wave 2)
+- [x] 170.1.2-10: phase gate, label and id sweep; SC-4 and SC-5 orchestrator-owned (wave 3)
 
 ---
 
@@ -6457,7 +6457,7 @@ kept verbatim.
 | 170. LAYOUT | 20/20 | Complete | verification passed (ROADMAP phase list: completed 2026-10-01; this row read `In Progress` until 2026-10-04) |
 | 170.1 COPY | 8/8 | Complete — CSV never raises or stores a wrong date (grids 135→0, 489→0); Sentry header redaction; SC-5 passed; SECURED | 2026-10-20 · v0.132.6.0 · #1082 |
 | 170.1.1 TITLES | 9/9 | Complete — own tab title on every route under one template; sentence-case headings; /referral removed; SC-4 passed on production; SECURED | 2026-10-20 · v0.132.9.0 · #1093 |
-| 170.1.2 LABELS | 0/? | Queued — split from 170.1 (founder 2026-10-15), after 170.1 | - |
+| 170.1.2 LABELS | 10/10 | Complete — labels and names through shared maps with a database CHECK census; "Unnamed strategy" and "Unknown allocator" on every lookup miss; OutcomeForm placeholder removed; SC-4 PROD correction 0 mismatches of 3; SC-5 390/640 px passed; verification passed | 2026-10-21 · v0.132.10.0 · #1101 |
 | 170.1.3 NARROWCHARTS | 0/? | Queued — booked 2026-10-20 (founder) | - |
 | 170.2 PROBEFIXES | 11/11 | Complete | 2026-10-12 |
 | 170.3 OGPUBLIC | 3/3 | Complete | 2026-10-11 |
