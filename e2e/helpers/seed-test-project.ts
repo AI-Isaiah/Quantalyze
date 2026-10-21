@@ -813,9 +813,16 @@ export async function seedAllocatorBook(opts: {
    * Omitted = the book is byte-identical to before: other specs call this.
    */
   wide?: boolean;
+  /**
+   * Phase 170.1.3: the last day of the equity curve, as epoch ms. Omitted = now, so the curve
+   * ends today (every other spec). A spec that commits a reading of the chart's svg text
+   * (layout-narrow's desktop fixture) pins it, because month ticks move with the date.
+   */
+  anchorMs?: number;
 }): Promise<{ apiKeyId: string }> {
   const admin = getAdmin();
   const days = opts.days ?? 120;
+  const anchorMs = opts.anchorMs ?? Date.now();
 
   // 1. Active api_key (placeholder ciphertext — no DB-level validation trigger).
   // venue_account_id is set so plan 11's readiness does not hold the book in
@@ -911,7 +918,7 @@ export async function seedAllocatorBook(opts: {
   // 3. A daily equity curve so EquityChart has a real series to draw.
   const snapshots = Array.from({ length: days }, (_, i) => ({
     allocator_id: opts.allocatorUserId,
-    asof: new Date(Date.now() - (days - 1 - i) * 86_400_000)
+    asof: new Date(anchorMs - (days - 1 - i) * 86_400_000)
       .toISOString()
       .slice(0, 10),
     value_usd: 100_000 * (1 + Math.sin(i / 30) * 0.08 * (i / Math.max(1, days))),

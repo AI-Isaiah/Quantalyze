@@ -855,6 +855,10 @@ export interface SvgTextEntry {
   text: string;
   /** The `text-anchor` attribute, `start` (the SVG initial value) when absent. */
   anchor: string;
+  /** The `x` attribute on the `<text>` itself (user units), null when absent. Deterministic, unlike `rect`, so it can be committed. */
+  attrX: string | null;
+  /** The `y` attribute on the `<text>` itself (user units), null when absent. */
+  attrY: string | null;
   /** True when the text is a Recharts x-axis tick label. Recharts 3 draws those in a sibling `.recharts-xAxis-tick-labels` layer, not inside `.recharts-xAxis`. */
   inXAxis: boolean;
   /** Signed exceedance beyond the bound, positive = outside; null = that axis is unbounded. */
@@ -978,6 +982,8 @@ export async function readSvgTextLayout(
           texts.push({
             text: raw,
             anchor: t.getAttribute("text-anchor") ?? "start",
+            attrX: t.getAttribute("x"),
+            attrY: t.getAttribute("y"),
             inXAxis: t.closest(".recharts-xAxis-tick-labels, .recharts-xAxis") !== null,
             exceed,
             overflowPx: round(worst),

@@ -13,6 +13,7 @@
  * cleanup deletes only that prefix. Never assert a global count.
  */
 import fs from "node:fs";
+import path from "node:path";
 import { test, expect, type Locator, type Page } from "./helpers/hydration-guard";
 import { assertNoReflow } from "./helpers/reflow";
 import {
@@ -2203,11 +2204,16 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
  *   `overview: equity …` (plan 01's gate), `overview|composer: no svg text
  *   clipped` (plan 04's gate), `overview|composer: desktop reading` (C-5).
  *
- * C-5 desktop BEFORE/AFTER: set NARROWCHARTS_DESKTOP_OUT to write the
- * 1280 x 800 reading (per surface, per svg in DOM order: width and every text
- * with its anchor and overflow) and NARROWCHARTS_DESKTOP_BEFORE to compare
- * against a committed one. Neither set: the reading cases still build the
- * reading and assert it is non-empty, and compare nothing.
+ * C-5 desktop unchanged: the `V1280 ... desktop reading` cases compare a 1280 x 800
+ * reading (per surface, per svg in DOM order: width, and every text with its string,
+ * anchor and the `x` / `y` attributes) against the fixture committed at
+ * `e2e/fixtures/narrowcharts-desktop-1280.json`, on every run. The fixture lives
+ * outside `.planning/` because ship branches drop it. Attributes are compared, not
+ * rendered boxes: boxes depend on the machine's fonts, attributes do not.
+ * To accept an intended desktop change, regenerate the fixture on the local-stack lane:
+ *   NARROWCHARTS_DESKTOP_OUT=e2e/fixtures/narrowcharts-desktop-1280.json \
+ *     npx playwright test e2e/layout-narrow.spec.ts -g "desktop reading" --workers=1
+ * With NARROWCHARTS_DESKTOP_OUT set the cases write the reading and compare nothing.
  */
 const NARROW_VIEWPORTS: { id: string; width: number; height: number }[] = [
   { id: "V390", width: 390, height: 844 },
@@ -2309,7 +2315,7 @@ async function waitForStableWidth(page: Page, selector: string): Promise<void> {
 async function openOverview(page: Page, vp: { width: number; height: number }): Promise<void> {
   await page.setViewportSize({ width: vp.width, height: vp.height });
   const allocator = await seedTestAllocator();
-  await seedAllocatorBook({ allocatorUserId: allocator.userId, days: 120 });
+  await seedAllocatorBook({ allocatorUserId: allocator.userId, days: 120, anchorMs: NARROW_ANCHOR_MS });
   await loginViaForm(page, allocator.email, allocator.password);
   const res = await page.goto("/allocations?tab=overview");
   if (res && res.status() >= 400) {
@@ -2407,7 +2413,9 @@ async function openSurface(
 interface ReadingText {
   text: string;
   anchor: string;
-  overflowPx: number;
+  /** The `x` / `y` attributes on the `<text>`, in the svg's user units. */
+  x: number | null;
+  y: number | null;
 }
 interface ReadingSvg {
   surface: Surface;
@@ -2418,6 +2426,13 @@ interface ReadingSvg {
   texts: ReadingText[];
 }
 
+const DESKTOP_FIXTURE = path.join(__dirname, "fixtures", "narrowcharts-desktop-1280.json");
+// Layout widths and Recharts' arithmetic agree to well under this on one machine; the slop
+// is for the same arithmetic on another one.
+const DESKTOP_SLOP_PX = 0.5;
+
+const attrNumber = (v: string | null): number | null => (v === null || v === "" ? null : Number(v));
+
 function toReading(surface: Surface, layouts: SvgTextLayout[]): ReadingSvg[] {
   return layouts.map((l) => ({
     surface,
@@ -2425,7 +2440,12 @@ function toReading(surface: Surface, layouts: SvgTextLayout[]): ReadingSvg[] {
     label: l.label,
     emitter: l.emitter,
     width: l.width,
-    texts: l.texts.map((t) => ({ text: t.text, anchor: t.anchor, overflowPx: t.overflowPx })),
+    texts: l.texts.map((t) => ({
+      text: t.text,
+      anchor: t.anchor,
+      x: attrNumber(t.attrX),
+      y: attrNumber(t.attrY),
+    })),
   }));
 }
 
@@ -2442,12 +2462,16 @@ function writeDesktopReading(outPath: string, surface: Surface, reading: Reading
   fs.renameSync(tmp, outPath);
 }
 
-function compareDesktopReading(beforePath: string, surface: Surface, after: ReadingSvg[]): void {
-  const doc = JSON.parse(fs.readFileSync(beforePath, "utf8")) as {
+const differs = (a: number | null, b: number | null): boolean =>
+  a === null || b === null ? a !== b : Math.abs(a - b) > DESKTOP_SLOP_PX;
+
+/** Every difference between the committed reading and this run's, one line each. */
+function compareDesktopReading(baselinePath: string, surface: Surface, after: ReadingSvg[]): void {
+  const doc = JSON.parse(fs.readFileSync(baselinePath, "utf8")) as {
     readings: Record<string, ReadingSvg[]>;
   };
   const before = doc.readings[surface];
-  if (!before) throw new Error(`NARROWCHARTS: ${beforePath} has no "${surface}" reading`);
+  if (!before) throw new Error(`NARROWCHARTS: ${baselinePath} has no "${surface}" reading`);
   const problems: string[] = [];
   if (before.length !== after.length) {
     problems.push(`${surface}: svg count ${before.length} -> ${after.length}`);
@@ -2456,7 +2480,7 @@ function compareDesktopReading(beforePath: string, surface: Surface, after: Read
     const b = before[i];
     const a = after[i];
     const who = `${surface} svg#${i} ${b.label ?? ""}`;
-    if (Math.abs(b.width - a.width) > 0.5) problems.push(`${who}: width ${b.width} -> ${a.width}`);
+    if (Math.abs(b.width - a.width) > DESKTOP_SLOP_PX) problems.push(`${who}: width ${b.width} -> ${a.width}`);
     const bt = b.texts.map((t) => t.text);
     const at = a.texts.map((t) => t.text);
     if (JSON.stringify(bt) !== JSON.stringify(at)) {
@@ -2465,17 +2489,17 @@ function compareDesktopReading(beforePath: string, surface: Surface, after: Read
     }
     b.texts.forEach((t, k) => {
       const u = a.texts[k];
-      if (t.anchor === u.anchor) return;
-      if (t.overflowPx > 0.5) {
-        console.log(
-          `NARROWCHARTS-DESKTOP-ANCHOR-CHANGE ${surface} "${t.text}" ${t.anchor} -> ${u.anchor} (was overflowing by ${t.overflowPx})`,
-        );
-      } else {
-        problems.push(`${who}: "${t.text}" anchor ${t.anchor} -> ${u.anchor} but it was not overflowing (${t.overflowPx})`);
-      }
+      if (t.anchor !== u.anchor) problems.push(`${who}: "${t.text}" anchor ${t.anchor} -> ${u.anchor}`);
+      if (differs(t.x, u.x)) problems.push(`${who}: "${t.text}" x ${t.x} -> ${u.x}`);
+      if (differs(t.y, u.y)) problems.push(`${who}: "${t.text}" y ${t.y} -> ${u.y}`);
     });
   }
-  expect(problems, `desktop ${surface} differs from the BEFORE reading:\n${problems.join("\n")}`).toEqual([]);
+  problems.forEach((p) => console.log(`NARROWCHARTS-DESKTOP-CHANGE ${p}`));
+  expect(
+    problems,
+    `desktop ${surface} differs from ${path.relative(process.cwd(), baselinePath)} ` +
+      `(if the change is intended, regenerate the fixture, see the comment above this describe):\n${problems.join("\n")}`,
+  ).toEqual([]);
 }
 
 test.describe("/allocations charts — NARROWCHARTS", () => {
@@ -2623,8 +2647,6 @@ test.describe("/allocations charts — NARROWCHARTS", () => {
       const emitters = surface === "composer" ? COMPOSER_EMITTERS : OVERVIEW_EMITTERS;
       const layouts = await readSvgTextLayout(page, "#main-content", "svg", emitters);
       const reading = toReading(surface, layouts);
-      const out = process.env.NARROWCHARTS_DESKTOP_OUT;
-      if (out) writeDesktopReading(out, surface, reading);
       const texts = reading.reduce((n, s) => n + s.texts.length, 0);
       console.log(`NARROWCHARTS V1280 ${surface} reading: ${reading.length} svg(s), ${texts} text(s)`);
       expect(reading.length, `${surface}: no svg read (W-02)`).toBeGreaterThan(0);
@@ -2634,8 +2656,9 @@ test.describe("/allocations charts — NARROWCHARTS", () => {
         `${surface} ${vp.id}`,
         surface === "composer" ? COMPOSER_REQUIRED : OVERVIEW_REQUIRED,
       );
-      const before = process.env.NARROWCHARTS_DESKTOP_BEFORE;
-      if (before) compareDesktopReading(before, surface, reading);
+      const out = process.env.NARROWCHARTS_DESKTOP_OUT;
+      if (out) writeDesktopReading(out, surface, reading);
+      else compareDesktopReading(DESKTOP_FIXTURE, surface, reading);
     });
   }
 });
