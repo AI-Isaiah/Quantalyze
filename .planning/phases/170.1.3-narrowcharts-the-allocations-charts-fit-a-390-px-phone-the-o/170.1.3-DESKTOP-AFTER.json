@@ -1,0 +1,2534 @@
+{
+  "viewport": "1280x800",
+  "readings": {
+    "overview": [
+      {
+        "surface": "overview",
+        "index": 0,
+        "label": "Equity chart",
+        "emitter": null,
+        "width": 798,
+        "texts": [
+          {
+            "text": "-1.5%",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "-1.0%",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "-0.5%",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "0%",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.5%",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "+1.0%",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "+1.5%",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "+2.0%",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 1,
+        "label": "Master brush — full timeline equity overview",
+        "emitter": null,
+        "width": 382,
+        "texts": [
+          {
+            "text": "2026",
+            "anchor": "start",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 2,
+        "label": "Cumulative Returns: My Portfolio",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "-1.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+1.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+2.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 3,
+        "label": "Cumulative Returns vs Benchmark: My Portfolio",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "-100.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-80.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-60.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-40.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-20.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 4,
+        "label": "Daily Returns: My Portfolio",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "-0.1%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.1%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 5,
+        "label": "Rolling Volatility (30d): My Portfolio",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "N<30 — noisy",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.1%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.1%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.1%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.2%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.3%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.3%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.4%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "avg 0.2%",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 6,
+        "label": "Rolling Sharpe (30d): My Portfolio",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "N<30 — noisy",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-500.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-400.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-300.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-200.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-100.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+100.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "avg -79.63",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 7,
+        "label": "Rolling Sortino (30d): My Portfolio",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "N<30 — noisy",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+1000.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+2000.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+3000.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "avg 66.46",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 8,
+        "label": "Rolling β (90d) vs Comparator: My Portfolio",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "N<90 — noisy",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.20",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.40",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.60",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.80",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+1.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 9,
+        "label": "Worst 10 Drawdown Periods: My Portfolio",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "-1.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+1.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+2.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "#1 -3.4%",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 10,
+        "label": "Underwater Chart for Accumulated Capital: My Portfolio",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "-3.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-2.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-1.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 11,
+        "label": "Distribution of daily returns: My Portfolio",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "-0.50%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "0%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.50%",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 12,
+        "label": "Quantile box plot for the strategy's daily return distribution",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "P5 -0.1%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "P95 +0.1%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "-0.1%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "0%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.1%",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 13,
+        "label": "End-of-year returns by calendar year",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "My Portfolio",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "2026",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-1.5%",
+            "anchor": "start",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 14,
+        "label": "Cross-asset correlations between strategy and major benchmarks",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "-1.0",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "-0.5",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.0",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.5",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "1.0",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "BTC",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "ETH",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "S&P 500",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Gold",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "US 10Y (IEF)",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "start",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 15,
+        "label": "Pairwise correlation matrix of strategy and benchmarks",
+        "emitter": null,
+        "width": 644,
+        "texts": [
+          {
+            "text": "My Portfolio",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "BTC",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "ETH",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "SPX",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Gold",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "IEF",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "My Portfolio",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "1.00",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "BTC",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "1.00",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "ETH",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "1.00",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "SPX",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "1.00",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "Gold",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "1.00",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "IEF",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "1.00",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 16,
+        "label": "Daily-return calendar for 2026",
+        "emitter": null,
+        "width": 770,
+        "texts": [
+          {
+            "text": "Jan",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Feb",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Mar",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Apr",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "May",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jun",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jul",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Aug",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Sep",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Oct",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Nov",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Dec",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jan",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "M",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "W",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "F",
+            "anchor": "start",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 17,
+        "label": "Wins streak-length distribution",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "0",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "1",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "1",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "3",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "5",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "7",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "9",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "11",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "13",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "14+",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 18,
+        "label": "Losses streak-length distribution",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "0",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "1",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "1",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "3",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "5",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "7",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "9",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "11",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "13",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "14+",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      }
+    ],
+    "composer": [
+      {
+        "surface": "composer",
+        "index": 0,
+        "label": "Master brush — full timeline equity overview",
+        "emitter": "brush",
+        "width": 382,
+        "texts": [
+          {
+            "text": "2025",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "2026",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 1,
+        "label": "Cumulative Returns: Scenario",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+50.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+100.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+200.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 2,
+        "label": "Daily Returns: Scenario",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+20.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+40.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+60.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+80.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+100.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 3,
+        "label": "Rolling Volatility (6mo): Scenario",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "N<126 — noisy",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+20.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+40.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+60.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+80.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+100.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 4,
+        "label": "Rolling Sharpe (6mo): Scenario",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "N<126 — noisy",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.20",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.40",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.60",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.80",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+1.00",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 5,
+        "label": "Rolling Sortino (6mo): Scenario",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "N<126 — noisy",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.20",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.40",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.60",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.80",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+1.00",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 6,
+        "label": "Worst 10 Drawdown Periods: Scenario",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+50.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+100.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+200.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 7,
+        "label": "Underwater Chart for Accumulated Capital: Scenario",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+20.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+40.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+60.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+80.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+100.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 8,
+        "label": "Distribution of daily returns: Scenario",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "-0.50%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "0%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "+0.50%",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 9,
+        "label": "Quantile box plot for the strategy's daily return distribution",
+        "emitter": "quantile-box",
+        "width": 400,
+        "texts": [
+          {
+            "text": "P5 -1.0%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "P95 +1.0%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "-1.0%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "0%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "+1.0%",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 10,
+        "label": "End-of-year returns by calendar year",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "Scenario",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "2025",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+5.4%",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "2026",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+8.0%",
+            "anchor": "start",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 11,
+        "label": "Daily-return calendar for 2025",
+        "emitter": null,
+        "width": 770,
+        "texts": [
+          {
+            "text": "Jan",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Feb",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Mar",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Apr",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "May",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jun",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jul",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Aug",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Sep",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Oct",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Nov",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Dec",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jan",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "M",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "W",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "F",
+            "anchor": "start",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 12,
+        "label": "Daily-return calendar for 2026",
+        "emitter": null,
+        "width": 770,
+        "texts": [
+          {
+            "text": "Jan",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Feb",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Mar",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Apr",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "May",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jun",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jul",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Aug",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Sep",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Oct",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Nov",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Dec",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "Jan",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "M",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "W",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "F",
+            "anchor": "start",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 13,
+        "label": "Wins streak-length distribution",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "0",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "1",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "2",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "3",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "4",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "5",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "1",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "3",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "5",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "7",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "9",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "11",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "13",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "14+",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 14,
+        "label": "Losses streak-length distribution",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "0",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "1",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "2",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "3",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "4",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "1",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "3",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "5",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "7",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "9",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "11",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "13",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "14+",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 15,
+        "label": "Forward confidence bands over 252 trading days. Median terminal return +10.11%, with a 5 to 95 percent interval of -35.34% to +83.27%.",
+        "emitter": null,
+        "width": 858,
+        "texts": [
+          {
+            "text": "-35.75%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.00%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "+84.14%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "Today",
+            "anchor": "start",
+            "overflowPx": 0
+          },
+          {
+            "text": "252d",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 16,
+        "label": "Returns distribution",
+        "emitter": null,
+        "width": 858,
+        "texts": [
+          {
+            "text": "-1.0%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "-0.6%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "-0.2%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.2%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.6%",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "0",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "15",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "30",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "45",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "60",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 17,
+        "label": "Return quantiles box plot across 1 period (All).",
+        "emitter": null,
+        "width": 858,
+        "texts": [
+          {
+            "text": "-1.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-0.5%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.5%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "1.0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "All",
+            "anchor": "middle",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 18,
+        "label": "Rolling metrics",
+        "emitter": "rolling-sharpe",
+        "width": 858,
+        "texts": [
+          {
+            "text": "01-18",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "01-31",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "02-13",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "02-27",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "03-13",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "03-27",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "04-10",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "04-24",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "05-09",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "05-24",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "06-08",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "06-23",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "07-08",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "07-22",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "08-06",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "08-21",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "09-04",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "09-19",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "10-19",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-6",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-3",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "3",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "6",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 19,
+        "label": "Rolling volatility",
+        "emitter": "rolling-volatility",
+        "width": 858,
+        "texts": [
+          {
+            "text": "01-18",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "01-31",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "02-13",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "02-27",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "03-13",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "03-27",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "04-10",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "04-24",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "05-09",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "05-24",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "06-08",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "06-23",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "07-08",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "07-22",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "08-06",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "08-21",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "09-04",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "09-19",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "10-19",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "3%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "6%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "9%",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "12%",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 20,
+        "label": "Rolling Sortino",
+        "emitter": "rolling-sortino",
+        "width": 858,
+        "texts": [
+          {
+            "text": "01-18",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "01-31",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "02-13",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "02-27",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "03-13",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "03-27",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "04-10",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "04-24",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "05-09",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "05-24",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "06-08",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "06-23",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "07-08",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "07-22",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "08-06",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "08-21",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "09-04",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "09-19",
+            "anchor": "middle",
+            "overflowPx": 0
+          },
+          {
+            "text": "10-19",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-8.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "-4.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "0.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "4.00",
+            "anchor": "end",
+            "overflowPx": 0
+          },
+          {
+            "text": "8.00",
+            "anchor": "end",
+            "overflowPx": 0
+          }
+        ]
+      }
+    ]
+  }
+}

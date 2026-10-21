@@ -4,6 +4,8 @@ import {
   decimalExponent,
   estLabelWidth,
   fitTickLabel,
+  fitEndLabelX,
+  fitBaselineY,
   niceStepValues,
   pow10,
   tickTolerance,
@@ -286,5 +288,39 @@ describe("fitTickLabel", () => {
     // Centred "2025" at font 15 spans 36: x = 18 puts its left edge exactly at 0.
     expect(fitTickLabel(18, "2025", 15, 0, 1100)).toEqual({ x: 18, textAnchor: "middle" });
     expect(fitTickLabel(17.9, "2025", 15, 0, 1100).x).toBe(17.9);
+  });
+});
+
+describe("fitEndLabelX", () => {
+  it("moves an end-anchored y tick right until its box starts at the svg's left edge", () => {
+    // "+1000.00" at font 10 is 8 * 6 = 48 wide; ending at x = 44 it would start at -4.
+    expect(fitEndLabelX(44, "+1000.00", 10)).toBe(48);
+  });
+
+  it("leaves a label that already fits where it is", () => {
+    // "+10.00" is 36 wide: 44 - 36 = 8 >= 0.
+    expect(fitEndLabelX(44, "+10.00", 10)).toBe(44);
+    // A box that starts exactly on the edge fits: 48 - 48 = 0.
+    expect(fitEndLabelX(48, "+1000.00", 10)).toBe(48);
+  });
+
+  it("never changes the label or shrinks it: only x moves, and only rightwards", () => {
+    expect(fitEndLabelX(52, "-1.0%", 22)).toBe(66);
+    expect(fitEndLabelX(52, "-1.0%", 22)).toBeGreaterThanOrEqual(52);
+  });
+});
+
+describe("fitBaselineY", () => {
+  it("lowers a baseline whose text box would start above the svg's top edge", () => {
+    // Font 13: the em-box ascent estimate is ceil(13 * 1.05) = 14, so a baseline at 10 puts the top at -4.
+    expect(fitBaselineY(10, 13)).toBe(14);
+    // Font 16 legend at baseline 12: ceil(16.8) = 17.
+    expect(fitBaselineY(12, 16)).toBe(17);
+  });
+
+  it("leaves a baseline that already clears the top edge where it is", () => {
+    // Desktop arms: font 9 at baseline 10 (ceil 9.45 = 10) and font 10 at baseline 12 (ceil 10.5 = 11).
+    expect(fitBaselineY(10, 9)).toBe(10);
+    expect(fitBaselineY(12, 10)).toBe(12);
   });
 });
