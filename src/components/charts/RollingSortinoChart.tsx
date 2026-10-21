@@ -2,6 +2,7 @@
 
 import { Line, LineChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
 import { TouchTooltip } from "./TouchTooltip";
+import { EdgeFitXTick } from "./EdgeFitXTick";
 import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import {
   CHART_ACCENT,
@@ -30,7 +31,7 @@ export function RollingSortinoChart({ data }: RollingSortinoChartProps) {
         <LineChart accessibilityLayer={false} data={data} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
           <XAxis
             dataKey="date"
-            tick={CHART_TICK_STYLE}
+            tick={<EdgeFitXTick {...CHART_TICK_STYLE} />}
             tickLine={false}
             axisLine={{ stroke: CHART_BORDER }}
             tickFormatter={(d: string) => d.slice(5)}
