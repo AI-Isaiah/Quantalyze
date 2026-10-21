@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.132.10.3] - 2026-10-21 — NARROWCHARTS: the /allocations charts fit a 390 px phone and every axis label is drawn whole (Phase 170.1.3)
+
+### Fixed
+- The Overview equity chart is never wider than its card. `EquityChart.tsx` floored its measured width with `Math.max(400, …)`, so at 375–390 px its card clipped the right axis labels; the floor is gone. Below 400 px the chart thins its x ticks (`thinXTicks`) and grows its right pad to the widest y label (`rightAxisPad`) (D-01, D-02).
+- Axis, tick and legend labels are no longer cut by their own `<svg>` at 390 px on the Overview and the scenario composer. Each shared chart is fixed once, so every page that mounts it benefits (D-03a/b/c):
+  - the brush year tick and the quantile box P5/P95 labels anchor inward when they would cross an edge (`fitTickLabel`, `estLabelWidth` in `src/lib/chart-ticks.ts`);
+  - the EOY legend and the calendar month labels move their baseline down far enough to clear the top edge (`fitBaselineY`), on mobile only;
+  - `ReturnQuantiles` and `TimeSeriesChart` grow their left gutter from the widest y label (9-character labels such as "+10000.00" no longer land on the plot);
+  - the three rolling charts (RollingMetrics, RollingVolatilityChart, RollingSortinoChart) choose their date ticks in code through `RollingXAxis` and `fitXTickValues`: evenly spaced, oldest and newest kept, never overlapping, with the end label clamped inside the svg (`EdgeFitXTick`).
+- `RollingMetrics` with three empty series (a strategy with under 30 days of history) renders an empty axis instead of throwing.
+- SVG chart text is laid out with `text-rendering: geometricPrecision` (`globals.css`). Without it, Playwright's Linux headless Chromium rounds every glyph advance to a whole pixel, so labels drew up to about 1 px wider than the 0.6 em the fit rules assume and were cut at the svg edge. The mobile streak histogram's top y label now uses `fitBaselineY` too, since an exact 1 em text box put it 0.6 px over the top edge.
+
+### Changed
+- Desktop (1280 px) output is unchanged except for deliberate, recorded moves: the two brush year labels that were already cut, the Overview Rolling Sortino gutter (50 to 56 for "+1000.00"), and the rolling charts' date ticks, now 14 evenly spaced dates instead of the 19 Recharts measured from the body font. The founder accepted the last one on 2026-10-21 as an amendment to D-04 / SC-3; the old set depended on font measurement and could not be reproduced deterministically.
+
+### Removed
+- `fitEndLabelX`, added during the phase and replaced by the gutter rule before ship.
+
+### Tests
+- `e2e/layout-narrow.spec.ts` gains a NARROWCHARTS describe (helpers in `e2e/helpers/geometry.ts`): at 390, 640 and 1280 px every svg text on the Overview and the composer must sit inside its svg, each emitter the phase fixed must be present with a minimum text count, the rolling and equity x labels must not overlap, and the equity svg must equal its card's content box.
+- The 1280 px desktop reading is compared on every run against `e2e/fixtures/narrowcharts-desktop-1280.json` (svg count and width, text strings, anchors, x/y within 0.5 px; a non-finite value counts as a difference). Its x/y were shown not to depend on fonts by forcing serif and monospace body fonts. `seedAllocatorBook` takes an optional `anchorMs` so the reading does not move with the date.
+- Unit tests for the tick helpers include a sweep over 2–400-point series at the 390/640/1280 chart widths. Each new test was run red against the old code first.
+
+### Notes
+- SC-4, a 390 px and 640 px reading in the logged-in browser, runs after deploy.
+
 ## [0.132.10.2] - 2026-10-21 — SENTRYTRIAGE: the three unbooked production Sentry groups are fixed at their cause (Phase 166.5.1)
 
 ### Root cause

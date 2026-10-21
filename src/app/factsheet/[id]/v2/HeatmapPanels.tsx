@@ -9,6 +9,7 @@ import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { useTapPin } from "@/hooks/useTapPin";
 import type { DailyHeatmapYear, MonthlyReturnsRow } from "@/lib/factsheet/types";
 import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
+import { fitBaselineY } from "@/lib/chart-ticks";
 
 /** Resolve the heatmap mixing trio from the central palette. */
 function useHeatmapBase(): { base: string; accent: string; negative: string } {
@@ -261,9 +262,17 @@ export function DailyReturnsHeatmap() {
 }
 
 function YearCalendar({ year, maxAbs, palette }: { year: DailyHeatmapYear; maxAbs: number; palette: { base: string; accent: string; negative: string } }) {
+  const isMobile = useBreakpoint() === "mobile";
   const cols = year.cells.length;
   const labelW = 14;
-  const monthLabelH = 14;
+  // Mobile legibility (CHART-02): bump the month overlay label font from its desktop literal
+  // (9) so it clears the floor at 320px. Desktop arm = today's literal -> byte-identical.
+  const monthFont = isMobile ? 13 : 9;
+  // Phase 170.1.3 NARROWCHARTS (D-03c): the baseline follows the font so the text box does not
+  // start above the overlay svg (desktop font 9 keeps today's 10), and the label band keeps its
+  // 4-unit gap below the baseline so a descender never lands on the first cell row (desktop 14).
+  const monthY = fitBaselineY(10, monthFont);
+  const monthLabelH = monthY + 4;
   const w = labelW + cols * (CELL + CELL_GAP);
   const h = monthLabelH + 7 * (CELL + CELL_GAP);
 
@@ -297,6 +306,8 @@ function YearCalendar({ year, maxAbs, palette }: { year: DailyHeatmapYear; maxAb
       h={h}
       labelW={labelW}
       monthLabelH={monthLabelH}
+      monthFont={monthFont}
+      monthY={monthY}
       monthLabels={monthLabels}
     />
   );
@@ -321,6 +332,8 @@ function YearCalendarCanvas({
   h,
   labelW,
   monthLabelH,
+  monthFont,
+  monthY,
   monthLabels,
 }: {
   year: DailyHeatmapYear;
@@ -330,13 +343,13 @@ function YearCalendarCanvas({
   h: number;
   labelW: number;
   monthLabelH: number;
+  monthFont: number;
+  monthY: number;
   monthLabels: { col: number; label: string }[];
 }) {
   const isMobile = useBreakpoint() === "mobile";
-  // Mobile legibility (CHART-02): bump the month/weekday overlay label font from
-  // its desktop literals (9 / 8) so it clears the floor at 320px. Desktop arm =
-  // today's literals → desktop render byte-identical.
-  const monthFont = isMobile ? 13 : 9;
+  // Mobile legibility (CHART-02): bump the weekday overlay label font from its desktop literal
+  // (8) so it clears the floor at 320px. Desktop arm = today's literal → byte-identical.
   const dayFont = isMobile ? 12 : 8;
 
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -564,7 +577,7 @@ function YearCalendarCanvas({
             <text
               key={`m-${ml.col}-${ml.label}`}
               x={labelW + ml.col * (CELL + CELL_GAP)}
-              y={10}
+              y={monthY}
               fontSize={monthFont}
               fontFamily="var(--font-mono)"
               fill="var(--color-text-muted)"

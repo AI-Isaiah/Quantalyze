@@ -1,0 +1,2883 @@
+{
+  "viewport": "1280x800",
+  "readings": {
+    "overview": [
+      {
+        "surface": "overview",
+        "index": 0,
+        "label": "Equity chart",
+        "emitter": null,
+        "width": 798,
+        "texts": [
+          {
+            "text": "-1.5%",
+            "anchor": "start",
+            "x": 738,
+            "y": 228.89089169880117
+          },
+          {
+            "text": "-1.0%",
+            "anchor": "start",
+            "x": 738,
+            "y": 200.5996002920942
+          },
+          {
+            "text": "-0.5%",
+            "anchor": "start",
+            "x": 738,
+            "y": 172.30830888538725
+          },
+          {
+            "text": "0%",
+            "anchor": "start",
+            "x": 738,
+            "y": 144.0170174786803
+          },
+          {
+            "text": "+0.5%",
+            "anchor": "start",
+            "x": 738,
+            "y": 115.72572607197397
+          },
+          {
+            "text": "+1.0%",
+            "anchor": "start",
+            "x": 738,
+            "y": 87.43443466526764
+          },
+          {
+            "text": "+1.5%",
+            "anchor": "start",
+            "x": 738,
+            "y": 59.143143258561295
+          },
+          {
+            "text": "+2.0%",
+            "anchor": "start",
+            "x": 738,
+            "y": 30.85185185185497
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "x": 32.403361344537814,
+            "y": 250
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "x": 148.31932773109244,
+            "y": 250
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "x": 337.4453781512605,
+            "y": 250
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "x": 526.5714285714286,
+            "y": 250
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "x": 679.09243697479,
+            "y": 250
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 1,
+        "label": "Master brush — full timeline equity overview",
+        "emitter": null,
+        "width": 382,
+        "texts": [
+          {
+            "text": "2026",
+            "anchor": "start",
+            "x": 6,
+            "y": 56
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 2,
+        "label": "Cumulative Returns: My Portfolio",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "-1.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 217.42868421815083
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 156.22809790138837
+          },
+          {
+            "text": "+1.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 95.63648274183127
+          },
+          {
+            "text": "+2.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 35.64183901370184
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "x": 50,
+            "y": 272
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "x": 97.45762711864407,
+            "y": 272
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "x": 307.62711864406776,
+            "y": 272
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "x": 517.7966101694915,
+            "y": 272
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "x": 721.1864406779661,
+            "y": 272
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 3,
+        "label": "Cumulative Returns vs Benchmark: My Portfolio",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "-100.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 246.35714285714286
+          },
+          {
+            "text": "-80.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 204.21428571428572
+          },
+          {
+            "text": "-60.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 162.07142857142858
+          },
+          {
+            "text": "-40.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 119.92857142857143
+          },
+          {
+            "text": "-20.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 77.78571428571428
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 35.64285714285715
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "x": 50,
+            "y": 272
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "x": 97.45762711864407,
+            "y": 272
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "x": 307.62711864406776,
+            "y": 272
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "x": 517.7966101694915,
+            "y": 272
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "x": 721.1864406779661,
+            "y": 272
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 4,
+        "label": "Daily Returns: My Portfolio",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "-0.1%",
+            "anchor": "end",
+            "x": 44,
+            "y": 181.7319823762626
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 158.1554618162173
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 134.57894125617202
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 111.0024206961267
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 87.4259001360814
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 63.849379576036114
+          },
+          {
+            "text": "+0.1%",
+            "anchor": "end",
+            "x": 44,
+            "y": 40.27285901599079
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "x": 50,
+            "y": 212
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "x": 97.45762711864407,
+            "y": 212
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "x": 307.62711864406776,
+            "y": 212
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "x": 517.7966101694915,
+            "y": 212
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "x": 721.1864406779661,
+            "y": 212
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 5,
+        "label": "Rolling Volatility (30d): My Portfolio",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "N<30 — noisy",
+            "anchor": "end",
+            "x": 242.61016949152543,
+            "y": 32
+          },
+          {
+            "text": "+0.1%",
+            "anchor": "end",
+            "x": 44,
+            "y": 169.07810179960492
+          },
+          {
+            "text": "+0.1%",
+            "anchor": "end",
+            "x": 44,
+            "y": 146.26677388115502
+          },
+          {
+            "text": "+0.1%",
+            "anchor": "end",
+            "x": 44,
+            "y": 123.45544596270507
+          },
+          {
+            "text": "+0.2%",
+            "anchor": "end",
+            "x": 44,
+            "y": 100.64411804425514
+          },
+          {
+            "text": "+0.3%",
+            "anchor": "end",
+            "x": 44,
+            "y": 77.8327901258052
+          },
+          {
+            "text": "+0.3%",
+            "anchor": "end",
+            "x": 44,
+            "y": 55.02146220735527
+          },
+          {
+            "text": "+0.4%",
+            "anchor": "end",
+            "x": 44,
+            "y": 32.21013428890534
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "x": 50,
+            "y": 192
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "x": 97.45762711864407,
+            "y": 192
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "x": 307.62711864406776,
+            "y": 192
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "x": 517.7966101694915,
+            "y": 192
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "x": 721.1864406779661,
+            "y": 192
+          },
+          {
+            "text": "avg 0.2%",
+            "anchor": "end",
+            "x": 846,
+            "y": 78.18835729395214
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 6,
+        "label": "Rolling Sharpe (30d): My Portfolio",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "N<30 — noisy",
+            "anchor": "end",
+            "x": 242.61016949152543,
+            "y": 32
+          },
+          {
+            "text": "-500.00",
+            "anchor": "end",
+            "x": 44,
+            "y": 170.4328162920883
+          },
+          {
+            "text": "-400.00",
+            "anchor": "end",
+            "x": 44,
+            "y": 147.74395112624325
+          },
+          {
+            "text": "-300.00",
+            "anchor": "end",
+            "x": 44,
+            "y": 125.05508596039822
+          },
+          {
+            "text": "-200.00",
+            "anchor": "end",
+            "x": 44,
+            "y": 102.36622079455319
+          },
+          {
+            "text": "-100.00",
+            "anchor": "end",
+            "x": 44,
+            "y": 79.67735562870814
+          },
+          {
+            "text": "0.00",
+            "anchor": "end",
+            "x": 44,
+            "y": 56.98849046286311
+          },
+          {
+            "text": "+100.00",
+            "anchor": "end",
+            "x": 44,
+            "y": 34.29962529701809
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "x": 50,
+            "y": 192
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "x": 97.45762711864407,
+            "y": 192
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "x": 307.62711864406776,
+            "y": 192
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "x": 517.7966101694915,
+            "y": 192
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "x": 721.1864406779661,
+            "y": 192
+          },
+          {
+            "text": "avg -79.63",
+            "anchor": "end",
+            "x": 846,
+            "y": 69.05625144676924
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 7,
+        "label": "Rolling Sortino (30d): My Portfolio",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "N<30 — noisy",
+            "anchor": "end",
+            "x": 247.135593220339,
+            "y": 32
+          },
+          {
+            "text": "0.00",
+            "anchor": "end",
+            "x": 50,
+            "y": 169.9174869456365
+          },
+          {
+            "text": "+1000.00",
+            "anchor": "end",
+            "x": 50,
+            "y": 131.92227157667753
+          },
+          {
+            "text": "+2000.00",
+            "anchor": "end",
+            "x": 50,
+            "y": 93.92705620771855
+          },
+          {
+            "text": "+3000.00",
+            "anchor": "end",
+            "x": 50,
+            "y": 55.931840838759584
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "x": 56,
+            "y": 192
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "x": 103.10169491525423,
+            "y": 192
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "x": 311.69491525423723,
+            "y": 192
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "x": 520.2881355932203,
+            "y": 192
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "x": 722.1525423728814,
+            "y": 192
+          },
+          {
+            "text": "avg 66.46",
+            "anchor": "end",
+            "x": 846,
+            "y": 161.39230038827014
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 8,
+        "label": "Rolling β (90d) vs Comparator: My Portfolio",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "N<90 — noisy",
+            "anchor": "end",
+            "x": 649.3898305084746,
+            "y": 32
+          },
+          {
+            "text": "0.00",
+            "anchor": "end",
+            "x": 44,
+            "y": 170.64285714285714
+          },
+          {
+            "text": "+0.20",
+            "anchor": "end",
+            "x": 44,
+            "y": 142.78571428571428
+          },
+          {
+            "text": "+0.40",
+            "anchor": "end",
+            "x": 44,
+            "y": 114.92857142857143
+          },
+          {
+            "text": "+0.60",
+            "anchor": "end",
+            "x": 44,
+            "y": 87.07142857142857
+          },
+          {
+            "text": "+0.80",
+            "anchor": "end",
+            "x": 44,
+            "y": 59.21428571428571
+          },
+          {
+            "text": "+1.00",
+            "anchor": "end",
+            "x": 44,
+            "y": 31.35714285714286
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "x": 50,
+            "y": 192
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "x": 97.45762711864407,
+            "y": 192
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "x": 307.62711864406776,
+            "y": 192
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "x": 517.7966101694915,
+            "y": 192
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "x": 721.1864406779661,
+            "y": 192
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 9,
+        "label": "Worst 10 Drawdown Periods: My Portfolio",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "-1.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 217.42868421815083
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 156.22809790138837
+          },
+          {
+            "text": "+1.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 95.63648274183127
+          },
+          {
+            "text": "+2.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 35.64183901370184
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "x": 50,
+            "y": 272
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "x": 97.45762711864407,
+            "y": 272
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "x": 307.62711864406776,
+            "y": 272
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "x": 517.7966101694915,
+            "y": 272
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "x": 721.1864406779661,
+            "y": 272
+          },
+          {
+            "text": "#1 -3.4%",
+            "anchor": "middle",
+            "x": 850,
+            "y": 31
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 10,
+        "label": "Underwater Chart for Accumulated Capital: My Portfolio",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "-3.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 120.56976865537037
+          },
+          {
+            "text": "-2.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 90.11794100834216
+          },
+          {
+            "text": "-1.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 59.666113361313926
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 29.21428571428572
+          },
+          {
+            "text": "Jun",
+            "anchor": "middle",
+            "x": 50,
+            "y": 152
+          },
+          {
+            "text": "Jul",
+            "anchor": "middle",
+            "x": 97.45762711864407,
+            "y": 152
+          },
+          {
+            "text": "Aug",
+            "anchor": "middle",
+            "x": 307.62711864406776,
+            "y": 152
+          },
+          {
+            "text": "Sep",
+            "anchor": "middle",
+            "x": 517.7966101694915,
+            "y": 152
+          },
+          {
+            "text": "Oct",
+            "anchor": "middle",
+            "x": 721.1864406779661,
+            "y": 152
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 11,
+        "label": "Distribution of daily returns: My Portfolio",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "-0.50%",
+            "anchor": "middle",
+            "x": 50,
+            "y": 186
+          },
+          {
+            "text": "0%",
+            "anchor": "middle",
+            "x": 450,
+            "y": 186
+          },
+          {
+            "text": "+0.50%",
+            "anchor": "middle",
+            "x": 850,
+            "y": 186
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 12,
+        "label": "Quantile box plot for the strategy's daily return distribution",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "P5 -0.1%",
+            "anchor": "middle",
+            "x": 32.42314206273838,
+            "y": 45
+          },
+          {
+            "text": "P95 +0.1%",
+            "anchor": "middle",
+            "x": 839.1810420204711,
+            "y": 45
+          },
+          {
+            "text": "-0.1%",
+            "anchor": "middle",
+            "x": 30,
+            "y": 120
+          },
+          {
+            "text": "0%",
+            "anchor": "middle",
+            "x": 439.9873683674843,
+            "y": 120
+          },
+          {
+            "text": "+0.1%",
+            "anchor": "middle",
+            "x": 850,
+            "y": 120
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 13,
+        "label": "End-of-year returns by calendar year",
+        "emitter": "eoy-legend",
+        "width": 400,
+        "texts": [
+          {
+            "text": "My Portfolio",
+            "anchor": "start",
+            "x": 74,
+            "y": 12
+          },
+          {
+            "text": "2026",
+            "anchor": "end",
+            "x": 52,
+            "y": 41
+          },
+          {
+            "text": "-1.5%",
+            "anchor": "start",
+            "x": 806,
+            "y": 41
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 14,
+        "label": "Cross-asset correlations between strategy and major benchmarks",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "-1.0",
+            "anchor": "middle",
+            "x": 110,
+            "y": 20
+          },
+          {
+            "text": "-0.5",
+            "anchor": "middle",
+            "x": 285,
+            "y": 20
+          },
+          {
+            "text": "0.0",
+            "anchor": "middle",
+            "x": 460,
+            "y": 20
+          },
+          {
+            "text": "0.5",
+            "anchor": "middle",
+            "x": 635,
+            "y": 20
+          },
+          {
+            "text": "1.0",
+            "anchor": "middle",
+            "x": 810,
+            "y": 20
+          },
+          {
+            "text": "BTC",
+            "anchor": "end",
+            "x": 102,
+            "y": 47
+          },
+          {
+            "text": "—",
+            "anchor": "start",
+            "x": 816,
+            "y": 47
+          },
+          {
+            "text": "ETH",
+            "anchor": "end",
+            "x": 102,
+            "y": 73
+          },
+          {
+            "text": "—",
+            "anchor": "start",
+            "x": 816,
+            "y": 73
+          },
+          {
+            "text": "S&P 500",
+            "anchor": "end",
+            "x": 102,
+            "y": 99
+          },
+          {
+            "text": "—",
+            "anchor": "start",
+            "x": 816,
+            "y": 99
+          },
+          {
+            "text": "Gold",
+            "anchor": "end",
+            "x": 102,
+            "y": 125
+          },
+          {
+            "text": "—",
+            "anchor": "start",
+            "x": 816,
+            "y": 125
+          },
+          {
+            "text": "US 10Y (IEF)",
+            "anchor": "end",
+            "x": 102,
+            "y": 151
+          },
+          {
+            "text": "—",
+            "anchor": "start",
+            "x": 816,
+            "y": 151
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 15,
+        "label": "Pairwise correlation matrix of strategy and benchmarks",
+        "emitter": null,
+        "width": 644,
+        "texts": [
+          {
+            "text": "My Portfolio",
+            "anchor": "middle",
+            "x": 154,
+            "y": 20
+          },
+          {
+            "text": "BTC",
+            "anchor": "middle",
+            "x": 242,
+            "y": 20
+          },
+          {
+            "text": "ETH",
+            "anchor": "middle",
+            "x": 330,
+            "y": 20
+          },
+          {
+            "text": "SPX",
+            "anchor": "middle",
+            "x": 418,
+            "y": 20
+          },
+          {
+            "text": "Gold",
+            "anchor": "middle",
+            "x": 506,
+            "y": 20
+          },
+          {
+            "text": "IEF",
+            "anchor": "middle",
+            "x": 594,
+            "y": 20
+          },
+          {
+            "text": "My Portfolio",
+            "anchor": "end",
+            "x": 102,
+            "y": 50
+          },
+          {
+            "text": "1.00",
+            "anchor": "middle",
+            "x": 154,
+            "y": 50
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 242,
+            "y": 50
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 330,
+            "y": 50
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 418,
+            "y": 50
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 506,
+            "y": 50
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 594,
+            "y": 50
+          },
+          {
+            "text": "BTC",
+            "anchor": "end",
+            "x": 102,
+            "y": 86
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 154,
+            "y": 86
+          },
+          {
+            "text": "1.00",
+            "anchor": "middle",
+            "x": 242,
+            "y": 86
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 330,
+            "y": 86
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 418,
+            "y": 86
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 506,
+            "y": 86
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 594,
+            "y": 86
+          },
+          {
+            "text": "ETH",
+            "anchor": "end",
+            "x": 102,
+            "y": 122
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 154,
+            "y": 122
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 242,
+            "y": 122
+          },
+          {
+            "text": "1.00",
+            "anchor": "middle",
+            "x": 330,
+            "y": 122
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 418,
+            "y": 122
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 506,
+            "y": 122
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 594,
+            "y": 122
+          },
+          {
+            "text": "SPX",
+            "anchor": "end",
+            "x": 102,
+            "y": 158
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 154,
+            "y": 158
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 242,
+            "y": 158
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 330,
+            "y": 158
+          },
+          {
+            "text": "1.00",
+            "anchor": "middle",
+            "x": 418,
+            "y": 158
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 506,
+            "y": 158
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 594,
+            "y": 158
+          },
+          {
+            "text": "Gold",
+            "anchor": "end",
+            "x": 102,
+            "y": 194
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 154,
+            "y": 194
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 242,
+            "y": 194
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 330,
+            "y": 194
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 418,
+            "y": 194
+          },
+          {
+            "text": "1.00",
+            "anchor": "middle",
+            "x": 506,
+            "y": 194
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 594,
+            "y": 194
+          },
+          {
+            "text": "IEF",
+            "anchor": "end",
+            "x": 102,
+            "y": 230
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 154,
+            "y": 230
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 242,
+            "y": 230
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 330,
+            "y": 230
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 418,
+            "y": 230
+          },
+          {
+            "text": "—",
+            "anchor": "middle",
+            "x": 506,
+            "y": 230
+          },
+          {
+            "text": "1.00",
+            "anchor": "middle",
+            "x": 594,
+            "y": 230
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 16,
+        "label": "Daily-return calendar for 2026",
+        "emitter": "heatmap-months",
+        "width": 770,
+        "texts": [
+          {
+            "text": "Jan",
+            "anchor": "start",
+            "x": 14,
+            "y": 10
+          },
+          {
+            "text": "Feb",
+            "anchor": "start",
+            "x": 70,
+            "y": 10
+          },
+          {
+            "text": "Mar",
+            "anchor": "start",
+            "x": 126,
+            "y": 10
+          },
+          {
+            "text": "Apr",
+            "anchor": "start",
+            "x": 196,
+            "y": 10
+          },
+          {
+            "text": "May",
+            "anchor": "start",
+            "x": 252,
+            "y": 10
+          },
+          {
+            "text": "Jun",
+            "anchor": "start",
+            "x": 322,
+            "y": 10
+          },
+          {
+            "text": "Jul",
+            "anchor": "start",
+            "x": 378,
+            "y": 10
+          },
+          {
+            "text": "Aug",
+            "anchor": "start",
+            "x": 434,
+            "y": 10
+          },
+          {
+            "text": "Sep",
+            "anchor": "start",
+            "x": 504,
+            "y": 10
+          },
+          {
+            "text": "Oct",
+            "anchor": "start",
+            "x": 560,
+            "y": 10
+          },
+          {
+            "text": "Nov",
+            "anchor": "start",
+            "x": 616,
+            "y": 10
+          },
+          {
+            "text": "Dec",
+            "anchor": "start",
+            "x": 686,
+            "y": 10
+          },
+          {
+            "text": "Jan",
+            "anchor": "start",
+            "x": 742,
+            "y": 10
+          },
+          {
+            "text": "M",
+            "anchor": "start",
+            "x": 0,
+            "y": 22
+          },
+          {
+            "text": "W",
+            "anchor": "start",
+            "x": 0,
+            "y": 50
+          },
+          {
+            "text": "F",
+            "anchor": "start",
+            "x": 0,
+            "y": 78
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 17,
+        "label": "Wins streak-length distribution",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "0",
+            "anchor": "end",
+            "x": 38,
+            "y": 177
+          },
+          {
+            "text": "1",
+            "anchor": "end",
+            "x": 38,
+            "y": 17
+          },
+          {
+            "text": "1",
+            "anchor": "middle",
+            "x": 55.64285714285714,
+            "y": 188
+          },
+          {
+            "text": "3",
+            "anchor": "middle",
+            "x": 110.21428571428571,
+            "y": 188
+          },
+          {
+            "text": "5",
+            "anchor": "middle",
+            "x": 164.78571428571428,
+            "y": 188
+          },
+          {
+            "text": "7",
+            "anchor": "middle",
+            "x": 219.35714285714286,
+            "y": 188
+          },
+          {
+            "text": "9",
+            "anchor": "middle",
+            "x": 273.92857142857144,
+            "y": 188
+          },
+          {
+            "text": "11",
+            "anchor": "middle",
+            "x": 328.5,
+            "y": 188
+          },
+          {
+            "text": "13",
+            "anchor": "middle",
+            "x": 383.07142857142856,
+            "y": 188
+          },
+          {
+            "text": "14+",
+            "anchor": "middle",
+            "x": 410.35714285714283,
+            "y": 188
+          }
+        ]
+      },
+      {
+        "surface": "overview",
+        "index": 18,
+        "label": "Losses streak-length distribution",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "0",
+            "anchor": "end",
+            "x": 38,
+            "y": 177
+          },
+          {
+            "text": "1",
+            "anchor": "end",
+            "x": 38,
+            "y": 17
+          },
+          {
+            "text": "1",
+            "anchor": "middle",
+            "x": 55.64285714285714,
+            "y": 188
+          },
+          {
+            "text": "3",
+            "anchor": "middle",
+            "x": 110.21428571428571,
+            "y": 188
+          },
+          {
+            "text": "5",
+            "anchor": "middle",
+            "x": 164.78571428571428,
+            "y": 188
+          },
+          {
+            "text": "7",
+            "anchor": "middle",
+            "x": 219.35714285714286,
+            "y": 188
+          },
+          {
+            "text": "9",
+            "anchor": "middle",
+            "x": 273.92857142857144,
+            "y": 188
+          },
+          {
+            "text": "11",
+            "anchor": "middle",
+            "x": 328.5,
+            "y": 188
+          },
+          {
+            "text": "13",
+            "anchor": "middle",
+            "x": 383.07142857142856,
+            "y": 188
+          },
+          {
+            "text": "14+",
+            "anchor": "middle",
+            "x": 410.35714285714283,
+            "y": 188
+          }
+        ]
+      }
+    ],
+    "composer": [
+      {
+        "surface": "composer",
+        "index": 0,
+        "label": "Master brush — full timeline equity overview",
+        "emitter": "brush",
+        "width": 382,
+        "texts": [
+          {
+            "text": "2025",
+            "anchor": "start",
+            "x": 6,
+            "y": 56
+          },
+          {
+            "text": "2026",
+            "anchor": "middle",
+            "x": 300.49624060150376,
+            "y": 56
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 1,
+        "label": "Cumulative Returns: Scenario",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 246.35714285714286
+          },
+          {
+            "text": "+50.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 160.91985222006537
+          },
+          {
+            "text": "+100.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 100.30112981058299
+          },
+          {
+            "text": "+200.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 14.86383917350546
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 2,
+        "label": "Daily Returns: Scenario",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 189.57142857142856
+          },
+          {
+            "text": "+20.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 158.14285714285714
+          },
+          {
+            "text": "+40.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 126.71428571428572
+          },
+          {
+            "text": "+60.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 95.28571428571428
+          },
+          {
+            "text": "+80.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 63.85714285714285
+          },
+          {
+            "text": "+100.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 32.42857142857143
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 3,
+        "label": "Rolling Volatility (6mo): Scenario",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "N<126 — noisy",
+            "anchor": "end",
+            "x": 846,
+            "y": 32
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 170.64285714285714
+          },
+          {
+            "text": "+20.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 142.78571428571428
+          },
+          {
+            "text": "+40.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 114.92857142857143
+          },
+          {
+            "text": "+60.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 87.07142857142857
+          },
+          {
+            "text": "+80.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 59.21428571428571
+          },
+          {
+            "text": "+100.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 31.35714285714286
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 4,
+        "label": "Rolling Sharpe (6mo): Scenario",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "N<126 — noisy",
+            "anchor": "end",
+            "x": 846,
+            "y": 32
+          },
+          {
+            "text": "0.00",
+            "anchor": "end",
+            "x": 44,
+            "y": 170.64285714285714
+          },
+          {
+            "text": "+0.20",
+            "anchor": "end",
+            "x": 44,
+            "y": 142.78571428571428
+          },
+          {
+            "text": "+0.40",
+            "anchor": "end",
+            "x": 44,
+            "y": 114.92857142857143
+          },
+          {
+            "text": "+0.60",
+            "anchor": "end",
+            "x": 44,
+            "y": 87.07142857142857
+          },
+          {
+            "text": "+0.80",
+            "anchor": "end",
+            "x": 44,
+            "y": 59.21428571428571
+          },
+          {
+            "text": "+1.00",
+            "anchor": "end",
+            "x": 44,
+            "y": 31.35714285714286
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 5,
+        "label": "Rolling Sortino (6mo): Scenario",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "N<126 — noisy",
+            "anchor": "end",
+            "x": 846,
+            "y": 32
+          },
+          {
+            "text": "0.00",
+            "anchor": "end",
+            "x": 44,
+            "y": 170.64285714285714
+          },
+          {
+            "text": "+0.20",
+            "anchor": "end",
+            "x": 44,
+            "y": 142.78571428571428
+          },
+          {
+            "text": "+0.40",
+            "anchor": "end",
+            "x": 44,
+            "y": 114.92857142857143
+          },
+          {
+            "text": "+0.60",
+            "anchor": "end",
+            "x": 44,
+            "y": 87.07142857142857
+          },
+          {
+            "text": "+0.80",
+            "anchor": "end",
+            "x": 44,
+            "y": 59.21428571428571
+          },
+          {
+            "text": "+1.00",
+            "anchor": "end",
+            "x": 44,
+            "y": 31.35714285714286
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 6,
+        "label": "Worst 10 Drawdown Periods: Scenario",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 246.35714285714286
+          },
+          {
+            "text": "+50.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 160.91985222006537
+          },
+          {
+            "text": "+100.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 100.30112981058299
+          },
+          {
+            "text": "+200.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 14.86383917350546
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 7,
+        "label": "Underwater Chart for Accumulated Capital: Scenario",
+        "emitter": "timeseries-y",
+        "width": 400,
+        "texts": [
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 132.78571428571428
+          },
+          {
+            "text": "+20.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 112.07142857142858
+          },
+          {
+            "text": "+40.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 91.35714285714286
+          },
+          {
+            "text": "+60.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 70.64285714285714
+          },
+          {
+            "text": "+80.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 49.92857142857142
+          },
+          {
+            "text": "+100.0%",
+            "anchor": "end",
+            "x": 44,
+            "y": 29.21428571428572
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 8,
+        "label": "Distribution of daily returns: Scenario",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "-0.50%",
+            "anchor": "middle",
+            "x": 50,
+            "y": 186
+          },
+          {
+            "text": "0%",
+            "anchor": "middle",
+            "x": 450,
+            "y": 186
+          },
+          {
+            "text": "+0.50%",
+            "anchor": "middle",
+            "x": 850,
+            "y": 186
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 9,
+        "label": "Quantile box plot for the strategy's daily return distribution",
+        "emitter": "quantile-box",
+        "width": 400,
+        "texts": [
+          {
+            "text": "P5 -1.0%",
+            "anchor": "middle",
+            "x": 35.97086299989386,
+            "y": 45
+          },
+          {
+            "text": "P95 +1.0%",
+            "anchor": "middle",
+            "x": 844.6277025291445,
+            "y": 45
+          },
+          {
+            "text": "-1.0%",
+            "anchor": "middle",
+            "x": 30,
+            "y": 120
+          },
+          {
+            "text": "0%",
+            "anchor": "middle",
+            "x": 439.9994987330176,
+            "y": 120
+          },
+          {
+            "text": "+1.0%",
+            "anchor": "middle",
+            "x": 850,
+            "y": 120
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 10,
+        "label": "End-of-year returns by calendar year",
+        "emitter": "eoy-legend",
+        "width": 400,
+        "texts": [
+          {
+            "text": "Scenario",
+            "anchor": "start",
+            "x": 74,
+            "y": 12
+          },
+          {
+            "text": "2025",
+            "anchor": "end",
+            "x": 52,
+            "y": 41
+          },
+          {
+            "text": "+5.4%",
+            "anchor": "start",
+            "x": 806,
+            "y": 41
+          },
+          {
+            "text": "2026",
+            "anchor": "end",
+            "x": 52,
+            "y": 63
+          },
+          {
+            "text": "+8.0%",
+            "anchor": "start",
+            "x": 806,
+            "y": 63
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 11,
+        "label": "Daily-return calendar for 2025",
+        "emitter": "heatmap-months",
+        "width": 770,
+        "texts": [
+          {
+            "text": "Jan",
+            "anchor": "start",
+            "x": 14,
+            "y": 10
+          },
+          {
+            "text": "Feb",
+            "anchor": "start",
+            "x": 70,
+            "y": 10
+          },
+          {
+            "text": "Mar",
+            "anchor": "start",
+            "x": 126,
+            "y": 10
+          },
+          {
+            "text": "Apr",
+            "anchor": "start",
+            "x": 196,
+            "y": 10
+          },
+          {
+            "text": "May",
+            "anchor": "start",
+            "x": 252,
+            "y": 10
+          },
+          {
+            "text": "Jun",
+            "anchor": "start",
+            "x": 308,
+            "y": 10
+          },
+          {
+            "text": "Jul",
+            "anchor": "start",
+            "x": 378,
+            "y": 10
+          },
+          {
+            "text": "Aug",
+            "anchor": "start",
+            "x": 434,
+            "y": 10
+          },
+          {
+            "text": "Sep",
+            "anchor": "start",
+            "x": 504,
+            "y": 10
+          },
+          {
+            "text": "Oct",
+            "anchor": "start",
+            "x": 560,
+            "y": 10
+          },
+          {
+            "text": "Nov",
+            "anchor": "start",
+            "x": 616,
+            "y": 10
+          },
+          {
+            "text": "Dec",
+            "anchor": "start",
+            "x": 686,
+            "y": 10
+          },
+          {
+            "text": "Jan",
+            "anchor": "start",
+            "x": 742,
+            "y": 10
+          },
+          {
+            "text": "M",
+            "anchor": "start",
+            "x": 0,
+            "y": 22
+          },
+          {
+            "text": "W",
+            "anchor": "start",
+            "x": 0,
+            "y": 50
+          },
+          {
+            "text": "F",
+            "anchor": "start",
+            "x": 0,
+            "y": 78
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 12,
+        "label": "Daily-return calendar for 2026",
+        "emitter": "heatmap-months",
+        "width": 770,
+        "texts": [
+          {
+            "text": "Jan",
+            "anchor": "start",
+            "x": 14,
+            "y": 10
+          },
+          {
+            "text": "Feb",
+            "anchor": "start",
+            "x": 70,
+            "y": 10
+          },
+          {
+            "text": "Mar",
+            "anchor": "start",
+            "x": 126,
+            "y": 10
+          },
+          {
+            "text": "Apr",
+            "anchor": "start",
+            "x": 196,
+            "y": 10
+          },
+          {
+            "text": "May",
+            "anchor": "start",
+            "x": 252,
+            "y": 10
+          },
+          {
+            "text": "Jun",
+            "anchor": "start",
+            "x": 322,
+            "y": 10
+          },
+          {
+            "text": "Jul",
+            "anchor": "start",
+            "x": 378,
+            "y": 10
+          },
+          {
+            "text": "Aug",
+            "anchor": "start",
+            "x": 434,
+            "y": 10
+          },
+          {
+            "text": "Sep",
+            "anchor": "start",
+            "x": 504,
+            "y": 10
+          },
+          {
+            "text": "Oct",
+            "anchor": "start",
+            "x": 560,
+            "y": 10
+          },
+          {
+            "text": "Nov",
+            "anchor": "start",
+            "x": 616,
+            "y": 10
+          },
+          {
+            "text": "Dec",
+            "anchor": "start",
+            "x": 686,
+            "y": 10
+          },
+          {
+            "text": "Jan",
+            "anchor": "start",
+            "x": 742,
+            "y": 10
+          },
+          {
+            "text": "M",
+            "anchor": "start",
+            "x": 0,
+            "y": 22
+          },
+          {
+            "text": "W",
+            "anchor": "start",
+            "x": 0,
+            "y": 50
+          },
+          {
+            "text": "F",
+            "anchor": "start",
+            "x": 0,
+            "y": 78
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 13,
+        "label": "Wins streak-length distribution",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "0",
+            "anchor": "end",
+            "x": 38,
+            "y": 177
+          },
+          {
+            "text": "1",
+            "anchor": "end",
+            "x": 38,
+            "y": 145
+          },
+          {
+            "text": "2",
+            "anchor": "end",
+            "x": 38,
+            "y": 113
+          },
+          {
+            "text": "3",
+            "anchor": "end",
+            "x": 38,
+            "y": 81
+          },
+          {
+            "text": "4",
+            "anchor": "end",
+            "x": 38,
+            "y": 49
+          },
+          {
+            "text": "5",
+            "anchor": "end",
+            "x": 38,
+            "y": 17
+          },
+          {
+            "text": "1",
+            "anchor": "middle",
+            "x": 55.64285714285714,
+            "y": 188
+          },
+          {
+            "text": "3",
+            "anchor": "middle",
+            "x": 110.21428571428571,
+            "y": 188
+          },
+          {
+            "text": "5",
+            "anchor": "middle",
+            "x": 164.78571428571428,
+            "y": 188
+          },
+          {
+            "text": "7",
+            "anchor": "middle",
+            "x": 219.35714285714286,
+            "y": 188
+          },
+          {
+            "text": "9",
+            "anchor": "middle",
+            "x": 273.92857142857144,
+            "y": 188
+          },
+          {
+            "text": "11",
+            "anchor": "middle",
+            "x": 328.5,
+            "y": 188
+          },
+          {
+            "text": "13",
+            "anchor": "middle",
+            "x": 383.07142857142856,
+            "y": 188
+          },
+          {
+            "text": "14+",
+            "anchor": "middle",
+            "x": 410.35714285714283,
+            "y": 188
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 14,
+        "label": "Losses streak-length distribution",
+        "emitter": null,
+        "width": 400,
+        "texts": [
+          {
+            "text": "0",
+            "anchor": "end",
+            "x": 38,
+            "y": 177
+          },
+          {
+            "text": "1",
+            "anchor": "end",
+            "x": 38,
+            "y": 137
+          },
+          {
+            "text": "2",
+            "anchor": "end",
+            "x": 38,
+            "y": 97
+          },
+          {
+            "text": "3",
+            "anchor": "end",
+            "x": 38,
+            "y": 57
+          },
+          {
+            "text": "4",
+            "anchor": "end",
+            "x": 38,
+            "y": 17
+          },
+          {
+            "text": "1",
+            "anchor": "middle",
+            "x": 55.64285714285714,
+            "y": 188
+          },
+          {
+            "text": "3",
+            "anchor": "middle",
+            "x": 110.21428571428571,
+            "y": 188
+          },
+          {
+            "text": "5",
+            "anchor": "middle",
+            "x": 164.78571428571428,
+            "y": 188
+          },
+          {
+            "text": "7",
+            "anchor": "middle",
+            "x": 219.35714285714286,
+            "y": 188
+          },
+          {
+            "text": "9",
+            "anchor": "middle",
+            "x": 273.92857142857144,
+            "y": 188
+          },
+          {
+            "text": "11",
+            "anchor": "middle",
+            "x": 328.5,
+            "y": 188
+          },
+          {
+            "text": "13",
+            "anchor": "middle",
+            "x": 383.07142857142856,
+            "y": 188
+          },
+          {
+            "text": "14+",
+            "anchor": "middle",
+            "x": 410.35714285714283,
+            "y": 188
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 15,
+        "label": "Forward confidence bands over 252 trading days. Median terminal return +10.11%, with a 5 to 95 percent interval of -35.34% to +83.27%.",
+        "emitter": null,
+        "width": 858,
+        "texts": [
+          {
+            "text": "-35.75%",
+            "anchor": "end",
+            "x": 42,
+            "y": 219
+          },
+          {
+            "text": "0.00%",
+            "anchor": "end",
+            "x": 42,
+            "y": 158.16498458045277
+          },
+          {
+            "text": "+84.14%",
+            "anchor": "end",
+            "x": 42,
+            "y": 15
+          },
+          {
+            "text": "Today",
+            "anchor": "start",
+            "x": 48,
+            "y": 234
+          },
+          {
+            "text": "252d",
+            "anchor": "end",
+            "x": 588,
+            "y": 234
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 16,
+        "label": "Returns distribution",
+        "emitter": null,
+        "width": 858,
+        "texts": [
+          {
+            "text": "-1.0%",
+            "anchor": "middle",
+            "x": 84.7,
+            "y": 223
+          },
+          {
+            "text": "-0.6%",
+            "anchor": "middle",
+            "x": 242.29999999999998,
+            "y": 223
+          },
+          {
+            "text": "-0.2%",
+            "anchor": "middle",
+            "x": 399.9,
+            "y": 223
+          },
+          {
+            "text": "0.2%",
+            "anchor": "middle",
+            "x": 557.5,
+            "y": 223
+          },
+          {
+            "text": "0.6%",
+            "anchor": "middle",
+            "x": 715.1,
+            "y": 223
+          },
+          {
+            "text": "0",
+            "anchor": "end",
+            "x": 57,
+            "y": 215
+          },
+          {
+            "text": "15",
+            "anchor": "end",
+            "x": 57,
+            "y": 162.5
+          },
+          {
+            "text": "30",
+            "anchor": "end",
+            "x": 57,
+            "y": 110
+          },
+          {
+            "text": "45",
+            "anchor": "end",
+            "x": 57,
+            "y": 57.5
+          },
+          {
+            "text": "60",
+            "anchor": "end",
+            "x": 57,
+            "y": 9
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 17,
+        "label": "Return quantiles box plot across 1 period (All).",
+        "emitter": "return-quantiles",
+        "width": 858,
+        "texts": [
+          {
+            "text": "-1.0%",
+            "anchor": "end",
+            "x": 52,
+            "y": 174
+          },
+          {
+            "text": "-0.5%",
+            "anchor": "end",
+            "x": 52,
+            "y": 136.5
+          },
+          {
+            "text": "0.0%",
+            "anchor": "end",
+            "x": 52,
+            "y": 99
+          },
+          {
+            "text": "0.5%",
+            "anchor": "end",
+            "x": 52,
+            "y": 61.5
+          },
+          {
+            "text": "1.0%",
+            "anchor": "end",
+            "x": 52,
+            "y": 24
+          },
+          {
+            "text": "All",
+            "anchor": "middle",
+            "x": 310,
+            "y": 192
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 18,
+        "label": "Rolling metrics",
+        "emitter": "rolling-sharpe",
+        "width": 858,
+        "texts": [
+          {
+            "text": "01-18",
+            "anchor": "middle",
+            "x": 65,
+            "y": 199
+          },
+          {
+            "text": "02-08",
+            "anchor": "middle",
+            "x": 125.3941605839416,
+            "y": 199
+          },
+          {
+            "text": "03-01",
+            "anchor": "middle",
+            "x": 185.7883211678832,
+            "y": 199
+          },
+          {
+            "text": "03-22",
+            "anchor": "middle",
+            "x": 246.1824817518248,
+            "y": 199
+          },
+          {
+            "text": "04-12",
+            "anchor": "middle",
+            "x": 306.5766423357664,
+            "y": 199
+          },
+          {
+            "text": "05-03",
+            "anchor": "middle",
+            "x": 366.97080291970804,
+            "y": 199
+          },
+          {
+            "text": "05-24",
+            "anchor": "middle",
+            "x": 427.3649635036496,
+            "y": 199
+          },
+          {
+            "text": "06-15",
+            "anchor": "middle",
+            "x": 490.6350364963503,
+            "y": 199
+          },
+          {
+            "text": "07-06",
+            "anchor": "middle",
+            "x": 551.029197080292,
+            "y": 199
+          },
+          {
+            "text": "07-27",
+            "anchor": "middle",
+            "x": 611.4233576642335,
+            "y": 199
+          },
+          {
+            "text": "08-17",
+            "anchor": "middle",
+            "x": 671.8175182481751,
+            "y": 199
+          },
+          {
+            "text": "09-07",
+            "anchor": "middle",
+            "x": 732.2116788321167,
+            "y": 199
+          },
+          {
+            "text": "09-28",
+            "anchor": "middle",
+            "x": 792.6058394160583,
+            "y": 199
+          },
+          {
+            "text": "10-19",
+            "anchor": "middle",
+            "x": 840,
+            "y": 199
+          },
+          {
+            "text": "-6",
+            "anchor": "end",
+            "x": 57,
+            "y": 191
+          },
+          {
+            "text": "-3",
+            "anchor": "end",
+            "x": 57,
+            "y": 144.5
+          },
+          {
+            "text": "0",
+            "anchor": "end",
+            "x": 57,
+            "y": 98
+          },
+          {
+            "text": "3",
+            "anchor": "end",
+            "x": 57,
+            "y": 51.5
+          },
+          {
+            "text": "6",
+            "anchor": "end",
+            "x": 57,
+            "y": 9
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 19,
+        "label": "Rolling volatility",
+        "emitter": "rolling-volatility",
+        "width": 858,
+        "texts": [
+          {
+            "text": "01-18",
+            "anchor": "middle",
+            "x": 65,
+            "y": 223
+          },
+          {
+            "text": "02-08",
+            "anchor": "middle",
+            "x": 125.3941605839416,
+            "y": 223
+          },
+          {
+            "text": "03-01",
+            "anchor": "middle",
+            "x": 185.7883211678832,
+            "y": 223
+          },
+          {
+            "text": "03-22",
+            "anchor": "middle",
+            "x": 246.1824817518248,
+            "y": 223
+          },
+          {
+            "text": "04-12",
+            "anchor": "middle",
+            "x": 306.5766423357664,
+            "y": 223
+          },
+          {
+            "text": "05-03",
+            "anchor": "middle",
+            "x": 366.97080291970804,
+            "y": 223
+          },
+          {
+            "text": "05-24",
+            "anchor": "middle",
+            "x": 427.3649635036496,
+            "y": 223
+          },
+          {
+            "text": "06-15",
+            "anchor": "middle",
+            "x": 490.6350364963503,
+            "y": 223
+          },
+          {
+            "text": "07-06",
+            "anchor": "middle",
+            "x": 551.029197080292,
+            "y": 223
+          },
+          {
+            "text": "07-27",
+            "anchor": "middle",
+            "x": 611.4233576642335,
+            "y": 223
+          },
+          {
+            "text": "08-17",
+            "anchor": "middle",
+            "x": 671.8175182481751,
+            "y": 223
+          },
+          {
+            "text": "09-07",
+            "anchor": "middle",
+            "x": 732.2116788321167,
+            "y": 223
+          },
+          {
+            "text": "09-28",
+            "anchor": "middle",
+            "x": 792.6058394160583,
+            "y": 223
+          },
+          {
+            "text": "10-19",
+            "anchor": "middle",
+            "x": 840,
+            "y": 223
+          },
+          {
+            "text": "0%",
+            "anchor": "end",
+            "x": 57,
+            "y": 215
+          },
+          {
+            "text": "3%",
+            "anchor": "end",
+            "x": 57,
+            "y": 162.5
+          },
+          {
+            "text": "6%",
+            "anchor": "end",
+            "x": 57,
+            "y": 110
+          },
+          {
+            "text": "9%",
+            "anchor": "end",
+            "x": 57,
+            "y": 57.5
+          },
+          {
+            "text": "12%",
+            "anchor": "end",
+            "x": 57,
+            "y": 9
+          }
+        ]
+      },
+      {
+        "surface": "composer",
+        "index": 20,
+        "label": "Rolling Sortino",
+        "emitter": "rolling-sortino",
+        "width": 858,
+        "texts": [
+          {
+            "text": "01-18",
+            "anchor": "middle",
+            "x": 65,
+            "y": 223
+          },
+          {
+            "text": "02-08",
+            "anchor": "middle",
+            "x": 125.3941605839416,
+            "y": 223
+          },
+          {
+            "text": "03-01",
+            "anchor": "middle",
+            "x": 185.7883211678832,
+            "y": 223
+          },
+          {
+            "text": "03-22",
+            "anchor": "middle",
+            "x": 246.1824817518248,
+            "y": 223
+          },
+          {
+            "text": "04-12",
+            "anchor": "middle",
+            "x": 306.5766423357664,
+            "y": 223
+          },
+          {
+            "text": "05-03",
+            "anchor": "middle",
+            "x": 366.97080291970804,
+            "y": 223
+          },
+          {
+            "text": "05-24",
+            "anchor": "middle",
+            "x": 427.3649635036496,
+            "y": 223
+          },
+          {
+            "text": "06-15",
+            "anchor": "middle",
+            "x": 490.6350364963503,
+            "y": 223
+          },
+          {
+            "text": "07-06",
+            "anchor": "middle",
+            "x": 551.029197080292,
+            "y": 223
+          },
+          {
+            "text": "07-27",
+            "anchor": "middle",
+            "x": 611.4233576642335,
+            "y": 223
+          },
+          {
+            "text": "08-17",
+            "anchor": "middle",
+            "x": 671.8175182481751,
+            "y": 223
+          },
+          {
+            "text": "09-07",
+            "anchor": "middle",
+            "x": 732.2116788321167,
+            "y": 223
+          },
+          {
+            "text": "09-28",
+            "anchor": "middle",
+            "x": 792.6058394160583,
+            "y": 223
+          },
+          {
+            "text": "10-19",
+            "anchor": "middle",
+            "x": 840,
+            "y": 223
+          },
+          {
+            "text": "-8.00",
+            "anchor": "end",
+            "x": 57,
+            "y": 215
+          },
+          {
+            "text": "-4.00",
+            "anchor": "end",
+            "x": 57,
+            "y": 162.5
+          },
+          {
+            "text": "0.00",
+            "anchor": "end",
+            "x": 57,
+            "y": 110
+          },
+          {
+            "text": "4.00",
+            "anchor": "end",
+            "x": 57,
+            "y": 57.5
+          },
+          {
+            "text": "8.00",
+            "anchor": "end",
+            "x": 57,
+            "y": 9
+          }
+        ]
+      }
+    ]
+  }
+}

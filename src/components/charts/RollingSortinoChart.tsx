@@ -1,11 +1,11 @@
 "use client";
 
-import { Line, LineChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
+import { Line, LineChart, ResponsiveContainer, YAxis } from "recharts";
 import { TouchTooltip } from "./TouchTooltip";
+import { RollingXAxis } from "./EdgeFitXTick";
 import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import {
   CHART_ACCENT,
-  CHART_BORDER,
   CHART_TICK_STYLE,
   CHART_TOOLTIP_STYLE,
 } from "./chart-tokens";
@@ -28,14 +28,7 @@ export function RollingSortinoChart({ data }: RollingSortinoChartProps) {
     <div role="img" aria-label="Rolling Sortino">
       <ResponsiveContainer width="100%" height={250}>
         <LineChart accessibilityLayer={false} data={data} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
-          <XAxis
-            dataKey="date"
-            tick={CHART_TICK_STYLE}
-            tickLine={false}
-            axisLine={{ stroke: CHART_BORDER }}
-            tickFormatter={(d: string) => d.slice(5)}
-            interval="preserveStartEnd"
-          />
+          <RollingXAxis dates={data.map((d) => d.date)} />
           <YAxis
             tick={CHART_TICK_STYLE}
             tickLine={false}

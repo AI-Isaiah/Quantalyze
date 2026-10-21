@@ -141,3 +141,45 @@ describe("ReturnQuantiles — DESIGN-01 identity (14b-02)", () => {
     expect(desktopVB).not.toBe(mobileVB);
   });
 });
+
+/**
+ * Phase 170.1.3 NARROWCHARTS (D-02, D-03c): the y tick labels are drawn whole.
+ *
+ * Why: the mobile arm bumps the y font to 22 inside a 600-wide viewBox whose left gutter is 60.
+ * "-1.0%" is 5 * 22 * 0.6 = 66 wide and ends 8 left of the plot, so its box started 6 units
+ * below the svg's left edge and the composer's phone reading showed it cut. The gutter grows
+ * to the widest label plus the 8-unit gap, rounded up to the 4-unit ladder, so the label keeps
+ * its right alignment against the axis. Desktop labels fit in 60, so desktop is unchanged.
+ * Every expected number is typed by hand.
+ */
+describe("ReturnQuantiles y tick labels stay inside the svg (170.1.3 D-03c)", () => {
+  // One period whose min and max are +-1%: the mobile y labels are "-1.0%", "0.0%", "1.0%".
+  const NARROW: Record<string, number[]> = { All: [-0.01, -0.004, 0, 0.004, 0.01] };
+
+  const yLabelTexts = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll("text[font-family]")) as SVGTextElement[];
+
+  it("mobile: the gutter grows to 76 so the widest label (66 wide) starts at x = 2, not -6", () => {
+    setBreakpoint("mobile");
+    const { container } = render(<ReturnQuantiles data={NARROW} />);
+    const texts = yLabelTexts(container);
+    expect(texts.map((t) => t.textContent)).toEqual(["-1.0%", "0.0%", "1.0%"]);
+    for (const t of texts) {
+      // Right-aligned against the axis (gutter 76 minus the 8 gap).
+      expect(t.getAttribute("text-anchor")).toBe("end");
+      expect(t.getAttribute("x")).toBe("68");
+      // The widest label is 5 chars * 22 * 0.6 = 66 wide: its left edge 68 - 66 = 2 >= 0.
+      const w = (t.textContent ?? "").length * 22 * 0.6;
+      expect(68 - w).toBeGreaterThanOrEqual(0);
+    }
+    const grid = container.querySelector("line[stroke='#F1F5F9']");
+    expect(grid?.getAttribute("x1")).toBe("76");
+  });
+
+  it("desktop: the gutter stays 60 and labels stay at x = 52 (labels fit, nothing moves)", () => {
+    setBreakpoint("desktop");
+    const { container } = render(<ReturnQuantiles data={NARROW} />);
+    for (const t of yLabelTexts(container)) expect(t.getAttribute("x")).toBe("52");
+    expect(container.querySelector("line[stroke='#F1F5F9']")?.getAttribute("x1")).toBe("60");
+  });
+});
