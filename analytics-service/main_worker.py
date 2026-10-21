@@ -363,6 +363,22 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # minutes (full-history realized PnL + funding fetch); watchdog must be
     # strictly greater. Mirrors the sync_trades 15→30 pairing.
     "derive_broker_dailies": "30 minutes",  # handler timeout = 15 minutes
+    # Phase 166.5.1 / SENTRYTRIAGE (D-03) — QUANTALYZE-2A / QUANTALYZE-A. Handler timeout
+    # = 5 minutes (TIMEOUT_PER_KIND), yet PROD claim-to-done is longer: over the 14 days to
+    # 2026-10-21, 110 jobs, p95 = 8:14.8 and max = 10:03.9, which put the 10-minute default
+    # inside the runtime envelope. The watchdog then flipped a still-working run back to
+    # 'pending' and the runner's own done/failed mark was then refused (P0002).
+    # Why claim-to-done exceeds the handler timeout: the claim RPC stamps claimed_at on the
+    # whole batch (p_batch_size 5 in _claim_priority) and dispatch_tick runs the claimed jobs
+    # one after another, so a job's staleness clock includes its batch-mates' runtime. On the
+    # backfill worker those are BACKFILL_KINDS (derive_broker_dailies, 15-minute handler,
+    # and this kind). 20 minutes is about twice the measured maximum and exactly 4x the
+    # handler timeout (the cap in test_watchdog_threshold_has_sane_upper_bound); a larger
+    # window would leave a genuinely stuck derive job unreclaimed for longer. RESIDUAL: a run
+    # that waits behind a full 15-minute derive_broker_dailies batch-mate can still exceed
+    # 20 minutes. The structural close is a lease/heartbeat renewing claimed_at (founder
+    # deferred it). The mark refusals stay loud, so a recurrence surfaces as 2A / A.
+    "derive_allocator_equity": "20 minutes",  # handler timeout = 5 minutes
     # Phase 86 (COMP-02) — the composite fans out over N member keys and, when
     # MTM is admissible, crawls each Deribit member TWICE (cash + mark_to_market),
     # so its handler timeout is 20 minutes. Watchdog must be strictly greater;

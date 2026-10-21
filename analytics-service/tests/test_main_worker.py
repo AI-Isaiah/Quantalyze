@@ -479,6 +479,70 @@ class TestWatchdogTick:
         assert overrides["sync_trades"] == "30 minutes"
         assert overrides["poll_positions"] == "5 minutes"
         assert overrides["compute_portfolio"] == "15 minutes"
+        # 166.5.1 / D-03: derive_allocator_equity runs past the 10-minute
+        # default in PROD (max 10:03.9 claim-to-done), so it needs its own.
+        assert overrides["derive_allocator_equity"] == "20 minutes"
+
+    @pytest.mark.asyncio
+    async def test_derive_allocator_equity_run_at_measured_claim_age_is_not_reset_under_the_runner(
+        self,
+    ) -> None:
+        """QUANTALYZE-2A / QUANTALYZE-A reproduction (166.5.1 CONTEXT root cause C).
+
+        A derive_allocator_equity run that is claimed 604 s ago (the PROD
+        14-day maximum claim-to-done to 2026-10-21 was 10:03.9, rounded up)
+        and is still being worked by its runner must stay 'running'. On the
+        old map the kind had no override, so the 10-minute default reset it
+        to 'pending' at 600 s, and the runner's mark was then refused
+        (P0002) -- the finished result was lost or run twice.
+
+        WHAT THIS MODELS. It runs the real ``watchdog_tick()`` against a
+        mocked rpc and captures ``p_stale_threshold`` / ``p_per_kind_overrides``
+        exactly as sent. It then applies the threshold-selection rule of
+        ``reset_stalled_compute_jobs`` as defined in migration
+        20260516104201_compute_jobs_audit_2026_05_07_residual.sql: a per-kind
+        pass when the kind key is in ``p_per_kind_overrides`` (threshold =
+        the override), otherwise the default pass (threshold =
+        ``p_stale_threshold``), each matching ``status = 'running' AND
+        claimed_at < now() - threshold``. It also models the mark functions'
+        refusal of a row that is no longer 'running'.
+
+        WHAT THIS DOES NOT COVER. It does not execute the SQL, so a later
+        migration that changes the selection rule is not caught here. It does
+        not cover a claim age above 604 s (the residual batch wait behind a
+        15-minute derive_broker_dailies batch-mate). It does not cover the
+        mark RPCs' own SQL or the claim-token 55006 fence.
+        """
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=0)
+        mock_supabase.rpc.return_value = chain
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            await watchdog_tick()
+
+        params = mock_supabase.rpc.call_args.args[1]
+        default_threshold = params["p_stale_threshold"]
+        overrides = params["p_per_kind_overrides"]
+
+        row = {"kind": "derive_allocator_equity", "status": "running"}
+        claim_age_seconds = 604
+
+        threshold = overrides.get(row["kind"], default_threshold)
+        if claim_age_seconds > _watchdog_seconds(threshold):
+            row["status"] = "pending"
+
+        # The runner finishes and marks. The mark is accepted only while the
+        # row is still 'running' (otherwise P0002 is raised).
+        mark_accepted = row["status"] == "running"
+
+        assert mark_accepted and row["status"] == "running", (
+            "QUANTALYZE-2A/A: a derive_allocator_equity run claimed "
+            f"{claim_age_seconds}s ago was reset to {row['status']!r} by the "
+            f"watchdog (threshold {threshold!r}) while its runner was still "
+            "working, so the runner's mark would be refused (P0002). Give the "
+            "kind a WATCHDOG_PER_KIND_OVERRIDES entry above its measured runtime."
+        )
 
     @pytest.mark.asyncio
     async def test_overrides_encode_as_jsonb_object_not_scalar(self) -> None:
