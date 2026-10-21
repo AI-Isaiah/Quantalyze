@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { Line, LineChart, ReferenceLine, ResponsiveContainer, XAxis, YAxis, Legend } from "recharts";
 import { TouchTooltip } from "./TouchTooltip";
+import { EdgeFitXTick } from "./EdgeFitXTick";
 import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import {
   CHART_ACCENT,
@@ -145,7 +146,7 @@ export function RollingMetrics({
         <LineChart accessibilityLayer={false} data={merged} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
           <XAxis
             dataKey="date"
-            tick={CHART_TICK_STYLE}
+            tick={<EdgeFitXTick {...CHART_TICK_STYLE} />}
             tickLine={false}
             axisLine={{ stroke: CHART_BORDER }}
             tickFormatter={(d: string) => d.slice(5)}

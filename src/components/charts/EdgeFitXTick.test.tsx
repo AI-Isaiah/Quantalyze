@@ -6,6 +6,8 @@ import { EdgeFitXTick } from "./EdgeFitXTick";
 import { CHART_AXIS_TICK, CHART_FONT_MONO, CHART_TICK_STYLE } from "./chart-tokens";
 import { estLabelWidth } from "@/lib/chart-ticks";
 import { RollingVolatilityChart } from "./RollingVolatilityChart";
+import { RollingSortinoChart } from "./RollingSortinoChart";
+import { RollingMetrics } from "./RollingMetrics";
 
 /**
  * Phase 170.1.3 NARROWCHARTS plan 03 (D-02, D-03b) — real-Recharts pins for the shared x-axis
@@ -163,10 +165,15 @@ describe("EdgeFitXTick — the shared x-axis tick renderer (D-02, D-03b)", () =>
   });
 });
 
-describe("RollingVolatilityChart — the end-date tick is drawn whole at 390 px (D-03b)", () => {
-  it("anchors the last x tick '10-20' with text-anchor=end", () => {
+describe("the rolling charts draw the end-date tick whole at 390 px (D-03b)", () => {
+  const charts: [string, () => React.ReactElement][] = [
+    ["RollingVolatilityChart", () => <RollingVolatilityChart data={POINTS} />],
+    ["RollingSortinoChart", () => <RollingSortinoChart data={POINTS} />],
+    ["RollingMetrics", () => <RollingMetrics data={{ sharpe_365d: POINTS }} />],
+  ];
+  it.each(charts)("%s anchors the last x tick '10-20' with text-anchor=end", (_name, make) => {
     sizing.width = 390;
-    const { container } = render(<RollingVolatilityChart data={POINTS} />);
+    const { container } = render(make());
     const ticks = readXTicks(container);
     const last = ticks[ticks.length - 1];
     expect(last.text).toBe("10-20");
