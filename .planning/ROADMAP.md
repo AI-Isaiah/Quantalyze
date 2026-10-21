@@ -4574,8 +4574,8 @@ Plans:
 Plans:
 - [ ] 166.5.1-01: the cron's allocator query excludes the demo allocator; M-3 ERROR and stale is_example advice removed (D-01, QUANTALYZE-Z) (wave 1)
 - [ ] 166.5.1-02: derive_allocator_equity watchdog override from its measured runtime; reset-then-mark reproduced; BACKFILL_KINDS override invariant (D-03, QUANTALYZE-2A/A) (wave 1)
-- [ ] 166.5.1-03: the read-retry helper treats ReadTimeout as transient; claim and watchdog reset pinned; opens with the D-02 classification decision (D-02, QUANTALYZE-2B/2C) (wave 2)
-- [ ] 166.5.1-04: the decided pure-read sites (job_worker _sel, cron reads) on the helper; six-group SC-2 table; SC-4 handoff (D-02, D-04, QUANTALYZE-2D/2E/2F/2G) (wave 3)
+- [ ] 166.5.1-03: the read-retry helper treats ReadTimeout as transient; claim and watchdog reset pinned; measured worst case stated (D-02, D-02a, QUANTALYZE-2B/2C) (wave 2)
+- [ ] 166.5.1-04: the four Sentry-named pure reads on the helper (a sync twin for 2D/2G); six-group SC-2 table; SC-4 handoff (D-02a, D-04, QUANTALYZE-2D/2E/2F/2G) (wave 3)
 
 ### Phase 166.1: ENGINEFLOOR — every Python ratio site reads the one dispersion floor, so a constant yield never produces a fabricated ratio (INSERTED)
 
@@ -6433,7 +6433,7 @@ kept verbatim.
 | 166.4 BENCHALIGN | 4/4 | Complete | v0.108.0.0 · #892 · (verification passed 7/7) |
 | 166.4.1 PORTFOLIOANALYTICS | 4/4 | Complete | 2026-10-14 |
 | 166.5 COMPUTEDATSTAMP | 9/9 | Complete — the runner stamps `computed_at` from the database clock and the bridge never writes it; Wave 5 forced recompute on PROD: 42 enqueued, 23 done each with its own stamp, 0 too-new dates, 19 failed with dates held (18 archived CSV, 1 refused Deribit key, founder items); verification passed; SECURED | 2026-10-20 · v0.131.13.0 · #1047, v0.131.13.1 · #1050 |
-| 166.5.1 SENTRYTRIAGE | 0/4 | Planned 2026-10-21 — 4 plans in 3 waves; plan 03 opens with a D-02 classification decision | - |
+| 166.5.1 SENTRYTRIAGE | 0/4 | Planned 2026-10-21 — 4 plans in 3 waves (D-02a recorded) | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Complete    | 2026-10-04 |
 | 167.1.1 HOLDINGKEYSCOPE | 5/5 | Complete | v0.132.0.0 · #1053; 375px follow-up v0.132.0.1 · #1056 |
