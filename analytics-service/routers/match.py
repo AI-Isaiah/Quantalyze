@@ -3190,6 +3190,13 @@ async def cron_recompute() -> dict[str, Any]:
         supabase.table("profiles")
         .select("id")
         .in_("role", ["allocator", "both"])
+        # D-01 (QUANTALYZE-Z): the demo allocator shares the allocator role, so
+        # the role filter alone returned it on every run. Excluding it here, in
+        # the keyset page itself, means the cron never fetches it and a page
+        # never spends a slot on it. The scoring-time is_example filter in
+        # _score_one_allocator stays the boundary for the endpoint the anon
+        # demo can reach.
+        .neq("id", _DEMO_ALLOCATOR_ID)
     )
     if cursor is not None:
         allocators_query = allocators_query.gt("id", cursor)
@@ -3197,7 +3204,7 @@ async def cron_recompute() -> dict[str, Any]:
         allocators_query.order("id").limit(CRON_BATCH_SIZE + 1).execute()
     )
     _fetched_page = rows(allocators_result)
-    # has_more is computed from the RAW fetch (before trimming/demo-filter):
+    # has_more is computed from the RAW fetch (before trimming to the page):
     # CRON_BATCH_SIZE + 1 rows came back means at least one more exists
     # beyond this page.
     has_more = len(_fetched_page) > CRON_BATCH_SIZE
@@ -3227,27 +3234,6 @@ async def cron_recompute() -> dict[str, Any]:
             return _early_return("no_allocators", wrapped=True)
         logger.info("match_engine cron: no allocators found")
         return _early_return("no_allocators")
-
-    # M-3 (red-team): confirm the demo allocator (is_example profile) is never
-    # returned by the role IN ('allocator','both') query. The demo allocator uses
-    # the same role value as real allocators, so the only structural guarantee
-    # that it is excluded is that the seeded profile has is_example=true. If that
-    # ever changes (e.g., a migration resets the flag), the cron would process the
-    # demo allocator with the full (non-demo-filtered) universe, silently exposing
-    # real strategies. Log at ERROR so Sentry fires; continue processing the
-    # remaining allocators (removing the demo allocator from the batch is safer
-    # than aborting the entire cron run).
-    demo_ids_in_batch = [
-        p["id"] for p in allocators if p["id"] == _DEMO_ALLOCATOR_ID
-    ]
-    if demo_ids_in_batch:
-        logger.error(
-            "match_engine cron: demo allocator %s appeared in allocators list "
-            "(role IN allocator/both) — skipping to preserve demo boundary. "
-            "Verify profiles.is_example=true for the demo seed row.",
-            _DEMO_ALLOCATOR_ID,
-        )
-        allocators = [p for p in allocators if p["id"] != _DEMO_ALLOCATOR_ID]
 
     # Load universe ONCE for the whole cron run.
     # NEW-C08-09 note: the cron loads the FULL (non-demo-only) universe so all
@@ -3421,29 +3407,20 @@ async def cron_recompute() -> dict[str, Any]:
         # decides on, never conflated with it. Persist the cursor so the
         # NEXT tick resumes strictly after the last COMPLETED allocator.
         #
-        # WR-01: last_handled_id is None when the loop body never ran — the
-        # `if not allocators` guard above fires BEFORE the demo-allocator
-        # filter, so a page whose only non-trimmed member is the demo
-        # allocator reaches here with nothing handled. Writing None there
-        # would write the WRAP MARKER while `has_more` says more allocators
-        # exist: `{"status": "partial", "next_cursor": null}` is a
-        # self-contradiction (partial means "resume after next_cursor"),
-        # and the pass would loop over the same prefix forever, never
-        # reaching anything ordered after it. Writing a half-page id would
-        # skip the rest. So write NOTHING and say so loudly — the next tick
-        # re-attempts this same slice from the same starting cursor, which
-        # is the identical disposition the mid-run kill-switch abort takes.
+        # A batch boundary is reached only after at least one allocator was
+        # handled: the query excludes the demo allocator (D-01), so a
+        # non-empty page always reaches the loop, whose first iteration
+        # either aborts on the mid-run kill switch (that path returns above)
+        # or sets last_handled_id. Writing None here would write the WRAP
+        # marker while `has_more` says more allocators exist, so an
+        # impossible state fails loud rather than being logged as routine.
         if last_handled_id is None:
-            logger.error(
-                "match_engine cron: batch boundary reached with NOTHING "
-                "handled (has_more=%s budget_exhausted=%s) — cursor left "
-                "unwritten so the next tick re-attempts this slice. The "
-                "usual cause is a page trimmed to empty by the demo-allocator "
-                "filter; check the preceding demo-boundary ERROR.",
-                has_more, budget_exhausted,
+            raise RuntimeError(
+                "match_engine cron: batch boundary reached with nothing "
+                "handled — a batch boundary is reached only after at least "
+                "one allocator was handled"
             )
-        else:
-            await _write_cron_cursor(last_handled_id)
+        await _write_cron_cursor(last_handled_id)
         logger.info(
             "match_engine cron: batch boundary reached (has_more=%s "
             "budget_exhausted=%s) — next_cursor=%s processed=%d skipped=%d "
@@ -3458,10 +3435,7 @@ async def cron_recompute() -> dict[str, Any]:
             "failed": failed,
             "retention_deleted": retention_total,
             "duration_s": duration_s,
-            # WR-01: when nothing was handled the cursor was left unwritten
-            # (above), so the truthful resume point is the cursor this tick
-            # STARTED from — never a null, which reads as "start over".
-            "next_cursor": last_handled_id if last_handled_id is not None else cursor,
+            "next_cursor": last_handled_id,
         }
 
     # The set was exhausted in this pass (no has-more flag, no budget trip):
