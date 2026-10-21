@@ -557,13 +557,17 @@ export function EquityChart({
   const showBench = useTweakValue("showBench");
 
   // ResizeObserver — fall back to a fixed 960 in jsdom / older runtimes.
+  // The svg is exactly its wrapper's content width at every width (Phase
+  // 170.1.3 D-01): a floor here made a 334 px card clip a 400 px svg. The
+  // narrow width arrives only through this observer, after hydration, so the
+  // server render and the first client render stay identical (React #418).
   useEffect(() => {
     if (typeof ResizeObserver === "undefined") return;
     const el = wrapRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       const cr = entries[0]?.contentRect;
-      if (cr) setWidth(Math.max(400, Math.floor(cr.width)));
+      if (cr) setWidth(Math.floor(cr.width));
     });
     ro.observe(el);
     return () => ro.disconnect();
