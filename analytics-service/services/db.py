@@ -220,7 +220,11 @@ def _is_transient_read_error(exc: BaseException) -> bool:
     return _is_gateway_timeout(exc) or isinstance(exc, httpx.ReadTimeout)
 
 
-async def db_read_with_retry(fn: Callable[[], _T]) -> _T:
+async def db_read_with_retry(
+    fn: Callable[[], _T],
+    *,
+    retry_on: Callable[[BaseException], bool] = _is_transient_read_error,
+) -> _T:
     """Retry a synchronous Supabase read (via db_execute) with exponential
     backoff+jitter, but ONLY on a transient-timeout-shaped exception
     (`_is_transient_read_error`: a gateway 504 or an httpx ReadTimeout). Any
@@ -246,8 +250,8 @@ async def db_read_with_retry(fn: Callable[[], _T]) -> _T:
     minutes, where one attempt cost 120 s before. That is longer than one
     gateway window. Callers on a loop inherit it: the worker's job claim (its
     healthz stamp, 90 s STALE_THRESHOLD, comes only after the claim returns)
-    and `watchdog_loop`, and so do request handlers that use the helper
-    (`routers/process_key.py`).
+    and `watchdog_loop`, and so do request handlers that use the helper with
+    the default predicate.
 
     ⛔ This bound is deliberately stated against the GATEWAY, not against a
     `service_role` `statement_timeout`. Phase 164.5.1 planned an
@@ -261,6 +265,11 @@ async def db_read_with_retry(fn: Callable[[], _T]) -> _T:
     PostgREST request inherits `authenticator`'s login-applied 8s rather
     than the 120s server default the phase had assumed — the migration
     would have LOOSENED the real ceiling sevenfold.
+
+    `retry_on` picks the retried exceptions and defaults to
+    `_is_transient_read_error`. `routers/process_key.py`'s two resync-guard reads
+    pass `_is_gateway_timeout`, so a user's click is never held for the ReadTimeout
+    budget above (Phase 166.5.1, D-06).
 
     Exhaustion signal is a BARE re-raise of the ORIGINAL exception, unchanged
     — mirrors `_okx_bills_fetch_with_backoff`'s "let the caller decide"
@@ -279,7 +288,7 @@ async def db_read_with_retry(fn: Callable[[], _T]) -> _T:
         try:
             return await db_execute(fn)
         except Exception as exc:  # noqa: BLE001 — re-raised unchanged below
-            if not _is_transient_read_error(exc) or attempt == DB_READ_MAX_RETRIES - 1:
+            if not retry_on(exc) or attempt == DB_READ_MAX_RETRIES - 1:
                 raise
             delay = DB_READ_BACKOFF_BASE_S * (2 ** attempt) + random.uniform(
                 0, DB_READ_JITTER_MAX_S
