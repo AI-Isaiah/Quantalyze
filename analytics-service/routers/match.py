@@ -3190,6 +3190,7 @@ async def cron_recompute() -> dict[str, Any]:
         supabase.table("profiles")
         .select("id")
         .in_("role", ["allocator", "both"])
+        .neq("id", _DEMO_ALLOCATOR_ID)
     )
     if cursor is not None:
         allocators_query = allocators_query.gt("id", cursor)

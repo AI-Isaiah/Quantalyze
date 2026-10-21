@@ -953,7 +953,7 @@ class TestCronPartialFailure:
     def test_one_allocator_failure_does_not_abort_cron(self, client, monkeypatch):
         """3 allocators, second raises → processed=2, failed=1, cron returns 200."""
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -998,7 +998,7 @@ class TestCronPartialFailure:
         (the cache freshness logic is covered separately)."""
         monkeypatch.setattr("routers.match.KILL_SWITCH_CACHE_TTL_S", 0.0)
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1055,7 +1055,7 @@ class TestCronPartialFailure:
         # within this run and would keep reading the seeded ON value.
         monkeypatch.setattr("routers.match.KILL_SWITCH_CACHE_TTL_S", 3600.0)
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}, {"id": "a4"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1105,7 +1105,7 @@ class TestCronPartialFailure:
         """Per-allocator retention failures must not abort the sweep loop.
         Verify total retention is still summed across the surviving allocators."""
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1177,7 +1177,7 @@ class TestCronResponseShape:
     def test_no_allocators_branch_has_full_shape(self, client, monkeypatch):
         monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1191,7 +1191,7 @@ class TestCronResponseShape:
     def test_empty_universe_branch_has_full_shape(self, client, monkeypatch):
         monkeypatch.setattr("routers.match._engine_is_enabled", _async_engine_state(True))
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1592,23 +1592,26 @@ class TestCronResponseShape:
         assert self._REQUIRED_KEYS <= set(body)
 
     @pytest.mark.asyncio
-    async def test_cron_batch_boundary_with_nothing_handled_leaves_cursor_alone(
+    async def test_cron_query_excludes_demo_allocator_so_a_demo_first_page_handles_the_next_allocator(
         self, monkeypatch
     ):
-        """WR-01 — a `partial` run must never write the WRAP marker.
+        """D-01 (QUANTALYZE-Z) — the cron's own allocator query must exclude
+        the demo allocator, so a keyset page never spends a slot on it.
 
-        The `if not allocators` guard runs BEFORE the demo-allocator filter,
-        so a page whose only non-trimmed member is the demo allocator
-        reaches the batch boundary with `last_handled_id is None`. Writing
-        that None is writing the wrap marker: the response becomes
-        `{"status": "partial", "next_cursor": null}` — "resume after
-        nothing" — and the pass restarts at the beginning while it has just
-        MEASURED that more allocators exist. Every allocator ordered after
-        that page is then never reached, forever.
+        Before D-01 the query only filtered by role, and the demo allocator
+        shares that role. With the demo id sorting first and a batch size of
+        one, the page was the demo id ALONE: a post-fetch filter dropped it,
+        nothing was handled, the cursor was left unwritten and the cron
+        logged an ERROR on every run (87 events in 7 days) — advising a
+        check of a `profiles` column PROD does not have. The ERROR was not a
+        guard firing on a real breach; the query simply never excluded the
+        id.
 
-        The correct disposition is the one the mid-run kill-switch abort
-        already takes: write nothing, leave the resume point where it was,
-        and say so at ERROR.
+        Now the page is [zz1] (plus the one-row has-more probe), so one
+        allocator is handled, the cursor advances to it, and the demo id was
+        never fetched. Asserting the recorded `neq` call as well as the
+        outcome pins WHICH mechanism does it: an exclusion applied after the
+        fetch would still handle nothing on this page.
         """
         from routers import match as match_mod
 
@@ -1619,6 +1622,29 @@ class TestCronResponseShape:
         monkeypatch.setattr(match_mod, "CRON_BATCH_SIZE", 1)
         self._install_batching_doubles(monkeypatch, match_mod, all_ids)
         store = self._install_cursor_store(monkeypatch, match_mod)
+
+        tables_read: list[str] = []
+        profiles_fakes: list[_FakeProfilesQuery] = []
+
+        def _table(name: str):
+            tables_read.append(name)
+            if name == "profiles":
+                fake = _FakeProfilesQuery(all_ids)
+                profiles_fakes.append(fake)
+                return fake
+            return MagicMock()
+
+        sb = MagicMock()
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        scored: list[str] = []
+
+        async def _score(allocator_id, universe):
+            scored.append(allocator_id)
+            return {}
+
+        monkeypatch.setattr(match_mod, "_score_one_allocator", _score)
 
         write_calls: list[Any] = []
         _real_write = match_mod._write_cron_cursor
@@ -1631,13 +1657,19 @@ class TestCronResponseShape:
 
         body = await match_mod.cron_recompute()
 
-        assert body["status"] == "partial"
-        assert body["processed"] + body["skipped"] + body["failed"] == 0
-        assert write_calls == [], (
-            "a batch boundary that handled NOTHING must not write the "
-            f"cursor — it wrote {write_calls!r}"
+        assert tables_read.count("profiles") == 1, (
+            "the allocator page must be read through exactly one profiles "
+            f"builder; tables read: {tables_read!r}"
         )
-        assert store["value"] is None, "the resume point must be untouched"
+        assert profiles_fakes[0].neq_calls == [("id", demo)], (
+            "the cron's query must exclude the demo allocator itself"
+        )
+        assert scored == ["zz1"], f"exactly the next allocator is scored: {scored!r}"
+        assert body["status"] == "partial"
+        assert body["processed"] == 1
+        assert body["next_cursor"] == "zz1"
+        assert write_calls == ["zz1"]
+        assert store["value"] == "zz1"
         assert self._REQUIRED_KEYS <= set(body)
 
     @pytest.mark.asyncio
@@ -1705,7 +1737,7 @@ class TestCronTotalFailureLogging:
         missing, supabase down). Must emit logger.error so Sentry alerts
         fire — would otherwise be silently 200-OK."""
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -1752,7 +1784,7 @@ class TestCronTotalFailureLogging:
         fail, the response must surface 'degraded' so monitoring can
         differentiate partial-success from healthy."""
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
         )
         monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
@@ -4192,7 +4224,7 @@ class TestCronSkipsDemoAllocator:
 
         def _make_allocator_sb(ids):
             sb = MagicMock()
-            sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
                 data=[{"id": i} for i in ids]
             )
             sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
@@ -4289,7 +4321,7 @@ class TestCronRetentionSweepScopedToScoredAllocators:
 
         match_mod._reset_kill_switch_cache()
         sb = MagicMock()
-        sb.table.return_value.select.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value = (
+        sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a-ok"}, {"id": "a-skip"}, {"id": "a-fail"}])
         )
         monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
@@ -5244,7 +5276,7 @@ class TestCronBatchBoundsInvariants:
 
 class _FakeProfilesQuery:
     """Minimal in-memory stand-in for the profiles keyset-paginated query
-    chain (.select().in_().gt().order().limit().execute()), backed by a
+    chain (.select().in_().neq().gt().order().limit().execute()), backed by a
     plain sorted list of ids. Exercises REAL keyset semantics (cursor
     filter, order, limit) rather than a brittle mock-chain attribute path —
     the id ordering and the has-more/trim arithmetic are the actual thing
@@ -5254,11 +5286,19 @@ class _FakeProfilesQuery:
         self._all_ids = list(all_ids)
         self._cursor: str | None = None
         self._limit: int | None = None
+        # D-01: every (column, value) the cron excluded via .neq(). Recorded
+        # so a test can assert WHICH exclusion the query asked for, not only
+        # that the demo id happened to be absent from the result.
+        self.neq_calls: list[tuple[str, Any]] = []
 
     def select(self, *_a, **_k):
         return self
 
     def in_(self, *_a, **_k):
+        return self
+
+    def neq(self, col, value):
+        self.neq_calls.append((col, value))
         return self
 
     def gt(self, _col, value):
@@ -5274,6 +5314,10 @@ class _FakeProfilesQuery:
 
     def execute(self):
         ids = sorted(self._all_ids)
+        # Only the profile key is modelled: the cron excludes by "id".
+        for col, value in self.neq_calls:
+            assert col == "id", f"fake only models neq on id, got {col!r}"
+            ids = [i for i in ids if i != value]
         if self._cursor is not None:
             ids = [i for i in ids if i > self._cursor]
         if self._limit is not None:
