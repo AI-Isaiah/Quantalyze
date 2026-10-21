@@ -7,10 +7,11 @@ import { useBasisSeriesView, useRangeGesture } from "./basis-context";
 import { resolveSeries, type ChartConfig, type ChartValueFormat, type ResolvedSeries } from "./chart-configs";
 import { trackFactsheetEvent } from "./factsheet-analytics";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
-import { fitEndLabelX, niceStepValues, pow10, tickTolerance } from "@/lib/chart-ticks";
+import { estLabelWidth, niceStepValues, pow10, tickTolerance } from "@/lib/chart-ticks";
 import { drawdownTone, formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 
 const VB_W = 880;
+// `left` is the minimum gutter: it grows from the widest y tick label (see `padLeft`).
 const PAD = { top: 20, right: 30, bottom: 24, left: 50 };
 const MIN_VISIBLE = 5;
 /**
@@ -82,7 +83,6 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
   const cmp = view.comparators[cmpKey];
 
   const height = config.height ?? 280;
-  const plotW = VB_W - PAD.left - PAD.right;
   const plotH = height - PAD.top - PAD.bottom;
 
   const [scale, setScale] = useState<"log" | "linear">(config.defaultScale);
@@ -225,6 +225,20 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
     return [lo - pad, hi + pad];
   }, [series, muted, scale, config.baseline, config.scalable, xRange, yOverride]);
 
+  const yTicks = useMemo(
+    () => makeYTicks(yDomain, config.scalable && scale === "log", config.valueFormat, config.baseline),
+    [yDomain, scale, config.scalable, config.valueFormat, config.baseline],
+  );
+  // Left gutter (Phase 170.1.3 WR-02): the widest y tick label plus its 6-unit gap, rounded up to a
+  // 4-unit ladder, as ReturnQuantiles grows its gutter. A label that fits keeps PAD.left, so a chart
+  // whose labels were never cut is unchanged; a long one ("+10000.00") ends at the gutter's edge
+  // instead of being pushed onto the plot. Deterministic arithmetic, not a DOM read (React #418).
+  const padLeft = Math.max(
+    PAD.left,
+    Math.ceil((Math.max(...yTicks.map((t) => estLabelWidth(t.label, 10))) + 6) / 4) * 4,
+  );
+  const plotW = VB_W - padLeft - PAD.right;
+
   const n = view.dates.length;
   // Defensive clamp (T-103-08): the frozen xRange is maintained in cash-index
   // space (context length = cash dates). Under a SHORTER MTM axis the persisted
@@ -251,8 +265,8 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
   // X maps an index into the visible window onto plot pixels. Indices outside
   // [xStart, xEnd] still get computed (so paths clip naturally) but are off-plot.
   const X = useCallback(
-    (i: number) => PAD.left + ((i - xStart) / xSpan) * plotW,
-    [xStart, xSpan, plotW],
+    (i: number) => padLeft + ((i - xStart) / xSpan) * plotW,
+    [xStart, xSpan, plotW, padLeft],
   );
   const Y = useCallback(
     (v: number) => {
@@ -270,8 +284,8 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
     if (!config.warmup || config.warmup <= 1 || config.warmup >= n) return null;
     const warmupEndIdx = config.warmup - 1;
     if (warmupEndIdx < xStart) return null;
-    const xEndPx = Math.min(PAD.left + plotW, X(warmupEndIdx));
-    const width = xEndPx - PAD.left;
+    const xEndPx = Math.min(padLeft + plotW, X(warmupEndIdx));
+    const width = xEndPx - padLeft;
     if (width <= 0) return null;
     return (
       <g pointerEvents="none">
@@ -286,7 +300,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
             <line x1="0" y1="0" x2="0" y2="6" stroke="var(--color-text-muted)" strokeOpacity="0.15" strokeWidth="3" />
           </pattern>
         </defs>
-        <rect x={PAD.left} y={PAD.top} width={width} height={plotH} fill={`url(#warmup-${config.key})`} />
+        <rect x={padLeft} y={PAD.top} width={width} height={plotH} fill={`url(#warmup-${config.key})`} />
         <text
           x={xEndPx - 4}
           y={PAD.top + 12}
@@ -300,7 +314,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
         </text>
       </g>
     );
-  }, [config.warmup, config.key, n, xStart, plotW, plotH, X]);
+  }, [config.warmup, config.key, n, xStart, padLeft, plotW, plotH, X]);
 
   // FS-01/FS-02 composite seam overlay — memoized so the <defs><pattern>
   // subtrees don't rebuild every pan frame (warmupBand idiom). One
@@ -316,7 +330,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
     if (boundaries.length === 0 && gaps.length === 0) return null;
 
     const dates = view.dates;
-    const plotRight = PAD.left + plotW;
+    const plotRight = padLeft + plotW;
     const plotBottom = PAD.top + plotH;
 
     // Boundary (FS-01): dashed neutral vertical line + mono seq label at the
@@ -332,7 +346,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
       const exact = indexOfDate(dates, b.date);
       const idx = exact >= 0 ? exact : firstIndexAfter(dates, b.date);
       if (idx >= dates.length || idx < xStart || idx > xEnd) return [];
-      const x = Math.max(PAD.left, Math.min(plotRight, X(idx)));
+      const x = Math.max(padLeft, Math.min(plotRight, X(idx)));
       return [
         <g key={`seg-bound-${i}`} data-idx={idx}>
           <title>{`Key ${b.seq} track begins ${b.date}`}</title>
@@ -366,11 +380,11 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
     const gapNodes = gaps.flatMap((g, i) => {
       const seamIdx = firstIndexAfter(dates, g.end);
       if (seamIdx >= dates.length || seamIdx < xStart || seamIdx > xEnd) return [];
-      const x = Math.max(PAD.left, Math.min(plotRight, X(seamIdx)));
+      const x = Math.max(padLeft, Math.min(plotRight, X(seamIdx)));
       // Unique pattern id per config key + segment index avoids <defs> collisions.
       const patternId = `gap-${config.key}-${i}`;
       const sliver = 6;
-      const x0 = Math.max(PAD.left, x - sliver / 2);
+      const x0 = Math.max(padLeft, x - sliver / 2);
       const w = Math.min(plotRight, x + sliver / 2) - x0;
       return [
         <g key={`seg-gap-${i}`}>
@@ -416,15 +430,12 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
     view.dates,
     xStart,
     xEnd,
+    padLeft,
     plotW,
     plotH,
     X,
   ]);
 
-  const yTicks = useMemo(
-    () => makeYTicks(yDomain, config.scalable && scale === "log", config.valueFormat, config.baseline),
-    [yDomain, scale, config.scalable, config.valueFormat, config.baseline],
-  );
   const yTickTol = useMemo(() => tickTolerance(yTicks.map(t => t.value)), [yTicks]);
   const xTicks = useMemo(
     () => makeXTicks(view.dates, xStart, xEnd),
@@ -435,12 +446,12 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
   const pixelToIdx = useCallback(
     (clientX: number, rect: DOMRect): number | null => {
       const px = ((clientX - rect.left) / rect.width) * VB_W;
-      const plotPx = px - PAD.left;
+      const plotPx = px - padLeft;
       if (plotPx < 0 || plotPx > plotW) return null;
       const t = plotPx / plotW;
       return xStart + t * xSpan;
     },
-    [plotW, xStart, xSpan],
+    [padLeft, plotW, xStart, xSpan],
   );
 
   const onPointerMove = useCallback(
@@ -536,7 +547,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
       if (!svg) return;
       const rect = svg.getBoundingClientRect();
       // Pixel-to-viewBox-x of the click. If inside the left axis gutter
-      // (x < PAD.left), enter Y-pull mode instead of X-pan mode.
+      // (x < padLeft), enter Y-pull mode instead of X-pan mode.
       const vbX = ((e.clientX - rect.left) / rect.width) * VB_W;
       const vbY = ((e.clientY - rect.top) / rect.height) * height;
       // Record tap-start for the touch tap-to-pin detection in onPointerUp.
@@ -546,14 +557,14 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
       if (vbY > PAD.top + plotH) {
         // X-axis gutter: anchor the data index under the cursor (clamped to
         // plot bounds) and stretch the visible range around it on vertical drag.
-        const ratio = Math.max(0, Math.min(1, (vbX - PAD.left) / plotW));
+        const ratio = Math.max(0, Math.min(1, (vbX - padLeft) / plotW));
         holdRange(xRange);
         xDragRef.current = {
           startY: e.clientY,
           startRange: xRange,
           anchor: xStart + ratio * xSpan,
         };
-      } else if (vbX < PAD.left) {
+      } else if (vbX < padLeft) {
         // Anchor the data value under the cursor and stretch around it.
         const ratio = 1 - (vbY - PAD.top) / plotH;
         const useLog = config.scalable && scale === "log";
@@ -568,7 +579,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
         panRef.current = { startX: e.clientX, startRange: xRange };
       }
     },
-    [xRange, yDomain, plotH, plotW, scale, config.scalable, height, xStart, xSpan, holdRange],
+    [xRange, yDomain, padLeft, plotH, plotW, scale, config.scalable, height, xStart, xSpan, holdRange],
   );
 
   const onPointerUp = useCallback((e: ReactPointerEvent<SVGSVGElement>) => {
@@ -845,8 +856,8 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
         {/* Regime bands — bull (positive comparator rolling-Sharpe) tinted teal,
             bear tinted red. Drawn behind everything else as a low-opacity wash. */}
         {regimeSegments.map((seg, i) => {
-          const x0 = Math.max(PAD.left, X(seg.start));
-          const x1 = Math.min(PAD.left + plotW, X(seg.end));
+          const x0 = Math.max(padLeft, X(seg.start));
+          const x1 = Math.min(padLeft + plotW, X(seg.end));
           const w = x1 - x0;
           if (w <= 0) return null;
           return (
@@ -879,8 +890,8 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
           return (
             <g key={`y-${t.value}`}>
               <line
-                x1={PAD.left}
-                x2={PAD.left + plotW}
+                x1={padLeft}
+                x2={padLeft + plotW}
                 y1={Y(t.value)}
                 y2={Y(t.value)}
                 stroke={isBaseline ? "var(--color-text-muted)" : "var(--color-border)"}
@@ -889,7 +900,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
                 strokeWidth={isBaseline ? 1.2 : 1}
               />
               <text
-                x={fitEndLabelX(PAD.left - 6, t.label, 10)}
+                x={padLeft - 6}
                 y={Y(t.value) + 3}
                 textAnchor="end"
                 fontSize={10}
@@ -927,8 +938,8 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
 
         {/* Worst-N drawdown highlight bands — drawn behind the series line. */}
         {config.ddHighlights && view.strategyWorst10.map((p, i) => {
-          const x0 = Math.max(PAD.left, X(p.start));
-          const x1 = Math.min(PAD.left + plotW, X(p.recover));
+          const x0 = Math.max(padLeft, X(p.start));
+          const x1 = Math.min(padLeft + plotW, X(p.recover));
           const w = x1 - x0;
           if (w <= 0) return null;
           return (
@@ -981,8 +992,8 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
           return (
             <g pointerEvents="none">
               <line
-                x1={PAD.left}
-                x2={PAD.left + plotW}
+                x1={padLeft}
+                x2={padLeft + plotW}
                 y1={yAvg}
                 y2={yAvg}
                 stroke={series[0].color}
@@ -991,7 +1002,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
                 strokeWidth={1}
               />
               <text
-                x={PAD.left + plotW - 4}
+                x={padLeft + plotW - 4}
                 y={yAvg - 3}
                 textAnchor="end"
                 fontSize={9}
@@ -1011,7 +1022,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
             outside as visible vertical streaks. */}
         <defs>
           <clipPath id={`plot-clip-${config.key}`}>
-            <rect x={PAD.left} y={PAD.top} width={plotW} height={plotH} />
+            <rect x={padLeft} y={PAD.top} width={plotW} height={plotH} />
           </clipPath>
         </defs>
         <g clipPath={`url(#plot-clip-${config.key})`}>
@@ -1125,8 +1136,8 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
             })}
             <CrosshairTooltip
               x={X(crossIdx)}
-              plotLeft={PAD.left}
-              plotRight={PAD.left + plotW}
+              plotLeft={padLeft}
+              plotRight={padLeft + plotW}
               plotTop={PAD.top}
               date={view.dates[crossIdx]}
               crossIdx={crossIdx}

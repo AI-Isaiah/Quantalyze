@@ -169,7 +169,7 @@ describe("QuantileBoxPlotPanel P5/P95 reference labels anchor inward (D-02, D-03
   });
 });
 
-describe("TimeSeriesChart y tick labels stay inside the svg (D-02, D-03a)", () => {
+describe("TimeSeriesChart y tick labels stay inside the svg and off the plot (D-02, D-03a, WR-02)", () => {
   // The Overview's Rolling Sortino (30d) values are in the thousands: "+1000.00" is 8 chars.
   function mountSortino(values: number[]) {
     const daily = dailyRows(values.length, Date.UTC(2026, 0, 1));
@@ -190,24 +190,45 @@ describe("TimeSeriesChart y tick labels stay inside the svg (D-02, D-03a)", () =
       .map((t) => ({ label: t.textContent ?? "", x: t.getAttribute("x"), anchor: t.getAttribute("text-anchor") }));
   }
 
-  it("an 8-character tick ends at x = 48 so its box starts at the svg's left edge; a short one stays at 44", () => {
+  /** Where the plot starts: the left end of the horizontal gridlines. */
+  function plotLeft(container: HTMLElement): number {
+    const xs = Array.from(container.querySelectorAll("svg line"))
+      .filter((l) => l.getAttribute("y1") === l.getAttribute("y2"))
+      .map((l) => Number(l.getAttribute("x1")));
+    expect(xs.length).toBeGreaterThan(0);
+    return Math.min(...xs);
+  }
+
+  it("an 8-character tick grows the gutter from 50 to 56, so its box starts 2 units inside the svg", () => {
     const { container } = mountSortino(Array.from({ length: 12 }, (_, i) => 500 + i * 250));
     const ticks = yTicks(container);
     expect(ticks.map((t) => t.label)).toEqual(["0.00", "+1000.00", "+2000.00", "+3000.00"]);
-    // "+1000.00" at font 10 is 8 * 6 = 48 wide: ending at the gutter's x = 44 it would start at -4.
-    for (const t of ticks.slice(1)) {
+    // "+1000.00" at font 10 is 8 * 6 = 48 wide; with the 6-unit gap that needs 54, rounded up to 56.
+    expect(plotLeft(container)).toBe(56);
+    for (const t of ticks) {
       expect(t.anchor).toBe("end");
-      expect(t.x).toBe("48");
+      expect(t.x).toBe("50");
     }
-    // "0.00" is 24 wide and fits: it keeps the gutter x of PAD.left - 6.
-    expect(ticks[0].anchor).toBe("end");
-    expect(ticks[0].x).toBe("44");
   });
 
-  it("ticks that fit everywhere stay at x = 44", () => {
+  it("a 9-character tick grows the gutter to 60 instead of reaching onto the plot", () => {
+    const { container } = mountSortino(Array.from({ length: 12 }, (_, i) => 2000 + i * 1000));
+    const ticks = yTicks(container);
+    // Precondition: the widest label really is "+10000.00" (9 chars = 54 wide).
+    expect(ticks.map((t) => t.label)).toContain("+10000.00");
+    // 54 + the 6-unit gap = 60: the label ends at 54 (gutter - 6), starts at 0, and the plot starts at 60.
+    expect(plotLeft(container)).toBe(60);
+    for (const t of ticks) {
+      expect(t.anchor).toBe("end");
+      expect(t.x).toBe("54");
+    }
+  });
+
+  it("ticks that fit everywhere keep the gutter at 50 and x = 44", () => {
     const { container } = mountSortino(Array.from({ length: 12 }, (_, i) => 1 + i * 0.25));
     const ticks = yTicks(container);
     expect(ticks.length).toBeGreaterThan(1);
+    expect(plotLeft(container)).toBe(50);
     for (const t of ticks) expect(t.x).toBe("44");
   });
 });

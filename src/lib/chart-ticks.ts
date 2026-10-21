@@ -153,20 +153,6 @@ export function fitTickLabel(
 }
 
 /**
- * Where an END-anchored y tick label is drawn so its box stays inside its own
- * SVG (Phase 170.1.3 D-02, D-03c). A y axis label ends just left of the plot;
- * when the label is wider than the gutter its box starts below the SVG's left
- * edge (x = 0) and is cut. The label keeps its end anchor and its text and
- * moves right just far enough to start at 0, so it never flips onto the plot.
- * A label that already fits keeps `x`. Same deterministic width estimate as
- * `fitTickLabel`, so server and browser emit the same markup.
- */
-export function fitEndLabelX(x: number, label: string, fontSize: number): number {
-  const w = estLabelWidth(label, fontSize);
-  return x - w < 0 ? w : x;
-}
-
-/**
  * Em-box ascent as a multiple of the font size: an upper bound on how far an
  * SVG text box reaches above its baseline. Geist Mono measured at 1.0 em in
  * Chromium (a 13 px label at baseline 10 was cut by exactly 3 px); the 5%
