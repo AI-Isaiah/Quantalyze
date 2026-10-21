@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.132.9.6] - 2026-10-21 — roadmap: book NARROWCHARTS 170.1.3
+
+### Notes
+- Booked Phase 170.1.3 NARROWCHARTS (founder 2026-10-20: "Book as a Small Phase"). On a 390 px phone the /allocations Overview equity chart is clipped by its card, because `EquityChart.tsx` floors its width at 400 px, which hides the right-hand axis labels. SVG axis tick labels are also cut 3-4 px on the Overview and the scenario composer. Both were measured by the HISTORYREADER post-deploy check.
+- The phase takes over item (2) of TODOS `[170.1-SC5-SCENARIO-NARROW-DEFECTS]`; the entry's other items stay where they are. The ROADMAP section carries the evidence and four success criteria, and STATE records the insertion.
+
 ## [0.132.9.5] - 2026-10-20 — records: close COMPUTEDATSTAMP 166.5
 
 ### Notes

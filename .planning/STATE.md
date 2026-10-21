@@ -6,16 +6,16 @@ current_phase: "170.1.2"
 current_phase_name: LABELS
 status: executing
 stopped_at: 166.5 COMPUTEDATSTAMP closed; 170.1.2 LABELS in review and verification; AUMBASIS records pending
-last_updated: "2026-10-20T21:48:42.531Z"
+last_updated: "2026-10-21T11:05:21.797Z"
 last_activity: 2026-10-20
 last_activity_desc: "166.5 COMPUTEDATSTAMP closed (v0.131.13.0 #1047, v0.131.13.1 #1050; Wave 5 forced recompute read on PROD; verification passed)"
-state_head: 42730765f67f1c2b3a86b46c3415d387b09cdc2e
+state_head: 20d18378de92ee41207517977af13b9b2c8b858c
 progress:
-  total_phases: 119
+  total_phases: 120
   completed_phases: 115
   total_plans: 840
   completed_plans: 823
-  percent: 97
+  percent: 96
 ---
 
 ## ⭐ STATE lineage
@@ -174,9 +174,9 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: 170.1.2 (LABELS) — EXECUTING
 Plan: 10 of 10
-Status: Executing — several phases in parallel. 170.1.2 LABELS is the current one: all 10 plans are written and it is in review and verification. 167.1.1.2 AUMBASIS (#1087) shipped; its records PR is pending. 167.1.2.2.2.1 OKXHISTORY is at plan 13 (the first preflight, plan 12, stopped on a parser defect fixed by #1091). 166.5.1 SENTRYTRIAGE is booked and 170.1.3 NARROWCHARTS is being booked (#1098 open); neither is planned yet. 166.5 COMPUTEDATSTAMP closed 2026-10-20 (v0.131.13.0 #1047, v0.131.13.1 #1050; the Wave 5 forced recompute on PROD: 42 enqueued, 23 done each with its own runner stamp, 0 too-new dates, 19 failed with dates held and routed to the founder as `166.5-RECOMPUTE-RESIDUAL-19`; verification passed). 167.1.2.1.2 HISTORYREADER closed 2026-10-20 (#1089). 170.1.1 TITLES closed 2026-10-20 (#1093). 170.1 COPY closed 2026-10-20 (#1082).
+Status: Executing — several phases in parallel. 170.1.2 LABELS is the current one: all 10 plans are written and it is in review and verification. 167.1.1.2 AUMBASIS (#1087) shipped; its records PR is pending. 167.1.2.2.2.1 OKXHISTORY is at plan 13 (the first preflight, plan 12, stopped on a parser defect fixed by #1091). 166.5.1 SENTRYTRIAGE is booked and 170.1.3 NARROWCHARTS is booked (#1098); neither is planned yet. 166.5 COMPUTEDATSTAMP closed 2026-10-20 (v0.131.13.0 #1047, v0.131.13.1 #1050; the Wave 5 forced recompute on PROD: 42 enqueued, 23 done each with its own runner stamp, 0 too-new dates, 19 failed with dates held and routed to the founder as `166.5-RECOMPUTE-RESIDUAL-19`; verification passed). 167.1.2.1.2 HISTORYREADER closed 2026-10-20 (#1089). 170.1.1 TITLES closed 2026-10-20 (#1093). 170.1 COPY closed 2026-10-20 (#1082).
 Last activity: 2026-10-20 — 166.5 COMPUTEDATSTAMP closed (v0.131.13.0 #1047, v0.131.13.1 #1050; Wave 5 forced recompute read on PROD; verification passed)
-Progress: [█████████░] 97%
+Progress: [█████████░] 96%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -634,6 +634,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 170.1.2 inserted after Phase 170.1: LABELS: names and readable labels instead of ids and internal values (founder 2026-10-15, "Split into 3 phases")
 - Phase 167.1.1.2 inserted after Phase 167.1.1: AUMBASIS: commit sizing counts derivative unrealized P&L not notional; missing P&L stored as missing (founder 2026-10-15)
 - Phase 166.5.1 inserted after Phase 166.5: SENTRYTRIAGE — demo-allocator cron warning (QUANTALYZE-Z), worker ReadTimeouts (2B-2G), job-state race (2A, A); founder 2026-10-20
+- Phase 170.1.3 inserted after Phase 170.1: NARROWCHARTS: the /allocations equity chart's 400 px floor and clipped SVG axis labels at 390 px (founder 2026-10-20, "Book as a Small Phase")
 
 ### Decisions
 
