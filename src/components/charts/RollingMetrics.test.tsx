@@ -1,6 +1,9 @@
+import React from "react";
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { RollingMetrics } from "./RollingMetrics";
+import { EdgeFitXTick } from "./EdgeFitXTick";
+import { CHART_TICK_STYLE } from "./chart-tokens";
 
 // Recharts in jsdom has zero width/height in the ResponsiveContainer which
 // means the internal chart tree never renders, so we can't observe child
@@ -17,6 +20,18 @@ vi.mock("recharts", () => {
   }
   const NullComponent = () => null;
   NullComponent.displayName = "RechartsMockNull";
+  const XAxisMock = ({ tick }: { tick?: React.ReactElement }) => {
+    const isEl = React.isValidElement(tick);
+    return (
+      <div
+        data-testid="x-axis"
+        data-tick-is-element={String(isEl)}
+        data-tick-props={isEl ? JSON.stringify(tick.props) : ""}
+        data-tick-type={isEl ? (tick.type === EdgeFitXTick ? "EdgeFitXTick" : "other") : ""}
+      />
+    );
+  };
+  XAxisMock.displayName = "RechartsMockXAxis";
   const RefLine = ({ y, label }: { y: number; label?: { value?: string } }) => (
     <div data-testid="ref-line" data-y={y} data-label={label?.value ?? ""} />
   );
@@ -50,9 +65,14 @@ vi.mock("recharts", () => {
   Tooltip.displayName = "RechartsMockTooltip";
   return {
     ResponsiveContainer: makePassthrough("ResponsiveContainer"),
+    // RollingXAxis reads the chart context; outside a real chart both hooks are undefined.
+    useChartWidth: () => undefined,
+    usePlotArea: () => undefined,
     LineChart: makePassthrough("LineChart"),
     Line: NullComponent,
-    XAxis: NullComponent,
+    // 2026-10-21 (Phase 170.1.3 NARROWCHARTS plan 03, D-03b): record the `tick` prop (this mock
+    // used to render nothing) so a case can assert it is the EdgeFitXTick element.
+    XAxis: XAxisMock,
     YAxis: NullComponent,
     Tooltip,
     Legend,
@@ -138,6 +158,16 @@ describe("RollingMetrics overallSharpe prop", () => {
   it("returns null entirely when data is empty, regardless of overallSharpe", () => {
     const { container } = render(<RollingMetrics data={{}} overallSharpe={1.5} />);
     expect(container.firstChild).toBeNull();
+  });
+});
+
+describe("RollingMetrics x-axis tick (D-03b)", () => {
+  it("draws its x ticks through EdgeFitXTick carrying CHART_TICK_STYLE", () => {
+    render(<RollingMetrics data={sampleData} />);
+    const x = screen.getByTestId("x-axis");
+    expect(x.getAttribute("data-tick-is-element")).toBe("true");
+    expect(x.getAttribute("data-tick-type")).toBe("EdgeFitXTick");
+    expect(JSON.parse(x.getAttribute("data-tick-props") ?? "{}")).toEqual(CHART_TICK_STYLE);
   });
 });
 

@@ -3,7 +3,8 @@ import { describe, it, expect, vi } from "vitest";
 import { render } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { CHART_ACCENT } from "./chart-tokens";
+import { CHART_ACCENT, CHART_TICK_STYLE } from "./chart-tokens";
+import { EdgeFitXTick } from "./EdgeFitXTick";
 
 /**
  * Phase 14b-03 Task 1 — RollingSortinoChart unit tests. Identical structure
@@ -30,10 +31,18 @@ vi.mock("recharts", () => {
   );
   Line.displayName = "RechartsMockLine";
   const XAxis = (props: Record<string, unknown>) => {
-    const tick = (props.tick ?? {}) as Record<string, unknown>;
+    // 2026-10-21 (Phase 170.1.3 NARROWCHARTS plan 03, D-03b): the XAxis `tick` is now an
+    // `<EdgeFitXTick {...CHART_TICK_STYLE} />` element. Resolve the style from the element's props
+    // when it is an element and from the object itself otherwise, so every assertion below keeps
+    // its intent (font size, tabular numerals).
+    const rawTick = props.tick;
+    const tick = (React.isValidElement(rawTick)
+      ? rawTick.props
+      : (rawTick ?? {})) as Record<string, unknown>;
     return (
       <div
         data-testid="x-axis"
+        data-tick-type={React.isValidElement(rawTick) ? (rawTick.type === EdgeFitXTick ? "EdgeFitXTick" : "other") : ""}
         data-tick-font-size={String(tick.fontSize ?? "")}
         data-tick-tabular={String(tick.fontVariantNumeric ?? "")}
       />
@@ -57,6 +66,9 @@ vi.mock("recharts", () => {
   NullComponent.displayName = "RechartsMockNull";
   return {
     ResponsiveContainer: makePassthrough("ResponsiveContainer"),
+    // RollingXAxis reads the chart context; outside a real chart both hooks are undefined.
+    useChartWidth: () => undefined,
+    usePlotArea: () => undefined,
     LineChart: makePassthrough("LineChart"),
     Line,
     XAxis,
@@ -92,6 +104,14 @@ describe("RollingSortinoChart — Phase 14b-03 Task 1", () => {
     expect(getByTestId("x-axis").getAttribute("data-tick-font-size")).toBe("12");
     expect(getByTestId("x-axis").getAttribute("data-tick-tabular")).toBe("tabular-nums");
     expect(getByTestId("y-axis").getAttribute("data-formatter-sample")).toBe("1.23");
+  });
+
+  it("Test 4b: the XAxis tick is an EdgeFitXTick element carrying CHART_TICK_STYLE (D-03b)", () => {
+    const { getByTestId } = render(<RollingSortinoChart data={sample} />);
+    const x = getByTestId("x-axis");
+    expect(x.getAttribute("data-tick-type")).toBe("EdgeFitXTick");
+    expect(x.getAttribute("data-tick-font-size")).toBe(String(CHART_TICK_STYLE.fontSize));
+    expect(x.getAttribute("data-tick-tabular")).toBe(CHART_TICK_STYLE.fontVariantNumeric);
   });
 
   it("Test 9: source contains height={250} ResponsiveContainer", () => {

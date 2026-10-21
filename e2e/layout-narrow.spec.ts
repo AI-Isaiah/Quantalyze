@@ -12,11 +12,19 @@
  * Shared TEST: every seed uses this spec's own per-worker prefix and
  * cleanup deletes only that prefix. Never assert a global count.
  */
+import fs from "node:fs";
+import path from "node:path";
 import { test, expect, type Locator, type Page } from "./helpers/hydration-guard";
 import { assertNoReflow } from "./helpers/reflow";
 import {
   assertChildrenInside,
+  assertEmittersMeasured,
   assertInsideViewport,
+  assertSvgTextInsideSvg,
+  readSvgTextLayout,
+  type RequiredEmitter,
+  type SvgTextEmitterDef,
+  type SvgTextLayout,
   assertFitsOrScrollsInside,
   assertNotClippedByAncestors,
   assertColumnPinnedBelow3xl,
@@ -2180,6 +2188,484 @@ test.describe("/discovery — SC6-DISCOVERY pinned", () => {
         failures,
         `${vp.id}: SC-6 pinned-stack contracts that failed`,
       ).toEqual([]);
+    });
+  }
+});
+
+/**
+ * Phase 170.1.3 NARROWCHARTS — the /allocations charts fit a 390 px phone.
+ *
+ * Contract-first, in the shape Phase 170's T0 used: this describe is the gate
+ * the four plans share. Between plan 01 and plan 04 the whole-surface clip
+ * cases ("no svg text clipped") are RED by design; the plans ship in ONE PR,
+ * and `e2e-seeded` runs this file. Do not weaken an assertion to go green.
+ *
+ * Test titles are fixed, the plans select them with `-g`:
+ *   `overview: equity …` (plan 01's gate), `overview|composer: no svg text
+ *   clipped` (plan 04's gate), `overview|composer: desktop reading` (C-5).
+ *
+ * C-5 desktop unchanged: the `V1280 ... desktop reading` cases compare a 1280 x 800
+ * reading (per surface, per svg in DOM order: width, and every text with its string,
+ * anchor and the `x` / `y` attributes) against the fixture committed at
+ * `e2e/fixtures/narrowcharts-desktop-1280.json`, on every run. The fixture lives
+ * outside `.planning/` because ship branches drop it. Attributes are compared, not
+ * rendered boxes: boxes depend on the machine's fonts, attributes do not. That holds for the
+ * rolling charts too because `RollingXAxis` picks their x ticks in arithmetic; Recharts'
+ * own pick measured DM Sans in the DOM and so differed by host. It was checked by forcing
+ * the page font to a serif and to Courier New: the reading is unchanged.
+ * To accept an intended desktop change, regenerate the fixture on the local-stack lane:
+ *   NARROWCHARTS_DESKTOP_OUT=e2e/fixtures/narrowcharts-desktop-1280.json \
+ *     npx playwright test e2e/layout-narrow.spec.ts -g "desktop reading" --workers=1
+ * With NARROWCHARTS_DESKTOP_OUT set the cases write the reading and compare nothing.
+ */
+const NARROW_VIEWPORTS: { id: string; width: number; height: number }[] = [
+  { id: "V390", width: 390, height: 844 },
+  { id: "V640", width: 640, height: 800 },
+  { id: "V1280", width: 1280, height: 800 },
+];
+
+// The value of COLLAPSIBLE_OPEN_ALL_EVENT in src/components/ui/CollapsibleSection.tsx.
+// Written as a literal: that file is a client component and is not imported
+// into the Playwright process. Every CollapsibleSection listens for it.
+const COLLAPSIBLE_OPEN_ALL_EVENT_NAME = "collapsible-section:open-all";
+
+const NARROW_FIXTURE_NAME = `${NAME_PREFIX} NARROWCHARTS`;
+// Fixed so svg text strings do not drift between the BEFORE and AFTER reading.
+const NARROW_ANCHOR_MS = Date.UTC(2026, 9, 20);
+
+const EQUITY_ROOT = '[data-testid="overview-equity-curve"]';
+const EQUITY_SVG = 'svg[aria-label="Equity chart"]';
+
+// The D-03c emitters, mounted by the Overview and the composer alike. Each is selected by the
+// aria-label (or the aria-describedby) its component writes, so a moved selector reads as missing.
+const SHARED_EMITTERS: SvgTextEmitterDef[] = [
+  { key: "eoy-legend", selector: 'svg[aria-label^="End-of-year returns by calendar year"]' },
+  { key: "heatmap-months", selector: '[aria-label^="Daily-return calendar for"] svg' },
+  { key: "return-quantiles", selector: 'svg[aria-label^="Return quantiles box plot"]' },
+  { key: "timeseries-y", selector: 'svg[aria-describedby^="chart-help-"]' },
+];
+
+const COMPOSER_EMITTERS: SvgTextEmitterDef[] = [
+  { key: "brush", selector: '[aria-label="Master timeline brush"] svg' },
+  {
+    key: "quantile-box",
+    selector: `svg[aria-label="Quantile box plot for the strategy's daily return distribution"]`,
+  },
+  {
+    key: "rolling-sharpe",
+    selector: "details#composer-blend-detail svg.recharts-surface",
+    headingText: "Rolling Sharpe",
+  },
+  { key: "rolling-volatility", selector: '[aria-label="Rolling volatility"] svg.recharts-surface' },
+  { key: "rolling-sortino", selector: '[aria-label="Rolling Sortino"] svg.recharts-surface' },
+  ...SHARED_EMITTERS,
+];
+
+const OVERVIEW_EMITTERS: SvgTextEmitterDef[] = SHARED_EMITTERS;
+
+// Floors are the counts measured on the local-stack lane at V390, V640 and V1280 (the minimum over
+// the three; they differ only for return-quantiles, which draws fewer y ticks on the mobile arm).
+// The Overview does not mount ReturnQuantiles.
+const OVERVIEW_REQUIRED: RequiredEmitter[] = [
+  { key: "eoy-legend", minTexts: 3 },
+  { key: "heatmap-months", minTexts: 16 },
+  { key: "timeseries-y", minTexts: 102 },
+];
+
+const COMPOSER_REQUIRED: RequiredEmitter[] = [
+  { key: "brush", minTexts: 2 },
+  { key: "quantile-box" },
+  { key: "rolling-sharpe", minTexts: 2, minXAxisTexts: 2 },
+  { key: "rolling-volatility", minTexts: 2, minXAxisTexts: 2 },
+  { key: "rolling-sortino", minTexts: 2, minXAxisTexts: 2 },
+  { key: "eoy-legend", minTexts: 5 },
+  { key: "heatmap-months", minTexts: 32 },
+  { key: "return-quantiles", minTexts: 4 },
+  { key: "timeseries-y", minTexts: 41 },
+];
+
+type Surface = "overview" | "composer";
+
+const ROLLING_XTICKS: Record<string, string> = {
+  "rolling-sharpe":
+    'details#composer-blend-detail div:has(> h3:text-is("Rolling Sharpe")) .recharts-xAxis-tick-labels text',
+  "rolling-volatility":
+    '[aria-label="Rolling volatility"] .recharts-xAxis-tick-labels text',
+  "rolling-sortino":
+    '[aria-label="Rolling Sortino"] .recharts-xAxis-tick-labels text',
+};
+
+/** Wait until the element's width has not moved across two reads 200 ms apart. */
+async function waitForStableWidth(page: Page, selector: string): Promise<void> {
+  let prev = -1;
+  await expect
+    .poll(
+      async () => {
+        const w = await page
+          .locator(selector)
+          .first()
+          .evaluate((el) => el.getBoundingClientRect().width);
+        const stable = w === prev && w > 0;
+        prev = w;
+        await page.waitForTimeout(200);
+        return stable;
+      },
+      { timeout: 15_000, message: `${selector} width never settled` },
+    )
+    .toBe(true);
+}
+
+async function openOverview(page: Page, vp: { width: number; height: number }): Promise<void> {
+  await page.setViewportSize({ width: vp.width, height: vp.height });
+  const allocator = await seedTestAllocator();
+  await seedAllocatorBook({ allocatorUserId: allocator.userId, days: 120, anchorMs: NARROW_ANCHOR_MS });
+  await loginViaForm(page, allocator.email, allocator.password);
+  const res = await page.goto("/allocations?tab=overview");
+  if (res && res.status() >= 400) {
+    throw new Error(`/allocations returned HTTP ${res.status()} — cannot run NARROWCHARTS`);
+  }
+  await expect(
+    page.locator(`${EQUITY_ROOT} ${EQUITY_SVG}`),
+    "Equity chart svg not visible — EmptyState/login page would false-green",
+  ).toBeVisible({ timeout: 20_000 });
+  await page.waitForLoadState("networkidle");
+  await page.evaluate((n) => window.dispatchEvent(new Event(n)), COLLAPSIBLE_OPEN_ALL_EVENT_NAME);
+  await waitForStableWidth(page, `${EQUITY_ROOT} ${EQUITY_SVG}`);
+}
+
+/** Composer in composed mode with the FIXED fixture name and anchor. */
+async function openNarrowComposer(
+  page: Page,
+  vp: { width: number; height: number },
+  days = 400,
+): Promise<void> {
+  await page.setViewportSize({ width: vp.width, height: vp.height });
+  await cleanupStrategiesByNamePrefix(NAME_PREFIX);
+  const fixtureId = await seedStrategyWithHistory({
+    days,
+    name: NARROW_FIXTURE_NAME,
+    codename: NARROW_FIXTURE_NAME,
+    withDailyReturns: true,
+    anchorMs: NARROW_ANCHOR_MS,
+  });
+  const allocator = await seedTestAllocator();
+  await loginViaForm(page, allocator.email, allocator.password);
+
+  await page.goto("/allocations?tab=scenario");
+  await page.waitForLoadState("networkidle");
+  await expect(page.locator("h2", { hasText: "Start a portfolio" })).toBeVisible({
+    timeout: 10_000,
+  });
+  await page.click('button:has-text("Browse strategies")');
+  await expect(
+    page.locator('[role="dialog"][aria-label="Browse strategies"]'),
+  ).toBeVisible({ timeout: 5_000 });
+  await page.fill('input[placeholder="Search by name or codename"]', NARROW_FIXTURE_NAME);
+  const fixtureAdd = page.locator(`[data-testid="browse-add-${fixtureId}"]`);
+  await expect(fixtureAdd).toBeVisible({ timeout: 10_000 });
+  await fixtureAdd.click();
+  await page.click('[aria-label="Close drawer"]');
+  await page.waitForLoadState("networkidle");
+  await expect(page.locator("h2", { hasText: "Portfolio" }).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(
+    page.locator('[aria-label="Master timeline brush"]'),
+    "composed factsheet charts did not mount",
+  ).toBeVisible({ timeout: 20_000 });
+}
+
+/**
+ * Open every collapsed section BEFORE any measurement. The composer mounts the
+ * three rolling charts (and the histogram and quantiles card) inside the
+ * closed-by-default `details#composer-blend-detail`; closed, they are
+ * display:none, measure zero width and draw no ticks.
+ */
+async function expandAll(page: Page, surface: Surface): Promise<void> {
+  await page.evaluate((n) => window.dispatchEvent(new Event(n)), COLLAPSIBLE_OPEN_ALL_EVENT_NAME);
+  if (surface === "composer") {
+    await expect(
+      page.locator("details#composer-blend-detail"),
+      "details#composer-blend-detail did not open (event name or id changed?)",
+    ).toHaveAttribute("open", "", { timeout: 10_000 });
+    for (const [key, selector] of Object.entries(ROLLING_XTICKS)) {
+      await expect
+        .poll(() => page.locator(selector).count(), {
+          timeout: 15_000,
+          message: `NARROWCHARTS-EMITTER-MISSING composer ${key}: fewer than two x-axis ticks drawn`,
+        })
+        .toBeGreaterThanOrEqual(2);
+    }
+    await waitForStableWidth(page, '[aria-label="Master timeline brush"] svg');
+  } else {
+    await waitForStableWidth(page, `${EQUITY_ROOT} ${EQUITY_SVG}`);
+  }
+}
+
+async function openSurface(
+  page: Page,
+  surface: Surface,
+  vp: { width: number; height: number },
+  composerDays?: number,
+): Promise<void> {
+  if (surface === "overview") await openOverview(page, vp);
+  else await openNarrowComposer(page, vp, composerDays);
+  await expandAll(page, surface);
+}
+
+interface ReadingText {
+  text: string;
+  anchor: string;
+  /** The `x` / `y` attributes on the `<text>`, in the svg's user units. */
+  x: number | null;
+  y: number | null;
+}
+interface ReadingSvg {
+  surface: Surface;
+  index: number;
+  label: string | null;
+  emitter: string | null;
+  width: number;
+  texts: ReadingText[];
+}
+
+const DESKTOP_FIXTURE = path.join(__dirname, "fixtures", "narrowcharts-desktop-1280.json");
+// Layout widths and Recharts' arithmetic agree to well under this on one machine; the slop
+// is for the same arithmetic on another one.
+const DESKTOP_SLOP_PX = 0.5;
+
+const attrNumber = (v: string | null): number | null => (v === null || v === "" ? null : Number(v));
+
+function toReading(surface: Surface, layouts: SvgTextLayout[]): ReadingSvg[] {
+  return layouts.map((l) => ({
+    surface,
+    index: l.index,
+    label: l.label,
+    emitter: l.emitter,
+    width: l.width,
+    texts: l.texts.map((t) => ({
+      text: t.text,
+      anchor: t.anchor,
+      x: attrNumber(t.attrX),
+      y: attrNumber(t.attrY),
+    })),
+  }));
+}
+
+/** Merge one surface into the OUT file (sync read-modify-write, then rename). */
+function writeDesktopReading(outPath: string, surface: Surface, reading: ReadingSvg[]): void {
+  let doc: { viewport: string; readings: Record<string, ReadingSvg[]> } = {
+    viewport: "1280x800",
+    readings: {},
+  };
+  if (fs.existsSync(outPath)) doc = JSON.parse(fs.readFileSync(outPath, "utf8"));
+  doc.readings[surface] = reading;
+  const tmp = `${outPath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(doc, null, 2)}\n`);
+  fs.renameSync(tmp, outPath);
+}
+
+// A missing attribute (null) differs from a number, and a non-finite value (NaN, from a malformed
+// attribute) on either side is a difference: `Math.abs(NaN - b) > slop` is false, so without the
+// finite check a corrupt reading would compare equal to everything.
+const differs = (a: number | null, b: number | null): boolean =>
+  a === null || b === null
+    ? a !== b
+    : !Number.isFinite(a) || !Number.isFinite(b) || Math.abs(a - b) > DESKTOP_SLOP_PX;
+
+/** Every difference between the committed reading and this run's, one line each. */
+function compareDesktopReading(baselinePath: string, surface: Surface, after: ReadingSvg[]): void {
+  const doc = JSON.parse(fs.readFileSync(baselinePath, "utf8")) as {
+    readings: Record<string, ReadingSvg[]>;
+  };
+  const before = doc.readings[surface];
+  if (!before) throw new Error(`NARROWCHARTS: ${baselinePath} has no "${surface}" reading`);
+  const problems: string[] = [];
+  if (before.length !== after.length) {
+    problems.push(`${surface}: svg count ${before.length} -> ${after.length}`);
+  }
+  for (let i = 0; i < Math.min(before.length, after.length); i++) {
+    const b = before[i];
+    const a = after[i];
+    const who = `${surface} svg#${i} ${b.label ?? ""}`;
+    if (differs(b.width, a.width)) problems.push(`${who}: width ${b.width} -> ${a.width}`);
+    const bt = b.texts.map((t) => t.text);
+    const at = a.texts.map((t) => t.text);
+    if (JSON.stringify(bt) !== JSON.stringify(at)) {
+      problems.push(`${who}: text strings differ\n  before ${JSON.stringify(bt)}\n  after  ${JSON.stringify(at)}`);
+      continue;
+    }
+    b.texts.forEach((t, k) => {
+      const u = a.texts[k];
+      if (t.anchor !== u.anchor) problems.push(`${who}: "${t.text}" anchor ${t.anchor} -> ${u.anchor}`);
+      if (differs(t.x, u.x)) problems.push(`${who}: "${t.text}" x ${t.x} -> ${u.x}`);
+      if (differs(t.y, u.y)) problems.push(`${who}: "${t.text}" y ${t.y} -> ${u.y}`);
+    });
+  }
+  problems.forEach((p) => console.log(`NARROWCHARTS-DESKTOP-CHANGE ${p}`));
+  expect(
+    problems,
+    `desktop ${surface} differs from ${path.relative(process.cwd(), baselinePath)} ` +
+      `(if the change is intended, regenerate the fixture, see the comment above this describe):\n${problems.join("\n")}`,
+  ).toEqual([]);
+}
+
+test.describe("/allocations charts — NARROWCHARTS", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "layout-narrow: seed-helper env vars not wired " +
+      "(set TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY) — " +
+      "Skipping prevents false-green on empty/404/login pages (W-02). " +
+      "The live geometry proof runs in CI e2e-seeded once seed env is present.",
+  );
+
+  test.afterAll(async () => {
+    if (HAS_SEED_ENV) {
+      await cleanupStrategiesByNamePrefix(NAME_PREFIX);
+    }
+  });
+
+  for (const vp of NARROW_VIEWPORTS) {
+    if (vp.id !== "V1280") {
+      test(`${vp.id} overview: equity chart fits its card`, async ({ page }) => {
+        test.setTimeout(120_000);
+        await openSurface(page, "overview", vp);
+        const svg = page.locator(`${EQUITY_ROOT} ${EQUITY_SVG}`).first();
+        const geo = await svg.evaluate((el) => {
+          const wrap = el.closest("div.relative.w-full");
+          if (!wrap) return { error: 'no ancestor matches div.relative.w-full' };
+          if (wrap !== el.parentElement?.parentElement) {
+            return { error: "div.relative.w-full is not the svg's grandparent — the markup moved" };
+          }
+          const cs = getComputedStyle(wrap);
+          const w = wrap.getBoundingClientRect();
+          const s = el.getBoundingClientRect();
+          const px = (v: string) => Number.parseFloat(v) || 0;
+          return {
+            content: {
+              left: w.left + px(cs.borderLeftWidth) + px(cs.paddingLeft),
+              right: w.right - px(cs.borderRightWidth) - px(cs.paddingRight),
+            },
+            svg: { left: s.left, right: s.right, width: s.width },
+          };
+        });
+        if ("error" in geo) throw new Error(`${vp.id}: ${geo.error}`);
+        console.log(
+          `NARROWCHARTS ${vp.id} equity svg ${geo.svg.left.toFixed(1)}..${geo.svg.right.toFixed(1)} (w ${geo.svg.width.toFixed(1)}) in wrapper content ${geo.content.left.toFixed(1)}..${geo.content.right.toFixed(1)}`,
+        );
+        expect(
+          geo.svg.left,
+          `${vp.id}: equity svg left ${geo.svg.left} is left of the wrapper content box ${geo.content.left}`,
+        ).toBeGreaterThanOrEqual(geo.content.left - 0.5);
+        expect(
+          geo.svg.right,
+          `${vp.id}: equity svg right ${geo.svg.right} is right of the wrapper content box ${geo.content.right} (svg width ${geo.svg.width})`,
+        ).toBeLessThanOrEqual(geo.content.right + 0.5);
+        await assertNotClippedByAncestors(svg, `${vp.id} equity svg`);
+      });
+    }
+
+    test(`${vp.id} overview: equity text not clipped`, async ({ page }) => {
+      test.setTimeout(120_000);
+      await openSurface(page, "overview", vp);
+      await assertSvgTextInsideSvg(page, EQUITY_ROOT, `overview-equity ${vp.id}`, EQUITY_SVG);
+    });
+
+    test(`${vp.id} overview: no svg text clipped`, async ({ page }) => {
+      test.setTimeout(120_000);
+      await openSurface(page, "overview", vp);
+      await assertSvgTextInsideSvg(page, "#main-content", `overview ${vp.id}`, "svg", {
+        emitters: OVERVIEW_EMITTERS,
+        required: OVERVIEW_REQUIRED,
+      });
+    });
+
+    test(`${vp.id} composer: no svg text clipped`, async ({ page }) => {
+      test.setTimeout(150_000);
+      await openSurface(page, "composer", vp);
+      await assertSvgTextInsideSvg(page, "#main-content", `composer ${vp.id}`, "svg", {
+        emitters: COMPOSER_EMITTERS,
+        required: COMPOSER_REQUIRED,
+      });
+    });
+  }
+
+  test("V390 overview: equity x labels do not overlap", async ({ page }) => {
+    test.setTimeout(120_000);
+    await openSurface(page, "overview", NARROW_VIEWPORTS[0]);
+    const labels = page.locator(
+      `${EQUITY_ROOT} ${EQUITY_SVG} text[font-family="var(--font-sans)"]`,
+    );
+    const rects = await labels.evaluateAll((els) =>
+      els.map((el) => {
+        const r = el.getBoundingClientRect();
+        return { text: (el.textContent ?? "").trim(), x: r.x, y: r.y, width: r.width, height: r.height };
+      }),
+    );
+    expect(rects.length, "fewer than two equity x labels — nothing to compare (W-02)").toBeGreaterThanOrEqual(2);
+    const overlaps: string[] = [];
+    for (let i = 0; i < rects.length; i++) {
+      for (let j = i + 1; j < rects.length; j++) {
+        if (rectsIntersect(rects[i], rects[j])) {
+          overlaps.push(`"${rects[i].text}" overlaps "${rects[j].text}"`);
+        }
+      }
+    }
+    console.log(`NARROWCHARTS V390 equity x labels: ${rects.map((r) => r.text).join(" | ")}`);
+    expect(overlaps, `V390 equity x labels overlap:\n${overlaps.join("\n")}`).toEqual([]);
+  });
+
+  // WR-01: the rolling charts' end-date label must not land on the label before it. The tick list
+  // is arithmetic (`fitXTickValues`, swept over 2 to 400 days in src/lib/chart-ticks.test.ts);
+  // this case is the real-browser check of one window. 260 days was RED against the old end flip.
+  for (const vp of [NARROW_VIEWPORTS[0], NARROW_VIEWPORTS[1]]) {
+    test(`${vp.id} composer: rolling x labels do not overlap`, async ({ page }) => {
+      test.setTimeout(150_000);
+      await openSurface(page, "composer", vp, 260);
+      const overlaps: string[] = [];
+      for (const [key, selector] of Object.entries(ROLLING_XTICKS)) {
+        const rects = await page.locator(selector).evaluateAll((els) =>
+          els.map((el) => {
+            const r = el.getBoundingClientRect();
+            return { text: (el.textContent ?? "").trim(), x: r.x, y: r.y, width: r.width, height: r.height };
+          }),
+        );
+        expect(rects.length, `${key}: fewer than two x labels — nothing to compare (W-02)`).toBeGreaterThanOrEqual(2);
+        for (let i = 0; i < rects.length; i++) {
+          for (let j = i + 1; j < rects.length; j++) {
+            if (rectsIntersect(rects[i], rects[j])) {
+              overlaps.push(`${key}: "${rects[i].text}" overlaps "${rects[j].text}"`);
+            }
+          }
+        }
+        console.log(
+          `NARROWCHARTS ${vp.id} ${key} x labels: ${rects.map((r) => `${r.text}@${r.x.toFixed(1)}+${r.width.toFixed(1)}`).join(" | ")}`,
+        );
+      }
+      expect(overlaps, `${vp.id} rolling x labels overlap:\n${overlaps.join("\n")}`).toEqual([]);
+    });
+  }
+
+  for (const surface of ["overview", "composer"] as const) {
+    test(`V1280 ${surface}: desktop reading`, async ({ page }) => {
+      test.setTimeout(150_000);
+      const vp = NARROW_VIEWPORTS[2];
+      await openSurface(page, surface, vp);
+      const emitters = surface === "composer" ? COMPOSER_EMITTERS : OVERVIEW_EMITTERS;
+      const layouts = await readSvgTextLayout(page, "#main-content", "svg", emitters);
+      const reading = toReading(surface, layouts);
+      const texts = reading.reduce((n, s) => n + s.texts.length, 0);
+      console.log(`NARROWCHARTS V1280 ${surface} reading: ${reading.length} svg(s), ${texts} text(s)`);
+      expect(reading.length, `${surface}: no svg read (W-02)`).toBeGreaterThan(0);
+      expect(texts, `${surface}: no svg text read (W-02)`).toBeGreaterThan(0);
+      assertEmittersMeasured(
+        layouts,
+        `${surface} ${vp.id}`,
+        surface === "composer" ? COMPOSER_REQUIRED : OVERVIEW_REQUIRED,
+      );
+      const out = process.env.NARROWCHARTS_DESKTOP_OUT;
+      if (out) writeDesktopReading(out, surface, reading);
+      else compareDesktopReading(DESKTOP_FIXTURE, surface, reading);
     });
   }
 });

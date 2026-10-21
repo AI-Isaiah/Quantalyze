@@ -15,7 +15,7 @@ import { WidgetState } from "../../components/WidgetState";
 import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 import { formatRelativeTime } from "@/lib/utils";
 import { captureToSentry } from "@/lib/sentry-capture";
-import { pow10 } from "@/lib/chart-ticks";
+import { estLabelWidth, fitTickLabel, pow10 } from "@/lib/chart-ticks";
 import { formatFixedSigned, signTone } from "@/lib/factsheet/display-sign";
 import {
   isMonotonicByDay,
@@ -48,6 +48,59 @@ function toneColor(tone: "positive" | "negative" | undefined): string {
   if (tone === "positive") return "var(--color-positive)";
   if (tone === "negative") return "var(--color-negative)";
   return "var(--color-text-primary)";
+}
+
+/**
+ * Phase 170.1.3 NARROWCHARTS (D-01, UI-SPEC C-2): below this width the x tick
+ * list is thinned. At or above it the list is the unchanged one, which is what
+ * keeps desktop identical (every width at or above it was already drawn this
+ * way, because the old 400 px floor forced it).
+ */
+export const NARROW_TICK_WIDTH_PX = 400;
+/** The least horizontal pitch between two x ticks when thinned: a "Oct 20" label plus clear gaps, on the 4 px ladder. */
+export const NARROW_TICK_PITCH_PX = 64;
+
+/**
+ * Thin an x tick list for a narrow chart: at most
+ * `max(2, floor(chartW / NARROW_TICK_PITCH_PX))` ticks, every k-th counted back
+ * from the newest so the most recent date keeps its label, `k = ceil(len /
+ * maxTicks)`. Returns the input list unchanged at or above
+ * NARROW_TICK_WIDTH_PX. Pure: no DOM read, so the server and the browser agree
+ * (React #418). Never touches y ticks.
+ */
+export function thinXTicks<T>(
+  ticks: T[],
+  width: number,
+  pad: { l: number; r: number },
+): T[] {
+  if (width >= NARROW_TICK_WIDTH_PX) return ticks;
+  const chartW = Math.max(1, width - pad.l - pad.r);
+  const maxTicks = Math.max(2, Math.floor(chartW / NARROW_TICK_PITCH_PX));
+  if (ticks.length <= maxTicks) return ticks;
+  const k = Math.ceil(ticks.length / maxTicks);
+  const kept: T[] = [];
+  for (let i = ticks.length - 1; i >= 0; i -= k) kept.push(ticks[i]);
+  return kept.reverse();
+}
+
+/** The right-axis gutter the label room allows without growing (UI-SPEC C-3). */
+const RIGHT_AXIS_DEFAULT_PAD_PX = 64;
+const RIGHT_AXIS_LABEL_ROOM_PX = 60;
+
+/**
+ * The right gutter for the y labels: 64 while every label's estimated width
+ * fits the 60 px of label room, else `ceil(widest) + 8` rounded up to a
+ * multiple of 4. A long label grows the gutter instead of clipping; no label is
+ * hidden, truncated, rotated or shrunk.
+ */
+export function rightAxisPad(labels: string[], fontSize: number): number {
+  let widest = 0;
+  for (const label of labels) {
+    const w = estLabelWidth(label, fontSize);
+    if (w > widest) widest = w;
+  }
+  if (widest <= RIGHT_AXIS_LABEL_ROOM_PX) return RIGHT_AXIS_DEFAULT_PAD_PX;
+  return Math.ceil((Math.ceil(widest) + 8) / 4) * 4;
 }
 
 // PR-3+4 performance H1 helper: shared by the x-tick month-midEpoch
@@ -557,13 +610,17 @@ export function EquityChart({
   const showBench = useTweakValue("showBench");
 
   // ResizeObserver — fall back to a fixed 960 in jsdom / older runtimes.
+  // The svg is exactly its wrapper's content width at every width (Phase
+  // 170.1.3 D-01): a floor here made a 334 px card clip a 400 px svg. The
+  // narrow width arrives only through this observer, after hydration, so the
+  // server render and the first client render stay identical (React #418).
   useEffect(() => {
     if (typeof ResizeObserver === "undefined") return;
     const el = wrapRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       const cr = entries[0]?.contentRect;
-      if (cr) setWidth(Math.max(400, Math.floor(cr.width)));
+      if (cr) setWidth(Math.floor(cr.width));
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -729,12 +786,7 @@ export function EquityChart({
       return null;
     }
 
-    // pad.r carries the Y-axis tick labels on the right edge. Sized for
-    // "+XX.X%" labels at 12px Geist Mono without clipping.
-    const pad = { t: 20, r: 64, b: 28, l: 8 };
     const height = 260;
-    const chartW = Math.max(1, width - pad.l - pad.r);
-    const chartH = Math.max(1, height - pad.t - pad.b);
     const n = visible.length;
 
     // Period-relative normalization — re-anchor everything to 1.0 at the
@@ -976,6 +1028,25 @@ export function EquityChart({
       return Array.from(ticks).sort((a, b) => a - b);
     })();
 
+    // The y label strings are built ONCE, here, so the right gutter below and
+    // the text the render draws come from one source (Phase 170.1.3 D-02).
+    const yLabels = yTicks.map((v) => {
+      const pct = (v - 1) * 100;
+      return formatFixedSigned(pct, {
+        dp: pct !== 0 && Math.abs(pct) < 10 ? 1 : 0,
+        suffix: "%",
+        plus: true,
+      });
+    });
+
+    // pad.r carries the Y-axis tick labels on the right edge. It stays 64 for
+    // "+XX.X%" labels at 12px Geist Mono and grows only when a label's
+    // estimated width needs it (rightAxisPad). It is derived BEFORE chartW,
+    // which reads it.
+    const pad = { t: 20, r: rightAxisPad(yLabels, 12), b: 28, l: 8 };
+    const chartW = Math.max(1, width - pad.l - pad.r);
+    const chartH = Math.max(1, height - pad.t - pad.b);
+
     // NEW-C04-06: map x by CALENDAR time, not array index.
     //
     // The previous index-based `x(i) = pad.l + (i/(n-1))*chartW` spaced
@@ -1095,6 +1166,8 @@ export function EquityChart({
       }
       ticks.reverse();
     }
+    // Below 400 px fewer x ticks so the labels do not collide (D-01, C-2).
+    const shownTicks = thinXTicks(ticks, width, pad);
 
     return {
       pad,
@@ -1114,7 +1187,8 @@ export function EquityChart({
       y,
       toPath,
       toArea,
-      ticks,
+      ticks: shownTicks,
+      yLabels,
       // NEW-C04-08: range annotation for flat windows
       narrowRange,
       naturalRange,
@@ -1200,6 +1274,7 @@ export function EquityChart({
     periodReturnLabel,
     visibleBenchmarkNormalized,
     yTicks,
+    yLabels,
     x,
     y,
     toPath,
@@ -1568,12 +1643,7 @@ export function EquityChart({
           {yTicks.map((v, i) => {
             const isBaseline = Math.abs(v - 1) < 1e-9;
             const yPos = y(v);
-            const pct = (v - 1) * 100;
-            const label = formatFixedSigned(pct, {
-              dp: pct !== 0 && Math.abs(pct) < 10 ? 1 : 0,
-              suffix: "%",
-              plus: true,
-            });
+            const label = yLabels[i];
             return (
               <g key={i}>
                 <line
@@ -1619,19 +1689,24 @@ export function EquityChart({
             stroke="var(--color-border)"
             strokeWidth={1}
           />
-          {ticks.map((t, i) => (
-            <text
-              key={i}
-              x={x(t.i)}
-              y={height - 10}
-              fontSize={12}
-              fill="var(--color-text-muted)"
-              fontFamily="var(--font-sans)"
-              textAnchor="middle"
-            >
-              {t.label}
-            </text>
-          ))}
+          {ticks.map((t, i) => {
+            // An edge label anchors inward when its centred box would cross
+            // the svg (D-02); a label that fits keeps its centred position.
+            const fit = fitTickLabel(x(t.i), t.label, 12, 0, width);
+            return (
+              <text
+                key={i}
+                x={fit.x}
+                y={height - 10}
+                fontSize={12}
+                fill="var(--color-text-muted)"
+                fontFamily="var(--font-sans)"
+                textAnchor={fit.textAnchor}
+              >
+                {t.label}
+              </text>
+            );
+          })}
 
           {/* Benchmark (dashed) — normalized to period start so it
               departs from the 0% baseline alongside the portfolio.
