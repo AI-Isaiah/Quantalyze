@@ -219,6 +219,50 @@ class TestKillSwitchFailClosed:
             "kill_switch_unavailable" in rec.getMessage() for rec in caplog.records
         ), "the outage must log ERROR naming kill_switch_unavailable"
 
+    def test_kill_switch_stops_cron_on_exhausted_read_timeout(
+        self, client, monkeypatch, caplog
+    ):
+        """Phase 166.5.1 (D-02a): an httpx ReadTimeout on every attempt is
+        retried DB_READ_MAX_RETRIES times, then the engine STOPS fail-closed
+        (KILL_SWITCH_UNAVAILABLE) exactly as for an exhausted gateway 504. The
+        ERROR log must name the real class ("transient timeout"), never
+        "non-retryable": an operator reading Sentry would otherwise conclude
+        the retry seam ignored a timeout it in fact retried three times."""
+        import httpx
+
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        call_count = {"n": 0}
+
+        def _raise_read_timeout(*_a, **_k):
+            call_count["n"] += 1
+            raise httpx.ReadTimeout("The read operation timed out")
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.side_effect = (
+            _raise_read_timeout
+        )
+        monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            r = client.post("/api/match/cron-recompute")
+
+        assert r.status_code == 200
+        assert r.json()["status"] == "kill_switch_unavailable"
+        assert call_count["n"] == 3, (
+            "db_read_with_retry must attempt exactly DB_READ_MAX_RETRIES=3 "
+            "times on an exhausted ReadTimeout"
+        )
+        failed = [
+            rec.getMessage()
+            for rec in caplog.records
+            if "kill switch check FAILED" in rec.getMessage()
+        ]
+        assert failed, "the outage must log the kill-switch ERROR"
+        assert "transient timeout, retries exhausted" in failed[0], failed[0]
+        assert "non-retryable" not in failed[0], failed[0]
+
     def test_kill_switch_unavailable_is_distinct_from_founder_disabled(
         self, client, monkeypatch
     ):

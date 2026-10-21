@@ -628,3 +628,23 @@ def test_predicates_keep_their_separate_meanings() -> None:
         RuntimeError("x"),
     ):
         assert _is_transient_read_error(other) is False, repr(other)
+
+
+async def test_read_with_retry_warning_names_the_real_class(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Phase 166.5.1 (T-166.5.1-08): the retry WARNING names the exception class
+    that was retried. A ReadTimeout logged as a "gateway timeout" would send an
+    operator looking for a 504 that never happened."""
+    import httpx
+
+    from services.db import db_read_with_retry
+
+    _zero_backoff(monkeypatch)
+    fn = _ScriptedCall([httpx.ReadTimeout("slow"), "ok"])
+    with caplog.at_level("WARNING", logger="services.db"):
+        await db_read_with_retry(fn)
+    msgs = [r.getMessage() for r in caplog.records if "db_read_with_retry" in r.getMessage()]
+    assert msgs, "a retry must log a warning"
+    assert "ReadTimeout" in msgs[0] and "transient timeout" in msgs[0], msgs[0]
+    assert "gateway timeout" not in msgs[0], msgs[0]

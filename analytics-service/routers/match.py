@@ -53,7 +53,7 @@ from services.benchmark import get_btc_closes
 from services.db import (
     PaginatedSelectTruncated,
     Row,
-    _is_gateway_timeout,
+    _is_transient_read_error,
     chunked_in_query,
     db_execute,
     db_read_with_retry,
@@ -299,8 +299,9 @@ async def _engine_is_enabled() -> str:
 
     Fail-CLOSED contract (Phase 164.5.1 criterion 8, superseding the former
     fail-open one): the Supabase read goes through `db_read_with_retry`,
-    which retries ONLY a gateway-timeout-shaped exception
-    (`_is_gateway_timeout`) up to DB_READ_MAX_RETRIES times. After retries
+    which retries ONLY a transient-timeout-shaped exception
+    (`_is_transient_read_error`: a gateway 504 or an httpx ReadTimeout) up to
+    DB_READ_MAX_RETRIES times. After retries
     are exhausted — or on any other exception — the engine STOPS:
     KILL_SWITCH_UNAVAILABLE is returned and logged at ERROR so Sentry fires.
     There is no surviving fail-open arm; a transient DB blip that outlasts
@@ -328,14 +329,17 @@ async def _engine_is_enabled() -> str:
         # lines of branch between two messages differing by a parenthetical.
         # The two arms shared their prefix and their suffix, no test could
         # tell them apart, and the branch was therefore unexercised in the
-        # direction that mattered. `_is_gateway_timeout` is `services.db`'s
+        # direction that mattered. `_is_transient_read_error` is `services.db`'s
         # own retry predicate — the classification is only ever a log
         # adjective here; both arms stop the engine FAIL-CLOSED identically.
+        # Phase 166.5.1 (T-166.5.1-08): the predicate widened to ReadTimeout,
+        # so an exhausted ReadTimeout reads "transient timeout", not
+        # "non-retryable".
         logger.error(
             "match_engine: kill switch check FAILED (%s) — engine STOPPED "
             "(kill_switch_unavailable): %s",
-            "gateway timeout, retries exhausted"
-            if _is_gateway_timeout(err)
+            "transient timeout, retries exhausted"
+            if _is_transient_read_error(err)
             else "non-retryable",
             err,
         )

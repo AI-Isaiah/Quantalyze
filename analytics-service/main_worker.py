@@ -803,7 +803,10 @@ async def dispatch_tick(worker_id: str) -> None:
             # [164.5.1-GATEWAY-CEILING-INVERSION]: the Supabase API gateway
             # cuts off and answers 504 before Postgres reports anything, so a
             # transient gateway timeout on this claim read is retried rather
-            # than costing the worker a whole tick.
+            # than costing the worker a whole tick. Phase 166.5.1 (D-02a,
+            # QUANTALYZE-2C): an httpx ReadTimeout is retried too. A timed-out
+            # claim cannot double-claim: its batch waits for the watchdog, as
+            # today.
             claim_result = await db_read_with_retry(_claim_priority)
         except Exception as exc:  # noqa: BLE001
             if _is_undefined_function(exc):
@@ -1171,7 +1174,8 @@ async def watchdog_tick() -> None:
         ).execute()
 
     # [164.5.1-GATEWAY-CEILING-INVERSION]: retry a transient Supabase gateway
-    # timeout on this watchdog write rather than losing a whole tick. The
+    # timeout on this watchdog write rather than losing a whole tick. Phase
+    # 166.5.1 (D-02a, QUANTALYZE-2B): an httpx ReadTimeout is retried too. The
     # seam is named for reads; this call site is idempotent-by-filter (see
     # above), which is what makes consuming it legitimate here.
     result = await db_read_with_retry(_reset)
@@ -1181,12 +1185,13 @@ async def watchdog_tick() -> None:
         # here from one delivered before it, so `reset_count` is a LOWER
         # BOUND, not a measurement. Log unconditionally at WARNING — a
         # silent zero would make "reclaimed nothing" and "reclaimed, then
-        # lost the receipt to a post-commit gateway timeout" look identical.
+        # lost the receipt to a post-commit transient timeout" look identical.
         logger.warning(
             "Watchdog reclaimed at least %d stalled jobs (count is a LOWER "
             "BOUND: the reset RPC was retried across %d attempts after a "
-            "gateway timeout, and an attempt that committed before timing "
-            "out no longer matches the staleness filter)",
+            "transient timeout (gateway 504 or read timeout), and an attempt "
+            "that committed before timing out no longer matches the "
+            "staleness filter)",
             reset_count,
             attempts,
         )
