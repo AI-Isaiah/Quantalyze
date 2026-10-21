@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from services import job_worker as jw
@@ -342,3 +343,78 @@ async def test_the_watchdog_loop_runs_the_sweep_every_tick(
     assert task in done, "watchdog_loop hung"
     assert calls >= 2, f"the sweep ran {calls} time(s); a failing sweep stopped the loop"
     assert task.exception() is None
+
+
+class _FlakyJobReads:
+    """Like ``_FlakyKeyReads`` for the sweep's own ``compute_jobs`` read: the first
+    ``failures`` reads raise an httpx ReadTimeout, as a slow PostgREST response does."""
+
+    def __init__(self, inner: FakeSupabaseClient, failures: int) -> None:
+        self._inner = inner
+        self.failures = failures
+        self.job_reads = 0
+
+    def table(self, name: str) -> Any:
+        if name == "compute_jobs":
+            self.job_reads += 1
+            if self.failures > 0:
+                self.failures -= 1
+                raise httpx.ReadTimeout("The read operation timed out")
+        return self._inner.table(name)
+
+
+def _zero_read_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+    monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+
+@pytest.mark.asyncio
+async def test_orphan_sweep_read_timeout_is_retried_not_captured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """QUANTALYZE-2E (Phase 166.5.1, D-02a). A single slow compute_jobs read used to reach
+    ``capture_exception`` and end the tick, so one transient timeout was an alert AND a
+    skipped sweep. It must cost one retry: the capped event for the orphan still fires
+    once, and nothing is captured as an exception."""
+    _zero_read_backoff(monkeypatch)
+    fake = _fake()
+    _key(fake, API_KEY_ID_1, marker=None, attempts=CAP)
+    _job(fake, "orphan-1", API_KEY_ID_1)
+    flaky = _FlakyJobReads(fake, failures=1)
+    monkeypatch.setattr(jw, "get_supabase", lambda: flaky)
+
+    with patch("services.job_worker.sentry_sdk") as sentry:
+        await jw.report_orphaned_capped_reconstructs()
+
+    sentry.capture_exception.assert_not_called()
+    assert sentry.capture_message.call_count == 1, sentry.mock_calls
+    assert _tags(sentry)["compute_job_id"] == "orphan-1"
+    assert flaky.job_reads == 2, "the compute_jobs read was retried exactly once"
+
+
+@pytest.mark.asyncio
+async def test_orphan_sweep_read_timeout_on_every_attempt_is_captured_once_and_remembers_nothing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Exhaustion keeps today's disposition: an exhausted read stays loud (one
+    ``capture_exception``, one log line), the function returns, and no job id is
+    remembered, so the next tick evaluates the job again."""
+    from services.db import DB_READ_MAX_RETRIES
+
+    _zero_read_backoff(monkeypatch)
+    fake = _fake()
+    _key(fake, API_KEY_ID_1, marker=None, attempts=CAP)
+    _job(fake, "orphan-1", API_KEY_ID_1)
+    flaky = _FlakyJobReads(fake, failures=10)
+    monkeypatch.setattr(jw, "get_supabase", lambda: flaky)
+
+    with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+        with patch("services.job_worker.sentry_sdk") as sentry:
+            await jw.report_orphaned_capped_reconstructs()
+
+    assert sentry.capture_exception.call_count == 1, sentry.mock_calls
+    assert isinstance(sentry.capture_exception.call_args.args[0], httpx.ReadTimeout)
+    sentry.capture_message.assert_not_called()
+    assert flaky.job_reads == DB_READ_MAX_RETRIES
+    assert jw._orphan_cap_reported == set()
+    assert any("orphan sweep: job read failed" in r.getMessage() for r in caplog.records)
