@@ -6,16 +6,16 @@ current_phase: "167.1.2.2.2.1"
 current_phase_name: OKXHISTORY
 status: executing
 stopped_at: 170.1.2 LABELS closed; 167.1.2.2.2.1 OKXHISTORY plan 13 done, PR-B (#1103) merged, Railway deploy pending, plan 14 (calibrate) next
-last_updated: "2026-10-21T13:21:03.307Z"
+last_updated: "2026-10-21T22:45:32.939Z"
 last_activity: 2026-10-21
 last_activity_desc: "170.1.2 LABELS closed (v0.132.10.0 #1101; SC-4 PROD correction and the WR-04 label rename read on PROD 2026-10-21; SC-5 passed at 390 px and 640 CSS px on a seeded local stack; verification passed)"
-state_head: 500bac67d8e1e661f60a9f4fbd327a8a5e81d059
+state_head: 5fee7e9bbd52f8638c1e162f3a8650666b4a1004
 progress:
-  total_phases: 120
+  total_phases: 123
   completed_phases: 117
   total_plans: 846
   completed_plans: 839
-  percent: 98
+  percent: 95
 ---
 
 ## ⭐ STATE lineage
@@ -176,7 +176,7 @@ Phase: 167.1.2.2.2.1 (OKXHISTORY) — EXECUTING
 Plan: 13 done, plan 14 (calibrate) next
 Status: Executing — several phases in parallel. 167.1.2.2.2.1 OKXHISTORY is the current one: plan 13 is done, PR-B (#1103) is merged, its Railway deploy is pending, and plan 14 (calibrate) is next. 166.5.1 SENTRYTRIAGE is booked and 170.1.3 NARROWCHARTS is booked (#1098); neither is planned yet. 170.1.2 LABELS closed 2026-10-21 (v0.132.10.0 #1101; the SC-4 PROD correction read 0 mismatches of 3, the WR-04 label rename read 6 "Deribit key", 1 "OKX key" and 0 old-style labels on PROD, and SC-5 passed at 390 px and 640 CSS px on a seeded local stack with no overflow and no clipped label; verification passed). 167.1.1.2 AUMBASIS closed 2026-10-21 (v0.132.7.0 #1087). 166.5 COMPUTEDATSTAMP closed 2026-10-20 (v0.131.13.0 #1047, v0.131.13.1 #1050). 167.1.2.1.2 HISTORYREADER closed 2026-10-20 (#1089). 170.1.1 TITLES closed 2026-10-20 (#1093). 170.1 COPY closed 2026-10-20 (#1082).
 Last activity: 2026-10-21 — 170.1.2 LABELS closed (v0.132.10.0 #1101; SC-4 PROD correction and the WR-04 label rename read on PROD; SC-5 passed at 390 px and 640 CSS px; verification passed)
-Progress: [█████████░] 98%
+Progress: [█████████░] 95%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -635,6 +635,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.1.1.2 inserted after Phase 167.1.1: AUMBASIS: commit sizing counts derivative unrealized P&L not notional; missing P&L stored as missing (founder 2026-10-15)
 - Phase 166.5.1 inserted after Phase 166.5: SENTRYTRIAGE — demo-allocator cron warning (QUANTALYZE-Z), worker ReadTimeouts (2B-2G), job-state race (2A, A); founder 2026-10-20
 - Phase 170.1.3 inserted after Phase 170.1: NARROWCHARTS: the /allocations equity chart's 400 px floor and clipped SVG axis labels at 390 px (founder 2026-10-20, "Book as a Small Phase")
+- Phase 167.2.1.1 inserted after Phase 167.2.1: UPNLVENUES: Bybit/Binance equity read one way on every path; open-position profit neither double-counted nor dropped (founder 2026-10-22, "Book it.")
+- Phase 167.2.1.1.1 inserted after Phase 167.2.1.1: NAVMTM: every ingest stores marked NAV incl. unrealized profit plus the unrealized amount; curves use stored marks from storage start (founder 2026-10-22, "remember NAV + unrealized profit")
+- Phase 167.2.1.1.1.1 inserted after Phase 167.2.1.1.1: MARKSOURCE: one stated mark rule on every path; the two allocator equity curves agree while positions are open; last-bar uPnL spike gone (founder 2026-10-22, "Or several phases")
 
 ### Decisions
 
