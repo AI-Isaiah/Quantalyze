@@ -6206,6 +6206,7 @@ Plans:
 **Requirements**: TBD (phase-local SC ids)
 **Founder decision 2026-10-21 (AskUserQuestion, "Fix shared once (Recommended)"):** the composer's cut labels come from chart components shared with `/factsheet/[id]/v2`; they are fixed once in the shared component, so the factsheet page also stops cutting those labels (CONTEXT D-03a).
 **Founder decision 2026-10-21 (AskUserQuestion, "Fix shared once (Recommended)"):** the composer's cut "10-20"/"10-19" end-date labels come from the shared Recharts rolling charts in `src/components/charts/`, also used on strategy pages; they are fixed once there (CONTEXT D-03b).
+**Founder decision 2026-10-21 (AskUserQuestion, "Fix all three (Recommended)"):** three more shared emitters measured cutting a label at 390 px (EOY panel legend, calendar heatmap month labels, ReturnQuantiles y tick) are fixed once in this phase (CONTEXT D-03c).
 **Depends on:** Phase 170.1
 **Success Criteria** (what must be TRUE):
 1. At 390 px the Overview equity chart's SVG is no wider than its card's content box and all of its axis labels are visible. A test goes RED on the 400 px floor.
