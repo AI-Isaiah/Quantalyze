@@ -384,6 +384,15 @@ describe("POST /api/strategies/composite/add-key — read-only enforcement (T-88
     expect(args.p_api_key_encrypted).toBe("encrypted-blob-base64");
     expect(args.p_api_secret_encrypted).toBeNull();
   });
+
+  it("170.1.2 WR-04: a blank label is stored with the venue display name, never the lowercase code", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, label: "   " }));
+
+    expect(res.status).toBe(200);
+    const [, rpcArgs] = rpcMock.mock.calls[0];
+    expect((rpcArgs as Record<string, unknown>).p_label).toBe("OKX key");
+  });
 });
 
 describe("POST /api/strategies/composite/add-key — ONB-03 per-key add", () => {

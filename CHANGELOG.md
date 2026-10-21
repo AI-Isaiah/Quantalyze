@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.132.10.0] - 2026-10-21 — LABELS: pages show names and readable labels instead of ids and raw values (Phase 170.1.2)
+
+### Added
+- `src/lib/display-labels.ts`, the one home for every new label vocabulary (D-01). `labelOf` resolves only an own key (so `constructor` and `__proto__` read the fallback) and a non-string reads the fallback. Each vocabulary has its own fallback and never returns the raw value:
+  - compute-job kind, status and error kind ("Other job", "Unknown status");
+  - allocation event type, match decision, mandate breach reason, match-miss reason ("Other event", "Other decision", "Other mandate breach", "Other reason");
+  - organisation member role, profile role and status, app role;
+  - verification status, intro snapshot status, intro source, relationship status, analytics status, disclosure tier, strategy source;
+  - venue (`venueLabel`, "Other venue"), `supportedExchangeLabel` for the free-text `supported_exchanges` list (a venue the table lacks is returned as written, not erased), and holding side.
+  It imports `EXCHANGE_DISPLAY`, `ROLES` and `ROLE_META` rather than copying them. `ROLE_META` moved from `UserRolesPanel` to `src/lib/auth-types.ts` so server components can read it.
+- `src/lib/display-labels.test.ts`: a census parses `supabase/schema/baseline.sql` and fails, in either direction and naming the constraint, when a vocabulary's key set differs from its database CHECK set (17 constraints plus `Badge`'s status map against the strategy and contact-request status CHECKs). It resolves each CHECK newest-wins across the baseline and newer migrations, tolerates `NOT VALID` and a comma terminator, covers `allocator_holdings_side_check`, and has fixture tests for the resolver.
+- `/admin/match/eval` names allocators and strategies server-side (`allocator_name`, `strategy_name`) behind the existing CSRF, auth, admin and rate-limit gates; the dashboard shows them.
+- `/admin/partner-pilot/[partner_tag]` looks up each strategy owner's name by id, so a manager outside the pilot still resolves.
+- The portfolio PDF correlation matrix reads the names of strategies that have since left the portfolio.
+
+### Changed
+- Admin pages read words, not raw values:
+  - `/admin/compute-jobs` and the compute-jobs table show job kinds, statuses and error kinds as labels, the venue by display name, and the strategy or portfolio name as the target (never an id). The page now reads the `compute_jobs_admin` view for the names, with an explicit column list that still excludes `claim_token`, and a failed jobs read throws to the error screen instead of rendering as an empty queue.
+  - `/admin/csv-status` shows status and trust tier as words.
+  - `/admin/users`, `/admin/users/[id]`, `/admin/intros`, `/admin/partner-pilot/[partner_tag]`, `AdminTabs`, `OrganizationTab` and the match queue show roles, statuses, the legacy-admin flag, intro source and snapshot status, disclosure tier, strategy source, analytics status and match decisions as labels. "Intro Made" reads "Intro made".
+- A failed name lookup reads "Unnamed strategy" (also the `displayStrategyName` null arm, formerly "(strategy)"), "Unnamed portfolio" or "Unknown allocator", never an id fragment: correlation views and the weight optimizer, `ScenarioComposer`, `/portfolios/[id]/manage`, `AllocationTimeline`, the admin intros and partner-pilot pages, the match queue and the PDF. An allocator or manager with no display name is named by company, then email.
+- Venues read by display name (OKX, Deribit, sFOX), not wire code or a first-letter capital: the holdings and open-positions tables, the Holdings exposure table (with a labelled side), the exchange manager (visible text and screen-reader labels), allocation-over-time legend and tooltip, factsheet and overview panels, wizard composite progress and sync preview, the factsheet and wizard degraded-member lines, sync progress and the venue-outage sentence. A slug outside the display table keeps its own name in the outage sentence.
+- Bridge surfaces: breach reasons read "Above max weight" and "Above correlation ceiling", the empty case reads "Composite score above threshold", and venues are named, in the drawer, the widget and the flagged-holdings list.
+- A key saved without a nickname is labelled with the venue display name ("OKX key", not "okx key") on the create-with-key, composite add-key and validate-and-encrypt routes and in the wizard and strategy edit form; the nickname placeholder shows the display name too.
+- The match-eval missed table reads its miss reason as a sentence. `Badge` status labels are sentence case ("Pending review") and an unknown status reads "Unknown status".
+- Both portfolio-PDF routes (`/api/portfolio-pdf/[id]` and the demo route) refuse to print a render page that did not answer 2xx, and answer a plain sentence ("We couldn't generate this PDF. Close this tab and try again.") instead of a JSON envelope, because a plain link opens them in a tab. The render page answers non-2xx (`notFound()`) for an invalid token or a missing portfolio, and throws on a failed portfolio, analytics or strategies read instead of printing an empty report. The demo route now reports its failures to Sentry; both routes tag a refused render `render_status`, apart from a Chromium crash.
+
+### Removed
+- The disabled "Modified (coming soon)" option and its tooltip in `OutcomeForm` (D-03); the form offers Allocated and Rejected. `bridge_outcomes_kind_check` admits only those two.
+- The local venue maps and capitalisers that the shared `venueLabel` replaces (`HoldingsTable`, `OpenPositionsTable`, `SyncPreviewStep`, `AdminTabs`).
+
+### Fixed (review rounds)
+- Round 1: the label census resolves each CHECK newest-wins instead of reading the baseline alone; a failed match-eval name read is captured as step `name-read`, not as an upstream error; the PDF correlation matrix names departed strategies; the wizard composite progress list uses `venueLabel`; a blank key nickname is saved as the display name; the allocation tooltip's per-venue dollar lookup is pinned at formatter level.
+- Round 2: the census covers `allocator_holdings_side_check` and tolerates `NOT VALID` and a comma terminator; the strategy edit page stores the display name in the key label; sync progress and the venue-outage sentence name venues by display name; the PDF routes stop printing a failed render page; unresolved correlation headers are numbered ("Unnamed strategy 1", "Unnamed strategy 2") and the failed read is named; the exposure-agreement reader compares the venue by code; the match-miss reason test reads the literals `match_eval.py` emits.
+- Round 3: the key-nickname placeholder shows the display label, not the raw code; the venue-outage sentence keeps the name of a slug outside the display table; the PDF render page answers non-2xx on its own failures and a refused render is traceable in Sentry and readable by the user.
+
+### Tests
+- Every changed surface pins the label it shows and that the raw value does not render (53 test files added or changed). Each fix-round test was seen RED on the old code. The census negative control (an extra key in a label map) goes RED naming the constraint.
+- `strategy-table-default-mounts.json` (the e2e mount snapshot) moves with the "Pending review" sentence case.
+
+### Notes
+- Known limits, booked rather than fixed, all in `TODOS.md`:
+  - `[170.1.2-PDF-RENDER-NOTFOUND]`: `/portfolio-pdf/[id]` reads the portfolio with `.single()`, so a portfolio deleted mid-render reports to Sentry as a read failure and the new missing-portfolio `notFound()` is unreachable; both `notFound()` arms collapse into one `render_status` event. The user sees the same sentence either way.
+  - `[170.1.2-DEMO-MATCH-PAYLOAD-EMAIL]`: the public cached demo match JSON still carries the seed allocator persona's email (pre-existing, found by the security audit; `/demo/founder-view` no longer renders it).
+  - `[170.1.2-VERIFIER-RESIDUALS]`: the verifier's seven low-severity residuals W-1 to W-7 (one unguarded trust-tier map, a hand-typed status filter, two local venue maps, a null-venue "Other venue", raw `holding_type` text, the legacy scenario stub's "coming soon", and two departed strategies sharing "Unnamed strategy" in the app's correlation views).
+- SC-4 is done on PROD (2026-10-20): a guarded `DO` block corrected one strategy's `supported_exchanges` from Bybit to OKX to match its key's venue, and the same census then read 0 mismatches of 3. `[170.1-LISTED-EXCHANGE-VS-KEY-VENUE]` is closed in `TODOS.md`.
+- Open founder decision: seven stored key nicknames saved as "<code> key" before this change (for example "okx key") stay as they are; they are to be renamed to the display name after deploy.
+- SC-5, the 390 px and 640 CSS px (200% zoom) re-check of the pages with the longer labels, runs after deploy; the verification is `human_needed` until it does.
+
 ## [0.132.9.8] - 2026-10-21 — fix: OKXHISTORY PR-B — the archive host is allowed, and the four round-3 survivors are fixed
 
 ### Added

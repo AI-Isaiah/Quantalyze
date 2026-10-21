@@ -116,11 +116,11 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
           for (const s of data.strategies) {
             const id = s?.strategy_id ?? s?.strategy?.id;
             const name =
-              s?.alias ?? s?.strategy?.codename ?? s?.strategy?.name ?? id;
+              s?.alias ?? s?.strategy?.codename ?? s?.strategy?.name;
             if (id && name) nameMap[id] = name;
           }
         }
-        const n: Label[] = keys.map((k) => ({ id: k, name: nameMap[k] ?? k }));
+        const n: Label[] = keys.map((k) => ({ id: k, name: nameMap[k] ?? "Unnamed strategy" }));
         return { names: n, matrix: m };
       }
     }
@@ -134,7 +134,7 @@ function CorrelationMatrixInner({ data }: { data: RiskWidgetData } & BaseWidgetP
         );
         if (dr.length > 0) {
           const name =
-            s?.alias ?? s?.strategy?.codename ?? s?.strategy?.name ?? "?";
+            s?.alias ?? s?.strategy?.codename ?? s?.strategy?.name ?? "Unnamed strategy";
           // The row index backs a row with no id, so a key is never shared.
           const id = s?.strategy_id ?? s?.strategy?.id ?? `row-${idx}`;
           const dates: string[] = [];

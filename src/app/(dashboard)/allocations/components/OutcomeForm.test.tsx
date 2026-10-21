@@ -86,18 +86,36 @@ describe("OutcomeForm — H-0098", () => {
     expect(screen.getByLabelText("Allocated on")).toBeInTheDocument();
   });
 
-  it("the 'Modified (coming soon)' option is disabled and clicking it does not change mode", () => {
-    render(<OutcomeForm strategyId="strat-1" row={makeRow()} />);
-    const modified = screen.getByRole("button", {
-      name: /Modified \(coming soon\)/i,
-    });
-    expect(modified).toBeDisabled();
-    expect(modified).toHaveAttribute("aria-disabled", "true");
-    fireEvent.click(modified);
-    expect(screen.getByRole("button", { name: "Allocated" })).toHaveAttribute(
+  it("offers exactly two outcome options, Allocated and Rejected, and no roadmap placeholder", () => {
+    const { container } = render(
+      <OutcomeForm strategyId="strat-1" row={makeRow()} />,
+    );
+    const group = screen.getByRole("group", { name: "Outcome action" });
+    const options = Array.from(group.querySelectorAll("button")).map(
+      (b) => b.textContent,
+    );
+    expect(options).toEqual(["Allocated", "Rejected"]);
+    expect(screen.queryByText(/modified|coming soon/i)).toBeNull();
+    expect(container.querySelector('[title*="follow-up phase"]')).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Rejected" }));
+    expect(screen.getByRole("button", { name: "Rejected" })).toHaveAttribute(
       "aria-pressed",
       "true",
     );
+  });
+
+  it("success state names the venue as a label when the row has no strategy", async () => {
+    render(
+      <OutcomeForm strategyId="strat-1" row={makeRow({ strategy: null })} />,
+    );
+    fireEvent.change(screen.getByLabelText("Percent allocated"), {
+      target: { value: "5" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Record allocation/i }));
+    await waitFor(() =>
+      expect(screen.getByTestId("outcome-form-recorded")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("Logged against OKX · BTC.")).toBeInTheDocument();
   });
 
   it("valid allocated submit → calls postBridgeOutcome and renders the recorded success state", async () => {

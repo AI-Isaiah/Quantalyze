@@ -37,6 +37,9 @@
  * the invented number TRAP-3 is about.
  */
 
+import { EXCHANGE_DISPLAY } from "@/lib/closed-sets";
+import { venueLabel } from "@/lib/display-labels";
+
 /**
  * The sentence for a `424`, naming the venue when the wire named one.
  *
@@ -56,16 +59,16 @@
  * the user's venue is never reported as ours.
  */
 export function venueOutageMessage(venue: string | null): string {
-  // The wire carries slugs (`binance`, `bybit`), and a sentence that opens with
-  // a lowercase letter reads as a rendering bug. This is PRESENTATION only —
-  // one character's case — never a rewrite, never a lookup table mapping slugs
-  // to display names. A table would be the hardcoded venue list this surface is
-  // required not to have, and its failure mode is that an exchange nobody
-  // remembered to add renders as nothing at all.
+  // The wire carries slugs, and the venue vocabulary is open: a code in the
+  // shared display table reads by its display name (`okx` -> "OKX"), and any
+  // other slug (`mt5-gateway`, a future venue) keeps its own name with a
+  // capital first letter rather than collapsing to "Other venue".
   const subject =
     venue === null
       ? "An exchange"
-      : venue.charAt(0).toUpperCase() + venue.slice(1);
+      : Object.hasOwn(EXCHANGE_DISPLAY, venue)
+        ? venueLabel(venue)
+        : venue.charAt(0).toUpperCase() + venue.slice(1);
   return (
     `${subject} isn't responding right now. The fault is at the venue, not in ` +
     `the analytics service. Retry in a moment.`

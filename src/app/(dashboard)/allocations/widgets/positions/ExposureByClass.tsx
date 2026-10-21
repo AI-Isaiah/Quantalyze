@@ -5,6 +5,7 @@ import { Card } from "@/components/ui/Card";
 import { formatCurrency } from "@/lib/utils";
 import { CHART_ACCENT } from "@/components/charts/chart-tokens";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
+import { holdingSideLabel, venueLabel } from "@/lib/display-labels";
 
 /**
  * PI-01 — Exposure by asset class (99-UI-SPEC § Widget 1).
@@ -198,7 +199,7 @@ export function ExposureByClass({
                     key={`${s.apiKeyId}|${s.holdingType}|${s.venue}|${s.symbol}|${s.side}`}
                     className="border-b border-border/50 transition-colors hover:bg-page/50"
                   >
-                    <td className="py-2 pr-4">{s.venue}</td>
+                    <td className="py-2 pr-4">{venueLabel(s.venue)}</td>
                     <td className="py-2 pr-4">
                       {(s.apiKeyId !== null && keyLabels?.get(s.apiKeyId)) || "—"}
                     </td>
@@ -212,7 +213,7 @@ export function ExposureByClass({
                         {CLASS_LABEL_SHORT[s.holdingType]}
                       </span>
                     </td>
-                    <td className="py-2 pr-4 text-caption text-text-secondary">{s.side}</td>
+                    <td className="py-2 pr-4 text-caption text-text-secondary">{holdingSideLabel(s.side)}</td>
                     <td className="py-2 pr-4 text-right font-metric">{formatCurrency(s.valueUsd)}</td>
                     <td className="py-2 text-right font-metric">{formatCurrency(s.signedValueUsd)}</td>
                   </tr>

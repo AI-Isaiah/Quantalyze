@@ -97,3 +97,29 @@ describe("MatchQueueIndex — @container parent/child structural guard", () => {
     expect(tabular.length).toBeGreaterThan(0);
   });
 });
+
+describe("MatchQueueIndex — 170.1.2 D-01: a row with no name reads 'Unknown allocator'", () => {
+  it("shows 'Unknown allocator' for a row with neither display_name nor email, never '(unknown)'", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("kill-switch")) {
+          return { ok: true, status: 200, json: async () => ({ enabled: true }) };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            allocators: [{ ...allocatorRow("a1"), display_name: null, email: null }],
+          }),
+        };
+      }) as unknown as typeof fetch,
+    );
+    let container: HTMLElement;
+    await act(async () => {
+      ({ container } = render(<MatchQueueIndex />));
+    });
+    expect(container!.textContent).toContain("Unknown allocator");
+    expect(container!.textContent).not.toContain("(unknown)");
+  });
+});

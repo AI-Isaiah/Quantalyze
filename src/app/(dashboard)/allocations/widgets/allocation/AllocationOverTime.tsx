@@ -5,6 +5,7 @@ import { Area, AreaChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
 
 import type { AllocationPoint, AsofGap } from "@/lib/portfolio-exposure";
 import { Card } from "@/components/ui/Card";
+import { venueLabel } from "@/lib/display-labels";
 import { TouchTooltip } from "@/components/charts/TouchTooltip";
 import {
   CHART_BORDER,
@@ -173,7 +174,7 @@ export function AllocationOverTime({
               className="inline-block h-2.5 w-2.5 rounded-sm"
               style={{ backgroundColor: STRATEGY_PALETTE[i % STRATEGY_PALETTE.length] }}
             />
-            {venue}
+            {venueLabel(venue)}
           </span>
         ))}
       </div>
@@ -194,7 +195,7 @@ export function AllocationOverTime({
                 key={venue}
                 type="monotone"
                 dataKey={venueKey(venue)}
-                name={venue}
+                name={venueLabel(venue)}
                 stackId="alloc"
                 fill={STRATEGY_PALETTE[i % STRATEGY_PALETTE.length]}
                 fillOpacity={0.85}
@@ -226,7 +227,11 @@ export function AllocationOverTime({
               labelFormatter={(ms) => new Date(Number(ms)).toISOString().slice(0, 10)}
               formatter={(v, name, item) => [
                 `${(Number(v) * 100).toFixed(1)}% (${formatCurrency(
-                  usdByAsofMs.get(item.payload.asofMs)?.[String(name)] ?? null,
+                  // `name` is the display label now; the USD map is keyed by the
+                  // raw venue code, which the series' dataKey still carries.
+                  usdByAsofMs.get(item.payload.asofMs)?.[
+                    String(item.dataKey).slice(VENUE_KEY_PREFIX.length)
+                  ] ?? null,
                 )})`,
                 String(name),
               ]}

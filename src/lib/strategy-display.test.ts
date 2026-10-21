@@ -46,12 +46,12 @@ describe("displayStrategyName", () => {
     ).toBe("Strategy #12345678");
   });
 
-  it("returns '(strategy)' for null input", () => {
-    expect(displayStrategyName(null)).toBe("(strategy)");
+  it("returns 'Unnamed strategy' for null input (a lookup miss, never an id)", () => {
+    expect(displayStrategyName(null)).toBe("Unnamed strategy");
   });
 
-  it("returns '(strategy)' for undefined input", () => {
-    expect(displayStrategyName(undefined)).toBe("(strategy)");
+  it("returns 'Unnamed strategy' for undefined input", () => {
+    expect(displayStrategyName(undefined)).toBe("Unnamed strategy");
   });
 
   it("prefers codename over name even when tier is institutional", () => {

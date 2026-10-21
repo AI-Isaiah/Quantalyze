@@ -9,6 +9,7 @@ import { LiveRegion } from "@/components/ui/LiveRegion";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { computeFreshness } from "@/lib/freshness";
 import { displayStrategyName } from "@/lib/strategy-display";
+import { matchDecisionLabel } from "@/lib/display-labels";
 import type { DisclosureTier } from "@/lib/types";
 import type { AllocatorPreferences } from "@/lib/preferences";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
@@ -517,7 +518,11 @@ export function AllocatorMatchQueue({
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
             <h1 className="text-h3 font-display text-text-primary">
-              {profile.display_name || "(unknown)"}
+              {/* Email only off the public read-only demo, as the breadcrumb above does. */}
+              {profile.display_name ||
+                profile.company ||
+                (!forceReadOnly && profile.email) ||
+                "Unknown allocator"}
             </h1>
             {profile.company && (
               <p className="text-small text-text-secondary mt-0.5">{profile.company}</p>
@@ -847,7 +852,7 @@ export function AllocatorMatchQueue({
                           {new Date(d.created_at).toLocaleDateString()}
                         </td>
                         <td className="px-4 py-2 text-caption font-mono uppercase tracking-wider text-text-secondary">
-                          {d.decision.replace("_", " ")}
+                          {matchDecisionLabel(d.decision)}
                           {/* Narrow-container relocation of the collapsed When
                               column \u2014 the REAL decision date. */}
                           <span className="mt-0.5 block font-mono normal-case tracking-normal text-micro text-text-muted @2xl:hidden">

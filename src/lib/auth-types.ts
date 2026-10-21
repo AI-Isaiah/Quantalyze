@@ -49,3 +49,31 @@ export const APP_ROLES: readonly AppRole[] = [
   "quant_manager",
   "analyst",
 ] as const;
+
+/**
+ * UX copy per role (moved here from `UserRolesPanel` in Phase 170.1.2 so
+ * `@/lib/display-labels` can read it from server components). Keyed by
+ * `AppRole` so `satisfies Record<AppRole, …>` catches any role added to the
+ * union without a corresponding entry.
+ */
+export const ROLE_META = {
+  admin: {
+    label: "Admin",
+    description: "Full back-office access. Can grant and revoke roles.",
+  },
+  allocator: {
+    label: "Allocator",
+    description:
+      "LP-side user. Can request intros, own portfolios, and see factsheets.",
+  },
+  quant_manager: {
+    label: "Quant manager",
+    description:
+      "Publishes strategies. Manages their own API keys and analytics.",
+  },
+  analyst: {
+    label: "Analyst",
+    description:
+      "Read-only analyst seat. No mutation surface; views discovery + factsheets.",
+  },
+} as const satisfies Record<AppRole, { label: string; description: string }>;

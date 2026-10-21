@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { labelOf } from "@/lib/display-labels";
 
 const colorMap: Record<string, string> = {
   "Long-Only": "bg-badge-directional/10 text-badge-directional",
@@ -30,16 +31,18 @@ const statusMap: Record<string, string> = {
   declined: "bg-negative/10 text-negative",
 };
 
-const statusLabelMap: Record<string, string> = {
+// Exported so display-labels.test.ts can check its key set against the
+// strategies_status_check and contact_requests_status_check CHECK sets.
+export const statusLabelMap: Record<string, string> = {
   published: "Published",
   draft: "Draft",
-  pending_review: "Pending Review",
+  pending_review: "Pending review",
   archived: "Archived",
   // Phase 149 Delta 3 — see statusMap above.
   private: "Private",
   // contact_request statuses
   pending: "Pending",
-  intro_made: "Intro Made",
+  intro_made: "Intro made",
   completed: "Completed",
   declined: "Declined",
 };
@@ -56,7 +59,9 @@ export function Badge({ label, type = "strategy", className = "" }: BadgeProps) 
       ? statusMap[label] ?? statusMap.draft
       : colorMap[label] ?? colorMap.Other;
 
-  const displayLabel = type === "status" ? (statusLabelMap[label] ?? label) : label;
+  // A status outside the map reads "Unknown status", never the raw key.
+  const displayLabel =
+    type === "status" ? labelOf(statusLabelMap, label, "Unknown status") : label;
 
   return (
     <span

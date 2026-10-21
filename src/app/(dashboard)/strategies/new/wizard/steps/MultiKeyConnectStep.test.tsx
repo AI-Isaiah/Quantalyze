@@ -287,8 +287,11 @@ describe("[ONB-01] MultiKeyConnectStep — per-key validate", () => {
     expect(body.api_secret).toBe("SECRET_key2");
     expect(body.exchange).toBe("binance");
     expect(body.wizard_session_id).toBe(SESSION);
+    // 170.1.2 WR-04: no nickname typed → the venue DISPLAY name, never the code.
+    expect(body.label).toBe("Binance key");
 
     const summary = screen.getByTestId("key-1-summary");
+    expect(summary).toHaveTextContent("Binance key");
     expect(summary).toHaveTextContent("Binance");
     expect(summary).toHaveTextContent("2024-01-01");
     const pill = within(summary).getByTestId("trust-tier-label");
@@ -1447,6 +1450,8 @@ describe("[CR-03] MultiKeyConnectStep — a draft-carried MT5 panel keeps its br
     expect(pass).toHaveAttribute("type", "password");
     expect(within(panel0).getByLabelText("OKX Passphrase")).toBe(pass);
     expect(pass).toHaveAttribute("placeholder", "Paste the OKX passphrase");
+    // The nickname placeholder shows the display label, never the raw code.
+    expect(within(panel0).getByPlaceholderText("e.g. OKX · prod")).toBeInTheDocument();
     expect(panel0).toHaveTextContent(
       "OKX requires a passphrase in addition to key and secret.",
     );

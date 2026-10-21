@@ -29,7 +29,10 @@ vi.mock("@/lib/bridge/send-intro", () => ({
 }));
 
 import { BridgeDrawer } from "./BridgeDrawer";
-import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
+import {
+  buildHoldingRef,
+  type FlaggedHolding,
+} from "../lib/holding-outcome-adapter";
 
 const FLAGGED_A: FlaggedHolding = {
   venue: "binance",
@@ -282,6 +285,47 @@ describe("BridgeDrawer — Phase 09.1 Plan 09 / D-15 / D-16", () => {
     fireEvent.click(screen.getByRole("button", { name: /Back to candidates/ }));
     expect(screen.getByText("Review candidates")).toBeInTheDocument();
     expect(screen.queryByText("Confirm intro")).not.toBeInTheDocument();
+  });
+
+  it("mandate list names reasons and venue as labels; empty reasons read 'Composite score above threshold'", () => {
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={vi.fn()}
+        flaggedHoldings={[
+          {
+            ...FLAGGED_B,
+            symbol: "BTC",
+            breach_reasons: ["max_weight", "correlation_ceiling"],
+          },
+          { ...FLAGGED_A, breach_reasons: [] },
+        ]}
+        matchDecisionsByHoldingRef={{}}
+      />,
+    );
+    expect(
+      screen.getByText(/BTC \(OKX\): Above max weight, Above correlation ceiling/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/\(Binance\): Composite score above threshold/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/max_weight|composite threshold/)).toBeNull();
+  });
+
+  it("confirm panel renders the venue label in the From row", () => {
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={vi.fn()}
+        flaggedHoldings={[{ ...FLAGGED_B, symbol: "BTC" }]}
+        matchDecisionsByHoldingRef={{}}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId(`bridge-candidate-${buildHoldingRef({ ...FLAGGED_B, symbol: "BTC" })}`),
+    );
+    expect(screen.getAllByText("BTC (OKX)").length).toBeGreaterThan(0);
+    expect(screen.queryByText("BTC (okx)")).toBeNull();
   });
 
   it("flaggedHoldings=[] → empty-state copy + no candidates list", () => {

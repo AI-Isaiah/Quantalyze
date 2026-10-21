@@ -47,6 +47,7 @@ import {
 import { venueSecretIsVerbatim } from "@/lib/closed-sets";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
+import { venueLabel } from "@/lib/display-labels";
 
 /**
  * Phase 88 / ONB-01 — the multi-key ConnectKeyStep.
@@ -1544,7 +1545,7 @@ export function MultiKeyConnectStep({
               // normalizes empty→"" and accepts it for sfox).
               api_secret: requiresSecret ? p.apiSecret : "",
               passphrase: requiresPassphrase ? p.passphrase : null,
-              label: p.nickname.trim() || `${p.exchange} key`,
+              label: p.nickname.trim() || `${venueLabel(p.exchange)} key`,
               wizard_session_id: wizardSessionId,
             }),
           },
@@ -2357,7 +2358,7 @@ function KeyPanel({
             <span className="text-body text-text-primary">{active?.name}</span>
             <span className="text-text-muted">·</span>
             <span className="text-caption text-text-secondary">
-              {p.nickname.trim() || `${p.exchange} key`}
+              {p.nickname.trim() || `${venueLabel(p.exchange)} key`}
             </span>
             <span className="text-text-muted">·</span>
             <span className="font-metric text-caption tabular-nums text-text-secondary">
@@ -2495,7 +2496,7 @@ function KeyPanel({
                 label="Key nickname (optional)"
                 value={p.nickname}
                 onChange={(e) => onUpdate(index, { nickname: e.target.value })}
-                placeholder={`e.g. ${p.exchange} · prod`}
+                placeholder={`e.g. ${venueLabel(p.exchange)} · prod`}
                 autoComplete="off"
                 data-testid={`key-${index}-nickname`}
               />

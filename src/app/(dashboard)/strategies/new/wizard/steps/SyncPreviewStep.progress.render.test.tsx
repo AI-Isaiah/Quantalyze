@@ -236,6 +236,9 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
 
     expect(within(row3).getByText("Waiting")).toBeInTheDocument();
     expect(row3).toHaveTextContent("Key 3");
+    // No label → the shared venue display name, never a capitalised code
+    // ("Okx"). 170.1.2 WR-01.
+    expect(row3).toHaveTextContent("Key 3 — OKX");
   });
 
   // PANEL — a degraded row shows "Degraded" and NO reason text (decision 3).

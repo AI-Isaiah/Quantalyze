@@ -285,7 +285,7 @@ export function MatchQueueIndex() {
                       )}
                       <div>
                         <p className="text-small font-medium text-text-primary">
-                          {row.display_name || row.email || "(unknown)"}
+                          {row.display_name || row.email || "Unknown allocator"}
                         </p>
                         {row.company && (
                           <p className="text-caption text-text-secondary">{row.company}</p>

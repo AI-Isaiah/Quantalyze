@@ -22,6 +22,21 @@ vi.mock("recharts", async () => {
   };
 });
 
+// The tooltip formatter is the only caller of the per-venue USD lookup, and
+// recharts never invokes it under jsdom (no pointer). Capture the props the
+// component hands the tooltip so a test can call the formatter directly.
+const captured = vi.hoisted(() => ({
+  formatter: null as
+    | null
+    | ((v: unknown, name: unknown, item: unknown) => [string, string]),
+}));
+vi.mock("@/components/charts/TouchTooltip", () => ({
+  TouchTooltip: (props: { formatter: NonNullable<typeof captured.formatter> }) => {
+    captured.formatter = props.formatter;
+    return null;
+  },
+}));
+
 const utc = (iso: string) => {
   const [y, m, d] = iso.split("-").map(Number);
   return Date.UTC(y, m - 1, d);
@@ -127,7 +142,22 @@ describe("AllocationOverTime — single-venue book", () => {
     expect(rows.find((r) => r.asofMs === utc("2026-01-01"))![vk("binance")]).toBe(1);
     render(<AllocationOverTime points={points} gaps={[]} />);
     // getByText throws on >1 match — proves exactly one legend chip.
-    expect(screen.getByText("binance")).toBeTruthy();
+    expect(screen.getByText("Binance")).toBeTruthy();
+  });
+
+  it("names a venue by its display name in the legend while the dataKey keeps the raw code (170.1.2 / D-01)", () => {
+    const points = [
+      ap("2026-01-01", [venue("okx", 100, 0.6), venue("sfox", 100, 0.4)]),
+      ap("2026-01-02", [venue("okx", 100, 0.6), venue("sfox", 100, 0.4)]),
+    ];
+    const { venues, rows } = buildAllocationChartData(points, []);
+    expect(venues).toEqual(["okx", "sfox"]);
+    expect(rows[0][vk("okx")]).toBe(0.6);
+    render(<AllocationOverTime points={points} gaps={[]} />);
+    expect(screen.getByText("OKX")).toBeTruthy();
+    expect(screen.getByText("sFOX")).toBeTruthy();
+    expect(screen.queryByText("okx")).toBeNull();
+    expect(screen.queryByText("Okx")).toBeNull();
   });
 });
 
@@ -194,5 +224,21 @@ describe("AllocationOverTime — header + a11y", () => {
     ).toBeTruthy();
     expect(screen.getByText("Allocation over time")).toBeTruthy();
     expect(screen.getByText("as of 2026-03-02")).toBeTruthy();
+  });
+});
+
+describe("AllocationOverTime — tooltip formatter (170.1.2 M3)", () => {
+  // The series carries the DISPLAY name ("OKX") while the USD map is keyed by the
+  // RAW venue code, which only `dataKey` ("v:okx") still holds. A lookup that
+  // used `name` would miss and print "—" beside a real weight.
+  it("renders a real dollar string for an okx point, not the em-dash", () => {
+    render(<AllocationOverTime points={ALLOC_POINTS} gaps={[]} />);
+    const [line, label] = captured.formatter!(0.4, "OKX", {
+      dataKey: vk("okx"),
+      payload: { asofMs: utc("2026-03-01") },
+    });
+    expect(line).toBe("40.0% ($400K)");
+    expect(line).not.toContain("—");
+    expect(label).toBe("OKX");
   });
 });

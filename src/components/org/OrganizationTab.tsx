@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Card } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
+import { orgMemberRoleLabel } from "@/lib/display-labels";
 
 interface Org {
   organization_id: string;
@@ -190,7 +191,7 @@ export function OrganizationTab() {
               <div key={o.organization_id} className="flex items-center justify-between rounded-lg border border-border p-3">
                 <div>
                   <p className="text-sm font-medium text-text-primary">{o.organizations.name}</p>
-                  <p className="text-xs text-text-muted capitalize">{o.role}</p>
+                  <p className="text-xs text-text-muted">{orgMemberRoleLabel(o.role)}</p>
                 </div>
                 {(o.role === "owner" || o.role === "admin") && (
                   <Button size="sm" variant="ghost" onClick={() => { setShowInvite(o.organization_id); setInviteEmail(""); }}>

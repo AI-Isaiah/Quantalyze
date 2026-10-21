@@ -20,6 +20,7 @@
 
 import { type CSSProperties } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
+import { venueLabel } from "@/lib/display-labels";
 // Phase 167 CREDTRUST / D-16 — the SEVENTH former `=== "revoked"` equality,
 // and the only one on this surface. Shared with HoldingsTable so the two money
 // surfaces cannot drift on what "trusted" means. ⛔ Do not re-introduce a
@@ -92,11 +93,6 @@ export interface OpenPositionRow {
 
 interface OpenPositionsTableProps {
   rows: OpenPositionRow[];
-}
-
-function venueLabel(v: string): string {
-  if (!v) return "";
-  return v.charAt(0).toUpperCase() + v.slice(1);
 }
 
 function formatQuantity(n: number): string {
