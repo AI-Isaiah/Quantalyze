@@ -6152,3 +6152,141 @@ class TestCandidateUniverseIsScoredOnDailyReturnsFromTheStoredCurve:
             assert series.loc[d2] == pytest.approx(0.144, abs=1e-12)
             assert len(series) == 2
         assert closes_mock.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 166.5.1 plan 04 (D-02a): the two match.py reads Sentry named retry a
+# transient httpx ReadTimeout. Only those reads: a retry is attached to the
+# single select, never to the function around it, so a retry cannot re-run the
+# dozen other reads in _load_allocator_context or add one to a read Sentry did
+# not name.
+# ---------------------------------------------------------------------------
+
+
+def _zero_read_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+    monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+
+class TestShouldSkipAllocatorRetriesReadTimeout:
+    async def test_should_skip_allocator_retries_a_read_timeout_on_the_latest_batch_read(
+        self, monkeypatch
+    ):
+        """QUANTALYZE-2F: the latest match_batches read raised an httpx ReadTimeout and, with
+        no retry, the skip check threw into the cron loop (the skip-check is outside its
+        per-allocator try), failing the run. One slow response must cost one retry."""
+        import httpx
+
+        from routers.match import _should_skip_allocator
+
+        _zero_read_backoff(monkeypatch)
+        stale_engine = {"computed_at": "2026-01-01T00:00:00Z", "engine_version": "v0-older"}
+        executes = {"n": 0}
+
+        def _execute() -> Any:
+            executes["n"] += 1
+            if executes["n"] == 1:
+                raise httpx.ReadTimeout("The read operation timed out")
+            return MagicMock(data=[stale_engine])
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.side_effect = _execute
+        monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
+
+        assert await _should_skip_allocator("alloc-2f", force=False) is False
+        assert executes["n"] == 2, "the match_batches read was retried exactly once"
+
+    async def test_second_read_stays_single_attempt(self, monkeypatch):
+        """The mandate_edited_at read is not one of the four named reads (D-02a): a
+        ReadTimeout there is NOT retried, and propagates as before."""
+        import httpx
+
+        from routers.match import ENGINE_VERSION, _should_skip_allocator
+
+        _zero_read_backoff(monkeypatch)
+        one_hour_ago = (
+            (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=1))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        prefs_executes = {"n": 0}
+
+        def _prefs_execute() -> Any:
+            prefs_executes["n"] += 1
+            raise httpx.ReadTimeout("The read operation timed out")
+
+        sb = MagicMock()
+        sb.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[{"computed_at": one_hour_ago, "engine_version": ENGINE_VERSION}]
+        )
+        sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.side_effect = _prefs_execute
+        monkeypatch.setattr("routers.match.get_supabase", lambda: sb)
+
+        with pytest.raises(httpx.ReadTimeout):
+            await _should_skip_allocator("alloc-2f-second", force=False)
+        assert prefs_executes["n"] == 1
+
+
+class _CountingChain:
+    """A chainable stand-in for a postgrest query: any builder method returns itself and
+    `execute()` answers an empty page, counting executes per table in `reads`."""
+
+    def __init__(self, name: str, reads: dict[str, int], prefs_script: list[Any]) -> None:
+        self._name = name
+        self._reads = reads
+        self._prefs_script = prefs_script
+
+    def __getattr__(self, _attr: str) -> Any:
+        return lambda *a, **k: self
+
+    def execute(self) -> Any:
+        self._reads[self._name] = self._reads.get(self._name, 0) + 1
+        if self._name == "allocator_preferences":
+            item = self._prefs_script.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+        return MagicMock(data=[])
+
+
+class TestLoadAllocatorContextRetriesPreferencesRead:
+    @staticmethod
+    def _run(monkeypatch: pytest.MonkeyPatch, prefs_script: list[Any]) -> tuple[dict[str, Any], dict[str, int]]:
+        from routers import match as match_mod
+
+        reads: dict[str, int] = {}
+        sb = MagicMock()
+        sb.table.side_effect = lambda name: _CountingChain(name, reads, prefs_script)
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+        return match_mod._load_allocator_context("alloc-2d"), reads
+
+    def test_load_allocator_context_retries_a_read_timeout_on_the_preferences_read(
+        self, monkeypatch
+    ):
+        """QUANTALYZE-2D: the allocator_preferences maybe_single read raised an httpx
+        ReadTimeout and failed the whole scoring of that allocator. One slow response must
+        cost one retry of THAT read only: every other table is read exactly as often as in a
+        run with no timeout (measured as a control, not assumed to be once)."""
+        import httpx
+
+        _zero_read_backoff(monkeypatch)
+        prefs_row = {"user_id": "alloc-2d", "target_ticket_size_usd": 250000}
+
+        control_ctx, control_reads = self._run(monkeypatch, [MagicMock(data=prefs_row)])
+        ctx, reads = self._run(
+            monkeypatch,
+            [httpx.ReadTimeout("The read operation timed out"), MagicMock(data=prefs_row)],
+        )
+
+        assert ctx["preferences"] == prefs_row == control_ctx["preferences"]
+        assert control_reads["allocator_preferences"] == 1
+        assert reads["allocator_preferences"] == 2, "the preferences read was retried once"
+        others = {t: n for t, n in reads.items() if t != "allocator_preferences"}
+        control_others = {t: n for t, n in control_reads.items() if t != "allocator_preferences"}
+        assert others == control_others, "no other read in the function was retried"
+
+    def test_a_prefs_read_that_returns_none_still_yields_no_preferences(self, monkeypatch):
+        """The maybe_single() None guard still holds under the retry wrapper."""
+        ctx, reads = self._run(monkeypatch, [None])
+        assert ctx["preferences"] is None
+        assert reads["allocator_preferences"] == 1

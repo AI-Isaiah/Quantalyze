@@ -57,6 +57,7 @@ from services.db import (
     chunked_in_query,
     db_execute,
     db_read_with_retry,
+    db_read_with_retry_sync,
     get_supabase,
     one,
     paginated_select,
@@ -1149,9 +1150,14 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     supabase = get_supabase()
 
     # Preferences
-    prefs_result = supabase.table("allocator_preferences").select("*").eq(
-        "user_id", allocator_id
-    ).maybe_single().execute()
+    # QUANTALYZE-2D (Phase 166.5.1, D-02a): only this select retries a transient
+    # ReadTimeout (synchronous twin: this function runs in a worker thread).
+    # None of the reads below move.
+    prefs_result = db_read_with_retry_sync(
+        lambda: supabase.table("allocator_preferences").select("*").eq(
+            "user_id", allocator_id
+        ).maybe_single().execute()
+    )
     # postgrest maybe_single().execute() returns None (not an APIResponse with
     # data=None) when no allocator_preferences row exists. Guard the None before
     # .data; _score_one_allocator already normalizes None preferences to {}.
@@ -2182,7 +2188,9 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
     if force:
         return False
     supabase = get_supabase()
-    result = await asyncio.to_thread(
+    # QUANTALYZE-2F (Phase 166.5.1, D-02a): this latest-batch read retries a transient
+    # ReadTimeout; the second read below stays: Sentry did not name it.
+    result = await db_read_with_retry(
         lambda: supabase.table("match_batches")
         .select("computed_at, engine_version")
         .eq("allocator_id", allocator_id)
