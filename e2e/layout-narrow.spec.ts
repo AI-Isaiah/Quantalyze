@@ -2227,6 +2227,15 @@ const NARROW_ANCHOR_MS = Date.UTC(2026, 9, 20);
 const EQUITY_ROOT = '[data-testid="overview-equity-curve"]';
 const EQUITY_SVG = 'svg[aria-label="Equity chart"]';
 
+// The D-03c emitters, mounted by the Overview and the composer alike. Each is selected by the
+// aria-label (or the aria-describedby) its component writes, so a moved selector reads as missing.
+const SHARED_EMITTERS: SvgTextEmitterDef[] = [
+  { key: "eoy-legend", selector: 'svg[aria-label^="End-of-year returns by calendar year"]' },
+  { key: "heatmap-months", selector: '[aria-label^="Daily-return calendar for"] svg' },
+  { key: "return-quantiles", selector: 'svg[aria-label^="Return quantiles box plot"]' },
+  { key: "timeseries-y", selector: 'svg[aria-describedby^="chart-help-"]' },
+];
+
 const COMPOSER_EMITTERS: SvgTextEmitterDef[] = [
   { key: "brush", selector: '[aria-label="Master timeline brush"] svg' },
   {
@@ -2240,14 +2249,30 @@ const COMPOSER_EMITTERS: SvgTextEmitterDef[] = [
   },
   { key: "rolling-volatility", selector: '[aria-label="Rolling volatility"] svg.recharts-surface' },
   { key: "rolling-sortino", selector: '[aria-label="Rolling Sortino"] svg.recharts-surface' },
+  ...SHARED_EMITTERS,
+];
+
+const OVERVIEW_EMITTERS: SvgTextEmitterDef[] = SHARED_EMITTERS;
+
+// Floors are the counts measured on the local-stack lane at V390, V640 and V1280 (the minimum over
+// the three; they differ only for return-quantiles, which draws fewer y ticks on the mobile arm).
+// The Overview does not mount ReturnQuantiles.
+const OVERVIEW_REQUIRED: RequiredEmitter[] = [
+  { key: "eoy-legend", minTexts: 3 },
+  { key: "heatmap-months", minTexts: 16 },
+  { key: "timeseries-y", minTexts: 102 },
 ];
 
 const COMPOSER_REQUIRED: RequiredEmitter[] = [
-  { key: "brush" },
+  { key: "brush", minTexts: 2 },
   { key: "quantile-box" },
   { key: "rolling-sharpe", minTexts: 2, minXAxisTexts: 2 },
   { key: "rolling-volatility", minTexts: 2, minXAxisTexts: 2 },
   { key: "rolling-sortino", minTexts: 2, minXAxisTexts: 2 },
+  { key: "eoy-legend", minTexts: 5 },
+  { key: "heatmap-months", minTexts: 32 },
+  { key: "return-quantiles", minTexts: 4 },
+  { key: "timeseries-y", minTexts: 41 },
 ];
 
 type Surface = "overview" | "composer";
@@ -2517,7 +2542,10 @@ test.describe("/allocations charts — NARROWCHARTS", () => {
     test(`${vp.id} overview: no svg text clipped`, async ({ page }) => {
       test.setTimeout(120_000);
       await openSurface(page, "overview", vp);
-      await assertSvgTextInsideSvg(page, "#main-content", `overview ${vp.id}`);
+      await assertSvgTextInsideSvg(page, "#main-content", `overview ${vp.id}`, "svg", {
+        emitters: OVERVIEW_EMITTERS,
+        required: OVERVIEW_REQUIRED,
+      });
     });
 
     test(`${vp.id} composer: no svg text clipped`, async ({ page }) => {
@@ -2592,7 +2620,7 @@ test.describe("/allocations charts — NARROWCHARTS", () => {
       test.setTimeout(150_000);
       const vp = NARROW_VIEWPORTS[2];
       await openSurface(page, surface, vp);
-      const emitters = surface === "composer" ? COMPOSER_EMITTERS : [];
+      const emitters = surface === "composer" ? COMPOSER_EMITTERS : OVERVIEW_EMITTERS;
       const layouts = await readSvgTextLayout(page, "#main-content", "svg", emitters);
       const reading = toReading(surface, layouts);
       const out = process.env.NARROWCHARTS_DESKTOP_OUT;
@@ -2601,9 +2629,11 @@ test.describe("/allocations charts — NARROWCHARTS", () => {
       console.log(`NARROWCHARTS V1280 ${surface} reading: ${reading.length} svg(s), ${texts} text(s)`);
       expect(reading.length, `${surface}: no svg read (W-02)`).toBeGreaterThan(0);
       expect(texts, `${surface}: no svg text read (W-02)`).toBeGreaterThan(0);
-      if (surface === "composer") {
-        assertEmittersMeasured(layouts, `composer ${vp.id}`, COMPOSER_REQUIRED);
-      }
+      assertEmittersMeasured(
+        layouts,
+        `${surface} ${vp.id}`,
+        surface === "composer" ? COMPOSER_REQUIRED : OVERVIEW_REQUIRED,
+      );
       const before = process.env.NARROWCHARTS_DESKTOP_BEFORE;
       if (before) compareDesktopReading(before, surface, reading);
     });

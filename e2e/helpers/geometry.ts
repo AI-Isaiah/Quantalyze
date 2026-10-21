@@ -1051,6 +1051,7 @@ export function assertEmittersMeasured(
     const mine = layouts.filter((l) => l.emitter === req.key);
     const texts = mine.reduce((n, l) => n + l.texts.length, 0);
     const xTexts = mine.reduce((n, l) => n + l.texts.filter((t) => t.inXAxis).length, 0);
+    console.log(`NARROWCHARTS-EMITTER ${label} ${req.key} (texts=${texts}, xAxisTexts=${xTexts})`);
     if (texts < (req.minTexts ?? 1) || xTexts < (req.minXAxisTexts ?? 0)) {
       missing.push(
         `NARROWCHARTS-EMITTER-MISSING ${label} ${req.key} (texts=${texts}, xAxisTexts=${xTexts})`,
