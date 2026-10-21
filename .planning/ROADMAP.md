@@ -159,7 +159,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [x] **Phase 166.4.1: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly** (INSERTED) — 4 plans; closed 2026-10-14 (records PR) (verification passed, PROD glance taken 2026-10-14)
 - [x] **Phase 166.5: COMPUTEDATSTAMP — the analytics runner stamps computed_at on a real finish** (INSERTED 2026-10-03) — 9 plans, shipped as v0.131.13.0 (#1047, the runner stamp) and v0.131.13.1 (#1050, the status bridge stops writing the date; migration applied on TEST and PROD); the Wave 5 forced recompute on PROD 2026-10-20 enqueued 42, 23 done each carrying its own runner stamp, 0 too-new dates, 19 failed with their dates held (18 archived keyless CSV strategies, 1 composite with a refused Deribit key, routed to the founder); verification passed; security SECURED (completed 2026-10-20)
-- [ ] **Phase 166.5.1: SENTRYTRIAGE — the three unbooked production Sentry groups are fixed at their root cause or silenced with a stated reason** (INSERTED 2026-10-20) — not yet planned (founder 2026-10-20; demo-allocator cron warning, worker ReadTimeouts, job-state race)
+- [ ] **Phase 166.5.1: SENTRYTRIAGE — the three unbooked production Sentry groups are fixed at their root cause or silenced with a stated reason** (INSERTED 2026-10-20) — planned 2026-10-21, 4 plans in 3 waves (founder 2026-10-20; demo-allocator cron warning, worker ReadTimeouts, job-state race)
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [x] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — verified 2026-10-15 (completed 2026-10-15)
@@ -4568,10 +4568,13 @@ Plans:
 3. Job-state race: the sequence that returns a running job to `pending` while its runner still finishes is reproduced in a test and fixed at its source (claim, reset or lease), so a finished job is never lost or run twice. The mark functions' refusals stay loud.
 4. After deploy, each group's event rate is read from Sentry over 48 h, and the fixed groups are resolved there.
 
-**Plans:** 0 plans
+**Plans:** 4 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [ ] 166.5.1-01: the cron's allocator query excludes the demo allocator; M-3 ERROR and stale is_example advice removed (D-01, QUANTALYZE-Z) (wave 1)
+- [ ] 166.5.1-02: derive_allocator_equity watchdog override from its measured runtime; reset-then-mark reproduced; BACKFILL_KINDS override invariant (D-03, QUANTALYZE-2A/A) (wave 1)
+- [ ] 166.5.1-03: the read-retry helper treats ReadTimeout as transient; claim and watchdog reset pinned; opens with the D-02 classification decision (D-02, QUANTALYZE-2B/2C) (wave 2)
+- [ ] 166.5.1-04: the decided pure-read sites (job_worker _sel, cron reads) on the helper; six-group SC-2 table; SC-4 handoff (D-02, D-04, QUANTALYZE-2D/2E/2F/2G) (wave 3)
 
 ### Phase 166.1: ENGINEFLOOR — every Python ratio site reads the one dispersion floor, so a constant yield never produces a fabricated ratio (INSERTED)
 
@@ -6429,7 +6432,7 @@ kept verbatim.
 | 166.4 BENCHALIGN | 4/4 | Complete | v0.108.0.0 · #892 · (verification passed 7/7) |
 | 166.4.1 PORTFOLIOANALYTICS | 4/4 | Complete | 2026-10-14 |
 | 166.5 COMPUTEDATSTAMP | 9/9 | Complete — the runner stamps `computed_at` from the database clock and the bridge never writes it; Wave 5 forced recompute on PROD: 42 enqueued, 23 done each with its own stamp, 0 too-new dates, 19 failed with dates held (18 archived CSV, 1 refused Deribit key, founder items); verification passed; SECURED | 2026-10-20 · v0.131.13.0 · #1047, v0.131.13.1 · #1050 |
-| 166.5.1 SENTRYTRIAGE | 0/? | Queued — booked 2026-10-20 (founder) | - |
+| 166.5.1 SENTRYTRIAGE | 0/4 | Planned 2026-10-21 — 4 plans in 3 waves; plan 03 opens with a D-02 classification decision | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Complete    | 2026-10-04 |
 | 167.1.1 HOLDINGKEYSCOPE | 5/5 | Complete | v0.132.0.0 · #1053; 375px follow-up v0.132.0.1 · #1056 |
