@@ -13084,7 +13084,7 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 
 ## Phase 166.5 (COMPUTEDATSTAMP) — routed items (logged 2026-10-20)
 
-### 166.5-RECOMPUTE-RESIDUAL-19 — 19 strategy rows the Wave 5 forced recompute could not finish, 18 CSV and 1 composite (booked 2026-10-20, 166.5 D-04 residual, USER-FACING, FOUNDER DECISION)
+### 166.5-RECOMPUTE-RESIDUAL-19 — 19 strategy rows the Wave 5 forced recompute could not finish, 18 CSV and 1 composite (booked 2026-10-20, 166.5 D-04 residual, USER-FACING, FOUNDER DECISION, CLOSED 2026-10-21)
 
 **Reading.** The Wave 5 forced recompute on PROD, 2026-10-20 20:30Z to 21:42Z, enqueued 42 rows. 23 reached `done`, each carrying its own runner stamp, with 0 too-new dates. 19 reached `failed_final`, all error class `permanent`. Every one of the 19 kept its old date (`failed_rows_date_moved_no_runner` 0), which is the D-04 rule working. They are counts and classes only; the ordinal-to-strategy mapping lived in the session scratchpad. The reading is in `166.5-VERIFICATION.md`, section "Wave 5 forced recompute reading (D-05), 2026-10-20".
 
@@ -13093,3 +13093,7 @@ Both entries came out of the live PROD readings taken in the founder's signed-in
 **Class 2: 1 composite whose Deribit member key is refused.** The venue answers `invalid_credentials` (`invalid nonce`). The row went `complete_with_warnings` to `failed`, and its date is held at its last good compute (2026-10-15). The member key is not marked `revoked` or `sign_in_failed`, so the hand-off's untrusted-member filter did not exclude it. **Founder action: re-enter the key, or disconnect it.** The row reads `failed` until then.
 
 **Owner / Trigger:** founder decision. Closed when the founder has decided the 18 CSV rows (leave or retire) and acted on the composite's key (re-entered or disconnected). No code change is needed for either class.
+
+**CLOSED 2026-10-21 (founder decision, verbatim: "archive and fix").** Counts and classes only.
+- **Class 1, the 18 keyless CSV strategies:** they were already `archived` and stay archived. No write. Their failed analytics rows are accepted as they are, so the 18 `failed_final` rows are the settled state, not a backlog.
+- **Class 2, the 1 composite:** the premise that its Deribit key was invalid was wrong. All three Deribit member keys synced on 2026-10-21 between 04:04Z and 04:08Z, so `invalid nonce` was a request-timing refusal by the venue, not a bad credential, and no key was re-entered or disconnected. The `stitch_composite` job was re-enqueued through the guarded `enqueue_compute_job` path (source `deribit-nonce-retry-2026-10-21`) at 11:06Z. It finished `done` on attempt 1 at 11:25Z, and the row reads `complete_with_warnings` with a fresh runner stamp. The lesson for the next reader: `invalid_credentials` with the text `invalid nonce` from Deribit is worth one guarded retry before anyone treats the key as lost.
