@@ -1182,7 +1182,10 @@ class TestWatchdogInvariant:
         default, reproducing the wizard-hang for allocator equity
         backfill. This test iterates TIMEOUT_PER_KIND (source of truth)
         and asserts every kind has watchdog headroom, including ones
-        that take the default."""
+        that take the default. It cannot see the backfill case, where the
+        claim-age clock outruns the handler timeout (derive_allocator_equity
+        passed it at 600s > 300s while still racing): see
+        test_every_backfill_kind_has_an_explicit_watchdog_override."""
         from main_worker import WATCHDOG_PER_KIND_OVERRIDES
         from services.job_worker import TIMEOUT_PER_KIND
 
@@ -1205,6 +1208,33 @@ class TestWatchdogInvariant:
                 f"value greater than {handler_seconds:.0f} seconds — "
                 "otherwise the watchdog reclaims the still-running job "
                 "and any caller polling for terminal status hangs."
+            )
+
+    def test_every_backfill_kind_has_an_explicit_watchdog_override(self) -> None:
+        """166.5.1 / D-03 (QUANTALYZE-2A / QUANTALYZE-A): BACKFILL_KINDS run on
+        the dedicated backfill worker. The claim RPC stamps claimed_at on a
+        whole batch and dispatch_tick runs the claimed jobs one after another,
+        so a job's claim-age clock includes its batch-mates' runtime. The
+        10-minute default is sized for neither, and the headroom invariant
+        above (handler timeout vs. default) passed for derive_allocator_equity
+        while PROD runs reached 10:03.9 claim-to-done and were reset under
+        their runner. Membership in BACKFILL_KINDS names that mechanism
+        (serial batches on the dedicated worker) instead of a runtime threshold
+        that would drift, so each such kind must carry an explicit override."""
+        from main_worker import BACKFILL_KINDS, WATCHDOG_PER_KIND_OVERRIDES
+
+        # An empty tuple would make the loop below pass vacuously.
+        assert BACKFILL_KINDS, "BACKFILL_KINDS is empty; the invariant would pass vacuously"
+
+        for kind in BACKFILL_KINDS:
+            assert kind in WATCHDOG_PER_KIND_OVERRIDES, (
+                f"Backfill kind {kind!r} has no WATCHDOG_PER_KIND_OVERRIDES entry. "
+                "Backfill kinds are claimed in batches of 5 and dispatched "
+                "serially, so the claim-age clock includes batch-mates' runtime "
+                "and the 10-minute default is sized for neither: the watchdog "
+                "resets a still-working run and its mark is refused (P0002), "
+                "the QUANTALYZE-2A/A race. Add an override sized from the "
+                "kind's measured claim-to-done."
             )
 
     def test_watchdog_threshold_has_sane_upper_bound(self) -> None:
