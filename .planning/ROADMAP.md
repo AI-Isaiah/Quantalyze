@@ -6211,7 +6211,7 @@ Plans:
 **Success Criteria** (what must be TRUE):
 1. At 390 px the Overview equity chart's SVG is no wider than its card's content box and all of its axis labels are visible. A test goes RED on the 400 px floor.
 2. At 390 px no axis tick label on the /allocations Overview or the scenario composer is clipped by its SVG: each measured label box lies inside its SVG box.
-3. Desktop rendering is unchanged, shown by a desktop-width measurement before and after.
+3. Desktop rendering is unchanged, shown by a desktop-width measurement before and after. **Amended 2026-10-21 (founder, AskUserQuestion "Accept, amend D-04 (Recommended)"; CONTEXT D-04):** rolling-chart date labels (RollingMetrics, RollingVolatilityChart, RollingSortinoChart) may change at desktop width. They are chosen in code, are evenly spaced, never overlap, and keep both the newest and the oldest date. Reason: the old set came from font measurement and cannot be reproduced deterministically (REVIEW-2 HI-01, REVIEW-3 HI-02). All other desktop output stays as D-04 states. The wording before this amendment is kept as lineage.
 4. After deploy, a 390 px and a 640 px measurement in the logged-in browser are recorded in the phase VERIFICATION.
 **Plans:** 4 plans
 
