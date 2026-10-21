@@ -2049,6 +2049,44 @@ class TestWorkerGatewayTimeoutRetry:
         )
 
     @pytest.mark.asyncio
+    async def test_claim_site_retries_read_timeout_then_succeeds(
+        self, monkeypatch
+    ) -> None:
+        """QUANTALYZE-2C (D-02a): an httpx ReadTimeout at the priority claim RPC
+        is retried like a gateway 504. One slow response must not cost the
+        worker a claim tick. A timed-out claim cannot double-claim: its batch
+        waits for the watchdog, as before. The legacy fallback is never reached
+        and the permanent latch stays False."""
+        import httpx
+
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        read_timeout = httpx.ReadTimeout("The read operation timed out")
+        mock_supabase = MagicMock()
+        priority_chain = MagicMock()
+        priority_chain.execute.side_effect = [read_timeout, MagicMock(data=[])]
+        legacy_chain = MagicMock()
+        legacy_chain.execute.return_value = MagicMock(data=[])
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return priority_chain
+            return legacy_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            await dispatch_tick("worker-read-timeout-retry")
+
+        assert priority_chain.execute.call_count == 2, (
+            "a ReadTimeout must be retried once and then succeed"
+        )
+        called_rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert "claim_compute_jobs" not in called_rpc_names
+        assert main_worker._FALLBACK_CLAIM_RPC is False
+
+    @pytest.mark.asyncio
     async def test_claim_site_structured_42883_is_not_retried_as_gateway_timeout(
         self, monkeypatch
     ) -> None:
@@ -2121,6 +2159,37 @@ class TestWorkerGatewayTimeoutRetry:
             "the WARNING must report the count from the SUCCESSFUL retry "
             "attempt, hedged as a LOWER BOUND because an earlier attempt may "
             "have committed before its gateway timeout (WR-10)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_watchdog_reset_retries_read_timeout_then_succeeds(
+        self, monkeypatch, caplog
+    ) -> None:
+        """QUANTALYZE-2B (D-02a): an httpx ReadTimeout at the watchdog reset RPC
+        is retried (the reset is idempotent by its staleness filter). The count
+        comes from the SUCCESSFUL attempt and, because a retry occurred, is
+        still hedged as a lower bound."""
+        import httpx
+
+        monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+        read_timeout = httpx.ReadTimeout("The read operation timed out")
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.side_effect = [read_timeout, MagicMock(data=3)]
+        mock_supabase.rpc.return_value = chain
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase):
+            with caplog.at_level(logging.WARNING):
+                await watchdog_tick()
+
+        assert chain.execute.call_count == 2, (
+            "a ReadTimeout must be retried once and then succeed"
+        )
+        assert any(
+            "Watchdog reclaimed at least 3 stalled jobs" in rec.getMessage()
+            for rec in caplog.records
         )
 
     @pytest.mark.asyncio

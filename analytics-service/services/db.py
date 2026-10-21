@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, TypeVar, cast
 
+import httpx
+
 # postgrest does not re-export SingleAPIResponse from its package root (only
 # APIResponse is). Both live in base_request_builder, which is where supabase-py
 # itself imports them from; pin the submodule path so a postgrest bump that
@@ -194,6 +196,29 @@ DB_READ_BACKOFF_BASE_S = 1.0
 DB_READ_JITTER_MAX_S = 0.5
 
 
+def _is_transient_read_error(exc: BaseException) -> bool:
+    """Return True iff `db_read_with_retry` should retry `exc`: a gateway 504
+    (`_is_gateway_timeout`) OR an ``httpx.ReadTimeout`` (Phase 166.5.1, D-02 /
+    D-02a).
+
+    Why ReadTimeout only: it is the timeout httpx raises after the request was
+    sent while the response was being awaited, which is the class Sentry
+    recorded in the six QUANTALYZE-2B..2G groups. ConnectTimeout, WriteTimeout
+    and PoolTimeout are deliberately NOT included: D-02 names ReadTimeout
+    only, so the retryable set grows by exactly what was measured.
+
+    `_is_gateway_timeout` stays a separate, unchanged predicate because
+    ``services/account_identity.py`` reads it for its own 504-only meaning.
+
+    ⚠️ A ReadTimeout on a WRITE may follow a commit (the server did the work
+    and the response was lost). That is why this seam's only write consumers
+    are the watchdog reset (idempotent by its staleness filter) and the job
+    claim. A timed-out claim cannot double-claim: its batch waits for the
+    watchdog, as before (D-02a). No other write gains a retry.
+    """
+    return _is_gateway_timeout(exc) or isinstance(exc, httpx.ReadTimeout)
+
+
 async def db_read_with_retry(fn: Callable[[], _T]) -> _T:
     """Retry a synchronous Supabase read (via db_execute) with exponential
     backoff+jitter, but ONLY on a gateway-timeout-shaped exception
@@ -232,7 +257,7 @@ async def db_read_with_retry(fn: Callable[[], _T]) -> _T:
         try:
             return await db_execute(fn)
         except Exception as exc:  # noqa: BLE001 — re-raised unchanged below
-            if not _is_gateway_timeout(exc) or attempt == DB_READ_MAX_RETRIES - 1:
+            if not _is_transient_read_error(exc) or attempt == DB_READ_MAX_RETRIES - 1:
                 raise
             delay = DB_READ_BACKOFF_BASE_S * (2 ** attempt) + random.uniform(
                 0, DB_READ_JITTER_MAX_S
