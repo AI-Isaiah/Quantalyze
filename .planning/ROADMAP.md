@@ -164,7 +164,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — verified 2026-10-15 (completed 2026-10-15)
 - [x] **Phase 167.1.1.1: BRIDGERETURNS — the Bridge matcher's per-holding returns come from each holding's daily mark price, so buying, selling or moving an asset never reads as a gain or loss** (INSERTED 2026-10-15) — 10 plans, shipped as v0.132.3.0 (#1070) and gap-closure v0.132.4.0 (#1074, engine v2.4.0); SC4 PROD before/after read 2026-10-16 (portfolio fit 0/8 → 3/5 personalized candidates, every holding named by reason, the 2 remaining nulls named overlap_below_min 8 and 9 days); verification passed; security SECURED 23/23 (completed 2026-10-16)
-- [ ] **Phase 167.1.1.2: AUMBASIS — scenario commit sizing counts a derivative at its unrealized P&L, never its notional, and a missing P&L is stored as missing, never as 0** (INSERTED 2026-10-15) — not yet planned (data integrity; founder decision during 167.1.1.1 discuss)
+- [x] **Phase 167.1.1.2: AUMBASIS — scenario commit sizing counts a derivative at its unrealized P&L, never its notional, and a missing P&L is stored as missing, never as 0** (INSERTED 2026-10-15) — 6 plans, shipped as v0.132.7.0 (#1087, no migration; the commit route sizes from the shared `holdingEquityContribution`, the derivative writers store NULL when a venue reports no P&L, and the composer and Open Positions say "N derivatives without reported P&L left out"); the SC-4 AFTER reading on PROD 2026-10-21 (history exact-zero rows 15 unchanged, every book's `past_sized_rows` 0, derivative NULL count 0, 7 books sized from equity AUM) and the 375 px and 200% zoom wrap check on a seeded local stack both passed; verification passed; security SECURED 21/21 (completed 2026-10-21)
 - [x] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — verified 2026-10-11 (completed 2026-10-11)
 - [x] **Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped** (INSERTED) — 10 plans, shipped as PR 1 v0.131.3.0 (#1022) and PR 2 v0.131.8.0 (#1033); D-11 day-0 and day-1 PROD reads as expected (capped_events 0), founder acknowledged 2026-10-16; verification passed 7/7; security SECURED 33/33 (completed 2026-10-16)
 - [x] **Phase 167.1.2.1.1: WRITERRESIDUALS — the allocator equity writer persists why a curve was refused and never dilutes or drops a key silently** (INSERTED) — 4 plans plus three minimal fix rounds, shipped as v0.132.5.0 (#1079), deployed 2026-10-19 20:33Z outside 03:30–06:45 UTC (SC-8); verification passed 9/9; security SECURED 20/20 (completed 2026-10-19)
@@ -4954,10 +4954,15 @@ Measured at `3175e5dd` by the 167.1.1.1 researcher:
 2. A venue that reports no unrealized P&L is written as NULL, never 0.0, on every derivative writer path. A test goes RED on the `or 0` coercion.
 3. Every reader of `unrealized_pnl_usd` handles NULL by name: it is withheld and disclosed, never summed as 0. That covers the dashboard, the composer, the commit route, the equity curve and the 167.1.1.1 matcher.
 4. Before and after on PROD, read-only and marker first: the number of NULL derivative P&L rows, and the commit sizing of the books holding derivatives. Past `size_at_decision_usd` rows are read, never rewritten, unless the founder decides otherwise.
-**Plans:** 0 plans
+**Plans:** 6/6 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 167.1.1.2-01: one TypeScript `holdingEquityContribution` that returns null for a derivative with no reported P&L, every caller threaded, `summarizeLiveHoldings` counts the left-out rows (wave 1)
+- [x] 167.1.1.2-02: the derivative writers store NULL, never 0.0, when a venue reports no unrealized P&L (Bybit V5, Deribit, CCXT, the allocator row builder) (wave 1)
+- [x] 167.1.1.2-03: the equity curve stamps which derivatives it left out onto the snapshot breakdown, protected from truncation (wave 1)
+- [x] 167.1.1.2-04: the scenario commit sizes from equity through the shared definition, names an AUM at or below 0 and every left-out holding on the audit row (wave 2)
+- [x] 167.1.1.2-05: the "N derivatives without reported P&L left out" sentence on the composer AUM row and the Open Positions footer (wave 2)
+- [x] 167.1.1.2-06: the phase proven as one tree, the SC-4 query pair pinned for the post-deploy PROD reading (wave 3)
 
 ### Phase 167.1.1.1: BRIDGERETURNS — the Bridge matcher's per-holding returns come from each holding's daily mark price, so buying, selling or moving an asset never reads as a gain or loss (INSERTED)
 
@@ -6429,7 +6434,7 @@ kept verbatim.
 | 167.1 AUMTRUST | 6/6 | Complete    | 2026-10-04 |
 | 167.1.1 HOLDINGKEYSCOPE | 5/5 | Complete | v0.132.0.0 · #1053; 375px follow-up v0.132.0.1 · #1056 |
 | 167.1.1.1 BRIDGERETURNS | 10/10 | Complete — SC4 PROD before/after read, short-overlap nulls named; verification passed, SECURED 23/23 | 2026-10-16 · v0.132.3.0 · #1070, v0.132.4.0 · #1074 |
-| 167.1.1.2 AUMBASIS | 0/? | Queued — data integrity; founder decision 2026-10-15 | - |
+| 167.1.1.2 AUMBASIS | 6/6 | Complete — commit sizing on the equity basis, a missing P&L stored and shown as missing; SC-4 PROD AFTER reading as expected (past commits untouched), 375 px and 200% zoom wrap passed; verification passed; SECURED 21/21 | 2026-10-21 · v0.132.7.0 · #1087 |
 | 167.1.2 ACCOUNTTRUTH | PR A, B, C1–C5 shipped | Complete | 2026-10-11 |
 | 167.1.2.1 RECONMARKER | 10/10 | Complete — D-11 day-0 and day-1 PROD reads as expected, capped_events 0; verification passed, SECURED 33/33 | 2026-10-16 · v0.131.3.0 · #1022, v0.131.8.0 · #1033 |
 | 167.1.2.1.1 WRITERRESIDUALS | 4/4 | Complete — VERIFICATION passed 9/9, SECURED 20/20; three minimal fix rounds (D-15), new-book wait accepted as a known limit (D-16); deployed 20:33Z outside the 03:30–06:45 window | 2026-10-19 · v0.132.5.0 · #1079 |
