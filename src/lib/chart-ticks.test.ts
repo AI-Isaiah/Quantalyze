@@ -2,6 +2,8 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   TICK_SNAP_RATIO,
   decimalExponent,
+  estLabelWidth,
+  fitTickLabel,
   niceStepValues,
   pow10,
   tickTolerance,
@@ -244,5 +246,45 @@ describe("tickTolerance", () => {
 
   it("ignores repeated values when finding the smallest gap", () => {
     expect(tickTolerance([1, 1, 3])).toBe(2 * TICK_SNAP_RATIO);
+  });
+});
+
+/**
+ * Phase 170.1.3 NARROWCHARTS (D-02, UI-SPEC C-3). One shared rule decides where
+ * an axis label is anchored so its box stays inside its own svg. The estimate is
+ * deterministic (no DOM read) so the server and the browser emit the same
+ * markup: a label that crosses an edge only on one side would be React #418.
+ */
+describe("estLabelWidth", () => {
+  it("is length x fontSize x 0.6, the Geist Mono advance", () => {
+    expect(estLabelWidth("2025", 15)).toBe(36);
+    // 9 * 16 * 0.6 is 86.39999999999999 in IEEE-754.
+    expect(estLabelWidth("P95 +0.1%", 16)).toBeCloseTo(86.4, 9);
+  });
+});
+
+describe("fitTickLabel", () => {
+  it("anchors a first-year brush tick at x = 6 to start, because centred it would cross the left edge", () => {
+    expect(fitTickLabel(6, "2025", 15, 0, 1100)).toEqual({ x: 6, textAnchor: "start" });
+  });
+
+  it("anchors a right-edge reference label to end, because centred it would cross the right edge", () => {
+    expect(fitTickLabel(860, "P95 +0.1%", 16, 0, 880)).toEqual({ x: 860, textAnchor: "end" });
+  });
+
+  it("keeps the caller's anchor and x for a label that already fits", () => {
+    expect(fitTickLabel(440, "P95 +0.1%", 16, 0, 880)).toEqual({ x: 440, textAnchor: "middle" });
+    expect(fitTickLabel(100, "2025", 15, 0, 1100, "start")).toEqual({ x: 100, textAnchor: "start" });
+    expect(fitTickLabel(400, "2025", 15, 0, 1100, "end")).toEqual({ x: 400, textAnchor: "end" });
+  });
+
+  it("returns end for a start-anchored box that crosses the right edge", () => {
+    expect(fitTickLabel(860, "P95 +0.1%", 16, 0, 880, "start")).toEqual({ x: 860, textAnchor: "end" });
+  });
+
+  it("never moves x and a box exactly on the edge still fits", () => {
+    // Centred "2025" at font 15 spans 36: x = 18 puts its left edge exactly at 0.
+    expect(fitTickLabel(18, "2025", 15, 0, 1100)).toEqual({ x: 18, textAnchor: "middle" });
+    expect(fitTickLabel(17.9, "2025", 15, 0, 1100).x).toBe(17.9);
   });
 });

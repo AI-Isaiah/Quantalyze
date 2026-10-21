@@ -104,3 +104,50 @@ export function tickTolerance(values: readonly number[]): number {
   }
   return minGap === Infinity ? 0 : minGap * TICK_SNAP_RATIO;
 }
+
+/** The SVG `text-anchor` values a tick label can take. */
+export type TickLabelAnchor = "start" | "middle" | "end";
+
+/**
+ * Estimated rendered width of a label, in the SVG's own user units:
+ * `label.length * fontSize * 0.6`. Geist Mono advances 0.6 em, so this is exact
+ * for the mono labels and an over-estimate for DM Sans, which only makes
+ * `fitTickLabel` anchor inward slightly earlier.
+ *
+ * Deterministic on purpose (Phase 170.1.3 NARROWCHARTS). A DOM measurement
+ * (`getBBox`, `getComputedTextLength`) would give the server and the browser
+ * different answers and so different markup, which is React #418 (the reason
+ * this module exists).
+ */
+export function estLabelWidth(label: string, fontSize: number): number {
+  return label.length * fontSize * 0.6;
+}
+
+/**
+ * Where an axis tick label is anchored so that its box stays inside its own
+ * SVG (Phase 170.1.3 D-02, UI-SPEC C-3). `x` is the tick position, `[minX,
+ * maxX]` the SVG's own coordinate extent (`0` and `width`, or `0` and the
+ * viewBox width), `anchor` the caller's default (usually `"middle"`).
+ *
+ * The estimated box is computed for the given anchor. A box whose left edge is
+ * below `minX` returns `"start"` (the label starts at its tick); otherwise a
+ * box whose right edge is above `maxX` returns `"end"` (the label ends at its
+ * tick); otherwise the caller's anchor. `x` is never moved and a label that
+ * already fits keeps its position, which is what keeps a wide desktop chart
+ * unchanged. Labels are never hidden, truncated or shrunk.
+ */
+export function fitTickLabel(
+  x: number,
+  label: string,
+  fontSize: number,
+  minX: number,
+  maxX: number,
+  anchor: TickLabelAnchor = "middle",
+): { x: number; textAnchor: TickLabelAnchor } {
+  const w = estLabelWidth(label, fontSize);
+  const left = anchor === "middle" ? x - w / 2 : anchor === "start" ? x : x - w;
+  const right = left + w;
+  if (left < minX) return { x, textAnchor: "start" };
+  if (right > maxX) return { x, textAnchor: "end" };
+  return { x, textAnchor: anchor };
+}
