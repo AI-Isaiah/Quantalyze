@@ -672,7 +672,7 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "process_key_long": 30 * 60,   # Phase 19 / BACKBONE-09 — 30 min ceiling supports 90-day OKX archive backfill
     "derive_broker_dailies": 15 * 60,  # full-history realized PnL + funding fetch (mirrors sync_trades envelope)
     "stitch_composite": 20 * 60,  # Phase 86 / COMP-02 — N-member fan-out (worst case 2× crawl per key when MTM open)
-    "derive_allocator_equity": 5 * 60,  # Phase 115.1 / RD-3 Option B — pure DB + math, no exchange I/O (5 min < 10 min watchdog floor → no override needed)
+    "derive_allocator_equity": 5 * 60,  # Phase 115.1 / RD-3 Option B — pure DB + math, no exchange I/O; watchdog override is 20 min in main_worker.WATCHDOG_PER_KIND_OVERRIDES because measured claim-to-done exceeds the 10 min default (D-03, 166.5.1)
     # Phase 167.1.2.2.2.1 / OKXHISTORY (D-04) — the 2-3 h wait for OKX to generate a
     # quarterly file is NOT this timeout: it is defer_compute_job, which returns the row to
     # pending between claims. But ONE calibrate or apply claim does ALL of the rest in
@@ -13893,7 +13893,9 @@ async def report_orphaned_capped_reconstructs() -> None:
                 .execute()
             )
 
-        rows = getattr(await db_execute(_sel), "data", None) or []
+        # QUANTALYZE-2E (Phase 166.5.1, D-02a): this compute_jobs read retries a
+        # transient ReadTimeout. An exhausted read is still captured below.
+        rows = getattr(await db_read_with_retry(_sel), "data", None) or []
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "history reconstruct orphan sweep: job read failed: %s "

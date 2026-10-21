@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.132.10.2] - 2026-10-21 — SENTRYTRIAGE: the three unbooked production Sentry groups are fixed at their cause (Phase 166.5.1)
+
+### Root cause
+- QUANTALYZE-Z: the hourly match cron's allocator query (`.in_("role", ["allocator", "both"])`) never excluded the demo allocator, so a post-filter logged an ERROR on every run.
+- QUANTALYZE-2B/2C/2D/2E/2F/2G: `db_read_with_retry` retried only a gateway 504. An httpx `ReadTimeout` on a pure read, the job claim or the watchdog reset propagated on the first attempt.
+- QUANTALYZE-2A/A: `derive_allocator_equity` had no watchdog override, so the 10-minute default could reset a run still working under its runner (PROD, 14 days: 110 jobs, median 5.8 s, whole 5-job batches up to 606 s), and the first runner's mark was then refused.
+
+### Fixed
+- The cron's allocator query excludes the demo allocator with `.neq` (D-01). The dead demo ERROR block and the unreachable nothing-handled branch are removed; that state now raises `RuntimeError`. The scoring-time demo boundaries are unchanged.
+- `db_read_with_retry` retries a `ReadTimeout` through the new `_is_transient_read_error` (D-02/D-02a); `_is_gateway_timeout` keeps its 504-only meaning for `account_identity.py`. The retry warning names the real exception class, and the kill-switch log reads "transient timeout, retries exhausted".
+- The four reads Sentry named retry their own single query: 2E the orphan-sweep read in `report_orphaned_capped_reconstructs`, 2F both reads in `_should_skip_allocator`, 2D the `allocator_preferences` read in `_load_allocator_context`, 2G the marker read in `read_native_unpriced_days`. 2D and 2G run in worker threads, so they use the new `db_read_with_retry_sync`, which shares the predicate and budget.
+- `WATCHDOG_PER_KIND_OVERRIDES["derive_allocator_equity"] = "20 minutes"` (D-03, D-05).
+
+### Changed
+- `db_read_with_retry` takes a keyword-only `retry_on=` (default: the transient predicate). The resync guard and verification reads in `routers/process_key.py` pass `_is_gateway_timeout`, so a `ReadTimeout` there is one attempt and a 504 keeps its retry (D-06, founder 2026-10-21).
+
+### Tests
+- Every new test was run red against the pre-change code first. A watchdog reproduction test (it models the SQL threshold rule from migration `20260516104201`, it does not run it) and a BACKFILL_KINDS invariant fail for any backfill override under 2 x 600 s. ReadTimeout retry, exhaustion and predicate tests cover the async helper, the sync twin and each named read; the resync reads are pinned to one attempt.
+
+### Notes
+- Worst case per retried read is now about 6 minutes (3 x the 120 s client read timeout plus backoff), against 120 s before, and only while PostgREST is failing. The claim can hold the worker healthz stale for that long, and one `watchdog_loop` iteration can take about 12 minutes. Accepted under D-02a.
+- SC-3 is partly met (D-05): a derive run behind slow 5-job batch-mates can still pass 20 minutes. Booked as TODOS `166.5.1-DERIVE-BATCH-RESET-RESIDUAL`, routed to the deferred heartbeat/lease work.
+- SC-4, the 48 h Sentry readout, runs after the Railway deploy.
+
 ## [0.132.10.1] - 2026-10-21 — records: close LABELS 170.1.2
 
 ### Notes

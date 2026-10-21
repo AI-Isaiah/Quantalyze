@@ -46,7 +46,7 @@ from pydantic import BaseModel, ValidationInfo, field_validator, model_validator
 
 from services import exchange as exchange_svc
 from services.basis_series import derive_basis_series
-from services.db import db_read_with_retry, get_supabase, one, rows
+from services.db import _is_gateway_timeout, db_read_with_retry, get_supabase, one, rows
 from services.ingestion import get_adapter
 from services.ingestion.adapter import FlowType, KeySubmissionRequest, Source, Trade
 from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
@@ -1691,8 +1691,10 @@ async def process_key(
     # Tenant scope is the same as the draft pre-check's: this runs after the
     # `_caller_owns_strategy` gate, so the strategy_id filter carries it.
     #
-    # Both reads go through `db_read_with_retry` (a gateway 504 is retried inside
-    # one gateway window). If the job read still fails, the guard is SKIPPED and
+    # Both reads go through `db_read_with_retry` with `retry_on=_is_gateway_timeout`
+    # (a gateway 504 is retried inside one gateway window; a ReadTimeout is one
+    # attempt, so a user's click is never held for the ReadTimeout retry budget:
+    # Phase 166.5.1, D-06). If the job read still fails, the guard is SKIPPED and
     # the resync takes the path it took before this guard existed, logged with
     # context and reported (`_report_guard_read_failure`: a DB or network error
     # at warning, anything else at error with an exception capture, and the
@@ -1721,7 +1723,8 @@ async def process_key(
                     .gte("created_at", live_cutoff.isoformat())
                     .order("created_at", desc=True)
                     .limit(20)
-                    .execute()
+                    .execute(),
+                    retry_on=_is_gateway_timeout,
                 )
             )
         except Exception as exc:  # noqa: BLE001 — classified and reported below
@@ -1768,7 +1771,8 @@ async def process_key(
                         .order("created_at", desc=True)
                         .limit(1)
                         .maybe_single()
-                        .execute()
+                        .execute(),
+                        retry_on=_is_gateway_timeout,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 — a job IS in flight; reply without it
