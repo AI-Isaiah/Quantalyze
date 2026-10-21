@@ -818,3 +818,314 @@ export async function assertPinnedCellsMatchHeaders(
   if (res.problems.length) throw new Error(res.problems.join("; "));
   return { rows: res.rows, stops: ["0", "max"] };
 }
+
+/**
+ * Phase 170.1.3 NARROWCHARTS — svg text geometry.
+ *
+ * `readSvgTextLayout` reads, in ONE page.evaluate, every svg under a root that
+ * matches a selector, in DOM order, with each non-empty `<text>` it contains.
+ * `assertSvgTextInsideSvg` turns that reading into the clip gate. Both are
+ * measurement only: nothing here decides a rendered position (React #418 is
+ * the app's concern, not this probe's).
+ *
+ * The bound a text is held to (per axis):
+ *  - svg overflow NOT `visible` (the UA default for a non-root svg): the svg's
+ *    own rect, within 0.5 px.
+ *  - svg overflow `visible` (e.g. `className="overflow-visible"`): the padding
+ *    box of the nearest ancestor that really cuts on that axis. Horizontally
+ *    any non-`visible` overflow counts (a sideways scroller or a hidden box
+ *    both mean the label is not wholly on screen at a fixed scroll position);
+ *    vertically only `hidden` / `clip` count, because a vertical scroller
+ *    reaches content below its fold by scrolling, so its padding box is not a
+ *    bound. With no cutting ancestor the horizontal bound is the viewport
+ *    width. The vertical axis is then unbounded: a page scrolls vertically, so
+ *    a text below the fold is not clipped.
+ */
+
+export interface SvgTextEmitterDef {
+  /** Stable key the reading and the MEASUREMENT note refer to. */
+  key: string;
+  /** `svg.matches(selector)`; may carry a descendant combinator. */
+  selector: string;
+  /** When set, the svg must also sit inside a `div` whose first child is an `h3` with exactly this text. */
+  headingText?: string;
+}
+
+export interface SvgTextEntry {
+  text: string;
+  /** The `text-anchor` attribute, `start` (the SVG initial value) when absent. */
+  anchor: string;
+  /** True when the text is a Recharts x-axis tick label. Recharts 3 draws those in a sibling `.recharts-xAxis-tick-labels` layer, not inside `.recharts-xAxis`. */
+  inXAxis: boolean;
+  /** Signed exceedance beyond the bound, positive = outside; null = that axis is unbounded. */
+  exceed: {
+    left: number | null;
+    right: number | null;
+    top: number | null;
+    bottom: number | null;
+  };
+  /** Largest positive exceedance over the four sides (0 when inside), 2 dp. */
+  overflowPx: number;
+  /** The cutting ancestor that bounded the worst side, or null (own svg rect / viewport). */
+  boundedBy: string | null;
+  rect: { left: number; top: number; right: number; bottom: number };
+}
+
+export interface SvgTextLayout {
+  index: number;
+  label: string | null;
+  emitter: string | null;
+  width: number;
+  rect: Rect;
+  overflow: string;
+  texts: SvgTextEntry[];
+}
+
+export async function readSvgTextLayout(
+  page: Page,
+  rootSelector: string,
+  svgSelector = "svg",
+  emitters: SvgTextEmitterDef[] = [],
+): Promise<SvgTextLayout[]> {
+  return page.evaluate(
+    ({ rootSelector, svgSelector, emitters }) => {
+      const roots = Array.from(document.querySelectorAll(rootSelector));
+      const svgs: SVGSVGElement[] = [];
+      for (const root of roots) {
+        for (const s of Array.from(root.querySelectorAll<SVGSVGElement>(svgSelector))) {
+          if (!svgs.includes(s)) svgs.push(s);
+        }
+      }
+      const short = (el: Element): string => {
+        const cls =
+          typeof (el as HTMLElement).className === "string"
+            ? String((el as HTMLElement).className).split(" ").filter(Boolean).slice(0, 2).join(".")
+            : "";
+        return `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}${cls ? `.${cls}` : ""}`;
+      };
+      const round = (n: number) => Math.round(n * 100) / 100;
+      const out: unknown[] = [];
+      let index = 0;
+      for (const svg of svgs) {
+        const sr = svg.getBoundingClientRect();
+        if (sr.width === 0 || sr.height === 0) continue;
+        const cs = getComputedStyle(svg);
+        const texts: unknown[] = [];
+        for (const t of Array.from(svg.querySelectorAll("text"))) {
+          const raw = (t.textContent ?? "").trim();
+          if (raw.length === 0) continue;
+          const r = t.getBoundingClientRect();
+          if (r.width === 0 && r.height === 0) continue;
+          // Per-axis bound.
+          let loX = sr.left;
+          let hiX = sr.right;
+          let loY: number | null = sr.top;
+          let hiY: number | null = sr.bottom;
+          let byX: string | null = null;
+          let byY: string | null = null;
+          if (cs.overflowX === "visible") {
+            loX = 0;
+            hiX = document.documentElement.clientWidth;
+            let a = svg.parentElement;
+            while (a && a !== document.documentElement) {
+              const acs = getComputedStyle(a);
+              if (acs.overflowX !== "visible") {
+                const box = a.getBoundingClientRect();
+                loX = box.left + a.clientLeft;
+                hiX = loX + a.clientWidth;
+                byX = short(a);
+                break;
+              }
+              a = a.parentElement;
+            }
+          }
+          if (cs.overflowY === "visible") {
+            loY = null;
+            hiY = null;
+            let a = svg.parentElement;
+            while (a && a !== document.documentElement) {
+              const acs = getComputedStyle(a);
+              if (acs.overflowY === "hidden" || acs.overflowY === "clip") {
+                const box = a.getBoundingClientRect();
+                loY = box.top + a.clientTop;
+                hiY = loY + a.clientHeight;
+                byY = short(a);
+                break;
+              }
+              a = a.parentElement;
+            }
+          }
+          const exceed = {
+            left: round(loX - r.left),
+            right: round(r.right - hiX),
+            top: loY === null ? null : round(loY - r.top),
+            bottom: hiY === null ? null : round(r.bottom - hiY),
+          };
+          const sides: [string, number | null, string | null][] = [
+            ["left", exceed.left, byX],
+            ["right", exceed.right, byX],
+            ["top", exceed.top, byY],
+            ["bottom", exceed.bottom, byY],
+          ];
+          let worst = 0;
+          let boundedBy: string | null = null;
+          for (const [, v, by] of sides) {
+            if (v !== null && v > worst) {
+              worst = v;
+              boundedBy = by;
+            }
+          }
+          texts.push({
+            text: raw,
+            anchor: t.getAttribute("text-anchor") ?? "start",
+            inXAxis: t.closest(".recharts-xAxis-tick-labels, .recharts-xAxis") !== null,
+            exceed,
+            overflowPx: round(worst),
+            boundedBy,
+            rect: { left: round(r.left), top: round(r.top), right: round(r.right), bottom: round(r.bottom) },
+          });
+        }
+        if (texts.length === 0) continue;
+        let emitter: string | null = null;
+        for (const e of emitters) {
+          if (!svg.matches(e.selector)) continue;
+          if (e.headingText !== undefined) {
+            let a: Element | null = svg.parentElement;
+            let ok = false;
+            while (a && a !== document.documentElement) {
+              const first = a.firstElementChild;
+              if (
+                a.tagName === "DIV" &&
+                first &&
+                first.tagName === "H3" &&
+                (first.textContent ?? "").trim() === e.headingText
+              ) {
+                ok = true;
+                break;
+              }
+              a = a.parentElement;
+            }
+            if (!ok) continue;
+          }
+          emitter = e.key;
+          break;
+        }
+        const own = svg.getAttribute("aria-label");
+        const viaAncestor = svg.closest("[aria-label]")?.getAttribute("aria-label") ?? null;
+        out.push({
+          index: index++,
+          label: own ?? viaAncestor,
+          emitter,
+          width: round(sr.width),
+          rect: { x: round(sr.x), y: round(sr.y), width: round(sr.width), height: round(sr.height) },
+          overflow: `${cs.overflowX}/${cs.overflowY}`,
+          texts,
+        });
+      }
+      return out;
+    },
+    { rootSelector, svgSelector, emitters },
+  ) as Promise<SvgTextLayout[]>;
+}
+
+export interface RequiredEmitter {
+  key: string;
+  /** Minimum measured texts (default 1). */
+  minTexts?: number;
+  /** Minimum measured texts inside a Recharts x axis (default 0). */
+  minXAxisTexts?: number;
+}
+
+/**
+ * Fails with one `NARROWCHARTS-EMITTER-MISSING <label> <emitter>` line per
+ * required emitter that contributed too few measured texts, so a collapsed
+ * section or a moved selector can never read as a clean pass.
+ */
+export function assertEmittersMeasured(
+  layouts: SvgTextLayout[],
+  label: string,
+  required: RequiredEmitter[],
+): void {
+  const missing: string[] = [];
+  for (const req of required) {
+    const mine = layouts.filter((l) => l.emitter === req.key);
+    const texts = mine.reduce((n, l) => n + l.texts.length, 0);
+    const xTexts = mine.reduce((n, l) => n + l.texts.filter((t) => t.inXAxis).length, 0);
+    if (texts < (req.minTexts ?? 1) || xTexts < (req.minXAxisTexts ?? 0)) {
+      missing.push(
+        `NARROWCHARTS-EMITTER-MISSING ${label} ${req.key} (texts=${texts}, xAxisTexts=${xTexts})`,
+      );
+    }
+  }
+  if (missing.length > 0) {
+    for (const m of missing) console.log(m);
+    throw new Error(missing.join("\n"));
+  }
+}
+
+const CLIP_SLOP_PX = 0.5;
+
+/**
+ * Every non-empty `svg text` under `rootSelector` (limited to svgs matching
+ * `svgSelector`) lies inside its bound within 0.5 px, per the rule in the
+ * block comment above. Offenders are accumulated, printed one per line as
+ * `NARROWCHARTS-CLIPPED <label> <svg aria-label or index> "<text>" <side> <px> [by <ancestor>]`,
+ * and reported once at the end. A text that sits beyond an overflow-visible svg
+ * but inside its cutting ancestor prints `NARROWCHARTS-OVERFLOW-VISIBLE-OK`.
+ * Zero measured texts fails: an empty chart must not read as "nothing clipped".
+ *
+ * `label` is the "<surface> <viewport>" prefix of every printed line.
+ */
+export async function assertSvgTextInsideSvg(
+  page: Page,
+  rootSelector: string,
+  label: string,
+  svgSelector = "svg",
+  options: { emitters?: SvgTextEmitterDef[]; required?: RequiredEmitter[] } = {},
+): Promise<SvgTextLayout[]> {
+  const layouts = await readSvgTextLayout(page, rootSelector, svgSelector, options.emitters ?? []);
+  if (options.required) assertEmittersMeasured(layouts, label, options.required);
+  const measured = layouts.reduce((n, l) => n + l.texts.length, 0);
+  if (measured === 0) {
+    throw new Error(
+      `${label}: no svg text measured under ${rootSelector} / ${svgSelector} — an empty page must not pass (W-02)`,
+    );
+  }
+  const offenders: string[] = [];
+  for (const l of layouts) {
+    const who = l.label ?? `svg#${l.index}`;
+    const visible = l.overflow.startsWith("visible");
+    for (const t of l.texts) {
+      const sides: [string, number | null][] = [
+        ["left", t.exceed.left],
+        ["right", t.exceed.right],
+        ["top", t.exceed.top],
+        ["bottom", t.exceed.bottom],
+      ];
+      for (const [side, px] of sides) {
+        if (px === null || px <= CLIP_SLOP_PX) continue;
+        offenders.push(
+          `NARROWCHARTS-CLIPPED ${label} ${who} "${t.text}" ${side} ${px}${t.boundedBy ? ` by ${t.boundedBy}` : ""}`,
+        );
+      }
+      if (visible && t.overflowPx <= CLIP_SLOP_PX) {
+        // Beyond the svg box but inside the cutting ancestor is not an offender.
+        const beyondSvg =
+          t.rect.left < l.rect.x - CLIP_SLOP_PX ||
+          t.rect.right > l.rect.x + l.rect.width + CLIP_SLOP_PX ||
+          t.rect.top < l.rect.y - CLIP_SLOP_PX ||
+          t.rect.bottom > l.rect.y + l.rect.height + CLIP_SLOP_PX;
+        if (beyondSvg) {
+          console.log(`NARROWCHARTS-OVERFLOW-VISIBLE-OK ${label} ${who} "${t.text}"`);
+        }
+      }
+    }
+  }
+  for (const o of offenders) console.log(o);
+  console.log(`${label}: measured ${measured} svg text(s) in ${layouts.length} svg(s), ${offenders.length} clipped side(s)`);
+  expect(
+    offenders,
+    `${label}: ${offenders.length} svg text side(s) clipped:\n${offenders.join("\n")}`,
+  ).toEqual([]);
+  return layouts;
+}
