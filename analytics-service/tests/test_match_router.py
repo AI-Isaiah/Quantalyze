@@ -4196,25 +4196,32 @@ class TestForceThrottleLockAtomicity:
 
 
 # ---------------------------------------------------------------------------
-# M-3 (red-team) — cron skips demo allocator if it appears in allocators list
+# D-01 (QUANTALYZE-Z) — the cron never fetches the demo allocator
 # ---------------------------------------------------------------------------
 
 
 class TestCronSkipsDemoAllocator:
-    """M-3 (red-team): the cron must log at ERROR and filter out the demo
-    allocator if it appears in the role IN ('allocator','both') query result.
-    The demo allocator must never be processed with the full (non-demo-filtered)
-    universe."""
+    """D-01 (QUANTALYZE-Z): the cron's allocator query excludes the demo
+    allocator itself, so the cron never fetches it and logs nothing about it.
+
+    This replaces M-3, which fetched the demo allocator, dropped it after the
+    fact and logged an ERROR on every run (87 events in 7 days). That ERROR
+    reported no breach: the query never excluded the id, and its advice named
+    a `profiles` column PROD does not have. The demo allocator must still
+    never be scored with the full (non-demo-filtered) universe, and now the
+    query guarantees it before any row comes back."""
 
     @pytest.mark.asyncio
-    async def test_demo_allocator_filtered_from_cron_with_error_log(
+    async def test_demo_allocator_never_fetched_or_scored_and_nothing_logged_at_error(
         self, monkeypatch, caplog
     ):
         from routers import match as match_mod
 
+        match_mod._reset_kill_switch_cache()
         demo_id = match_mod._DEMO_ALLOCATOR_ID
         real_id = str(uuid4())
-        scored = []
+        profiles_fakes: list[_FakeProfilesQuery] = []
+        scored: list[str] = []
 
         async def _mock_score(aid, universe):
             scored.append(aid)
@@ -4222,18 +4229,26 @@ class TestCronSkipsDemoAllocator:
         async def _no_skip(allocator_id, force):
             return False
 
-        def _make_allocator_sb(ids):
-            sb = MagicMock()
-            sb.table.return_value.select.return_value.in_.return_value.neq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
-                data=[{"id": i} for i in ids]
-            )
-            sb.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
-                data={"enabled": True}
-            )
-            return sb
+        async def _no_cursor():
+            return None
+
+        async def _write_cursor(value):
+            return None
+
+        def _table(name: str):
+            if name == "profiles":
+                fake = _FakeProfilesQuery([demo_id, real_id])
+                profiles_fakes.append(fake)
+                return fake
+            return MagicMock()
+
+        sb = MagicMock()
+        sb.table.side_effect = _table
 
         monkeypatch.setattr(match_mod, "_engine_is_enabled", _async_engine_state(True))
-        monkeypatch.setattr(match_mod, "get_supabase", lambda: _make_allocator_sb([demo_id, real_id]))
+        monkeypatch.setattr(match_mod, "_read_cron_cursor", _no_cursor)
+        monkeypatch.setattr(match_mod, "_write_cron_cursor", _write_cursor)
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
         monkeypatch.setattr(
             match_mod, "_load_candidate_universe",
             lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
@@ -4242,20 +4257,23 @@ class TestCronSkipsDemoAllocator:
         monkeypatch.setattr(match_mod, "_score_one_allocator", _mock_score)
         monkeypatch.setattr(match_mod, "_retention_sweep", lambda *_: 0)
 
-        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
-            result = await match_mod.cron_recompute()
+        with caplog.at_level("ERROR"):
+            await match_mod.cron_recompute()
 
-        # Demo allocator must NOT have been scored
-        assert demo_id not in scored, (
-            "demo allocator must be filtered from cron scoring when it appears "
-            "in the allocators list"
+        # The demo allocator must NOT have been scored; the real one is.
+        assert scored == [real_id], (
+            "only the real allocator may be scored; the demo allocator must "
+            f"never reach the cron's scoring loop: {scored!r}"
         )
-        # Must log at ERROR to surface the invariant violation
-        assert any(
+        # The Sentry symptom itself: no ERROR about the demo allocator.
+        assert not any(
             "demo allocator" in rec.getMessage().lower()
             and rec.levelname == "ERROR"
             for rec in caplog.records
-        ), "demo allocator in cron list must log at ERROR (M-3)"
+        ), "the cron must log nothing at ERROR about the demo allocator (D-01)"
+        # The mechanism: the query excluded the id, it was not filtered later.
+        assert len(profiles_fakes) == 1
+        assert profiles_fakes[0].neq_calls == [("id", demo_id)]
 
 
 # ---------------------------------------------------------------------------
