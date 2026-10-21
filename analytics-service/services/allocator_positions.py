@@ -75,7 +75,7 @@ from services.closed_sets import (
     sfox_enabled_server,
 )
 from services.benchmark import BtcClosesReadError, read_btc_closes
-from services.db import db_execute
+from services.db import db_execute, db_read_with_retry_sync
 from services.mt5_client import (
     Mt5AccountMismatchError,
     Mt5ClientError,
@@ -1758,13 +1758,20 @@ def read_native_unpriced_days(
     if not api_key_ids:
         return {}
     kinds = [NATIVE_UNPRICED_KIND_PREFIX + k for k in api_key_ids]
-    res = (
-        supabase_client.table("allocator_equity_derived")
-        .select("kind, payload")
-        .eq("allocator_id", allocator_id)
-        .in_("kind", kinds)
-        .execute()
-    )
+
+    # QUANTALYZE-2G (Phase 166.5.1, D-02a): this single select retries a transient
+    # ReadTimeout through the synchronous twin (every caller runs in a worker thread).
+    # Only the select is wrapped; a read that still fails after the budget raises as before.
+    def _read() -> Any:
+        return (
+            supabase_client.table("allocator_equity_derived")
+            .select("kind, payload")
+            .eq("allocator_id", allocator_id)
+            .in_("kind", kinds)
+            .execute()
+        )
+
+    res = db_read_with_retry_sync(_read)
     day_by_key: dict[str, str] = {}
     for row in getattr(res, "data", None) or []:
         kind = row.get("kind")

@@ -648,3 +648,81 @@ async def test_read_with_retry_warning_names_the_real_class(
     assert msgs, "a retry must log a warning"
     assert "ReadTimeout" in msgs[0] and "transient timeout" in msgs[0], msgs[0]
     assert "gateway timeout" not in msgs[0], msgs[0]
+
+
+# ---------------------------------------------------------------------------
+# db_read_with_retry_sync: the twin for reads inside worker-thread functions
+# (Phase 166.5.1 plan 04, D-02a). QUANTALYZE-2D and 2G sit in synchronous
+# functions that run under asyncio.to_thread / db_execute, where the async
+# helper cannot be awaited. The twin must share the async helper's predicate
+# and budget, or the two seams drift apart and one of them stops retrying a
+# class the other retries.
+# ---------------------------------------------------------------------------
+
+
+def test_read_with_retry_sync_retries_read_timeout_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from services.db import db_read_with_retry_sync
+
+    _zero_backoff(monkeypatch)
+    fn = _ScriptedCall([httpx.ReadTimeout("The read operation timed out"), "ok"])
+    assert db_read_with_retry_sync(fn) == "ok"
+    assert fn.calls == 2
+
+
+def test_read_with_retry_sync_exhausted_read_timeout_reraises_same_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from services.db import DB_READ_MAX_RETRIES, db_read_with_retry_sync
+
+    _zero_backoff(monkeypatch)
+    exc = httpx.ReadTimeout("The read operation timed out")
+    fn = _ScriptedCall([exc])
+    with pytest.raises(httpx.ReadTimeout) as excinfo:
+        db_read_with_retry_sync(fn)
+    assert excinfo.value is exc, "exhaustion is a bare re-raise, never a re-wrap"
+    assert fn.calls == DB_READ_MAX_RETRIES
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param("ConnectTimeout", id="connect"),
+        pytest.param("RuntimeError", id="plain"),
+    ],
+)
+def test_read_with_retry_sync_does_not_retry_other_errors(
+    monkeypatch: pytest.MonkeyPatch, exc: str
+) -> None:
+    import httpx
+
+    from services.db import db_read_with_retry_sync
+
+    _zero_backoff(monkeypatch)
+    cls = RuntimeError if exc == "RuntimeError" else getattr(httpx, exc)
+    err = cls("boom")
+    fn = _ScriptedCall([err, "ok"])
+    with pytest.raises(cls) as excinfo:
+        db_read_with_retry_sync(fn)
+    assert excinfo.value is err
+    assert fn.calls == 1, f"{exc} must propagate on the first attempt"
+
+
+def test_read_with_retry_sync_retries_a_gateway_504(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins the SHARED predicate: the twin retries a 504 exactly as the async helper does."""
+    from services.db import db_read_with_retry_sync
+
+    class _Coded(Exception):
+        code = "504"
+
+    _zero_backoff(monkeypatch)
+    fn = _ScriptedCall([_Coded("gateway"), "ok"])
+    assert db_read_with_retry_sync(fn) == "ok"
+    assert fn.calls == 2

@@ -13893,7 +13893,9 @@ async def report_orphaned_capped_reconstructs() -> None:
                 .execute()
             )
 
-        rows = getattr(await db_execute(_sel), "data", None) or []
+        # QUANTALYZE-2E (Phase 166.5.1, D-02a): this compute_jobs read retries a
+        # transient ReadTimeout. An exhausted read is still captured below.
+        rows = getattr(await db_read_with_retry(_sel), "data", None) or []
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "history reconstruct orphan sweep: job read failed: %s "
