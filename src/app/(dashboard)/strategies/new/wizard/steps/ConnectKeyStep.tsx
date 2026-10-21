@@ -41,6 +41,7 @@ import {
 import { venueSecretIsVerbatim } from "@/lib/closed-sets";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
+import { venueLabel } from "@/lib/display-labels";
 
 /**
  * ConnectKeyStep renders the exchange selector, the inline permission
@@ -1289,7 +1290,7 @@ export function ConnectKeyStep({
           // exchange still sends its real secret).
           api_secret: requiresSecret ? apiSecret : "",
           passphrase: requiresPassphrase ? passphrase : null,
-          label: nickname.trim() || `${exchange} key`,
+          label: nickname.trim() || `${venueLabel(exchange)} key`,
           wizard_session_id: wizardSessionId,
         }),
       }, {
@@ -1975,7 +1976,7 @@ export function ConnectKeyStep({
             label="Key nickname (optional)"
             value={nickname}
             onChange={(e) => setNickname(e.target.value)}
-            placeholder={`e.g. ${exchange} · prod`}
+            placeholder={`e.g. ${venueLabel(exchange)} · prod`}
             autoComplete="off"
           />
           <p className="mt-1 text-micro text-text-muted">

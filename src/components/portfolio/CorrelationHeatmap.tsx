@@ -236,7 +236,7 @@ export function CorrelationHeatmap({
 
   const n = ids.length;
   function label(id: string): string {
-    return strategyNames[id] ?? id.slice(0, 8);
+    return strategyNames[id] ?? "Unnamed strategy";
   }
   // How many off-diagonal pairs the caption's average covers. A pair whose
   // correlation is undefined has no cell (the engine leaves it out, founder

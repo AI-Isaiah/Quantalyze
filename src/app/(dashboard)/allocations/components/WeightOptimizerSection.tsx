@@ -272,7 +272,7 @@ export function WeightOptimizerSection({ strategies, onApply }: WeightOptimizerS
                   data-testid={`optimizer-weight-${id}`}
                   className="flex items-center justify-between border-b border-border/50 bg-surface px-4 py-2 last:border-b-0"
                 >
-                  <span className="text-xs text-text-secondary">{nameById.get(id) ?? id}</span>
+                  <span className="text-xs text-text-secondary">{nameById.get(id) ?? "Unnamed strategy"}</span>
                   <span className="text-xs font-metric text-text-secondary">{formatPercent(w)}</span>
                 </div>
               ))}

@@ -1,3 +1,4 @@
+import { notFound } from "next/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { extractAnalytics } from "@/lib/queries";
@@ -64,9 +65,9 @@ export default async function PortfolioPdfPage({
   const renderToken = typeof sp.renderToken === "string" ? sp.renderToken : null;
 
   if (!verifyPdfRenderToken(id, renderToken)) {
-    return (
-      <div className="p-8 text-center text-text-muted">Unauthorized.</div>
-    );
+    // Non-2xx so the PDF route's status guard refuses it; a 200 "Unauthorized."
+    // div would be printed and delivered as the report.
+    notFound();
   }
 
   const admin = createAdminClient();
@@ -92,13 +93,28 @@ export default async function PortfolioPdfPage({
       .order("added_at", { ascending: false }),
   ]);
 
+  // A failed read must fail the render: swallowing it prints an empty report
+  // as a 200 PDF. Each message names the read and the portfolio.
+  if (portfolioRes.error) {
+    throw new Error(
+      `portfolio read failed for portfolio ${id}: ${portfolioRes.error.message}`,
+    );
+  }
+  if (analyticsRes.error) {
+    throw new Error(
+      `portfolio analytics read failed for portfolio ${id}: ${analyticsRes.error.message}`,
+    );
+  }
+  if (strategiesRes.error) {
+    throw new Error(
+      `portfolio strategies read failed for portfolio ${id}: ${strategiesRes.error.message}`,
+    );
+  }
+
   const { data: portfolio } = portfolioRes;
   if (!portfolio) {
-    return (
-      <div className="p-8 text-center text-text-muted">
-        Portfolio not found.
-      </div>
-    );
+    // Non-2xx for the same reason as the token gate above.
+    notFound();
   }
 
   // Route ALL portfolio_analytics reads through the adapter so malformed
@@ -147,7 +163,7 @@ export default async function PortfolioPdfPage({
     // Weight comes from portfolio_strategies, TWR from the strategy's own analytics.
     return {
       strategy_id: ps.strategy_id,
-      name: s?.name ?? "Unknown",
+      name: s?.name ?? "Unnamed strategy",
       weight: ps.current_weight ?? null,
       twr: a?.cagr ?? null,
       sharpe: a?.sharpe ?? null,
@@ -193,6 +209,32 @@ export default async function PortfolioPdfPage({
       .filter((s) => s.strategies)
       .map((s) => [s.strategy_id, s.strategies!.name] as const),
   );
+  // A stored matrix can still carry a strategy that has since left the
+  // portfolio. Its name exists in `strategies`; read it rather than print an id
+  // fragment into a document that leaves the platform.
+  const missingIds = correlationKeys.filter((k) => !strategyNameById.has(k));
+  if (missingIds.length > 0) {
+    const { data: departed, error: departedError } = await admin
+      .from("strategies")
+      .select("id, name")
+      .in("id", missingIds);
+    if (departedError) {
+      throw new Error(
+        `correlation names read failed for portfolio ${id}: ${departedError.message}`,
+      );
+    }
+    for (const r of departed ?? []) {
+      if (r.name) strategyNameById.set(r.id, r.name);
+    }
+  }
+  // Two unresolved keys under one label would print identical headers; number
+  // them only then, so the common single miss still reads "Unnamed strategy".
+  const unresolvedKeys = correlationKeys.filter((k) => !strategyNameById.has(k));
+  const correlationLabel = (k: string) =>
+    strategyNameById.get(k) ??
+    (unresolvedKeys.length > 1
+      ? `Unnamed strategy ${unresolvedKeys.indexOf(k) + 1}`
+      : "Unnamed strategy");
 
   return (
     <div className="max-w-[800px] mx-auto p-8 bg-white print:p-4">
@@ -326,7 +368,7 @@ export default async function PortfolioPdfPage({
                     key={k}
                     className="text-right py-1 px-1 font-medium text-text-muted"
                   >
-                    {(strategyNameById.get(k) ?? k).slice(0, 10)}
+                    {correlationLabel(k)}
                   </th>
                 ))}
               </tr>
@@ -335,7 +377,7 @@ export default async function PortfolioPdfPage({
               {correlationKeys.map((rowKey) => (
                 <tr key={rowKey} className="border-b border-border/30">
                   <td className="py-1 px-1 font-medium text-text-primary">
-                    {(strategyNameById.get(rowKey) ?? rowKey).slice(0, 14)}
+                    {correlationLabel(rowKey)}
                   </td>
                   {correlationKeys.map((colKey) => {
                     const val = correlationMatrix[rowKey]?.[colKey];

@@ -10,6 +10,7 @@ import { AllocationTimeline } from "@/components/portfolio/AllocationTimeline";
 import { MigrationWizardButton } from "@/components/portfolio/MigrationWizard";
 import { RemoveStrategyButton } from "@/components/portfolio/RemoveStrategyButton";
 import { getPortfolioDetail, getPortfolioStrategies, getAllocationEvents } from "@/lib/queries";
+import { relationshipStatusLabel } from "@/lib/display-labels";
 import { formatCurrency } from "@/lib/utils";
 
 const statusStyles: Record<string, string> = {
@@ -94,20 +95,20 @@ export default async function ManagePortfolioPage({ params }: { params: Promise<
                 <Card key={ps.strategy_id} padding="sm">
                   <div className="flex items-center justify-between gap-4">
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-text-primary break-words min-w-0">{s?.name ?? ps.strategy_id}</p>
+                      <p className="text-sm font-medium text-text-primary break-words min-w-0">{s?.name ?? "Unnamed strategy"}</p>
                       <div className="flex items-center gap-3 mt-1 text-xs text-text-secondary">
                         {ps.allocated_amount != null && <span className="font-metric">{formatCurrency(ps.allocated_amount)}</span>}
                         {ps.current_weight != null && <span className="font-metric">{(ps.current_weight * 100).toFixed(1)}%</span>}
                       </div>
                     </div>
                     <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${(ps.relationship_status && statusStyles[ps.relationship_status]) ?? ""}`}>
-                      {ps.relationship_status}
+                      {relationshipStatusLabel(ps.relationship_status)}
                     </span>
                     <RemoveStrategyButton
                       portfolioId={id}
                       portfolioName={portfolio.name}
                       strategyId={ps.strategy_id}
-                      strategyName={s?.name ?? ps.strategy_id}
+                      strategyName={s?.name ?? "Unnamed strategy"}
                     />
                   </div>
                 </Card>

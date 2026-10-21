@@ -4,6 +4,12 @@ import { isAdminUser } from "@/lib/admin";
 import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { PageHeader } from "@/components/layout/PageHeader";
+import {
+  computeJobErrorKindLabel,
+  computeJobKindLabel,
+  computeJobStatusLabel,
+  venueLabel,
+} from "@/lib/display-labels";
 
 export const metadata: Metadata = {
   title: "Compute jobs",
@@ -19,21 +25,22 @@ export default async function ComputeJobsPage() {
 
   // Parallel queries for fill health indicators
   const [jobsResult, fillHealthResult, dqfResult] = await Promise.all([
-    // Recent compute jobs.
+    // Recent compute jobs, read from the `compute_jobs_admin` view so the
+    // strategy and portfolio NAMES arrive with the job (Phase 170.1.2 D-01).
     //
     // SECURITY (audit-2026-05-07 P97 / G12.A.2 — mig 117):
-    // DO NOT add `claim_token` to this select list. claim_token is a
-    // capability token used by the worker fence (mark_compute_job_done /
-    // mark_compute_job_failed verify it before flipping the row). Leaking
-    // it to the admin UI lets anyone who can see this page race the
-    // worker by calling the mark RPCs with the leaked token. The
-    // src/__tests__/compute-jobs-claim-token-not-leaked.test.ts grep
-    // gate enforces this — never `select("*")` against compute_jobs
-    // anywhere in src/.
+    // The view does not expose `claim_token`, and this explicit column list
+    // must never gain it. claim_token is a capability token used by the worker
+    // fence (mark_compute_job_done / mark_compute_job_failed verify it before
+    // flipping the row). Leaking it to the admin UI lets anyone who can see
+    // this page race the worker by calling the mark RPCs with the leaked
+    // token. The view also joins the owner's email; this page shows names
+    // only, so that column stays out of the list. The src/__tests__/compute-jobs-claim-token-not-leaked.test.ts
+    // grep gate enforces the no-star rule on `compute_jobs`.
     admin
-      .from("compute_jobs")
+      .from("compute_jobs_admin")
       .select(
-        "id, strategy_id, portfolio_id, kind, status, attempts, max_attempts, last_error, error_kind, exchange, trade_count, created_at, updated_at",
+        "id, strategy_id, portfolio_id, strategy_name, portfolio_name, kind, status, attempts, max_attempts, last_error, error_kind, exchange, trade_count, created_at, updated_at",
       )
       .order("updated_at", { ascending: false })
       .limit(50),
@@ -58,6 +65,12 @@ export default async function ComputeJobsPage() {
       .eq("data_quality_flags->>position_metrics_failed", "true"),
   ]);
 
+  // A failed read must not render as an empty queue; throw so ./error.tsx
+  // shows the load-error state (same idiom as the admin dashboard page).
+  if (jobsResult.error) {
+    console.error("[admin/compute-jobs] jobs query failed", jobsResult.error);
+    throw new Error("jobs query failed");
+  }
   const jobs = jobsResult.data ?? [];
 
   // Count strategies missing fills — RPC may not exist yet, fall back gracefully
@@ -84,21 +97,21 @@ export default async function ComputeJobsPage() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
         <HealthCard
           label="Strategies Missing Fills"
-          value={strategiesMissingFills != null ? String(strategiesMissingFills) : "N/A"}
+          value={strategiesMissingFills != null ? String(strategiesMissingFills) : "—"}
           description="API-connected strategies with 0 fill rows"
           variant={strategiesMissingFills != null && strategiesMissingFills > 0 ? "warning" : "ok"}
         />
         <HealthCard
           label="Position Metrics Failed"
           value={String(failedPositionMetrics)}
-          description="Analytics rows with position_metrics_failed flag"
+          description="Analytics rows whose position metrics did not compute"
           variant={failedPositionMetrics > 0 ? "warning" : "ok"}
         />
         <HealthCard
           label="Recent Jobs"
           value={String(jobs.length)}
           description={Object.entries(statusCounts)
-            .map(([s, c]) => `${s}: ${c}`)
+            .map(([s, c]) => `${computeJobStatusLabel(s)}: ${c}`)
             .join(", ") || "No jobs"}
           variant="neutral"
         />
@@ -123,22 +136,32 @@ export default async function ComputeJobsPage() {
             <tbody>
               {jobs.map((job) => (
                 <tr key={job.id} className="border-b border-border last:border-b-0 hover:bg-gray-50 transition-colors">
-                  <td className="px-3 py-2 font-metric text-caption text-text-primary">{job.kind}</td>
+                  <td className="px-3 py-2 font-metric text-caption text-text-primary">{computeJobKindLabel(job.kind)}</td>
                   <td className="px-3 py-2">
                     <StatusBadge status={job.status} />
                   </td>
                   <td className="px-3 py-2 text-caption text-text-muted font-metric truncate max-w-[120px]">
-                    {(job.strategy_id ?? job.portfolio_id ?? "—").slice(0, 8)}
+                    {job.strategy_name ??
+                      job.portfolio_name ??
+                      (job.strategy_id
+                        ? "Unnamed strategy"
+                        : job.portfolio_id
+                          ? "Unnamed portfolio"
+                          : "—")}
                   </td>
                   <td className="px-3 py-2 font-metric text-caption text-text-secondary">
                     {job.attempts}/{job.max_attempts}
                   </td>
-                  <td className="px-3 py-2 text-caption text-text-muted">{job.exchange ?? "—"}</td>
+                  <td className="px-3 py-2 text-caption text-text-muted">{job.exchange ? venueLabel(job.exchange) : "—"}</td>
                   <td className="px-3 py-2 font-metric text-caption text-text-secondary">
                     {job.trade_count != null ? job.trade_count.toLocaleString() : "—"}
                   </td>
                   <td className="px-3 py-2 text-caption text-negative truncate max-w-[200px]" title={job.last_error ?? undefined}>
-                    {job.last_error ? `${job.error_kind ?? ""}: ${job.last_error.slice(0, 60)}` : "—"}
+                    {job.last_error
+                      ? job.error_kind
+                        ? `${computeJobErrorKindLabel(job.error_kind)}: ${job.last_error.slice(0, 60)}`
+                        : job.last_error.slice(0, 60)
+                      : "—"}
                   </td>
                   <td className="px-3 py-2 text-caption text-text-muted font-metric">
                     {new Date(job.updated_at).toLocaleString("en-US", {
@@ -212,7 +235,7 @@ function StatusBadge({ status }: { status: string }) {
 
   return (
     <span className={`inline-block rounded px-1.5 py-0.5 text-micro font-semibold ${styles[status] ?? "bg-gray-50 text-text-muted"}`}>
-      {status}
+      {computeJobStatusLabel(status)}
     </span>
   );
 }

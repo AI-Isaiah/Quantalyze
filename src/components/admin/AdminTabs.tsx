@@ -17,26 +17,8 @@ import {
 } from "@/lib/utils";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { displayStrategyName, type DisplayableStrategy } from "@/lib/strategy-display";
-import { isStrategySource, type StrategySource } from "@/lib/strategy-sources";
+import { analyticsStatusLabel, strategySourceLabel } from "@/lib/display-labels";
 import { ComputeJobsTable } from "./ComputeJobsTable";
-
-// Single-source-of-truth badge labels per `strategies.source` value.
-// `Record<StrategySource, string>` forces exhaustiveness — TypeScript
-// will fail the build when a new value is added to STRATEGY_SOURCES
-// without a paired badge label.
-const SOURCE_BADGE_LABEL: Record<StrategySource, string> = {
-  legacy: "legacy",
-  wizard: "wizard",
-  admin_import: "import",
-  allocator_connected: "connected",
-  csv: "csv",
-  okx: "okx",
-  binance: "binance",
-  bybit: "bybit",
-  deribit: "deribit",
-  sfox: "sfox",
-  mt5: "mt5",
-};
 
 const TABS = ["Intro Requests", "Strategy Review", "Allocators", "Managers", "Compute Jobs"] as const;
 type Tab = (typeof TABS)[number];
@@ -162,7 +144,7 @@ type StatusFilter = "all" | "pending" | "intro_made" | "completed" | "declined";
 const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
   { value: "all", label: "All" },
   { value: "pending", label: "Pending" },
-  { value: "intro_made", label: "Intro Made" },
+  { value: "intro_made", label: "Intro made" },
   { value: "completed", label: "Completed" },
   { value: "declined", label: "Declined" },
 ];
@@ -276,7 +258,7 @@ function IntroRequestsTab({ requests }: { requests: IntroRequestRow[] }) {
                     {status === "pending" && (
                       <>
                         <Button size="sm" onClick={() => handleAction(r.id, "intro_made")} disabled={loading === r.id}>
-                          Intro Made
+                          Intro made
                         </Button>
                         <Button size="sm" variant="ghost" onClick={() => handleAction(r.id, "declined")} disabled={loading === r.id}>
                           Decline
@@ -409,8 +391,10 @@ function computeRecency(
   return everComputed ? formatRecency(analytics.computed_at) : "—";
 }
 
+// An absent source keeps today's "Legacy" default; a present value outside
+// the set reads "Other source" (strategySourceLabel's fallback).
 function sourceBadgeLabel(source: string | undefined): string {
-  return isStrategySource(source) ? SOURCE_BADGE_LABEL[source] : "legacy";
+  return strategySourceLabel(source ?? "legacy");
 }
 
 function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] }) {
@@ -545,7 +529,7 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
                   {analytics?.computation_status &&
                     analytics.computation_status !== "complete" && (
                       <p className="mt-2 text-micro text-amber-600">
-                        Analytics: {analytics.computation_status}
+                        {analyticsStatusLabel(analytics.computation_status)}
                       </p>
                     )}
                 </div>

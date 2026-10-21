@@ -37,6 +37,12 @@ describe("HoldingFactsheet (finding g4)", () => {
     expect(screen.getByText(/spot/i)).toBeInTheDocument();
   });
 
+  it("names the venue by its display name, never the raw code (170.1.2 / D-01)", () => {
+    render(<HoldingFactsheet item={{ ...SAMPLE, venue: "sfox" }} />);
+    expect(screen.getByText(/sFOX · spot/)).toBeInTheDocument();
+    expect(screen.queryByText(/sfox/)).toBeNull();
+  });
+
   it("renders all four computed metric labels", () => {
     render(<HoldingFactsheet item={SAMPLE} />);
     // Labels (DM Sans typography expected via DESIGN.md — tests validate presence not class)
@@ -328,7 +334,7 @@ describe("HoldingFactsheet (finding g4)", () => {
     expect(screen.queryByTestId("holding-factsheet-price-basis")).toBeNull();
     // The header stays, so the card is still identifiably that holding.
     expect(screen.getByText("USDT")).toBeInTheDocument();
-    expect(screen.getByText(/binance/)).toBeInTheDocument();
+    expect(screen.getByText(/Binance/)).toBeInTheDocument();
   });
 
   // M-R2-01 (167.1.1 round 2): an MT5 account is an account balance. Its recorded

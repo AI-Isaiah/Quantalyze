@@ -147,7 +147,7 @@ describe("AllocatorExchangeManager — the connected count is live keys only (SC
     );
     const row = keyRow("Revoked OKX");
     expect(
-      within(row).getByRole("button", { name: "Disconnect okx key" }),
+      within(row).getByRole("button", { name: "Disconnect OKX key" }),
     ).toBeTruthy();
     // The disconnected key keeps its own section.
     expect(screen.getByRole("heading", { name: "Disconnected" })).toBeTruthy();
@@ -242,9 +242,9 @@ describe("AllocatorExchangeManager — no balance repeats, no revoked balance (S
       />,
     );
     expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
-    expect(readOnlyLine("Holder Binance")).toBe("binance · Read-only · Balance $5,000");
+    expect(readOnlyLine("Holder Binance")).toBe("Binance · Read-only · Balance $5,000");
     for (const label of ["Dup One", "Dup Two"]) {
-      expect(readOnlyLine(label)).toBe("binance · Read-only");
+      expect(readOnlyLine(label)).toBe("Binance · Read-only");
       expect(within(keyRow(label)).getByRole("note").textContent).toBe(
         "This key reads the same exchange account as Binance — Holder Binance. Disconnect one of them.",
       );
@@ -261,7 +261,7 @@ describe("AllocatorExchangeManager — no balance repeats, no revoked balance (S
         ]}
       />,
     );
-    expect(readOnlyLine("Dup One")).toBe("binance · Read-only · Balance $5,000");
+    expect(readOnlyLine("Dup One")).toBe("Binance · Read-only · Balance $5,000");
     expect(within(keyRow("Dup One")).queryByRole("note")).toBeNull();
   });
 
@@ -284,8 +284,8 @@ describe("AllocatorExchangeManager — no balance repeats, no revoked balance (S
         />,
       );
       expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
-      expect(readOnlyLine("Dup One")).toBe("binance · Read-only · Balance $5,000");
-      expect(readOnlyLine("Holder Binance")).toBe("binance · Read-only");
+      expect(readOnlyLine("Dup One")).toBe("Binance · Read-only · Balance $5,000");
+      expect(readOnlyLine("Holder Binance")).toBe("Binance · Read-only");
     },
   );
 
@@ -309,8 +309,8 @@ describe("AllocatorExchangeManager — no balance repeats, no revoked balance (S
         />,
       );
       expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
-      expect(readOnlyLine("Holder Binance")).toBe("binance · Read-only · Balance $5,000");
-      expect(readOnlyLine("Dup One")).toBe("binance · Read-only");
+      expect(readOnlyLine("Holder Binance")).toBe("Binance · Read-only · Balance $5,000");
+      expect(readOnlyLine("Dup One")).toBe("Binance · Read-only");
     },
   );
 
@@ -332,7 +332,7 @@ describe("AllocatorExchangeManager — no balance repeats, no revoked balance (S
       />,
     );
     expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
-    expect(readOnlyLine("Holder Binance")).toBe("binance · Read-only · Balance $5,000");
+    expect(readOnlyLine("Holder Binance")).toBe("Binance · Read-only · Balance $5,000");
   });
 
   it("a failing holder with two working marked keys shows the balance once", () => {
@@ -347,7 +347,7 @@ describe("AllocatorExchangeManager — no balance repeats, no revoked balance (S
       />,
     );
     expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
-    expect(readOnlyLine("Dup One")).toBe("binance · Read-only · Balance $5,000");
+    expect(readOnlyLine("Dup One")).toBe("Binance · Read-only · Balance $5,000");
   });
 
   it("a lone key in error keeps its balance (only a pair is collapsed)", () => {
@@ -357,7 +357,7 @@ describe("AllocatorExchangeManager — no balance repeats, no revoked balance (S
         initialKeys={[makeKey({ sync_status: "error" })]}
       />,
     );
-    expect(readOnlyLine("Live Binance")).toBe("binance · Read-only · Balance $1,000");
+    expect(readOnlyLine("Live Binance")).toBe("Binance · Read-only · Balance $1,000");
   });
 
   it("a revoked key with a stored balance shows no balance", () => {
@@ -367,13 +367,13 @@ describe("AllocatorExchangeManager — no balance repeats, no revoked balance (S
         initialKeys={[LIVE, makeKey({ ...REVOKED, account_balance_usdt: 7_000 })]}
       />,
     );
-    expect(readOnlyLine("Revoked OKX")).toBe("okx · Read-only");
+    expect(readOnlyLine("Revoked OKX")).toBe("OKX · Read-only");
     expect(screen.queryByText(/\$7,000/)).toBeNull();
   });
 
   it("a live, unshared key keeps its balance", () => {
     render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[LIVE]} />);
-    expect(readOnlyLine("Live Binance")).toBe("binance · Read-only · Balance $1,000");
+    expect(readOnlyLine("Live Binance")).toBe("Binance · Read-only · Balance $1,000");
   });
 });
 
@@ -411,9 +411,9 @@ describe("AllocatorExchangeManager — one balance per account identity (D-74)",
       />,
     );
     expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
-    expect(readOnlyLine("Holder Binance")).toBe("binance · Read-only · Balance $5,000");
+    expect(readOnlyLine("Holder Binance")).toBe("Binance · Read-only · Balance $5,000");
     expect(elsewhereNote("Holder Binance")).toBeNull();
-    expect(readOnlyLine("Member Binance")).toBe("binance · Read-only");
+    expect(readOnlyLine("Member Binance")).toBe("Binance · Read-only");
     expect(elsewhereNote("Member Binance")).toBe("Balance shown on Holder Binance");
   });
 
@@ -428,8 +428,8 @@ describe("AllocatorExchangeManager — one balance per account identity (D-74)",
       />,
     );
     expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
-    expect(readOnlyLine("First Binance")).toBe("binance · Read-only · Balance $5,000");
-    expect(readOnlyLine("Second Binance")).toBe("binance · Read-only");
+    expect(readOnlyLine("First Binance")).toBe("Binance · Read-only · Balance $5,000");
+    expect(readOnlyLine("Second Binance")).toBe("Binance · Read-only");
     expect(elsewhereNote("Second Binance")).toBe("Balance shown on First Binance");
   });
 
@@ -444,7 +444,7 @@ describe("AllocatorExchangeManager — one balance per account identity (D-74)",
       />,
     );
     expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
-    expect(readOnlyLine("Second Binance")).toBe("binance · Read-only · Balance $5,000");
+    expect(readOnlyLine("Second Binance")).toBe("Binance · Read-only · Balance $5,000");
     expect(elsewhereNote("First Binance")).toBe("Balance shown on Second Binance");
   });
 
@@ -463,8 +463,8 @@ describe("AllocatorExchangeManager — one balance per account identity (D-74)",
       />,
     );
     expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
-    expect(readOnlyLine("Old Binance")).toBe("binance · Read-only · Balance $5,000");
-    expect(readOnlyLine("New Binance")).toBe("binance · Read-only");
+    expect(readOnlyLine("Old Binance")).toBe("Binance · Read-only · Balance $5,000");
+    expect(readOnlyLine("New Binance")).toBe("Binance · Read-only");
     expect(elsewhereNote("New Binance")).toBe("Balance shown on Old Binance");
     expect(screen.queryByText(/Balance —/)).toBeNull();
   });
@@ -487,7 +487,7 @@ describe("AllocatorExchangeManager — one balance per account identity (D-74)",
       />,
     );
     expect(screen.getAllByText(/Balance \$5,000/)).toHaveLength(1);
-    expect(readOnlyLine("Dup Binance")).toBe("binance · Read-only · Balance $5,000");
+    expect(readOnlyLine("Dup Binance")).toBe("Binance · Read-only · Balance $5,000");
     expect(elsewhereNote("New Binance")).toBe("Balance shown on Dup Binance");
     expect(screen.queryByText(/Balance —/)).toBeNull();
   });
@@ -503,9 +503,9 @@ describe("AllocatorExchangeManager — one balance per account identity (D-74)",
         ]}
       />,
     );
-    expect(readOnlyLine("First Binance")).toBe("binance · Read-only · Balance $5,000");
-    expect(readOnlyLine("Other Binance")).toBe("binance · Read-only · Balance $3,000");
-    expect(readOnlyLine("Unknown Binance")).toBe("binance · Read-only · Balance $2,000");
+    expect(readOnlyLine("First Binance")).toBe("Binance · Read-only · Balance $5,000");
+    expect(readOnlyLine("Other Binance")).toBe("Binance · Read-only · Balance $3,000");
+    expect(readOnlyLine("Unknown Binance")).toBe("Binance · Read-only · Balance $2,000");
     expect(screen.queryAllByTestId("balance-shown-elsewhere")).toHaveLength(0);
   });
 
@@ -520,9 +520,9 @@ describe("AllocatorExchangeManager — one balance per account identity (D-74)",
       />,
     );
     expect(screen.queryByText(/\$7,000/)).toBeNull();
-    expect(readOnlyLine("Revoked Binance")).toBe("binance · Read-only");
+    expect(readOnlyLine("Revoked Binance")).toBe("Binance · Read-only");
     expect(elsewhereNote("Revoked Binance")).toBe("Balance shown on Live Twin");
-    expect(readOnlyLine("Live Twin")).toBe("binance · Read-only · Balance $5,000");
+    expect(readOnlyLine("Live Twin")).toBe("Binance · Read-only · Balance $5,000");
   });
 
   it("an account whose only key is revoked shows no balance and no note", () => {
@@ -532,7 +532,7 @@ describe("AllocatorExchangeManager — one balance per account identity (D-74)",
         initialKeys={[makeKey({ ...REVOKED, venue_account_id: "V-9", account_balance_usdt: 7_000 })]}
       />,
     );
-    expect(readOnlyLine("Revoked OKX")).toBe("okx · Read-only");
+    expect(readOnlyLine("Revoked OKX")).toBe("OKX · Read-only");
     expect(elsewhereNote("Revoked OKX")).toBeNull();
   });
 

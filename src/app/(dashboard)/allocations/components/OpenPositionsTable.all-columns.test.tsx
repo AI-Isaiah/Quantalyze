@@ -308,3 +308,13 @@ describe("[169 M-4] the footer total over rows with no P&L", () => {
     expect(queryByTestId("open-positions-pnl-unavailable-note")).toBeNull();
   });
 });
+
+describe("OpenPositionsTable venue display name (170.1.2 / D-01)", () => {
+  it("a position on venue okx reads 'OKX · BTC-PERP', never 'Okx'", () => {
+    const { container } = render(
+      <OpenPositionsTable rows={[makeRow({ venue: "okx" })]} />,
+    );
+    expect(container.textContent).toContain("OKX · BTC-PERP");
+    expect(container.textContent).not.toContain("Okx");
+  });
+});

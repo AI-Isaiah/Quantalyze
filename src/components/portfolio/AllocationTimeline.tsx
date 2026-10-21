@@ -1,4 +1,5 @@
 import { Card } from "@/components/ui/Card";
+import { allocationEventTypeLabel } from "@/lib/display-labels";
 import { formatCurrency } from "@/lib/utils";
 import type { AllocationEvent } from "@/lib/types";
 
@@ -28,7 +29,7 @@ export function AllocationTimeline({
           <div className="flex items-center justify-between gap-4">
             <div className="min-w-0 flex-1">
               <p className="text-small font-medium text-text-primary truncate">
-                {strategyNames[event.strategy_id] ?? event.strategy_id}
+                {strategyNames[event.strategy_id] ?? "Unnamed strategy"}
               </p>
               {event.notes && (
                 <p className="text-caption text-text-secondary mt-0.5 truncate">
@@ -44,7 +45,7 @@ export function AllocationTimeline({
                     : "bg-negative/10 text-negative"
                 }`}
               >
-                {event.event_type}
+                {allocationEventTypeLabel(event.event_type)}
               </span>
               <span className="text-small font-metric text-text-primary">
                 {formatCurrency(event.amount)}

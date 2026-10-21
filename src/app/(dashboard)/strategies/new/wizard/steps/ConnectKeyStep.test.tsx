@@ -373,6 +373,11 @@ describe("Phase 69 — Deribit wizard card (UX-01)", () => {
       screen.getByPlaceholderText("Paste the Deribit Client Secret"),
     ).toBeInTheDocument();
 
+    // The nickname placeholder names the venue by its display label, never
+    // the raw wire code.
+    fireEvent.click(screen.getByTestId("wizard-exchange-okx"));
+    expect(screen.getByPlaceholderText("e.g. OKX · prod")).toBeInTheDocument();
+
     // Revert direction: back to binance restores the generic labels.
     fireEvent.click(screen.getByTestId("wizard-exchange-binance"));
     expect(screen.getByLabelText("API Key")).toBeInTheDocument();
@@ -474,6 +479,8 @@ describe("Phase 122 — sFOX wizard card (flag ON, SFOX-08)", () => {
     expect(body.api_key).toBe("SFOX_TOKEN_xxx");
     expect(body.api_secret).toBe("");
     expect(body.passphrase).toBeNull();
+    // 170.1.2 WR-04: no nickname typed → the venue DISPLAY name, never "sfox key".
+    expect(body.label).toBe("sFOX key");
   });
 
   // WR-01: sFOX's per-exchange #sfox-readonly SubAnchor is server-flag-gated

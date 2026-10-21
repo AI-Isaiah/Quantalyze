@@ -8,6 +8,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { Button } from "@/components/ui/Button";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { contactHref } from "@/lib/contact";
+import { venueLabel } from "@/lib/display-labels";
 import type { StrategyAnalytics } from "@/lib/types";
 import {
   MISSING_ROW_GRACE_POLLS,
@@ -304,7 +305,7 @@ export function SyncProgress({
         );
       }
       if (!cancelled && apiKey?.exchange) {
-        setExchangeName(apiKey.exchange.charAt(0).toUpperCase() + apiKey.exchange.slice(1));
+        setExchangeName(venueLabel(apiKey.exchange));
       }
     }
     fetchExchange();

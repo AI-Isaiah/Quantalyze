@@ -420,7 +420,9 @@ function exposureTokens(): string[] {
     .map((tr) => {
       const c = Array.from(tr.querySelectorAll("td")).map((td) => td.textContent ?? "");
       // Venue | Key | Symbol | Type | Side | Gross | Net
-      return `${c[1]}|${c[0]}|${c[2]}|${c[3] === "Spot" ? "spot" : "derivative"}`;
+      // Venue prints its display name since 170.1.2 WR-02; compare by code, as
+      // venueAndSymbol does for the other two surfaces.
+      return `${c[1]}|${c[0].toLowerCase()}|${c[2]}|${c[3] === "Spot" ? "spot" : "derivative"}`;
     })
     .sort();
 }

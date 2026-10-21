@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
-import { APP_ROLES, type AppRole } from "@/lib/auth-types";
+import { APP_ROLES, ROLE_META, type AppRole } from "@/lib/auth-types";
 
 /**
  * Role-provisioning panel. Client component rendered inside
@@ -26,29 +26,9 @@ import { APP_ROLES, type AppRole } from "@/lib/auth-types";
  * entry is added.
  */
 
-// UX copy per role. Keyed by `AppRole` so `satisfies Record<AppRole, …>`
-// catches any role added to the union without a corresponding entry.
-const ROLE_META = {
-  admin: {
-    label: "Admin",
-    description: "Full back-office access. Can grant and revoke roles.",
-  },
-  allocator: {
-    label: "Allocator",
-    description:
-      "LP-side user. Can request intros, own portfolios, and see factsheets.",
-  },
-  quant_manager: {
-    label: "Quant manager",
-    description:
-      "Publishes strategies. Manages their own API keys and analytics.",
-  },
-  analyst: {
-    label: "Analyst",
-    description:
-      "Read-only analyst seat. No mutation surface; views discovery + factsheets.",
-  },
-} as const satisfies Record<AppRole, { label: string; description: string }>;
+// `ROLE_META` (UX copy per role) lives in `@/lib/auth-types` so server
+// components can read it too: an export of a "use client" module is a client
+// reference on the server and cannot be read there.
 
 /** Render a `granted_at` ISO timestamp as YYYY-MM-DD in UTC. Using UTC
  * avoids the timezone-jitter that would make "Granted 2026-04-16" on

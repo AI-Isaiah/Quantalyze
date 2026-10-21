@@ -1,5 +1,6 @@
 import type { StrategyV2Detail } from "@/lib/queries";
 import { PartialDataBanner } from "./PartialDataBanner";
+import { supportedExchangeLabel } from "@/lib/display-labels";
 
 interface OverviewPanelProps {
   panel1: StrategyV2Detail["panel1"];
@@ -60,7 +61,7 @@ export function OverviewPanel({ panel1, history_days }: OverviewPanelProps) {
           <div>
             <dt className="text-xs font-normal text-text-muted">Supported exchanges</dt>
             <dd className="mt-1 text-lg font-semibold text-text-primary tabular-nums">
-              {fmtList(panel1.supported_exchanges)}
+              {fmtList(panel1.supported_exchanges?.map(supportedExchangeLabel))}
             </dd>
           </div>
           <div>

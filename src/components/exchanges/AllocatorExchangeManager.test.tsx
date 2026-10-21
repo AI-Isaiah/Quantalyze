@@ -257,7 +257,7 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
     );
     // mt5 renders the canonical mono tag with the neutral-slate navy fg — the
     // fallback would use #475569, so this fg pins the EXCHANGE_TAGS entry.
-    const mt5Tag = screen.getByLabelText("mt5");
+    const mt5Tag = screen.getByLabelText("MT5");
     expect(mt5Tag).toHaveTextContent("MT5");
     expect(mt5Tag).toHaveStyle({ color: "#0F172A", backgroundColor: "#F1F5F9" });
     // Existing venue is byte-unchanged.
@@ -884,7 +884,7 @@ describe("AllocatorExchangeManager — rate_limited retry countdown (ISSUE-006)"
 // Phase 08 Plan 02 Task 1 — Disconnect rename + cascade-optional modal
 // (MANAGE-01 / MANAGE-03). Verifies:
 //   - Row button labelled "Disconnect" (not "Remove")
-//   - Modal title "Disconnect {Venue}?" with venue capitalised
+//   - Modal title "Disconnect {Venue}?" with the shared venue display name
 //   - Locked explainer copy ("stop syncing this key", "historical holdings stay available")
 //   - Checkbox DEFAULT UNCHECKED when deleteHoldingsCount > 0
 //   - Disconnect button ENABLED regardless of checkbox state once count loads
@@ -962,7 +962,7 @@ describe("AllocatorExchangeManager — Disconnect rename + cascade-optional moda
     const checkbox = screen.getByRole("checkbox") as HTMLInputElement;
     expect(checkbox.checked).toBe(false);
     // Disconnect button — the danger button inside the modal. Match by
-    // exact name so the row's "Disconnect binance key" aria-label doesn't
+    // exact name so the row's "Disconnect Binance key" aria-label doesn't
     // match this assertion.
     // Prefer the modal's confirm button. There are two buttons whose
     // textContent === "Disconnect" (the row button that opened the modal,
@@ -1426,7 +1426,7 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
       />,
     );
     expect(
-      screen.getByRole("button", { name: "Update password for mt5 key" }),
+      screen.getByRole("button", { name: "Update password for MT5 key" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /Sync mt5 now/i }),
@@ -1456,7 +1456,7 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
       />,
     );
     const updateButton = screen.getByRole("button", {
-      name: "Update password for mt5 key",
+      name: "Update password for MT5 key",
     });
     expect(updateButton).toBeInTheDocument();
     expect(
@@ -1510,7 +1510,7 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
 
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: "Update password for mt5 key" }),
+        screen.getByRole("button", { name: "Update password for MT5 key" }),
       );
     });
     fireEvent.change(screen.getByLabelText("New password"), {
@@ -2890,9 +2890,9 @@ describe("AllocatorExchangeManager — key rows wrap so Disconnect is reachable 
     );
 
     const disconnect = screen.getByRole("button", {
-      name: "Disconnect binance key",
+      name: "Disconnect Binance key",
     });
-    const sync = screen.getByRole("button", { name: "Sync binance now" });
+    const sync = screen.getByRole("button", { name: "Sync Binance now" });
     const group = disconnect.parentElement;
     expect(group).not.toBeNull();
     expectActionGroup(group!);
@@ -2903,16 +2903,16 @@ describe("AllocatorExchangeManager — key rows wrap so Disconnect is reachable 
     expect(activeRow.className).toContain("flex-wrap");
 
     const update = screen.getByRole("button", {
-      name: "Update password for mt5 key",
+      name: "Update password for MT5 key",
     });
     const mt5Disconnect = screen.getByRole("button", {
-      name: "Disconnect mt5 key",
+      name: "Disconnect MT5 key",
     });
     expect(update.parentElement).toBe(mt5Disconnect.parentElement);
     expectActionGroup(mt5Disconnect.parentElement!);
     expect(surfaceRow(mt5Disconnect).className).toContain("flex-wrap");
 
-    const reconnect = screen.getByRole("button", { name: "Reconnect okx key" });
+    const reconnect = screen.getByRole("button", { name: "Reconnect OKX key" });
     const disconnectedGroup = reconnect.parentElement;
     expect(disconnectedGroup).not.toBeNull();
     expectActionGroup(disconnectedGroup!);
@@ -2927,5 +2927,61 @@ describe("AllocatorExchangeManager — key rows wrap so Disconnect is reachable 
       expect(button.className).toContain("py-2.5");
       expect(button.className).toContain("text-body");
     }
+  });
+});
+
+// Phase 170.1.2 plan 05 (D-01) — a venue code reads its display name, visibly
+// and to assistive tech. The old first-letter-capitalising modal helper turned
+// "okx" into "Okx"; the shared venueLabel reads "OKX".
+describe("AllocatorExchangeManager — venue display names (170.1.2 / D-01)", () => {
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    insertMock.mockReset();
+    getUserMock.mockReset();
+    rpcMock.mockReset();
+    holdingsCountMock.mockReset();
+    holdingsCountMock.mockReturnValue({ count: 0, error: null });
+  });
+
+  const okxKey = () =>
+    makeKey({ id: "key-okx-1", exchange: "okx", label: "Primary OKX" });
+
+  it("an okx key reads 'OKX · Read-only' with 'Sync OKX now' and 'Disconnect OKX key' buttons", () => {
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[okxKey()]} />);
+    const row = screen.getByTestId("allocator-key-row");
+    expect(row.textContent).toContain("OKX · Read-only");
+    expect(row.textContent).not.toContain("Okx");
+    expect(screen.getByRole("button", { name: "Sync OKX now" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disconnect OKX key" })).toBeInTheDocument();
+    expect(screen.getByLabelText("OKX")).toBeInTheDocument();
+  });
+
+  it("the disconnect confirmation for an okx key is titled 'Disconnect OKX?'", async () => {
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[okxKey()]} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Disconnect OKX key" }));
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Disconnect OKX?")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Disconnect Okx\?/)).not.toBeInTheDocument();
+  });
+
+  it("a disconnected okx row reads 'OKX · Disconnected' with a 'Reconnect OKX key' button", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({
+            id: "key-okx-gone",
+            exchange: "okx",
+            label: "Old OKX",
+            disconnected_at: "2026-04-22T09:00:00Z",
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText(/OKX · Disconnected/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reconnect OKX key" })).toBeInTheDocument();
   });
 });

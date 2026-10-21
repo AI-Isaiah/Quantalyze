@@ -7,13 +7,7 @@
  * "Record outcome" sub-tab. Routes through the existing `postBridgeOutcome`
  * flow (Phase 5 / Phase 09) — NO new API surface introduced.
  *
- * Segmented control exposes THREE options per C1 accepted:
- *   - Allocated (real)
- *   - Rejected (real)
- *   - Modified (coming soon) — disabled placeholder so allocators see the
- *     intended capability without a silent gap. The button is `disabled`
- *     + `aria-disabled` and carries an explanatory `title` tooltip.
- *     Clicking it CANNOT change the `action` state (T-09.1-08-06 mitigation).
+ * Segmented control exposes two options: Allocated and Rejected.
  */
 
 import { useState } from "react";
@@ -26,24 +20,14 @@ import {
   type RejectionReason,
 } from "@/lib/bridge-outcome-schema";
 import { Button } from "@/components/ui/Button";
+import { venueLabel } from "@/lib/display-labels";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
 
 type Action = "allocated" | "rejected";
 
-const MODES: Array<{
-  key: Action | "modified";
-  label: string;
-  disabled: boolean;
-  tooltip?: string;
-}> = [
-  { key: "allocated", label: "Allocated", disabled: false },
-  { key: "rejected", label: "Rejected", disabled: false },
-  {
-    key: "modified",
-    label: "Modified (coming soon)",
-    disabled: true,
-    tooltip: "Schema extension pending — see follow-up phase",
-  },
+const MODES: Array<{ key: Action; label: string }> = [
+  { key: "allocated", label: "Allocated" },
+  { key: "rejected", label: "Rejected" },
 ];
 
 export type OutcomeFormProps = {
@@ -132,7 +116,7 @@ export function OutcomeForm({ strategyId, row, onRecorded }: OutcomeFormProps) {
           Outcome recorded
         </div>
         <div className="mt-1 text-xs text-text-secondary">
-          Logged against {row.strategy ?? `${row.venue} · ${row.symbol}`}.
+          Logged against {row.strategy ?? `${venueLabel(row.venue)} · ${row.symbol}`}.
         </div>
       </div>
     );
@@ -150,25 +134,19 @@ export function OutcomeForm({ strategyId, row, onRecorded }: OutcomeFormProps) {
         className="flex flex-wrap gap-1"
       >
         {MODES.map((mode) => {
-          const isActive = !mode.disabled && action === mode.key;
+          const isActive = action === mode.key;
           const baseClass =
             "px-3 py-1 text-xs rounded transition-colors font-sans";
-          const className = mode.disabled
-            ? `${baseClass} border border-border text-text-muted cursor-not-allowed opacity-60`
-            : isActive
-              ? `${baseClass} bg-accent text-white border border-accent`
-              : `${baseClass} border border-border text-text-primary hover:bg-page/50`;
+          const className = isActive
+            ? `${baseClass} bg-accent text-white border border-accent`
+            : `${baseClass} border border-border text-text-primary hover:bg-page/50`;
           return (
             <button
               key={mode.key}
               type="button"
               aria-pressed={isActive}
-              aria-disabled={mode.disabled}
-              disabled={mode.disabled}
-              title={mode.tooltip}
               onClick={() => {
-                if (mode.disabled) return;
-                setAction(mode.key as Action);
+                setAction(mode.key);
                 setError(null);
               }}
               className={className}

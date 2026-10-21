@@ -663,7 +663,7 @@ describe("FactsheetView hero strip — HARD-05 degraded_members server-truth cav
     const { getByText } = renderComposite(
       degradedPayload([{ seq: 2, venue: "bybit" }]),
     );
-    expect(getByText(/Key 2 \(bybit\)/)).toBeInTheDocument();
+    expect(getByText(/Key 2 \(Bybit\)/)).toBeInTheDocument();
     expect(
       getByText(/excluded from this track record/),
     ).toBeInTheDocument();
@@ -676,7 +676,7 @@ describe("FactsheetView hero strip — HARD-05 degraded_members server-truth cav
         { seq: 3, venue: "okx" },
       ]),
     );
-    expect(getByText(/Key 2 \(bybit\), Key 3 \(okx\)/)).toBeInTheDocument();
+    expect(getByText(/Key 2 \(Bybit\), Key 3 \(OKX\)/)).toBeInTheDocument();
     // Plural pronoun for >1 excluded member.
     expect(getByText(/their data is excluded/)).toBeInTheDocument();
   });

@@ -3962,7 +3962,7 @@ export function ScenarioComposer({
     }
     return outlierIdsFor(spansById).map((id) => ({
       id,
-      name: nameById[id] ?? id,
+      name: nameById[id] ?? "Unnamed strategy",
       isAdded: addedIdSet.has(id),
     }));
   }, [engineSet, commonPeriodWindow, selectedSpanById, addedIdSet]);
@@ -6149,9 +6149,9 @@ export function ScenarioComposer({
                                 name (T-52-06). text-[12px] → text-caption tier. */}
                             <span
                               className="text-caption text-text-primary truncate max-w-[160px]"
-                              title={strategyNames[id] ?? id}
+                              title={strategyNames[id] ?? "Unnamed strategy"}
                             >
-                              {strategyNames[id] ?? id.slice(0, 8)}
+                              {strategyNames[id] ?? "Unnamed strategy"}
                             </span>
                             {isHedge && (
                               <span

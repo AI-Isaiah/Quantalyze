@@ -59,11 +59,32 @@ describe("Badge — strategy status domain", () => {
     expect(badge.className).toContain("text-text-muted");
   });
 
-  it("an unknown status still falls back to draft styling with the raw label", () => {
+  it("an unknown status keeps draft styling but reads 'Unknown status', never the raw key", () => {
     render(<Badge type="status" label="bogus_status" />);
 
-    const badge = screen.getByText("bogus_status");
+    const badge = screen.getByText("Unknown status");
     expect(badge.className).toContain("text-badge-other");
+    expect(screen.queryByText("bogus_status")).toBeNull();
+  });
+
+  it("a prototype key reads 'Unknown status', not a function's text", () => {
+    render(<Badge type="status" label="constructor" />);
+
+    expect(screen.getByText("Unknown status")).toBeInTheDocument();
+  });
+
+  it("pending_review → 'Pending review' in sentence case", () => {
+    render(<Badge type="status" label="pending_review" />);
+
+    expect(screen.getByText("Pending review")).toBeInTheDocument();
+    expect(screen.queryByText("Pending Review")).toBeNull();
+  });
+
+  it("intro_made → 'Intro made' in sentence case", () => {
+    render(<Badge type="status" label="intro_made" />);
+
+    expect(screen.getByText("Intro made")).toBeInTheDocument();
+    expect(screen.queryByText("Intro Made")).toBeNull();
   });
 });
 

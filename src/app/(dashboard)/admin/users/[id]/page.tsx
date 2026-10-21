@@ -9,6 +9,7 @@ import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { UserRolesPanel } from "@/components/admin/UserRolesPanel";
 import type { AppRole } from "@/lib/auth";
+import { profileRoleLabel, profileStatusLabel } from "@/lib/display-labels";
 
 /**
  * Tab title. The display name is read with the service-role client, so the
@@ -148,7 +149,7 @@ export default async function AdminUserDetailPage({
                 {profile.company}
               </span>
             )}
-            {profile.is_admin && <Badge label="legacy admin" />}
+            {profile.is_admin && <Badge label="Legacy admin" />}
           </>
         }
       />
@@ -161,19 +162,19 @@ export default async function AdminUserDetailPage({
           <dl className="space-y-3 text-small">
             <Row
               label="Profile role"
-              value={profile.role}
+              value={profileRoleLabel(profile.role)}
             />
             <Row
               label="Allocator status"
-              value={profile.allocator_status}
+              value={profileStatusLabel(profile.allocator_status)}
             />
             <Row
               label="Manager status"
-              value={profile.manager_status}
+              value={profileStatusLabel(profile.manager_status)}
             />
             <Row
-              label="Legacy is_admin"
-              value={profile.is_admin ? "true" : "false"}
+              label="Legacy admin flag"
+              value={profile.is_admin ? "Yes" : "No"}
             />
             <Row
               label="Created"

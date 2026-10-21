@@ -4909,6 +4909,32 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     ).toBeNull();
   });
 
+  it("D-01 — a PCR constituent with no name reads 'Unnamed strategy' in its label and title, never an id slice", () => {
+    const payload = makePayload(mockHoldingPlusStrategy());
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // An added strategy that reaches the composer without a name (a lookup miss).
+    addStrategy({
+      id: STRAT_A,
+      name: undefined as unknown as string,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    const list = screen
+      .getByText("Risk contribution per constituent (% of total)")
+      .closest("div")
+      ?.querySelector('ul[role="list"]') as HTMLElement;
+    expect(list).not.toBeNull();
+    const unnamed = within(list).getByText("Unnamed strategy");
+    expect(unnamed).toHaveAttribute("title", "Unnamed strategy");
+    expect(list.innerHTML).not.toContain(STRAT_A.slice(0, 8));
+  });
+
   it("CORR-05 — the PCR list renders one role=listitem per constituent, de-aliased, sorted descending", () => {
     const payload = makePayload(withRefLabels(mockThreeStrategies()));
     render(
