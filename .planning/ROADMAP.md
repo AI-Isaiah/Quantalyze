@@ -4559,6 +4559,7 @@ Plans:
 - **(B) ReadTimeout** ("The read operation timed out"), six groups, 37 events: QUANTALYZE-2C (18, `main_worker` `_claim_priority`), 2E (8, `services.job_worker` `_sel`), 2B (7, `main_worker` `_reset`), and 2F, 2G, 2D (4, `/api/match/cron-recompute`). The worker reads go through `db_read_with_retry` (`analytics-service/services/db.py`), which retries only gateway-timeout-shaped exceptions, so an httpx ReadTimeout propagates on the first attempt.
 - **(C) QUANTALYZE-2A and QUANTALYZE-A**, 2 + 2 events. `mark_compute_job_done` and `mark_compute_job_failed` find the job back at `pending` instead of `running` (P0002): a job's claim was reset or reclaimed while its runner was still finishing. That job-state race can lose a finished result.
 - **Out of scope, owned elsewhere:** QUANTALYZE-18 (SERVICE_KEY mismatch, booked); the `account_duplicate` refusals (QUANTALYZE-23 and 2H, expected since 167.1.2.1.1 WRITERRESIDUALS); benchmark refresh "no BTC series" (1M, 1N, 1P); the Bybit unmatched-IP funding fetch (21).
+**Founder decision 2026-10-21 (AskUserQuestion, "A: helper + move 4 reads (Recommended)"):** ReadTimeout is retried wherever the read-retry helper is already used, the job claim included, and the four pure reads Sentry named for 2D, 2E, 2F and 2G move onto the helper (CONTEXT D-02a).
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 166.5
 
