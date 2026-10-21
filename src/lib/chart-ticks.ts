@@ -154,17 +154,25 @@ export function fitXTickValues<T>(
   plotRight: number,
   svgWidth: number,
 ): T[] {
-  const overshoot = Math.max(0, labelW / 2 - (svgWidth - plotRight));
+  // Only `Math.ceil` and `Math.abs` are allowed here (chart-ticks-class-guard): a floor is
+  // `-Math.ceil(-x)`, and a max or a round is a comparison.
+  const edge = labelW / 2 - (svgWidth - plotRight);
+  const overshoot = edge > 0 ? edge : 0;
   const pitch = labelW + X_TICK_GAP_PX + overshoot;
-  const maxTicks = Math.max(1, Math.floor((plotRight - plotLeft) / pitch));
+  const fit = -Math.ceil(-(plotRight - plotLeft) / pitch);
+  const maxTicks = fit > 1 ? fit : 1;
   if (values.length <= maxTicks) return values;
   // Keep both ends and space the rest evenly. A rounded index gap is at least floor(gap), so `count`
   // is the largest number of labels whose floor(gap) still spans `pitch` of the plot.
   const last = values.length - 1;
   const step = Math.ceil((last * pitch) / (plotRight - plotLeft));
-  const count = 1 + Math.floor(last / step);
+  const count = 1 - Math.ceil(-last / step);
   if (count < 2) return [values[last]];
-  return Array.from({ length: count }, (_, j) => values[Math.round((j * last) / (count - 1))]);
+  return Array.from({ length: count }, (_, j) => {
+    const x = (j * last) / (count - 1);
+    const below = -Math.ceil(-x);
+    return values[x - below < 0.5 ? below : below + 1];
+  });
 }
 
 /**

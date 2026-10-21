@@ -10,6 +10,7 @@
   - `ReturnQuantiles` and `TimeSeriesChart` grow their left gutter from the widest y label (9-character labels such as "+10000.00" no longer land on the plot);
   - the three rolling charts (RollingMetrics, RollingVolatilityChart, RollingSortinoChart) choose their date ticks in code through `RollingXAxis` and `fitXTickValues`: evenly spaced, oldest and newest kept, never overlapping, with the end label clamped inside the svg (`EdgeFitXTick`).
 - `RollingMetrics` with three empty series (a strategy with under 30 days of history) renders an empty axis instead of throwing.
+- SVG chart text is laid out with `text-rendering: geometricPrecision` (`globals.css`). Without it, Playwright's Linux headless Chromium rounds every glyph advance to a whole pixel, so labels drew up to about 1 px wider than the 0.6 em the fit rules assume and were cut at the svg edge. The mobile streak histogram's top y label now uses `fitBaselineY` too, since an exact 1 em text box put it 0.6 px over the top edge.
 
 ### Changed
 - Desktop (1280 px) output is unchanged except for deliberate, recorded moves: the two brush year labels that were already cut, the Overview Rolling Sortino gutter (50 to 56 for "+1000.00"), and the rolling charts' date ticks, now 14 evenly spaced dates instead of the 19 Recharts measured from the body font. The founder accepted the last one on 2026-10-21 as an amendment to D-04 / SC-3; the old set depended on font measurement and could not be reproduced deterministically.

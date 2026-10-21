@@ -325,6 +325,14 @@ body[data-show-outcomes="false"] [data-allocator-panel="outcomes"] {
   font-variant-numeric: tabular-nums;
 }
 
+/* Chart labels are laid out at the font's own advances, which `estLabelWidth`
+   (src/lib/chart-ticks.ts) assumes. A browser that hints each glyph advance to a
+   whole pixel draws them wider (Playwright's Linux headless shell: "+100.0%" is
+   21 px where 0.6 em gives 19.09) and the label is cut at the svg edge. */
+svg text {
+  text-rendering: geometricPrecision;
+}
+
 /* Instrument Serif for display headings */
 .font-display {
   font-family: var(--font-serif);

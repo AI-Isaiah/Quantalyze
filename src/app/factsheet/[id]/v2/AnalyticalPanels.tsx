@@ -5,7 +5,7 @@ import { useBasisSeriesView, useWindowedView, withheldBootstrapCI } from "./basi
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { useTapPin } from "@/hooks/useTapPin";
-import { decimalExponent, pow10 } from "@/lib/chart-ticks";
+import { decimalExponent, fitBaselineY, pow10 } from "@/lib/chart-ticks";
 import { pct, pctSigned, ratio } from "./format";
 
 /**
@@ -140,7 +140,7 @@ function StreakHist({ title, data, color, maxLen }: { title: string; data: numbe
             />
             <text
               x={HIST_PAD.left - 4}
-              y={yPx(t.value) + 3}
+              y={fitBaselineY(yPx(t.value) + 3, axisFont)}
               textAnchor="end"
               fontSize={axisFont}
               fontFamily="var(--font-mono)"
