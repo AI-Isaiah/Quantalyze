@@ -515,3 +515,136 @@ def test_one_returns_none_for_non_dict_data() -> None:
 
     assert one(SingleAPIResponse(data=None)) is None
     assert one(SingleAPIResponse(data=[1, 2, 3])) is None  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# db_read_with_retry: httpx.ReadTimeout is transient (Phase 166.5.1, D-02/D-02a)
+#
+# Sentry QUANTALYZE-2B..2G recorded an httpx ReadTimeout failing a read or a
+# claim on its FIRST attempt, because the helper retried only a gateway 504.
+# These tests encode WHY: a single slow response must cost one retry, not a
+# claim tick; and the retryable set must grow by exactly ReadTimeout (the class
+# that was measured), not by every httpx timeout.
+# ---------------------------------------------------------------------------
+
+
+def _zero_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("services.db.DB_READ_BACKOFF_BASE_S", 0.0)
+    monkeypatch.setattr("services.db.DB_READ_JITTER_MAX_S", 0.0)
+
+
+class _ScriptedCall:
+    """A sync callable that raises/returns a scripted sequence and counts calls."""
+
+    def __init__(self, script: list) -> None:
+        self._script = list(script)
+        self.calls = 0
+
+    def __call__(self):
+        item = self._script[min(self.calls, len(self._script) - 1)]
+        self.calls += 1
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+async def test_read_with_retry_retries_read_timeout_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from services.db import db_read_with_retry
+
+    _zero_backoff(monkeypatch)
+    fn = _ScriptedCall([httpx.ReadTimeout("The read operation timed out"), "ok"])
+    assert await db_read_with_retry(fn) == "ok"
+    assert fn.calls == 2
+
+
+async def test_read_with_retry_exhausted_read_timeout_reraises_same_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from services.db import DB_READ_MAX_RETRIES, db_read_with_retry
+
+    _zero_backoff(monkeypatch)
+    exc = httpx.ReadTimeout("The read operation timed out")
+    fn = _ScriptedCall([exc])
+    with pytest.raises(httpx.ReadTimeout) as excinfo:
+        await db_read_with_retry(fn)
+    assert excinfo.value is exc, "exhaustion is a bare re-raise, never a re-wrap"
+    assert fn.calls == DB_READ_MAX_RETRIES
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param("ConnectTimeout", id="connect"),
+        pytest.param("WriteTimeout", id="write"),
+        pytest.param("PoolTimeout", id="pool"),
+        pytest.param("RuntimeError", id="plain"),
+    ],
+)
+async def test_read_with_retry_does_not_retry_other_timeouts_or_errors(
+    monkeypatch: pytest.MonkeyPatch, exc: str
+) -> None:
+    import httpx
+
+    from services.db import db_read_with_retry
+
+    _zero_backoff(monkeypatch)
+    cls = RuntimeError if exc == "RuntimeError" else getattr(httpx, exc)
+    err = cls("boom")
+    fn = _ScriptedCall([err, "ok"])
+    with pytest.raises(cls) as excinfo:
+        await db_read_with_retry(fn)
+    assert excinfo.value is err
+    assert fn.calls == 1, f"{exc} must propagate on the first attempt"
+
+
+def test_predicates_keep_their_separate_meanings() -> None:
+    """`_is_gateway_timeout` keeps its 504-only meaning (services/account_identity.py
+    reads it for that meaning and must not be widened); the helper reads the
+    wider `_is_transient_read_error`."""
+    import httpx
+
+    from services.db import _is_gateway_timeout, _is_transient_read_error
+
+    class _Coded(Exception):
+        def __init__(self, code: object) -> None:
+            self.code = code
+
+    read_timeout = httpx.ReadTimeout("x")
+    assert _is_gateway_timeout(read_timeout) is False
+    assert _is_transient_read_error(read_timeout) is True
+    assert _is_transient_read_error(_Coded("504")) is True
+    assert _is_transient_read_error(_Coded(504)) is True
+    for other in (
+        httpx.ConnectTimeout("x"),
+        httpx.WriteTimeout("x"),
+        httpx.PoolTimeout("x"),
+        _Coded("42883"),
+        RuntimeError("x"),
+    ):
+        assert _is_transient_read_error(other) is False, repr(other)
+
+
+async def test_read_with_retry_warning_names_the_real_class(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Phase 166.5.1 (T-166.5.1-08): the retry WARNING names the exception class
+    that was retried. A ReadTimeout logged as a "gateway timeout" would send an
+    operator looking for a 504 that never happened."""
+    import httpx
+
+    from services.db import db_read_with_retry
+
+    _zero_backoff(monkeypatch)
+    fn = _ScriptedCall([httpx.ReadTimeout("slow"), "ok"])
+    with caplog.at_level("WARNING", logger="services.db"):
+        await db_read_with_retry(fn)
+    msgs = [r.getMessage() for r in caplog.records if "db_read_with_retry" in r.getMessage()]
+    assert msgs, "a retry must log a warning"
+    assert "ReadTimeout" in msgs[0] and "transient timeout" in msgs[0], msgs[0]
+    assert "gateway timeout" not in msgs[0], msgs[0]
