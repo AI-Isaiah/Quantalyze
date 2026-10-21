@@ -372,12 +372,17 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # whole batch (p_batch_size 5 in _claim_priority) and dispatch_tick runs the claimed jobs
     # one after another, so a job's staleness clock includes its batch-mates' runtime. On the
     # backfill worker those are BACKFILL_KINDS (derive_broker_dailies, 15-minute handler,
-    # and this kind). 20 minutes is about twice the measured maximum and exactly 4x the
-    # handler timeout (the cap in test_watchdog_threshold_has_sane_upper_bound); a larger
-    # window would leave a genuinely stuck derive job unreclaimed for longer. RESIDUAL: a run
-    # that waits behind a full 15-minute derive_broker_dailies batch-mate can still exceed
-    # 20 minutes. The structural close is a lease/heartbeat renewing claimed_at (founder
-    # deferred it). The mark refusals stay loud, so a recurrence surfaces as 2A / A.
+    # and this kind). The 10:03.9 / 606 s figures are measurements of WHOLE batches and are
+    # capped by the old 10-minute reset: a batch past 600 s was reset and is seen only as
+    # its re-run, so they are a floor, not the tail. 20 minutes is twice that 600 s ceiling
+    # and exactly 4x the handler timeout (the cap in
+    # test_watchdog_threshold_has_sane_upper_bound); a larger window would leave a
+    # genuinely stuck derive job unreclaimed for longer. RESIDUAL (founder D-05, SC-3
+    # partly met): a run that waits behind slow batch-mates (a 15-minute
+    # derive_broker_dailies each) can still exceed 20 minutes and be reset. The structural
+    # close is a lease/heartbeat renewing claimed_at (founder deferred it; TODOS
+    # [166.5.1-DERIVE-BATCH-RESET-RESIDUAL]). The mark refusals stay loud, so a
+    # recurrence surfaces as 2A / A.
     "derive_allocator_equity": "20 minutes",  # handler timeout = 5 minutes
     # Phase 86 (COMP-02) — the composite fans out over N member keys and, when
     # MTM is admissible, crawls each Deribit member TWICE (cash + mark_to_market),

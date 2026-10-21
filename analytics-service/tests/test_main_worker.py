@@ -487,14 +487,16 @@ class TestWatchdogTick:
     async def test_derive_allocator_equity_run_at_measured_claim_age_is_not_reset_under_the_runner(
         self,
     ) -> None:
-        """QUANTALYZE-2A / QUANTALYZE-A reproduction (166.5.1 CONTEXT root cause C).
+        """QUANTALYZE-2A / QUANTALYZE-A reproduction (166.5.1 CONTEXT root cause C, D-05).
 
-        A derive_allocator_equity run that is claimed 604 s ago (the PROD
-        14-day maximum claim-to-done to 2026-10-21 was 10:03.9, rounded up)
-        and is still being worked by its runner must stay 'running'. On the
-        old map the kind had no override, so the 10-minute default reset it
-        to 'pending' at 600 s, and the runner's mark was then refused
-        (P0002) -- the finished result was lost or run twice.
+        A derive_allocator_equity run whose claim age is BATCH_CLAIM_AGE_FLOOR_S
+        (twice the 600 s ceiling the PROD sample was capped at; the sample is
+        MEASURED_WHOLE_BATCH_MAX_S = 606 s, see the constants above) and which
+        its runner is still working must stay 'running'. That age is past the
+        old 10-minute default, which reset the run to 'pending' and made the
+        runner's mark refuse (P0002): the finished result was lost or run
+        twice. It is also well past a bare 11-minute override, so an override
+        below the measured batch bound fails here.
 
         WHAT THIS MODELS. It runs the real ``watchdog_tick()`` against a
         mocked rpc and captures ``p_stale_threshold`` / ``p_per_kind_overrides``
@@ -509,9 +511,10 @@ class TestWatchdogTick:
 
         WHAT THIS DOES NOT COVER. It does not execute the SQL, so a later
         migration that changes the selection rule is not caught here. It does
-        not cover a claim age above 604 s (the residual batch wait behind a
-        15-minute derive_broker_dailies batch-mate). It does not cover the
-        mark RPCs' own SQL or the claim-token 55006 fence.
+        not cover a claim age above BATCH_CLAIM_AGE_FLOOR_S: a run behind slow
+        15-minute derive_broker_dailies batch-mates can still pass 20 minutes
+        (SC-3 is partly met, TODOS ``[166.5.1-DERIVE-BATCH-RESET-RESIDUAL]``).
+        It does not cover the mark RPCs' own SQL or the claim-token 55006 fence.
         """
         mock_supabase = MagicMock()
         chain = MagicMock()
@@ -526,7 +529,11 @@ class TestWatchdogTick:
         overrides = params["p_per_kind_overrides"]
 
         row = {"kind": "derive_allocator_equity", "status": "running"}
-        claim_age_seconds = 604
+        claim_age_seconds = BATCH_CLAIM_AGE_FLOOR_S
+
+        # The age must be one the old default would have reset, or the test
+        # proves nothing about the override.
+        assert claim_age_seconds > _watchdog_seconds(default_threshold)
 
         threshold = overrides.get(row["kind"], default_threshold)
         if claim_age_seconds > _watchdog_seconds(threshold):
@@ -541,7 +548,9 @@ class TestWatchdogTick:
             f"{claim_age_seconds}s ago was reset to {row['status']!r} by the "
             f"watchdog (threshold {threshold!r}) while its runner was still "
             "working, so the runner's mark would be refused (P0002). Give the "
-            "kind a WATCHDOG_PER_KIND_OVERRIDES entry above its measured runtime."
+            "kind a WATCHDOG_PER_KIND_OVERRIDES entry of at least "
+            f"{BATCH_CLAIM_AGE_FLOOR_S}s (twice the {OLD_RESET_CEILING_S}s "
+            f"ceiling of the {MEASURED_WHOLE_BATCH_MAX_S}s PROD sample)."
         )
 
     @pytest.mark.asyncio
@@ -1132,6 +1141,21 @@ _INTERVAL_UNIT_SECONDS: dict[str, int] = {
 }
 
 
+# 166.5.1 / D-05 (WR-01). PROD, read-only, measured 2026-10-21 over the last 14
+# days: 110 derive_allocator_equity jobs, median claim age 5.8 s, max 604 s.
+# Whole 5-job batches that contained one finished within 606 s, the longest
+# observed. 2 jobs had attempts=2, both re-runs (2026-10-15 and 2026-10-18).
+# ⚠️ That 606 s is CENSORED: the 10-minute default reset any run past 600 s, so a
+# batch longer than that shows up only as its re-run. The margin is therefore
+# applied to the 600 s ceiling the sample was capped at, not to 606 s (twice
+# 606 s is 1212 s, 12 s above the 20 minutes the founder kept in D-05).
+MEASURED_WHOLE_BATCH_MAX_S = 606
+OLD_RESET_CEILING_S = 600
+# An override must outlive twice the ceiling: a claim age the old default reset
+# and the measured sample could never show.
+BATCH_CLAIM_AGE_FLOOR_S = 2 * OLD_RESET_CEILING_S
+
+
 def _watchdog_seconds(s: str) -> float:
     """Convert a single-term Postgres INTERVAL string ('30 seconds',
     '15 minutes', '1 hour') to total seconds, matching the unit semantics of
@@ -1220,7 +1244,8 @@ class TestWatchdogInvariant:
         while PROD runs reached 10:03.9 claim-to-done and were reset under
         their runner. Membership in BACKFILL_KINDS names that mechanism
         (serial batches on the dedicated worker) instead of a runtime threshold
-        that would drift, so each such kind must carry an explicit override."""
+        that would drift, so each such kind must carry an explicit override, and
+        (D-05) one of at least BATCH_CLAIM_AGE_FLOOR_S, not just any key."""
         from main_worker import BACKFILL_KINDS, WATCHDOG_PER_KIND_OVERRIDES
 
         # An empty tuple would make the loop below pass vacuously.
@@ -1235,6 +1260,14 @@ class TestWatchdogInvariant:
                 "resets a still-working run and its mark is refused (P0002), "
                 "the QUANTALYZE-2A/A race. Add an override sized from the "
                 "kind's measured claim-to-done."
+            )
+            override_seconds = _watchdog_seconds(WATCHDOG_PER_KIND_OVERRIDES[kind])
+            assert override_seconds >= BATCH_CLAIM_AGE_FLOOR_S, (
+                f"Backfill kind {kind!r}: override {override_seconds:.0f}s is below "
+                f"{BATCH_CLAIM_AGE_FLOOR_S}s, twice the {OLD_RESET_CEILING_S}s ceiling "
+                f"of the {MEASURED_WHOLE_BATCH_MAX_S}s whole-batch PROD maximum "
+                "(166.5.1 D-05). A claim-age clock that covers a whole batch of 5 "
+                "outruns a bare handler-timeout margin."
             )
 
     def test_watchdog_threshold_has_sane_upper_bound(self) -> None:
