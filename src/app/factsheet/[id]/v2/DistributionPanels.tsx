@@ -10,6 +10,7 @@ import { COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
 import { benchmarkWithheldReason } from "@/lib/factsheet/returns-unit";
 import { formatFixedSigned } from "@/lib/factsheet/display-sign";
 import { pctSigned, ratio, signed } from "./format";
+import { fitTickLabel } from "@/lib/chart-ticks";
 
 /**
  * Three compact analytical panels sharing a common visual language:
@@ -276,6 +277,13 @@ export function QuantileBoxPlotPanel() {
   const boxBot = cy + 22;
   const whiskerTop = cy - 14;
   const whiskerBot = cy + 14;
+  // Phase 170.1.3 (D-02, D-03a): each reference label is built once and the same string is
+  // measured and drawn, so a label on the range end anchors inward instead of being cut
+  // ("P95 +1.0%" lost its last glyphs at 390 px). A label that fits keeps "middle".
+  const p05Text = `P5 ${pctSigned(q.p05)}`;
+  const p95Text = `P95 ${pctSigned(q.p95)}`;
+  const p05Label = fitTickLabel(X(q.p05), p05Text, refLabelFont, 0, VB_W);
+  const p95Label = fitTickLabel(X(q.p95), p95Text, refLabelFont, 0, VB_W);
   const ticks: { value: number; label: string }[] = [
     { value: lo, label: pctSigned(lo) },
     ...(lo < 0 && hi > 0 ? [{ value: 0, label: "0%" }] : []),
@@ -332,11 +340,11 @@ export function QuantileBoxPlotPanel() {
         <line x1={X(q.p05)} y1={cy - 18} x2={X(q.p05)} y2={cy + 18} stroke="var(--color-text-muted)" strokeDasharray="2 2" strokeWidth={1} />
         <line x1={X(q.p95)} y1={cy - 18} x2={X(q.p95)} y2={cy + 18} stroke="var(--color-text-muted)" strokeDasharray="2 2" strokeWidth={1} />
         {/* P05/P95 labels above */}
-        <text x={X(q.p05)} y={cy - 22} textAnchor="middle" fontSize={refLabelFont} fontFamily="var(--font-mono)" fill="var(--color-text-muted)">
-          P5 {pctSigned(q.p05)}
+        <text x={p05Label.x} y={cy - 22} textAnchor={p05Label.textAnchor} fontSize={refLabelFont} fontFamily="var(--font-mono)" fill="var(--color-text-muted)">
+          {p05Text}
         </text>
-        <text x={X(q.p95)} y={cy - 22} textAnchor="middle" fontSize={refLabelFont} fontFamily="var(--font-mono)" fill="var(--color-text-muted)">
-          P95 {pctSigned(q.p95)}
+        <text x={p95Label.x} y={cy - 22} textAnchor={p95Label.textAnchor} fontSize={refLabelFont} fontFamily="var(--font-mono)" fill="var(--color-text-muted)">
+          {p95Text}
         </text>
         {/* Axis ticks */}
         {ticks.map((t, i) => (
