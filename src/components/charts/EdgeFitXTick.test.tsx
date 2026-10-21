@@ -70,14 +70,16 @@ function readXTicks(container: HTMLElement): TickRead[] {
 /** A bare real LineChart at an explicit width, with the rolling charts' x-axis settings. */
 /**
  * Real Recharts in jsdom does not measure text, so `interval="preserveStartEnd"` keeps every tick
- * and the last few sit inside the edge band. The rule is therefore pinned per tick: a tick whose
- * centred box (rendered x, estimated width) stays inside the chart keeps "middle"; one that
- * crosses the right edge is "end". The end-date tick is also pinned by hand-typed value.
+ * and the last few sit inside the edge band. Every tick keeps Recharts' centred anchor, and its
+ * centred box (rendered x, estimated width) lies inside the chart: an edge label moves only by
+ * its real overflow, which stays inside the gap Recharts reserved for the centred label (WR-01).
  */
-function expectEdgeRule(ticks: TickRead[], chartWidth: number) {
+function expectCentredInside(ticks: TickRead[], chartWidth: number) {
   for (const t of ticks) {
-    const crosses = t.x + estLabelWidth(t.text, 12) / 2 > chartWidth;
-    expect(t.anchor, `tick ${t.text} at x=${t.x}`).toBe(crosses ? "end" : "middle");
+    const half = estLabelWidth(t.text, 12) / 2;
+    expect(t.anchor, `tick ${t.text} at x=${t.x}`).toBe("middle");
+    expect(t.x - half, `tick ${t.text} left edge`).toBeGreaterThanOrEqual(0);
+    expect(t.x + half, `tick ${t.text} right edge`).toBeLessThanOrEqual(chartWidth);
   }
 }
 
@@ -108,14 +110,15 @@ describe("EdgeFitXTick — the shared x-axis tick renderer (D-02, D-03b)", () =>
     sizing.width = 390;
   });
 
-  it("at 390 px anchors the end-date tick 'end' and every interior tick 'middle'", () => {
+  it("at 390 px keeps every tick centred and clamps the end-date tick into the svg", () => {
     const { container } = render(bareChart(390, <EdgeFitXTick {...CHART_TICK_STYLE} />));
     const ticks = readXTicks(container);
     const last = ticks[ticks.length - 1];
     expect(last.text).toBe("10-20");
-    expect(last.anchor).toBe("end");
-    expect(ticks[0].anchor).toBe("middle");
-    expectEdgeRule(ticks, 390);
+    expect(last.anchor).toBe("middle");
+    // "10-20" at 12 px is 5 * 12 * 0.6 = 36 wide: its centre is held 18 from the right edge.
+    expect(last.x).toBe(390 - 18);
+    expectCentredInside(ticks, 390);
     // Style precedence is kept: the tick still draws the shared font and fill (T-170.1.3-08).
     expect(last.el.getAttribute("font-size")).toBe("12");
     expect(last.el.getAttribute("font-family")).toBe(CHART_FONT_MONO);
@@ -129,20 +132,20 @@ describe("EdgeFitXTick — the shared x-axis tick renderer (D-02, D-03b)", () =>
     }
   });
 
-  it("at 1280 px changes no label and no interior anchor; only the last anchor may follow its box", () => {
+  it("at 1280 px changes no label, anchor or interior x; only the last tick's x follows its box", () => {
     const wide = (tick: React.ReactElement | object) => bareChart(1280, tick);
     const control = readXTicks(render(wide(CHART_TICK_STYLE)).container);
     const fitted = readXTicks(render(wide(<EdgeFitXTick {...CHART_TICK_STYLE} />)).container);
 
     expect(fitted.map((t) => t.text)).toEqual(control.map((t) => t.text));
-    // The control draws every tick "middle" at 1280, so any "end" in the fitted chart is a tick
-    // whose box crosses the edge and nothing else moved.
     for (const t of control) expect(t.anchor).toBe("middle");
+    for (const t of fitted) expect(t.anchor).toBe("middle");
+    // A tick whose centred box already fits keeps Recharts' own x; only the one that crosses moves.
     for (let i = 0; i < fitted.length; i++) {
-      const crosses = fitted[i].x + estLabelWidth(fitted[i].text, 12) / 2 > 1280;
-      expect(fitted[i].anchor).toBe(crosses ? "end" : control[i].anchor);
+      const crosses = control[i].x + estLabelWidth(control[i].text, 12) / 2 > 1280;
+      if (!crosses) expect(fitted[i].x).toBe(control[i].x);
     }
-    expect(fitted[fitted.length - 1].anchor).toBe("end");
+    expect(fitted[fitted.length - 1].x).toBe(1280 - 18);
   });
 
   it("keeps the caller's anchor outside a chart context instead of throwing (T-170.1.3-07)", () => {
@@ -165,20 +168,20 @@ describe("EdgeFitXTick — the shared x-axis tick renderer (D-02, D-03b)", () =>
   });
 });
 
-describe("the rolling charts draw the end-date tick whole at 390 px (D-03b)", () => {
+describe("the rolling charts draw the end-date tick whole at 390 px (D-03b, WR-01)", () => {
   const charts: [string, () => React.ReactElement][] = [
     ["RollingVolatilityChart", () => <RollingVolatilityChart data={POINTS} />],
     ["RollingSortinoChart", () => <RollingSortinoChart data={POINTS} />],
     ["RollingMetrics", () => <RollingMetrics data={{ sharpe_365d: POINTS }} />],
   ];
-  it.each(charts)("%s anchors the last x tick '10-20' with text-anchor=end", (_name, make) => {
+  it.each(charts)("%s keeps the last x tick '10-20' centred and inside the svg", (_name, make) => {
     sizing.width = 390;
     const { container } = render(make());
     const ticks = readXTicks(container);
     const last = ticks[ticks.length - 1];
     expect(last.text).toBe("10-20");
-    expect(last.anchor).toBe("end");
+    expect(last.anchor).toBe("middle");
     expect(ticks[0].anchor).toBe("middle");
-    expectEdgeRule(ticks, 390);
+    expectCentredInside(ticks, 390);
   });
 });

@@ -2,7 +2,7 @@
 
 import type { ComponentProps } from "react";
 import { Text, useChartWidth } from "recharts";
-import { fitTickLabel, type TickLabelAnchor } from "@/lib/chart-ticks";
+import { estLabelWidth } from "@/lib/chart-ticks";
 
 type RechartsTextProps = ComponentProps<typeof Text>;
 
@@ -21,14 +21,18 @@ export interface EdgeFitXTickProps extends Omit<RechartsTextProps, "children"> {
 }
 
 /**
- * XAxis tick renderer that anchors an edge label inward (Phase 170.1.3
+ * XAxis tick renderer that keeps an edge label inside its svg (Phase 170.1.3
  * NARROWCHARTS, D-02 and D-03b).
  *
- * The rule is `fitTickLabel` (`src/lib/chart-ticks.ts`): a label whose
- * estimated box crosses the chart's right edge is drawn with
- * `text-anchor="end"`, one that crosses the left edge with `"start"`, and
- * every other label keeps the anchor Recharts chose. The tick position `x`
- * never moves and no label is hidden, truncated, rotated or shrunk.
+ * The anchor stays the one Recharts chose (centred). The tick's `x` is clamped
+ * so the label's estimated box (`estLabelWidth`, `src/lib/chart-ticks.ts`)
+ * lies in `[0, chartWidth]`: a label that fits keeps its `x`, and one that
+ * crosses an edge moves by its real overflow only. That is deliberate.
+ * Recharts has already shifted the end label inward and hidden the earlier
+ * labels whose centred boxes reach into the gap it reserved, so a centred
+ * label that moves a few px stays inside that gap, where flipping the anchor
+ * (a further half label width) would not. No label is hidden, truncated,
+ * rotated or shrunk.
  *
  * Why the chart width comes from `useChartWidth()` and not from the DOM: the
  * width is Recharts' own layout state (the width of its `recharts-surface`
@@ -37,14 +41,15 @@ export interface EdgeFitXTickProps extends Omit<RechartsTextProps, "children"> {
  * the browser different markup, which is React #418.
  *
  * Outside a chart context `useChartWidth()` is `undefined`, and a tick whose
- * `x` is not a finite number cannot be placed; in both cases the caller's
- * anchor is kept, so the renderer can never throw or blank an axis.
+ * `x` is not a finite number cannot be placed; in both cases `x` is kept, so
+ * the renderer can never throw or blank an axis.
  *
  * Every other prop (font family and size, fill, vertical anchor, class names)
  * is passed through to Recharts' own `Text`, the component its default tick
- * path renders, so the drawn tick differs from the default only in
- * `text-anchor`. The style spread on the element still overrides Recharts'
- * `fill: stroke`, exactly as the plain `tick={CHART_TICK_STYLE}` object does.
+ * path renders, so the drawn tick differs from the default only in `x`, and
+ * only for a label that would cross an edge. The style spread on the element
+ * still overrides Recharts' `fill: stroke`, exactly as the plain
+ * `tick={CHART_TICK_STYLE}` object does.
  * No `style` prop is added: `fontVariantNumeric` is dropped by Recharts' svg
  * filter today and stays dropped (D-04, no desktop glyph change).
  *
@@ -62,10 +67,8 @@ export function EdgeFitXTick(props: EdgeFitXTickProps) {
 
   const tickX = typeof x === "string" ? Number(x) : x;
   const size = typeof fontSize === "string" ? Number(fontSize) : fontSize;
-  const callerAnchor: TickLabelAnchor =
-    textAnchor === "start" || textAnchor === "end" ? textAnchor : "middle";
 
-  let anchor = textAnchor;
+  let drawX = x;
   if (
     chartWidth !== undefined &&
     typeof tickX === "number" &&
@@ -73,11 +76,12 @@ export function EdgeFitXTick(props: EdgeFitXTickProps) {
     typeof size === "number" &&
     Number.isFinite(size)
   ) {
-    anchor = fitTickLabel(tickX, label, size, 0, chartWidth, callerAnchor).textAnchor;
+    const half = estLabelWidth(label, size) / 2;
+    drawX = Math.max(half, Math.min(tickX, chartWidth - half));
   }
 
   return (
-    <Text {...rest} x={x} fontSize={fontSize} textAnchor={anchor}>
+    <Text {...rest} x={drawX} fontSize={fontSize} textAnchor={textAnchor}>
       {label}
     </Text>
   );

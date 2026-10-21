@@ -2300,11 +2300,15 @@ async function openOverview(page: Page, vp: { width: number; height: number }): 
 }
 
 /** Composer in composed mode with the FIXED fixture name and anchor. */
-async function openNarrowComposer(page: Page, vp: { width: number; height: number }): Promise<void> {
+async function openNarrowComposer(
+  page: Page,
+  vp: { width: number; height: number },
+  days = 400,
+): Promise<void> {
   await page.setViewportSize({ width: vp.width, height: vp.height });
   await cleanupStrategiesByNamePrefix(NAME_PREFIX);
   const fixtureId = await seedStrategyWithHistory({
-    days: 400,
+    days,
     name: NARROW_FIXTURE_NAME,
     codename: NARROW_FIXTURE_NAME,
     withDailyReturns: true,
@@ -2368,9 +2372,10 @@ async function openSurface(
   page: Page,
   surface: Surface,
   vp: { width: number; height: number },
+  composerDays?: number,
 ): Promise<void> {
   if (surface === "overview") await openOverview(page, vp);
-  else await openNarrowComposer(page, vp);
+  else await openNarrowComposer(page, vp, composerDays);
   await expandAll(page, surface);
 }
 
@@ -2549,6 +2554,38 @@ test.describe("/allocations charts — NARROWCHARTS", () => {
     console.log(`NARROWCHARTS V390 equity x labels: ${rects.map((r) => r.text).join(" | ")}`);
     expect(overlaps, `V390 equity x labels overlap:\n${overlaps.join("\n")}`).toEqual([]);
   });
+
+  // WR-01: the rolling charts' end-date label must not land on the label before it. Whether the
+  // penultimate label reaches the end label depends on the data window (Recharts places it by a
+  // forward walk), and the default 400-day fixture happens to clear it even with the old end flip.
+  // 260 days measured RED against that flip at both widths, so this case seeds 260.
+  for (const vp of [NARROW_VIEWPORTS[0], NARROW_VIEWPORTS[1]]) {
+    test(`${vp.id} composer: rolling x labels do not overlap`, async ({ page }) => {
+      test.setTimeout(150_000);
+      await openSurface(page, "composer", vp, 260);
+      const overlaps: string[] = [];
+      for (const [key, selector] of Object.entries(ROLLING_XTICKS)) {
+        const rects = await page.locator(selector).evaluateAll((els) =>
+          els.map((el) => {
+            const r = el.getBoundingClientRect();
+            return { text: (el.textContent ?? "").trim(), x: r.x, y: r.y, width: r.width, height: r.height };
+          }),
+        );
+        expect(rects.length, `${key}: fewer than two x labels — nothing to compare (W-02)`).toBeGreaterThanOrEqual(2);
+        for (let i = 0; i < rects.length; i++) {
+          for (let j = i + 1; j < rects.length; j++) {
+            if (rectsIntersect(rects[i], rects[j])) {
+              overlaps.push(`${key}: "${rects[i].text}" overlaps "${rects[j].text}"`);
+            }
+          }
+        }
+        console.log(
+          `NARROWCHARTS ${vp.id} ${key} x labels: ${rects.map((r) => `${r.text}@${r.x.toFixed(1)}+${r.width.toFixed(1)}`).join(" | ")}`,
+        );
+      }
+      expect(overlaps, `${vp.id} rolling x labels overlap:\n${overlaps.join("\n")}`).toEqual([]);
+    });
+  }
 
   for (const surface of ["overview", "composer"] as const) {
     test(`V1280 ${surface}: desktop reading`, async ({ page }) => {
